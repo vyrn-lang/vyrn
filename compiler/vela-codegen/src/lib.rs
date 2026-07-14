@@ -975,6 +975,15 @@ pub fn emit(program: &Program) -> Result<String, String> {
     for f in &program.functions {
         collect_strings_block(&f.body, &mut literals, &type_map);
     }
+    // A string literal can also live in a type's refinement predicate
+    // (`String where value == "root"`), which is lowered inline at every
+    // construction site — collect those too (regex collection below does the
+    // same walk for `=~` patterns).
+    for t in &program.type_decls {
+        if let Some(pred) = &t.predicate {
+            collect_strings_expr(pred, &mut literals, &type_map);
+        }
+    }
     for (i, s) in literals.iter().enumerate() {
         let name = format!("@.str.{i}");
         let (escaped, len) = llvm_str(s);
@@ -1481,12 +1490,18 @@ impl<'a> Gen<'a> {
 
         self.gen_block(&f.body)?;
 
-        // ensure the final block is terminated (dead default for unreachable tails)
+        // Ensure the final block is terminated. The checker proves every path
+        // returns, so a fall-through tail is dead by construction — but it must
+        // still carry a *valid* terminator. `ret <ty> 0` is only legal for
+        // integer types (`ret ptr 0` / `ret double 0` are IR syntax errors, and
+        // a String-returning fn ending in a returning if/else hits exactly
+        // that); `unreachable` is correct for every type.
         if !self.terminated {
             self.emit_modify_copyout();
-            match self.llt(&f.ret).as_str() {
-                "void" => self.emit_term("ret void".into()),
-                other => self.emit_term(format!("ret {other} 0")),
+            if self.llt(&f.ret).as_str() == "void" {
+                self.emit_term("ret void".into());
+            } else {
+                self.emit_term("unreachable".into());
             }
         }
 
@@ -2129,9 +2144,13 @@ impl<'a> Gen<'a> {
         let zero_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
 
-        // merge
+        // merge — a statement-position match with Unit arms (side effects only)
+        // has no value to merge, and `phi void` is invalid IR.
         self.emit_label(&end_l);
         let ll = self.llt(&ty);
+        if ll == "void" {
+            return Ok((String::new(), ty));
+        }
         let res = self.fresh_tmp();
         self.emit(format!(
             "{res} = phi {ll} [ {one_val}, %{one_end} ], [ {zero_val}, %{zero_end} ]"
@@ -2205,6 +2224,11 @@ impl<'a> Gen<'a> {
 
         self.emit_label(&end_l);
         let ll = self.llt(&ty);
+        // Unit-typed arms (side effects only) have no value — `phi void` is
+        // invalid IR, so skip the merge entirely.
+        if ll == "void" {
+            return Ok((String::new(), ty));
+        }
         let res = self.fresh_tmp();
         let phi = incoming
             .iter()
@@ -3788,6 +3812,48 @@ mod tests {
         assert!(ir.contains("define i32 @main()"));
         assert!(ir.contains("@printf"));
         assert!(ir.contains("add i64"));
+    }
+
+    #[test]
+    fn dead_tail_of_nonint_fn_is_unreachable_not_ret_zero() {
+        // A String-returning fn whose branches both return leaves a dead final
+        // block; `ret ptr 0` there is invalid IR — it must be `unreachable`.
+        let program = check(
+            "fn pick(b: Bool) -> String { if b { return \"yes\" } else { return \"no\" } } \
+             fn main() -> Int { print(pick(true)); return 0; }",
+        )
+        .unwrap();
+        let ir = emit(&program).unwrap();
+        assert!(!ir.contains("ret ptr 0"), "invalid dead default:\n{ir}");
+        assert!(ir.contains("unreachable"));
+    }
+
+    #[test]
+    fn unit_match_arms_emit_no_phi_void() {
+        // A statement-position match whose arms are side-effecting prints has
+        // Unit type; `phi void` is invalid IR, so no merge value is built.
+        let program = check(
+            "fn main() -> Int { let o = Some(4); \
+             match o { Some(x) => print(x), None => print(0) } \
+             return 0; }",
+        )
+        .unwrap();
+        let ir = emit(&program).unwrap();
+        assert!(!ir.contains("phi void"), "invalid phi:\n{ir}");
+    }
+
+    #[test]
+    fn predicate_string_literals_reach_the_pool() {
+        // A literal that appears ONLY in a type's `where` predicate must still
+        // be emitted as a string global (the predicate is lowered inline at
+        // construction sites).
+        let program = check(
+            "type Name = String where value == \"root\" \
+             fn main() -> Int { let n = Name(\"root\"); print(n); return 0; }",
+        )
+        .unwrap();
+        let ir = emit(&program).unwrap();
+        assert!(ir.contains("c\"root\\00\""), "predicate literal missing from pool:\n{ir}");
     }
 
     #[test]

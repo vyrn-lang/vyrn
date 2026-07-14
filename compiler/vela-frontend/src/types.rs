@@ -129,7 +129,7 @@ pub fn schema_struct_lit(decl: &TypeDecl) -> Expr {
 /// `object` with `properties` and a `required` list (non-`Option` fields).
 pub fn json_schema_string(decl: &TypeDecl, types: &HashMap<String, TypeDecl>) -> String {
     let dialect = "\"$schema\":\"https://json-schema.org/draft/2020-12/schema\"";
-    let inner = type_schema(&Type::Named(decl.name.clone()), types);
+    let inner = type_schema(&Type::Named(decl.name.clone()), types, &mut Vec::new());
     if inner == "{}" {
         format!("{{{dialect}}}")
     } else {
@@ -139,8 +139,12 @@ pub fn json_schema_string(decl: &TypeDecl, types: &HashMap<String, TypeDecl>) ->
 }
 
 /// The JSON Schema object (`{ .. }`) for a structural type, without the top-level
-/// `$schema` dialect. Recurses through records, arrays, and options.
-fn type_schema(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
+/// `$schema` dialect. Recurses through records, arrays, and options. `visiting`
+/// tracks the named types on the current expansion path: schemas inline nested
+/// named types, so a recursive record (`next: Option<Node>` inside `Node`) would
+/// otherwise expand forever — the back-edge is documented with a `$comment`
+/// instead (honest-lossy, like every other unmappable form here).
+fn type_schema(ty: &Type, types: &HashMap<String, TypeDecl>, visiting: &mut Vec<String>) -> String {
     match ty {
         Type::Int | Type::IntN { .. } => "{\"type\":\"integer\"}".to_string(),
         Type::Float | Type::Float32 => "{\"type\":\"number\"}".to_string(),
@@ -148,22 +152,39 @@ fn type_schema(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         Type::Str => "{\"type\":\"string\"}".to_string(),
         // An `Option<T>` field carries `T`'s schema; its optionality is expressed
         // by omission from the enclosing object's `required` list.
-        Type::Option(inner) => type_schema(inner, types),
+        Type::Option(inner) => type_schema(inner, types, visiting),
         Type::Array(inner) | Type::ArrayN(inner, _) => {
-            format!("{{\"type\":\"array\",\"items\":{}}}", type_schema(inner, types))
+            format!("{{\"type\":\"array\",\"items\":{}}}", type_schema(inner, types, visiting))
         }
-        Type::Named(n) => match types.get(n) {
-            Some(d) => named_schema(d, types),
-            None => "{}".to_string(),
-        },
-        Type::Record(fields) => record_schema(fields, types),
+        Type::Named(n) => {
+            if visiting.iter().any(|v| v == n) {
+                return format!(
+                    "{{\"$comment\":\"{}\"}}",
+                    json_escape(&format!("recursive reference to: {n}"))
+                );
+            }
+            match types.get(n) {
+                Some(d) => {
+                    visiting.push(n.clone());
+                    let s = named_schema(d, types, visiting);
+                    visiting.pop();
+                    s
+                }
+                None => "{}".to_string(),
+            }
+        }
+        Type::Record(fields) => record_schema(fields, types, visiting),
         _ => "{}".to_string(),
     }
 }
 
 /// The schema for a named declaration: a validated scalar carries its `where`
 /// constraints; anything else defers to its structural base (record, alias, …).
-fn named_schema(decl: &TypeDecl, types: &HashMap<String, TypeDecl>) -> String {
+fn named_schema(
+    decl: &TypeDecl,
+    types: &HashMap<String, TypeDecl>,
+    visiting: &mut Vec<String>,
+) -> String {
     let pred = decl.predicate.as_ref();
     match &decl.base {
         Type::Int | Type::IntN { .. } => scalar_with_constraints("integer", pred),
@@ -174,11 +195,11 @@ fn named_schema(decl: &TypeDecl, types: &HashMap<String, TypeDecl>) -> String {
         // `$comment` naming the invariant (JSON Schema can't express arithmetic
         // between properties; the runtime check remains the source of truth).
         Type::Record(fields) if pred.is_some() => {
-            let obj = record_schema(fields, types);
+            let obj = record_schema(fields, types, visiting);
             let comment = unmapped_comment(pred.unwrap());
             format!("{}{}}}", &obj[..obj.len() - 1], format!(",{comment}"))
         }
-        other => type_schema(other, types),
+        other => type_schema(other, types, visiting),
     }
 }
 
@@ -311,10 +332,14 @@ fn json_escape(s: &str) -> String {
 }
 
 /// A record maps to a JSON Schema `object`; non-`Option` fields are `required`.
-fn record_schema(fields: &[Field], types: &HashMap<String, TypeDecl>) -> String {
+fn record_schema(
+    fields: &[Field],
+    types: &HashMap<String, TypeDecl>,
+    visiting: &mut Vec<String>,
+) -> String {
     let props: Vec<String> = fields
         .iter()
-        .map(|f| format!("\"{}\":{}", f.name, type_schema(&f.ty, types)))
+        .map(|f| format!("\"{}\":{}", f.name, type_schema(&f.ty, types, visiting)))
         .collect();
     let required: Vec<String> = fields
         .iter()
@@ -700,6 +725,41 @@ mod json_schema_tests {
         );
         // Exactly one `pattern` key would be a duplicate → must not appear bare.
         assert!(!s.contains("$\",\"pattern\""), "no duplicate pattern key: {s}");
+    }
+
+    #[test]
+    fn recursive_record_terminates_with_comment() {
+        // A self-referential record must not expand forever (this used to
+        // stack-overflow the compiler); the back-edge becomes a `$comment`.
+        let s = schema_of(
+            "type Node = { name: String, next: Option<Node> }",
+            "Node",
+        );
+        assert!(s.contains("\"$comment\":\"recursive reference to: Node\""), "{s}");
+        assert!(s.contains("\"name\":{\"type\":\"string\"}"), "{s}");
+    }
+
+    #[test]
+    fn mutually_recursive_records_terminate() {
+        let s = schema_of(
+            "type A = { b: Option<B> } \
+             type B = { a: Option<A> }",
+            "A",
+        );
+        assert!(s.contains("recursive reference to: A"), "{s}");
+    }
+
+    #[test]
+    fn repeated_nonrecursive_reference_is_still_inlined() {
+        // The same named type appearing twice on *sibling* paths is not a cycle
+        // — both occurrences inline fully.
+        let s = schema_of(
+            "type Age = Int where value >= 18 \
+             type Pair = { x: Age, y: Age }",
+            "Pair",
+        );
+        assert_eq!(s.matches("\"minimum\":18").count(), 2, "{s}");
+        assert!(!s.contains("recursive"), "{s}");
     }
 
     #[test]
