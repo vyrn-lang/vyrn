@@ -332,6 +332,17 @@ pub fn run(program: &Program) -> Result<i64, String> {
 }
 
 fn run_inner(program: &Program) -> Result<i64, String> {
+    // The same ownership analysis the native backend uses to reclaim heap
+    // values at block exit. Freeing a string/array buffer is invisible from
+    // inside the language, but auto-*releasing* a reference cell is not: the
+    // slot returns to the slab (a million loop iterations fit in 65536 cells)
+    // and any illegally retained alias must trap. The interpreter executes the
+    // identical plan so both backends observe the same slab behavior.
+    // Identities are `Stmt` node addresses — unique program-wide, so the
+    // per-function maps flatten into one.
+    let ownership = crate::own::analyze(program);
+    let droppable: HashMap<usize, crate::own::DropKind> =
+        ownership.droppable.into_values().flatten().collect();
     let funcs: HashMap<&str, &Function> =
         program.functions.iter().map(|f| (f.name.as_str(), f)).collect();
     let types: HashMap<&str, &TypeDecl> =
@@ -358,6 +369,7 @@ fn run_inner(program: &Program) -> Result<i64, String> {
         funcs,
         types,
         variants,
+        droppable,
         cells: RefCell::new(Vec::new()),
         free: RefCell::new(Vec::new()),
         log_level: program.log_level,
@@ -390,6 +402,9 @@ struct Interp<'a> {
     funcs: HashMap<&'a str, &'a Function>,
     types: HashMap<&'a str, &'a TypeDecl>,
     variants: std::collections::HashSet<&'a str>,
+    /// Droppable `let` bindings (by `Stmt` node address) and their reclamation
+    /// kind — the ownership analysis shared with the native backend.
+    droppable: HashMap<usize, crate::own::DropKind>,
     /// The generational-reference cell slab (RFC-0004 §4, Path B).
     cells: RefCell<Vec<CellSlot>>,
     /// Free slots available for reuse (their generation was already bumped).
@@ -445,31 +460,61 @@ impl<'a> Interp<'a> {
     /// validated value is just its base value (zero overhead).
     fn construct(&self, decl: &TypeDecl, v: Val) -> Result<Val, Ctrl> {
         if !self.validates(decl, &v)? {
-            return Err(
-                format!("validation failed: {v:?} does not satisfy `{}`", decl.name).into()
-            );
+            return Err(format!("validation failed for `{}`", decl.name).into());
         }
         Ok(v)
     }
 
     fn block(&self, block: &Block, scope: &mut Vec<HashMap<String, Val>>) -> Result<Flow, Ctrl> {
         scope.push(HashMap::new());
+        // Values reclaimed when this frame exits (normally or via `return`),
+        // mirroring the native backend's block-exit drops. Only a reference
+        // release is observable here (the slab slot is recycled and stale
+        // aliases must trap); string/array buffers are host-reclaimed. The
+        // value is captured at the `let` (droppable bindings are immutable),
+        // which also keeps shadowed bindings reclaimable.
+        let mut drops: Vec<Val> = Vec::new();
         for stmt in &block.stmts {
             let flow = self.stmt(stmt, scope);
             match flow {
                 Ok(Flow::Return(v)) => {
+                    self.run_drops(&drops)?;
                     scope.pop();
                     return Ok(Flow::Return(v));
                 }
-                Ok(Flow::Normal) => {}
+                Ok(Flow::Normal) => {
+                    if let Stmt::Let { name, .. } = stmt {
+                        if let Some(kind) = self.droppable.get(&(stmt as *const Stmt as usize)) {
+                            if *kind == crate::own::DropKind::ReleaseRef {
+                                if let Some(v) = scope.last().unwrap().get(name) {
+                                    drops.push(v.clone());
+                                }
+                            }
+                        }
+                    }
+                }
                 Err(e) => {
                     scope.pop();
                     return Err(e);
                 }
             }
         }
+        let r = self.run_drops(&drops);
         scope.pop();
+        r?;
         Ok(Flow::Normal)
+    }
+
+    /// Execute a frame's pending block-exit drops: release each captured
+    /// reference (bumping its slot's generation, exactly like the emitted
+    /// `release` in the native backend).
+    fn run_drops(&self, drops: &[Val]) -> Result<(), Ctrl> {
+        for v in drops {
+            if let Val::Ref { slot, gen } = v {
+                self.cell_release(*slot, *gen)?;
+            }
+        }
+        Ok(())
     }
 
     fn stmt(&self, stmt: &Stmt, scope: &mut Vec<HashMap<String, Val>>) -> Result<Flow, Ctrl> {
@@ -787,7 +832,7 @@ impl<'a> Interp<'a> {
                         Val::Str(s) => Ok(Val::Option(parse_int(s).map(|n| Box::new(Val::Int(n))))),
                         other => Err(format!("parse of non-String {other:?}").into()),
                     },
-                    "cell" => Ok(self.cell_alloc(vals.remove(0))),
+                    "cell" => self.cell_alloc(vals.remove(0)),
                     "get" => {
                         let (slot, gen) = self.as_ref(&vals[0])?;
                         self.cell_get(slot, gen)
@@ -1274,15 +1319,20 @@ impl<'a> Interp<'a> {
         Ctrl::Err("reference used after release".into())
     }
 
-    fn cell_alloc(&self, v: Val) -> Val {
+    fn cell_alloc(&self, v: Val) -> Result<Val, Ctrl> {
         let mut cells = self.cells.borrow_mut();
         if let Some(slot) = self.free.borrow_mut().pop() {
             cells[slot].val = v; // generation already bumped at release
-            return Val::Ref { slot, gen: cells[slot].gen };
+            return Ok(Val::Ref { slot, gen: cells[slot].gen });
         }
         let slot = cells.len();
+        // The native slab is a fixed 65536-slot array; mirror its capacity (and
+        // its trap message) exactly rather than growing without bound.
+        if slot >= 65536 {
+            return Err("out of reference cells".into());
+        }
         cells.push(CellSlot { gen: 0, val: v });
-        Val::Ref { slot, gen: 0 }
+        Ok(Val::Ref { slot, gen: 0 })
     }
 
     fn cell_get(&self, slot: usize, gen: u64) -> Result<Val, Ctrl> {
@@ -1944,7 +1994,7 @@ mod tests {
         let src = "type Name = String where value.length >= 3; \
                    fn mk(s: String) -> Name { return Name(s); } \
                    fn main() -> Int { let n = mk(\"x\"); return 0; }";
-        assert!(run(src).unwrap_err().contains("does not satisfy `Name`"));
+        assert!(run(src).unwrap_err().contains("validation failed for `Name`"));
     }
 
     #[test]
@@ -1960,6 +2010,48 @@ mod tests {
     }
 
     #[test]
+    fn auto_release_recycles_the_slab() {
+        // A non-escaping cell per iteration: the inferred release returns each
+        // slot to the slab, so 70k allocations fit in 65536 cells — the
+        // interpreter executes the same drop plan as the native backend.
+        let src = "fn main() -> Int { \
+                       let mut i = 0 \
+                       let mut last = 0 \
+                       while i < 70000 { \
+                           let c = cell(i) \
+                           set(c, get(c) + 1) \
+                           last = get(c) \
+                           i = i + 1 \
+                       } \
+                       if last == 70000 { return 1 } return 0 }";
+        assert_eq!(run(src).unwrap(), 1);
+    }
+
+    #[test]
+    fn slab_exhaustion_traps_like_native() {
+        // Cells that ESCAPE (aliased) are not auto-released; the 65537th live
+        // allocation must trap with the native slab's exact message.
+        let src = "fn main() -> Int { \
+                       let mut i = 0 \
+                       while i < 70000 { \
+                           let c = cell(1) \
+                           let d = c \
+                           i = i + 1 \
+                       } \
+                       return 0 }";
+        let e = run(src).unwrap_err();
+        assert_eq!(e, "out of reference cells");
+    }
+
+    #[test]
+    fn validation_trap_message_is_canonical() {
+        let src = "type Age = Int where value >= 18; \
+                   fn mk(n: Int) -> Age { return Age(n); } \
+                   fn main() -> Int { let a = mk(5); return 0; }";
+        assert_eq!(run(src).unwrap_err(), "validation failed for `Age`");
+    }
+
+    #[test]
     fn float_refined_type_constructs_and_rejects_at_runtime() {
         // Refinements over a Float base run under the runtime evaluator (this
         // used to fail for even VALID values — ConstVal had no Float).
@@ -1970,7 +2062,7 @@ mod tests {
         let bad = "type Ratio = Float where value > 0.0 && value <= 1.0; \
                    fn mk(x: Float) -> Ratio { return Ratio(x); } \
                    fn main() -> Int { let r = mk(2.5); return 0; }";
-        assert!(run(bad).unwrap_err().contains("does not satisfy `Ratio`"));
+        assert!(run(bad).unwrap_err().contains("validation failed for `Ratio`"));
     }
 
     #[test]
@@ -2048,7 +2140,7 @@ mod tests {
         let src = "type Code = String where value =~ \"[A-Z][A-Z][A-Z]\"; \
                    fn mk(s: String) -> Code { return Code(s); } \
                    fn main() -> Int { let c = mk(\"ab\"); return 0; }";
-        assert!(run(src).unwrap_err().contains("does not satisfy `Code`"));
+        assert!(run(src).unwrap_err().contains("validation failed for `Code`"));
     }
 
     #[test]

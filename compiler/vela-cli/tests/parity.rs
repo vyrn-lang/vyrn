@@ -14,12 +14,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Examples currently expected to diverge, with the reason. Shrink this list —
-/// never grow it silently.
-const KNOWN_DIVERGENT: &[(&str, &str)] = &[
-    // Trap wording/stream differs until the trap-unification phase lands:
-    // interp: stderr "error: ..."; native: stdout "Vela: validation failed".
-    ("validate_fail.vela", "trap text/stream not yet unified"),
-];
+/// never grow it silently. (Empty since trap unification: every trap prints
+/// the same `error: ...` bytes to stderr in both backends.)
+const KNOWN_DIVERGENT: &[(&str, &str)] = &[];
 
 fn examples_dir() -> PathBuf {
     // vela-cli/ -> compiler/ -> repo root -> examples/

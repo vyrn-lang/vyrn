@@ -5,8 +5,11 @@
 // check happens at runtime — and fails, aborting the program with a nonzero
 // exit code. (Compare validate.vela, where every construction succeeds.)
 //
+// Both backends behave identically: `error: validation failed for `Age`` on
+// stderr, exit code 1.
+//
 //   velac run   examples/validate_fail.vela   -> error, exit 1
-//   velac build examples/validate_fail.vela   -> prints "Vela: validation failed", aborts
+//   velac build examples/validate_fail.vela   -> same error, same exit code
 
 type Age = Int where value >= 18
 

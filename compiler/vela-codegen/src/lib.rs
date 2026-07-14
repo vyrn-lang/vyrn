@@ -85,12 +85,13 @@ const CELL_RUNTIME: &str = "\
 @__vela_cell_top = global i64 0
 @__vela_cell_free = global [65536 x i64] zeroinitializer
 @__vela_cell_freetop = global i64 0
-@.fmt.uaf = private unnamed_addr constant [36 x i8] c\"Vela: reference used after release\\0A\\00\"
-@.fmt.oom = private unnamed_addr constant [30 x i8] c\"Vela: out of reference cells\\0A\\00\"
+@.fmt.uaf = private unnamed_addr constant [37 x i8] c\"error: reference used after release\\0A\\00\"
+@.fmt.oom = private unnamed_addr constant [31 x i8] c\"error: out of reference cells\\0A\\00\"
 
 define void @__vela_cell_trap() {
 entry:
-  call i32 (ptr, ...) @printf(ptr @.fmt.uaf)
+  %e = call ptr @__acrt_iob_func(i32 2)
+  %r = call i32 @fputs(ptr @.fmt.uaf, ptr %e)
   call void @exit(i32 1)
   unreachable
 }
@@ -111,7 +112,8 @@ fresh:
   %oob = icmp sge i64 %top, 65536
   br i1 %oob, label %overflow, label %ok
 overflow:
-  call i32 (ptr, ...) @printf(ptr @.fmt.oom)
+  %eo = call ptr @__acrt_iob_func(i32 2)
+  %ro = call i32 @fputs(ptr @.fmt.oom, ptr %eo)
   call void @exit(i32 1)
   unreachable
 ok:
@@ -908,8 +910,15 @@ pub fn emit(program: &Program) -> Result<String, String> {
         ));
         out.push_str("@.logmode = private unnamed_addr constant [2 x i8] c\"w\\00\"\n");
     }
+    // Index traps carry the offending index (fprintf'd to stderr), matching
+    // the interpreter's `error: array index {i} out of bounds` byte-for-byte.
     out.push_str(
-        "@.fmt.aoob = private unnamed_addr constant [33 x i8] c\"Vela: array index out of bounds\\0A\\00\"\n\n",
+        "@.trap.aoob = private unnamed_addr constant [39 x i8] \
+         c\"error: array index %lld out of bounds\\0A\\00\"\n",
+    );
+    out.push_str(
+        "@.trap.soob = private unnamed_addr constant [40 x i8] \
+         c\"error: string index %lld out of bounds\\0A\\00\"\n\n",
     );
 
     // ---- region / arena runtime (RFC-0004 §4) ---------------------------
@@ -963,10 +972,24 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("@.lvl.info = private unnamed_addr constant [5 x i8] c\"INFO\\00\"\n");
     out.push_str("@.lvl.warn = private unnamed_addr constant [5 x i8] c\"WARN\\00\"\n");
     out.push_str("@.lvl.error = private unnamed_addr constant [6 x i8] c\"ERROR\\00\"\n");
-    // 24 chars + NUL = 25: "Vela: validation failed\n"
-    out.push_str(
-        "@.fmt.verr = private unnamed_addr constant [25 x i8] c\"Vela: validation failed\\0A\\00\"\n",
-    );
+    // Validation trap messages, one per predicated type — byte-identical to
+    // the interpreter's errors as the CLI renders them (`error: {msg}` on
+    // stderr, exit 1). A record base gets the cross-field wording.
+    for t in &program.type_decls {
+        if t.predicate.is_none() {
+            continue;
+        }
+        let msg = if matches!(t.base, Type::Record(_)) {
+            format!("error: validation failed: `{}` violates its `where` clause\n", t.name)
+        } else {
+            format!("error: validation failed for `{}`\n", t.name)
+        };
+        let (escaped, len) = llvm_str(&msg);
+        out.push_str(&format!(
+            "@.trap.verr.{} = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n",
+            t.name
+        ));
+    }
     // Division trap messages — byte-identical to the interpreter's errors as
     // rendered by the CLI (`error: {msg}` on stderr, exit 1).
     out.push_str(
@@ -2128,14 +2151,9 @@ impl<'a> Gen<'a> {
                     }
                     let (cond, _) = self.gen_expr(pred)?;
                     self.scope.pop();
-                    let ok_l = self.fresh_label("rok");
-                    let fail_l = self.fresh_label("rfail");
-                    self.emit_term(format!("br i1 {cond}, label %{ok_l}, label %{fail_l}"));
-                    self.emit_label(&fail_l);
-                    self.emit("call i32 (ptr, ...) @printf(ptr @.fmt.verr)".into());
-                    self.emit("call void @exit(i32 1)".into());
-                    self.emit_term("unreachable".into());
-                    self.emit_label(&ok_l);
+                    let nok = self.fresh_tmp();
+                    self.emit(format!("{nok} = xor i1 {cond}, true"));
+                    self.trap_if(&nok, &format!("@.trap.verr.{name}"), "rfail");
                 }
             }
         }
@@ -3170,9 +3188,16 @@ impl<'a> Gen<'a> {
             let (iv, _) = self.gen_expr(&args[1])?;
             let bad_l = self.fresh_label("at.oob");
             let ok_l = self.fresh_label("at.ok");
-            let emit_trap = |g: &mut Self| {
+            // The trap message carries the offending index and goes to stderr,
+            // byte-identical to the interpreter's `error: ... index {i} out of
+            // bounds`. Strings pick the "string index" wording.
+            let emit_trap = |g: &mut Self, fmt: &str| {
                 g.emit_label(&bad_l);
-                g.emit("call i32 (ptr, ...) @printf(ptr @.fmt.aoob)".into());
+                let e = g.fresh_tmp();
+                g.emit(format!("{e} = call ptr @__acrt_iob_func(i32 2)"));
+                g.emit(format!(
+                    "call i32 (ptr, ptr, ...) @fprintf(ptr {e}, ptr {fmt}, i64 {iv})"
+                ));
                 g.emit("call void @exit(i32 1)".into());
                 g.emit_term("unreachable".into());
             };
@@ -3187,7 +3212,7 @@ impl<'a> Gen<'a> {
                     let oob = self.fresh_tmp();
                     self.emit(format!("{oob} = icmp uge i64 {iv}, {len}"));
                     self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
-                    emit_trap(self);
+                    emit_trap(self, "@.trap.aoob");
                     self.emit_label(&ok_l);
                     let ep = self.fresh_tmp();
                     let v = self.fresh_tmp();
@@ -3204,7 +3229,7 @@ impl<'a> Gen<'a> {
                     let oob = self.fresh_tmp();
                     self.emit(format!("{oob} = icmp uge i64 {iv}, {n}"));
                     self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
-                    emit_trap(self);
+                    emit_trap(self, "@.trap.aoob");
                     self.emit_label(&ok_l);
                     let slot = self.fresh_alloca(&aggty);
                     self.emit(format!("store {aggty} {av}, ptr {slot}"));
@@ -3222,7 +3247,7 @@ impl<'a> Gen<'a> {
                     let oob = self.fresh_tmp();
                     self.emit(format!("{oob} = icmp uge i64 {iv}, {len}"));
                     self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
-                    emit_trap(self);
+                    emit_trap(self, "@.trap.soob");
                     self.emit_label(&ok_l);
                     let ep = self.fresh_tmp();
                     let byte = self.fresh_tmp();
@@ -3513,16 +3538,9 @@ impl<'a> Gen<'a> {
         let slot = self.declare("value", &decl.base);
         self.emit(format!("store {base_ll} {v}, ptr {slot}"));
         let (cond, _) = self.gen_expr(pred)?;
-        let ok_l = self.fresh_label("vok");
-        let fail_l = self.fresh_label("vfail");
-        self.emit_term(format!("br i1 {cond}, label %{ok_l}, label %{fail_l}"));
-
-        self.emit_label(&fail_l);
-        self.emit("call i32 (ptr, ...) @printf(ptr @.fmt.verr)".into());
-        self.emit("call void @exit(i32 1)".into());
-        self.emit_term("unreachable".into());
-
-        self.emit_label(&ok_l);
+        let nok = self.fresh_tmp();
+        self.emit(format!("{nok} = xor i1 {cond}, true"));
+        self.trap_if(&nok, &format!("@.trap.verr.{}", decl.name), "vfail");
         let result = self.fresh_tmp();
         self.emit(format!("{result} = load {base_ll}, ptr {slot}"));
         self.scope.pop();
@@ -4259,7 +4277,7 @@ mod tests {
                    fn main() -> Int { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(exit_calls(&ir) > exit_baseline(), "expected a runtime check: {ir}");
-        assert!(ir.contains("@.fmt.verr"), "{ir}");
+        assert!(ir.contains("@.trap.verr.Age"), "{ir}");
     }
 
     #[test]
@@ -4275,7 +4293,7 @@ mod tests {
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("load i8"), "loads a byte: {ir}");
         assert!(ir.contains("zext i8") && ir.contains("to i64"), "zero-extends: {ir}");
-        assert!(ir.contains("@.fmt.aoob"), "bounds-checked: {ir}");
+        assert!(ir.contains("@.trap.soob"), "bounds-checked: {ir}");
     }
 
     #[test]
@@ -4320,7 +4338,7 @@ mod tests {
                    fn main() -> Int { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("call i64 @strlen"), "refinement uses strlen: {ir}");
-        assert!(ir.contains("@.fmt.verr"), "refinement traps: {ir}");
+        assert!(ir.contains("@.trap.verr.Name"), "refinement traps: {ir}");
     }
 
     #[test]
@@ -4329,7 +4347,7 @@ mod tests {
                    fn mk(x: Int, y: Int) -> R { return R { a: x, b: y }; } \
                    fn main() -> Int { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("@.fmt.verr"), "cross-field traps: {ir}");
+        assert!(ir.contains("@.trap.verr.R"), "cross-field traps: {ir}");
     }
 
     #[test]
