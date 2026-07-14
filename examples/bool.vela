@@ -1,0 +1,17 @@
+// Booleans, short-circuit &&/||, and printing bools.
+// Prints:
+//   true
+//   false
+//   true
+// and exits with code 0.
+
+fn isEven(n: Int) -> Bool {
+    return n % 2 == 0
+}
+
+fn main() -> Int {
+    print(isEven(4))            // true
+    print(isEven(7))           // false
+    print(isEven(4) && !isEven(7)) // true
+    return 0
+}

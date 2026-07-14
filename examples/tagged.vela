@@ -1,0 +1,49 @@
+// Tagged templates — RFC-0007. The injection-safe-by-construction payoff.
+//
+// A tag prefix on a string (`sql"..."`) hands the template to a function as two
+// separate arrays: the literal fragments (`parts`, trusted, compile-time) and the
+// interpolated values (`values`, untrusted, boxed into the built-in `Value` enum).
+// Because the query's *structure* can only come from `parts`, an interpolated
+// value can never become SQL — it can only ever land in a parameter slot. This is
+// the same guarantee JavaScript tagged templates and parameterized queries give,
+// but enforced by the desugaring, not by remembering to escape.
+//
+// `sql"a \{x} b"` desugars to `sql(list(["a ", " b"]), list([value(x)]))`.
+
+fn sql(parts: Array<String>, values: Array<Value>) -> String {
+    // Assemble the query text, replacing each hole with a $N placeholder.
+    let mut out = ""
+    let mut i = 0
+    for p in parts {
+        out = concat(out, p)
+        if i < values.length {
+            out = concat(out, concat("$", str(i + 1)))
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// Render a bound parameter for display (the value the driver would bind to $N).
+fn showValue(v: Value) -> String {
+    return match v {
+        VInt(n) => str(n),
+        VBool(b) => str(b),
+        VStr(s) => s,
+    }
+}
+
+fn main() -> Int {
+    // A hostile input that would wreck a string-concatenated query.
+    let userName = "'; DROP TABLE users; --"
+    let minAge = 18
+
+    let q = sql"SELECT * FROM users WHERE name = \{userName} AND age >= \{minAge}"
+    print(q)                          // SELECT * FROM users WHERE name = $1 AND age >= $2
+
+    // The values are carried separately, as data — never as query structure.
+    print(showValue(VStr(userName)))  // '; DROP TABLE users; --   (bound to $1)
+    print(showValue(VInt(minAge)))    // 18                        (bound to $2)
+
+    return 0
+}

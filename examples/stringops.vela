@@ -1,0 +1,48 @@
+/// String operations — indexing, iteration, character literals, and the common
+/// `contains`/`startsWith`/`endsWith` methods. These make arbitrary per-character
+/// validation expressible (a regex covers the regular cases; a hand-written check
+/// covers the rest). Everything runs identically in the interpreter and native.
+///
+///   s.length        the byte length
+///   s[i]            the byte at index i (an Int; traps if out of bounds)
+///   'a'             a character literal — the byte value 97 (like Rust's b'a')
+///   for b in s      iterate the bytes as Ints
+///   s.contains(x) / s.startsWith(x) / s.endsWith(x)   -> Bool  (also free fns)
+
+/// A hand-written check: every character at an even 1-based position is 'a'.
+fn everyEvenIsA(s: String) -> Bool {
+    let mut i = 1
+    let mut ok = true
+    for c in s {
+        if i % 2 == 0 {
+            if c != 'a' {
+                ok = false
+            }
+        }
+        i = i + 1
+    }
+    return ok
+}
+
+/// Indexing works inside a refinement predicate too (it is pure and const-foldable):
+/// a command must be non-empty and start with an uppercase 'H'.
+type Greeting = String where value.length >= 1 && value[0] == 'H'
+
+fn main() -> Int {
+    let s = "banana"
+    print(s.length)                 // 6
+    print(s[0])                     // 98  ('b')
+    print(s[0] == 'b')              // true
+
+    print(everyEvenIsA("banana"))   // true  (positions 2,4,6 = a,a,a)
+    print(everyEvenIsA("bandit"))   // false
+
+    print(s.contains("nan"))        // true
+    print(s.startsWith("ban"))      // true
+    print(s.endsWith("na"))         // true
+
+    let g = Greeting("Hello")       // valid: non-empty and starts with 'H'
+    print(g)                        // Hello
+
+    return 0
+}

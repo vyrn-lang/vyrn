@@ -1,0 +1,56 @@
+// A binary tree — the `Ref<T>` + `Option<Ref>` shape extends from linear lists
+// to *branching* recursive structures with no new machinery (RFC-0004 §4). Each
+// node holds two optional child references; traversal and reclamation recurse
+// into both.
+
+type Tree = { value: Int, left: Option<Ref<Tree>>, right: Option<Ref<Tree>> }
+
+fn treeSum(o: Option<Ref<Tree>>) -> Int {
+    return match o {
+        Some(r) => get(r).value + treeSum(get(r).left) + treeSum(get(r).right),
+        None => 0,
+    }
+}
+
+fn treeDepth(o: Option<Ref<Tree>>) -> Int {
+    return match o { Some(r) => 1 + maxDepth(r), None => 0 }
+}
+fn maxDepth(r: Ref<Tree>) -> Int {
+    let l = treeDepth(get(r).left)
+    let d = treeDepth(get(r).right)
+    if l > d { return l }
+    return d
+}
+
+// Reclaim the whole tree: capture both children before dropping this node, then
+// recurse into each.
+fn treeFree(o: Option<Ref<Tree>>) -> Int {
+    return match o { Some(r) => freeNode(r), None => 0 }
+}
+fn freeNode(r: Ref<Tree>) -> Int {
+    let l = get(r).left
+    let rt = get(r).right
+    drop r
+    return treeFree(l) + treeFree(rt)
+}
+
+fn leaf(v: Int) -> Option<Ref<Tree>> {
+    return Some(cell(Tree { value: v, left: None, right: None }))
+}
+
+fn main() -> Int {
+    //        2
+    //       / \
+    //      1   4
+    //         /
+    //        3
+    let deep = Some(cell(Tree { value: 4, left: leaf(3), right: None }))
+    let root = Some(cell(Tree { value: 2, left: leaf(1), right: deep }))
+
+    let total = treeSum(root)   // 2 + 1 + 4 + 3
+    print(total)                 // 10
+    print(treeDepth(root))      // 3
+
+    treeFree(root)              // every node reclaimed
+    return total
+}

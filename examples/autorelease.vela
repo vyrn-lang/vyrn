@@ -1,0 +1,26 @@
+// Inferred `release` for generational references (RFC-0004 §4).
+//
+// The same ownership analysis that auto-frees non-escaping strings also
+// auto-*releases* non-escaping reference cells — so idiomatic code needs no
+// manual `release`. Here each iteration allocates a cell that never escapes the
+// loop body; the compiler releases it at the end of the block, returning the
+// slot to the slab for reuse. This runs a million allocations through a slab of
+// only 65536 cells without exhausting it — proof the release actually fires.
+//
+// This is Path B's advantage made concrete: reclamation can be aggressive
+// because a *missed* alias fails a cheap generation check (a clean trap) instead
+// of dangling — where a wrongly-freed string would be a use-after-free.
+
+fn main() -> Int {
+    let mut i = 0
+    let mut last = 0
+    while i < 1000000 {
+        let c = cell(i)       // owned by this block…
+        set(c, get(c) + 1)
+        last = get(c)
+        i = i + 1
+    }                          // …auto-released here; the slot is reused next turn
+
+    print(last)               // 1000000
+    return 0
+}

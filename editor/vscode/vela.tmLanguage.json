@@ -1,0 +1,97 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Vela",
+  "scopeName": "source.vela",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#numbers" },
+    { "include": "#operators" },
+    { "include": "#punctuation" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "name": "comment.line.double-slash.vela",
+      "match": "//.*$"
+    },
+    "strings": {
+      "patterns": [
+        {
+          "comment": "Interpolated string \"a\\{expr}b\" (RFC-0007). Holes use \\{ ... } so plain { } stay literal.",
+          "name": "string.quoted.double.vela",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "include": "#string-escapes" },
+            { "include": "#interpolation" }
+          ]
+        }
+      ]
+    },
+    "string-escapes": {
+      "comment": "String escapes. \\{ is NOT here: it opens an interpolation hole (below), and { is already a literal char in Vela strings, so there is no `\\{` escape.",
+      "name": "constant.character.escape.vela",
+      "match": "\\\\(?:n|t|\\\\|\")"
+    },
+    "interpolation": {
+      "comment": "A \\{ ... } interpolation hole. The closing } is consumed by `end` and colored via endCaptures. Inner patterns deliberately OMIT } — an included } here would match before `end` and leave the hole unterminated. Nested braces (e.g. a block expr) are a known limitation: the hole closes at the first } not inside a nested string. NOTE: the delimiter scopes intentionally reuse the `punctuation.definition.template-expression.*` family rather than a generic `punctuation.definition.interpolation` — Dark+ (and most themes) theme the former but not the latter, so this is what makes \\{ and } actually render in a distinct color instead of falling back to the surrounding string color.",
+      "name": "meta.interpolation.vela",
+      "begin": "\\\\\\{",
+      "beginCaptures": { "0": { "name": "punctuation.definition.template-expression.begin.vela" } },
+      "end": "\\}",
+      "endCaptures": { "0": { "name": "punctuation.definition.template-expression.end.vela" } },
+      "patterns": [
+        { "include": "#strings" },
+        { "include": "#keywords" },
+        { "include": "#types" },
+        { "include": "#numbers" },
+        { "include": "#operators" },
+        { "include": "#hole-punctuation" },
+        { "include": "#identifiers" }
+      ]
+    },
+    "keywords": {
+      "name": "keyword.control.vela",
+      "match": "\\b(fn|let|mut|if|else|while|for|in|drop|protocol|impl|self|return|true|false|type|where|match|region|spawn)\\b"
+    },
+    "types": {
+      "comment": "Type and enum-variant names. Vela's style is PascalCase for types/variants (Shape, Circle, Option, Int, Some, Ok) and lowerCamelCase for variables/functions, so a PascalCase identifier is reliably a type or variant. This subsumes the built-ins (all PascalCase) and colors user-defined types/variants the same as built-ins, instead of maintaining an explicit list. Scoped as support.type → teal in Dark+.",
+      "name": "support.type.vela",
+      "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+    },
+    "numbers": {
+      "name": "constant.numeric.integer.vela",
+      "match": "\\b\\d+\\b"
+    },
+    "operators": {
+      "comment": "Multi-char operators listed first so >= is not split into > then =. Order in the alternation matters: oniguruma picks the first alternative that matches at the position.",
+      "name": "keyword.operator.vela",
+      "match": "->|=>|==|!=|<=|>=|[+\\-*/%=<>!?|&]"
+    },
+    "punctuation": {
+      "comment": "Brackets and delimiters in normal (top-level) code. Includes } (block close).",
+      "patterns": [
+        { "name": "punctuation.section.parens.vela", "match": "[()]" },
+        { "name": "punctuation.section.brackets.vela", "match": "[\\[\\]]" },
+        { "name": "punctuation.section.braces.vela", "match": "[{}]" },
+        { "name": "punctuation.separator.vela", "match": "[,;:.]" }
+      ]
+    },
+    "hole-punctuation": {
+      "comment": "Same as #punctuation but WITHOUT } — the interpolation hole's `end` owns the closing brace, and an included } would shadow it and never close the hole.",
+      "patterns": [
+        { "name": "punctuation.section.parens.vela", "match": "[()]" },
+        { "name": "punctuation.section.brackets.vela", "match": "[\\[\\]]" },
+        { "name": "punctuation.section.braces.vela", "match": "\\{" },
+        { "name": "punctuation.separator.vela", "match": "[,;:.]" }
+      ]
+    },
+    "identifiers": {
+      "name": "variable.other.vela",
+      "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+    }
+  }
+}

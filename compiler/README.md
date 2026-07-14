@@ -1,0 +1,244 @@
+# Vela compiler (prototype)
+
+A Rust workspace implementing the **v0.1 subset** of Vela. Every feature below is
+verified to produce identical results under the tree-walking interpreter and the
+clang-compiled native binary:
+
+- **Core**: `Int`, `Bool`, immutable + dynamic `String`, `let`/`mut`, arithmetic,
+  `if`/`else`, `while`, `for`-in over arrays, functions, `print`, and `str`/`parse`
+  conversions (`parse` is checked — returns `Option<Int>`).
+- **Collections, subject-first**: `[]` builds a growable array, `a.push(x)` grows
+  it, `a[i]` indexes (bounds-checked), `a.length` is the count, and `drop a;`
+  reclaims it explicitly (usually inferred — `drop` is the handoff escape hatch and
+  a *consume*, so use-after-drop is a compile error).
+- **Validated / nominal types** (RFC-0002 §2, RFC-0003): `type Age = Int where
+  value >= 18`; `type UserId = String`; fallible construction `Age?(n)`.
+- **`Option`/`Result`/`match`/`?`** (RFC-0005). `Option` and `Result` payloads may
+  be any type, so `Option<Ref<Node>>` gives **recursive heap structures** — a linked
+  list and a binary tree, each built, traversed, and reclaimed by a recursive
+  `release` walk.
+- **Structural records** with width subtyping, **intersection** `A & B`, and the
+  **`Omit`/`Pick`/`Merge`/`Partial`/`Readonly`** transformers (RFC-0002).
+- **Enums / sum types** with multi-payload variants and exhaustive `match`.
+- **Arrays** — growable `Array<T>` (a `Vec`: `array` / `push` / `at` / `alen` /
+  `afree`, a doubling heap buffer) and fixed-size `Array<T, N>` (a const generic,
+  the stack `[N x T]` with array-literal `[a, b, c]` syntax); both bounds-checked.
+- **Generics** — functions, records, enums — with inference, monomorphization,
+  and **built-in bounds** `Eq`/`Ord`/`Num` (RFC-0002 §6).
+- **Capabilities** (RFC-0004): `consume` (move checking) and `modify` (a parameter
+  changed in place, visible to the caller via call-by-value-result).
+- **Structured concurrency**: `spawn f(args) -> Task<T>` / `join` — a deterministic
+  fork-join. The compiler *proves* a spawned function is isolated (no I/O, no shared
+  mutable state, transitively), so it's data-race-free; `share` = concurrent read.
+- **Heap + deterministic reclamation** (RFC-0004 §4, no GC): dynamic strings
+  (`concat`/`len`), a `region { .. }` block that frees a whole group of
+  allocations at exit (escaping a heap value from a region is a compile error),
+  an **ownership** pass that auto-frees individual heap temporaries proven not to
+  escape their block, and **ownership transfer** so a function can return a fresh
+  heap value that the caller then owns and frees (inferred by call-graph
+  fixpoint). Every allocation is owned by exactly one mechanism, so nothing is
+  freed twice; unprovable cases leak (safe).
+- **Generational references** (RFC-0004 §4, Path B): a `Ref<T>` — a freely-copyable
+  handle to a mutable heap cell holding any `T` (`cell` / `get` / `set` /
+  `release`; the payload is boxed, so the handle is fixed-size). Each access is
+  generation-checked, so a use-after-release traps instead of dangling, even after
+  the slot is reused. `release` is **inferred** by the same ownership analysis that
+  frees strings. A record may hold a `Ref` to its own type without becoming infinite.
+
+## What builds today (no LLVM needed)
+
+The default workspace has **zero external dependencies**:
+
+```bash
+cd compiler
+cargo test        # 188 tests across lexer/parser/checker/interpreter/codegen/movecheck/ownership
+cargo build       # builds the `velac` binary
+```
+
+| Crate | Role |
+|-------|------|
+| `vela-frontend` | lexer → parser → AST → type checker → move checker → tree-walking **interpreter**; also the structured-`Diagnostic` API (`diagnostics(source)`) |
+| `vela-codegen`  | emits **textual LLVM IR** (a string; no LLVM libs to produce it) |
+| `vela-cli`      | the `velac` driver |
+| `vela-lsp`      | Language Server Protocol server (excluded — pulls `lsp-server`/`lsp-types`; see below) |
+
+## Running programs
+
+```bash
+# interpret (process exits with main's return value)
+cargo run -p vela-cli -- run    ../examples/fib.vela     # prints 55, exit code 55
+cargo run -p vela-cli -- run    ../examples/loop.vela    # prints 45
+cargo run -p vela-cli -- run    ../examples/bool.vela    # prints true / false / true
+
+# type-check only
+cargo run -p vela-cli -- check  ../examples/fib.vela     # -> ok
+# type-check, multi-error: reports every type/ownership error across all functions
+#   e.g. a return-type mismatch in f() and an arithmetic error in g() are BOTH shown:
+#   bad.vela:1:0: return type mismatch: expected Int, found Bool
+#   bad.vela:2:0: arithmetic needs Int operands, found Str and Int
+
+# emit LLVM IR to stdout
+cargo run -p vela-cli -- emit-ir ../examples/loop.vela
+```
+
+### Validated types (RFC-0003)
+
+```bash
+# compile-time rejection of a provably-invalid value:
+echo 'type Age = Int where value >= 18; fn main() -> Int { let b = Age(5); return 0; }' > bad.vela
+cargo run -p vela-cli -- check bad.vela
+#   error: line 1: Int(5) does not satisfy `Age` (predicate `where value >= 18` is false)
+
+# runtime validation compiled to native code (see examples/validate_fail.vela):
+cargo run -p vela-cli -- build ../examples/validate_fail.vela -o vfail.exe
+./vfail.exe ; echo $?     # prints "Vela: validation failed", exit 1
+```
+
+## Getting a native executable  ✅ verified working
+
+The text IR targets **LLVM 15+** (opaque pointers) and has been compiled and run
+natively with `clang` (tested against clang 22 on Windows). The `build`
+subcommand does emit-IR + link in one shot:
+
+```bash
+# one-shot: emits <out>.ll next to the binary, then links with clang
+cargo run -p vela-cli -- build ../examples/fib.vela -o fib.exe
+./fib.exe ; echo $?      # prints 55, exit code 55
+```
+
+`velac build` finds clang via `$CLANG`, then PATH, then
+`C:\Program Files\LLVM\bin\clang.exe`. Or do it by hand:
+
+```bash
+cargo run -p vela-cli -- emit-ir ../examples/fib.vela > fib.ll
+clang fib.ll -o fib.exe
+```
+
+> Note: native output uses the platform C runtime, so on Windows `print` lines end
+> with `\r\n`; the interpreter (`velac run`) uses `\n`. Same text, same exit codes
+> — a benign line-ending artifact, not a semantic difference.
+
+## The Inkwell backend (works — needs an external LLVM 22 dev install)
+
+`vela-codegen-llvm/` is the "proper" backend the design chose (Rust + Inkwell):
+it builds an LLVM module in memory and writes an object file directly. It is
+kept **excluded** from the default workspace only so the commands above never
+require an LLVM install — but it **builds, links, and runs** against a full LLVM
+22 dev SDK. Its tests emit verified IR, write native object files, and — end to
+end — link with `clang` into an exe whose exit code matches the interpreter
+(`fib(10)=55`).
+
+```bash
+cd vela-codegen-llvm
+cargo test --features llvm22-1      # env + link flags come from .cargo/config.toml
+```
+
+**Scope:** only the v0.1 subset — `Int`/`Bool`/arithmetic/`if`/`while`/`print`/
+`Option`/`Result`/validated types. Records, enums, generics, strings, `Ref`,
+arrays, and `spawn` return explicit "unsupported" errors. The text-IR backend in
+`vela-codegen` is the full reference native backend; this one is a proof that the
+in-memory LLVM path the design chose is viable.
+
+> **What it took to build on Windows** (all wired into `.cargo/config.toml`,
+> `build.rs`, and `.llvm-stublib/`, so `cargo test --features llvm22-1` "just
+> works" once LLVM 22 is at `C:\Program Files\LLVM`):
+> 1. **inkwell 0.9.0** (`llvm22-1`) — earlier 0.5 capped at LLVM 18; 0.9 removes
+>    the version wall.
+> 2. **A full LLVM dev SDK**, not the `winget` compiler package — you need
+>    `llvm-config`, the full `llvm-c/*.h` headers, and the static libs.
+> 3. **A short-path `CFLAGS` override** — `llvm-config --cflags` returns a path
+>    with a space (`C:\Program Files`) that cc-rs splits; the 8.3 name
+>    (`C:\PROGRA~1`) avoids it.
+> 4. **Static CRT + Windows SDK lib dirs** — LLVM's libs are `/MT`; mixing with
+>    Rust's default `/MD` crashes on cross-heap frees. `+crt-static` fixes it and
+>    pulls the system libs static, so the SDK lib dirs must be on the search path.
+> 5. **An empty `xml2s.lib` stub** — `--system-libs` lists libxml2 but the
+>    redistributable omits it; unused, so the linker dead-strips the stub.
+
+## Editor support — diagnostics + symbol query + LSP (core API)
+
+Structured diagnostics and a symbol query are **core** responsibilities of the
+front end, not editor-specific add-ons. `vela_frontend::diagnostics(source)`
+returns every problem as a `Diagnostic { line, col, end_col, severity, stage,
+message }` with a precise position, and `vela_frontend::analyze(source)` runs
+the same pipeline *plus* a symbol index — both `velac check` and the LSP
+consume the *same* API, no duplication.
+
+- **Accumulation** is bounded: the lexer and parser stop at the first problem
+  (recovery is future work), but once a file parses, every type/ownership error
+  across all functions and types is reported — an error in one function does
+  not suppress errors in the others. Inside a single function body the check is
+  still first-error.
+- **`velac check`** prints each as `file:line:col: message` (`col` is `0` when a
+  stage knows only the line).
+- **`vela_frontend::analyze`** (`src/symbols.rs`) returns an `Analysis {
+  diagnostics, symbols, tokens, locals, decl_lines, fn_lines }` in one parse:
+  the diagnostics, a `Symbol` per top-level function/type/variant/method (with a
+  precise name column reused from the lexer's `Token.col` — the AST carries line
+  only, no span), the identifier tokens for cursor→token mapping, and a
+  `LocalBinding` per function parameter / `let` / `for`-in var (for variable
+  hover + go-to-definition). `resolve(analysis, line, col)` maps a cursor to the
+  declaration it names — a local in the cursor's enclosing function wins over a
+  same-named top-level symbol (shadowing), with the latest binding at or before
+  the cursor winning; `completions(analysis)` lists top-level symbols.
+  `diagnostics()` delegates to `analyze()` and returns its `.diagnostics`, so
+  there is one pipeline. The approach is deliberately non-invasive: no AST/parser
+  span threading, just the token positions already on `Token`. Top-level names
+  are unique (no shadowing), so top-level resolution is robust; local scope is
+  line-based (an over-approximation — a `let` inside an `if` is treated as
+  visible to the function's end; acceptable for hover/go-to-def).
+- **`vela-lsp`** is a tiny, **synchronous** `lsp-server` server (no tokio, no
+  async) and a **pure adapter**: it calls `analyze` once on open/change, caches
+  the `Analysis`, and serves `textDocument/publishDiagnostics`, `/hover`,
+  `/definition`, and `/completion` from it — a request never re-parses. It is
+  **excluded** from the default workspace so the zero-dependency property holds;
+  build it explicitly:
+
+  ```bash
+  cargo build --manifest-path compiler/vela-lsp/Cargo.toml
+  # binary: compiler/vela-lsp/target/debug/vela-lsp(.exe)
+  ```
+
+  Hover/go-to-definition/completion cover top-level functions, types, and
+  variants, **and local bindings** — function parameters, `let` bindings, and
+  `for`-in variables (a local shadows a same-named top-level symbol; the latest
+  binding at or before the cursor wins). Local hover shows the declared type for
+  params and annotated `let`s; unannotated `let`s and `for`-vars still get
+  go-to-definition (the inferred type isn't retained without a checker change).
+  Still deferred: inferred-`let`-type hover, method-call resolution (`x.foo()`),
+  `.foo` member completion, and parser recovery.
+
+### VS Code extension (`editor/vscode/`)
+
+A minimal, **plain-JavaScript** extension (no TypeScript compile step) that
+spawns the `vela-lsp` binary and contributes a TextMate grammar for colors. To
+try it: open this repo in VS Code and press **F5** (build the server first with
+the `cargo build` above — the launch config no longer rebuilds it, to avoid a
+Windows file-lock on the running binary aborting the launch); an Extension
+Development Host window opens with `.vela` files colored, squiggled, and with
+hover / F12 go-to-definition / completion. See `editor/vscode/README.md`.
+
+## Semantics contract
+
+All three execution paths — the interpreter, the text-IR backend, and the
+Inkwell backend — must agree. The interpreter in
+`vela-frontend/src/interp.rs` is the executable reference; its unit tests
+(`fib`, `while`+`mut`, arithmetic) plus the `examples/` are the shared
+conformance cases. Verified match points include: `print` of a `Bool` prints
+`true`/`false`; a compile-time-proven validated construction has no runtime
+check; a failed runtime validation exits with code 1 (native prints
+`Vela: validation failed`, interpreter prints a detailed message).
+
+## Layout
+
+```
+compiler/
+├── Cargo.toml              workspace (excludes vela-codegen-llvm and vela-lsp)
+├── vela-frontend/          lexer, parser, ast, checker, movecheck, interp, types, diagnostics (+ tests)
+├── vela-codegen/           textual LLVM IR emitter (+ unit tests)
+├── vela-cli/               velac: run | check | emit-ir | build
+├── vela-lsp/               LSP server (excluded — pulls lsp-server/lsp-types)
+└── vela-codegen-llvm/      Inkwell backend (works; excluded — needs LLVM 22 dev SDK)
+
+editor/vscode/             VS Code extension: extension.js (LSP client) + TextMate grammar
+```

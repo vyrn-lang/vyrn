@@ -1,0 +1,30 @@
+// Compile-time type transformers (RFC-0002 §7): derive new record shapes from
+// existing ones. These are pure type-level functions, erased before codegen —
+// the runtime values are just plain records.
+
+type User = { id: Int, name: Int, password: Int }
+
+type Public  = Omit<User, password>   // { id, name }
+type Id      = Pick<User, id>         // { id }
+type Audit   = { createdAt: Int }
+type Tracked = Merge<User, Audit>     // { id, name, password, createdAt }
+
+fn showPublic(p: Public) -> Int { return p.name }
+fn showId(v: Id) -> Int { return v.id }
+
+fn main() -> Int {
+    let u = User { id: 1, name: 42, password: 999 }
+
+    // A User is structurally a superset of Public and Id, so it flows in with no
+    // cast (width subtyping over a transformer-derived shape).
+    let a = showPublic(u)          // 42
+    let b = showId(u)              // 1
+
+    // You can also build a derived type directly (only its retained fields).
+    let p = Public { id: 7, name: 8 }
+
+    print(a)        // 42
+    print(b)        // 1
+    print(p.name)   // 8
+    return 0
+}

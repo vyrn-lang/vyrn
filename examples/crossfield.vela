@@ -1,0 +1,28 @@
+/// Cross-field validation — a record may carry a `where` clause that references
+/// its fields by name, enforcing an invariant *between* fields at construction.
+///
+/// Like scalar refinements: a provably-invalid constant literal is a compile
+/// error, and a value that only fails at runtime traps (exit 1) — identically in
+/// the interpreter and native code. JSON Schema can't express arithmetic between
+/// properties, so `jsonSchema` documents the invariant in a `$comment` (the
+/// runtime check remains the source of truth).
+
+type Range = { start: Int, end: Int } where start < end
+type Bracket = { lo: Int, hi: Int, step: Int } where lo <= hi && step > 0
+
+fn span(r: Range) -> Int {
+    return r.end - r.start
+}
+
+fn main() -> Int {
+    let r = Range { start: 3, end: 10 }        // valid at compile time
+    print(span(r))                             // 7
+
+    // Constructed from runtime values — checked at construction.
+    let b = Bracket { lo: 0, hi: 100, step: 5 }
+    print(b.hi - b.lo)                          // 100
+
+    print(jsonSchema(Range))
+    print(jsonSchema(Bracket))
+    return 0
+}

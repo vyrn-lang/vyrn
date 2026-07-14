@@ -1,0 +1,31 @@
+// String interpolation — RFC-0007, Phase 1.
+//
+// A `\{ expr }` hole inside a normal `"..."` string interpolates the expression,
+// rendered with `str` (Int, sized IntN, Float, Bool, and String). The escape is on the
+// *interpolation*, so `{` and `}` stay ordinary characters — no doubling needed,
+// which is what makes this pleasant for brace-heavy text (LaTeX, JSON, code).
+//
+// An interpolated string desugars to a `concat`/`str` chain producing a `String`,
+// so the interpreter and native backend render identically.
+
+fn greet(name: String, count: Int) -> String {
+    return "hi \{name}, you have \{count} messages"
+}
+
+fn main() -> Int {
+    let name = "Vela"
+    let n = 3
+    let done = n > 2
+
+    print(greet(name, n))                 // hi Vela, you have 3 messages
+    print("n=\{n}, doubled=\{n + n}")     // n=3, doubled=6
+    print("done? \{done}")                // done? true
+    print("literal braces { } stay put")  // literal braces { } stay put
+
+    // Sized ints and floats interpolate too, rendering exactly as `print`.
+    let port: UInt16 = 8080
+    let ratio = 0.5
+    print("port=\{port}, ratio=\{ratio}")  // port=8080, ratio=0.500000
+
+    return n
+}

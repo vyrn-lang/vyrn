@@ -1,0 +1,49 @@
+{
+  "name": "vela",
+  "displayName": "Vela",
+  "description": "Language support for Vela: syntax highlighting + diagnostics via the vela-lsp server.",
+  "version": "0.1.0",
+  "publisher": "vela-lang",
+  "license": "MIT",
+  "engines": { "vscode": "^1.70.0" },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:vela"],
+  "main": "./extension.js",
+  "scripts": {
+    "package": "node scripts/make-vsix.mjs"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "vela",
+        "aliases": ["Vela", "vela"],
+        "extensions": [".vela"],
+        "icon": { "light": "./icons/vela.svg", "dark": "./icons/vela.svg" },
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "vela",
+        "scopeName": "source.vela",
+        "path": "./vela.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Vela",
+      "properties": {
+        "vela.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the vela-lsp server binary. Defaults to ${workspaceFolder}/compiler/vela-lsp/target/debug/vela-lsp (or .exe). Leave empty for the dev default."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.0"
+  }
+}

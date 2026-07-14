@@ -1,0 +1,26 @@
+// Optionals and pattern matching (RFC-0005). No null: absence is an explicit
+// Option<T>, and the only way to read it is an exhaustive `match`.
+
+fn safeDiv(a: Int, b: Int) -> Option<Int> {
+    if b == 0 {
+        return None          // type inferred from the return type
+    }
+    return Some(a / b)
+}
+
+// `match` is an expression; both arms must yield the same type.
+fn unwrapOr(o: Option<Int>, fallback: Int) -> Int {
+    return match o {
+        Some(x) => x,
+        None    => fallback,
+    }
+}
+
+fn main() -> Int {
+    let a = safeDiv(10, 2)   // Some(5)
+    let b = safeDiv(10, 0)   // None
+
+    print(unwrapOr(a, 0 - 1))   // 5
+    print(unwrapOr(b, 0 - 1))   // -1
+    return 0
+}

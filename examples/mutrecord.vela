@@ -1,0 +1,28 @@
+// Mutable record fields — `name.field = value` on a `mut` binding (RFC-0004,
+// the `modify` direction). A record is a value, so this rebuilds it in place
+// mutating a field of a binding declared without `mut` is a compile error.
+
+type Account = { balance: Int, count: Int }
+
+fn deposit(a: Account, amount: Int) -> Account {
+    // Records are values: return the updated one (a `modify`-by-reference
+    // parameter would let this mutate the caller's copy directly; that lowering
+    // is future work — today `Ref<Account>` cells cover shared mutation).
+    let mut next = a
+    next.balance = next.balance + amount
+    next.count = next.count + 1
+    return next
+}
+
+fn main() -> Int {
+    let mut acct = Account { balance: 0, count: 0 }
+
+    // Mutate fields directly on a local `mut` record.
+    acct.balance = 100
+    acct = deposit(acct, 50)
+    acct = deposit(acct, 25)
+
+    print(acct.balance)   // 175
+    print(acct.count)     // 2
+    return acct.balance
+}

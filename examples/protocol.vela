@@ -1,0 +1,37 @@
+// Protocols — RFC-0002 §5. A protocol is a named set of method signatures a type
+// can implement; a generic can be bounded by it. Dispatch is static (each generic
+// is monomorphized to the concrete impl), so there is no vtable and no runtime
+// cost — and the interpreter matches native by dispatching on the runtime type.
+//
+// Methods are subject-first: `x.show()` calls the `Show` impl for `x`'s type.
+
+protocol Show {
+    fn show(self) -> String
+}
+
+impl Show for Int {
+    fn show(self) -> String { return str(self) }
+}
+
+impl Show for Bool {
+    fn show(self) -> String {
+        if self { return "yes" }
+        return "no"
+    }
+}
+
+// A generic function bounded by `Show` can call `.show()` on its argument.
+fn label(x: Int, flag: Bool) -> String {
+    return concat(concat("x=", show(x)), concat(" flag=", show(flag)))
+}
+
+fn describe<T: Show>(x: T) -> String {
+    return concat("= ", x.show())
+}
+
+fn main() -> Int {
+    print(describe(42))           // = 42       (generic, T = Int)
+    print(describe(true))         // = yes      (generic, T = Bool)
+    print(label(7, false))        // x=7 flag=no
+    return 0
+}

@@ -1,0 +1,12 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build-lsp",
+      "type": "shell",
+      "command": "cargo build --manifest-path ${workspaceFolder}/compiler/vela-lsp/Cargo.toml",
+      "problemMatcher": "$rustc",
+      "group": "build"
+    }
+  ]
+}

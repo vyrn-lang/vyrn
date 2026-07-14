@@ -1,0 +1,1462 @@
+//! Recursive-descent parser with precedence climbing for expressions.
+
+use crate::ast::*;
+use crate::diagnostics::Diagnostic;
+use crate::lexer::{Tok, Token};
+
+/// Parse a token stream into a [`Program`].
+///
+/// Returns the *first* parse error (the historical single-error surface). For
+/// **all** parse errors recovered in one pass, use [`parse_accum`].
+pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
+    let (program, errors) = parse_accum(tokens);
+    match errors.into_iter().next() {
+        Some(d) => Err(d),
+        None => Ok(program),
+    }
+}
+
+/// Parse a token stream into a ([`Program`], `Vec<Diagnostic>`), recovering past
+/// bad top-level declarations so **multiple** parse errors are reported in one
+/// pass (RFC-0006 recovery). Each declaration's parser stays first-error (its
+/// internals use `?`); recovery happens only at the top level: when a
+/// `fn`/`type`/`protocol`/`impl`/`logging` declaration fails, the diagnostic is
+/// recorded and the cursor synchronizes to the next top-level declaration
+/// starter (skipping nested braces) before continuing. The returned `Program`
+/// holds whatever declarations *did* parse cleanly; callers that surface
+/// diagnostics should treat a non-empty error list as "do not run downstream
+/// checks" (a partial program would only produce cascading type errors).
+pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
+    let (mut program, errors) =
+        Parser { tokens, pos: 0, no_struct: false, type_params: Vec::new() }.program_accum();
+    // The built-in `Value` enum (RFC-0007): the closed set of types a tagged
+    // template can interpolate. Injected so every program can name `Array<Value>`
+    // and match `VInt`/`VBool`/`VStr` — the tag surface — without a `use`.
+    program.type_decls.push(TypeDecl {
+        name: "Value".to_string(),
+        doc: None,
+        type_params: Vec::new(),
+        base: Type::Enum(vec![
+            EnumVariant { name: "VInt".to_string(), payload: vec![Type::Int] },
+            EnumVariant { name: "VBool".to_string(), payload: vec![Type::Bool] },
+            EnumVariant { name: "VStr".to_string(), payload: vec![Type::Str] },
+        ]),
+        predicate: None,
+        line: 0,
+    });
+    // The built-in `Template` record (RFC-0007): the structured form of an
+    // interpolated string — literal `parts` interleaved with boxed `values`.
+    // `template"a\{x}b"` yields one of these; any code can read its fields.
+    program.type_decls.push(TypeDecl {
+        name: "Template".to_string(),
+        doc: None,
+        type_params: Vec::new(),
+        base: Type::Record(vec![
+            Field { name: "parts".to_string(), ty: Type::Array(Box::new(Type::Str)) },
+            Field {
+                name: "values".to_string(),
+                ty: Type::Array(Box::new(Type::Named("Value".to_string()))),
+            },
+        ]),
+        predicate: None,
+        line: 0,
+    });
+    // The error model (RFC-0009): a structured `Issue` (with an i18n `key`) and a
+    // generic `Validation<T>` = `Valid(T) | Invalid([Issue])`. A validator
+    // accumulates all failing checks into an issue array and returns `Invalid`,
+    // so every problem is reported at once and each carries a translation key.
+    program.type_decls.push(TypeDecl {
+        name: "Issue".to_string(),
+        doc: None,
+        type_params: Vec::new(),
+        base: Type::Record(vec![
+            Field { name: "key".to_string(), ty: Type::Str },
+            Field { name: "path".to_string(), ty: Type::Str },
+            Field { name: "message".to_string(), ty: Type::Str },
+        ]),
+        predicate: None,
+        line: 0,
+    });
+    program.type_decls.push(TypeDecl {
+        name: "Validation".to_string(),
+        doc: None,
+        type_params: vec!["T".to_string()],
+        base: Type::Enum(vec![
+            EnumVariant { name: "Valid".to_string(), payload: vec![Type::Param("T".to_string())] },
+            EnumVariant {
+                name: "Invalid".to_string(),
+                payload: vec![Type::Array(Box::new(Type::Named("Issue".to_string())))],
+            },
+        ]),
+        predicate: None,
+        line: 0,
+    });
+    // `Schema` (RFC-0003 reflection): the extractable shape of a validated type,
+    // produced by `schemaOf(TypeName)` — its base plus the numeric bounds its
+    // `where` predicate implies. Turn it into OpenAPI/JSON in ordinary code.
+    program.type_decls.push(TypeDecl {
+        name: "Schema".to_string(),
+        doc: None,
+        type_params: Vec::new(),
+        base: Type::Record(vec![
+            Field { name: "base".to_string(), ty: Type::Str },
+            Field { name: "min".to_string(), ty: Type::Option(Box::new(Type::Int)) },
+            Field { name: "max".to_string(), ty: Type::Option(Box::new(Type::Int)) },
+        ]),
+        predicate: None,
+        line: 0,
+    });
+    // Flatten each `impl P for T` method into a mangled top-level function
+    // (`P__Key__method`), so type checking, monomorphization, and lowering treat
+    // it like any function; protocol-method *calls* resolve to these names by the
+    // receiver's type. Impls on unsupported targets are left for the checker.
+    let mut flat = Vec::new();
+    for imp in &program.impls {
+        if let Some(key) = crate::types::type_key(&imp.ty) {
+            for m in &imp.methods {
+                let mut f = m.clone();
+                f.name = crate::types::impl_method_name(&imp.protocol, &key, &m.name);
+                flat.push(f);
+            }
+        }
+    }
+    program.functions.extend(flat);
+    (program, errors)
+}
+
+struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
+    /// When true, a bare `Ident {` is NOT a struct literal (so `if x { .. }`
+    /// parses `x` as the condition and `{` as the block). Reset inside `( .. )`.
+    no_struct: bool,
+    /// The current function's generic parameters; a type name matching one of
+    /// these parses as [`Type::Param`] rather than a named type.
+    type_params: Vec<String>,
+}
+
+impl Parser {
+    // ---- token cursor helpers -------------------------------------------
+
+    fn peek(&self) -> &Tok {
+        &self.tokens[self.pos].tok
+    }
+
+    fn line(&self) -> usize {
+        self.tokens[self.pos].line
+    }
+
+    /// Consume a statement/declaration terminator. A `;` is optional — statements
+    /// are otherwise terminated by the start of the next one (the expression
+    /// grammar is greedy, so a boundary falls where an expression can't extend).
+    fn eat_semi(&mut self) {
+        if *self.peek() == Tok::Semi {
+            self.advance();
+        }
+    }
+
+    /// Consume consecutive `///` doc-comment tokens and return them joined by
+    /// newlines (markdown), or `None` if there were none. Used to attach docs to
+    /// the following declaration; elsewhere (inside bodies) the result is ignored,
+    /// which simply discards stray doc comments.
+    fn take_docs(&mut self) -> Option<String> {
+        let mut lines = Vec::new();
+        loop {
+            match self.peek() {
+                Tok::Doc(t) => {
+                    lines.push(t.clone());
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join("\n"))
+        }
+    }
+
+    /// 1-based column of the current token (for diagnostics).
+    fn col(&self) -> usize {
+        self.tokens[self.pos].col
+    }
+
+    fn advance(&mut self) -> Tok {
+        let t = self.tokens[self.pos].tok.clone();
+        if self.pos + 1 < self.tokens.len() {
+            self.pos += 1;
+        }
+        t
+    }
+
+    fn eat(&mut self, expected: &Tok) -> Result<(), Diagnostic> {
+        if self.peek() == expected {
+            self.advance();
+            Ok(())
+        } else {
+            Err(Diagnostic::error(
+                self.line(),
+                self.col(),
+                "parse",
+                format!("expected {:?}, found {:?}", expected, self.peek()),
+            ))
+        }
+    }
+
+    fn expect_ident(&mut self) -> Result<String, Diagnostic> {
+        match self.advance() {
+            Tok::Ident(name) => Ok(name),
+            other => Err(Diagnostic::error(
+                self.line(),
+                self.col(),
+                "parse",
+                format!("expected identifier, found {:?}", other),
+            )),
+        }
+    }
+
+    // ---- grammar --------------------------------------------------------
+
+    /// Top-level: zero or more declarations, with **recovery**. When a
+    /// declaration fails to parse, record its diagnostic, synchronize to the
+    /// next top-level starter, and continue — so one bad `fn` doesn't hide a
+    /// later bad `type`. Returns the partial program plus every diagnostic.
+    fn program_accum(&mut self) -> (Program, Vec<Diagnostic>) {
+        let mut type_decls = Vec::new();
+        let mut functions = Vec::new();
+        let mut protocols = Vec::new();
+        let mut impls = Vec::new();
+        let mut log_level = DEFAULT_LOG_LEVEL;
+        let mut log_sink = LogSink::Stderr;
+        let mut saw_logging = false;
+        let mut errors = Vec::new();
+        while *self.peek() != Tok::Eof {
+            // Collect any leading `///` doc comments and attach to the next decl.
+            let doc = self.take_docs();
+            if *self.peek() == Tok::Eof {
+                break; // trailing docs at end of file
+            }
+            match self.peek() {
+                Tok::Type => match self.type_decl() {
+                    Ok(mut d) => { d.doc = doc; type_decls.push(d); }
+                    Err(d) => { errors.push(d); self.sync_to_decl(); }
+                },
+                Tok::Fn => match self.function() {
+                    Ok(mut f) => { f.doc = doc; functions.push(f); }
+                    Err(d) => { errors.push(d); self.sync_to_decl(); }
+                },
+                Tok::Protocol => match self.protocol_decl() {
+                    Ok(mut p) => { p.doc = doc; protocols.push(p); }
+                    Err(d) => { errors.push(d); self.sync_to_decl(); }
+                },
+                Tok::Impl => match self.impl_block() {
+                    Ok(i) => impls.push(i),
+                    Err(d) => { errors.push(d); self.sync_to_decl(); }
+                },
+                // `logging { level: <name> }` — the RFC-0008 config block.
+                Tok::Ident(name) if name == "logging" => {
+                    let line = self.line();
+                    let col = self.col();
+                    if saw_logging {
+                        errors.push(Diagnostic::error(
+                            line, col, "parse",
+                            "duplicate `logging` config block".to_string(),
+                        ));
+                        self.sync_to_decl();
+                        continue;
+                    }
+                    saw_logging = true;
+                    match self.logging_config() {
+                        Ok((lvl, sink)) => { log_level = lvl; log_sink = sink; }
+                        Err(d) => { errors.push(d); self.sync_to_decl(); }
+                    }
+                }
+                other => {
+                    errors.push(Diagnostic::error(
+                        self.line(), self.col(), "parse",
+                        format!(
+                            "expected `fn`, `type`, `protocol`, `impl`, or `logging` at top \
+                             level, found {other:?}"
+                        ),
+                    ));
+                    self.advance(); // consume the stray token so progress is guaranteed
+                }
+            }
+        }
+        (Program { type_decls, functions, protocols, impls, log_level, log_sink }, errors)
+    }
+
+    /// Recovery sync point: advance until the cursor sits on a top-level
+    /// declaration starter (`fn`/`type`/`protocol`/`impl`/`logging`) at brace
+    /// depth 0, or at `Eof`. Brace depth is tracked so a `fn`/`type` keyword
+    /// accidentally appearing inside an unbalanced body doesn't fool us into
+    /// resuming mid-declaration. Always makes progress: the caller has already
+    /// consumed at least the starter token of the failed declaration, so `pos`
+    /// is strictly past the failure point.
+    fn sync_to_decl(&mut self) {
+        // Skip the token at the failure point first — it is part of the bad
+        // declaration (for `fn`/`type`/… the per-decl parser already consumed the
+        // starter, so this skips the rest of the bad decl; for the duplicate
+        // `logging` case the starter is still unconsumed, so this is what
+        // guarantees forward progress).
+        self.advance();
+        let mut depth = 0i32;
+        while *self.peek() != Tok::Eof {
+            match self.peek() {
+                Tok::LBrace => { depth += 1; self.advance(); }
+                Tok::RBrace => { if depth > 0 { depth -= 1; } self.advance(); }
+                Tok::Fn | Tok::Type | Tok::Protocol | Tok::Impl if depth == 0 => return,
+                Tok::Ident(name) if depth == 0 && name == "logging" => return,
+                _ => { self.advance(); }
+            }
+        }
+    }
+
+    /// `protocol Name { fn m(self, p: T, ..) -> R; .. }` — a set of method
+    /// signatures. The `self` receiver is required and elided from the stored
+    /// parameter types.
+    fn protocol_decl(&mut self) -> Result<ProtocolDecl, Diagnostic> {
+        let line = self.line();
+        self.eat(&Tok::Protocol)?;
+        let name = self.expect_ident()?;
+        self.eat(&Tok::LBrace)?;
+        let mut methods = Vec::new();
+        while *self.peek() != Tok::RBrace {
+            self.take_docs(); // method-level docs (not retained yet)
+            if *self.peek() == Tok::RBrace {
+                break;
+            }
+            let mline = self.line();
+            self.eat(&Tok::Fn)?;
+            let mname = self.expect_ident()?;
+            self.eat(&Tok::LParen)?;
+            self.eat(&Tok::Vself)?;
+            let mut params = Vec::new();
+            while *self.peek() == Tok::Comma {
+                self.advance();
+                let _pname = self.expect_ident()?;
+                self.eat(&Tok::Colon)?;
+                params.push(self.type_()?);
+            }
+            self.eat(&Tok::RParen)?;
+            let ret = if *self.peek() == Tok::Arrow {
+                self.advance();
+                self.type_()?
+            } else {
+                Type::Unit
+            };
+            self.eat_semi();
+            methods.push(MethodSig { name: mname, params, ret, line: mline });
+        }
+        self.eat(&Tok::RBrace)?;
+        Ok(ProtocolDecl { name, doc: None, methods, line })
+    }
+
+    /// `impl P for T { fn m(self, ..) -> R { .. } .. }` — a type's methods for a
+    /// protocol. Each method's `self` receiver is typed to `T`.
+    fn impl_block(&mut self) -> Result<ImplBlock, Diagnostic> {
+        let line = self.line();
+        self.eat(&Tok::Impl)?;
+        let protocol = self.expect_ident()?;
+        self.eat(&Tok::For)?;
+        let ty = self.type_()?;
+        self.eat(&Tok::LBrace)?;
+        let mut methods = Vec::new();
+        while *self.peek() != Tok::RBrace {
+            self.take_docs(); // method-level docs (not retained yet)
+            if *self.peek() == Tok::RBrace {
+                break;
+            }
+            methods.push(self.impl_method(&ty)?);
+        }
+        self.eat(&Tok::RBrace)?;
+        Ok(ImplBlock { protocol, ty, methods, line })
+    }
+
+    /// One `fn m(self, ..) -> R { .. }` inside an `impl`. Returns a [`Function`]
+    /// whose first parameter is `self`, typed to the implementing type.
+    fn impl_method(&mut self, self_ty: &Type) -> Result<Function, Diagnostic> {
+        let line = self.line();
+        self.eat(&Tok::Fn)?;
+        let name = self.expect_ident()?;
+        self.eat(&Tok::LParen)?;
+        self.eat(&Tok::Vself)?;
+        let mut params = vec![Param {
+            name: "self".to_string(),
+            capability: Capability::Read,
+            ty: self_ty.clone(),
+        }];
+        while *self.peek() == Tok::Comma {
+            self.advance();
+            let pname = self.expect_ident()?;
+            self.eat(&Tok::Colon)?;
+            let capability = self.parse_capability();
+            let ty = self.type_()?;
+            params.push(Param { name: pname, capability, ty });
+        }
+        self.eat(&Tok::RParen)?;
+        let ret = if *self.peek() == Tok::Arrow {
+            self.advance();
+            self.type_()?
+        } else {
+            Type::Unit
+        };
+        let body = self.block()?;
+        Ok(Function {
+            name,
+            doc: None,
+            type_params: Vec::new(),
+            type_bounds: Default::default(),
+            params,
+            ret,
+            body,
+            line,
+        })
+    }
+
+    /// `logging { level: <name>, sink: <dest> }` — comma-separated fields, each
+    /// optional. `level` is a threshold name; `sink` is `stderr`, `stdout`, or
+    /// `file("path")`. Returns `(threshold ordinal, sink)`.
+    fn logging_config(&mut self) -> Result<(usize, LogSink), Diagnostic> {
+        self.advance(); // `logging`
+        self.eat(&Tok::LBrace)?;
+        let mut level = DEFAULT_LOG_LEVEL;
+        let mut sink = LogSink::Stderr;
+        while *self.peek() != Tok::RBrace {
+            let line = self.line();
+            let col = self.col();
+            let key = self.expect_ident()?;
+            self.eat(&Tok::Colon)?;
+            match key.as_str() {
+                "level" => {
+                    let name = self.expect_ident()?;
+                    level = log_level_ordinal(&name).ok_or_else(|| {
+                        Diagnostic::error(
+                            line,
+                            col,
+                            "parse",
+                            format!("unknown log level `{name}` (trace/debug/info/warn/error)"),
+                        )
+                    })?;
+                }
+                "sink" => sink = self.log_sink()?,
+                other => {
+                    return Err(Diagnostic::error(
+                        line,
+                        col,
+                        "parse",
+                        format!("unknown `logging` field `{other}` (expected `level` or `sink`)"),
+                    ))
+                }
+            }
+            if *self.peek() == Tok::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.eat(&Tok::RBrace)?;
+        Ok((level, sink))
+    }
+
+    /// A logging sink: `stderr`, `stdout`, or `file("path")`.
+    fn log_sink(&mut self) -> Result<LogSink, Diagnostic> {
+        let line = self.line();
+        let col = self.col();
+        let name = self.expect_ident()?;
+        match name.as_str() {
+            "stderr" => Ok(LogSink::Stderr),
+            "stdout" => Ok(LogSink::Stdout),
+            "file" => {
+                self.eat(&Tok::LParen)?;
+                let path = match self.advance() {
+                    Tok::Str(s) => s,
+                    other => {
+                        return Err(Diagnostic::error(
+                            line,
+                            col,
+                            "parse",
+                            format!("`file(..)` sink needs a string path, found {other:?}"),
+                        ))
+                    }
+                };
+                self.eat(&Tok::RParen)?;
+                Ok(LogSink::File(path))
+            }
+            other => Err(Diagnostic::error(
+                line,
+                col,
+                "parse",
+                format!("unknown sink `{other}` (expected stderr, stdout, or file(\"..\"))"),
+            )),
+        }
+    }
+
+    /// `type Name = Base [where <predicate>] ;` (validated scalar), or
+    /// `type Name = { field: Type, ... } ;` (structural record).
+    fn type_decl(&mut self) -> Result<TypeDecl, Diagnostic> {
+        let line = self.line();
+        self.eat(&Tok::Type)?;
+        let name = self.expect_ident()?;
+
+        // optional generic parameters: `type Box<T> = ...`
+        let mut type_params = Vec::new();
+        if *self.peek() == Tok::Lt {
+            self.advance();
+            while *self.peek() != Tok::Gt {
+                type_params.push(self.expect_ident()?);
+                if *self.peek() == Tok::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.eat(&Tok::Gt)?;
+        }
+        self.type_params = type_params.clone(); // names parse as Type::Param in the body
+
+        self.eat(&Tok::Eq)?;
+        let base = if *self.peek() == Tok::Pipe {
+            self.enum_type()?
+        } else {
+            self.type_()?
+        };
+        let predicate = if *self.peek() == Tok::Where {
+            self.advance();
+            Some(self.expr()?)
+        } else {
+            None
+        };
+        self.eat_semi();
+        self.type_params.clear();
+        Ok(TypeDecl { name, doc: None, type_params, base, predicate, line })
+    }
+
+    /// Parse an optional capability keyword (`read`/`modify`/`consume`/`share`)
+    /// before a parameter's type. Contextual, not reserved: a keyword only counts
+    /// as a capability when another identifier (the type) follows it.
+    fn parse_capability(&mut self) -> Capability {
+        if let Tok::Ident(id) = self.peek() {
+            let cap = match id.as_str() {
+                "read" => Some(Capability::Read),
+                "modify" => Some(Capability::Modify),
+                "consume" => Some(Capability::Consume),
+                "share" => Some(Capability::Share),
+                _ => None,
+            };
+            if let Some(c) = cap {
+                if matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_)) {
+                    self.advance();
+                    return c;
+                }
+            }
+        }
+        Capability::Read
+    }
+
+    /// `| Variant(Type) | Variant | ...` — a user-defined enum (sum type).
+    /// A leading `|` is required (it disambiguates enums from other type forms).
+    fn enum_type(&mut self) -> Result<Type, Diagnostic> {
+        let mut variants = Vec::new();
+        while *self.peek() == Tok::Pipe {
+            self.advance();
+            let name = self.expect_ident()?;
+            let mut payload = Vec::new();
+            if *self.peek() == Tok::LParen {
+                self.advance();
+                while *self.peek() != Tok::RParen {
+                    payload.push(self.type_()?);
+                    if *self.peek() == Tok::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.eat(&Tok::RParen)?;
+            }
+            variants.push(EnumVariant { name, payload });
+        }
+        Ok(Type::Enum(variants))
+    }
+
+    /// `{ field: Type, field: Type, ... }` — a structural record type.
+    fn record_type(&mut self) -> Result<Type, Diagnostic> {
+        self.eat(&Tok::LBrace)?;
+        let mut fields = Vec::new();
+        while *self.peek() != Tok::RBrace {
+            let name = self.expect_ident()?;
+            self.eat(&Tok::Colon)?;
+            let ty = self.type_()?;
+            fields.push(Field { name, ty });
+            if *self.peek() == Tok::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.eat(&Tok::RBrace)?;
+        Ok(Type::Record(fields))
+    }
+
+    fn function(&mut self) -> Result<Function, Diagnostic> {
+        let line = self.line();
+        self.eat(&Tok::Fn)?;
+        let name = self.expect_ident()?;
+
+        // optional generic parameters with bounds: `<T: Ord, U>`
+        let mut type_params = Vec::new();
+        let mut type_bounds: std::collections::HashMap<String, Vec<String>> = Default::default();
+        if *self.peek() == Tok::Lt {
+            self.advance();
+            while *self.peek() != Tok::Gt {
+                let tp = self.expect_ident()?;
+                if *self.peek() == Tok::Colon {
+                    self.advance();
+                    let mut bounds = Vec::new();
+                    loop {
+                        bounds.push(self.expect_ident()?);
+                        if *self.peek() == Tok::Plus {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    type_bounds.insert(tp.clone(), bounds);
+                }
+                type_params.push(tp);
+                if *self.peek() == Tok::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.eat(&Tok::Gt)?;
+        }
+        // these names parse as Type::Param within this function's signature/body
+        self.type_params = type_params.clone();
+
+        self.eat(&Tok::LParen)?;
+
+        let mut params = Vec::new();
+        while *self.peek() != Tok::RParen {
+            let pname = self.expect_ident()?;
+            self.eat(&Tok::Colon)?;
+            let capability = self.parse_capability();
+            let ty = self.type_()?;
+            params.push(Param { name: pname, capability, ty });
+            if *self.peek() == Tok::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.eat(&Tok::RParen)?;
+
+        // optional `-> Type`; absence means Unit
+        let ret = if *self.peek() == Tok::Arrow {
+            self.advance();
+            self.type_()?
+        } else {
+            Type::Unit
+        };
+
+        let body = self.block()?;
+        self.type_params.clear();
+        Ok(Function { name, doc: None, type_params, type_bounds, params, ret, body, line })
+    }
+
+    /// A type, possibly an intersection `A & B & ...` (sugar for nested
+    /// `Merge<A, B>`, left-associative).
+    fn type_(&mut self) -> Result<Type, Diagnostic> {
+        let mut t = self.type_atom()?;
+        while *self.peek() == Tok::Amp {
+            self.advance();
+            let rhs = self.type_atom()?;
+            t = Type::Merge(Box::new(t), Box::new(rhs));
+        }
+        Ok(t)
+    }
+
+    fn type_atom(&mut self) -> Result<Type, Diagnostic> {
+        // An anonymous record type, e.g. in `User & { salary: Int }`.
+        if *self.peek() == Tok::LBrace {
+            return self.record_type();
+        }
+        let name = self.expect_ident()?;
+        Ok(match name.as_str() {
+            // `Int` is the default 64-bit signed integer; `Int64` is its alias.
+            "Int" | "Int64" => Type::Int,
+            // Sized signed integers.
+            "Int8" => Type::IntN { bits: 8, signed: true },
+            "Int16" => Type::IntN { bits: 16, signed: true },
+            "Int32" => Type::IntN { bits: 32, signed: true },
+            // Sized unsigned integers.
+            "UInt8" => Type::IntN { bits: 8, signed: false },
+            "UInt16" => Type::IntN { bits: 16, signed: false },
+            "UInt32" => Type::IntN { bits: 32, signed: false },
+            "UInt64" => Type::IntN { bits: 64, signed: false },
+            // `Float64` is 64-bit IEEE-754; `Float` is its alias. `Float32` is 32-bit.
+            "Float" | "Float64" => Type::Float,
+            "Float32" => Type::Float32,
+            "Bool" => Type::Bool,
+            "String" => Type::Str,
+            "Unit" => Type::Unit,
+            // A logger handle (RFC-0008), e.g. `fn f(l: Logger)`.
+            "Logger" => Type::Logger,
+            // A generational reference to a heap cell (RFC-0004 §4, Path B).
+            "Ref" => {
+                self.eat(&Tok::Lt)?;
+                let inner = self.type_()?;
+                self.eat(&Tok::Gt)?;
+                Type::Ref(Box::new(inner))
+            }
+            // A concurrent task's result handle.
+            "Task" => {
+                self.eat(&Tok::Lt)?;
+                let inner = self.type_()?;
+                self.eat(&Tok::Gt)?;
+                Type::Task(Box::new(inner))
+            }
+            // `Array<T>` (growable) or `Array<T, N>` (fixed-size const generic).
+            "Array" => {
+                self.eat(&Tok::Lt)?;
+                let inner = self.type_()?;
+                if *self.peek() == Tok::Comma {
+                    self.advance();
+                    let n = match self.peek() {
+                        Tok::Int(n) if *n >= 0 => *n as usize,
+                        _ => {
+                            return Err(Diagnostic::error(
+                                self.line(),
+                                self.col(),
+                                "parse",
+                                "`Array<T, N>` needs a non-negative integer size".to_string(),
+                            ))
+                        }
+                    };
+                    self.advance();
+                    self.eat(&Tok::Gt)?;
+                    Type::ArrayN(Box::new(inner), n)
+                } else {
+                    self.eat(&Tok::Gt)?;
+                    Type::Array(Box::new(inner))
+                }
+            }
+            "Option" => {
+                self.eat(&Tok::Lt)?;
+                let inner = self.type_()?;
+                self.eat(&Tok::Gt)?;
+                Type::Option(Box::new(inner))
+            }
+            "Result" => {
+                self.eat(&Tok::Lt)?;
+                let ok = self.type_()?;
+                self.eat(&Tok::Comma)?;
+                let err = self.type_()?;
+                self.eat(&Tok::Gt)?;
+                Type::Result(Box::new(ok), Box::new(err))
+            }
+            // Compile-time transformers (RFC-0002 §7).
+            "Omit" | "Pick" => {
+                self.eat(&Tok::Lt)?;
+                let base = self.type_()?;
+                let mut keys = Vec::new();
+                while *self.peek() == Tok::Comma {
+                    self.advance();
+                    keys.push(self.expect_ident()?);
+                }
+                self.eat(&Tok::Gt)?;
+                if keys.is_empty() {
+                    return Err(Diagnostic::error(
+                        self.line(),
+                        self.col(),
+                        "parse",
+                        format!("`{name}` needs at least one field, e.g. `{name}<T, field>`"),
+                    ));
+                }
+                if name == "Omit" {
+                    Type::Omit(Box::new(base), keys)
+                } else {
+                    Type::Pick(Box::new(base), keys)
+                }
+            }
+            "Merge" => {
+                self.eat(&Tok::Lt)?;
+                let a = self.type_()?;
+                self.eat(&Tok::Comma)?;
+                let b = self.type_()?;
+                self.eat(&Tok::Gt)?;
+                Type::Merge(Box::new(a), Box::new(b))
+            }
+            "Partial" => {
+                self.eat(&Tok::Lt)?;
+                let inner = self.type_()?;
+                self.eat(&Tok::Gt)?;
+                Type::Partial(Box::new(inner))
+            }
+            // Readonly<T> is the identity here (records are already immutable).
+            "Readonly" => {
+                self.eat(&Tok::Lt)?;
+                let inner = self.type_()?;
+                self.eat(&Tok::Gt)?;
+                inner
+            }
+            // A generic parameter of the current function/type.
+            other if self.type_params.iter().any(|p| p == other) => Type::Param(other.to_string()),
+            // `Name<T, ...>` — an application of a generic named type.
+            other if *self.peek() == Tok::Lt => {
+                self.advance();
+                let mut args = Vec::new();
+                while *self.peek() != Tok::Gt {
+                    args.push(self.type_()?);
+                    if *self.peek() == Tok::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.eat(&Tok::Gt)?;
+                Type::App(other.to_string(), args)
+            }
+            // Any other identifier is a named type; the checker verifies it exists.
+            other => Type::Named(other.to_string()),
+        })
+    }
+
+    fn block(&mut self) -> Result<Block, Diagnostic> {
+        self.eat(&Tok::LBrace)?;
+        let mut stmts = Vec::new();
+        while *self.peek() != Tok::RBrace && *self.peek() != Tok::Eof {
+            self.take_docs(); // discard any stray `///` inside a body
+            if *self.peek() == Tok::RBrace || *self.peek() == Tok::Eof {
+                break;
+            }
+            stmts.push(self.stmt()?);
+        }
+        self.eat(&Tok::RBrace)?;
+        Ok(Block { stmts })
+    }
+
+    fn stmt(&mut self) -> Result<Stmt, Diagnostic> {
+        let line = self.line();
+        match self.peek() {
+            Tok::Let => {
+                self.advance();
+                let mutable = if *self.peek() == Tok::Mut {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+                let name = self.expect_ident()?;
+                let ty = if *self.peek() == Tok::Colon {
+                    self.advance();
+                    Some(self.type_()?)
+                } else {
+                    None
+                };
+                self.eat(&Tok::Eq)?;
+                let value = self.expr()?;
+                self.eat_semi();
+                Ok(Stmt::Let { name, mutable, ty, value, line })
+            }
+            Tok::Return => {
+                self.advance();
+                // A value follows unless we're at a terminator: `;`, block end
+                // `}`, or EOF (a bare `return` for a Unit function).
+                let value = if matches!(self.peek(), Tok::Semi | Tok::RBrace | Tok::Eof) {
+                    None
+                } else {
+                    Some(self.expr()?)
+                };
+                self.eat_semi();
+                Ok(Stmt::Return { value, line })
+            }
+            Tok::If => {
+                self.advance();
+                let cond = self.cond_expr()?;
+                let then_block = self.block()?;
+                let else_block = if *self.peek() == Tok::Else {
+                    self.advance();
+                    Some(self.block()?)
+                } else {
+                    None
+                };
+                Ok(Stmt::If { cond, then_block, else_block, line })
+            }
+            Tok::While => {
+                self.advance();
+                let cond = self.cond_expr()?;
+                let body = self.block()?;
+                Ok(Stmt::While { cond, body, line })
+            }
+            Tok::For => {
+                self.advance();
+                let var = self.expect_ident()?;
+                self.eat(&Tok::In)?;
+                // Parse the iterable in the no-struct context (like a `while`
+                // condition) so a bare `{` opens the loop body, not a struct lit.
+                let iter = self.cond_expr()?;
+                let body = self.block()?;
+                Ok(Stmt::ForIn { var, iter, body, line })
+            }
+            Tok::Region => {
+                self.advance();
+                let body = self.block()?;
+                Ok(Stmt::Region { body, line })
+            }
+            // `drop name;` — reclaim a heap value explicitly (the rare handoff
+            // case; most reclamation is inferred). It consumes `name`.
+            Tok::Drop => {
+                self.advance();
+                let name = self.expect_ident()?;
+                self.eat_semi();
+                Ok(Stmt::Drop { name, line })
+            }
+            // assignment `name = expr;` or a bare expression statement
+            Tok::Ident(_) if self.tokens[self.pos + 1].tok == Tok::Eq => {
+                let name = self.expect_ident()?;
+                self.eat(&Tok::Eq)?;
+                let value = self.expr()?;
+                self.eat_semi();
+                Ok(Stmt::Assign { name, value, line })
+            }
+            // field mutation `name.field = expr;`
+            Tok::Ident(_)
+                if self.tokens[self.pos + 1].tok == Tok::Dot
+                    && matches!(self.tokens[self.pos + 2].tok, Tok::Ident(_))
+                    && self.tokens[self.pos + 3].tok == Tok::Eq =>
+            {
+                let name = self.expect_ident()?;
+                self.eat(&Tok::Dot)?;
+                let field = self.expect_ident()?;
+                self.eat(&Tok::Eq)?;
+                let value = self.expr()?;
+                self.eat_semi();
+                Ok(Stmt::SetField { name, field, value, line })
+            }
+            _ => {
+                let e = self.expr()?;
+                self.eat_semi();
+                // A mutating method used as a statement writes back through its
+                // receiver variable: `sq.push(x);` desugars to `sq = push(sq, x);`
+                // (parsed as `push(sq, x)` above), so the reallocated array sticks.
+                if let Expr::Call { name, args, .. } = &e {
+                    if name == "push" {
+                        if let Some(Expr::Var { name: recv, .. }) = args.first() {
+                            return Ok(Stmt::Assign { name: recv.clone(), value: e, line });
+                        }
+                    }
+                }
+                Ok(Stmt::Expr(e))
+            }
+        }
+    }
+
+    // ---- expressions (precedence climbing) ------------------------------
+
+    fn expr(&mut self) -> Result<Expr, Diagnostic> {
+        self.binary(0)
+    }
+
+    /// Parse an expression in a position immediately followed by a `{ .. }`
+    /// block (an `if`/`while` condition or a `match` scrutinee), where a bare
+    /// `Name {` must be read as "value, then block", not a struct literal.
+    fn cond_expr(&mut self) -> Result<Expr, Diagnostic> {
+        let saved = self.no_struct;
+        self.no_struct = true;
+        let e = self.expr();
+        self.no_struct = saved;
+        e
+    }
+
+    /// Binding powers: higher binds tighter.
+    fn binop(tok: &Tok) -> Option<(BinOp, u8)> {
+        Some(match tok {
+            Tok::OrOr => (BinOp::Or, 1),
+            Tok::AndAnd => (BinOp::And, 2),
+            Tok::EqEq => (BinOp::Eq, 3),
+            Tok::NotEq => (BinOp::NotEq, 3),
+            Tok::TildeMatch => (BinOp::Match, 3),
+            Tok::Lt => (BinOp::Lt, 4),
+            Tok::LtEq => (BinOp::LtEq, 4),
+            Tok::Gt => (BinOp::Gt, 4),
+            Tok::GtEq => (BinOp::GtEq, 4),
+            Tok::Plus => (BinOp::Add, 5),
+            Tok::Minus => (BinOp::Sub, 5),
+            Tok::Star => (BinOp::Mul, 6),
+            Tok::Slash => (BinOp::Div, 6),
+            Tok::Percent => (BinOp::Rem, 6),
+            _ => return None,
+        })
+    }
+
+    fn binary(&mut self, min_bp: u8) -> Result<Expr, Diagnostic> {
+        let mut lhs = self.unary()?;
+        while let Some((op, bp)) = Self::binop(self.peek()) {
+            if bp < min_bp {
+                break;
+            }
+            let line = self.line();
+            self.advance();
+            // left-associative: parse rhs with strictly higher binding power
+            let rhs = self.binary(bp + 1)?;
+            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), line };
+        }
+        Ok(lhs)
+    }
+
+    fn unary(&mut self) -> Result<Expr, Diagnostic> {
+        let line = self.line();
+        match self.peek() {
+            Tok::Minus => {
+                self.advance();
+                Ok(Expr::Unary { op: UnOp::Neg, expr: Box::new(self.unary()?), line })
+            }
+            Tok::Bang => {
+                self.advance();
+                Ok(Expr::Unary { op: UnOp::Not, expr: Box::new(self.unary()?), line })
+            }
+            _ => self.postfix(),
+        }
+    }
+
+    /// Postfix operators `?` and `.field`, binding tighter than unary/binary.
+    fn postfix(&mut self) -> Result<Expr, Diagnostic> {
+        let mut e = self.primary()?;
+        loop {
+            let line = self.line();
+            match self.peek() {
+                Tok::Question => {
+                    self.advance();
+                    e = Expr::Try { expr: Box::new(e), line };
+                }
+                Tok::Dot => {
+                    self.advance();
+                    let name = self.expect_ident()?;
+                    if *self.peek() == Tok::LParen {
+                        // Method call `recv.name(args)` is sugar for the free call
+                        // `name(recv, args)` — the receiver becomes the first arg.
+                        self.advance();
+                        let saved = self.no_struct;
+                        self.no_struct = false;
+                        let mut args = vec![e];
+                        while *self.peek() != Tok::RParen {
+                            args.push(self.expr()?);
+                            if *self.peek() == Tok::Comma {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        self.no_struct = saved;
+                        self.eat(&Tok::RParen)?;
+                        e = Expr::Call { name, args, line };
+                    } else {
+                        // Property / field access `recv.name` (e.g. `arr.length`).
+                        e = Expr::Field { expr: Box::new(e), field: name, line };
+                    }
+                }
+                Tok::LBracket => {
+                    // Index `recv[i]` is sugar for the bounds-checked `at(recv, i)`.
+                    self.advance();
+                    let saved = self.no_struct;
+                    self.no_struct = false;
+                    let idx = self.expr()?;
+                    self.no_struct = saved;
+                    self.eat(&Tok::RBracket)?;
+                    e = Expr::Call { name: "at".to_string(), args: vec![e, idx], line };
+                }
+                _ => break,
+            }
+        }
+        Ok(e)
+    }
+
+    fn primary(&mut self) -> Result<Expr, Diagnostic> {
+        let line = self.line();
+        let col = self.col();
+        match self.advance() {
+            Tok::Int(v) => Ok(Expr::Int(v)),
+            Tok::Float(v) => Ok(Expr::Float(v)),
+            Tok::Str(s) => Ok(Expr::Str(s)),
+            // `self` — the receiver inside an `impl` method; an ordinary binding.
+            Tok::Vself => Ok(Expr::Var { name: "self".to_string(), line }),
+            Tok::TemplateStr { parts, exprs } => self.template(parts, exprs, line, col),
+            Tok::True => Ok(Expr::Bool(true)),
+            Tok::False => Ok(Expr::Bool(false)),
+            Tok::LParen => {
+                // Struct literals are allowed again inside parentheses.
+                let saved = self.no_struct;
+                self.no_struct = false;
+                let e = self.expr()?;
+                self.no_struct = saved;
+                self.eat(&Tok::RParen)?;
+                Ok(e)
+            }
+            // A fixed-size array literal `[a, b, c]`.
+            Tok::LBracket => {
+                let saved = self.no_struct;
+                self.no_struct = false;
+                let mut elems = Vec::new();
+                while *self.peek() != Tok::RBracket {
+                    elems.push(self.expr()?);
+                    if *self.peek() == Tok::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.no_struct = saved;
+                self.eat(&Tok::RBracket)?;
+                // An empty `[]` is a growable/fixed empty array; its element type
+                // comes from the expected type (like `None`). A non-empty literal
+                // is a fixed-size `Array<T, N>`.
+                Ok(Expr::ArrayLit { elems, line })
+            }
+            Tok::Match => self.match_expr(line),
+            // `spawn f(args)` — a concurrent task over a pure function.
+            Tok::Spawn => {
+                let name = self.expect_ident()?;
+                self.eat(&Tok::LParen)?;
+                let saved = self.no_struct;
+                self.no_struct = false;
+                let mut args = Vec::new();
+                while *self.peek() != Tok::RParen {
+                    args.push(self.expr()?);
+                    if *self.peek() == Tok::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.no_struct = saved;
+                self.eat(&Tok::RParen)?;
+                Ok(Expr::Spawn { name, args, line })
+            }
+            Tok::Ident(name) => {
+                // Tagged template `tag"...\{e}..."` (RFC-0007): an identifier
+                // directly followed by an interpolated string literal.
+                if matches!(self.peek(), Tok::TemplateStr { .. }) {
+                    if let Tok::TemplateStr { parts, exprs } = self.advance() {
+                        return self.tagged_template(name, parts, exprs, line, col);
+                    }
+                }
+                if matches!(self.peek(), Tok::Str(_)) {
+                    return Err(Diagnostic::error(
+                        line,
+                        col,
+                        "parse",
+                        format!(
+                            "a tagged template `{name}\"..\"` needs at least one `\\{{ }}` \
+                             interpolation; use a plain string otherwise"
+                        ),
+                    ));
+                }
+                // Fallible construction: `Name?(args)`.
+                let fallible = *self.peek() == Tok::Question
+                    && self.tokens[self.pos + 1].tok == Tok::LParen;
+                if fallible {
+                    self.advance(); // consume `?`
+                }
+                if *self.peek() == Tok::LParen {
+                    // call / construction
+                    self.advance();
+                    let saved = self.no_struct;
+                    self.no_struct = false;
+                    let mut args = Vec::new();
+                    while *self.peek() != Tok::RParen {
+                        args.push(self.expr()?);
+                        if *self.peek() == Tok::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.no_struct = saved;
+                    self.eat(&Tok::RParen)?;
+                    Ok(if fallible {
+                        Expr::TryConstruct { name, args, line }
+                    } else {
+                        Expr::Call { name, args, line }
+                    })
+                } else if *self.peek() == Tok::LBrace && !self.no_struct {
+                    // struct literal: `Name { field: expr, ... }`
+                    self.struct_lit(name, line)
+                } else {
+                    Ok(Expr::Var { name, line })
+                }
+            }
+            other => Err(Diagnostic::error(
+                line,
+                col,
+                "parse",
+                format!("unexpected token in expression: {other:?}"),
+            )),
+        }
+    }
+
+    /// Desugar an interpolated string `"a\{e}b"` into a `concat`/`str` chain
+    /// producing a `String` — the default (untagged) template of RFC-0007. Each
+    /// hole's raw source is re-lexed and parsed as an expression, then rendered
+    /// with `str` (which handles Int/Bool/String). `parts.len() == exprs.len()+1`.
+    fn template(
+        &mut self,
+        parts: Vec<String>,
+        exprs: Vec<String>,
+        line: usize,
+        col: usize,
+    ) -> Result<Expr, Diagnostic> {
+        let mut pieces: Vec<Expr> = Vec::new();
+        if !parts[0].is_empty() {
+            pieces.push(Expr::Str(parts[0].clone()));
+        }
+        for (k, src) in exprs.iter().enumerate() {
+            let e = self.parse_hole(src, line, col)?;
+            pieces.push(Expr::Call { name: "str".to_string(), args: vec![e], line });
+            if !parts[k + 1].is_empty() {
+                pieces.push(Expr::Str(parts[k + 1].clone()));
+            }
+        }
+        // There is always at least one hole here, so `pieces` is non-empty. Fold
+        // left with `concat`; a lone piece is already a `String`.
+        let mut iter = pieces.into_iter();
+        let mut acc = iter.next().unwrap();
+        for p in iter {
+            acc = Expr::Call { name: "concat".to_string(), args: vec![acc, p], line };
+        }
+        Ok(acc)
+    }
+
+    /// Re-lex and parse one interpolation hole's raw source as an expression,
+    /// sharing the enclosing function's generic parameters.
+    fn parse_hole(&self, src: &str, line: usize, col: usize) -> Result<Expr, Diagnostic> {
+        let toks = crate::lexer::lex(src).map_err(|e| {
+            Diagnostic::error(line, col, "parse", format!("in interpolation: {}", e.render()))
+        })?;
+        let mut sub = Parser {
+            tokens: toks,
+            pos: 0,
+            no_struct: false,
+            type_params: self.type_params.clone(),
+        };
+        let e = sub.expr()?;
+        if *sub.peek() != Tok::Eof {
+            return Err(Diagnostic::error(
+                line,
+                col,
+                "parse",
+                format!("unexpected tokens after interpolation expression `{}`", src.trim()),
+            ));
+        }
+        Ok(e)
+    }
+
+    /// Desugar a **tagged** template `tag"a\{e}b"` into a call
+    /// `tag(list([parts..]), list([value(e)..]))` — RFC-0007. The literal parts
+    /// and the interpolated values reach the tag as separate arrays; the values
+    /// are boxed into the built-in `Value` enum. Requires ≥1 interpolation.
+    fn tagged_template(
+        &self,
+        tag: String,
+        parts: Vec<String>,
+        exprs: Vec<String>,
+        line: usize,
+        col: usize,
+    ) -> Result<Expr, Diagnostic> {
+        let parts_lit = Expr::ArrayLit {
+            elems: parts.into_iter().map(Expr::Str).collect(),
+            line,
+        };
+        let mut values = Vec::new();
+        for src in &exprs {
+            let e = self.parse_hole(src, line, col)?;
+            values.push(Expr::Call { name: "value".to_string(), args: vec![e], line });
+        }
+        let values_lit = Expr::ArrayLit { elems: values, line };
+        let wrap = |e| Expr::Call { name: "list".to_string(), args: vec![e], line };
+        // The built-in `template` tag yields the first-class `Template` record;
+        // any other tag is an ordinary function call `tag(parts, values)`.
+        if tag == "template" {
+            return Ok(Expr::StructLit {
+                name: "Template".to_string(),
+                fields: vec![
+                    ("parts".to_string(), wrap(parts_lit)),
+                    ("values".to_string(), wrap(values_lit)),
+                ],
+                line,
+            });
+        }
+        Ok(Expr::Call { name: tag, args: vec![wrap(parts_lit), wrap(values_lit)], line })
+    }
+
+    /// `match scrutinee { pattern => expr, ... }` (the `match` keyword is already
+    /// consumed). Arms are single expressions in v0.1.
+    fn match_expr(&mut self, line: usize) -> Result<Expr, Diagnostic> {
+        let scrutinee = self.cond_expr()?;
+        self.eat(&Tok::LBrace)?;
+        let mut arms = Vec::new();
+        while *self.peek() != Tok::RBrace && *self.peek() != Tok::Eof {
+            let pattern = self.pattern()?;
+            self.eat(&Tok::FatArrow)?;
+            let body = self.expr()?;
+            arms.push(MatchArm { pattern, body });
+            if *self.peek() == Tok::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.eat(&Tok::RBrace)?;
+        Ok(Expr::Match { scrutinee: Box::new(scrutinee), arms, line })
+    }
+
+    /// `Name { field: expr, ... }` — a record literal (the name is consumed).
+    fn struct_lit(&mut self, name: String, line: usize) -> Result<Expr, Diagnostic> {
+        self.eat(&Tok::LBrace)?;
+        // Field values may themselves be struct literals.
+        let saved = self.no_struct;
+        self.no_struct = false;
+        let mut fields = Vec::new();
+        while *self.peek() != Tok::RBrace {
+            let fname = self.expect_ident()?;
+            self.eat(&Tok::Colon)?;
+            let value = self.expr()?;
+            fields.push((fname, value));
+            if *self.peek() == Tok::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.no_struct = saved;
+        self.eat(&Tok::RBrace)?;
+        Ok(Expr::StructLit { name, fields, line })
+    }
+
+    /// Parse the `(name)` that binds a pattern's payload.
+    fn pattern_binding(&mut self) -> Result<String, Diagnostic> {
+        self.eat(&Tok::LParen)?;
+        let bind = self.expect_ident()?;
+        self.eat(&Tok::RParen)?;
+        Ok(bind)
+    }
+
+    fn pattern(&mut self) -> Result<Pattern, Diagnostic> {
+        let line = self.line();
+        let name = self.expect_ident()?;
+        match name.as_str() {
+            "Some" => Ok(Pattern::Some(self.pattern_binding()?)),
+            "Ok" => Ok(Pattern::Ok(self.pattern_binding()?)),
+            "Err" => Ok(Pattern::Err(self.pattern_binding()?)),
+            "None" => Ok(Pattern::None),
+            // Any other identifier is a user-enum variant: `V`, `V(x)`, `V(x, y)`.
+            _ => {
+                let _ = line;
+                let mut binds = Vec::new();
+                if *self.peek() == Tok::LParen {
+                    self.advance();
+                    while *self.peek() != Tok::RParen {
+                        binds.push(self.expect_ident()?);
+                        if *self.peek() == Tok::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.eat(&Tok::RParen)?;
+                }
+                Ok(Pattern::Variant(name, binds))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+
+    fn parse_src(s: &str) -> Program {
+        parse(lex(s).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn semicolons_are_optional() {
+        // No terminators at all — statement boundaries fall where an expression
+        // can't extend. Parses to the same shape as the semicolon-terminated form.
+        let src = "fn main() -> Int {\n\
+                   let a = 1\n\
+                   let mut b = 2\n\
+                   b = b + a\n\
+                   return b\n\
+                   }";
+        let p = parse_src(src);
+        let f = &p.functions[0];
+        assert_eq!(f.body.stmts.len(), 4);
+        assert!(matches!(f.body.stmts[0], Stmt::Let { .. }));
+        assert!(matches!(f.body.stmts[2], Stmt::Assign { .. }));
+        assert!(matches!(f.body.stmts[3], Stmt::Return { value: Some(_), .. }));
+    }
+
+    #[test]
+    fn bare_return_before_brace_needs_no_semicolon() {
+        let src = "fn f(x: Int) { if x > 0 { return } print(x) } fn main() -> Int { return 0 }";
+        let p = parse_src(src);
+        let f = p.functions.iter().find(|f| f.name == "f").unwrap();
+        match &f.body.stmts[0] {
+            Stmt::If { then_block, .. } => {
+                assert!(matches!(then_block.stmts[0], Stmt::Return { value: None, .. }));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attaches_doc_comments_to_declarations() {
+        let src = "/// first line\n/// second line\nfn f() -> Int { return 0; }\n\
+                   // not a doc\n/// a type doc\ntype T = Int;\n\
+                   //// four slashes: plain comment\nfn main() -> Int { return 0; }";
+        let p = parse_src(src);
+        let f = p.functions.iter().find(|f| f.name == "f").unwrap();
+        assert_eq!(f.doc.as_deref(), Some("first line\nsecond line"));
+        let t = p.type_decls.iter().find(|t| t.name == "T").unwrap();
+        assert_eq!(t.doc.as_deref(), Some("a type doc"));
+        // `//` and `////` are plain comments — `main` has no doc.
+        let m = p.functions.iter().find(|f| f.name == "main").unwrap();
+        assert_eq!(m.doc, None);
+    }
+
+    #[test]
+    fn parses_precedence() {
+        // 1 + 2 * 3  ==>  Add(1, Mul(2, 3))
+        let p = parse_src("fn main() -> Int { return 1 + 2 * 3; }");
+        let f = &p.functions[0];
+        match &f.body.stmts[0] {
+            Stmt::Return { value: Some(Expr::Binary { op: BinOp::Add, rhs, .. }), .. } => {
+                assert!(matches!(**rhs, Expr::Binary { op: BinOp::Mul, .. }));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_function_with_params() {
+        let p = parse_src("fn add(a: Int, b: Int) -> Int { return a + b; }");
+        let f = &p.functions[0];
+        assert_eq!(f.name, "add");
+        assert_eq!(f.params.len(), 2);
+        assert_eq!(f.ret, Type::Int);
+    }
+
+    #[test]
+    fn parses_region_block() {
+        let p = parse_src("fn main() -> Int { region { print(1); } return 0; }");
+        let f = &p.functions[0];
+        match &f.body.stmts[0] {
+            Stmt::Region { body, .. } => assert_eq!(body.stmts.len(), 1),
+            other => panic!("expected region, got {other:?}"),
+        }
+    }
+}

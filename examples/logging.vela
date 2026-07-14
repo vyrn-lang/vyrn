@@ -1,0 +1,35 @@
+// Logging — RFC-0008: a leveled console logger with a threshold.
+//
+// `logger(name)` returns a named logger; the five levels are called subject-first
+// (`log.info(..)`). Messages use RFC-0007 interpolation. Logs are written to
+// stderr as `[LEVEL] name: message` — deliberately separate from program output
+// on stdout, so "where does it print" has a clear answer.
+//
+// The `logging { level: .., sink: .. }` block configures the logger. `level` sets
+// the threshold: calls below it are dropped at compile time (zero runtime cost,
+// identical in both backends) — here `debug`, so `trace` is filtered out. `sink`
+// chooses the destination: `stderr` (default), `stdout`, or `file("path")`.
+
+logging { level: debug, sink: stderr }
+
+fn factorial(n: Int) -> Int {
+    if n < 2 { return 1 }
+    return n * factorial(n - 1)
+}
+
+fn main() -> Int {
+    let log = logger("factorial")
+    let n = 5
+
+    log.trace("this is below the threshold and never prints")
+    log.debug("computing factorial of \{n}")
+    let result = factorial(n)
+    log.info("factorial(\{n}) = \{result}")
+
+    if result > 100 {
+        log.warn("result \{result} is getting large")
+    }
+
+    print(result)        // 120, on stdout
+    return 0
+}

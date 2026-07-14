@@ -1,0 +1,16 @@
+// Dynamic strings (RFC-0004 — the heap). `concat` allocates a fresh buffer on
+// the heap; `len` measures a string. This is the first step of the memory model:
+// the heap now exists (via malloc). Allocations are not yet freed — the
+// reclamation strategy (ownership+regions vs generational references) is the
+// open research question the rest of RFC-0004 will settle.
+
+fn greeting(name: String) -> String {
+    return concat(concat("Hello, ", name), "!")
+}
+
+fn main() -> Int {
+    let g = greeting("Vela")
+    print(g)        // Hello, Vela!
+    print(g.len())   // 12
+    return g.len()   // 12
+}

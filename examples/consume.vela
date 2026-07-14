@@ -1,0 +1,21 @@
+// Capabilities (RFC-0004): a parameter's capability states the function's INTENT.
+// A `consume` parameter takes ownership — after you pass a value to it, the
+// compiler forbids using that value again. Ownership is expressed as intent and
+// enforced statically, with no runtime cost (capabilities are erased).
+
+type Token = { id: Int }
+
+fn redeem(t: consume Token) -> Int { return t.id }   // takes ownership
+fn peek(t: read Token) -> Int { return t.id }        // just observes (the default)
+
+fn main() -> Int {
+    let a = Token { id: 10 }
+    // `peek` only reads, so `a` stays usable afterward:
+    let x = peek(a) + peek(a)   // 20
+
+    let b = Token { id: 5 }
+    let y = redeem(b)           // `b` is consumed here...
+    // ...and using `b` again would be a compile error:
+    //     return redeem(b)     // error: `b` was already consumed by `redeem(..)`
+    return x + y                // 25
+}

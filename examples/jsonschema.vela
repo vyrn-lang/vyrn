@@ -1,0 +1,30 @@
+/// Compile-time JSON Schema — `jsonSchema(TypeName)` renders a declared type as a
+/// JSON Schema (draft 2020-12) document, computed from the type's `where` predicate
+/// and structure *at compile time*. Like `schemaOf` (see reflection.vela) it is not
+/// runtime reflection — Vela erases types — so the interpreter and native backend
+/// emit byte-identical strings. Serve it, write it to disk, or diff it in CI.
+///
+/// Scalar bases map to the standard type names; the `where` predicate contributes
+/// `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/`multipleOf`; a record
+/// becomes an `object` with `properties` and a `required` list (non-`Option` fields).
+
+type Age = Int where value >= 18
+type Port = Int where value >= 1 && value <= 65535
+type Even = Int where value % 2 == 0
+type Ratio = Float where value > 0.0 && value <= 1.0
+type Username = String where value.length >= 3 && value.length <= 16
+
+/// A user record: `age` reuses the validated `Age` and `handle` the validated
+/// `Username` (their constraints inline), and the optional `nick` is omitted
+/// from `required`.
+type User = { handle: Username, age: Age, nick: Option<String> }
+
+fn main() -> Int {
+    print(jsonSchema(Age))
+    print(jsonSchema(Port))
+    print(jsonSchema(Even))
+    print(jsonSchema(Ratio))
+    print(jsonSchema(Username))
+    print(jsonSchema(User))
+    return 0
+}

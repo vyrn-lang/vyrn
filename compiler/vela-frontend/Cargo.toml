@@ -1,0 +1,11 @@
+[package]
+name = "vela-frontend"
+version = "0.0.0"
+edition = "2021"
+description = "Vela front end: lexer, parser, AST, type checker, and a tree-walking interpreter for the v0 subset."
+
+[dependencies]
+
+[lib]
+name = "vela_frontend"
+path = "src/lib.rs"

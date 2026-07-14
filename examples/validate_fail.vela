@@ -1,0 +1,21 @@
+// Demonstrates a RUNTIME validation failure.
+//
+// `checked(5)` passes 5 to `Age`, whose predicate requires value >= 18. Because
+// 5 arrives through a function parameter the compiler can't fold it, so the
+// check happens at runtime — and fails, aborting the program with a nonzero
+// exit code. (Compare validate.vela, where every construction succeeds.)
+//
+//   velac run   examples/validate_fail.vela   -> error, exit 1
+//   velac build examples/validate_fail.vela   -> prints "Vela: validation failed", aborts
+
+type Age = Int where value >= 18
+
+fn checked(n: Int) -> Age {
+    return Age(n)
+}
+
+fn main() -> Int {
+    let bad = checked(5)   // 5 < 18  ->  validation fails at runtime
+    print(bad)
+    return 0
+}

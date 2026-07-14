@@ -1,0 +1,28 @@
+// region { .. } — an arena scope (RFC-0004 §4).
+//
+// Heap allocations made inside a region (here, `concat`) are freed
+// deterministically when the block exits — the first real *reclamation*
+// strategy, versus the leak-by-default outside a region. A region produces a
+// non-heap result (a length), so nothing escapes to dangle.
+
+fn main() -> Int {
+    let hello = "Hello, "
+    let world = "world!"
+
+    let mut total = 0
+
+    // Build many temporary strings and measure them. Each `concat` allocates in
+    // the arena; all of it is freed at the closing brace — no leak, no GC.
+    region {
+        let mut i = 0
+        while i < 1000 {
+            let greeting = concat(hello, world)
+            total = greeting.len()
+            i = i + 1
+        }
+    }
+
+    // `total` is a plain Int computed inside the region — safe to carry out.
+    print(total)   // 13
+    return total
+}

@@ -1,0 +1,12 @@
+[package]
+name = "vela-codegen"
+version = "0.0.0"
+edition = "2021"
+description = "Emits textual LLVM IR for the Vela v0 subset. No external deps; feed output to clang/llc."
+
+[dependencies]
+vela-frontend = { path = "../vela-frontend" }
+
+[lib]
+name = "vela_codegen"
+path = "src/lib.rs"

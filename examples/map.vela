@@ -1,0 +1,34 @@
+// An integer-keyed map built entirely in Vela from an `Array` of key/value
+// records — no new builtin. Lookup is a recursive linear scan returning an
+// `Option`. This is a small capstone: arrays, records, `Option`, recursion, and
+// reclamation all compose into a real abstract data type.
+
+type Entry = { key: Int, value: Int }
+
+fn scan(a: Array<Entry>, k: Int, i: Int) -> Option<Int> {
+    if i >= a.length { return None }
+    let e = a[i]
+    if e.key == k { return Some(e.value) }
+    return scan(a, k, i + 1)
+}
+fn mapGet(a: Array<Entry>, k: Int) -> Option<Int> {
+    return scan(a, k, 0)
+}
+fn put(a: Array<Entry>, k: Int, v: Int) -> Array<Entry> {
+    return a.push(Entry { key: k, value: v })
+}
+
+fn main() -> Int {
+    let mut m: Array<Entry> = []
+    m = put(m, 1, 100)
+    m = put(m, 2, 200)
+    m = put(m, 3, 300)
+
+    let hit  = match mapGet(m, 2) { Some(v) => v, None => 0 - 1 }   // 200
+    let miss = match mapGet(m, 9) { Some(v) => v, None => 0 - 1 }   // -1
+    print(hit)
+    print(miss)
+
+    drop m
+    return hit + miss   // 199
+}

@@ -1,0 +1,38 @@
+/// Regular-expression refinements — `String =~ "pattern"` full-matches a string
+/// against a regex. The pattern is a string literal, compiled to a DFA at compile
+/// time and run identically by the interpreter and native backend (the compiler
+/// builds the DFA once; the code generator emits its transition table + a fixed
+/// runner). A `String` type refined with `=~` reflects to a JSON Schema `pattern`.
+///
+/// Supported subset (a subset of ECMA-262, so JSON Schema agrees): literals, `.`,
+/// classes `[a-z]`/`[^0-9]`, shorthands `\d \w \s` (and `\D \W \S`), alternation
+/// `a|b`, grouping `(…)`, and the quantifiers `* + ?`. A literal backslash in the
+/// pattern is written `\\` (e.g. `\\.` for a literal dot), as in any non-raw string.
+
+type Email = String where value =~ "[a-z0-9_.]+@[a-z0-9]+\\.[a-z]+"
+type Hex = String where value =~ "#[0-9a-f][0-9a-f][0-9a-f]"
+
+/// Several checks compose in one refinement: a size bound, a general regex, and
+/// "every 2nd character is 'a'" — the last expressed as the group pattern `(.a)*`.
+/// (Two patterns reflect to a JSON Schema `allOf`.)
+type EveryOther = String where value.length >= 2 && value =~ "[a-z]+" && value =~ "(.a)*"
+
+fn main() -> Int {
+    // `=~` is an ordinary Bool expression.
+    print("abc" =~ "[a-z]+")          // true
+    print("abc9" =~ "[a-z]+")         // false (a digit is not [a-z])
+    print("id_42" =~ "\\w+")          // true
+    print("cat" =~ "cat|dog")         // true  (alternation)
+    print("xaya" =~ "(.a)*")          // true  (every 2nd char is 'a')
+    print("xayb" =~ "(.a)*")          // false
+
+    // Validated construction runs the same matcher.
+    let e = Email("dev@vela.io")
+    print(e)                          // dev@vela.io
+    let w = EveryOther("banana")      // 6 chars, a-z, every 2nd char 'a'
+    print(w)                          // banana
+
+    print(jsonSchema(Email))          // ... "pattern":"^...$"
+    print(jsonSchema(EveryOther))     // ... "minLength":2,"allOf":[{...},{...}]
+    return 0
+}

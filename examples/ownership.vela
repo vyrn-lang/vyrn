@@ -1,0 +1,33 @@
+// Automatic reclamation of heap temporaries (RFC-0004 §4) — no `region` needed.
+//
+// The compiler's ownership analysis proves that a heap string bound to a `let`
+// never escapes its block (it is only read by `len`/`print`/`concat`, never
+// returned, aliased, or stored outward), and frees it deterministically when the
+// block exits. This is the ownership half of Path A, the counterpart to arenas:
+//
+//   * `region { .. }`  — free a *group* of allocations together at block exit.
+//   * ownership (here) — free an *individual* non-escaping temporary.
+//
+// Without it, this loop's million allocations would leak; with it, memory stays
+// flat. A value that escapes (is returned or aliased) is left alone — leaked
+// rather than freed, which is always safe.
+
+fn greetingLen(a: String, b: String) -> Int {
+    let g = concat(a, b)   // a heap temporary…
+    return g.len()          // …freed automatically before this return
+}
+
+fn main() -> Int {
+    let hello = "Hello, "
+    let world = "world!"
+
+    let mut i = 0
+    let mut n = 0
+    while i < 1000000 {
+        n = greetingLen(hello, world)   // each call allocates and frees
+        i = i + 1
+    }
+
+    print(n)   // 13
+    return n
+}

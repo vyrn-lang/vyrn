@@ -1,0 +1,46 @@
+/// String templates — RFC-0007: multi-line strings and a first-class `Template`.
+///
+/// A raw newline is allowed inside `"..."`, so strings/templates span lines
+/// (handy for SQL/LaTeX/HTML). And `template"..\{}"` yields a `Template` record
+/// `{ parts: Array<String>, values: Array<Value> }` — the structured form of an
+/// interpolated string — that any code can consume generically. (A plain
+/// `"..\{}"` still renders to a `String`; a tagged `sql"..."` calls its tag.)
+
+fn showValue(v: Value) -> String {
+    return match v {
+        VInt(n) => str(n),
+        VBool(b) => str(b),
+        VStr(s) => s,
+    }
+}
+
+// Render a Template by walking its parts and values — generic over any template.
+fn render(t: Template) -> String {
+    let mut out = ""
+    let mut i = 0
+    for p in t.parts {
+        out = concat(out, p)
+        if i < t.values.length {
+            out = concat(out, showValue(t.values[i]))
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn main() -> Int {
+    let name = "Vela"
+    let n = 3
+
+    // A multi-line interpolated string.
+    let banner = "== \{name} ==
+messages: \{n}"
+    print(banner)
+
+    // A first-class Template: inspect and re-render it.
+    let t = template"x = \{n}, name = \{name}"
+    print(t.parts.length)      // 3
+    print(t.values.length)     // 2
+    print(render(t))           // x = 3, name = Vela
+    return 0
+}

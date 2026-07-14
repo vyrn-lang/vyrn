@@ -1,0 +1,19 @@
+// Generic functions (RFC-0002 §6). A type parameter `<T>` is inferred at each
+// call site; the native backend monomorphizes — one specialized machine
+// function per concrete type it's used with.
+
+fn id<T>(x: T) -> T {
+    return x
+}
+
+fn pick<T>(cond: Bool, a: T, b: T) -> T {
+    if cond { return a }
+    return b
+}
+
+fn main() -> Int {
+    print(id(42))             // 42          — id<Int>
+    print(id("polymorphic"))  // polymorphic — id<String>, the SAME source function
+    print(pick(true, 7, 9))   // 7           — pick<Int>
+    return id(0) + 5          // 5
+}

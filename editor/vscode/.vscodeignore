@@ -1,0 +1,10 @@
+# Exclude dev/build clutter from the .vsix. Everything not listed here is
+# bundled. The shipped extension needs: extension.js, language-configuration,
+# the grammar, icons, and node_modules (runtime deps only) — and the bundled
+# server/ binary. Dev tooling, editor config, and source maps are dropped.
+.vscode/**
+.gitignore
+**/*.map
+scripts/**
+**/@vscode/vsce/**
+**/.DS_Store

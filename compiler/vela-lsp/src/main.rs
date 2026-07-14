@@ -1,0 +1,373 @@
+//! A minimal, synchronous Language Server Protocol server for Vela.
+//!
+//! Design goals (per the project's "easy maintained" constraint):
+//!   * No async runtime — a plain blocking `lsp-server` loop on the main thread.
+//!   * No duplication of the compiler. The only compiler calls are
+//!     [`vela_frontend::analyze`] (diagnostics + a symbol index, in one pass) and
+//!     the [`vela_frontend::resolve`] / [`vela_frontend::completions`] /
+//!     [`vela_frontend::member_completions`] queries over its result. This server
+//!     is a pure adapter: text in, LSP diagnostics / hover / go-to-definition /
+//!     completion out.
+//!   * Hover, go-to-definition, and completion cover top-level functions, types,
+//!     and variants; locals/params (with inferred `let` types) for hover + def;
+//!     and built-in method calls (`arr.push`, `log.info`) for hover +
+//!     `.foo` member completion. The checker now resolves user `protocol`/`impl`
+//!     method calls (RFC-0002 §5); surfacing those in hover/`.foo` completion for
+//!     protocol-typed receivers is a remaining enhancement to the query layer.
+//!
+//! Wire format: the server reads Content-Length-framed JSON-RPC messages from
+//! stdin and writes them to stdout. Diagnostics are pushed via
+//! `textDocument/publishDiagnostics` whenever a document changes; hover/def/
+//! completion are answered synchronously to each request.
+
+use std::collections::HashMap;
+
+use lsp_server::{Connection, Message, Notification, Request, Response};
+use lsp_types::notification::{
+    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
+    PublishDiagnostics,
+};
+use lsp_types::{
+    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    Diagnostic as LspDiagnostic, DiagnosticSeverity, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeParams, InitializeResult,
+    Location, MarkupContent, MarkupKind, OneOf, Position, PublishDiagnosticsParams, Range,
+    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+};
+
+use vela_frontend::{analyze, completions, member_completions, resolve, Analysis, SymbolKind};
+
+fn main() {
+    // `Connection::stdio` sets up the stdin/stdout channels. The server is
+    // single-threaded and blocking — no tokio, no I/O threads.
+    let (connection, io_threads) = Connection::stdio();
+
+    let mut server = Server { docs: HashMap::new(), analyses: HashMap::new() };
+
+    // `initialize` is a special handshake: read it, reply with capabilities,
+    // then enter the main loop. EOF here just means the client left.
+    if handle_initialize(&connection).is_err() {
+        return;
+    }
+
+    main_loop(&connection, &mut server);
+    // Drop the connection BEFORE joining the I/O threads: the writer thread
+    // only exits once its sender (owned by `connection`) is dropped, and
+    // `IoThreads::join` joins the writer last. Dropping here releases it so the
+    // join can complete (a real client additionally closes the pipe, but we
+    // shouldn't depend on that).
+    drop(connection);
+    io_threads.join().expect("LSP io threads panicked");
+}
+
+struct Server {
+    /// Raw source text per URI (kept so didChange can re-analyze).
+    docs: HashMap<Url, String>,
+    /// Cached [`Analysis`] per URI — diagnostics + a symbol index + identifier
+    /// tokens. Built once per open/change; hover/def/completion read from it, so
+    /// a request never re-parses.
+    analyses: HashMap<Url, Analysis>,
+}
+
+fn handle_initialize(connection: &Connection) -> Result<(), ()> {
+    // lsp-server 0.7: `initialize_start` reads the first `initialize` request
+    // and returns its id + raw params; `initialize_finish` sends the reply.
+    let (id, params) = connection.initialize_start().map_err(|_| ())?;
+    let _params: InitializeParams = serde_json::from_value(params).unwrap_or_default();
+
+    let capabilities = ServerCapabilities {
+        // Full document sync: the client sends the whole text on every edit.
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        hover_provider: Some(true.into()),
+        definition_provider: Some(OneOf::Left(true)),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![".".into()]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let result = InitializeResult {
+        capabilities,
+        server_info: Some(ServerInfo { name: "vela-lsp".into(), version: Some("0.1.0".into()) }),
+    };
+    let value = serde_json::to_value(result).unwrap();
+    connection.initialize_finish(id, value).map_err(|_| ())?;
+    Ok(())
+}
+
+fn main_loop(connection: &Connection, server: &mut Server) {
+    while let Ok(msg) = connection.receiver.recv() {
+        match msg {
+            Message::Request(req) => {
+                // `handle_shutdown` replies to `shutdown` and returns true; it
+                // does not exit the process — we return so `main` can finish
+                // and the io threads can drain.
+                if connection.handle_shutdown(&req).unwrap_or(false) {
+                    return;
+                }
+                let resp = handle_request(server, req);
+                let _ = connection.sender.send(Message::Response(resp));
+            }
+            Message::Notification(notif) => {
+                handle_notification(connection, server, notif);
+            }
+            Message::Response(_) => {} // we sent no requests; ignore responses
+        }
+    }
+}
+
+/// Dispatch a request to a hover/definition/completion handler, or the
+/// method-not-found fallback. Always produces a `Response` (never leaves the
+/// client waiting on a reply).
+fn handle_request(server: &Server, req: Request) -> Response {
+    match req.method.as_str() {
+        // `Response::new_ok(id, Option<T>)` is the correct shape for "maybe a
+        // result": serde serializes `Some(x)` as the object and `None` as `null`.
+        // We must NOT hand-build `Response { result: None, error: None }` — both
+        // fields are `skip_serializing_if = Option::is_none`, so that would emit a
+        // message with NEITHER `result` nor `error`, which the JSON-RPC client
+        // rejects ("neither a result nor an error property"). A null `result` is
+        // the spec-correct "nothing to hover / no definition".
+        "textDocument/hover" => Response::new_ok(req.id, handle_hover(server, req.params)),
+        "textDocument/definition" => Response::new_ok(req.id, handle_definition(server, req.params)),
+        "textDocument/completion" => Response::new_ok(req.id, handle_completion(server, req.params)),
+        _ => Response {
+            id: req.id,
+            result: None,
+            error: Some(lsp_server::ResponseError {
+                code: -32601, // Method not found
+                message: format!("unsupported request: {}", req.method),
+                data: None,
+            }),
+        },
+    }
+}
+
+fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
+    let p: HoverParams = serde_json::from_value(params).ok()?;
+    let (analysis, _uri) = lookup(server, &p.text_document_position_params.text_document.uri)?;
+    let (line, col) = to_frontend(&p.text_document_position_params.position);
+    let r = resolve(analysis, line, col)?;
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: r.hover,
+        }),
+        range: None,
+    })
+}
+
+fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoDefinitionResponse> {
+    let p: GotoDefinitionParams = serde_json::from_value(params).ok()?;
+    let (analysis, uri) = lookup(server, &p.text_document_position_params.text_document.uri)?;
+    let (line, col) = to_frontend(&p.text_document_position_params.position);
+    let r = resolve(analysis, line, col)?;
+    // A built-in method (e.g. `push`, `info`) resolves for hover but has no source
+    // declaration to jump to — return "no definition" rather than a bogus location.
+    if !r.definition {
+        return None;
+    }
+    Some(GotoDefinitionResponse::Scalar(Location {
+        uri,
+        range: lsp_range(r.target_line, r.target_col, r.target_end_col),
+    }))
+}
+
+fn handle_completion(server: &Server, params: serde_json::Value) -> Option<CompletionResponse> {
+    let p: CompletionParams = serde_json::from_value(params).ok()?;
+    let uri = &p.text_document_position.text_document.uri;
+    let (analysis, _uri) = lookup(server, uri)?;
+    let (line, col) = to_frontend(&p.text_document_position.position);
+    // A `.foo` member access → context-aware completions for the receiver's type
+    // (e.g. `arr.` → push/at/alen/afree/length). Otherwise → all top-level
+    // symbols; the client filters by the prefix the user typed.
+    let raw = server.docs.get(uri);
+    let items = if is_member_context(raw, line, col) {
+        member_completions(analysis, line, col)
+    } else {
+        completions(analysis)
+    }
+    .into_iter()
+    .map(|c| CompletionItem {
+        label: c.label,
+        kind: Some(to_lsp_kind(c.kind)),
+        detail: Some(c.detail),
+        ..Default::default()
+    })
+    .collect();
+    // Always return a list (possibly empty) — the client filters by prefix.
+    Some(CompletionResponse::Array(items))
+}
+
+/// Whether the cursor at 1-based `(line, col)` is in a `.foo` member-access
+/// context: the nearest non-space character to the left (skipping the partial
+/// member name being typed) is a `.`. Used to route completion to
+/// [`member_completions`] instead of top-level [`completions`].
+fn is_member_context(text: Option<&String>, line: usize, col: usize) -> bool {
+    let line_text = match text.and_then(|t| t.lines().nth(line.saturating_sub(1))) {
+        Some(l) => l,
+        None => return false,
+    };
+    // `col` is 1-based; the char just before the cursor is at 0-based index
+    // `col - 2` in the line. Walk left, skipping the partial identifier the user
+    // is typing (alnum/underscore), then any spaces.
+    let bytes = line_text.as_bytes();
+    let mut i = col.saturating_sub(2);
+    // Skip the partial member name (e.g. the `pu` in `arr.pu`).
+    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+        i = i.wrapping_sub(1);
+        if i == usize::MAX {
+            return false;
+        }
+    }
+    // Skip spaces between the dot and the partial name.
+    while i < bytes.len() && bytes[i] == b' ' {
+        i = i.wrapping_sub(1);
+        if i == usize::MAX {
+            return false;
+        }
+    }
+    i < bytes.len() && bytes[i] == b'.'
+}
+
+/// Look up the cached [`Analysis`] for a document. Returns `None` (→ a null
+/// result, i.e. "nothing to report") if the document isn't open or failed to
+/// parse (no symbols were indexed).
+fn lookup<'s>(server: &'s Server, uri: &Url) -> Option<(&'s Analysis, Url)> {
+    Some((server.analyses.get(uri)?, uri.clone()))
+}
+
+/// LSP 0-based position → frontend 1-based (line, col).
+fn to_frontend(pos: &Position) -> (usize, usize) {
+    ((pos.line + 1) as usize, (pos.character + 1) as usize)
+}
+
+/// Frontend 1-based (line, col, end_col) → LSP 0-based `Range`. A col of 0 means
+/// "whole line, unknown column" → a zero-length range at the line start (mirrors
+/// `publish()`).
+fn lsp_range(line: usize, col: usize, end_col: usize) -> Range {
+    let l = line.saturating_sub(1) as u32;
+    let c = if col == 0 { 0 } else { col.saturating_sub(1) as u32 };
+    let ec = if end_col == 0 { c } else { end_col.saturating_sub(1) as u32 };
+    Range {
+        start: Position { line: l, character: c },
+        end: Position { line: l, character: ec },
+    }
+}
+
+fn to_lsp_kind(kind: SymbolKind) -> CompletionItemKind {
+    match kind {
+        SymbolKind::Function | SymbolKind::Method => CompletionItemKind::FUNCTION,
+        SymbolKind::Type => CompletionItemKind::CLASS,
+        SymbolKind::Variant => CompletionItemKind::ENUM_MEMBER,
+        // Locals are never returned by `completions` (top-level only), but the
+        // match must be exhaustive — map them to VARIABLE for safety.
+        SymbolKind::Param | SymbolKind::Local => CompletionItemKind::VARIABLE,
+    }
+}
+
+fn handle_notification(connection: &Connection, server: &mut Server, notif: Notification) {
+    // Dispatch on the notification method. `lsp-types` gives typed params per
+    // known method; unknown notifications are ignored.
+    if DidOpenTextDocument::METHOD == notif.method {
+        if let Ok(params) = serde_json::from_value::<DidOpenTextDocumentParams>(notif.params) {
+            let uri = params.text_document.uri.clone();
+            let text = params.text_document.text;
+            server.docs.insert(uri.clone(), text.clone());
+            let analysis = analyze(&text);
+            publish(connection, &uri, &text, &analysis.diagnostics);
+            server.analyses.insert(uri, analysis);
+        }
+    } else if DidChangeTextDocument::METHOD == notif.method {
+        if let Ok(params) = serde_json::from_value::<DidChangeTextDocumentParams>(notif.params) {
+            let uri = params.text_document.uri.clone();
+            // Full sync: the last change carries the entire document text.
+            if let Some(change) = params.content_changes.into_iter().last() {
+                server.docs.insert(uri.clone(), change.text.clone());
+                let analysis = analyze(&change.text);
+                publish(connection, &uri, &change.text, &analysis.diagnostics);
+                server.analyses.insert(uri, analysis);
+            }
+        }
+    } else if DidCloseTextDocument::METHOD == notif.method {
+        if let Ok(params) = serde_json::from_value::<DidCloseTextDocumentParams>(notif.params) {
+            // Drop the document and clear its diagnostics.
+            server.docs.remove(&params.text_document.uri);
+            server.analyses.remove(&params.text_document.uri);
+            let _ = connection.sender.send(Message::Notification(Notification::new(
+                PublishDiagnostics::METHOD.to_string(),
+                PublishDiagnosticsParams {
+                    uri: params.text_document.uri,
+                    diagnostics: vec![],
+                    version: None,
+                },
+            )));
+        }
+    }
+    // Other notifications (didSave, etc.) are ignored.
+}
+
+/// Push the frontend's diagnostics for `uri` to the client.
+///
+/// `source` is the document text the diagnostics were computed from, used to
+/// turn a "whole line" diagnostic (`col == 0`, i.e. the stage knew only the
+/// line) into a squiggle over the *entire* line. Rendering such a diagnostic as
+/// a zero-length range at column 0 makes VS Code squiggle just the first token
+/// on the line (e.g. `return` on a `return match s {` line), which is misleading
+/// — the error is about the `match`, not `return`. The whole line covers the
+/// relevant keyword and reads as "this line has a problem".
+fn publish(
+    connection: &Connection,
+    uri: &Url,
+    source: &str,
+    diags: &[vela_frontend::diagnostics::Diagnostic],
+) {
+    let mapped: Vec<LspDiagnostic> = diags
+        .iter()
+        .map(|d| {
+            // 1-based frontend line → 0-based LSP line.
+            let line = d.line.saturating_sub(1) as u32;
+            // col == 0 means "whole line / unknown column" → squiggle the whole
+            // line (start 0 .. line length). Otherwise a precise token range
+            // (end_col == 0 → a single character/point).
+            let (start_char, end_char) = if d.col == 0 {
+                (0, line_char_len(source, d.line.saturating_sub(1)))
+            } else {
+                let s = d.col.saturating_sub(1) as u32;
+                let e = if d.end_col == 0 { s } else { d.end_col.saturating_sub(1) as u32 };
+                (s, e)
+            };
+            LspDiagnostic {
+                range: Range {
+                    start: Position { line, character: start_char },
+                    end: Position { line, character: end_char },
+                },
+                severity: Some(match d.severity {
+                    vela_frontend::diagnostics::Severity::Error => DiagnosticSeverity::ERROR,
+                    vela_frontend::diagnostics::Severity::Warning => DiagnosticSeverity::WARNING,
+                }),
+                code: None,
+                code_description: None,
+                source: Some("vela".into()),
+                message: d.message.clone(),
+                related_information: None,
+                tags: None,
+                data: None,
+            }
+        })
+        .collect();
+    let _ = connection.sender.send(Message::Notification(Notification::new(
+        PublishDiagnostics::METHOD.to_string(),
+        PublishDiagnosticsParams { uri: uri.clone(), diagnostics: mapped, version: None },
+    )));
+}
+
+/// The character length of line `line_idx` (0-based) in `source`, or 0 if out
+/// of range. Uses `str::lines`, so a trailing `\r`/`\n` is not counted — this is
+/// the visible line length. (LSP positions are UTF-16 code units; for the
+/// *end* of a whole-line squiggle this is a cosmetic detail the client clamps
+/// to the line end, and Vela sources are overwhelmingly ASCII.)
+fn line_char_len(source: &str, line_idx: usize) -> u32 {
+    source.lines().nth(line_idx).map(|l| l.chars().count() as u32).unwrap_or(0)
+}

@@ -1,0 +1,45 @@
+// Generic generational references — `Ref<T>` for any T (RFC-0004 §4, Path B).
+//
+// A `Ref<T>` is a fixed-size { slot, generation } handle no matter what T is: the
+// payload is boxed, so the reference never grows. Two consequences:
+//   * you can make a `Ref` to a String, a record, or even another `Ref`, and
+//   * a record may hold a `Ref` to *its own type* without becoming infinite —
+//     the reference breaks the cycle, exactly as a pointer would.
+// Every access is still generation-checked, so a stale reference traps rather
+// than dangling.
+
+// A self-referential type. It is *finite* precisely because the recursive edge
+// goes through a `Ref` (a fixed-size handle) rather than an inline `Node`. It
+// type-checks and lowers; actually building a list also needs a nil terminator
+// (`Option<Ref>`), which is future work — so this declaration just demonstrates
+// that recursion-through-`Ref` is well-formed.
+type Node = { value: Int, next: Ref<Node> }
+
+// References compose across function boundaries: this takes a Ref<String> and
+// returns a fresh Ref<Int> (ownership of the new cell transfers to the caller).
+fn measure(s: Ref<String>) -> Ref<Int> {
+    return cell(len(get(s)))
+}
+
+fn main() -> Int {
+    // Ref<String>: mutate a heap string in place through the reference.
+    let s = cell("hello")
+    set(s, concat(get(s), " world"))
+    print(get(s))              // hello world
+
+    // Ref<Ref<Int>>: a reference to a reference.
+    let rr = cell(cell(41))
+    let inner = get(rr)
+    set(inner, get(inner) + 1)
+    print(get(inner))         // 42
+
+    let n = measure(s)        // Ref<Int> holding 11
+    let lenS = get(n)
+    print(lenS)              // 11
+
+    drop s
+    drop inner
+    drop rr
+    drop n
+    return lenS              // 11
+}

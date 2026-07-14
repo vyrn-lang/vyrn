@@ -1,0 +1,25 @@
+# The installed LLVM 22 static libs are built with the STATIC CRT (/MT →
+# libcmt/libcpmt). Rust defaults to the dynamic CRT (/MD → msvcrt), and mixing
+# the two gives each its own heap — so a string allocated inside LLVM and freed
+# across the boundary crashes (STATUS_ACCESS_VIOLATION in `print_to_string`).
+# Building with the static CRT makes both sides share one CRT/heap.
+#
+# With crt-static, `llvm-sys` links the Windows system libs (psapi, …) statically,
+# so rustc must be able to find them + the static UCRT — add the Windows SDK lib
+# dirs. (SDK version is machine-specific; adjust if yours differs.)
+# Point llvm-sys at the install, and work around a cc-rs quirk: `llvm-config
+# --cflags` returns an include path containing a space ("C:\Program Files"), which
+# cc-rs splits — so override the target CFLAGS with the space-free 8.3 short path.
+[env]
+LLVM_SYS_221_PREFIX = "C:\\Program Files\\LLVM"
+CFLAGS_x86_64_pc_windows_msvc = "-IC:\\PROGRA~1\\LLVM\\include"
+
+[build]
+rustflags = [
+  "-C", "target-feature=+crt-static",
+  "-L", "native=C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\um\\x64",
+  "-L", "native=C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\ucrt\\x64",
+  # Empty stub for `xml2s.lib`: LLVM's --system-libs lists libxml2 but the install
+  # doesn't ship it; we don't use XML paths and the linker dead-strips them.
+  "-L", "native=N:\\lang\\compiler\\vela-codegen-llvm\\.llvm-stublib",
+]

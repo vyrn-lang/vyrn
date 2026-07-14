@@ -1,0 +1,23 @@
+// Generic enums / sum types (RFC-0002 §6) — the last piece of generics. With
+// this, Option and Result could be ordinary library types rather than built-ins.
+
+type Opt<T> =
+    | Wrap(T)
+    | Empty
+
+// A generic function over a generic enum.
+fn orElse<T>(o: Opt<T>, fallback: T) -> T {
+    return match o {
+        Wrap(x) => x,
+        Empty   => fallback,
+    }
+}
+
+fn main() -> Int {
+    let a = Wrap(41)            // Opt<Int>, inferred from the payload
+    let b: Opt<Int> = Empty     // a nullary variant takes its type from context
+
+    print(orElse(a, 0) + 1)    // 42
+    print(orElse(b, 99))       // 99
+    return orElse(a, 0) + 1    // 42
+}

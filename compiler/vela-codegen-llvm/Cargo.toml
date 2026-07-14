@@ -1,0 +1,33 @@
+# Inkwell (in-memory LLVM) backend for Vela — WORKS, but kept out of the default
+# workspace because it needs an external LLVM 22 dev install to build.
+#
+# Status: builds, links, and runs against a full LLVM 22 dev SDK. Its tests emit
+# verified IR, write native object files, and (end-to-end) link with clang into an
+# exe whose exit code matches the interpreter (fib(10)=55). It only covers the v0.1
+# SUBSET — Int/Bool/arithmetic/if/while/print/Option/Result/validated types; records,
+# enums, generics, strings, Ref, arrays, and spawn return explicit errors. The
+# text-IR backend in `vela-codegen` remains the full reference native backend.
+#
+# Build recipe (Windows, LLVM 22 dev SDK at C:\Program Files\LLVM):
+#   cargo test --features llvm22-1        # run from this crate dir
+# Everything else is wired up for you in .cargo/config.toml:
+#   - [env] sets LLVM_SYS_221_PREFIX and a short-path CFLAGS override (cc-rs splits
+#     the space in "C:\Program Files"); build.rs + .llvm-stublib/xml2s.lib stub a
+#     system lib the redistributable omits; rustflags force the static CRT (LLVM's
+#     libs are /MT — mixing with Rust's default /MD crashes on cross-heap frees) and
+#     add the Windows SDK lib dirs. Static linking means the exe needs no LLVM DLL.
+
+[package]
+name = "vela-codegen-llvm"
+version = "0.0.0"
+edition = "2021"
+description = "Inkwell/LLVM code generation for the Vela v0 subset (requires LLVM)."
+
+[dependencies]
+vela-frontend = { path = "../vela-frontend" }
+inkwell = { version = "0.9.0", default-features = false }
+
+[features]
+# Enable the one matching your LLVM dev install (set LLVM_SYS_<ver>_PREFIX too).
+llvm18-1 = ["inkwell/llvm18-1"]
+llvm22-1 = ["inkwell/llvm22-1"]

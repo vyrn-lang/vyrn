@@ -1,0 +1,39 @@
+/// Text encoding — Vela strings are UTF-8. Most operations work at the byte level;
+/// `chars` decodes to Unicode code points when you need character-level logic.
+///
+///   "\u{1F600}"     a Unicode-scalar escape (also `'\u{e9}'` in a char literal)
+///   s.length        byte length          bytes(s)  -> Array<Int>  (UTF-8 bytes)
+///   chars(s)        -> Array<Int>         the Unicode code points (scalar values)
+///
+/// `chars(s)` is an ordinary `Array<Int>`, so iteration, indexing, and `.length`
+/// all work on it. Everything is identical in the interpreter and native backend.
+
+/// Count the Unicode characters (code points), not the bytes.
+fn charCount(s: String) -> Int {
+    return chars(s).length
+}
+
+fn main() -> Int {
+    let s = "café"                 // 'é' (U+00E9) is 2 UTF-8 bytes
+    print(s)                       // café
+    print(s.length)                // 5   — byte length
+    print(bytes(s).length)         // 5   — same, as a byte array
+    print(charCount(s))            // 4   — code points: c, a, f, é
+    print(chars(s)[3])             // 233 — 'é' == '\u{e9}'
+    print(chars(s)[3] == '\u{e9}') // true
+
+    // Sum the code points by iterating the decoded array.
+    let mut total = 0
+    for cp in chars(s) {
+        total = total + cp
+    }
+    print(total)                   // 99 + 97 + 102 + 233 = 531
+
+    // An emoji: one code point, four UTF-8 bytes.
+    let grin = "\u{1F600}"
+    print(grin.length)             // 4  — bytes
+    print(charCount(grin))         // 1  — one character
+    print(chars(grin)[0])          // 128512
+
+    return 0
+}

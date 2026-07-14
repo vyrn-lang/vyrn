@@ -1,0 +1,21 @@
+[package]
+name = "vela-lsp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A tiny, synchronous Language Server Protocol server for Vela. It is NOT part
+# of the default workspace (see ../Cargo.toml `exclude`): it pulls in
+# `lsp-server`/`lsp-types`, which would add external dependencies to the default
+# resolve. Build it explicitly:
+#   cargo build --manifest-path compiler/vela-lsp/Cargo.toml
+[dependencies]
+vela-frontend = { path = "../vela-frontend" }
+lsp-server = "0.7"
+lsp-types = "0.95"
+serde = "1"
+serde_json = "1"
+
+[[bin]]
+name = "vela-lsp"
+path = "src/main.rs"

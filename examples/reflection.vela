@@ -1,0 +1,35 @@
+/// Extractable `where` — RFC-0003 reflection. `schemaOf(TypeName)` reads a
+/// validated type's `where` predicate *at compile time* and yields a `Schema`
+/// { base, min, max }. It is NOT runtime reflection (Vela erases types); the
+/// compiler computes it from the declaration, so the interpreter and native
+/// backend produce identical results. Turn it into OpenAPI, JSON Schema, etc.
+/// (For a ready-made JSON Schema document, use `jsonSchema(TypeName)` directly —
+/// see jsonschema.vela.)
+
+type Age = Int where value >= 18
+type Port = Int where value >= 1 && value <= 65535
+
+fn has(o: Option<Int>) -> Bool {
+    return match o { Some(n) => true, None => false }
+}
+fn optOr(o: Option<Int>, d: Int) -> Int {
+    return match o { Some(n) => n, None => d }
+}
+
+// Turn a Schema into an OpenAPI-style JSON fragment (the motivating use case).
+fn openApi(s: Schema) -> String {
+    let mut json = "{ \"type\": \"integer\""
+    if has(s.min) {
+        json = concat(json, ", \"minimum\": \{optOr(s.min, 0)}")
+    }
+    if has(s.max) {
+        json = concat(json, ", \"maximum\": \{optOr(s.max, 0)}")
+    }
+    return concat(json, " }")
+}
+
+fn main() -> Int {
+    print(openApi(schemaOf(Age)))     // { "type": "integer", "minimum": 18 }
+    print(openApi(schemaOf(Port)))    // { "type": "integer", "minimum": 1, "maximum": 65535 }
+    return 0
+}

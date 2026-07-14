@@ -1,0 +1,31 @@
+# Vela compiler workspace.
+#
+# Default members build with ZERO external dependencies, so `cargo build` and
+# `cargo test` work today without LLVM installed:
+#   - vela-frontend : lexer + parser + AST + type checker + tree-walking interpreter
+#   - vela-codegen  : emits textual LLVM IR (feed to `clang`/`llc` once LLVM is installed)
+#   - vela-cli      : the `velac` driver
+#
+# The Inkwell (LLVM C++ API) backend lives in the EXCLUDED crate
+# `vela-codegen-llvm`. It requires a matching LLVM toolchain to build and is not
+# part of the default resolve. See compiler/README.md.
+#
+# `vela-lsp` (the Language Server Protocol server) is also EXCLUDED: it pulls in
+# `lsp-server`/`lsp-types`, which would break the zero-external-dependency
+# property of the default resolve. Build it explicitly:
+#   cargo build --manifest-path compiler/vela-lsp/Cargo.toml
+
+[workspace]
+resolver = "2"
+members = [
+    "vela-frontend",
+    "vela-codegen",
+    "vela-cli",
+]
+exclude = [
+    "vela-codegen-llvm",
+    "vela-lsp",
+]
+
+[profile.release]
+opt-level = 3

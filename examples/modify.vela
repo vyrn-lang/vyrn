@@ -1,0 +1,33 @@
+// The `modify` capability (RFC-0004 §1) — a parameter that a function changes in
+// place, with the change visible to the caller. You write the *intent* on the
+// parameter; the compiler passes the binding by reference (call-by-value-result)
+// and requires the argument to be a `mut` variable.
+//
+// This is the capability surface for mutation: `bump(c, 5)` reads as "this may
+// change c", without the caller writing `c = ...` or threading a return value.
+
+type Counter = { value: Int, hits: Int }
+
+fn bump(c: modify Counter, by: Int) {
+    c.value = c.value + by
+    c.hits = c.hits + 1
+}
+
+fn reset(c: modify Counter) {
+    c.value = 0
+}
+
+fn main() -> Int {
+    let mut c = Counter { value: 0, hits: 0 }
+
+    bump(c, 5)
+    bump(c, 10)
+    bump(c, 100)        // each call mutates the caller's `c`
+    print(c.value)      // 115
+    print(c.hits)       // 3
+
+    reset(c)
+    print(c.value)      // 0
+
+    return c.hits       // 3
+}

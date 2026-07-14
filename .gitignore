@@ -1,0 +1,16 @@
+# Rust build output (workspace and the excluded vela-codegen-llvm crate)
+target/
+
+# Compiled Vela artifacts (regenerable via `velac build`)
+*.exe
+*.ll
+*.obj
+*.pdb
+
+# Editor / tooling
+editor/**/node_modules/
+*.vsix
+
+# OS noise
+Thumbs.db
+.DS_Store

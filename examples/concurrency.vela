@@ -1,0 +1,37 @@
+// Structured concurrency (RFC-0004 §Q4) — deterministic fork-join over *pure*
+// tasks. `spawn f(args)` runs an isolated function as a task, yielding a
+// `Task<T>`; `join(t)` awaits its result.
+//
+// The compiler *proves* each spawned function is isolated: no I/O (`print`) and no
+// shared mutable state (`cell`/`set`/`drop`), transitively. Because tasks are
+// pure, the result is the same under any schedule — so the interpreter (which runs
+// them one after another) and native code agree, and a parallel scheduler could be
+// dropped in without changing a single answer.
+//
+// `share` is the capability for concurrent read access: the same immutable value
+// can be handed to several tasks at once, precisely because none can mutate it.
+
+type Config = { base: Int, scale: Int }
+
+fn transform(cfg: share Config, x: Int) -> Int {
+    return cfg.base + x * cfg.scale
+}
+
+fn fib(n: Int) -> Int {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn main() -> Int {
+    let cfg = Config { base: 100, scale: 3 }
+
+    // Three tasks sharing one immutable config, plus an independent computation.
+    let a = spawn transform(cfg, 1)    // 103
+    let b = spawn transform(cfg, 2)    // 106
+    let c = spawn transform(cfg, 10)   // 130
+    let f = spawn fib(20)              // 6765
+
+    let total = join(a) + join(b) + join(c) + join(f)
+    print(total)                       // 103 + 106 + 130 + 6765 = 7104
+    return total
+}
