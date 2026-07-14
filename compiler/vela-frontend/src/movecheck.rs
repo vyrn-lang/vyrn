@@ -136,8 +136,12 @@ impl MoveCheck<'_> {
                 Ok(())
             }
             Stmt::While { cond, body, .. } => {
-                self.expr(cond, consumed, scope)?;
+                // The condition re-runs on every iteration, so consumption in it
+                // is loop-consumption exactly like the body's (`while take(x)`
+                // would use `x` again next time around) — track both in the
+                // in-loop map and run the same next-iteration check.
                 let mut body_c = consumed.clone();
+                self.expr(cond, &mut body_c, scope)?;
                 self.block(body, &mut body_c, scope);
                 for (k, (line, consumer)) in &body_c {
                     if !consumed.contains_key(k) && Self::in_scope(scope, k) {
@@ -277,9 +281,19 @@ impl MoveCheck<'_> {
                 }
                 Ok(())
             }
-            Expr::Spawn { args, .. } => {
-                for e in args {
-                    self.expr(e, consumed, scope)?;
+            // `spawn f(args)` moves arguments exactly like a direct call: a
+            // `consume` parameter takes ownership across the task boundary.
+            Expr::Spawn { name, args, line } => {
+                let caps = self.caps.get(name);
+                for (i, arg) in args.iter().enumerate() {
+                    self.expr(arg, consumed, scope)?;
+                    if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
+                        if let Expr::Var { name: v, .. } = arg {
+                            consumed
+                                .entry(v.clone())
+                                .or_insert((*line, format!("`spawn {name}(..)`")));
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -335,6 +349,31 @@ mod tests {
                    fn main() -> Int { let mut x = T { id: 1 }; let a = take(x); \
                                       x = T { id: 2 }; return a + take(x); }";
         assert!(run(src).is_ok());
+    }
+
+    #[test]
+    fn rejects_consume_in_while_condition() {
+        // The condition re-runs every iteration — consuming there is the same
+        // bug as consuming in the body.
+        let src = "type T = { id: Int }; \
+                   fn take(t: consume T) -> Bool { return t.id > 0; } \
+                   fn main() -> Int { let x = T { id: 1 }; \
+                                      while take(x) { let y = 1; } return 0; }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("inside a loop"), "{e}");
+    }
+
+    #[test]
+    fn spawn_applies_consume_capabilities() {
+        // `spawn take(x)` moves x across the task boundary; a second use is a
+        // double move.
+        let src = "type T = { id: Int }; \
+                   fn take(t: consume T) -> Int { return t.id; } \
+                   fn main() -> Int { let x = T { id: 1 }; \
+                                      let t = spawn take(x); \
+                                      let z = take(x); return join(t) + z; }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("already consumed by `spawn take(..)`"), "{e}");
     }
 
     #[test]

@@ -147,11 +147,37 @@ pub fn check_accum_with_let_types(
     // A monotone fixpoint over the call graph (starts optimistic, shrinks).
     let fn_names: std::collections::HashSet<String> =
         program.functions.iter().map(|f| f.name.clone()).collect();
+    // A protocol-method call site (`n.burp()`) collects the *surface* name, but
+    // impl bodies live under mangled names (`Noise__Int__burp`). Expand each
+    // surface method name to every registered impl so those call-graph edges
+    // are visible to the fixpoint — otherwise an impure impl (one that prints)
+    // would be spawnable through a method call.
+    let mut method_impls: HashMap<String, Vec<String>> = HashMap::new();
+    for imp in &program.impls {
+        if let Some(key) = crate::types::type_key(&imp.ty) {
+            for m in &imp.methods {
+                method_impls
+                    .entry(m.name.clone())
+                    .or_default()
+                    .push(crate::types::impl_method_name(&imp.protocol, &key, &m.name));
+            }
+        }
+    }
+    let expand = |calls: std::collections::HashSet<String>| -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::with_capacity(calls.len());
+        for c in calls {
+            if let Some(impls) = method_impls.get(&c) {
+                out.extend(impls.iter().cloned());
+            }
+            out.insert(c);
+        }
+        out
+    };
     let mut spawn_safe: std::collections::HashSet<String> = program
         .functions
         .iter()
         .filter(|f| {
-            let calls = fn_calls(&f.body);
+            let calls = expand(fn_calls(&f.body));
             let no_modify = f.params.iter().all(|p| p.capability != Capability::Modify);
             // `drop` is a statement (not a call), but `drop`ping a `Ref` releases a
             // shared cell — a shared-state mutation. A spawn-safe task must not do
@@ -167,7 +193,7 @@ pub fn check_accum_with_let_types(
         let snapshot = spawn_safe.clone();
         for f in &program.functions {
             if snapshot.contains(&f.name) {
-                let callees = fn_calls(&f.body);
+                let callees = expand(fn_calls(&f.body));
                 let ok = callees
                     .iter()
                     .filter(|c| fn_names.contains(*c))
@@ -397,6 +423,18 @@ impl<'a> Checker<'a> {
         }
         if let (Type::Result(a, e1), Type::Result(b, e2)) = (from, to) {
             return self.assignable(a, b) && self.assignable(e1, e2);
+        }
+        // A record type with a cross-field `where` predicate is NOMINAL: only
+        // the exact named type may flow in. Width subtyping would smuggle in
+        // structurally-identical values that never ran the invariant check
+        // (`Plain { start: 10, end: 3 }` as a `Range where start < end`);
+        // explicit construction `Range { .. }` is what validates.
+        if let Type::Named(n) = to {
+            if let Some(d) = self.types.get(n) {
+                if d.predicate.is_some() && matches!(d.base, Type::Record(_)) {
+                    return matches!(from, Type::Named(m) if m == n);
+                }
+            }
         }
         // Structural width subtyping: `from` is usable as `to` if it has every
         // field `to` requires, with an assignable type. Extra fields are fine.
@@ -1462,7 +1500,15 @@ impl<'a> Checker<'a> {
         match result {
             None => *result = Some(bty),
             Some(rt) => {
-                if !self.assignable(&bty, rt) && !self.assignable(rt, &bty) {
+                if self.assignable(&bty, rt) {
+                    // The arm fits the current result type — keep it.
+                } else if self.assignable(rt, &bty) {
+                    // The current result only fits the arm's WIDER type (e.g. a
+                    // validated `Age` arm meeting a raw-`Int` arm): the join is
+                    // the wider type. Keeping the narrow named type would
+                    // launder the raw arm past its refinement without any check.
+                    *result = Some(bty);
+                } else {
                     return Err(format!(
                         "line {line}: `match` arms have differing types: {rt:?} vs {bty:?}"
                     ));
@@ -2175,7 +2221,16 @@ impl<'a> Checker<'a> {
             let recv = self.expr(&args[0], scope, None, fn_ret)?;
             if let Type::Param(t) = &recv {
                 if self.param_has_bound(t, &proto) {
-                    // Check the remaining arguments against the signature.
+                    // Check arity, then EVERY remaining argument against the
+                    // signature (a bare `zip` would silently drop extras and
+                    // leave them entirely unchecked).
+                    if args.len() - 1 != sig.params.len() {
+                        return Err(format!(
+                            "line {line}: `{name}` expects {} argument(s) besides `self`, got {}",
+                            sig.params.len(),
+                            args.len() - 1
+                        ));
+                    }
                     for (arg, pty) in args[1..].iter().zip(&sig.params) {
                         let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
                         if !self.assignable(&aty, pty) {
@@ -2216,9 +2271,21 @@ impl<'a> Checker<'a> {
         // Generic call: infer the type parameters from the argument types.
         if let Some(type_params) = self.generics.get(name) {
             let mut subst: HashMap<String, Type> = HashMap::new();
+            let mut atys: Vec<Type> = Vec::with_capacity(args.len());
             for (arg, pty) in args.iter().zip(params) {
                 let aty = self.expr(arg, scope, None, fn_ret)?;
                 self.unify(pty, &aty, &mut subst, line)?;
+                atys.push(aty);
+            }
+            // Capability discipline applies to generic calls exactly as to
+            // concrete ones (this path used to return early and skip it,
+            // letting `f<T>(c: modify C, ..)` mutate immutable bindings).
+            let caps = self.caps.get(name);
+            for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
+                if caps.and_then(|c| c.get(i)) == Some(&Capability::Modify) {
+                    let concrete_pty = crate::types::substitute(pty, &subst);
+                    self.check_modify_arg(name, i, arg, &atys[i], &concrete_pty, scope, line)?;
+                }
             }
             for tp in type_params {
                 if !subst.contains_key(tp) {
@@ -2240,7 +2307,22 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            return Ok(crate::types::substitute(ret, &subst));
+            // The v0.1 "no nested Option/Result" rule holds through inference
+            // too: `wrap(Some(1))` with `fn wrap<T>(x: T) -> Option<T>` must
+            // not materialize an Option<Option<Int>>.
+            let rty = crate::types::substitute(ret, &subst);
+            let nested = params
+                .iter()
+                .map(|p| crate::types::substitute(p, &subst))
+                .chain(std::iter::once(rty.clone()))
+                .any(|t| has_nested_wrap(&t));
+            if nested {
+                return Err(format!(
+                    "line {line}: nested Option/Result is not supported in v0.1 \
+                     (inferred through `{name}`)"
+                ));
+            }
+            return Ok(rty);
         }
 
         let caps = self.caps.get(name);
@@ -2252,33 +2334,61 @@ impl<'a> Checker<'a> {
                     i + 1
                 ));
             }
-            // A `modify` parameter receives the caller's binding by reference, so
-            // the argument must be a mutable variable, not a temporary.
+            // A `modify` parameter receives the caller's binding by reference —
+            // full discipline checked in the shared helper.
             if caps.and_then(|c| c.get(i)) == Some(&Capability::Modify) {
-                match arg {
-                    Expr::Var { name: vn, .. } => {
-                        let b = self.lookup(scope, vn).ok_or_else(|| {
-                            format!("line {line}: unknown variable `{vn}`")
-                        })?;
-                        if !b.mutable {
-                            return Err(format!(
-                                "line {line}: `{name}` argument {} is `modify`, so `{vn}` must be \
-                                 declared `mut`",
-                                i + 1
-                            ));
-                        }
-                    }
-                    _ => {
-                        return Err(format!(
-                            "line {line}: `{name}` argument {} is `modify`; pass a mutable \
-                             variable, not a temporary",
-                            i + 1
-                        ))
-                    }
-                }
+                self.check_modify_arg(name, i, arg, &aty, pty, scope, line)?;
             }
         }
         Ok(ret.clone())
+    }
+
+    /// The call-site discipline for a `modify` parameter, shared by concrete
+    /// and generic calls: the argument must be a *mutable variable* (not a
+    /// temporary), and its type must be EXACTLY the parameter type. Width
+    /// subtyping is unsound here: the callee may whole-reassign the parameter
+    /// (`n = Named { .. }`), and writing that back through a wider caller
+    /// record would silently drop the caller's extra fields.
+    fn check_modify_arg(
+        &self,
+        fname: &str,
+        i: usize,
+        arg: &Expr,
+        aty: &Type,
+        pty: &Type,
+        scope: &Vec<HashMap<String, Binding>>,
+        line: usize,
+    ) -> Result<(), String> {
+        match arg {
+            Expr::Var { name: vn, .. } => {
+                let b = self
+                    .lookup(scope, vn)
+                    .ok_or_else(|| format!("line {line}: unknown variable `{vn}`"))?;
+                if !b.mutable {
+                    return Err(format!(
+                        "line {line}: `{fname}` argument {} is `modify`, so `{vn}` must be \
+                         declared `mut`",
+                        i + 1
+                    ));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "line {line}: `{fname}` argument {} is `modify`; pass a mutable \
+                     variable, not a temporary",
+                    i + 1
+                ))
+            }
+        }
+        if !matches!(aty, Type::Err) && !matches!(pty, Type::Err) && aty != pty {
+            return Err(format!(
+                "line {line}: `{fname}` argument {} is `modify` and needs exactly \
+                 {pty:?}, found {aty:?} (width subtyping is read-only: a wider \
+                 record could lose fields on write-back)",
+                i + 1
+            ));
+        }
+        Ok(())
     }
 
     /// Match a (possibly generic) parameter type against a concrete argument
@@ -2446,6 +2556,21 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
     }
 }
 
+/// Whether a type contains a directly nested `Option`/`Result` (the v0.1
+/// prohibition), anywhere inside it.
+fn has_nested_wrap(ty: &Type) -> bool {
+    let wrapped = |t: &Type| matches!(t, Type::Option(_) | Type::Result(..));
+    match ty {
+        Type::Option(t) => wrapped(t) || has_nested_wrap(t),
+        Type::Result(a, b) => {
+            wrapped(a) || wrapped(b) || has_nested_wrap(a) || has_nested_wrap(b)
+        }
+        Type::Array(t) | Type::ArrayN(t, _) | Type::Ref(t) | Type::Task(t) => has_nested_wrap(t),
+        Type::Record(fs) => fs.iter().any(|f| has_nested_wrap(&f.ty)),
+        _ => false,
+    }
+}
+
 /// Whether an integer literal `n` fits the sized type. The lexer wraps
 /// u64-range literals into the i64 bit pattern, so a *negative* `n` means "a
 /// literal above i64::MAX" — it fits only `UInt64`. (True negative literals
@@ -2481,10 +2606,12 @@ fn render_int_literal(n: i64) -> String {
 }
 
 /// Builtins a concurrent task may not use: `print` (observable ordering),
-/// `cell`/`set`/`release` (mutate the shared reference slab). `get` is a
-/// read-only slab access and is allowed.
-const SPAWN_FORBIDDEN: &[&str] =
-    &["print", "cell", "set", "release", "trace", "debug", "info", "warn", "error"];
+/// `cell`/`set`/`release` (mutate the shared reference slab), `afree` (frees a
+/// buffer the caller may still hold across the task boundary), and the log
+/// methods. `get` is a read-only slab access and is allowed.
+const SPAWN_FORBIDDEN: &[&str] = &[
+    "print", "cell", "set", "release", "afree", "trace", "debug", "info", "warn", "error",
+];
 
 /// Whether a block contains a `drop` statement anywhere (including nested blocks).
 /// Used by spawn-safety: `drop` can release a shared `Ref`, so a task must not.
@@ -2863,6 +2990,114 @@ mod tests {
                        region { let mut s = a; s = concat(a, b); print(s); } \
                        return 0; }";
         assert!(check_src(src).is_ok());
+    }
+
+    // ---- soundness: validated types cannot be bypassed --------------------
+
+    #[test]
+    fn rejects_structural_record_as_predicated_named() {
+        // A predicated record is nominal: a structurally-identical plain record
+        // must not flow in without running the invariant.
+        let src = "type Range = { start: Int, end: Int } where start < end \
+                   type Plain = { start: Int, end: Int } \
+                   fn span(r: Range) -> Int { return r.end - r.start } \
+                   fn main() -> Int { \
+                       let p = Plain { start: 10, end: 3 } \
+                       return span(p) }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("expects Named(\"Range\")"), "{e}");
+    }
+
+    #[test]
+    fn accepts_predicated_named_record_itself() {
+        let src = "type Range = { start: Int, end: Int } where start < end \
+                   fn span(r: Range) -> Int { return r.end - r.start } \
+                   fn main() -> Int { \
+                       let r = Range { start: 1, end: 5 } \
+                       return span(r) }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn match_arm_cannot_launder_validated_scalar() {
+        // A raw-Int arm joins the match to Int, so returning it as `Age`
+        // fails — the refinement can't be skipped via arm unification.
+        let src = "type Age = Int where value >= 18 \
+                   fn pick(o: Option<Int>) -> Age { \
+                       return match o { Some(x) => 5, None => 5 } } \
+                   fn main() -> Int { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("return type mismatch"), "{e}");
+    }
+
+    #[test]
+    fn rejects_modify_with_wider_record() {
+        // The callee may whole-reassign a `modify` param; writing back through
+        // a wider caller record would lose fields — exact type required.
+        let src = "type Named = { name: Int } \
+                   type User = { name: Int, age: Int } \
+                   fn clobber(n: modify Named) { n = Named { name: 5 } } \
+                   fn main() -> Int { \
+                       let mut u = User { name: 1, age: 30 } \
+                       clobber(u) \
+                       return u.age }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("needs exactly"), "{e}");
+    }
+
+    #[test]
+    fn generic_calls_enforce_modify_discipline() {
+        // The generic-inference path must run the same capability checks.
+        let src = "type C = { x: Int } \
+                   fn f<T>(c: modify C, tag: T) -> Int { c.x = 99 return 0 } \
+                   fn main() -> Int { \
+                       let c = C { x: 1 } \
+                       let r = f(c, 0) \
+                       return c.x }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("must be declared `mut`"), "{e}");
+    }
+
+    #[test]
+    fn rejects_spawn_of_protocol_method_that_prints() {
+        // Purity must see through protocol dispatch: the impl body does I/O.
+        let src = "protocol Noise { fn burp(self) -> Int } \
+                   impl Noise for Int { fn burp(self) -> Int { print(self) return self } } \
+                   fn task(n: Int) -> Int { return n.burp() } \
+                   fn main() -> Int { let t = spawn task(5) return join(t) }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("isolated (pure)"), "{e}");
+    }
+
+    #[test]
+    fn rejects_spawn_of_function_that_afrees() {
+        let src = "fn task(a: Array<Int>) -> Int { afree(a) return 0 } \
+                   fn main() -> Int { \
+                       let a = list([1, 2]) \
+                       let t = spawn task(a) \
+                       return join(t) }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("isolated (pure)"), "{e}");
+    }
+
+    #[test]
+    fn protocol_call_arity_is_checked() {
+        let src = "protocol P { fn m(self, k: Int) -> Int } \
+                   impl P for Int { fn m(self, k: Int) -> Int { return self + k } } \
+                   fn go<T: P>(x: T) -> Int { return x.m(1, 2, 3) } \
+                   fn main() -> Int { return go(4) }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("expects 1 argument(s) besides `self`"), "{e}");
+    }
+
+    #[test]
+    fn rejects_nested_option_via_generic_inference() {
+        let src = "fn wrap<T>(x: T) -> Option<T> { return Some(x) } \
+                   fn main() -> Int { \
+                       let o = wrap(Some(1)) \
+                       return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("nested Option/Result"), "{e}");
     }
 
     // ---- integer literal ranges ------------------------------------------
