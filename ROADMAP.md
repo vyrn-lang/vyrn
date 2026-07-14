@@ -3,9 +3,22 @@
 The forward-looking companion to the [RFCs](rfcs/). What ships today, what's next,
 and the one decision the rest of the language waits on.
 
-**Every feature below is verified**: the clang-compiled native binary produces the
-same output and exit code as the tree-walking interpreter (the reference
-semantics), across **38 examples** and **188 tests** (0 warnings).
+**Every feature below is verified**: the clang-compiled native binary produces
+byte-identical stdout, stderr, and exit codes against the tree-walking
+interpreter (the reference semantics), across **55 examples** and **371 tests**
+(0 warnings) — including every runtime trap path (one canonical `error: ...`
+wording on stderr, exit 1, in both backends). The permanent corpus harness is
+`cargo test -p vela-cli --test parity -- --ignored` (needs clang; its
+known-divergent list is empty and must stay that way).
+
+A 2026-07-15 hardening pass fixed ~40 reviewed defects: native
+use-after-free/heap-corruption bugs (cell `set`, region escapes, `list` in
+regions), invalid-IR shapes (dead `ret`, `phi void`, unpooled predicate
+strings), interp/native numeric divergences (wrapping overflow semantics,
+sized-int operand truncation, Float refinements, NaN, division traps),
+validated-type soundness holes (nominal predicated records, match-arm
+laundering, `modify` width subtyping, generic capability checks, spawn purity
+through protocols, movecheck gaps), and a lexer/parser diagnostics batch.
 
 ---
 
