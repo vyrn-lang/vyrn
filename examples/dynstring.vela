@@ -8,7 +8,7 @@ fn greeting(name: String) -> String {
     return concat(concat("Hello, ", name), "!")
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let g = greeting("Vela")
     print(g)        // Hello, Vela!
     print(g.len())   // 12

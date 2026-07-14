@@ -2,9 +2,9 @@
 // the `modify` direction). A record is a value, so this rebuilds it in place
 // mutating a field of a binding declared without `mut` is a compile error.
 
-type Account = { balance: Int, count: Int }
+type Account = { balance: Int64, count: Int64 }
 
-fn deposit(a: Account, amount: Int) -> Account {
+fn deposit(a: Account, amount: Int64) -> Account {
     // Records are values: return the updated one (a `modify`-by-reference
     // parameter would let this mutate the caller's copy directly; that lowering
     // is future work — today `Ref<Account>` cells cover shared mutation).
@@ -14,7 +14,7 @@ fn deposit(a: Account, amount: Int) -> Account {
     return next
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let mut acct = Account { balance: 0, count: 0 }
 
     // Mutate fields directly on a local `mut` record.

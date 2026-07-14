@@ -559,7 +559,7 @@ mod tests {
 
     #[test]
     fn lexes_operators_and_keywords() {
-        let toks = lex("fn main() -> Int { let x = 1 + 2; }").unwrap();
+        let toks = lex("fn main() -> Int64 { let x = 1 + 2; }").unwrap();
         let kinds: Vec<Tok> = toks.into_iter().map(|t| t.tok).collect();
         assert_eq!(
             kinds,
@@ -569,7 +569,7 @@ mod tests {
                 Tok::LParen,
                 Tok::RParen,
                 Tok::Arrow,
-                Tok::Ident("Int".into()),
+                Tok::Ident("Int64".into()),
                 Tok::LBrace,
                 Tok::Let,
                 Tok::Ident("x".into()),

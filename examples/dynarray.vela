@@ -6,9 +6,9 @@
 // it with `arr[i]` (bounds-checked). Reclamation is automatic; `drop` is the
 // explicit escape hatch shown at the end.
 
-fn main() -> Int {
+fn main() -> Int64 {
     // Collect the squares 0², 1², … 9² — the backing buffer grows 0→4→8→16.
-    let mut squares: Array<Int> = []
+    let mut squares: Array<Int64> = []
     let mut i = 0
     while i < 10 {
         squares.push(i * i)

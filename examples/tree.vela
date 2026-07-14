@@ -3,19 +3,19 @@
 // node holds two optional child references; traversal and reclamation recurse
 // into both.
 
-type Tree = { value: Int, left: Option<Ref<Tree>>, right: Option<Ref<Tree>> }
+type Tree = { value: Int64, left: Option<Ref<Tree>>, right: Option<Ref<Tree>> }
 
-fn treeSum(o: Option<Ref<Tree>>) -> Int {
+fn treeSum(o: Option<Ref<Tree>>) -> Int64 {
     return match o {
         Some(r) => get(r).value + treeSum(get(r).left) + treeSum(get(r).right),
         None => 0,
     }
 }
 
-fn treeDepth(o: Option<Ref<Tree>>) -> Int {
+fn treeDepth(o: Option<Ref<Tree>>) -> Int64 {
     return match o { Some(r) => 1 + maxDepth(r), None => 0 }
 }
-fn maxDepth(r: Ref<Tree>) -> Int {
+fn maxDepth(r: Ref<Tree>) -> Int64 {
     let l = treeDepth(get(r).left)
     let d = treeDepth(get(r).right)
     if l > d { return l }
@@ -24,21 +24,21 @@ fn maxDepth(r: Ref<Tree>) -> Int {
 
 // Reclaim the whole tree: capture both children before dropping this node, then
 // recurse into each.
-fn treeFree(o: Option<Ref<Tree>>) -> Int {
+fn treeFree(o: Option<Ref<Tree>>) -> Int64 {
     return match o { Some(r) => freeNode(r), None => 0 }
 }
-fn freeNode(r: Ref<Tree>) -> Int {
+fn freeNode(r: Ref<Tree>) -> Int64 {
     let l = get(r).left
     let rt = get(r).right
     drop r
     return treeFree(l) + treeFree(rt)
 }
 
-fn leaf(v: Int) -> Option<Ref<Tree>> {
+fn leaf(v: Int64) -> Option<Ref<Tree>> {
     return Some(cell(Tree { value: v, left: None, right: None }))
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     //        2
     //       / \
     //      1   4

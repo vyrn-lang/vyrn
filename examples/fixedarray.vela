@@ -11,8 +11,8 @@ fn weekdayLetters() -> Array<String, 3> {
     return ["Mon", "Tue", "Wed"]
 }
 
-fn main() -> Int {
-    let squares: Array<Int, 5> = [0, 1, 4, 9, 16]
+fn main() -> Int64 {
+    let squares: Array<Int64, 5> = [0, 1, 4, 9, 16]
 
     let mut sum = 0
     for sq in squares {              // iterate, no manual index

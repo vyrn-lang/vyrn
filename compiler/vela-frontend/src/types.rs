@@ -19,7 +19,8 @@ const MAX_DEPTH: usize = 64;
 /// resize/round between `Int`, sized `IntN`, and `Float` (sext/trunc/sitofp/fptosi).
 pub fn numeric_conv_target(name: &str) -> Option<Type> {
     match name {
-        "Int" | "Int64" => Some(Type::Int),
+        // Only the sized spellings exist — there is no `Int(x)`/`Float(x)`.
+        "Int64" => Some(Type::Int),
         "Int32" => Some(Type::IntN { bits: 32, signed: true }),
         "Int16" => Some(Type::IntN { bits: 16, signed: true }),
         "Int8" => Some(Type::IntN { bits: 8, signed: true }),
@@ -27,7 +28,7 @@ pub fn numeric_conv_target(name: &str) -> Option<Type> {
         "UInt16" => Some(Type::IntN { bits: 16, signed: false }),
         "UInt32" => Some(Type::IntN { bits: 32, signed: false }),
         "UInt64" => Some(Type::IntN { bits: 64, signed: false }),
-        "Float" | "Float64" => Some(Type::Float),
+        "Float64" => Some(Type::Float),
         "Float32" => Some(Type::Float32),
         _ => None,
     }
@@ -39,7 +40,7 @@ pub fn numeric_conv_target(name: &str) -> Option<Type> {
 /// Records and other structural types return `None` (no runtime identity).
 pub fn type_key(ty: &Type) -> Option<String> {
     match ty {
-        Type::Int => Some("Int".to_string()),
+        Type::Int => Some("Int64".to_string()),
         Type::Bool => Some("Bool".to_string()),
         Type::Str => Some("String".to_string()),
         Type::Named(n) => Some(n.clone()),
@@ -98,7 +99,7 @@ fn flip(op: BinOp) -> BinOp {
 pub fn schema_struct_lit(decl: &TypeDecl) -> Expr {
     let (min, max) = decl.predicate.as_ref().map_or((None, None), |p| predicate_bounds(p));
     let base = match decl.base {
-        Type::Int => "Int",
+        Type::Int => "Int64",
         Type::Bool => "Bool",
         Type::Str => "String",
         _ => "?",
@@ -590,7 +591,7 @@ mod json_schema_tests {
     #[test]
     fn integer_minimum() {
         assert_eq!(
-            schema_of("type Age = Int where value >= 18", "Age"),
+            schema_of("type Age = Int64 where value >= 18", "Age"),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"integer\",\"minimum\":18}"
         );
     }
@@ -598,7 +599,7 @@ mod json_schema_tests {
     #[test]
     fn integer_min_and_max() {
         assert_eq!(
-            schema_of("type Port = Int where value >= 1 && value <= 65535", "Port"),
+            schema_of("type Port = Int64 where value >= 1 && value <= 65535", "Port"),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"integer\",\"minimum\":1,\"maximum\":65535}"
         );
     }
@@ -606,11 +607,11 @@ mod json_schema_tests {
     #[test]
     fn exclusive_bounds_and_multiple_of() {
         assert_eq!(
-            schema_of("type Even = Int where value % 2 == 0", "Even"),
+            schema_of("type Even = Int64 where value % 2 == 0", "Even"),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"integer\",\"multipleOf\":2}"
         );
         assert_eq!(
-            schema_of("type Big = Int where value > 100", "Big"),
+            schema_of("type Big = Int64 where value > 100", "Big"),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"integer\",\"exclusiveMinimum\":100}"
         );
     }
@@ -618,7 +619,7 @@ mod json_schema_tests {
     #[test]
     fn float_number_with_bounds() {
         assert_eq!(
-            schema_of("type Ratio = Float where value > 0.0 && value <= 1.0", "Ratio"),
+            schema_of("type Ratio = Float64 where value > 0.0 && value <= 1.0", "Ratio"),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"number\",\"exclusiveMinimum\":0,\"maximum\":1}"
         );
     }
@@ -627,7 +628,7 @@ mod json_schema_tests {
     fn negative_bound_is_captured() {
         // `-273.15` parses as Unary(Neg, Float); `num_lit` unwraps the negation.
         assert_eq!(
-            schema_of("type Temp = Float where value >= -273.15", "Temp"),
+            schema_of("type Temp = Float64 where value >= -273.15", "Temp"),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"number\",\"minimum\":-273.15}"
         );
     }
@@ -637,7 +638,7 @@ mod json_schema_tests {
         // A validated field inlines its own constraints; an Option field is optional.
         assert_eq!(
             schema_of(
-                "type Age = Int where value >= 18 \
+                "type Age = Int64 where value >= 18 \
                  type User = { name: String, age: Age, nick: Option<String> }",
                 "User"
             ),
@@ -677,7 +678,7 @@ mod json_schema_tests {
     fn not_equal_maps_to_not_const() {
         // A multi-clause predicate is captured faithfully: `!= N` → not/const.
         assert_eq!(
-            schema_of("type Score = Int where value > 0 && value % 2 == 0 && value != 100", "Score"),
+            schema_of("type Score = Int64 where value > 0 && value % 2 == 0 && value != 100", "Score"),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"integer\",\
              \"exclusiveMinimum\":0,\"multipleOf\":2,\"not\":{\"const\":100}}"
         );
@@ -688,7 +689,7 @@ mod json_schema_tests {
         // A predicate the keyword model can't encode keeps a faithful `$comment`
         // rather than silently under-specifying.
         assert_eq!(
-            schema_of("type Small = Int where value < 10 || value > 1000", "Small"),
+            schema_of("type Small = Int64 where value < 10 || value > 1000", "Small"),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"integer\",\
              \"$comment\":\"constrained by: value < 10 || value > 1000\"}"
         );
@@ -698,7 +699,7 @@ mod json_schema_tests {
     fn partial_capture_keeps_mapped_parts_and_comments() {
         // `value >= 0` maps; the `!= 7` after an OR makes the whole thing partial,
         // so the mapped bound stays AND the full predicate is documented.
-        let s = schema_of("type T = Int where value >= 0 && (value < 3 || value > 5)", "T");
+        let s = schema_of("type T = Int64 where value >= 0 && (value < 3 || value > 5)", "T");
         assert!(s.contains("\"minimum\":0"), "keeps mapped bound: {s}");
         assert!(s.contains("\"$comment\":\"constrained by:"), "documents remainder: {s}");
     }
@@ -754,7 +755,7 @@ mod json_schema_tests {
         // The same named type appearing twice on *sibling* paths is not a cycle
         // — both occurrences inline fully.
         let s = schema_of(
-            "type Age = Int where value >= 18 \
+            "type Age = Int64 where value >= 18 \
              type Pair = { x: Age, y: Age }",
             "Pair",
         );
@@ -764,7 +765,7 @@ mod json_schema_tests {
 
     #[test]
     fn cross_field_record_documents_invariant() {
-        let s = schema_of("type R = { a: Int, b: Int } where a < b", "R");
+        let s = schema_of("type R = { a: Int64, b: Int64 } where a < b", "R");
         assert!(s.contains("\"type\":\"object\""), "still an object: {s}");
         assert!(s.contains("\"required\":[\"a\",\"b\"]"), "required intact: {s}");
         assert!(s.contains("\"$comment\":\"constrained by: a < b\""), "documents invariant: {s}");

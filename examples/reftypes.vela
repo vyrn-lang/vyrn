@@ -13,27 +13,27 @@
 // type-checks and lowers; actually building a list also needs a nil terminator
 // (`Option<Ref>`), which is future work — so this declaration just demonstrates
 // that recursion-through-`Ref` is well-formed.
-type Node = { value: Int, next: Ref<Node> }
+type Node = { value: Int64, next: Ref<Node> }
 
 // References compose across function boundaries: this takes a Ref<String> and
-// returns a fresh Ref<Int> (ownership of the new cell transfers to the caller).
-fn measure(s: Ref<String>) -> Ref<Int> {
+// returns a fresh Ref<Int64> (ownership of the new cell transfers to the caller).
+fn measure(s: Ref<String>) -> Ref<Int64> {
     return cell(len(get(s)))
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     // Ref<String>: mutate a heap string in place through the reference.
     let s = cell("hello")
     set(s, concat(get(s), " world"))
     print(get(s))              // hello world
 
-    // Ref<Ref<Int>>: a reference to a reference.
+    // Ref<Ref<Int64>>: a reference to a reference.
     let rr = cell(cell(41))
     let inner = get(rr)
     set(inner, get(inner) + 1)
     print(get(inner))         // 42
 
-    let n = measure(s)        // Ref<Int> holding 11
+    let n = measure(s)        // Ref<Int64> holding 11
     let lenS = get(n)
     print(lenS)              // 11
 

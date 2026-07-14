@@ -1,21 +1,21 @@
 // Validated types (RFC-0003): validation lives in the type, not at call sites.
 // An invalid value of a validated type simply cannot exist.
 
-type Age  = Int where value >= 18
-type Port = Int where value >= 1 && value <= 65535
+type Age  = Int64 where value >= 18
+type Port = Int64 where value >= 1 && value <= 65535
 
 // `n` is not a compile-time constant, so this construction is checked at RUNTIME.
 // If `n` is out of range the program aborts — you can't get an invalid Age out.
-fn checkedAge(n: Int) -> Age {
+fn checkedAge(n: Int64) -> Age {
     return Age(n)
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let a = Age(25)            // proven valid at COMPILE TIME — zero runtime cost
     let p = Port(8080)         // proven valid at compile time
     let grown = checkedAge(30) // runtime check — passes
 
-    // A validated type decays to its base, so an Age prints as the Int it is.
+    // A validated type decays to its base, so an Age prints as the Int64 it is.
     print(a)       // 25
     print(p)       // 8080
     print(grown)   // 30

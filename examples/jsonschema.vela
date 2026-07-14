@@ -8,10 +8,10 @@
 /// `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/`multipleOf`; a record
 /// becomes an `object` with `properties` and a `required` list (non-`Option` fields).
 
-type Age = Int where value >= 18
-type Port = Int where value >= 1 && value <= 65535
-type Even = Int where value % 2 == 0
-type Ratio = Float where value > 0.0 && value <= 1.0
+type Age = Int64 where value >= 18
+type Port = Int64 where value >= 1 && value <= 65535
+type Even = Int64 where value % 2 == 0
+type Ratio = Float64 where value > 0.0 && value <= 1.0
 type Username = String where value.length >= 3 && value.length <= 16
 
 /// A user record: `age` reuses the validated `Age` and `handle` the validated
@@ -19,7 +19,7 @@ type Username = String where value.length >= 3 && value.length <= 16
 /// from `required`.
 type User = { handle: Username, age: Age, nick: Option<String> }
 
-fn main() -> Int {
+fn main() -> Int64 {
     print(jsonSchema(Age))
     print(jsonSchema(Port))
     print(jsonSchema(Even))

@@ -163,7 +163,8 @@ pub struct Param {
 /// [`TypeDecl`] carrying the predicate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
-    /// The default 64-bit signed integer (`Int`, also spelled `Int64`).
+    /// The default 64-bit signed integer, written `Int64` (there is no
+    /// unsized `Int` in the surface language).
     Int,
     /// A sized integer: `Int8`/`Int16`/`Int32` signed, `UInt8`/`UInt16`/`UInt32`/
     /// `UInt64` unsigned. `bits` ∈ {8, 16, 32, 64}; arithmetic wraps at that width
@@ -238,6 +239,57 @@ pub enum Type {
     /// second diagnostic. Never reaches codegen — it only arises from a check
     /// error, and a program with any `Err` has at least one diagnostic.
     Err,
+}
+
+impl std::fmt::Display for Type {
+    /// The user-facing spelling of a type, exactly as it is written in Vela
+    /// source: `Int64`, `UInt8`, `Float64`, `String`, `Option<T>`, a named
+    /// type by its name, a record by its shape. Diagnostics use this — never
+    /// the `Debug` form (`IntN { bits: 8, .. }` / `Named("Age")`).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Int => write!(f, "Int64"),
+            Type::IntN { bits, signed } => {
+                write!(f, "{}Int{bits}", if *signed { "" } else { "U" })
+            }
+            Type::Float => write!(f, "Float64"),
+            Type::Float32 => write!(f, "Float32"),
+            Type::Bool => write!(f, "Bool"),
+            Type::Str => write!(f, "String"),
+            Type::Unit => write!(f, "Unit"),
+            Type::Named(n) | Type::Param(n) => write!(f, "{n}"),
+            Type::Option(t) => write!(f, "Option<{t}>"),
+            Type::Result(t, e) => write!(f, "Result<{t}, {e}>"),
+            Type::Record(fields) => {
+                write!(f, "{{ ")?;
+                for (i, fld) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", fld.name, fld.ty)?;
+                }
+                write!(f, " }}")
+            }
+            Type::Omit(b, keys) => write!(f, "Omit<{b}, {}>", keys.join(", ")),
+            Type::Pick(b, keys) => write!(f, "Pick<{b}, {}>", keys.join(", ")),
+            Type::Merge(a, b) => write!(f, "Merge<{a}, {b}>"),
+            Type::Partial(b) => write!(f, "Partial<{b}>"),
+            Type::Enum(vs) => {
+                let names: Vec<&str> = vs.iter().map(|v| v.name.as_str()).collect();
+                write!(f, "enum {{ {} }}", names.join(" | "))
+            }
+            Type::App(n, args) => {
+                let rendered: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                write!(f, "{n}<{}>", rendered.join(", "))
+            }
+            Type::Ref(t) => write!(f, "Ref<{t}>"),
+            Type::Array(t) => write!(f, "Array<{t}>"),
+            Type::ArrayN(t, n) => write!(f, "Array<{t}, {n}>"),
+            Type::Task(t) => write!(f, "Task<{t}>"),
+            Type::Logger => write!(f, "Logger"),
+            Type::Err => write!(f, "<type error>"),
+        }
+    }
 }
 
 /// A brace-delimited sequence of statements.

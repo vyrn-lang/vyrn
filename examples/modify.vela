@@ -6,9 +6,9 @@
 // This is the capability surface for mutation: `bump(c, 5)` reads as "this may
 // change c", without the caller writing `c = ...` or threading a return value.
 
-type Counter = { value: Int, hits: Int }
+type Counter = { value: Int64, hits: Int64 }
 
-fn bump(c: modify Counter, by: Int) {
+fn bump(c: modify Counter, by: Int64) {
     c.value = c.value + by
     c.hits = c.hits + 1
 }
@@ -17,7 +17,7 @@ fn reset(c: modify Counter) {
     c.value = 0
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let mut c = Counter { value: 0, hits: 0 }
 
     bump(c, 5)

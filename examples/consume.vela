@@ -3,12 +3,12 @@
 // compiler forbids using that value again. Ownership is expressed as intent and
 // enforced statically, with no runtime cost (capabilities are erased).
 
-type Token = { id: Int }
+type Token = { id: Int64 }
 
-fn redeem(t: consume Token) -> Int { return t.id }   // takes ownership
-fn peek(t: read Token) -> Int { return t.id }        // just observes (the default)
+fn redeem(t: consume Token) -> Int64 { return t.id }   // takes ownership
+fn peek(t: read Token) -> Int64 { return t.id }        // just observes (the default)
 
-fn main() -> Int {
+fn main() -> Int64 {
     let a = Token { id: 10 }
     // `peek` only reads, so `a` stays usable afterward:
     let x = peek(a) + peek(a)   // 20

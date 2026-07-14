@@ -9,7 +9,7 @@ protocol Show {
     fn show(self) -> String
 }
 
-impl Show for Int {
+impl Show for Int64 {
     fn show(self) -> String { return str(self) }
 }
 
@@ -21,7 +21,7 @@ impl Show for Bool {
 }
 
 // A generic function bounded by `Show` can call `.show()` on its argument.
-fn label(x: Int, flag: Bool) -> String {
+fn label(x: Int64, flag: Bool) -> String {
     return concat(concat("x=", show(x)), concat(" flag=", show(flag)))
 }
 
@@ -29,8 +29,8 @@ fn describe<T: Show>(x: T) -> String {
     return concat("= ", x.show())
 }
 
-fn main() -> Int {
-    print(describe(42))           // = 42       (generic, T = Int)
+fn main() -> Int64 {
+    print(describe(42))           // = 42       (generic, T = Int64)
     print(describe(true))         // = yes      (generic, T = Bool)
     print(label(7, false))        // x=7 flag=no
     return 0

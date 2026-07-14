@@ -28,7 +28,7 @@ fn render(t: Template) -> String {
     return out
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let name = "Vela"
     let n = 3
 

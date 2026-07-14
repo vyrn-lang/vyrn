@@ -33,7 +33,7 @@ fn showValue(v: Value) -> String {
     }
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     // A hostile input that would wreck a string-concatenated query.
     let userName = "'; DROP TABLE users; --"
     let minAge = 18

@@ -2,10 +2,10 @@
 // short-circuits by returning `Err` from the enclosing function — no manual
 // match at every call site.
 
-type Age = Int where value >= 18
+type Age = Int64 where value >= 18
 
 // Fallible validated construction, composed from Result + the validated type.
-fn parseAge(n: Int) -> Result<Age, Int> {
+fn parseAge(n: Int64) -> Result<Age, Int64> {
     if n >= 18 {
         return Ok(Age(n))   // Age(n) is provably safe here (n >= 18)
     }
@@ -13,12 +13,12 @@ fn parseAge(n: Int) -> Result<Age, Int> {
 }
 
 // `?` propagates the Err(n) automatically when parseAge fails.
-fn agePlus(n: Int, extra: Int) -> Result<Int, Int> {
+fn agePlus(n: Int64, extra: Int64) -> Result<Int64, Int64> {
     let a = parseAge(n)?   // early-returns Err(n) if n < 18
     return Ok(a + extra)
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let ok  = match agePlus(30, 5) { Ok(v) => v, Err(e) => 0 - e }   // 35
     let bad = match agePlus(10, 5) { Ok(v) => v, Err(e) => 0 - e }   // -10 (propagated Err)
     print(ok)

@@ -2,16 +2,16 @@
 // and aborts on failure; `Age?(n)` instead returns `Option<Age>` — `None` when
 // the refinement fails — so untrusted input is handled without aborting.
 
-type Age = Int where value >= 18
+type Age = Int64 where value >= 18
 
-fn make(n: Int) -> Int {
+fn make(n: Int64) -> Int64 {
     return match Age?(n) {
-        Some(a) => a,        // valid: use it (an Age decays to Int)
+        Some(a) => a,        // valid: use it (an Age decays to Int64)
         None    => 0 - 1,    // invalid: recover gracefully
     }
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     print(make(25))   // 25
     print(make(5))    // -1   (5 < 18 — no abort)
     return 0

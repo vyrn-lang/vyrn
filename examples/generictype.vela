@@ -1,6 +1,6 @@
 // Generic types (RFC-0002 §6): user-defined containers parameterized by type.
 // Type arguments in a value are inferred from the fields (no turbofish needed)
-// annotations use the explicit form `Pair<Int, String>`.
+// annotations use the explicit form `Pair<Int64, String>`.
 
 type Box<T>     = { value: T }
 type Pair<A, B> = { first: A, second: B }
@@ -10,11 +10,11 @@ fn unbox<T>(b: Box<T>) -> T {
     return b.value
 }
 
-fn main() -> Int {
-    let n = Box { value: 41 }          // Box<Int>, inferred
-    let p: Pair<Int, String> = Pair { first: 7, second: "seven" }
+fn main() -> Int64 {
+    let n = Box { value: 41 }          // Box<Int64>, inferred
+    let p: Pair<Int64, String> = Pair { first: 7, second: "seven" }
 
-    print(unbox(n) + 1)                // 42   — unbox<Int>
+    print(unbox(n) + 1)                // 42   — unbox<Int64>
     print(p.second)                    // seven
     print(p.first)                     // 7
 

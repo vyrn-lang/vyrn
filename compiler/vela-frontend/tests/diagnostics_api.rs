@@ -10,7 +10,7 @@ use vela_frontend::diagnostics;
 /// A valid program produces no diagnostics.
 #[test]
 fn valid_program_is_clean() {
-    let src = "fn main() -> Int { let x = 2 + 3; print(x); return x; }";
+    let src = "fn main() -> Int64 { let x = 2 + 3; print(x); return x; }";
     assert!(diagnostics(src).is_empty(), "{:?}", diagnostics(src));
 }
 
@@ -19,7 +19,7 @@ fn valid_program_is_clean() {
 /// source: f before g.
 #[test]
 fn accumulates_across_functions() {
-    let src = "fn f() -> Int { return true; }\nfn g() -> Int { let y = \"s\" + 1; return y; }\nfn main() -> Int { return f(); }";
+    let src = "fn f() -> Int64 { return true; }\nfn g() -> Int64 { let y = \"s\" + 1; return y; }\nfn main() -> Int64 { return f(); }";
     let diags = diagnostics(src);
     assert_eq!(diags.len(), 2, "{:?}", diags);
     assert_eq!(diags[0].stage, "check");
@@ -34,12 +34,12 @@ fn accumulates_across_functions() {
 /// A lex error is reported alone (the lexer stops at the first illegal token).
 #[test]
 fn lex_error_is_single_and_has_a_column() {
-    let src = "fn main() -> Int { let x = @; return x; }";
+    let src = "fn main() -> Int64 { let x = @; return x; }";
     let diags = diagnostics(src);
     assert_eq!(diags.len(), 1, "{:?}", diags);
     assert_eq!(diags[0].stage, "lex");
-    // `@` is the 28th character (1-based) of `fn main() -> Int { let x = @; ...`.
-    assert_eq!(diags[0].col, 28);
+    // `@` is the 30th character (1-based) of `fn main() -> Int64 { let x = @; ...`.
+    assert_eq!(diags[0].col, 30);
     assert!(diags[0].message.contains("unexpected character"), "{:?}", diags[0]);
 }
 
@@ -47,7 +47,7 @@ fn lex_error_is_single_and_has_a_column() {
 /// nothing downstream runs.
 #[test]
 fn parse_error_suppresses_downstream() {
-    let src = "fn f() -> Int { return true; }\nfn main() -> Int { let x = ; return x; }";
+    let src = "fn f() -> Int64 { return true; }\nfn main() -> Int64 { let x = ; return x; }";
     let diags = diagnostics(src);
     assert_eq!(diags.len(), 1, "{:?}", diags);
     assert_eq!(diags[0].stage, "parse");
@@ -57,22 +57,22 @@ fn parse_error_suppresses_downstream() {
 /// existing callers/tests see the same string they always did.
 #[test]
 fn check_shim_matches_first_rendered() {
-    let src = "fn f() -> Int { return true; }\nfn g() -> Int { let y = \"s\" + 1; return y; }\nfn main() -> Int { return f(); }";
+    let src = "fn f() -> Int64 { return true; }\nfn g() -> Int64 { let y = \"s\" + 1; return y; }\nfn main() -> Int64 { return f(); }";
     let diags = diagnostics(src);
     let via_shim = vela_frontend::check(src).unwrap_err();
     // The shim returns the FIRST diagnostic rendered, which is f's error on line 1.
     assert_eq!(via_shim, diags[0].render());
-    assert_eq!(via_shim, "line 1: return type mismatch: expected Int, found Bool");
+    assert_eq!(via_shim, "line 1: return type mismatch: expected Int64, found Bool");
 }
 
 /// A move-check error (use-after-consume) is reported with the right stage and
 /// accumulates with a type error in another function.
 #[test]
 fn movecheck_accumulates_with_check() {
-    let src = "type T = { id: Int };\n\
-               fn take(t: consume T) -> Int { return t.id; }\n\
-               fn bad() -> Int { return true; }\n\
-               fn main() -> Int { let x = T { id: 1 }; let a = take(x); return take(x); }";
+    let src = "type T = { id: Int64 };\n\
+               fn take(t: consume T) -> Int64 { return t.id; }\n\
+               fn bad() -> Int64 { return true; }\n\
+               fn main() -> Int64 { let x = T { id: 1 }; let a = take(x); return take(x); }";
     let diags = diagnostics(src);
     // One check error (bad returns Bool) and one movecheck error (x used twice).
     let check_errs = diags.iter().filter(|d| d.stage == "check").count();
@@ -89,9 +89,9 @@ fn movecheck_accumulates_with_check() {
 /// `take(x)` on line 5, the second `take(y)` on line 6).
 #[test]
 fn movecheck_accumulates_within_function_body() {
-    let src = "type T = { id: Int };\n\
-               fn take(t: consume T) -> Int { return t.id; }\n\
-               fn main() -> Int {\n  let x = T { id: 1 }; let a = take(x); let b = take(x);\n  let y = T { id: 2 }; let c = take(y); let d = take(y);\n  return a + c;\n}";
+    let src = "type T = { id: Int64 };\n\
+               fn take(t: consume T) -> Int64 { return t.id; }\n\
+               fn main() -> Int64 {\n  let x = T { id: 1 }; let a = take(x); let b = take(x);\n  let y = T { id: 2 }; let c = take(y); let d = take(y);\n  return a + c;\n}";
     let diags = diagnostics(src);
     let move_errs: Vec<_> = diags.iter().filter(|d| d.stage == "movecheck").collect();
     assert_eq!(move_errs.len(), 2, "{:?}", diags);
@@ -108,9 +108,9 @@ fn movecheck_accumulates_within_function_body() {
 /// `helper` between them still parses (it just produces no diagnostic).
 #[test]
 fn parse_recovers_across_declarations() {
-    let src = "fn main() -> Int { let x = ; return x; }\n\
-               fn helper() -> Int { return 1; }\n\
-               type Bad = Int where;";
+    let src = "fn main() -> Int64 { let x = ; return x; }\n\
+               fn helper() -> Int64 { return 1; }\n\
+               type Bad = Int64 where;";
     let diags = diagnostics(src);
     assert_eq!(diags.len(), 2, "{:?}", diags);
     assert!(diags.iter().all(|d| d.stage == "parse"), "{:?}", diags);
@@ -126,8 +126,8 @@ fn parse_recovers_across_declarations() {
 /// existing "parse error suppresses downstream" contract, now with recovery.
 #[test]
 fn parse_recovery_skips_downstream_checks() {
-    let src = "fn main() -> Int { let x = ; return x; }\n\
-               fn bad() -> Int { return true; }";
+    let src = "fn main() -> Int64 { let x = ; return x; }\n\
+               fn bad() -> Int64 { return true; }";
     let diags = diagnostics(src);
     assert!(diags.iter().all(|d| d.stage == "parse"), "{:?}", diags);
     assert_eq!(diags.len(), 1, "{:?}", diags);
@@ -142,7 +142,7 @@ fn parse_recovery_skips_downstream_checks() {
 /// name to `Type::Err`, which is assignable to the declared `Int` return.
 #[test]
 fn accumulates_within_function_body() {
-    let src = "fn main() -> Int {\n  let a = \"s\" + 1;\n  let b = true + 2;\n  return a;\n}";
+    let src = "fn main() -> Int64 {\n  let a = \"s\" + 1;\n  let b = true + 2;\n  return a;\n}";
     let diags = diagnostics(src);
     assert_eq!(diags.len(), 2, "{:?}", diags);
     assert_eq!(diags[0].stage, "check");
@@ -158,7 +158,7 @@ fn accumulates_within_function_body() {
 /// short-circuits on an `Err` operand. Only the first, real error is reported.
 #[test]
 fn failed_let_does_not_cascade_through_binop() {
-    let src = "fn main() -> Int {\n  let a = \"s\" + 1;\n  let b = a + 1;\n  return b;\n}";
+    let src = "fn main() -> Int64 {\n  let a = \"s\" + 1;\n  let b = a + 1;\n  return b;\n}";
     let diags = diagnostics(src);
     assert_eq!(diags.len(), 1, "{:?}", diags);
     assert!(diags[0].message.contains("arithmetic needs matching numeric"), "{:?}", diags[0]);
@@ -170,7 +170,7 @@ fn failed_let_does_not_cascade_through_binop() {
 /// builtin's `Type::Err` guard returns `Err`, so only the original error survives.
 #[test]
 fn failed_let_does_not_cascade_through_builtin() {
-    let src = "fn main() -> Int {\n  let a = \"s\" + 1;\n  let n = len(a);\n  return 0;\n}";
+    let src = "fn main() -> Int64 {\n  let a = \"s\" + 1;\n  let n = len(a);\n  return 0;\n}";
     let diags = diagnostics(src);
     assert_eq!(diags.len(), 1, "{:?}", diags);
     assert!(diags[0].message.contains("arithmetic needs matching numeric"), "{:?}", diags[0]);

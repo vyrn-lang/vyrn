@@ -1,18 +1,18 @@
 // String interpolation — RFC-0007, Phase 1.
 //
 // A `\{ expr }` hole inside a normal `"..."` string interpolates the expression,
-// rendered with `str` (Int, sized IntN, Float, Bool, and String). The escape is on the
+// rendered with `str` (Int64, sized IntN, Float64, Bool, and String). The escape is on the
 // *interpolation*, so `{` and `}` stay ordinary characters — no doubling needed,
 // which is what makes this pleasant for brace-heavy text (LaTeX, JSON, code).
 //
 // An interpolated string desugars to a `concat`/`str` chain producing a `String`,
 // so the interpreter and native backend render identically.
 
-fn greet(name: String, count: Int) -> String {
+fn greet(name: String, count: Int64) -> String {
     return "hi \{name}, you have \{count} messages"
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let name = "Vela"
     let n = 3
     let done = n > 2

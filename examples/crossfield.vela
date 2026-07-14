@@ -7,14 +7,14 @@
 /// properties, so `jsonSchema` documents the invariant in a `$comment` (the
 /// runtime check remains the source of truth).
 
-type Range = { start: Int, end: Int } where start < end
-type Bracket = { lo: Int, hi: Int, step: Int } where lo <= hi && step > 0
+type Range = { start: Int64, end: Int64 } where start < end
+type Bracket = { lo: Int64, hi: Int64, step: Int64 } where lo <= hi && step > 0
 
-fn span(r: Range) -> Int {
+fn span(r: Range) -> Int64 {
     return r.end - r.start
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let r = Range { start: 3, end: 10 }        // valid at compile time
     print(span(r))                             // 7
 

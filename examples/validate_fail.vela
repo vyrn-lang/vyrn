@@ -11,13 +11,13 @@
 //   velac run   examples/validate_fail.vela   -> error, exit 1
 //   velac build examples/validate_fail.vela   -> same error, same exit code
 
-type Age = Int where value >= 18
+type Age = Int64 where value >= 18
 
-fn checked(n: Int) -> Age {
+fn checked(n: Int64) -> Age {
     return Age(n)
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let bad = checked(5)   // 5 < 18  ->  validation fails at runtime
     print(bad)
     return 0

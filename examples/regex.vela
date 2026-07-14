@@ -17,7 +17,7 @@ type Hex = String where value =~ "#[0-9a-f][0-9a-f][0-9a-f]"
 /// (Two patterns reflect to a JSON Schema `allOf`.)
 type EveryOther = String where value.length >= 2 && value =~ "[a-z]+" && value =~ "(.a)*"
 
-fn main() -> Int {
+fn main() -> Int64 {
     // `=~` is an ordinary Bool expression.
     print("abc" =~ "[a-z]+")          // true
     print("abc9" =~ "[a-z]+")         // false (a digit is not [a-z])

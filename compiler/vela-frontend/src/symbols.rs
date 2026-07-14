@@ -481,7 +481,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
         out.push(Completion {
             label: "length".to_string(),
             kind: SymbolKind::Type,
-            detail: "length: Int — element count (read-only)".to_string(),
+            detail: "length: Int64 — element count (read-only)".to_string(),
         });
     }
     out
@@ -910,44 +910,14 @@ fn variant_detail(enum_name: &str, v: &EnumVariant) -> String {
 }
 
 fn type_to_string(ty: &Type) -> String {
+    // One source of truth: the AST's `Display` impl (the user-facing type
+    // spelling). Enums keep the richer per-variant arm rendering for hovers.
     match ty {
-        Type::Int => "Int".into(),
-        Type::IntN { bits, signed } => {
-            format!("{}Int{bits}", if *signed { "" } else { "U" })
-        }
-        Type::Float => "Float64".into(),
-        Type::Float32 => "Float32".into(),
-        Type::Bool => "Bool".into(),
-        Type::Str => "Str".into(),
-        Type::Unit => "Unit".into(),
-        Type::Named(s) | Type::Param(s) => s.clone(),
-        Type::Option(inner) => format!("Option<{}>", type_to_string(inner)),
-        Type::Result(ok, err) => format!("Result<{}, {}>", type_to_string(ok), type_to_string(err)),
-        Type::Record(fields) => {
-            let fs = fields
-                .iter()
-                .map(|f| format!("{}: {}", f.name, type_to_string(&f.ty)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{{ {} }}", fs)
-        }
         Type::Enum(vs) => {
             let arms = vs.iter().map(variant_arm).collect::<Vec<_>>().join(" | ");
             format!("{{ {} }}", arms)
         }
-        Type::App(name, args) => {
-            format!("{}<{}>", name, args.iter().map(type_to_string).collect::<Vec<_>>().join(", "))
-        }
-        Type::Ref(inner) => format!("Ref<{}>", type_to_string(inner)),
-        Type::Array(inner) => format!("Array<{}>", type_to_string(inner)),
-        Type::ArrayN(inner, n) => format!("Array<{}, {}>", type_to_string(inner), n),
-        Type::Task(inner) => format!("Task<{}>", type_to_string(inner)),
-        Type::Logger => "Logger".into(),
-        Type::Omit(base, _) => format!("Omit<{}>", type_to_string(base)),
-        Type::Pick(base, _) => format!("Pick<{}>", type_to_string(base)),
-        Type::Merge(a, b) => format!("Merge<{}, {}>", type_to_string(a), type_to_string(b)),
-        Type::Partial(base) => format!("Partial<{}>", type_to_string(base)),
-        Type::Err => "Err".into(),
+        other => other.to_string(),
     }
 }
 
@@ -972,12 +942,12 @@ struct BuiltinMethod {
 static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "push", detail: "push(array, value) -> Array<T> — append to a growable array" },
     BuiltinMethod { name: "at", detail: "at(array, index) -> T — read an element by index" },
-    BuiltinMethod { name: "alen", detail: "alen(array) -> Int — element count" },
+    BuiltinMethod { name: "alen", detail: "alen(array) -> Int64 — element count" },
     BuiltinMethod { name: "afree", detail: "afree(array) -> Unit — free a growable array" },
     BuiltinMethod { name: "get", detail: "get(ref) -> T — read through a generational reference" },
     BuiltinMethod { name: "set", detail: "set(ref, value) -> Unit — write through a generational reference" },
     BuiltinMethod { name: "release", detail: "release(ref) -> Unit — release a generational reference" },
-    BuiltinMethod { name: "len", detail: "len(string) -> Int — string length" },
+    BuiltinMethod { name: "len", detail: "len(string) -> Int64 — string length" },
     BuiltinMethod { name: "join", detail: "join(task) -> T — await a spawned task's result" },
     BuiltinMethod { name: "trace", detail: "trace(logger, message) -> Unit — log at trace level" },
     BuiltinMethod { name: "debug", detail: "debug(logger, message) -> Unit — log at debug level" },

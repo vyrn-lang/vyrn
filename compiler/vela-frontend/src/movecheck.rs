@@ -319,34 +319,34 @@ mod tests {
 
     #[test]
     fn rejects_use_after_consume() {
-        let src = "type T = { id: Int }; \
-                   fn use_up(t: consume T) -> Int { return t.id; } \
-                   fn main() -> Int { let x = T { id: 1 }; let a = use_up(x); return use_up(x); }";
+        let src = "type T = { id: Int64 }; \
+                   fn use_up(t: consume T) -> Int64 { return t.id; } \
+                   fn main() -> Int64 { let x = T { id: 1 }; let a = use_up(x); return use_up(x); }";
         let e = run(src).unwrap_err();
         assert!(e.contains("already consumed"), "{e}");
     }
 
     #[test]
     fn allows_read_reuse() {
-        let src = "type T = { id: Int }; \
-                   fn peek(t: read T) -> Int { return t.id; } \
-                   fn main() -> Int { let x = T { id: 1 }; return peek(x) + peek(x); }";
+        let src = "type T = { id: Int64 }; \
+                   fn peek(t: read T) -> Int64 { return t.id; } \
+                   fn main() -> Int64 { let x = T { id: 1 }; return peek(x) + peek(x); }";
         assert!(run(src).is_ok());
     }
 
     #[test]
     fn consume_then_no_reuse_is_ok() {
-        let src = "type T = { id: Int }; \
-                   fn take(t: consume T) -> Int { return t.id; } \
-                   fn main() -> Int { let x = T { id: 1 }; return take(x); }";
+        let src = "type T = { id: Int64 }; \
+                   fn take(t: consume T) -> Int64 { return t.id; } \
+                   fn main() -> Int64 { let x = T { id: 1 }; return take(x); }";
         assert!(run(src).is_ok());
     }
 
     #[test]
     fn reassignment_revives() {
-        let src = "type T = { id: Int }; \
-                   fn take(t: consume T) -> Int { return t.id; } \
-                   fn main() -> Int { let mut x = T { id: 1 }; let a = take(x); \
+        let src = "type T = { id: Int64 }; \
+                   fn take(t: consume T) -> Int64 { return t.id; } \
+                   fn main() -> Int64 { let mut x = T { id: 1 }; let a = take(x); \
                                       x = T { id: 2 }; return a + take(x); }";
         assert!(run(src).is_ok());
     }
@@ -355,9 +355,9 @@ mod tests {
     fn rejects_consume_in_while_condition() {
         // The condition re-runs every iteration — consuming there is the same
         // bug as consuming in the body.
-        let src = "type T = { id: Int }; \
+        let src = "type T = { id: Int64 }; \
                    fn take(t: consume T) -> Bool { return t.id > 0; } \
-                   fn main() -> Int { let x = T { id: 1 }; \
+                   fn main() -> Int64 { let x = T { id: 1 }; \
                                       while take(x) { let y = 1; } return 0; }";
         let e = run(src).unwrap_err();
         assert!(e.contains("inside a loop"), "{e}");
@@ -367,9 +367,9 @@ mod tests {
     fn spawn_applies_consume_capabilities() {
         // `spawn take(x)` moves x across the task boundary; a second use is a
         // double move.
-        let src = "type T = { id: Int }; \
-                   fn take(t: consume T) -> Int { return t.id; } \
-                   fn main() -> Int { let x = T { id: 1 }; \
+        let src = "type T = { id: Int64 }; \
+                   fn take(t: consume T) -> Int64 { return t.id; } \
+                   fn main() -> Int64 { let x = T { id: 1 }; \
                                       let t = spawn take(x); \
                                       let z = take(x); return join(t) + z; }";
         let e = run(src).unwrap_err();
@@ -378,9 +378,9 @@ mod tests {
 
     #[test]
     fn rejects_consume_in_loop() {
-        let src = "type T = { id: Int }; \
-                   fn take(t: consume T) -> Int { return t.id; } \
-                   fn main() -> Int { let x = T { id: 1 }; let mut i = 0; \
+        let src = "type T = { id: Int64 }; \
+                   fn take(t: consume T) -> Int64 { return t.id; } \
+                   fn main() -> Int64 { let x = T { id: 1 }; let mut i = 0; \
                                       while i < 3 { let a = take(x); i = i + 1; } return 0; }";
         let e = run(src).unwrap_err();
         assert!(e.contains("inside a loop"), "{e}");

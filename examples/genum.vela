@@ -13,9 +13,9 @@ fn orElse<T>(o: Opt<T>, fallback: T) -> T {
     }
 }
 
-fn main() -> Int {
-    let a = Wrap(41)            // Opt<Int>, inferred from the payload
-    let b: Opt<Int> = Empty     // a nullary variant takes its type from context
+fn main() -> Int64 {
+    let a = Wrap(41)            // Opt<Int64>, inferred from the payload
+    let b: Opt<Int64> = Empty     // a nullary variant takes its type from context
 
     print(orElse(a, 0) + 1)    // 42
     print(orElse(b, 99))       // 99

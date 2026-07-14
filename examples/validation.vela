@@ -7,9 +7,9 @@
 ///   type Issue      = { key: String, path: String, message: String }
 ///   type Validation<T> = | Valid(T) | Invalid(Array<Issue>)
 
-type Person = { name: String, age: Int }
+type Person = { name: String, age: Int64 }
 
-fn validatePerson(name: String, age: Int) -> Validation<Person> {
+fn validatePerson(name: String, age: Int64) -> Validation<Person> {
     let mut issues: Array<Issue> = []
     if name.len() == 0 {
         issues.push(Issue { key: "name.required", path: "name", message: "Name is required" })
@@ -41,7 +41,7 @@ fn translateDe(key: String) -> String {
     return key
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     // Two problems at once: empty name AND age out of range.
     let issues = issuesOf(validatePerson("", 200))
     print(issues.length)                 // 2

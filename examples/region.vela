@@ -5,7 +5,7 @@
 // strategy, versus the leak-by-default outside a region. A region produces a
 // non-heap result (a length), so nothing escapes to dangle.
 
-fn main() -> Int {
+fn main() -> Int64 {
     let hello = "Hello, "
     let world = "world!"
 
@@ -22,7 +22,7 @@ fn main() -> Int {
         }
     }
 
-    // `total` is a plain Int computed inside the region — safe to carry out.
+    // `total` is a plain Int64 computed inside the region — safe to carry out.
     print(total)   // 13
     return total
 }

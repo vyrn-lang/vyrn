@@ -23,6 +23,19 @@ pub enum ConstVal {
     Str(String),
 }
 
+impl std::fmt::Display for ConstVal {
+    /// The value as it would be written in source — used in diagnostics
+    /// (`5 does not satisfy \`Age\``), never the `Debug` form (`Int(5)`).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConstVal::Int(n) => write!(f, "{n}"),
+            ConstVal::Bool(b) => write!(f, "{b}"),
+            ConstVal::Float(x) => write!(f, "{x}"),
+            ConstVal::Str(s) => write!(f, "{s:?}"),
+        }
+    }
+}
+
 impl ConstVal {
     pub fn as_bool(self) -> Option<bool> {
         match self {

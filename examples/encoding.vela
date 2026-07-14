@@ -2,18 +2,18 @@
 /// `chars` decodes to Unicode code points when you need character-level logic.
 ///
 ///   "\u{1F600}"     a Unicode-scalar escape (also `'\u{e9}'` in a char literal)
-///   s.length        byte length          bytes(s)  -> Array<Int>  (UTF-8 bytes)
-///   chars(s)        -> Array<Int>         the Unicode code points (scalar values)
+///   s.length        byte length          bytes(s)  -> Array<Int64>  (UTF-8 bytes)
+///   chars(s)        -> Array<Int64>         the Unicode code points (scalar values)
 ///
-/// `chars(s)` is an ordinary `Array<Int>`, so iteration, indexing, and `.length`
+/// `chars(s)` is an ordinary `Array<Int64>`, so iteration, indexing, and `.length`
 /// all work on it. Everything is identical in the interpreter and native backend.
 
 /// Count the Unicode characters (code points), not the bytes.
-fn charCount(s: String) -> Int {
+fn charCount(s: String) -> Int64 {
     return chars(s).length
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let s = "café"                 // 'é' (U+00E9) is 2 UTF-8 bytes
     print(s)                       // café
     print(s.length)                // 5   — byte length

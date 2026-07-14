@@ -13,7 +13,7 @@ fn register(name: String) -> Username {
     return Username(name)
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let u = Username("alice")     // valid at compile time — no runtime check emitted
     print(u)                      // alice
     print(u.length)               // 5

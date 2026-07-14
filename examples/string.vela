@@ -2,14 +2,14 @@
 // allocated. You can print them, compare them, and store them in records — no
 // heap, no memory-model questions. Concatenation/mutation come later.
 
-type User = { name: String, age: Int }
+type User = { name: String, age: Int64 }
 
-fn greet(u: User) -> Int {
+fn greet(u: User) -> Int64 {
     print(u.name)
     return u.age
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let alice = User { name: "Alice", age: 30 }
     let a = greet(alice)          // prints "Alice", returns 30
 

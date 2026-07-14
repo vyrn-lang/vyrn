@@ -4,14 +4,14 @@ A Rust workspace implementing the **v0.1 subset** of Vela. Every feature below i
 verified to produce identical results under the tree-walking interpreter and the
 clang-compiled native binary:
 
-- **Core**: `Int`, `Bool`, immutable + dynamic `String`, `let`/`mut`, arithmetic,
+- **Core**: `Int64`, `Bool`, immutable + dynamic `String`, `let`/`mut`, arithmetic,
   `if`/`else`, `while`, `for`-in over arrays, functions, `print`, and `str`/`parse`
-  conversions (`parse` is checked — returns `Option<Int>`).
+  conversions (`parse` is checked — returns `Option<Int64>`).
 - **Collections, subject-first**: `[]` builds a growable array, `a.push(x)` grows
   it, `a[i]` indexes (bounds-checked), `a.length` is the count, and `drop a;`
   reclaims it explicitly (usually inferred — `drop` is the handoff escape hatch and
   a *consume*, so use-after-drop is a compile error).
-- **Validated / nominal types** (RFC-0002 §2, RFC-0003): `type Age = Int where
+- **Validated / nominal types** (RFC-0002 §2, RFC-0003): `type Age = Int64 where
   value >= 18`; `type UserId = String`; fallible construction `Age?(n)`.
 - **`Option`/`Result`/`match`/`?`** (RFC-0005). `Option` and `Result` payloads may
   be any type, so `Option<Ref<Node>>` gives **recursive heap structures** — a linked
@@ -74,8 +74,8 @@ cargo run -p vela-cli -- run    ../examples/bool.vela    # prints true / false /
 cargo run -p vela-cli -- check  ../examples/fib.vela     # -> ok
 # type-check, multi-error: reports every type/ownership error across all functions
 #   e.g. a return-type mismatch in f() and an arithmetic error in g() are BOTH shown:
-#   bad.vela:1:0: return type mismatch: expected Int, found Bool
-#   bad.vela:2:0: arithmetic needs Int operands, found Str and Int
+#   bad.vela:1:0: return type mismatch: expected Int64, found Bool
+#   bad.vela:2:0: arithmetic needs matching numeric operands, found Int64 and String
 
 # emit LLVM IR to stdout
 cargo run -p vela-cli -- emit-ir ../examples/loop.vela
@@ -85,9 +85,9 @@ cargo run -p vela-cli -- emit-ir ../examples/loop.vela
 
 ```bash
 # compile-time rejection of a provably-invalid value:
-echo 'type Age = Int where value >= 18; fn main() -> Int { let b = Age(5); return 0; }' > bad.vela
+echo 'type Age = Int64 where value >= 18; fn main() -> Int64 { let b = Age(5); return 0; }' > bad.vela
 cargo run -p vela-cli -- check bad.vela
-#   error: line 1: Int(5) does not satisfy `Age` (predicate `where value >= 18` is false)
+#   error: line 1: 5 does not satisfy `Age` (predicate `where value >= 18` is false)
 
 # runtime validation compiled to native code (see examples/validate_fail.vela):
 cargo run -p vela-cli -- build ../examples/validate_fail.vela -o vfail.exe
@@ -133,7 +133,7 @@ cd vela-codegen-llvm
 cargo test --features llvm22-1      # env + link flags come from .cargo/config.toml
 ```
 
-**Scope:** only the v0.1 subset — `Int`/`Bool`/arithmetic/`if`/`while`/`print`/
+**Scope:** only the v0.1 subset — `Int64`/`Bool`/arithmetic/`if`/`while`/`print`/
 `Option`/`Result`/validated types. Records, enums, generics, strings, `Ref`,
 arrays, and `spawn` return explicit "unsupported" errors. The text-IR backend in
 `vela-codegen` is the full reference native backend; this one is a proof that the

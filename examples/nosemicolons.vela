@@ -9,13 +9,13 @@ protocol Show {
     fn show(self) -> String
 }
 
-impl Show for Int {
+impl Show for Int64 {
     fn show(self) -> String {
         return str(self)
     }
 }
 
-fn sumTo(n: Int) -> Int {
+fn sumTo(n: Int64) -> Int64 {
     let mut total = 0
     let mut i = 0
     while i < n {
@@ -29,8 +29,8 @@ fn describe<T: Show>(x: T) -> String {
     return concat("value = ", x.show())
 }
 
-fn main() -> Int {
-    let mut xs: Array<Int> = []
+fn main() -> Int64 {
+    let mut xs: Array<Int64> = []
     xs.push(3)
     xs.push(4)
 

@@ -1,7 +1,7 @@
 // Optionals and pattern matching (RFC-0005). No null: absence is an explicit
 // Option<T>, and the only way to read it is an exhaustive `match`.
 
-fn safeDiv(a: Int, b: Int) -> Option<Int> {
+fn safeDiv(a: Int64, b: Int64) -> Option<Int64> {
     if b == 0 {
         return None          // type inferred from the return type
     }
@@ -9,14 +9,14 @@ fn safeDiv(a: Int, b: Int) -> Option<Int> {
 }
 
 // `match` is an expression; both arms must yield the same type.
-fn unwrapOr(o: Option<Int>, fallback: Int) -> Int {
+fn unwrapOr(o: Option<Int64>, fallback: Int64) -> Int64 {
     return match o {
         Some(x) => x,
         None    => fallback,
     }
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let a = safeDiv(10, 2)   // Some(5)
     let b = safeDiv(10, 0)   // None
 

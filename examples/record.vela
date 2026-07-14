@@ -5,15 +5,15 @@
 //   velac build examples/record.vela   -> native binary; prints 7, 30 (width
 //                                          subtyping lowers to a copy coercion)
 
-type Named = { name: Int }
-type User  = { name: Int, age: Int }
+type Named = { name: Int64 }
+type User  = { name: Int64, age: Int64 }
 
 // `greet` accepts anything shaped like `Named` (i.e. has a `name` field).
-fn greet(who: Named) -> Int {
+fn greet(who: Named) -> Int64 {
     return who.name
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let u = User { name: 7, age: 30 }
 
     // A `User` has everything `Named` requires, so this is allowed structurally

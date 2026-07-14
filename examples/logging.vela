@@ -12,12 +12,12 @@
 
 logging { level: debug, sink: stderr }
 
-fn factorial(n: Int) -> Int {
+fn factorial(n: Int64) -> Int64 {
     if n < 2 { return 1 }
     return n * factorial(n - 1)
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let log = logger("factorial")
     let n = 5
 

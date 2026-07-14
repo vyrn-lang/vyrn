@@ -58,7 +58,7 @@
       "match": "\\b(fn|let|mut|if|else|while|for|in|drop|protocol|impl|self|return|true|false|type|where|match|region|spawn)\\b"
     },
     "types": {
-      "comment": "Type and enum-variant names. Vela's style is PascalCase for types/variants (Shape, Circle, Option, Int, Some, Ok) and lowerCamelCase for variables/functions, so a PascalCase identifier is reliably a type or variant. This subsumes the built-ins (all PascalCase) and colors user-defined types/variants the same as built-ins, instead of maintaining an explicit list. Scoped as support.type → teal in Dark+.",
+      "comment": "Type and enum-variant names. Vela's style is PascalCase for types/variants (Shape, Circle, Option, Int64, Some, Ok) and lowerCamelCase for variables/functions, so a PascalCase identifier is reliably a type or variant. This subsumes the built-ins (all PascalCase) and colors user-defined types/variants the same as built-ins, instead of maintaining an explicit list. Scoped as support.type → teal in Dark+.",
       "name": "support.type.vela",
       "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
     },

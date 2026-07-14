@@ -1,18 +1,18 @@
 /// Sized integers — `Int8`/`Int16`/`Int32` (signed) and `UInt8`/`UInt16`/
 /// `UInt32`/`UInt64` (unsigned).
 ///
-/// `Int` (= `Int64`) is the default. A sized integer wraps at its width using
+/// `Int64` (= `Int64`) is the default. A sized integer wraps at its width using
 /// two's-complement arithmetic — identically in the interpreter and native code.
 /// Unsigned types use unsigned division/comparison (`udiv`/`ult`) and print as
 /// magnitudes. Operands must share a type (no implicit widening); a plain integer
-/// literal adapts to a sized sibling (`x + 5`). Convert explicitly with `Int(x)`,
+/// literal adapts to a sized sibling (`x + 5`). Convert explicitly with `Int64(x)`,
 /// `Int32(x)`, `UInt8(x)`, `Float64(x)`, etc. (`Float32` is planned.)
 
 fn wrap32(a: Int32, b: Int32) -> Int32 {
     return a + b
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     // Int32 overflow wraps at 32 bits: 2e9 + 2e9 → -294967296.
     let big: Int32 = 2000000000
     print(wrap32(big, big))          // -294967296
@@ -31,9 +31,9 @@ fn main() -> Int {
 
     // Conversions: sized ints / floats interoperate via explicit casts.
     let sum: Int32 = wrap32(big, big)
-    print(Int(sum))                  // -294967296  (Int32 -> Int, sign-extended)
+    print(Int64(sum))                  // -294967296  (Int32 -> Int64, sign-extended)
     print(Float64(n))                // 40.000000   (Int32 -> Float64)
-    print(Int(2.9))                  // 2           (Float -> Int, truncates)
+    print(Int64(2.9))                  // 2           (Float64 -> Int64, truncates)
 
     // Unsigned integers wrap into their magnitude range (no negatives).
     let u: UInt8 = 200
@@ -47,7 +47,7 @@ fn main() -> Int {
 
     // Explicit unsigned conversions.
     print(UInt8(300))                // 44   (300 mod 256)
-    print(UInt32(Int(4000000000)))   // 4000000000  (fits in UInt32, not Int32)
+    print(UInt32(Int64(4000000000)))   // 4000000000  (fits in UInt32, not Int32)
 
     return 0
 }

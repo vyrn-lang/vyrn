@@ -7,21 +7,21 @@
 // reference cells" after the 65536th allocation. It runs to completion, so
 // reclamation holds. (The native binary handles far more — see the docs.)
 
-type Node = { value: Int, next: Option<Ref<Node>> }
+type Node = { value: Int64, next: Option<Ref<Node>> }
 
-fn sum(o: Option<Ref<Node>>) -> Int {
+fn sum(o: Option<Ref<Node>>) -> Int64 {
     return match o { Some(r) => get(r).value + sum(get(r).next), None => 0 }
 }
-fn freeList(o: Option<Ref<Node>>) -> Int {
+fn freeList(o: Option<Ref<Node>>) -> Int64 {
     return match o { Some(r) => freeNode(r), None => 0 }
 }
-fn freeNode(r: Ref<Node>) -> Int {
+fn freeNode(r: Ref<Node>) -> Int64 {
     let tail = get(r).next
     drop r
     return freeList(tail)
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let mut i = 0
     let mut last = 0
     while i < 20000 {

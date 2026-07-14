@@ -1,7 +1,7 @@
-/// Floating point — `Float64` (also spelled `Float`).
+/// Floating point — `Float64` (also spelled `Float64`).
 ///
-/// `Int` is the default 64-bit signed integer (also `Int64`); `Float64` is 64-bit
-/// IEEE-754. Arithmetic requires matching operands — there is no implicit Int↔Float
+/// `Int64` is the default 64-bit signed integer (also `Int64`); `Float64` is 64-bit
+/// IEEE-754. Arithmetic requires matching operands — there is no implicit Int64↔Float64
 /// mixing. Floats print with fixed 6-decimal precision (identical in both backends).
 /// See `float32.vela` for the 32-bit `Float32` type and `sizedints.vela` for `Int8/16/32`
 /// and `UInt8/16/32/64`.
@@ -10,7 +10,7 @@ fn areaOfCircle(r: Float64) -> Float64 {
     return 3.14159 * r * r
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let radius = 2.0
     let area = areaOfCircle(radius)
     print(area)                    // 12.566360
@@ -20,7 +20,7 @@ fn main() -> Int {
     print(10.0 / 4.0)              // 2.500000
     print(-sum)                    // -3.750000
 
-    let big: Int64 = 1000000       // Int64 is an alias for Int
+    let big: Int64 = 1000000       // Int64 is an alias for Int64
     print(big)                     // 1000000
 
     if area > 12.0 {

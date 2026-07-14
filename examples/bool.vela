@@ -5,11 +5,11 @@
 //   true
 // and exits with code 0.
 
-fn isEven(n: Int) -> Bool {
+fn isEven(n: Int64) -> Bool {
     return n % 2 == 0
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     print(isEven(4))            // true
     print(isEven(7))           // false
     print(isEven(4) && !isEven(7)) // true

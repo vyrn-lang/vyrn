@@ -15,7 +15,7 @@ A 2026-07-15 hardening pass fixed ~40 reviewed defects: native
 use-after-free/heap-corruption bugs (cell `set`, region escapes, `list` in
 regions), invalid-IR shapes (dead `ret`, `phi void`, unpooled predicate
 strings), interp/native numeric divergences (wrapping overflow semantics,
-sized-int operand truncation, Float refinements, NaN, division traps),
+sized-int operand truncation, Float64 refinements, NaN, division traps),
 validated-type soundness holes (nominal predicated records, match-arm
 laundering, `modify` width subtyping, generic capability checks, spawn purity
 through protocols, movecheck gaps), and a lexer/parser diagnostics batch.
@@ -25,14 +25,14 @@ through protocols, movecheck gaps), and a lexer/parser diagnostics batch.
 ## Shipped
 
 ### Language core
-- `Int` / `Bool`, `let`/`mut`, arithmetic, `if`/`else`, `while`, `for`-in over
+- `Int64` / `Bool`, `let`/`mut`, arithmetic, `if`/`else`, `while`, `for`-in over
   arrays, functions, `print`.
 - Immutable string literals (`==`, `!=`, record fields), statically allocated.
 
 ### Types
-- **Validated types** — `type Age = Int where value >= 18`. Provable constants
+- **Validated types** — `type Age = Int64 where value >= 18`. Provable constants
   rejected at compile time; others checked at runtime; zero cost when proven.
-- **Nominal types** over `Int`/`Bool`/`String`, and **fallible construction**
+- **Nominal types** over `Int64`/`Bool`/`String`, and **fallible construction**
   `Age?(n) -> Option<Age>`.
 - **Structural records** with width subtyping and mutable fields (`c.x = ...`).
 - **Transformers** — `Omit` / `Pick` / `Merge` / `Partial` / `Readonly`, plus
@@ -44,7 +44,7 @@ through protocols, movecheck gaps), and a lexer/parser diagnostics batch.
 ### Errors & control
 - `Option<T>`, `Result<T, E>`, `match`, and `?` propagation (no null). `Option` and
   `Result` payloads may be any type, so `Option<Ref<Node>>` gives a nil terminator.
-- **Checked conversions** — `str(Int) -> String` and `parse(String) -> Option<Int>`
+- **Checked conversions** — `str(Int64) -> String` and `parse(String) -> Option<Int64>`
   (the fallible case is an explicit `None`, never a silent 0 or a crash).
 
 ### Data structures

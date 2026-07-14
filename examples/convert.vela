@@ -1,7 +1,7 @@
 // Integer/string conversion — Vela's "no unchecked casts" in action (RFC-0001).
 //
-//   * `str(Int) -> String`         — total: an Int always has a decimal form.
-//   * `parse(String) -> Option<Int>` — *checked* narrowing: a string might not
+//   * `str(Int64) -> String`         — total: an Int64 always has a decimal form.
+//   * `parse(String) -> Option<Int64>` — *checked* narrowing: a string might not
 //     be an integer, so the failure is an explicit `None`, not a silent 0 or a
 //     crash. You must `match` it, so the "what if it isn't a number?" case can't
 //     be forgotten.
@@ -9,14 +9,14 @@
 // `parse` is strict: an optional leading `-`, then digits, and nothing else —
 // no whitespace, no `+`.
 
-fn toInt(s: String) -> Int {
+fn toInt(s: String) -> Int64 {
     return match parse(s) {
         Some(n) => n,
         None => 0 - 1,        // sentinel for "not a number"
     }
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     // Build a string from numbers.
     print("sum = \{3 + 4}")                  // sum = 7
 

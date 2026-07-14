@@ -3,22 +3,22 @@
 // `Option`. This is a small capstone: arrays, records, `Option`, recursion, and
 // reclamation all compose into a real abstract data type.
 
-type Entry = { key: Int, value: Int }
+type Entry = { key: Int64, value: Int64 }
 
-fn scan(a: Array<Entry>, k: Int, i: Int) -> Option<Int> {
+fn scan(a: Array<Entry>, k: Int64, i: Int64) -> Option<Int64> {
     if i >= a.length { return None }
     let e = a[i]
     if e.key == k { return Some(e.value) }
     return scan(a, k, i + 1)
 }
-fn mapGet(a: Array<Entry>, k: Int) -> Option<Int> {
+fn mapGet(a: Array<Entry>, k: Int64) -> Option<Int64> {
     return scan(a, k, 0)
 }
-fn put(a: Array<Entry>, k: Int, v: Int) -> Array<Entry> {
+fn put(a: Array<Entry>, k: Int64, v: Int64) -> Array<Entry> {
     return a.push(Entry { key: k, value: v })
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let mut m: Array<Entry> = []
     m = put(m, 1, 100)
     m = put(m, 2, 200)

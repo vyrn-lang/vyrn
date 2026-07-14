@@ -62,7 +62,7 @@ tree-walking interpreter and the clang-compiled native binary (34 examples, 145
 tests). Highlights:
 
 - **Validated types (RFC-0003) — the signature feature — implemented** end to
-  end: `type Age = Int where value >= 18;`. Provably-invalid constants are
+  end: `type Age = Int64 where value >= 18;`. Provably-invalid constants are
   compile errors; valid ones cost nothing at runtime; non-constant values are
   checked at runtime. See [`examples/validate.vela`](examples/validate.vela).
 - **`Option<T>`, `Result<T, E>`, `match`, and `?` (RFC-0005) implemented** end to
@@ -85,7 +85,7 @@ tests). Highlights:
   new record shapes from existing ones; pure type-level functions, erased before
   codegen. See [`examples/utility.vela`](examples/utility.vela).
 - **User-defined enums / sum types with exhaustive `match` (RFC-0002 §4)** —
-  `type Shape = | Circle(Int) | Unit;`; native-lowered to a tagged aggregate +
+  `type Shape = | Circle(Int64) | Unit;`; native-lowered to a tagged aggregate +
   `switch`. See [`examples/enum.vela`](examples/enum.vela).
 - **Immutable string literals** — a first-class `String` type (`print`, `==`,
   record fields), statically allocated so it needs no heap. See
@@ -106,8 +106,8 @@ tests). Highlights:
   variants, fallible construction `Age?(n)`, and constrained generics
   `<T: Ord>`** — see [`examples/bounded.vela`](examples/bounded.vela),
   [`examples/fallible.vela`](examples/fallible.vela).
-- **Checked conversions** — `str(Int) -> String` (total) and
-  `parse(String) -> Option<Int>` (fallible, so the "not a number" case is an
+- **Checked conversions** — `str(Int64) -> String` (total) and
+  `parse(String) -> Option<Int64>` (fallible, so the "not a number" case is an
   explicit `None` you must `match`). See [`examples/convert.vela`](examples/convert.vela).
 - **Arrays** — growable `Array<T>` (a `Vec`: `array()` / `push` / `at` / `alen` /
   `afree`, a doubling heap buffer, bounds-checked, with explicit reclamation) and

@@ -11,9 +11,9 @@ fn pick<T>(cond: Bool, a: T, b: T) -> T {
     return b
 }
 
-fn main() -> Int {
-    print(id(42))             // 42          — id<Int>
+fn main() -> Int64 {
+    print(id(42))             // 42          — id<Int64>
     print(id("polymorphic"))  // polymorphic — id<String>, the SAME source function
-    print(pick(true, 7, 9))   // 7           — pick<Int>
+    print(pick(true, 7, 9))   // 7           — pick<Int64>
     return id(0) + 5          // 5
 }

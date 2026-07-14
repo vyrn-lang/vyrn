@@ -389,21 +389,21 @@ mod tests {
 
     #[test]
     fn frees_non_escaping_temporary() {
-        let src = "fn main() -> Int { let a = \"x\"; let b = \"y\"; \
+        let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let s = concat(a, b); let n = len(s); return n; }";
         assert_eq!(drop_count(src, "main"), 1);
     }
 
     #[test]
     fn does_not_free_aliased_temporary() {
-        let src = "fn main() -> Int { let a = \"x\"; let b = \"y\"; \
+        let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let s = concat(a, b); let t = s; return len(t); }";
         assert_eq!(drop_count(src, "main"), 0);
     }
 
     #[test]
     fn concat_argument_is_a_safe_read() {
-        let src = "fn main() -> Int { let a = \"x\"; let b = \"y\"; \
+        let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let s = concat(a, b); let u = concat(s, b); return len(u); }";
         assert_eq!(drop_count(src, "main"), 2);
     }
@@ -413,7 +413,7 @@ mod tests {
         // `set(c, s)` stores `s` in the cell, which outlives the block — `s`
         // must NOT stay droppable (auto-freeing it would leave the cell
         // dangling; the next `get` would be a use-after-free).
-        let src = "fn main() -> Int { let a = \"x\"; let b = \"y\"; \
+        let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let c = cell(\"seed\"); \
                    if true { let s = concat(a, b); set(c, s); } \
                    print(get(c)); release(c); return 0; }";
@@ -424,21 +424,21 @@ mod tests {
     fn set_ref_argument_is_a_safe_read() {
         // Passing an owned *cell* to `set`/`get` does not escape the cell
         // binding — with no explicit `release`, it stays auto-releasable.
-        let src = "fn main() -> Int { let c = cell(1); set(c, 2); \
+        let src = "fn main() -> Int64 { let c = cell(1); set(c, 2); \
                    let n = get(c); return n; }";
         assert_eq!(drop_count(src, "main"), 1);
     }
 
     #[test]
     fn skips_temporary_inside_region() {
-        let src = "fn main() -> Int { let a = \"x\"; let b = \"y\"; let mut n = 0; \
+        let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; let mut n = 0; \
                    region { let s = concat(a, b); n = len(s); } return n; }";
         assert_eq!(drop_count(src, "main"), 0);
     }
 
     #[test]
     fn skips_mutable_binding() {
-        let src = "fn main() -> Int { let a = \"x\"; let b = \"y\"; \
+        let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let mut s = concat(a, b); return len(s); }";
         assert_eq!(drop_count(src, "main"), 0);
     }
@@ -448,7 +448,7 @@ mod tests {
     #[test]
     fn factory_returning_concat_is_owned() {
         let src = "fn make(a: String, b: String) -> String { return concat(a, b); } \
-                   fn main() -> Int { return 0; }";
+                   fn main() -> Int64 { return 0; }";
         let (o, _) = analyze_src(src);
         assert!(o.owned_fns.contains_key("make"));
     }
@@ -456,7 +456,7 @@ mod tests {
     #[test]
     fn factory_returning_local_owner_is_owned_and_moves_it() {
         let src = "fn make(a: String, b: String) -> String { let s = concat(a, b); return s; } \
-                   fn main() -> Int { return 0; }";
+                   fn main() -> Int64 { return 0; }";
         let (o, _) = analyze_src(src);
         assert!(o.owned_fns.contains_key("make"));
         // `s` is moved out by the return, so it is not dropped inside `make`.
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn identity_returning_param_is_not_owned() {
-        let src = "fn id(s: String) -> String { return s; } fn main() -> Int { return 0; }";
+        let src = "fn id(s: String) -> String { return s; } fn main() -> Int64 { return 0; }";
         let (o, _) = analyze_src(src);
         assert!(!o.owned_fns.contains_key("id"));
     }
@@ -474,7 +474,7 @@ mod tests {
     fn mixed_return_paths_are_not_owned() {
         let src = "fn pick(c: Bool, a: String, b: String) -> String { \
                        if c { return concat(a, b); } return a; } \
-                   fn main() -> Int { return 0; }";
+                   fn main() -> Int64 { return 0; }";
         let (o, _) = analyze_src(src);
         assert!(!o.owned_fns.contains_key("pick"));
     }
@@ -483,7 +483,7 @@ mod tests {
     fn caller_frees_owned_call_result() {
         // `y` receives a fresh owned value from `make` and doesn't escape.
         let src = "fn make(a: String, b: String) -> String { return concat(a, b); } \
-                   fn main() -> Int { let a = \"x\"; let b = \"y\"; \
+                   fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                        let y = make(a, b); return len(y); }";
         let (o, _) = analyze_src(src);
         assert_eq!(o.droppable.get("main").map(|s| s.len()).unwrap_or(0), 1);
@@ -493,7 +493,7 @@ mod tests {
     fn caller_does_not_free_borrowed_call_result() {
         // `id` is not owned, so its result must not be freed by the caller.
         let src = "fn id(s: String) -> String { return s; } \
-                   fn main() -> Int { let a = \"x\"; let b = \"y\"; \
+                   fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                        let s = concat(a, b); let y = id(s); return len(y); }";
         let (o, _) = analyze_src(src);
         // `s` escapes into the `id(..)` call, `y` is not an owned result:
@@ -509,14 +509,14 @@ mod tests {
 
     #[test]
     fn non_escaping_cell_is_auto_released() {
-        let src = "fn main() -> Int { let c = cell(1); set(c, get(c) + 1); return get(c); }";
+        let src = "fn main() -> Int64 { let c = cell(1); set(c, get(c) + 1); return get(c); }";
         assert_eq!(drop_kinds(src, "main"), vec![DropKind::ReleaseRef]);
     }
 
     #[test]
     fn aliased_cell_is_not_auto_released() {
         // `c` is aliased into `d`, so it must not be auto-released.
-        let src = "fn main() -> Int { let c = cell(1); let d = c; return get(d); }";
+        let src = "fn main() -> Int64 { let c = cell(1); let d = c; return get(d); }";
         assert_eq!(drop_count(src, "main"), 0);
     }
 
@@ -524,7 +524,7 @@ mod tests {
     fn explicitly_released_cell_is_not_auto_released() {
         // Passing `c` to `release` hands the cell off — no auto-release on top,
         // which would double-release and trap.
-        let src = "fn main() -> Int { let c = cell(1); let v = get(c); release(c); return v; }";
+        let src = "fn main() -> Int64 { let c = cell(1); let v = get(c); release(c); return v; }";
         assert_eq!(drop_count(src, "main"), 0);
     }
 
@@ -532,7 +532,7 @@ mod tests {
     fn cell_inside_region_is_still_released() {
         // The cell slab is separate from the arena, so a region does not reclaim
         // it — ownership still auto-releases the reference.
-        let src = "fn main() -> Int { let mut n = 0; \
+        let src = "fn main() -> Int64 { let mut n = 0; \
                    region { let c = cell(7); n = get(c); } return n; }";
         assert_eq!(drop_kinds(src, "main"), vec![DropKind::ReleaseRef]);
     }
@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn mut_array_with_self_update_is_auto_freed() {
-        let src = "fn main() -> Int { let mut a: Array<Int> = array(); \
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
                    let mut i = 0; while i < 3 { a = push(a, i); i = i + 1; } \
                    return at(a, 0); }";
         assert_eq!(drop_kinds(src, "main"), vec![DropKind::AfreeArr]);
@@ -549,22 +549,22 @@ mod tests {
 
     #[test]
     fn explicitly_afreed_array_is_not_auto_freed() {
-        let src = "fn main() -> Int { let mut a: Array<Int> = array(); \
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
                    a = push(a, 1); let v = at(a, 0); afree(a); return v; }";
         assert_eq!(drop_count(src, "main"), 0);
     }
 
     #[test]
     fn returned_array_is_not_auto_freed() {
-        let src = "fn build() -> Array<Int> { let mut a: Array<Int> = array(); \
-                   a = push(a, 1); return a; } fn main() -> Int { return 0; }";
+        let src = "fn build() -> Array<Int64> { let mut a: Array<Int64> = array(); \
+                   a = push(a, 1); return a; } fn main() -> Int64 { return 0; }";
         // `a` is moved out by the return, so it is not freed inside `build`.
         assert_eq!(drop_count(src, "build"), 0);
     }
 
     #[test]
     fn factory_returning_cell_is_owned() {
-        let src = "fn make(v: Int) -> Ref<Int> { return cell(v); } fn main() -> Int { return 0; }";
+        let src = "fn make(v: Int64) -> Ref<Int64> { return cell(v); } fn main() -> Int64 { return 0; }";
         let (o, _) = analyze_src(src);
         assert_eq!(o.owned_fns.get("make"), Some(&DropKind::ReleaseRef));
     }

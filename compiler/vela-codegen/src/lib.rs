@@ -2059,7 +2059,7 @@ impl<'a> Gen<'a> {
             .ok_or_else(|| format!("unknown type `{name}`"))?;
         if self.resolve(&decl.base) != Type::Int {
             return Err(format!(
-                "native fallible construction supports Int-based types only (`{name}`); use `velac run`"
+                "native fallible construction supports Int64-based types only (`{name}`); use `velac run`"
             ));
         }
         let (v, _) = self.gen_expr(arg)?;
@@ -2525,7 +2525,7 @@ impl<'a> Gen<'a> {
                 BinOp::Eq => format!("{t} = fcmp oeq {f} {l}, {r}"),
                 BinOp::NotEq => format!("{t} = fcmp one {f} {l}, {r}"),
                 BinOp::Rem | BinOp::And | BinOp::Or | BinOp::Match => {
-                    return Err("`%`/`&&`/`||`/`=~` are not valid on Float".into())
+                    return Err("`%`/`&&`/`||`/`=~` are not valid on Float64".into())
                 }
             }
         } else {
@@ -3771,7 +3771,7 @@ fn collect_strings_expr(e: &Expr, out: &mut Vec<String>, types: &HashMap<String,
             // `schemaOf` lowers to a `Schema` literal whose `base` is one of these
             // synthetic strings; make sure they land in the pool.
             if name == "schemaOf" {
-                for s in ["Int", "Bool", "String"] {
+                for s in ["Int64", "Bool", "String"] {
                     if !out.contains(&s.to_string()) {
                         out.push(s.to_string());
                     }
@@ -3852,9 +3852,9 @@ fn mangle_name(name: &str, type_args: &[Type]) -> String {
 
 fn mangle_ty(t: &Type) -> String {
     match t {
-        Type::Int => "Int".into(),
+        Type::Int => "Int64".into(),
         Type::IntN { bits, signed } => format!("{}Int{bits}", if *signed { "" } else { "U" }),
-        Type::Float => "Float".into(),
+        Type::Float => "Float64".into(),
         Type::Float32 => "Float32".into(),
         Type::Bool => "Bool".into(),
         Type::Str => "Str".into(),
@@ -3904,7 +3904,7 @@ mod tests {
 
     #[test]
     fn emits_module_with_main_wrapper() {
-        let program = check("fn main() -> Int { let x = 2 + 3; print(x); return x; }").unwrap();
+        let program = check("fn main() -> Int64 { let x = 2 + 3; print(x); return x; }").unwrap();
         let ir = emit(&program).unwrap();
         assert!(ir.contains("define i64 @vela_main("));
         assert!(ir.contains("define i32 @main()"));
@@ -3917,7 +3917,7 @@ mod tests {
         // `/` guards divisor-zero and MIN/-1 with the interpreter's exact
         // `error: ...` message on stderr (a bare sdiv would SEH-crash silently).
         let program =
-            check("fn main() -> Int { let mut d = 3; return 10 / d; }").unwrap();
+            check("fn main() -> Int64 { let mut d = 3; return 10 / d; }").unwrap();
         let ir = emit(&program).unwrap();
         assert!(ir.contains("@.trap.div0"), "zero guard: {ir}");
         assert!(ir.contains("@.trap.divovf"), "MIN/-1 guard: {ir}");
@@ -3929,7 +3929,7 @@ mod tests {
     fn float_print_selects_nan_literal() {
         // NaN prints as `NaN` (interp's Rust formatting), not UCRT's -nan(ind):
         // the format string is selected on `fcmp uno`.
-        let program = check("fn main() -> Int { print(0.0 / 0.0); return 0; }").unwrap();
+        let program = check("fn main() -> Int64 { print(0.0 / 0.0); return 0; }").unwrap();
         let ir = emit(&program).unwrap();
         assert!(ir.contains("fcmp uno double"), "NaN test: {ir}");
         assert!(ir.contains("@.fmt.nan"), "NaN format: {ir}");
@@ -3941,7 +3941,7 @@ mod tests {
         // block; `ret ptr 0` there is invalid IR — it must be `unreachable`.
         let program = check(
             "fn pick(b: Bool) -> String { if b { return \"yes\" } else { return \"no\" } } \
-             fn main() -> Int { print(pick(true)); return 0; }",
+             fn main() -> Int64 { print(pick(true)); return 0; }",
         )
         .unwrap();
         let ir = emit(&program).unwrap();
@@ -3954,7 +3954,7 @@ mod tests {
         // A statement-position match whose arms are side-effecting prints has
         // Unit type; `phi void` is invalid IR, so no merge value is built.
         let program = check(
-            "fn main() -> Int { let o = Some(4); \
+            "fn main() -> Int64 { let o = Some(4); \
              match o { Some(x) => print(x), None => print(0) } \
              return 0; }",
         )
@@ -3970,7 +3970,7 @@ mod tests {
         // construction sites).
         let program = check(
             "type Name = String where value == \"root\" \
-             fn main() -> Int { let n = Name(\"root\"); print(n); return 0; }",
+             fn main() -> Int64 { let n = Name(\"root\"); print(n); return 0; }",
         )
         .unwrap();
         let ir = emit(&program).unwrap();
@@ -3980,7 +3980,7 @@ mod tests {
     #[test]
     fn short_circuit_uses_phi() {
         let program =
-            check("fn main() -> Int { if true && false { return 1; } return 0; }").unwrap();
+            check("fn main() -> Int64 { if true && false { return 1; } return 0; }").unwrap();
         let ir = emit(&program).unwrap();
         assert!(ir.contains("phi i1"), "{ir}");
     }
@@ -3989,7 +3989,7 @@ mod tests {
     fn logging_lowers_to_fprintf_stderr() {
         // `log.info(..)` emits an fprintf to stderr (`__acrt_iob_func(2)`) with
         // the level-name global.
-        let src = "fn main() -> Int { let log = logger(\"m\"); log.info(\"hi\"); return 0; }";
+        let src = "fn main() -> Int64 { let log = logger(\"m\"); log.info(\"hi\"); return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("@__acrt_iob_func(i32 2)"), "stderr handle: {ir}");
         assert!(ir.contains("@fprintf"), "fprintf: {ir}");
@@ -3999,7 +3999,7 @@ mod tests {
     #[test]
     fn stdout_sink_selects_stream_1() {
         let src = "logging { sink: stdout } \
-                   fn main() -> Int { let l = logger(\"m\"); l.error(\"x\"); return 0; }";
+                   fn main() -> Int64 { let l = logger(\"m\"); l.error(\"x\"); return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("@__acrt_iob_func(i32 1)"), "stdout is stream 1: {ir}");
     }
@@ -4007,7 +4007,7 @@ mod tests {
     #[test]
     fn file_sink_opens_and_closes_in_main() {
         let src = "logging { sink: file(\"a.log\") } \
-                   fn main() -> Int { let l = logger(\"m\"); l.error(\"x\"); return 0; }";
+                   fn main() -> Int64 { let l = logger(\"m\"); l.error(\"x\"); return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("@fopen(ptr @.logpath"), "opens the file: {ir}");
         assert!(ir.contains("@fclose"), "closes the file: {ir}");
@@ -4019,7 +4019,7 @@ mod tests {
         // With `level: warn`, a `debug` call must not emit an fprintf, but a
         // `warn` call must. (Args are still evaluated — see the interpreter.)
         let src = "logging { level: warn } \
-                   fn main() -> Int { let log = logger(\"m\"); \
+                   fn main() -> Int64 { let log = logger(\"m\"); \
                    log.debug(\"lo\"); log.warn(\"hi\"); return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // The level-name globals are always declared; check the fprintf *use*
@@ -4035,8 +4035,8 @@ mod tests {
     fn tagged_template_lowers_to_tag_call_with_arrays() {
         // `sql"a\{x}b"` -> `sql(list([..]), list([value(x)]))`; the value is boxed
         // into the `Value` enum aggregate and the arrays are built on the heap.
-        let src = "fn sql(parts: Array<String>, values: Array<Value>) -> Int { return 0; } \
-                   fn main() -> Int { let x = 5; return sql\"a\\{x}b\"; }";
+        let src = "fn sql(parts: Array<String>, values: Array<Value>) -> Int64 { return 0; } \
+                   fn main() -> Int64 { let x = 5; return sql\"a\\{x}b\"; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("call i64 @vela_sql("), "calls the tag: {ir}");
         // Two heap buffers (parts + values) are allocated for the growable arrays.
@@ -4047,10 +4047,10 @@ mod tests {
     fn string_interpolation_lowers_to_str_and_concat() {
         // `"n=\{n}"` desugars to `concat("n=", str(n))`; `str(Bool)` selects the
         // no-newline global and copies it into a fresh buffer.
-        let src = "fn main() -> Int { let n = 7; let ok = true; \
+        let src = "fn main() -> Int64 { let n = 7; let ok = true; \
                    let s = \"n=\\{n} ok=\\{ok}\"; return len(s); }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("@snprintf"), "str(Int) -> snprintf: {ir}");
+        assert!(ir.contains("@snprintf"), "str(Int64) -> snprintf: {ir}");
         assert!(ir.contains("select i1"), "str(Bool) -> select true/false: {ir}");
         assert!(ir.contains("@strcpy"), "bool/str render copies: {ir}");
         assert!(ir.contains("@.str.true"), "no-newline bool global: {ir}");
@@ -4058,9 +4058,9 @@ mod tests {
 
     #[test]
     fn numeric_conversions_lower_to_casts() {
-        let src = "fn main() -> Int { let f = 3.5; let n = Int(f); \
+        let src = "fn main() -> Int64 { let f = 3.5; let n = Int64(f); \
                    let g = Float64(n); let s = Int32(5000000000); \
-                   print(g); return Int(s); }";
+                   print(g); return Int64(s); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("fptosi double"), "float→int: {ir}");
         assert!(ir.contains("sitofp i64"), "int→float: {ir}");
@@ -4070,7 +4070,7 @@ mod tests {
 
     #[test]
     fn sized_ints_lower_to_width_ops() {
-        let src = "fn main() -> Int { let a: Int32 = 5; let b: Int32 = 3; \
+        let src = "fn main() -> Int64 { let a: Int32 = 5; let b: Int32 = 3; \
                    let c = a + b; print(c); if c > 0 { return 1; } return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("add i32"), "i32 add: {ir}");
@@ -4083,7 +4083,7 @@ mod tests {
 
     #[test]
     fn unsigned_ints_lower_to_unsigned_ops() {
-        let src = "fn main() -> Int { let a: UInt32 = 10; let b: UInt32 = 3; \
+        let src = "fn main() -> Int64 { let a: UInt32 = 10; let b: UInt32 = 3; \
                    let q = a / b; print(q); if a > b { return 1; } return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("udiv i32"), "unsigned divide: {ir}");
@@ -4095,7 +4095,7 @@ mod tests {
     #[test]
     fn uint64_prints_without_extension() {
         // A 64-bit value is already i64; no zext/sext is emitted before print.
-        let src = "fn main() -> Int { let n: UInt64 = 42; print(n); return 0; }";
+        let src = "fn main() -> Int64 { let n: UInt64 = 42; print(n); return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("@.fmt.u"), "uses %llu: {ir}");
         assert!(!ir.contains("zext i64 %"), "no i64→i64 extension: {ir}");
@@ -4103,7 +4103,7 @@ mod tests {
 
     #[test]
     fn floats_lower_to_double_ops() {
-        let src = "fn main() -> Int { let a = 1.5; let b = 2.0; \
+        let src = "fn main() -> Int64 { let a = 1.5; let b = 2.0; \
                    if a * b > 2.0 { return 1; } return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("fmul double"), "float multiply: {ir}");
@@ -4114,7 +4114,7 @@ mod tests {
 
     #[test]
     fn float32_lowers_to_single_precision_ops() {
-        let src = "fn main() -> Int { let a: Float32 = 1.5; let b: Float32 = 2.5; \
+        let src = "fn main() -> Int64 { let a: Float32 = 1.5; let b: Float32 = 2.5; \
                    let c = a + b; print(c); if c > 0.0 { return 1; } return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("fadd float"), "f32 add: {ir}");
@@ -4126,10 +4126,10 @@ mod tests {
 
     #[test]
     fn float32_conversions_use_fptrunc_and_fpext() {
-        let widen = "fn main() -> Int { let x: Float32 = 1.5; let d = Float64(x); \
+        let widen = "fn main() -> Int64 { let x: Float32 = 1.5; let d = Float64(x); \
                      if d > 0.0 { return 1; } return 0; }";
         assert!(emit(&check(widen).unwrap()).unwrap().contains("fpext float"), "f32→f64");
-        let narrow = "fn main() -> Int { let d = 1.5; let x = Float32(d); \
+        let narrow = "fn main() -> Int64 { let d = 1.5; let x = Float32(d); \
                       if x > 0.0 { return 1; } return 0; }";
         assert!(emit(&check(narrow).unwrap()).unwrap().contains("fptrunc double"), "f64→f32");
     }
@@ -4138,7 +4138,7 @@ mod tests {
     fn exit_code_is_masked_to_low_byte() {
         // `@main` masks vela_main's return so it matches the interpreter's
         // `code & 0xff` on values > 255 (POSIX exit convention).
-        let ir = emit(&check("fn main() -> Int { return 285; }").unwrap()).unwrap();
+        let ir = emit(&check("fn main() -> Int64 { return 285; }").unwrap()).unwrap();
         assert!(ir.contains("and i64 %r, 255"), "{ir}");
     }
 
@@ -4146,7 +4146,7 @@ mod tests {
     fn drop_of_array_emits_afree() {
         // `drop a` on a growable array frees its backing buffer (an extra free
         // beyond the region-runtime baseline).
-        let src = "fn main() -> Int { let mut a: Array<Int> = []; a.push(1); \
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; a.push(1); \
                    drop a; return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(free_calls(&ir) >= 1, "expected an afree from `drop`: {ir}");
@@ -4155,7 +4155,7 @@ mod tests {
     #[test]
     fn length_and_index_surface_lower_to_alen_and_at() {
         // `a.length` -> extractvalue field 1; `a[i]` -> bounds-checked `at`.
-        let src = "fn main() -> Int { let mut a: Array<Int> = []; a.push(5); \
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; a.push(5); \
                    return a.length + a[0]; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("extractvalue { ptr, i64, i64 }"), "length -> extractvalue: {ir}");
@@ -4166,7 +4166,7 @@ mod tests {
     fn for_loop_lowers_to_indexed_walk() {
         // A `for` over a growable array reads the length once and walks it with a
         // bounds-comparison branch, accumulating into the total.
-        let src = "fn main() -> Int { let mut a: Array<Int> = array(); \
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
                    a = push(a, 3); a = push(a, 4); \
                    let mut s = 0; for x in a { s = s + x; } return s; }";
         let ir = emit(&check(src).unwrap()).unwrap();
@@ -4185,7 +4185,7 @@ mod tests {
 
     #[test]
     fn non_escaping_temporary_is_freed() {
-        let src = "fn main() -> Int { let a = \"x\"; let b = \"y\"; \
+        let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let s = concat(a, b); let n = len(s); return n; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(free_calls(&ir) > 1, "expected an auto-free beyond the runtime: {ir}");
@@ -4194,7 +4194,7 @@ mod tests {
     #[test]
     fn escaping_temporary_is_not_freed() {
         // `s` is aliased into `t`, so it must not be auto-freed (would dangle).
-        let src = "fn main() -> Int { let a = \"x\"; let b = \"y\"; \
+        let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let s = concat(a, b); let t = s; return len(t); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert_eq!(free_calls(&ir), 1, "only the runtime free should be present: {ir}");
@@ -4202,7 +4202,7 @@ mod tests {
 
     #[test]
     fn generational_reference_lowers_to_slab_calls() {
-        let src = "fn main() -> Int { let c = cell(1); set(c, get(c) + 1); \
+        let src = "fn main() -> Int64 { let c = cell(1); set(c, get(c) + 1); \
                    let v = get(c); release(c); return v; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("call i64 @__vela_cell_alloc"), "{ir}");
@@ -4216,7 +4216,7 @@ mod tests {
     fn non_escaping_cell_is_auto_released() {
         // No explicit `release` in the source, yet the non-escaping cell must be
         // released at block exit (inferred by the ownership analysis).
-        let src = "fn main() -> Int { let c = cell(1); set(c, get(c) + 1); return get(c); }";
+        let src = "fn main() -> Int64 { let c = cell(1); set(c, get(c) + 1); return get(c); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("call void @__vela_cell_release"), "expected auto-release: {ir}");
     }
@@ -4226,7 +4226,7 @@ mod tests {
         // `make` returns a fresh owned String; `main` must free the result it
         // receives, but `make` must NOT free what it moves out.
         let src = "fn make(a: String, b: String) -> String { return concat(a, b); } \
-                   fn main() -> Int { let a = \"x\"; let b = \"y\"; \
+                   fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                        let g = make(a, b); return len(g); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // One runtime free + exactly one auto-free (in `main`, for `g`).
@@ -4235,7 +4235,7 @@ mod tests {
 
     #[test]
     fn region_brackets_body_with_enter_and_exit() {
-        let src = "fn main() -> Int { \
+        let src = "fn main() -> Int64 { \
                        let a = \"x\"; let b = \"y\"; let mut n = 0; \
                        region { let s = concat(a, b); n = len(s); } \
                        return n; }";
@@ -4253,14 +4253,14 @@ mod tests {
         ir.matches("call void @exit").count()
     }
     fn exit_baseline() -> usize {
-        exit_calls(&emit(&check("fn main() -> Int { return 0; }").unwrap()).unwrap())
+        exit_calls(&emit(&check("fn main() -> Int64 { return 0; }").unwrap()).unwrap())
     }
 
     #[test]
     fn const_construction_has_no_runtime_check() {
         // A compile-time-constant construction erases to the value (RFC-0003).
-        let src = "type Age = Int where value >= 18; \
-                   fn main() -> Int { let a = Age(25); return 0; }";
+        let src = "type Age = Int64 where value >= 18; \
+                   fn main() -> Int64 { let a = Age(25); return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert_eq!(
             exit_calls(&ir),
@@ -4272,9 +4272,9 @@ mod tests {
     #[test]
     fn runtime_construction_emits_check() {
         // A non-constant construction (through a parameter) is checked at runtime.
-        let src = "type Age = Int where value >= 18; \
-                   fn mk(n: Int) -> Age { return Age(n); } \
-                   fn main() -> Int { return 0; }";
+        let src = "type Age = Int64 where value >= 18; \
+                   fn mk(n: Int64) -> Age { return Age(n); } \
+                   fn main() -> Int64 { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(exit_calls(&ir) > exit_baseline(), "expected a runtime check: {ir}");
         assert!(ir.contains("@.trap.verr.Age"), "{ir}");
@@ -4282,14 +4282,14 @@ mod tests {
 
     #[test]
     fn string_length_lowers_to_strlen() {
-        let src = "fn main() -> Int { let s = \"hi\"; return s.length; }";
+        let src = "fn main() -> Int64 { let s = \"hi\"; return s.length; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("call i64 @strlen"), "str .length → strlen: {ir}");
     }
 
     #[test]
     fn string_index_lowers_to_byte_load() {
-        let src = "fn main() -> Int { let s = \"hi\"; return s[0]; }";
+        let src = "fn main() -> Int64 { let s = \"hi\"; return s[0]; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("load i8"), "loads a byte: {ir}");
         assert!(ir.contains("zext i8") && ir.contains("to i64"), "zero-extends: {ir}");
@@ -4298,7 +4298,7 @@ mod tests {
 
     #[test]
     fn encodings_lower_to_runtime() {
-        let ir = emit(&check("fn main() -> Int { \
+        let ir = emit(&check("fn main() -> Int64 { \
             let a = hexEncode(\"x\"); let b = base64Encode(\"x\"); let c = urlEncode(\"x\"); \
             let d = hexDecode(\"41\"); return 0; }").unwrap()).unwrap();
         assert!(ir.contains("call ptr @__vela_hex_encode"), "hexEncode: {ir}");
@@ -4312,7 +4312,7 @@ mod tests {
 
     #[test]
     fn chars_and_bytes_lower_to_runtime() {
-        let ir = emit(&check("fn main() -> Int { return chars(\"hi\").length + bytes(\"hi\").length; }").unwrap()).unwrap();
+        let ir = emit(&check("fn main() -> Int64 { return chars(\"hi\").length + bytes(\"hi\").length; }").unwrap()).unwrap();
         assert!(ir.contains("call { ptr, i64, i64 } @__vela_str_chars"), "chars → decoder: {ir}");
         assert!(ir.contains("call { ptr, i64, i64 } @__vela_str_bytes"), "bytes → helper: {ir}");
         // The UTF-8 decoder is defined in the module.
@@ -4322,10 +4322,10 @@ mod tests {
     #[test]
     fn string_methods_lower_to_libc() {
         let c = emit(&check("fn f(s: String) -> Bool { return contains(s, \"x\"); } \
-                             fn main() -> Int { return 0; }").unwrap()).unwrap();
+                             fn main() -> Int64 { return 0; }").unwrap()).unwrap();
         assert!(c.contains("call ptr @strstr"), "contains → strstr: {c}");
         let s = emit(&check("fn f(s: String) -> Bool { return startsWith(s, \"x\"); } \
-                             fn main() -> Int { return 0; }").unwrap()).unwrap();
+                             fn main() -> Int64 { return 0; }").unwrap()).unwrap();
         assert!(s.contains("call i32 @strncmp"), "startsWith → strncmp: {s}");
     }
 
@@ -4335,7 +4335,7 @@ mod tests {
         // traps through the same validation-error path.
         let src = "type Name = String where value.length >= 3; \
                    fn mk(s: String) -> Name { return Name(s); } \
-                   fn main() -> Int { return 0; }";
+                   fn main() -> Int64 { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("call i64 @strlen"), "refinement uses strlen: {ir}");
         assert!(ir.contains("@.trap.verr.Name"), "refinement traps: {ir}");
@@ -4343,9 +4343,9 @@ mod tests {
 
     #[test]
     fn cross_field_record_emits_runtime_check() {
-        let src = "type R = { a: Int, b: Int } where a < b; \
-                   fn mk(x: Int, y: Int) -> R { return R { a: x, b: y }; } \
-                   fn main() -> Int { return 0; }";
+        let src = "type R = { a: Int64, b: Int64 } where a < b; \
+                   fn mk(x: Int64, y: Int64) -> R { return R { a: x, b: y }; } \
+                   fn main() -> Int64 { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("@.trap.verr.R"), "cross-field traps: {ir}");
     }
@@ -4353,7 +4353,7 @@ mod tests {
     #[test]
     fn regex_match_lowers_to_dfa_runner() {
         let src = "fn f(s: String) -> Bool { return s =~ \"[a-z]+\"; } \
-                   fn main() -> Int { return 0; }";
+                   fn main() -> Int64 { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("call i1 @__vela_regex_run"), "calls the runner: {ir}");
         assert!(ir.contains("@.rx.0.table"), "emits a transition table: {ir}");
@@ -4362,8 +4362,8 @@ mod tests {
 
     #[test]
     fn option_match_lowers_to_aggregate_and_phi() {
-        let src = "fn f() -> Option<Int> { return Some(7); } \
-                   fn main() -> Int { return match f() { Some(x) => x, None => 0 }; }";
+        let src = "fn f() -> Option<Int64> { return Some(7); } \
+                   fn main() -> Int64 { return match f() { Some(x) => x, None => 0 }; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("insertvalue { i1, i64, i64 }"), "Some should build an aggregate: {ir}");
         assert!(ir.contains("extractvalue { i1, i64, i64 }"), "match should extract: {ir}");
@@ -4373,26 +4373,26 @@ mod tests {
     #[test]
     fn generic_record_monomorphizes_by_layout() {
         let src = "type Box<T> = { value: T }; \
-                   fn main() -> Int { let a = Box { value: 5 }; let b = Box { value: true }; \
+                   fn main() -> Int64 { let a = Box { value: 5 }; let b = Box { value: true }; \
                                       if b.value { return a.value; } return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("insertvalue { i64 }"), "Box<Int> is a 1x i64 struct:\n{ir}");
+        assert!(ir.contains("insertvalue { i64 }"), "Box<Int64> is a 1x i64 struct:\n{ir}");
         assert!(ir.contains("insertvalue { i1 }"), "Box<Bool> is a 1x i1 struct:\n{ir}");
     }
 
     #[test]
     fn generic_monomorphizes_per_type() {
         let src = "fn id<T>(x: T) -> T { return x; } \
-                   fn main() -> Int { print(id(\"s\")); return id(1); }";
+                   fn main() -> Int64 { print(id(\"s\")); return id(1); }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("define i64 @vela_id__Int"), "Int instance:\n{ir}");
+        assert!(ir.contains("define i64 @vela_id__Int"), "Int64 instance:\n{ir}");
         assert!(ir.contains("define ptr @vela_id__Str"), "Str instance:\n{ir}");
         assert!(!ir.contains("@vela_id("), "no un-instantiated generic body:\n{ir}");
     }
 
     #[test]
     fn string_lowers_to_global_and_strcmp() {
-        let src = "fn main() -> Int { if \"a\" == \"a\" { return 1; } return 0; }";
+        let src = "fn main() -> Int64 { if \"a\" == \"a\" { return 1; } return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("@.str.0 = private"), "string global:\n{ir}");
         assert!(ir.contains("call i32 @strcmp"), "== uses strcmp:\n{ir}");
@@ -4400,9 +4400,9 @@ mod tests {
 
     #[test]
     fn enum_match_lowers_to_switch() {
-        let src = "type E = | A(Int) | B(Int) | C; \
-                   fn f(e: E) -> Int { return match e { A(x) => x, B(y) => y, C => 0 }; } \
-                   fn main() -> Int { return f(A(5)); }";
+        let src = "type E = | A(Int64) | B(Int64) | C; \
+                   fn f(e: E) -> Int64 { return match e { A(x) => x, B(y) => y, C => 0 }; } \
+                   fn main() -> Int64 { return f(A(5)); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("switch i64"), "enum match uses a switch:\n{ir}");
         assert!(ir.contains("@vela_f({ i64, i64 }"), "enum lowers to a 2-word aggregate:\n{ir}");
@@ -4411,9 +4411,9 @@ mod tests {
 
     #[test]
     fn omit_transformer_lowers_to_narrower_struct() {
-        let src = "type User = { id: Int, name: Int, pw: Int }; type Public = Omit<User, pw>; \
-                   fn f(p: Public) -> Int { return p.name; } \
-                   fn main() -> Int { let u = User { id: 1, name: 2, pw: 3 }; return f(u); }";
+        let src = "type User = { id: Int64, name: Int64, pw: Int64 }; type Public = Omit<User, pw>; \
+                   fn f(p: Public) -> Int64 { return p.name; } \
+                   fn main() -> Int64 { let u = User { id: 1, name: 2, pw: 3 }; return f(u); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // Public resolves to a 2-field struct; User is 3 fields; coercion happens.
         assert!(ir.contains("@vela_f({ i64, i64 }"), "Public layout: {ir}");
@@ -4422,9 +4422,9 @@ mod tests {
 
     #[test]
     fn record_width_subtyping_coerces() {
-        let src = "type Named = { name: Int }; type User = { name: Int, age: Int }; \
-                   fn greet(w: Named) -> Int { return w.name; } \
-                   fn main() -> Int { let u = User { name: 7, age: 30 }; return greet(u); }";
+        let src = "type Named = { name: Int64 }; type User = { name: Int64, age: Int64 }; \
+                   fn greet(w: Named) -> Int64 { return w.name; } \
+                   fn main() -> Int64 { let u = User { name: 7, age: 30 }; return greet(u); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // greet takes a 1-field record; User is a 2-field record.
         assert!(ir.contains("@vela_greet({ i64 }"), "greet param layout: {ir}");
@@ -4437,9 +4437,9 @@ mod tests {
 
     #[test]
     fn question_mark_lowers_to_early_return() {
-        let src = "fn f() -> Result<Int, Int> { return Ok(1); } \
-                   fn g() -> Result<Int, Int> { let x = f()?; return Ok(x); } \
-                   fn main() -> Int { return 0; }";
+        let src = "fn f() -> Result<Int64, Int64> { return Ok(1); } \
+                   fn g() -> Result<Int64, Int64> { let x = f()?; return Ok(x); } \
+                   fn main() -> Int64 { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // `?` tests the tag and returns the aggregate on the propagate path.
         assert!(ir.contains("try.prop"), "? should have a propagate block: {ir}");
@@ -4450,7 +4450,7 @@ mod tests {
     fn mut_array_is_auto_freed() {
         // No explicit `afree`, yet the non-escaping mutable array is freed at
         // scope end (inferred by the ownership analysis).
-        let src = "fn main() -> Int { let mut a: Array<Int> = array(); \
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
                    a = push(a, 1); return at(a, 0); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("call void @free(ptr"), "expected auto-afree: {ir}");
@@ -4458,7 +4458,7 @@ mod tests {
 
     #[test]
     fn afree_frees_the_array_buffer() {
-        let src = "fn main() -> Int { let mut a: Array<Int> = array(); \
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
                    a = push(a, 1); afree(a); return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // The buffer pointer (aggregate field 0) is freed.
@@ -4469,7 +4469,7 @@ mod tests {
     #[test]
     fn option_holds_a_ref_inline() {
         // A `Ref` (two words) fits inline in the widened Option aggregate — no box.
-        let src = "fn main() -> Int { let r = cell(7); let o = Some(r); \
+        let src = "fn main() -> Int64 { let r = cell(7); let o = Some(r); \
                    return match o { Some(x) => get(x), None => 0 }; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // The Option is the three-word aggregate, and the Ref is rebuilt inline
@@ -4483,7 +4483,7 @@ mod tests {
         // Regression: a call to a Bool-returning function must be typed i1 at the
         // call site (not i64), or branching on it produces invalid IR.
         let src = "fn t() -> Bool { return true; } \
-                   fn main() -> Int { if t() { return 1; } return 0; }";
+                   fn main() -> Int64 { if t() { return 1; } return 0; }";
         let program = check(src).unwrap();
         let ir = emit(&program).unwrap();
         assert!(ir.contains("call i1 @vela_t()"), "{ir}");

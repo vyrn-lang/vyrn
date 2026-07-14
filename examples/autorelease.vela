@@ -11,7 +11,7 @@
 // because a *missed* alias fails a cheap generation check (a clean trap) instead
 // of dangling — where a wrongly-freed string would be a use-after-free.
 
-fn main() -> Int {
+fn main() -> Int64 {
     let mut i = 0
     let mut last = 0
     while i < 1000000 {

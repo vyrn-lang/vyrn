@@ -17,7 +17,7 @@ fn fullName(first: String, last: String) -> String {
     return whole                           // moved out to the caller
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let first = "Ada"
     let last = "Lovelace"
 

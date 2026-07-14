@@ -74,7 +74,7 @@ fn resolve_variant_at_call_site() {
     assert_eq!(r.name, "Circle");
     assert_eq!(r.target_line, 5);
     assert_eq!(r.target_col, 7);
-    assert_eq!(r.hover, "variant of Shape: Circle(Int)");
+    assert_eq!(r.hover, "variant of Shape: Circle(Int64)");
 }
 
 /// Hovering `area` at its call site resolves to the function declaration with a
@@ -87,7 +87,7 @@ fn resolve_function_at_call_site() {
     assert_eq!(r.kind, SymbolKind::Function);
     assert_eq!(r.target_line, 10);
     assert_eq!(r.target_col, 4);
-    assert_eq!(r.hover, "fn area(s: Shape) -> Int");
+    assert_eq!(r.hover, "fn area(s: Shape) -> Int64");
 }
 
 /// Hovering a type reference (`s: Shape`) resolves to the type declaration with
@@ -100,7 +100,7 @@ fn resolve_type_at_annotation() {
     assert_eq!(r.kind, SymbolKind::Type);
     assert_eq!(r.target_line, 4);
     assert_eq!(r.target_col, 6);
-    assert_eq!(r.hover, "type Shape = Circle(Int) | Rect(Int, Int) | Unit");
+    assert_eq!(r.hover, "type Shape = Circle(Int64) | Rect(Int64, Int64) | Unit");
 }
 
 /// A cursor not on an identifier resolves to nothing.
@@ -130,7 +130,7 @@ fn completions_list_top_level() {
 /// blocking diagnostic — matching `diagnostics()`'s contract.
 #[test]
 fn parse_error_yields_no_symbols() {
-    let src = "fn main() -> Int { let x = ; return x; }";
+    let src = "fn main() -> Int64 { let x = ; return x; }";
     let a = analyze(src);
     assert!(a.symbols.is_empty());
     assert!(a.tokens.is_empty());
@@ -148,7 +148,7 @@ fn diagnostics_delegate_matches_analyze() {
     assert!(a.diagnostics.is_empty());
 
     // A broken file: both report one parse diagnostic with the same message.
-    let bad = "fn main() -> Int { let x = ; return x; }";
+    let bad = "fn main() -> Int64 { let x = ; return x; }";
     let ab = analyze(bad);
     let db = vela_frontend::diagnostics(bad);
     assert_eq!(ab.diagnostics.len(), db.len());
@@ -194,7 +194,7 @@ fn resolve_annotated_let() {
     assert_eq!(r.name, "squares");
     // `let squares: Array<Int, 5> = ..` is on line 11; name at col 9.
     assert_eq!(r.target_line, 11);
-    assert_eq!(r.hover, "let squares: Array<Int, 5>");
+    assert_eq!(r.hover, "let squares: Array<Int64, 5>");
 }
 
 /// A mutable unannotated `let` resolves with `let mut <name>: <type>` — the
@@ -209,7 +209,7 @@ fn resolve_mutable_unannotated_let() {
     assert_eq!(r.name, "total");
     // `let mut total = 0;` is on line 12; name at col 13. `0` infers to Int.
     assert_eq!(r.target_line, 12);
-    assert_eq!(r.hover, "let mut total: Int");
+    assert_eq!(r.hover, "let mut total: Int64");
 }
 
 /// A `for`-in loop variable resolves to its binding line, now with the inferred
@@ -224,17 +224,17 @@ fn resolve_for_var() {
     // `for s in squares {` is on line 13; `s` is at col 9. `squares` is
     // `Array<Int, 5>`, so the loop variable is Int.
     assert_eq!(r.target_line, 13);
-    assert_eq!(r.hover, "for s: Int");
+    assert_eq!(r.hover, "for s: Int64");
 }
 
 /// An unannotated `let` whose initializer is a string literal hovers with the
-/// inferred `Str` type — the checker's retained type, not just the name. Guards
+/// inferred `String` type — the checker's retained type, not just the name. Guards
 /// the inference path for a non-`Int` scalar (the mutable/`for`-var cases above
 /// both happened to infer `Int`).
 #[test]
 fn unannotated_let_infers_str() {
     let src = "\
-fn main() -> Int {
+fn main() -> Int64 {
     let s = \"hi\";
     print(s);
     return 0;
@@ -247,7 +247,7 @@ fn main() -> Int {
     assert_eq!(r.kind, SymbolKind::Local);
     assert_eq!(r.name, "s");
     assert_eq!(r.target_line, 2);
-    assert_eq!(r.hover, "let s: Str");
+    assert_eq!(r.hover, "let s: String");
 }
 
 /// A local shadows a same-named top-level symbol: the `area` *call* on line 19
@@ -269,14 +269,14 @@ fn local_falls_back_to_top_level_symbol() {
 #[test]
 fn match_exhaustiveness_pinned_to_match_keyword() {
     let src = "\
-type T = | A(Int) | B;
-fn f(x: T) -> Int {
+type T = | A(Int64) | B;
+fn f(x: T) -> Int64 {
     let r = match x {
         A(n) => n,
     };
     return r;
 }
-fn main() -> Int { return 0; }
+fn main() -> Int64 { return 0; }
 ";
     let a = analyze(src);
     let d = a
@@ -298,7 +298,7 @@ fn main() -> Int { return 0; }
 #[test]
 fn if_condition_pinned_to_if_keyword() {
     let src = "\
-fn main() -> Int {
+fn main() -> Int64 {
     if 5 {
         print(1);
     }
@@ -323,7 +323,7 @@ fn main() -> Int {
 #[test]
 fn unknown_variable_pinned_to_ident() {
     let src = "\
-fn main() -> Int {
+fn main() -> Int64 {
     return x;
 }
 ";
@@ -346,7 +346,7 @@ fn main() -> Int {
 #[test]
 fn movecheck_use_after_consume_pinned_to_ident() {
     let src = "\
-fn main() -> Int {
+fn main() -> Int64 {
     let x = 5;
     drop x;
     return x;
@@ -370,10 +370,10 @@ fn main() -> Int {
 #[test]
 fn unknown_type_pinned_to_ident() {
     let src = "\
-fn f(x: Foo) -> Int {
+fn f(x: Foo) -> Int64 {
     return 0;
 }
-fn main() -> Int { return 0; }
+fn main() -> Int64 { return 0; }
 ";
     let a = analyze(src);
     let d = a
@@ -394,7 +394,7 @@ fn main() -> Int { return 0; }
 /// and that hovering the RHS array literal position (not an ident) is None.
 #[test]
 fn binding_not_visible_before_its_line() {
-    let src = "fn main() -> Int {\n    return x;\n    let x = 5;\n    return x;\n}\n";
+    let src = "fn main() -> Int64 {\n    return x;\n    let x = 5;\n    return x;\n}\n";
     let a = analyze(src);
     // Line 2: `    return x;` — `x` used before its binding on line 3. No local
     // with line <= 2 named `x`, and no top-level `x` → resolve returns None.
@@ -417,8 +417,8 @@ fn binding_not_visible_before_its_line() {
 #[test]
 fn builtin_method_hover_is_definition_false() {
     let src = "\
-fn main() -> Int {
-    let mut a: Array<Int> = [];
+fn main() -> Int64 {
+    let mut a: Array<Int64> = [];
     a.push(1);
     return a.length;
 }
@@ -438,7 +438,7 @@ fn main() -> Int {
 #[test]
 fn builtin_logger_method_hover() {
     let src = "\
-fn main() -> Int {
+fn main() -> Int64 {
     let log = logger(\"app\");
     log.info(\"hi\");
     return 0;
@@ -458,7 +458,7 @@ fn main() -> Int {
 #[test]
 fn local_shadows_builtin_method_name() {
     let src = "\
-fn main() -> Int {
+fn main() -> Int64 {
     let push = 5;
     return push;
 }
@@ -469,7 +469,7 @@ fn main() -> Int {
     assert_eq!(r.kind, SymbolKind::Local);
     assert_eq!(r.name, "push");
     assert!(r.definition, "a local has a real definition");
-    assert_eq!(r.hover, "let push: Int");
+    assert_eq!(r.hover, "let push: Int64");
 }
 
 /// `member_completions` after `arr.` lists the array methods + `length`, keyed
@@ -478,8 +478,8 @@ fn main() -> Int {
 #[test]
 fn member_completions_for_array() {
     let src = "\
-fn main() -> Int {
-    let mut a: Array<Int> = [];
+fn main() -> Int64 {
+    let mut a: Array<Int64> = [];
     a.push(1);
     return a.length;
 }
@@ -500,7 +500,7 @@ fn main() -> Int {
 #[test]
 fn member_completions_for_logger() {
     let src = "\
-fn main() -> Int {
+fn main() -> Int64 {
     let log = logger(\"app\");
     log.info(\"hi\");
     return 0;
@@ -522,7 +522,7 @@ fn main() -> Int {
 /// the receiver is a top-level function (not a local). Guards the fallbacks.
 #[test]
 fn member_completions_empty_without_receiver_type() {
-    let src = "fn main() -> Int { let a: Array<Int> = []; return a.length; }\n";
+    let src = "fn main() -> Int64 { let a: Array<Int64> = []; return a.length; }\n";
     let a = analyze(src);
     // Line 1, col 1 — no dot at/before the cursor → no member context.
     assert!(member_completions(&a, 1, 1).is_empty(), "no dot → no members");

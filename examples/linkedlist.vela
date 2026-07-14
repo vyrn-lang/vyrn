@@ -9,17 +9,17 @@
 //     whole structure — proven by the stress loop in `examples/freelist.vela`,
 //     which builds and frees 100,000 nodes through a 65536-cell slab.
 
-type Node = { value: Int, next: Option<Ref<Node>> }
+type Node = { value: Int64, next: Option<Ref<Node>> }
 
 // Recursive traversal: match peels off one node, recurse on its tail. (Match arms
 // are single expressions, so traversal is a recursive function, not a loop.)
-fn sum(o: Option<Ref<Node>>) -> Int {
+fn sum(o: Option<Ref<Node>>) -> Int64 {
     return match o {
         Some(r) => get(r).value + sum(get(r).next),
         None => 0,
     }
 }
-fn length(o: Option<Ref<Node>>) -> Int {
+fn length(o: Option<Ref<Node>>) -> Int64 {
     return match o {
         Some(r) => 1 + length(get(r).next),
         None => 0,
@@ -27,16 +27,16 @@ fn length(o: Option<Ref<Node>>) -> Int {
 }
 
 // Reclaim every node: read the tail *before* releasing the head, then recurse.
-fn freeList(o: Option<Ref<Node>>) -> Int {
+fn freeList(o: Option<Ref<Node>>) -> Int64 {
     return match o { Some(r) => freeNode(r), None => 0 }
 }
-fn freeNode(r: Ref<Node>) -> Int {
+fn freeNode(r: Ref<Node>) -> Int64 {
     let tail = get(r).next   // read before drop, or the access would trap
     drop r
     return freeList(tail)
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     // Build [1, 2, 3, 4, 5] by prepending cells to the head.
     let mut head: Option<Ref<Node>> = None
     let mut i = 5

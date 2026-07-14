@@ -1,7 +1,7 @@
 // Generational references (RFC-0004 §4, Path B) — the memory model's answer to
 // the *aliasing* case that single-ownership can't express.
 //
-// A `Ref` is a freely-copyable handle to a mutable heap `Int` cell. Unlike an
+// A `Ref` is a freely-copyable handle to a mutable heap `Int64` cell. Unlike an
 // owned value, it can be aliased and passed around at will. Each access carries
 // the generation captured when the reference was made; the cell carries a
 // counter that is bumped on `drop`. So a reference used after the cell is
@@ -14,12 +14,12 @@
 // all — the ownership analysis reclaims it automatically (see
 // `examples/autorelease.vela`).
 
-fn bump(r: Ref<Int>) -> Int {
+fn bump(r: Ref<Int64>) -> Int64 {
     set(r, get(r) + 1)       // mutate through a reference passed by value
     return get(r)
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let counter = cell(0)
     let alias = counter      // a second reference to the same cell — allowed
     set(alias, 40)           // write through one alias…

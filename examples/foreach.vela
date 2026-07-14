@@ -6,9 +6,9 @@
 // magic — a bounds-free index walk from 0 to the array's length — so the
 // interpreter and the native backend agree exactly.
 
-fn sumFixed() -> Int {
+fn sumFixed() -> Int64 {
     // Fixed-size array literal: no heap, lives on the stack.
-    let squares: Array<Int, 5> = [0, 1, 4, 9, 16]
+    let squares: Array<Int64, 5> = [0, 1, 4, 9, 16]
     let mut total = 0
     for s in squares {
         total = total + s
@@ -16,7 +16,7 @@ fn sumFixed() -> Int {
     return total               // 0+1+4+9+16 = 30
 }
 
-fn countLongWords() -> Int {
+fn countLongWords() -> Int64 {
     // Growable array of strings, built subject-first.
     let mut words: Array<String> = []
     words.push("hi")
@@ -35,7 +35,7 @@ fn countLongWords() -> Int {
     return long                // "there" and "friend" -> 2
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let a = sumFixed()
     print(a)                   // 30
     let b = countLongWords()

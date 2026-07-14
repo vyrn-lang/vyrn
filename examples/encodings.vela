@@ -14,7 +14,7 @@ fn show(o: Option<String>) -> String {
     }
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     // Hex.
     print(hexEncode("Hi"))                    // 4869
     print(show(hexDecode("4869")))            // Hi

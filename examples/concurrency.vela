@@ -11,18 +11,18 @@
 // `share` is the capability for concurrent read access: the same immutable value
 // can be handed to several tasks at once, precisely because none can mutate it.
 
-type Config = { base: Int, scale: Int }
+type Config = { base: Int64, scale: Int64 }
 
-fn transform(cfg: share Config, x: Int) -> Int {
+fn transform(cfg: share Config, x: Int64) -> Int64 {
     return cfg.base + x * cfg.scale
 }
 
-fn fib(n: Int) -> Int {
+fn fib(n: Int64) -> Int64 {
     if n < 2 { return n }
     return fib(n - 1) + fib(n - 2)
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let cfg = Config { base: 100, scale: 3 }
 
     // Three tasks sharing one immutable config, plus an independent computation.

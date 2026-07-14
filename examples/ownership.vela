@@ -12,12 +12,12 @@
 // flat. A value that escapes (is returned or aliased) is left alone — leaked
 // rather than freed, which is always safe.
 
-fn greetingLen(a: String, b: String) -> Int {
+fn greetingLen(a: String, b: String) -> Int64 {
     let g = concat(a, b)   // a heap temporary…
     return g.len()          // …freed automatically before this return
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     let hello = "Hello, "
     let world = "world!"
 

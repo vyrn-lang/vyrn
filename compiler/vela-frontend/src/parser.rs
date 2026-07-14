@@ -696,8 +696,10 @@ impl Parser {
         }
         let name = self.expect_ident()?;
         Ok(match name.as_str() {
-            // `Int` is the default 64-bit signed integer; `Int64` is its alias.
-            "Int" | "Int64" => Type::Int,
+            // Every numeric type carries its size in its name. `Int64` is the
+            // default integer (what an unannotated literal infers to), but it
+            // is always written explicitly — there is no unsized `Int`.
+            "Int64" => Type::Int,
             // Sized signed integers.
             "Int8" => Type::IntN { bits: 8, signed: true },
             "Int16" => Type::IntN { bits: 16, signed: true },
@@ -707,9 +709,28 @@ impl Parser {
             "UInt16" => Type::IntN { bits: 16, signed: false },
             "UInt32" => Type::IntN { bits: 32, signed: false },
             "UInt64" => Type::IntN { bits: 64, signed: false },
-            // `Float64` is 64-bit IEEE-754; `Float` is its alias. `Float32` is 32-bit.
-            "Float" | "Float64" => Type::Float,
+            // `Float64` is 64-bit IEEE-754; `Float32` is 32-bit.
+            "Float64" => Type::Float,
             "Float32" => Type::Float32,
+            // The unsized names are removed — point at the sized spellings.
+            "Int" => {
+                return Err(Diagnostic::error(
+                    self.line(),
+                    self.col(),
+                    "parse",
+                    "`Int` has no size; write `Int64` (or `Int8`/`Int16`/`Int32`, \
+                     `UInt8`..`UInt64`)"
+                        .to_string(),
+                ))
+            }
+            "Float" => {
+                return Err(Diagnostic::error(
+                    self.line(),
+                    self.col(),
+                    "parse",
+                    "`Float` has no size; write `Float64` (or `Float32`)".to_string(),
+                ))
+            }
             "Bool" => Type::Bool,
             "String" => Type::Str,
             "Unit" => Type::Unit,
@@ -1412,7 +1433,7 @@ mod tests {
     fn semicolons_are_optional() {
         // No terminators at all — statement boundaries fall where an expression
         // can't extend. Parses to the same shape as the semicolon-terminated form.
-        let src = "fn main() -> Int {\n\
+        let src = "fn main() -> Int64 {\n\
                    let a = 1\n\
                    let mut b = 2\n\
                    b = b + a\n\
@@ -1429,7 +1450,7 @@ mod tests {
     #[test]
     fn stray_semicolon_after_block_statement_is_tolerated() {
         // "Semicolons optional" includes a stray one after `if { .. }`.
-        let src = "fn main() -> Int { if true { print(1) }; return 0 }";
+        let src = "fn main() -> Int64 { if true { print(1) }; return 0 }";
         let p = parse_src(src);
         assert_eq!(p.functions[0].body.stmts.len(), 2);
     }
@@ -1437,7 +1458,7 @@ mod tests {
     #[test]
     fn gteq_splits_when_closing_a_generic() {
         // `Array<Int>= []` — the lexer max-munches `>=`; the parser splits it.
-        let src = "fn main() -> Int { let x: Array<Int>= array() return alen(x) }";
+        let src = "fn main() -> Int64 { let x: Array<Int64>= array() return alen(x) }";
         let p = parse_src(src);
         assert!(matches!(
             p.functions[0].body.stmts[0],
@@ -1450,7 +1471,7 @@ mod tests {
         // In semicolon-free code, a statement ending in a variable followed by
         // a statement starting with a string must not raise the tagged-template
         // error (adjacency requires the same line).
-        let src = "fn main() -> Int {\n\
+        let src = "fn main() -> Int64 {\n\
                    let y = 1\n\
                    let z = y\n\
                    print(\"done\")\n\
@@ -1463,7 +1484,7 @@ mod tests {
     #[test]
     fn hole_parse_errors_are_anchored_at_the_template() {
         // The sub-parser's hole-relative line numbers must not leak.
-        let toks = lex("fn main() -> Int {\n    let s = \"\\{ 1 + }\"\n    return 0\n}").unwrap();
+        let toks = lex("fn main() -> Int64 {\n    let s = \"\\{ 1 + }\"\n    return 0\n}").unwrap();
         let e = parse(toks).unwrap_err();
         assert_eq!(e.line, 2, "{e:?}");
         assert!(e.message.contains("in interpolation"), "{}", e.message);
@@ -1474,9 +1495,9 @@ mod tests {
         // After a broken `fn bad<T>`, `T` in the NEXT declaration must parse as
         // a named type, not a stale Type::Param.
         let src = "fn bad<T>(x: T -> T { return x } \
-                   type T = Int \
+                   type T = Int64 \
                    fn ok(x: T) -> T { return x } \
-                   fn main() -> Int { return ok(1) }";
+                   fn main() -> Int64 { return ok(1) }";
         let toks = lex(src).unwrap();
         let mut p = Parser { tokens: toks, pos: 0, no_struct: false, type_params: Vec::new() };
         let (prog, errors) = p.program_accum();
@@ -1487,7 +1508,7 @@ mod tests {
 
     #[test]
     fn bare_return_before_brace_needs_no_semicolon() {
-        let src = "fn f(x: Int) { if x > 0 { return } print(x) } fn main() -> Int { return 0 }";
+        let src = "fn f(x: Int64) { if x > 0 { return } print(x) } fn main() -> Int64 { return 0 }";
         let p = parse_src(src);
         let f = p.functions.iter().find(|f| f.name == "f").unwrap();
         match &f.body.stmts[0] {
@@ -1500,9 +1521,9 @@ mod tests {
 
     #[test]
     fn attaches_doc_comments_to_declarations() {
-        let src = "/// first line\n/// second line\nfn f() -> Int { return 0; }\n\
-                   // not a doc\n/// a type doc\ntype T = Int;\n\
-                   //// four slashes: plain comment\nfn main() -> Int { return 0; }";
+        let src = "/// first line\n/// second line\nfn f() -> Int64 { return 0; }\n\
+                   // not a doc\n/// a type doc\ntype T = Int64;\n\
+                   //// four slashes: plain comment\nfn main() -> Int64 { return 0; }";
         let p = parse_src(src);
         let f = p.functions.iter().find(|f| f.name == "f").unwrap();
         assert_eq!(f.doc.as_deref(), Some("first line\nsecond line"));
@@ -1516,7 +1537,7 @@ mod tests {
     #[test]
     fn parses_precedence() {
         // 1 + 2 * 3  ==>  Add(1, Mul(2, 3))
-        let p = parse_src("fn main() -> Int { return 1 + 2 * 3; }");
+        let p = parse_src("fn main() -> Int64 { return 1 + 2 * 3; }");
         let f = &p.functions[0];
         match &f.body.stmts[0] {
             Stmt::Return { value: Some(Expr::Binary { op: BinOp::Add, rhs, .. }), .. } => {
@@ -1528,7 +1549,7 @@ mod tests {
 
     #[test]
     fn parses_function_with_params() {
-        let p = parse_src("fn add(a: Int, b: Int) -> Int { return a + b; }");
+        let p = parse_src("fn add(a: Int64, b: Int64) -> Int64 { return a + b; }");
         let f = &p.functions[0];
         assert_eq!(f.name, "add");
         assert_eq!(f.params.len(), 2);
@@ -1537,7 +1558,7 @@ mod tests {
 
     #[test]
     fn parses_region_block() {
-        let p = parse_src("fn main() -> Int { region { print(1); } return 0; }");
+        let p = parse_src("fn main() -> Int64 { region { print(1); } return 0; }");
         let f = &p.functions[0];
         match &f.body.stmts[0] {
             Stmt::Region { body, .. } => assert_eq!(body.stmts.len(), 1),

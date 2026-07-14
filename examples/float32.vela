@@ -1,16 +1,16 @@
 /// Single-precision floating point — `Float32`.
 ///
-/// `Float`/`Float64` is the default 64-bit IEEE-754 type; `Float32` is 32-bit.
+/// `Float64`/`Float64` is the default 64-bit IEEE-754 type; `Float32` is 32-bit.
 /// Arithmetic on `Float32` rounds to single precision *at every step*, so it can
 /// differ from `Float64` — identically in the interpreter and native code. A plain
 /// float literal adapts to a `Float32` sibling (`x + 2.5`). Convert explicitly with
-/// `Float32(x)` / `Float64(x)` (fptrunc/fpext) and `Int(x)` / `Float32(n)`.
+/// `Float32(x)` / `Float64(x)` (fptrunc/fpext) and `Int64(x)` / `Float32(n)`.
 
 fn addF32(a: Float32, b: Float32) -> Float32 {
     return a + b
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     // 2^24 + 1 is exact in Float64 but not in Float32 — it rounds to 2^24.
     let big: Float32 = 16777217.0
     print(big)                      // 16777216.000000  (single-precision rounding)
@@ -26,9 +26,9 @@ fn main() -> Int {
     print(addF32(g, 1.0))           // 100000000.000000  (1.0 vanishes)
 
     // Conversions round or widen exactly.
-    print(Float32(7))               // 7.000000   (Int -> Float32)
-    print(Int(Float32(3.9)))        // 3          (Float32 -> Int, truncates)
-    print(Float(Float32(0.5)))      // 0.500000   (Float32 -> Float64, exact)
+    print(Float32(7))               // 7.000000   (Int64 -> Float32)
+    print(Int64(Float32(3.9)))        // 3          (Float32 -> Int64, truncates)
+    print(Float64(Float32(0.5)))      // 0.500000   (Float32 -> Float64, exact)
 
     // Float32 renders in interpolation just like it prints.
     print("big=\{big}, half=\{half}")  // big=16777216.000000, half=1.500000

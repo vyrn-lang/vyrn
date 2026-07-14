@@ -6,13 +6,13 @@
 /// (For a ready-made JSON Schema document, use `jsonSchema(TypeName)` directly —
 /// see jsonschema.vela.)
 
-type Age = Int where value >= 18
-type Port = Int where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18
+type Port = Int64 where value >= 1 && value <= 65535
 
-fn has(o: Option<Int>) -> Bool {
+fn has(o: Option<Int64>) -> Bool {
     return match o { Some(n) => true, None => false }
 }
-fn optOr(o: Option<Int>, d: Int) -> Int {
+fn optOr(o: Option<Int64>, d: Int64) -> Int64 {
     return match o { Some(n) => n, None => d }
 }
 
@@ -28,7 +28,7 @@ fn openApi(s: Schema) -> String {
     return concat(json, " }")
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     print(openApi(schemaOf(Age)))     // { "type": "integer", "minimum": 18 }
     print(openApi(schemaOf(Port)))    // { "type": "integer", "minimum": 1, "maximum": 65535 }
     return 0

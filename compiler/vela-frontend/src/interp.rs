@@ -392,7 +392,7 @@ fn run_inner(program: &Program) -> Result<i64, String> {
     };
     match interp.call("main", &[]) {
         Ok(Val::Int(n)) => Ok(n),
-        Ok(other) => Err(format!("main returned {other:?}, expected Int")),
+        Ok(other) => Err(format!("main returned {other:?}, expected Int64")),
         Err(Ctrl::Err(s)) => Err(s),
         Err(Ctrl::Return(_)) => Err("internal: `?` propagated past main".into()),
     }
@@ -867,7 +867,7 @@ impl<'a> Interp<'a> {
                             .get(*i as usize)
                             .map(|b| Val::Int(*b as i64))
                             .ok_or_else(|| format!("string index {i} out of bounds").into()),
-                        _ => Err("at of non-Array/Int".into()),
+                        _ => Err("at of non-Array/Int64".into()),
                     },
                     "alen" => match &vals[0] {
                         Val::Array(elems) => Ok(Val::Int(elems.len() as i64)),
@@ -1277,7 +1277,7 @@ impl<'a> Interp<'a> {
     /// name for a scalar, or the enum's name for an enum value.
     fn val_type_key(&self, v: &Val) -> Option<String> {
         match v {
-            Val::Int(_) => Some("Int".to_string()),
+            Val::Int(_) => Some("Int64".to_string()),
             Val::Bool(_) => Some("Bool".to_string()),
             Val::Str(_) => Some("String".to_string()),
             Val::Enum(variant, _) => self.variant_enum.get(variant).cloned(),
@@ -1374,17 +1374,17 @@ mod tests {
 
     #[test]
     fn arithmetic_and_return() {
-        assert_eq!(run("fn main() -> Int { return 2 + 3 * 4; }").unwrap(), 14);
+        assert_eq!(run("fn main() -> Int64 { return 2 + 3 * 4; }").unwrap(), 14);
     }
 
     #[test]
     fn functions_and_recursion() {
         let src = "
-            fn fib(n: Int) -> Int {
+            fn fib(n: Int64) -> Int64 {
                 if n < 2 { return n; }
                 return fib(n - 1) + fib(n - 2);
             }
-            fn main() -> Int { return fib(10); }
+            fn main() -> Int64 { return fib(10); }
         ";
         assert_eq!(run(src).unwrap(), 55);
     }
@@ -1392,14 +1392,14 @@ mod tests {
     #[test]
     fn option_and_match() {
         let src = "
-            fn sd(a: Int, b: Int) -> Option<Int> {
+            fn sd(a: Int64, b: Int64) -> Option<Int64> {
                 if b == 0 { return None; }
                 return Some(a / b);
             }
-            fn uw(o: Option<Int>, f: Int) -> Int {
+            fn uw(o: Option<Int64>, f: Int64) -> Int64 {
                 return match o { Some(x) => x, None => f };
             }
-            fn main() -> Int { return uw(sd(10, 2), 0) + uw(sd(1, 0), 100); }
+            fn main() -> Int64 { return uw(sd(10, 2), 0) + uw(sd(1, 0), 100); }
         ";
         assert_eq!(run(src).unwrap(), 105); // 5 + 100
     }
@@ -1409,15 +1409,15 @@ mod tests {
         // `?` propagates Err out of `chain`, so chain(0) returns Err(-1) and the
         // final match yields the fallback.
         let src = "
-            fn checked(n: Int) -> Result<Int, Int> {
+            fn checked(n: Int64) -> Result<Int64, Int64> {
                 if n == 0 { return Err(0 - 1); }
                 return Ok(n);
             }
-            fn chain(n: Int) -> Result<Int, Int> {
+            fn chain(n: Int64) -> Result<Int64, Int64> {
                 let x = checked(n)?;      // early-returns Err when n == 0
                 return Ok(x + 1);
             }
-            fn main() -> Int {
+            fn main() -> Int64 {
                 let a = match chain(5) { Ok(v) => v, Err(e) => e };   // 6
                 let b = match chain(0) { Ok(v) => v, Err(e) => e };   // -1
                 return a + b;             // 5
@@ -1428,7 +1428,7 @@ mod tests {
 
     #[test]
     fn generational_reference_roundtrip() {
-        let src = "fn main() -> Int { \
+        let src = "fn main() -> Int64 { \
                        let c = cell(10); set(c, get(c) + 5); \
                        let v = get(c); release(c); return v; }";
         assert_eq!(run(src).unwrap(), 15);
@@ -1438,11 +1438,11 @@ mod tests {
     fn linked_list_via_option_ref() {
         // A nil-terminated recursive list: Option<Ref<Node>> holds each edge.
         let src = "
-            type Node = { value: Int, next: Option<Ref<Node>> };
-            fn sum(o: Option<Ref<Node>>) -> Int {
+            type Node = { value: Int64, next: Option<Ref<Node>> };
+            fn sum(o: Option<Ref<Node>>) -> Int64 {
                 return match o { Some(r) => get(r).value + sum(get(r).next), None => 0 };
             }
-            fn main() -> Int {
+            fn main() -> Int64 {
                 let n2 = cell(Node { value: 2, next: None });
                 let n1 = cell(Node { value: 1, next: Some(n2) });
                 return sum(Some(n1));
@@ -1453,7 +1453,7 @@ mod tests {
 
     #[test]
     fn str_and_parse_roundtrip() {
-        let src = "fn main() -> Int { \
+        let src = "fn main() -> Int64 { \
                        let s = str(0 - 123); \
                        return match parse(s) { Some(n) => n, None => 0 }; }";
         assert_eq!(run(src).unwrap(), -123);
@@ -1464,7 +1464,7 @@ mod tests {
         let cases = [("\"12x\"", -1), ("\"\"", -1), ("\"-\"", -1), ("\" 5\"", -1), ("\"42\"", 42)];
         for (lit, want) in cases {
             let src = format!(
-                "fn main() -> Int {{ return match parse({lit}) {{ Some(n) => n, None => 0 - 1 }}; }}"
+                "fn main() -> Int64 {{ return match parse({lit}) {{ Some(n) => n, None => 0 - 1 }}; }}"
             );
             assert_eq!(run(&src).unwrap(), want, "parse({lit})");
         }
@@ -1474,11 +1474,11 @@ mod tests {
     fn result_holds_non_int_payloads() {
         // Ok carries a Ref, Err carries a String.
         let src = "
-            fn lookup(k: Int) -> Result<Ref<Int>, String> {
+            fn lookup(k: Int64) -> Result<Ref<Int64>, String> {
                 if k == 0 { return Err(\"nope\"); }
                 return Ok(cell(k * 10));
             }
-            fn main() -> Int {
+            fn main() -> Int64 {
                 let a = match lookup(5) { Ok(r) => get(r), Err(e) => 0 - len(e) };
                 let b = match lookup(0) { Ok(r) => get(r), Err(e) => 0 - len(e) };
                 return a + b;  // 50 + (-4)
@@ -1489,7 +1489,7 @@ mod tests {
 
     #[test]
     fn fixed_array_literal_and_index() {
-        let src = "fn main() -> Int { let a: Array<Int, 4> = [10, 20, 30, 40]; \
+        let src = "fn main() -> Int64 { let a: Array<Int64, 4> = [10, 20, 30, 40]; \
                    let mut s = 0; let mut i = 0; \
                    while i < alen(a) { s = s + at(a, i); i = i + 1; } return s; }";
         assert_eq!(run(src).unwrap(), 100);
@@ -1497,14 +1497,14 @@ mod tests {
 
     #[test]
     fn fixed_array_out_of_bounds_errors() {
-        let src = "fn main() -> Int { let a: Array<Int, 2> = [1, 2]; return at(a, 4); }";
+        let src = "fn main() -> Int64 { let a: Array<Int64, 2> = [1, 2]; return at(a, 4); }";
         assert!(run(src).unwrap_err().contains("out of bounds"));
     }
 
     #[test]
     fn growable_array_push_and_read() {
-        let src = "fn main() -> Int { \
-                       let mut a: Array<Int> = array(); \
+        let src = "fn main() -> Int64 { \
+                       let mut a: Array<Int64> = array(); \
                        let mut i = 0; \
                        while i < 6 { a = push(a, i * i); i = i + 1; } \
                        let mut s = 0; let mut j = 0; \
@@ -1515,21 +1515,21 @@ mod tests {
 
     #[test]
     fn array_index_out_of_bounds_errors() {
-        let src = "fn main() -> Int { let mut a: Array<Int> = array(); \
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
                    a = push(a, 1); return at(a, 3); }";
         assert!(run(src).unwrap_err().contains("out of bounds"));
     }
 
     #[test]
     fn for_over_fixed_array() {
-        let src = "fn main() -> Int { let a: Array<Int, 5> = [0, 1, 4, 9, 16]; \
+        let src = "fn main() -> Int64 { let a: Array<Int64, 5> = [0, 1, 4, 9, 16]; \
                    let mut s = 0; for x in a { s = s + x; } return s; }";
         assert_eq!(run(src).unwrap(), 30);
     }
 
     #[test]
     fn for_over_growable_array() {
-        let src = "fn main() -> Int { let mut a: Array<Int> = array(); \
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
                    let mut i = 0; while i < 6 { a = push(a, i * i); i = i + 1; } \
                    let mut s = 0; for x in a { s = s + x; } return s; }"; // 0+1+4+9+16+25
         assert_eq!(run(src).unwrap(), 55);
@@ -1537,7 +1537,7 @@ mod tests {
 
     #[test]
     fn for_over_empty_array_runs_zero_times() {
-        let src = "fn main() -> Int { let a: Array<Int> = array(); \
+        let src = "fn main() -> Int64 { let a: Array<Int64> = array(); \
                    let mut s = 7; for x in a { s = s + x; } return s; }";
         assert_eq!(run(src).unwrap(), 7);
     }
@@ -1545,7 +1545,7 @@ mod tests {
     #[test]
     fn for_loop_variable_is_scoped_to_body() {
         // `x` must not leak past the loop — referencing it after is unbound.
-        let src = "fn main() -> Int { let a: Array<Int, 2> = [1, 2]; \
+        let src = "fn main() -> Int64 { let a: Array<Int64, 2> = [1, 2]; \
                    for x in a { let y = x; } return x; }";
         assert!(run(src).is_err());
     }
@@ -1553,23 +1553,23 @@ mod tests {
     #[test]
     fn for_body_early_return() {
         // Returning from inside the loop stops iteration immediately.
-        let src = "fn firstOver(a: Array<Int, 4>, t: Int) -> Int { \
+        let src = "fn firstOver(a: Array<Int64, 4>, t: Int64) -> Int64 { \
                    for x in a { if x > t { return x; } } return 0 - 1; } \
-                   fn main() -> Int { let a: Array<Int, 4> = [3, 8, 1, 9]; \
+                   fn main() -> Int64 { let a: Array<Int64, 4> = [3, 8, 1, 9]; \
                    return firstOver(a, 5); }"; // first element > 5 is 8
         assert_eq!(run(src).unwrap(), 8);
     }
 
     #[test]
     fn for_over_non_array_is_rejected() {
-        let src = "fn main() -> Int { let n = 3; for x in n { } return 0; }";
+        let src = "fn main() -> Int64 { let n = 3; for x in n { } return 0; }";
         assert!(run(src).unwrap_err().contains("Array"));
     }
 
     #[test]
     fn method_index_and_length_surface() {
         // `[]`, `.push`, `.length`, and `[i]` desugar to array()/push/alen/at.
-        let src = "fn main() -> Int { let mut a: Array<Int> = []; \
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; \
                    a.push(10); a.push(20); a.push(30); \
                    return a.length + a[0] + a[2]; }"; // 3 + 10 + 30
         assert_eq!(run(src).unwrap(), 43);
@@ -1578,7 +1578,7 @@ mod tests {
     #[test]
     fn method_push_writes_back() {
         // `a.push(x);` as a statement mutates `a` in place (write-back).
-        let src = "fn main() -> Int { let mut a: Array<Int> = []; \
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; \
                    let mut i = 0; while i < 5 { a.push(i); i = i + 1; } \
                    let mut s = 0; for x in a { s = s + x; } return s; }"; // 0+1+2+3+4
         assert_eq!(run(src).unwrap(), 10);
@@ -1587,7 +1587,7 @@ mod tests {
     #[test]
     fn drop_then_use_is_a_compile_error() {
         // `drop` consumes: using the value afterward must be rejected.
-        let src = "fn main() -> Int { let mut a: Array<Int> = []; a.push(1); \
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; a.push(1); \
                    drop a; return a.length; }";
         assert!(run(src).is_err());
     }
@@ -1596,14 +1596,14 @@ mod tests {
     fn drop_of_reference_releases_it() {
         // After `drop r`, the reference is released, so reading it would trap —
         // but here we just confirm a well-formed drop runs and returns.
-        let src = "fn main() -> Int { let r = cell(7); let v = get(r); \
+        let src = "fn main() -> Int64 { let r = cell(7); let v = get(r); \
                    drop r; return v; }";
         assert_eq!(run(src).unwrap(), 7);
     }
 
     #[test]
     fn drop_of_non_heap_is_rejected() {
-        let src = "fn main() -> Int { let n = 5; drop n; return 0; }";
+        let src = "fn main() -> Int64 { let n = 5; drop n; return 0; }";
         assert!(run(src).unwrap_err().contains("heap"));
     }
 
@@ -1611,7 +1611,7 @@ mod tests {
     fn string_interpolation_renders_scalars() {
         // `\{ }` holes render Int/Bool/String; literal braces are untouched. The
         // program returns the interpolated string's length so we can assert it.
-        let src = "fn main() -> Int { let n = 42; let ok = true; \
+        let src = "fn main() -> Int64 { let n = 42; let ok = true; \
                    let s = \"n=\\{n} ok=\\{ok} {lit}\"; return len(s); }";
         // "n=42 ok=true {lit}" -> 18 characters
         assert_eq!(run(src).unwrap(), 18);
@@ -1619,21 +1619,21 @@ mod tests {
 
     #[test]
     fn interpolation_evaluates_hole_expressions() {
-        let src = "fn main() -> Int { let a = 3; let b = 4; \
+        let src = "fn main() -> Int64 { let a = 3; let b = 4; \
                    let s = \"\\{a * b}\"; return len(s); }"; // "12" -> len 2
         assert_eq!(run(src).unwrap(), 2);
     }
 
     #[test]
     fn str_renders_bool_and_string() {
-        let src = "fn main() -> Int { let s = str(false); return len(s); }"; // "false" -> 5
+        let src = "fn main() -> Int64 { let s = str(false); return len(s); }"; // "false" -> 5
         assert_eq!(run(src).unwrap(), 5);
     }
 
     #[test]
     fn str_renders_sized_int() {
         // A signed Int32 renders by value; an unsigned UInt8 renders its magnitude.
-        let s = "fn main() -> Int { let a: Int32 = 42; let b: UInt8 = 200; \
+        let s = "fn main() -> Int64 { let a: Int32 = 42; let b: UInt8 = 200; \
                  let s = \"\\{a}/\\{b + b}\"; return len(s); }"; // "42/144" -> 6
         assert_eq!(run(s).unwrap(), 6);
     }
@@ -1641,21 +1641,21 @@ mod tests {
     #[test]
     fn str_renders_uint64_above_i64_max() {
         // The full 64-bit magnitude renders (not a signed reinterpretation).
-        let s = "fn main() -> Int { let n: UInt64 = 10000000000000000000; \
+        let s = "fn main() -> Int64 { let n: UInt64 = 10000000000000000000; \
                  let s = str(n); return len(s); }"; // 20 digits
         assert_eq!(run(s).unwrap(), 20);
     }
 
     #[test]
     fn str_renders_float_to_six_decimals() {
-        let s = "fn main() -> Int { let s = str(3.14159); return len(s); }"; // "3.141590" -> 8
+        let s = "fn main() -> Int64 { let s = str(3.14159); return len(s); }"; // "3.141590" -> 8
         assert_eq!(run(s).unwrap(), 8);
     }
 
     #[test]
     fn float_arithmetic_and_comparison() {
         // 1.5 * 2.5 = 3.75 > 3.0 → 1
-        let src = "fn main() -> Int { let a = 1.5; let b = 2.5; \
+        let src = "fn main() -> Int64 { let a = 1.5; let b = 2.5; \
                    if a * b > 3.0 { return 1; } return 0; }";
         assert_eq!(run(src).unwrap(), 1);
     }
@@ -1663,29 +1663,29 @@ mod tests {
     #[test]
     fn float_through_function_and_negation() {
         let src = "fn half(x: Float64) -> Float64 { return x / 2.0; } \
-                   fn main() -> Int { let h = half(5.0); \
+                   fn main() -> Int64 { let h = half(5.0); \
                    if h == 2.5 { if -h < 0.0 { return 7; } } return 0; }";
         assert_eq!(run(src).unwrap(), 7);
     }
 
     #[test]
     fn float_to_int_truncates_toward_zero() {
-        let src = "fn main() -> Int { let f = 3.9; return Int(f); }";
+        let src = "fn main() -> Int64 { let f = 3.9; return Int64(f); }";
         assert_eq!(run(src).unwrap(), 3);
     }
 
     #[test]
     fn int_to_float_and_back() {
-        let src = "fn main() -> Int { let f = Float64(7); let g = f + 0.5; return Int(g); }"; // 7.5 -> 7
+        let src = "fn main() -> Int64 { let f = Float64(7); let g = f + 0.5; return Int64(g); }"; // 7.5 -> 7
         assert_eq!(run(src).unwrap(), 7);
     }
 
     #[test]
     fn float32_rounds_to_single_precision() {
         // 2^24 + 1 is exact in f64 but rounds to 2^24 in f32, so `Int(..)` differs.
-        let f32 = "fn main() -> Int { let x: Float32 = 16777217.0; return Int(x); }";
+        let f32 = "fn main() -> Int64 { let x: Float32 = 16777217.0; return Int64(x); }";
         assert_eq!(run(f32).unwrap(), 16777216);
-        let f64 = "fn main() -> Int { let x: Float64 = 16777217.0; return Int(x); }";
+        let f64 = "fn main() -> Int64 { let x: Float64 = 16777217.0; return Int64(x); }";
         assert_eq!(run(f64).unwrap(), 16777217);
     }
 
@@ -1693,14 +1693,14 @@ mod tests {
     fn float32_arithmetic_stays_single_precision() {
         // Adding 1.0 to 1e8 is below the f32 ULP → lost; f64 keeps it.
         let src = "fn addf(a: Float32, b: Float32) -> Float32 { return a + b; } \
-                   fn main() -> Int { let g: Float32 = 100000000.0; return Int(addf(g, 1.0)); }";
+                   fn main() -> Int64 { let g: Float32 = 100000000.0; return Int64(addf(g, 1.0)); }";
         assert_eq!(run(src).unwrap(), 100000000);
     }
 
     #[test]
     fn float32_widens_to_float64_exactly() {
         // 0.5 is exact in both; Float32 -> Float64 -> Int round-trips its value.
-        let src = "fn main() -> Int { let x: Float32 = 2.5; let d = Float64(x); \
+        let src = "fn main() -> Int64 { let x: Float32 = 2.5; let d = Float64(x); \
                    if d == 2.5 { return 1; } return 0; }";
         assert_eq!(run(src).unwrap(), 1);
     }
@@ -1708,52 +1708,52 @@ mod tests {
     #[test]
     fn float32_literal_adapts_to_sibling() {
         // A plain float literal takes the Float32 sibling's precision.
-        let src = "fn main() -> Int { let h: Float32 = 1.5; let r = h + 2.5; return Int(r); }";
+        let src = "fn main() -> Int64 { let h: Float32 = 1.5; let r = h + 2.5; return Int64(r); }";
         assert_eq!(run(src).unwrap(), 4);
     }
 
     #[test]
     fn int_to_int32_wraps_and_back() {
         // 5_000_000_000 wraps into i32 to 705032704; Int(..) sext's it back.
-        let src = "fn main() -> Int { let big = 5000000000; return Int(Int32(big)); }";
+        let src = "fn main() -> Int64 { let big = 5000000000; return Int64(Int32(big)); }";
         assert_eq!(run(src).unwrap(), 705032704);
     }
 
     #[test]
     fn int8_conversion_wraps() {
-        let src = "fn main() -> Int { return Int(Int8(300)); }"; // 300 & 0xFF as i8 = 44
+        let src = "fn main() -> Int64 { return Int64(Int8(300)); }"; // 300 & 0xFF as i8 = 44
         assert_eq!(run(src).unwrap(), 44);
     }
 
     #[test]
     fn rejects_conversion_of_non_number() {
-        let src = "fn main() -> Int { let x = Int(\"hi\"); return 0; }";
+        let src = "fn main() -> Int64 { let x = Int64(\"hi\"); return 0; }";
         assert!(run(src).unwrap_err().contains("converts a number"));
     }
 
     #[test]
     fn int64_is_an_alias_for_int() {
-        let src = "fn f(n: Int64) -> Int { return n + 1; } \
-                   fn main() -> Int { let x: Int = 41; return f(x); }";
+        let src = "fn f(n: Int64) -> Int64 { return n + 1; } \
+                   fn main() -> Int64 { let x: Int64 = 41; return f(x); }";
         assert_eq!(run(src).unwrap(), 42);
     }
 
     #[test]
     fn rejects_int_float_mixing() {
-        let src = "fn main() -> Int { let a = 1 + 2.0; return 0; }";
+        let src = "fn main() -> Int64 { let a = 1 + 2.0; return 0; }";
         assert!(run(src).unwrap_err().contains("matching numeric"));
     }
 
     #[test]
     fn rejects_float_assigned_to_int() {
-        let src = "fn main() -> Int { let x: Int = 1.5; return x; }";
+        let src = "fn main() -> Int64 { let x: Int64 = 1.5; return x; }";
         assert!(run(src).is_err());
     }
 
     #[test]
     fn int32_overflow_wraps() {
         // 2e9 + 2e9 = 4e9 wraps at 32 bits to -294967296.
-        let src = "fn main() -> Int { let a: Int32 = 2000000000; let b: Int32 = 2000000000; \
+        let src = "fn main() -> Int64 { let a: Int32 = 2000000000; let b: Int32 = 2000000000; \
                    let c = a + b; if c < 0 { return 1; } return 0; }";
         assert_eq!(run(src).unwrap(), 1);
     }
@@ -1762,7 +1762,7 @@ mod tests {
     fn int8_wraps_at_eight_bits() {
         // 100 + 100 = 200 wraps at 8 bits (signed) to -56.
         let src = "fn wrap(a: Int8, b: Int8) -> Int8 { return a + b; } \
-                   fn main() -> Int { let x: Int8 = 100; let r = wrap(x, x); \
+                   fn main() -> Int64 { let x: Int8 = 100; let r = wrap(x, x); \
                    if r < 0 { return 1; } return 0; }";
         assert_eq!(run(src).unwrap(), 1);
     }
@@ -1770,14 +1770,14 @@ mod tests {
     #[test]
     fn uint8_wraps_into_magnitude_range() {
         // 200 + 200 = 400 wraps at 8 bits (unsigned) to 144 — stays non-negative.
-        let src = "fn main() -> Int { let x: UInt8 = 200; let r = x + x; return Int(r); }";
+        let src = "fn main() -> Int64 { let x: UInt8 = 200; let r = x + x; return Int64(r); }";
         assert_eq!(run(src).unwrap(), 144);
     }
 
     #[test]
     fn uint8_subtraction_wraps_below_zero() {
         // 200 - 250 = -50 wraps to 206 in unsigned 8-bit space.
-        let src = "fn main() -> Int { let x: UInt8 = 200; let r = x - 250; return Int(r); }";
+        let src = "fn main() -> Int64 { let x: UInt8 = 200; let r = x - 250; return Int64(r); }";
         assert_eq!(run(src).unwrap(), 206);
     }
 
@@ -1785,7 +1785,7 @@ mod tests {
     fn uint_uses_unsigned_division() {
         // A UInt64 above i64::MAX divides unsigned (signed sdiv would give a
         // different, negative-influenced quotient).
-        let src = "fn main() -> Int { let n: UInt64 = 10000000000000000000; \
+        let src = "fn main() -> Int64 { let n: UInt64 = 10000000000000000000; \
                    let q = n / 3; if q == 3333333333333333333 { return 1; } return 0; }";
         assert_eq!(run(src).unwrap(), 1);
     }
@@ -1794,7 +1794,7 @@ mod tests {
     fn uint_comparison_is_unsigned() {
         // As unsigned, 10e18 (>i64::MAX, stored as a negative i64) is GREATER
         // than 5 — a signed comparison would wrongly rank it below.
-        let src = "fn main() -> Int { let big: UInt64 = 10000000000000000000; \
+        let src = "fn main() -> Int64 { let big: UInt64 = 10000000000000000000; \
                    let small: UInt64 = 5; if big > small { return 1; } return 0; }";
         assert_eq!(run(src).unwrap(), 1);
     }
@@ -1802,20 +1802,20 @@ mod tests {
     #[test]
     fn uint32_holds_value_above_int32_max() {
         // 4_000_000_000 overflows Int32 but fits UInt32.
-        let src = "fn main() -> Int { return Int(UInt32(Int(4000000000))); }";
+        let src = "fn main() -> Int64 { return Int64(UInt32(Int64(4000000000))); }";
         assert_eq!(run(src).unwrap(), 4000000000);
     }
 
     #[test]
     fn sized_int_no_overflow_is_normal() {
-        let src = "fn main() -> Int { let a: Int32 = 5; let b = a * 3; \
+        let src = "fn main() -> Int64 { let a: Int32 = 5; let b = a * 3; \
                    if b == 15 { return 1; } return 0; }";
         assert_eq!(run(src).unwrap(), 1);
     }
 
     #[test]
     fn rejects_mixing_different_int_widths() {
-        let src = "fn main() -> Int { let a: Int32 = 1; let b: Int8 = 2; let c = a + b; return 0; }";
+        let src = "fn main() -> Int64 { let a: Int32 = 1; let b: Int8 = 2; let c = a + b; return 0; }";
         assert!(run(src).unwrap_err().contains("matching numeric"));
     }
 
@@ -1823,9 +1823,9 @@ mod tests {
     fn tagged_template_passes_parts_and_boxed_values() {
         // A `sql` tag receives literal parts + boxed values; the structure comes
         // only from parts (here we return $N per hole and check the length).
-        let src = "fn sql(parts: Array<String>, values: Array<Value>) -> Int { \
+        let src = "fn sql(parts: Array<String>, values: Array<Value>) -> Int64 { \
                        return parts.length + values.length; } \
-                   fn main() -> Int { let a = 1; let b = 2; \
+                   fn main() -> Int64 { let a = 1; let b = 2; \
                        return sql\"x\\{a}y\\{b}z\"; }"; // parts=3, values=2 -> 5
         assert_eq!(run(src).unwrap(), 5);
     }
@@ -1833,84 +1833,84 @@ mod tests {
     #[test]
     fn tagged_template_values_are_matchable_and_typed() {
         // The boxed values decode back to their original scalars via `match`.
-        let src = "fn sql(parts: Array<String>, values: Array<Value>) -> Int { \
+        let src = "fn sql(parts: Array<String>, values: Array<Value>) -> Int64 { \
                        return match values[0] { VInt(n) => n, VBool(b) => 0, VStr(s) => len(s) }; } \
-                   fn main() -> Int { let x = 41; return sql\"n=\\{x}\"; }";
+                   fn main() -> Int64 { let x = 41; return sql\"n=\\{x}\"; }";
         assert_eq!(run(src).unwrap(), 41);
     }
 
     #[test]
     fn schema_of_extracts_where_bounds() {
         // `schemaOf(Port)` reads the `where` predicate at compile time.
-        let src = "type Port = Int where value >= 1 && value <= 65535; \
-                   fn optOr(o: Option<Int>, d: Int) -> Int { \
+        let src = "type Port = Int64 where value >= 1 && value <= 65535; \
+                   fn optOr(o: Option<Int64>, d: Int64) -> Int64 { \
                        return match o { Some(n) => n, None => d }; } \
-                   fn main() -> Int { let s = schemaOf(Port); \
+                   fn main() -> Int64 { let s = schemaOf(Port); \
                        return optOr(s.min, 0) + optOr(s.max, 0); }"; // 1 + 65535
         assert_eq!(run(src).unwrap(), 65536);
     }
 
     #[test]
     fn schema_of_unbounded_type_has_no_bounds() {
-        let src = "type Id = Int; \
-                   fn none(o: Option<Int>) -> Int { return match o { Some(n) => 1, None => 0 }; } \
-                   fn main() -> Int { let s = schemaOf(Id); return none(s.min) + none(s.max); }";
+        let src = "type Id = Int64; \
+                   fn none(o: Option<Int64>) -> Int64 { return match o { Some(n) => 1, None => 0 }; } \
+                   fn main() -> Int64 { let s = schemaOf(Id); return none(s.min) + none(s.max); }";
         assert_eq!(run(src).unwrap(), 0); // both None
     }
 
     #[test]
     fn schema_of_rejects_a_non_type() {
-        let src = "fn main() -> Int { let x = 5; let s = schemaOf(x); return 0; }";
+        let src = "fn main() -> Int64 { let x = 5; let s = schemaOf(x); return 0; }";
         assert!(run(src).unwrap_err().contains("not a type"));
     }
 
     #[test]
     fn string_length_field() {
-        let src = "fn main() -> Int { let s = \"hello\"; return s.length; }";
+        let src = "fn main() -> Int64 { let s = \"hello\"; return s.length; }";
         assert_eq!(run(src).unwrap(), 5);
     }
 
     #[test]
     fn string_indexing_and_char_literal() {
         // `s[1]` is the byte 'e' (101); a char literal is that byte value.
-        let src = "fn main() -> Int { let s = \"hello\"; return s[1]; }";
+        let src = "fn main() -> Int64 { let s = \"hello\"; return s[1]; }";
         assert_eq!(run(src).unwrap(), 101);
-        let cmp = "fn main() -> Int { let s = \"hello\"; if s[0] == 'h' { return 1; } return 0; }";
+        let cmp = "fn main() -> Int64 { let s = \"hello\"; if s[0] == 'h' { return 1; } return 0; }";
         assert_eq!(run(cmp).unwrap(), 1);
     }
 
     #[test]
     fn string_index_out_of_bounds_traps() {
-        let src = "fn main() -> Int { let s = \"hi\"; return s[5]; }";
+        let src = "fn main() -> Int64 { let s = \"hi\"; return s[5]; }";
         assert!(run(src).unwrap_err().contains("out of bounds"));
     }
 
     #[test]
     fn unicode_bytes_vs_code_points() {
         // "café": 5 UTF-8 bytes but 4 code points; `é` is U+00E9 = 233.
-        let bytes = "fn main() -> Int { return bytes(\"caf\\u{e9}\").length; }";
+        let bytes = "fn main() -> Int64 { return bytes(\"caf\\u{e9}\").length; }";
         assert_eq!(run(bytes).unwrap(), 5);
-        let chars = "fn main() -> Int { return chars(\"caf\\u{e9}\").length; }";
+        let chars = "fn main() -> Int64 { return chars(\"caf\\u{e9}\").length; }";
         assert_eq!(run(chars).unwrap(), 4);
-        let cp = "fn main() -> Int { return chars(\"caf\\u{e9}\")[3]; }";
+        let cp = "fn main() -> Int64 { return chars(\"caf\\u{e9}\")[3]; }";
         assert_eq!(run(cp).unwrap(), 233);
     }
 
     #[test]
     fn code_point_iteration_and_emoji() {
         // A 4-byte emoji is a single code point.
-        let len = "fn main() -> Int { return \"\\u{1F600}\".length; }"; // 4 bytes
+        let len = "fn main() -> Int64 { return \"\\u{1F600}\".length; }"; // 4 bytes
         assert_eq!(run(len).unwrap(), 4);
-        let one = "fn main() -> Int { return chars(\"\\u{1F600}\").length; }"; // 1 char
+        let one = "fn main() -> Int64 { return chars(\"\\u{1F600}\").length; }"; // 1 char
         assert_eq!(run(one).unwrap(), 1);
-        let val = "fn main() -> Int { return chars(\"\\u{1F600}\")[0]; }";
+        let val = "fn main() -> Int64 { return chars(\"\\u{1F600}\")[0]; }";
         assert_eq!(run(val).unwrap(), 128512);
     }
 
     #[test]
     fn unicode_char_literal() {
         // A non-ASCII char literal is its Unicode scalar value.
-        let src = "fn main() -> Int { return '\\u{e9}'; }";
+        let src = "fn main() -> Int64 { return '\\u{e9}'; }";
         assert_eq!(run(src).unwrap(), 233);
     }
 
@@ -1941,7 +1941,7 @@ mod tests {
     #[test]
     fn encoding_builtins_in_program() {
         // Exercised end-to-end (checker + interp) with an Option result.
-        let src = "fn main() -> Int { \
+        let src = "fn main() -> Int64 { \
                    let d = base64Decode(base64Encode(\"hey\")); \
                    return match d { Some(s) => s.length, None => 0 }; }";
         assert_eq!(run(src).unwrap(), 3);
@@ -1950,21 +1950,21 @@ mod tests {
     #[test]
     fn string_iteration_sums_bytes() {
         // 'a'(97) + 'b'(98) + 'c'(99) = 294.
-        let src = "fn main() -> Int { let s = \"abc\"; let mut t = 0; \
+        let src = "fn main() -> Int64 { let s = \"abc\"; let mut t = 0; \
                    for c in s { t = t + c; } return t; }";
         assert_eq!(run(src).unwrap(), 294);
     }
 
     #[test]
     fn string_predicate_methods() {
-        let c = "fn main() -> Int { if contains(\"hello\", \"ell\") { return 1; } return 0; }";
+        let c = "fn main() -> Int64 { if contains(\"hello\", \"ell\") { return 1; } return 0; }";
         assert_eq!(run(c).unwrap(), 1);
-        let s = "fn main() -> Int { if startsWith(\"hello\", \"he\") { return 1; } return 0; }";
+        let s = "fn main() -> Int64 { if startsWith(\"hello\", \"he\") { return 1; } return 0; }";
         assert_eq!(run(s).unwrap(), 1);
-        let e = "fn main() -> Int { if endsWith(\"hello\", \"lo\") { return 1; } return 0; }";
+        let e = "fn main() -> Int64 { if endsWith(\"hello\", \"lo\") { return 1; } return 0; }";
         assert_eq!(run(e).unwrap(), 1);
         // `endsWith` guards against a suffix longer than the string.
-        let g = "fn main() -> Int { if endsWith(\"hi\", \"ahoy\") { return 1; } return 0; }";
+        let g = "fn main() -> Int64 { if endsWith(\"hi\", \"ahoy\") { return 1; } return 0; }";
         assert_eq!(run(g).unwrap(), 0);
     }
 
@@ -1972,11 +1972,11 @@ mod tests {
     fn indexing_in_refinement_predicate() {
         let ok = "type G = String where value.length >= 1 && value[0] == 'H'; \
                   fn mk(s: String) -> G { return G(s); } \
-                  fn main() -> Int { let g = mk(\"Hi\"); return g.length; }";
+                  fn main() -> Int64 { let g = mk(\"Hi\"); return g.length; }";
         assert_eq!(run(ok).unwrap(), 2);
         // A provably-wrong constant is rejected at compile time (via consteval).
         let bad = "type G = String where value.length >= 1 && value[0] == 'H'; \
-                   fn main() -> Int { let g = G(\"bye\"); return 0; }";
+                   fn main() -> Int64 { let g = G(\"bye\"); return 0; }";
         assert!(run(bad).unwrap_err().contains("does not satisfy `G`"));
     }
 
@@ -1984,7 +1984,7 @@ mod tests {
     fn validated_string_accepts_valid_value() {
         let src = "type Name = String where value.length >= 3; \
                    fn mk(s: String) -> Name { return Name(s); } \
-                   fn main() -> Int { let n = mk(\"bob\"); return n.length; }";
+                   fn main() -> Int64 { let n = mk(\"bob\"); return n.length; }";
         assert_eq!(run(src).unwrap(), 3);
     }
 
@@ -1993,19 +1993,19 @@ mod tests {
         // Runtime construction of an invalid string aborts (matches native exit 1).
         let src = "type Name = String where value.length >= 3; \
                    fn mk(s: String) -> Name { return Name(s); } \
-                   fn main() -> Int { let n = mk(\"x\"); return 0; }";
+                   fn main() -> Int64 { let n = mk(\"x\"); return 0; }";
         assert!(run(src).unwrap_err().contains("validation failed for `Name`"));
     }
 
     #[test]
     fn cross_field_record_valid_and_invalid() {
-        let ok = "type R = { a: Int, b: Int } where a < b; \
-                  fn mk(x: Int, y: Int) -> R { return R { a: x, b: y }; } \
-                  fn main() -> Int { let r = mk(1, 2); return r.b; }";
+        let ok = "type R = { a: Int64, b: Int64 } where a < b; \
+                  fn mk(x: Int64, y: Int64) -> R { return R { a: x, b: y }; } \
+                  fn main() -> Int64 { let r = mk(1, 2); return r.b; }";
         assert_eq!(run(ok).unwrap(), 2);
-        let bad = "type R = { a: Int, b: Int } where a < b; \
-                   fn mk(x: Int, y: Int) -> R { return R { a: x, b: y }; } \
-                   fn main() -> Int { let r = mk(5, 1); return 0; }";
+        let bad = "type R = { a: Int64, b: Int64 } where a < b; \
+                   fn mk(x: Int64, y: Int64) -> R { return R { a: x, b: y }; } \
+                   fn main() -> Int64 { let r = mk(5, 1); return 0; }";
         assert!(run(bad).unwrap_err().contains("violates its `where`"));
     }
 
@@ -2014,7 +2014,7 @@ mod tests {
         // A non-escaping cell per iteration: the inferred release returns each
         // slot to the slab, so 70k allocations fit in 65536 cells — the
         // interpreter executes the same drop plan as the native backend.
-        let src = "fn main() -> Int { \
+        let src = "fn main() -> Int64 { \
                        let mut i = 0 \
                        let mut last = 0 \
                        while i < 70000 { \
@@ -2031,7 +2031,7 @@ mod tests {
     fn slab_exhaustion_traps_like_native() {
         // Cells that ESCAPE (aliased) are not auto-released; the 65537th live
         // allocation must trap with the native slab's exact message.
-        let src = "fn main() -> Int { \
+        let src = "fn main() -> Int64 { \
                        let mut i = 0 \
                        while i < 70000 { \
                            let c = cell(1) \
@@ -2045,9 +2045,9 @@ mod tests {
 
     #[test]
     fn validation_trap_message_is_canonical() {
-        let src = "type Age = Int where value >= 18; \
-                   fn mk(n: Int) -> Age { return Age(n); } \
-                   fn main() -> Int { let a = mk(5); return 0; }";
+        let src = "type Age = Int64 where value >= 18; \
+                   fn mk(n: Int64) -> Age { return Age(n); } \
+                   fn main() -> Int64 { let a = mk(5); return 0; }";
         assert_eq!(run(src).unwrap_err(), "validation failed for `Age`");
     }
 
@@ -2055,13 +2055,13 @@ mod tests {
     fn float_refined_type_constructs_and_rejects_at_runtime() {
         // Refinements over a Float base run under the runtime evaluator (this
         // used to fail for even VALID values — ConstVal had no Float).
-        let ok = "type Ratio = Float where value > 0.0 && value <= 1.0; \
-                  fn mk(x: Float) -> Ratio { return Ratio(x); } \
-                  fn main() -> Int { let r = mk(0.5); return 0; }";
+        let ok = "type Ratio = Float64 where value > 0.0 && value <= 1.0; \
+                  fn mk(x: Float64) -> Ratio { return Ratio(x); } \
+                  fn main() -> Int64 { let r = mk(0.5); return 0; }";
         assert_eq!(run(ok).unwrap(), 0);
-        let bad = "type Ratio = Float where value > 0.0 && value <= 1.0; \
-                   fn mk(x: Float) -> Ratio { return Ratio(x); } \
-                   fn main() -> Int { let r = mk(2.5); return 0; }";
+        let bad = "type Ratio = Float64 where value > 0.0 && value <= 1.0; \
+                   fn mk(x: Float64) -> Ratio { return Ratio(x); } \
+                   fn main() -> Int64 { let r = mk(2.5); return 0; }";
         assert!(run(bad).unwrap_err().contains("validation failed for `Ratio`"));
     }
 
@@ -2069,19 +2069,19 @@ mod tests {
     fn sized_int_refined_type_constructs_at_runtime() {
         let src = "type Small = Int32 where value < 100; \
                    fn mk(x: Int32) -> Small { return Small(x); } \
-                   fn main() -> Int { let s = mk(Int32(5)); return 0; }";
+                   fn main() -> Int64 { let s = mk(Int32(5)); return 0; }";
         assert_eq!(run(src).unwrap(), 0);
     }
 
     #[test]
     fn cross_field_predicate_over_float_fields() {
         let ok = "type R = { a: Float64, b: Float64 } where a < b; \
-                  fn mk(x: Float, y: Float) -> R { return R { a: x, b: y }; } \
-                  fn main() -> Int { let r = mk(1.0, 2.0); return 0; }";
+                  fn mk(x: Float64, y: Float64) -> R { return R { a: x, b: y }; } \
+                  fn main() -> Int64 { let r = mk(1.0, 2.0); return 0; }";
         assert_eq!(run(ok).unwrap(), 0);
         let bad = "type R = { a: Float64, b: Float64 } where a < b; \
-                   fn mk(x: Float, y: Float) -> R { return R { a: x, b: y }; } \
-                   fn main() -> Int { let r = mk(2.0, 1.0); return 0; }";
+                   fn mk(x: Float64, y: Float64) -> R { return R { a: x, b: y }; } \
+                   fn main() -> Int64 { let r = mk(2.0, 1.0); return 0; }";
         assert!(run(bad).unwrap_err().contains("violates its `where`"));
     }
 
@@ -2089,13 +2089,13 @@ mod tests {
     fn int_arithmetic_wraps_like_native() {
         // i64::MAX + 1 wraps to i64::MIN in BOTH backends (and independent of
         // the cargo profile — bare `+` would panic in a debug build).
-        let src = "fn main() -> Int { \
+        let src = "fn main() -> Int64 { \
                        let m = 9223372036854775807 \
                        let w = m + 1 \
                        if w < 0 { return 1 } return 0 }";
         assert_eq!(run(src).unwrap(), 1);
         // -i64::MIN also wraps (back to MIN).
-        let neg = "fn main() -> Int { \
+        let neg = "fn main() -> Int64 { \
                        let m = -9223372036854775808 \
                        let w = 0 - m \
                        if w < 0 { return 1 } return 0 }";
@@ -2104,12 +2104,12 @@ mod tests {
 
     #[test]
     fn division_traps_have_stable_messages() {
-        let z = "fn main() -> Int { let mut d = 0; return 1 / d; }";
+        let z = "fn main() -> Int64 { let mut d = 0; return 1 / d; }";
         assert_eq!(run(z).unwrap_err(), "division by zero");
-        let rz = "fn main() -> Int { let mut d = 0; return 1 % d; }";
+        let rz = "fn main() -> Int64 { let mut d = 0; return 1 % d; }";
         assert_eq!(run(rz).unwrap_err(), "remainder by zero");
         // i64::MIN / -1 is unrepresentable: a clean trap, not a panic/SEH crash.
-        let ovf = "fn main() -> Int { \
+        let ovf = "fn main() -> Int64 { \
                        let m = -9223372036854775808 \
                        let mut d = 0 - 1 \
                        return m / d }";
@@ -2121,17 +2121,17 @@ mod tests {
         // `value + 1 != 0` at i64::MAX: wraps to MIN (≠ 0) — the predicate
         // holds in both backends (checked arithmetic used to refuse to prove
         // it and the interpreter then errored out).
-        let src = "type T = Int where value + 1 != 0; \
-                   fn mk(x: Int) -> T { return T(x); } \
-                   fn main() -> Int { let t = mk(9223372036854775807); return 0; }";
+        let src = "type T = Int64 where value + 1 != 0; \
+                   fn mk(x: Int64) -> T { return T(x); } \
+                   fn main() -> Int64 { let t = mk(9223372036854775807); return 0; }";
         assert_eq!(run(src).unwrap(), 0);
     }
 
     #[test]
     fn regex_match_operator() {
-        let src = "fn main() -> Int { if \"abc\" =~ \"[a-z]+\" { return 1; } return 0; }";
+        let src = "fn main() -> Int64 { if \"abc\" =~ \"[a-z]+\" { return 1; } return 0; }";
         assert_eq!(run(src).unwrap(), 1);
-        let no = "fn main() -> Int { if \"ab9\" =~ \"[a-z]+\" { return 1; } return 0; }";
+        let no = "fn main() -> Int64 { if \"ab9\" =~ \"[a-z]+\" { return 1; } return 0; }";
         assert_eq!(run(no).unwrap(), 0);
     }
 
@@ -2139,15 +2139,15 @@ mod tests {
     fn validated_string_via_regex_traps() {
         let src = "type Code = String where value =~ \"[A-Z][A-Z][A-Z]\"; \
                    fn mk(s: String) -> Code { return Code(s); } \
-                   fn main() -> Int { let c = mk(\"ab\"); return 0; }";
+                   fn main() -> Int64 { let c = mk(\"ab\"); return 0; }";
         assert!(run(src).unwrap_err().contains("validation failed for `Code`"));
     }
 
     #[test]
     fn validation_accumulates_all_issues() {
         // Both checks fail → Invalid carries both issues (i18n keys included).
-        let src = "type P = { n: Int }; \
-                   fn v(a: Int, b: Int) -> Validation<P> { \
+        let src = "type P = { n: Int64 }; \
+                   fn v(a: Int64, b: Int64) -> Validation<P> { \
                        let mut issues: Array<Issue> = []; \
                        if a < 0 { issues.push(Issue { key: \"a.min\", path: \"a\", message: \"m\" }); } \
                        if b < 0 { issues.push(Issue { key: \"b.min\", path: \"b\", message: \"m\" }); } \
@@ -2155,32 +2155,32 @@ mod tests {
                        return Valid(P { n: a + b }); } \
                    fn iss(x: Validation<P>) -> Array<Issue> { \
                        return match x { Valid(p) => [], Invalid(is) => is }; } \
-                   fn main() -> Int { return iss(v(0 - 1, 0 - 1)).length; }";
+                   fn main() -> Int64 { return iss(v(0 - 1, 0 - 1)).length; }";
         assert_eq!(run(src).unwrap(), 2);
     }
 
     #[test]
     fn validation_valid_case_carries_the_value() {
-        let src = "type P = { n: Int }; \
-                   fn v(a: Int) -> Validation<P> { \
+        let src = "type P = { n: Int64 }; \
+                   fn v(a: Int64) -> Validation<P> { \
                        if a < 0 { return Invalid([]); } return Valid(P { n: a }); } \
-                   fn valueOr(x: Validation<P>) -> Int { \
+                   fn valueOr(x: Validation<P>) -> Int64 { \
                        return match x { Valid(p) => p.n, Invalid(is) => 0 - 1 }; } \
-                   fn main() -> Int { return valueOr(v(41)); }";
+                   fn main() -> Int64 { return valueOr(v(41)); }";
         assert_eq!(run(src).unwrap(), 41);
     }
 
     #[test]
     fn multiline_string_includes_the_newline() {
         // A raw newline inside "..." is part of the string (RFC-0007).
-        let src = "fn main() -> Int { let s = \"ab\ncd\"; return len(s); }"; // 'a','b','\n','c','d' = 5
+        let src = "fn main() -> Int64 { let s = \"ab\ncd\"; return len(s); }"; // 'a','b','\n','c','d' = 5
         assert_eq!(run(src).unwrap(), 5);
     }
 
     #[test]
     fn template_value_exposes_parts_and_values() {
         // `template"..."` yields a first-class Template { parts, values }.
-        let src = "fn main() -> Int { let n = 7; let t = template\"a\\{n}b\"; \
+        let src = "fn main() -> Int64 { let n = 7; let t = template\"a\\{n}b\"; \
                    return t.parts.length + t.values.length; }"; // 2 parts + 1 value = 3
         assert_eq!(run(src).unwrap(), 3);
     }
@@ -2188,14 +2188,14 @@ mod tests {
     #[test]
     fn tagged_template_needs_an_interpolation() {
         // A tag on a hole-less string is rejected (use a plain string instead).
-        let src = "fn sql(p: Array<String>, v: Array<Value>) -> Int { return 0; } \
-                   fn main() -> Int { return sql\"no holes here\"; }";
+        let src = "fn sql(p: Array<String>, v: Array<Value>) -> Int64 { return 0; } \
+                   fn main() -> Int64 { return sql\"no holes here\"; }";
         assert!(run(src).unwrap_err().contains("interpolation"));
     }
 
     #[test]
     fn value_boxes_string_and_int_distinctly() {
-        let src = "fn main() -> Int { \
+        let src = "fn main() -> Int64 { \
                    let a = match value(7) { VInt(n) => n, VBool(b) => 0, VStr(s) => 0 - 1 }; \
                    let b = match value(\"hey\") { VInt(n) => 0, VBool(x) => 0, VStr(s) => len(s) }; \
                    return a + b; }"; // 7 + 3
@@ -2206,7 +2206,7 @@ mod tests {
     fn logger_and_levels_typecheck_and_run() {
         // A logger with each level, using interpolation in the message. Logs go
         // to stderr; the program returns normally.
-        let src = "fn main() -> Int { let log = logger(\"t\"); let n = 2; \
+        let src = "fn main() -> Int64 { let log = logger(\"t\"); let n = 2; \
                    log.trace(\"a\"); log.debug(\"b\"); log.info(\"n=\\{n}\"); \
                    log.warn(\"c\"); log.error(\"d\"); return n; }";
         assert_eq!(run(src).unwrap(), 2);
@@ -2215,55 +2215,55 @@ mod tests {
     #[test]
     fn log_level_requires_a_logger() {
         // Calling a level on a non-Logger is rejected.
-        let src = "fn main() -> Int { info(\"notalogger\", \"x\"); return 0; }";
+        let src = "fn main() -> Int64 { info(\"notalogger\", \"x\"); return 0; }";
         assert!(run(src).is_err());
     }
 
     #[test]
     fn logging_is_forbidden_in_spawned_tasks() {
         // A spawned function must be pure; logging is observable I/O.
-        let src = "fn work(n: Int) -> Int { let l = logger(\"w\"); l.info(\"hi\"); return n; } \
-                   fn main() -> Int { let t = spawn work(1); return join(t); }";
+        let src = "fn work(n: Int64) -> Int64 { let l = logger(\"w\"); l.info(\"hi\"); return n; } \
+                   fn main() -> Int64 { let t = spawn work(1); return join(t); }";
         assert!(run(src).is_err());
     }
 
     #[test]
     fn logging_config_block_parses_and_runs() {
         let src = "logging { level: warn } \
-                   fn main() -> Int { let log = logger(\"a\"); \
+                   fn main() -> Int64 { let log = logger(\"a\"); \
                    log.info(\"filtered\"); log.error(\"shown\"); return 0; }";
         assert_eq!(run(src).unwrap(), 0);
     }
 
     #[test]
     fn invalid_log_level_is_rejected() {
-        let src = "logging { level: loud } fn main() -> Int { return 0; }";
+        let src = "logging { level: loud } fn main() -> Int64 { return 0; }";
         assert!(run(src).unwrap_err().contains("log level"));
     }
 
     #[test]
     fn duplicate_logging_block_is_rejected() {
         let src = "logging { level: info } logging { level: warn } \
-                   fn main() -> Int { return 0; }";
+                   fn main() -> Int64 { return 0; }";
         assert!(run(src).unwrap_err().contains("duplicate"));
     }
 
     #[test]
     fn logging_sink_and_level_parse_together() {
         let src = "logging { level: warn, sink: stdout } \
-                   fn main() -> Int { let l = logger(\"a\"); l.warn(\"x\"); return 0; }";
+                   fn main() -> Int64 { let l = logger(\"a\"); l.warn(\"x\"); return 0; }";
         assert_eq!(run(src).unwrap(), 0);
     }
 
     #[test]
     fn unknown_sink_is_rejected() {
-        let src = "logging { sink: syslog } fn main() -> Int { return 0; }";
+        let src = "logging { sink: syslog } fn main() -> Int64 { return 0; }";
         assert!(run(src).unwrap_err().contains("sink"));
     }
 
     #[test]
     fn file_sink_needs_a_string_path() {
-        let src = "logging { sink: file(main) } fn main() -> Int { return 0; }";
+        let src = "logging { sink: file(main) } fn main() -> Int64 { return 0; }";
         assert!(run(src).is_err());
     }
 
@@ -2272,14 +2272,14 @@ mod tests {
         // Build+free a list many more times than the cell budget: only possible
         // if `freeList` reclaims each node and its slot is reused.
         let src = "
-            type Node = { value: Int, next: Option<Ref<Node>> };
-            fn freeList(o: Option<Ref<Node>>) -> Int {
+            type Node = { value: Int64, next: Option<Ref<Node>> };
+            fn freeList(o: Option<Ref<Node>>) -> Int64 {
                 return match o { Some(r) => freeNode(r), None => 0 };
             }
-            fn freeNode(r: Ref<Node>) -> Int {
+            fn freeNode(r: Ref<Node>) -> Int64 {
                 let tail = get(r).next; release(r); return freeList(tail);
             }
-            fn main() -> Int {
+            fn main() -> Int64 {
                 let mut i = 0;
                 while i < 200 {
                     let mut head: Option<Ref<Node>> = None;
@@ -2297,17 +2297,17 @@ mod tests {
     #[test]
     fn binary_tree_sum() {
         let src = "
-            type Tree = { value: Int, left: Option<Ref<Tree>>, right: Option<Ref<Tree>> };
-            fn tsum(o: Option<Ref<Tree>>) -> Int {
+            type Tree = { value: Int64, left: Option<Ref<Tree>>, right: Option<Ref<Tree>> };
+            fn tsum(o: Option<Ref<Tree>>) -> Int64 {
                 return match o {
                     Some(r) => get(r).value + tsum(get(r).left) + tsum(get(r).right),
                     None => 0,
                 };
             }
-            fn leaf(v: Int) -> Option<Ref<Tree>> {
+            fn leaf(v: Int64) -> Option<Ref<Tree>> {
                 return Some(cell(Tree { value: v, left: None, right: None }));
             }
-            fn main() -> Int {
+            fn main() -> Int64 {
                 let root = Some(cell(Tree { value: 2, left: leaf(1), right: leaf(4) }));
                 return tsum(root);
             }
@@ -2318,7 +2318,7 @@ mod tests {
     #[test]
     fn generic_reference_holds_any_type() {
         // A Ref<String> mutated in place, then measured.
-        let src = "fn main() -> Int { let s = cell(\"ab\"); \
+        let src = "fn main() -> Int64 { let s = cell(\"ab\"); \
                        set(s, concat(get(s), \"cd\")); \
                        let n = len(get(s)); release(s); return n; }";
         assert_eq!(run(src).unwrap(), 4);
@@ -2327,7 +2327,7 @@ mod tests {
     #[test]
     fn use_after_release_is_caught() {
         // Access through a stale alias must fail the generation check, not dangle.
-        let src = "fn main() -> Int { \
+        let src = "fn main() -> Int64 { \
                        let c = cell(10); let d = c; release(c); return get(d); }";
         let e = run(src).unwrap_err();
         assert!(e.contains("used after release"), "{e}");
@@ -2336,10 +2336,10 @@ mod tests {
     #[test]
     fn released_slot_is_reused_with_a_new_generation() {
         // After release, a fresh cell reuses the slot; the old reference is stale.
-        let ok = "fn main() -> Int { \
+        let ok = "fn main() -> Int64 { \
                       let c = cell(1); release(c); let d = cell(2); return get(d); }";
         assert_eq!(run(ok).unwrap(), 2);
-        let stale = "fn main() -> Int { \
+        let stale = "fn main() -> Int64 { \
                         let c = cell(1); release(c); let d = cell(2); return get(c); }";
         assert!(run(stale).unwrap_err().contains("used after release"));
     }
@@ -2347,8 +2347,8 @@ mod tests {
     #[test]
     fn spawn_and_join_fork_join() {
         let src = "
-            fn sq(n: Int) -> Int { return n * n; }
-            fn main() -> Int {
+            fn sq(n: Int64) -> Int64 { return n * n; }
+            fn main() -> Int64 {
                 let a = spawn sq(6);
                 let b = spawn sq(8);
                 return join(a) + join(b);   // 36 + 64
@@ -2360,9 +2360,9 @@ mod tests {
     #[test]
     fn modify_parameter_writes_back_to_caller() {
         let src = "
-            type C = { x: Int };
+            type C = { x: Int64 };
             fn bump(c: modify C) { c.x = c.x + 1; }
-            fn main() -> Int {
+            fn main() -> Int64 {
                 let mut c = C { x: 40 };
                 bump(c); bump(c);   // caller's c is mutated each time
                 return c.x;          // 42
@@ -2374,10 +2374,10 @@ mod tests {
     #[test]
     fn record_field_access_and_subtyping() {
         let src = "
-            type Named = { name: Int };
-            type Pt = { name: Int, x: Int, y: Int };
-            fn nm(w: Named) -> Int { return w.name; }
-            fn main() -> Int {
+            type Named = { name: Int64 };
+            type Pt = { name: Int64, x: Int64, y: Int64 };
+            fn nm(w: Named) -> Int64 { return w.name; }
+            fn main() -> Int64 {
                 let p = Pt { name: 3, x: 10, y: 20 };
                 return nm(p) + p.x + p.y;   // 3 + 10 + 20
             }
@@ -2388,11 +2388,11 @@ mod tests {
     #[test]
     fn enum_construct_and_match() {
         let src = "
-            type Shape = | Circle(Int) | Square(Int) | Nil;
-            fn area(s: Shape) -> Int {
+            type Shape = | Circle(Int64) | Square(Int64) | Nil;
+            fn area(s: Shape) -> Int64 {
                 return match s { Circle(r) => 3 * r * r, Square(w) => w * w, Nil => 0 };
             }
-            fn main() -> Int { return area(Circle(2)) + area(Square(5)) + area(Nil); }
+            fn main() -> Int64 { return area(Circle(2)) + area(Square(5)) + area(Nil); }
         ";
         assert_eq!(run(src).unwrap(), 37); // 12 + 25 + 0
     }
@@ -2400,13 +2400,13 @@ mod tests {
     #[test]
     fn dynamic_string_concat_and_len() {
         let src = "fn g(n: String) -> String { return concat(concat(\"Hi, \", n), \"!\"); } \
-                   fn main() -> Int { return len(g(\"Vela\")); }";
+                   fn main() -> Int64 { return len(g(\"Vela\")); }";
         assert_eq!(run(src).unwrap(), 9); // "Hi, Vela!" = 9 bytes
     }
 
     #[test]
     fn string_eq() {
-        let src = "fn main() -> Int { \
+        let src = "fn main() -> Int64 { \
                    let s = \"hello\"; \
                    if s == \"hello\" { return 1; } return 0; }";
         assert_eq!(run(src).unwrap(), 1);
@@ -2415,7 +2415,7 @@ mod tests {
     #[test]
     fn while_loop_and_mut() {
         let src = "
-            fn main() -> Int {
+            fn main() -> Int64 {
                 let mut i = 0;
                 let mut sum = 0;
                 while i < 5 {

@@ -15,7 +15,7 @@ fn same<T: Eq>(a: T, b: T) -> Bool {
     return a == b
 }
 
-fn main() -> Int {
+fn main() -> Int64 {
     print(max(3, 9))           // 9
     print(sum3(10, 20, 30))    // 60
     if same("hi", "hi") { print("equal") }   // equal (Eq works on String)
