@@ -194,6 +194,13 @@ impl Parser {
         if self.peek() == expected {
             self.advance();
             Ok(())
+        } else if *expected == Tok::Gt && *self.peek() == Tok::GtEq {
+            // `let x: Array<Int>= []` — the lexer max-munches `>=`; when a `>`
+            // is expected (closing a generic argument list), split it into the
+            // `>` we consume and an `=` left for the caller.
+            self.tokens[self.pos].tok = Tok::Eq;
+            self.tokens[self.pos].col += 1;
+            Ok(())
         } else {
             Err(Diagnostic::error(
                 self.line(),
@@ -232,6 +239,10 @@ impl Parser {
         let mut saw_logging = false;
         let mut errors = Vec::new();
         while *self.peek() != Tok::Eof {
+            // A failed `fn f<T>` / `type G<T>` clears its generic params only on
+            // the success path — reset here so stale params never leak into the
+            // NEXT declaration (where a `T` would wrongly parse as Type::Param).
+            self.type_params.clear();
             // Collect any leading `///` doc comments and attach to the next decl.
             let doc = self.take_docs();
             if *self.peek() == Tok::Eof {
@@ -829,6 +840,12 @@ impl Parser {
         let mut stmts = Vec::new();
         while *self.peek() != Tok::RBrace && *self.peek() != Tok::Eof {
             self.take_docs(); // discard any stray `///` inside a body
+            // Semicolons are optional separators: a stray one (e.g. after an
+            // `if { .. };`) is skipped, never a parse error.
+            if *self.peek() == Tok::Semi {
+                self.advance();
+                continue;
+            }
             if *self.peek() == Tok::RBrace || *self.peek() == Tok::Eof {
                 break;
             }
@@ -1137,13 +1154,17 @@ impl Parser {
             }
             Tok::Ident(name) => {
                 // Tagged template `tag"...\{e}..."` (RFC-0007): an identifier
-                // directly followed by an interpolated string literal.
-                if matches!(self.peek(), Tok::TemplateStr { .. }) {
+                // directly followed — on the same line — by an interpolated
+                // string literal. The same-line requirement keeps a statement
+                // ending in a variable from swallowing the next statement's
+                // string literal in semicolon-free code.
+                let string_adjacent = self.tokens[self.pos].line == line;
+                if string_adjacent && matches!(self.peek(), Tok::TemplateStr { .. }) {
                     if let Tok::TemplateStr { parts, exprs } = self.advance() {
                         return self.tagged_template(name, parts, exprs, line, col);
                     }
                 }
-                if matches!(self.peek(), Tok::Str(_)) {
+                if string_adjacent && matches!(self.peek(), Tok::Str(_)) {
                     return Err(Diagnostic::error(
                         line,
                         col,
@@ -1241,7 +1262,12 @@ impl Parser {
             no_struct: false,
             type_params: self.type_params.clone(),
         };
-        let e = sub.expr()?;
+        // A sub-parser diagnostic carries line numbers relative to the hole
+        // snippet — anchor it at the template and embed the detail, exactly
+        // like the lex-error wrapping above.
+        let e = sub.expr().map_err(|d| {
+            Diagnostic::error(line, col, "parse", format!("in interpolation: {}", d.message))
+        })?;
         if *sub.peek() != Tok::Eof {
             return Err(Diagnostic::error(
                 line,
@@ -1398,6 +1424,65 @@ mod tests {
         assert!(matches!(f.body.stmts[0], Stmt::Let { .. }));
         assert!(matches!(f.body.stmts[2], Stmt::Assign { .. }));
         assert!(matches!(f.body.stmts[3], Stmt::Return { value: Some(_), .. }));
+    }
+
+    #[test]
+    fn stray_semicolon_after_block_statement_is_tolerated() {
+        // "Semicolons optional" includes a stray one after `if { .. }`.
+        let src = "fn main() -> Int { if true { print(1) }; return 0 }";
+        let p = parse_src(src);
+        assert_eq!(p.functions[0].body.stmts.len(), 2);
+    }
+
+    #[test]
+    fn gteq_splits_when_closing_a_generic() {
+        // `Array<Int>= []` — the lexer max-munches `>=`; the parser splits it.
+        let src = "fn main() -> Int { let x: Array<Int>= array() return alen(x) }";
+        let p = parse_src(src);
+        assert!(matches!(
+            p.functions[0].body.stmts[0],
+            Stmt::Let { ty: Some(Type::Array(_)), .. }
+        ));
+    }
+
+    #[test]
+    fn identifier_before_next_lines_string_is_not_a_tagged_template() {
+        // In semicolon-free code, a statement ending in a variable followed by
+        // a statement starting with a string must not raise the tagged-template
+        // error (adjacency requires the same line).
+        let src = "fn main() -> Int {\n\
+                   let y = 1\n\
+                   let z = y\n\
+                   print(\"done\")\n\
+                   return 0\n\
+                   }";
+        let p = parse_src(src);
+        assert_eq!(p.functions[0].body.stmts.len(), 4);
+    }
+
+    #[test]
+    fn hole_parse_errors_are_anchored_at_the_template() {
+        // The sub-parser's hole-relative line numbers must not leak.
+        let toks = lex("fn main() -> Int {\n    let s = \"\\{ 1 + }\"\n    return 0\n}").unwrap();
+        let e = parse(toks).unwrap_err();
+        assert_eq!(e.line, 2, "{e:?}");
+        assert!(e.message.contains("in interpolation"), "{}", e.message);
+    }
+
+    #[test]
+    fn failed_generic_decl_does_not_leak_type_params() {
+        // After a broken `fn bad<T>`, `T` in the NEXT declaration must parse as
+        // a named type, not a stale Type::Param.
+        let src = "fn bad<T>(x: T -> T { return x } \
+                   type T = Int \
+                   fn ok(x: T) -> T { return x } \
+                   fn main() -> Int { return ok(1) }";
+        let toks = lex(src).unwrap();
+        let mut p = Parser { tokens: toks, pos: 0, no_struct: false, type_params: Vec::new() };
+        let (prog, errors) = p.program_accum();
+        assert!(!errors.is_empty(), "the broken decl must actually fail");
+        let ok = prog.functions.iter().find(|f| f.name == "ok").expect("ok parsed");
+        assert_eq!(ok.params[0].ty, Type::Named("T".into()), "not a stale Param");
     }
 
     #[test]

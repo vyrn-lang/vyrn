@@ -154,7 +154,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
             }
             if is_doc {
                 let text: String = chars[start + 3..i].iter().collect();
-                let text = text.strip_prefix(' ').unwrap_or(&text).to_string();
+                // CRLF files leave a trailing `\r` (the scan stops at `\n`
+                // only) — strip it so it never leaks into rendered markdown.
+                let text = text.strip_suffix('\r').unwrap_or(&text);
+                let text = text.strip_prefix(' ').unwrap_or(text).to_string();
                 out.push(Token { tok: Tok::Doc(text), line, col });
             }
             continue;
@@ -165,6 +168,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
         // characters, so only `\{` opens interpolation.
         if c == '"' {
             let start_col = col; // column of the opening quote
+            let start_line = line; // a multi-line string is anchored at its start
             i += 1; // opening quote
             let mut parts: Vec<String> = Vec::new();
             let mut exprs: Vec<String> = Vec::new();
@@ -232,6 +236,33 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                                     }
                                     i += 1; // closing nested quote
                                 }
+                                // Skip a nested char literal — a `}` inside one
+                                // (`'}'`, `'\u{1F600}'`) must not close the hole.
+                                '\'' => {
+                                    i += 1;
+                                    while i < chars.len() && chars[i] != '\'' && chars[i] != '\n'
+                                    {
+                                        i += if chars[i] == '\\' { 2 } else { 1 };
+                                    }
+                                    if i >= chars.len() || chars[i] == '\n' {
+                                        return Err(Diagnostic::error(
+                                            line,
+                                            start_col,
+                                            "lex",
+                                            "unterminated character literal in interpolation"
+                                                .to_string(),
+                                        ));
+                                    }
+                                    i += 1; // closing nested quote
+                                }
+                                // Skip a `//` comment — a `}` inside it is text,
+                                // not the end of the hole. The `\n` stays for the
+                                // newline arm to count.
+                                '/' if i + 1 < chars.len() && chars[i + 1] == '/' => {
+                                    while i < chars.len() && chars[i] != '\n' {
+                                        i += 1;
+                                    }
+                                }
                                 '{' => {
                                     depth += 1;
                                     i += 1;
@@ -297,17 +328,20 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                 cur.push(ch);
                 i += 1;
             }
+            // The token is anchored at the OPENING quote: a diagnostic on a
+            // multi-line string must point where it starts, not where it ends
+            // (and `(end_line, start_col)` would be internally inconsistent).
             if exprs.is_empty() {
                 out.push(Token {
                     tok: Tok::Str(cur),
-                    line,
+                    line: start_line,
                     col: start_col,
                 });
             } else {
                 parts.push(cur); // the trailing fragment after the last hole
                 out.push(Token {
                     tok: Tok::TemplateStr { parts, exprs },
-                    line,
+                    line: start_line,
                     col: start_col,
                 });
             }
@@ -350,6 +384,16 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                     (e, 3) // '\x'
                 }
             } else {
+                // A raw newline is almost certainly a typo (and would silently
+                // desync line counting) — require the `'\n'` escape.
+                if chars[i + 1] == '\n' {
+                    return Err(Diagnostic::error(
+                        line,
+                        start_col,
+                        "lex",
+                        "raw newline in character literal; write '\\n'".into(),
+                    ));
+                }
                 (chars[i + 1] as u32, 2) // 'x' — any Unicode scalar
             };
             if i + consumed >= chars.len() || chars[i + consumed] != '\'' {
@@ -546,5 +590,45 @@ mod tests {
         assert_eq!(toks[0].tok, Tok::Let);
         assert_eq!(toks[0].line, 2);
         assert_eq!(toks[1].line, 3);
+    }
+
+    #[test]
+    fn multiline_string_token_is_anchored_at_its_start() {
+        // A string spanning lines 2-4 must carry line 2 (where it opens), so a
+        // diagnostic about it points at the right place.
+        let toks = lex("let\n\"a\nb\nc\"\nx").unwrap();
+        assert!(matches!(toks[1].tok, Tok::Str(_)));
+        assert_eq!(toks[1].line, 2, "anchored at the opening quote");
+        assert_eq!(toks[2].line, 5, "counting still advances past it");
+    }
+
+    #[test]
+    fn doc_comment_strips_trailing_cr() {
+        // CRLF files must not leak `\r` into rendered markdown.
+        let toks = lex("/// hello\r\nfn").unwrap();
+        assert_eq!(toks[0].tok, Tok::Doc("hello".into()));
+    }
+
+    #[test]
+    fn hole_scanner_skips_comments_and_char_literals() {
+        // A `}` inside a char literal or a `//` comment must not close the hole.
+        let toks = lex("\"\\{'}'}\"").unwrap();
+        assert!(
+            matches!(&toks[0].tok, Tok::TemplateStr { exprs, .. } if exprs[0] == "'}'"),
+            "{:?}",
+            toks[0].tok
+        );
+        let toks = lex("\"\\{ 1 + // } not the end\n 2 }\"").unwrap();
+        assert!(
+            matches!(&toks[0].tok, Tok::TemplateStr { exprs, .. } if exprs[0].contains("2")),
+            "{:?}",
+            toks[0].tok
+        );
+    }
+
+    #[test]
+    fn raw_newline_in_char_literal_is_rejected() {
+        let e = lex("'\n'").unwrap_err();
+        assert!(e.message.contains("raw newline"), "{}", e.message);
     }
 }
