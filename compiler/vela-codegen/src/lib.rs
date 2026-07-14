@@ -3186,7 +3186,11 @@ impl<'a> Gen<'a> {
                     let sz = self.fresh_tmp();
                     self.emit(format!("{szp} = getelementptr {aggty}, ptr null, i64 1"));
                     self.emit(format!("{sz} = ptrtoint ptr {szp} to i64"));
-                    let buf = self.heap_alloc(&sz);
+                    // Always plain malloc — never the region arena: `push` grows
+                    // this buffer with `realloc` and array cleanup uses `free`,
+                    // both of which are undefined on an arena interior pointer.
+                    let buf = self.fresh_tmp();
+                    self.emit(format!("{buf} = call ptr @malloc(i64 {sz})"));
                     self.emit(format!("store {aggty} {v}, ptr {buf}"));
                     let a = self.fresh_tmp();
                     let b = self.fresh_tmp();

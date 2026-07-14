@@ -1,0 +1,16 @@
+/// Storing a block-local string into a longer-lived cell: `set(c, s)` retains
+/// `s`, so ownership analysis must not auto-free it at block exit — the later
+/// `get(c)` reads it back intact (this was a real use-after-free once).
+
+fn main() -> Int {
+    let a = "x"
+    let b = "y"
+    let c = cell("seed")
+    if true {
+        let s = concat(a, b)
+        set(c, s)
+    }
+    print(get(c))
+    release(c)
+    return 0
+}

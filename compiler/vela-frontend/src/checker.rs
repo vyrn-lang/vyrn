@@ -767,20 +767,7 @@ impl<'a> Checker<'a> {
                         b.ty, vty
                     ));
                 }
-                // Escape guard: inside a `region`, a heap-carrying value may not
-                // be stored into a binding that outlives the region — it would
-                // dangle once the region frees.
-                if let Some(&floor) = self.region_floor.borrow().last() {
-                    let idx = scope.iter().rposition(|f| f.contains_key(name));
-                    if idx.map_or(false, |i| i < floor) && self.contains_heap(&b.ty) {
-                        return Err(format!(
-                            "line {line}: cannot assign a heap value to `{name}`, which \
-                             outlives the enclosing `region` (it would dangle when the \
-                             region frees). Move `{name}` inside the region, or compute a \
-                             non-heap result to carry out."
-                        ));
-                    }
-                }
+                self.region_store_guard(name, &b.ty, scope, *line)?;
                 Ok(false)
             }
             Stmt::SetField { name, field, value, line } => {
@@ -806,6 +793,7 @@ impl<'a> Checker<'a> {
                         "line {line}: field `{field}` is {fty:?} but assigned {vty:?}"
                     ));
                 }
+                self.region_store_guard(name, &fty, scope, *line)?;
                 Ok(false)
             }
             Stmt::Return { value, line } => {
@@ -905,17 +893,48 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether a value of this type can carry a heap allocation (a dynamic
-    /// `String`, or a record/enum/Option/Result that transitively contains one).
+    /// `String`, an `Array` buffer, a `Ref` cell, a `Task` payload, or a
+    /// record/enum/Option/Result that transitively contains one).
     /// Used by the `region` escape guard.
     fn contains_heap(&self, ty: &Type) -> bool {
         match self.base(ty) {
             Type::Str => true,
+            // Array buffers and the cell slab are always malloc'd (never in the
+            // region arena), so only their *contents* can dangle.
+            Type::Array(inner) | Type::ArrayN(inner, _) => self.contains_heap(&inner),
+            Type::Ref(inner) | Type::Task(inner) => self.contains_heap(&inner),
             Type::Record(fs) => fs.iter().any(|f| self.contains_heap(&f.ty)),
             Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(|p| self.contains_heap(p))),
             Type::Option(inner) => self.contains_heap(&inner),
             Type::Result(a, b) => self.contains_heap(&a) || self.contains_heap(&b),
             _ => false,
         }
+    }
+
+    /// The `region` escape guard for a store into the binding `name`: inside a
+    /// `region`, a heap-carrying value may not be stored into a binding that
+    /// outlives the region — it would dangle once the region frees. `stored_ty`
+    /// is the type actually being stored (the binding's, a field's, or a call
+    /// argument's).
+    fn region_store_guard(
+        &self,
+        name: &str,
+        stored_ty: &Type,
+        scope: &Vec<HashMap<String, Binding>>,
+        line: usize,
+    ) -> Result<(), String> {
+        if let Some(&floor) = self.region_floor.borrow().last() {
+            let idx = scope.iter().rposition(|f| f.contains_key(name));
+            if idx.map_or(false, |i| i < floor) && self.contains_heap(stored_ty) {
+                return Err(format!(
+                    "line {line}: cannot store a heap value into `{name}`, which \
+                     outlives the enclosing `region` (it would dangle when the \
+                     region frees). Move `{name}` inside the region, or compute a \
+                     non-heap result to carry out."
+                ));
+            }
+        }
+        Ok(())
     }
 
     // ---- expressions ----------------------------------------------------
@@ -1768,6 +1787,11 @@ impl<'a> Checker<'a> {
                     "line {line}: `set` value is {v:?} but the cell holds {elem:?}"
                 ));
             }
+            // A store through a cell is a store into wherever the cell lives:
+            // `set(outer, <heap>)` inside a `region` would dangle at exit.
+            if let Expr::Var { name: cname, .. } = &args[0] {
+                self.region_store_guard(cname, &elem, scope, line)?;
+            }
             return Ok(Type::Unit);
         }
         // release(r: Ref<T>) -> Unit
@@ -1821,6 +1845,14 @@ impl<'a> Checker<'a> {
                 return Err(format!(
                     "line {line}: `push` value is {v:?} but the array holds {elem:?}"
                 ));
+            }
+            // `push(outer, <heap elem>)` inside a `region` stores a value that
+            // dies with the region into a buffer that outlives it (the rebind
+            // form `a = push(a, ..)` is caught by the Assign guard; this catches
+            // the statement/method form). The buffer itself is malloc'd, so
+            // pushing a non-heap element is fine.
+            if let Expr::Var { name: aname, .. } = &args[0] {
+                self.region_store_guard(aname, &elem, scope, line)?;
             }
             return Ok(Type::Array(Box::new(elem)));
         }
@@ -2675,6 +2707,65 @@ mod tests {
                        return 0; }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("outlives the enclosing `region`"), "{e}");
+    }
+
+    #[test]
+    fn rejects_heap_escaping_region_via_field() {
+        // Storing an arena string into an outer record's field dangles too.
+        let src = "type Holder = { s: String } \
+                   fn main() -> Int { \
+                       let mut h = Holder { s: \"init\" } \
+                       region { h.s = concat(\"a\", \"b\") } \
+                       return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("outlives the enclosing `region`"), "{e}");
+    }
+
+    #[test]
+    fn rejects_heap_escaping_region_via_push() {
+        // Pushing an arena string into an outer array outlives the region.
+        let src = "fn main() -> Int { \
+                       let mut a: Array<String> = array() \
+                       region { a = push(a, concat(\"x\", \"y\")) } \
+                       return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("outlives the enclosing `region`"), "{e}");
+    }
+
+    #[test]
+    fn rejects_heap_escaping_region_via_set() {
+        // Storing an arena string through an outer cell dangles at region exit.
+        let src = "fn main() -> Int { \
+                       let c = cell(\"seed\") \
+                       region { set(c, concat(\"a\", \"b\")) } \
+                       print(get(c)) release(c) return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("outlives the enclosing `region`"), "{e}");
+    }
+
+    #[test]
+    fn allows_nonheap_stores_out_of_region() {
+        // Ints carry no arena memory: pushing into an outer Array<Int> and
+        // setting an outer Ref<Int> from inside a region are both fine.
+        let src = "fn main() -> Int { \
+                       let mut a: Array<Int> = array() \
+                       let c = cell(1) \
+                       region { a = push(a, 2) set(c, 3) } \
+                       release(c) return at(a, 0) }";
+        assert!(check_src(src).is_ok());
+    }
+
+    #[test]
+    fn allows_region_local_cell_and_array_heap_stores() {
+        // A region-local cell/array dies with the region — heap stores are fine.
+        let src = "fn main() -> Int { \
+                       region { \
+                           let c = cell(\"seed\") \
+                           set(c, concat(\"a\", \"b\")) \
+                           print(get(c)) release(c) \
+                       } \
+                       return 0 }";
+        assert!(check_src(src).is_ok());
     }
 
     #[test]

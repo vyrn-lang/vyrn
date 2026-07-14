@@ -284,16 +284,28 @@ impl Analysis<'_> {
             Expr::Call { name, args, .. } => {
                 // These builtins only *read* their heap argument and never retain
                 // it — a whole candidate passed to one is a safe use: `len` /
-                // `print` / `concat` for strings, `get` / `set` for references,
+                // `print` / `concat` for strings, `get` for references,
                 // and the log methods (which format-and-write their message).
                 // `release` is intentionally excluded: it hands the cell off, so
                 // it escapes the binding (no auto-release on top of it). `logger`
                 // is excluded too: it *returns* its name argument (an alias). Any
                 // other call may alias its argument into its result (e.g.
                 // `fn id(s) { return s; }`), so it counts as an escape too.
-                if matches!(
+                //
+                // `set(c, v)` reads its *Ref* argument but STORES `v` in the cell
+                // — the cell outlives the block, so `v` must escape (a droppable
+                // `v` would be freed at block exit while the cell still points at
+                // it: a use-after-free on the next `get`).
+                if name == "set" {
+                    if let Some((c, rest)) = args.split_first() {
+                        self.operand(c);
+                        for a in rest {
+                            self.visit(a);
+                        }
+                    }
+                } else if matches!(
                     name.as_str(),
-                    "len" | "print" | "concat" | "get" | "set" | "at" | "alen"
+                    "len" | "print" | "concat" | "get" | "at" | "alen"
                         | "trace" | "debug" | "info" | "warn" | "error"
                 ) {
                     for a in args {
@@ -394,6 +406,27 @@ mod tests {
         let src = "fn main() -> Int { let a = \"x\"; let b = \"y\"; \
                    let s = concat(a, b); let u = concat(s, b); return len(u); }";
         assert_eq!(drop_count(src, "main"), 2);
+    }
+
+    #[test]
+    fn set_value_argument_escapes() {
+        // `set(c, s)` stores `s` in the cell, which outlives the block — `s`
+        // must NOT stay droppable (auto-freeing it would leave the cell
+        // dangling; the next `get` would be a use-after-free).
+        let src = "fn main() -> Int { let a = \"x\"; let b = \"y\"; \
+                   let c = cell(\"seed\"); \
+                   if true { let s = concat(a, b); set(c, s); } \
+                   print(get(c)); release(c); return 0; }";
+        assert_eq!(drop_count(src, "main"), 0);
+    }
+
+    #[test]
+    fn set_ref_argument_is_a_safe_read() {
+        // Passing an owned *cell* to `set`/`get` does not escape the cell
+        // binding — with no explicit `release`, it stays auto-releasable.
+        let src = "fn main() -> Int { let c = cell(1); set(c, 2); \
+                   let n = get(c); return n; }";
+        assert_eq!(drop_count(src, "main"), 1);
     }
 
     #[test]
