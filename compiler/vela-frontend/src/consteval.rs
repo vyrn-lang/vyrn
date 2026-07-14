@@ -14,6 +14,10 @@ use crate::ast::*;
 pub enum ConstVal {
     Int(i64),
     Bool(bool),
+    /// A float constant — participates in refinement predicates over a
+    /// `Float`/`Float64` base with exact IEEE `f64` semantics (identical to
+    /// both runtimes, so a compile-time proof never disagrees with them).
+    Float(f64),
     /// A string constant — supports `value.length` and equality in refinement
     /// predicates over a `String` base (RFC-0003). Not `Copy` (owns its bytes).
     Str(String),
@@ -36,15 +40,18 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
     match expr {
         Expr::Int(n) => Some(ConstVal::Int(*n)),
         Expr::Bool(b) => Some(ConstVal::Bool(*b)),
-        // String constants participate (for `String where` refinements); floats
-        // are still not const-evaluated in v0.1.
+        // String and float constants participate (for `String where` /
+        // `Float where` refinements).
         Expr::Str(s) => Some(ConstVal::Str(s.clone())),
-        Expr::Float(_) => None,
+        Expr::Float(f) => Some(ConstVal::Float(*f)),
         Expr::Var { name, .. } => env.get(name).cloned(),
         Expr::Unary { op, expr, .. } => {
             let v = eval(expr, env)?;
             match (op, v) {
-                (UnOp::Neg, ConstVal::Int(n)) => Some(ConstVal::Int(n.checked_neg()?)),
+                // Wrapping: the language's defined overflow semantics (both
+                // backends wrap), so a proof here never disagrees with runtime.
+                (UnOp::Neg, ConstVal::Int(n)) => Some(ConstVal::Int(n.wrapping_neg())),
+                (UnOp::Neg, ConstVal::Float(f)) => Some(ConstVal::Float(-f)),
                 (UnOp::Not, ConstVal::Bool(b)) => Some(ConstVal::Bool(!b)),
                 _ => None,
             }
@@ -70,9 +77,13 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
             let r = eval(rhs, env)?;
             match (l, r) {
                 (ConstVal::Int(a), ConstVal::Int(b)) => Some(match op {
-                    BinOp::Add => ConstVal::Int(a.checked_add(b)?),
-                    BinOp::Sub => ConstVal::Int(a.checked_sub(b)?),
-                    BinOp::Mul => ConstVal::Int(a.checked_mul(b)?),
+                    // Wrapping two's complement — matches both runtimes exactly
+                    // (checked_* would refuse to prove `value + 1 != 0` at
+                    // i64::MAX, which the backends happily wrap). Division by
+                    // zero and MIN/-1 stay unprovable: both trap at runtime.
+                    BinOp::Add => ConstVal::Int(a.wrapping_add(b)),
+                    BinOp::Sub => ConstVal::Int(a.wrapping_sub(b)),
+                    BinOp::Mul => ConstVal::Int(a.wrapping_mul(b)),
                     BinOp::Div => ConstVal::Int(a.checked_div(b)?),
                     BinOp::Rem => ConstVal::Int(a.checked_rem(b)?),
                     BinOp::Lt => ConstVal::Bool(a < b),
@@ -82,6 +93,22 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
                     BinOp::Eq => ConstVal::Bool(a == b),
                     BinOp::NotEq => ConstVal::Bool(a != b),
                     BinOp::And | BinOp::Or | BinOp::Match => return None,
+                }),
+                // IEEE f64 arithmetic — bit-identical in consteval, the
+                // interpreter, and native doubles. `/ 0.0` is inf/NaN (IEEE),
+                // never a trap. `%` on floats is rejected by the checker.
+                (ConstVal::Float(a), ConstVal::Float(b)) => Some(match op {
+                    BinOp::Add => ConstVal::Float(a + b),
+                    BinOp::Sub => ConstVal::Float(a - b),
+                    BinOp::Mul => ConstVal::Float(a * b),
+                    BinOp::Div => ConstVal::Float(a / b),
+                    BinOp::Lt => ConstVal::Bool(a < b),
+                    BinOp::LtEq => ConstVal::Bool(a <= b),
+                    BinOp::Gt => ConstVal::Bool(a > b),
+                    BinOp::GtEq => ConstVal::Bool(a >= b),
+                    BinOp::Eq => ConstVal::Bool(a == b),
+                    BinOp::NotEq => ConstVal::Bool(a != b),
+                    _ => return None,
                 }),
                 (ConstVal::Bool(a), ConstVal::Bool(b)) => match op {
                     BinOp::Eq => Some(ConstVal::Bool(a == b)),

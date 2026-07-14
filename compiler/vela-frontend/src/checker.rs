@@ -951,11 +951,37 @@ impl<'a> Checker<'a> {
     ) -> Result<Type, String> {
         match expr {
             // An integer literal takes the expected sized-integer type if there is
-            // one (`let x: Int32 = 5`), otherwise the default `Int`.
-            Expr::Int(_) => Ok(match expected.map(|t| self.base(t)) {
-                Some(t @ Type::IntN { .. }) => t,
-                _ => Type::Int,
-            }),
+            // one (`let x: Int32 = 5`), otherwise the default `Int` — but only if
+            // the value actually fits (`let x: Int8 = 300` is an error, not a
+            // silent wrap to 44). The lexer parses literals up to u64::MAX by
+            // wrapping into the i64 bit pattern, so a *negative* `n` here can only
+            // be a literal above i64::MAX — valid solely as a `UInt64`.
+            Expr::Int(n) => match expected.map(|t| self.base(t)) {
+                Some(t @ Type::IntN { bits, signed }) => {
+                    if int_literal_fits(*n, bits, signed) {
+                        Ok(t)
+                    } else {
+                        Err(format!(
+                            "integer literal {} does not fit {} (its range is {})",
+                            render_int_literal(*n),
+                            intn_name(bits, signed),
+                            intn_range(bits, signed),
+                        ))
+                    }
+                }
+                _ => {
+                    if *n < 0 {
+                        Err(format!(
+                            "integer literal {} exceeds Int's maximum \
+                             (9223372036854775807); only `UInt64` can hold it — \
+                             annotate the binding (`let x: UInt64 = ...`)",
+                            *n as u64
+                        ))
+                    } else {
+                        Ok(Type::Int)
+                    }
+                }
+            },
             // A float literal takes the expected float type (`let x: Float32 = 1.5`),
             // otherwise the default `Float` (f64).
             Expr::Float(_) => Ok(match expected.map(|t| self.base(t)) {
@@ -1003,6 +1029,13 @@ impl<'a> Checker<'a> {
                     .ok_or_else(|| format!("line {line}: unknown variable `{name}`"))
             }
             Expr::Unary { op, expr, line } => {
+                // `-9223372036854775808` is the one literal whose magnitude only
+                // exists negated (i64::MIN): the bare literal wraps to MIN in the
+                // lexer, and negation wraps it straight back — accept it here
+                // rather than diagnosing the (unrepresentable) positive half.
+                if *op == UnOp::Neg && matches!(**expr, Expr::Int(i64::MIN)) {
+                    return Ok(Type::Int);
+                }
                 let t = self.base(&self.expr(expr, scope, None, fn_ret)?);
                 match op {
                     UnOp::Neg if matches!(t, Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }) => Ok(t),
@@ -1015,14 +1048,34 @@ impl<'a> Checker<'a> {
                 let mut l = self.base(&self.expr(lhs, scope, None, fn_ret)?);
                 let mut r = self.base(&self.expr(rhs, scope, None, fn_ret)?);
                 // A plain integer literal adapts to a sized sibling operand, so
-                // `x + 5` (x: Int32) and `5 + x` both type-check.
-                if l == Type::Int && matches!(**lhs, Expr::Int(_)) {
-                    if let Type::IntN { .. } = r {
+                // `x + 5` (x: Int32) and `5 + x` both type-check — but only if it
+                // fits (`x < 300` on a UInt8 would otherwise silently truncate
+                // 300 to 44 in the comparison).
+                if l == Type::Int {
+                    if let (Expr::Int(n), Type::IntN { bits, signed }) = (&**lhs, &r) {
+                        if !int_literal_fits(*n, *bits, *signed) {
+                            return Err(format!(
+                                "line {line}: integer literal {} does not fit {} \
+                                 (its range is {})",
+                                render_int_literal(*n),
+                                intn_name(*bits, *signed),
+                                intn_range(*bits, *signed),
+                            ));
+                        }
                         l = r.clone();
                     }
                 }
-                if r == Type::Int && matches!(**rhs, Expr::Int(_)) {
-                    if let Type::IntN { .. } = l {
+                if r == Type::Int {
+                    if let (Expr::Int(n), Type::IntN { bits, signed }) = (&**rhs, &l) {
+                        if !int_literal_fits(*n, *bits, *signed) {
+                            return Err(format!(
+                                "line {line}: integer literal {} does not fit {} \
+                                 (its range is {})",
+                                render_int_literal(*n),
+                                intn_name(*bits, *signed),
+                                intn_range(*bits, *signed),
+                            ));
+                        }
                         r = l.clone();
                     }
                 }
@@ -2393,6 +2446,40 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
     }
 }
 
+/// Whether an integer literal `n` fits the sized type. The lexer wraps
+/// u64-range literals into the i64 bit pattern, so a *negative* `n` means "a
+/// literal above i64::MAX" — it fits only `UInt64`. (True negative literals
+/// never reach this: unary `-` does not adapt to sized types.)
+fn int_literal_fits(n: i64, bits: u8, signed: bool) -> bool {
+    if bits == 64 {
+        return !signed || n >= 0;
+    }
+    let max = if signed { i64::MAX >> (64 - u32::from(bits)) } else { (1i64 << bits) - 1 };
+    (0..=max).contains(&n)
+}
+
+/// The user-facing name of a sized integer type (`Int8` … `UInt64`).
+fn intn_name(bits: u8, signed: bool) -> String {
+    format!("{}Int{bits}", if signed { "" } else { "U" })
+}
+
+/// The inclusive value range of a sized integer type, for diagnostics.
+fn intn_range(bits: u8, signed: bool) -> String {
+    if signed {
+        let shift = 64 - u32::from(bits);
+        format!("{}..={}", i64::MIN >> shift, i64::MAX >> shift)
+    } else {
+        let max: u64 = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        format!("0..={max}")
+    }
+}
+
+/// Render a literal as the user wrote it: a negative `n` is a wrapped
+/// u64-range literal, so show its unsigned value.
+fn render_int_literal(n: i64) -> String {
+    if n < 0 { (n as u64).to_string() } else { n.to_string() }
+}
+
 /// Builtins a concurrent task may not use: `print` (observable ordering),
 /// `cell`/`set`/`release` (mutate the shared reference slab). `get` is a
 /// read-only slab access and is allowed.
@@ -2776,6 +2863,54 @@ mod tests {
                        region { let mut s = a; s = concat(a, b); print(s); } \
                        return 0; }";
         assert!(check_src(src).is_ok());
+    }
+
+    // ---- integer literal ranges ------------------------------------------
+
+    #[test]
+    fn rejects_out_of_range_sized_literal() {
+        let e = check_src("fn main() -> Int { let y: Int8 = 300; return 0; }").unwrap_err();
+        assert!(e.contains("does not fit Int8"), "{e}");
+        assert!(e.contains("-128..=127"), "{e}");
+    }
+
+    #[test]
+    fn rejects_out_of_range_literal_adapting_to_sized_sibling() {
+        // `x < 300` on a UInt8 would silently truncate 300 to 44 in the compare.
+        let e = check_src(
+            "fn main() -> Int { let x: UInt8 = 200; if x < 300 { return 1 } return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("does not fit UInt8"), "{e}");
+    }
+
+    #[test]
+    fn rejects_bare_u64_range_literal_in_int_context() {
+        // The lexer wraps literals above i64::MAX into the i64 bit pattern;
+        // without a UInt64 context that would silently print a negative number.
+        let e = check_src("fn main() -> Int { let x = 9223372036854775808; return 0; }")
+            .unwrap_err();
+        assert!(e.contains("exceeds Int's maximum"), "{e}");
+        assert!(e.contains("9223372036854775808"), "{e}");
+    }
+
+    #[test]
+    fn accepts_u64_range_literal_as_uint64_and_i64_min() {
+        let src = "fn main() -> Int { \
+                       let x: UInt64 = 18446744073709551615 \
+                       let m = -9223372036854775808 \
+                       if m < 0 { return 0 } return 1 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn accepts_in_range_sized_literals() {
+        let src = "fn main() -> Int { \
+                       let a: Int8 = 127 \
+                       let b: UInt8 = 255 \
+                       let c: Int32 = 2147483647 \
+                       if a < 127 { return 1 } return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
     // ---- validated types ------------------------------------------------

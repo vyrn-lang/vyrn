@@ -894,6 +894,9 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // `__acrt_iob_func(2)` (there is no direct `@stderr` global).
     out.push_str("declare i32 @fprintf(ptr, ptr, ...)\n");
     out.push_str("declare ptr @__acrt_iob_func(i32)\n");
+    // Runtime traps (division, and eventually every trap) fputs to stderr with
+    // the interpreter's exact `error: ...` wording, then exit(1).
+    out.push_str("declare i32 @fputs(ptr, ptr)\n");
     out.push_str("declare ptr @fopen(ptr, ptr)\n");
     out.push_str("declare i32 @fclose(ptr)\n");
     // For a `file(..)` sink: a global stream handle plus the path/mode constants.
@@ -964,6 +967,22 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str(
         "@.fmt.verr = private unnamed_addr constant [25 x i8] c\"Vela: validation failed\\0A\\00\"\n",
     );
+    // Division trap messages — byte-identical to the interpreter's errors as
+    // rendered by the CLI (`error: {msg}` on stderr, exit 1).
+    out.push_str(
+        "@.trap.div0 = private unnamed_addr constant [25 x i8] c\"error: division by zero\\0A\\00\"\n",
+    );
+    out.push_str(
+        "@.trap.rem0 = private unnamed_addr constant [26 x i8] c\"error: remainder by zero\\0A\\00\"\n",
+    );
+    out.push_str(
+        "@.trap.divovf = private unnamed_addr constant [37 x i8] \
+         c\"error: integer overflow in division\\0A\\00\"\n",
+    );
+    // NaN renders as `NaN` (the interpreter's Rust formatting); UCRT's %f
+    // would print `-nan(ind)`.
+    out.push_str("@.fmt.nan = private unnamed_addr constant [5 x i8] c\"NaN\\0A\\00\"\n");
+    out.push_str("@.str.nan = private unnamed_addr constant [4 x i8] c\"NaN\\00\"\n");
 
     // Emit one global per distinct string literal; map content -> global name.
     // Built before string collection so `jsonSchema`/`schemaOf` can seed their
@@ -1422,6 +1441,22 @@ impl<'a> Gen<'a> {
             self.emit(format!("{buf} = call ptr @malloc(i64 {size})"));
         }
         buf
+    }
+
+    /// Emit a conditional runtime trap: if `cond` (an i1) is true, print the
+    /// message global to **stderr** (matching the interpreter's `error: ...`
+    /// channel) and exit(1); otherwise fall through. `prefix` names the labels.
+    fn trap_if(&mut self, cond: &str, msg_global: &str, prefix: &str) {
+        let trap_l = self.fresh_label(&format!("{prefix}.trap"));
+        let ok_l = self.fresh_label(&format!("{prefix}.ok"));
+        self.emit_term(format!("br i1 {cond}, label %{trap_l}, label %{ok_l}"));
+        self.emit_label(&trap_l);
+        let e = self.fresh_tmp();
+        self.emit(format!("{e} = call ptr @__acrt_iob_func(i32 2)"));
+        self.emit(format!("call i32 @fputs(ptr {msg_global}, ptr {e})"));
+        self.emit("call void @exit(i32 1)".into());
+        self.emit_term("unreachable".into());
+        self.emit_label(&ok_l);
     }
 
     fn fresh_alloca(&mut self, ll: &str) -> String {
@@ -2480,6 +2515,29 @@ impl<'a> Gen<'a> {
             // for signed/unsigned (two's complement); Div/Rem and comparisons pick
             // the signed (`sdiv`/`slt`) or unsigned (`udiv`/`ult`) opcode by width.
             let unsigned = matches!(numty, Type::IntN { signed: false, .. });
+            // `sdiv`/`udiv`/`srem`/`urem` trap the *process* (SIGFPE/SEH, no
+            // message) on a zero divisor, and `sdiv` on MIN / -1. Guard both
+            // with the interpreter's exact `error: ...` messages instead.
+            if matches!(op, BinOp::Div | BinOp::Rem) {
+                let z = self.fresh_tmp();
+                self.emit(format!("{z} = icmp eq {ll} {r}, 0"));
+                let msg = if op == BinOp::Div { "@.trap.div0" } else { "@.trap.rem0" };
+                self.trap_if(&z, msg, "div.z");
+                if !unsigned {
+                    let bits: u32 = match numty {
+                        Type::IntN { bits, .. } => bits.into(),
+                        _ => 64,
+                    };
+                    let min = i64::MIN >> (64 - bits);
+                    let lm = self.fresh_tmp();
+                    let rm = self.fresh_tmp();
+                    let both = self.fresh_tmp();
+                    self.emit(format!("{lm} = icmp eq {ll} {l}, {min}"));
+                    self.emit(format!("{rm} = icmp eq {ll} {r}, -1"));
+                    self.emit(format!("{both} = and i1 {lm}, {rm}"));
+                    self.trap_if(&both, "@.trap.divovf", "div.ovf");
+                }
+            }
             match op {
                 BinOp::Add => format!("{t} = add {ll} {l}, {r}"),
                 BinOp::Sub => format!("{t} = sub {ll} {l}, {r}"),
@@ -2607,15 +2665,27 @@ impl<'a> Gen<'a> {
                     self.emit(format!("call i32 (ptr, ...) @printf(ptr @.fmt.s, ptr {v})"));
                 }
                 // Float: 6-decimal `%f\n`, matching the interpreter's `{:.6}`.
+                // NaN is special-cased: UCRT's %f renders it `-nan(ind)` while
+                // the interpreter prints `NaN` — select the literal instead
+                // (`fcmp uno x, x` is true exactly for NaN; printf ignores the
+                // unused vararg).
                 Type::Float => {
-                    self.emit(format!("call i32 (ptr, ...) @printf(ptr @.fmt.f, double {v})"));
+                    let nan = self.fresh_tmp();
+                    let fmt = self.fresh_tmp();
+                    self.emit(format!("{nan} = fcmp uno double {v}, {v}"));
+                    self.emit(format!("{fmt} = select i1 {nan}, ptr @.fmt.nan, ptr @.fmt.f"));
+                    self.emit(format!("call i32 (ptr, ...) @printf(ptr {fmt}, double {v})"));
                 }
                 // Float32 promotes to `double` for printf's varargs (C default
                 // argument promotion), then prints with the same `%f\n`.
                 Type::Float32 => {
                     let d = self.fresh_tmp();
                     self.emit(format!("{d} = fpext float {v} to double"));
-                    self.emit(format!("call i32 (ptr, ...) @printf(ptr @.fmt.f, double {d})"));
+                    let nan = self.fresh_tmp();
+                    let fmt = self.fresh_tmp();
+                    self.emit(format!("{nan} = fcmp uno double {d}, {d}"));
+                    self.emit(format!("{fmt} = select i1 {nan}, ptr @.fmt.nan, ptr @.fmt.f"));
+                    self.emit(format!("call i32 (ptr, ...) @printf(ptr {fmt}, double {d})"));
                 }
                 // A signed sized int sign-extends to i64 and prints with `%lld`;
                 // an unsigned one zero-extends and prints with `%llu` — same digits
@@ -2831,11 +2901,17 @@ impl<'a> Gen<'a> {
                     return Ok((buf, Type::Str));
                 }
                 // Float renders with %f (6 decimals). A 512-byte buffer covers the
-                // widest magnitude (~1e308 → ~320 chars).
+                // widest magnitude (~1e308 → ~320 chars). NaN selects a literal
+                // "NaN" format (UCRT %f would render `-nan(ind)`; the interp
+                // prints `NaN`) — snprintf ignores the unused vararg.
                 Type::Float => {
+                    let nan = self.fresh_tmp();
+                    let fmt = self.fresh_tmp();
+                    self.emit(format!("{nan} = fcmp uno double {v}, {v}"));
+                    self.emit(format!("{fmt} = select i1 {nan}, ptr @.str.nan, ptr @.fmt.lf"));
                     let buf = self.heap_alloc("512");
                     self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @snprintf(ptr {buf}, i64 512, ptr @.fmt.lf, double {v})"
+                        "call i32 (ptr, i64, ptr, ...) @snprintf(ptr {buf}, i64 512, ptr {fmt}, double {v})"
                     ));
                     return Ok((buf, Type::Str));
                 }
@@ -2843,9 +2919,13 @@ impl<'a> Gen<'a> {
                 Type::Float32 => {
                     let d = self.fresh_tmp();
                     self.emit(format!("{d} = fpext float {v} to double"));
+                    let nan = self.fresh_tmp();
+                    let fmt = self.fresh_tmp();
+                    self.emit(format!("{nan} = fcmp uno double {d}, {d}"));
+                    self.emit(format!("{fmt} = select i1 {nan}, ptr @.str.nan, ptr @.fmt.lf"));
                     let buf = self.heap_alloc("512");
                     self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @snprintf(ptr {buf}, i64 512, ptr @.fmt.lf, double {d})"
+                        "call i32 (ptr, i64, ptr, ...) @snprintf(ptr {buf}, i64 512, ptr {fmt}, double {d})"
                     ));
                     return Ok((buf, Type::Str));
                 }
@@ -3812,6 +3892,29 @@ mod tests {
         assert!(ir.contains("define i32 @main()"));
         assert!(ir.contains("@printf"));
         assert!(ir.contains("add i64"));
+    }
+
+    #[test]
+    fn division_emits_stderr_trap_guards() {
+        // `/` guards divisor-zero and MIN/-1 with the interpreter's exact
+        // `error: ...` message on stderr (a bare sdiv would SEH-crash silently).
+        let program =
+            check("fn main() -> Int { let mut d = 3; return 10 / d; }").unwrap();
+        let ir = emit(&program).unwrap();
+        assert!(ir.contains("@.trap.div0"), "zero guard: {ir}");
+        assert!(ir.contains("@.trap.divovf"), "MIN/-1 guard: {ir}");
+        assert!(ir.contains("icmp eq i64"), "guard compare: {ir}");
+        assert!(ir.contains("@fputs"), "stderr write: {ir}");
+    }
+
+    #[test]
+    fn float_print_selects_nan_literal() {
+        // NaN prints as `NaN` (interp's Rust formatting), not UCRT's -nan(ind):
+        // the format string is selected on `fcmp uno`.
+        let program = check("fn main() -> Int { print(0.0 / 0.0); return 0; }").unwrap();
+        let ir = emit(&program).unwrap();
+        assert!(ir.contains("fcmp uno double"), "NaN test: {ir}");
+        assert!(ir.contains("@.fmt.nan"), "NaN format: {ir}");
     }
 
     #[test]

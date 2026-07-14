@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::io::Write as _;
 
 use crate::ast::*;
-use crate::consteval::{self, ConstVal};
 
 /// A runtime value.
 #[derive(Debug, Clone, PartialEq)]
@@ -292,18 +291,6 @@ fn url_decode(s: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-/// A scalar `Val` as a `ConstVal` for cross-field predicate evaluation, or `None`
-/// for non-scalar values (records/arrays/refs can't appear in a comparison).
-fn val_to_constval(v: &Val) -> Option<ConstVal> {
-    match v {
-        Val::Int(n) => Some(ConstVal::Int(*n)),
-        Val::IntN { v, .. } => Some(ConstVal::Int(*v)),
-        Val::Bool(b) => Some(ConstVal::Bool(*b)),
-        Val::Str(s) => Some(ConstVal::Str(s.clone())),
-        _ => None,
-    }
-}
-
 /// Parse a base-10 integer with strict, backend-matched semantics: an optional
 /// leading `-`, then one or more ASCII digits, and nothing else (no whitespace,
 /// no `+`). Returns `None` on any deviation. Overflow *wraps* (it is not
@@ -457,29 +444,10 @@ impl<'a> Interp<'a> {
     /// `v` and fail if it does not hold. The runtime representation of a
     /// validated value is just its base value (zero overhead).
     fn construct(&self, decl: &TypeDecl, v: Val) -> Result<Val, Ctrl> {
-        if let Some(pred) = &decl.predicate {
-            let cv = match &v {
-                Val::Int(n) => ConstVal::Int(*n),
-                Val::Bool(b) => ConstVal::Bool(*b),
-                Val::Str(s) => ConstVal::Str(s.clone()),
-                other => return Err(format!("cannot construct `{}` from {other:?}", decl.name).into()),
-            };
-            let mut env = HashMap::new();
-            env.insert("value".to_string(), cv.clone());
-            match consteval::eval(pred, &env).and_then(ConstVal::as_bool) {
-                Some(true) => {}
-                Some(false) => {
-                    return Err(format!("validation failed: {cv:?} does not satisfy `{}`", decl.name)
-                        .into())
-                }
-                None => {
-                    return Err(format!(
-                        "could not evaluate refinement predicate for `{}`",
-                        decl.name
-                    )
-                    .into())
-                }
-            }
+        if !self.validates(decl, &v)? {
+            return Err(
+                format!("validation failed: {v:?} does not satisfy `{}`", decl.name).into()
+            );
         }
         Ok(v)
     }
@@ -627,7 +595,9 @@ impl<'a> Interp<'a> {
             Expr::Unary { op, expr, .. } => {
                 let v = self.expr(expr, scope)?;
                 match (op, v) {
-                    (UnOp::Neg, Val::Int(n)) => Ok(Val::Int(-n)),
+                    // wrapping: -i64::MIN has no representation; two's complement
+                    // keeps it MIN, exactly as native `sub i64 0, %n` does.
+                    (UnOp::Neg, Val::Int(n)) => Ok(Val::Int(n.wrapping_neg())),
                     (UnOp::Neg, Val::IntN { v, bits, signed }) => {
                         Ok(Val::IntN { v: wrap_intn(v.wrapping_neg(), bits, signed), bits, signed })
                     }
@@ -956,26 +926,24 @@ impl<'a> Interp<'a> {
                     map.insert(fname.clone(), v);
                 }
                 // Enforce a cross-field `where` invariant, if the record declares
-                // one (e.g. `{ start, end } where start < end`).
+                // one (e.g. `{ start, end } where start < end`). The predicate
+                // runs under the runtime evaluator with every field bound, so
+                // Float/sized-int fields compare with exact runtime semantics.
                 if let Some(decl) = self.types.get(name.as_str()) {
                     if let Some(pred) = &decl.predicate {
-                        let mut env = HashMap::new();
-                        for (fname, v) in &map {
-                            if let Some(cv) = val_to_constval(v) {
-                                env.insert(fname.clone(), cv);
-                            }
-                        }
-                        match consteval::eval(pred, &env).and_then(ConstVal::as_bool) {
-                            Some(true) => {}
-                            Some(false) => {
+                        let mut env = vec![map.clone()];
+                        match self.expr(pred, &mut env)? {
+                            Val::Bool(true) => {}
+                            Val::Bool(false) => {
                                 return Err(format!(
                                     "validation failed: `{name}` violates its `where` clause"
                                 )
                                 .into())
                             }
-                            None => {
+                            other => {
                                 return Err(format!(
-                                    "could not evaluate cross-field predicate for `{name}`"
+                                    "cross-field predicate for `{name}` did not evaluate \
+                                     to Bool (got {other:?})"
                                 )
                                 .into())
                             }
@@ -1031,22 +999,25 @@ impl<'a> Interp<'a> {
     }
 
     /// Whether `v` satisfies `decl`'s refinement predicate (always true if none).
+    ///
+    /// The predicate is evaluated by the *runtime* evaluator with `value` bound
+    /// — not by consteval — so every value kind the interpreter has (Float,
+    /// sized ints, strings, `at()`, `=~`) validates with exactly its runtime
+    /// semantics, and a predicate that traps (division by zero) traps the same
+    /// way an ordinary expression does.
     fn validates(&self, decl: &TypeDecl, v: &Val) -> Result<bool, Ctrl> {
         let pred = match &decl.predicate {
             None => return Ok(true),
             Some(p) => p,
         };
-        let cv = match v {
-            Val::Int(n) => ConstVal::Int(*n),
-            Val::Bool(b) => ConstVal::Bool(*b),
-            Val::Str(s) => ConstVal::Str(s.clone()),
-            _ => return Err(format!("cannot validate `{}` from {v:?}", decl.name).into()),
-        };
-        let mut env = HashMap::new();
-        env.insert("value".to_string(), cv);
-        match consteval::eval(pred, &env).and_then(ConstVal::as_bool) {
-            Some(b) => Ok(b),
-            None => Err(format!("could not evaluate refinement for `{}`", decl.name).into()),
+        let mut scope = vec![HashMap::from([("value".to_string(), v.clone())])];
+        match self.expr(pred, &mut scope)? {
+            Val::Bool(b) => Ok(b),
+            other => Err(format!(
+                "refinement for `{}` did not evaluate to Bool (got {other:?})",
+                decl.name
+            )
+            .into()),
         }
     }
 
@@ -1122,17 +1093,25 @@ impl<'a> Interp<'a> {
                 }
                 _ => unreachable!(),
             };
+            // Wrap BOTH operands to the sized type first: a plain-`Int` literal
+            // sibling (`x < 300` on a UInt8) must be truncated exactly as the
+            // native backend's iN registers truncate it — comparing or dividing
+            // by the raw i64 would give a different answer.
             let x = match l {
-                Val::IntN { v, .. } => v,
-                Val::Int(n) => n,
+                Val::IntN { v, .. } => wrap_intn(v, bits, signed),
+                Val::Int(n) => wrap_intn(n, bits, signed),
                 _ => return Err("type error in sized-int binop".into()),
             };
             let y = match r {
-                Val::IntN { v, .. } => v,
-                Val::Int(n) => n,
+                Val::IntN { v, .. } => wrap_intn(v, bits, signed),
+                Val::Int(n) => wrap_intn(n, bits, signed),
                 _ => return Err("type error in sized-int binop".into()),
             };
             let mk = |v: i64| Val::IntN { v: wrap_intn(v, bits, signed), bits, signed };
+            // The sized type's minimum, for the signed-overflow division trap
+            // (MIN / -1 has no representable result; native sdiv traps on it).
+            // Arithmetic shift sign-extends, so this is exact for bits = 8..64.
+            let min_n: i64 = if signed { i64::MIN >> (64 - bits) } else { 0 };
             // Add/Sub/Mul are identical for signed/unsigned (two's complement);
             // Div/Rem and comparison differ — unsigned uses `u64` semantics.
             return Ok(match op {
@@ -1143,6 +1122,9 @@ impl<'a> Interp<'a> {
                     if y == 0 {
                         return Err("division by zero".into());
                     }
+                    if signed && x == min_n && y == -1 {
+                        return Err("integer overflow in division".into());
+                    }
                     mk(if signed {
                         x.wrapping_div(y)
                     } else {
@@ -1152,6 +1134,9 @@ impl<'a> Interp<'a> {
                 Rem => {
                     if y == 0 {
                         return Err("remainder by zero".into());
+                    }
+                    if signed && x == min_n && y == -1 {
+                        return Err("integer overflow in division".into());
                     }
                     mk(if signed {
                         x.wrapping_rem(y)
@@ -1170,18 +1155,27 @@ impl<'a> Interp<'a> {
         }
         match (l, r) {
             (Val::Int(a), Val::Int(b)) => Ok(match op {
-                Add => Val::Int(a + b),
-                Sub => Val::Int(a - b),
-                Mul => Val::Int(a * b),
+                // Wrapping two's complement — the language's defined overflow
+                // semantics, matching native (and independent of the build
+                // profile; bare `+` would panic in debug and wrap in release).
+                Add => Val::Int(a.wrapping_add(b)),
+                Sub => Val::Int(a.wrapping_sub(b)),
+                Mul => Val::Int(a.wrapping_mul(b)),
                 Div => {
                     if b == 0 {
                         return Err("division by zero".into());
+                    }
+                    if a == i64::MIN && b == -1 {
+                        return Err("integer overflow in division".into());
                     }
                     Val::Int(a / b)
                 }
                 Rem => {
                     if b == 0 {
                         return Err("remainder by zero".into());
+                    }
+                    if a == i64::MIN && b == -1 {
+                        return Err("integer overflow in division".into());
                     }
                     Val::Int(a % b)
                 }
@@ -1963,6 +1957,82 @@ mod tests {
                    fn mk(x: Int, y: Int) -> R { return R { a: x, b: y }; } \
                    fn main() -> Int { let r = mk(5, 1); return 0; }";
         assert!(run(bad).unwrap_err().contains("violates its `where`"));
+    }
+
+    #[test]
+    fn float_refined_type_constructs_and_rejects_at_runtime() {
+        // Refinements over a Float base run under the runtime evaluator (this
+        // used to fail for even VALID values — ConstVal had no Float).
+        let ok = "type Ratio = Float where value > 0.0 && value <= 1.0; \
+                  fn mk(x: Float) -> Ratio { return Ratio(x); } \
+                  fn main() -> Int { let r = mk(0.5); return 0; }";
+        assert_eq!(run(ok).unwrap(), 0);
+        let bad = "type Ratio = Float where value > 0.0 && value <= 1.0; \
+                   fn mk(x: Float) -> Ratio { return Ratio(x); } \
+                   fn main() -> Int { let r = mk(2.5); return 0; }";
+        assert!(run(bad).unwrap_err().contains("does not satisfy `Ratio`"));
+    }
+
+    #[test]
+    fn sized_int_refined_type_constructs_at_runtime() {
+        let src = "type Small = Int32 where value < 100; \
+                   fn mk(x: Int32) -> Small { return Small(x); } \
+                   fn main() -> Int { let s = mk(Int32(5)); return 0; }";
+        assert_eq!(run(src).unwrap(), 0);
+    }
+
+    #[test]
+    fn cross_field_predicate_over_float_fields() {
+        let ok = "type R = { a: Float64, b: Float64 } where a < b; \
+                  fn mk(x: Float, y: Float) -> R { return R { a: x, b: y }; } \
+                  fn main() -> Int { let r = mk(1.0, 2.0); return 0; }";
+        assert_eq!(run(ok).unwrap(), 0);
+        let bad = "type R = { a: Float64, b: Float64 } where a < b; \
+                   fn mk(x: Float, y: Float) -> R { return R { a: x, b: y }; } \
+                   fn main() -> Int { let r = mk(2.0, 1.0); return 0; }";
+        assert!(run(bad).unwrap_err().contains("violates its `where`"));
+    }
+
+    #[test]
+    fn int_arithmetic_wraps_like_native() {
+        // i64::MAX + 1 wraps to i64::MIN in BOTH backends (and independent of
+        // the cargo profile — bare `+` would panic in a debug build).
+        let src = "fn main() -> Int { \
+                       let m = 9223372036854775807 \
+                       let w = m + 1 \
+                       if w < 0 { return 1 } return 0 }";
+        assert_eq!(run(src).unwrap(), 1);
+        // -i64::MIN also wraps (back to MIN).
+        let neg = "fn main() -> Int { \
+                       let m = -9223372036854775808 \
+                       let w = 0 - m \
+                       if w < 0 { return 1 } return 0 }";
+        assert_eq!(run(neg).unwrap(), 1);
+    }
+
+    #[test]
+    fn division_traps_have_stable_messages() {
+        let z = "fn main() -> Int { let mut d = 0; return 1 / d; }";
+        assert_eq!(run(z).unwrap_err(), "division by zero");
+        let rz = "fn main() -> Int { let mut d = 0; return 1 % d; }";
+        assert_eq!(run(rz).unwrap_err(), "remainder by zero");
+        // i64::MIN / -1 is unrepresentable: a clean trap, not a panic/SEH crash.
+        let ovf = "fn main() -> Int { \
+                       let m = -9223372036854775808 \
+                       let mut d = 0 - 1 \
+                       return m / d }";
+        assert_eq!(run(ovf).unwrap_err(), "integer overflow in division");
+    }
+
+    #[test]
+    fn wrapped_predicate_arithmetic_matches_native() {
+        // `value + 1 != 0` at i64::MAX: wraps to MIN (≠ 0) — the predicate
+        // holds in both backends (checked arithmetic used to refuse to prove
+        // it and the interpreter then errored out).
+        let src = "type T = Int where value + 1 != 0; \
+                   fn mk(x: Int) -> T { return T(x); } \
+                   fn main() -> Int { let t = mk(9223372036854775807); return 0; }";
+        assert_eq!(run(src).unwrap(), 0);
     }
 
     #[test]
