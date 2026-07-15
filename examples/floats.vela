@@ -1,27 +1,47 @@
-/// Floating point — `Float64` (also spelled `Float64`).
+/// Floating point — `Float64` and `Float32` (every numeric type names its size).
 ///
-/// `Int64` is the default 64-bit signed integer (also `Int64`); `Float64` is 64-bit
-/// IEEE-754. Arithmetic requires matching operands — there is no implicit Int64↔Float64
-/// mixing. Floats print with fixed 6-decimal precision (identical in both backends).
-/// See `float32.vela` for the 32-bit `Float32` type and `sizedints.vela` for `Int8/16/32`
-/// and `UInt8/16/32/64`.
+/// `Float64` is 64-bit IEEE-754, `Float32` is 32-bit. Arithmetic requires
+/// matching operands — there is no implicit mixing (convert explicitly with
+/// `Float64(x)` / `Float32(x)`, and `Int64(x)` to truncate). `Float32`
+/// arithmetic rounds to single precision *at every step*, identically in the
+/// interpreter and native code. Floats print with fixed 6-decimal precision.
 
 fn areaOfCircle(r: Float64) -> Float64 {
     return 3.14159 * r * r
 }
 
+fn addF32(a: Float32, b: Float32) -> Float32 {
+    return a + b
+}
+
 fn main() -> Int64 {
-    let radius = 2.0
-    let area = areaOfCircle(radius)
-    print(area)                    // 12.566360
+    // ---- Float64: the default float ------------------------------------
+    let area = areaOfCircle(2.0)
+    print(area)                     // 12.566360
+    print(1.5 + 2.25)               // 3.750000
+    print(10.0 / 4.0)               // 2.500000
 
-    let sum = 1.5 + 2.25
-    print(sum)                     // 3.750000
-    print(10.0 / 4.0)              // 2.500000
-    print(-sum)                    // -3.750000
+    // ---- Float32: genuinely single precision ----------------------------
+    // 2^24 + 1 is exact in Float64 but not in Float32 — it rounds to 2^24.
+    let big: Float32 = 16777217.0
+    print(big)                      // 16777216.000000  (single-precision rounding)
+    print(16777217.0)               // 16777217.000000  (double keeps it)
 
-    let big: Int64 = 1000000       // Int64 is an alias for Int64
-    print(big)                     // 1000000
+    // A literal adapts to a Float32 sibling; the sum stays single precision.
+    let half: Float32 = 1.5
+    print(half + 2.5)               // 4.000000
+
+    // Adding 1.0 to a large Float32 is lost below the ULP.
+    let g: Float32 = 100000000.0
+    print(addF32(g, 1.0))           // 100000000.000000  (1.0 vanishes)
+
+    // Conversions round or widen exactly.
+    print(Float32(7))               // 7.000000   (Int64  -> Float32)
+    print(Int64(Float32(3.9)))      // 3          (Float32 -> Int64, truncates)
+    print(Float64(Float32(0.5)))    // 0.500000   (Float32 -> Float64, exact)
+
+    // Both precisions interpolate exactly as they print.
+    print("area=\{area}, half=\{half}")  // area=12.566360, half=1.500000
 
     if area > 12.0 {
         return 1

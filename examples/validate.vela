@@ -1,5 +1,11 @@
 // Validated types (RFC-0003): validation lives in the type, not at call sites.
 // An invalid value of a validated type simply cannot exist.
+//
+// Three ways in:
+//   - automatically, at any value boundary (see autovalidate.vela);
+//   - explicitly, `Age(n)` — asserts validity, traps on failure;
+//   - fallibly, `Age?(n) -> Option<Age>` — `None` when the refinement fails,
+//     so untrusted input is handled without aborting.
 
 type Age  = Int64 where value >= 18
 type Port = Int64 where value >= 1 && value <= 65535
@@ -8,6 +14,14 @@ type Port = Int64 where value >= 1 && value <= 65535
 // If `n` is out of range the program aborts — you can't get an invalid Age out.
 fn checkedAge(n: Int64) -> Age {
     return Age(n)
+}
+
+// The fallible form: recover instead of trapping.
+fn make(n: Int64) -> Int64 {
+    return match Age?(n) {
+        Some(a) => a,        // valid: use it (an Age decays to Int64)
+        None    => 0 - 1,    // invalid: recover gracefully
+    }
 }
 
 fn main() -> Int64 {
@@ -19,5 +33,8 @@ fn main() -> Int64 {
     print(a)       // 25
     print(p)       // 8080
     print(grown)   // 30
+
+    print(make(25))   // 25
+    print(make(5))    // -1   (5 < 18 — no abort)
     return 0
 }

@@ -1,33 +1,61 @@
-// Generational references (RFC-0004 §4, Path B) — the memory model's answer to
-// the *aliasing* case that single-ownership can't express.
+// Generational references — `Ref<T>` for any T (RFC-0004 §4, Path B) — the
+// memory model's answer to the *aliasing* case single-ownership can't express.
 //
-// A `Ref` is a freely-copyable handle to a mutable heap `Int64` cell. Unlike an
-// owned value, it can be aliased and passed around at will. Each access carries
-// the generation captured when the reference was made; the cell carries a
-// counter that is bumped on `drop`. So a reference used after the cell is
-// dropped fails a cheap generation check instead of dangling — a stale alias is
-// caught, never a use-after-free. (See the interpreter/codegen unit tests for the
-// trap; this example exercises the safe, aliased, mutable path.)
+// A `Ref<T>` is a freely-copyable, fixed-size { slot, generation } handle to a
+// mutable heap cell (the payload is boxed, so the reference never grows).
+// Every access is generation-checked: a reference used after the cell is
+// dropped fails a cheap check instead of dangling — a stale alias is caught,
+// never a use-after-free. A record may even hold a `Ref` to *its own type*
+// without becoming infinite (see linkedlist.vela / tree.vela).
 //
-// Because `counter` is *aliased* here, the compiler leaves its reclamation to the
-// explicit `drop` below. A cell that is never aliased needs no `drop` at
-// all — the ownership analysis reclaims it automatically (see
-// `examples/autorelease.vela`).
+// An *aliased* cell needs an explicit `drop`; a cell that is never aliased is
+// auto-released by the ownership analysis (see autorelease.vela).
 
 fn bump(r: Ref<Int64>) -> Int64 {
     set(r, get(r) + 1)       // mutate through a reference passed by value
     return get(r)
 }
 
+// References compose across function boundaries: this takes a Ref<String> and
+// returns a fresh Ref<Int64> (ownership of the new cell transfers to the caller).
+fn measure(s: Ref<String>) -> Ref<Int64> {
+    return cell(len(get(s)))
+}
+
 fn main() -> Int64 {
+    // ---- aliased mutation, generation-checked -----------------------------
     let counter = cell(0)
     let alias = counter      // a second reference to the same cell — allowed
     set(alias, 40)           // write through one alias…
     let a = bump(counter)    // …read/modify through another: 41
-    let b = bump(alias)      // 42
-
-    print(b)                 // 42
-
+    print(bump(alias))       // 42
     drop counter             // free once; every copy is now stale (checked)
-    return b
+
+    // ---- Ref<String>: mutate a heap string through the reference -----------
+    let s = cell("hello")
+    set(s, concat(get(s), " world"))
+    print(get(s))            // hello world
+
+    // A block-local string stored into a longer-lived cell survives the block:
+    // `set` RETAINS its value, so ownership analysis must not auto-free it.
+    if true {
+        let tail = concat("!", "!")
+        set(s, tail)
+    }
+    print(get(s))            // !!
+
+    // ---- Ref<Ref<Int64>>: a reference to a reference -----------------------
+    let rr = cell(cell(41))
+    let inner = get(rr)
+    set(inner, get(inner) + 1)
+    print(get(inner))        // 42
+
+    let n = measure(s)       // Ref<Int64> holding 2
+    print(get(n))            // 2
+
+    drop s
+    drop inner
+    drop rr
+    drop n
+    return 0
 }

@@ -67,8 +67,7 @@ cargo build       # builds the `velac` binary
 ```bash
 # interpret (process exits with main's return value)
 cargo run -p vela-cli -- run    ../examples/fib.vela     # prints 55, exit code 55
-cargo run -p vela-cli -- run    ../examples/loop.vela    # prints 45
-cargo run -p vela-cli -- run    ../examples/bool.vela    # prints true / false / true
+cargo run -p vela-cli -- run    ../examples/fib.vela     # exit code 55
 
 # type-check only
 cargo run -p vela-cli -- check  ../examples/fib.vela     # -> ok
@@ -78,7 +77,7 @@ cargo run -p vela-cli -- check  ../examples/fib.vela     # -> ok
 #   bad.vela:2:0: arithmetic needs matching numeric operands, found Int64 and String
 
 # emit LLVM IR to stdout
-cargo run -p vela-cli -- emit-ir ../examples/loop.vela
+cargo run -p vela-cli -- emit-ir ../examples/fib.vela
 ```
 
 ### Validated types (RFC-0003)

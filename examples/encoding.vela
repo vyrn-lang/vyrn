@@ -1,39 +1,58 @@
-/// Text encoding — Vela strings are UTF-8. Most operations work at the byte level;
-/// `chars` decodes to Unicode code points when you need character-level logic.
+/// Encodings — Vela strings are UTF-8, plus the data encodings (hex, base64,
+/// URL) over their bytes.
 ///
-///   "\u{1F600}"     a Unicode-scalar escape (also `'\u{e9}'` in a char literal)
-///   s.length        byte length          bytes(s)  -> Array<Int64>  (UTF-8 bytes)
-///   chars(s)        -> Array<Int64>         the Unicode code points (scalar values)
+/// Text level:
+///   "\u{1F600}"   a Unicode-scalar escape (also `'\u{e9}'` in a char literal)
+///   s.length      byte length         bytes(s) -> Array<Int64>  (UTF-8 bytes)
+///   chars(s)      -> Array<Int64>     the Unicode code points (scalar values)
 ///
-/// `chars(s)` is an ordinary `Array<Int64>`, so iteration, indexing, and `.length`
-/// all work on it. Everything is identical in the interpreter and native backend.
+/// Data level: each `Encode` takes a String (its UTF-8 bytes) and returns
+/// ASCII text; each `Decode` parses back and returns `Option<String>` — `None`
+/// if the input is malformed *or* the decoded bytes are not valid UTF-8 (the
+/// native backend uses Björn Höhrmann's validation DFA, so it rejects exactly
+/// what the interpreter does).
 
-/// Count the Unicode characters (code points), not the bytes.
 fn charCount(s: String) -> Int64 {
     return chars(s).length
 }
 
+fn show(o: Option<String>) -> String {
+    return match o {
+        Some(s) => s,
+        None => "<invalid>",
+    }
+}
+
 fn main() -> Int64 {
+    // ---- UTF-8 text ------------------------------------------------------
     let s = "café"                 // 'é' (U+00E9) is 2 UTF-8 bytes
-    print(s)                       // café
     print(s.length)                // 5   — byte length
-    print(bytes(s).length)         // 5   — same, as a byte array
     print(charCount(s))            // 4   — code points: c, a, f, é
-    print(chars(s)[3])             // 233 — 'é' == '\u{e9}'
     print(chars(s)[3] == '\u{e9}') // true
 
-    // Sum the code points by iterating the decoded array.
-    let mut total = 0
-    for cp in chars(s) {
-        total = total + cp
-    }
-    print(total)                   // 99 + 97 + 102 + 233 = 531
+    let grin = "\u{1F600}"         // an emoji: one code point, four bytes
+    print(grin.length)             // 4
+    print(charCount(grin))         // 1
 
-    // An emoji: one code point, four UTF-8 bytes.
-    let grin = "\u{1F600}"
-    print(grin.length)             // 4  — bytes
-    print(charCount(grin))         // 1  — one character
-    print(chars(grin)[0])          // 128512
+    // ---- hex ---------------------------------------------------------------
+    print(hexEncode("Hi"))                    // 4869
+    print(show(hexDecode("4869")))            // Hi
+
+    // ---- base64 (standard alphabet, `=` padding) ----------------------------
+    print(base64Encode("Hello, Vela!"))       // SGVsbG8sIFZlbGEh
+    print(show(base64Decode("SGVsbG8=")))     // Hello
+
+    // ---- URL / percent encoding (unreserved set is A-Za-z0-9-_.~) -----------
+    print(urlEncode("name=a b&x"))            // name%3Da%20b%26x
+    print(show(urlDecode("%C3%A9")))          // é   (U+00E9, UTF-8 C3 A9)
+
+    // A full UTF-8 round-trip through base64.
+    print(show(base64Decode(base64Encode("café ☕"))))   // café ☕
+
+    // Decoding fails cleanly on bad input or non-text bytes.
+    print(show(hexDecode("zz")))              // <invalid>  (not hex)
+    print(show(base64Decode("////")))         // <invalid>  (bytes aren't UTF-8)
+    print(show(urlDecode("%")))               // <invalid>  (truncated escape)
 
     return 0
 }

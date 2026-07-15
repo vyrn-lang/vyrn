@@ -1,10 +1,18 @@
-/// String templates — RFC-0007: multi-line strings and a first-class `Template`.
+/// String templates — RFC-0007: interpolation, multi-line strings, and the
+/// first-class `Template` record. (See tagged.vela for tagged templates.)
 ///
-/// A raw newline is allowed inside `"..."`, so strings/templates span lines
-/// (handy for SQL/LaTeX/HTML). And `template"..\{}"` yields a `Template` record
-/// `{ parts: Array<String>, values: Array<Value> }` — the structured form of an
-/// interpolated string — that any code can consume generically. (A plain
-/// `"..\{}"` still renders to a `String`; a tagged `sql"..."` calls its tag.)
+/// A `\{ expr }` hole inside a normal `"..."` string interpolates the
+/// expression, rendered exactly as `print` renders it (Int64, sized ints,
+/// floats, Bool, String). The escape is on the *interpolation*, so `{` and `}`
+/// stay ordinary characters — pleasant for brace-heavy text (LaTeX, JSON).
+/// A raw newline is allowed inside `"..."`, so strings span lines. And
+/// `template"..\{}"` yields a `Template` record
+/// `{ parts: Array<String>, values: Array<Value> }` — the structured form of
+/// an interpolated string — that any code can consume generically.
+
+fn greet(name: String, count: Int64) -> String {
+    return "hi \{name}, you have \{count} messages"
+}
 
 fn showValue(v: Value) -> String {
     return match v {
@@ -31,13 +39,25 @@ fn render(t: Template) -> String {
 fn main() -> Int64 {
     let name = "Vela"
     let n = 3
+    let done = n > 2
 
-    // A multi-line interpolated string.
+    // ---- interpolation ---------------------------------------------------
+    print(greet(name, n))                 // hi Vela, you have 3 messages
+    print("n=\{n}, doubled=\{n + n}")     // n=3, doubled=6
+    print("done? \{done}")                // done? true
+    print("literal braces { } stay put")  // literal braces { } stay put
+
+    // Sized ints and floats interpolate too, rendering exactly as `print`.
+    let port: UInt16 = 8080
+    let ratio = 0.5
+    print("port=\{port}, ratio=\{ratio}")  // port=8080, ratio=0.500000
+
+    // ---- multi-line strings ----------------------------------------------
     let banner = "== \{name} ==
 messages: \{n}"
     print(banner)
 
-    // A first-class Template: inspect and re-render it.
+    // ---- first-class Template: inspect and re-render ----------------------
     let t = template"x = \{n}, name = \{name}"
     print(t.parts.length)      // 3
     print(t.values.length)     // 2

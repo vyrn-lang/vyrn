@@ -1,0 +1,49 @@
+// Arrays — growable `Array<T>` and fixed-size `Array<T, N>` (RFC-0002).
+//
+// The growable array is Vela's `Vec`: a { data, len, cap } triple over a heap
+// buffer that doubles when it fills. The surface is subject-first: build an
+// empty one with `[]`, grow it with `arr.push(x)`, read `arr.length`, index
+// with `arr[i]` (bounds-checked). Reclamation is automatic; `drop` is the
+// explicit escape hatch.
+//
+// The fixed-size array is a const generic: the length is part of the type, it
+// lives on the stack as the value aggregate `[N x T]` (no heap, no
+// reclamation), and is written with an array literal `[a, b, c]`. Indexing is
+// still bounds-checked against the constant N.
+
+// A tiny fixed lookup table.
+fn weekdayLetters() -> Array<String, 3> {
+    return ["Mon", "Tue", "Wed"]
+}
+
+fn main() -> Int64 {
+    // ---- growable: collect the squares 0², 1², … 9² ------------------------
+    let mut squares: Array<Int64> = []
+    let mut i = 0
+    while i < 10 {
+        squares.push(i * i)      // the backing buffer grows 0→4→8→16
+        i = i + 1
+    }
+    print(squares.length)        // 10
+    print(squares[3])            // 9 — bounds-checked index
+
+    let mut total = 0
+    for sq in squares {          // a `for` loop, no manual index
+        total = total + sq
+    }
+    print(total)                 // 0+1+4+9+16+25+36+49+64+81 = 285
+    drop squares                 // explicit reclaim (usually inferred; using
+                                 // `squares` after this is a compile error)
+
+    // ---- fixed-size -----------------------------------------------------------
+    let fixed: Array<Int64, 5> = [0, 1, 4, 9, 16]
+    let mut sum = 0
+    for sq in fixed {
+        sum = sum + sq
+    }
+    print(fixed.length)          // 5 (a compile-time constant)
+    print(sum)                   // 30
+    print(weekdayLetters()[1])   // Tue
+
+    return 0
+}

@@ -1,21 +1,28 @@
-/// Regular-expression refinements — `String =~ "pattern"` full-matches a string
-/// against a regex. The pattern is a string literal, compiled to a DFA at compile
-/// time and run identically by the interpreter and native backend (the compiler
-/// builds the DFA once; the code generator emits its transition table + a fixed
-/// runner). A `String` type refined with `=~` reflects to a JSON Schema `pattern`.
+/// String refinements — length bounds and regular expressions.
 ///
-/// Supported subset (a subset of ECMA-262, so JSON Schema agrees): literals, `.`,
-/// classes `[a-z]`/`[^0-9]`, shorthands `\d \w \s` (and `\D \W \S`), alternation
-/// `a|b`, grouping `(…)`, and the quantifiers `* + ?`. A literal backslash in the
-/// pattern is written `\\` (e.g. `\\.` for a literal dot), as in any non-raw string.
+/// A `String` base may carry a `where` over `value.length` (the byte length,
+/// same as `strlen`) and/or `value =~ "pattern"`, which full-matches against a
+/// regex. Patterns are string literals compiled to a DFA at compile time and
+/// run identically by the interpreter and native backend (the code generator
+/// emits the transition table + a fixed runner). Refinements reflect to JSON
+/// Schema: `minLength`/`maxLength` and `pattern` (several patterns → `allOf`).
+///
+/// Supported regex subset (a subset of ECMA-262, so JSON Schema agrees):
+/// literals, `.`, classes `[a-z]`/`[^0-9]`, shorthands `\d \w \s` (and
+/// `\D \W \S`), alternation `a|b`, grouping `(…)`, and the quantifiers `* + ?`.
+/// A literal backslash is written `\\` (e.g. `\\.` for a literal dot).
 
+type Username = String where value.length >= 3 && value.length <= 16
 type Email = String where value =~ "[a-z0-9_.]+@[a-z0-9]+\\.[a-z]+"
-type Hex = String where value =~ "#[0-9a-f][0-9a-f][0-9a-f]"
 
 /// Several checks compose in one refinement: a size bound, a general regex, and
 /// "every 2nd character is 'a'" — the last expressed as the group pattern `(.a)*`.
-/// (Two patterns reflect to a JSON Schema `allOf`.)
 type EveryOther = String where value.length >= 2 && value =~ "[a-z]+" && value =~ "(.a)*"
+
+fn register(name: String) -> Username {
+    // Checked at runtime because `name` is not a compile-time constant.
+    return Username(name)
+}
 
 fn main() -> Int64 {
     // `=~` is an ordinary Bool expression.
@@ -26,12 +33,20 @@ fn main() -> Int64 {
     print("xaya" =~ "(.a)*")          // true  (every 2nd char is 'a')
     print("xayb" =~ "(.a)*")          // false
 
-    // Validated construction runs the same matcher.
+    // Length-refined strings.
+    let u = Username("alice")         // valid at compile time — no runtime check
+    print(u)                          // alice
+    print(u.length)                   // 5
+    print(register("bob"))            // bob — validated at runtime
+
+    // Regex-refined strings run the same matcher.
     let e = Email("dev@vela.io")
     print(e)                          // dev@vela.io
     let w = EveryOther("banana")      // 6 chars, a-z, every 2nd char 'a'
     print(w)                          // banana
 
+    // Refinements reflect into JSON Schema.
+    print(jsonSchema(Username))       // ... "minLength":3,"maxLength":16
     print(jsonSchema(Email))          // ... "pattern":"^...$"
     print(jsonSchema(EveryOther))     // ... "minLength":2,"allOf":[{...},{...}]
     return 0

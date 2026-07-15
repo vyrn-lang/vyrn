@@ -1,25 +1,40 @@
-// Structural records (RFC-0002): type compatibility is by SHAPE, not by name.
-// A value with more fields is usable where fewer are expected — with no cast.
+// Structural records (RFC-0002): type compatibility is by SHAPE, not by name,
+// and fields of a `mut` binding can be assigned in place.
 //
-//   velac run   examples/record.vela   -> 7, 30, exit 0
-//   velac build examples/record.vela   -> native binary; prints 7, 30 (width
-//                                          subtyping lowers to a copy coercion)
+// A value with more fields is usable where fewer are expected — width
+// subtyping, no cast (it lowers to a copy coercion natively). Records are
+// values: functions return updated copies; `Ref<Account>` cells cover shared
+// mutation. (Records with a `where` invariant are the exception: their fields
+// cannot be mutated in place — rebuild the value, which re-validates.)
 
-type Named = { name: Int64 }
-type User  = { name: Int64, age: Int64 }
+type Named   = { name: Int64 }
+type User    = { name: Int64, age: Int64 }
+type Account = { balance: Int64, count: Int64 }
 
 // `greet` accepts anything shaped like `Named` (i.e. has a `name` field).
 fn greet(who: Named) -> Int64 {
     return who.name
 }
 
-fn main() -> Int64 {
-    let u = User { name: 7, age: 30 }
+fn deposit(a: Account, amount: Int64) -> Account {
+    let mut next = a
+    next.balance = next.balance + amount
+    next.count = next.count + 1
+    return next
+}
 
-    // A `User` has everything `Named` requires, so this is allowed structurally
-    // with no cast — width subtyping.
-    let n = greet(u)
-    print(n)        // 7
-    print(u.age)    // 30
+fn main() -> Int64 {
+    // ---- width subtyping ---------------------------------------------------
+    let u = User { name: 7, age: 30 }
+    print(greet(u))   // 7 — a User has everything Named requires
+    print(u.age)      // 30
+
+    // ---- mutable fields ------------------------------------------------------
+    let mut acct = Account { balance: 0, count: 0 }
+    acct.balance = 100                 // direct field mutation on a `mut` record
+    acct = deposit(acct, 50)
+    acct = deposit(acct, 25)
+    print(acct.balance)   // 175
+    print(acct.count)     // 2
     return 0
 }

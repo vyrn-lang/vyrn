@@ -1,5 +1,9 @@
-// Optionals and pattern matching (RFC-0005). No null: absence is an explicit
-// Option<T>, and the only way to read it is an exhaustive `match`.
+// Option, Result, and `?` (RFC-0005). No null: absence is an explicit
+// Option<T>; failure is an explicit Result<T, E>; the only way to read either
+// is an exhaustive `match` — and `?` unwraps `Ok`/`Some` or short-circuits by
+// returning the failure from the enclosing function.
+
+type Age = Int64 where value >= 18
 
 fn safeDiv(a: Int64, b: Int64) -> Option<Int64> {
     if b == 0 {
@@ -16,11 +20,29 @@ fn unwrapOr(o: Option<Int64>, fallback: Int64) -> Int64 {
     }
 }
 
-fn main() -> Int64 {
-    let a = safeDiv(10, 2)   // Some(5)
-    let b = safeDiv(10, 0)   // None
+// Fallible validated construction, composed from Result + a validated type.
+fn parseAge(n: Int64) -> Result<Age, Int64> {
+    if n >= 18 {
+        return Ok(Age(n))   // Age(n) is provably safe here (n >= 18)
+    }
+    return Err(n)           // report the offending value as the error
+}
 
-    print(unwrapOr(a, 0 - 1))   // 5
-    print(unwrapOr(b, 0 - 1))   // -1
+// `?` propagates the Err(n) automatically when parseAge fails.
+fn agePlus(n: Int64, extra: Int64) -> Result<Int64, Int64> {
+    let a = parseAge(n)?   // early-returns Err(n) if n < 18
+    return Ok(a + extra)
+}
+
+fn main() -> Int64 {
+    // ---- Option ------------------------------------------------------------
+    print(unwrapOr(safeDiv(10, 2), 0 - 1))   // 5
+    print(unwrapOr(safeDiv(10, 0), 0 - 1))   // -1
+
+    // ---- Result + ? ----------------------------------------------------------
+    let ok  = match agePlus(30, 5) { Ok(v) => v, Err(e) => 0 - e }   // 35
+    let bad = match agePlus(10, 5) { Ok(v) => v, Err(e) => 0 - e }   // -10
+    print(ok)
+    print(bad)
     return 0
 }

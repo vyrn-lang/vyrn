@@ -74,8 +74,7 @@ tests). Highlights:
   [`examples/linkedlist.vela`](examples/linkedlist.vela),
   [`examples/tree.vela`](examples/tree.vela),
   [`examples/freelist.vela`](examples/freelist.vela),
-  [`examples/option.vela`](examples/option.vela), and
-  [`examples/result.vela`](examples/result.vela).
+  and [`examples/option.vela`](examples/option.vela) (Option, Result, and `?`).
 - **Structural records with width subtyping (RFC-0002)** — compatibility by
   shape, no casts, implemented end to end *including native code*. Width
   subtyping lowers to a copy coercion at each boundary. Fields of a `mut` record
@@ -87,15 +86,10 @@ tests). Highlights:
 - **User-defined enums / sum types with exhaustive `match` (RFC-0002 §4)** —
   `type Shape = | Circle(Int64) | Unit;`; native-lowered to a tagged aggregate +
   `switch`. See [`examples/enum.vela`](examples/enum.vela).
-- **Immutable string literals** — a first-class `String` type (`print`, `==`,
-  record fields), statically allocated so it needs no heap. See
-  [`examples/string.vela`](examples/string.vela).
 - **Generics — functions, records, and enums (RFC-0002 §6)** — `fn id<T>(x: T)`,
   `type Box<T> = { value: T }`, `type Opt<T> = | Wrap(T) | Empty`, inferred per use
   and **monomorphized** for native code. See
-  [`examples/generic.vela`](examples/generic.vela),
-  [`examples/generictype.vela`](examples/generictype.vela), and
-  [`examples/genum.vela`](examples/genum.vela).
+  [`examples/generics.vela`](examples/generics.vela).
 - **`consume` and `modify` capabilities (RFC-0004)** — a `consume` parameter takes
   ownership (using the value after is a compile error); a `modify` parameter is
   changed in place with the change visible to the caller (by-reference, and the
@@ -104,8 +98,8 @@ tests). Highlights:
   [`examples/modify.vela`](examples/modify.vela).
 - **Nominal types, intersection `A & B`, `Partial`/`Readonly`, multi-payload
   variants, fallible construction `Age?(n)`, and constrained generics
-  `<T: Ord>`** — see [`examples/bounded.vela`](examples/bounded.vela),
-  [`examples/fallible.vela`](examples/fallible.vela).
+  `<T: Ord>`** — see [`examples/generics.vela`](examples/generics.vela) and
+  [`examples/validate.vela`](examples/validate.vela).
 - **Checked conversions** — `str(Int64) -> String` (total) and
   `parse(String) -> Option<Int64>` (fallible, so the "not a number" case is an
   explicit `None` you must `match`). See [`examples/convert.vela`](examples/convert.vela).
@@ -113,8 +107,7 @@ tests). Highlights:
   `afree`, a doubling heap buffer, bounds-checked, with explicit reclamation) and
   **fixed-size `Array<T, N>`** (a const generic: the stack value aggregate `[N x T]`,
   no heap, written with an array literal `[a, b, c]`). See
-  [`examples/dynarray.vela`](examples/dynarray.vela),
-  [`examples/fixedarray.vela`](examples/fixedarray.vela), and
+  [`examples/arrays.vela`](examples/arrays.vela) and
   [`examples/map.vela`](examples/map.vela) (an integer-keyed map written in Vela).
 - **The heap + deterministic reclamation (RFC-0004)** — dynamic strings
   (`concat`/`len`), plus *two* ways memory gets freed, no GC:
@@ -127,10 +120,8 @@ tests). Highlights:
     the call graph).
 
   All measured flat (~3 MB) where the same million-allocation loop leaks 1.2 GB.
-  See [`examples/region.vela`](examples/region.vela),
-  [`examples/ownership.vela`](examples/ownership.vela),
-  [`examples/transfer.vela`](examples/transfer.vela), and
-  [`examples/dynstring.vela`](examples/dynstring.vela).
+  See [`examples/region.vela`](examples/region.vela) and
+  [`examples/ownership.vela`](examples/ownership.vela).
 - **Generational references (RFC-0004, Path B)** — a `Ref<T>` is a freely-copyable
   handle to a mutable heap cell holding any `T` (a scalar, `String`, record, or
   another `Ref`); unlike an owned value it can be *aliased*. Each access is
@@ -138,9 +129,8 @@ tests). Highlights:
   dangling) — even after the slot is reused. `release` is **inferred** (the same
   ownership analysis that frees strings auto-releases a non-escaping cell), and
   because the payload is boxed a record may hold a `Ref` to its own type without
-  becoming infinite. See [`examples/genref.vela`](examples/genref.vela),
-  [`examples/autorelease.vela`](examples/autorelease.vela), and
-  [`examples/reftypes.vela`](examples/reftypes.vela).
+  becoming infinite. See [`examples/genref.vela`](examples/genref.vela) and
+  [`examples/autorelease.vela`](examples/autorelease.vela).
 - **Structured concurrency (RFC-0004 §Q4)** — `spawn f(args) -> Task<T>` and
   `join`, a deterministic fork-join. The compiler *proves* a spawned function is
   isolated (no I/O, no shared mutable state, transitively), so it's data-race-free
