@@ -1426,6 +1426,23 @@ impl<'a> Gen<'a> {
                 return Ok((cur, to.clone()));
             }
         }
+        // A contextual array literal: a fixed `[N x T]` value flowing into a
+        // growable `Array<T>` slot (a `let`/arg/return annotation) is copied to
+        // the heap and wrapped in the `{ptr,len,cap}` triple — the same lowering
+        // `list([..])` used. Element types already match (the checker coerced
+        // each element into `T` when it built the literal), so no per-element
+        // step is needed here.
+        {
+            let rf = self.resolve(from);
+            let rt = self.resolve(to);
+            if let (Type::ArrayN(fi, _), Type::Array(ti)) = (&rf, &rt) {
+                if fi == ti {
+                    let inner = (**fi).clone();
+                    let (triple, _) = self.array_n_to_heap(&op, &inner, &rf)?;
+                    return Ok((triple, to.clone()));
+                }
+            }
+        }
         // A plain integer flowing into a sized-integer slot truncates to `iN`
         // (matching the interpreter's `wrap_intn`). Same-width is a no-op.
         if let Type::IntN { bits, .. } = self.resolve(to) {
@@ -1516,6 +1533,62 @@ impl<'a> Gen<'a> {
             self.emit(format!("{buf} = call ptr @__vela_malloc(i64 {size})"));
         }
         buf
+    }
+
+    /// Concatenate two `String` pointers into a fresh, NUL-terminated buffer.
+    /// Shared by the `@concat` builtin (interpolation) and the `a + b` operator
+    /// lowering. Routing is lexical: inside a `region` the buffer is drawn from
+    /// the arena (freed at region exit); outside, from `malloc` (freed by
+    /// ownership analysis if it does not escape, else leaked). The two paths are
+    /// mutually exclusive, so no buffer is ever freed twice.
+    fn emit_str_concat(&mut self, a: &str, b: &str) -> String {
+        let la = self.fresh_tmp();
+        let lb = self.fresh_tmp();
+        self.emit(format!("{la} = call i64 @__vela_strlen(ptr {a})"));
+        self.emit(format!("{lb} = call i64 @__vela_strlen(ptr {b})"));
+        let sum = self.fresh_tmp();
+        let tot = self.fresh_tmp();
+        self.emit(format!("{sum} = add i64 {la}, {lb}"));
+        self.emit(format!("{tot} = add i64 {sum}, 1"));
+        let buf = self.heap_alloc(&tot);
+        self.emit(format!("call ptr @strcpy(ptr {buf}, ptr {a})"));
+        self.emit(format!("call ptr @strcat(ptr {buf}, ptr {b})"));
+        buf
+    }
+
+    /// Copy a fixed `[N x T]` aggregate value `v` (type `arr_ty`) into a fresh
+    /// heap buffer and wrap it in the `{ptr,len,cap}` growable-array triple —
+    /// the lowering behind a contextual array literal `[..]` in an `Array<T>`
+    /// position (and the old `list([..])`). Always plain `malloc`, never the
+    /// region arena: `push` grows this buffer with `realloc` and cleanup uses
+    /// `free`, both undefined on an arena interior pointer. Copying (not
+    /// aliasing) is what makes the `ArrayN → Array` coercion sound.
+    fn array_n_to_heap(
+        &mut self,
+        v: &str,
+        inner: &Type,
+        arr_ty: &Type,
+    ) -> Result<(String, Type), String> {
+        let n = match self.resolve(arr_ty) {
+            Type::ArrayN(_, n) => n,
+            other => return Err(format!("array_n_to_heap on non-ArrayN {other:?}")),
+        };
+        let ell = self.llt(inner);
+        let aggty = format!("[{n} x {ell}]");
+        let szp = self.fresh_tmp();
+        let sz = self.fresh_tmp();
+        self.emit(format!("{szp} = getelementptr {aggty}, ptr null, i64 1"));
+        self.emit(format!("{sz} = ptrtoint ptr {szp} to i64"));
+        let buf = self.fresh_tmp();
+        self.emit(format!("{buf} = call ptr @__vela_malloc(i64 {sz})"));
+        self.emit(format!("store {aggty} {v}, ptr {buf}"));
+        let a = self.fresh_tmp();
+        let b = self.fresh_tmp();
+        let c = self.fresh_tmp();
+        self.emit(format!("{a} = insertvalue {{ ptr, i64, i64 }} undef, ptr {buf}, 0"));
+        self.emit(format!("{b} = insertvalue {{ ptr, i64, i64 }} {a}, i64 {n}, 1"));
+        self.emit(format!("{c} = insertvalue {{ ptr, i64, i64 }} {b}, i64 {n}, 2"));
+        Ok((c, Type::Array(Box::new(inner.clone()))))
     }
 
     /// Emit a conditional runtime trap: if `cond` (an i1) is true, print the
@@ -2555,6 +2628,13 @@ impl<'a> Gen<'a> {
             return Ok((t, Type::Bool));
         }
 
+        // `a + b` on two Strings is concatenation (replacing `concat`): the same
+        // heap allocation, region routing, and drop analysis.
+        if op == BinOp::Add && self.resolve(&lty) == Type::Str {
+            let buf = self.emit_str_concat(&l, &r);
+            return Ok((buf, Type::Str));
+        }
+
         // The integer op width: a sized-int operand sets it (a plain-Int literal
         // sibling adopts that width); otherwise `i64`/`i1` from the operand type.
         let numty = if matches!(self.resolve(&lty), Type::IntN { .. }) {
@@ -2820,13 +2900,8 @@ impl<'a> Gen<'a> {
             return Ok(("".into(), Type::Unit));
         }
 
-        // len(String) -> Int
-        if name == "len" {
-            let (v, _) = self.gen_expr(&args[0])?;
-            let t = self.fresh_tmp();
-            self.emit(format!("{t} = call i64 @__vela_strlen(ptr {v})"));
-            return Ok((t, Type::Int));
-        }
+        // (`len(String)` was removed; a String's byte length is the `.length`
+        // field, lowered at `Expr::Field` via `@__vela_strlen`.)
         // Text encodings. Encoders return a fresh String; decoders return the
         // Option<String> aggregate (runtime helpers do the work + UTF-8 checking).
         if matches!(name, "hexEncode" | "base64Encode" | "urlEncode") {
@@ -2920,31 +2995,16 @@ impl<'a> Gen<'a> {
         // when the region exits); outside, it comes from `malloc` and is freed by
         // ownership analysis if it doesn't escape, else leaked. The two paths are
         // mutually exclusive, so no buffer is ever freed twice.
-        if name == "concat" {
+        if name == "@concat" {
             let (a, _) = self.gen_expr(&args[0])?;
             let (b, _) = self.gen_expr(&args[1])?;
-            let la = self.fresh_tmp();
-            let lb = self.fresh_tmp();
-            self.emit(format!("{la} = call i64 @__vela_strlen(ptr {a})"));
-            self.emit(format!("{lb} = call i64 @__vela_strlen(ptr {b})"));
-            let sum = self.fresh_tmp();
-            let tot = self.fresh_tmp();
-            self.emit(format!("{sum} = add i64 {la}, {lb}"));
-            self.emit(format!("{tot} = add i64 {sum}, 1"));
-            let buf = self.fresh_tmp();
-            if self.region_depth > 0 {
-                self.emit(format!("{buf} = call ptr @__vela_region_alloc(i64 {tot})"));
-            } else {
-                self.emit(format!("{buf} = call ptr @__vela_malloc(i64 {tot})"));
-            }
-            self.emit(format!("call ptr @strcpy(ptr {buf}, ptr {a})"));
-            self.emit(format!("call ptr @strcat(ptr {buf}, ptr {b})"));
+            let buf = self.emit_str_concat(&a, &b);
             return Ok((buf, Type::Str));
         }
 
         // str(Int) -> String: format into a fresh 24-byte buffer (enough for any
         // i64). Routed like `concat` (arena inside a region, else malloc).
-        if name == "str" {
+        if name == "@str" {
             // Render a scalar to a fresh, owned heap String (Int / Bool / String).
             let (v, ty) = self.gen_expr(&args[0])?;
             match self.resolve(&ty) {
@@ -3360,36 +3420,19 @@ impl<'a> Gen<'a> {
         }
         // list(Array<T, N>) -> Array<T>: copy the fixed value aggregate into a
         // heap buffer and wrap it as a growable `{ ptr, len, cap }` triple.
-        if name == "list" {
+        if name == "@list" {
             let (v, ty) = self.gen_expr(&args[0])?;
             match self.resolve(&ty) {
                 Type::Array(inner) => return Ok((v, Type::Array(inner))), // already growable
-                Type::ArrayN(inner, n) => {
-                    let ell = self.llt(&inner);
-                    let aggty = format!("[{n} x {ell}]");
-                    let szp = self.fresh_tmp();
-                    let sz = self.fresh_tmp();
-                    self.emit(format!("{szp} = getelementptr {aggty}, ptr null, i64 1"));
-                    self.emit(format!("{sz} = ptrtoint ptr {szp} to i64"));
-                    // Always plain malloc — never the region arena: `push` grows
-                    // this buffer with `realloc` and array cleanup uses `free`,
-                    // both of which are undefined on an arena interior pointer.
-                    let buf = self.fresh_tmp();
-                    self.emit(format!("{buf} = call ptr @__vela_malloc(i64 {sz})"));
-                    self.emit(format!("store {aggty} {v}, ptr {buf}"));
-                    let a = self.fresh_tmp();
-                    let b = self.fresh_tmp();
-                    let c = self.fresh_tmp();
-                    self.emit(format!("{a} = insertvalue {{ ptr, i64, i64 }} undef, ptr {buf}, 0"));
-                    self.emit(format!("{b} = insertvalue {{ ptr, i64, i64 }} {a}, i64 {n}, 1"));
-                    self.emit(format!("{c} = insertvalue {{ ptr, i64, i64 }} {b}, i64 {n}, 2"));
-                    return Ok((c, Type::Array(inner)));
+                Type::ArrayN(inner, _) => {
+                    let (triple, out) = self.array_n_to_heap(&v, &inner, &ty)?;
+                    return Ok((triple, out));
                 }
-                other => return Err(format!("`list` needs an Array, found {other:?}")),
+                other => return Err(format!("`@list` needs an Array, found {other:?}")),
             }
         }
-        // join(Task<T>) -> T: with eager tasks the result is already computed.
-        if name == "join" {
+        // @join (`t.join()`): with eager tasks the result is already computed.
+        if name == "@join" {
             let (v, ty) = self.gen_expr(&args[0])?;
             let inner = match self.resolve(&ty) {
                 Type::Task(inner) => *inner,
@@ -4148,12 +4191,33 @@ mod tests {
         // `"n=\{n}"` desugars to `concat("n=", str(n))`; `str(Bool)` selects the
         // no-newline global and copies it into a fresh buffer.
         let src = "fn main() -> Int64 { let n = 7; let ok = true; \
-                   let s = \"n=\\{n} ok=\\{ok}\"; return len(s); }";
+                   let s = \"n=\\{n} ok=\\{ok}\"; return s.length; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("@__vela_snprintf"), "str(Int64) -> snprintf: {ir}");
         assert!(ir.contains("select i1"), "str(Bool) -> select true/false: {ir}");
         assert!(ir.contains("@strcpy"), "bool/str render copies: {ir}");
         assert!(ir.contains("@.str.true"), "no-newline bool global: {ir}");
+    }
+
+    #[test]
+    fn string_plus_lowers_to_concat_runtime() {
+        // `a + b` on Strings emits the same strlen/strcpy/strcat sequence `concat`
+        // used, and `x.toString()` renders via snprintf.
+        let src = "fn main() -> Int64 { let a = \"x\"; let n = (5).toString() + a; return n.length; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("@__vela_strlen"), "concat length: {ir}");
+        assert!(ir.contains("@strcpy") && ir.contains("@strcat"), "concat copy: {ir}");
+        assert!(ir.contains("@__vela_snprintf"), "toString(Int) -> snprintf: {ir}");
+    }
+
+    #[test]
+    fn contextual_array_literal_lowers_to_heap_triple() {
+        // A literal in an `Array<T>` slot is malloc'd into the `{ptr,len,cap}`
+        // triple (like `list([..])`), then `.length` reads field 1.
+        let src = "fn main() -> Int64 { let a: Array<Int64> = [1, 2, 3]; return a.length; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("call ptr @__vela_malloc"), "heap copy: {ir}");
+        assert!(ir.contains("insertvalue { ptr, i64, i64 }"), "growable triple: {ir}");
     }
 
     #[test]
@@ -4286,7 +4350,7 @@ mod tests {
     #[test]
     fn non_escaping_temporary_is_freed() {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                   let s = concat(a, b); let n = len(s); return n; }";
+                   let s = a + b; let n = s.length; return n; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(free_calls(&ir) > 1, "expected an auto-free beyond the runtime: {ir}");
     }
@@ -4295,7 +4359,7 @@ mod tests {
     fn escaping_temporary_is_not_freed() {
         // `s` is aliased into `t`, so it must not be auto-freed (would dangle).
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                   let s = concat(a, b); let t = s; return len(t); }";
+                   let s = a + b; let t = s; return t.length; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert_eq!(free_calls(&ir), 1, "only the runtime free should be present: {ir}");
     }
@@ -4325,9 +4389,9 @@ mod tests {
     fn caller_frees_owned_transfer_result() {
         // `make` returns a fresh owned String; `main` must free the result it
         // receives, but `make` must NOT free what it moves out.
-        let src = "fn make(a: String, b: String) -> String { return concat(a, b); } \
+        let src = "fn make(a: String, b: String) -> String { return a + b; } \
                    fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                       let g = make(a, b); return len(g); }";
+                       let g = make(a, b); return g.length; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // One runtime free + exactly one auto-free (in `main`, for `g`).
         assert_eq!(free_calls(&ir), 2, "caller should free the owned result once: {ir}");
@@ -4337,7 +4401,7 @@ mod tests {
     fn region_brackets_body_with_enter_and_exit() {
         let src = "fn main() -> Int64 { \
                        let a = \"x\"; let b = \"y\"; let mut n = 0; \
-                       region { let s = concat(a, b); n = len(s); } \
+                       region { let s = a + b; n = s.length; } \
                        return n; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("call void @__vela_region_enter()"), "{ir}");
@@ -4553,9 +4617,9 @@ mod tests {
         // it leaked every owned local on the early exit).
         let src = "fn f() -> Result<Int64, Int64> { return Ok(1); } \
                    fn g() -> Result<Int64, Int64> { \
-                       let s = concat(\"a\", \"b\"); \
+                       let s = \"a\" + \"b\"; \
                        let x = f()?; \
-                       let n = len(s); \
+                       let n = s.length; \
                        return Ok(x + n); } \
                    fn main() -> Int64 { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();

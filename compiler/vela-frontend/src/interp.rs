@@ -801,13 +801,11 @@ impl<'a> Interp<'a> {
                         }
                         Ok(Val::Unit)
                     }
-                    "len" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Int(s.len() as i64)),
-                        other => Err(format!("len of non-String {other:?}").into()),
-                    },
-                    "concat" => match (&vals[0], &vals[1]) {
+                    // `@concat` — internal spelling produced by interpolation
+                    // (the surface form is `a + b`, handled in `binop`).
+                    "@concat" => match (&vals[0], &vals[1]) {
                         (Val::Str(a), Val::Str(b)) => Ok(Val::Str(format!("{a}{b}"))),
-                        _ => Err("concat of non-Strings".into()),
+                        _ => Err("@concat of non-Strings".into()),
                     },
                     "contains" => match (&vals[0], &vals[1]) {
                         (Val::Str(a), Val::Str(b)) => Ok(Val::Bool(a.contains(b.as_str()))),
@@ -859,10 +857,10 @@ impl<'a> Interp<'a> {
                         };
                         Ok(Val::Option(out.map(|s| Box::new(Val::Str(s)))))
                     }
-                    // `str` must render exactly as `print` does (interpolation
-                    // reuses it): signed IntN by value, unsigned as `u64`, Float
-                    // to 6 decimals.
-                    "str" => match &vals[0] {
+                    // `@str` (from `x.toString()` and interpolation) must render
+                    // exactly as `print` does: signed IntN by value, unsigned as
+                    // `u64`, Float to 6 decimals.
+                    "@str" => match &vals[0] {
                         Val::Int(n) => Ok(Val::Str(n.to_string())),
                         Val::IntN { v, signed: true, .. } => Ok(Val::Str(v.to_string())),
                         Val::IntN { v, signed: false, .. } => Ok(Val::Str((*v as u64).to_string())),
@@ -934,14 +932,14 @@ impl<'a> Interp<'a> {
                         };
                         Ok(Val::Enum(variant.to_string(), vec![v]))
                     }
-                    // list(a) -> Array: fixed and growable arrays share a runtime
-                    // representation here, so this is the identity.
-                    "list" => match &vals[0] {
+                    // `@list` (tagged-template desugaring): fixed and growable
+                    // arrays share a runtime representation here — the identity.
+                    "@list" => match &vals[0] {
                         Val::Array(_) => Ok(vals.remove(0)),
-                        other => Err(format!("list of non-Array {other:?}").into()),
+                        other => Err(format!("@list of non-Array {other:?}").into()),
                     },
-                    // `join` awaits a task; with eager tasks the result is in hand.
-                    "join" => Ok(vals.remove(0)),
+                    // `@join` (`t.join()`) awaits a task; eager tasks are in hand.
+                    "@join" => Ok(vals.remove(0)),
                     "Some" => Ok(Val::Option(Some(Box::new(vals.remove(0))))),
                     "Ok" => Ok(Val::Result(true, Box::new(vals.remove(0)))),
                     "Err" => Ok(Val::Result(false, Box::new(vals.remove(0)))),
@@ -1314,6 +1312,8 @@ impl<'a> Interp<'a> {
                 _ => Err("type error in bool binop (should have been caught)".into()),
             },
             (Val::Str(a), Val::Str(b)) => match op {
+                // `a + b` concatenates (replacing `concat`) — a fresh String.
+                Add => Ok(Val::Str(format!("{a}{b}"))),
                 Eq => Ok(Val::Bool(a == b)),
                 NotEq => Ok(Val::Bool(a != b)),
                 // `s =~ "pat"`: compile the (literal) pattern and full-match.
@@ -1585,7 +1585,7 @@ mod tests {
     #[test]
     fn str_and_parse_roundtrip() {
         let src = "fn main() -> Int64 { \
-                       let s = str(0 - 123); \
+                       let s = (0 - 123).toString(); \
                        return match parse(s) { Some(n) => n, None => 0 }; }";
         assert_eq!(run(src).unwrap(), -123);
     }
@@ -1610,8 +1610,8 @@ mod tests {
                 return Ok(cell(k * 10));
             }
             fn main() -> Int64 {
-                let a = match lookup(5) { Ok(r) => get(r), Err(e) => 0 - len(e) };
-                let b = match lookup(0) { Ok(r) => get(r), Err(e) => 0 - len(e) };
+                let a = match lookup(5) { Ok(r) => get(r), Err(e) => 0 - e.length };
+                let b = match lookup(0) { Ok(r) => get(r), Err(e) => 0 - e.length };
                 return a + b;  // 50 + (-4)
             }
         ";
@@ -1743,7 +1743,7 @@ mod tests {
         // `\{ }` holes render Int/Bool/String; literal braces are untouched. The
         // program returns the interpolated string's length so we can assert it.
         let src = "fn main() -> Int64 { let n = 42; let ok = true; \
-                   let s = \"n=\\{n} ok=\\{ok} {lit}\"; return len(s); }";
+                   let s = \"n=\\{n} ok=\\{ok} {lit}\"; return s.length; }";
         // "n=42 ok=true {lit}" -> 18 characters
         assert_eq!(run(src).unwrap(), 18);
     }
@@ -1751,13 +1751,13 @@ mod tests {
     #[test]
     fn interpolation_evaluates_hole_expressions() {
         let src = "fn main() -> Int64 { let a = 3; let b = 4; \
-                   let s = \"\\{a * b}\"; return len(s); }"; // "12" -> len 2
+                   let s = \"\\{a * b}\"; return s.length; }"; // "12" -> len 2
         assert_eq!(run(src).unwrap(), 2);
     }
 
     #[test]
     fn str_renders_bool_and_string() {
-        let src = "fn main() -> Int64 { let s = str(false); return len(s); }"; // "false" -> 5
+        let src = "fn main() -> Int64 { let s = false.toString(); return s.length; }"; // "false" -> 5
         assert_eq!(run(src).unwrap(), 5);
     }
 
@@ -1765,7 +1765,7 @@ mod tests {
     fn str_renders_sized_int() {
         // A signed Int32 renders by value; an unsigned UInt8 renders its magnitude.
         let s = "fn main() -> Int64 { let a: Int32 = 42; let b: UInt8 = 200; \
-                 let s = \"\\{a}/\\{b + b}\"; return len(s); }"; // "42/144" -> 6
+                 let s = \"\\{a}/\\{b + b}\"; return s.length; }"; // "42/144" -> 6
         assert_eq!(run(s).unwrap(), 6);
     }
 
@@ -1773,13 +1773,13 @@ mod tests {
     fn str_renders_uint64_above_i64_max() {
         // The full 64-bit magnitude renders (not a signed reinterpretation).
         let s = "fn main() -> Int64 { let n: UInt64 = 10000000000000000000; \
-                 let s = str(n); return len(s); }"; // 20 digits
+                 let s = n.toString(); return s.length; }"; // 20 digits
         assert_eq!(run(s).unwrap(), 20);
     }
 
     #[test]
     fn str_renders_float_to_six_decimals() {
-        let s = "fn main() -> Int64 { let s = str(3.14159); return len(s); }"; // "3.141590" -> 8
+        let s = "fn main() -> Int64 { let s = (3.14159).toString(); return s.length; }"; // "3.141590" -> 8
         assert_eq!(run(s).unwrap(), 8);
     }
 
@@ -1965,7 +1965,7 @@ mod tests {
     fn tagged_template_values_are_matchable_and_typed() {
         // The boxed values decode back to their original scalars via `match`.
         let src = "fn sql(parts: Array<String>, values: Array<Value>) -> Int64 { \
-                       return match values[0] { VInt(n) => n, VBool(b) => 0, VStr(s) => len(s) }; } \
+                       return match values[0] { VInt(n) => n, VBool(b) => 0, VStr(s) => s.length }; } \
                    fn main() -> Int64 { let x = 41; return sql\"n=\\{x}\"; }";
         assert_eq!(run(src).unwrap(), 41);
     }
@@ -2398,7 +2398,7 @@ mod tests {
     #[test]
     fn multiline_string_includes_the_newline() {
         // A raw newline inside "..." is part of the string (RFC-0007).
-        let src = "fn main() -> Int64 { let s = \"ab\ncd\"; return len(s); }"; // 'a','b','\n','c','d' = 5
+        let src = "fn main() -> Int64 { let s = \"ab\ncd\"; return s.length; }"; // 'a','b','\n','c','d' = 5
         assert_eq!(run(src).unwrap(), 5);
     }
 
@@ -2422,7 +2422,7 @@ mod tests {
     fn value_boxes_string_and_int_distinctly() {
         let src = "fn main() -> Int64 { \
                    let a = match value(7) { VInt(n) => n, VBool(b) => 0, VStr(s) => 0 - 1 }; \
-                   let b = match value(\"hey\") { VInt(n) => 0, VBool(x) => 0, VStr(s) => len(s) }; \
+                   let b = match value(\"hey\") { VInt(n) => 0, VBool(x) => 0, VStr(s) => s.length }; \
                    return a + b; }"; // 7 + 3
         assert_eq!(run(src).unwrap(), 10);
     }
@@ -2448,7 +2448,7 @@ mod tests {
     fn logging_is_forbidden_in_spawned_tasks() {
         // A spawned function must be pure; logging is observable I/O.
         let src = "fn work(n: Int64) -> Int64 { let l = logger(\"w\"); l.info(\"hi\"); return n; } \
-                   fn main() -> Int64 { let t = spawn work(1); return join(t); }";
+                   fn main() -> Int64 { let t = spawn work(1); return t.join(); }";
         assert!(run(src).is_err());
     }
 
@@ -2544,8 +2544,8 @@ mod tests {
     fn generic_reference_holds_any_type() {
         // A Ref<String> mutated in place, then measured.
         let src = "fn main() -> Int64 { let s = cell(\"ab\"); \
-                       set(s, concat(get(s), \"cd\")); \
-                       let n = len(get(s)); release(s); return n; }";
+                       set(s, get(s) + \"cd\"); \
+                       let n = get(s).length; release(s); return n; }";
         assert_eq!(run(src).unwrap(), 4);
     }
 
@@ -2576,7 +2576,7 @@ mod tests {
             fn main() -> Int64 {
                 let a = spawn sq(6);
                 let b = spawn sq(8);
-                return join(a) + join(b);   // 36 + 64
+                return a.join() + b.join();   // 36 + 64
             }
         ";
         assert_eq!(run(src).unwrap(), 100);
@@ -2624,9 +2624,33 @@ mod tests {
 
     #[test]
     fn dynamic_string_concat_and_len() {
-        let src = "fn g(n: String) -> String { return concat(concat(\"Hi, \", n), \"!\"); } \
-                   fn main() -> Int64 { return len(g(\"Vela\")); }";
+        let src = "fn g(n: String) -> String { return \"Hi, \" + n + \"!\"; } \
+                   fn main() -> Int64 { return g(\"Vela\").length; }";
         assert_eq!(run(src).unwrap(), 9); // "Hi, Vela!" = 9 bytes
+    }
+
+    #[test]
+    fn to_string_method_renders() {
+        // `x.toString()` renders scalars, then `+` concatenates: "42/true" = 7.
+        let src = "fn main() -> Int64 { let s = (42).toString() + \"/\" + true.toString(); \
+                   return s.length; }";
+        assert_eq!(run(src).unwrap(), 7);
+    }
+
+    #[test]
+    fn contextual_array_literal_is_growable() {
+        // A literal in an `Array<T>` position is a growable heap array you can
+        // `push` onto — its element count is observable via `.length`.
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2, 3]; \
+                   a.push(4); return a.length + a[3]; }"; // 4 + 4
+        assert_eq!(run(src).unwrap(), 8);
+    }
+
+    #[test]
+    fn task_join_method_awaits_result() {
+        let src = "fn sq(n: Int64) -> Int64 { return n * n } \
+                   fn main() -> Int64 { let t = spawn sq(9); return t.join() }";
+        assert_eq!(run(src).unwrap(), 81);
     }
 
     #[test]

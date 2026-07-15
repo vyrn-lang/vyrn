@@ -1283,8 +1283,8 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "get", detail: "get(ref) -> T — read through a generational reference" },
     BuiltinMethod { name: "set", detail: "set(ref, value) -> Unit — write through a generational reference" },
     BuiltinMethod { name: "release", detail: "release(ref) -> Unit — release a generational reference" },
-    BuiltinMethod { name: "len", detail: "len(string) -> Int64 — string length" },
-    BuiltinMethod { name: "join", detail: "join(task) -> T — await a spawned task's result" },
+    BuiltinMethod { name: "toString", detail: "x.toString() -> String — render a number, Bool, or String" },
+    BuiltinMethod { name: "join", detail: "task.join() -> T — await a spawned task's result" },
     BuiltinMethod { name: "trace", detail: "trace(logger, message) -> Unit — log at trace level" },
     BuiltinMethod { name: "debug", detail: "debug(logger, message) -> Unit — log at debug level" },
     BuiltinMethod { name: "info", detail: "info(logger, message) -> Unit — log at info level" },
@@ -1310,7 +1310,11 @@ fn builtin_methods_for(ty: &Type) -> Vec<BuiltinMethod> {
             .flatten()
             .collect(),
         Type::Ref(_) => vec![by_name("get"), by_name("set"), by_name("release")].into_iter().flatten().collect(),
-        Type::Str => vec![by_name("len")].into_iter().flatten().collect(),
+        // `String` renders with `.toString()` (its byte length is the `.length`
+        // field, surfaced by record/field completion, not here).
+        Type::Str | Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool => {
+            vec![by_name("toString")].into_iter().flatten().collect()
+        }
         Type::Logger => vec![by_name("trace"), by_name("debug"), by_name("info"), by_name("warn"), by_name("error")]
             .into_iter()
             .flatten()

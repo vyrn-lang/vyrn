@@ -10,11 +10,13 @@
 //!     hands the caller a fresh, unaliased allocation, transferring ownership out
 //!     so the *caller's* receiving binding becomes droppable in turn.
 //!
-//! A fresh heap value is produced by `concat(..)` or by a call to a function that
-//! itself returns owned (computed by fixpoint over the call graph). A binding is
-//! droppable unless it is `mut`, lexically inside a `region` (the arena owns it),
-//! or *escapes*: it appears anywhere except as a whole argument of
-//! `len`/`print`/`concat` (which only read a string) or an operand of `==`/`!=`.
+//! A fresh heap value is produced by `a + b` on Strings (the `@concat`/`@str`
+//! internal spellings), or by a call to a function that itself returns owned
+//! (computed by fixpoint over the call graph). A binding is droppable unless it
+//! is `mut`, lexically inside a `region` (the arena owns it), or *escapes*: it
+//! appears anywhere except as a whole argument of `print`/`@concat` (which only
+//! read a string), an operand of a binary operator (`==`/`+`/…, all reads), or
+//! `s.length`.
 //! Returning a local owner is a *move* (the value leaves, so it is not dropped
 //! here); aliasing it (`let t = x`) or passing it to any other function escapes
 //! it. Anything not provably single-owned is simply left to leak — always safe,
@@ -23,11 +25,11 @@
 //! Identities are `Stmt::Let` node addresses (`*const Stmt as usize`): the
 //! backend runs this on the same borrowed AST it emits, so the addresses match
 //! one-to-one — a collision-free key where a source line is not (two `let`s can
-//! share a line). Because a non-region `concat` uses `malloc` and a region one
-//! uses the arena, and this analysis skips the region case, the two reclamation
-//! mechanisms partition every allocation — nothing is freed twice.
+//! share a line). Because a non-region string concat uses `malloc` and a region
+//! one uses the arena, and this analysis skips the region case, the two
+//! reclamation mechanisms partition every allocation — nothing is freed twice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 
@@ -53,6 +55,21 @@ pub struct Ownership {
 
 /// Analyse ownership across a whole program.
 pub fn analyze(program: &Program) -> Ownership {
+    // Named types over `String`, and functions returning a String-like type —
+    // the light context the `a + b` string classifier needs (see `str_vars`).
+    let string_types: HashSet<String> = program
+        .type_decls
+        .iter()
+        .filter(|d| matches!(d.base, Type::Str))
+        .map(|d| d.name.clone())
+        .collect();
+    let string_fns: HashSet<String> = program
+        .functions
+        .iter()
+        .filter(|f| is_string_like(&f.ret, &string_types))
+        .map(|f| f.name.clone())
+        .collect();
+
     // Seed optimistically: every heap-returning function might return owned.
     let mut owned: HashMap<String, DropKind> = program
         .functions
@@ -66,7 +83,9 @@ pub fn analyze(program: &Program) -> Ownership {
         let mut changed = false;
         let snapshot = owned.clone();
         for f in &program.functions {
-            if snapshot.contains_key(&f.name) && !analyze_fn(f, &snapshot).is_owned {
+            if snapshot.contains_key(&f.name)
+                && !analyze_fn(f, &snapshot, &string_fns, &string_types).is_owned
+            {
                 owned.remove(&f.name);
                 changed = true;
             }
@@ -79,9 +98,21 @@ pub fn analyze(program: &Program) -> Ownership {
     // Final droppable sets, computed under the fixed owned set.
     let mut droppable = HashMap::new();
     for f in &program.functions {
-        droppable.insert(f.name.clone(), analyze_fn(f, &owned).droppable);
+        droppable.insert(
+            f.name.clone(),
+            analyze_fn(f, &owned, &string_fns, &string_types).droppable,
+        );
     }
     Ownership { owned_fns: owned, droppable }
+}
+
+/// Whether `ty` is a `String` or a nominal type whose base is `String`.
+fn is_string_like(ty: &Type, string_types: &HashSet<String>) -> bool {
+    match ty {
+        Type::Str => true,
+        Type::Named(n) => string_types.contains(n),
+        _ => false,
+    }
 }
 
 /// The reclamation kind a function transfers to its caller, if its return type is
@@ -101,7 +132,19 @@ struct FnResult {
     is_owned: bool,
 }
 
-fn analyze_fn(f: &Function, owned: &HashMap<String, DropKind>) -> FnResult {
+fn analyze_fn(
+    f: &Function,
+    owned: &HashMap<String, DropKind>,
+    string_fns: &HashSet<String>,
+    string_types: &HashSet<String>,
+) -> FnResult {
+    // Seed the string-var scope with any `String`-typed parameters.
+    let params: HashSet<String> = f
+        .params
+        .iter()
+        .filter(|p| is_string_like(&p.ty, string_types))
+        .map(|p| p.name.clone())
+        .collect();
     let mut a = Analysis {
         droppable: HashMap::new(),
         live: vec![HashMap::new()],
@@ -109,6 +152,8 @@ fn analyze_fn(f: &Function, owned: &HashMap<String, DropKind>) -> FnResult {
         owned,
         ret_is_heap: returns_owned_kind(&f.ret).is_some(),
         all_returns_owned: true,
+        string_fns,
+        str_vars: vec![params],
     };
     a.block(&f.body);
     FnResult { droppable: a.droppable, is_owned: a.ret_is_heap && a.all_returns_owned }
@@ -130,14 +175,26 @@ struct Analysis<'a> {
     ret_is_heap: bool,
     /// Whether every heap return seen so far transfers a fresh owned value.
     all_returns_owned: bool,
+    /// Names of functions whose return type is a `String` (or a nominal type
+    /// over `String`). Used to classify `a + b` as string concatenation when an
+    /// operand is a call — a fresh heap String the caller then owns.
+    string_fns: &'a HashSet<String>,
+    /// Scope stack of `String`-typed variable names (params + string-bound lets).
+    /// Kept in lock-step with `live`; lets `a + b` be recognised as a string
+    /// concat (not integer arithmetic) without a full re-typing pass. It only
+    /// ever under-approximates — an unrecognised string temporary is left to
+    /// leak, never freed as if it were an integer.
+    str_vars: Vec<HashSet<String>>,
 }
 
 impl Analysis<'_> {
     fn block(&mut self, b: &Block) {
         self.live.push(HashMap::new());
+        self.str_vars.push(HashSet::new());
         for s in &b.stmts {
             self.stmt(s);
         }
+        self.str_vars.pop();
         self.live.pop();
     }
 
@@ -145,8 +202,14 @@ impl Analysis<'_> {
         match s {
             Stmt::Let { name, mutable, value, .. } => {
                 // Account for uses in the initializer *before* the new binding
-                // exists (so `let x = concat(x, b)` escapes the old `x`).
+                // exists (so `let x = x + b` escapes the old `x`).
                 self.visit(value);
+                // Track a `String`-typed binding so later `a + b` on it is seen
+                // as concatenation. Computed against the *pre-binding* env, so a
+                // self-reference resolves to the old value's type.
+                if self.expr_is_string(value) {
+                    self.str_vars.last_mut().unwrap().insert(name.clone());
+                }
                 if let Some(kind) = self.owner_producing(value) {
                     // A dynamic string inside a region is owned by the arena, so
                     // skip it. A cell (`ReleaseRef`) lives in the separate slab,
@@ -250,11 +313,17 @@ impl Analysis<'_> {
     }
 
     /// The reclamation kind if `e` yields a fresh heap value the binding owns:
-    /// `concat` → a string, `cell` → a reference, or a call to an owned function
-    /// (its declared kind). Otherwise `None`.
+    /// `@concat`/`@str` or `a + b` on Strings → a string, `cell` → a reference,
+    /// or a call to an owned function (its declared kind). Otherwise `None`.
     fn owner_producing(&self, e: &Expr) -> Option<DropKind> {
         match e {
-            Expr::Call { name, .. } if name == "concat" || name == "str" => Some(DropKind::FreeStr),
+            Expr::Call { name, .. } if name == "@concat" || name == "@str" => {
+                Some(DropKind::FreeStr)
+            }
+            // `a + b` on Strings allocates a fresh String, exactly like `@concat`.
+            Expr::Binary { op: BinOp::Add, .. } if self.expr_is_string(e) => {
+                Some(DropKind::FreeStr)
+            }
             Expr::Call { name, .. } if name == "cell" => Some(DropKind::ReleaseRef),
             Expr::Call { name, .. } if name == "array" || name == "push" => {
                 Some(DropKind::AfreeArr)
@@ -264,27 +333,51 @@ impl Analysis<'_> {
         }
     }
 
+    /// Whether `name` is a known `String`-typed binding in the current scopes.
+    fn is_string_var(&self, name: &str) -> bool {
+        self.str_vars.iter().any(|f| f.contains(name))
+    }
+
+    /// A conservative, sound "is this expression a `String`?" test — used only to
+    /// decide whether `a + b` is concatenation (heap) or arithmetic (no heap).
+    /// It never reports a non-string as a string (so an integer add is never
+    /// freed); when unsure it answers `false`, leaving a genuine string temporary
+    /// to leak, which is always safe.
+    fn expr_is_string(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Str(_) => true,
+            Expr::Call { name, .. } if name == "@concat" || name == "@str" => true,
+            Expr::Call { name, .. } => self.string_fns.contains(name),
+            Expr::Binary { op: BinOp::Add, lhs, .. } => self.expr_is_string(lhs),
+            Expr::Var { name, .. } => self.is_string_var(name),
+            _ => false,
+        }
+    }
+
     /// Walk an expression, escaping any candidate used outside a safe read.
     fn visit(&mut self, e: &Expr) {
         match e {
             Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
             Expr::Var { name, .. } => self.escape(name),
-            Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-                self.visit(expr)
-            }
-            Expr::Binary { op, lhs, rhs, .. } => {
-                if matches!(op, BinOp::Eq | BinOp::NotEq) {
-                    self.operand(lhs);
-                    self.operand(rhs);
-                } else {
-                    self.visit(lhs);
-                    self.visit(rhs);
-                }
+            Expr::Unary { expr, .. } | Expr::Try { expr, .. } => self.visit(expr),
+            // `x.length` reads the length header only — a safe read of a candidate
+            // (matches `s.length` replacing `len(s)`). Any other field access is a
+            // conservative escape.
+            Expr::Field { expr, field, .. } if field == "length" => self.operand(expr),
+            Expr::Field { expr, .. } => self.visit(expr),
+            Expr::Binary { lhs, rhs, .. } => {
+                // `==`/`!=` and string `+` only *read* their operands (concat
+                // copies both into a fresh buffer, never retaining them), so a
+                // whole candidate on either side is a safe read. Other operators
+                // are numeric, whose operands are never tracked candidates — so
+                // treating them as reads too is harmless and simpler.
+                self.operand(lhs);
+                self.operand(rhs);
             }
             Expr::Call { name, args, .. } => {
                 // These builtins only *read* their heap argument and never retain
-                // it — a whole candidate passed to one is a safe use: `len` /
-                // `print` / `concat` for strings, `get` for references,
+                // it — a whole candidate passed to one is a safe use: `print` /
+                // `@concat` for strings, `get` for references,
                 // and the log methods (which format-and-write their message).
                 // `release` is intentionally excluded: it hands the cell off, so
                 // it escapes the binding (no auto-release on top of it). `logger`
@@ -305,7 +398,7 @@ impl Analysis<'_> {
                     }
                 } else if matches!(
                     name.as_str(),
-                    "len" | "print" | "concat" | "get" | "at" | "alen"
+                    "print" | "@concat" | "get" | "at" | "alen"
                         | "trace" | "debug" | "info" | "warn" | "error"
                 ) {
                     for a in args {
@@ -390,21 +483,21 @@ mod tests {
     #[test]
     fn frees_non_escaping_temporary() {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                   let s = concat(a, b); let n = len(s); return n; }";
+                   let s = a + b; let n = s.length; return n; }";
         assert_eq!(drop_count(src, "main"), 1);
     }
 
     #[test]
     fn does_not_free_aliased_temporary() {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                   let s = concat(a, b); let t = s; return len(t); }";
+                   let s = a + b; let t = s; return t.length; }";
         assert_eq!(drop_count(src, "main"), 0);
     }
 
     #[test]
     fn concat_argument_is_a_safe_read() {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                   let s = concat(a, b); let u = concat(s, b); return len(u); }";
+                   let s = a + b; let u = s + b; return u.length; }";
         assert_eq!(drop_count(src, "main"), 2);
     }
 
@@ -415,7 +508,7 @@ mod tests {
         // dangling; the next `get` would be a use-after-free).
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let c = cell(\"seed\"); \
-                   if true { let s = concat(a, b); set(c, s); } \
+                   if true { let s = a + b; set(c, s); } \
                    print(get(c)); release(c); return 0; }";
         assert_eq!(drop_count(src, "main"), 0);
     }
@@ -432,14 +525,14 @@ mod tests {
     #[test]
     fn skips_temporary_inside_region() {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; let mut n = 0; \
-                   region { let s = concat(a, b); n = len(s); } return n; }";
+                   region { let s = a + b; n = s.length; } return n; }";
         assert_eq!(drop_count(src, "main"), 0);
     }
 
     #[test]
     fn skips_mutable_binding() {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                   let mut s = concat(a, b); return len(s); }";
+                   let mut s = a + b; return s.length; }";
         assert_eq!(drop_count(src, "main"), 0);
     }
 
@@ -447,7 +540,7 @@ mod tests {
 
     #[test]
     fn factory_returning_concat_is_owned() {
-        let src = "fn make(a: String, b: String) -> String { return concat(a, b); } \
+        let src = "fn make(a: String, b: String) -> String { return a + b; } \
                    fn main() -> Int64 { return 0; }";
         let (o, _) = analyze_src(src);
         assert!(o.owned_fns.contains_key("make"));
@@ -455,7 +548,7 @@ mod tests {
 
     #[test]
     fn factory_returning_local_owner_is_owned_and_moves_it() {
-        let src = "fn make(a: String, b: String) -> String { let s = concat(a, b); return s; } \
+        let src = "fn make(a: String, b: String) -> String { let s = a + b; return s; } \
                    fn main() -> Int64 { return 0; }";
         let (o, _) = analyze_src(src);
         assert!(o.owned_fns.contains_key("make"));
@@ -473,7 +566,7 @@ mod tests {
     #[test]
     fn mixed_return_paths_are_not_owned() {
         let src = "fn pick(c: Bool, a: String, b: String) -> String { \
-                       if c { return concat(a, b); } return a; } \
+                       if c { return a + b; } return a; } \
                    fn main() -> Int64 { return 0; }";
         let (o, _) = analyze_src(src);
         assert!(!o.owned_fns.contains_key("pick"));
@@ -482,9 +575,9 @@ mod tests {
     #[test]
     fn caller_frees_owned_call_result() {
         // `y` receives a fresh owned value from `make` and doesn't escape.
-        let src = "fn make(a: String, b: String) -> String { return concat(a, b); } \
+        let src = "fn make(a: String, b: String) -> String { return a + b; } \
                    fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                       let y = make(a, b); return len(y); }";
+                       let y = make(a, b); return y.length; }";
         let (o, _) = analyze_src(src);
         assert_eq!(o.droppable.get("main").map(|s| s.len()).unwrap_or(0), 1);
     }
@@ -494,7 +587,7 @@ mod tests {
         // `id` is not owned, so its result must not be freed by the caller.
         let src = "fn id(s: String) -> String { return s; } \
                    fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                       let s = concat(a, b); let y = id(s); return len(y); }";
+                       let s = a + b; let y = id(s); return y.length; }";
         let (o, _) = analyze_src(src);
         // `s` escapes into the `id(..)` call, `y` is not an owned result:
         assert_eq!(o.droppable.get("main").map(|s| s.len()).unwrap_or(0), 0);

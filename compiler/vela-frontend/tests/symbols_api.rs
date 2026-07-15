@@ -649,7 +649,7 @@ fn analyze_linked_missing_module_still_indexes_root() {
 /// protocol's method signatures. Mirrors the checker's static dispatch.
 #[test]
 fn member_completion_offers_protocol_methods() {
-    let src = "protocol Show {\n    fn show(self) -> String\n}\n\nimpl Show for Int64 {\n    fn show(self) -> String { return str(self) }\n}\n\nfn describe<T: Show>(x: T) -> String {\n    return x.show()\n}\n\nfn main() -> Int64 {\n    let n: Int64 = 5\n    let s = n.show()\n    return 0\n}\n";
+    let src = "protocol Show {\n    fn show(self) -> String\n}\n\nimpl Show for Int64 {\n    fn show(self) -> String { return self.toString() }\n}\n\nfn describe<T: Show>(x: T) -> String {\n    return x.show()\n}\n\nfn main() -> Int64 {\n    let n: Int64 = 5\n    let s = n.show()\n    return 0\n}\n";
     let a = analyze(src);
     assert!(a.diagnostics.is_empty(), "clean program: {:?}", a.diagnostics);
 

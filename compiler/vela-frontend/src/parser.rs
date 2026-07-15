@@ -1307,6 +1307,16 @@ impl Parser {
                         }
                         self.no_struct = saved;
                         self.eat(&Tok::RParen)?;
+                        // Method-only builtins map to their internal spellings:
+                        // `x.toString()` renders via the `@str` machinery and
+                        // `t.join()` awaits via `@join`. The bare free-function
+                        // forms (`toString(x)`, `join(t)`) never reach this arm,
+                        // so the checker reports them with a migration hint.
+                        let name = match name.as_str() {
+                            "toString" => "@str".to_string(),
+                            "join" => "@join".to_string(),
+                            _ => name,
+                        };
                         e = Expr::Call { name, args, line };
                     } else {
                         // Property / field access `recv.name` (e.g. `arr.length`).
@@ -1473,17 +1483,21 @@ impl Parser {
         }
         for (k, src) in exprs.iter().enumerate() {
             let e = self.parse_hole(src, line, col)?;
-            pieces.push(Expr::Call { name: "str".to_string(), args: vec![e], line });
+            // `@str` / `@concat` are the *internal* spellings of the removed
+            // `str`/`concat` builtins: the parser produces them for desugaring,
+            // but the lexer can never produce a leading `@`, so user source
+            // hitting the bare `str`/`concat` names gets the migration hint.
+            pieces.push(Expr::Call { name: "@str".to_string(), args: vec![e], line });
             if !parts[k + 1].is_empty() {
                 pieces.push(Expr::Str(parts[k + 1].clone()));
             }
         }
         // There is always at least one hole here, so `pieces` is non-empty. Fold
-        // left with `concat`; a lone piece is already a `String`.
+        // left with `@concat`; a lone piece is already a `String`.
         let mut iter = pieces.into_iter();
         let mut acc = iter.next().unwrap();
         for p in iter {
-            acc = Expr::Call { name: "concat".to_string(), args: vec![acc, p], line };
+            acc = Expr::Call { name: "@concat".to_string(), args: vec![acc, p], line };
         }
         Ok(acc)
     }
@@ -1540,7 +1554,9 @@ impl Parser {
             values.push(Expr::Call { name: "value".to_string(), args: vec![e], line });
         }
         let values_lit = Expr::ArrayLit { elems: values, line };
-        let wrap = |e| Expr::Call { name: "list".to_string(), args: vec![e], line };
+        // `@list` is the internal spelling of the removed `list` builtin (see
+        // `@str`/`@concat` above): produced only by desugaring, never lexable.
+        let wrap = |e| Expr::Call { name: "@list".to_string(), args: vec![e], line };
         // The built-in `template` tag yields the first-class `Template` record;
         // any other tag is an ordinary function call `tag(parts, values)`.
         if tag == "template" {

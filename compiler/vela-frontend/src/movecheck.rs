@@ -373,7 +373,7 @@ mod tests {
                    fn take(t: consume T) -> Int64 { return t.id; } \
                    fn main() -> Int64 { let x = T { id: 1 }; \
                                       let t = spawn take(x); \
-                                      let z = take(x); return join(t) + z; }";
+                                      let z = take(x); return t.join() + z; }";
         let e = run(src).unwrap_err();
         assert!(e.contains("already consumed by `spawn take(..)`"), "{e}");
     }

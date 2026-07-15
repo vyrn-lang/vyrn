@@ -25,7 +25,7 @@ fn accumulates_across_functions() {
     assert_eq!(diags[0].stage, "check");
     assert_eq!(diags[1].stage, "check");
     assert!(diags[0].message.contains("return type mismatch"), "{:?}", diags[0]);
-    assert!(diags[1].message.contains("arithmetic needs matching numeric"), "{:?}", diags[1]);
+    assert!(diags[1].message.contains("`+` concatenates two Strings"), "{:?}", diags[1]);
     // f is on line 1, g on line 2.
     assert_eq!(diags[0].line, 1);
     assert_eq!(diags[1].line, 2);
@@ -147,7 +147,7 @@ fn accumulates_within_function_body() {
     assert_eq!(diags.len(), 2, "{:?}", diags);
     assert_eq!(diags[0].stage, "check");
     assert_eq!(diags[1].stage, "check");
-    assert!(diags[0].message.contains("arithmetic needs matching numeric"), "{:?}", diags[0]);
+    assert!(diags[0].message.contains("`+` concatenates two Strings"), "{:?}", diags[0]);
     assert!(diags[1].message.contains("arithmetic needs matching numeric"), "{:?}", diags[1]);
     assert_eq!(diags[0].line, 2);
     assert_eq!(diags[1].line, 3);
@@ -161,18 +161,18 @@ fn failed_let_does_not_cascade_through_binop() {
     let src = "fn main() -> Int64 {\n  let a = \"s\" + 1;\n  let b = a + 1;\n  return b;\n}";
     let diags = diagnostics(src);
     assert_eq!(diags.len(), 1, "{:?}", diags);
-    assert!(diags[0].message.contains("arithmetic needs matching numeric"), "{:?}", diags[0]);
+    assert!(diags[0].message.contains("`+` concatenates two Strings"), "{:?}", diags[0]);
     assert_eq!(diags[0].line, 2);
 }
 
 /// Cascade-free recovery through a built-in: a failed `let a` (Err-typed) flows
-/// into `len(a)` without a spurious "`len` needs a String, found Err" — the
-/// builtin's `Type::Err` guard returns `Err`, so only the original error survives.
+/// into `a.length` without a spurious "cannot access field" — the `Field`
+/// `Type::Err` guard returns `Err`, so only the original error survives.
 #[test]
 fn failed_let_does_not_cascade_through_builtin() {
-    let src = "fn main() -> Int64 {\n  let a = \"s\" + 1;\n  let n = len(a);\n  return 0;\n}";
+    let src = "fn main() -> Int64 {\n  let a = \"s\" + 1;\n  let n = a.length;\n  return 0;\n}";
     let diags = diagnostics(src);
     assert_eq!(diags.len(), 1, "{:?}", diags);
-    assert!(diags[0].message.contains("arithmetic needs matching numeric"), "{:?}", diags[0]);
+    assert!(diags[0].message.contains("`+` concatenates two Strings"), "{:?}", diags[0]);
     assert_eq!(diags[0].line, 2);
 }

@@ -60,6 +60,7 @@ pub fn check_accum_with_let_types(
         "contains", "startsWith", "endsWith", "bytes", "chars",
         "hexEncode", "hexDecode", "base64Encode", "base64Decode", "urlEncode", "urlDecode",
         "trace", "debug", "info", "warn", "error", "value", "list", "schemaOf", "jsonSchema",
+        "toString",
         "Int", "Int64", "Int32", "Int16", "Int8", "Float", "Float64", "Float32",
         "UInt8", "UInt16", "UInt32", "UInt64",
     ];
@@ -1276,6 +1277,9 @@ impl<'a> Checker<'a> {
             Expr::Field { expr, field, line } => {
                 let ety = self.expr(expr, scope, None, fn_ret)?;
                 match self.base(&ety) {
+                    // A recovered `Err` receiver yields `Err` — no spurious
+                    // "cannot access field" cascade (mirrors the binop guard).
+                    Type::Err => Ok(Type::Err),
                     // `arr.length` is the element count (like TS). Sugar for the
                     // `alen` builtin, resolved here so it doesn't shadow record
                     // fields (a `.length` on a record still reads its field).
@@ -1357,10 +1361,16 @@ impl<'a> Checker<'a> {
                         )),
                     };
                 }
-                // All elements share a type; the result is a fixed-size array.
-                let elem_expected = match expected {
-                    Some(Type::ArrayN(t, _)) => Some((**t).clone()),
-                    _ => None,
+                // All elements share a type. In a context expecting a growable
+                // `Array<T>` the literal *is* that heap array directly (replacing
+                // the old `list([..])`); otherwise it is a fixed-size `Array<T,N>`.
+                // The `Array<T>` route is restricted to literal expressions here,
+                // so a stack-allocated `ArrayN` value can never silently alias
+                // into a heap array (the codegen copies element-wise).
+                let (elem_expected, growable) = match expected {
+                    Some(Type::ArrayN(t, _)) => (Some((**t).clone()), false),
+                    Some(Type::Array(t)) => (Some((**t).clone()), true),
+                    _ => (None, false),
                 };
                 let first = self.expr(&elems[0], scope, elem_expected.as_ref(), fn_ret)?;
                 let elem_ty = elem_expected.unwrap_or(first.clone());
@@ -1381,7 +1391,11 @@ impl<'a> Checker<'a> {
                     }
                     self.prove_coercion(e, &elem_ty, *line)?;
                 }
-                Ok(Type::ArrayN(Box::new(elem_ty), elems.len()))
+                if growable {
+                    Ok(Type::Array(Box::new(elem_ty)))
+                } else {
+                    Ok(Type::ArrayN(Box::new(elem_ty), elems.len()))
+                }
             }
         }
     }
@@ -1695,11 +1709,18 @@ impl<'a> Checker<'a> {
         }
         let numeric = |t: &Type| matches!(t, Type::Int | Type::Float | Type::Float32 | Type::IntN { .. });
         match op {
+            // `+` on two Strings is concatenation (replacing the old `concat`
+            // builtin); it lowers to the same heap allocation and drop analysis.
+            Add if l == Type::Str && r == Type::Str => Ok(Type::Str),
             // Arithmetic works on Int, Float, or a sized integer; operands must
             // match exactly (no implicit widening). `Rem` (%) is integer-only.
             Add | Sub | Mul | Div => {
                 if l == r && numeric(&l) {
                     Ok(l)
+                } else if op == Add && (l == Type::Str || r == Type::Str) {
+                    Err(format!(
+                        "line {line}: `+` concatenates two Strings, found {l} and {r}"
+                    ))
                 } else {
                     Err(format!(
                         "line {line}: arithmetic needs matching numeric operands, \
@@ -1762,6 +1783,44 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
+        // Removed free-function builtins → their method/operator replacements.
+        // These fire only for the *bare* user-written spelling; the desugaring
+        // and method forms use the unspellable `@`-prefixed internal names
+        // (`@str`/`@concat`/`@list`/`@join`), which flow past this guard.
+        match name {
+            "str" => {
+                return Err(format!(
+                    "line {line}: `str(x)` was removed; render a value with `x.toString()`"
+                ))
+            }
+            "concat" => {
+                return Err(format!(
+                    "line {line}: `concat(a, b)` was removed; concatenate Strings with `a + b`"
+                ))
+            }
+            "len" => {
+                return Err(format!(
+                    "line {line}: `len(s)` was removed; a String's byte length is `s.length`"
+                ))
+            }
+            "list" => {
+                return Err(format!(
+                    "line {line}: `list([..])` was removed; write the array literal `[..]` \
+                     directly where an `Array<T>` is expected"
+                ))
+            }
+            "join" => {
+                return Err(format!(
+                    "line {line}: `join(t)` was removed; await a task's result with `t.join()`"
+                ))
+            }
+            "toString" => {
+                return Err(format!(
+                    "line {line}: `toString` is a method; write `x.toString()`"
+                ))
+            }
+            _ => {}
+        }
         // built-in: print(Int|Bool) -> Unit
         if name == "print" {
             if args.len() != 1 {
@@ -1822,20 +1881,8 @@ impl<'a> Checker<'a> {
             return Ok(Type::Unit);
         }
 
-        // built-in: len(String) -> Int
-        if name == "len" {
-            if args.len() != 1 {
-                return Err(format!("line {line}: `len` takes 1 argument, got {}", args.len()));
-            }
-            let t = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(format!("line {line}: `len` needs a String, found {t}"));
-            }
-            return Ok(Type::Int);
-        }
+        // (`len(String)` was removed — see the migration hint above; its byte
+        // length now lives on the `String.length` field, resolved at `Expr::Field`.)
 
         // built-in string predicates: contains / startsWith / endsWith (via UFCS
         // also `s.contains(sub)` etc.). Each takes two Strings and yields a Bool.
@@ -1900,10 +1947,12 @@ impl<'a> Checker<'a> {
             return Ok(Type::Array(Box::new(Type::Int)));
         }
 
-        // built-in: concat(String, String) -> String (heap-allocated)
-        if name == "concat" {
+        // Internal string concat (`a + b` on Strings, and interpolation): the
+        // `@concat` spelling is produced by the desugarer / the `+` lowering,
+        // never by user source. Heap-allocated result.
+        if name == "@concat" {
             if args.len() != 2 {
-                return Err(format!("line {line}: `concat` takes 2 arguments, got {}", args.len()));
+                return Err(format!("line {line}: `@concat` takes 2 arguments, got {}", args.len()));
             }
             for a in args {
                 let t = self.base(&self.expr(a, scope, None, fn_ret)?);
@@ -1911,29 +1960,30 @@ impl<'a> Checker<'a> {
                     return Ok(Type::Err);
                 }
                 if t != Type::Str {
-                    return Err(format!("line {line}: `concat` needs Strings, found {t}"));
+                    return Err(format!("line {line}: `@concat` needs Strings, found {t}"));
                 }
             }
             return Ok(Type::Str);
         }
 
-        // join(Task<T>) -> T — await a spawned task's result.
-        if name == "join" {
+        // `@join` — the internal spelling of `t.join()`: await a spawned task.
+        if name == "@join" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `join` takes 1 argument, got {}", args.len()));
+                return Err(format!("line {line}: `join` takes no arguments"));
             }
             match self.base(&self.expr(&args[0], scope, None, fn_ret)?) {
                 Type::Task(inner) => return Ok((*inner).clone()),
                 Type::Err => return Ok(Type::Err),
-                other => return Err(format!("line {line}: `join` needs a Task, found {other}")),
+                other => return Err(format!("line {line}: `.join()` needs a Task, found {other}")),
             }
         }
 
-        // Int/String conversions (checked narrowing). str is total; parse is
-        // fallible (returns None on a non-integer string).
-        if name == "str" {
+        // `@str` — the internal spelling of `x.toString()` and of interpolation
+        // holes: render a scalar to a fresh String. `parse` (below) is the
+        // fallible inverse.
+        if name == "@str" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `str` takes 1 argument, got {}", args.len()));
+                return Err(format!("line {line}: `toString` takes no arguments"));
             }
             // `str` renders a scalar to a fresh String — Int, sized IntN, Float,
             // Bool, or String (String is copied). Interpolation lowers to this.
@@ -1946,7 +1996,7 @@ impl<'a> Checker<'a> {
                 Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool | Type::Str
             ) {
                 return Err(format!(
-                    "line {line}: `str` renders a number, Bool, or String, found {t}"
+                    "line {line}: `toString` renders a number, Bool, or String, found {t}"
                 ));
             }
             return Ok(Type::Str);
@@ -2224,9 +2274,12 @@ impl<'a> Checker<'a> {
         }
         // built-in: list(Array<T, N>) -> Array<T> — a fixed array as a growable one
         // (RFC-0007 tagged-template desugar; the tag takes size-erased arrays).
-        if name == "list" {
+        // `@list` — the internal spelling of the removed `list` builtin, still
+        // produced by tagged-template desugaring: coerce a fixed array to a
+        // growable one. (User source uses a contextual array literal instead.)
+        if name == "@list" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `list` takes 1 argument, got {}", args.len()));
+                return Err(format!("line {line}: `@list` takes 1 argument, got {}", args.len()));
             }
             let a = self.expr(&args[0], scope, None, fn_ret)?;
             match self.base(&a) {
@@ -2235,7 +2288,7 @@ impl<'a> Checker<'a> {
                 }
                 Type::Err => return Ok(Type::Err),
                 other => {
-                    return Err(format!("line {line}: `list` needs an Array, found {other}"))
+                    return Err(format!("line {line}: `@list` needs an Array, found {other}"))
                 }
             }
         }
@@ -2896,7 +2949,7 @@ mod tests {
     fn cell_is_generic_over_element_type() {
         // A cell can hold any type; `get` returns exactly that type.
         let src = "fn main() -> Int64 { let c = cell(\"hi\"); \
-                   let n = len(get(c)); release(c); return n; }";
+                   let n = get(c).length; release(c); return n; }";
         assert!(check_src(src).is_ok());
     }
 
@@ -2927,14 +2980,14 @@ mod tests {
     #[test]
     fn accepts_spawn_of_pure_function() {
         let src = "fn sq(n: Int64) -> Int64 { return n * n; } \
-                   fn main() -> Int64 { let t = spawn sq(5); return join(t); }";
+                   fn main() -> Int64 { let t = spawn sq(5); return t.join(); }";
         assert!(check_src(src).is_ok());
     }
 
     #[test]
     fn rejects_spawn_of_impure_function() {
         let e = check_src("fn noisy(n: Int64) -> Int64 { print(n); return n; } \
-                           fn main() -> Int64 { let t = spawn noisy(5); return join(t); }")
+                           fn main() -> Int64 { let t = spawn noisy(5); return t.join(); }")
             .unwrap_err();
         assert!(e.contains("isolated (pure)"), "{e}");
     }
@@ -2943,15 +2996,15 @@ mod tests {
     fn rejects_spawn_of_transitively_impure_function() {
         let e = check_src("fn inner(n: Int64) -> Int64 { print(n); return n; } \
                            fn outer(n: Int64) -> Int64 { return inner(n); } \
-                           fn main() -> Int64 { let t = spawn outer(5); return join(t); }")
+                           fn main() -> Int64 { let t = spawn outer(5); return t.join(); }")
             .unwrap_err();
         assert!(e.contains("isolated (pure)"), "{e}");
     }
 
     #[test]
     fn rejects_join_of_non_task() {
-        let e = check_src("fn main() -> Int64 { return join(5); }").unwrap_err();
-        assert!(e.contains("`join` needs a Task"), "{e}");
+        let e = check_src("fn main() -> Int64 { let x = 5; return x.join(); }").unwrap_err();
+        assert!(e.contains("`.join()` needs a Task"), "{e}");
     }
 
     #[test]
@@ -2960,7 +3013,7 @@ mod tests {
         // must not contain it — even though `drop` is a statement, not a call.
         let e = check_src(
             "fn work(r: Ref<Int64>) -> Int64 { let v = get(r); drop r; return v; } \
-             fn main() -> Int64 { let c = cell(1); let t = spawn work(c); return join(t); }",
+             fn main() -> Int64 { let c = cell(1); let t = spawn work(c); return t.join(); }",
         )
         .unwrap_err();
         assert!(e.contains("isolated (pure)"), "{e}");
@@ -3047,7 +3100,7 @@ mod tests {
         // A heap temporary lives and dies inside the region; only an Int escapes.
         let src = "fn main() -> Int64 { \
                        let a = \"x\"; let b = \"y\"; let mut n = 0; \
-                       region { let s = concat(a, b); n = len(s); } \
+                       region { let s = a + b; n = s.length; } \
                        return n; }";
         assert!(check_src(src).is_ok());
     }
@@ -3056,7 +3109,7 @@ mod tests {
     fn rejects_heap_escaping_region() {
         let src = "fn main() -> Int64 { \
                        let a = \"x\"; let b = \"y\"; let mut out = \"\"; \
-                       region { out = concat(a, b); } \
+                       region { out = a + b; } \
                        return 0; }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("outlives the enclosing `region`"), "{e}");
@@ -3068,7 +3121,7 @@ mod tests {
         let src = "type Holder = { s: String } \
                    fn main() -> Int64 { \
                        let mut h = Holder { s: \"init\" } \
-                       region { h.s = concat(\"a\", \"b\") } \
+                       region { h.s = \"a\" + \"b\" } \
                        return 0 }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("outlives the enclosing `region`"), "{e}");
@@ -3079,7 +3132,7 @@ mod tests {
         // Pushing an arena string into an outer array outlives the region.
         let src = "fn main() -> Int64 { \
                        let mut a: Array<String> = array() \
-                       region { a = push(a, concat(\"x\", \"y\")) } \
+                       region { a = push(a, \"x\" + \"y\") } \
                        return 0 }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("outlives the enclosing `region`"), "{e}");
@@ -3090,7 +3143,7 @@ mod tests {
         // Storing an arena string through an outer cell dangles at region exit.
         let src = "fn main() -> Int64 { \
                        let c = cell(\"seed\") \
-                       region { set(c, concat(\"a\", \"b\")) } \
+                       region { set(c, \"a\" + \"b\") } \
                        print(get(c)) release(c) return 0 }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("outlives the enclosing `region`"), "{e}");
@@ -3114,7 +3167,7 @@ mod tests {
         let src = "fn main() -> Int64 { \
                        region { \
                            let c = cell(\"seed\") \
-                           set(c, concat(\"a\", \"b\")) \
+                           set(c, \"a\" + \"b\") \
                            print(get(c)) release(c) \
                        } \
                        return 0 }";
@@ -3126,7 +3179,7 @@ mod tests {
         // Assigning a heap value to a region-local `mut` is fine — it dies here.
         let src = "fn main() -> Int64 { \
                        let a = \"x\"; let b = \"y\"; \
-                       region { let mut s = a; s = concat(a, b); print(s); } \
+                       region { let mut s = a; s = a + b; print(s); } \
                        return 0; }";
         assert!(check_src(src).is_ok());
     }
@@ -3223,7 +3276,7 @@ mod tests {
         let src = "protocol Noise { fn burp(self) -> Int64 } \
                    impl Noise for Int64 { fn burp(self) -> Int64 { print(self) return self } } \
                    fn task(n: Int64) -> Int64 { return n.burp() } \
-                   fn main() -> Int64 { let t = spawn task(5) return join(t) }";
+                   fn main() -> Int64 { let t = spawn task(5) return t.join() }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("isolated (pure)"), "{e}");
     }
@@ -3232,9 +3285,9 @@ mod tests {
     fn rejects_spawn_of_function_that_afrees() {
         let src = "fn task(a: Array<Int64>) -> Int64 { afree(a) return 0 } \
                    fn main() -> Int64 { \
-                       let a = list([1, 2]) \
+                       let a: Array<Int64> = [1, 2] \
                        let t = spawn task(a) \
-                       return join(t) }";
+                       return t.join() }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("isolated (pure)"), "{e}");
     }
@@ -3589,9 +3642,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_string_arithmetic() {
-        let e = check_src("fn main() -> Int64 { let x = \"a\" + \"b\"; return 0; }").unwrap_err();
-        assert!(e.contains("arithmetic needs matching numeric"), "{e}");
+    fn string_plus_is_concatenation() {
+        // `+` on two Strings concatenates (replacing `concat`); its length is 3.
+        let src = "fn main() -> Int64 { let x = \"a\" + \"bc\"; return x.length; }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn rejects_mixed_string_int_plus() {
+        // `+` needs matching operands: a String and an Int don't concatenate.
+        let e = check_src("fn main() -> Int64 { let n = 1; let x = \"a\" + n; return 0; }")
+            .unwrap_err();
+        assert!(e.contains("`+` concatenates two Strings"), "{e}");
     }
 
     #[test]
@@ -3600,6 +3662,63 @@ mod tests {
                    fn nm(u: U) -> Int64 { print(u.name); return u.age; } \
                    fn main() -> Int64 { return nm(U { name: \"x\", age: 7 }); }";
         assert!(check_src(src).is_ok());
+    }
+
+    // ---- surface migration: removed free builtins → method/operator forms ----
+
+    #[test]
+    fn removed_builtins_emit_migration_hints() {
+        let cases = [
+            ("fn main() -> Int64 { let s = str(1); return 0; }", "`str(x)` was removed"),
+            ("fn main() -> Int64 { let s = concat(\"a\", \"b\"); return 0; }", "`concat(a, b)` was removed"),
+            ("fn main() -> Int64 { let s = \"a\"; return len(s); }", "`len(s)` was removed"),
+            ("fn main() -> Int64 { let a: Array<Int64> = list([1, 2]); return 0; }", "`list([..])` was removed"),
+            ("fn main() -> Int64 { let n = 5; return join(n); }", "`join(t)` was removed"),
+            ("fn main() -> Int64 { let s = toString(1); return 0; }", "`toString` is a method"),
+        ];
+        for (src, want) in cases {
+            let e = check_src(src).unwrap_err();
+            assert!(e.contains(want), "for `{src}` expected `{want}`, got `{e}`");
+        }
+    }
+
+    #[test]
+    fn to_string_renders_scalar_receivers() {
+        // `x.toString()` on Int64, a sized int, Float64, Bool, and String.
+        let src = "fn main() -> Int64 { \
+                       let a = (42).toString(); let b: Int8 = 3; let c = b.toString(); \
+                       let d = (1.5).toString(); let e = true.toString(); let f = \"hi\".toString(); \
+                       return a.length + c.length + d.length + e.length + f.length; }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn to_string_rejects_non_scalar_receiver() {
+        let e = check_src(
+            "type P = { x: Int64 } fn main() -> Int64 { let p = P { x: 1 } let s = p.toString() return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("toString"), "{e}");
+    }
+
+    #[test]
+    fn contextual_array_literal_in_let_param_return() {
+        // A literal in an `Array<T>` position becomes a growable heap array:
+        // in a `let` annotation, as a call argument, and as a return value.
+        let src = "fn take(a: Array<Int64>) -> Int64 { return a.length } \
+                   fn make() -> Array<String> { return [\"a\", \"b\"] } \
+                   fn main() -> Int64 { \
+                       let xs: Array<Int64> = [1, 2, 3] \
+                       let n = take([4, 5]) \
+                       return xs.length + n + make().length }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn task_join_method_awaits() {
+        let src = "fn sq(n: Int64) -> Int64 { return n * n } \
+                   fn main() -> Int64 { let t = spawn sq(6); return t.join() }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
     // ---- user enums (sum types) ----------------------------------------
