@@ -14,6 +14,7 @@ pub mod ast;
 pub mod checker;
 pub mod consteval;
 pub mod diagnostics;
+pub mod fmt;
 pub mod interp;
 pub mod lexer;
 pub mod loader;
@@ -33,6 +34,11 @@ pub use symbols::{
     analyze, analyze_linked, completions, member_completions, resolve, Analysis, Completion,
     LocalBinding, LocalKind, Resolution, Symbol, SymbolKind, TokenInfo,
 };
+
+// The canonical formatter (RFC-0017). `fmt` the module and `fmt` the function
+// live in different namespaces, so `vela_frontend::fmt(src)` calls the function
+// and `vela_frontend::fmt::` names the module.
+pub use fmt::fmt;
 
 /// Parse, type-check, and move-check `source`, returning the checked
 /// [`ast::Program`].

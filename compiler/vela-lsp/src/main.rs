@@ -30,11 +30,11 @@ use lsp_types::notification::{
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    Diagnostic as LspDiagnostic, DiagnosticSeverity, DocumentSymbol, DocumentSymbolParams,
-    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverParams, InitializeParams, InitializeResult, Location, MarkupContent, MarkupKind, OneOf,
-    Position, PublishDiagnosticsParams, Range, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    Diagnostic as LspDiagnostic, DiagnosticSeverity, DocumentFormattingParams, DocumentSymbol,
+    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
+    Hover, HoverContents, HoverParams, InitializeParams, InitializeResult, Location, MarkupContent,
+    MarkupKind, OneOf, Position, PublishDiagnosticsParams, Range, ServerCapabilities, ServerInfo,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
 };
 
 use vela_frontend::{analyze, completions, member_completions, resolve, Analysis, SymbolKind};
@@ -214,6 +214,9 @@ fn handle_initialize(connection: &Connection) -> Result<(), ()> {
             ..Default::default()
         }),
         document_symbol_provider: Some(OneOf::Left(true)),
+        // Whole-document formatting (RFC-0017): the handler runs `vela_frontend::fmt`
+        // and returns one full-range replace. VS Code format-on-save then works.
+        document_formatting_provider: Some(OneOf::Left(true)),
         ..Default::default()
     };
     let result = InitializeResult {
@@ -264,6 +267,7 @@ fn handle_request(server: &Server, req: Request) -> Response {
         "textDocument/documentSymbol" => {
             Response::new_ok(req.id, handle_document_symbol(server, req.params))
         }
+        "textDocument/formatting" => Response::new_ok(req.id, handle_formatting(server, req.params)),
         _ => Response {
             id: req.id,
             result: None,
@@ -357,6 +361,44 @@ fn handle_document_symbol(
         .filter_map(to_document_symbol)
         .collect();
     Some(DocumentSymbolResponse::Nested(symbols))
+}
+
+/// Answer `textDocument/formatting` (RFC-0017): run the canonical formatter on
+/// the cached document and return one whole-document replace. A document that
+/// fails to lex returns `null` (no edit) — format-on-save must never corrupt a
+/// buffer the user is mid-edit in. An already-canonical document returns an empty
+/// edit list.
+fn handle_formatting(server: &Server, params: serde_json::Value) -> Option<Vec<TextEdit>> {
+    let p: DocumentFormattingParams = serde_json::from_value(params).ok()?;
+    let text = server.docs.get(&p.text_document.uri)?;
+    // A lex error (or the internal safety tripwire) → `None` → null result.
+    let formatted = vela_frontend::fmt(text).ok()?;
+    if &formatted == text {
+        return Some(vec![]);
+    }
+    Some(vec![TextEdit { range: whole_document_range(text), new_text: formatted }])
+}
+
+/// A `Range` covering the entire `text` (start of the document to just past its
+/// last character), so a single edit replaces everything.
+fn whole_document_range(text: &str) -> Range {
+    // LSP lines are 0-based; the end position is the line/character just after the
+    // last content. Counting `\n`s gives the last line index; the final line's
+    // length is its char count.
+    let mut last_line = 0u32;
+    let mut last_line_len = 0u32;
+    for ch in text.chars() {
+        if ch == '\n' {
+            last_line += 1;
+            last_line_len = 0;
+        } else {
+            last_line_len += 1;
+        }
+    }
+    Range {
+        start: Position { line: 0, character: 0 },
+        end: Position { line: last_line, character: last_line_len },
+    }
 }
 
 /// Map one frontend [`Symbol`](vela_frontend::Symbol) to an LSP `DocumentSymbol`.

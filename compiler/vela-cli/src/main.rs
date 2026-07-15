@@ -21,7 +21,7 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: velac <run|check|emit-ir|build|test|serve> [file.vela] [-o out] [--target wasm] [--offline]\n       velac run [file.vela] [args...]   (trailing args reach the program's args())\n       velac test [file.vela] [--name <substring>]\n       velac serve [file.vela] [--port N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       velac new <name> | velac add <specifier> [--name alias] | velac update [alias] | velac vendor [--check] | velac deps";
+const USAGE: &str = "usage: velac <run|check|emit-ir|build|test|serve|fmt> [file.vela] [-o out] [--target wasm] [--offline]\n       velac run [file.vela] [args...]   (trailing args reach the program's args())\n       velac test [file.vela] [--name <substring>]\n       velac serve [file.vela] [--port N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       velac fmt [file.vela ...] [--check]   (canonical formatter; no files = project main + local imports)\n       velac new <name> | velac add <specifier> [--name alias] | velac update [alias] | velac vendor [--check] | velac deps";
 
 /// `--offline` flag or `VELA_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
@@ -61,6 +61,9 @@ fn main() -> ExitCode {
     }
     if cmd == "vendor" {
         return vendor(args.get(2).is_some_and(|a| a == "--check"));
+    }
+    if cmd == "fmt" {
+        return fmt_cmd(&args[2..]);
     }
 
     // The remaining commands take an optional file; without one, the manifest
@@ -319,6 +322,138 @@ fn deps() -> ExitCode {
                 eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
             }
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// `velac fmt [file ...] [--check]` (RFC-0017) — the canonical formatter.
+///
+/// With explicit files, formats each in place. With no files, formats the
+/// project `main` plus its LOCAL (non-remote) imports, discovered through the
+/// module graph. `--check` writes nothing: it lists the files that would change
+/// and exits 1 if any do (0 otherwise) — the CI gate.
+///
+/// fmt requires only *lexable* input (a parse error still formats). A lex error
+/// leaves that file untouched and is reported; the command still processes the
+/// other files but exits non-zero.
+fn fmt_cmd(rest: &[String]) -> ExitCode {
+    let check = rest.iter().any(|a| a == "--check");
+    let files: Vec<String> = rest.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+
+    // Resolve the set of files to format.
+    let targets: Vec<String> = if files.is_empty() {
+        match fmt_project_files() {
+            Ok(t) => t,
+            Err(code) => return code,
+        }
+    } else {
+        files
+    };
+    if targets.is_empty() {
+        eprintln!("error: no input files, and no vela.json with a `main` found");
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
+
+    let mut would_change: Vec<String> = Vec::new();
+    let mut had_error = false;
+    let mut written = 0usize;
+    for path in &targets {
+        let source = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: cannot read {path}: {e}");
+                had_error = true;
+                continue;
+            }
+        };
+        // Normalize to LF for a stable comparison; the formatter emits LF and one
+        // trailing newline. (Repo files are LF; a CRLF checkout still formats to LF.)
+        let normalized = source.replace("\r\n", "\n");
+        match vela_frontend::fmt(&normalized) {
+            Ok(formatted) => {
+                if formatted != source {
+                    if check {
+                        would_change.push(path.clone());
+                    } else if let Err(e) = std::fs::write(path, &formatted) {
+                        eprintln!("error: cannot write {path}: {e}");
+                        had_error = true;
+                    } else {
+                        written += 1;
+                    }
+                }
+            }
+            Err(d) => {
+                // A lex error (or the internal safety-invariant tripwire) — leave
+                // the file untouched.
+                eprintln!("{path}:{}: {}", d.line, d.message);
+                had_error = true;
+            }
+        }
+    }
+
+    if check {
+        for f in &would_change {
+            println!("{f}");
+        }
+        if !would_change.is_empty() || had_error {
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::SUCCESS;
+    }
+    if written > 0 {
+        println!("formatted {written} file{}", if written == 1 { "" } else { "s" });
+    } else if !had_error {
+        println!("already formatted");
+    }
+    if had_error {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// The project's `main` plus its local (non-remote) imports, as file paths — the
+/// default target set for a bare `velac fmt`. Remote imports (github:/gist:/https:)
+/// are pinned artifacts, never formatted in place.
+fn fmt_project_files() -> Result<Vec<String>, ExitCode> {
+    let Some(main) = manifest_main() else {
+        return Ok(Vec::new());
+    };
+    let source = match std::fs::read_to_string(&main) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {main}: {e}");
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    let root_key = main.trim_start_matches(r"\\?\").replace('\\', "/");
+    let opts = load_options(&root_key);
+    let resolver = make_resolver(&root_key);
+    match vela_frontend::loader::module_graph(&source, &root_key, &opts, &resolver) {
+        Ok(graph) => {
+            // Module keys are the local modules' file paths (and remote specifiers,
+            // which we exclude). De-duplicate while preserving order.
+            let mut seen = std::collections::HashSet::new();
+            let mut out = Vec::new();
+            for (module, _imports) in graph {
+                if vela_frontend::loader::is_remote(&module) {
+                    continue;
+                }
+                if seen.insert(module.clone()) {
+                    out.push(module);
+                }
+            }
+            Ok(out)
+        }
+        Err(diags) => {
+            // A graph error (e.g. an unresolvable import) — fall back to just the
+            // main file so `fmt` is still useful on a partly-broken project.
+            for d in &diags {
+                let file = d.file.as_deref().unwrap_or(&root_key);
+                eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
+            }
+            Ok(vec![root_key])
         }
     }
 }

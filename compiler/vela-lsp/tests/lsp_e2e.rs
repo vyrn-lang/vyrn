@@ -601,3 +601,73 @@ fn imports_resolve_across_files() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Whole-document formatting (RFC-0017): the server advertises
+/// `documentFormattingProvider`, and `textDocument/formatting` on a deliberately
+/// mis-spaced (but lexable) buffer returns one full-range `TextEdit` whose
+/// `newText` is the canonical form — semicolons dropped, spacing normalized,
+/// 4-space indent, one trailing newline.
+#[test]
+fn document_formatting_returns_canonical_edit() {
+    let mut client = LspClient::spawn().expect("spawn vela-lsp");
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+        "params": { "capabilities": {}, "processId": null }
+    }));
+    let init_resp = client.read_response(&init_id);
+    assert!(
+        init_resp
+            .pointer("/result/capabilities/documentFormattingProvider")
+            .is_some(),
+        "documentFormatting advertised: {init_resp}"
+    );
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+
+    // Messy input: no indent, cramped operators, trailing semicolons.
+    let uri = "file:///fmt/messy.vela";
+    let src = "fn main()->Int64{\nlet  x=1+2*3;\nreturn x;\n}\n";
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": { "textDocument": { "uri": uri, "languageId": "vela", "version": 1, "text": src } }
+    }));
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let mut ids = Ids::new();
+    let fmt_id = ids.next();
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": fmt_id, "method": "textDocument/formatting",
+        "params": {
+            "textDocument": { "uri": uri },
+            "options": { "tabSize": 4, "insertSpaces": true }
+        }
+    }));
+    let resp = client.read_response(&fmt_id);
+    let edits = resp.get("result").and_then(|r| r.as_array()).expect("formatting returns edits");
+    assert_eq!(edits.len(), 1, "one whole-document edit: {resp}");
+    let new_text = edits[0].get("newText").and_then(|t| t.as_str()).expect("newText");
+    assert_eq!(
+        new_text,
+        "fn main() -> Int64 {\n    let x = 1 + 2 * 3\n    return x\n}\n",
+        "formatting yields the canonical form"
+    );
+
+    // A document that fails to lex returns a null result (no edit) — never a
+    // corrupting change while the user is mid-edit.
+    let bad_uri = "file:///fmt/broken.vela";
+    let bad_src = "fn main() -> Int64 { let s = \"unterminated }\n";
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": { "textDocument": { "uri": bad_uri, "languageId": "vela", "version": 1, "text": bad_src } }
+    }));
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+    let bad_id = ids.next();
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": bad_id, "method": "textDocument/formatting",
+        "params": { "textDocument": { "uri": bad_uri }, "options": { "tabSize": 4, "insertSpaces": true } }
+    }));
+    let bad_resp = client.read_response(&bad_id);
+    assert!(bad_resp.get("error").is_none(), "no error for an unlexable buffer: {bad_resp}");
+    assert!(bad_resp.get("result").is_some(), "`result` key present (not skipped): {bad_resp}");
+    assert!(bad_resp["result"].is_null(), "unlexable buffer formats to null (no edit)");
+}

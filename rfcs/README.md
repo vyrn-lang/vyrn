@@ -43,8 +43,8 @@ The early RFCs (0001–0009) began as **Draft**, distilled from the founding
 design conversation; most of the surface they describe — and RFCs 0010–0016 —
 is now **Implemented** in `compiler/` and covered by the three-way parity
 corpus (each RFC header carries its own status). RFC-0004's memory model is the
-part still expected to move; RFC-0017 (the formatter) is approved but not yet
-built.
+part still expected to move; RFC-0017 (the formatter, `velac fmt` + LSP
+`textDocument/formatting`) is now **Implemented** too.
 
 ## Process
 

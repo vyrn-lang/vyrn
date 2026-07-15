@@ -6,9 +6,10 @@ and the one decision the rest of the language waits on.
 **Every feature below is verified three ways**: the clang-compiled native
 binary AND the `wasm32-wasi` module produce byte-identical stdout, stderr, and
 exit codes against the tree-walking interpreter (the reference semantics),
-across **45 examples** and **573 tests** (0 warnings) — including every runtime
+across **45 examples** and **595 tests** (0 warnings) — including every runtime
 trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere)
-and the canonical I/O error strings (RFC-0014).
+and the canonical I/O error strings (RFC-0014). The whole corpus is kept
+canonical by `velac fmt` (RFC-0017) and re-verified by the parity harness.
 The permanent corpus harness is
 `cargo test -p vela-cli --test parity -- --ignored` (needs clang; the wasm
 column runs when `tools/` holds a wasi-sysroot + wasmtime, or via
@@ -384,10 +385,25 @@ none blocks the core loop.
   `resolve(analysis, line, col)` maps a cursor to its declaration; `
   completions(analysis)` lists top-level symbols. Non-invasive: no AST/parser
   span threading. `diagnostics()` delegates to `analyze()`, so one pipeline.
+- **`velac fmt` — the canonical formatter** (RFC-0017). One style, no options.
+  `vela_frontend::fmt(source) -> Result<String, Diagnostic>` prints a
+  comment-preserving token stream (`lexer::lex_with_trivia`): 4-space brace-depth
+  indent, the normative spacing table, semicolons dropped, 2+ blank lines
+  collapsed to one, one trailing newline. It **never joins or splits lines** (no
+  width reflow) and never re-synthesizes a literal — it only chooses the
+  whitespace between raw token texts, so the **safety invariant** is cheap:
+  `lex(fmt(src))` equals `lex(src)` modulo removed `Semi`, checked in `fmt`
+  itself (a mismatch returns an error and leaves the file untouched) and over the
+  whole corpus. `velac fmt [files…] [--check]` formats in place (or bare
+  `velac fmt` = project main + local imports via the module graph); `--check` is
+  the CI gate (lists drift, exits 1, writes nothing). Requires only *lexable*
+  input, so a half-typed buffer with a parse error still formats — which is what
+  makes format-on-save safe.
 - **`vela-lsp`** — a synchronous `lsp-server` LSP server (no async runtime) and a
   pure adapter: it calls `analyze_linked` once on open/change, caches the
   `Analysis`, and serves `textDocument/publishDiagnostics`, `/hover`,
-  `/definition`, and `/completion` from it (a request never re-parses). Excluded
+  `/definition`, `/completion`, and `/formatting` (whole-document, running the
+  same `fmt`) from it (a request never re-parses). Excluded
   from the default workspace (pulls `lsp-server`/`lsp-types`); built with
   `cargo build --manifest-path compiler/vela-lsp/Cargo.toml`. The only compiler
   calls are `vela_frontend::analyze_linked` + the query layer, so the editor and

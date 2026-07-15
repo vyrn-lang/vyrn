@@ -4,8 +4,10 @@ A minimal VS Code extension that adds **syntax highlighting** (including
 **regex highlighting** inside `=~` / `where` predicates and distinct colors for
 `import`, function calls, and capability modifiers), **live diagnostics**,
 **hover**, **go-to-definition**, **completion**, **document symbols / outline**
-(including `test` blocks), **▶ Run / ▶ Run test CodeLenses**, and **snippets**
-for the Vela language (`.vela` files).
+(including `test` blocks), **document formatting** (RFC-0017 — format-on-save
+works with zero extra config, since the server advertises
+`documentFormattingProvider`), **▶ Run / ▶ Run test CodeLenses**, and
+**snippets** for the Vela language (`.vela` files).
 
 It is deliberately tiny and plain-JavaScript (no TypeScript compile step):
 
@@ -112,6 +114,9 @@ completion** keyed off the receiver's type (`arr.` → `push`/`at`/`alen`/`afree
 `length`; `log.` → `trace`/`debug`/`info`/`warn`/`error`). **Document symbols**
 (outline / breadcrumbs / Ctrl-Shift-O) list the document's own top-level
 functions, methods, types, and variants (imported symbols are excluded).
-Deferred: user
+**Formatting** (Shift+Alt+F, or Format on Save) runs the canonical formatter
+(RFC-0017) over the whole document; a buffer that fails to lex is left untouched
+(no edit) rather than corrupted mid-edit. Deferred: range formatting
+(whole-document only in v1), user
 `protocol`/`impl` method-call resolution (the checker itself does not resolve
 `impl` methods yet), and parser error recovery. See `ROADMAP.md`.

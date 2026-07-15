@@ -1,6 +1,8 @@
 # RFC-0017 — `velac fmt`: the Canonical Formatter
 
-- **Status:** Draft — approved for implementation
+- **Status:** Implemented — `vela_frontend::fmt`, `velac fmt [--check]`, LSP
+  `textDocument/formatting`; the whole corpus is canonical and re-verified by
+  the three-way parity harness.
 - **Depends on:** RFC-0006 (diagnostics/lexer positions), the no-semicolon
   and lowerCamelCase surface decisions
 
@@ -67,6 +69,44 @@ and leaves the file untouched (a formatter bug must never corrupt source).
   the diff should be near-empty (the style *is* the corpus style); whatever
   it does change is reviewed as a style-rule bug or a corpus inconsistency,
   then the parity harness re-verifies everything.
+
+## Implementation decisions (v1)
+
+The printer works over a comment-preserving token stream
+(`lexer::lex_with_trivia`) and only ever chooses the whitespace *between* raw
+token texts — it never re-synthesizes a token's spelling, so string/char/number
+literals (and `\{ }` interpolation holes) are reproduced byte-for-byte. A few
+rules that the normative style left implicit had to be pinned down:
+
+- **Generic `<`/`>` vs comparison.** Disambiguated by *source tightness*: a
+  generic bracket is written tight against its neighbours (`Box<T>`,
+  `Array<Int64>`, `Array<String, 3>` — the const-generic size counts, so a `>`
+  after an integer is still generic), whereas a comparison is spaced (`a < b`,
+  `i < 1`). This matches the entire corpus and needs no type information (fmt
+  builds no AST). Space *after* a generic `>` follows the ordinary rules, so
+  `Box<T> =` keeps its space and never fuses into `>=`; a generic `>` before `(`
+  attaches (`fn id<T>(x)`).
+- **Unary vs binary `-`.** By the previous token: `-` is unary unless it follows
+  an operand (identifier, literal, `)`, `]`, `?`). Unary binds tight (`-1`,
+  `(-1)`, `=> -1`); binary is spaced (`a - 1`).
+- **Leading-pipe enums.** A line whose first token is `|` indents one level
+  deeper than brace depth (`type Shape =` then `    | Circle(Int64)`), the one
+  construct whose indentation is not brace-driven.
+- **Tagged templates.** A string literal written tight against a preceding
+  identifier stays tight (`sql"..\{}.."`), matching RFC-0007. The parser keys on
+  same-line adjacency (not column), so this is cosmetic — but tight is the
+  canonical form. `return "x"` / `from "path"` have a source space and are
+  unaffected.
+- **`///` doc / blank-line interaction.** A blank line between a `///` block and
+  a declaration is **load-bearing** — the parser *detaches* the doc on a gap
+  (a file-header block belongs to the file, observable via hover and
+  `schemaOf(T).doc`). The formatter therefore does **not** remove it; it only
+  collapses 2+ blanks to one. An already-adjacent doc stays adjacent. (This is
+  the meaning-preserving reading of "a `///` doc block sits directly above its
+  declaration": the token stream is identical either way, but attachment is not,
+  so line structure is preserved rather than rewritten.)
+- **Semicolons.** Dropped. A stray single-line `a; b` becomes `a b`; v1 does not
+  reflow it onto two lines, and the no-semicolon parser accepts the result.
 
 ## Out of scope
 

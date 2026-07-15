@@ -90,6 +90,391 @@ pub struct Token {
     pub col: usize,
 }
 
+/// A lexical *item* for the formatter (RFC-0017): a token or a comment, carrying
+/// its **raw source text** (verbatim) and the source lines it spans. This is the
+/// additive, comment-preserving view of the token stream that [`lex_with_trivia`]
+/// produces; the normal [`lex`] and its callers are untouched.
+///
+/// The formatter prints raw `text` for every item and only ever changes the
+/// whitespace *between* items — so a literal (string, char, number) can never be
+/// re-escaped or mangled, which is what makes the safety invariant cheap.
+#[derive(Debug, Clone)]
+pub struct Triv {
+    pub kind: TrivKind,
+    /// Raw source slice, verbatim. For comments/docs it includes the leading
+    /// slashes; trailing whitespace/CR is stripped.
+    pub text: String,
+    /// 1-based line the item starts on.
+    pub start_line: usize,
+    /// 1-based line the item ends on (equal to `start_line` except for multi-line
+    /// string literals, whose internal newlines are part of the token).
+    pub end_line: usize,
+    /// Whether whitespace, a newline, or a comment separated this item from the
+    /// previous token in the source. Drives the `<`/`>` generic-vs-comparison
+    /// disambiguation (a generic bracket is *tight* against its neighbours).
+    pub space_before: bool,
+}
+
+/// What a [`Triv`] item is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrivKind {
+    /// A real token. The payload is the token *kind* (used for spacing
+    /// decisions); its inner value is a dummy for literals — the raw `text` is
+    /// what gets printed, never a re-synthesized spelling.
+    Tok(Tok),
+    /// A `//` line comment (including `////+` plain comments).
+    Comment,
+    /// A `///` documentation line.
+    Doc,
+}
+
+/// Map an identifier's text to its keyword token, or [`Tok::Ident`]. Shared
+/// spelling table so [`lex`] and [`lex_with_trivia`] agree exactly.
+fn keyword_or_ident(text: &str) -> Tok {
+    match text {
+        "fn" => Tok::Fn,
+        "let" => Tok::Let,
+        "mut" => Tok::Mut,
+        "if" => Tok::If,
+        "else" => Tok::Else,
+        "while" => Tok::While,
+        "for" => Tok::For,
+        "in" => Tok::In,
+        "drop" => Tok::Drop,
+        "protocol" => Tok::Protocol,
+        "import" => Tok::Import,
+        "export" => Tok::Export,
+        "impl" => Tok::Impl,
+        "self" => Tok::Vself,
+        "return" => Tok::Return,
+        "true" => Tok::True,
+        "false" => Tok::False,
+        "type" => Tok::Type,
+        "where" => Tok::Where,
+        "match" => Tok::Match,
+        "region" => Tok::Region,
+        "spawn" => Tok::Spawn,
+        _ => Tok::Ident(text.to_string()),
+    }
+}
+
+/// Two-character operator table (returns `None` if `(a, b)` is not one).
+fn two_char_op(a: char, b: char) -> Option<Tok> {
+    match (a, b) {
+        ('-', '>') => Some(Tok::Arrow),
+        ('=', '>') => Some(Tok::FatArrow),
+        ('=', '~') => Some(Tok::TildeMatch),
+        ('=', '=') => Some(Tok::EqEq),
+        ('!', '=') => Some(Tok::NotEq),
+        ('<', '=') => Some(Tok::LtEq),
+        ('>', '=') => Some(Tok::GtEq),
+        ('&', '&') => Some(Tok::AndAnd),
+        ('|', '|') => Some(Tok::OrOr),
+        _ => None,
+    }
+}
+
+/// Single-character operator/punctuation table.
+fn single_char_op(c: char) -> Option<Tok> {
+    Some(match c {
+        '(' => Tok::LParen,
+        ')' => Tok::RParen,
+        '{' => Tok::LBrace,
+        '}' => Tok::RBrace,
+        '[' => Tok::LBracket,
+        ']' => Tok::RBracket,
+        ',' => Tok::Comma,
+        ';' => Tok::Semi,
+        ':' => Tok::Colon,
+        '.' => Tok::Dot,
+        '+' => Tok::Plus,
+        '-' => Tok::Minus,
+        '*' => Tok::Star,
+        '/' => Tok::Slash,
+        '%' => Tok::Percent,
+        '=' => Tok::Eq,
+        '<' => Tok::Lt,
+        '>' => Tok::Gt,
+        '!' => Tok::Bang,
+        '?' => Tok::Question,
+        '|' => Tok::Pipe,
+        '&' => Tok::Amp,
+        _ => return None,
+    })
+}
+
+/// Comment-preserving tokenizer (RFC-0017). Yields the same tokens as [`lex`]
+/// **plus** `//` comments and blank-line structure (via each item's raw text and
+/// line span), so the formatter can reconstruct the source faithfully.
+///
+/// Token *kinds* are accurate (keywords vs identifiers, each operator), but
+/// literal payloads are dummy — the raw `text` slice is authoritative and is all
+/// the printer ever emits. Boundaries mirror [`lex`] exactly (strings, char
+/// literals, `\{..}` interpolation holes, `///` docs vs `//`/`////+` comments),
+/// so re-lexing the printer's output with [`lex`] round-trips modulo semicolons.
+pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
+    let chars: Vec<char> = src.chars().collect();
+    let mut i = 0usize;
+    let mut line = 1usize;
+    let mut out: Vec<Triv> = Vec::new();
+    // No token precedes the first one; the file start counts as "space before".
+    let mut space_before = true;
+
+    // Trim a comment/doc slice: strip a trailing CR and any trailing blanks
+    // (verbatim content otherwise, so no-trailing-whitespace holds).
+    let trim_comment = |s: &[char]| -> String {
+        let mut t: String = s.iter().collect();
+        while t.ends_with('\r') || t.ends_with(' ') || t.ends_with('\t') {
+            t.pop();
+        }
+        t
+    };
+
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\n' {
+            line += 1;
+            i += 1;
+            space_before = true;
+            continue;
+        }
+        if c.is_whitespace() {
+            i += 1;
+            space_before = true;
+            continue;
+        }
+
+        let start = i;
+        let start_line = line;
+
+        // `//` comment or `///` doc (`////+` is a plain comment, like `lex`).
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            let is_doc = i + 2 < chars.len()
+                && chars[i + 2] == '/'
+                && !(i + 3 < chars.len() && chars[i + 3] == '/');
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            out.push(Triv {
+                kind: if is_doc { TrivKind::Doc } else { TrivKind::Comment },
+                text: trim_comment(&chars[start..i]),
+                start_line,
+                end_line: start_line,
+                space_before,
+            });
+            space_before = true;
+            continue;
+        }
+
+        // string / interpolated string — one item spanning any internal newlines.
+        if c == '"' {
+            i += 1;
+            loop {
+                if i >= chars.len() {
+                    return Err(Diagnostic::error(line, 0, "lex", "unterminated string literal".into()));
+                }
+                let ch = chars[i];
+                if ch == '"' {
+                    i += 1;
+                    break;
+                }
+                if ch == '\n' {
+                    line += 1;
+                    i += 1;
+                    continue;
+                }
+                if ch == '\\' {
+                    if i + 1 >= chars.len() {
+                        return Err(Diagnostic::error(line, 0, "lex", "unterminated escape in string".into()));
+                    }
+                    if chars[i + 1] == '{' {
+                        // interpolation hole: scan raw to matching `}` (mirroring
+                        // `lex` — nested strings, char literals, comments, braces).
+                        i += 2;
+                        let mut depth = 1usize;
+                        while i < chars.len() && depth > 0 {
+                            match chars[i] {
+                                '\n' => {
+                                    line += 1;
+                                    i += 1;
+                                }
+                                '"' => {
+                                    i += 1;
+                                    while i < chars.len() && chars[i] != '"' {
+                                        if chars[i] == '\n' {
+                                            line += 1;
+                                        }
+                                        i += if chars[i] == '\\' { 2 } else { 1 };
+                                    }
+                                    if i >= chars.len() {
+                                        return Err(Diagnostic::error(line, 0, "lex", "unterminated string in interpolation".into()));
+                                    }
+                                    i += 1;
+                                }
+                                '\'' => {
+                                    i += 1;
+                                    while i < chars.len() && chars[i] != '\'' && chars[i] != '\n' {
+                                        i += if chars[i] == '\\' { 2 } else { 1 };
+                                    }
+                                    if i >= chars.len() || chars[i] == '\n' {
+                                        return Err(Diagnostic::error(line, 0, "lex", "unterminated character literal in interpolation".into()));
+                                    }
+                                    i += 1;
+                                }
+                                '/' if i + 1 < chars.len() && chars[i + 1] == '/' => {
+                                    while i < chars.len() && chars[i] != '\n' {
+                                        i += 1;
+                                    }
+                                }
+                                '{' => {
+                                    depth += 1;
+                                    i += 1;
+                                }
+                                '}' => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                    i += 1;
+                                }
+                                _ => i += 1,
+                            }
+                        }
+                        if depth != 0 {
+                            return Err(Diagnostic::error(line, 0, "lex", "unterminated `\\{` interpolation".into()));
+                        }
+                        i += 1; // closing `}`
+                        continue;
+                    }
+                    // Any other escape: skip the backslash and its next char. `\u{..}`
+                    // leaves `{HEX}` as ordinary string chars (harmless here — only
+                    // `\{` opens a hole), matching `lex`.
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+            }
+            out.push(Triv {
+                kind: TrivKind::Tok(Tok::Str(String::new())),
+                text: chars[start..i].iter().collect(),
+                start_line,
+                end_line: line,
+                space_before,
+            });
+            space_before = false;
+            continue;
+        }
+
+        // character literal `'a'` / `'\n'` / `'\u{HEX}'` — a single Int token.
+        if c == '\'' {
+            i += 1;
+            if i < chars.len() && chars[i] == '\\' {
+                if i + 1 < chars.len() && chars[i + 1] == 'u' {
+                    i += 2;
+                    while i < chars.len() && chars[i] != '}' && chars[i] != '\n' {
+                        i += 1;
+                    }
+                    if i < chars.len() && chars[i] == '}' {
+                        i += 1;
+                    }
+                } else {
+                    i += 2; // `\x`
+                }
+            } else if i < chars.len() && chars[i] != '\n' {
+                i += 1; // any single scalar
+            }
+            if i < chars.len() && chars[i] == '\'' {
+                i += 1;
+            } else {
+                return Err(Diagnostic::error(start_line, 0, "lex", "unterminated character literal".into()));
+            }
+            out.push(Triv {
+                kind: TrivKind::Tok(Tok::Int(0)),
+                text: chars[start..i].iter().collect(),
+                start_line,
+                end_line: line,
+                space_before,
+            });
+            space_before = false;
+            continue;
+        }
+
+        // number (int or `1.5` float — same rule as `lex`).
+        if c.is_ascii_digit() {
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            let mut kind = Tok::Int(0);
+            if i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit() {
+                i += 1;
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                kind = Tok::Float(0.0);
+            }
+            out.push(Triv {
+                kind: TrivKind::Tok(kind),
+                text: chars[start..i].iter().collect(),
+                start_line,
+                end_line: line,
+                space_before,
+            });
+            space_before = false;
+            continue;
+        }
+
+        // identifier or keyword.
+        if c.is_alphabetic() || c == '_' {
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let text: String = chars[start..i].iter().collect();
+            let tok = keyword_or_ident(&text);
+            out.push(Triv {
+                kind: TrivKind::Tok(tok),
+                text,
+                start_line,
+                end_line: line,
+                space_before,
+            });
+            space_before = false;
+            continue;
+        }
+
+        // multi-char then single-char operators.
+        if let Some(tok) = i.checked_add(1).filter(|&j| j < chars.len()).and_then(|j| two_char_op(c, chars[j])) {
+            i += 2;
+            out.push(Triv {
+                kind: TrivKind::Tok(tok),
+                text: chars[start..i].iter().collect(),
+                start_line,
+                end_line: line,
+                space_before,
+            });
+            space_before = false;
+            continue;
+        }
+        match single_char_op(c) {
+            Some(tok) => {
+                i += 1;
+                out.push(Triv {
+                    kind: TrivKind::Tok(tok),
+                    text: chars[start..i].iter().collect(),
+                    start_line,
+                    end_line: line,
+                    space_before,
+                });
+                space_before = false;
+            }
+            None => {
+                return Err(Diagnostic::error(line, 0, "lex", format!("unexpected character {c:?}")));
+            }
+        }
+    }
+
+    Ok(out)
+}
+
 /// Parse a `\u{HEX}` Unicode-scalar escape starting at the backslash (`chars[at]`
 /// is `\`, `chars[at+1]` is `u`). Returns the decoded character and the index
 /// just past the closing `}`.
