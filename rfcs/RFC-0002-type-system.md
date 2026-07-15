@@ -150,6 +150,21 @@ nominal type SessionId = String
 // UserId and SessionId never mix, despite both being String-shaped.
 ```
 
+### String encoding (decision)
+
+A `String` is an **immutable sequence of UTF-8 bytes**. `s.length` is the
+**byte** count — identical to the number of code points for ASCII, but larger
+for multi-byte text (`"é".length == 2`, `"日".length == 3`). The regex engine
+is byte-wise (`.` matches one byte), and source files are read as UTF-8.
+
+This makes `.length` and indexing O(1) with no hidden scan, at one documented
+cost: a `String where` predicate's length bounds are byte bounds, so when they
+are emitted as JSON-Schema `minLength`/`maxLength` (RFC-0003 / `schemaOf`) the
+numbers pass through unchanged and therefore bound **bytes**, whereas a JSON
+validator counts UTF-16 code units. For ASCII these agree; for non-ASCII text
+they deliberately differ. A code-point-counting `.length` was rejected because
+it would turn every length query into an O(n) walk.
+
 ## 3. No casts
 
 There is no `as`. Every conversion is one of:

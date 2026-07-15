@@ -103,6 +103,12 @@ tests). Highlights:
 - **Checked conversions** — `str(Int64) -> String` (total) and
   `parse(String) -> Option<Int64>` (fallible, so the "not a number" case is an
   explicit `None` you must `match`). See [`examples/stringops.vela`](examples/stringops.vela).
+- **Strings are UTF-8** — a `String` is an immutable sequence of UTF-8 bytes.
+  `s.length` counts *bytes* (equal to code points for ASCII, larger for
+  multi-byte text: `"é".length == 2`), the regex engine matches byte-wise, and
+  source files are read as UTF-8. One consequence: JSON-Schema
+  `minLength`/`maxLength` bounds count bytes, not UTF-16 code units — a
+  deliberate, documented divergence. See [`examples/stringops.vela`](examples/stringops.vela).
 - **Arrays** — growable `Array<T>` (a `Vec`: `array()` / `push` / `at` / `alen` /
   `afree`, a doubling heap buffer, bounds-checked, with explicit reclamation) and
   **fixed-size `Array<T, N>`** (a const generic: the stack value aggregate `[N x T]`,

@@ -111,6 +111,16 @@ NIST vectors; `curl`/`git ls-remote` subprocesses, all in vela-cli).
   Concatenate two Strings with `a + b`; a String's byte length is the `s.length`
   field. (The old `concat(a, b)` / `len(s)` free-functions were removed — a
   user-written call to either reports a migration hint.)
+- **String encoding.** A `String` is an immutable sequence of **UTF-8 bytes**.
+  `s.length` counts **bytes**, not code points — equal to the code-point count
+  for ASCII text, larger for text with multi-byte characters (e.g. `"é"` has
+  `length` 2, `"日"` has `length` 3). The regex engine matches
+  byte-wise for the same reason, and `.` matches one byte. Source files are read
+  as UTF-8. One documented divergence follows from this: JSON-Schema
+  `minLength`/`maxLength` bounds derived from a `String where` predicate carry
+  the byte count through unchanged, so for non-ASCII text they bound bytes where
+  a JSON validator counts UTF-16 code units — a deliberate, noted trade-off (a
+  code-point index would cost an O(n) scan on every `.length`).
 
 ### Types
 - **Validated types** — `type Age = Int64 where value >= 18`, or inline on a
