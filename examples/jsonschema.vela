@@ -15,8 +15,8 @@ type Ratio = Float64 where value > 0.0 && value <= 1.0
 type Username = String where value.length >= 3 && value.length <= 16
 
 /// A user record: `age` reuses the validated `Age` and `handle` the validated
-/// `Username` (their constraints inline), and the optional `nick` is omitted
-/// from `required`.
+/// `Username` — named types render as `$ref`s into a `$defs` section, keeping
+/// the names on the wire — and the optional `nick` is omitted from `required`.
 type User = { handle: Username, age: Age, nick: Option<String> }
 
 fn main() -> Int64 {

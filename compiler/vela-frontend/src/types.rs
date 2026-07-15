@@ -130,22 +130,50 @@ pub fn schema_struct_lit(decl: &TypeDecl) -> Expr {
 /// `object` with `properties` and a `required` list (non-`Option` fields).
 pub fn json_schema_string(decl: &TypeDecl, types: &HashMap<String, TypeDecl>) -> String {
     let dialect = "\"$schema\":\"https://json-schema.org/draft/2020-12/schema\"";
-    let inner = type_schema(&Type::Named(decl.name.clone()), types, &mut Vec::new());
-    if inner == "{}" {
+    let mut cx = SchemaCx { types, root: &decl.name, defs: Vec::new() };
+    // Render the root's body directly — inside the expansion, `Named(root)`
+    // is a back-edge and renders as `{"$ref":"#"}`.
+    let inner = named_schema(decl, &mut cx);
+    // Nested named types were rendered into `$defs`; splice them in as the
+    // root object's last member (the schemastore convention, and what the
+    // RFC-0010 importer synthesizes back byte-identically).
+    let body = if cx.defs.is_empty() {
+        inner
+    } else {
+        let defs: Vec<String> = cx
+            .defs
+            .iter()
+            .map(|(n, s)| format!("\"{}\":{}", json_escape(n), s.as_deref().unwrap_or("{}")))
+            .collect();
+        format!("{},\"$defs\":{{{}}}}}", &inner[..inner.len() - 1], defs.join(","))
+    };
+    if body == "{}" {
         format!("{{{dialect}}}")
     } else {
-        // Splice the dialect in as the first member (drop `inner`'s leading `{`).
-        format!("{{{dialect},{}", &inner[1..])
+        // Splice the dialect in as the first member (drop `body`'s leading `{`).
+        format!("{{{dialect},{}", &body[1..])
     }
 }
 
+/// Shared state of one `json_schema_string` rendering.
+struct SchemaCx<'a> {
+    types: &'a HashMap<String, TypeDecl>,
+    /// The root declaration's name — a back-edge to it renders `{"$ref":"#"}`.
+    root: &'a str,
+    /// Every non-root named type encountered, in first-encounter order:
+    /// `(name, rendered schema)`. A `None` body means "currently rendering" —
+    /// a cycle just takes the `$ref`, which is what makes recursive types
+    /// (mutually or through the root) terminate naturally.
+    defs: Vec<(String, Option<String>)>,
+}
+
 /// The JSON Schema object (`{ .. }`) for a structural type, without the top-level
-/// `$schema` dialect. Recurses through records, arrays, and options. `visiting`
-/// tracks the named types on the current expansion path: schemas inline nested
-/// named types, so a recursive record (`next: Option<Node>` inside `Node`) would
-/// otherwise expand forever — the back-edge is documented with a `$comment`
-/// instead (honest-lossy, like every other unmappable form here).
-fn type_schema(ty: &Type, types: &HashMap<String, TypeDecl>, visiting: &mut Vec<String>) -> String {
+/// `$schema` dialect. Recurses through records, arrays, and options. A named
+/// type renders as `{"$ref":"#/$defs/N"}` (the root itself as `{"$ref":"#"}`)
+/// with its schema collected into [`SchemaCx::defs`] — except synthetic inline
+/// refinement helpers (`User.age`), which stay inlined so a field-level `where`
+/// round-trips as the inline constraints the user wrote.
+fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
     match ty {
         // The default Int64 is "just an integer"; a *sized* int is a deliberate
         // wire-width choice, so its bounds are part of the contract.
@@ -156,28 +184,37 @@ fn type_schema(ty: &Type, types: &HashMap<String, TypeDecl>, visiting: &mut Vec<
         Type::Str => "{\"type\":\"string\"}".to_string(),
         // An `Option<T>` field carries `T`'s schema; its optionality is expressed
         // by omission from the enclosing object's `required` list.
-        Type::Option(inner) => type_schema(inner, types, visiting),
+        Type::Option(inner) => type_schema(inner, cx),
         Type::Array(inner) | Type::ArrayN(inner, _) => {
-            format!("{{\"type\":\"array\",\"items\":{}}}", type_schema(inner, types, visiting))
+            format!("{{\"type\":\"array\",\"items\":{}}}", type_schema(inner, cx))
         }
         Type::Named(n) => {
-            if visiting.iter().any(|v| v == n) {
-                return format!(
-                    "{{\"$comment\":\"{}\"}}",
-                    json_escape(&format!("recursive reference to: {n}"))
-                );
+            if n == cx.root {
+                return "{\"$ref\":\"#\"}".to_string();
+            }
+            let types = cx.types;
+            // Synthetic inline-refinement helpers are desugaring artifacts,
+            // not schema-worthy names — render their body inline.
+            if n.contains('.') {
+                return match types.get(n) {
+                    Some(d) => named_schema(d, cx),
+                    None => "{}".to_string(),
+                };
             }
             match types.get(n) {
                 Some(d) => {
-                    visiting.push(n.clone());
-                    let s = named_schema(d, types, visiting);
-                    visiting.pop();
-                    s
+                    if !cx.defs.iter().any(|(dn, _)| dn == n) {
+                        let i = cx.defs.len();
+                        cx.defs.push((n.clone(), None)); // in progress
+                        let body = named_schema(d, cx);
+                        cx.defs[i].1 = Some(body);
+                    }
+                    format!("{{\"$ref\":\"#/$defs/{}\"}}", json_escape(n))
                 }
                 None => "{}".to_string(),
             }
         }
-        Type::Record(fields) => record_schema(fields, types, visiting),
+        Type::Record(fields) => record_schema(fields, cx),
         // A payload-less sum type is exactly a JSON Schema `enum` of its
         // variant names; payload variants have no faithful encoding, so they
         // get the honest-lossy `$comment` (like every unmappable form here).
@@ -233,11 +270,7 @@ fn intn_schema(bits: u8, signed: bool, extra: &[(String, String)]) -> String {
 
 /// The schema for a named declaration: a validated scalar carries its `where`
 /// constraints; anything else defers to its structural base (record, alias, …).
-fn named_schema(
-    decl: &TypeDecl,
-    types: &HashMap<String, TypeDecl>,
-    visiting: &mut Vec<String>,
-) -> String {
+fn named_schema(decl: &TypeDecl, cx: &mut SchemaCx) -> String {
     let pred = decl.predicate.as_ref();
     match &decl.base {
         Type::Int => scalar_with_constraints("integer", pred),
@@ -261,11 +294,11 @@ fn named_schema(
         // `$comment` naming the invariant (JSON Schema can't express arithmetic
         // between properties; the runtime check remains the source of truth).
         Type::Record(fields) if pred.is_some() => {
-            let obj = record_schema(fields, types, visiting);
+            let obj = record_schema(fields, cx);
             let comment = unmapped_comment(pred.unwrap());
             format!("{}{}}}", &obj[..obj.len() - 1], format!(",{comment}"))
         }
-        other => type_schema(other, types, visiting),
+        other => type_schema(other, cx),
     }
 }
 
@@ -408,14 +441,10 @@ fn json_escape(s: &str) -> String {
 }
 
 /// A record maps to a JSON Schema `object`; non-`Option` fields are `required`.
-fn record_schema(
-    fields: &[Field],
-    types: &HashMap<String, TypeDecl>,
-    visiting: &mut Vec<String>,
-) -> String {
+fn record_schema(fields: &[Field], cx: &mut SchemaCx) -> String {
     let props: Vec<String> = fields
         .iter()
-        .map(|f| format!("\"{}\":{}", f.name, type_schema(&f.ty, types, visiting)))
+        .map(|f| format!("\"{}\":{}", f.name, type_schema(&f.ty, cx)))
         .collect();
     let required: Vec<String> = fields
         .iter()
@@ -710,7 +739,8 @@ mod json_schema_tests {
 
     #[test]
     fn record_object_with_required() {
-        // A validated field inlines its own constraints; an Option field is optional.
+        // A named validated field becomes a `$ref` into `$defs` (the schema
+        // keeps the user's name); an Option field is optional.
         assert_eq!(
             schema_of(
                 "type Age = Int64 where value >= 18 \
@@ -718,8 +748,9 @@ mod json_schema_tests {
                 "User"
             ),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\
-             \"properties\":{\"name\":{\"type\":\"string\"},\"age\":{\"type\":\"integer\",\"minimum\":18},\
-             \"nick\":{\"type\":\"string\"}},\"required\":[\"name\",\"age\"]}"
+             \"properties\":{\"name\":{\"type\":\"string\"},\"age\":{\"$ref\":\"#/$defs/Age\"},\
+             \"nick\":{\"type\":\"string\"}},\"required\":[\"name\",\"age\"],\
+             \"$defs\":{\"Age\":{\"type\":\"integer\",\"minimum\":18}}}"
         );
     }
 
@@ -804,38 +835,41 @@ mod json_schema_tests {
     }
 
     #[test]
-    fn recursive_record_terminates_with_comment() {
+    fn recursive_record_terminates_with_root_ref() {
         // A self-referential record must not expand forever (this used to
-        // stack-overflow the compiler); the back-edge becomes a `$comment`.
+        // stack-overflow the compiler); the back-edge is a real `$ref` to the
+        // document root — a faithful recursive schema, not a lossy comment.
         let s = schema_of(
             "type Node = { name: String, next: Option<Node> }",
             "Node",
         );
-        assert!(s.contains("\"$comment\":\"recursive reference to: Node\""), "{s}");
+        assert!(s.contains("\"next\":{\"$ref\":\"#\"}"), "{s}");
         assert!(s.contains("\"name\":{\"type\":\"string\"}"), "{s}");
     }
 
     #[test]
     fn mutually_recursive_records_terminate() {
+        // A → B via `$defs`; B's back-edge to the root A is `{"$ref":"#"}`.
         let s = schema_of(
             "type A = { b: Option<B> } \
              type B = { a: Option<A> }",
             "A",
         );
-        assert!(s.contains("recursive reference to: A"), "{s}");
+        assert!(s.contains("\"b\":{\"$ref\":\"#/$defs/B\"}"), "{s}");
+        assert!(s.contains("\"$defs\":{\"B\":{\"type\":\"object\",\"properties\":{\"a\":{\"$ref\":\"#\"}}}}"), "{s}");
     }
 
     #[test]
-    fn repeated_nonrecursive_reference_is_still_inlined() {
-        // The same named type appearing twice on *sibling* paths is not a cycle
-        // — both occurrences inline fully.
+    fn repeated_reference_shares_one_def() {
+        // The same named type on sibling paths renders one `$defs` entry and
+        // two `$ref`s — no duplication.
         let s = schema_of(
             "type Age = Int64 where value >= 18 \
              type Pair = { x: Age, y: Age }",
             "Pair",
         );
-        assert_eq!(s.matches("\"minimum\":18").count(), 2, "{s}");
-        assert!(!s.contains("recursive"), "{s}");
+        assert_eq!(s.matches("{\"$ref\":\"#/$defs/Age\"}").count(), 2, "{s}");
+        assert_eq!(s.matches("\"minimum\":18").count(), 1, "{s}");
     }
 
     #[test]

@@ -55,10 +55,14 @@ modules exist. I/O lives behind a `ModuleResolver` trait (filesystem in the
 CLI, in-memory maps in tests). **JSON Schema type imports** (M2):
 `import type { User } from "./api.schema.json"` synthesizes validated types
 from a schema document — the exact inverse of `jsonSchema(T)` (bounds/lengths/
-patterns become `where` clauses, `required` steers `Option<T>`, `$defs` and
-`#/$defs/..` refs resolve, constrained fields become synthetic `User.age`
+patterns become `where` clauses, `required` steers `Option<T>`, `$defs`,
+`#/$defs/..` and root `#` refs resolve, `enum`-of-strings becomes a
+payload-less Vela enum, constrained fields become synthetic `User.age`
 types), byte-exact round-trip with the emitter, and any inexpressible keyword
-is a hard error. **Project manifest** (M3): an optional `vela.json`
+is a hard error. The emitter side is correspondingly rich: named nested types
+render as `$ref`s into a `$defs` section (recursion is a real `$ref` — `"#"`
+for the root — not a lossy comment), sized ints carry their width bounds as
+part of the wire contract, and payload-less enums emit `enum` arrays. **Project manifest** (M3): an optional `vela.json`
 (`name`/`main`/`dependencies`) found by walking up from the cwd — `velac run/
 check/build` need no file argument in a project, bare import specifiers
 (`import { x } from "money"`) resolve through the `dependencies` map (an

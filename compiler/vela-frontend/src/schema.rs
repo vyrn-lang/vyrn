@@ -276,13 +276,19 @@ pub fn synthesize(
             continue;
         }
         let mut nested: Vec<TypeDecl> = Vec::new();
-        let (base, predicate, mut extra) = convert(schema, &name, module, &mut nested)?;
+        let (base, predicate, mut extra) = convert(schema, &name, module, root_title, &mut nested)?;
         // $defs referenced via $ref come back in `extra`; queue unemitted ones.
+        // A `$ref: "#"` back-edge references the root itself, which lives at
+        // the document top, not under `$defs`.
         for r in extra.drain(..) {
             if !done.contains(&r) {
-                let schema = defs.and_then(|d| d.get(&r)).ok_or_else(|| {
-                    format!("{module}: `$ref` points at missing `#/$defs/{r}`")
-                })?;
+                let schema = if Some(r.as_str()) == root_title {
+                    &doc
+                } else {
+                    defs.and_then(|d| d.get(&r)).ok_or_else(|| {
+                        format!("{module}: `$ref` points at missing `#/$defs/{r}`")
+                    })?
+                };
                 pending.push((r, schema, false));
             }
         }
@@ -323,6 +329,7 @@ fn convert(
     schema: &Json,
     name: &str,
     module: &str,
+    root: Option<&str>,
     nested: &mut Vec<TypeDecl>,
 ) -> Result<(Type, Option<Expr>, Vec<String>), String> {
     let Json::Obj(fields) = schema else {
@@ -331,10 +338,18 @@ fn convert(
 
     // $ref-only schema.
     if let Some(r) = schema.get("$ref").and_then(|r| r.as_str()) {
+        // `#` is the document root — a recursive back-edge the emitter
+        // produces for self-referential types (`next: Option<Node>`).
+        if r == "#" {
+            let target = root.ok_or_else(|| {
+                format!("{module}: type `{name}`: `$ref` `#` needs a root `title`")
+            })?;
+            return Ok((Type::Named(target.to_string()), None, vec![target.to_string()]));
+        }
         let target = r.strip_prefix("#/$defs/").ok_or_else(|| {
             format!(
-                "{module}: type `{name}`: unsupported `$ref` `{r}` (only `#/$defs/..` \
-                 is supported)"
+                "{module}: type `{name}`: unsupported `$ref` `{r}` (only `#` and \
+                 `#/$defs/..` are supported)"
             )
         })?;
         return Ok((Type::Named(target.to_string()), None, vec![target.to_string()]));
@@ -486,7 +501,7 @@ fn convert(
             let items = schema.get("items").ok_or_else(|| {
                 format!("{module}: type `{name}`: `array` schema needs `items`")
             })?;
-            let (inner, pred, mut r) = convert(items, &format!("{name}.item"), module, nested)?;
+            let (inner, pred, mut r) = convert(items, &format!("{name}.item"), module, root, nested)?;
             refs.append(&mut r);
             let inner = if pred.is_some() {
                 // Constrained elements become a synthetic validated type, so
@@ -519,7 +534,7 @@ fn convert(
             let mut rec_fields = Vec::new();
             for (fname, fschema) in &props {
                 let sub_name = format!("{name}.{fname}");
-                let (fty, fpred, mut r) = convert(fschema, &sub_name, module, nested)?;
+                let (fty, fpred, mut r) = convert(fschema, &sub_name, module, root, nested)?;
                 refs.append(&mut r);
                 // A constrained (or nested-object) field becomes a synthetic
                 // named type — the mirror of inline `where` refinements, so
@@ -787,6 +802,29 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("unsupported keyword `type` alongside `enum`"), "{err}");
+    }
+
+    /// A recursive type round-trips through its `$ref` back-edge: the emitter
+    /// renders `next: Option<Node>` as `{"$ref":"#"}`, the importer resolves
+    /// `#` to the root title, and re-emission is byte-identical.
+    #[test]
+    fn recursive_type_round_trips_via_root_ref() {
+        let src = "type Node = { name: String, next: Option<Node> }\n\
+                   fn main() -> Int64 { return 0 }";
+        let program = crate::check(src).unwrap();
+        let types: HashMap<String, TypeDecl> =
+            program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        let emitted = crate::types::json_schema_string(&types["Node"], &types);
+        assert!(emitted.contains("\"next\":{\"$ref\":\"#\"}"), "{emitted}");
+        let doc = emitted.replacen("{", "{\"title\":\"Node\",", 1);
+        let decls = synthesize(&doc, Some(&["Node".to_string()]), "t.json").unwrap();
+        let reimported: HashMap<String, TypeDecl> =
+            decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        assert_eq!(
+            emitted,
+            crate::types::json_schema_string(&reimported["Node"], &reimported),
+            "recursive schema round-trip must be exact"
+        );
     }
 
     /// A sized-int type emits its width bounds and round-trips: the import
