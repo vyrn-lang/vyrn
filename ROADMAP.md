@@ -6,7 +6,7 @@ and the one decision the rest of the language waits on.
 **Every feature below is verified three ways**: the clang-compiled native
 binary AND the `wasm32-wasi` module produce byte-identical stdout, stderr, and
 exit codes against the tree-walking interpreter (the reference semantics),
-across **37 examples** and **408 tests** (0 warnings) — including every runtime
+across **37 examples** and **418 tests** (0 warnings) — including every runtime
 trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere).
 The permanent corpus harness is
 `cargo test -p vela-cli --test parity -- --ignored` (needs clang; the wasm
@@ -56,9 +56,21 @@ check/build` need no file argument in a project, bare import specifiers
 (`import { x } from "money"`) resolve through the `dependencies` map (an
 import map; targets are relative-to-manifest or `std/` for now), and `velac
 new <name>` scaffolds a runnable project, `velac deps` prints the resolved
-module graph. Bare `velac run file.vela` stays manifest-free forever. Next:
-reproducible remote imports (github:/gist:/https: with vela.lock +
-content-addressed cache + `velac add/update/vendor`).
+module graph. Bare `velac run file.vela` stays manifest-free forever.
+**Reproducible remote imports** (M4): `github:owner/repo@ref/path`,
+`gist:user/id[@rev]/file`, and `https://...` specifiers (inline or as manifest
+targets). The first resolve pins each dep in `vela.lock`
+(`specifier ⇥ immutable-url ⇥ sha256`, floating refs frozen to a commit via
+`git ls-remote`); content lives in the content-addressed
+`~/.vela/cache/sha256/` and is hash-verified on EVERY load (tampering fails
+loudly). `--offline`/`VELA_OFFLINE=1` builds never touch the network;
+`velac add <spec> [--name alias]` fetches+pins+records, `velac update [alias]`
+is the only way a pin changes, and `velac vendor [--check]` copies the lock's
+blobs into `./vela_vendor/` — a committed checkout builds forever even if the
+upstream is deleted (any copy of a file with the locked hash restores it).
+Remote modules are sandboxed: relative imports stay inside their pinned base,
+no local paths, no bare specifiers. Zero new crates (hand-rolled SHA-256 with
+NIST vectors; `curl`/`git ls-remote` subprocesses, all in vela-cli).
 
 ---
 

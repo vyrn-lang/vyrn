@@ -82,6 +82,43 @@ fn dir_of(resolved: &str) -> &str {
     }
 }
 
+/// Whether a specifier/key is remote (`github:`, `gist:`, `https:`).
+pub fn is_remote(spec: &str) -> bool {
+    spec.starts_with("github:") || spec.starts_with("gist:") || spec.starts_with("https://")
+}
+
+/// The immutable base of a remote key (`github:o/r@ref`, `gist:u/id[@rev]`,
+/// or `https://host`). Relative imports inside a remote module must stay
+/// under it — a remote file can never read your disk or climb out of its
+/// pinned tree.
+fn remote_base(key: &str) -> Option<String> {
+    if let Some(rest) = key.strip_prefix("github:") {
+        let at = rest.find('@')?;
+        let slash = rest[at + 1..].find('/')?;
+        return Some(format!("github:{}", &rest[..at + 1 + slash]));
+    }
+    if let Some(rest) = key.strip_prefix("gist:") {
+        // gist:user/id[@rev]/file — base is user/id[@rev].
+        let mut segs = rest.splitn(3, '/');
+        let user = segs.next()?;
+        let id = segs.next()?;
+        return Some(format!("gist:{user}/{id}"));
+    }
+    if let Some(rest) = key.strip_prefix("https://") {
+        let host = rest.split('/').next()?;
+        return Some(format!("https://{host}"));
+    }
+    None
+}
+
+/// Normalize the path part of a remote key (the scheme/anchor is left alone).
+fn normalize_remote(key: &str) -> String {
+    let Some(base) = remote_base(key) else { return key.to_string() };
+    let rest = &key[base.len()..];
+    let rest = rest.trim_start_matches('/');
+    format!("{base}/{}", normalize(rest))
+}
+
 /// Resolve an import specifier written inside `importer` to a module key.
 fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String, String> {
     let with_ext = |p: String| {
@@ -97,7 +134,32 @@ fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String
         })?;
         return Ok(normalize(&with_ext(format!("{root}/{rest}"))));
     }
+    if spec.starts_with("http://") {
+        return Err(format!("insecure `http:` import `{spec}` — use https"));
+    }
+    // Remote specifiers are their own keys; the resolver (vela-cli) turns them
+    // into content via the lockfile/cache/network.
+    if is_remote(spec) {
+        let key = normalize_remote(&with_ext(spec.to_string()));
+        remote_base(&key)
+            .ok_or_else(|| format!("malformed remote specifier `{spec}`"))?;
+        return Ok(key);
+    }
     if spec.starts_with("./") || spec.starts_with("../") {
+        // Inside a remote module, relative imports stay within the pinned
+        // base — never onto the local disk, never above the anchor.
+        if let Some(base) = remote_base(importer) {
+            let dir = dir_of(importer);
+            let key = normalize_remote(&with_ext(format!("{dir}/{spec}")));
+            let escaped = !key.starts_with(&format!("{base}/"))
+                || key[base.len()..].split('/').any(|seg| seg == "..");
+            if escaped {
+                return Err(format!(
+                    "`{spec}` escapes its remote module's base `{base}`"
+                ));
+            }
+            return Ok(key);
+        }
         let base = dir_of(importer);
         let joined =
             if base.is_empty() { spec.to_string() } else { format!("{base}/{spec}") };
@@ -105,26 +167,29 @@ fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String
     }
     // A bare specifier resolves through the manifest's dependency map; the
     // mapped target is itself a specifier, rooted at the manifest's directory.
-    if let Some(target) = opts.aliases.get(spec) {
-        if target.starts_with("./") || target.starts_with("../") {
-            let joined = if opts.alias_base.is_empty() {
-                target.clone()
-            } else {
-                format!("{}/{target}", opts.alias_base)
-            };
-            return Ok(normalize(&with_ext(joined)));
+    // Remote modules have no manifest — their bare specifiers are errors.
+    if remote_base(importer).is_none() {
+        if let Some(target) = opts.aliases.get(spec) {
+            if target.starts_with("./") || target.starts_with("../") {
+                let joined = if opts.alias_base.is_empty() {
+                    target.clone()
+                } else {
+                    format!("{}/{target}", opts.alias_base)
+                };
+                return Ok(normalize(&with_ext(joined)));
+            }
+            if target.starts_with("std/") || is_remote(target) {
+                return resolve_spec(target, importer, opts);
+            }
+            return Err(format!(
+                "manifest maps `{spec}` to `{target}`, which is not a supported specifier"
+            ));
         }
-        if target.starts_with("std/") {
-            return resolve_spec(target, importer, opts);
-        }
-        return Err(format!(
-            "manifest maps `{spec}` to `{target}`, which is not a supported \
-             specifier yet (remote imports land in the next milestone)"
-        ));
     }
     Err(format!(
         "cannot resolve import `{spec}`: use a relative path (`./name`), `std/name`, \
-         or declare it in vela.json's `dependencies`"
+         a remote specifier (github:/gist:/https:), or declare it in vela.json's \
+         `dependencies`"
     ))
 }
 
@@ -694,11 +759,11 @@ fn type_names(ty: &Type) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn map(entries: &[(&str, &str)]) -> MapResolver {
+    pub(super) fn map(entries: &[(&str, &str)]) -> MapResolver {
         MapResolver(entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
     }
 
-    fn opts() -> LoadOptions {
+    pub(super) fn opts() -> LoadOptions {
         LoadOptions { std_root: Some("std".into()), ..Default::default() }
     }
 
@@ -836,5 +901,85 @@ mod tests {
         let root = "import { f } from \"./lib\" fn main() -> Int64 { return f() }";
         let e = load_err(root, &[("lib.vela", lib)]);
         assert!(e.contains("only the root module may configure `logging"), "{e}");
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::tests::{map, opts};
+    use super::*;
+
+    fn load_err_at(root: &str, files: &[(&str, &str)]) -> String {
+        match load(root, "main.vela", &opts(), &map(files)) {
+            Ok(_) => panic!("expected a load error"),
+            Err(ds) => ds.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("\n"),
+        }
+    }
+
+    #[test]
+    fn remote_specifiers_are_their_own_keys() {
+        // A MapResolver keyed by the remote key stands in for the network —
+        // exactly what the CLI's cache does.
+        let lib = "export fn pad(n: Int64) -> Int64 { return n + 1 }";
+        let root = "import { pad } from \"github:acme/strings@v1/src/pad\" \
+                    fn main() -> Int64 { return pad(41) }";
+        let program = load(
+            root,
+            "main.vela",
+            &opts(),
+            &map(&[("github:acme/strings@v1/src/pad.vela", lib)]),
+        )
+        .unwrap();
+        assert_eq!(crate::interp::run(&program).unwrap(), 42);
+    }
+
+    #[test]
+    fn relative_imports_inside_a_remote_stay_in_its_base() {
+        let a = "import { b } from \"./b\" export fn a() -> Int64 { return b() }";
+        let b = "export fn b() -> Int64 { return 7 }";
+        let root = "import { a } from \"github:acme/x@abc/src/a\" \
+                    fn main() -> Int64 { return a() }";
+        let program = load(
+            root,
+            "main.vela",
+            &opts(),
+            &map(&[
+                ("github:acme/x@abc/src/a.vela", a),
+                ("github:acme/x@abc/src/b.vela", b),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(crate::interp::run(&program).unwrap(), 7);
+    }
+
+    #[test]
+    fn remote_relative_escapes_are_rejected() {
+        let a = "import { x } from \"../../../etc/passwd\" \
+                 export fn a() -> Int64 { return 0 }";
+        let root = "import { a } from \"github:acme/x@abc/src/a\" \
+                    fn main() -> Int64 { return a() }";
+        let e = load_err_at(root, &[("github:acme/x@abc/src/a.vela", a)]);
+        assert!(e.contains("escapes its remote module's base"), "{e}");
+    }
+
+    #[test]
+    fn bare_specifiers_inside_remote_modules_are_rejected() {
+        let a = "import { x } from \"money\" export fn a() -> Int64 { return 0 }";
+        let root = "import { a } from \"gist:demko/abc123/a\" \
+                    fn main() -> Int64 { return a() }";
+        let mut o = opts();
+        o.aliases.insert("money".into(), "./money".into());
+        let e = match load(root, "main.vela", &o, &map(&[("gist:demko/abc123/a.vela", a)])) {
+            Ok(_) => panic!("expected error"),
+            Err(ds) => ds[0].message.clone(),
+        };
+        assert!(e.contains("cannot resolve import `money`"), "{e}");
+    }
+
+    #[test]
+    fn http_imports_are_rejected() {
+        let root = "import { x } from \"http://x.dev/y\" fn main() -> Int64 { return 0 }";
+        let e = load_err_at(root, &[]);
+        assert!(e.contains("insecure `http:`"), "{e}");
     }
 }

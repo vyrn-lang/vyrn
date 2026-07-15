@@ -16,10 +16,24 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-const USAGE: &str = "usage: velac <run|check|emit-ir|build> [file.vela] [-o out] [--target wasm]\n       velac new <name> | velac deps";
+mod remote;
+
+const USAGE: &str = "usage: velac <run|check|emit-ir|build> [file.vela] [-o out] [--target wasm] [--offline]\n       velac new <name> | velac add <specifier> [--name alias] | velac update [alias] | velac vendor [--check] | velac deps";
+
+/// `--offline` flag or `VELA_OFFLINE=1`: never touch the network; a lock+cache
+/// miss is a hard error instead.
+fn offline(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--offline") || std::env::var("VELA_OFFLINE").is_ok()
+}
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    let is_offline = offline(&args);
+    if is_offline {
+        // Normalized so every later resolver construction sees it.
+        std::env::set_var("VELA_OFFLINE", "1");
+    }
+    args.retain(|a| a != "--offline");
     if args.len() < 2 {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
@@ -35,6 +49,15 @@ fn main() -> ExitCode {
     }
     if cmd == "deps" {
         return deps();
+    }
+    if cmd == "add" {
+        return add(&args[2..], is_offline);
+    }
+    if cmd == "update" {
+        return update(args.get(2).map(|s| s.as_str()));
+    }
+    if cmd == "vendor" {
+        return vendor(args.get(2).is_some_and(|a| a == "--check"));
     }
 
     // The remaining commands take an optional file; without one, the manifest
@@ -288,6 +311,45 @@ fn deps() -> ExitCode {
     }
 }
 
+/// The lockfile location + project dir for a root file: next to the manifest
+/// when there is one, else next to the root file.
+fn lock_home(root_key: &str) -> (PathBuf, Option<String>) {
+    let start = Path::new(root_key)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(m) = start.clone().and_then(|d| find_manifest(&d)) {
+        return (Path::new(&m.dir).join("vela.lock"), Some(m.dir));
+    }
+    let dir = start.unwrap_or_else(|| PathBuf::from("."));
+    (dir.join("vela.lock"), None)
+}
+
+/// Build the CLI resolver (fs + lock/cache/network remote handling).
+fn make_resolver(root_key: &str) -> remote::RemoteResolver {
+    let (lock_path, project_dir) = lock_home(root_key);
+    remote::RemoteResolver {
+        lock: std::cell::RefCell::new(remote::Lock::load(lock_path)),
+        project_dir,
+        offline: std::env::var("VELA_OFFLINE").is_ok(),
+    }
+}
+
+/// Persist any new pins the load produced. Failures to write the lock are
+/// loud: an unpinned build is not reproducible.
+fn save_lock(resolver: &remote::RemoteResolver) -> Result<(), ExitCode> {
+    let lock = resolver.lock.borrow();
+    if lock.dirty {
+        if let Err(e) = lock.save() {
+            eprintln!("error: cannot write {}: {e}", lock.path.display());
+            return Err(ExitCode::FAILURE);
+        }
+        eprintln!("pinned new remote imports in {}", lock.path.display());
+    }
+    Ok(())
+}
+
 /// Load + check a root file through the module loader, printing diagnostics
 /// (with their originating file) on failure.
 fn load_program(path: &str, source: &str) -> Result<vela_frontend::ast::Program, ExitCode> {
@@ -295,7 +357,11 @@ fn load_program(path: &str, source: &str) -> Result<vela_frontend::ast::Program,
     // slash normalization nor readable diagnostics.
     let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
     let opts = load_options(&root_key);
-    match vela_frontend::load(source, &root_key, &opts, &FsResolver) {
+    let resolver = make_resolver(&root_key);
+    let result = vela_frontend::load(source, &root_key, &opts, &resolver);
+    // Pins are kept even when a later stage fails — fetched is pinned.
+    save_lock(&resolver)?;
+    match result {
         Ok(p) => Ok(p),
         Err(diags) => {
             for d in &diags {
@@ -303,6 +369,233 @@ fn load_program(path: &str, source: &str) -> Result<vela_frontend::ast::Program,
                 eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
             }
             Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// `velac add <specifier> [--name alias]` — fetch + pin a remote module and
+/// record it in vela.json's dependencies.
+fn add(rest: &[String], _offline: bool) -> ExitCode {
+    let Some(spec) = rest.first().filter(|s| !s.starts_with('-')) else {
+        eprintln!("usage: velac add <github:|gist:|https: specifier> [--name alias]");
+        return ExitCode::from(2);
+    };
+    let spec = if spec.ends_with(".vela") || spec.ends_with(".json") {
+        spec.clone()
+    } else {
+        format!("{spec}.vela")
+    };
+    if !vela_frontend::loader::is_remote(&spec) {
+        eprintln!("error: `add` takes a remote specifier (github:/gist:/https:)");
+        return ExitCode::FAILURE;
+    }
+    let alias = match rest.iter().position(|a| a == "--name") {
+        Some(i) => match rest.get(i + 1) {
+            Some(a) => a.clone(),
+            None => {
+                eprintln!("error: --name needs a value");
+                return ExitCode::from(2);
+            }
+        },
+        None => Path::new(&spec)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "dep".to_string()),
+    };
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let Some(manifest) = find_manifest(&cwd) else {
+        eprintln!("error: no vela.json found — run `velac new` or create one first");
+        return ExitCode::FAILURE;
+    };
+
+    // Fetch + pin now, so `add` fails fast on typos and the build is offline-
+    // ready immediately.
+    let resolver = make_resolver(&format!("{}/vela.json", manifest.dir));
+    if let Err(e) = vela_frontend::loader::ModuleResolver::read(&resolver, &spec) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
+    if save_lock(&resolver).is_err() {
+        return ExitCode::FAILURE;
+    }
+
+    // Record the alias in vela.json (a small textual JSON rewrite through the
+    // frontend's parser + this serializer keeps key order stable).
+    let manifest_path = Path::new(&manifest.dir).join("vela.json");
+    let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|_| "{}".into());
+    let doc = match vela_frontend::schema::parse_json(&text) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: vela.json is not valid JSON: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    use vela_frontend::schema::Json;
+    let mut fields = match doc {
+        Json::Obj(f) => f,
+        _ => Vec::new(),
+    };
+    let dep_entry = (alias.clone(), Json::Str(spec.clone()));
+    match fields.iter_mut().find(|(k, _)| k == "dependencies") {
+        Some((_, Json::Obj(deps))) => {
+            deps.retain(|(k, _)| k != &alias);
+            deps.push(dep_entry);
+        }
+        Some((_, other)) => *other = Json::Obj(vec![dep_entry]),
+        None => fields.push(("dependencies".into(), Json::Obj(vec![dep_entry]))),
+    }
+    if let Err(e) = std::fs::write(&manifest_path, json_pretty(&Json::Obj(fields), 0)) {
+        eprintln!("error: cannot write {}: {e}", manifest_path.display());
+        return ExitCode::FAILURE;
+    }
+    println!("added `{alias}` -> {spec}");
+    ExitCode::SUCCESS
+}
+
+/// `velac update [alias]` — re-resolve floating refs (all remote deps, or just
+/// one alias) and rewrite their pins.
+fn update(alias: Option<&str>) -> ExitCode {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let Some(manifest) = find_manifest(&cwd) else {
+        eprintln!("error: no vela.json found");
+        return ExitCode::FAILURE;
+    };
+    let (lock_path, project_dir) = lock_home(&format!("{}/vela.json", manifest.dir));
+    let mut lock = remote::Lock::load(lock_path);
+    let targets: Vec<(String, String)> = manifest
+        .dependencies
+        .iter()
+        .filter(|(name, spec)| {
+            vela_frontend::loader::is_remote(spec) && alias.is_none_or(|a| a == name)
+        })
+        .map(|(n, s)| {
+            let s = if s.ends_with(".vela") || s.ends_with(".json") {
+                s.clone()
+            } else {
+                format!("{s}.vela")
+            };
+            (n.clone(), s)
+        })
+        .collect();
+    if targets.is_empty() {
+        eprintln!("nothing to update");
+        return ExitCode::SUCCESS;
+    }
+    for (name, spec) in &targets {
+        lock.entries.remove(spec);
+        lock.dirty = true;
+        println!("re-resolving `{name}` ({spec})");
+    }
+    let resolver = remote::RemoteResolver {
+        lock: std::cell::RefCell::new(lock),
+        project_dir,
+        offline: false,
+    };
+    for (_, spec) in &targets {
+        if let Err(e) = vela_frontend::loader::ModuleResolver::read(&resolver, spec) {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    if save_lock(&resolver).is_err() {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// `velac vendor [--check]` — copy every locked blob into ./vela_vendor (or
+/// verify it is already there), making the checkout self-contained forever.
+fn vendor(check: bool) -> ExitCode {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let Some(manifest) = find_manifest(&cwd) else {
+        eprintln!("error: no vela.json found");
+        return ExitCode::FAILURE;
+    };
+    let (lock_path, _) = lock_home(&format!("{}/vela.json", manifest.dir));
+    let lock = remote::Lock::load(lock_path);
+    let vend = remote::vendor_dir(&manifest.dir);
+    let cache = remote::cache_dir();
+    let mut missing = 0;
+    for (spec, (_, sha)) in &lock.entries {
+        let vendored = vend.join(sha);
+        if vendored.is_file() {
+            let ok = std::fs::read(&vendored)
+                .map(|b| remote::sha256_hex(&b) == *sha)
+                .unwrap_or(false);
+            if ok {
+                continue;
+            }
+            eprintln!("corrupt vendor blob for `{spec}` ({sha})");
+            missing += 1;
+            continue;
+        }
+        if check {
+            eprintln!("missing from vendor: `{spec}` ({sha})");
+            missing += 1;
+            continue;
+        }
+        let cached = cache.join(sha);
+        match std::fs::read(&cached) {
+            Ok(bytes) if remote::sha256_hex(&bytes) == *sha => {
+                if let Err(e) = std::fs::create_dir_all(&vend)
+                    .and_then(|_| std::fs::write(&vendored, &bytes))
+                {
+                    eprintln!("error: cannot vendor `{spec}`: {e}");
+                    return ExitCode::FAILURE;
+                }
+                println!("vendored `{spec}`");
+            }
+            _ => {
+                eprintln!(
+                    "cannot vendor `{spec}`: not in the cache — run the build once                      (online) first"
+                );
+                missing += 1;
+            }
+        }
+    }
+    if missing > 0 {
+        eprintln!("{missing} entr{} not vendored", if missing == 1 { "y" } else { "ies" });
+        return ExitCode::FAILURE;
+    }
+    println!("vendor is complete ({} entr{})", lock.entries.len(),
+        if lock.entries.len() == 1 { "y" } else { "ies" });
+    ExitCode::SUCCESS
+}
+
+/// Pretty-print a Json value (4-space indent, stable key order).
+fn json_pretty(j: &vela_frontend::schema::Json, depth: usize) -> String {
+    use vela_frontend::schema::Json;
+    let pad = "    ".repeat(depth + 1);
+    let close = "    ".repeat(depth);
+    match j {
+        Json::Null => "null".into(),
+        Json::Bool(b) => b.to_string(),
+        Json::Num(n) => {
+            if n.fract() == 0.0 {
+                format!("{}", *n as i64)
+            } else {
+                format!("{n}")
+            }
+        }
+        Json::Str(s) => format!("{s:?}"),
+        Json::Arr(items) => {
+            if items.is_empty() {
+                return "[]".into();
+            }
+            let inner: Vec<String> =
+                items.iter().map(|v| format!("{pad}{}", json_pretty(v, depth + 1))).collect();
+            format!("[\n{}\n{close}]", inner.join(",\n"))
+        }
+        Json::Obj(fields) => {
+            if fields.is_empty() {
+                return "{}".into();
+            }
+            let inner: Vec<String> = fields
+                .iter()
+                .map(|(k, v)| format!("{pad}{k:?}: {}", json_pretty(v, depth + 1)))
+                .collect();
+            format!("{{\n{}\n{close}}}", inner.join(",\n"))
         }
     }
 }
