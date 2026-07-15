@@ -11,7 +11,7 @@
 ///   s.contains(x) / s.startsWith(x) / s.endsWith(x)   -> Bool  (also free fns)
 ///
 /// Conversions are checked — "no unchecked casts" (RFC-0001):
-///   str(n)   -> String         total: a number always has a decimal form
+///   n.toString()   -> String         total: a number always has a decimal form
 ///   parse(s) -> Option<Int64>  a string might NOT be an integer, so the
 ///                              failure is an explicit `None` you must match —
 ///                              never a silent 0 or a crash. Strict: optional

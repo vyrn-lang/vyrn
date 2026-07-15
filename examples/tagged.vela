@@ -8,16 +8,16 @@
 // the same guarantee JavaScript tagged templates and parameterized queries give,
 // but enforced by the desugaring, not by remembering to escape.
 //
-// `sql"a \{x} b"` desugars to `sql(list(["a ", " b"]), list([value(x)]))`.
+// `sql"a \{x} b"` desugars to `sql(["a ", " b"], [value(x)])`.
 
 fn sql(parts: Array<String>, values: Array<Value>) -> String {
     // Assemble the query text, replacing each hole with a $N placeholder.
     let mut out = ""
     let mut i = 0
     for p in parts {
-        out = concat(out, p)
+        out = out + p
         if i < values.length {
-            out = concat(out, concat("$", str(i + 1)))
+            out = out + "$" + (i + 1).toString()
         }
         i = i + 1
     }
@@ -27,8 +27,8 @@ fn sql(parts: Array<String>, values: Array<Value>) -> String {
 // Render a bound parameter for display (the value the driver would bind to $N).
 fn showValue(v: Value) -> String {
     return match v {
-        VInt(n) => str(n),
-        VBool(b) => str(b),
+        VInt(n) => n.toString(),
+        VBool(b) => b.toString(),
         VStr(s) => s,
     }
 }

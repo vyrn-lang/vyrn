@@ -1,6 +1,6 @@
 // Structured concurrency (RFC-0004 §Q4) — deterministic fork-join over *pure*
 // tasks. `spawn f(args)` runs an isolated function as a task, yielding a
-// `Task<T>`; `join(t)` awaits its result.
+// `Task<T>`; `t.join()` awaits its result.
 //
 // The compiler *proves* each spawned function is isolated: no I/O (`print`) and no
 // shared mutable state (`cell`/`set`/`drop`), transitively. Because tasks are
@@ -31,7 +31,7 @@ fn main() -> Int64 {
     let c = spawn transform(cfg, 10)   // 130
     let f = spawn fib(20)              // 6765
 
-    let total = join(a) + join(b) + join(c) + join(f)
+    let total = a.join() + b.join() + c.join() + f.join()
     print(total)                       // 103 + 106 + 130 + 6765 = 7104
     // Exit codes are portable only in 0..126 (WASI's rule); print the result
     // and return a small success/failure indicator instead.

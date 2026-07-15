@@ -19,7 +19,7 @@ fn bump(r: Ref<Int64>) -> Int64 {
 // References compose across function boundaries: this takes a Ref<String> and
 // returns a fresh Ref<Int64> (ownership of the new cell transfers to the caller).
 fn measure(s: Ref<String>) -> Ref<Int64> {
-    return cell(len(get(s)))
+    return cell(get(s).length)
 }
 
 fn main() -> Int64 {
@@ -33,13 +33,13 @@ fn main() -> Int64 {
 
     // ---- Ref<String>: mutate a heap string through the reference -----------
     let s = cell("hello")
-    set(s, concat(get(s), " world"))
+    set(s, get(s) + " world")
     print(get(s))            // hello world
 
     // A block-local string stored into a longer-lived cell survives the block:
     // `set` RETAINS its value, so ownership analysis must not auto-free it.
     if true {
-        let tail = concat("!", "!")
+        let tail = "!" + "!"
         set(s, tail)
     }
     print(get(s))            // !!

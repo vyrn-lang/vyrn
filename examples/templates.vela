@@ -16,8 +16,8 @@ fn greet(name: String, count: Int64) -> String {
 
 fn showValue(v: Value) -> String {
     return match v {
-        VInt(n) => str(n),
-        VBool(b) => str(b),
+        VInt(n) => n.toString(),
+        VBool(b) => b.toString(),
         VStr(s) => s,
     }
 }
@@ -27,9 +27,9 @@ fn render(t: Template) -> String {
     let mut out = ""
     let mut i = 0
     for p in t.parts {
-        out = concat(out, p)
+        out = out + p
         if i < t.values.length {
-            out = concat(out, showValue(t.values[i]))
+            out = out + showValue(t.values[i])
         }
         i = i + 1
     }

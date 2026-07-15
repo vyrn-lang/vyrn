@@ -17,7 +17,7 @@ fn main() -> Int64 {
     print(clamp(999, 0, 100))            // 100 — std, written in Vela
 
     print(repeat("ab", 3))               // ababab
-    let parts = list(["x", "y", "z"])
+    let parts: Array<String> = ["x", "y", "z"]
     print(joinWith(parts, ", "))         // x, y, z
 
     return 0

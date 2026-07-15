@@ -28,32 +28,32 @@ fn optStrOr(o: Option<String>, d: String) -> String {
 fn openApi(s: Schema) -> String {
     let mut json = "{ \"type\": \"integer\""
     if has(s.min) {
-        json = concat(json, ", \"minimum\": \{optOr(s.min, 0)}")
+        json = json + ", \"minimum\": \{optOr(s.min, 0)}"
     }
     if has(s.max) {
-        json = concat(json, ", \"maximum\": \{optOr(s.max, 0)}")
+        json = json + ", \"maximum\": \{optOr(s.max, 0)}"
     }
     let doc = optStrOr(s.doc, "")
     if doc != "" {
-        json = concat(json, ", \"description\": \"\{doc}\"")
+        json = json + ", \"description\": \"\{doc}\""
     }
-    return concat(json, " }")
+    return json + " }"
 }
 
 // String schemas carry length bounds and the pattern as written.
 fn openApiString(s: Schema) -> String {
     let mut json = "{ \"type\": \"string\""
     if has(s.minLength) {
-        json = concat(json, ", \"minLength\": \{optOr(s.minLength, 0)}")
+        json = json + ", \"minLength\": \{optOr(s.minLength, 0)}"
     }
     if has(s.maxLength) {
-        json = concat(json, ", \"maxLength\": \{optOr(s.maxLength, 0)}")
+        json = json + ", \"maxLength\": \{optOr(s.maxLength, 0)}"
     }
     let pat = optStrOr(s.pattern, "")
     if pat != "" {
-        json = concat(json, ", \"pattern\": \"\{pat}\"")
+        json = json + ", \"pattern\": \"\{pat}\""
     }
-    return concat(json, " }")
+    return json + " }"
 }
 
 fn main() -> Int64 {

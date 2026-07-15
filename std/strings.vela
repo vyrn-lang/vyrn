@@ -5,7 +5,7 @@ export fn repeat(s: String, n: Int64) -> String {
     let mut out = ""
     let mut i = 0
     while i < n {
-        out = concat(out, s)
+        out = out + s
         i = i + 1
     }
     return out
@@ -17,9 +17,9 @@ export fn joinWith(parts: Array<String>, sep: String) -> String {
     let mut i = 0
     for p in parts {
         if i > 0 {
-            out = concat(out, sep)
+            out = out + sep
         }
-        out = concat(out, p)
+        out = out + p
         i = i + 1
     }
     return out

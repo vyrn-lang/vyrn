@@ -17,8 +17,8 @@ fn main() -> Int64 {
     region {
         let mut i = 0
         while i < 1000 {
-            let greeting = concat(hello, world)
-            total = greeting.len()
+            let greeting = hello + world
+            total = greeting.length
             i = i + 1
         }
     }
@@ -27,7 +27,7 @@ fn main() -> Int64 {
     // the buffer with realloc), so they compose with the arena freely.
     let mut n = 0
     region {
-        let mut a = list([1, 2])
+        let mut a: Array<Int64> = [1, 2]
         a = push(a, 3)
         a = push(a, 4)
         a = push(a, 5)

@@ -108,6 +108,9 @@ NIST vectors; `curl`/`git ls-remote` subprocesses, all in vela-cli).
 - `Int64` / `Bool`, `let`/`mut`, arithmetic, `if`/`else`, `while`, `for`-in over
   arrays, functions, `print`.
 - Immutable string literals (`==`, `!=`, record fields), statically allocated.
+  Concatenate two Strings with `a + b`; a String's byte length is the `s.length`
+  field. (The old `concat(a, b)` / `len(s)` free-functions were removed — a
+  user-written call to either reports a migration hint.)
 
 ### Types
 - **Validated types** — `type Age = Int64 where value >= 18`, or inline on a
@@ -136,16 +139,20 @@ NIST vectors; `curl`/`git ls-remote` subprocesses, all in vela-cli).
 ### Errors & control
 - `Option<T>`, `Result<T, E>`, `match`, and `?` propagation (no null). `Option` and
   `Result` payloads may be any type, so `Option<Ref<Node>>` gives a nil terminator.
-- **Checked conversions** — `str(Int64) -> String` and `parse(String) -> Option<Int64>`
-  (the fallible case is an explicit `None`, never a silent 0 or a crash).
+- **Checked conversions** — `x.toString() -> String` (a method on every number,
+  `Bool`, and `String`; it replaced the `str(x)` builtin) and
+  `parse(String) -> Option<Int64>` (the fallible inverse is an explicit `None`,
+  never a silent 0 or a crash).
 
 ### Data structures
 - **Arrays** — growable `Array<T>` (a `Vec`: `[]` / `a.push(x)` / `a[i]` /
   `a.length`, a doubling heap buffer, bounds-checked; non-escaping arrays reclaimed
   automatically, `drop a;` for handoff) and fixed-size **`Array<T, N>`** (a const
-  generic: stack `[N x T]`, no heap, array-literal `[a, b, c]` syntax). Both
-  iterate with `for x in arr { .. }`. The surface is subject-first — no
-  `verb(object, …)` builtins.
+  generic: stack `[N x T]`, no heap, array-literal `[a, b, c]` syntax). An
+  array literal written where an `Array<T>` is expected (a `let` annotation, a
+  call argument, a return) is that growable heap array directly — contextual,
+  replacing the old `list([..])` builtin. Both iterate with `for x in arr { .. }`.
+  The surface is subject-first — no `verb(object, …)` builtins.
 - **Recursive heap structures** — a singly-linked list and a binary tree. `Ref<T>`
   makes the node type finite, `Option<Ref>` terminates it, and a recursive `release`
   walk reclaims the whole structure (proven: 100,000 nodes cycled through a
@@ -159,13 +166,13 @@ NIST vectors; `curl`/`git ls-remote` subprocesses, all in vela-cli).
   (by-reference / call-by-value-result; the argument must be a `mut` variable).
 
 ### Concurrency (RFC-0004 §Q4)
-- **Structured fork-join** — `spawn f(args) -> Task<T>` / `join`. The compiler
+- **Structured fork-join** — `spawn f(args) -> Task<T>` / `t.join()`. The compiler
   *proves* a spawned function is isolated (no I/O, no shared mutable state,
   transitively), so tasks are data-race-free and the result is schedule-independent
   — which is what keeps interpreter == native. `share` is the concurrent-read
   capability. (Execution is eager/sequential today; a parallel scheduler is a
   drop-in backend optimisation the model already guarantees is safe.)
-- **The heap** — dynamic strings (`concat` / `len`), malloc-backed.
+- **The heap** — dynamic strings (`a + b` concatenation, `s.length`), malloc-backed.
 - **Deterministic reclamation, Path A (no GC):**
   - `region { .. }` arenas free a whole *group* of allocations at block exit.
   - **ownership auto-drop** frees an *individual* heap value proven not to escape
