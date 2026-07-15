@@ -4,9 +4,13 @@
   "scopeName": "source.vela",
   "patterns": [
     { "include": "#comments" },
+    { "include": "#regex-string" },
+    { "include": "#template-tag" },
     { "include": "#strings" },
+    { "include": "#capabilities" },
     { "include": "#keywords" },
     { "include": "#types" },
+    { "include": "#function-calls" },
     { "include": "#numbers" },
     { "include": "#operators" },
     { "include": "#punctuation" },
@@ -16,6 +20,52 @@
     "comments": {
       "name": "comment.line.double-slash.vela",
       "match": "//.*$"
+    },
+    "regex-string": {
+      "comment": "A string literal immediately after `=~` (a String refinement or `where` predicate, e.g. `value =~ \"[a-z]+\"`) is a REGEX, not plain text — scope it string.regexp and highlight its structure so escapes/classes/quantifiers/groups read distinctly. Placed BEFORE #strings and #operators in the patterns list so it wins the `=~ \"` sequence: at the `=` both this and #operators/#strings could start, and rule order decides. The supported regex grammar (see compiler/vela-frontend/src/regex.rs) is alternation `|`, grouping `()`, classes `[…]`, escapes `\\d \\w \\s \\D \\W \\S \\<c>`, `.`, and quantifiers `* + ? {m} {m,} {m,n}`.",
+      "name": "string.regexp.vela",
+      "begin": "(=~)\\s*(\")",
+      "beginCaptures": {
+        "1": { "name": "keyword.operator.vela" },
+        "2": { "name": "punctuation.definition.string.begin.vela" }
+      },
+      "end": "\"",
+      "endCaptures": { "0": { "name": "punctuation.definition.string.end.vela" } },
+      "patterns": [
+        {
+          "comment": "Escapes and shorthand classes: \\d \\w \\s (and negated) plus any escaped metacharacter (\\. \\[ \\\\ …). Listed first so `\\[` does not open a character class and `\\.` is not read as the dot atom.",
+          "name": "constant.character.escape.vela",
+          "match": "\\\\(?:d|w|s|D|W|S|.)"
+        },
+        {
+          "comment": "A character class `[…]` or negated `[^…]`.",
+          "name": "constant.other.character-class.vela",
+          "match": "\\[\\^?[^\\]]*\\]"
+        },
+        {
+          "comment": "Quantifiers: * + ? and counted {m} {m,} {m,n}.",
+          "name": "keyword.operator.quantifier.regexp.vela",
+          "match": "[*+?]|\\{\\d+(?:,\\d*)?\\}"
+        },
+        {
+          "comment": "Alternation and grouping.",
+          "name": "keyword.operator.or.regexp.vela",
+          "match": "[|()]"
+        }
+      ]
+    },
+    "template-tag": {
+      "comment": "The tag of a tagged template (`sql\"…\"`, RFC-0007 Phase 2): a lowerCamelCase identifier directly against a `\"`. Scoped entity.name.function so the tag reads as the call it is. Placed before #strings; the string itself is highlighted by #strings on the next position.",
+      "name": "entity.name.function.vela",
+      "match": "\\b[a-z_][A-Za-z0-9_]*(?=\")"
+    },
+    "capabilities": {
+      "comment": "Capability modifiers on a parameter's type: `fn f(t: consume Token)`, `fn f(c: modify Counter)`, `fn f(cfg: share Config)`, `read`. These are CONTEXTUAL, not reserved — the lexer emits them as plain identifiers and the parser only treats them as capabilities in `: <cap> <Type>` position (parse_capability). So match them contextually — between the `:` and a PascalCase type — rather than as keywords, which keeps `let share = 1` a normal binding. The `:` is captured (and re-scoped as separator) instead of a variable-length lookbehind, which oniguruma does not reliably support. Scoped storage.modifier so themes render it distinctly from both keywords and variables.",
+      "match": "(:)(\\s*)(consume|share|modify|read)(?=\\s+[A-Z])",
+      "captures": {
+        "1": { "name": "punctuation.separator.vela" },
+        "3": { "name": "storage.modifier.vela" }
+      }
     },
     "strings": {
       "patterns": [
@@ -47,6 +97,7 @@
         { "include": "#strings" },
         { "include": "#keywords" },
         { "include": "#types" },
+        { "include": "#function-calls" },
         { "include": "#numbers" },
         { "include": "#operators" },
         { "include": "#hole-punctuation" },
@@ -55,7 +106,12 @@
     },
     "keywords": {
       "name": "keyword.control.vela",
-      "match": "\\b(fn|let|mut|if|else|while|for|in|drop|protocol|impl|self|return|true|false|type|where|match|region|spawn)\\b"
+      "match": "\\b(fn|let|mut|if|else|while|for|in|drop|protocol|impl|self|return|true|false|type|where|match|region|spawn|import|export|from|logging)\\b"
+    },
+    "function-calls": {
+      "comment": "A lowerCamelCase identifier directly before `(` is a function/method call (or the name in `fn name(...)`) — entity.name.function → yellow in Dark+, distinct from plain variables. PascalCase constructors (Circle(1), Some(x)) are NOT matched here: #types is included earlier and wins, keeping variants teal. Keywords are also included earlier, so `if (...)` stays a keyword.",
+      "name": "entity.name.function.vela",
+      "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\s*\\()"
     },
     "types": {
       "comment": "Type and enum-variant names. Vela's style is PascalCase for types/variants (Shape, Circle, Option, Int64, Some, Ok) and lowerCamelCase for variables/functions, so a PascalCase identifier is reliably a type or variant. This subsumes the built-ins (all PascalCase) and colors user-defined types/variants the same as built-ins, instead of maintaining an explicit list. Scoped as support.type → teal in Dark+.",

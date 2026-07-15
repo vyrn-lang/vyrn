@@ -29,6 +29,19 @@
         "path": "./vela.tmLanguage.json"
       }
     ],
+    "snippets": [
+      {
+        "language": "vela",
+        "path": "./snippets/vela.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "vela.run",
+        "title": "Vela: Run File",
+        "category": "Vela"
+      }
+    ],
     "configuration": {
       "title": "Vela",
       "properties": {
@@ -36,6 +49,11 @@
           "type": "string",
           "default": "",
           "description": "Path to the vela-lsp server binary. Defaults to ${workspaceFolder}/compiler/vela-lsp/target/debug/vela-lsp (or .exe). Leave empty for the dev default."
+        },
+        "vela.velacPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the velac compiler binary used by the ▶ Run CodeLens. When empty, resolves ${workspaceFolder}/compiler/target/release/velac(.exe), then the debug build, then falls back to `cargo run -p vela-cli`."
         }
       }
     }

@@ -1,16 +1,33 @@
 # Vela — VS Code support
 
-A minimal VS Code extension that adds **syntax highlighting**, **live
-diagnostics**, **hover**, **go-to-definition**, and **completion** for the
-Vela language (`.vela` files).
+A minimal VS Code extension that adds **syntax highlighting** (including
+**regex highlighting** inside `=~` / `where` predicates and distinct colors for
+`import`, function calls, and capability modifiers), **live diagnostics**,
+**hover**, **go-to-definition**, **completion**, **document symbols / outline**,
+a **▶ Run CodeLens** over `fn main`, and **snippets** for the Vela language
+(`.vela` files).
 
 It is deliberately tiny and plain-JavaScript (no TypeScript compile step):
 
-- `extension.js` — spawns the `vela-lsp` server and shuttles JSON-RPC. The
-  server does **all** the work; this file just launches it.
+- `extension.js` — spawns the `vela-lsp` server and shuttles JSON-RPC, and
+  registers the ▶ Run CodeLens + `vela.run` command (a terminal launcher; no
+  server needed). The server does the language-analysis work.
 - `vela.tmLanguage.json` — a TextMate grammar (colors) derived from the real
-  lexer token set. Works even without the server.
+  lexer token set: keywords, PascalCase types/variants, function calls,
+  contextual capability modifiers (`consume`/`share`/`modify`/`read`), tagged
+  templates, and structural regex highlighting after `=~`. Works even without
+  the server.
+- `snippets/vela.json` — snippets for `fn`, `main`, record/enum `type`,
+  `protocol`, `impl`, `match`, `import`, and the `logging` block.
 - `language-configuration.json` — `//` comment toggle + bracket matching.
+
+## Run a file
+
+A **▶ Run** CodeLens appears above every `fn main` (Vela's only entry point).
+Clicking it runs the file in a reused integrated terminal named `vela`. The
+compiler is resolved as: the `vela.velacPath` setting, else
+`${workspaceFolder}/compiler/target/release/velac(.exe)`, else the `debug`
+build, else `cargo run -p vela-cli -- run <file>`.
 
 The LSP server (`compiler/vela-lsp`) is a thin adapter over the compiler's core
 diagnostics + symbol-query API (`vela_frontend::analyze`), the same one `velac
@@ -70,10 +87,12 @@ each target platform you want to ship.
 
 ```
 editor/vscode/
-  package.json              extension manifest + grammar/language contributions
-  extension.js              the LSP client (plain JS)
+  package.json              extension manifest + grammar/language/snippet contributions
+  extension.js              the LSP client + ▶ Run CodeLens/command (plain JS)
   vela.tmLanguage.json      TextMate grammar
+  snippets/vela.json        snippets (fn, main, type, protocol, impl, match, import, logging)
   language-configuration.json
+  server/vela-lsp.exe       bundled language server (deployed release build)
   node_modules/             vscode-languageclient (gitignored)
 ```
 
@@ -84,6 +103,9 @@ variants; **locals/params** (with inferred `let` types, so hovering an
 unannotated `let x = 5` shows `let x: Int64`); and **built-in method calls**
 (`arr.push`, `log.info`, `Ref.get`, …) for hover plus **`.foo` member
 completion** keyed off the receiver's type (`arr.` → `push`/`at`/`alen`/`afree`/
-`length`; `log.` → `trace`/`debug`/`info`/`warn`/`error`). Deferred: user
+`length`; `log.` → `trace`/`debug`/`info`/`warn`/`error`). **Document symbols**
+(outline / breadcrumbs / Ctrl-Shift-O) list the document's own top-level
+functions, methods, types, and variants (imported symbols are excluded).
+Deferred: user
 `protocol`/`impl` method-call resolution (the checker itself does not resolve
 `impl` methods yet), and parser error recovery. See `ROADMAP.md`.

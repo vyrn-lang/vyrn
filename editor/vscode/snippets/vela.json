@@ -1,0 +1,79 @@
+{
+  "function": {
+    "prefix": "fn",
+    "body": [
+      "fn ${1:name}(${2:x: Int64}) -> ${3:Int64} {",
+      "    ${0:return $2}",
+      "}"
+    ],
+    "description": "A function declaration"
+  },
+  "main": {
+    "prefix": "main",
+    "body": [
+      "fn main() -> Int64 {",
+      "    ${0:return 0}",
+      "}"
+    ],
+    "description": "The program entry point"
+  },
+  "type (record)": {
+    "prefix": "type record",
+    "body": [
+      "type ${1:Name} = { ${2:field}: ${3:Int64} }"
+    ],
+    "description": "A record type"
+  },
+  "type (enum)": {
+    "prefix": "type enum",
+    "body": [
+      "type ${1:Name} =",
+      "    | ${2:Variant}",
+      "    | ${0:Other}"
+    ],
+    "description": "An enum / sum type (leading-pipe style)"
+  },
+  "protocol": {
+    "prefix": "protocol",
+    "body": [
+      "protocol ${1:Name} {",
+      "    fn ${2:method}(self) -> ${0:String}",
+      "}"
+    ],
+    "description": "A protocol (named set of method signatures)"
+  },
+  "impl": {
+    "prefix": "impl",
+    "body": [
+      "impl ${1:Protocol} for ${2:Type} {",
+      "    fn ${3:method}(self) -> ${4:String} {",
+      "        ${0:return str(self)}",
+      "    }",
+      "}"
+    ],
+    "description": "Implement a protocol for a type"
+  },
+  "match": {
+    "prefix": "match",
+    "body": [
+      "match ${1:value} {",
+      "    ${2:Variant} => ${0:0},",
+      "}"
+    ],
+    "description": "A match expression"
+  },
+  "import": {
+    "prefix": "import",
+    "body": [
+      "import { ${1:name} } from \"${2:./module}\""
+    ],
+    "description": "Import names from a module"
+  },
+  "logging": {
+    "prefix": "logging",
+    "body": [
+      "logging { level: ${1|trace,debug,info,warn,error|}, sink: ${2|stderr,stdout|} }"
+    ],
+    "description": "Configure the leveled logger (threshold + sink)"
+  }
+}
