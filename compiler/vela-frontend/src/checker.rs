@@ -184,10 +184,11 @@ pub fn check_accum_with_let_types(
         .filter(|f| {
             let calls = expand(fn_calls(&f.body));
             let no_modify = f.params.iter().all(|p| p.capability != Capability::Modify);
-            // `drop` is a statement (not a call), but `drop`ping a `Ref` releases a
-            // shared cell — a shared-state mutation. A spawn-safe task must not do
-            // it, so exclude any body containing `drop` (conservatively).
-            no_modify
+            // An `extern` (RFC-0012) is a host effect (I/O by definition), so it is
+            // never spawn-safe — and any function that calls one becomes unsafe
+            // transitively through the fixpoint below.
+            !f.is_extern
+                && no_modify
                 && !calls.iter().any(|c| SPAWN_FORBIDDEN.contains(&c.as_str()))
                 && !contains_drop(&f.body)
         })
@@ -298,7 +299,13 @@ pub fn check_accum_with_let_types(
                 checker.ensure_type_exists(&p.ty, f.line)?;
             }
             checker.ensure_type_exists(&f.ret, f.line)?;
-            checker.function(f)?;
+            // An `extern` (RFC-0012) has no body to check; instead enforce the
+            // JS-boundary ABI type domain on its signature.
+            if f.is_extern {
+                checker.check_extern_sig(f)?;
+            } else {
+                checker.function(f)?;
+            }
             Ok(())
         })();
         if let Err(s) = r {
@@ -744,6 +751,41 @@ impl<'a> Checker<'a> {
             }
             // Unknown bound names: unsatisfiable.
             _ => false,
+        }
+    }
+
+    /// Enforce the `extern` ABI type domain (RFC-0012): every parameter type
+    /// must be one of `Int64`/sized ints/`Float64`/`Float32`/`Bool`/`String`,
+    /// and the return type may additionally be `Unit`. Anything else (a named
+    /// validated type, a record, an option, an array, …) cannot cross the JS
+    /// boundary in v1 — reject it, naming the offending parameter/return type.
+    /// Accumulates every offender (mirroring `function`): the first is the `Err`,
+    /// the rest stay in the sink for `check_accum` to drain.
+    fn check_extern_sig(&self, f: &Function) -> Result<(), String> {
+        self.errors.borrow_mut().clear();
+        for p in &f.params {
+            if !extern_abi_type_ok(&p.ty, false) {
+                self.errors.borrow_mut().push(format!(
+                    "line {}: extern fn `{}` parameter `{}` has type {}, which cannot cross \
+                     the JS boundary (allowed: Int64, sized ints, Float64, Float32, Bool, String)",
+                    f.line, f.name, p.name, p.ty
+                ));
+            }
+        }
+        if !extern_abi_type_ok(&f.ret, true) {
+            self.errors.borrow_mut().push(format!(
+                "line {}: extern fn `{}` returns {}, which cannot cross the JS boundary \
+                 (allowed: Int64, sized ints, Float64, Float32, Bool, String, Unit)",
+                f.line, f.name, f.ret
+            ));
+        }
+        let mut errs = self.errors.borrow_mut();
+        if let Some(first) = errs.first().cloned() {
+            let rest: Vec<String> = errs.drain(1..).collect();
+            *errs = rest;
+            Err(first)
+        } else {
+            Ok(())
         }
     }
 
@@ -2915,6 +2957,20 @@ const SPAWN_FORBIDDEN: &[&str] = &[
     "print", "cell", "set", "release", "afree", "trace", "debug", "info", "warn", "error",
 ];
 
+/// Whether a type may appear in an `extern` signature (RFC-0012 ABI). The scalar
+/// primitives cross by value; a `String` crosses as a `(ptr, len)` pair. Nothing
+/// else — named/validated types, records, options, arrays, refs — has a v1
+/// wire representation. `allow_unit` permits `Unit` in return position only.
+fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
+    match ty {
+        Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool | Type::Str => {
+            true
+        }
+        Type::Unit => allow_unit,
+        _ => false,
+    }
+}
+
 /// Whether a block contains a `drop` statement anywhere (including nested blocks).
 /// Used by spawn-safety: `drop` can release a shared `Ref`, so a task must not.
 fn contains_drop(b: &Block) -> bool {
@@ -3119,6 +3175,58 @@ mod tests {
     fn rejects_join_of_non_task() {
         let e = check_src("fn main() -> Int64 { let x = 5; return x.join(); }").unwrap_err();
         assert!(e.contains("`.join()` needs a Task"), "{e}");
+    }
+
+    // ---- extern (RFC-0012 M1) --------------------------------------------
+
+    #[test]
+    fn extern_signatures_accept_the_abi_domain() {
+        // Scalars in, scalar/String/Unit out — the whole v1 boundary domain.
+        let src = "extern fn jsLog(msg: String) \
+                   extern fn jsNow() -> Float64 \
+                   extern fn jsAdd(a: Int64, b: Int64) -> Int64 \
+                   extern fn jsFlag(on: Bool, small: UInt8) -> Bool \
+                   fn main() -> Int64 { return 0; }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn extern_rejects_non_abi_types() {
+        // A composite parameter cannot cross the JS boundary in v1.
+        let e = check_src(
+            "extern fn bad(xs: Array<Int64>) \
+             fn main() -> Int64 { return 0; }",
+        )
+        .unwrap_err();
+        assert!(e.contains("cannot cross the JS boundary"), "{e}");
+        // Same for a composite return.
+        let e = check_src(
+            "extern fn bad() -> Option<Int64> \
+             fn main() -> Int64 { return 0; }",
+        )
+        .unwrap_err();
+        assert!(e.contains("cannot cross the JS boundary"), "{e}");
+    }
+
+    #[test]
+    fn extern_calls_are_not_spawn_safe() {
+        // An extern is a host effect; a task calling one (even transitively)
+        // is not isolated.
+        let e = check_src(
+            "extern fn jsNow() -> Float64 \
+             fn sample(n: Int64) -> Int64 { let t = jsNow(); return n; } \
+             fn main() -> Int64 { let t = spawn sample(1); return t.join(); }",
+        )
+        .unwrap_err();
+        assert!(e.contains("isolated (pure)"), "{e}");
+    }
+
+    #[test]
+    fn extern_with_body_is_a_parse_error() {
+        let toks = lex("extern fn f() -> Int64 { return 1; } fn main() -> Int64 { return 0; }")
+            .unwrap();
+        let e = parse(toks).unwrap_err();
+        assert!(e.message.contains("an `extern fn` has no body"), "{}", e.message);
     }
 
     #[test]

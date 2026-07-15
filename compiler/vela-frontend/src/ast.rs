@@ -161,6 +161,14 @@ pub struct Function {
     pub ret: Type,
     pub body: Block,
     pub line: usize,
+    /// `extern fn ..` — a JS-interop import (RFC-0012). A body-less declaration
+    /// whose implementation the wasm host supplies from the `vela` import
+    /// namespace; on native/interpreter a *call* traps (declaring is fine). The
+    /// `body` is empty for an extern declaration (M1); `export extern fn` with a
+    /// body is M2 (exports). Distinguishes externs everywhere functions are
+    /// iterated (codegen emits a `declare`, not a `define`; the checker skips the
+    /// body analyses and enforces the extern ABI type domain).
+    pub is_extern: bool,
 }
 
 /// A capability declares what a function does with a parameter (RFC-0004):

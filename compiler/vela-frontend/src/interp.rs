@@ -454,6 +454,15 @@ impl<'a> Interp<'a> {
             .funcs
             .get(name)
             .ok_or_else(|| Ctrl::Err(format!("call to unknown function `{name}`")))?;
+        // An `extern` (RFC-0012) is host-provided; the interpreter has no host to
+        // call, so a *call* traps with the canonical wording (byte-identical to
+        // the native backend's inline trap). Declaring one is fine — only calling
+        // it here is the effect the interpreter cannot honor.
+        if f.is_extern {
+            return Err(Ctrl::Err(format!(
+                "extern `{name}` is not available on this target"
+            )));
+        }
         let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
         for (p, v) in f.params.iter().zip(args) {
             // Coerce each argument to its parameter type (sized-int wrapping,
@@ -2748,6 +2757,22 @@ mod tests {
             }
         ";
         assert_eq!(run(src).unwrap(), 10); // 0+1+2+3+4
+    }
+
+    /// Calling an `extern fn` (RFC-0012) traps: the interpreter has no host to
+    /// provide it. Declaring one is fine — only the call is the unavailable
+    /// effect. Wording is byte-identical to the native trap stub's.
+    #[test]
+    fn extern_call_traps_with_canonical_wording() {
+        let src = "extern fn jsNow() -> Float64\n\
+                   fn main() -> Int64 {\n\
+                       let t = jsNow()\n\
+                       return 0\n\
+                   }";
+        assert_eq!(run(src).unwrap_err(), "extern `jsNow` is not available on this target");
+        // Declaring without calling is harmless.
+        let src = "extern fn jsNow() -> Float64\nfn main() -> Int64 { return 7 }";
+        assert_eq!(run(src).unwrap(), 7);
     }
 
     /// The native arena runtime has a fixed 64-slot region stack and traps on

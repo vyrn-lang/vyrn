@@ -1,0 +1,43 @@
+/// JS interop (RFC-0012, milestone 1) — `extern fn` imports.
+///
+/// An `extern fn` is a body-less declaration whose implementation the wasm host
+/// supplies from the fixed `vela` import namespace (see `web/`). Calling one on
+/// the wasm target crosses into JavaScript for real; calling it on native or
+/// under the interpreter traps with `extern \`name\` is not available on this
+/// target`, since a single binary has no host to provide it. Declaring an
+/// extern is fine everywhere — only a *call* crosses the boundary.
+///
+/// Because this program calls externs, it is WASM-only in the parity harness:
+/// interp and native both assert the canonical trap, and the real round-trip is
+/// exercised by the browser demo page (`web/externdemo.html`).
+
+extern fn jsLog(msg: String)
+extern fn jsNow() -> Float64
+extern fn jsAdd(a: Int64, b: Int64) -> Int64
+
+// Pure logic — a genuine computation, not just a boundary exercise. `jsAdd`
+// mirrors this addition on the JS side so the number round-trip is checkable.
+fn sumTo(n: Int64) -> Int64 {
+    let mut total = 0
+    let mut i = 1
+    while i <= n {
+        total = total + i
+        i = i + 1
+    }
+    return total
+}
+
+fn main() -> Int64 {
+    let n = 10
+    let local = sumTo(n)
+
+    // Timestamp from a JS clock, then log a line across the boundary.
+    let t = jsNow()
+    jsLog("vela: sum(1..\{n}) = \{local} at t=\{t}")
+
+    // Round-trip two integers out to JS and back.
+    let viaJs = jsAdd(local, n)
+    jsLog("vela: jsAdd(\{local}, \{n}) = \{viaJs}")
+
+    return 0
+}

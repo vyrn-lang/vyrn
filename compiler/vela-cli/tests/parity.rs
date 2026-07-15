@@ -27,6 +27,17 @@ const KNOWN_DIVERGENT: &[(&str, &str)] = &[];
 const EXPECTED_CHECK_FAILURE: &[(&str, &str)] =
     &[("validate_compile.vela", "compile-time rejection of a provably-invalid constant")];
 
+/// Examples whose behavior is HOST-PROVIDED (RFC-0012 `extern`): only a browser
+/// page supplies the `vela` import namespace, so three-way output parity cannot
+/// apply — wasmtime provides WASI, not `vela`. Excluded from the parity loop;
+/// instead [`wasm_only_examples_trap_identically`] asserts the decided
+/// non-wasm semantics: interp and native both produce the canonical
+/// `error: extern `name` is not available on this target` trap, byte-identical
+/// to each other. The real browser behavior is exercised by `web/externdemo.html`.
+/// KNOWN_DIVERGENT stays empty — this list is about *hosts*, not divergence.
+const WASM_ONLY: &[(&str, &str)] =
+    &[("externdemo.vela", "calls `extern` fns; only the browser provides the `vela` namespace")];
+
 fn examples_dir() -> PathBuf {
     // vela-cli/ -> compiler/ -> repo root -> examples/
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples").canonicalize().unwrap()
@@ -94,6 +105,11 @@ fn examples_interp_native_parity() {
         }
         if let Some((_, why)) = EXPECTED_CHECK_FAILURE.iter().find(|(n, _)| *n == name) {
             eprintln!("SKIP  {name}  (expected check failure: {why})");
+            skipped += 1;
+            continue;
+        }
+        if let Some((_, why)) = WASM_ONLY.iter().find(|(n, _)| *n == name) {
+            eprintln!("SKIP  {name}  (wasm-only: {why})");
             skipped += 1;
             continue;
         }
@@ -176,6 +192,45 @@ fn examples_interp_native_parity() {
 /// name a validation diagnostic) — a guard so a silently-fixed example doesn't
 /// keep claiming to demonstrate a rejection. Runs without clang, so it is not
 /// `#[ignore]`d.
+/// The wasm-only (extern-calling) examples must trap with the canonical
+/// wording on BOTH non-wasm targets, byte-identically — the RFC-0012 parity
+/// rule. Needs clang for the native half, so it is `#[ignore]`d like the main
+/// parity run.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vela-cli --test parity -- --ignored"]
+fn wasm_only_examples_trap_identically() {
+    let dir = examples_dir();
+    let out_dir = std::env::temp_dir().join("vela-parity");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    for (name, _why) in WASM_ONLY {
+        let path = dir.join(name);
+
+        let interp = velac().arg("run").arg(&path).output().expect("run interp");
+        assert_eq!(interp.status.code(), Some(1), "{name}: interp must trap (exit 1)");
+        let i_err = norm(&interp.stderr);
+        assert!(
+            i_err.contains("is not available on this target"),
+            "{name}: interp must print the canonical extern trap, got:\n{i_err}"
+        );
+
+        let exe = out_dir.join(format!("{name}.exe"));
+        let build = velac().arg("build").arg(&path).arg("-o").arg(&exe).output().expect("build");
+        assert!(
+            build.status.success(),
+            "{name}: native build must succeed (extern trap stubs link):\n{}",
+            norm(&build.stderr)
+        );
+        let native = Command::new(&exe).output().expect("run native");
+        assert_eq!(native.status.code(), Some(1), "{name}: native must trap (exit 1)");
+        assert_eq!(
+            norm(&native.stderr),
+            i_err,
+            "{name}: interp and native extern traps must be byte-identical"
+        );
+        assert_eq!(norm(&native.stdout), norm(&interp.stdout), "{name}: stdout identical too");
+    }
+}
+
 #[test]
 fn expected_check_failures_do_fail() {
     let dir = examples_dir();

@@ -332,6 +332,18 @@ impl Parser {
                     Ok(i) => impls.push(i),
                     Err(d) => { errors.push(d); self.sync_to_decl(); }
                 },
+                // `extern fn ..` — a JS-interop import (RFC-0012). `extern` is a
+                // contextual starter (a plain identifier elsewhere); recognize it
+                // only when `fn` follows, so a variable named `extern` is unharmed.
+                Tok::Ident(name)
+                    if name == "extern"
+                        && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
+                {
+                    match self.extern_function() {
+                        Ok(mut f) => { f.doc = doc; f.exported = exported; functions.push(f); }
+                        Err(d) => { errors.push(d); self.sync_to_decl(); }
+                    }
+                }
                 // `logging { level: <name> }` — the RFC-0008 config block.
                 Tok::Ident(name) if name == "logging" => {
                     let line = self.line();
@@ -390,6 +402,14 @@ impl Parser {
                     return
                 }
                 Tok::Ident(name) if depth == 0 && name == "logging" => return,
+                // `extern fn ..` is a top-level starter (RFC-0012) — resume there.
+                Tok::Ident(name)
+                    if depth == 0
+                        && name == "extern"
+                        && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
+                {
+                    return
+                }
                 _ => { self.advance(); }
             }
         }
@@ -496,6 +516,7 @@ impl Parser {
             ret,
             body,
             line,
+            is_extern: false,
         })
     }
 
@@ -891,7 +912,64 @@ impl Parser {
 
         let body = self.block()?;
         self.type_params.clear();
-        Ok(Function { name, exported: false, module: None, doc: None, type_params, type_bounds, params, ret, body, line })
+        Ok(Function { name, exported: false, module: None, doc: None, type_params, type_bounds, params, ret, body, line, is_extern: false })
+    }
+
+    /// `extern fn name(params) -> Ret` — a body-less JS-interop import (RFC-0012
+    /// M1). `extern` is a contextual starter (a plain identifier elsewhere); the
+    /// caller has already confirmed the `extern` / `fn` lookahead. The parameter
+    /// list and return arrow parse exactly like an ordinary function; the ABI
+    /// type domain is enforced later by the checker. A body here is an error —
+    /// `extern fn` never has one in M1 (`export extern fn { .. }` is M2).
+    fn extern_function(&mut self) -> Result<Function, Diagnostic> {
+        let line = self.line();
+        self.advance(); // `extern` (a contextual Ident)
+        self.eat(&Tok::Fn)?;
+        let name = self.expect_ident()?;
+        // No generic parameters on an extern (the ABI is monomorphic).
+        self.eat(&Tok::LParen)?;
+        let mut params = Vec::new();
+        while *self.peek() != Tok::RParen {
+            let pname = self.expect_ident()?;
+            self.eat(&Tok::Colon)?;
+            let capability = self.parse_capability();
+            let ty = self.type_()?;
+            params.push(Param { name: pname, capability, ty });
+            if *self.peek() == Tok::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.eat(&Tok::RParen)?;
+        let ret = if *self.peek() == Tok::Arrow {
+            self.advance();
+            self.type_()?
+        } else {
+            Type::Unit
+        };
+        if *self.peek() == Tok::LBrace {
+            return Err(Diagnostic::error(
+                self.line(),
+                self.col(),
+                "parse",
+                "an `extern fn` has no body".to_string(),
+            ));
+        }
+        self.eat_semi();
+        Ok(Function {
+            name,
+            exported: false,
+            module: None,
+            doc: None,
+            type_params: Vec::new(),
+            type_bounds: Default::default(),
+            params,
+            ret,
+            body: Block { stmts: Vec::new() },
+            line,
+            is_extern: true,
+        })
     }
 
     /// A type, possibly an intersection `A & B & ...` (sugar for nested

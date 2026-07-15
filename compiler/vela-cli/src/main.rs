@@ -661,6 +661,29 @@ extern int vela_entry(void);
 int main(void) { return vela_entry(); }
 "#;
 
+/// C trap stubs for the program's `extern` imports (RFC-0012), one per `extern
+/// fn`, appended to the shim on the **native** target only. Each defines the
+/// import symbol (`__vela_extern_<name>`, matching codegen) as a function that
+/// prints the canonical trap and exits — so a native binary that reaches an
+/// `extern` call behaves exactly like the interpreter (`error: extern \`name\`
+/// is not available on this target`), rather than failing to link. The declared
+/// `(void)` signature is intentional: the stub never returns (it `exit`s), so
+/// the caller's argument/return registers are never observed.
+fn extern_trap_stubs(program: &vela_frontend::ast::Program) -> String {
+    let mut s = String::new();
+    for f in program.functions.iter().filter(|f| f.is_extern) {
+        // `f.name` is a Vela identifier (alphanumeric + `_`), safe to inline
+        // into both a C symbol and a C string literal.
+        s.push_str(&format!(
+            "void __vela_extern_{name}(void) {{ \
+             fputs(\"error: extern `{name}` is not available on this target\\n\", stderr); \
+             exit(1); }}\n",
+            name = f.name
+        ));
+    }
+    s
+}
+
 /// `velac build <file.vela> [-o out] [--target wasm]` — emit IR, then invoke
 /// clang to link a native executable (or a `wasm32-wasi` module).
 fn build(path: &str, rest: &[String]) -> ExitCode {
@@ -726,8 +749,17 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         eprintln!("error: cannot write {}: {e}", ll_path.display());
         return ExitCode::FAILURE;
     }
+    // The portable shim, plus (native only) a trap stub per `extern` import
+    // (RFC-0012). On wasm the stubs are OMITTED so each `extern` resolves to the
+    // host page's `vela` import namespace; on native there is no host, so the
+    // stub satisfies the symbol by printing the canonical "not available on this
+    // target" message and exiting — the same wording the interpreter traps with.
+    let mut shim = RUNTIME_SHIM.to_string();
+    if !wasm {
+        shim.push_str(&extern_trap_stubs(&program));
+    }
     let shim_path = PathBuf::from(&out_path).with_extension("shim.c");
-    if let Err(e) = std::fs::write(&shim_path, RUNTIME_SHIM) {
+    if let Err(e) = std::fs::write(&shim_path, &shim) {
         eprintln!("error: cannot write {}: {e}", shim_path.display());
         return ExitCode::FAILURE;
     }

@@ -1157,7 +1157,10 @@ fn function_detail(f: &Function) -> String {
     } else {
         format!("<{}>", f.type_params.join(", "))
     };
-    format!("fn {}{}({}) -> {}", f.name, tp, params, type_to_string(&f.ret))
+    // An `extern` import (RFC-0012) shows the `extern fn` prefix so hover makes
+    // the JS-boundary crossing obvious.
+    let kw = if f.is_extern { "extern fn" } else { "fn" };
+    format!("{} {}{}({}) -> {}", kw, f.name, tp, params, type_to_string(&f.ret))
 }
 
 fn method_sig_detail(m: &MethodSig) -> String {

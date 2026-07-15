@@ -880,6 +880,50 @@ done:
 
 ";
 
+/// The private LLVM symbol for an `extern` import (RFC-0012). Prefixed so it
+/// cannot collide with a real C symbol on the native target: the generated C
+/// trap stub defines exactly this name, and the wasm import name is carried
+/// separately by the `wasm-import-name` attribute (the raw Vela name).
+fn extern_symbol(name: &str) -> String {
+    format!("__vela_extern_{name}")
+}
+
+/// The extern (JS-boundary) ABI value type for one primitive, per the RFC-0012
+/// table: `Int64`/`i64`, sized ints ≤32-bit widen to `i32`, `Bool` is `i32`,
+/// floats stay `double`/`float`, `String` returns as a bare `ptr`, `Unit` is a
+/// missing result. `String` *parameters* are handled separately (they cross as
+/// a `(ptr, len)` pair). The checker guarantees no other type reaches here.
+fn extern_abi_ll(ty: &Type) -> &'static str {
+    match ty {
+        Type::Int => "i64",
+        Type::IntN { bits: 64, .. } => "i64",
+        Type::IntN { .. } => "i32",
+        Type::Float => "double",
+        Type::Float32 => "float",
+        Type::Bool => "i32",
+        Type::Str => "ptr",
+        Type::Unit => "void",
+        // Unreachable: the checker restricts the extern signature domain.
+        _ => "i64",
+    }
+}
+
+/// The parameter list of an `extern` import's `declare`, flattened per the ABI:
+/// a `String` becomes two arguments `(ptr, i64)`; every other type is its single
+/// ABI value type.
+fn extern_decl_params(f: &Function) -> String {
+    let mut parts = Vec::new();
+    for p in &f.params {
+        if matches!(p.ty, Type::Str) {
+            parts.push("ptr".to_string());
+            parts.push("i64".to_string());
+        } else {
+            parts.push(extern_abi_ll(&p.ty).to_string());
+        }
+    }
+    parts.join(", ")
+}
+
 /// Emit a complete LLVM IR module for `program`.
 pub fn emit(program: &Program) -> Result<String, String> {
     let mut out = String::new();
@@ -914,6 +958,26 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare i32 @fputs(ptr, ptr)\n");
     out.push_str("declare ptr @fopen(ptr, ptr)\n");
     out.push_str("declare i32 @fclose(ptr)\n");
+    // `extern` imports (RFC-0012): each body-less `extern fn` becomes a wasm
+    // import from the fixed `vela` namespace. We emit ONE target-neutral IR —
+    // a `declare` carrying the wasm-import attributes plus a real `call` at each
+    // use site (see `gen_extern_call`). On the wasm target the import resolves
+    // against the host page's `vela` object; on native the symbol is satisfied
+    // by a per-extern C trap stub that vela-cli links in (printing the canonical
+    // "not available on this target" message and exiting), so a single binary
+    // stays honest instead of silently stubbing. Attribute groups are collected
+    // here and appended at module end.
+    let mut extern_attr_groups = String::new();
+    for (i, f) in program.functions.iter().filter(|f| f.is_extern).enumerate() {
+        let ret = extern_abi_ll(&f.ret);
+        let params = extern_decl_params(f);
+        let grp = 100 + i; // arbitrary, distinct ids; no other groups in this IR
+        out.push_str(&format!("declare {ret} @{}({params}) #{grp}\n", extern_symbol(&f.name)));
+        extern_attr_groups.push_str(&format!(
+            "attributes #{grp} = {{ \"wasm-import-module\"=\"vela\" \"wasm-import-name\"=\"{}\" }}\n",
+            f.name
+        ));
+    }
     // For a `file(..)` sink: a global stream handle plus the path/mode constants.
     if let LogSink::File(path) = &program.log_sink {
         out.push_str("@__vela_log_file = global ptr null\n");
@@ -1149,6 +1213,11 @@ pub fn emit(program: &Program) -> Result<String, String> {
         if !f.type_params.is_empty() {
             continue;
         }
+        // An `extern` (RFC-0012) is a `declare`d import, not a `define` — its
+        // declaration and attribute group were emitted in the preamble.
+        if f.is_extern {
+            continue;
+        }
         let sym = if f.name == "main" { "vela_main".to_string() } else { format!("vela_{}", f.name) };
         let mut gen = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
@@ -1215,6 +1284,13 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("  %c = trunc i64 %m to i32\n");
     out.push_str("  ret i32 %c\n");
     out.push_str("}\n");
+
+    // Attribute groups for the `extern` imports (referenced by their declares
+    // above) — top-level, so their position is immaterial to LLVM.
+    if !extern_attr_groups.is_empty() {
+        out.push('\n');
+        out.push_str(&extern_attr_groups);
+    }
 
     Ok(out)
 }
@@ -3708,6 +3784,16 @@ impl<'a> Gen<'a> {
             return self.gen_call(&mangled, args);
         }
 
+        // `extern` call (RFC-0012): emit the real host call. This is the one
+        // call whose behavior differs by target — the shared IR carries the
+        // import, and the C trap stub (native) vs the `vela` namespace (wasm)
+        // decides what it does. String args cross as `(ptr, len)`.
+        if let Some(callee) = self.funcs.get(name).copied() {
+            if callee.is_extern {
+                return self.gen_extern_call(callee, args);
+            }
+        }
+
         // Generic callee: solve its type arguments (concrete, under our subst),
         // mangle its symbol, and register the instantiation to emit later.
         let callee = self.funcs.get(name).copied();
@@ -3788,6 +3874,91 @@ impl<'a> Gen<'a> {
             let t = self.fresh_tmp();
             self.emit(format!("{t} = call {retll} @{sym}({})", arg_ops.join(", ")));
             Ok((t, ret))
+        }
+    }
+
+    /// Emit a real call to an `extern` import (RFC-0012). Each argument is
+    /// coerced to its declared parameter type, then to the ABI value type; a
+    /// `String` crosses as a `(ptr, strlen)` pair. The result is converted from
+    /// the ABI type back to the value's Vela representation. The callee symbol
+    /// (`@__vela_extern_<name>`) resolves to the host import (wasm) or the linked
+    /// C trap stub (native) — the IR is identical either way.
+    fn gen_extern_call(&mut self, f: &Function, args: &[Expr]) -> Result<(String, Type), String> {
+        let mut arg_ops = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let (v, vty) = self.gen_expr(a)?;
+            let pty = f.params[i].ty.clone();
+            let (v, cty) = self.coerce(v, &vty, &pty)?;
+            if matches!(self.resolve(&cty), Type::Str) {
+                // String → (ptr, len): the callee decodes UTF-8 from linear
+                // memory (strings are immutable, so decode-on-cross is safe).
+                let len = self.fresh_tmp();
+                self.emit(format!("{len} = call i64 @__vela_strlen(ptr {v})"));
+                arg_ops.push(format!("ptr {v}"));
+                arg_ops.push(format!("i64 {len}"));
+            } else {
+                let (abi_v, abi_ll) = self.to_extern_abi(&v, &cty);
+                arg_ops.push(format!("{abi_ll} {abi_v}"));
+            }
+        }
+        let sym = extern_symbol(&f.name);
+        let ret_ll = extern_abi_ll(&f.ret);
+        if ret_ll == "void" {
+            self.emit(format!("call void @{sym}({})", arg_ops.join(", ")));
+            Ok((String::new(), Type::Unit))
+        } else {
+            let raw = self.fresh_tmp();
+            self.emit(format!("{raw} = call {ret_ll} @{sym}({})", arg_ops.join(", ")));
+            let v = self.from_extern_abi(&raw, &f.ret);
+            Ok((v, f.ret.clone()))
+        }
+    }
+
+    /// Widen a value from its native representation to the extern ABI value type
+    /// (RFC-0012): `Bool` (`i1`) and sub-word ints extend to `i32`; `Int64`/`f64`/
+    /// `f32`/`ptr` pass through. Returns `(operand, ABI llvm type)`.
+    fn to_extern_abi(&mut self, v: &str, ty: &Type) -> (String, &'static str) {
+        match self.resolve(ty) {
+            Type::Bool => {
+                let t = self.fresh_tmp();
+                self.emit(format!("{t} = zext i1 {v} to i32"));
+                (t, "i32")
+            }
+            Type::IntN { bits: 64, .. } => (v.to_string(), "i64"),
+            Type::IntN { bits: 32, .. } => (v.to_string(), "i32"),
+            Type::IntN { bits, signed } => {
+                let op = if signed { "sext" } else { "zext" };
+                let t = self.fresh_tmp();
+                self.emit(format!("{t} = {op} i{bits} {v} to i32"));
+                (t, "i32")
+            }
+            Type::Float => (v.to_string(), "double"),
+            Type::Float32 => (v.to_string(), "float"),
+            Type::Str => (v.to_string(), "ptr"),
+            // Int64 and anything else the checker admitted.
+            _ => (v.to_string(), "i64"),
+        }
+    }
+
+    /// Narrow an extern ABI result back to the value's native representation
+    /// (inverse of [`to_extern_abi`]): `i32`→`i1` for `Bool`, `i32`→`iN` for a
+    /// sub-word int; others pass through.
+    fn from_extern_abi(&mut self, raw: &str, ty: &Type) -> String {
+        match self.resolve(ty) {
+            Type::Bool => {
+                let t = self.fresh_tmp();
+                self.emit(format!("{t} = trunc i32 {raw} to i1"));
+                t
+            }
+            Type::IntN { bits: 64, .. } | Type::IntN { bits: 32, .. } | Type::Int => {
+                raw.to_string()
+            }
+            Type::IntN { bits, .. } => {
+                let t = self.fresh_tmp();
+                self.emit(format!("{t} = trunc i32 {raw} to i{bits}"));
+                t
+            }
+            _ => raw.to_string(),
         }
     }
 
@@ -4826,6 +4997,35 @@ mod tests {
         assert!(
             ir.contains("%over = icmp sge i64 %sp, 64"),
             "region_enter bounds-checks the stack pointer: {ir}"
+        );
+    }
+
+    #[test]
+    fn extern_fn_emits_wasm_import_declaration() {
+        // RFC-0012: a body-less `extern fn` becomes a `declare` carrying the
+        // wasm-import attributes (namespace `vela`, field = the Vela name) on
+        // the prefixed symbol; a String parameter flattens to a (ptr, i64)
+        // pair; the call site passes the pointer plus a computed length.
+        let src = "extern fn jsLog(msg: String) \
+                   extern fn jsAdd(a: Int64, b: Int64) -> Int64 \
+                   fn main() -> Int64 { jsLog(\"hi\"); return jsAdd(1, 2); }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(
+            ir.contains("declare void @__vela_extern_jsLog(ptr, i64)"),
+            "String param flattens to (ptr, i64): {ir}"
+        );
+        assert!(
+            ir.contains("declare i64 @__vela_extern_jsAdd(i64, i64)"),
+            "scalar extern declared with ABI types: {ir}"
+        );
+        assert!(
+            ir.contains("\"wasm-import-module\"=\"vela\"") &&
+            ir.contains("\"wasm-import-name\"=\"jsLog\""),
+            "wasm import attributes present: {ir}"
+        );
+        assert!(
+            ir.contains("call i64 @__vela_extern_jsAdd(i64 1, i64 2)"),
+            "extern call emitted at the use site: {ir}"
         );
     }
 
