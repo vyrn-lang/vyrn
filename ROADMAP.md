@@ -40,8 +40,21 @@ the two — asserted by the parity harness's `WASM_ONLY` list; declaring is
 fine everywhere, and `KNOWN_DIVERGENT` stays empty). Extern calls are
 never spawn-safe (a host effect), and the signature domain is checked
 (scalars + String only). See `examples/externdemo.vela` +
-`web/externdemo.html`. Next on the browser path: RFC-0012 M2 (`export
-extern fn` — JS calling into a live module), then an event-loop story —
+`web/externdemo.html`. **JS interop stage 2 ships too (RFC-0012 M2)**:
+`export extern fn velaAdd(a: Int64, b: Int64) -> Int64 { … }` is a normal,
+body-checked Vela function that is *additionally* exported to JS — after
+`_start` runs `main`, the host calls it on the live instance
+(`runVela(...).exports`). The export is an inline `wasm-export-name`
+attribute on the `define` (auto-rooted; the module's `__vela_malloc` is
+force-exported when a String parameter is present so the shim can allocate
+argument buffers). A `String` crosses *into* an exported call as a single
+`ptr` (the JS caller allocates + NUL-terminates — the asymmetry vs. an
+import's `(ptr, len)`), and a returned `String` is NUL-decoded from linear
+memory: `greet(String) -> String` round-trips a string both ways.
+Because they never trap (only body-less imports do),
+`examples/externdemo2.vela` stays fully three-way parity-capable
+(interp == native == wasm); the browser round trip is in the M2 section of
+`web/externdemo.html`. Next on the browser path: an event-loop story —
 the long-range goal is same-language server (native SSR) + client (wasm),
 with validated types as the wire contract.
 

@@ -27,7 +27,7 @@ python -m http.server 8734 --directory web
 
 The page also accepts any `.wasm` you built yourself via the file picker.
 
-## JS interop (`extern`, RFC-0012 M1)
+## JS interop — imports (`extern`, RFC-0012 M1)
 
 A Vela program can declare host imports; the page supplies them:
 
@@ -56,14 +56,54 @@ that combination.) String *returns* from JS are not supported yet (needs an
 exported allocator — RFC-0012 stage 1.5). See [externdemo.html](externdemo.html)
 driving [examples/externdemo.vela](../examples/externdemo.vela).
 
-On the interpreter and the native binary, *calling* an extern traps with the
-canonical ``error: extern `name` is not available on this target`` (declaring
-one is fine) — only the browser has a host.
+On the interpreter and the native binary, *calling* an import extern traps with
+the canonical ``error: extern `name` is not available on this target``
+(declaring one is fine) — only the browser has a host.
+
+## JS interop — exports (`export extern fn`, RFC-0012 M2)
+
+The other direction: a Vela function exported to JS. It is a *normal* function
+(body checked, runs everywhere, callable from Vela) that additionally appears on
+the wasm module's exports.
+
+```vela
+export extern fn velaAdd(a: Int64, b: Int64) -> Int64 { return a + b }
+export extern fn greet(name: String) -> String { return "Hello, \{name}!" }
+```
+
+```js
+const { exitCode, stdout, exports } = await runVela(bytes, {
+  exportReturns: { greet: "string" },   // see the ABI note below
+});
+// _start already ran main(); now call the exports on the live instance:
+exports.velaAdd(40, 2);   // => 42n  (Int64 is a BigInt)
+exports.greet("world");   // => "Hello, world!"
+```
+
+The shim reads the module's function + export sections to recover each export's
+signature, then wraps it. **String ABI, and why it differs from an import:** an
+exported `String` *parameter* is a single `ptr` (not the import's `(ptr, len)`
+pair), because the JS caller *can* allocate inside the module — it takes the
+module's exported `__vela_malloc`, copies UTF-8 + a NUL terminator, and passes
+the pointer; `velac` force-exports `__vela_malloc` whenever an `export extern fn`
+has a String parameter. A returned `String` is a `ptr` the shim NUL-decodes from
+linear memory. Because a `String`, `Bool`, and `Int32` all lower to a wasm
+`i32`, the wrapper resolves *arguments* by the JS value's runtime type (a JS
+string is allocated + copied) and *results* by an optional `exportReturns` hint
+(`"string"` → NUL-decoded, `"bool"` → `true`/`false`, else a number; `i64` is a
+BigInt, floats are numbers). The wrapper skips `memory`, `_start`,
+`__vela_malloc`, and any `__`-prefixed export. See the M2 section of
+[externdemo.html](externdemo.html) driving
+[examples/externdemo2.vela](../examples/externdemo2.vela).
+
+Unlike an import, calling an `export extern fn` never traps — it is an ordinary
+function — so `externdemo2.vela` is fully three-way parity-capable
+(interp == native == wasm).
 
 ## What this is (and isn't) yet
 
-This is the browser direction through stage 2 (WASI shim demo) and RFC-0012 M1
-(extern imports): the full pipeline — validated types, protocols, schemas,
-regex DFAs, the arena runtime, host calls — runs in a browser today. What it
-does NOT have yet: `export extern fn` (JS calling into a live Vela module —
-RFC-0012 M2) and an event-loop story, both tracked in ROADMAP.md.
+This is the browser direction through stage 2 (WASI shim demo) and RFC-0012 M1+M2
+(extern imports *and* exports): the full pipeline — validated types, protocols,
+schemas, regex DFAs, the arena runtime, host calls in both directions — runs in
+a browser today. What it does NOT have yet: an event-loop story (callbacks,
+timers, promises from JS into running Vela), tracked in ROADMAP.md.
