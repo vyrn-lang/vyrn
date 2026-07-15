@@ -126,6 +126,26 @@ fn completions_list_top_level() {
     }
 }
 
+/// Synthetic inline-refinement types (`User.age` from a field-level `where`)
+/// are desugaring artifacts: they must appear in neither the symbol index nor
+/// completions, while the record itself still does.
+#[test]
+fn synthetic_field_refinement_types_are_filtered() {
+    let src = "type User = { age: Int64 where value >= 18 }\n\
+               fn main() -> Int64 { let u = User { age: 21 } return u.age }\n";
+    let a = analyze(src);
+    assert!(a.diagnostics.is_empty(), "clean source: {:?}", a.diagnostics);
+    let n = names(&a);
+    assert!(n.contains("User"), "the record is indexed: {n:?}");
+    assert!(!n.iter().any(|s| s.contains('.')), "no synthetic types leak: {n:?}");
+    let labels: HashSet<String> = completions(&a).into_iter().map(|c| c.label).collect();
+    assert!(!labels.iter().any(|s| s.contains('.')), "completions clean: {labels:?}");
+    // Hovering the record renders the refinement as the user WROTE it — the
+    // synthetic name never leaks into hover text.
+    let user = a.symbols.iter().find(|s| s.name == "User").unwrap();
+    assert_eq!(user.detail, "type User = { age: Int64 where value >= 18 }", "{}", user.detail);
+}
+
 /// A parse error yields no symbols (the parser does not recover) and a single
 /// blocking diagnostic — matching `diagnostics()`'s contract.
 #[test]

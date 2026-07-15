@@ -40,7 +40,7 @@ re-parsing).
    - Hover an identifier (e.g. `Circle` in `area(Circle(2))`) → a tooltip with
      the variant/function/type detail.
    - F12 / Ctrl-click on `area` → jumps to the `fn area` line; on `Circle` →
-     jumps to `| Circle(Int)`.
+     jumps to `| Circle(Int64)`.
    - Trigger completion (Ctrl+Space, or type a prefix) → top-level functions,
      types, and variants.
 
@@ -81,7 +81,7 @@ editor/vscode/
 
 Hover / go-to-definition / completion cover **top-level** functions, types, and
 variants; **locals/params** (with inferred `let` types, so hovering an
-unannotated `let x = 5` shows `let x: Int`); and **built-in method calls**
+unannotated `let x = 5` shows `let x: Int64`); and **built-in method calls**
 (`arr.push`, `log.info`, `Ref.get`, …) for hover plus **`.foo` member
 completion** keyed off the receiver's type (`arr.` → `push`/`at`/`alen`/`afree`/
 `length`; `log.` → `trace`/`debug`/`info`/`warn`/`error`). Deferred: user

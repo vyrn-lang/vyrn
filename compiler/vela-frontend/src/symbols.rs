@@ -648,7 +648,7 @@ fn index_symbols(
             line: t.line,
             col,
             end_col,
-            detail: type_decl_detail(t),
+            detail: type_decl_detail(t, &program.type_decls),
         });
         if let Type::Enum(variants) = &t.base {
             // Variants carry no AST line; find the name token between this decl's
@@ -861,18 +861,33 @@ fn protocol_detail(p: &ProtocolDecl) -> String {
     }
 }
 
-fn type_decl_detail(t: &TypeDecl) -> String {
+fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl]) -> String {
     match &t.base {
         Type::Enum(vs) => {
             let arms = vs.iter().map(variant_arm).collect::<Vec<_>>().join(" | ");
             format!("type {} = {}", t.name, arms)
         }
         Type::Record(fields) => {
-            let fs = fields
-                .iter()
-                .map(|f| format!("{}: {}", f.name, type_to_string(&f.ty)))
-                .collect::<Vec<_>>()
-                .join(", ");
+            // A synthetic inline-refinement field type (`User.age`) renders as
+            // the user wrote it: `age: Int64 where value >= 18`.
+            let render = |f: &ast::Field| -> String {
+                if let Type::Named(n) = &f.ty {
+                    if n.contains('.') {
+                        if let Some(d) = all.iter().find(|d| d.name == *n) {
+                            if let Some(pred) = &d.predicate {
+                                return format!(
+                                    "{}: {} where {}",
+                                    f.name,
+                                    type_to_string(&d.base),
+                                    crate::checker::pred_summary(pred)
+                                );
+                            }
+                        }
+                    }
+                }
+                format!("{}: {}", f.name, type_to_string(&f.ty))
+            };
+            let fs = fields.iter().map(render).collect::<Vec<_>>().join(", ");
             format!("type {} = {{ {} }}", t.name, fs)
         }
         _ => {

@@ -210,7 +210,7 @@ fn hover_definition_completion_on_enum_vela() {
         value.contains("variant of Shape") && value.contains("Circle"),
         "hover detail: {value}"
     );
-    assert!(value.contains("Circle(Int)"), "hover carries the payload: {value}");
+    assert!(value.contains("Circle(Int64)"), "hover carries the payload: {value}");
 
     // --- go-to-definition over `area` at the call site --------------------
     // Line 19 1-based, "area" cols 13-16 1-based → LSP line 18, char 12.
@@ -359,14 +359,14 @@ fn non_exhaustive_match_squiggles_the_match_keyword() {
     // chars 12-17 (start 12, end 17).
     let uri = "file:///non/exhaustive.vela";
     let src = "\
-type T = | A(Int) | B;
-fn f(x: T) -> Int {
+type T = | A(Int64) | B;
+fn f(x: T) -> Int64 {
     let r = match x {
         A(n) => n,
     };
     return r;
 }
-fn main() -> Int { return 0; }
+fn main() -> Int64 { return 0; }
 ";
     client.send(&serde_json::json!({
         "jsonrpc": "2.0",
@@ -419,8 +419,8 @@ fn member_completion_after_dot_lists_array_methods() {
 
     let uri = "file:///member/comp.vela";
     let src = "\
-fn main() -> Int {
-    let mut a: Array<Int> = [];
+fn main() -> Int64 {
+    let mut a: Array<Int64> = [];
     a.push(1);
     return a.length;
 }
