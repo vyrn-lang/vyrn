@@ -457,3 +457,56 @@ fn main() -> Int64 {
     // In a `.foo` context the top-level symbols must NOT be offered.
     assert!(!labels.contains(&"main"), "top-level `main` leaked into member completion: {labels:?}");
 }
+
+/// Multi-file awareness (RFC-0010): a document importing from a sibling file
+/// gets CLEAN diagnostics (the loader resolves the import), and an import of a
+/// nonexistent module produces a diagnostic instead of silent breakage.
+/// Before `analyze_linked`, every imported name squiggled as unknown.
+#[test]
+fn imports_resolve_across_files() {
+    let dir = std::env::temp_dir().join(format!("vela-lsp-e2e-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.vela"),
+        "export fn double(x: Int64) -> Int64 {\n    return x * 2\n}\n",
+    )
+    .unwrap();
+    let root_path = dir.join("main.vela");
+    let root_text = "import { double } from \"./lib\"\n\nfn main() -> Int64 {\n    return double(21)\n}\n";
+    std::fs::write(&root_path, root_text).unwrap();
+    let uri = format!("file:///{}", root_path.to_string_lossy().replace('\\', "/"));
+
+    let mut client = LspClient::spawn().expect("spawn vela-lsp");
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+        "params": { "capabilities": {}, "processId": null }
+    }));
+    let _ = client.read_response(&init_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": { "textDocument": {
+            "uri": uri.clone(), "languageId": "vela", "version": 1, "text": root_text
+        } }
+    }));
+    let notif = client.read_notification("textDocument/publishDiagnostics");
+    let diags = notif["params"]["diagnostics"].as_array().unwrap();
+    assert!(diags.is_empty(), "import resolved via loader, expected no diagnostics: {diags:?}");
+
+    // Edit the import to a nonexistent module → a load diagnostic appears.
+    let bad_text = root_text.replace("./lib", "./gone");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": uri, "version": 2 },
+            "contentChanges": [ { "text": bad_text } ]
+        }
+    }));
+    let notif = client.read_notification("textDocument/publishDiagnostics");
+    let diags = notif["params"]["diagnostics"].as_array().unwrap();
+    assert!(!diags.is_empty(), "unresolvable import must produce a diagnostic");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

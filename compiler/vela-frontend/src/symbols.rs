@@ -145,6 +145,43 @@ pub struct Completion {
 /// may carry several parse errors — but `symbols`/`tokens`/`locals` are still
 /// empty (a partial program is not indexed) and downstream checks are skipped.
 pub fn analyze(source: &str) -> Analysis {
+    analyze_inner(source, None)
+}
+
+/// Like [`analyze`], but resolves the document's `import`s through the module
+/// loader (RFC-0010), so multi-file programs get real diagnostics in the
+/// editor instead of "unknown name" noise for every imported binding.
+///
+/// Symbols/locals/completions still index the ROOT document only (hover and
+/// go-to-definition across files is future work); diagnostics come from the
+/// fully linked program. A problem inside an imported module is reported at
+/// line 0 with an `in <file>: ...` prefix, so it is visible without being
+/// mis-anchored in the open document.
+pub fn analyze_linked(
+    source: &str,
+    root_path: &str,
+    opts: &crate::loader::LoadOptions,
+    resolver: &dyn crate::loader::ModuleResolver,
+) -> Analysis {
+    analyze_inner(source, Some((root_path, opts, resolver)))
+}
+
+/// Rewrite a foreign-file diagnostic so it is visible (but not mis-anchored)
+/// in the root document.
+fn adopt_foreign(mut d: Diagnostic) -> Diagnostic {
+    if let Some(file) = d.file.take() {
+        d.message = format!("in {file}: {}", d.message);
+        d.line = 0;
+        d.col = 0;
+        d.end_col = 0;
+    }
+    d
+}
+
+fn analyze_inner(
+    source: &str,
+    linker: Option<(&str, &crate::loader::LoadOptions, &dyn crate::loader::ModuleResolver)>,
+) -> Analysis {
     let tokens = match lexer::lex(source) {
         Ok(t) => t,
         Err(d) => return empty_analysis(vec![d]),
@@ -201,12 +238,33 @@ pub fn analyze(source: &str) -> Analysis {
     }
 
     let mut diags = Vec::new();
+    // With a linker and any imports, check the fully LINKED program; the
+    // parsed root keeps powering the symbol index below. `None` = linking
+    // failed (the load diagnostics are already in `diags`).
+    let checked: Option<crate::ast::Program> = match (&linker, program.imports.is_empty()) {
+        (Some((root_path, opts, resolver)), false) => {
+            match crate::loader::load(source, root_path, opts, *resolver) {
+                Ok(linked) => Some(linked),
+                Err(load_diags) => {
+                    diags.extend(load_diags.into_iter().map(adopt_foreign));
+                    None
+                }
+            }
+        }
+        _ => Some(program.clone()),
+    };
     // `check_accum_with_let_types` returns the diagnostics AND a table of the
     // inferred/declared type of each clean `let` and `for`-var — used below to
     // give unannotated lets a real type on hover (`let x: Int`).
-    let (check_diags, let_types) = checker::check_accum_with_let_types(&program);
-    diags.extend(check_diags);
-    diags.extend(movecheck::check_accum(&program));
+    let let_types = match &checked {
+        Some(prog) => {
+            let (check_diags, let_types) = checker::check_accum_with_let_types(prog);
+            diags.extend(check_diags.into_iter().map(adopt_foreign));
+            diags.extend(movecheck::check_accum(prog).into_iter().map(adopt_foreign));
+            let_types
+        }
+        None => Default::default(),
+    };
     pin_diagnostics(&mut diags, &kw_cols, &tok_info);
 
     let decl_lines = decl_lines(&program);

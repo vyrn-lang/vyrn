@@ -182,16 +182,24 @@ NIST vectors; `curl`/`git ls-remote` subprocesses, all in vela-cli).
   completions(analysis)` lists top-level symbols. Non-invasive: no AST/parser
   span threading. `diagnostics()` delegates to `analyze()`, so one pipeline.
 - **`vela-lsp`** — a synchronous `lsp-server` LSP server (no async runtime) and a
-  pure adapter: it calls `analyze` once on open/change, caches the `Analysis`,
-  and serves `textDocument/publishDiagnostics`, `/hover`, `/definition`, and
-  `/completion` from it (a request never re-parses). Excluded from the default
-  workspace (pulls `lsp-server`/`lsp-types`); built with
+  pure adapter: it calls `analyze_linked` once on open/change, caches the
+  `Analysis`, and serves `textDocument/publishDiagnostics`, `/hover`,
+  `/definition`, and `/completion` from it (a request never re-parses). Excluded
+  from the default workspace (pulls `lsp-server`/`lsp-types`); built with
   `cargo build --manifest-path compiler/vela-lsp/Cargo.toml`. The only compiler
-  call is `vela_frontend::analyze`, so the editor and CLI report identical
-  errors. Hover/go-to-definition/completion cover top-level functions, types,
-  and variants, plus local bindings (params, `let`s, `for`-in vars) — a local
-  shadows a same-named top-level symbol; local hover shows the declared type for
-  params and annotated lets.
+  calls are `vela_frontend::analyze_linked` + the query layer, so the editor and
+  CLI report identical errors. **Multi-file aware** (RFC-0010): the server
+  resolves a document's `import`s through the module loader — local files from
+  disk, `std/` via the same discovery as `velac`, manifest aliases from
+  `vela.json`, and *pinned* remote modules read-only from `vela_vendor/` or the
+  user cache (the editor never fetches; unpinned remotes get a "run `velac
+  check` once" diagnostic). Errors inside an imported file surface in the open
+  document as `in <file>: …` at the top. Hover/go-to-definition/completion cover
+  top-level functions, types, and variants of the open document, plus local
+  bindings (params, `let`s, `for`-in vars) — a local shadows a same-named
+  top-level symbol; local hover shows the declared type for params and annotated
+  lets. Cross-file hover/go-to-def (jumping *into* the imported file) is a
+  deferred enhancement.
 - **VS Code extension** (`editor/vscode/`) — plain-JavaScript (no compile step)
   extension that spawns `vela-lsp` and ships a TextMate grammar for colors. `F5`
   from the repo root runs it against `examples/`: colored, squiggled, with hover

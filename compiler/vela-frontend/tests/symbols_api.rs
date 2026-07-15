@@ -547,3 +547,59 @@ fn member_completions_empty_without_receiver_type() {
     // Line 1, col 1 — no dot at/before the cursor → no member context.
     assert!(member_completions(&a, 1, 1).is_empty(), "no dot → no members");
 }
+/// `analyze_linked` resolves imports through the loader: a two-file program
+/// that would show "unknown function" under plain `analyze` is clean, and the
+/// symbol index still covers only the root document (not imported decls).
+#[test]
+fn analyze_linked_resolves_imports() {
+    let root = "import { double } from \"./lib\"\n\nfn main() -> Int64 {\n    return double(21)\n}\n";
+    let lib = "export fn double(x: Int64) -> Int64 {\n    return x * 2\n}\n";
+
+    // Single-file analyze: `double` is unknown.
+    assert!(
+        analyze(root).diagnostics.iter().any(|d| d.message.contains("double")),
+        "plain analyze should flag the imported name"
+    );
+
+    let resolver = vela_frontend::loader::MapResolver(
+        [("lib.vela".to_string(), lib.to_string())].into_iter().collect(),
+    );
+    let opts = vela_frontend::loader::LoadOptions::default();
+    let a = vela_frontend::analyze_linked(root, "main.vela", &opts, &resolver);
+    assert!(a.diagnostics.is_empty(), "linked analyze should be clean: {:?}", a.diagnostics);
+    // Root-only symbol index: `main` yes, imported `double` no.
+    let syms = names(&a);
+    assert!(syms.contains("main"));
+    assert!(!syms.contains("double"), "imported decls are not root symbols");
+}
+
+/// An error INSIDE an imported module is surfaced in the root document's
+/// diagnostics as `in <file>: ...` at line 0 — visible, not mis-anchored.
+#[test]
+fn analyze_linked_adopts_foreign_errors() {
+    let root = "import { bad } from \"./lib\"\n\nfn main() -> Int64 {\n    return bad(1)\n}\n";
+    let lib = "export fn bad(x: Int64) -> Int64 {\n    return \"nope\"\n}\n";
+    let resolver = vela_frontend::loader::MapResolver(
+        [("lib.vela".to_string(), lib.to_string())].into_iter().collect(),
+    );
+    let opts = vela_frontend::loader::LoadOptions::default();
+    let a = vela_frontend::analyze_linked(root, "main.vela", &opts, &resolver);
+    let d = a
+        .diagnostics
+        .iter()
+        .find(|d| d.message.starts_with("in lib.vela:"))
+        .expect("foreign error should be adopted with an `in <file>:` prefix");
+    assert_eq!(d.line, 0, "foreign diagnostics anchor at line 0");
+}
+
+/// A missing module file becomes a load diagnostic (adopted the same way),
+/// and the root symbols are still indexed so hover keeps working.
+#[test]
+fn analyze_linked_missing_module_still_indexes_root() {
+    let root = "import { f } from \"./gone\"\n\nfn main() -> Int64 {\n    return 0\n}\n";
+    let resolver = vela_frontend::loader::MapResolver(Default::default());
+    let opts = vela_frontend::loader::LoadOptions::default();
+    let a = vela_frontend::analyze_linked(root, "main.vela", &opts, &resolver);
+    assert!(!a.diagnostics.is_empty(), "unresolvable import must be reported");
+    assert!(names(&a).contains("main"), "root symbols survive a load failure");
+}

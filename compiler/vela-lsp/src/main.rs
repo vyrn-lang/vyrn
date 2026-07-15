@@ -38,6 +38,133 @@ use lsp_types::{
 
 use vela_frontend::{analyze, completions, member_completions, resolve, Analysis, SymbolKind};
 
+// ---------------------------------------------------------------------------
+// Multi-file analysis (RFC-0010). A document with `import`s is analyzed via
+// `analyze_linked`, which resolves the imports through the module loader so
+// imported names stop showing as "unknown" in the editor. The resolver below
+// is deliberately READ-ONLY and offline: local files come from disk; remote
+// modules come from `./vela_vendor` or `~/.vela/cache` *only if* `vela.lock`
+// already pins them (the editor never touches the network — fetching and
+// pinning stay `velac`'s job).
+// ---------------------------------------------------------------------------
+
+/// Analyze `text`, linking imports when the document has a real filesystem
+/// path (an untitled buffer falls back to single-file [`analyze`]).
+fn analyze_doc(uri: &Url, text: &str) -> Analysis {
+    let path = match uri.to_file_path() {
+        Ok(p) => p.to_string_lossy().replace('\\', "/"),
+        Err(()) => return analyze(text),
+    };
+    let mut opts =
+        vela_frontend::loader::LoadOptions { std_root: std_root(), ..Default::default() };
+    let manifest_dir = std::path::Path::new(&path)
+        .parent()
+        .and_then(|d| find_manifest(d))
+        .map(|(dir, deps)| {
+            opts.aliases = deps.into_iter().collect();
+            opts.alias_base = dir.clone();
+            dir
+        });
+    let resolver = EditorResolver { manifest_dir };
+    vela_frontend::analyze_linked(text, &path, &opts, &resolver)
+}
+
+/// The std-library root: `$VELA_STD`, or `std/` found by walking up from the
+/// executable (the bundled server lives at `<repo>/editor/vscode/server/`,
+/// dev builds under `<repo>/compiler/vela-lsp/target/<profile>/` — both are
+/// within five levels of the repo's `std/`). Mirrors `velac`'s discovery.
+fn std_root() -> Option<String> {
+    if let Ok(p) = std::env::var("VELA_STD") {
+        if std::path::Path::new(&p).exists() {
+            return Some(p.replace('\\', "/"));
+        }
+    }
+    let mut dir = std::env::current_exe().ok()?;
+    for _ in 0..5 {
+        dir = dir.parent()?.to_path_buf();
+        let cand = dir.join("std");
+        if cand.is_dir() {
+            return Some(cand.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    None
+}
+
+/// Find `vela.json` by walking up from `start`; returns the manifest's
+/// directory (slash-separated) and its `dependencies` import map. A compact
+/// duplicate of `velac`'s reader (the CLI is a binary crate, not linkable).
+fn find_manifest(start: &std::path::Path) -> Option<(String, Vec<(String, String)>)> {
+    use vela_frontend::schema::Json;
+    let mut dir = start.to_path_buf();
+    loop {
+        let candidate = dir.join("vela.json");
+        if candidate.is_file() {
+            let text = std::fs::read_to_string(&candidate).ok()?;
+            let doc = vela_frontend::schema::parse_json(&text).ok()?;
+            let deps = match doc.get("dependencies") {
+                Some(Json::Obj(entries)) => entries
+                    .iter()
+                    .filter_map(|(k, v)| match v {
+                        Json::Str(s) => Some((k.clone(), s.clone())),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            return Some((dir.to_string_lossy().replace('\\', "/"), deps));
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
+}
+
+/// Read-only module resolver for the editor: local paths from disk; remote
+/// specifiers served from the project's `vela_vendor/` or the user cache — but
+/// only when `vela.lock` pins them. Never fetches.
+struct EditorResolver {
+    /// Directory holding `vela.json` (and thus `vela.lock` / `vela_vendor/`),
+    /// if the document is inside a project.
+    manifest_dir: Option<String>,
+}
+
+impl vela_frontend::loader::ModuleResolver for EditorResolver {
+    fn read(&self, resolved: &str) -> Result<String, String> {
+        if !vela_frontend::loader::is_remote(resolved) {
+            return std::fs::read_to_string(resolved).map_err(|e| e.to_string());
+        }
+        let dir = self
+            .manifest_dir
+            .as_deref()
+            .ok_or_else(|| "remote import outside a vela.json project".to_string())?;
+        let lock = std::fs::read_to_string(std::path::Path::new(dir).join("vela.lock"))
+            .map_err(|_| format!("`{resolved}` is not pinned yet — run `velac check` once to fetch it"))?;
+        // vela.lock is TSV: `specifier ⇥ resolved-url ⇥ sha256`, keyed by the
+        // exact specifier string the loader hands us.
+        let sha = lock
+            .lines()
+            .filter_map(|l| {
+                let mut parts = l.split('\t');
+                Some((parts.next()?, parts.nth(1)?))
+            })
+            .find(|(spec, _)| *spec == resolved)
+            .map(|(_, sha)| sha.to_string())
+            .ok_or_else(|| {
+                format!("`{resolved}` is not pinned in vela.lock — run `velac check` once to fetch it")
+            })?;
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| ".".to_string());
+        for blob_dir in [
+            std::path::Path::new(dir).join("vela_vendor/sha256"),
+            std::path::Path::new(&home).join(".vela/cache/sha256"),
+        ] {
+            if let Ok(text) = std::fs::read_to_string(blob_dir.join(&sha)) {
+                return Ok(text);
+            }
+        }
+        Err(format!("`{resolved}` is pinned but not cached — run `velac check` once to fetch it"))
+    }
+}
+
 fn main() {
     // `Connection::stdio` sets up the stdin/stdout channels. The server is
     // single-threaded and blocking — no tokio, no I/O threads.
@@ -275,7 +402,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             let uri = params.text_document.uri.clone();
             let text = params.text_document.text;
             server.docs.insert(uri.clone(), text.clone());
-            let analysis = analyze(&text);
+            let analysis = analyze_doc(&uri, &text);
             publish(connection, &uri, &text, &analysis.diagnostics);
             server.analyses.insert(uri, analysis);
         }
@@ -285,7 +412,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             // Full sync: the last change carries the entire document text.
             if let Some(change) = params.content_changes.into_iter().last() {
                 server.docs.insert(uri.clone(), change.text.clone());
-                let analysis = analyze(&change.text);
+                let analysis = analyze_doc(&uri, &change.text);
                 publish(connection, &uri, &change.text, &analysis.diagnostics);
                 server.analyses.insert(uri, analysis);
             }

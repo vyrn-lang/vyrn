@@ -30,8 +30,8 @@ pub mod types;
 // directly. `diagnostics` (below) delegates to `symbols::analyze`, so the whole
 // pipeline lives in one place.
 pub use symbols::{
-    analyze, completions, member_completions, resolve, Analysis, Completion, LocalBinding,
-    LocalKind, Resolution, Symbol, SymbolKind, TokenInfo,
+    analyze, analyze_linked, completions, member_completions, resolve, Analysis, Completion,
+    LocalBinding, LocalKind, Resolution, Symbol, SymbolKind, TokenInfo,
 };
 
 /// Parse, type-check, and move-check `source`, returning the checked
