@@ -23,7 +23,7 @@ fn names(a: &vela_frontend::Analysis) -> HashSet<String> {
 }
 
 /// The index covers the user types, every variant, and the functions; the
-/// parser-injected built-in `Value` enum (and its `VInt`/`VBool`/`VStr` variants)
+/// parser-injected built-in `Value` enum (and its `IntVal`/`StrVal`/`BoolVal` variants)
 /// is filtered out — it has no real source position.
 #[test]
 fn indexes_enum_example_symbols() {
@@ -33,7 +33,7 @@ fn indexes_enum_example_symbols() {
     for expected in ["Shape", "Circle", "Rect", "Unit", "area", "main"] {
         assert!(n.contains(expected), "missing symbol {expected}: {:?}", n);
     }
-    for injected in ["Value", "VInt", "VBool", "VStr"] {
+    for injected in ["Value", "IntVal", "StrVal", "BoolVal"] {
         assert!(!n.contains(injected), "injected {injected} should be filtered: {:?}", n);
     }
 }
@@ -121,7 +121,7 @@ fn completions_list_top_level() {
     for expected in ["Shape", "Circle", "Rect", "Unit", "area", "main"] {
         assert!(labels.contains(expected), "completion missing {expected}: {:?}", labels);
     }
-    for injected in ["Value", "VInt", "VBool", "VStr"] {
+    for injected in ["Value", "IntVal", "StrVal", "BoolVal"] {
         assert!(!labels.contains(injected), "injected {injected} leaked into completions");
     }
 }

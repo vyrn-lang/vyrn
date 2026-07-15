@@ -22,7 +22,7 @@
 > `values` reach it as separate arrays, so a value can only ever become a parameter,
 > never query structure (the safety property — see `examples/tagged.vela`, a `sql`
 > tag that renders `$N` placeholders and keeps a `'; DROP TABLE …` value out of the
-> text). `Value` is the built-in closed enum `VInt(Int) | VBool(Bool) | VStr(String)`
+> text). `Value` is the built-in closed enum `IntVal(Int) | StrVal(String) | BoolVal(Bool)`
 > (injected at parse time, matchable by the tag); the `value(x)` builtin boxes a
 > scalar into it, and `list(Array<T,N>)` size-erases the fixed literal arrays into
 > the growable arrays the tag takes. **A tagged template requires ≥1 interpolation**
@@ -110,7 +110,7 @@ needs a common value type. Two stages:
 ### v1 — a closed, built-in set (implementable on today's type system)
 
 ```vela
-type Value = | VInt(Int) | VBool(Bool) | VStr(String);
+type Value = | IntVal(Int) | StrVal(String) | BoolVal(Bool)
 ```
 
 The compiler boxes each `\{ e }` into the variant matching `e`'s static type. A
@@ -151,7 +151,7 @@ library code, which is what makes the feature open-ended.
 let userName = "'; DROP TABLE users; --";
 let q = sql"SELECT * FROM users WHERE name = \{userName}";
 //  q.text   == "SELECT * FROM users WHERE name = $1"
-//  q.params == [ VStr(userName) ]
+//  q.params == [ StrVal(userName) ]
 ```
 
 Because `parts` is literal and `userName` can only land in `values`, `sql` places

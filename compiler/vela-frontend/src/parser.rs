@@ -32,7 +32,7 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             .program_accum();
     // The built-in `Value` enum (RFC-0007): the closed set of types a tagged
     // template can interpolate. Injected so every program can name `Array<Value>`
-    // and match `VInt`/`VBool`/`VStr` — the tag surface — without a `use`.
+    // and match `IntVal`/`StrVal`/`BoolVal` — the tag surface — without a `use`.
     program.type_decls.push(TypeDecl {
         name: "Value".to_string(),
         exported: false,
@@ -40,9 +40,9 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         doc: None,
         type_params: Vec::new(),
         base: Type::Enum(vec![
-            EnumVariant { name: "VInt".to_string(), payload: vec![Type::Int] },
-            EnumVariant { name: "VBool".to_string(), payload: vec![Type::Bool] },
-            EnumVariant { name: "VStr".to_string(), payload: vec![Type::Str] },
+            EnumVariant { name: "IntVal".to_string(), payload: vec![Type::Int] },
+            EnumVariant { name: "StrVal".to_string(), payload: vec![Type::Str] },
+            EnumVariant { name: "BoolVal".to_string(), payload: vec![Type::Bool] },
         ]),
         predicate: None,
         line: 0,

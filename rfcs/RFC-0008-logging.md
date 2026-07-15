@@ -128,7 +128,7 @@ the structure instead of flattening it:
 ```
 log.info("collected \{n} squares in \{ms}ms")
    ⇒ record { msg_template: "collected {} squares in {}ms",
-              fields: [ VInt(n), VInt(ms) ] }
+              fields: [ IntVal(n), IntVal(ms) ] }
 ```
 
 A text sink renders `parts`+`values` to a line; a future JSON sink emits

@@ -925,9 +925,9 @@ impl<'a> Interp<'a> {
                     "value" => {
                         let v = vals.remove(0);
                         let variant = match &v {
-                            Val::Int(_) => "VInt",
-                            Val::Bool(_) => "VBool",
-                            Val::Str(_) => "VStr",
+                            Val::Int(_) => "IntVal",
+                            Val::Bool(_) => "BoolVal",
+                            Val::Str(_) => "StrVal",
                             other => return Err(format!("value of {other:?}").into()),
                         };
                         Ok(Val::Enum(variant.to_string(), vec![v]))
@@ -1965,7 +1965,7 @@ mod tests {
     fn tagged_template_values_are_matchable_and_typed() {
         // The boxed values decode back to their original scalars via `match`.
         let src = "fn sql(parts: Array<String>, values: Array<Value>) -> Int64 { \
-                       return match values[0] { VInt(n) => n, VBool(b) => 0, VStr(s) => s.length }; } \
+                       return match values[0] { IntVal(n) => n, BoolVal(b) => 0, StrVal(s) => s.length }; } \
                    fn main() -> Int64 { let x = 41; return sql\"n=\\{x}\"; }";
         assert_eq!(run(src).unwrap(), 41);
     }
@@ -2421,8 +2421,8 @@ mod tests {
     #[test]
     fn value_boxes_string_and_int_distinctly() {
         let src = "fn main() -> Int64 { \
-                   let a = match value(7) { VInt(n) => n, VBool(b) => 0, VStr(s) => 0 - 1 }; \
-                   let b = match value(\"hey\") { VInt(n) => 0, VBool(x) => 0, VStr(s) => s.length }; \
+                   let a = match value(7) { IntVal(n) => n, BoolVal(b) => 0, StrVal(s) => 0 - 1 }; \
+                   let b = match value(\"hey\") { IntVal(n) => 0, BoolVal(x) => 0, StrVal(s) => s.length }; \
                    return a + b; }"; // 7 + 3
         assert_eq!(run(src).unwrap(), 10);
     }

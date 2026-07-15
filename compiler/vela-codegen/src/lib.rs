@@ -3400,9 +3400,9 @@ impl<'a> Gen<'a> {
         if name == "value" {
             let (v, ty) = self.gen_expr(&args[0])?;
             let vname = match self.resolve(&ty) {
-                Type::Int => "VInt",
-                Type::Bool => "VBool",
-                Type::Str => "VStr",
+                Type::Int => "IntVal",
+                Type::Bool => "BoolVal",
+                Type::Str => "StrVal",
                 other => return Err(format!("`value` cannot box {other:?}")),
             };
             let (tag, enum_name) = self

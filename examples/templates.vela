@@ -16,9 +16,9 @@ fn greet(name: String, count: Int64) -> String {
 
 fn showValue(v: Value) -> String {
     return match v {
-        VInt(n) => n.toString(),
-        VBool(b) => b.toString(),
-        VStr(s) => s,
+        IntVal(n) => n.toString(),
+        BoolVal(b) => b.toString(),
+        StrVal(s) => s,
     }
 }
 

@@ -27,9 +27,9 @@ fn sql(parts: Array<String>, values: Array<Value>) -> String {
 // Render a bound parameter for display (the value the driver would bind to $N).
 fn showValue(v: Value) -> String {
     return match v {
-        VInt(n) => n.toString(),
-        VBool(b) => b.toString(),
-        VStr(s) => s,
+        IntVal(n) => n.toString(),
+        BoolVal(b) => b.toString(),
+        StrVal(s) => s,
     }
 }
 
@@ -42,8 +42,8 @@ fn main() -> Int64 {
     print(q)                          // SELECT * FROM users WHERE name = $1 AND age >= $2
 
     // The values are carried separately, as data — never as query structure.
-    print(showValue(VStr(userName)))  // '; DROP TABLE users; --   (bound to $1)
-    print(showValue(VInt(minAge)))    // 18                        (bound to $2)
+    print(showValue(StrVal(userName)))  // '; DROP TABLE users; --   (bound to $1)
+    print(showValue(IntVal(minAge)))    // 18                        (bound to $2)
 
     return 0
 }

@@ -263,7 +263,7 @@ fn hover_definition_completion_on_enum_vela() {
         assert!(labels.contains(&expected), "completion missing {expected}: {labels:?}");
     }
     // The injected built-in `Value` family must not leak into completions.
-    for injected in ["Value", "VInt", "VBool", "VStr"] {
+    for injected in ["Value", "IntVal", "StrVal", "BoolVal"] {
         assert!(!labels.contains(&injected), "injected {injected} leaked: {labels:?}");
     }
 
