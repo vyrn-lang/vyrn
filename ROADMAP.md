@@ -28,10 +28,22 @@ imports exactly five preview1 functions (`fd_write`, `fd_fdstat_get`,
 trap parity holds end-to-end (division by zero prints the canonical
 `error: division by zero` + exit 1 in the browser, byte-identical to interp
 and native). `web/build.ps1` builds the example modules; any static server
-serves it. Next steps on the browser path: a JS interop layer (`extern`
-imports/exports + string glue), then an event-loop story — the long-range
-goal is same-language server (native SSR) + client (wasm), with validated
-types as the wire contract.
+serves it. **JS interop stage 1 ships (RFC-0012 M1)**: `extern fn
+jsLog(msg: String)` declares a host import from the wasm `vela` namespace —
+scalars cross by value (`Int64` is a `BigInt` in JS), a `String` crosses as
+a `(ptr, len)` pair that `wasi-min.js` decodes, and the page supplies the
+functions via `runVela(bytes, { extern: { … } })` (a missing one is a clear
+instantiate error naming provided vs wanted). On the interpreter and the
+native binary an extern *call* traps with canonical wording (``error:
+extern `name` is not available on this target``, byte-identical between
+the two — asserted by the parity harness's `WASM_ONLY` list; declaring is
+fine everywhere, and `KNOWN_DIVERGENT` stays empty). Extern calls are
+never spawn-safe (a host effect), and the signature domain is checked
+(scalars + String only). See `examples/externdemo.vela` +
+`web/externdemo.html`. Next on the browser path: RFC-0012 M2 (`export
+extern fn` — JS calling into a live module), then an event-loop story —
+the long-range goal is same-language server (native SSR) + client (wasm),
+with validated types as the wire contract.
 
 A 2026-07-15 hardening pass fixed ~40 reviewed defects: native
 use-after-free/heap-corruption bugs (cell `set`, region escapes, `list` in

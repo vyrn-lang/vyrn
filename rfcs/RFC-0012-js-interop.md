@@ -1,6 +1,6 @@
 # RFC-0012 — JS Interop (`extern`)
 
-- **Status:** Draft — approved for implementation (stage 1: imports)
+- **Status:** M1 implemented (imports); M2 (exports) pending
 - **Depends on:** RFC-0010 (modules — `export` already has a meaning),
   the wasm backend (ROADMAP "browser path"), `web/wasi-min.js` (stage-2 demo)
 

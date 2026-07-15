@@ -27,11 +27,43 @@ python -m http.server 8734 --directory web
 
 The page also accepts any `.wasm` you built yourself via the file picker.
 
+## JS interop (`extern`, RFC-0012 M1)
+
+A Vela program can declare host imports; the page supplies them:
+
+```vela
+extern fn jsLog(msg: String)
+extern fn jsNow() -> Float64
+```
+
+```js
+const r = await runVela(bytes, {
+  extern: {
+    jsLog: (msg) => append(msg),      // String param arrives decoded
+    jsNow: () => Date.now() / 1000,   // Float64 return
+    jsAdd: (a, b) => a + b,           // Int64 params/returns are BigInt
+  },
+});
+```
+
+The shim reads the module's own import section to recover each `vela.*`
+signature and wraps the host function: a `String` crosses as a `(ptr, len)`
+pair decoded from linear memory, `Int64` is a JS `BigInt`, floats and Bool map
+naturally. A missing extern is a clear instantiate error naming provided vs
+wanted. (Known ABI-shape caveat: an `i32` immediately followed by an `i64` in
+a signature is decoded as one String argument — no v1 extern signature hits
+that combination.) String *returns* from JS are not supported yet (needs an
+exported allocator — RFC-0012 stage 1.5). See [externdemo.html](externdemo.html)
+driving [examples/externdemo.vela](../examples/externdemo.vela).
+
+On the interpreter and the native binary, *calling* an extern traps with the
+canonical ``error: extern `name` is not available on this target`` (declaring
+one is fine) — only the browser has a host.
+
 ## What this is (and isn't) yet
 
-This is stage 2 of the browser direction: proof that the full pipeline —
-validated types, protocols, schemas, regex DFAs, the arena runtime — runs in a
-browser today with the interp == native == wasm invariant intact. What it does
-NOT have yet is JS interop (calling into the DOM / being called from JS) — that
-needs an `extern` story in the language and is the next stage, tracked in
-ROADMAP.md.
+This is the browser direction through stage 2 (WASI shim demo) and RFC-0012 M1
+(extern imports): the full pipeline — validated types, protocols, schemas,
+regex DFAs, the arena runtime, host calls — runs in a browser today. What it
+does NOT have yet: `export extern fn` (JS calling into a live Vela module —
+RFC-0012 M2) and an event-loop story, both tracked in ROADMAP.md.

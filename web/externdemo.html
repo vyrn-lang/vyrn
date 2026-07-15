@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vela × JS interop (extern)</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1a1a1a; --bg: #fdfdfd; --dim: #6b6b6b;
+    --card: #f3f3f3; --accent: #7c5cff; --err: #c0392b; --ok: #2e9e5b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8e8e8; --bg: #131316; --dim: #9a9aa2; --card: #1e1e24; --err: #ff7b6b; --ok: #5ad18a; }
+  }
+  body {
+    margin: 0 auto; max-width: 46rem; padding: 2rem 1.25rem 4rem;
+    font: 16px/1.55 system-ui, sans-serif; color: var(--fg); background: var(--bg);
+  }
+  h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
+  .sub { color: var(--dim); margin: 0 0 1.5rem; }
+  .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+  button {
+    font: inherit; padding: .4rem .8rem; border-radius: 8px; border: 1px solid var(--dim);
+    background: var(--card); color: var(--fg); cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  pre {
+    background: var(--card); border-radius: 10px; padding: .9rem 1rem;
+    overflow-x: auto; min-height: 2.4rem; white-space: pre-wrap; margin: 0;
+  }
+  .label { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 1.1rem 0 .3rem; }
+  #jslog:empty::before, #stdout:empty::before { content: "(empty)"; color: var(--dim); }
+  #status { color: var(--dim); }
+  .ok { color: var(--ok); }
+  code { background: var(--card); padding: .1rem .35rem; border-radius: 5px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<h1>Vela × JS interop</h1>
+<p class="sub">
+  <code>examples/externdemo.vela</code> declares three <code>extern fn</code>
+  imports (RFC-0012) and calls them. The host page below supplies them in the
+  <code>vela</code> import namespace: <code>jsLog</code> (a <code>String</code>
+  decoded from linear memory), <code>jsNow</code> (returns a
+  <code>Float64</code>), and <code>jsAdd</code> (two <code>Int64</code>s round-
+  tripped through JS). The same module traps under the interpreter and the
+  native binary — only wasm has a host. <a href="./index.html">← plain demo</a>
+</p>
+
+<div class="row">
+  <button class="primary" id="run">Run externdemo.wasm</button>
+  <span id="status"></span>
+</div>
+
+<div class="label">jsLog (Vela → JS, string glue)</div>
+<pre id="jslog"></pre>
+<div class="label">the externs, as this page implements them</div>
+<pre id="which"></pre>
+<div class="label">program stdout</div>
+<pre id="stdout"></pre>
+<div class="label">program stderr</div>
+<pre id="stderr" style="color: var(--err)"></pre>
+
+<script type="module">
+import { runVela } from "./wasi-min.js";
+
+const status = document.getElementById("status");
+const jslog = document.getElementById("jslog");
+const out = document.getElementById("stdout");
+const err = document.getElementById("stderr");
+
+// Track the values that cross the boundary so the round-trip is observable.
+let lastNow = null;
+let addCalls = [];
+
+const extern = {
+  // String param: wasi-min.js decodes (ptr, len) from memory before we see it.
+  jsLog: (msg) => { jslog.textContent += msg + "\n"; },
+  // Float64 return: a fixed value keeps the demo deterministic (a real clock
+  // would be Date.now() / 1000). The value flows back into Vela and is logged.
+  jsNow: () => 1721000000.5,
+  // Int64 params arrive as BigInt; returning a BigInt keeps it an i64.
+  jsAdd: (a, b) => { const r = a + b; addCalls.push(`${a} + ${b} = ${r}`); return r; },
+};
+
+document.getElementById("which").textContent =
+  "jsLog(String)      -> appended above\n" +
+  "jsNow() -> Float64 -> 1721000000.5\n" +
+  "jsAdd(Int64,Int64) -> a + b (BigInt)";
+
+document.getElementById("run").addEventListener("click", async () => {
+  jslog.textContent = ""; out.textContent = ""; err.textContent = "";
+  lastNow = null; addCalls = [];
+  status.textContent = "running…";
+  try {
+    const resp = await fetch("./externdemo.wasm");
+    if (!resp.ok) {
+      status.textContent = "externdemo.wasm not built — run web/build.ps1 first";
+      return;
+    }
+    const bytes = await resp.arrayBuffer();
+    const r = await runVela(bytes, {
+      extern,
+      onStdout: (s) => (out.textContent += s),
+      onStderr: (s) => (err.textContent += s),
+    });
+    // Round-trip evidence, on the page for the reader (and the verifier).
+    const roundtrip = addCalls.length ? ` · jsAdd: ${addCalls.join("; ")}` : "";
+    status.innerHTML =
+      `<span class="ok">exit ${r.exitCode}</span> · jsNow → 1721000000.5` + roundtrip;
+  } catch (e) {
+    status.textContent = "trap";
+    err.textContent += `\n${e}`;
+  }
+});
+</script>
+</body>
+</html>
