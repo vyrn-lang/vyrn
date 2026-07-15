@@ -18,6 +18,15 @@ use std::process::Command;
 /// the same `error: ...` bytes to stderr in both backends.)
 const KNOWN_DIVERGENT: &[(&str, &str)] = &[];
 
+/// Examples that are INTENTIONAL compile errors — they demonstrate a diagnostic
+/// (e.g. compile-time validation of a provably-invalid constant) and never
+/// build, so they can't participate in run-time parity. They are excluded from
+/// the parity loop and instead asserted to fail `velac check` by
+/// [`expected_check_failures_do_fail`]. This is distinct from KNOWN_DIVERGENT
+/// (which is about interp/native divergence of programs that DO run).
+const EXPECTED_CHECK_FAILURE: &[(&str, &str)] =
+    &[("validate_compile.vela", "compile-time rejection of a provably-invalid constant")];
+
 fn examples_dir() -> PathBuf {
     // vela-cli/ -> compiler/ -> repo root -> examples/
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples").canonicalize().unwrap()
@@ -80,6 +89,11 @@ fn examples_interp_native_parity() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         if let Some((_, why)) = KNOWN_DIVERGENT.iter().find(|(n, _)| *n == name) {
             eprintln!("SKIP  {name}  ({why})");
+            skipped += 1;
+            continue;
+        }
+        if let Some((_, why)) = EXPECTED_CHECK_FAILURE.iter().find(|(n, _)| *n == name) {
+            eprintln!("SKIP  {name}  (expected check failure: {why})");
             skipped += 1;
             continue;
         }
@@ -156,4 +170,26 @@ fn examples_interp_native_parity() {
         failures.len()
     );
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
+}
+
+/// The intentional-compile-error examples must actually fail `velac check` (and
+/// name a validation diagnostic) — a guard so a silently-fixed example doesn't
+/// keep claiming to demonstrate a rejection. Runs without clang, so it is not
+/// `#[ignore]`d.
+#[test]
+fn expected_check_failures_do_fail() {
+    let dir = examples_dir();
+    for (name, _why) in EXPECTED_CHECK_FAILURE {
+        let path = dir.join(name);
+        let out = velac().arg("check").arg(&path).output().expect("run check");
+        assert!(
+            !out.status.success(),
+            "{name}: expected `velac check` to fail, but it passed"
+        );
+        let err = norm(&out.stderr) + &norm(&out.stdout);
+        assert!(
+            err.contains("does not satisfy"),
+            "{name}: expected a validation diagnostic, got:\n{err}"
+        );
+    }
 }

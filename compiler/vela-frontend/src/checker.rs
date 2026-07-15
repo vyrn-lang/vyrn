@@ -3458,6 +3458,38 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_constant_return() {
+        // A literal returned where a predicated type is expected is proven at
+        // compile time, exactly like a let/argument boundary.
+        let src = "type Age = Int64 where value >= 18 \
+                   fn birth() -> Age { return 5 } \
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("does not satisfy `Age`"), "{e}");
+    }
+
+    #[test]
+    fn rejects_folded_constant_construction() {
+        // The offending value need not be a bare literal: any consteval-foldable
+        // expression is evaluated and, if provably out of range, rejected.
+        let src = "type Age = Int64 where value >= 18 \
+                   fn main() -> Int64 { let a = Age(10 + 5) return 0 }";
+        let e = check_src(src).unwrap_err();
+        // 10 + 5 folds to 15, which is < 18.
+        assert!(e.contains("15 does not satisfy `Age`"), "{e}");
+    }
+
+    #[test]
+    fn accepts_folded_constant_in_range() {
+        // The dual: a foldable expression that PASSES the predicate is proven
+        // valid at compile time and costs nothing — never a false rejection.
+        let src = "type Age = Int64 where value >= 18 \
+                   fn birth() -> Age { return 12 + 9 } \
+                   fn main() -> Int64 { return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
     fn rejects_predicate_with_call() {
         let src = "type Bad = Int64 where print(value) == value; \
                    fn main() -> Int64 { return 0; }";
