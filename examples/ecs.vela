@@ -1,6 +1,6 @@
 // A tiny Entity-Component-System (ECS), Structure-of-Arrays style — a feasibility
-// probe for "can Vela do an efficient ECS today?". Verdict: the DATA LAYOUT is
-// already right; the MUTATION surface is the gap. This toy is honest about both.
+// probe for "can Vela do an efficient ECS today?". Verdict: the DATA LAYOUT was
+// already right, and RFC-0011 closed the MUTATION gap this file first exposed.
 //
 // What an ECS wants: components stored contiguously so a system can stream over
 // them, and cheap spawn/despawn. Here each component is its own `Array<Int64>`
@@ -11,23 +11,25 @@
 // Three things measured while writing this (see ROADMAP "ECS notes" for the
 // verdict they add up to):
 //
-//   (a) In-place element write — NOT AVAILABLE. `a[i] = v` does not parse; the
-//       array surface is create (`[]`), append (`a.push(x)`), read (`a[i]`),
-//       `a.length`, and `drop`. There is no element store, no `pop`, no
-//       `swap_remove`. So a per-entity update can't mutate in place — this file
-//       INTEGRATES and COMPACTS by rebuilding fresh survivor arrays each tick.
-//       (The only in-place cell today is a boxed `Ref<T>` via cell/get/set —
-//       pointer-chased, not contiguous, so it defeats the SoA point.)
+//   (a) In-place element write — NOW AVAILABLE (RFC-0011). `a[i] = v` stores
+//       into an element, `a.pop()` removes the last, and `a.swapRemove(i)` is
+//       the O(1) unordered despawn a real ECS uses. So this file INTEGRATES in
+//       place (`xs[i] = nx`) and DESPAWNS with `swapRemove` — no per-tick
+//       rebuild, no fresh allocation. The movement system mutates the SoA
+//       buffers directly.
 //
 //   (b) Array<Record> — indexing COPIES. `let p = a[i]; p.x = 9` leaves `a[i]`
-//       unchanged, and `a[i].x = v` does not parse. You cannot write a field
-//       back through the array, which is exactly why this ECS uses parallel
-//       scalar arrays (SoA) rather than one `Array<Entity>` (AoS).
+//       unchanged, and `a[i].field = v` write-through is still out of scope
+//       (RFC-0011 "Out of scope"). You cannot write a field back through the
+//       array, which is exactly why this ECS uses parallel scalar arrays (SoA)
+//       rather than one `Array<Entity>` (AoS) — the SoA element stores in (a)
+//       are the write path.
 //
 //   (c) Contiguity — YES. A growable `Array<T>` lowers to `{ ptr, len, cap }`
 //       over a single realloc'd buffer; `a[i]` is `getelementptr`+`load` at an
-//       element stride. So the SoA scalar stores are genuinely cache-friendly
-//       contiguous memory — the iteration half of an ECS is already efficient.
+//       element stride, and `a[i] = v` the matching `store`. So the SoA scalar
+//       stores are genuinely cache-friendly contiguous memory — both halves of
+//       an ECS (iterate AND mutate) are now efficient.
 //
 // Deterministic, so interp == native == wasm byte-for-byte.
 // Expected output:
@@ -63,36 +65,30 @@ fn main() -> Int64 {
     // The simulation loop.
     let mut t = 0
     while t < ticks {
-        // --- movement system + despawn, fused into one compacting rebuild ---
-        // No in-place write (finding a), so we stream the old arrays into fresh
-        // ones, integrating as we go and simply not copying the entities that
-        // left the arena. This IS the swap-remove/alive-mask a real ECS would
-        // do in place — here it costs one pass and one fresh allocation.
-        let mut nxs: Array<Int64> = []
-        let mut nys: Array<Int64> = []
-        let mut ndxs: Array<Int64> = []
-        let mut ndys: Array<Int64> = []
+        // --- movement system + despawn, both in place (RFC-0011) ---
+        // Walk the SoA arrays once. A survivor is integrated in place with an
+        // element store; a departing entity is removed with `swapRemove`, which
+        // moves the LAST entity into the vacated slot across all four arrays in
+        // lockstep (keeping entity `i` aligned). On a swap we do NOT advance `i`,
+        // so the entity just moved into slot `i` is processed this tick too. No
+        // rebuild, no fresh allocation — this is the alive-compaction a real ECS
+        // does, now expressible directly.
         let mut i = 0
         while i < xs.length {
             let nx = xs[i] + dxs[i]
             let ny = ys[i] + dys[i]
-            if nx < bound {                 // survives — keep it, integrated
-                nxs.push(nx)
-                nys.push(ny)
-                ndxs.push(dxs[i])
-                ndys.push(dys[i])
+            if nx < bound {                 // survives — integrate in place
+                xs[i] = nx
+                ys[i] = ny
                 checksum = checksum + nx * 7 + ny * 13
+                i = i + 1
+            } else {                        // left the arena — O(1) despawn
+                xs.swapRemove(i)
+                ys.swapRemove(i)
+                dxs.swapRemove(i)
+                dys.swapRemove(i)
             }
-            i = i + 1
         }
-        drop xs
-        drop ys
-        drop dxs
-        drop dys
-        xs = nxs
-        ys = nys
-        dxs = ndxs
-        dys = ndys
 
         // --- spawn system: introduce fresh entities at the left edge ---
         let mut k = 0

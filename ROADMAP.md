@@ -155,10 +155,14 @@ NIST vectors; `curl`/`git ls-remote` subprocesses, all in vela-cli).
   never a silent 0 or a crash).
 
 ### Data structures
-- **Arrays** — growable `Array<T>` (a `Vec`: `[]` / `a.push(x)` / `a[i]` /
-  `a.length`, a doubling heap buffer, bounds-checked; non-escaping arrays reclaimed
-  automatically, `drop a;` for handoff) and fixed-size **`Array<T, N>`** (a const
-  generic: stack `[N x T]`, no heap, array-literal `[a, b, c]` syntax). An
+- **Arrays** — growable `Array<T>` (a `Vec`: `[]` / `a.push(x)` / `a[i]` read /
+  `a[i] = v` in-place store / `a.pop()` → `Option<T>` / `a.swapRemove(i)` → `T`
+  (O(1) unordered remove) / `a.length`, a doubling heap buffer, bounds-checked;
+  non-escaping arrays reclaimed automatically, `drop a;` for handoff) and
+  fixed-size **`Array<T, N>`** (a const generic: stack `[N x T]`, no heap,
+  array-literal `[a, b, c]` syntax; element store allowed, `pop`/`swapRemove`
+  rejected — it cannot shrink). The element store and shrinking ops are RFC-0011;
+  a validated element type auto-validates on store. An
   array literal written where an `Array<T>` is expected (a `let` annotation, a
   call argument, a return) is that growable heap array directly — contextual,
   replacing the old `list([..])` builtin. Both iterate with `for x in arr { .. }`.
@@ -179,42 +183,41 @@ exactly where the language helps and where it doesn't:
 
 **Efficient today**
 - **Contiguous scalar SoA stores.** A growable `Array<T>` lowers to
-  `{ ptr, len, cap }` over a single realloc'd buffer, and `a[i]` is a
-  `getelementptr` + `load` at an element stride — genuinely cache-friendly. A
-  system that streams over one component array per tick is doing tight, linear
-  memory access. The *iteration* half of an ECS is already good.
+  `{ ptr, len, cap }` over a single realloc'd buffer, `a[i]` is a
+  `getelementptr` + `load` at an element stride, and `a[i] = v` the matching
+  `store` — genuinely cache-friendly. A system that streams over one component
+  array per tick, reading and writing in place, is doing tight, linear memory
+  access. Both halves of an ECS (iterate AND mutate) are good.
+- **In-place update + O(1) despawn (RFC-0011).** The movement system integrates
+  each survivor with an element store (`xs[i] = nx`) and despawns departing
+  entities with `swapRemove` across all four SoA arrays in lockstep — no
+  per-tick rebuild, no fresh allocation. This is the alive-compaction a real
+  ECS does, expressed directly.
 - **Cheap append-spawn.** `a.push(x)` is amortised O(1) with geometric growth.
 - **Deterministic, reclaimed.** Arrays auto-drop when they don't escape; the whole
   world tears down without a GC, identically on every backend.
 
-**Gaps (all trace back to one missing primitive)**
-- **No in-place element write.** `a[i] = v` does not parse; there is no element
-  store, `pop`, `truncate`, or `swap_remove`. So a per-entity update or an
-  in-place swap-remove despawn cannot be expressed — `ecs.vela` instead *rebuilds*
-  fresh survivor arrays each tick (integrate + compact in one pass, one fresh
-  allocation). Correct and still linear, but it reallocates every frame where a
-  real ECS would mutate in place. **An `a[i] = v` element store (and a `pop` /
-  `swap_remove`) is the single highest-leverage addition for ECS work.**
+**Remaining gaps**
 - **`Array<Record>` (AoS) is copy-only.** Indexing an `Array<Record>` returns a
-  *copy*; `a[i].field = v` does not parse, so you cannot mutate a component
-  struct through the array. This is why the example is SoA, not one
-  `Array<Entity>`. An AoS ECS needs the same element-write primitive plus
-  place-expression field assignment through an index.
-- **In-place mutation exists only boxed.** A `Ref<T>` cell (`cell`/`get`/`set`)
-  is mutable in place, so an `Array<Ref<Int64>>` *can* be updated per-element —
-  but each value is heap-boxed and pointer-chased, which defeats the contiguous
-  SoA layout that makes an ECS fast. Useful for sparse/aliased state, not the hot
-  component arrays.
+  *copy*, and `a[i].field = v` write-through is still out of scope (RFC-0011
+  "Out of scope"), so you cannot mutate a component struct in place through the
+  array. This is why the example is SoA, not one `Array<Entity>`: the SoA scalar
+  element stores *are* the write path. An AoS ECS needs place-expression field
+  assignment through an index on top of what exists.
+- **No order-preserving `insert`/`remove`/`truncate`/`clear`.** The shrinking
+  surface is `pop` (last) and `swapRemove` (O(1), unordered); an ordered removal
+  or a bulk shrink still means an explicit shift loop. Additive, future work.
 - **No generational entity handles yet at the array level.** `Ref<T>` gives
   generation-checked cells, but there's no built-in dense/sparse-set or
-  generational-index allocator; entity ids here are plain array positions, which
-  is why despawn compaction shifts indices (fine for this toy, not for stable
-  cross-frame handles).
+  generational-index allocator; entity ids here are plain array positions, and
+  `swapRemove` reorders survivors (fine for this toy, not for stable cross-frame
+  handles).
 
-**Verdict.** The storage model is ready for an efficient ECS; the mutation model
-is not. Add an in-place `a[i] = v` (with `pop`/`swap_remove`), and a fast,
-in-place SoA ECS becomes straightforward. Until then, an ECS is expressible and
-correct but pays a rebuild-per-tick allocation cost.
+**Verdict.** Both the storage model and the mutation model are now ready for an
+efficient in-place SoA ECS: contiguous component arrays, per-element writes, and
+O(1) despawn, all reallocation-free per tick. The open items (AoS field
+write-through, ordered `insert`/`remove`, generational handles) are additive and
+none blocks the core loop.
 
 ### Memory (RFC-0004)
 - `consume` capability + move checking (using a consumed value is a compile error).

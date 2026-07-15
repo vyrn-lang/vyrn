@@ -3,8 +3,10 @@
 // The growable array is Vela's `Vec`: a { data, len, cap } triple over a heap
 // buffer that doubles when it fills. The surface is subject-first: build an
 // empty one with `[]`, grow it with `arr.push(x)`, read `arr.length`, index
-// with `arr[i]` (bounds-checked). Reclamation is automatic; `drop` is the
-// explicit escape hatch.
+// with `arr[i]` (bounds-checked), and MUTATE in place (RFC-0011): store an
+// element with `arr[i] = v`, remove the last with `arr.pop()` (→ `Option<T>`),
+// or O(1)-unordered-remove with `arr.swapRemove(i)` (→ `T`). Reclamation is
+// automatic; `drop` is the explicit escape hatch.
 //
 // The fixed-size array is a const generic: the length is part of the type, it
 // lives on the stack as the value aggregate `[N x T]` (no heap, no
@@ -34,6 +36,18 @@ fn main() -> Int64 {
     print(total)                 // 0+1+4+9+16+25+36+49+64+81 = 285
     drop squares                 // explicit reclaim (usually inferred; using
                                  // `squares` after this is a compile error)
+
+    // ---- in-place mutation (RFC-0011) -----------------------------------------
+    let mut xs: Array<Int64> = [10, 20, 30, 40]
+    xs[1] = 25                   // element store — xs = [10, 25, 30, 40]
+    print(xs[1])                 // 25
+    let popped = match xs.pop() { Some(v) => v, None => 0 }  // 40; xs = [10, 25, 30]
+    print(popped)                // 40
+    let removed = xs.swapRemove(0)   // returns 10; last (30) moves into slot 0
+    print(removed)               // 10 — xs is now [30, 25]
+    print(xs.length)             // 2
+    print(xs[0])                 // 30
+    drop xs
 
     // ---- fixed-size -----------------------------------------------------------
     let fixed: Array<Int64, 5> = [0, 1, 4, 9, 16]

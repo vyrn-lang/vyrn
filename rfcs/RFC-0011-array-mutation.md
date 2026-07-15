@@ -1,6 +1,6 @@
 # RFC-0011 — In-Place Array Mutation
 
-- **Status:** Draft — approved for implementation
+- **Status:** Implemented
 - **Depends on:** RFC-0002 (arrays, records), RFC-0003 (validated types),
   RFC-0004 (ownership — arrays are owned heap values)
 
