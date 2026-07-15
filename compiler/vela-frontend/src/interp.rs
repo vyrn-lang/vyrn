@@ -1981,6 +1981,36 @@ mod tests {
         assert_eq!(run(src).unwrap(), 65536);
     }
 
+    /// The enriched `Schema`: name, base spelling (incl. sized ints), `///`
+    /// doc, `multipleOf`, string length bounds, and the regex pattern.
+    #[test]
+    fn schema_of_enriched_fields() {
+        let src = "/// A lowercase handle.\n\
+                   type Username = String where value.length >= 3 && value.length <= 16 && value =~ \"[a-z]+\"\n\
+                   type Even = Int64 where value % 2 == 0\n\
+                   type Byte = UInt8\n\
+                   fn optOr(o: Option<Int64>, d: Int64) -> Int64 {\n\
+                       return match o { Some(n) => n, None => d }\n\
+                   }\n\
+                   fn main() -> Int64 {\n\
+                       let u = schemaOf(Username)\n\
+                       let e = schemaOf(Even)\n\
+                       let b = schemaOf(Byte)\n\
+                       let mut n = 0\n\
+                       if u.name == \"Username\" { n = n + 1 }\n\
+                       if u.base == \"String\" { n = n + 1 }\n\
+                       if optOr(u.minLength, 0) == 3 { n = n + 1 }\n\
+                       if optOr(u.maxLength, 0) == 16 { n = n + 1 }\n\
+                       if match u.pattern { Some(p) => p == \"[a-z]+\", None => false } { n = n + 1 }\n\
+                       if match u.doc { Some(d) => true, None => false } { n = n + 1 }\n\
+                       if optOr(e.multipleOf, 0) == 2 { n = n + 1 }\n\
+                       if b.base == \"UInt8\" { n = n + 1 }\n\
+                       if match b.doc { Some(d) => false, None => true } { n = n + 1 }\n\
+                       return n\n\
+                   }";
+        assert_eq!(run(src).unwrap(), 9);
+    }
+
     #[test]
     fn schema_of_unbounded_type_has_no_bounds() {
         let src = "type Id = Int64; \

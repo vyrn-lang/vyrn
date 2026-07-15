@@ -34,14 +34,23 @@ sized-int operand truncation, Float64 refinements, NaN, division traps),
 validated-type soundness holes (nominal predicated records, match-arm
 laundering, `modify` width subtyping, generic capability checks, spawn purity
 through protocols, movecheck gaps), and a lexer/parser diagnostics batch.
-A follow-up closed three more from that review's deferred list: the `?`
+A follow-up closed the rest of that review's deferred list: the `?`
 propagate path now frees in-scope owned temporaries exactly like `return`
 (was leaking every owned local on the early exit); region nesting past the
 arena stack's 64 slots now traps (`error: region nesting exceeds 64`) in
 both backends instead of corrupting memory past the fixed `[64 x ptr]`
 global — and the checker's return-path analysis learned that a `region`
 body that always returns satisfies the enclosing function (it runs exactly
-once, unlike a loop).
+once, unlike a loop). Allocation failure traps (`error: out of memory`)
+instead of dereferencing null — the C shim's `__vela_malloc`/`__vela_realloc`
+check once at the choke point, including the ILP32 guard against a 64-bit
+size silently truncating in the `(size_t)` cast on wasm32. `schemaOf(T)`
+was enriched: `Schema` now carries `name`, the full base spelling (sized
+ints included), the `///` `doc`, `multipleOf`, `minLength`/`maxLength`,
+and the regex `pattern` — enough to assemble real OpenAPI fragments in
+ordinary Vela code (see `examples/reflection.vela`). Along the way, a
+`///` block separated from a declaration by a blank line (a file header)
+no longer glues onto that declaration's doc.
 
 **Modules (RFC-0010)**: `import { names } from "./path"` / `export fn|type|protocol`
 — TS-style, resolved relative to the importing file (`.vela` appended), with

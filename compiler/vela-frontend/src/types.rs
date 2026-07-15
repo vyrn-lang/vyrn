@@ -93,27 +93,128 @@ fn flip(op: BinOp) -> BinOp {
     }
 }
 
-/// Build the `Schema { base, min, max }` struct-literal expression for a declared
-/// type — the compile-time reflection of `schemaOf(TypeName)`. Both backends
-/// evaluate the *same* expression, so the invariant holds by construction.
-pub fn schema_struct_lit(decl: &TypeDecl) -> Expr {
-    let (min, max) = decl.predicate.as_ref().map_or((None, None), |p| predicate_bounds(p));
-    let base = match decl.base {
+/// The `multipleOf` a predicate implies: `value % K == 0` (in a conjunction).
+pub fn predicate_multiple_of(pred: &Expr) -> Option<i64> {
+    if let Expr::Binary { op, lhs, rhs, .. } = pred {
+        match op {
+            BinOp::And => return predicate_multiple_of(lhs).or_else(|| predicate_multiple_of(rhs)),
+            BinOp::Eq => {
+                if let Expr::Binary { op: BinOp::Rem, lhs: base, rhs: k, .. } = &**lhs {
+                    if matches!(&**base, Expr::Var { name, .. } if name == "value")
+                        && matches!(&**rhs, Expr::Int(0))
+                    {
+                        if let Expr::Int(kv) = &**k {
+                            return Some(*kv);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The inclusive `(minLength, maxLength)` a predicate implies via
+/// `value.length OP N` comparisons (exclusive bounds are floored/ceiled to
+/// inclusive, exactly like the JSON Schema emitter).
+pub fn predicate_length_bounds(pred: &Expr) -> (Option<i64>, Option<i64>) {
+    if let Expr::Binary { op, lhs, rhs, .. } = pred {
+        if *op == BinOp::And {
+            let (l0, l1) = predicate_length_bounds(lhs);
+            let (r0, r1) = predicate_length_bounds(rhs);
+            return (l0.or(r0), l1.or(r1));
+        }
+        let (norm, n) = match (&**lhs, &**rhs) {
+            (l, r) if is_length_of_value(l) => (*op, int_lit(r)),
+            (l, r) if is_length_of_value(r) => (flip(*op), int_lit(l)),
+            _ => return (None, None),
+        };
+        if let Some(n) = n {
+            return match norm {
+                BinOp::GtEq => (Some(n), None),
+                BinOp::Gt => (Some(n + 1), None),
+                BinOp::LtEq => (None, Some(n)),
+                BinOp::Lt => (None, Some(n - 1)),
+                _ => (None, None),
+            };
+        }
+    }
+    (None, None)
+}
+
+/// The first `value =~ "…"` pattern in a predicate conjunction, as written
+/// (unanchored — the anchoring is the JSON Schema emitter's concern).
+pub fn predicate_pattern(pred: &Expr) -> Option<String> {
+    if let Expr::Binary { op, lhs, rhs, .. } = pred {
+        match op {
+            BinOp::And => return predicate_pattern(lhs).or_else(|| predicate_pattern(rhs)),
+            BinOp::Match => {
+                if matches!(&**lhs, Expr::Var { name, .. } if name == "value") {
+                    if let Expr::Str(pat) = &**rhs {
+                        return Some(pat.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The surface spelling of a schema base type (what `Schema.base` reports).
+fn base_spelling(ty: &Type) -> &'static str {
+    match ty {
         Type::Int => "Int64",
+        Type::IntN { bits: 8, signed: true } => "Int8",
+        Type::IntN { bits: 16, signed: true } => "Int16",
+        Type::IntN { bits: 32, signed: true } => "Int32",
+        Type::IntN { bits: 8, signed: false } => "UInt8",
+        Type::IntN { bits: 16, signed: false } => "UInt16",
+        Type::IntN { bits: 32, signed: false } => "UInt32",
+        Type::IntN { bits: 64, signed: false } => "UInt64",
+        Type::IntN { .. } => "?",
+        Type::Float => "Float64",
+        Type::Float32 => "Float32",
         Type::Bool => "Bool",
         Type::Str => "String",
+        Type::Record(_) => "record",
+        Type::Enum(_) => "enum",
         _ => "?",
-    };
+    }
+}
+
+/// Build the `Schema { .. }` struct-literal expression for a declared type —
+/// the compile-time reflection of `schemaOf(TypeName)`: the type's name, base
+/// spelling, `///` doc, and everything its `where` predicate implies (numeric
+/// bounds, `multipleOf`, string length bounds, regex pattern). Both backends
+/// evaluate the *same* expression, so the invariant holds by construction.
+pub fn schema_struct_lit(decl: &TypeDecl) -> Expr {
+    let pred = decl.predicate.as_ref();
+    let (min, max) = pred.map_or((None, None), |p| predicate_bounds(p));
+    let (min_len, max_len) = pred.map_or((None, None), |p| predicate_length_bounds(p));
+    let multiple_of = pred.and_then(predicate_multiple_of);
+    let pattern = pred.and_then(predicate_pattern);
     let opt = |n: Option<i64>| match n {
         Some(v) => Expr::Call { name: "Some".to_string(), args: vec![Expr::Int(v)], line: 0 },
+        None => Expr::Var { name: "None".to_string(), line: 0 },
+    };
+    let opt_str = |s: Option<String>| match s {
+        Some(v) => Expr::Call { name: "Some".to_string(), args: vec![Expr::Str(v)], line: 0 },
         None => Expr::Var { name: "None".to_string(), line: 0 },
     };
     Expr::StructLit {
         name: "Schema".to_string(),
         fields: vec![
-            ("base".to_string(), Expr::Str(base.to_string())),
+            ("name".to_string(), Expr::Str(decl.name.clone())),
+            ("base".to_string(), Expr::Str(base_spelling(&decl.base).to_string())),
+            ("doc".to_string(), opt_str(decl.doc.clone())),
             ("min".to_string(), opt(min)),
             ("max".to_string(), opt(max)),
+            ("multipleOf".to_string(), opt(multiple_of)),
+            ("minLength".to_string(), opt(min_len)),
+            ("maxLength".to_string(), opt(max_len)),
+            ("pattern".to_string(), opt_str(pattern)),
         ],
         line: 0,
     }

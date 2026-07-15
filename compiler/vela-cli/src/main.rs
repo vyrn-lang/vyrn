@@ -616,8 +616,33 @@ void* __vela_stdout(void) { return stdout; }
 /* size_t-clean wrappers: the IR always passes/returns 64-bit sizes, so these
    adapt on ILP32 targets (wasm32) and are transparent on LP64/LLP64. */
 unsigned long long __vela_strlen(const char* s) { return (unsigned long long)strlen(s); }
-void* __vela_malloc(unsigned long long n) { return malloc((size_t)n); }
-void* __vela_realloc(void* p, unsigned long long n) { return realloc(p, (size_t)n); }
+
+/* Allocation failure is a trap, not a null dereference: the emitted IR never
+   null-checks (every alloc site would need a branch), so the single choke
+   point checks instead. The size guard matters on ILP32 (wasm32): without it
+   a 64-bit request silently truncates in the (size_t) cast, and a huge size
+   could wrap to a tiny allocation - a buffer overflow, not an error. */
+static void* __vela_alloc_check(void* p, unsigned long long n) {
+    if (p == NULL && n > 0) {
+        fputs("error: out of memory\n", stderr);
+        exit(1);
+    }
+    return p;
+}
+void* __vela_malloc(unsigned long long n) {
+    if (n > (unsigned long long)(size_t)-1) {
+        fputs("error: out of memory\n", stderr);
+        exit(1);
+    }
+    return __vela_alloc_check(malloc((size_t)n), n);
+}
+void* __vela_realloc(void* p, unsigned long long n) {
+    if (n > (unsigned long long)(size_t)-1) {
+        fputs("error: out of memory\n", stderr);
+        exit(1);
+    }
+    return __vela_alloc_check(realloc(p, (size_t)n), n);
+}
 int __vela_strncmp(const char* a, const char* b, unsigned long long n) {
     return strncmp(a, b, (size_t)n);
 }

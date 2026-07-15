@@ -101,8 +101,10 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         line: 0,
     });
     // `Schema` (RFC-0003 reflection): the extractable shape of a validated type,
-    // produced by `schemaOf(TypeName)` — its base plus the numeric bounds its
-    // `where` predicate implies. Turn it into OpenAPI/JSON in ordinary code.
+    // produced by `schemaOf(TypeName)` — its name, base spelling, `///` doc,
+    // and everything its `where` predicate implies (numeric bounds, multipleOf,
+    // string length bounds, regex pattern). Turn it into OpenAPI/JSON in
+    // ordinary code.
     program.type_decls.push(TypeDecl {
         name: "Schema".to_string(),
         exported: false,
@@ -110,9 +112,15 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         doc: None,
         type_params: Vec::new(),
         base: Type::Record(vec![
+            Field { name: "name".to_string(), ty: Type::Str },
             Field { name: "base".to_string(), ty: Type::Str },
+            Field { name: "doc".to_string(), ty: Type::Option(Box::new(Type::Str)) },
             Field { name: "min".to_string(), ty: Type::Option(Box::new(Type::Int)) },
             Field { name: "max".to_string(), ty: Type::Option(Box::new(Type::Int)) },
+            Field { name: "multipleOf".to_string(), ty: Type::Option(Box::new(Type::Int)) },
+            Field { name: "minLength".to_string(), ty: Type::Option(Box::new(Type::Int)) },
+            Field { name: "maxLength".to_string(), ty: Type::Option(Box::new(Type::Int)) },
+            Field { name: "pattern".to_string(), ty: Type::Option(Box::new(Type::Str)) },
         ]),
         predicate: None,
         line: 0,
@@ -178,14 +186,30 @@ impl Parser {
     /// the following declaration; elsewhere (inside bodies) the result is ignored,
     /// which simply discards stray doc comments.
     fn take_docs(&mut self) -> Option<String> {
-        let mut lines = Vec::new();
+        let mut lines: Vec<String> = Vec::new();
+        let mut last_line = 0usize;
         loop {
+            let line = self.tokens[self.pos].line;
             match self.peek() {
                 Tok::Doc(t) => {
+                    // A blank line splits `///` blocks: a detached earlier
+                    // block (e.g. a file-header comment) belongs to the file,
+                    // not the next declaration — discard it.
+                    if !lines.is_empty() && line > last_line + 1 {
+                        lines.clear();
+                    }
                     lines.push(t.clone());
+                    last_line = line;
                     self.advance();
                 }
-                _ => break,
+                _ => {
+                    // The surviving block must sit DIRECTLY above the
+                    // declaration; a gap detaches it.
+                    if !lines.is_empty() && line > last_line + 1 {
+                        lines.clear();
+                    }
+                    break;
+                }
             }
         }
         if lines.is_empty() {
@@ -1769,6 +1793,23 @@ mod tests {
         // `//` and `////` are plain comments — `main` has no doc.
         let m = p.functions.iter().find(|f| f.name == "main").unwrap();
         assert_eq!(m.doc, None);
+    }
+
+    /// A `///` block separated from the declaration by a blank line is a
+    /// file-header comment, not the declaration's doc — it must not be glued
+    /// on (observable via LSP hover and `schemaOf(T).doc`).
+    #[test]
+    fn detached_doc_blocks_do_not_attach() {
+        // File header, blank line, then an undocumented function.
+        let p = parse_src("/// This file does things.\n/// Extensively.\n\nfn f() -> Int64 { return 0; }\nfn main() -> Int64 { return 0; }");
+        let f = p.functions.iter().find(|f| f.name == "f").unwrap();
+        assert_eq!(f.doc, None, "a detached header is not the decl's doc");
+
+        // Header, blank line, then a real doc directly above the decl: only
+        // the adjacent block attaches.
+        let p = parse_src("/// Header.\n\n/// The real doc.\nfn f() -> Int64 { return 0; }\nfn main() -> Int64 { return 0; }");
+        let f = p.functions.iter().find(|f| f.name == "f").unwrap();
+        assert_eq!(f.doc.as_deref(), Some("The real doc."));
     }
 
     #[test]

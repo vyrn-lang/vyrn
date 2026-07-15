@@ -3841,12 +3841,15 @@ fn collect_strings_expr(e: &Expr, out: &mut Vec<String>, types: &HashMap<String,
             collect_strings_expr(rhs, out, types);
         }
         Expr::Call { name, args, .. } => {
-            // `schemaOf` lowers to a `Schema` literal whose `base` is one of these
-            // synthetic strings; make sure they land in the pool.
+            // `schemaOf` lowers to a `Schema` literal carrying synthetic string
+            // literals (the type's name, base spelling, doc, pattern); walk the
+            // exact expression the code generator will emit so every one of
+            // them lands in the pool.
             if name == "schemaOf" {
-                for s in ["Int64", "Bool", "String"] {
-                    if !out.contains(&s.to_string()) {
-                        out.push(s.to_string());
+                if let Some(Expr::Var { name: tn, .. }) = args.first() {
+                    if let Some(decl) = types.get(tn) {
+                        let sl = vela_frontend::types::schema_struct_lit(decl);
+                        collect_strings_expr(&sl, out, types);
                     }
                 }
             }
