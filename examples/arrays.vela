@@ -18,6 +18,9 @@ fn weekdayLetters() -> Array<String, 3> {
     return ["Mon", "Tue", "Wed"]
 }
 
+// A record component, stored one-per-element in an Array<Point>.
+type Point = { x: Int64, y: Int64 }
+
 fn main() -> Int64 {
     // ---- growable: collect the squares 0², 1², … 9² ------------------------
     let mut squares: Array<Int64> = []
@@ -48,6 +51,21 @@ fn main() -> Int64 {
     print(xs.length)             // 2
     print(xs[0])                 // 30
     drop xs
+
+    // ---- record elements: field write-through (RFC-0011 addendum) -------------
+    // Indexing an `Array<Record>` COPIES the element, so `let p = pts[i]; p.x = 9`
+    // leaves `pts[i]` untouched. The `pts[i].field = v` sugar writes a field back
+    // THROUGH the array — it loads element `i`, sets the field on the copy, and
+    // stores it back into slot `i` (one bounds-checked load + store). One level
+    // only: `pts[i].field.field = v` is a compile error.
+    let mut pts: Array<Point> = []
+    pts.push(Point { x: 1, y: 1 })
+    pts.push(Point { x: 2, y: 2 })
+    pts[1].x = 20                // write-through: pts[1] is now { x: 20, y: 2 }
+    pts[0].y = pts[0].y + 9      // the RHS reads the (unchanged) old element first
+    print(pts[0].y)              // 10
+    print(pts[1].x)              // 20
+    drop pts
 
     // ---- fixed-size -----------------------------------------------------------
     let fixed: Array<Int64, 5> = [0, 1, 4, 9, 16]

@@ -1098,6 +1098,13 @@ fn collect_lets(
     for stmt in &block.stmts {
         match stmt {
             Stmt::Let { name, mutable, ty, line, .. } => {
+                // Synthetic desugar temporaries (e.g. `ps[]`, from `a[i].f = v`)
+                // are unspellable — they contain characters no real identifier
+                // can — and have no source token; never surface them as
+                // hover/outline/completion locals.
+                if name.starts_with('@') || name.contains('[') {
+                    continue;
+                }
                 let (col, end_col) = name_col_on_line(tok_info, name, *line);
                 // Prefer the checker's retained type (covers unannotated lets);
                 // fall back to the AST annotation.

@@ -19,11 +19,11 @@
 //       buffers directly.
 //
 //   (b) Array<Record> — indexing COPIES. `let p = a[i]; p.x = 9` leaves `a[i]`
-//       unchanged, and `a[i].field = v` write-through is still out of scope
-//       (RFC-0011 "Out of scope"). You cannot write a field back through the
-//       array, which is exactly why this ECS uses parallel scalar arrays (SoA)
-//       rather than one `Array<Entity>` (AoS) — the SoA element stores in (a)
-//       are the write path.
+//       unchanged; `a[i].field = v` write-through (RFC-0011 addendum) now writes
+//       a field back through the array as a load-modify-store. This ECS still
+//       uses parallel scalar arrays (SoA) — a movement system streaming one
+//       component at a time is the cache-friendly layout — but an AoS
+//       `Array<Entity>` with per-field updates is now equally expressible.
 //
 //   (c) Contiguity — YES. A growable `Array<T>` lowers to `{ ptr, len, cap }`
 //       over a single realloc'd buffer; `a[i]` is `getelementptr`+`load` at an

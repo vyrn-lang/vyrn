@@ -28,8 +28,15 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
 /// checks" (a partial program would only produce cascading type errors).
 pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     let (mut program, errors) =
-        Parser { tokens, pos: 0, no_struct: false, type_params: Vec::new(), field_preds: None }
-            .program_accum();
+        Parser {
+            tokens,
+            pos: 0,
+            no_struct: false,
+            type_params: Vec::new(),
+            field_preds: None,
+            extra_stmts: Vec::new(),
+        }
+        .program_accum();
     // The built-in `Value` enum (RFC-0007): the closed set of types a tagged
     // template can interpolate. Injected so every program can name `Array<Value>`
     // and match `IntVal`/`StrVal`/`BoolVal` — the tag surface — without a `use`.
@@ -194,6 +201,24 @@ struct Parser {
     /// declaration (inline `where` is then a parse error — an anonymous record
     /// has no name to hang the refinement on).
     field_preds: Option<Vec<(String, Expr)>>,
+    /// Extra statements emitted by a single-statement desugar (RFC-0011
+    /// addendum: `a[i].f = v` lowers to a `let mut @tmp = a[i]` / `@tmp.f = v` /
+    /// `a[i] = @tmp` idiom). `stmt` returns the first of the sequence and stashes
+    /// the rest here; `block` drains them right after, preserving order. Only
+    /// ever non-empty for the duration of one `stmt` call (its single caller).
+    extra_stmts: Vec<Stmt>,
+}
+
+/// Whether `e` is a field-access chain bottoming out in `a[i]` (i.e. `at(a, i)`),
+/// e.g. `a[i].f` or `a[i].f.g`. Used to distinguish a too-deep array-element
+/// write-through (`a[i].f.g = v`, rejected) from an ordinary nested record-field
+/// write (`a.b.c = v`, handled elsewhere).
+fn is_index_field_chain(e: &Expr) -> bool {
+    match e {
+        Expr::Call { name, args, .. } => name == "at" && args.len() == 2,
+        Expr::Field { expr, .. } => is_index_field_chain(expr),
+        _ => false,
+    }
 }
 
 impl Parser {
@@ -1307,6 +1332,9 @@ impl Parser {
                 break;
             }
             stmts.push(self.stmt()?);
+            // A statement desugar (e.g. `a[i].f = v`) leaves its follow-on
+            // statements here; splice them in order right after the primary one.
+            stmts.append(&mut self.extra_stmts);
         }
         self.eat(&Tok::RBrace)?;
         Ok(Block { stmts })
@@ -1470,6 +1498,77 @@ impl Parser {
                                 "parse",
                                 "the left side of an index assignment `[i] = ..` must be \
                                  a plain array variable"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    // `a[i].f = v` — write-through to a record field of an array
+                    // element (RFC-0011 addendum). `a[i].f` parsed as
+                    // `Field { at(a, i), f }`; a trailing `=` makes it a
+                    // copy-modify-store: load element `i`, set field `f` on the
+                    // copy, store it back into slot `i`. Desugars to the exact
+                    // idiom `let mut @tmp = a[i]  @tmp.f = v  a[i] = @tmp`, so it
+                    // inherits SetField's field/validated-data rules and
+                    // IndexSet's bounds-check + coercion unchanged, in all three
+                    // backends.
+                    if let Expr::Field { expr, field, .. } = &e {
+                        if let Expr::Call { name, args, .. } = expr.as_ref() {
+                            if name == "at" && args.len() == 2 {
+                                if let Expr::Var { name: recv, .. } = &args[0] {
+                                    let recv = recv.clone();
+                                    let load = (**expr).clone();
+                                    let field = field.clone();
+                                    self.advance(); // eat `=`
+                                    let value = self.expr()?;
+                                    self.eat_semi();
+                                    // The element copy's binding name. Unspellable
+                                    // (contains `[`), so it can't collide with a
+                                    // real identifier and is filtered from the
+                                    // symbol/completion index; but it reads
+                                    // naturally if it surfaces in a SetField
+                                    // diagnostic ("record `ps[]` has no field ..").
+                                    let tmp = format!("{recv}[]");
+                                    // `@tmp.f = v` then `a[i] = @tmp` follow the
+                                    // returned `let mut @tmp = a[i]`.
+                                    self.extra_stmts.push(Stmt::SetField {
+                                        name: tmp.clone(),
+                                        field,
+                                        value,
+                                        line,
+                                    });
+                                    self.extra_stmts.push(Stmt::IndexSet {
+                                        name: recv,
+                                        index: args[1].clone(),
+                                        value: Expr::Var { name: tmp.clone(), line },
+                                        line,
+                                    });
+                                    return Ok(Stmt::Let {
+                                        name: tmp,
+                                        mutable: true,
+                                        ty: None,
+                                        value: load,
+                                        line,
+                                    });
+                                }
+                                return Err(Diagnostic::error(
+                                    line,
+                                    self.col(),
+                                    "parse",
+                                    "the left side of `[i].field = ..` must be a plain \
+                                     array variable"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                        // `a[i].f.g = v` (and deeper) is rejected: v1 supports one
+                        // level of field write-through only.
+                        if is_index_field_chain(expr) {
+                            return Err(Diagnostic::error(
+                                line,
+                                self.col(),
+                                "parse",
+                                "only a single field write-through is supported: \
+                                 `a[i].field = v` (not `a[i].field.field = v`)"
                                     .to_string(),
                             ));
                         }
@@ -1802,6 +1901,7 @@ impl Parser {
             no_struct: false,
             type_params: self.type_params.clone(),
             field_preds: None,
+            extra_stmts: Vec::new(),
         };
         // A sub-parser diagnostic carries line numbers relative to the hole
         // snippet — anchor it at the template and embed the detail, exactly
@@ -2146,6 +2246,7 @@ mod tests {
             no_struct: false,
             type_params: Vec::new(),
             field_preds: None,
+            extra_stmts: Vec::new(),
         };
         let (prog, errors) = p.program_accum();
         assert!(!errors.is_empty(), "the broken decl must actually fail");
@@ -2228,5 +2329,58 @@ mod tests {
             Stmt::Region { body, .. } => assert_eq!(body.stmts.len(), 1),
             other => panic!("expected region, got {other:?}"),
         }
+    }
+
+    // ---- RFC-0011 addendum: `a[i].field = v` write-through --------------
+
+    #[test]
+    fn index_field_assign_desugars_to_load_setfield_store() {
+        // `a[i].f = v` becomes exactly `let mut a[] = a[i]  a[].f = v  a[i] = a[]`
+        // (three statements spliced into the block, in order).
+        let p = parse_src(
+            "fn main() -> Int64 { let mut a: Array<Int64> = []  a[0].f = 9  return 0 }",
+        );
+        let stmts = &p.functions[0].body.stmts;
+        // let a  |  let mut a[]=a[0]  |  a[].f=9  |  a[0]=a[]  |  return
+        assert_eq!(stmts.len(), 5);
+        match &stmts[1] {
+            Stmt::Let { name, mutable, value: Expr::Call { name: c, args, .. }, .. } => {
+                assert_eq!(name, "a[]");
+                assert!(mutable, "the element copy must be mut so SetField applies");
+                assert_eq!(c, "at");
+                assert!(matches!(args[0], Expr::Var { .. }));
+            }
+            other => panic!("expected `let mut a[] = a[0]`, got {other:?}"),
+        }
+        match &stmts[2] {
+            Stmt::SetField { name, field, .. } => {
+                assert_eq!(name, "a[]");
+                assert_eq!(field, "f");
+            }
+            other => panic!("expected SetField on the temp, got {other:?}"),
+        }
+        match &stmts[3] {
+            Stmt::IndexSet { name, value: Expr::Var { name: v, .. }, .. } => {
+                assert_eq!(name, "a", "stores back into the real array binding");
+                assert_eq!(v, "a[]");
+            }
+            other => panic!("expected `a[0] = a[]`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_index_field_assign_is_rejected() {
+        // One level only: `a[i].f.g = v` is a parse error.
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []  a[0].f.g = 9  return 0 }";
+        let e = parse(lex(src).unwrap()).unwrap_err();
+        assert!(e.message.contains("single field write-through"), "{}", e.message);
+    }
+
+    #[test]
+    fn index_field_assign_on_non_variable_array_is_rejected() {
+        // The left side must be a plain array variable, not a call result.
+        let src = "fn main() -> Int64 { f()[0].x = 9  return 0 }";
+        let e = parse(lex(src).unwrap()).unwrap_err();
+        assert!(e.message.contains("plain array variable"), "{}", e.message);
     }
 }

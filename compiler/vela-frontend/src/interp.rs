@@ -3537,4 +3537,32 @@ mod tests {
                    fn main() -> Int64 { return f() }";
         assert_eq!(run(src).unwrap(), 4);
     }
+
+    // ---- RFC-0011 addendum: `a[i].field = v` write-through --------------
+
+    #[test]
+    fn index_field_write_through_is_visible() {
+        // A field write through the array must stick (load-modify-store), and the
+        // RHS reads the pre-write element.
+        let src = "type P = { x: Int64, y: Int64 } \
+                   fn main() -> Int64 { \
+                       let mut a: Array<P> = [] \
+                       a.push(P { x: 1, y: 2 }) \
+                       a.push(P { x: 3, y: 4 }) \
+                       a[1].x = 20 \
+                       a[0].y = a[0].y + 9 \
+                       return a[0].y + a[1].x }"; // 11 + 20 = 31
+        assert_eq!(run(src).unwrap(), 31);
+    }
+
+    #[test]
+    fn index_field_write_through_traps_on_oob_load() {
+        // The bounds check on the element LOAD fires with the canonical wording.
+        let src = "type P = { x: Int64 } \
+                   fn main() -> Int64 { \
+                       let mut a: Array<P> = [P { x: 1 }] \
+                       a[5].x = 9 \
+                       return 0 }";
+        assert_eq!(run(src).unwrap_err(), "array index 5 out of bounds");
+    }
 }

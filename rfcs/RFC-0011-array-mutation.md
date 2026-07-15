@@ -59,11 +59,9 @@ builtins (RFC precedent: the 2026-07-16 surface migration).
 - **Validated elements.** `Array<Age>` + `xs[0] = 5` is a **compile-time**
   error (constant provably violates `Age`); `xs[0] = n` validates at runtime
   and traps with the existing validation wording on failure.
-- **No `a[i].field = v`.** Record-field writes through an array remain out of
-  scope (RFC-0003 rejects `SetField` into validated data generally; the
-  read-copy semantics of `a[i]` on records is unchanged). Idiom: read the
-  copy, modify, store back — `let mut p = ps[i]  p.x = 9  ps[i] = p` — or use
-  SoA layout as `ecs.vela` does.
+- **`a[i].field = v`.** Record-field write-through — see the **Addendum**
+  below; implemented as exactly the read-copy-store idiom this bullet used to
+  prescribe.
 
 ## The three backends
 
@@ -82,7 +80,45 @@ builtins (RFC precedent: the 2026-07-16 surface migration).
 plus example coverage; `ecs.vela` is rewritten from rebuild-compaction to
 `swapRemove` despawn and stays in the three-way parity corpus.
 
+## Addendum (implemented) — `a[i].field = v` write-through
+
+Writing a record field back *through* an array element is sugar for the
+copy-modify-store idiom, so it is exactly and only that:
+
+```vela
+let mut ps: Array<Point> = [Point { x: 1, y: 2 }]
+ps[0].x = 9        // sugar for:
+                   //   let mut ps[] = ps[0]   (load element 0 — bounds-checked)
+                   //   ps[].x = 9             (set field on the copy)
+                   //   ps[0] = ps[]           (store the copy back into slot 0)
+```
+
+- **Desugar (parser).** `ps[i].f = v` lowers in the parser to those three
+  existing statements (a `let mut` of an unspellable element copy named `ps[]`,
+  a `SetField` on it, and an `IndexSet` back into slot `i`). No new AST node, no
+  new checker/interpreter/codegen path — it inherits every rule and the
+  byte-identical behavior of the three legs it is built from. This is why the
+  three backends stay in lockstep for free.
+- **Semantics.** The load is the read path's bounds check (so `ps[i].f = v`
+  traps with the same `array index %lld out of bounds` wording on an
+  out-of-range `i`); the field write follows **`SetField`'s rules** — allowed on
+  a plain record element, and **rejected on/into validated data** with the exact
+  `SetField` wording (a predicated field type, or a predicated record type,
+  cannot be mutated in place); the store follows `IndexSet` (the array must be
+  `mut`, `v` coerces into the field type). The RHS is evaluated against the
+  *pre-write* element, exactly as the hand-written idiom would.
+- **Ownership.** The element copy is a value; `at(a, i)` produces no owned heap
+  handle, so the temporary never enters drop analysis (no double-free, no leak
+  beyond the store's existing "overwritten element is not freed" stance).
+- **One level only (v1).** `ps[i].f.g = v` is a compile error (a single field
+  write-through); deeper paths, and a non-variable array receiver
+  (`f()[i].x = v`), are rejected in the parser.
+
+Covered by `examples/arrays.vela` (a `Point` component array with field
+write-through) and in the three-way parity corpus.
+
 ## Out of scope (future)
 
 `insert`/`remove` (order-preserving, O(n)), `truncate`, `clear`, slices/views,
-`a[i].field = v` write-through. Each is additive; none blocks the ECS use case.
+and multi-level element write-through (`a[i].f.g = v`). Each is additive; none
+blocks the ECS use case.

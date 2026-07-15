@@ -5122,4 +5122,49 @@ mod tests {
         .unwrap_err();
         assert!(e.contains("unknown variable") || e.contains("lo"), "{e}");
     }
+
+    // ---- RFC-0011 addendum: `a[i].field = v` write-through --------------
+
+    #[test]
+    fn index_field_assign_requires_mut_array() {
+        // Storing the modified element back needs a `mut` array (the IndexSet leg).
+        let e = check_src(
+            "type P = { x: Int64 }\n\
+             fn main() -> Int64 { let a: Array<P> = [P { x: 1 }]  a[0].x = 9  return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("without `mut`"), "{e}");
+    }
+
+    #[test]
+    fn index_field_assign_unknown_field_is_rejected() {
+        let e = check_src(
+            "type P = { x: Int64 }\n\
+             fn main() -> Int64 { let mut a: Array<P> = [P { x: 1 }]  a[0].z = 9  return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("no field `z`"), "{e}");
+    }
+
+    #[test]
+    fn index_field_assign_into_validated_field_is_rejected() {
+        // A predicated field type cannot be written in place — same rule (and
+        // wording) SetField enforces for a plain record.
+        let e = check_src(
+            "type Age = Int64 where value >= 0\n\
+             type P = { age: Age }\n\
+             fn main() -> Int64 { let mut a: Array<P> = []  a.push(P { age: 1 })  a[0].age = 5  return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("(validated)"), "{e}");
+    }
+
+    #[test]
+    fn index_field_assign_accepts_plain_record_element() {
+        assert!(check_src(
+            "type P = { x: Int64, y: Int64 }\n\
+             fn main() -> Int64 { let mut a: Array<P> = [P { x: 1, y: 2 }]  a[0].x = 9  return 0 }",
+        )
+        .is_ok());
+    }
 }
