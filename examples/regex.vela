@@ -26,28 +26,28 @@ fn register(name: String) -> Username {
 
 fn main() -> Int64 {
     // `=~` is an ordinary Bool expression.
-    print("abc" =~ "[a-z]+")          // true
-    print("abc9" =~ "[a-z]+")         // false (a digit is not [a-z])
-    print("id_42" =~ "\\w+")          // true
-    print("cat" =~ "cat|dog")         // true  (alternation)
-    print("xaya" =~ "(.a)*")          // true  (every 2nd char is 'a')
-    print("xayb" =~ "(.a)*")          // false
+    print("abc" =~ "[a-z]+") // true
+    print("abc9" =~ "[a-z]+") // false (a digit is not [a-z])
+    print("id_42" =~ "\\w+") // true
+    print("cat" =~ "cat|dog") // true  (alternation)
+    print("xaya" =~ "(.a)*") // true  (every 2nd char is 'a')
+    print("xayb" =~ "(.a)*") // false
 
     // Length-refined strings.
-    let u = Username("alice")         // valid at compile time — no runtime check
-    print(u)                          // alice
-    print(u.length)                   // 5
-    print(register("bob"))            // bob — validated at runtime
+    let u = Username("alice") // valid at compile time — no runtime check
+    print(u) // alice
+    print(u.length) // 5
+    print(register("bob")) // bob — validated at runtime
 
     // Regex-refined strings run the same matcher.
     let e = Email("dev@vela.io")
-    print(e)                          // dev@vela.io
-    let w = EveryOther("banana")      // 6 chars, a-z, every 2nd char 'a'
-    print(w)                          // banana
+    print(e) // dev@vela.io
+    let w = EveryOther("banana") // 6 chars, a-z, every 2nd char 'a'
+    print(w) // banana
 
     // Refinements reflect into JSON Schema.
-    print(jsonSchema(Username))       // ... "minLength":3,"maxLength":16
-    print(jsonSchema(Email))          // ... "pattern":"^...$"
-    print(jsonSchema(EveryOther))     // ... "minLength":2,"allOf":[{...},{...}]
+    print(jsonSchema(Username)) // ... "minLength":3,"maxLength":16
+    print(jsonSchema(Email)) // ... "pattern":"^...$"
+    print(jsonSchema(EveryOther)) // ... "minLength":2,"allOf":[{...},{...}]
     return 0
 }

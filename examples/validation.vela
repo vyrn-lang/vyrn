@@ -44,7 +44,7 @@ fn translateDe(key: String) -> String {
 fn main() -> Int64 {
     // Two problems at once: empty name AND age out of range.
     let issues = issuesOf(validatePerson("", 200))
-    print(issues.length)                 // 2
+    print(issues.length) // 2
 
     for i in issues {
         // key + path (for programmatic handling) and a localized message (i18n).

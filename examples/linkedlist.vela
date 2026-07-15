@@ -31,7 +31,7 @@ fn freeList(o: Option<Ref<Node>>) -> Int64 {
     return match o { Some(r) => freeNode(r), None => 0 }
 }
 fn freeNode(r: Ref<Node>) -> Int64 {
-    let tail = get(r).next   // read before drop, or the access would trap
+    let tail = get(r).next // read before drop, or the access would trap
     drop r
     return freeList(tail)
 }
@@ -45,10 +45,10 @@ fn main() -> Int64 {
         i = i - 1
     }
 
-    print(length(head))   // 5
+    print(length(head)) // 5
     let total = sum(head) // 15
     print(total)
 
-    freeList(head)       // every node's cell is dropped here
+    freeList(head) // every node's cell is dropped here
     return total
 }

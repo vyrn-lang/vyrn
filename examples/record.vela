@@ -7,8 +7,8 @@
 // mutation. (Records with a `where` invariant are the exception: their fields
 // cannot be mutated in place — rebuild the value, which re-validates.)
 
-type Named   = { name: Int64 }
-type User    = { name: Int64, age: Int64 }
+type Named = { name: Int64 }
+type User = { name: Int64, age: Int64 }
 type Account = { balance: Int64, count: Int64 }
 
 // `greet` accepts anything shaped like `Named` (i.e. has a `name` field).
@@ -26,15 +26,15 @@ fn deposit(a: Account, amount: Int64) -> Account {
 fn main() -> Int64 {
     // ---- width subtyping ---------------------------------------------------
     let u = User { name: 7, age: 30 }
-    print(greet(u))   // 7 — a User has everything Named requires
-    print(u.age)      // 30
+    print(greet(u)) // 7 — a User has everything Named requires
+    print(u.age) // 30
 
     // ---- mutable fields ------------------------------------------------------
     let mut acct = Account { balance: 0, count: 0 }
-    acct.balance = 100                 // direct field mutation on a `mut` record
+    acct.balance = 100 // direct field mutation on a `mut` record
     acct = deposit(acct, 50)
     acct = deposit(acct, 25)
-    print(acct.balance)   // 175
-    print(acct.count)     // 2
+    print(acct.balance) // 175
+    print(acct.count) // 2
     return 0
 }

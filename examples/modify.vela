@@ -22,12 +22,12 @@ fn main() -> Int64 {
 
     bump(c, 5)
     bump(c, 10)
-    bump(c, 100)        // each call mutates the caller's `c`
-    print(c.value)      // 115
-    print(c.hits)       // 3
+    bump(c, 100) // each call mutates the caller's `c`
+    print(c.value) // 115
+    print(c.hits) // 3
 
     reset(c)
-    print(c.value)      // 0
+    print(c.value) // 0
 
-    return c.hits       // 3
+    return c.hits // 3
 }

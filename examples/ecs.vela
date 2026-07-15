@@ -39,26 +39,26 @@
 fn main() -> Int64 {
     // SoA component stores — one contiguous Array<Int64> per component,
     // indexed by entity id.
-    let mut xs: Array<Int64> = []    // position x
-    let mut ys: Array<Int64> = []    // position y
-    let mut dxs: Array<Int64> = []   // velocity x
-    let mut dys: Array<Int64> = []   // velocity y
+    let mut xs: Array<Int64> = [] // position x
+    let mut ys: Array<Int64> = [] // position y
+    let mut dxs: Array<Int64> = [] // velocity x
+    let mut dys: Array<Int64> = [] // velocity y
 
-    let bound = 16        // an entity with x >= bound has left the arena
-    let ticks = 15        // frames to simulate
-    let perTick = 3       // spawns per frame (the churn)
+    let bound = 16 // an entity with x >= bound has left the arena
+    let ticks = 15 // frames to simulate
+    let perTick = 3 // spawns per frame (the churn)
 
-    let mut seed = 0      // a plain counter — deterministic, no RNG needed
+    let mut seed = 0 // a plain counter — deterministic, no RNG needed
     let mut checksum = 0
 
     // Seed the world with an initial cohort of 5.
     let mut s = 0
     while s < 5 {
         seed = seed + 1
-        xs.push(0)                // all start at the left edge
-        ys.push(seed % 7)         // spread over rows
-        dxs.push((seed % 3) + 2)  // rightward speed 2..4
-        dys.push((seed % 4) + 1)  // downward drift 1..4
+        xs.push(0) // all start at the left edge
+        ys.push(seed % 7) // spread over rows
+        dxs.push((seed % 3) + 2) // rightward speed 2..4
+        dys.push((seed % 4) + 1) // downward drift 1..4
         s = s + 1
     }
 
@@ -77,12 +77,12 @@ fn main() -> Int64 {
         while i < xs.length {
             let nx = xs[i] + dxs[i]
             let ny = ys[i] + dys[i]
-            if nx < bound {                 // survives — integrate in place
+            if nx < bound { // survives — integrate in place
                 xs[i] = nx
                 ys[i] = ny
                 checksum = checksum + nx * 7 + ny * 13
                 i = i + 1
-            } else {                        // left the arena — O(1) despawn
+            } else { // left the arena — O(1) despawn
                 xs.swapRemove(i)
                 ys.swapRemove(i)
                 dxs.swapRemove(i)

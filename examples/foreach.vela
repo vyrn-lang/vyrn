@@ -13,7 +13,7 @@ fn sumFixed() -> Int64 {
     for s in squares {
         total = total + s
     }
-    return total               // 0+1+4+9+16 = 30
+    return total // 0+1+4+9+16 = 30
 }
 
 fn countLongWords() -> Int64 {
@@ -32,13 +32,13 @@ fn countLongWords() -> Int64 {
             long = long + 1
         }
     }
-    return long                // "there" and "friend" -> 2
+    return long // "there" and "friend" -> 2
 }
 
 fn main() -> Int64 {
     let a = sumFixed()
-    print(a)                   // 30
+    print(a) // 30
     let b = countLongWords()
-    print(b)                   // 2
-    return a + b               // 32
+    print(b) // 2
+    return a + b // 32
 }

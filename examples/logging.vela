@@ -30,6 +30,6 @@ fn main() -> Int64 {
         log.warn("result \{result} is getting large")
     }
 
-    print(result)        // 120, on stdout
+    print(result) // 120, on stdout
     return 0
 }

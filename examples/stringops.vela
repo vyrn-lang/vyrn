@@ -39,30 +39,30 @@ type Greeting = String where value.length >= 1 && value[0] == 'H'
 fn toInt(s: String) -> Int64 {
     return match parse(s) {
         Some(n) => n,
-        None => 0 - 1,        // sentinel for "not a number"
+        None => 0 - 1, // sentinel for "not a number"
     }
 }
 
 fn main() -> Int64 {
     let s = "banana"
-    print(s.length)                 // 6
-    print(s[0])                     // 98  ('b')
-    print(s[0] == 'b')              // true
+    print(s.length) // 6
+    print(s[0]) // 98  ('b')
+    print(s[0] == 'b') // true
 
-    print(everyEvenIsA("banana"))   // true  (positions 2,4,6 = a,a,a)
-    print(everyEvenIsA("bandit"))   // false
+    print(everyEvenIsA("banana")) // true  (positions 2,4,6 = a,a,a)
+    print(everyEvenIsA("bandit")) // false
 
-    print(s.contains("nan"))        // true
-    print(s.startsWith("ban"))      // true
-    print(s.endsWith("na"))         // true
+    print(s.contains("nan")) // true
+    print(s.startsWith("ban")) // true
+    print(s.endsWith("na")) // true
 
-    let g = Greeting("Hello")       // valid: non-empty and starts with 'H'
-    print(g)                        // Hello
+    let g = Greeting("Hello") // valid: non-empty and starts with 'H'
+    print(g) // Hello
 
     // ---- checked conversions ----------------------------------------------
-    print("sum = \{3 + 4}")         // sum = 7 — numbers render into strings
+    print("sum = \{3 + 4}") // sum = 7 — numbers render into strings
     print(toInt("40") + toInt("2")) // 42
-    print(toInt("twelve"))          // -1 — the invalid case is explicit
+    print(toInt("twelve")) // -1 — the invalid case is explicit
 
     return 0
 }

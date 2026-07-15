@@ -15,12 +15,12 @@ fn main() -> Int64 {
     let mut i = 0
     let mut last = 0
     while i < 1000000 {
-        let c = cell(i)       // owned by this block…
+        let c = cell(i) // owned by this block…
         set(c, get(c) + 1)
         last = get(c)
         i = i + 1
-    }                          // …auto-released here; the slot is reused next turn
+    } // …auto-released here; the slot is reused next turn
 
-    print(last)               // 1000000
+    print(last) // 1000000
     return 0
 }

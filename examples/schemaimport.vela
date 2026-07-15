@@ -14,13 +14,13 @@ fn mk(name: String, n: Int64) -> User {
 
 fn main() -> Int64 {
     let u = User { name: "grace", age: 42, nick: Some("g") }
-    print(u.age)                    // 42
+    print(u.age) // 42
 
-    let p: Port = 8080              // auto-validates against the schema bounds
-    print(p)                        // 8080
+    let p: Port = 8080 // auto-validates against the schema bounds
+    print(p) // 8080
 
-    let dyn = mk("ada", 99)         // runtime-checked construction
-    print(dyn.age)                  // 99
+    let dyn = mk("ada", 99) // runtime-checked construction
+    print(dyn.age) // 99
 
     // Round-trip: re-emitting the imported type reproduces the schema's
     // property constraints exactly.

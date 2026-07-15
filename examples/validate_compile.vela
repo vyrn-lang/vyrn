@@ -21,9 +21,9 @@
 type Age = Int64 where value >= 18
 
 fn main() -> Int64 {
-    let viaAnnotation: Age = 5      // 5  < 18  — rejected at compile time
-    let viaConstructor = Age(10)    // 10 < 18  — rejected at compile time
-    let viaFolded = Age(9 + 8)      // folds to 17 < 18 — rejected at compile time
+    let viaAnnotation: Age = 5 // 5  < 18  — rejected at compile time
+    let viaConstructor = Age(10) // 10 < 18  — rejected at compile time
+    let viaFolded = Age(9 + 8) // folds to 17 < 18 — rejected at compile time
     print(viaAnnotation)
     print(viaConstructor)
     print(viaFolded)

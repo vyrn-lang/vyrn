@@ -39,11 +39,11 @@ fn main() -> Int64 {
     let minAge = 18
 
     let q = sql"SELECT * FROM users WHERE name = \{userName} AND age >= \{minAge}"
-    print(q)                          // SELECT * FROM users WHERE name = $1 AND age >= $2
+    print(q) // SELECT * FROM users WHERE name = $1 AND age >= $2
 
     // The values are carried separately, as data — never as query structure.
-    print(showValue(StrVal(userName)))  // '; DROP TABLE users; --   (bound to $1)
-    print(showValue(IntVal(minAge)))    // 18                        (bound to $2)
+    print(showValue(StrVal(userName))) // '; DROP TABLE users; --   (bound to $1)
+    print(showValue(IntVal(minAge))) // 18                        (bound to $2)
 
     return 0
 }

@@ -12,7 +12,7 @@
 // auto-released by the ownership analysis (see autorelease.vela).
 
 fn bump(r: Ref<Int64>) -> Int64 {
-    set(r, get(r) + 1)       // mutate through a reference passed by value
+    set(r, get(r) + 1) // mutate through a reference passed by value
     return get(r)
 }
 
@@ -25,16 +25,16 @@ fn measure(s: Ref<String>) -> Ref<Int64> {
 fn main() -> Int64 {
     // ---- aliased mutation, generation-checked -----------------------------
     let counter = cell(0)
-    let alias = counter      // a second reference to the same cell — allowed
-    set(alias, 40)           // write through one alias…
-    let a = bump(counter)    // …read/modify through another: 41
-    print(bump(alias))       // 42
-    drop counter             // free once; every copy is now stale (checked)
+    let alias = counter // a second reference to the same cell — allowed
+    set(alias, 40) // write through one alias…
+    let a = bump(counter) // …read/modify through another: 41
+    print(bump(alias)) // 42
+    drop counter // free once; every copy is now stale (checked)
 
     // ---- Ref<String>: mutate a heap string through the reference -----------
     let s = cell("hello")
     set(s, get(s) + " world")
-    print(get(s))            // hello world
+    print(get(s)) // hello world
 
     // A block-local string stored into a longer-lived cell survives the block:
     // `set` RETAINS its value, so ownership analysis must not auto-free it.
@@ -42,16 +42,16 @@ fn main() -> Int64 {
         let tail = "!" + "!"
         set(s, tail)
     }
-    print(get(s))            // !!
+    print(get(s)) // !!
 
     // ---- Ref<Ref<Int64>>: a reference to a reference -----------------------
     let rr = cell(cell(41))
     let inner = get(rr)
     set(inner, get(inner) + 1)
-    print(get(inner))        // 42
+    print(get(inner)) // 42
 
-    let n = measure(s)       // Ref<Int64> holding 2
-    print(get(n))            // 2
+    let n = measure(s) // Ref<Int64> holding 2
+    print(get(n)) // 2
 
     drop s
     drop inner

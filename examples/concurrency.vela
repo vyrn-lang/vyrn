@@ -26,13 +26,13 @@ fn main() -> Int64 {
     let cfg = Config { base: 100, scale: 3 }
 
     // Three tasks sharing one immutable config, plus an independent computation.
-    let a = spawn transform(cfg, 1)    // 103
-    let b = spawn transform(cfg, 2)    // 106
-    let c = spawn transform(cfg, 10)   // 130
-    let f = spawn fib(20)              // 6765
+    let a = spawn transform(cfg, 1) // 103
+    let b = spawn transform(cfg, 2) // 106
+    let c = spawn transform(cfg, 10) // 130
+    let f = spawn fib(20) // 6765
 
     let total = a.join() + b.join() + c.join() + f.join()
-    print(total)                       // 103 + 106 + 130 + 6765 = 7104
+    print(total) // 103 + 106 + 130 + 6765 = 7104
     // Exit codes are portable only in 0..126 (WASI's rule); print the result
     // and return a small success/failure indicator instead.
     if total == 7104 { return 0 }

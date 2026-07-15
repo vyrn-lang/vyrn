@@ -30,8 +30,8 @@ fn describe<T: Show>(x: T) -> String {
 }
 
 fn main() -> Int64 {
-    print(describe(42))           // = 42       (generic, T = Int64)
-    print(describe(true))         // = yes      (generic, T = Bool)
-    print(label(7, false))        // x=7 flag=no
+    print(describe(42)) // = 42       (generic, T = Int64)
+    print(describe(true)) // = yes      (generic, T = Bool)
+    print(label(7, false)) // x=7 flag=no
     return 0
 }

@@ -28,20 +28,20 @@ fn span(r: Range) -> Int64 {
 }
 
 fn main() -> Int64 {
-    let a: Age = 25              // let annotation validates (proven, free)
-    print(greet(a))              // 25
-    print(greet(30))             // 30 — argument boundary validates
-    print(clamp(Some(42)))       // 42 — return boundary validates
+    let a: Age = 25 // let annotation validates (proven, free)
+    print(greet(a)) // 25
+    print(greet(30)) // 30 — argument boundary validates
+    print(clamp(Some(42))) // 42 — return boundary validates
 
     let mut m: Age = 21
-    m = m + 1                    // assignment re-validates through Age
-    print(m)                     // 22
+    m = m + 1 // assignment re-validates through Age
+    print(m) // 22
 
-    let u = User { name: "ada", age: 33 }   // field boundary validates
-    print(u.age)                 // 33
+    let u = User { name: "ada", age: 33 } // field boundary validates
+    print(u.age) // 33
 
-    let ages: Array<Age, 2> = [19, 20]      // each element validates
-    print(ages[1])               // 20
+    let ages: Array<Age, 2> = [19, 20] // each element validates
+    print(ages[1]) // 20
 
     print(span(Range { start: 2, end: 7 })) // cross-field `where` holds: 5
     return 0

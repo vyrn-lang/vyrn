@@ -16,9 +16,9 @@ fn mk(n: Int64) -> User {
 }
 
 fn main() -> Int64 {
-    let u = User { name: "ada", age: 33 }   // constants proven — zero cost
-    print(u.age)                            // 33
-    print(mk(21).age)                       // 21 — dynamic, checked at the field
-    print(jsonSchema(User))                 // constraints appear per property
+    let u = User { name: "ada", age: 33 } // constants proven — zero cost
+    print(u.age) // 33
+    print(mk(21).age) // 21 — dynamic, checked at the field
+    print(jsonSchema(User)) // constraints appear per property
     return 0
 }

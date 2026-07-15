@@ -24,8 +24,8 @@ fn main() -> Int64 {
     m = put(m, 2, 200)
     m = put(m, 3, 300)
 
-    let hit  = match mapGet(m, 2) { Some(v) => v, None => 0 - 1 }   // 200
-    let miss = match mapGet(m, 9) { Some(v) => v, None => 0 - 1 }   // -1
+    let hit = match mapGet(m, 2) { Some(v) => v, None => 0 - 1 } // 200
+    let miss = match mapGet(m, 9) { Some(v) => v, None => 0 - 1 } // -1
     print(hit)
     print(miss)
 

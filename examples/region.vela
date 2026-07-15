@@ -33,9 +33,9 @@ fn main() -> Int64 {
         a = push(a, 5)
         n = at(a, 4)
     }
-    print(n)       // 5
+    print(n) // 5
 
     // `total` is a plain Int64 computed inside the region — safe to carry out.
-    print(total)   // 13
+    print(total) // 13
     return total
 }

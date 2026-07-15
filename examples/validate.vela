@@ -7,7 +7,7 @@
 //   - fallibly, `Age?(n) -> Option<Age>` — `None` when the refinement fails,
 //     so untrusted input is handled without aborting.
 
-type Age  = Int64 where value >= 18
+type Age = Int64 where value >= 18
 type Port = Int64 where value >= 1 && value <= 65535
 
 // `n` is not a compile-time constant, so this construction is checked at RUNTIME.
@@ -19,22 +19,22 @@ fn checkedAge(n: Int64) -> Age {
 // The fallible form: recover instead of trapping.
 fn make(n: Int64) -> Int64 {
     return match Age?(n) {
-        Some(a) => a,        // valid: use it (an Age decays to Int64)
-        None    => 0 - 1,    // invalid: recover gracefully
+        Some(a) => a, // valid: use it (an Age decays to Int64)
+        None => 0 - 1, // invalid: recover gracefully
     }
 }
 
 fn main() -> Int64 {
-    let a = Age(25)            // proven valid at COMPILE TIME — zero runtime cost
-    let p = Port(8080)         // proven valid at compile time
+    let a = Age(25) // proven valid at COMPILE TIME — zero runtime cost
+    let p = Port(8080) // proven valid at compile time
     let grown = checkedAge(30) // runtime check — passes
 
     // A validated type decays to its base, so an Age prints as the Int64 it is.
-    print(a)       // 25
-    print(p)       // 8080
-    print(grown)   // 30
+    print(a) // 25
+    print(p) // 8080
+    print(grown) // 30
 
-    print(make(25))   // 25
-    print(make(5))    // -1   (5 < 18 — no abort)
+    print(make(25)) // 25
+    print(make(5)) // -1   (5 < 18 — no abort)
     return 0
 }

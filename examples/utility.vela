@@ -4,10 +4,10 @@
 
 type User = { id: Int64, name: Int64, password: Int64 }
 
-type Public  = Omit<User, password>   // { id, name }
-type Id      = Pick<User, id>         // { id }
-type Audit   = { createdAt: Int64 }
-type Tracked = Merge<User, Audit>     // { id, name, password, createdAt }
+type Public = Omit<User, password> // { id, name }
+type Id = Pick<User, id> // { id }
+type Audit = { createdAt: Int64 }
+type Tracked = Merge<User, Audit> // { id, name, password, createdAt }
 
 fn showPublic(p: Public) -> Int64 { return p.name }
 fn showId(v: Id) -> Int64 { return v.id }
@@ -17,14 +17,14 @@ fn main() -> Int64 {
 
     // A User is structurally a superset of Public and Id, so it flows in with no
     // cast (width subtyping over a transformer-derived shape).
-    let a = showPublic(u)          // 42
-    let b = showId(u)              // 1
+    let a = showPublic(u) // 42
+    let b = showId(u) // 1
 
     // You can also build a derived type directly (only its retained fields).
     let p = Public { id: 7, name: 8 }
 
-    print(a)        // 42
-    print(b)        // 1
-    print(p.name)   // 8
+    print(a) // 42
+    print(b) // 1
+    print(p.name) // 8
     return 0
 }

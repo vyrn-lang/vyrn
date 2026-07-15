@@ -47,10 +47,10 @@ fn main() -> Int64 {
     let deep = Some(cell(Tree { value: 4, left: leaf(3), right: None }))
     let root = Some(cell(Tree { value: 2, left: leaf(1), right: deep }))
 
-    let total = treeSum(root)   // 2 + 1 + 4 + 3
-    print(total)                 // 10
-    print(treeDepth(root))      // 3
+    let total = treeSum(root) // 2 + 1 + 4 + 3
+    print(total) // 10
+    print(treeDepth(root)) // 3
 
-    treeFree(root)              // every node reclaimed
+    treeFree(root) // every node reclaimed
     return total
 }

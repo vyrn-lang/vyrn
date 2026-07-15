@@ -26,30 +26,30 @@ fn main() -> Int64 {
     let mut squares: Array<Int64> = []
     let mut i = 0
     while i < 10 {
-        squares.push(i * i)      // the backing buffer grows 0→4→8→16
+        squares.push(i * i) // the backing buffer grows 0→4→8→16
         i = i + 1
     }
-    print(squares.length)        // 10
-    print(squares[3])            // 9 — bounds-checked index
+    print(squares.length) // 10
+    print(squares[3]) // 9 — bounds-checked index
 
     let mut total = 0
-    for sq in squares {          // a `for` loop, no manual index
+    for sq in squares { // a `for` loop, no manual index
         total = total + sq
     }
-    print(total)                 // 0+1+4+9+16+25+36+49+64+81 = 285
-    drop squares                 // explicit reclaim (usually inferred; using
-                                 // `squares` after this is a compile error)
+    print(total) // 0+1+4+9+16+25+36+49+64+81 = 285
+    drop squares // explicit reclaim (usually inferred; using
+    // `squares` after this is a compile error)
 
     // ---- in-place mutation (RFC-0011) -----------------------------------------
     let mut xs: Array<Int64> = [10, 20, 30, 40]
-    xs[1] = 25                   // element store — xs = [10, 25, 30, 40]
-    print(xs[1])                 // 25
-    let popped = match xs.pop() { Some(v) => v, None => 0 }  // 40; xs = [10, 25, 30]
-    print(popped)                // 40
-    let removed = xs.swapRemove(0)   // returns 10; last (30) moves into slot 0
-    print(removed)               // 10 — xs is now [30, 25]
-    print(xs.length)             // 2
-    print(xs[0])                 // 30
+    xs[1] = 25 // element store — xs = [10, 25, 30, 40]
+    print(xs[1]) // 25
+    let popped = match xs.pop() { Some(v) => v, None => 0 } // 40; xs = [10, 25, 30]
+    print(popped) // 40
+    let removed = xs.swapRemove(0) // returns 10; last (30) moves into slot 0
+    print(removed) // 10 — xs is now [30, 25]
+    print(xs.length) // 2
+    print(xs[0]) // 30
     drop xs
 
     // ---- record elements: field write-through (RFC-0011 addendum) -------------
@@ -61,10 +61,10 @@ fn main() -> Int64 {
     let mut pts: Array<Point> = []
     pts.push(Point { x: 1, y: 1 })
     pts.push(Point { x: 2, y: 2 })
-    pts[1].x = 20                // write-through: pts[1] is now { x: 20, y: 2 }
-    pts[0].y = pts[0].y + 9      // the RHS reads the (unchanged) old element first
-    print(pts[0].y)              // 10
-    print(pts[1].x)              // 20
+    pts[1].x = 20 // write-through: pts[1] is now { x: 20, y: 2 }
+    pts[0].y = pts[0].y + 9 // the RHS reads the (unchanged) old element first
+    print(pts[0].y) // 10
+    print(pts[1].x) // 20
     drop pts
 
     // ---- fixed-size -----------------------------------------------------------
@@ -73,9 +73,9 @@ fn main() -> Int64 {
     for sq in fixed {
         sum = sum + sq
     }
-    print(fixed.length)          // 5 (a compile-time constant)
-    print(sum)                   // 30
-    print(weekdayLetters()[1])   // Tue
+    print(fixed.length) // 5 (a compile-time constant)
+    print(sum) // 30
+    print(weekdayLetters()[1]) // Tue
 
     return 0
 }

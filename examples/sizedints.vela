@@ -15,39 +15,39 @@ fn wrap32(a: Int32, b: Int32) -> Int32 {
 fn main() -> Int64 {
     // Int32 overflow wraps at 32 bits: 2e9 + 2e9 → -294967296.
     let big: Int32 = 2000000000
-    print(wrap32(big, big))          // -294967296
+    print(wrap32(big, big)) // -294967296
 
     // Int8 wraps at 8 bits: 100 + 100 → -56.
     let a: Int8 = 100
-    print(a + a)                     // -56
+    print(a + a) // -56
 
     // A literal adapts to the sized sibling.
     let n: Int32 = 40
-    print(n + 2)                     // 42  (no overflow)
+    print(n + 2) // 42  (no overflow)
 
     // Int16.
     let m: Int16 = 30000
-    print(m + m)                     // -5536
+    print(m + m) // -5536
 
     // Conversions: sized ints / floats interoperate via explicit casts.
     let sum: Int32 = wrap32(big, big)
-    print(Int64(sum))                  // -294967296  (Int32 -> Int64, sign-extended)
-    print(Float64(n))                // 40.000000   (Int32 -> Float64)
-    print(Int64(2.9))                  // 2           (Float64 -> Int64, truncates)
+    print(Int64(sum)) // -294967296  (Int32 -> Int64, sign-extended)
+    print(Float64(n)) // 40.000000   (Int32 -> Float64)
+    print(Int64(2.9)) // 2           (Float64 -> Int64, truncates)
 
     // Unsigned integers wrap into their magnitude range (no negatives).
     let u: UInt8 = 200
-    print(u + u)                     // 144  (400 wraps mod 256, unsigned)
-    print(u - 250)                   // 206  (-50 wraps to 206, unsigned)
+    print(u + u) // 144  (400 wraps mod 256, unsigned)
+    print(u - 250) // 206  (-50 wraps to 206, unsigned)
 
     // Unsigned division and comparison differ from signed.
     let big64: UInt64 = 10000000000000000000
-    print(big64)                     // 10000000000000000000  (> Int64 max)
-    print(big64 / 3)                 // 3333333333333333333  (unsigned divide)
+    print(big64) // 10000000000000000000  (> Int64 max)
+    print(big64 / 3) // 3333333333333333333  (unsigned divide)
 
     // Explicit unsigned conversions.
-    print(UInt8(300))                // 44   (300 mod 256)
-    print(UInt32(Int64(4000000000)))   // 4000000000  (fits in UInt32, not Int32)
+    print(UInt8(300)) // 44   (300 mod 256)
+    print(UInt32(Int64(4000000000))) // 4000000000  (fits in UInt32, not Int32)
 
     return 0
 }

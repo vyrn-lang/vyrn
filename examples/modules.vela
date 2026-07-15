@@ -12,13 +12,13 @@ import { repeat, joinWith } from "std/strings"
 fn main() -> Int64 {
     // A validated type imported from another module auto-validates here.
     let half: Percent = 50
-    print(scale(300, half))              // 150
+    print(scale(300, half)) // 150
 
-    print(clamp(999, 0, 100))            // 100 — std, written in Vela
+    print(clamp(999, 0, 100)) // 100 — std, written in Vela
 
-    print(repeat("ab", 3))               // ababab
+    print(repeat("ab", 3)) // ababab
     let parts: Array<String> = ["x", "y", "z"]
-    print(joinWith(parts, ", "))         // x, y, z
+    print(joinWith(parts, ", ")) // x, y, z
 
     return 0
 }

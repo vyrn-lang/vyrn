@@ -42,15 +42,15 @@ fn main() -> Int64 {
     let done = n > 2
 
     // ---- interpolation ---------------------------------------------------
-    print(greet(name, n))                 // hi Vela, you have 3 messages
-    print("n=\{n}, doubled=\{n + n}")     // n=3, doubled=6
-    print("done? \{done}")                // done? true
-    print("literal braces { } stay put")  // literal braces { } stay put
+    print(greet(name, n)) // hi Vela, you have 3 messages
+    print("n=\{n}, doubled=\{n + n}") // n=3, doubled=6
+    print("done? \{done}") // done? true
+    print("literal braces { } stay put") // literal braces { } stay put
 
     // Sized ints and floats interpolate too, rendering exactly as `print`.
     let port: UInt16 = 8080
     let ratio = 0.5
-    print("port=\{port}, ratio=\{ratio}")  // port=8080, ratio=0.500000
+    print("port=\{port}, ratio=\{ratio}") // port=8080, ratio=0.500000
 
     // ---- multi-line strings ----------------------------------------------
     let banner = "== \{name} ==
@@ -59,8 +59,8 @@ messages: \{n}"
 
     // ---- first-class Template: inspect and re-render ----------------------
     let t = template"x = \{n}, name = \{name}"
-    print(t.parts.length)      // 3
-    print(t.values.length)     // 2
-    print(render(t))           // x = 3, name = Vela
+    print(t.parts.length) // 3
+    print(t.values.length) // 2
+    print(render(t)) // x = 3, name = Vela
     return 0
 }

@@ -16,7 +16,7 @@ fn pick<T>(cond: Bool, a: T, b: T) -> T {
 }
 
 // ---- generic types -----------------------------------------------------------
-type Box<T>     = { value: T }
+type Box<T> = { value: T }
 type Pair<A, B> = { first: A, second: B }
 
 fn unbox<T>(b: Box<T>) -> T {
@@ -31,7 +31,7 @@ type Opt<T> =
 fn orElse<T>(o: Opt<T>, fallback: T) -> T {
     return match o {
         Wrap(x) => x,
-        Empty   => fallback,
+        Empty => fallback,
     }
 }
 
@@ -50,24 +50,24 @@ fn same<T: Eq>(a: T, b: T) -> Bool {
 }
 
 fn main() -> Int64 {
-    print(id(42))             // 42          — id<Int64>
-    print(id("polymorphic"))  // polymorphic — id<String>, the SAME source function
-    print(pick(true, 7, 9))   // 7
+    print(id(42)) // 42          — id<Int64>
+    print(id("polymorphic")) // polymorphic — id<String>, the SAME source function
+    print(pick(true, 7, 9)) // 7
 
-    let n = Box { value: 41 }          // Box<Int64>, inferred from the field
+    let n = Box { value: 41 } // Box<Int64>, inferred from the field
     let p: Pair<Int64, String> = Pair { first: 7, second: "seven" }
-    print(unbox(n) + 1)                // 42
-    print(p.second)                    // seven
-    let flag = Box { value: true }     // Box<Bool>, a different instantiation
-    print(flag.value)                  // true
+    print(unbox(n) + 1) // 42
+    print(p.second) // seven
+    let flag = Box { value: true } // Box<Bool>, a different instantiation
+    print(flag.value) // true
 
-    let a = Wrap(41)                   // Opt<Int64>, inferred from the payload
-    let b: Opt<Int64> = Empty          // a nullary variant takes its type from context
-    print(orElse(a, 0) + 1)            // 42
-    print(orElse(b, 99))               // 99
+    let a = Wrap(41) // Opt<Int64>, inferred from the payload
+    let b: Opt<Int64> = Empty // a nullary variant takes its type from context
+    print(orElse(a, 0) + 1) // 42
+    print(orElse(b, 99)) // 99
 
-    print(max(3, 9))                   // 9
-    print(sum3(10, 20, 30))            // 60
-    if same("hi", "hi") { print("equal") }   // equal (Eq works on String)
+    print(max(3, 9)) // 9
+    print(sum3(10, 20, 30)) // 60
+    if same("hi", "hi") { print("equal") } // equal (Eq works on String)
     return 0
 }

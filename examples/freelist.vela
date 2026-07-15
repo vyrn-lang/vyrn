@@ -27,11 +27,11 @@ fn main() -> Int64 {
     while i < 20000 {
         let mut head: Option<Ref<Node>> = None
         let mut j = 5
-        while j > 0 { head = Some(cell(Node { value: j, next: head })); j = j - 1 }
+        while j > 0 { head = Some(cell(Node { value: j, next: head })) j = j - 1 }
         last = sum(head)
-        freeList(head)           // reclaim all 5 nodes; slots reused next turn
+        freeList(head) // reclaim all 5 nodes; slots reused next turn
         i = i + 1
     }
-    print(last)                   // 15
+    print(last) // 15
     return last
 }

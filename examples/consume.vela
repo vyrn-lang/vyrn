@@ -5,17 +5,17 @@
 
 type Token = { id: Int64 }
 
-fn redeem(t: consume Token) -> Int64 { return t.id }   // takes ownership
-fn peek(t: read Token) -> Int64 { return t.id }        // just observes (the default)
+fn redeem(t: consume Token) -> Int64 { return t.id } // takes ownership
+fn peek(t: read Token) -> Int64 { return t.id } // just observes (the default)
 
 fn main() -> Int64 {
     let a = Token { id: 10 }
     // `peek` only reads, so `a` stays usable afterward:
-    let x = peek(a) + peek(a)   // 20
+    let x = peek(a) + peek(a) // 20
 
     let b = Token { id: 5 }
-    let y = redeem(b)           // `b` is consumed here...
+    let y = redeem(b) // `b` is consumed here...
     // ...and using `b` again would be a compile error:
     //     return redeem(b)     // error: `b` was already consumed by `redeem(..)`
-    return x + y                // 25
+    return x + y // 25
 }

@@ -25,34 +25,34 @@ fn show(o: Option<String>) -> String {
 
 fn main() -> Int64 {
     // ---- UTF-8 text ------------------------------------------------------
-    let s = "café"                 // 'é' (U+00E9) is 2 UTF-8 bytes
-    print(s.length)                // 5   — byte length
-    print(charCount(s))            // 4   — code points: c, a, f, é
+    let s = "café" // 'é' (U+00E9) is 2 UTF-8 bytes
+    print(s.length) // 5   — byte length
+    print(charCount(s)) // 4   — code points: c, a, f, é
     print(chars(s)[3] == '\u{e9}') // true
 
-    let grin = "\u{1F600}"         // an emoji: one code point, four bytes
-    print(grin.length)             // 4
-    print(charCount(grin))         // 1
+    let grin = "\u{1F600}" // an emoji: one code point, four bytes
+    print(grin.length) // 4
+    print(charCount(grin)) // 1
 
     // ---- hex ---------------------------------------------------------------
-    print(hexEncode("Hi"))                    // 4869
-    print(show(hexDecode("4869")))            // Hi
+    print(hexEncode("Hi")) // 4869
+    print(show(hexDecode("4869"))) // Hi
 
     // ---- base64 (standard alphabet, `=` padding) ----------------------------
-    print(base64Encode("Hello, Vela!"))       // SGVsbG8sIFZlbGEh
-    print(show(base64Decode("SGVsbG8=")))     // Hello
+    print(base64Encode("Hello, Vela!")) // SGVsbG8sIFZlbGEh
+    print(show(base64Decode("SGVsbG8="))) // Hello
 
     // ---- URL / percent encoding (unreserved set is A-Za-z0-9-_.~) -----------
-    print(urlEncode("name=a b&x"))            // name%3Da%20b%26x
-    print(show(urlDecode("%C3%A9")))          // é   (U+00E9, UTF-8 C3 A9)
+    print(urlEncode("name=a b&x")) // name%3Da%20b%26x
+    print(show(urlDecode("%C3%A9"))) // é   (U+00E9, UTF-8 C3 A9)
 
     // A full UTF-8 round-trip through base64.
-    print(show(base64Decode(base64Encode("café ☕"))))   // café ☕
+    print(show(base64Decode(base64Encode("café ☕")))) // café ☕
 
     // Decoding fails cleanly on bad input or non-text bytes.
-    print(show(hexDecode("zz")))              // <invalid>  (not hex)
-    print(show(base64Decode("////")))         // <invalid>  (bytes aren't UTF-8)
-    print(show(urlDecode("%")))               // <invalid>  (truncated escape)
+    print(show(hexDecode("zz"))) // <invalid>  (not hex)
+    print(show(base64Decode("////"))) // <invalid>  (bytes aren't UTF-8)
+    print(show(urlDecode("%"))) // <invalid>  (truncated escape)
 
     return 0
 }
