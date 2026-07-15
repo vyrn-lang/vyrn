@@ -20,11 +20,18 @@ libc-portable: stream handles and all size_t-sensitive calls (`strlen`,
 `malloc`, `realloc`, `strncmp`, `snprintf`) route through a tiny embedded C
 shim with 64-bit-clean prototypes, and the C `main` lives in the shim (the IR
 exports `vela_entry`), so MSVC, glibc, and wasi-libc all link the same module.
-Exit codes are portable in 0..126 (WASI's constraint). Next steps on the
-browser path: a JS interop layer (`extern` imports/exports + string glue), a
-browser WASI shim demo, then modules/std-lib and an event-loop story — the
-long-range goal is same-language server (native SSR) + client (wasm), with
-validated types as the wire contract.
+Exit codes are portable in 0..126 (WASI's constraint). **The browser demo
+ships** (`web/`): a hand-rolled ~100-line WASI preview1 shim (`wasi-min.js`,
+zero dependencies) runs any `velac`-built module in a page — a velac module
+imports exactly five preview1 functions (`fd_write`, `fd_fdstat_get`,
+`fd_close`, `fd_seek`, `proc_exit`), stdout/stderr stream into the page, and
+trap parity holds end-to-end (division by zero prints the canonical
+`error: division by zero` + exit 1 in the browser, byte-identical to interp
+and native). `web/build.ps1` builds the example modules; any static server
+serves it. Next steps on the browser path: a JS interop layer (`extern`
+imports/exports + string glue), then an event-loop story — the long-range
+goal is same-language server (native SSR) + client (wasm), with validated
+types as the wire contract.
 
 A 2026-07-15 hardening pass fixed ~40 reviewed defects: native
 use-after-free/heap-corruption bugs (cell `set`, region escapes, `list` in

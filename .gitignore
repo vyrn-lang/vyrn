@@ -6,6 +6,9 @@ target/
 *.ll
 *.obj
 *.pdb
+# Browser-demo modules (regenerable via web/build.ps1)
+web/*.wasm
+web/*.shim.c
 
 # Editor / tooling
 editor/**/node_modules/

@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vela in the browser</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1a1a1a; --bg: #fdfdfd; --dim: #6b6b6b;
+    --card: #f3f3f3; --accent: #7c5cff; --err: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8e8e8; --bg: #131316; --dim: #9a9aa2; --card: #1e1e24; --err: #ff7b6b; }
+  }
+  body {
+    margin: 0 auto; max-width: 46rem; padding: 2rem 1.25rem 4rem;
+    font: 16px/1.55 system-ui, sans-serif; color: var(--fg); background: var(--bg);
+  }
+  h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
+  .sub { color: var(--dim); margin: 0 0 1.5rem; }
+  .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+  select, button, input[type=file] { font: inherit; }
+  select, button {
+    padding: .4rem .8rem; border-radius: 8px; border: 1px solid var(--dim);
+    background: var(--card); color: var(--fg); cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  pre {
+    background: var(--card); border-radius: 10px; padding: .9rem 1rem;
+    overflow-x: auto; min-height: 2.4rem; white-space: pre-wrap;
+  }
+  .label { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 1.1rem 0 .3rem; }
+  #stderr:empty::before, #stdout:empty::before { content: "(empty)"; color: var(--dim); }
+  #stderr { color: var(--err); }
+  #status { color: var(--dim); }
+  code { background: var(--card); padding: .1rem .35rem; border-radius: 5px; }
+</style>
+</head>
+<body>
+<h1>Vela in the browser</h1>
+<p class="sub">
+  The same <code>velac build --target wasm</code> module that runs under
+  wasmtime, executed here by a ~100-line hand-rolled WASI shim
+  (<code>wasi-min.js</code>). No frameworks, no toolchain in the page.
+</p>
+
+<div class="row">
+  <select id="pick"></select>
+  <button class="primary" id="run">Run</button>
+  <span id="status"></span>
+</div>
+<div class="row">
+  <label>…or drop in any velac-built module: <input type="file" id="file" accept=".wasm"></label>
+</div>
+
+<div class="label">stdout</div>
+<pre id="stdout"></pre>
+<div class="label">stderr</div>
+<pre id="stderr"></pre>
+
+<script type="module">
+import { runVela } from "./wasi-min.js";
+
+const pick = document.getElementById("pick");
+const status = document.getElementById("status");
+const out = document.getElementById("stdout");
+const err = document.getElementById("stderr");
+
+// Modules built by web/build.ps1 (see README) — absent entries just 404
+// with a clear message, so the page needs no manifest.
+for (const name of ["fib", "enum", "reflection", "jsonschema"]) {
+  const o = document.createElement("option");
+  o.value = `${name}.wasm`;
+  o.textContent = `examples/${name}.vela`;
+  pick.appendChild(o);
+}
+
+async function run(bytes) {
+  out.textContent = "";
+  err.textContent = "";
+  status.textContent = "running…";
+  try {
+    const t0 = performance.now();
+    const r = await runVela(bytes, {
+      onStdout: (s) => (out.textContent += s),
+      onStderr: (s) => (err.textContent += s),
+    });
+    const ms = (performance.now() - t0).toFixed(1);
+    status.textContent = `exit ${r.exitCode} · ${ms} ms`;
+  } catch (e) {
+    status.textContent = "trap";
+    err.textContent += `\n${e}`;
+  }
+}
+
+document.getElementById("run").addEventListener("click", async () => {
+  const resp = await fetch(pick.value);
+  if (!resp.ok) {
+    status.textContent = `${pick.value} not built — run web/build.ps1 first`;
+    return;
+  }
+  run(await resp.arrayBuffer());
+});
+
+document.getElementById("file").addEventListener("change", async (ev) => {
+  const f = ev.target.files[0];
+  if (f) run(await f.arrayBuffer());
+});
+</script>
+</body>
+</html>
