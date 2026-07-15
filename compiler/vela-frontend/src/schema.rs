@@ -706,7 +706,7 @@ mod tests {
             (r#"{"title": "X", "type": "string", "format": "email"}"#, "`format`"),
             (r#"{"title": "X", "oneOf": [{"type": "string"}]}"#, "no `type`"),
             (r#"{"title": "X", "type": "integer", "exclusiveMaximum": 5, "weird": 1}"#, "`weird`"),
-            (r#"{"title": "X", "type": "string", "pattern": "a{2,3}"}"#, "regex subset"),
+            (r#"{"title": "X", "type": "string", "pattern": "a(?=b)"}"#, "regex subset"),
         ] {
             let e = synthesize(doc, None, "t.json").unwrap_err();
             assert!(e.contains(needle), "doc: {doc}\nerror: {e}");

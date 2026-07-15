@@ -9,13 +9,18 @@
 //! Grammar (anchored full match):
 //!   alt    = concat ( `|` concat )*
 //!   concat = quant*
-//!   quant  = atom ( `*` | `+` | `?` )?
+//!   quant  = atom ( `*` | `+` | `?` | `{m}` | `{m,}` | `{m,n}` )?
 //!   atom   = `(` alt `)` | literal | `.` | `\d \w \s \D \W \S` | `\<c>` | `[ … ]`
-//!   class  = `[` `^`? ( range | char )+ `]`   (range = `a-z`)
-//! Supports alternation `|` and grouping `()` (no backreferences, so the language
-//! stays regular and the DFA handles it). Unsupported (rejected clearly): counted
-//! repetition `{m,n}`. Every accepted construct means the same thing as the
-//! equivalent ECMA-262 regex, so it round-trips to a JSON Schema `pattern`.
+//!   class  = `[` `^`? ( range | char )+ `]`   (range = `a-z`; reversed = error)
+//! Supports alternation `|`, grouping `()` (no backreferences, so the language
+//! stays regular and the DFA handles it), and counted repetition expanded
+//! structurally (bounds capped at 255 to keep the DFA small). Every accepted
+//! construct means the same thing as the equivalent ECMA-262 regex on ASCII —
+//! `.` excludes `\n`/`\r` like ECMA — so a pattern round-trips to a JSON
+//! Schema `pattern` faithfully. Caveat, documented rather than hidden: the
+//! engine is byte-wise, so on multi-byte UTF-8 input `.` and negated classes
+//! count bytes, not code points (a code-point-exact engine would need UTF-8
+//! range compilation; refinement patterns are ASCII in practice).
 
 /// A set of bytes (256 bits) — a single character class.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,9 +29,6 @@ pub struct ByteClass([u64; 4]);
 impl ByteClass {
     fn empty() -> Self {
         ByteClass([0; 4])
-    }
-    fn all() -> Self {
-        ByteClass([u64::MAX; 4])
     }
     fn set(&mut self, b: u8) {
         self.0[(b >> 6) as usize] |= 1u64 << (b & 63);
@@ -45,6 +47,7 @@ impl ByteClass {
 }
 
 /// A parsed regular expression (regular, so no backreferences).
+#[derive(Clone)]
 enum Re {
     /// Matches the empty string (an empty group/branch).
     Empty,
@@ -108,6 +111,7 @@ impl<'a> ReParser<'a> {
                     self.i += 1;
                     Some(c)
                 }
+                b'{' => return self.counted(atom),
                 _ => None,
             }
         } else {
@@ -119,6 +123,66 @@ impl<'a> ReParser<'a> {
             Some(b'?') => Re::Opt(Box::new(atom)),
             _ => atom,
         })
+    }
+
+    /// Counted repetition `{m}` / `{m,}` / `{m,n}`, expanded structurally:
+    /// `m` mandatory copies, then `n − m` optional ones (or a `*` for an open
+    /// upper bound). The DFA grows with `n`, so bounds are capped at 255 —
+    /// far above any real wire-format pattern, far below pathological.
+    fn counted(&mut self, atom: Re) -> Result<Re, String> {
+        self.i += 1; // past `{`
+        let m = self.int_in_braces()?;
+        let n = match self.b.get(self.i) {
+            Some(b'}') => Some(m),
+            Some(b',') => {
+                self.i += 1;
+                match self.b.get(self.i) {
+                    Some(b'}') => None, // `{m,}` — open upper bound
+                    _ => Some(self.int_in_braces()?),
+                }
+            }
+            _ => return Err("malformed counted repetition (expected `}` or `,`)".into()),
+        };
+        if self.b.get(self.i) != Some(&b'}') {
+            return Err("unclosed counted repetition `{`".into());
+        }
+        self.i += 1;
+        if let Some(n) = n {
+            if n < m {
+                return Err(format!("counted repetition `{{{m},{n}}}` has max < min"));
+            }
+        }
+        let mut parts: Vec<Re> = std::iter::repeat_with(|| atom.clone()).take(m as usize).collect();
+        match n {
+            None => parts.push(Re::Star(Box::new(atom))),
+            Some(n) => {
+                for _ in m..n {
+                    parts.push(Re::Opt(Box::new(atom.clone())));
+                }
+            }
+        }
+        Ok(match parts.len() {
+            0 => Re::Empty,
+            1 => parts.pop().unwrap(),
+            _ => Re::Concat(parts),
+        })
+    }
+
+    /// A decimal integer inside `{..}`, capped to keep the expanded DFA small.
+    fn int_in_braces(&mut self) -> Result<u32, String> {
+        let start = self.i;
+        while self.b.get(self.i).is_some_and(|c| c.is_ascii_digit()) {
+            self.i += 1;
+        }
+        if self.i == start {
+            return Err("counted repetition needs a number (`{m}`, `{m,}`, `{m,n}`)".into());
+        }
+        let text = std::str::from_utf8(&self.b[start..self.i]).unwrap();
+        let v: u32 = text.parse().map_err(|_| format!("repetition count `{text}` too large"))?;
+        if v > 255 {
+            return Err(format!("repetition count {v} exceeds the maximum (255)"));
+        }
+        Ok(v)
     }
 
     fn atom(&mut self) -> Result<Re, String> {
@@ -133,7 +197,10 @@ impl<'a> ReParser<'a> {
                 Ok(inner)
             }
             b'*' | b'+' | b'?' => Err("nothing to repeat before quantifier".into()),
-            b'{' | b'}' => Err("counted repetition `{..}` is not supported".into()),
+            // A quantifier brace with nothing before it (a literal brace is
+            // written `\{` / `\}`, as in ECMA-262 strict mode).
+            b'{' => Err("nothing to repeat before counted repetition `{..}`".into()),
+            b'}' => Err("unmatched `}` (a literal brace is `\\}`)".into()),
             b')' => Err("unmatched `)`".into()),
             _ => {
                 let (cl, ni) = parse_atom(self.b, self.i)?;
@@ -152,7 +219,15 @@ fn parse_atom(b: &[u8], i: usize) -> Result<(ByteClass, usize), String> {
             }
             Ok((escape_class(b[i + 1]), i + 2))
         }
-        b'.' => Ok((ByteClass::all(), i + 1)),
+        // `.` matches any byte except line terminators, matching ECMA-262
+        // (LF/CR; ECMA's U+2028/U+2029 are multi-byte in UTF-8 and thus
+        // never matched a single `.` here anyway). `[^..]` stays byte-wise.
+        b'.' => {
+            let mut nl = ByteClass::empty();
+            nl.set(b'\n');
+            nl.set(b'\r');
+            Ok((nl.negated(), i + 1))
+        }
         b'[' => parse_class(b, i),
         c => {
             let mut cl = ByteClass::empty();
@@ -226,6 +301,12 @@ fn parse_class(b: &[u8], start: usize) -> Result<(ByteClass, usize), String> {
         }
         // A range `a-z` (the `-` must be between two literals, not at the edge).
         if i + 2 < b.len() && b[i + 1] == b'-' && b[i + 2] != b']' {
+            if b[i] > b[i + 2] {
+                return Err(format!(
+                    "reversed range `{}-{}` in character class",
+                    b[i] as char, b[i + 2] as char
+                ));
+            }
             cl.add_range(b[i], b[i + 2]);
             i += 3;
         } else {
@@ -546,10 +627,43 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_syntax() {
-        assert!(compile("a{2,3}").is_err()); // counted repetition
         assert!(compile("*a").is_err()); // nothing to repeat
+        assert!(compile("{2,3}").is_err()); // nothing to repeat (counted)
         assert!(compile("[a-z").is_err()); // unterminated class
         assert!(compile("(ab").is_err()); // unclosed group
         assert!(compile("ab)").is_err()); // unmatched close
+        assert!(compile("a}").is_err()); // unmatched brace (literal is \})
+        assert!(compile("[z-a]").is_err()); // reversed class range
+        assert!(compile("a{3,2}").is_err()); // max < min
+        assert!(compile("a{999}").is_err()); // over the 255 cap
+        assert!(compile("a{2,").is_err()); // unclosed counted repetition
+    }
+
+    #[test]
+    fn counted_repetition() {
+        assert!(m("a{3}", "aaa"));
+        assert!(!m("a{3}", "aa"));
+        assert!(!m("a{3}", "aaaa"));
+        assert!(m("a{2,4}", "aa"));
+        assert!(m("a{2,4}", "aaaa"));
+        assert!(!m("a{2,4}", "a"));
+        assert!(!m("a{2,4}", "aaaaa"));
+        assert!(m("a{2,}", "aaaaaaa"));
+        assert!(!m("a{2,}", "a"));
+        assert!(m("(ab){2}", "abab"));
+        assert!(!m("(ab){2}", "ab"));
+        assert!(m("[0-9]{3}-[0-9]{4}", "555-0123"));
+        assert!(!m("[0-9]{3}-[0-9]{4}", "55-0123"));
+        assert!(m("a{0,2}", "")); // zero minimum matches empty
+    }
+
+    #[test]
+    fn dot_excludes_line_terminators() {
+        // ECMA-262 `.`: any character except a line terminator.
+        assert!(m("a.b", "axb"));
+        assert!(!m("a.b", "a\nb"));
+        assert!(!m("a.b", "a\rb"));
+        // An explicit negated class stays byte-wise and CAN match `\n`.
+        assert!(m("a[^x]b", "a\nb"));
     }
 }

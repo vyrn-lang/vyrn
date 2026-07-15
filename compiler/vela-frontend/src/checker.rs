@@ -3789,8 +3789,8 @@ mod tests {
         let dyn_pat = "fn f(s: String, p: String) -> Bool { return s =~ p; } \
                        fn main() -> Int64 { return 0; }";
         assert!(check_src(dyn_pat).unwrap_err().contains("string-literal pattern"));
-        // An invalid regex is rejected at compile time (`{..}` is unsupported).
-        let bad = "fn f(s: String) -> Bool { return s =~ \"a{2,3}\"; } \
+        // An invalid regex is rejected at compile time (reversed class range).
+        let bad = "fn f(s: String) -> Bool { return s =~ \"[z-a]\"; } \
                    fn main() -> Int64 { return 0; }";
         assert!(check_src(bad).unwrap_err().contains("invalid regex"));
     }
