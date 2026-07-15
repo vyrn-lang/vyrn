@@ -6,6 +6,9 @@
 //!   velac emit-ir [file.vela]            Print textual LLVM IR to stdout.
 //!   velac build   [file.vela] [-o out] [--target wasm]
 //!                                        Compile to a native executable (or wasm) via clang.
+//!   velac test    [file.vela] [--name <substring>]
+//!                                        Run the root file's `test` blocks under the interpreter.
+//!   velac serve   [file.vela] [--port N] Run `fn handle(req: Request) -> Response` as an HTTP host.
 //!   velac new     <name>                 Scaffold a project (vela.json + src/main.vela).
 //!   velac deps                           Print the resolved module graph.
 //!
@@ -18,7 +21,7 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: velac <run|check|emit-ir|build> [file.vela] [-o out] [--target wasm] [--offline]\n       velac run [file.vela] [args...]   (trailing args reach the program's args())\n       velac new <name> | velac add <specifier> [--name alias] | velac update [alias] | velac vendor [--check] | velac deps";
+const USAGE: &str = "usage: velac <run|check|emit-ir|build|test|serve> [file.vela] [-o out] [--target wasm] [--offline]\n       velac run [file.vela] [args...]   (trailing args reach the program's args())\n       velac test [file.vela] [--name <substring>]\n       velac serve [file.vela] [--port N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       velac new <name> | velac add <specifier> [--name alias] | velac update [alias] | velac vendor [--check] | velac deps";
 
 /// `--offline` flag or `VELA_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
@@ -76,6 +79,12 @@ fn main() -> ExitCode {
 
     if cmd == "build" {
         return build(&path, rest);
+    }
+    if cmd == "test" {
+        return test_cmd(&path, rest);
+    }
+    if cmd == "serve" {
+        return serve_cmd(&path, rest);
     }
     // `run` forwards any trailing arguments to the program as `args()`
     // (RFC-0014); the other commands take no extra arguments.
@@ -135,7 +144,7 @@ fn main() -> ExitCode {
             }
         }
         other => {
-            eprintln!("unknown command `{other}` (expected run, check, emit-ir, or build)");
+            eprintln!("unknown command `{other}` (expected run, check, emit-ir, build, test, or serve)");
             ExitCode::from(2)
         }
     }
@@ -792,6 +801,343 @@ fn extern_trap_stubs(program: &vela_frontend::ast::Program) -> String {
 
 /// `velac build <file.vela> [-o out] [--target wasm]` — emit IR, then invoke
 /// clang to link a native executable (or a `wasm32-wasi` module).
+/// `velac test [file] [--name <substring>]` (RFC-0015) — load + check the root
+/// file, then run its `test` blocks under the interpreter in declaration order.
+/// Prints `test "name" ... ok` / `... FAILED: <message>` per test and a
+/// `N passed, M failed` summary; exits 1 if any test failed. A file with no
+/// tests prints `no tests` and exits 0.
+fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
+    // Optional `--name <substring>` filter.
+    let mut filter: Option<String> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i] == "--name" && i + 1 < rest.len() {
+            filter = Some(rest[i + 1].clone());
+            i += 2;
+        } else {
+            eprintln!("test: unexpected argument `{}`", rest[i]);
+            return ExitCode::from(2);
+        }
+    }
+
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {path}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let program = match load_program(path, &source) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    // A file with no root-module tests: nothing to run.
+    let has_tests = program.tests.iter().any(|t| t.module.is_none());
+    if !has_tests {
+        println!("no tests");
+        return ExitCode::SUCCESS;
+    }
+
+    use std::io::Write;
+    // The result line prints AFTER the body runs, so any `print` output the test
+    // produced has already streamed to stdout (RFC-0015 "print passes through").
+    let on_result = |name: &str, result: &Result<(), String>| {
+        let mut stdout = std::io::stdout();
+        match result {
+            Ok(()) => {
+                let _ = writeln!(stdout, "test {name:?} ... ok");
+            }
+            Err(msg) => {
+                let _ = writeln!(stdout, "test {name:?} ... FAILED: {msg}");
+            }
+        }
+        let _ = stdout.flush();
+    };
+    match vela_frontend::interp::run_tests(&program, filter.as_deref(), on_result) {
+        Ok((passed, failed)) => {
+            println!("\n{passed} passed, {failed} failed");
+            if failed > 0 {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `velac serve [file] [--port N]` (RFC-0016) — a hand-rolled HTTP/1.1 host on
+/// `std::net` (no crates), running the file's `handle` under the interpreter.
+/// Sequential accept loop, one request at a time: module state is race-free by
+/// construction. Default port 8080.
+fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
+    // Optional `--port N` (default 8080).
+    let mut port: u16 = 8080;
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i] == "--port" && i + 1 < rest.len() {
+            match rest[i + 1].parse::<u16>() {
+                Ok(p) => port = p,
+                Err(_) => {
+                    eprintln!("serve: --port needs a number in 0..=65535");
+                    return ExitCode::from(2);
+                }
+            }
+            i += 2;
+        } else {
+            eprintln!("serve: unexpected argument `{}`", rest[i]);
+            return ExitCode::from(2);
+        }
+    }
+
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {path}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let program = match load_program(path, &source) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+
+    // `velac serve` requires `fn handle(req: Request) -> Response` (exactly this
+    // signature — the checker's no-`main` exemption uses the same rule).
+    use vela_frontend::ast::Type;
+    let has_handle = program.functions.iter().any(|f| {
+        f.name == "handle"
+            && !f.is_extern
+            && f.params.len() == 1
+            && f.params[0].ty == Type::Named("Request".to_string())
+            && f.ret == Type::Named("Response".to_string())
+    });
+    if !has_handle {
+        eprintln!(
+            "error: `velac serve` needs `fn handle(req: Request) -> Response` in {path}"
+        );
+        return ExitCode::FAILURE;
+    }
+
+    // Bind before running `main`, so a port clash fails fast and cleanly. A
+    // `--port 0` lets the OS pick a free port; report the one it chose.
+    let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: cannot bind port {port}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
+    let file_label = path.to_string();
+
+    // The interpreter thread owns one live `Interp` (module state persists); it
+    // runs `main` once, then invokes this accept loop with a per-request handler.
+    let result = vela_frontend::interp::serve(&program, move |call_handle| {
+        use std::io::Write;
+        // `main` (if any) has already run; flush its stdout so its startup
+        // output precedes the serving banner regardless of buffering mode.
+        let _ = std::io::stdout().flush();
+        eprintln!("serving {file_label} on http://localhost:{actual_port}");
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut s) => serve_one(&mut s, call_handle),
+                Err(_) => continue,
+            }
+        }
+        Ok(())
+    });
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Why a request never reached Vela.
+enum ParseError {
+    /// Malformed request line/headers → 400.
+    Bad,
+    /// A `Transfer-Encoding: chunked` body (unsupported in v1) → 501. Carries
+    /// the parsed method/path so the access line can still be logged.
+    Chunked { method: String, path: String },
+}
+
+/// Handle one connection: parse the request, call Vela's `handle`, write the
+/// response, close. Malformed input answers 400 without reaching Vela; a chunked
+/// body answers 501; a Vela trap is logged and answered 500 (the server keeps
+/// running — one bad request must not kill it).
+fn serve_one(
+    stream: &mut std::net::TcpStream,
+    call_handle: &mut dyn FnMut(
+        vela_frontend::interp::ServeRequest,
+    ) -> Result<vela_frontend::interp::ServeResponse, String>,
+) {
+    match parse_request(stream) {
+        Ok(req) => {
+            let method = req.method.clone();
+            let path = req.path.clone();
+            match call_handle(req) {
+                Ok(resp) => {
+                    eprintln!("{method} {path} -> {}", resp.status);
+                    write_response(stream, resp.status, &resp.content_type, resp.body.as_bytes());
+                }
+                Err(msg) => {
+                    // Canonical trap wording to stderr, then a generic 500.
+                    eprintln!("error: {msg}");
+                    eprintln!("{method} {path} -> 500");
+                    write_response(stream, 500, "text/plain", b"internal error");
+                }
+            }
+        }
+        Err(ParseError::Chunked { method, path }) => {
+            eprintln!("{method} {path} -> 501");
+            write_response(stream, 501, "text/plain", b"chunked transfer-encoding not supported");
+        }
+        Err(ParseError::Bad) => {
+            eprintln!("- - -> 400");
+            write_response(stream, 400, "text/plain", b"bad request");
+        }
+    }
+}
+
+/// Find the first occurrence of `needle` in `hay`.
+fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Parse one HTTP/1.1 request off the wire: request line, headers (case-
+/// insensitive) up to CRLF CRLF, then exactly `Content-Length` body bytes.
+fn parse_request(
+    stream: &mut std::net::TcpStream,
+) -> Result<vela_frontend::interp::ServeRequest, ParseError> {
+    use std::io::Read;
+    // Read until the header terminator (CRLF CRLF), guarding header size.
+    let mut buf: Vec<u8> = Vec::new();
+    let mut tmp = [0u8; 8192];
+    let header_end = loop {
+        if let Some(p) = find_subslice(&buf, b"\r\n\r\n") {
+            break p;
+        }
+        if buf.len() > 64 * 1024 {
+            return Err(ParseError::Bad);
+        }
+        match stream.read(&mut tmp) {
+            Ok(0) => return Err(ParseError::Bad), // closed before headers done
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Err(_) => return Err(ParseError::Bad),
+        }
+    };
+    // The header block is ASCII by protocol.
+    let head = std::str::from_utf8(&buf[..header_end]).map_err(|_| ParseError::Bad)?;
+    let mut lines = head.split("\r\n");
+
+    // Request line: METHOD SP TARGET SP HTTP/x.y
+    let request_line = lines.next().ok_or(ParseError::Bad)?;
+    let mut parts = request_line.split(' ');
+    let method = parts.next().filter(|s| !s.is_empty()).ok_or(ParseError::Bad)?.to_string();
+    let target = parts.next().filter(|s| !s.is_empty()).ok_or(ParseError::Bad)?.to_string();
+    let version = parts.next().unwrap_or("");
+    if !version.starts_with("HTTP/") || parts.next().is_some() {
+        return Err(ParseError::Bad);
+    }
+
+    // Headers: `name: value`, name compared case-insensitively.
+    let mut content_length: usize = 0;
+    let mut chunked = false;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let (name, value) = line.split_once(':').ok_or(ParseError::Bad)?;
+        let lname = name.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if lname == "content-length" {
+            content_length = value.parse::<usize>().map_err(|_| ParseError::Bad)?;
+        } else if lname == "transfer-encoding" && value.to_ascii_lowercase().contains("chunked") {
+            chunked = true;
+        }
+    }
+    if chunked {
+        return Err(ParseError::Chunked { method, path: target });
+    }
+
+    // Body: exactly `content_length` bytes (some already buffered after the
+    // header terminator). Absent Content-Length ⇒ no body.
+    let body_start = header_end + 4;
+    let mut body = buf[body_start..].to_vec();
+    while body.len() < content_length {
+        let need = content_length - body.len();
+        let mut chunk = vec![0u8; need.min(8192)];
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => body.extend_from_slice(&chunk[..n]),
+            Err(_) => return Err(ParseError::Bad),
+        }
+    }
+    body.truncate(content_length);
+    // A Vela `String` is UTF-8; a body that isn't is a bad request (lossy
+    // decoding would silently corrupt it).
+    let body = String::from_utf8(body).map_err(|_| ParseError::Bad)?;
+
+    Ok(vela_frontend::interp::ServeRequest { method, path: target, body })
+}
+
+/// A minimal status-code → reason-phrase table. Unknown codes get an empty
+/// reason (the space after the code is still required by the grammar).
+fn reason_phrase(status: i64) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        410 => "Gone",
+        418 => "I'm a teapot",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "",
+    }
+}
+
+/// Write one HTTP/1.1 response: status line, `Content-Type`, `Content-Length`,
+/// `Connection: close`, blank line, body. Errors are ignored — the peer may
+/// have hung up, and one dropped connection must not fault the server.
+fn write_response(stream: &mut std::net::TcpStream, status: i64, content_type: &str, body: &[u8]) {
+    use std::io::Write;
+    let reason = reason_phrase(status);
+    let header = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body);
+    let _ = stream.flush();
+}
+
 fn build(path: &str, rest: &[String]) -> ExitCode {
     // parse optional `-o <out>` / `--target wasm`
     let mut out: Option<String> = None;

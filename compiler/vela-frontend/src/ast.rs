@@ -27,6 +27,32 @@ pub struct Program {
     /// Where log records go (RFC-0008), set by `logging { sink: .. }`. Defaults
     /// to [`LogSink::Stderr`].
     pub log_sink: LogSink,
+    /// `test "name" { body }` declarations (RFC-0015). A separate field so the
+    /// run/build/emit-ir paths (which only walk `functions`) never see them: a
+    /// shipped binary contains no tests, and the string pool / regex collection
+    /// skip them by construction. Checked as Unit-returning function bodies;
+    /// executed only by `velac test`.
+    pub tests: Vec<TestDecl>,
+}
+
+/// A `test "name" { body }` declaration (RFC-0015): a named block checked exactly
+/// like a Unit-returning function body and run by `velac test`. The `name` is a
+/// plain string (unique per file). Only the *root* module's tests are run by
+/// `velac test <root>`; an imported module's tests still type-check but do not
+/// run (they run when that module is itself the argument).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestDecl {
+    /// The test's display name (the string literal after `test`).
+    pub name: String,
+    /// The block body — checked/analysed under a synthetic unspellable function
+    /// name (`test@<index>`) so movecheck/ownership/spawn analyses apply unchanged.
+    pub body: Block,
+    /// `///` documentation (markdown), attached by the parser; `None` if absent.
+    pub doc: Option<String>,
+    /// The module (file) this test came from; `None` for the root. Set by the
+    /// loader. `velac test` runs only `None`-module (root) tests.
+    pub module: Option<String>,
+    pub line: usize,
 }
 
 /// A logging destination (RFC-0008). One sink in this phase; fan-out is future.

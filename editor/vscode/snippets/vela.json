@@ -75,5 +75,14 @@
       "logging { level: ${1|trace,debug,info,warn,error|}, sink: ${2|stderr,stdout|} }"
     ],
     "description": "Configure the leveled logger (threshold + sink)"
+  },
+  "test": {
+    "prefix": "test",
+    "body": [
+      "test \"${1:name}\" {",
+      "    ${0:assert(true)}",
+      "}"
+    ],
+    "description": "A test block (RFC-0015): assert / assertEq, run with `velac test`"
   }
 }

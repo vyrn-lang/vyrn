@@ -125,6 +125,41 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         predicate: None,
         line: 0,
     });
+    // The server surface (RFC-0016): the `Request` handed to `handle` and the
+    // `Response` it returns. Ordinary records (no `where`), injected like
+    // `Schema`/`Issue` so every program can name them without a `use` and
+    // `velac serve` can construct/read them across the FFI-free interpreter
+    // boundary. `path` carries the query string as sent; `body` is the raw
+    // request body (`""` when absent). Users construct them freely — `main`
+    // calling `handle` directly is the parity story.
+    program.type_decls.push(TypeDecl {
+        name: "Request".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        base: Type::Record(vec![
+            Field { name: "method".to_string(), ty: Type::Str },
+            Field { name: "path".to_string(), ty: Type::Str },
+            Field { name: "body".to_string(), ty: Type::Str },
+        ]),
+        predicate: None,
+        line: 0,
+    });
+    program.type_decls.push(TypeDecl {
+        name: "Response".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        base: Type::Record(vec![
+            Field { name: "status".to_string(), ty: Type::Int },
+            Field { name: "contentType".to_string(), ty: Type::Str },
+            Field { name: "body".to_string(), ty: Type::Str },
+        ]),
+        predicate: None,
+        line: 0,
+    });
     // Flatten each `impl P for T` method into a mangled top-level function
     // (`P__Key__method`), so type checking, monomorphization, and lowering treat
     // it like any function; protocol-method *calls* resolve to these names by the
@@ -278,6 +313,7 @@ impl Parser {
         let mut protocols = Vec::new();
         let mut impls = Vec::new();
         let mut globals = Vec::new();
+        let mut tests = Vec::new();
         let mut log_level = DEFAULT_LOG_LEVEL;
         let mut log_sink = LogSink::Stderr;
         let mut saw_logging = false;
@@ -360,6 +396,18 @@ impl Parser {
                         Err(d) => { errors.push(d); self.sync_to_decl(); }
                     }
                 }
+                // `test "name" { body }` — a test declaration (RFC-0015).
+                // `test` is a contextual starter (a plain identifier elsewhere);
+                // recognize it only when a string literal follows, so a variable
+                // named `test` is unharmed.
+                Tok::Ident(name)
+                    if name == "test" && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
+                {
+                    match self.test_decl() {
+                        Ok(mut t) => { t.doc = doc; tests.push(t); }
+                        Err(d) => { errors.push(d); self.sync_to_decl(); }
+                    }
+                }
                 // `logging { level: <name> }` — the RFC-0008 config block.
                 Tok::Ident(name) if name == "logging" => {
                     let line = self.line();
@@ -390,7 +438,7 @@ impl Parser {
                 }
             }
         }
-        (Program { imports, type_decls, functions, protocols, impls, globals, log_level, log_sink }, errors)
+        (Program { imports, type_decls, functions, protocols, impls, globals, tests, log_level, log_sink }, errors)
     }
 
     /// Recovery sync point: advance until the cursor sits on a top-level
@@ -424,6 +472,14 @@ impl Parser {
                     if depth == 0
                         && name == "extern"
                         && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
+                {
+                    return
+                }
+                // `test "name" { .. }` is a top-level starter (RFC-0015).
+                Tok::Ident(name)
+                    if depth == 0
+                        && name == "test"
+                        && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
                 {
                     return
                 }
@@ -931,6 +987,32 @@ impl Parser {
         let body = self.block()?;
         self.type_params.clear();
         Ok(Function { name, exported: false, module: None, doc: None, type_params, type_bounds, params, ret, body, line, is_extern: false, is_export_extern: false })
+    }
+
+    /// `test "name" { body }` — a test declaration (RFC-0015). `test` is a
+    /// contextual starter (a plain identifier elsewhere); the caller has already
+    /// confirmed the `test` / string-literal lookahead. The body parses like any
+    /// function block; `assert`/`assertEq` become legal inside it (enforced by the
+    /// checker, which knows it is in a test).
+    fn test_decl(&mut self) -> Result<TestDecl, Diagnostic> {
+        let line = self.line();
+        self.advance(); // `test` (a contextual Ident)
+        let name = match self.advance() {
+            Tok::Str(s) => s,
+            other => {
+                return Err(Diagnostic::error(
+                    self.line(),
+                    self.col(),
+                    "parse",
+                    format!("expected a test name string, found {other:?}"),
+                ))
+            }
+        };
+        // A test body sees no generic parameters (a test is monomorphic).
+        self.type_params.clear();
+        let body = self.block()?;
+        self.type_params.clear();
+        Ok(TestDecl { name, body, doc: None, module: None, line })
     }
 
     /// `extern fn name(params) -> Ret` — a body-less JS-interop declaration
@@ -1961,6 +2043,48 @@ mod tests {
         let src = "let 123 = 5\nfn main() -> Int64 { return 0 }";
         let (p, errors) = parse_accum(lex(src).unwrap());
         assert!(!errors.is_empty(), "expected a parse error for the bad global");
+        assert!(p.functions.iter().any(|f| f.name == "main"), "recovered to `main`");
+    }
+
+    // ---- RFC-0015 tests ------------------------------------------------
+
+    #[test]
+    fn parses_test_declaration() {
+        let src = "test \"adds\" {\n\
+                   assert(1 + 1 == 2)\n\
+                   assertEq(2 + 2, 4)\n\
+                   }";
+        let p = parse_src(src);
+        assert_eq!(p.tests.len(), 1);
+        assert_eq!(p.tests[0].name, "adds");
+        assert_eq!(p.tests[0].body.stmts.len(), 2);
+        assert_eq!(p.tests[0].line, 1);
+    }
+
+    #[test]
+    fn test_is_only_contextual_before_a_string() {
+        // `test` used as an ordinary identifier (not followed by a string) is
+        // still a plain variable — it must not steal the keyword slot.
+        let src = "fn main() -> Int64 { let test = 5 return test }";
+        let p = parse_src(src);
+        assert!(p.tests.is_empty());
+        assert_eq!(p.functions[0].body.stmts.len(), 2);
+    }
+
+    #[test]
+    fn test_doc_comment_attaches() {
+        let src = "/// checks the happy path\ntest \"ok\" { assert(true) }";
+        let p = parse_src(src);
+        assert_eq!(p.tests[0].doc.as_deref(), Some("checks the happy path"));
+    }
+
+    #[test]
+    fn bad_test_recovers_to_next_decl() {
+        // A malformed test body must not swallow the following function —
+        // recovery syncs to the next top-level starter.
+        let src = "test \"broken\" { let = }\nfn main() -> Int64 { return 0 }";
+        let (p, errors) = parse_accum(lex(src).unwrap());
+        assert!(!errors.is_empty(), "expected a parse error for the bad test");
         assert!(p.functions.iter().any(|f| f.name == "main"), "recovered to `main`");
     }
 

@@ -76,6 +76,26 @@ enum Flow {
     Return(Val),
 }
 
+/// Render a scalar value with the canonical `toString`/`print` formatting:
+/// signed `IntN` by logical value, unsigned as `u64`, `Float` to 6 decimals, a
+/// `Bool` as `true`/`false`, a `String` verbatim. Shared by `x.toString()`
+/// (`@str`) and `assertEq`'s failure message so all three render identically
+/// (parity-identical by construction). Non-scalars (never reached from
+/// `assertEq`, whose operands the checker restricts to equatable scalars) fall
+/// back to the debug form.
+fn scalar_to_string(v: &Val) -> String {
+    match v {
+        Val::Int(n) => n.to_string(),
+        Val::IntN { v, signed: true, .. } => v.to_string(),
+        Val::IntN { v, signed: false, .. } => (*v as u64).to_string(),
+        Val::Float(f) => format!("{f:.6}"),
+        Val::Float32(f) => format!("{:.6}", *f as f64),
+        Val::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+        Val::Str(s) => s.clone(),
+        other => format!("{other:?}"),
+    }
+}
+
 /// Wrap `v` into a `bits`-wide two's-complement integer, matching the native
 /// backend's `iN` arithmetic. Signed values are sign-extended back into `i64`;
 /// unsigned are zero-extended. `bits >= 64` is the identity.
@@ -339,6 +359,194 @@ pub fn run_with_args(program: &Program, args: &[String]) -> Result<i64, String> 
 }
 
 fn run_inner(program: &Program, prog_args: &[String]) -> Result<i64, String> {
+    let interp = new_interp(program, prog_args)?;
+    if let Err(Ctrl::Err(s)) = interp.init_globals(program) {
+        return Err(s);
+    }
+    match interp.call("main", &[]) {
+        Ok(Val::Int(n)) => Ok(n),
+        Ok(other) => Err(format!("main returned {other:?}, expected Int64")),
+        Err(Ctrl::Err(s)) => Err(s),
+        Err(Ctrl::Return(_)) => Err("internal: `?` propagated past main".into()),
+    }
+}
+
+/// Run the ROOT module's `test` blocks (RFC-0015) under the interpreter, in
+/// declaration order. Only tests with no `module` tag (the root's) run; an
+/// imported module's tests are skipped (they still type-check). `filter`, when
+/// present, keeps only tests whose name contains it (`velac test --name`).
+///
+/// `on_result` is invoked once per run test, AFTER its body finishes — so any
+/// `print` output the body produced has already streamed to stdout, and the
+/// caller's per-test result line prints after it (the RFC's "print passes
+/// through" ordering). A body that traps (a failed `assert`, or any runtime
+/// trap) yields `Err(message)`; the runner treats every `Err` as that test
+/// FAILING and continues to the next. Returns `(passed, failed)`, or a harness
+/// error string if program setup (module-state initialization) itself fails.
+pub fn run_tests<F>(
+    program: &Program,
+    filter: Option<&str>,
+    on_result: F,
+) -> Result<(usize, usize), String>
+where
+    F: FnMut(&str, &Result<(), String>) + Send,
+{
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn_scoped(s, || run_tests_inner(program, filter, on_result))
+            .expect("failed to spawn interpreter thread")
+            .join()
+            .unwrap_or_else(|_| Err("interpreter thread panicked (likely stack overflow)".into()))
+    })
+}
+
+fn run_tests_inner<F>(
+    program: &Program,
+    filter: Option<&str>,
+    mut on_result: F,
+) -> Result<(usize, usize), String>
+where
+    F: FnMut(&str, &Result<(), String>),
+{
+    let interp = new_interp(program, &[])?;
+    if let Err(Ctrl::Err(s)) = interp.init_globals(program) {
+        return Err(s);
+    }
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    for t in &program.tests {
+        // Root-only: an imported module's tests are not run here (RFC-0015).
+        if t.module.is_some() {
+            continue;
+        }
+        if let Some(sub) = filter {
+            if !t.name.contains(sub) {
+                continue;
+            }
+        }
+        let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+        // Any `Ctrl::Err` is a FAILED test (including a failed `assert`); a bare
+        // `?`-propagated `Ctrl::Return` (a test may use `?`) simply ends it.
+        let result: Result<(), String> = match interp.block(&t.body, &mut scope) {
+            Ok(_) => Ok(()),
+            Err(Ctrl::Return(_)) => Ok(()),
+            Err(Ctrl::Err(s)) => Err(s),
+        };
+        if result.is_ok() {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
+        on_result(&t.name, &result);
+    }
+    Ok((passed, failed))
+}
+
+/// One HTTP request handed to a served `handle` (RFC-0016). The host (`velac
+/// serve`) fills these from the wire; the interpreter turns each into a
+/// `Request` record before calling `handle`.
+pub struct ServeRequest {
+    pub method: String,
+    pub path: String,
+    pub body: String,
+}
+
+/// The fields a served `handle` returned — the interpreter reads them back out
+/// of the `Response` record and hands them to the host to write on the wire.
+pub struct ServeResponse {
+    pub status: i64,
+    pub content_type: String,
+    pub body: String,
+}
+
+/// Run a served program (RFC-0016) under the interpreter: build ONE interpreter,
+/// initialize module state, run `main` once (the setup hook — optional; a
+/// nonzero return aborts the serve), then hand the caller a handler closure it
+/// can call once per request. The single interpreter instance lives for the
+/// whole `run_loop`, so module state (`let mut`) persists across requests — the
+/// host-owns-the-loop model. A trap inside `handle` surfaces as `Err(message)`
+/// and does NOT poison the interpreter: the global frame is untouched by a
+/// request's local unwinding, so the next request runs cleanly (exactly as a
+/// failing `test` body leaves the next test's state intact in [`run_tests`]).
+///
+/// `run_loop` receives a `&mut dyn FnMut(ServeRequest) -> Result<ServeResponse,
+/// String>` and owns the accept loop (the HTTP host lives in the CLI, keeping
+/// this crate std-only and network-free). It runs on the big-stack interpreter
+/// thread like `run`/`run_tests`, so deep `handle` recursion cannot overflow.
+pub fn serve<F>(program: &Program, run_loop: F) -> Result<(), String>
+where
+    F: FnOnce(&mut dyn FnMut(ServeRequest) -> Result<ServeResponse, String>) -> Result<(), String>
+        + Send,
+{
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn_scoped(s, || serve_inner(program, run_loop))
+            .expect("failed to spawn interpreter thread")
+            .join()
+            .unwrap_or_else(|_| Err("interpreter thread panicked (likely stack overflow)".into()))
+    })
+}
+
+fn serve_inner<F>(program: &Program, run_loop: F) -> Result<(), String>
+where
+    F: FnOnce(&mut dyn FnMut(ServeRequest) -> Result<ServeResponse, String>) -> Result<(), String>,
+{
+    let interp = new_interp(program, &[])?;
+    if let Err(Ctrl::Err(s)) = interp.init_globals(program) {
+        return Err(s);
+    }
+    // `main` is optional in a served file (RFC-0016). When present it runs once,
+    // before the first request (mirroring `_start`); a nonzero return aborts.
+    if interp.funcs.contains_key("main") {
+        match interp.call("main", &[]) {
+            Ok(Val::Int(0)) => {}
+            Ok(Val::Int(n)) => return Err(format!("main returned {n}, aborting serve")),
+            Ok(other) => return Err(format!("main returned {other:?}, expected Int64")),
+            Err(Ctrl::Err(s)) => return Err(s),
+            Err(Ctrl::Return(_)) => return Err("internal: `?` propagated past main".into()),
+        }
+    }
+    let mut handler = |req: ServeRequest| -> Result<ServeResponse, String> {
+        let request = Val::Record(HashMap::from([
+            ("method".to_string(), Val::Str(req.method)),
+            ("path".to_string(), Val::Str(req.path)),
+            ("body".to_string(), Val::Str(req.body)),
+        ]));
+        match interp.call("handle", &[request]) {
+            Ok(Val::Record(map)) => {
+                let status = match map.get("status") {
+                    Some(Val::Int(n)) => *n,
+                    Some(Val::IntN { v, .. }) => *v,
+                    _ => return Err("handle returned a Response without an Int64 `status`".into()),
+                };
+                let content_type = match map.get("contentType") {
+                    Some(Val::Str(s)) => s.clone(),
+                    _ => {
+                        return Err(
+                            "handle returned a Response without a String `contentType`".into()
+                        )
+                    }
+                };
+                let body = match map.get("body") {
+                    Some(Val::Str(s)) => s.clone(),
+                    _ => return Err("handle returned a Response without a String `body`".into()),
+                };
+                Ok(ServeResponse { status, content_type, body })
+            }
+            Ok(other) => Err(format!("handle returned {other:?}, expected a Response record")),
+            Err(Ctrl::Err(s)) => Err(s),
+            Err(Ctrl::Return(_)) => Err("internal: `?` propagated past handle".into()),
+        }
+    };
+    run_loop(&mut handler)
+}
+
+/// Build a fresh interpreter over `program` (shared setup for `run` and
+/// `run_tests`): the ownership plan, function/type/variant indexes, and the log
+/// sink. Does NOT initialize module state — call [`Interp::init_globals`].
+fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'a>, String> {
     // The same ownership analysis the native backend uses to reclaim heap
     // values at block exit. Freeing a string/array buffer is invisible from
     // inside the language, but auto-*releasing* a reference cell is not: the
@@ -400,30 +608,7 @@ fn run_inner(program: &Program, prog_args: &[String]) -> Result<i64, String> {
         globals: RefCell::new(HashMap::new()),
         args: prog_args.to_vec(),
     };
-    // Initialize module state (RFC-0013) once, in declaration order, before
-    // `main`. Each initializer runs in a fresh empty local scope; a read of an
-    // earlier global falls back to the persistent frame already populated below.
-    // The declared/annotated type is remembered so later assignments coerce.
-    let init_globals = || -> Result<(), Ctrl> {
-        for g in &program.globals {
-            let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
-            let mut v = interp.expr(&g.init, &mut scope)?;
-            if let Some(t) = &g.ty {
-                v = interp.coerce(v, t)?;
-            }
-            interp.globals.borrow_mut().insert(g.name.clone(), Slot { v, ty: g.ty.clone() });
-        }
-        Ok(())
-    };
-    if let Err(Ctrl::Err(s)) = init_globals() {
-        return Err(s);
-    }
-    match interp.call("main", &[]) {
-        Ok(Val::Int(n)) => Ok(n),
-        Ok(other) => Err(format!("main returned {other:?}, expected Int64")),
-        Err(Ctrl::Err(s)) => Err(s),
-        Err(Ctrl::Return(_)) => Err("internal: `?` propagated past main".into()),
-    }
+    Ok(interp)
 }
 
 struct Interp<'a> {
@@ -477,6 +662,23 @@ impl Slot {
 }
 
 impl<'a> Interp<'a> {
+    /// Initialize module state (RFC-0013) once, in declaration order, before
+    /// `main` (or, under `velac test`, before the first test). Each initializer
+    /// runs in a fresh empty local scope; a read of an earlier global falls back
+    /// to the persistent frame populated as we go. The declared/annotated type is
+    /// remembered so later assignments coerce.
+    fn init_globals(&self, program: &Program) -> Result<(), Ctrl> {
+        for g in &program.globals {
+            let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+            let mut v = self.expr(&g.init, &mut scope)?;
+            if let Some(t) = &g.ty {
+                v = self.coerce(v, t)?;
+            }
+            self.globals.borrow_mut().insert(g.name.clone(), Slot { v, ty: g.ty.clone() });
+        }
+        Ok(())
+    }
+
     fn call(&self, name: &str, args: &[Val]) -> Result<Val, Ctrl> {
         Ok(self.call_capturing(name, args)?.0)
     }
@@ -821,7 +1023,41 @@ impl<'a> Interp<'a> {
                 let r = self.expr(rhs, scope)?;
                 self.binop(*op, l, r)
             }
-            Expr::Call { name, args, .. } => {
+            Expr::Call { name, args, line } => {
+                // Test builtins (RFC-0015): `assert` / `assertEq`. A failing
+                // assertion traps the current test with a canonical message; the
+                // `velac test` runner catches it and marks the test FAILED.
+                if name == "assert" {
+                    match self.expr(&args[0], scope)? {
+                        Val::Bool(true) => return Ok(Val::Unit),
+                        Val::Bool(false) => {
+                            return Err(format!("assertion failed at line {line}").into())
+                        }
+                        other => {
+                            return Err(format!("assert of non-Bool {other:?}").into())
+                        }
+                    }
+                }
+                if name == "assertEq" {
+                    let a = self.expr(&args[0], scope)?;
+                    let b = self.expr(&args[1], scope)?;
+                    // Reuse `==` semantics exactly (parity-identical by
+                    // construction), then render each side with the canonical
+                    // `toString` formatting on mismatch.
+                    let equal = matches!(
+                        self.binop(BinOp::Eq, a.clone(), b.clone())?,
+                        Val::Bool(true)
+                    );
+                    if equal {
+                        return Ok(Val::Unit);
+                    }
+                    return Err(format!(
+                        "assertion failed at line {line}: {} != {}",
+                        scalar_to_string(&a),
+                        scalar_to_string(&b)
+                    )
+                    .into());
+                }
                 // `schemaOf(TypeName)` reflects a type at compile time — its
                 // argument is a type name, not a value — so build and evaluate its
                 // `Schema` literal before the normal argument evaluation.
@@ -1168,13 +1404,12 @@ impl<'a> Interp<'a> {
                     // exactly as `print` does: signed IntN by value, unsigned as
                     // `u64`, Float to 6 decimals.
                     "@str" => match &vals[0] {
-                        Val::Int(n) => Ok(Val::Str(n.to_string())),
-                        Val::IntN { v, signed: true, .. } => Ok(Val::Str(v.to_string())),
-                        Val::IntN { v, signed: false, .. } => Ok(Val::Str((*v as u64).to_string())),
-                        Val::Float(f) => Ok(Val::Str(format!("{f:.6}"))),
-                        Val::Float32(f) => Ok(Val::Str(format!("{:.6}", *f as f64))),
-                        Val::Bool(b) => Ok(Val::Str(if *b { "true" } else { "false" }.to_string())),
-                        Val::Str(s) => Ok(Val::Str(s.clone())),
+                        Val::Int(_)
+                        | Val::IntN { .. }
+                        | Val::Float(_)
+                        | Val::Float32(_)
+                        | Val::Bool(_)
+                        | Val::Str(_) => Ok(Val::Str(scalar_to_string(&vals[0]))),
                         other => Err(format!("str of unsupported value {other:?}").into()),
                     },
                     "parse" => match &vals[0] {
@@ -1820,6 +2055,42 @@ mod tests {
     #[test]
     fn arithmetic_and_return() {
         assert_eq!(run("fn main() -> Int64 { return 2 + 3 * 4; }").unwrap(), 14);
+    }
+
+    // ---- testing (RFC-0015) ---------------------------------------------
+
+    #[test]
+    fn run_tests_reports_pass_fail_and_trap_messages() {
+        let src = "test \"passes\" { assert(1 + 1 == 2) }\n\
+                   test \"fails assert\" { assert(1 == 2) }\n\
+                   test \"fails eq\" { assertEq(3 + 4, 8) }\n";
+        let program = crate::check(src).unwrap();
+        let mut results: Vec<(String, Result<(), String>)> = Vec::new();
+        let (passed, failed) = super::run_tests(&program, None, |name, r| {
+            results.push((name.to_string(), r.clone()));
+        })
+        .unwrap();
+        assert_eq!((passed, failed), (1, 2));
+        assert_eq!(results[0].0, "passes");
+        assert!(results[0].1.is_ok());
+        assert_eq!(results[1].1.as_ref().unwrap_err(), "assertion failed at line 2");
+        assert_eq!(
+            results[2].1.as_ref().unwrap_err(),
+            "assertion failed at line 3: 7 != 8"
+        );
+    }
+
+    #[test]
+    fn run_tests_name_filter() {
+        let src = "test \"alpha\" { assert(true) }\n\
+                   test \"beta\" { assert(true) }\n";
+        let program = crate::check(src).unwrap();
+        let mut names = Vec::new();
+        let (passed, failed) =
+            super::run_tests(&program, Some("alph"), |name, _| names.push(name.to_string()))
+                .unwrap();
+        assert_eq!((passed, failed), (1, 0));
+        assert_eq!(names, vec!["alpha".to_string()]);
     }
 
     // ---- input I/O (RFC-0014) ---------------------------------------------

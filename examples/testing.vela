@@ -1,0 +1,40 @@
+// Testing (RFC-0015) — `test` blocks, `assert`, `assertEq`, and `velac test`.
+//
+// A file may hold BOTH a `main` (an ordinary runnable program) AND `test`
+// blocks. `velac run` / `build` ignore the tests entirely — they are checked,
+// then stripped — so this stays a normal three-way parity citizen. To run the
+// tests instead of `main`, use `velac test`:
+//
+//   $ velac test examples/testing.vela
+//   test "clamp holds the bounds" ... ok
+//   test "clamp reports its edges" ... ok
+//   test "empty pops to None" ... ok
+//
+//   3 passed, 0 failed
+
+fn clamp(x: Int64, lo: Int64, hi: Int64) -> Int64 {
+    if x < lo { return lo }
+    if x > hi { return hi }
+    return x
+}
+
+test "clamp holds the bounds" {
+    assert(clamp(5, 0, 10) == 5)
+    assert(clamp(0 - 3, 0, 10) == 0)
+    assert(clamp(99, 0, 10) == 10)
+}
+
+test "clamp reports its edges" {
+    assertEq(clamp(7, 0, 10), 7)
+    assertEq(clamp(10, 0, 10), 10)
+}
+
+test "empty pops to None" {
+    let mut xs: Array<Int64> = []
+    assert(match xs.pop() { Some(v) => false, None => true })
+}
+
+fn main() -> Int64 {
+    print(clamp(42, 0, 10))
+    return 0
+}

@@ -62,7 +62,7 @@ pub fn check_accum_with_let_types(
         "hexEncode", "hexDecode", "base64Encode", "base64Decode", "urlEncode", "urlDecode",
         "args", "readLine", "readFile", "writeFile", "readFileBytes", "stringFromBytes",
         "trace", "debug", "info", "warn", "error", "value", "list", "schemaOf", "jsonSchema",
-        "toString", "pop", "swapRemove",
+        "toString", "pop", "swapRemove", "assert", "assertEq",
         "Int", "Int64", "Int32", "Int16", "Int8", "Float", "Float64", "Float32",
         "UInt8", "UInt16", "UInt32", "UInt64",
     ];
@@ -271,6 +271,7 @@ pub fn check_accum_with_let_types(
         let_types: RefCell::new(HashMap::new()),
         errors: RefCell::new(Vec::new()),
         globals: RefCell::new(HashMap::new()),
+        in_test: RefCell::new(false),
     };
 
     // 2b. Module state (RFC-0013): check each initializer in declaration order,
@@ -292,9 +293,22 @@ pub fn check_accum_with_let_types(
     // it exists to be imported, so demanding an entry point is noise (both in
     // `velac check lib.vela` and in the editor). Running one still fails
     // cleanly: the interpreter/backends report the missing `main` themselves.
+    // A file with tests (RFC-0015) needs no `main` either — it exists to be
+    // tested (`velac test`), extending the library-module rule (exports OR tests
+    // ⇒ no `main` required). RFC-0016 extends it once more: a file that defines
+    // `handle` with EXACTLY `fn handle(req: Request) -> Response` is a served
+    // module (`velac serve` drives it), so it needs no `main`. The signature
+    // must match exactly — any other `handle` is an ordinary function that does
+    // not exempt `main`.
+    let has_served_handle = sigs.get("handle").is_some_and(|(params, ret)| {
+        params.as_slice() == [Type::Named("Request".to_string())]
+            && *ret == Type::Named("Response".to_string())
+    });
     let is_library = program.functions.iter().map(|f| f.exported).any(|e| e)
         || program.type_decls.iter().any(|t| t.exported)
-        || program.protocols.iter().any(|p| p.exported);
+        || program.protocols.iter().any(|p| p.exported)
+        || !program.tests.is_empty()
+        || has_served_handle;
     match sigs.get("main") {
         None if !is_library => out.push(Diagnostic::from_rendered(
             "no `main` function found".to_string(),
@@ -350,8 +364,71 @@ pub fn check_accum_with_let_types(
         }
     }
 
+    // 6. Check test bodies (RFC-0015). Each is checked as a Unit-returning
+    //    function body under a synthetic unspellable name (`test@<index>`), so
+    //    every existing analysis (movecheck runs separately; ownership, spawn
+    //    purity, region) applies unchanged. Tests are NOT registered in `sigs`,
+    //    so user code can never call one. Duplicate names within a single file
+    //    are rejected here (a better message than a parse error).
+    check_tests(&checker, program, &mut out);
+
     let let_types = checker.let_types.borrow().clone();
     (out, let_types)
+}
+
+/// Check every `test` body (RFC-0015). Duplicate names per module are reported;
+/// each body is checked with `in_test` set so `assert`/`assertEq` are legal.
+fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
+    // Duplicate test names are per-file (per-module): group by module so the same
+    // name in two different files is fine, but twice in one file is an error.
+    let mut seen: HashMap<(Option<String>, String), usize> = HashMap::new();
+    for t in &program.tests {
+        let key = (t.module.clone(), t.name.clone());
+        if let Some(prev) = seen.get(&key) {
+            let mut d = Diagnostic::from_rendered(
+                format!(
+                    "line {}: duplicate test name {:?} (already declared on line {prev})",
+                    t.line, t.name
+                ),
+                "check",
+            );
+            d.file = t.module.clone();
+            out.push(d);
+        } else {
+            seen.insert(key, t.line);
+        }
+    }
+    *checker.in_test.borrow_mut() = true;
+    for (i, t) in program.tests.iter().enumerate() {
+        // A synthetic Unit-returning function with an unspellable name; its body
+        // is a clone (the checker keys nothing on node identity — only ownership
+        // does, and that pass analyses the real body directly).
+        let synthetic = Function {
+            name: format!("test@{i}"),
+            exported: false,
+            module: t.module.clone(),
+            doc: None,
+            type_params: Vec::new(),
+            type_bounds: Default::default(),
+            params: Vec::new(),
+            ret: Type::Unit,
+            body: t.body.clone(),
+            line: t.line,
+            is_extern: false,
+            is_export_extern: false,
+        };
+        if let Err(s) = checker.function(&synthetic) {
+            let mut d = Diagnostic::from_rendered(s, "check");
+            d.file = t.module.clone();
+            out.push(d);
+        }
+        for s in checker.errors.borrow_mut().drain(..) {
+            let mut d = Diagnostic::from_rendered(s, "check");
+            d.file = t.module.clone();
+            out.push(d);
+        }
+    }
+    *checker.in_test.borrow_mut() = false;
 }
 
 /// Type-check the program, returning **all** problems found across functions
@@ -417,6 +494,10 @@ struct Checker<'a> {
     /// scope stack bottoms out on these as an outermost frame below its params.
     /// The declared type is the annotation, or the initializer's inferred type.
     globals: RefCell<HashMap<String, Binding>>,
+    /// True while checking a `test` body (RFC-0015). `assert`/`assertEq` are legal
+    /// only when this is set; in ordinary code they are a checker error pointing
+    /// at validated types / `Result`.
+    in_test: RefCell<bool>,
 }
 
 /// What an enum variant name resolves to.
@@ -2012,6 +2093,58 @@ impl<'a> Checker<'a> {
             }
             _ => {}
         }
+        // Test builtins (RFC-0015): `assert`/`assertEq` are legal ONLY inside a
+        // `test` body. In ordinary code they are a checker error steering the
+        // programmer to the production tools (validated types / `Result`).
+        if name == "assert" || name == "assertEq" {
+            if !*self.in_test.borrow() {
+                return Err(format!(
+                    "line {line}: `{name}` is only available inside a `test` block — in ordinary \
+                     code, use a validated type or return a `Result` to signal failure"
+                ));
+            }
+            if name == "assert" {
+                if args.len() != 1 {
+                    return Err(format!(
+                        "line {line}: `assert` takes 1 Bool argument, got {}",
+                        args.len()
+                    ));
+                }
+                let t = self.base(&self.expr(&args[0], scope, Some(&Type::Bool), fn_ret)?);
+                if matches!(t, Type::Err) {
+                    return Ok(Type::Unit);
+                }
+                if t != Type::Bool {
+                    return Err(format!("line {line}: `assert` needs a Bool, found {t}"));
+                }
+                return Ok(Type::Unit);
+            }
+            // assertEq(a, b): both sides the same equatable scalar type.
+            if args.len() != 2 {
+                return Err(format!(
+                    "line {line}: `assertEq` takes 2 arguments, got {}",
+                    args.len()
+                ));
+            }
+            let a = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
+            let b = self.base(&self.expr(&args[1], scope, Some(&a), fn_ret)?);
+            if matches!(a, Type::Err) || matches!(b, Type::Err) {
+                return Ok(Type::Unit);
+            }
+            let equatable = |t: &Type| {
+                matches!(
+                    t,
+                    Type::Int | Type::Float | Type::Float32 | Type::IntN { .. } | Type::Bool | Type::Str
+                )
+            };
+            if a != b || !equatable(&a) {
+                return Err(format!(
+                    "line {line}: `assertEq` needs two equal, equatable values, found {a} and {b}"
+                ));
+            }
+            return Ok(Type::Unit);
+        }
+
         // built-in: print(Int|Bool) -> Unit
         if name == "print" {
             if args.len() != 1 {
@@ -3668,6 +3801,56 @@ mod tests {
         assert!(check_src("export type Age = Int64 where value >= 18").is_ok());
         let e = check_src("fn helper(x: Int64) -> Int64 { return x }").unwrap_err();
         assert!(e.contains("no `main` function found"), "{e}");
+    }
+
+    // ---- testing (RFC-0015) ---------------------------------------------
+
+    #[test]
+    fn file_with_tests_needs_no_main() {
+        // A file consisting only of tests is a valid library-like module.
+        assert!(check_src("test \"ok\" { assert(1 == 1) }").is_ok());
+    }
+
+    #[test]
+    fn assert_and_asserteq_check_inside_a_test() {
+        let src = "test \"t\" { assert(true) assertEq(1 + 1, 2) assertEq(\"a\", \"a\") }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn assert_outside_a_test_is_rejected() {
+        let e = check_src("fn main() -> Int64 { assert(true) return 0 }").unwrap_err();
+        assert!(e.contains("only available inside a `test` block"), "{e}");
+        let e = check_src("fn main() -> Int64 { assertEq(1, 1) return 0 }").unwrap_err();
+        assert!(e.contains("only available inside a `test` block"), "{e}");
+    }
+
+    #[test]
+    fn asserteq_needs_equal_equatable_types() {
+        // Mismatched types on the two sides.
+        let e = check_src("test \"t\" { assertEq(1, true) }").unwrap_err();
+        assert!(e.contains("equatable"), "{e}");
+    }
+
+    #[test]
+    fn assert_needs_a_bool() {
+        let e = check_src("test \"t\" { assert(5) }").unwrap_err();
+        assert!(e.contains("needs a Bool"), "{e}");
+    }
+
+    #[test]
+    fn duplicate_test_names_are_rejected() {
+        let e = check_src("test \"dup\" { assert(true) } test \"dup\" { assert(true) }")
+            .unwrap_err();
+        assert!(e.contains("duplicate test name"), "{e}");
+    }
+
+    #[test]
+    fn test_body_analyses_apply() {
+        // A use-after-consume-style type error inside a test body is caught: the
+        // body is checked exactly like a function body.
+        let e = check_src("test \"t\" { let x: Int64 = true }").unwrap_err();
+        assert!(e.contains("mismatch") || e.contains("Bool"), "{e}");
     }
 
     #[test]

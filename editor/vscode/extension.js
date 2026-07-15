@@ -99,15 +99,17 @@ function activate(context) {
  * @param {typeof import("vscode")} vsc
  */
 function registerRun(context, vsc) {
-  // One CodeLens per `fn main` declaration. A fresh regex per pass (the `g`
-  // flag makes `lastIndex` stateful — never share it across calls).
+  // CodeLenses: "▶ Run" over each `fn main`, and — for tests (RFC-0015) — a
+  // "▶ Run test" over each `test "name" { .. }` plus a "▶ Run all tests" over
+  // the first one. A fresh regex per pass (the `g` flag makes `lastIndex`
+  // stateful — never share it across calls).
   const provider = {
     provideCodeLenses(document) {
       const lenses = [];
       const text = document.getText();
-      const re = /^[ \t]*fn\s+main\s*\(/gm;
+      const mainRe = /^[ \t]*fn\s+main\s*\(/gm;
       let m;
-      while ((m = re.exec(text)) !== null) {
+      while ((m = mainRe.exec(text)) !== null) {
         const pos = document.positionAt(m.index);
         const range = new vsc.Range(pos, pos);
         lenses.push(
@@ -119,7 +121,37 @@ function registerRun(context, vsc) {
         );
         // A zero-width match can't happen here (the pattern consumes `fn main(`),
         // but guard against an accidental infinite loop regardless.
-        if (re.lastIndex === m.index) re.lastIndex++;
+        if (mainRe.lastIndex === m.index) mainRe.lastIndex++;
+      }
+
+      // `test "name"` blocks. The name is captured so the lens can filter to it
+      // with `velac test --name "<name>"`. Mirrors the parser's contextual
+      // recognition: `test` directly before a string literal.
+      const testRe = /^[ \t]*test\s+"((?:[^"\\]|\\.)*)"/gm;
+      let first = true;
+      let t;
+      while ((t = testRe.exec(text)) !== null) {
+        const pos = document.positionAt(t.index);
+        const range = new vsc.Range(pos, pos);
+        const name = t[1];
+        if (first) {
+          lenses.push(
+            new vsc.CodeLens(range, {
+              title: "▶ Run all tests",
+              command: "vela.testAll",
+              arguments: [document.uri],
+            })
+          );
+          first = false;
+        }
+        lenses.push(
+          new vsc.CodeLens(range, {
+            title: "▶ Run test",
+            command: "vela.test",
+            arguments: [document.uri, name],
+          })
+        );
+        if (testRe.lastIndex === t.index) testRe.lastIndex++;
       }
       return lenses;
     },
@@ -130,8 +162,27 @@ function registerRun(context, vsc) {
   );
 
   context.subscriptions.push(
-    vsc.commands.registerCommand("vela.run", (uri) => runFile(vsc, uri))
+    vsc.commands.registerCommand("vela.run", (uri) => runVelac(vsc, uri, (file) => ["run", file])),
+    vsc.commands.registerCommand("vela.testAll", (uri) =>
+      runVelac(vsc, uri, (file) => ["test", file])
+    ),
+    // The name is the JSON-string body as it appears in source (with escapes);
+    // unescape it so `velac test --name` matches the runtime test name.
+    vsc.commands.registerCommand("vela.test", (uri, name) =>
+      runVelac(vsc, uri, (file) => ["test", file, "--name", unescapeTestName(name)])
+    )
   );
+}
+
+/**
+ * Turn the source spelling of a test name (the characters between the quotes,
+ * with `\"`/`\\` escapes) into its runtime value, so `--name` matches.
+ *
+ * @param {string} s
+ * @returns {string}
+ */
+function unescapeTestName(s) {
+  return String(s).replace(/\\(["\\])/g, "$1");
 }
 
 /**
@@ -156,25 +207,29 @@ function findRepoRoot(startDir) {
 }
 
 /**
- * Run a `.vela` file with velac in the integrated terminal. Resolution order for
- * the compiler (first hit wins):
+ * Run velac against a `.vela` file in the integrated terminal. `buildArgs(file)`
+ * returns the full velac argument vector (e.g. `["run", file]` or
+ * `["test", file, "--name", "..."]`). Resolution order for the compiler (first
+ * hit wins):
  *   1. the `vela.velacPath` setting, if set;
  *   2. `<repo>/compiler/target/release/velac.exe`, if it exists;
  *   3. `<repo>/compiler/target/debug/velac.exe`, if it exists;
- *   4. `cargo run -q --manifest-path <repo>/compiler/Cargo.toml -p vela-cli -- run <file>`;
- *   5. no repo found at all: bare `velac run <file>` (PATH install).
+ *   4. `cargo run -q --manifest-path <repo>/compiler/Cargo.toml -p vela-cli -- <args>`;
+ *   5. no repo found at all: bare `velac <args>` (PATH install).
  * `<repo>` is found by walking up from the file (see [findRepoRoot]).
  *
  * @param {typeof import("vscode")} vsc
- * @param {import("vscode").Uri=} uri  the file to run (defaults to the active editor)
+ * @param {import("vscode").Uri=} uri  the file (defaults to the active editor)
+ * @param {(file: string) => string[]} buildArgs  velac args for the resolved file
  */
-function runFile(vsc, uri) {
+function runVelac(vsc, uri, buildArgs) {
   const target = uri || (vsc.window.activeTextEditor && vsc.window.activeTextEditor.document.uri);
   if (!target || target.scheme !== "file") {
     vsc.window.showWarningMessage("Vela: no file to run.");
     return;
   }
   const file = target.fsPath;
+  const args = buildArgs(file);
 
   const exe = process.platform === "win32" ? "velac.exe" : "velac";
   const cfg = vsc.workspace.getConfiguration("vela");
@@ -183,24 +238,26 @@ function runFile(vsc, uri) {
 
   let command;
   if (velacPath) {
-    command = invoke(velacPath, ["run", file]);
+    command = invoke(velacPath, args);
   } else if (repo) {
     const release = path.join(repo, "compiler", "target", "release", exe);
     const debug = path.join(repo, "compiler", "target", "debug", exe);
     if (fs.existsSync(release)) {
-      command = invoke(release, ["run", file]);
+      command = invoke(release, args);
     } else if (fs.existsSync(debug)) {
-      command = invoke(debug, ["run", file]);
+      command = invoke(debug, args);
     } else {
       const manifest = path.join(repo, "compiler", "Cargo.toml");
       // `cargo` is a bare program name on PATH, so it runs in any shell without
       // a call operator; only its arguments need quoting.
-      command = `cargo run -q --manifest-path ${quote(manifest)} -p vela-cli -- run ${quote(file)}`;
+      command = `cargo run -q --manifest-path ${quote(manifest)} -p vela-cli -- ${args
+        .map(quote)
+        .join(" ")}`;
     }
   } else {
     // Not inside a Vela repo: assume an installed `velac` on PATH (and point
     // at the setting if that guess is wrong).
-    command = `velac run ${quote(file)}`;
+    command = `velac ${args.map(quote).join(" ")}`;
     vsc.window.setStatusBarMessage(
       'Vela: no compiler/ found above this file — using `velac` from PATH ' +
         '(set "vela.velacPath" if that is not what you want)',

@@ -3,22 +3,23 @@
 A minimal VS Code extension that adds **syntax highlighting** (including
 **regex highlighting** inside `=~` / `where` predicates and distinct colors for
 `import`, function calls, and capability modifiers), **live diagnostics**,
-**hover**, **go-to-definition**, **completion**, **document symbols / outline**,
-a **▶ Run CodeLens** over `fn main`, and **snippets** for the Vela language
-(`.vela` files).
+**hover**, **go-to-definition**, **completion**, **document symbols / outline**
+(including `test` blocks), **▶ Run / ▶ Run test CodeLenses**, and **snippets**
+for the Vela language (`.vela` files).
 
 It is deliberately tiny and plain-JavaScript (no TypeScript compile step):
 
 - `extension.js` — spawns the `vela-lsp` server and shuttles JSON-RPC, and
-  registers the ▶ Run CodeLens + `vela.run` command (a terminal launcher; no
-  server needed). The server does the language-analysis work.
+  registers the ▶ Run / ▶ Run test CodeLenses + the `vela.run` / `vela.test` /
+  `vela.testAll` commands (terminal launchers; no server needed). The server
+  does the language-analysis work.
 - `vela.tmLanguage.json` — a TextMate grammar (colors) derived from the real
   lexer token set: keywords, PascalCase types/variants, function calls,
   contextual capability modifiers (`consume`/`share`/`modify`/`read`), tagged
   templates, and structural regex highlighting after `=~`. Works even without
   the server.
 - `snippets/vela.json` — snippets for `fn`, `main`, record/enum `type`,
-  `protocol`, `impl`, `match`, `import`, and the `logging` block.
+  `protocol`, `impl`, `match`, `import`, the `logging` block, and `test`.
 - `language-configuration.json` — `//` comment toggle + bracket matching.
 
 ## Run a file
@@ -28,6 +29,11 @@ Clicking it runs the file in a reused integrated terminal named `vela`. The
 compiler is resolved as: the `vela.velacPath` setting, else
 `${workspaceFolder}/compiler/target/release/velac(.exe)`, else the `debug`
 build, else `cargo run -p vela-cli -- run <file>`.
+
+For tests (RFC-0015), a **▶ Run test** CodeLens sits above every
+`test "name" { .. }` block — it runs `velac test <file> --name "name"` — and a
+**▶ Run all tests** CodeLens sits above the first test block (`velac test
+<file>`). Both use the same terminal and compiler-resolution as ▶ Run.
 
 The LSP server (`compiler/vela-lsp`) is a thin adapter over the compiler's core
 diagnostics + symbol-query API (`vela_frontend::analyze`), the same one `velac
@@ -88,9 +94,9 @@ each target platform you want to ship.
 ```
 editor/vscode/
   package.json              extension manifest + grammar/language/snippet contributions
-  extension.js              the LSP client + ▶ Run CodeLens/command (plain JS)
+  extension.js              the LSP client + ▶ Run / ▶ Run test CodeLenses/commands (plain JS)
   vela.tmLanguage.json      TextMate grammar
-  snippets/vela.json        snippets (fn, main, type, protocol, impl, match, import, logging)
+  snippets/vela.json        snippets (fn, main, type, protocol, impl, match, import, logging, test)
   language-configuration.json
   server/vela-lsp.exe       bundled language server (deployed release build)
   node_modules/             vscode-languageclient (gitignored)

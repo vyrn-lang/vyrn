@@ -913,6 +913,23 @@ fn index_symbols(
         }
     }
 
+    // Tests (RFC-0015): show each `test "name"` block in the outline. The name is
+    // a string literal (not an identifier token), so anchor the symbol at the
+    // `test` keyword on the declaration line. Kind `Method` renders sensibly in
+    // the outline; the detail carries the full `test "name"` form.
+    for t in &program.tests {
+        let (col, end_col) = name_col_on_line(tok_info, "test", t.line);
+        out.push(Symbol {
+            name: t.name.clone(),
+            kind: SymbolKind::Method,
+            line: t.line,
+            col,
+            end_col,
+            detail: format!("test {:?}", t.name),
+            file: None,
+        });
+    }
+
     out
 }
 
@@ -1422,5 +1439,19 @@ mod tests {
         let banner = a.symbols.iter().find(|s| s.name == "banner").expect("banner symbol");
         assert_eq!(banner.kind, SymbolKind::Global);
         assert_eq!(banner.detail, "let banner: String");
+    }
+
+    #[test]
+    fn tests_appear_in_the_symbol_index() {
+        // RFC-0015: each `test "name"` block is in the outline as a Method with a
+        // `test "name"` detail, anchored on its declaration line.
+        let src = "test \"adds up\" { assert(1 + 1 == 2) }\n\
+                   fn main() -> Int64 { return 0 }";
+        let a = analyze(src);
+        let t = a.symbols.iter().find(|s| s.name == "adds up").expect("test symbol");
+        assert_eq!(t.kind, SymbolKind::Method);
+        assert_eq!(t.detail, "test \"adds up\"");
+        assert_eq!(t.line, 1);
+        assert!(t.col > 0, "anchored at the `test` keyword for go-to");
     }
 }

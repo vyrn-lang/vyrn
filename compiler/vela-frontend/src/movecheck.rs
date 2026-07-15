@@ -46,6 +46,31 @@ pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
             out.push(d);
         }
     }
+    // Test bodies (RFC-0015) move-check as ordinary Unit function bodies under a
+    // synthetic name, so use-after-consume inside a test is caught unchanged.
+    for (i, t) in program.tests.iter().enumerate() {
+        let synthetic = Function {
+            name: format!("test@{i}"),
+            exported: false,
+            module: t.module.clone(),
+            doc: None,
+            type_params: Vec::new(),
+            type_bounds: Default::default(),
+            params: Vec::new(),
+            ret: Type::Unit,
+            body: t.body.clone(),
+            line: t.line,
+            is_extern: false,
+            is_export_extern: false,
+        };
+        mc.errors.borrow_mut().clear();
+        mc.function(&synthetic);
+        for s in mc.errors.borrow_mut().drain(..) {
+            let mut d = Diagnostic::from_rendered(s, "movecheck");
+            d.file = t.module.clone();
+            out.push(d);
+        }
+    }
     out
 }
 
@@ -367,6 +392,17 @@ mod tests {
         let src = "type T = { id: Int64 }; \
                    fn use_up(t: consume T) -> Int64 { return t.id; } \
                    fn main() -> Int64 { let x = T { id: 1 }; let a = use_up(x); return use_up(x); }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("already consumed"), "{e}");
+    }
+
+    #[test]
+    fn rejects_use_after_consume_inside_a_test_body() {
+        // RFC-0015: a test body is move-checked exactly like a function body.
+        let src = "type T = { id: Int64 }; \
+                   fn use_up(t: consume T) -> Int64 { return t.id; } \
+                   test \"consumes twice\" { let x = T { id: 1 }; \
+                       let a = use_up(x); let b = use_up(x); assert(a == b) }";
         let e = run(src).unwrap_err();
         assert!(e.contains("already consumed"), "{e}");
     }

@@ -1,0 +1,49 @@
+/// RFC-0016 — The Server. A served module: module state (a hit counter), an
+/// optional `main` setup hook, and `fn handle(req: Request) -> Response`.
+///
+/// `velac serve examples/server.vela --port 8080` runs `handle` over real HTTP
+/// (the host owns the accept loop; Vela owns the state and logic). Here `main`
+/// also drives `handle` directly with constructed `Request`s and prints the
+/// responses, so the file is a normal three-way parity citizen (interp ==
+/// native == wasm) — the serve host is CLI runtime, not language semantics.
+
+// Module state: the request counter, shared by every call, initialized once
+// before `main` and persisted across requests by the host's accept loop.
+let mut hits: Int64 = 0
+
+fn main() -> Int64 {
+    print("server starting")
+    // Drive `handle` deterministically, exactly as the HTTP host would — each
+    // call bumps the same module-level counter.
+    let health = handle(Request { method: "GET", path: "/health", body: "" })
+    print("\{health.status} \{health.body}")
+
+    let first = handle(Request { method: "GET", path: "/", body: "" })
+    print("\{first.status} \{first.body}")
+
+    let second = handle(Request { method: "POST", path: "/", body: "hi" })
+    print("\{second.status} \{second.body}")
+    return 0
+}
+
+/// The request handler the server calls once per request (and `main` calls
+/// directly above). Bumps the module-level counter, answers `/health` with
+/// plain text, and every other path with an interpolated HTML page that shows
+/// the live hit count and the request method.
+fn handle(req: Request) -> Response {
+    hits = hits + 1
+    if req.path == "/health" {
+        return Response { status: 200, contentType: "text/plain", body: "ok" }
+    }
+    return Response {
+        status: 200,
+        contentType: "text/html",
+        body: "<h1>hello #\{hits.toString()} via \{req.method}</h1>",
+    }
+}
+
+test "health returns 200 ok" {
+    let r = handle(Request { method: "GET", path: "/health", body: "" })
+    assertEq(r.status, 200)
+    assertEq(r.body, "ok")
+}

@@ -40,6 +40,16 @@
         "command": "vela.run",
         "title": "Vela: Run File",
         "category": "Vela"
+      },
+      {
+        "command": "vela.test",
+        "title": "Vela: Run Test",
+        "category": "Vela"
+      },
+      {
+        "command": "vela.testAll",
+        "title": "Vela: Run All Tests",
+        "category": "Vela"
       }
     ],
     "configuration": {

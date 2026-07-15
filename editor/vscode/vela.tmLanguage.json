@@ -8,6 +8,7 @@
     { "include": "#template-tag" },
     { "include": "#strings" },
     { "include": "#capabilities" },
+    { "include": "#test-keyword" },
     { "include": "#keywords" },
     { "include": "#types" },
     { "include": "#function-calls" },
@@ -103,6 +104,11 @@
         { "include": "#hole-punctuation" },
         { "include": "#identifiers" }
       ]
+    },
+    "test-keyword": {
+      "comment": "`test` (RFC-0015) is a CONTEXTUAL starter, not a reserved word: the parser treats it as a test declaration only when a string literal follows (`test \"name\" { .. }`), so `let test = 1` stays an ordinary binding. Match it as a keyword only directly before a `\"`, mirroring how the parser recognizes it. Placed before #keywords/#function-calls/#identifiers so it wins that position.",
+      "name": "keyword.control.vela",
+      "match": "\\btest\\b(?=\\s+\")"
     },
     "keywords": {
       "name": "keyword.control.vela",

@@ -103,6 +103,16 @@ pub fn analyze(program: &Program) -> Ownership {
             analyze_fn(f, &owned, &string_fns, &string_types).droppable,
         );
     }
+    // Test bodies (RFC-0015) get the same block-exit drop analysis so a `let` in
+    // a test reclaims its heap value exactly as it would in a function. The body
+    // is the REAL node the interpreter walks, so the by-address droppable keys
+    // match at run time. Tests never return an owned value (they are `Unit`).
+    for (i, t) in program.tests.iter().enumerate() {
+        droppable.insert(
+            format!("test@{i}"),
+            analyze_body(&[], &t.body, &Type::Unit, &owned, &string_fns, &string_types).droppable,
+        );
+    }
     Ownership { owned_fns: owned, droppable }
 }
 
@@ -138,9 +148,22 @@ fn analyze_fn(
     string_fns: &HashSet<String>,
     string_types: &HashSet<String>,
 ) -> FnResult {
+    analyze_body(&f.params, &f.body, &f.ret, owned, string_fns, string_types)
+}
+
+/// The core of [`analyze_fn`], parameterized over a body directly so a test body
+/// (RFC-0015) — which has no surrounding `Function` node — can be analysed with
+/// the SAME node addresses the interpreter walks (a clone would not match).
+fn analyze_body(
+    params_list: &[Param],
+    body: &Block,
+    ret: &Type,
+    owned: &HashMap<String, DropKind>,
+    string_fns: &HashSet<String>,
+    string_types: &HashSet<String>,
+) -> FnResult {
     // Seed the string-var scope with any `String`-typed parameters.
-    let params: HashSet<String> = f
-        .params
+    let params: HashSet<String> = params_list
         .iter()
         .filter(|p| is_string_like(&p.ty, string_types))
         .map(|p| p.name.clone())
@@ -150,12 +173,12 @@ fn analyze_fn(
         live: vec![HashMap::new()],
         region_depth: 0,
         owned,
-        ret_is_heap: returns_owned_kind(&f.ret).is_some(),
+        ret_is_heap: returns_owned_kind(ret).is_some(),
         all_returns_owned: true,
         string_fns,
         str_vars: vec![params],
     };
-    a.block(&f.body);
+    a.block(body);
     FnResult { droppable: a.droppable, is_owned: a.ret_is_heap && a.all_returns_owned }
 }
 

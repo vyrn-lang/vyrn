@@ -1,6 +1,6 @@
 # RFC-0016 — The Server: `velac serve` & the Async Decision
 
-- **Status:** Draft — approved for implementation
+- **Status:** Implemented
 - **Depends on:** RFC-0013 (module state + the host-owns-the-loop model),
   RFC-0014 (I/O), RFC-0003/RFC-0010 (validated types + jsonSchema as the
   wire contract — the long-range pitch this RFC starts cashing in)

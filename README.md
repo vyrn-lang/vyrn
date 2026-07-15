@@ -146,6 +146,14 @@ tests). Highlights:
 - **A working native path**: `velac build prog.vela` emits LLVM IR and links a
   real executable with `clang` (verified end-to-end; interpreter and native
   binary agree on output and exit codes, including runtime validation failures).
+- **A server (RFC-0016)** — `velac serve prog.vela [--port N]` runs an ordinary
+  `fn handle(req: Request) -> Response` over a hand-rolled HTTP/1.1 host
+  (`std::net` only, no crates). The host owns the accept loop; module state
+  (`let mut`) persists across requests. `handle` is a plain function — `main`
+  and `test` blocks can call it directly, so a served file is a normal three-way
+  parity citizen. Same program shape as the browser client (RFC-0013); Vela adds
+  no `async`/`await` (the async decision, recorded in the RFC). See
+  [`examples/server.vela`](examples/server.vela).
 
 See [`compiler/README.md`](compiler/README.md) for how to build and run it, and
 the status of the Inkwell backend (now also builds and runs against an LLVM 22

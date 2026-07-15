@@ -301,6 +301,7 @@ fn load_modules(
                     protocols: Vec::new(),
                     impls: Vec::new(),
                     globals: Vec::new(),
+                    tests: Vec::new(),
                     log_level: DEFAULT_LOG_LEVEL,
                     log_sink: LogSink::Stderr,
                 },
@@ -370,6 +371,11 @@ fn load_modules(
             }
             for p in &mut program.protocols {
                 p.module = Some(key.to_string());
+            }
+            // Tag tests with their module too (RFC-0015): they still type-check,
+            // but `velac test <root>` runs only the root's (`None`-module) tests.
+            for t in &mut program.tests {
+                t.module = Some(key.to_string());
             }
         }
 
@@ -617,6 +623,7 @@ fn link(modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>
     let mut extra_fns = Vec::new();
     let mut extra_protocols = Vec::new();
     let mut extra_impls = Vec::new();
+    let mut extra_tests = Vec::new();
     for m in modules {
         if m.key == root_key {
             merged = Some(m.program);
@@ -626,6 +633,9 @@ fn link(modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>
             extra_fns.extend(p.functions);
             extra_protocols.extend(p.protocols);
             extra_impls.extend(p.impls);
+            // Imported tests keep their `module` tag: they type-check but do not
+            // run under `velac test <root>` (RFC-0015).
+            extra_tests.extend(p.tests);
         }
     }
     let mut program = merged.expect("root module was loaded");
@@ -633,6 +643,7 @@ fn link(modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>
     program.functions.extend(extra_fns);
     program.protocols.extend(extra_protocols);
     program.impls.extend(extra_impls);
+    program.tests.extend(extra_tests);
     program.imports.clear(); // consumed
     Ok(program)
 }

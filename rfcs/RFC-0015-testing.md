@@ -1,6 +1,6 @@
 # RFC-0015 — Testing: `test` Blocks, `assert`, `velac test`
 
-- **Status:** Draft — approved for implementation
+- **Status:** Implemented
 - **Depends on:** RFC-0006 (diagnostics), RFC-0010 (modules — test files may
   import), the editor CodeLens (run affordance precedent)
 

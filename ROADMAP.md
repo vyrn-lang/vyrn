@@ -6,7 +6,7 @@ and the one decision the rest of the language waits on.
 **Every feature below is verified three ways**: the clang-compiled native
 binary AND the `wasm32-wasi` module produce byte-identical stdout, stderr, and
 exit codes against the tree-walking interpreter (the reference semantics),
-across **43 examples** and **533 tests** (0 warnings) — including every runtime
+across **45 examples** and **561 tests** (0 warnings) — including every runtime
 trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere)
 and the canonical I/O error strings (RFC-0014).
 The permanent corpus harness is
@@ -80,6 +80,25 @@ live version is `web/eventloop.html`, where a timer renders the count and a
 button calls `reset()`. Next on the browser path: the long-range goal is
 same-language server (native SSR) + client (wasm), with validated types as the
 wire contract.
+
+**The server half's v1 ships (RFC-0016).** `velac serve prog.vela [--port N]`
+is a hand-rolled HTTP/1.1 host on `std::net` (no crates, the no-crates ethos)
+running an ordinary `fn handle(req: Request) -> Response` under the interpreter
+— the *same program shape as the browser*: the host owns the accept loop, Vela
+owns the module state (`hits` persists across requests) and the logic.
+`Request`/`Response` are parser-injected records (like `Schema`/`Issue`), so
+`handle` is a plain, testable, checkable function — `main` and `test` blocks
+call it directly, and `examples/server.vela` is a normal three-way parity
+citizen (interp == native == wasm). Sequential accept loop, one request at a
+time, so module state is race-free by construction; a `handle` trap is caught,
+logged with the canonical wording, and answered 500 (the server survives).
+This RFC also **settled the async question: Vela adds no `async`/`await`** (for
+now, deliberately) — function suspension is the highest-risk feature the
+three-backend invariant could face (wasm can't switch stacks), the host-owns-
+the-loop model already covers the real use cases, and determinism is the
+product. When concurrency comes to the server it will be worker threads calling
+`handle` in parallel, gated on the isolation analysis — same output, no new
+language surface.
 
 A 2026-07-15 hardening pass fixed ~40 reviewed defects: native
 use-after-free/heap-corruption bugs (cell `set`, region escapes, `list` in
@@ -167,6 +186,25 @@ harness gained the I/O conventions: an `examples/<name>.stdin` fixture pipes
 into all three backends, every run's cwd is `examples/`, and wasmtime gets
 `--dir .` — `examples/input.vela`, `examples/files.vela`, and
 `examples/args.vela` are ordinary three-way parity citizens.
+
+**Testing (RFC-0015)**: a Vela user finally has somewhere to put a test.
+`test "name" { .. }` is a top-level declaration — a named block checked exactly
+like a `Unit`-returning function body (locals, `print`, spawn rules, ownership,
+move-checking all apply, under a synthetic unspellable `test@<index>` name), so
+every existing analysis catches bugs inside a test unchanged. Two builtins are
+legal **only** inside a test: `assert(cond: Bool)` traps the test with
+`assertion failed at line N`; `assertEq(a, b)` (same equatable type both sides)
+traps with `assertion failed at line N: <a> != <b>` using the canonical
+`toString` rendering. `velac test [file] [--name <substring>]` runs the root
+file's tests in declaration order under the interpreter, printing `test "name"
+... ok` / `... FAILED: <message>` and a `N passed, M failed` summary (exit 1 if
+any failed; a file with no tests prints `no tests`). Tests are **stripped** from
+`run`/`build`/`emit-ir` — a shipped binary contains no tests, and the string
+pool / regex collection never see them (they live in their own `Program.tests`
+field, not `functions`) — so a file with BOTH tests and a `main`
+(`examples/testing.vela`) stays a byte-identical three-way parity citizen. A
+file with tests (or exports) needs no `main` (the library-module rule). An
+imported module's tests type-check but do not run under `velac test <root>`.
 
 ---
 
@@ -373,7 +411,13 @@ none blocks the core loop.
 - **VS Code extension** (`editor/vscode/`) — plain-JavaScript (no compile step)
   extension that spawns `vela-lsp` and ships a TextMate grammar for colors. `F5`
   from the repo root runs it against `examples/`: colored, squiggled, with hover
-  / F12 go-to-definition / completion.
+  / F12 go-to-definition / completion. A **"▶ Run" CodeLens** sits over `fn main`
+  (runs `velac run`); for tests (RFC-0015) a **"▶ Run test"** CodeLens sits over
+  each `test "name"` block (`velac test --name "name"`) and a **"▶ Run all
+  tests"** over the first — all reusing the shared `vela` terminal and the
+  repo-root velac discovery. `test` is a contextual keyword in the grammar (only
+  before a string), there is a `test` snippet, and test blocks appear in the
+  outline / document-symbol list.
 
 ---
 
