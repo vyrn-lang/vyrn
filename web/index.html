@@ -41,7 +41,7 @@
 <h1>Vela in the browser</h1>
 <p class="sub">
   The same <code>velac build --target wasm</code> module that runs under
-  wasmtime, executed here by a ~100-line hand-rolled WASI shim
+  wasmtime, executed here by a small hand-rolled WASI shim
   (<code>wasi-min.js</code>). No frameworks, no toolchain in the page.
 </p>
 
@@ -69,7 +69,9 @@ const err = document.getElementById("stderr");
 
 // Modules built by web/build.ps1 (see README) — absent entries just 404
 // with a clear message, so the page needs no manifest.
-for (const name of ["fib", "enum", "reflection", "jsonschema"]) {
+// files/input/args use RFC-0014 input I/O — in a page they degrade gracefully
+// (no argv, stdin at EOF, no filesystem: readFile yields its canonical Err).
+for (const name of ["fib", "enum", "reflection", "jsonschema", "files", "input", "args"]) {
   const o = document.createElement("option");
   o.value = `${name}.wasm`;
   o.textContent = `examples/${name}.vela`;

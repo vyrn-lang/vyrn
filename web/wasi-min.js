@@ -1,11 +1,18 @@
 // Minimal WASI preview1 shim — just enough to run `velac build --target wasm`
-// output in a browser. Hand-rolled, zero dependencies, ~100 lines, matching
-// the project's no-crates ethos.
+// output in a browser. Hand-rolled, zero dependencies, matching the project's
+// no-crates ethos.
 //
-// A velac module imports exactly five preview1 functions (wasi-libc's stdio
-// path): fd_write, fd_close, fd_seek, fd_fdstat_get, proc_exit. Everything
-// else is out of scope on purpose — if the import surface ever grows, the
-// instantiate error names the missing function.
+// A compute-only velac module imports five preview1 functions (wasi-libc's
+// stdio path): fd_write, fd_close, fd_seek, fd_fdstat_get, proc_exit. A module
+// using input (RFC-0014: args/readLine/readFile/writeFile) additionally pulls
+// in args_get, args_sizes_get, fd_read, fd_fdstat_set_flags, fd_prestat_get,
+// fd_prestat_dir_name, and path_open. Those get GRACEFUL DEGRADATION, not file
+// access: the page has no argv and no filesystem, so `args()` sees zero
+// arguments, `readLine()` sees immediate EOF (`None`), and `readFile`/
+// `writeFile` fail with their canonical `Err` payloads — the module loads and
+// runs, it just sees an empty world. Real browser input is the `extern` story
+// (RFC-0012). Anything else is out of scope on purpose — if the import surface
+// ever grows, the instantiate error names the missing function.
 //
 // Usage:
 //   const { exitCode, stdout, stderr, exports } = await runVela(bytes, {
@@ -25,6 +32,7 @@
 
 const ERRNO_SUCCESS = 0;
 const ERRNO_BADF = 8;
+const ERRNO_NOENT = 44; // no filesystem in a page: every path_open fails
 const ERRNO_SPIPE = 29; // stdout/stderr are not seekable
 
 // --- minimal wasm reader: recover the signatures of the module's `vela.*`
@@ -181,6 +189,29 @@ export async function runVela(wasmBytes, hooks = {}) {
     proc_exit: (code) => {
       throw new VelaExit(code);
     },
+
+    // ---- input I/O (RFC-0014): graceful degradation, not file access -------
+    // A page has no argv: zero arguments, zero buffer bytes.
+    args_sizes_get: (argcPtr, bufSizePtr) => {
+      const view = new DataView(memory.buffer);
+      view.setUint32(argcPtr, 0, true);
+      view.setUint32(bufSizePtr, 0, true);
+      return ERRNO_SUCCESS;
+    },
+    args_get: () => ERRNO_SUCCESS, // argc is 0, so there is nothing to write
+    // Reading stdin yields immediate EOF (0 bytes) → `readLine()` is `None`.
+    fd_read: (fd, _iovsPtr, _iovsLen, nreadPtr) => {
+      if (fd !== 0) return ERRNO_BADF;
+      new DataView(memory.buffer).setUint32(nreadPtr, 0, true);
+      return ERRNO_SUCCESS;
+    },
+    fd_fdstat_set_flags: () => ERRNO_SUCCESS,
+    // No preopened directories: BADF ends wasi-libc's preopen scan (fd 3…).
+    fd_prestat_get: () => ERRNO_BADF,
+    fd_prestat_dir_name: () => ERRNO_BADF,
+    // No filesystem: every open fails, so `readFile`/`writeFile` return their
+    // canonical `Err` payloads in-page (never a crash).
+    path_open: () => ERRNO_NOENT,
   };
 
   // Build the `vela` import namespace (RFC-0012) from the host's extern hooks.

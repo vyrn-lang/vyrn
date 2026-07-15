@@ -1,17 +1,27 @@
 # Vela in the browser
 
 The same `velac build --target wasm` module that runs under wasmtime, executed
-in a browser by a hand-rolled ~100-line WASI preview1 shim
+in a browser by a hand-rolled WASI preview1 shim
 ([wasi-min.js](wasi-min.js)) — no frameworks, no toolchain in the page, zero
 dependencies (the project's no-crates ethos, applied to JS).
 
-A velac module imports exactly five preview1 functions — `fd_write`,
-`fd_fdstat_get`, `fd_close`, `fd_seek`, `proc_exit` — which is the whole shim
-surface. stdout/stderr stream into the page; `proc_exit` unwinds `_start` and
-reports the exit code; a genuine wasm trap surfaces as an error. Trap parity
-holds all the way here: division by zero prints the canonical
-`error: division by zero` to the page's stderr pane and exits 1, byte-identical
-to the interpreter and the native binary.
+A compute-only velac module imports five preview1 functions — `fd_write`,
+`fd_fdstat_get`, `fd_close`, `fd_seek`, `proc_exit`. A module using input
+(RFC-0014: `args`/`readLine`/`readFile`/`writeFile`) additionally pulls in
+`args_get`, `args_sizes_get`, `fd_read`, `fd_fdstat_set_flags`,
+`fd_prestat_get`, `fd_prestat_dir_name`, and `path_open` — twelve in total,
+which is the whole shim surface. The seven input syscalls get **graceful
+degradation**, not file access: a page has no argv, no stdin, and no
+filesystem, so `args()` returns an empty array, `readLine()` returns `None`
+(immediate EOF), and `readFile`/`writeFile` return their canonical `Err`
+payloads (``error: cannot read `path` `` wording, same bytes as the other
+backends) — an input-using module loads and runs, it just sees an empty world.
+Real browser input is the `extern` story (RFC-0012, below). stdout/stderr
+stream into the page; `proc_exit` unwinds `_start` and reports the exit code;
+a genuine wasm trap surfaces as an error. Trap parity holds all the way here:
+division by zero prints the canonical `error: division by zero` to the page's
+stderr pane and exits 1, byte-identical to the interpreter and the native
+binary.
 
 ## Run it
 
