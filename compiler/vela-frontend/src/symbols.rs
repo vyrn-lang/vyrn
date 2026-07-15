@@ -173,10 +173,16 @@ pub struct Completion {
 /// Lex, parse, type-check, move-check, and index `source` in one pass.
 ///
 /// On a lex error, `symbols`/`tokens`/`locals` are empty and `diagnostics`
-/// carries the single lex error. On a parse error, the parser **recovers**
-/// (RFC-0006): it reports every bad top-level declaration, so `diagnostics`
-/// may carry several parse errors — but `symbols`/`tokens`/`locals` are still
-/// empty (a partial program is not indexed) and downstream checks are skipped.
+/// carries the single lex error (the lexer stops at the first illegal token,
+/// leaving nothing to index).
+///
+/// On a parse error, the parser **recovers** (RFC-0006) both between top-level
+/// declarations AND between statements inside a body, so `diagnostics` may carry
+/// several parse errors while the recovered (partial) program is STILL indexed:
+/// `symbols`/`tokens`/`locals` are populated, so hover, outline, and completion
+/// keep working as you type. Downstream type/ownership checks are SKIPPED
+/// whenever any parse error exists (a partial AST would only cascade), so with
+/// parse errors present `diagnostics` holds parse errors only.
 pub fn analyze(source: &str) -> Analysis {
     analyze_inner(source, None)
 }
@@ -262,29 +268,35 @@ fn analyze_inner(
     }
 
     let (program, parse_errors) = parser::parse_accum(tokens);
-    if !parse_errors.is_empty() {
-        // Parse failed (possibly in several places — recovery reports each):
-        // no usable Program → no symbols, and `resolve`/`completions` are
-        // useless without symbols, so drop the cached tokens too. Downstream
-        // checks are NOT run on a partial program (they would only cascade).
-        return empty_analysis(parse_errors);
-    }
+    // Statement-level recovery (RFC-0006) means a body parse error no longer
+    // discards the program: `program` is still a usable (partial) AST, so the
+    // symbol/token/local index below keeps hover, outline, and completion alive
+    // while the user is mid-edit. But downstream type/ownership checks are
+    // SKIPPED whenever ANY parse error exists — running the checker on a
+    // recovered partial AST would only cascade into bogus "unknown"/mismatch
+    // diagnostics on top of the real syntax error.
+    let parse_failed = !parse_errors.is_empty();
+    let mut diags: Vec<Diagnostic> = parse_errors;
 
-    let mut diags = Vec::new();
     // With a linker and any imports, check the fully LINKED program; the
-    // parsed root keeps powering the symbol index below. `None` = linking
-    // failed (the load diagnostics are already in `diags`).
-    let checked: Option<crate::ast::Program> = match (&linker, program.imports.is_empty()) {
-        (Some((root_path, opts, resolver)), false) => {
-            match crate::loader::load(source, root_path, opts, *resolver) {
-                Ok(linked) => Some(linked),
-                Err(load_diags) => {
-                    diags.extend(load_diags.into_iter().map(adopt_foreign));
-                    None
+    // parsed root keeps powering the symbol index below. `None` = checks
+    // skipped (parse failed) or linking failed (load diagnostics already in
+    // `diags`).
+    let checked: Option<crate::ast::Program> = if parse_failed {
+        None
+    } else {
+        match (&linker, program.imports.is_empty()) {
+            (Some((root_path, opts, resolver)), false) => {
+                match crate::loader::load(source, root_path, opts, *resolver) {
+                    Ok(linked) => Some(linked),
+                    Err(load_diags) => {
+                        diags.extend(load_diags.into_iter().map(adopt_foreign));
+                        None
+                    }
                 }
             }
+            _ => Some(program.clone()),
         }
-        _ => Some(program.clone()),
     };
     // `check_accum_with_let_types` returns the diagnostics AND a table of the
     // inferred/declared type of each clean `let` and `for`-var — used below to

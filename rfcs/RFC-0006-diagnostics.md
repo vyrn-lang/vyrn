@@ -105,6 +105,37 @@ For runtime-checked construction, the diagnostic is about the *type of the
 result* ("Email(input) returns Result<Email> because input is not a compile-time
 constant"), nudging the programmer toward `?` or `match`.
 
+## 5. Error recovery & accumulation (implemented)
+
+One error should never hide the next. The pipeline accumulates rather than
+aborting at the first problem, at three granularities:
+
+- **Lexing** stops at the first illegal token (there is nothing reliable to
+  resume from), so a lex error is reported alone.
+- **Top-level recovery.** A malformed declaration is recorded, and the parser
+  synchronizes to the next top-level starter (`fn`/`type`/`protocol`/`impl`/
+  `let`/`test`/`logging`) at brace depth 0, then keeps going — so a broken `fn`
+  does not hide a later broken `type`.
+- **Statement-level recovery (implemented).** A statement that fails to parse
+  *inside a body* is recorded and dropped, and the parser synchronizes to the
+  next statement boundary — a token that starts a new source line at the block's
+  brace depth, a `;` at that depth, or the block's closing `}` — then continues
+  parsing the same body. Brace-depth tracking means a `{ .. }` inside the bad
+  statement doesn't fool the resync. Several bad statements in one body each get
+  their own diagnostic; recovery works inside nested blocks (`if`/`while`/
+  `for`/`region`) too. Expression-internal errors are unaffected — they surface
+  as that one statement's error.
+
+  The payoff is editor-facing: because a body parse error now leaves a **usable
+  (partial) AST**, `symbols::analyze` still indexes the file's symbols, tokens,
+  and locals while you are mid-edit, so hover, outline, and completion keep
+  working through a syntax error instead of blanking out. To avoid a cascade,
+  the type-checker and move-checker are **skipped whenever any parse error
+  exists** — with parse errors present the reported diagnostics are the parse
+  errors only, never spurious "unknown name"/type-mismatch follow-ons on a
+  half-formed tree. Once the source parses cleanly, every type/ownership error
+  across all functions and types is reported in one pass.
+
 ---
 
 ## Open questions

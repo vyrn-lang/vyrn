@@ -146,15 +146,28 @@ fn synthetic_field_refinement_types_are_filtered() {
     assert_eq!(user.detail, "type User = { age: Int64 where value >= 18 }", "{}", user.detail);
 }
 
-/// A parse error yields no symbols (the parser does not recover) and a single
-/// blocking diagnostic — matching `diagnostics()`'s contract.
+/// A body parse error no longer blanks the file. With statement-level recovery
+/// (RFC-0006) the parser drops the bad statement and keeps going, so the
+/// function symbol, its tokens, and the locals from the GOOD statements are
+/// still indexed — hover/outline/completion keep working while you type —
+/// alongside the parse diagnostic. Downstream type/ownership checks are skipped
+/// (the lone diagnostic is the parse error, never a cascade).
 #[test]
-fn parse_error_yields_no_symbols() {
-    let src = "fn main() -> Int64 { let x = ; return x; }";
+fn parse_error_still_indexes_symbols() {
+    let src = "fn main() -> Int64 {\n\
+                   let good = 1\n\
+                   let x = ;\n\
+                   return good\n\
+               }";
     let a = analyze(src);
-    assert!(a.symbols.is_empty());
-    assert!(a.tokens.is_empty());
-    assert_eq!(a.diagnostics.len(), 1);
+    assert!(a.symbols.iter().any(|s| s.name == "main"), "fn symbol indexed: {:?}", a.symbols);
+    assert!(!a.tokens.is_empty(), "identifier tokens cached for cursor mapping");
+    assert!(
+        a.locals.iter().any(|l| l.name == "good"),
+        "the good local survives the bad statement"
+    );
+    // Exactly the parse error — no cascaded checker diagnostics.
+    assert_eq!(a.diagnostics.len(), 1, "{:?}", a.diagnostics);
     assert_eq!(a.diagnostics[0].stage, "parse");
 }
 

@@ -35,6 +35,7 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             type_params: Vec::new(),
             field_preds: None,
             extra_stmts: Vec::new(),
+            errors: Vec::new(),
         }
         .program_accum();
     // The built-in `Value` enum (RFC-0007): the closed set of types a tagged
@@ -207,6 +208,12 @@ struct Parser {
     /// the rest here; `block` drains them right after, preserving order. Only
     /// ever non-empty for the duration of one `stmt` call (its single caller).
     extra_stmts: Vec<Stmt>,
+    /// Diagnostics accumulated by *within-body* statement recovery (RFC-0006):
+    /// when a statement inside a block fails to parse, [`Parser::block`] records
+    /// the error here and syncs to the next statement boundary instead of
+    /// aborting the whole declaration. Merged (and sorted by position) into the
+    /// program's error list by [`Parser::program_accum`].
+    errors: Vec<Diagnostic>,
 }
 
 /// Whether `e` is a field-access chain bottoming out in `a[i]` (i.e. `at(a, i)`),
@@ -463,6 +470,12 @@ impl Parser {
                 }
             }
         }
+        // Fold in the within-body statement-recovery diagnostics (collected in
+        // `self.errors` while parsing function/test bodies) and present every
+        // parse error in source order — top-level and in-body interleaved.
+        let mut errors = errors;
+        errors.append(&mut self.errors);
+        errors.sort_by_key(|d| (d.line, d.col));
         (Program { imports, type_decls, functions, protocols, impls, globals, tests, log_level, log_sink }, errors)
     }
 
@@ -1331,13 +1344,77 @@ impl Parser {
             if *self.peek() == Tok::RBrace || *self.peek() == Tok::Eof {
                 break;
             }
-            stmts.push(self.stmt()?);
-            // A statement desugar (e.g. `a[i].f = v`) leaves its follow-on
-            // statements here; splice them in order right after the primary one.
-            stmts.append(&mut self.extra_stmts);
+            // Statement-level recovery (RFC-0006): a bad statement is recorded
+            // and dropped, then we synchronize to the next statement boundary
+            // and keep parsing this body — so one typo mid-function no longer
+            // blanks out the whole declaration's symbols/hover, and several bad
+            // statements each get their own diagnostic. Expression-internal
+            // errors are unaffected (they surface as the single statement error
+            // here). A structural failure (a missing brace) still propagates.
+            let start = self.pos;
+            match self.stmt() {
+                Ok(s) => {
+                    stmts.push(s);
+                    // A statement desugar (e.g. `a[i].f = v`) leaves its
+                    // follow-on statements here; splice them in order right
+                    // after the primary one.
+                    stmts.append(&mut self.extra_stmts);
+                }
+                Err(d) => {
+                    self.errors.push(d);
+                    self.extra_stmts.clear(); // drop any partial desugar
+                    // Guarantee forward progress: a statement parser that failed
+                    // without consuming anything (e.g. a bad leading token) would
+                    // otherwise re-error here forever. One that already advanced
+                    // (the common case — it consumed a `let`/name/`=` before
+                    // failing) needs no nudge; skipping a token could eat the
+                    // block's `}`.
+                    if self.pos == start {
+                        self.advance();
+                    }
+                    self.sync_to_stmt();
+                }
+            }
         }
         self.eat(&Tok::RBrace)?;
         Ok(Block { stmts })
+    }
+
+    /// Recovery sync point for a failed *statement* inside a block. Advances
+    /// until the cursor sits at the next statement boundary: a token that starts
+    /// a new source line at THIS block's brace depth, a `;` separator at that
+    /// depth, the block's own closing `}`, or `Eof`. Brace depth is tracked so a
+    /// `{ .. }` inside the bad statement (a struct literal, a nested block) does
+    /// not fool the "same depth" test. Consumes nothing when already at a
+    /// boundary — [`Parser::block`] has already guaranteed progress. The bad
+    /// statement's remaining tokens are discarded.
+    fn sync_to_stmt(&mut self) {
+        let mut depth = 0i32;
+        while *self.peek() != Tok::Eof {
+            match self.peek() {
+                Tok::LBrace => {
+                    depth += 1;
+                    self.advance();
+                }
+                Tok::RBrace => {
+                    if depth == 0 {
+                        return; // the block's closing brace ends this body
+                    }
+                    depth -= 1;
+                    self.advance();
+                }
+                Tok::Semi if depth == 0 => {
+                    self.advance(); // a separator: the next statement follows
+                    return;
+                }
+                _ if depth == 0 && self.line() > self.tokens[self.pos - 1].line => {
+                    return; // a token on a fresh line begins the next statement
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
     }
 
     /// A top-level module-state binding (RFC-0013):
@@ -1902,6 +1979,7 @@ impl Parser {
             type_params: self.type_params.clone(),
             field_preds: None,
             extra_stmts: Vec::new(),
+            errors: Vec::new(),
         };
         // A sub-parser diagnostic carries line numbers relative to the hole
         // snippet — anchor it at the template and embed the detail, exactly
@@ -2247,6 +2325,7 @@ mod tests {
             type_params: Vec::new(),
             field_preds: None,
             extra_stmts: Vec::new(),
+            errors: Vec::new(),
         };
         let (prog, errors) = p.program_accum();
         assert!(!errors.is_empty(), "the broken decl must actually fail");
@@ -2328,6 +2407,69 @@ mod tests {
         match &f.body.stmts[0] {
             Stmt::Region { body, .. } => assert_eq!(body.stmts.len(), 1),
             other => panic!("expected region, got {other:?}"),
+        }
+    }
+
+    // ---- RFC-0006: within-body statement recovery -----------------------
+
+    #[test]
+    fn two_bad_statements_each_report_and_good_ones_survive() {
+        let src = "fn main() -> Int64 {\n\
+                   let a = ;\n\
+                   let good = 1\n\
+                   let b = ;\n\
+                   return good\n\
+                   }";
+        let (p, errors) = parse_accum(lex(src).unwrap());
+        assert_eq!(errors.len(), 2, "one diagnostic per bad statement: {errors:?}");
+        assert_eq!(errors[0].line, 2);
+        assert_eq!(errors[1].line, 4);
+        // The good statements between/after the bad ones are kept.
+        let body = &p.functions[0].body.stmts;
+        assert!(body.iter().any(|s| matches!(s, Stmt::Let { name, .. } if name == "good")));
+        assert!(matches!(body.last(), Some(Stmt::Return { .. })));
+    }
+
+    #[test]
+    fn body_error_does_not_hide_a_later_bad_declaration() {
+        // A recovered body error must not swallow a SEPARATE broken declaration
+        // that follows — top-level recovery still reports it, and `main` (whose
+        // body had the error) is still parsed.
+        let src = "fn main() -> Int64 {\n\
+                   let x = ;\n\
+                   return 0\n\
+                   }\n\
+                   fn bad<T>(x: T -> T { return x }";
+        let (p, errors) = parse_accum(lex(src).unwrap());
+        assert!(errors.len() >= 2, "body error AND decl error both reported: {errors:?}");
+        assert_eq!(errors[0].line, 2, "body error comes first in source order");
+        assert!(errors.iter().any(|e| e.line >= 5), "the bad decl is also reported: {errors:?}");
+        assert!(p.functions.iter().any(|f| f.name == "main"), "main survives");
+    }
+
+    #[test]
+    fn recovery_inside_a_nested_block() {
+        // A bad statement inside an `if` body recovers within that inner block:
+        // the good statement after it, and everything after the `if`, survive.
+        let src = "fn main() -> Int64 {\n\
+                   let mut n = 0\n\
+                   if n == 0 {\n\
+                   let x = ;\n\
+                   n = 1\n\
+                   }\n\
+                   return n\n\
+                   }";
+        let (p, errors) = parse_accum(lex(src).unwrap());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].line, 4);
+        let body = &p.functions[0].body.stmts;
+        assert!(matches!(body.last(), Some(Stmt::Return { .. })), "return survives");
+        match body.iter().find(|s| matches!(s, Stmt::If { .. })) {
+            Some(Stmt::If { then_block, .. }) => {
+                // The bad `let x` is dropped; the good `n = 1` remains.
+                assert!(then_block.stmts.iter().any(|s| matches!(s, Stmt::Assign { .. })));
+            }
+            _ => panic!("the `if` statement survives"),
         }
     }
 

@@ -466,13 +466,20 @@ on the reclamation decision above.
 - **More conversions** — `parse` for other types; formatting helpers.
 
 ### Editor (deferred from the LSP work)
-- **Parser error recovery** → multiple *parse* errors per pass. **Top-level
-  recovery ships**: `parse_accum` records a bad `fn`/`type`/`protocol`/`impl`/
-  `logging` declaration, synchronizes to the next top-level starter (brace-depth
-  aware), and continues — so one bad declaration no longer hides a later one
-  (`velac check` and the LSP now report each). What stays first-error is recovery
-  *within* a declaration (two errors in one body still report the first) — the
-  same statement/declaration boundary the checker and movecheck accumulate at.
+- **Parser error recovery** → multiple *parse* errors per pass, at BOTH
+  granularities now. **Top-level recovery**: `parse_accum` records a bad
+  `fn`/`type`/`protocol`/`impl`/`logging` declaration, synchronizes to the next
+  top-level starter (brace-depth aware), and continues — so one bad declaration
+  no longer hides a later one. **Within-declaration (statement-level) recovery —
+  shipped**: a statement that fails to parse inside a body is recorded and
+  dropped, the parser synchronizes to the next statement boundary (a fresh line
+  at the block's brace depth, a `;` at that depth, or the block's `}`), and keeps
+  parsing the same body — including inside nested `if`/`while`/`for`/`region`
+  blocks — so several bad statements each report. The payoff: a body parse error
+  now leaves a usable partial AST, so `symbols::analyze` keeps indexing symbols/
+  tokens/locals (hover, outline, completion stay live while you type); the
+  checker/movecheck are skipped while any parse error exists, so no cascade. This
+  was the editor track's last deferred item.
 - **User `protocol`/`impl` method-call resolution — shipped.** The checker
   resolves `x.foo()` through its protocol registries (RFC-0002 §5, static
   dispatch), and the LSP surfaces it: `.foo` member completion offers the
