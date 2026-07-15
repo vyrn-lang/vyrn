@@ -2775,6 +2775,16 @@ mod tests {
         assert_eq!(run(src).unwrap(), 7);
     }
 
+    /// An `export extern fn` (RFC-0012 M2) is a normal function: calling it from
+    /// Vela runs its body — no trap anywhere. Only body-less imports trap
+    /// off-wasm, so an export-extern-using program stays three-way-parity-capable.
+    #[test]
+    fn export_extern_is_a_normal_call() {
+        let src = "export extern fn velaAdd(a: Int64, b: Int64) -> Int64 { return a + b }\n\
+                   fn main() -> Int64 { return velaAdd(40, 2) }";
+        assert_eq!(run(src).unwrap(), 42);
+    }
+
     /// The native arena runtime has a fixed 64-slot region stack and traps on
     /// a 65th nested region; the interpreter enforces the identical bound with
     /// the identical message — depth accumulates dynamically across calls.

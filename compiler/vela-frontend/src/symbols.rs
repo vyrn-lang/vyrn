@@ -1157,9 +1157,16 @@ fn function_detail(f: &Function) -> String {
     } else {
         format!("<{}>", f.type_params.join(", "))
     };
-    // An `extern` import (RFC-0012) shows the `extern fn` prefix so hover makes
-    // the JS-boundary crossing obvious.
-    let kw = if f.is_extern { "extern fn" } else { "fn" };
+    // An `extern` import (RFC-0012 M1) shows the `extern fn` prefix, and an
+    // `export extern` (M2) the `export extern fn` prefix, so hover makes the
+    // JS-boundary crossing (and its direction) obvious.
+    let kw = if f.is_export_extern {
+        "export extern fn"
+    } else if f.is_extern {
+        "extern fn"
+    } else {
+        "fn"
+    };
     format!("{} {}{}({}) -> {}", kw, f.name, tp, params, type_to_string(&f.ret))
 }
 

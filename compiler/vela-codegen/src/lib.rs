@@ -1764,7 +1764,21 @@ impl<'a> Gen<'a> {
             }
         }
 
-        writeln!(out, "define {ret} @{sym}({}) {{", params.join(", ")).unwrap();
+        // `export extern fn` (RFC-0012 M2): the same `define` gains an inline
+        // `wasm-export-name` attribute so wasm-ld exports the function under its
+        // Vela name (not the internal `vela_<name>` symbol). The attribute is a
+        // GC root, so no `-Wl,--export` flag is needed for the function itself;
+        // on native targets LLVM simply ignores the string attribute. Note the
+        // String ABI asymmetry vs. an import (M1): an exported fn's `String`
+        // parameter is a single `ptr` (the normal lowering) because the JS caller
+        // CAN allocate — it grabs `__vela_malloc`, copies UTF-8 + a NUL, and
+        // passes the pointer. An import can't allocate, so it takes `(ptr, len)`.
+        let export_attr = if f.is_export_extern {
+            format!(" \"wasm-export-name\"=\"{}\"", f.name)
+        } else {
+            String::new()
+        };
+        writeln!(out, "define {ret} @{sym}({}){} {{", params.join(", "), export_attr).unwrap();
         out.push_str("entry:\n");
         for a in &self.allocas {
             out.push_str(a);
@@ -5026,6 +5040,37 @@ mod tests {
         assert!(
             ir.contains("call i64 @__vela_extern_jsAdd(i64 1, i64 2)"),
             "extern call emitted at the use site: {ir}"
+        );
+    }
+
+    #[test]
+    fn export_extern_emits_a_normal_define_with_the_export_attribute() {
+        // RFC-0012 M2: an `export extern fn` is a normal `define` under the
+        // internal `vela_<name>` symbol, carrying an inline `wasm-export-name`
+        // attribute so wasm-ld exports it under the bare Vela name. A `String`
+        // parameter is a SINGLE `ptr` (not the import's (ptr,len) pair) — the JS
+        // caller allocates the buffer, so decode-side length is a NUL scan.
+        let src = "export extern fn velaAdd(a: Int64, b: Int64) -> Int64 { return a + b } \
+                   export extern fn greet(name: String) -> String { return name } \
+                   fn main() -> Int64 { return velaAdd(1, 2) }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(
+            ir.contains("define i64 @vela_velaAdd(i64 %arg0, i64 %arg1) \"wasm-export-name\"=\"velaAdd\" {"),
+            "scalar export extern is a normal define with the export attr: {ir}"
+        );
+        assert!(
+            ir.contains("define ptr @vela_greet(ptr %arg0) \"wasm-export-name\"=\"greet\" {"),
+            "String param/return are single ptrs; export attr present: {ir}"
+        );
+        // It is NOT a body-less import: no declare, no import attributes for it.
+        assert!(
+            !ir.contains("@__vela_extern_velaAdd"),
+            "an export extern is not a wasm import: {ir}"
+        );
+        // A plain fn keeps no export attribute.
+        assert!(
+            ir.contains("define i64 @vela_main(") && !ir.contains("@vela_main() \"wasm-export-name\""),
+            "a plain fn is not exported: {ir}"
         );
     }
 

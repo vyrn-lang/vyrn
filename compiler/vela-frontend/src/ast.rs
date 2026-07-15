@@ -169,6 +169,15 @@ pub struct Function {
     /// iterated (codegen emits a `declare`, not a `define`; the checker skips the
     /// body analyses and enforces the extern ABI type domain).
     pub is_extern: bool,
+    /// `export extern fn ..` — a Vela function ADDITIONALLY exported to JS on the
+    /// wasm target (RFC-0012 M2). Unlike an `is_extern` import this is a *normal*
+    /// function in every respect: it has a body that is fully checked, runs under
+    /// the interpreter, participates in spawn-purity analysis by that body, and
+    /// is a plain `define` in codegen — it only gains a `wasm-export-name`
+    /// attribute so wasm-ld exports it under its Vela name. `is_extern` and
+    /// `is_export_extern` are mutually exclusive (import vs. exported impl); the
+    /// checker additionally enforces the extern ABI type domain on its signature.
+    pub is_export_extern: bool,
 }
 
 /// A capability declares what a function does with a parameter (RFC-0004):

@@ -816,6 +816,19 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+        // `export extern fn` (RFC-0012 M2) — the functions themselves export via
+        // their `wasm-export-name` attribute (a GC root, no flag needed). But if
+        // any takes a `String` parameter, the JS shim must allocate the argument
+        // buffer inside the module before calling in, so the module's own
+        // allocator has to be reachable. `__vela_malloc` lives in the C shim (no
+        // IR attribute to hang off), so force-export it with a linker flag.
+        let needs_malloc_export = program.functions.iter().any(|f| {
+            f.is_export_extern
+                && f.params.iter().any(|p| matches!(p.ty, vela_frontend::ast::Type::Str))
+        });
+        if needs_malloc_export {
+            cmd.arg("-Wl,--export=__vela_malloc");
+        }
     }
     let status = cmd.status();
     match status {

@@ -299,11 +299,17 @@ pub fn check_accum_with_let_types(
                 checker.ensure_type_exists(&p.ty, f.line)?;
             }
             checker.ensure_type_exists(&f.ret, f.line)?;
-            // An `extern` (RFC-0012) has no body to check; instead enforce the
-            // JS-boundary ABI type domain on its signature.
+            // An `extern` import (RFC-0012 M1) has no body to check; instead
+            // enforce the JS-boundary ABI type domain on its signature. An
+            // `export extern` (M2) is a normal function that ADDITIONALLY crosses
+            // the boundary, so its signature must satisfy the same ABI domain AND
+            // its body is checked like any other.
             if f.is_extern {
                 checker.check_extern_sig(f)?;
             } else {
+                if f.is_export_extern {
+                    checker.check_extern_sig(f)?;
+                }
                 checker.function(f)?;
             }
             Ok(())
@@ -3227,6 +3233,66 @@ mod tests {
             .unwrap();
         let e = parse(toks).unwrap_err();
         assert!(e.message.contains("an `extern fn` has no body"), "{}", e.message);
+    }
+
+    // ---- export extern (RFC-0012 M2) -------------------------------------
+
+    #[test]
+    fn export_extern_without_a_body_is_a_parse_error() {
+        // The exported direction MUST supply an implementation; a body-less form
+        // is an import, which is not how you write `export`.
+        let toks =
+            lex("export extern fn f() -> Int64 fn main() -> Int64 { return 0 }").unwrap();
+        let e = parse(toks).unwrap_err();
+        assert!(
+            e.message.contains("an exported extern needs a body"),
+            "{}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn export_extern_with_body_checks_and_enforces_the_abi_domain() {
+        // A well-formed exported extern: normal body, ABI-domain signature.
+        let src = "export extern fn velaAdd(a: Int64, b: Int64) -> Int64 { return a + b } \
+                   export extern fn greet(name: String) -> String { return name } \
+                   fn main() -> Int64 { return velaAdd(1, 2) }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+
+        // The signature must satisfy the same ABI domain as an import — a
+        // composite parameter cannot cross the JS boundary even with a body.
+        let e = check_src(
+            "export extern fn bad(xs: Array<Int64>) -> Int64 { return 0 } \
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("cannot cross the JS boundary"), "{e}");
+    }
+
+    #[test]
+    fn export_extern_body_is_checked_like_any_fn() {
+        // The body is a normal Vela body — a type error inside it is reported.
+        let e = check_src(
+            "export extern fn f(a: Int64) -> Int64 { return a + \"x\" } \
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(!e.is_empty(), "a type error in the body must be reported: {e}");
+    }
+
+    #[test]
+    fn export_extern_participates_in_spawn_purity_by_its_body() {
+        // A pure-bodied exported extern is spawn-safe (it is a normal fn); one
+        // whose body calls an import extern is not (transitive host effect).
+        let ok = "export extern fn dbl(n: Int64) -> Int64 { return n + n } \
+                  fn main() -> Int64 { let t = spawn dbl(3); return t.join() }";
+        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
+
+        let bad = "extern fn jsNow() -> Float64 \
+                   export extern fn impure(n: Int64) -> Int64 { let t = jsNow(); return n } \
+                   fn main() -> Int64 { let t = spawn impure(1); return t.join() }";
+        let e = check_src(bad).unwrap_err();
+        assert!(e.contains("isolated (pure)"), "{e}");
     }
 
     #[test]

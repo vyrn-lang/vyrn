@@ -294,10 +294,14 @@ impl Parser {
             // `export` marks the FOLLOWING declaration importable (RFC-0010).
             let exported = if *self.peek() == Tok::Export {
                 self.advance();
-                if !matches!(self.peek(), Tok::Fn | Tok::Type | Tok::Protocol) {
+                // `export extern fn ..` (RFC-0012 M2) is also valid — `extern` is a
+                // contextual starter, recognized only when `fn` follows it.
+                let is_export_extern = matches!(self.peek(), Tok::Ident(n) if n == "extern")
+                    && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
+                if !matches!(self.peek(), Tok::Fn | Tok::Type | Tok::Protocol) && !is_export_extern {
                     errors.push(Diagnostic::error(
                         self.line(), self.col(), "parse",
-                        "`export` must be followed by `fn`, `type`, or `protocol`"
+                        "`export` must be followed by `fn`, `type`, `protocol`, or `extern fn`"
                             .to_string(),
                     ));
                     self.sync_to_decl();
@@ -339,8 +343,11 @@ impl Parser {
                     if name == "extern"
                         && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
                 {
-                    match self.extern_function() {
-                        Ok(mut f) => { f.doc = doc; f.exported = exported; functions.push(f); }
+                    // `extern fn` (no `export`) is a body-less JS *import* (M1);
+                    // `export extern fn ... { body }` is a Vela function *exported*
+                    // to JS (M2). The `exported` flag decides which shape is legal.
+                    match self.extern_function(exported) {
+                        Ok(mut f) => { f.doc = doc; functions.push(f); }
                         Err(d) => { errors.push(d); self.sync_to_decl(); }
                     }
                 }
@@ -517,6 +524,7 @@ impl Parser {
             body,
             line,
             is_extern: false,
+            is_export_extern: false,
         })
     }
 
@@ -912,16 +920,25 @@ impl Parser {
 
         let body = self.block()?;
         self.type_params.clear();
-        Ok(Function { name, exported: false, module: None, doc: None, type_params, type_bounds, params, ret, body, line, is_extern: false })
+        Ok(Function { name, exported: false, module: None, doc: None, type_params, type_bounds, params, ret, body, line, is_extern: false, is_export_extern: false })
     }
 
-    /// `extern fn name(params) -> Ret` — a body-less JS-interop import (RFC-0012
-    /// M1). `extern` is a contextual starter (a plain identifier elsewhere); the
-    /// caller has already confirmed the `extern` / `fn` lookahead. The parameter
-    /// list and return arrow parse exactly like an ordinary function; the ABI
-    /// type domain is enforced later by the checker. A body here is an error —
-    /// `extern fn` never has one in M1 (`export extern fn { .. }` is M2).
-    fn extern_function(&mut self) -> Result<Function, Diagnostic> {
+    /// `extern fn name(params) -> Ret` — a body-less JS-interop declaration
+    /// (RFC-0012). `extern` is a contextual starter (a plain identifier
+    /// elsewhere); the caller has already confirmed the `extern` / `fn`
+    /// lookahead and tells us via `exported` whether an `export` preceded it.
+    /// The two body shapes are exactly opposite by direction:
+    ///
+    /// - `extern fn f(..)` (`exported == false`) is a JS *import* (M1): the wasm
+    ///   host supplies the body, so a body here is an error (`export extern fn`
+    ///   is how you supply one).
+    /// - `export extern fn f(..) { .. }` (`exported == true`) is a Vela function
+    ///   *exported* to JS (M2): it is a normal function that must HAVE a body — a
+    ///   body-less one is an error (that shape is an import, which `export` on an
+    ///   import is not the way to write). The parameter list and return arrow
+    ///   parse like an ordinary function; the ABI type domain is enforced later
+    ///   by the checker.
+    fn extern_function(&mut self, exported: bool) -> Result<Function, Diagnostic> {
         let line = self.line();
         self.advance(); // `extern` (a contextual Ident)
         self.eat(&Tok::Fn)?;
@@ -948,7 +965,38 @@ impl Parser {
         } else {
             Type::Unit
         };
-        if *self.peek() == Tok::LBrace {
+        let has_body = *self.peek() == Tok::LBrace;
+        if exported {
+            // `export extern fn` — the exported implementation MUST have a body.
+            if !has_body {
+                return Err(Diagnostic::error(
+                    self.line(),
+                    self.col(),
+                    "parse",
+                    "an exported extern needs a body — a body-less `extern fn` is an import"
+                        .to_string(),
+                ));
+            }
+            // No generic type params on an extern; the body parses like any fn.
+            self.type_params.clear();
+            let body = self.block()?;
+            self.type_params.clear();
+            return Ok(Function {
+                name,
+                exported: true,
+                module: None,
+                doc: None,
+                type_params: Vec::new(),
+                type_bounds: Default::default(),
+                params,
+                ret,
+                body,
+                line,
+                is_extern: false,
+                is_export_extern: true,
+            });
+        }
+        if has_body {
             return Err(Diagnostic::error(
                 self.line(),
                 self.col(),
@@ -969,6 +1017,7 @@ impl Parser {
             body: Block { stmts: Vec::new() },
             line,
             is_extern: true,
+            is_export_extern: false,
         })
     }
 
