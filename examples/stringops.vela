@@ -1,13 +1,21 @@
-/// String operations — indexing, iteration, character literals, and the common
-/// `contains`/`startsWith`/`endsWith` methods. These make arbitrary per-character
-/// validation expressible (a regex covers the regular cases; a hand-written check
-/// covers the rest). Everything runs identically in the interpreter and native.
+/// String operations — indexing, iteration, character literals, the common
+/// `contains`/`startsWith`/`endsWith` methods, and the checked number
+/// conversions. These make arbitrary per-character validation expressible (a
+/// regex covers the regular cases; a hand-written check covers the rest).
+/// Everything runs identically in the interpreter and native.
 ///
 ///   s.length        the byte length
 ///   s[i]            the byte at index i (an Int64; traps if out of bounds)
 ///   'a'             a character literal — the byte value 97 (like Rust's b'a')
 ///   for b in s      iterate the bytes as Ints
 ///   s.contains(x) / s.startsWith(x) / s.endsWith(x)   -> Bool  (also free fns)
+///
+/// Conversions are checked — "no unchecked casts" (RFC-0001):
+///   str(n)   -> String         total: a number always has a decimal form
+///   parse(s) -> Option<Int64>  a string might NOT be an integer, so the
+///                              failure is an explicit `None` you must match —
+///                              never a silent 0 or a crash. Strict: optional
+///                              leading `-`, then digits, nothing else.
 
 /// A hand-written check: every character at an even 1-based position is 'a'.
 fn everyEvenIsA(s: String) -> Bool {
@@ -28,6 +36,13 @@ fn everyEvenIsA(s: String) -> Bool {
 /// a command must be non-empty and start with an uppercase 'H'.
 type Greeting = String where value.length >= 1 && value[0] == 'H'
 
+fn toInt(s: String) -> Int64 {
+    return match parse(s) {
+        Some(n) => n,
+        None => 0 - 1,        // sentinel for "not a number"
+    }
+}
+
 fn main() -> Int64 {
     let s = "banana"
     print(s.length)                 // 6
@@ -43,6 +58,11 @@ fn main() -> Int64 {
 
     let g = Greeting("Hello")       // valid: non-empty and starts with 'H'
     print(g)                        // Hello
+
+    // ---- checked conversions ----------------------------------------------
+    print("sum = \{3 + 4}")         // sum = 7 — numbers render into strings
+    print(toInt("40") + toInt("2")) // 42
+    print(toInt("twelve"))          // -1 — the invalid case is explicit
 
     return 0
 }

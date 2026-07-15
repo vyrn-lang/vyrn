@@ -102,7 +102,7 @@ tests). Highlights:
   [`examples/validate.vela`](examples/validate.vela).
 - **Checked conversions** — `str(Int64) -> String` (total) and
   `parse(String) -> Option<Int64>` (fallible, so the "not a number" case is an
-  explicit `None` you must `match`). See [`examples/convert.vela`](examples/convert.vela).
+  explicit `None` you must `match`). See [`examples/stringops.vela`](examples/stringops.vela).
 - **Arrays** — growable `Array<T>` (a `Vec`: `array()` / `push` / `at` / `alen` /
   `afree`, a doubling heap buffer, bounds-checked, with explicit reclamation) and
   **fixed-size `Array<T, N>`** (a const generic: the stack value aggregate `[N x T]`,

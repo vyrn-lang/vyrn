@@ -5,7 +5,7 @@ and the one decision the rest of the language waits on.
 
 **Every feature below is verified**: the clang-compiled native binary produces
 byte-identical stdout, stderr, and exit codes against the tree-walking
-interpreter (the reference semantics), across **36 examples** and **384 tests**
+interpreter (the reference semantics), across **35 examples** and **384 tests**
 (0 warnings) — including every runtime trap path (one canonical `error: ...`
 wording on stderr, exit 1, in both backends). The permanent corpus harness is
 `cargo test -p vela-cli --test parity -- --ignored` (needs clang; its
