@@ -21,6 +21,7 @@ pub mod movecheck;
 pub mod own;
 pub mod parser;
 pub mod regex;
+pub mod schema;
 pub mod symbols;
 pub mod types;
 

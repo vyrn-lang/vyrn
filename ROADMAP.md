@@ -6,7 +6,7 @@ and the one decision the rest of the language waits on.
 **Every feature below is verified three ways**: the clang-compiled native
 binary AND the `wasm32-wasi` module produce byte-identical stdout, stderr, and
 exit codes against the tree-walking interpreter (the reference semantics),
-across **36 examples** and **396 tests** (0 warnings) — including every runtime
+across **37 examples** and **404 tests** (0 warnings) — including every runtime
 trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere).
 The permanent corpus harness is
 `cargo test -p vela-cli --test parity -- --ignored` (needs clang; the wasm
@@ -44,9 +44,14 @@ importing an enum brings its variants, a protocol its methods), rejects cycles
 and cross-module name collisions, then links everything into ONE Program — the
 checker, interpreter, both code generators, and the parity harness are unaware
 modules exist. I/O lives behind a `ModuleResolver` trait (filesystem in the
-CLI, in-memory maps in tests). Next: JSON Schema type imports, the `vela.json`
-manifest + build tool, and reproducible remote imports (github:/gist:/https:
-with lockfile + content-addressed cache).
+CLI, in-memory maps in tests). **JSON Schema type imports** (M2):
+`import type { User } from "./api.schema.json"` synthesizes validated types
+from a schema document — the exact inverse of `jsonSchema(T)` (bounds/lengths/
+patterns become `where` clauses, `required` steers `Option<T>`, `$defs` and
+`#/$defs/..` refs resolve, constrained fields become synthetic `User.age`
+types), byte-exact round-trip with the emitter, and any inexpressible keyword
+is a hard error. Next: the `vela.json` manifest + build tool, and reproducible
+remote imports (github:/gist:/https: with lockfile + content-addressed cache).
 
 ---
 

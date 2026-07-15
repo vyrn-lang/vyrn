@@ -1,0 +1,29 @@
+/// JSON Schema type imports (RFC-0010 M2): `import type { .. }` from a
+/// `.json` file synthesizes validated Vela types from a JSON Schema document —
+/// the exact inverse of `jsonSchema(T)`. Constraints become `where` clauses
+/// (auto-validated at every boundary, like any validated type), `required`
+/// steers `Option<T>`, and `$defs` entries are importable too. A schema using
+/// a keyword Vela can't express is a compile-time error, never a silently
+/// weaker type.
+
+import type { User, Port } from "./user.schema.json"
+
+fn mk(name: String, n: Int64) -> User {
+    return User { name: name, age: n, nick: None }
+}
+
+fn main() -> Int64 {
+    let u = User { name: "grace", age: 42, nick: Some("g") }
+    print(u.age)                    // 42
+
+    let p: Port = 8080              // auto-validates against the schema bounds
+    print(p)                        // 8080
+
+    let dyn = mk("ada", 99)         // runtime-checked construction
+    print(dyn.age)                  // 99
+
+    // Round-trip: re-emitting the imported type reproduces the schema's
+    // property constraints exactly.
+    print(jsonSchema(User))
+    return 0
+}

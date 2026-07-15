@@ -171,6 +171,30 @@ pub fn load(
             })?,
         };
         let is_root = key == root_key;
+
+        // A `.json` module is a JSON Schema document: synthesize validated
+        // type declarations from it (RFC-0010 M2) instead of parsing Vela.
+        // Schema modules import nothing themselves.
+        if key.ends_with(".json") {
+            let decls = crate::schema::synthesize(&text, None, key)
+                .map_err(|e| vec![Diagnostic::error(0, 0, "load", e)])?;
+            modules.push(Module {
+                key: key.to_string(),
+                program: Program {
+                    imports: Vec::new(),
+                    type_decls: decls,
+                    functions: Vec::new(),
+                    protocols: Vec::new(),
+                    impls: Vec::new(),
+                    log_level: DEFAULT_LOG_LEVEL,
+                    log_sink: LogSink::Stderr,
+                },
+                import_targets: Vec::new(),
+            });
+            stack.pop();
+            states.insert(key.to_string(), true);
+            return Ok(());
+        }
         let tokens = lexer::lex(&text).map_err(|mut d| {
             if !is_root {
                 d.file = Some(key.to_string());
