@@ -764,6 +764,20 @@ mod json_schema_tests {
     }
 
     #[test]
+    fn inline_field_refinements_reach_the_schema() {
+        // Zod-style inline `where` on fields lands in the field's schema, and
+        // the record-level cross-field `where` keeps its `$comment`.
+        let s = schema_of(
+            "type User = { name: String where value.length >= 3, \
+                           age: Int64 where value >= 18 } where age < 150",
+            "User",
+        );
+        assert!(s.contains("\"name\":{\"type\":\"string\",\"minLength\":3}"), "{s}");
+        assert!(s.contains("\"age\":{\"type\":\"integer\",\"minimum\":18}"), "{s}");
+        assert!(s.contains("\"$comment\":\"constrained by: age < 150\""), "{s}");
+    }
+
+    #[test]
     fn cross_field_record_documents_invariant() {
         let s = schema_of("type R = { a: Int64, b: Int64 } where a < b", "R");
         assert!(s.contains("\"type\":\"object\""), "still an object: {s}");

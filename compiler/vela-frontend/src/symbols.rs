@@ -635,8 +635,10 @@ fn index_symbols(
 
     for t in &program.type_decls {
         // Skip the parser-injected built-in `Value` enum (parser.rs injects it
-        // with line == 0); it has no real source position.
-        if t.line == 0 {
+        // with line == 0); it has no real source position. Synthetic inline
+        // field-refinement types (`User.age` — the `.` is not a lexable
+        // identifier) are desugaring artifacts, not user symbols.
+        if t.line == 0 || t.name.contains('.') {
             continue;
         }
         let (col, end_col) = name_col_on_line(tok_info, &t.name, t.line);

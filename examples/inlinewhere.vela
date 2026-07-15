@@ -1,0 +1,24 @@
+/// Inline field refinements (Zod/ArkType style): a field's constraint lives on
+/// the field itself, and the record-level trailing `where` remains the
+/// CROSS-FIELD invariant (the analog of Zod's object-level `.refine`). Each
+/// inline `where` desugars to a synthetic validated type (`User.age`), so the
+/// whole automatic-validation pipeline applies: constants are proven at compile
+/// time, dynamic values are checked at every boundary, and `jsonSchema` picks
+/// the constraints up field by field.
+
+type User = {
+    name: String where value.length >= 3,
+    age: Int64 where value >= 18,
+} where age < 150
+
+fn mk(n: Int64) -> User {
+    return User { name: "ada", age: n }
+}
+
+fn main() -> Int64 {
+    let u = User { name: "ada", age: 33 }   // constants proven — zero cost
+    print(u.age)                            // 33
+    print(mk(21).age)                       // 21 — dynamic, checked at the field
+    print(jsonSchema(User))                 // constraints appear per property
+    return 0
+}

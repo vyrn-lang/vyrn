@@ -2199,6 +2199,25 @@ mod tests {
     }
 
     #[test]
+    fn inline_field_refinements_validate_like_named_types() {
+        // Zod/ArkType-style inline `where` on fields: valid values flow through…
+        let ok = "type User = { name: String where value.length >= 3, \
+                                age: Int64 where value >= 18 } \
+                  fn mk(n: Int64) -> User { return User { name: \"ada\", age: n } } \
+                  fn main() -> Int64 { let u = mk(33) return u.age }";
+        assert_eq!(run(ok).unwrap(), 33);
+        // …a dynamic violation traps with the synthetic field-type name…
+        let bad = "type User = { age: Int64 where value >= 18 } \
+                   fn mk(n: Int64) -> User { return User { age: n } } \
+                   fn main() -> Int64 { let u = mk(5) return 0 }";
+        assert_eq!(run(bad).unwrap_err(), "validation failed for `User.age`");
+        // …and a provably-bad constant is rejected at compile time.
+        let constant = "type User = { age: Int64 where value >= 18 } \
+                        fn main() -> Int64 { let u = User { age: 5 } return 0 }";
+        assert!(run(constant).unwrap_err().contains("does not satisfy `User.age`"));
+    }
+
+    #[test]
     fn auto_validation_passes_valid_dynamic_values() {
         let src = "type Age = Int64 where value >= 18 \
                    fn g(a: Age) -> Int64 { return a } \

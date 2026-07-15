@@ -5,7 +5,7 @@ and the one decision the rest of the language waits on.
 
 **Every feature below is verified**: the clang-compiled native binary produces
 byte-identical stdout, stderr, and exit codes against the tree-walking
-interpreter (the reference semantics), across **56 examples** and **378 tests**
+interpreter (the reference semantics), across **57 examples** and **383 tests**
 (0 warnings) — including every runtime trap path (one canonical `error: ...`
 wording on stderr, exit 1, in both backends). The permanent corpus harness is
 `cargo test -p vela-cli --test parity -- --ignored` (needs clang; its
@@ -30,8 +30,11 @@ through protocols, movecheck gaps), and a lexer/parser diagnostics batch.
 - Immutable string literals (`==`, `!=`, record fields), statically allocated.
 
 ### Types
-- **Validated types** — `type Age = Int64 where value >= 18`, with **automatic,
-  exhaustive validation**: every value boundary (`let` annotation, assignment,
+- **Validated types** — `type Age = Int64 where value >= 18`, or inline on a
+  record field, Zod/ArkType style: `type User = { age: Int64 where value >= 18 }`
+  (desugars to a synthetic `User.age` validated type; the trailing record-level
+  `where` stays the cross-field invariant, like Zod's object `.refine`) — with
+  **automatic, exhaustive validation**: every value boundary (`let` annotation, assignment,
   call argument, return, record field, array element) checks a plain value
   flowing into a validated type by itself — no explicit constructor call
   needed. Provably-false constants are compile errors; provably-true ones cost

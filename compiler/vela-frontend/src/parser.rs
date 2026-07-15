@@ -28,7 +28,8 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
 /// checks" (a partial program would only produce cascading type errors).
 pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     let (mut program, errors) =
-        Parser { tokens, pos: 0, no_struct: false, type_params: Vec::new() }.program_accum();
+        Parser { tokens, pos: 0, no_struct: false, type_params: Vec::new(), field_preds: None }
+            .program_accum();
     // The built-in `Value` enum (RFC-0007): the closed set of types a tagged
     // template can interpolate. Injected so every program can name `Array<Value>`
     // and match `VInt`/`VBool`/`VStr` — the tag surface — without a `use`.
@@ -133,6 +134,13 @@ struct Parser {
     /// The current function's generic parameters; a type name matching one of
     /// these parses as [`Type::Param`] rather than a named type.
     type_params: Vec<String>,
+    /// Inline per-field refinements collected while parsing a record type
+    /// inside a `type` declaration: `(field, predicate)` for each
+    /// `field: T where pred`. Drained by `type_decl`, which desugars each into
+    /// a synthetic validated type named `Decl.field`. `None` outside a type
+    /// declaration (inline `where` is then a parse error — an anonymous record
+    /// has no name to hang the refinement on).
+    field_preds: Option<Vec<(String, Expr)>>,
 }
 
 impl Parser {
@@ -250,7 +258,10 @@ impl Parser {
             }
             match self.peek() {
                 Tok::Type => match self.type_decl() {
-                    Ok(mut d) => { d.doc = doc; type_decls.push(d); }
+                    Ok(mut ds) => {
+                        ds[0].doc = doc; // synthetic field types carry no doc
+                        type_decls.extend(ds);
+                    }
                     Err(d) => { errors.push(d); self.sync_to_decl(); }
                 },
                 Tok::Fn => match self.function() {
@@ -506,7 +517,7 @@ impl Parser {
 
     /// `type Name = Base [where <predicate>] ;` (validated scalar), or
     /// `type Name = { field: Type, ... } ;` (structural record).
-    fn type_decl(&mut self) -> Result<TypeDecl, Diagnostic> {
+    fn type_decl(&mut self) -> Result<Vec<TypeDecl>, Diagnostic> {
         let line = self.line();
         self.eat(&Tok::Type)?;
         let name = self.expect_ident()?;
@@ -528,11 +539,16 @@ impl Parser {
         self.type_params = type_params.clone(); // names parse as Type::Param in the body
 
         self.eat(&Tok::Eq)?;
+        // Collect inline field refinements while the base parses (record
+        // declarations only — the collector is what makes `where` legal in
+        // field position).
+        self.field_preds = Some(Vec::new());
         let base = if *self.peek() == Tok::Pipe {
             self.enum_type()?
         } else {
             self.type_()?
         };
+        let field_preds = self.field_preds.take().unwrap_or_default();
         let predicate = if *self.peek() == Tok::Where {
             self.advance();
             Some(self.expr()?)
@@ -541,7 +557,37 @@ impl Parser {
         };
         self.eat_semi();
         self.type_params.clear();
-        Ok(TypeDecl { name, doc: None, type_params, base, predicate, line })
+
+        // Desugar each inline refinement into a synthetic validated type named
+        // `Decl.field` (the `.` keeps it out of the user namespace — it shows
+        // up only in diagnostics: `validation failed for \`User.age\``). The
+        // field's type is rewritten to the synthetic name, so the whole
+        // automatic-validation pipeline (boundary checks, traps, jsonSchema)
+        // applies unchanged.
+        let mut base = base;
+        let mut decls = Vec::with_capacity(1 + field_preds.len());
+        if !field_preds.is_empty() {
+            let Type::Record(fields) = &mut base else {
+                unreachable!("field predicates only collect inside a record type")
+            };
+            for (fname, pred) in field_preds {
+                let synthetic = format!("{name}.{fname}");
+                let field = fields
+                    .iter_mut()
+                    .find(|f| f.name == fname)
+                    .expect("collected predicate names an existing field");
+                decls.push(TypeDecl {
+                    name: synthetic.clone(),
+                    doc: None,
+                    type_params: Vec::new(),
+                    base: std::mem::replace(&mut field.ty, Type::Named(synthetic)),
+                    predicate: Some(pred),
+                    line,
+                });
+            }
+        }
+        decls.insert(0, TypeDecl { name, doc: None, type_params, base, predicate, line });
+        Ok(decls)
     }
 
     /// Parse an optional capability keyword (`read`/`modify`/`consume`/`share`)
@@ -591,23 +637,62 @@ impl Parser {
         Ok(Type::Enum(variants))
     }
 
-    /// `{ field: Type, field: Type, ... }` — a structural record type.
+    /// `{ field: Type, field: Type, ... }` — a structural record type. Inside a
+    /// `type` declaration, a field may carry an inline refinement
+    /// (`age: Int64 where value >= 18`) — Zod/ArkType style — which `type_decl`
+    /// desugars into a synthetic validated type named `Decl.field`. The
+    /// record-level trailing `where` (after `}`) remains the cross-field
+    /// invariant; the two compose.
     fn record_type(&mut self) -> Result<Type, Diagnostic> {
         self.eat(&Tok::LBrace)?;
-        let mut fields = Vec::new();
-        while *self.peek() != Tok::RBrace {
-            let name = self.expect_ident()?;
-            self.eat(&Tok::Colon)?;
-            let ty = self.type_()?;
-            fields.push(Field { name, ty });
-            if *self.peek() == Tok::Comma {
-                self.advance();
-            } else {
-                break;
+        // Only the OUTERMOST record of a `type` declaration collects inline
+        // refinements (take() blinds nested records, whose fields belong to a
+        // different — anonymous — type and would otherwise be misattributed).
+        let outer = self.field_preds.take();
+        let collecting = outer.is_some();
+        let mut local: Vec<(String, Expr)> = Vec::new();
+        let mut parse = || -> Result<Vec<Field>, Diagnostic> {
+            let mut fields = Vec::new();
+            while *self.peek() != Tok::RBrace {
+                let name = self.expect_ident()?;
+                self.eat(&Tok::Colon)?;
+                let ty = self.type_()?;
+                if *self.peek() == Tok::Where {
+                    let line = self.line();
+                    let col = self.col();
+                    self.advance();
+                    let pred = self.expr()?;
+                    if !collecting {
+                        return Err(Diagnostic::error(
+                            line,
+                            col,
+                            "parse",
+                            "an inline field `where` needs a named record type \
+                             (`type T = { field: .. where .. }`); an anonymous record \
+                             has no name to attach the refinement to"
+                                .to_string(),
+                        ));
+                    }
+                    local.push((name.clone(), pred));
+                }
+                fields.push(Field { name, ty });
+                if *self.peek() == Tok::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
             }
+            self.eat(&Tok::RBrace)?;
+            Ok(fields)
+        };
+        let result = parse();
+        // Restore (and extend) the collector even on the error path, so
+        // recovery in `type_decl` sees a consistent state.
+        if let Some(mut prev) = outer {
+            prev.extend(local);
+            self.field_preds = Some(prev);
         }
-        self.eat(&Tok::RBrace)?;
-        Ok(Type::Record(fields))
+        Ok(Type::Record(result?))
     }
 
     fn function(&mut self) -> Result<Function, Diagnostic> {
@@ -1282,6 +1367,7 @@ impl Parser {
             pos: 0,
             no_struct: false,
             type_params: self.type_params.clone(),
+            field_preds: None,
         };
         // A sub-parser diagnostic carries line numbers relative to the hole
         // snippet — anchor it at the template and embed the detail, exactly
@@ -1448,6 +1534,43 @@ mod tests {
     }
 
     #[test]
+    fn inline_field_where_desugars_to_synthetic_validated_type() {
+        let src = "type User = { name: String where value.length >= 3, age: Int64 } \
+                   fn main() -> Int64 { return 0 }";
+        let p = parse_src(src);
+        // The synthetic `User.name` decl carries the predicate…
+        let synth = p.type_decls.iter().find(|t| t.name == "User.name").expect("synthetic decl");
+        assert_eq!(synth.base, Type::Str);
+        assert!(synth.predicate.is_some());
+        // …and the field's type is rewritten to reference it.
+        let user = p.type_decls.iter().find(|t| t.name == "User").unwrap();
+        let Type::Record(fields) = &user.base else { panic!("record") };
+        assert_eq!(fields[0].ty, Type::Named("User.name".into()));
+        assert_eq!(fields[1].ty, Type::Int, "unrefined fields untouched");
+        assert!(user.predicate.is_none());
+    }
+
+    #[test]
+    fn inline_field_where_composes_with_cross_field_where() {
+        let src = "type R = { a: Int64 where value > 0, b: Int64 } where a < b \
+                   fn main() -> Int64 { return 0 }";
+        let p = parse_src(src);
+        let r = p.type_decls.iter().find(|t| t.name == "R").unwrap();
+        assert!(r.predicate.is_some(), "cross-field where stays on the record");
+        assert!(p.type_decls.iter().any(|t| t.name == "R.a"), "field where desugars");
+    }
+
+    #[test]
+    fn inline_where_outside_a_type_decl_is_an_error() {
+        // An anonymous record (a parameter's type here) has no name to attach
+        // the synthetic refinement type to.
+        let src = "fn f(x: { n: Int64 where value > 0 }) -> Int64 { return 0 } \
+                   fn main() -> Int64 { return 0 }";
+        let e = parse(lex(src).unwrap()).unwrap_err();
+        assert!(e.message.contains("named record type"), "{}", e.message);
+    }
+
+    #[test]
     fn stray_semicolon_after_block_statement_is_tolerated() {
         // "Semicolons optional" includes a stray one after `if { .. }`.
         let src = "fn main() -> Int64 { if true { print(1) }; return 0 }";
@@ -1499,7 +1622,13 @@ mod tests {
                    fn ok(x: T) -> T { return x } \
                    fn main() -> Int64 { return ok(1) }";
         let toks = lex(src).unwrap();
-        let mut p = Parser { tokens: toks, pos: 0, no_struct: false, type_params: Vec::new() };
+        let mut p = Parser {
+            tokens: toks,
+            pos: 0,
+            no_struct: false,
+            type_params: Vec::new(),
+            field_preds: None,
+        };
         let (prog, errors) = p.program_accum();
         assert!(!errors.is_empty(), "the broken decl must actually fail");
         let ok = prog.functions.iter().find(|f| f.name == "ok").expect("ok parsed");
