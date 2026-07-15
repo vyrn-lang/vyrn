@@ -6,6 +6,8 @@ target/
 *.ll
 *.obj
 *.pdb
+# Files written by I/O examples (RFC-0014) — recreated on every run
+examples/data/*.tmp.txt
 # Browser-demo modules (regenerable via web/build.ps1)
 web/*.wasm
 web/*.shim.c

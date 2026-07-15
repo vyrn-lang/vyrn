@@ -1,0 +1,57 @@
+/// Reading stdin — RFC-0014. `readLine()` returns one line as
+/// `Option<String>`: `Some(line)` with the trailing newline stripped (`\r\n`
+/// and `\n` both, so Windows and POSIX pipes read identically), `None` at EOF.
+/// Repeated calls stream through stdin.
+///
+/// The parity harness pipes `examples/input.stdin` into all three backends
+/// (interpreter, native, wasm) and requires byte-identical output. Run it
+/// yourself with:
+///
+///   velac run examples/input.vela < examples/input.stdin
+
+/// One line, or the sentinel when stdin is exhausted. (`match` is an
+/// expression; a helper keeps the loop body flat.)
+fn nextLine() -> String {
+    return match readLine() {
+        Some(s) => s,
+        None => "<eof>",
+    }
+}
+
+/// A line's numeric value (words count as 0).
+fn numericValue(line: String) -> Int64 {
+    return match parse(line) {
+        Some(n) => n,
+        None => 0,
+    }
+}
+
+/// Whether a line is a word rather than a number.
+fn isWord(line: String) -> Bool {
+    return match parse(line) {
+        Some(n) => false,
+        None => true,
+    }
+}
+
+fn main() -> Int64 {
+    let mut lines = 0
+    let mut sum = 0
+    let mut words = 0
+    let mut going = true
+    while going {
+        let line = nextLine()
+        if line == "<eof>" {
+            going = false
+        } else {
+            lines = lines + 1
+            sum = sum + numericValue(line)
+            if isWord(line) {
+                words = words + 1
+            }
+            print("line \{lines}: \{line}")
+        }
+    }
+    print("\{lines} line(s): sum \{sum}, \{words} word(s)")
+    return 0
+}

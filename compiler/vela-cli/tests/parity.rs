@@ -11,7 +11,7 @@
 //! benign difference.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Examples currently expected to diverge, with the reason. Shrink this list —
 /// never grow it silently. (Empty since trap unification: every trap prints
@@ -49,6 +49,20 @@ fn velac() -> Command {
 
 fn norm(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n")
+}
+
+/// Run `cmd` with the RFC-0014 I/O conventions: cwd = `examples/` (so relative
+/// paths in examples resolve identically under every backend) and stdin piped
+/// from `examples/<name>.stdin` when that fixture exists, else closed (EOF) —
+/// never inherited, so a `readLine()` example can't hang the harness.
+fn run_io(mut cmd: Command, dir: &Path, stdin_fixture: &Path) -> std::process::Output {
+    cmd.current_dir(dir);
+    if stdin_fixture.exists() {
+        cmd.stdin(std::fs::File::open(stdin_fixture).expect("open stdin fixture"));
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    cmd.output().expect("run backend")
 }
 
 /// The wasm toolchain, when present: the wasi-libc sysroot (for `velac build
@@ -114,7 +128,14 @@ fn examples_interp_native_parity() {
             continue;
         }
 
-        let interp = velac().arg("run").arg(path).output().expect("run interp");
+        // RFC-0014 conventions: `examples/<name>.stdin` pipes into all three
+        // backends; every run's cwd is `examples/` so relative file paths in
+        // the example resolve identically everywhere.
+        let stdin_fixture = path.with_extension("stdin");
+
+        let mut interp_cmd = velac();
+        interp_cmd.arg("run").arg(path);
+        let interp = run_io(interp_cmd, &dir, &stdin_fixture);
 
         let exe = out_dir.join(format!("{name}.exe"));
         let build = velac().arg("build").arg(path).arg("-o").arg(&exe).output().expect("build");
@@ -126,7 +147,7 @@ fn examples_interp_native_parity() {
             ));
             continue;
         }
-        let native = Command::new(&exe).output().expect("run native");
+        let native = run_io(Command::new(&exe), &dir, &stdin_fixture);
 
         let (i_out, n_out) = (norm(&interp.stdout), norm(&native.stdout));
         let (i_err, n_err) = (norm(&interp.stderr), norm(&native.stderr));
@@ -164,7 +185,12 @@ fn examples_interp_native_parity() {
                 ));
                 continue;
             }
-            let w = Command::new(wasmtime).arg(&module).output().expect("run wasm");
+            // `--dir .` preopens the (already-set) working directory —
+            // `examples/` — so WASI file access sees the same tree the other
+            // two backends do (wasmtime v46: `--dir <HOST_DIR[::GUEST_DIR]>`).
+            let mut wasm_cmd = Command::new(wasmtime);
+            wasm_cmd.arg("run").arg("--dir").arg(".").arg(&module);
+            let w = run_io(wasm_cmd, &dir, &stdin_fixture);
             let (w_out, w_err) = (norm(&w.stdout), norm(&w.stderr));
             let w_code = w.status.code();
             if i_out != w_out || i_err != w_err || i_code != w_code {
