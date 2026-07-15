@@ -1,0 +1,121 @@
+// A tiny Entity-Component-System (ECS), Structure-of-Arrays style — a feasibility
+// probe for "can Vela do an efficient ECS today?". Verdict: the DATA LAYOUT is
+// already right; the MUTATION surface is the gap. This toy is honest about both.
+//
+// What an ECS wants: components stored contiguously so a system can stream over
+// them, and cheap spawn/despawn. Here each component is its own `Array<Int64>`
+// (SoA): xs/ys are positions, dxs/dys are velocities, and entity `i` is the same
+// index across all four. A "movement system" integrates every entity per tick;
+// entities that leave the arena despawn; fresh ones spawn — real churn.
+//
+// Three things measured while writing this (see ROADMAP "ECS notes" for the
+// verdict they add up to):
+//
+//   (a) In-place element write — NOT AVAILABLE. `a[i] = v` does not parse; the
+//       array surface is create (`[]`), append (`a.push(x)`), read (`a[i]`),
+//       `a.length`, and `drop`. There is no element store, no `pop`, no
+//       `swap_remove`. So a per-entity update can't mutate in place — this file
+//       INTEGRATES and COMPACTS by rebuilding fresh survivor arrays each tick.
+//       (The only in-place cell today is a boxed `Ref<T>` via cell/get/set —
+//       pointer-chased, not contiguous, so it defeats the SoA point.)
+//
+//   (b) Array<Record> — indexing COPIES. `let p = a[i]; p.x = 9` leaves `a[i]`
+//       unchanged, and `a[i].x = v` does not parse. You cannot write a field
+//       back through the array, which is exactly why this ECS uses parallel
+//       scalar arrays (SoA) rather than one `Array<Entity>` (AoS).
+//
+//   (c) Contiguity — YES. A growable `Array<T>` lowers to `{ ptr, len, cap }`
+//       over a single realloc'd buffer; `a[i]` is `getelementptr`+`load` at an
+//       element stride. So the SoA scalar stores are genuinely cache-friendly
+//       contiguous memory — the iteration half of an ECS is already efficient.
+//
+// Deterministic, so interp == native == wasm byte-for-byte.
+// Expected output:
+//   checksum: 38575
+//   live entities: 18
+
+fn main() -> Int64 {
+    // SoA component stores — one contiguous Array<Int64> per component,
+    // indexed by entity id.
+    let mut xs: Array<Int64> = []    // position x
+    let mut ys: Array<Int64> = []    // position y
+    let mut dxs: Array<Int64> = []   // velocity x
+    let mut dys: Array<Int64> = []   // velocity y
+
+    let bound = 16        // an entity with x >= bound has left the arena
+    let ticks = 15        // frames to simulate
+    let perTick = 3       // spawns per frame (the churn)
+
+    let mut seed = 0      // a plain counter — deterministic, no RNG needed
+    let mut checksum = 0
+
+    // Seed the world with an initial cohort of 5.
+    let mut s = 0
+    while s < 5 {
+        seed = seed + 1
+        xs.push(0)                // all start at the left edge
+        ys.push(seed % 7)         // spread over rows
+        dxs.push((seed % 3) + 2)  // rightward speed 2..4
+        dys.push((seed % 4) + 1)  // downward drift 1..4
+        s = s + 1
+    }
+
+    // The simulation loop.
+    let mut t = 0
+    while t < ticks {
+        // --- movement system + despawn, fused into one compacting rebuild ---
+        // No in-place write (finding a), so we stream the old arrays into fresh
+        // ones, integrating as we go and simply not copying the entities that
+        // left the arena. This IS the swap-remove/alive-mask a real ECS would
+        // do in place — here it costs one pass and one fresh allocation.
+        let mut nxs: Array<Int64> = []
+        let mut nys: Array<Int64> = []
+        let mut ndxs: Array<Int64> = []
+        let mut ndys: Array<Int64> = []
+        let mut i = 0
+        while i < xs.length {
+            let nx = xs[i] + dxs[i]
+            let ny = ys[i] + dys[i]
+            if nx < bound {                 // survives — keep it, integrated
+                nxs.push(nx)
+                nys.push(ny)
+                ndxs.push(dxs[i])
+                ndys.push(dys[i])
+                checksum = checksum + nx * 7 + ny * 13
+            }
+            i = i + 1
+        }
+        drop xs
+        drop ys
+        drop dxs
+        drop dys
+        xs = nxs
+        ys = nys
+        dxs = ndxs
+        dys = ndys
+
+        // --- spawn system: introduce fresh entities at the left edge ---
+        let mut k = 0
+        while k < perTick {
+            seed = seed + 1
+            xs.push(0)
+            ys.push(seed % 7)
+            dxs.push((seed % 3) + 2)
+            dys.push((seed % 4) + 1)
+            k = k + 1
+        }
+
+        t = t + 1
+    }
+
+    // Final aggregate: a checksum that folds in every entity that was ever alive
+    // during a tick, and the current population.
+    print("checksum: " + checksum.toString())
+    print("live entities: " + xs.length.toString())
+
+    drop xs
+    drop ys
+    drop dxs
+    drop dys
+    return 0
+}

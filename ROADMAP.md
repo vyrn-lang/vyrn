@@ -170,6 +170,52 @@ NIST vectors; `curl`/`git ls-remote` subprocesses, all in vela-cli).
   baseline — the `Option` payload is two words wide, so a `Ref` is stored inline
   with no heap box.
 
+#### ECS notes — what a Structure-of-Arrays ECS can do today
+
+`examples/ecs.vela` is a working SoA entity-component-system toy (parallel
+`Array<Int64>` component stores, a movement system, spawn/despawn churn, a
+deterministic checksum) verified interp == native == wasm. Writing it mapped out
+exactly where the language helps and where it doesn't:
+
+**Efficient today**
+- **Contiguous scalar SoA stores.** A growable `Array<T>` lowers to
+  `{ ptr, len, cap }` over a single realloc'd buffer, and `a[i]` is a
+  `getelementptr` + `load` at an element stride — genuinely cache-friendly. A
+  system that streams over one component array per tick is doing tight, linear
+  memory access. The *iteration* half of an ECS is already good.
+- **Cheap append-spawn.** `a.push(x)` is amortised O(1) with geometric growth.
+- **Deterministic, reclaimed.** Arrays auto-drop when they don't escape; the whole
+  world tears down without a GC, identically on every backend.
+
+**Gaps (all trace back to one missing primitive)**
+- **No in-place element write.** `a[i] = v` does not parse; there is no element
+  store, `pop`, `truncate`, or `swap_remove`. So a per-entity update or an
+  in-place swap-remove despawn cannot be expressed — `ecs.vela` instead *rebuilds*
+  fresh survivor arrays each tick (integrate + compact in one pass, one fresh
+  allocation). Correct and still linear, but it reallocates every frame where a
+  real ECS would mutate in place. **An `a[i] = v` element store (and a `pop` /
+  `swap_remove`) is the single highest-leverage addition for ECS work.**
+- **`Array<Record>` (AoS) is copy-only.** Indexing an `Array<Record>` returns a
+  *copy*; `a[i].field = v` does not parse, so you cannot mutate a component
+  struct through the array. This is why the example is SoA, not one
+  `Array<Entity>`. An AoS ECS needs the same element-write primitive plus
+  place-expression field assignment through an index.
+- **In-place mutation exists only boxed.** A `Ref<T>` cell (`cell`/`get`/`set`)
+  is mutable in place, so an `Array<Ref<Int64>>` *can* be updated per-element —
+  but each value is heap-boxed and pointer-chased, which defeats the contiguous
+  SoA layout that makes an ECS fast. Useful for sparse/aliased state, not the hot
+  component arrays.
+- **No generational entity handles yet at the array level.** `Ref<T>` gives
+  generation-checked cells, but there's no built-in dense/sparse-set or
+  generational-index allocator; entity ids here are plain array positions, which
+  is why despawn compaction shifts indices (fine for this toy, not for stable
+  cross-frame handles).
+
+**Verdict.** The storage model is ready for an efficient ECS; the mutation model
+is not. Add an in-place `a[i] = v` (with `pop`/`swap_remove`), and a fast,
+in-place SoA ECS becomes straightforward. Until then, an ECS is expressible and
+correct but pays a rebuild-per-tick allocation cost.
+
 ### Memory (RFC-0004)
 - `consume` capability + move checking (using a consumed value is a compile error).
 - `modify` capability — a parameter changed in place, visible to the caller
