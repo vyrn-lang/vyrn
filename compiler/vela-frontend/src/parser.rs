@@ -1193,6 +1193,32 @@ impl Parser {
             }
             _ => {
                 let e = self.expr()?;
+                // `a[i] = v` — element store into a `mut` array binding
+                // (RFC-0011). `a[i]` parsed as `at(a, i)` in `postfix`; a
+                // trailing `=` turns that read into an in-place store. The array
+                // must be a plain identifier binding (v1 restriction).
+                if *self.peek() == Tok::Eq {
+                    if let Expr::Call { name, args, .. } = &e {
+                        if name == "at" && args.len() == 2 {
+                            if let Expr::Var { name: recv, .. } = &args[0] {
+                                let recv = recv.clone();
+                                let index = args[1].clone();
+                                self.advance(); // eat `=`
+                                let value = self.expr()?;
+                                self.eat_semi();
+                                return Ok(Stmt::IndexSet { name: recv, index, value, line });
+                            }
+                            return Err(Diagnostic::error(
+                                line,
+                                self.col(),
+                                "parse",
+                                "the left side of an index assignment `[i] = ..` must be \
+                                 a plain array variable"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
                 self.eat_semi();
                 // A mutating method used as a statement writes back through its
                 // receiver variable: `sq.push(x);` desugars to `sq = push(sq, x);`
@@ -1315,6 +1341,12 @@ impl Parser {
                         let name = match name.as_str() {
                             "toString" => "@str".to_string(),
                             "join" => "@join".to_string(),
+                            // In-place array mutation (RFC-0011): method-only, so
+                            // they map to unspellable internal names — a free
+                            // `pop(a)` / `swapRemove(a, i)` never reaches here and
+                            // the checker reports it as an unknown call.
+                            "pop" => "@pop".to_string(),
+                            "swapRemove" => "@swapRemove".to_string(),
                             _ => name,
                         };
                         e = Expr::Call { name, args, line };

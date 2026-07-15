@@ -249,6 +249,15 @@ impl Analysis<'_> {
             // `name.field = value` stores `value` into a record field; a heap
             // value put there escapes (the record now owns it).
             Stmt::SetField { value, .. } => self.visit(value),
+            // `name[i] = value` stores into an array element; a heap value put
+            // there escapes (the array now owns it), and an overwritten heap
+            // element is not freed (a safe leak — RFC-0011). The array binding
+            // itself keeps its owner (the buffer is unchanged), so it is not
+            // escaped here. `index` is a scalar; visit it for completeness.
+            Stmt::IndexSet { index, value, .. } => {
+                self.visit(index);
+                self.visit(value);
+            }
             Stmt::Return { value, .. } => self.ret(value.as_ref()),
             Stmt::If { cond, then_block, else_block, .. } => {
                 self.visit(cond);
@@ -399,6 +408,10 @@ impl Analysis<'_> {
                 } else if matches!(
                     name.as_str(),
                     "print" | "@concat" | "get" | "at" | "alen"
+                        // `@pop`/`@swapRemove` mutate the array in place but do
+                        // not free its buffer, so the receiver stays a live owner
+                        // (a safe read); the removed element is a safe leak.
+                        | "@pop" | "@swapRemove"
                         | "trace" | "debug" | "info" | "warn" | "error"
                 ) {
                     for a in args {

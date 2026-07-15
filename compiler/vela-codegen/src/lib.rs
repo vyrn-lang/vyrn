@@ -1836,6 +1836,59 @@ impl<'a> Gen<'a> {
                 self.emit(format!("store {rec_ll} {next}, ptr {slot}"));
                 Ok(())
             }
+            // `name[index] = value` — in-place element store (RFC-0011). The
+            // read path's bounds check + `getelementptr` + `store`, with the
+            // value coerced into the element type (validated element types trap
+            // inline via `coerce`'s `emit_validation`). No header write-back: the
+            // element lives in the shared buffer, whose `{ptr,len,cap}` is
+            // unchanged. A fixed `Array<T, N>` stores straight into its stack slot.
+            Stmt::IndexSet { name, index, value, .. } => {
+                let (slot, aty) = self.lookup(name).ok_or_else(|| format!("unbound `{name}`"))?;
+                let bad_l = self.fresh_label("set.oob");
+                let ok_l = self.fresh_label("set.ok");
+                match self.resolve(&aty) {
+                    Type::Array(inner) => {
+                        let elem = *inner;
+                        let ell = self.llt(&elem);
+                        let hdr = self.fresh_tmp();
+                        let data = self.fresh_tmp();
+                        let len = self.fresh_tmp();
+                        self.emit(format!("{hdr} = load {{ ptr, i64, i64 }}, ptr {slot}"));
+                        self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {hdr}, 0"));
+                        self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {hdr}, 1"));
+                        let (iv, _) = self.gen_expr(index)?;
+                        let (v, vty) = self.gen_expr(value)?;
+                        let (v, _) = self.coerce(v, &vty, &elem)?;
+                        let oob = self.fresh_tmp();
+                        self.emit(format!("{oob} = icmp uge i64 {iv}, {len}"));
+                        self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
+                        self.emit_array_oob_trap(&bad_l, &iv);
+                        self.emit_label(&ok_l);
+                        let ep = self.fresh_tmp();
+                        self.emit(format!("{ep} = getelementptr {ell}, ptr {data}, i64 {iv}"));
+                        self.emit(format!("store {ell} {v}, ptr {ep}"));
+                        Ok(())
+                    }
+                    Type::ArrayN(inner, n) => {
+                        let elem = *inner;
+                        let ell = self.llt(&elem);
+                        let aggty = format!("[{n} x {ell}]");
+                        let (iv, _) = self.gen_expr(index)?;
+                        let (v, vty) = self.gen_expr(value)?;
+                        let (v, _) = self.coerce(v, &vty, &elem)?;
+                        let oob = self.fresh_tmp();
+                        self.emit(format!("{oob} = icmp uge i64 {iv}, {n}"));
+                        self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
+                        self.emit_array_oob_trap(&bad_l, &iv);
+                        self.emit_label(&ok_l);
+                        let ep = self.fresh_tmp();
+                        self.emit(format!("{ep} = getelementptr {aggty}, ptr {slot}, i64 0, i64 {iv}"));
+                        self.emit(format!("store {ell} {v}, ptr {ep}"));
+                        Ok(())
+                    }
+                    other => Err(format!("`{name}[i] = ..` needs an Array, found {other:?}")),
+                }
+            }
             Stmt::Return { value, .. } => {
                 match value {
                     Some(e) => {
@@ -2775,6 +2828,21 @@ impl<'a> Gen<'a> {
         Ok((t, to.clone()))
     }
 
+    /// Emit an array out-of-bounds trap block (`error: array index %lld out of
+    /// bounds` to stderr, then `exit(1)`), terminating the current block chain.
+    /// Shared by the index read (`at`), the index store (`a[i] = v`), and
+    /// `swapRemove` so all three are byte-identical to the interpreter.
+    fn emit_array_oob_trap(&mut self, label: &str, iv: &str) {
+        self.emit_label(label);
+        let e = self.fresh_tmp();
+        self.emit(format!("{e} = call ptr @__vela_stderr()"));
+        self.emit(format!(
+            "call i32 (ptr, ptr, ...) @fprintf(ptr {e}, ptr @.trap.aoob, i64 {iv})"
+        ));
+        self.emit("call void @exit(i32 1)".into());
+        self.emit_term("unreachable".into());
+    }
+
     fn gen_call(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
         // `schemaOf(TypeName)` reflects a type at compile time — build its Schema
         // literal from the type declaration and lower that (identical to interp).
@@ -3395,6 +3463,111 @@ impl<'a> Gen<'a> {
             self.emit(format!("call void @free(ptr {data})"));
             return Ok((String::new(), Type::Unit));
         }
+        // `a.pop()` (RFC-0011) — remove and return the last element as
+        // `Option<T>`. Loads the `{ptr,len,cap}` header from the binding's slot;
+        // on `len == 0` yields `None`, otherwise loads element `len-1`, writes
+        // the decremented header back, and wraps the element in `Some`. Never
+        // traps. No new runtime function — all inline.
+        if name == "@pop" {
+            let recv = match &args[0] {
+                Expr::Var { name, .. } => name.clone(),
+                _ => return Err("`pop` needs a plain array variable".into()),
+            };
+            let (slot, aty) = self.lookup(&recv).ok_or_else(|| format!("unbound `{recv}`"))?;
+            let elem = match self.resolve(&aty) {
+                Type::Array(inner) => *inner,
+                other => return Err(format!("`pop` needs an Array, found {other:?}")),
+            };
+            let ell = self.llt(&elem);
+            let hdr = self.fresh_tmp();
+            let data = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!("{hdr} = load {{ ptr, i64, i64 }}, ptr {slot}"));
+            self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {hdr}, 0"));
+            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {hdr}, 1"));
+            let empty = self.fresh_tmp();
+            self.emit(format!("{empty} = icmp eq i64 {len}, 0"));
+            let none_l = self.fresh_label("pop.none");
+            let some_l = self.fresh_label("pop.some");
+            let end_l = self.fresh_label("pop.end");
+            self.emit_term(format!("br i1 {empty}, label %{none_l}, label %{some_l}"));
+            // none: yield the empty Option aggregate.
+            self.emit_label(&none_l);
+            self.emit_term(format!("br label %{end_l}"));
+            // some: load the last element, shrink the header, wrap in Some.
+            self.emit_label(&some_l);
+            let nl = self.fresh_tmp();
+            self.emit(format!("{nl} = sub i64 {len}, 1"));
+            let ep = self.fresh_tmp();
+            let v = self.fresh_tmp();
+            self.emit(format!("{ep} = getelementptr {ell}, ptr {data}, i64 {nl}"));
+            self.emit(format!("{v} = load {ell}, ptr {ep}"));
+            let nh = self.fresh_tmp();
+            self.emit(format!("{nh} = insertvalue {{ ptr, i64, i64 }} {hdr}, i64 {nl}, 1"));
+            self.emit(format!("store {{ ptr, i64, i64 }} {nh}, ptr {slot}"));
+            let (w0, w1) = self.encode_payload(&v, &elem);
+            let s0 = self.fresh_tmp();
+            let s1 = self.fresh_tmp();
+            let s2 = self.fresh_tmp();
+            self.emit(format!("{s0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"));
+            self.emit(format!("{s1} = insertvalue {{ i1, i64, i64 }} {s0}, i64 {w0}, 1"));
+            self.emit(format!("{s2} = insertvalue {{ i1, i64, i64 }} {s1}, i64 {w1}, 2"));
+            let some_end = self.cur_block.clone();
+            self.emit_term(format!("br label %{end_l}"));
+            // merge: None aggregate from the empty path, Some from the other.
+            self.emit_label(&end_l);
+            let r = self.fresh_tmp();
+            self.emit(format!(
+                "{r} = phi {{ i1, i64, i64 }} [ {{ i1 0, i64 0, i64 0 }}, %{none_l} ], \
+                 [ {s2}, %{some_end} ]"
+            ));
+            return Ok((r, Type::Option(Box::new(elem))));
+        }
+        // `a.swapRemove(i)` (RFC-0011) — bounds-check `i`, load element `i`
+        // (the return value), move the last element into slot `i`, decrement the
+        // header, write it back. O(1), unordered. Traps out-of-bounds with the
+        // read path's wording. No new runtime function.
+        if name == "@swapRemove" {
+            let recv = match &args[0] {
+                Expr::Var { name, .. } => name.clone(),
+                _ => return Err("`swapRemove` needs a plain array variable".into()),
+            };
+            let (slot, aty) = self.lookup(&recv).ok_or_else(|| format!("unbound `{recv}`"))?;
+            let elem = match self.resolve(&aty) {
+                Type::Array(inner) => *inner,
+                other => return Err(format!("`swapRemove` needs an Array, found {other:?}")),
+            };
+            let ell = self.llt(&elem);
+            let hdr = self.fresh_tmp();
+            let data = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!("{hdr} = load {{ ptr, i64, i64 }}, ptr {slot}"));
+            self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {hdr}, 0"));
+            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {hdr}, 1"));
+            let (iv, _) = self.gen_expr(&args[1])?;
+            let bad_l = self.fresh_label("swap.oob");
+            let ok_l = self.fresh_label("swap.ok");
+            let oob = self.fresh_tmp();
+            self.emit(format!("{oob} = icmp uge i64 {iv}, {len}"));
+            self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
+            self.emit_array_oob_trap(&bad_l, &iv);
+            self.emit_label(&ok_l);
+            let nl = self.fresh_tmp();
+            self.emit(format!("{nl} = sub i64 {len}, 1"));
+            let ip = self.fresh_tmp();
+            let v = self.fresh_tmp();
+            self.emit(format!("{ip} = getelementptr {ell}, ptr {data}, i64 {iv}"));
+            self.emit(format!("{v} = load {ell}, ptr {ip}"));
+            let lp = self.fresh_tmp();
+            let last = self.fresh_tmp();
+            self.emit(format!("{lp} = getelementptr {ell}, ptr {data}, i64 {nl}"));
+            self.emit(format!("{last} = load {ell}, ptr {lp}"));
+            self.emit(format!("store {ell} {last}, ptr {ip}"));
+            let nh = self.fresh_tmp();
+            self.emit(format!("{nh} = insertvalue {{ ptr, i64, i64 }} {hdr}, i64 {nl}, 1"));
+            self.emit(format!("store {{ ptr, i64, i64 }} {nh}, ptr {slot}"));
+            return Ok((v, elem));
+        }
         // value(x) -> Value: box a scalar into the built-in `Value` enum, using the
         // same payload encoding as any enum variant (so `match` decodes it).
         if name == "value" {
@@ -3778,6 +3951,10 @@ fn collect_regex_stmt(s: &Stmt, out: &mut Vec<String>) {
             collect_regex_expr(iter, out);
             collect_regex_block(body, out);
         }
+        Stmt::IndexSet { index, value, .. } => {
+            collect_regex_expr(index, out);
+            collect_regex_expr(value, out);
+        }
         Stmt::Drop { .. } => {}
         Stmt::Expr(e) => collect_regex_expr(e, out),
         Stmt::Region { body, .. } => collect_regex_block(body, out),
@@ -3861,6 +4038,10 @@ fn collect_strings_stmt(s: &Stmt, out: &mut Vec<String>, types: &HashMap<String,
         Stmt::ForIn { iter, body, .. } => {
             collect_strings_expr(iter, out, types);
             collect_strings_block(body, out, types);
+        }
+        Stmt::IndexSet { index, value, .. } => {
+            collect_strings_expr(index, out, types);
+            collect_strings_expr(value, out, types);
         }
         Stmt::Drop { .. } => {}
         Stmt::Expr(e) => collect_strings_expr(e, out, types),
@@ -4691,5 +4872,52 @@ mod tests {
         assert!(ir.contains("call i1 @vela_t()"), "{ir}");
         // and the branch consumes an i1, never an i64 call result
         assert!(!ir.contains("call i64 @vela_t()"), "{ir}");
+    }
+
+    // ---- in-place array mutation (RFC-0011) -----------------------------
+
+    #[test]
+    fn index_store_emits_bounds_check_and_store() {
+        // `a[i] = v` is the read path's bounds check plus a `getelementptr`+`store`
+        // into the shared buffer; it reuses the array OOB trap global.
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2, 3]; a[1] = 9; return a[1]; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("@.trap.aoob"), "reuses the array OOB trap: {ir}");
+        assert!(ir.contains("icmp uge i64"), "bounds compare: {ir}");
+        assert!(ir.contains("store i64 9"), "element store: {ir}");
+    }
+
+    #[test]
+    fn index_store_validated_element_emits_check() {
+        // A dynamic value stored into an `Array<Age>` element validates inline.
+        let src = "type Age = Int64 where value >= 18 \
+                   fn main() -> Int64 { let mut a: Array<Age> = [Age(20)]; \
+                   let mut n = 30; a[0] = n; return 0; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("@.trap.verr.Age"), "element store validates: {ir}");
+    }
+
+    #[test]
+    fn pop_emits_none_some_branches_and_writeback() {
+        // `pop` len-checks, builds a None/Some aggregate via a phi, and writes
+        // the decremented header back to the array slot.
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2, 3]; \
+                   let p = match a.pop() { Some(x) => x, None => -1 }; return p; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("phi { i1, i64, i64 }"), "None/Some merge: {ir}");
+        assert!(ir.contains("insertvalue { ptr, i64, i64 }"), "header write-back: {ir}");
+        assert!(ir.contains("sub i64"), "length decrement: {ir}");
+    }
+
+    #[test]
+    fn swapremove_emits_bounds_check_and_swap() {
+        // `swapRemove` bounds-checks, loads element i (the result), moves the last
+        // element into slot i, and writes the shrunk header back.
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2, 3]; \
+                   let g = a.swapRemove(0); return g; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("@.trap.aoob"), "reuses the array OOB trap: {ir}");
+        assert!(ir.contains("insertvalue { ptr, i64, i64 }"), "header write-back: {ir}");
+        assert!(ir.contains("sub i64"), "length decrement: {ir}");
     }
 }

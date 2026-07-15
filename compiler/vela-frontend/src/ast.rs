@@ -351,6 +351,16 @@ pub enum Stmt {
         value: Expr,
         line: usize,
     },
+    /// `name[index] = value` — store `value` into element `index` of a `mut`
+    /// array binding (RFC-0011). `name` must be a plain array binding (v1
+    /// restriction, like `Assign`/`SetField`); the read form `a[i]` desugars
+    /// to `at(a, i)`, so a trailing `=` on it becomes this in-place store.
+    IndexSet {
+        name: String,
+        index: Expr,
+        value: Expr,
+        line: usize,
+    },
     /// `return [expr];`
     Return { value: Option<Expr>, line: usize },
     /// `if cond { .. } [else { .. }]`

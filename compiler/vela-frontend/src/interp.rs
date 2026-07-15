@@ -581,6 +581,40 @@ impl<'a> Interp<'a> {
                 }
                 Err(format!("field assignment to unbound record `{name}`").into())
             }
+            // `name[index] = value` — in-place element store (RFC-0011). The
+            // value coerces into the declared element type (sized-int wrapping,
+            // automatic validation), then is written through the shared buffer;
+            // an out-of-bounds index traps with the read path's wording.
+            Stmt::IndexSet { name, index, value, .. } => {
+                let iv = self.expr(index, scope)?;
+                let idx = match iv {
+                    Val::Int(n) => n,
+                    other => return Err(format!("array index must be an Int64, found {other:?}").into()),
+                };
+                let mut v = self.expr(value, scope)?;
+                // Coerce into the element type of the array binding's declared
+                // type (validated element types validate here, exactly like a
+                // `push` argument or an annotated `let`).
+                let elem_ty = scope.iter().rev().find_map(|f| {
+                    f.get(name).and_then(|s| match &s.ty {
+                        Some(Type::Array(t)) | Some(Type::ArrayN(t, _)) => Some((**t).clone()),
+                        _ => None,
+                    })
+                });
+                if let Some(t) = &elem_ty {
+                    v = self.coerce(v, t)?;
+                }
+                for frame in scope.iter_mut().rev() {
+                    if let Some(Slot { v: Val::Array(items), .. }) = frame.get_mut(name) {
+                        if idx < 0 || idx as usize >= items.len() {
+                            return Err(format!("array index {idx} out of bounds").into());
+                        }
+                        items[idx as usize] = v;
+                        return Ok(Flow::Normal);
+                    }
+                }
+                Err(format!("index-assignment to unbound array `{name}`").into())
+            }
             Stmt::Return { value, .. } => {
                 let v = match value {
                     Some(e) => self.expr(e, scope)?,
@@ -742,6 +776,45 @@ impl<'a> Interp<'a> {
                         }
                     }
                     return Err("`jsonSchema` needs a declared type name".into());
+                }
+                // `a.pop()` (RFC-0011) — remove and return the last element as
+                // `Option<T>` (`None` on empty), mutating the receiver in place.
+                // Handled before the generic argument evaluation because it needs
+                // to write the shrunk array back through the binding.
+                if name == "@pop" {
+                    if let Some(Expr::Var { name: recv, .. }) = args.first() {
+                        for frame in scope.iter_mut().rev() {
+                            if let Some(Slot { v: Val::Array(items), .. }) = frame.get_mut(recv) {
+                                let popped = items.pop();
+                                return Ok(Val::Option(popped.map(Box::new)));
+                            }
+                        }
+                    }
+                    return Err("`pop` needs a mutable array binding".into());
+                }
+                // `a.swapRemove(i)` (RFC-0011) — move the last element into slot
+                // `i`, shrink by one, return the old element `i`. Traps on an
+                // out-of-bounds index with the read path's wording.
+                if name == "@swapRemove" {
+                    let Some(Expr::Var { name: recv, .. }) = args.first() else {
+                        return Err("`swapRemove` needs a mutable array binding".into());
+                    };
+                    let recv = recv.clone();
+                    let idx = match self.expr(&args[1], scope)? {
+                        Val::Int(n) => n,
+                        other => {
+                            return Err(format!("array index must be an Int64, found {other:?}").into())
+                        }
+                    };
+                    for frame in scope.iter_mut().rev() {
+                        if let Some(Slot { v: Val::Array(items), .. }) = frame.get_mut(&recv) {
+                            if idx < 0 || idx as usize >= items.len() {
+                                return Err(format!("array index {idx} out of bounds").into());
+                            }
+                            return Ok(items.swap_remove(idx as usize));
+                        }
+                    }
+                    return Err("`swapRemove` needs a mutable array binding".into());
                 }
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {
@@ -2697,5 +2770,61 @@ mod tests {
         assert_eq!(run(&src(64)).unwrap(), 0);
         // The 65th traps, wording shared with the native runtime.
         assert_eq!(run(&src(65)).unwrap_err(), "region nesting exceeds 64");
+    }
+
+    // ---- in-place array mutation (RFC-0011) -----------------------------
+
+    #[test]
+    fn index_store_mutates_in_place() {
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = [10, 20, 30]; \
+                   a[1] = 25; return a[0] + a[1] + a[2]; }";
+        assert_eq!(run(src).unwrap(), 65);
+    }
+
+    #[test]
+    fn index_store_out_of_bounds_traps() {
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2, 3]; a[5] = 9; return 0; }";
+        assert_eq!(run(src).unwrap_err(), "array index 5 out of bounds");
+    }
+
+    #[test]
+    fn pop_returns_last_and_shrinks() {
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2, 7]; \
+                   let p = match a.pop() { Some(x) => x, None => -1 }; \
+                   return p * 100 + a.length; }";
+        assert_eq!(run(src).unwrap(), 702); // popped 7, length now 2
+    }
+
+    #[test]
+    fn pop_on_empty_is_none() {
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = [5]; \
+                   let p1 = a.pop(); let p2 = a.pop(); \
+                   return match p2 { Some(x) => x, None => -1 }; }";
+        assert_eq!(run(src).unwrap(), -1);
+    }
+
+    #[test]
+    fn swapremove_moves_last_into_slot() {
+        // [10, 20, 30, 40]; swapRemove(1) returns 20, moves 40 into slot 1.
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = [10, 20, 30, 40]; \
+                   let g = a.swapRemove(1); \
+                   return g * 1000 + a[0] * 100 + a[1] + a.length; }";
+        // g=20 -> 20000; a=[10,40,30]; 10*100=1000; a[1]=40; length=3 -> 21043
+        assert_eq!(run(src).unwrap(), 21043);
+    }
+
+    #[test]
+    fn swapremove_out_of_bounds_traps() {
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2, 3]; \
+                   let g = a.swapRemove(9); return g; }";
+        assert_eq!(run(src).unwrap_err(), "array index 9 out of bounds");
+    }
+
+    #[test]
+    fn index_store_validated_element_traps_at_runtime() {
+        let src = "type Age = Int64 where value >= 18 \
+                   fn main() -> Int64 { let mut a: Array<Age> = [Age(20)]; \
+                   let mut n = 5; a[0] = n; return 0; }";
+        assert_eq!(run(src).unwrap_err(), "validation failed for `Age`");
     }
 }

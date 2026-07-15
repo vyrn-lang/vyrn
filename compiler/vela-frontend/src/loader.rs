@@ -639,6 +639,10 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
             Stmt::Assign { value, line, .. } | Stmt::SetField { value, line, .. } => {
                 expr(value, *line, out)
             }
+            Stmt::IndexSet { index, value, line, .. } => {
+                expr(index, *line, out);
+                expr(value, *line, out)
+            }
             Stmt::Return { value: Some(e), line } => expr(e, *line, out),
             Stmt::Return { value: None, .. } => {}
             Stmt::If { cond, then_block, else_block, line } => {

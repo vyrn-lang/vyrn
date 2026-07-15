@@ -117,6 +117,13 @@ impl MoveCheck<'_> {
                 Ok(())
             }
             Stmt::SetField { value, .. } => self.expr(value, consumed, scope),
+            // `a[i] = v` — the stored value is consumed like a `push` argument
+            // (neither `push` nor the store marks it consumed, since no user
+            // `consume` capability is involved), so just check both sub-exprs.
+            Stmt::IndexSet { index, value, .. } => {
+                self.expr(index, consumed, scope)?;
+                self.expr(value, consumed, scope)
+            }
             Stmt::Return { value, .. } => {
                 if let Some(e) = value {
                     self.expr(e, consumed, scope)?;

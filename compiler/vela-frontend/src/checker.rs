@@ -60,7 +60,7 @@ pub fn check_accum_with_let_types(
         "contains", "startsWith", "endsWith", "bytes", "chars",
         "hexEncode", "hexDecode", "base64Encode", "base64Decode", "urlEncode", "urlDecode",
         "trace", "debug", "info", "warn", "error", "value", "list", "schemaOf", "jsonSchema",
-        "toString",
+        "toString", "pop", "swapRemove",
         "Int", "Int64", "Int32", "Int16", "Int8", "Float", "Float64", "Float32",
         "UInt8", "UInt16", "UInt32", "UInt64",
     ];
@@ -944,6 +944,45 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 self.region_store_guard(name, &fty, scope, *line)?;
+                Ok(false)
+            }
+            // `name[index] = value` — in-place element store (RFC-0011). Same
+            // `mut` rule as `Assign`/`push`; the index coerces to Int64 and the
+            // value coerces into the element type (validated element types are
+            // rejected at compile time here via `prove_coercion`, at runtime via
+            // the coerce the interpreter/codegen emit on store).
+            Stmt::IndexSet { name, index, value, line } => {
+                let b = self.lookup(scope, name).ok_or_else(|| {
+                    format!("line {line}: index-assignment to unknown variable `{name}`")
+                })?;
+                if !b.mutable {
+                    return Err(format!(
+                        "line {line}: cannot store into `{name}` (declared without `mut`)"
+                    ));
+                }
+                let elem = match self.base(&b.ty) {
+                    Type::Array(inner) | Type::ArrayN(inner, _) => (*inner).clone(),
+                    Type::Err => return Ok(false),
+                    other => {
+                        return Err(format!(
+                            "line {line}: `{name}[i] = ..` needs an Array, found {other}"
+                        ))
+                    }
+                };
+                let i = self.base(&self.expr(index, scope, Some(&Type::Int), Some(ret))?);
+                if !matches!(i, Type::Int | Type::Err) {
+                    return Err(format!(
+                        "line {line}: array index must be an Int64, found {i}"
+                    ));
+                }
+                let vty = self.expr(value, scope, Some(&elem), Some(ret))?;
+                if !self.coercible(&vty, &elem) {
+                    return Err(format!(
+                        "line {line}: `{name}` holds {elem} but the stored value is {vty}"
+                    ));
+                }
+                self.prove_coercion(value, &elem, *line)?;
+                self.region_store_guard(name, &elem, scope, *line)?;
                 Ok(false)
             }
             Stmt::Return { value, line } => {
@@ -2193,6 +2232,40 @@ impl<'a> Checker<'a> {
             }
             return Ok(Type::Unit);
         }
+        // `a.pop()` (RFC-0011) — remove and return the last element as
+        // `Option<T>`. Method-only (`@pop`); the receiver must be a `mut`
+        // `Array<T>` binding. A fixed-size `Array<T, N>` cannot shrink, so it is
+        // rejected with a message naming `Array<T>`.
+        if name == "@pop" {
+            if args.len() != 1 {
+                return Err(format!("line {line}: `pop` takes no arguments"));
+            }
+            let elem = self.mut_array_receiver(&args[0], scope, line, "pop")?;
+            return Ok(match elem {
+                Type::Err => Type::Err,
+                t => Type::Option(Box::new(t)),
+            });
+        }
+        // `a.swapRemove(i)` (RFC-0011) — O(1) unordered remove: move the last
+        // element into slot `i`, shrink by one, return the old element `i`.
+        // Traps out-of-bounds (same wording as reads). Same `mut`/`Array<T>`
+        // rules as `pop`.
+        if name == "@swapRemove" {
+            if args.len() != 2 {
+                return Err(format!(
+                    "line {line}: `swapRemove` takes 1 argument (an index), got {}",
+                    args.len() - 1
+                ));
+            }
+            let elem = self.mut_array_receiver(&args[0], scope, line, "swapRemove")?;
+            let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
+            if !matches!(i, Type::Int | Type::Err) {
+                return Err(format!(
+                    "line {line}: `swapRemove` index must be an Int64, found {i}"
+                ));
+            }
+            return Ok(elem);
+        }
         // Numeric conversion: `Int32(x)`, `Float64(x)`, etc. — resize/round a
         // number to the named numeric type. No implicit conversions elsewhere.
         if let Some(target) = crate::types::numeric_conv_target(name) {
@@ -2697,6 +2770,43 @@ impl<'a> Checker<'a> {
         }
         None
     }
+
+    /// The element type of the array a `pop`/`swapRemove` receiver names, after
+    /// checking it is a plain `mut` `Array<T>` binding (RFC-0011). A fixed-size
+    /// `Array<T, N>` cannot shrink, so it is rejected with a message naming
+    /// `Array<T>`. Returns `Type::Err` (already reported upstream) transparently.
+    fn mut_array_receiver(
+        &self,
+        recv: &Expr,
+        scope: &Vec<HashMap<String, Binding>>,
+        line: usize,
+        op: &str,
+    ) -> Result<Type, String> {
+        let Expr::Var { name, .. } = recv else {
+            return Err(format!(
+                "line {line}: `{op}` needs a plain array variable as its receiver"
+            ));
+        };
+        let b = self
+            .lookup(scope, name)
+            .ok_or_else(|| format!("line {line}: `{op}` on unknown variable `{name}`"))?;
+        if !b.mutable {
+            return Err(format!(
+                "line {line}: cannot `{op}` from `{name}` (declared without `mut`)"
+            ));
+        }
+        match self.base(&b.ty) {
+            Type::Array(inner) => Ok((*inner).clone()),
+            Type::Err => Ok(Type::Err),
+            Type::ArrayN(..) => Err(format!(
+                "line {line}: `{op}` is not available on a fixed-size array \
+                 (it cannot shrink); use a growable `Array<T>`"
+            )),
+            other => Err(format!(
+                "line {line}: `{op}` needs an `Array<T>`, found {other}"
+            )),
+        }
+    }
 }
 
 /// A terse one-line rendering of a predicate for diagnostics.
@@ -2856,6 +2966,10 @@ fn calls_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
         Stmt::ForIn { iter, body, .. } => {
             calls_expr(iter, out);
             calls_block(body, out);
+        }
+        Stmt::IndexSet { index, value, .. } => {
+            calls_expr(index, out);
+            calls_expr(value, out);
         }
         Stmt::Region { body, .. } => calls_block(body, out),
         Stmt::Drop { .. } => {}
@@ -3091,6 +3205,91 @@ mod tests {
     fn rejects_array_without_element_annotation() {
         let e = check_src("fn main() -> Int64 { let a = array(); return 0; }").unwrap_err();
         assert!(e.contains("cannot infer the element type"), "{e}");
+    }
+
+    // ---- in-place array mutation (RFC-0011) -----------------------------
+
+    #[test]
+    fn accepts_index_store_pop_swapremove() {
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = [10, 20, 30]; \
+                   a[1] = 25; let g = a.swapRemove(0); let p = a.pop(); \
+                   return a.length + g; }";
+        assert!(check_src(src).is_ok());
+    }
+
+    #[test]
+    fn index_store_requires_mut() {
+        let e = check_src("fn main() -> Int64 { let a: Array<Int64> = [1, 2]; a[0] = 9; return 0; }")
+            .unwrap_err();
+        assert!(e.contains("without `mut`"), "{e}");
+    }
+
+    #[test]
+    fn pop_requires_mut() {
+        let e = check_src("fn main() -> Int64 { let a: Array<Int64> = [1, 2]; let p = a.pop(); return 0; }")
+            .unwrap_err();
+        assert!(e.contains("without `mut`"), "{e}");
+    }
+
+    #[test]
+    fn index_store_rejects_wrong_element_type() {
+        let e = check_src("fn main() -> Int64 { let mut a: Array<Int64> = [1, 2]; a[0] = \"x\"; return 0; }")
+            .unwrap_err();
+        assert!(e.contains("holds Int64"), "{e}");
+    }
+
+    #[test]
+    fn index_store_rejects_non_int_index() {
+        let e = check_src("fn main() -> Int64 { let mut a: Array<Int64> = [1, 2]; a[\"i\"] = 9; return 0; }")
+            .unwrap_err();
+        assert!(e.contains("index must be an Int64"), "{e}");
+    }
+
+    #[test]
+    fn arrayn_allows_store_rejects_pop() {
+        // A fixed-size array can store in place but cannot shrink.
+        assert!(check_src(
+            "fn main() -> Int64 { let mut a: Array<Int64, 3> = [1, 2, 3]; a[0] = 9; return a[0]; }"
+        )
+        .is_ok());
+        let e = check_src(
+            "fn main() -> Int64 { let mut a: Array<Int64, 3> = [1, 2, 3]; let p = a.pop(); return 0; }",
+        )
+        .unwrap_err();
+        assert!(e.contains("fixed-size array"), "{e}");
+        let e = check_src(
+            "fn main() -> Int64 { let mut a: Array<Int64, 3> = [1, 2, 3]; let g = a.swapRemove(0); return g; }",
+        )
+        .unwrap_err();
+        assert!(e.contains("fixed-size array"), "{e}");
+    }
+
+    #[test]
+    fn index_store_validated_element_rejected_at_compile_time() {
+        // A provably-constant value that violates the element predicate is a
+        // compile-time error (routes through `prove_coercion` for free).
+        let src = "type Age = Int64 where value >= 18 \
+                   fn main() -> Int64 { let mut a: Array<Age> = [Age(20)]; a[0] = 5; return 0; }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("does not satisfy `Age`"), "{e}");
+    }
+
+    #[test]
+    fn pop_yields_option_swapremove_yields_element() {
+        // `pop()` is `Option<T>` (must be unwrapped); `swapRemove` is `T`.
+        let src = "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2, 3]; \
+                   let g: Int64 = a.swapRemove(0); \
+                   let p: Int64 = match a.pop() { Some(x) => x, None => 0 }; \
+                   return g + p; }";
+        assert!(check_src(src).is_ok());
+    }
+
+    #[test]
+    fn free_pop_is_not_callable() {
+        // `pop`/`swapRemove` are method-only; a free `pop(a)` is not a builtin.
+        let e = check_src("fn main() -> Int64 { let mut a: Array<Int64> = [1]; let p = pop(a); return 0; }")
+            .unwrap_err();
+        assert!(e.contains("pop"), "{e}");
     }
 
     // ---- region / arena -------------------------------------------------

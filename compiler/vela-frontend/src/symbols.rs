@@ -1280,6 +1280,8 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "at", detail: "at(array, index) -> T — read an element by index" },
     BuiltinMethod { name: "alen", detail: "alen(array) -> Int64 — element count" },
     BuiltinMethod { name: "afree", detail: "afree(array) -> Unit — free a growable array" },
+    BuiltinMethod { name: "pop", detail: "array.pop() -> Option<T> — remove and return the last element (None if empty)" },
+    BuiltinMethod { name: "swapRemove", detail: "array.swapRemove(index) -> T — O(1) unordered remove: move the last element into the slot" },
     BuiltinMethod { name: "get", detail: "get(ref) -> T — read through a generational reference" },
     BuiltinMethod { name: "set", detail: "set(ref, value) -> Unit — write through a generational reference" },
     BuiltinMethod { name: "release", detail: "release(ref) -> Unit — release a generational reference" },
@@ -1305,7 +1307,21 @@ fn builtin_method(name: &str) -> Option<&'static BuiltinMethod> {
 fn builtin_methods_for(ty: &Type) -> Vec<BuiltinMethod> {
     let by_name = |n: &str| ALL_BUILTIN_METHODS.iter().find(|b| b.name == n).copied();
     match ty {
-        Type::Array(_) | Type::ArrayN(..) => vec![by_name("push"), by_name("at"), by_name("alen"), by_name("afree")]
+        // A growable `Array<T>` offers the full mutation surface, including the
+        // shrinking ops `pop`/`swapRemove` (RFC-0011).
+        Type::Array(_) => vec![
+            by_name("push"),
+            by_name("at"),
+            by_name("alen"),
+            by_name("afree"),
+            by_name("pop"),
+            by_name("swapRemove"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        // A fixed-size `Array<T, N>` cannot shrink — no `pop`/`swapRemove`.
+        Type::ArrayN(..) => vec![by_name("push"), by_name("at"), by_name("alen"), by_name("afree")]
             .into_iter()
             .flatten()
             .collect(),
