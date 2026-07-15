@@ -9,6 +9,8 @@ target/
 
 # Editor / tooling
 editor/**/node_modules/
+# Bundled LSP server binary (copied from vela-lsp/target by npm run package)
+editor/vscode/server/
 *.vsix
 
 # OS noise
