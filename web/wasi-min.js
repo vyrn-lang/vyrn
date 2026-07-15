@@ -8,24 +8,36 @@
 // instantiate error names the missing function.
 //
 // Usage:
-//   const { exitCode, stdout, stderr } = await runVela(bytes, {
+//   const { exitCode, stdout, stderr, exports } = await runVela(bytes, {
 //     onStdout: line => ..., onStderr: line => ...,   // optional, per-chunk
-//     extern: {                                        // optional (RFC-0012)
+//     extern: {                                        // optional (RFC-0012 M1)
 //       jsLog: (msg) => console.log(msg),              //   String param decoded
 //       jsNow: () => Date.now() / 1000,                //   Float64 return
 //       jsAdd: (a, b) => a + b,                        //   Int64 -> BigInt args
 //     },
-//   });
+//     exportReturns: { greet: "string" },              // optional (M2): name an
+//   });                                                //   i32 result's real type
+//
+// After _start runs `main` once, `exports` holds a wrapper per `export extern
+// fn` (RFC-0012 M2): pass a JS string for a String param, get a decoded string
+// back for a String return. `exportReturns` disambiguates an `i32` result
+// (String / Bool / Int32 share the wasm type) — "string" or "bool", else number.
 
 const ERRNO_SUCCESS = 0;
 const ERRNO_BADF = 8;
 const ERRNO_SPIPE = 29; // stdout/stderr are not seekable
 
-// --- minimal wasm reader: enough to recover the signatures of the module's
-// `vela.*` imports so the extern glue (RFC-0012) can decode/encode arguments.
-// The JS WebAssembly API exposes import module/name but not their types, so we
-// read the type + import sections ourselves (same shape the codegen emits).
-function readModuleImports(bytes) {
+// --- minimal wasm reader: recover the signatures of the module's `vela.*`
+// imports (so the extern-import glue can decode/encode arguments, RFC-0012 M1)
+// AND of its exported functions (so the export glue can wrap them, M2). The JS
+// WebAssembly API exposes names but not types, so we read the type, import,
+// function, and export sections ourselves (the same shape the codegen emits).
+//
+// Function index space: imported functions occupy the first indices (in import
+// order), then the module's own defined functions (in function-section order).
+// An export names a function by that combined index; we map it back through the
+// function section to a type index to recover the signature.
+function readModule(bytes) {
   const b = new Uint8Array(bytes);
   let i = 8; // skip magic + version
   const VT = { 0x7f: "i32", 0x7e: "i64", 0x7d: "f32", 0x7c: "f64" };
@@ -46,6 +58,9 @@ function readModuleImports(bytes) {
   };
   const types = [];
   const imports = [];
+  const funcSec = []; // type index of each DEFINED function, in order
+  const rawExports = []; // { field, kind, index }
+  let importedFuncs = 0;
   while (i < b.length) {
     const id = b[i++];
     const len = uleb();
@@ -71,6 +86,7 @@ function readModuleImports(bytes) {
         if (kind === 0) {
           const ti = uleb();
           imports.push({ module: mod, field: fld, type: types[ti] });
+          importedFuncs++;
         } else if (kind === 1) {
           i++; const lim = b[i++]; uleb(); if (lim === 1) uleb();
         } else if (kind === 2) {
@@ -79,10 +95,30 @@ function readModuleImports(bytes) {
           i += 2;
         }
       }
+    } else if (id === 3) {
+      const c = uleb();
+      for (let f = 0; f < c; f++) funcSec.push(uleb());
+    } else if (id === 7) {
+      const c = uleb();
+      for (let e = 0; e < c; e++) {
+        const fld = name();
+        const kind = b[i++];
+        const index = uleb();
+        rawExports.push({ field: fld, kind, index });
+      }
     }
     i = end;
   }
-  return imports;
+  // Resolve each function export (kind 0) to its signature via the function
+  // section; non-function exports (memory, globals) carry no `type`.
+  const exports = rawExports.map((e) => {
+    if (e.kind === 0 && e.index >= importedFuncs) {
+      const ti = funcSec[e.index - importedFuncs];
+      return { ...e, type: types[ti] };
+    }
+    return e;
+  });
+  return { imports, exports };
 }
 
 /** Thrown by proc_exit to unwind out of _start; carries the exit code. */
@@ -160,7 +196,8 @@ export async function runVela(wasmBytes, hooks = {}) {
   // adjacent pair would collide — none of the v1 externs use that; documented
   // in web/README.md.)
   const externHooks = hooks.extern || {};
-  const wanted = readModuleImports(wasmBytes).filter((im) => im.module === "vela");
+  const mod = readModule(wasmBytes);
+  const wanted = mod.imports.filter((im) => im.module === "vela");
   const vela = {};
   for (const im of wanted) {
     const fn = externHooks[im.field];
@@ -205,6 +242,84 @@ export async function runVela(wasmBytes, hooks = {}) {
   });
   memory = instance.exports.memory;
 
+  // --- string helpers over linear memory (RFC-0012 M2 export ABI) ------------
+  // A String crosses into an exported Vela function as a single pointer: the JS
+  // side allocates `len + 1` bytes via the module's own `__vela_malloc`, copies
+  // UTF-8, and writes a NUL terminator (a Vela String is a NUL-terminated ptr).
+  // This is the asymmetry vs. an IMPORT (M1), where a String is a (ptr, len)
+  // pair — an import can't allocate inside the module, but an exported call can.
+  const enc = new TextEncoder();
+  const encodeString = (s) => {
+    const bytes = enc.encode(s);
+    if (typeof instance.exports.__vela_malloc !== "function") {
+      throw new Error(
+        "a String argument needs the module's allocator, but `__vela_malloc` is " +
+          "not exported. Rebuild: velac exports it whenever an `export extern fn` " +
+          "takes a String parameter."
+      );
+    }
+    const ptr = Number(instance.exports.__vela_malloc(BigInt(bytes.length + 1)));
+    const view = new Uint8Array(memory.buffer);
+    view.set(bytes, ptr);
+    view[ptr + bytes.length] = 0; // NUL
+    return ptr;
+  };
+  // Decode a returned String pointer: scan linear memory for the NUL byte.
+  const decodeCString = (ptr) => {
+    const p = Number(ptr) >>> 0;
+    const view = new Uint8Array(memory.buffer);
+    let e = p;
+    while (view[e] !== 0) e++;
+    return new TextDecoder().decode(view.subarray(p, e));
+  };
+
+  // --- wrap exported-extern functions (RFC-0012 M2) --------------------------
+  // For each `export extern fn`, expose a pre-wrapped callable on the returned
+  // `exports`. Argument encoding is by the ARG's JS type (the wasm export ABI is
+  // lossy: String / Bool / Int32 all lower to `i32`, so an i32 slot is decided
+  // at the call by the value passed — a JS string is allocated + copied, a
+  // boolean becomes 0/1, a number stays an i32; an i64 slot takes a BigInt).
+  // A result is likewise ambiguous for `i32`; `hooks.exportReturns[name]` may
+  // name it `"string"` (NUL-decoded) or `"bool"`, else an i32 result is a
+  // number. `i64` results are BigInt, floats are numbers. See web/README.md.
+  const returnHints = hooks.exportReturns || {};
+  const RESERVED = new Set(["memory", "_start", "__vela_malloc"]);
+  const wrappedExports = {};
+  for (const ex of mod.exports) {
+    if (ex.kind !== 0 || !ex.type) continue; // functions only
+    if (RESERVED.has(ex.field) || ex.field.startsWith("__")) continue;
+    const params = ex.type.params;
+    const result = ex.type.results[0];
+    const hint = returnHints[ex.field];
+    const raw = instance.exports[ex.field];
+    if (typeof raw !== "function") continue;
+    wrappedExports[ex.field] = (...jsArgs) => {
+      const call = [];
+      for (let k = 0; k < params.length; k++) {
+        const t = params[k];
+        const a = jsArgs[k];
+        if (t === "i64") {
+          call.push(typeof a === "bigint" ? a : BigInt(Math.trunc(Number(a))));
+        } else if (t === "i32") {
+          if (typeof a === "string") call.push(encodeString(a));
+          else if (typeof a === "boolean") call.push(a ? 1 : 0);
+          else call.push(Number(a) | 0);
+        } else {
+          call.push(Number(a)); // f32 / f64
+        }
+      }
+      const r = raw(...call);
+      if (result === undefined) return undefined; // Unit
+      if (result === "i64") return r; // BigInt
+      if (result === "i32") {
+        if (hint === "string") return decodeCString(r);
+        if (hint === "bool") return r !== 0;
+        return r;
+      }
+      return r; // f32 / f64 — number
+    };
+  }
+
   let exitCode = 0;
   try {
     instance.exports._start();
@@ -215,5 +330,7 @@ export async function runVela(wasmBytes, hooks = {}) {
       throw e; // a genuine trap (unreachable, OOB) — surface it
     }
   }
-  return { exitCode, stdout, stderr };
+  // `exports`: the exported-extern functions, callable AFTER `_start` ran `main`
+  // once — the instance stays alive (RFC-0012 M2 post-`_start` callability).
+  return { exitCode, stdout, stderr, exports: wrappedExports };
 }

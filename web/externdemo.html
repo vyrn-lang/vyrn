@@ -63,6 +63,39 @@
 <div class="label">program stderr</div>
 <pre id="stderr" style="color: var(--err)"></pre>
 
+<hr style="margin: 2.5rem 0; border: none; border-top: 1px solid var(--card);">
+
+<h1>Vela → JS exports (M2)</h1>
+<p class="sub">
+  <code>examples/externdemo2.vela</code> declares two <code>export extern fn</code>s
+  — a Vela function is a normal, fully-checked function that is <em>additionally</em>
+  exported to JS on the wasm target. After <code>_start</code> runs
+  <code>main</code> once, this page calls them on the live module instance:
+  <code>velaAdd(Int64, Int64) -> Int64</code> (BigInts round-trip) and
+  <code>greet(String) -> String</code> (a string crosses <em>into</em> Vela — the
+  page allocates the buffer via the module's <code>__vela_malloc</code>, copies
+  UTF-8 + a NUL — and a built string comes back, NUL-decoded from linear memory).
+</p>
+
+<div class="row">
+  <button class="primary" id="load2">Load externdemo2.wasm</button>
+  <span id="status2"></span>
+</div>
+<div class="label">program stdout (from main, on load)</div>
+<pre id="stdout2"></pre>
+
+<div class="row" id="callrow" style="display:none">
+  <label>velaAdd(<input id="addA" type="number" value="40" style="width:4rem">,
+  <input id="addB" type="number" value="2" style="width:4rem">)</label>
+  <button id="callAdd">call</button>
+  <span id="addOut" class="ok"></span>
+</div>
+<div class="row" id="greetrow" style="display:none">
+  <label>greet(<input id="greetName" type="text" value="world" style="width:9rem">)</label>
+  <button id="callGreet">call</button>
+  <span id="greetOut" class="ok"></span>
+</div>
+
 <script type="module">
 import { runVela } from "./wasi-min.js";
 
@@ -114,6 +147,54 @@ document.getElementById("run").addEventListener("click", async () => {
     status.textContent = "trap";
     err.textContent += `\n${e}`;
   }
+});
+
+// --- M2: exports. Run the module once (main), then call its exports live. -----
+const status2 = document.getElementById("status2");
+const out2 = document.getElementById("stdout2");
+let velaExports = null;
+
+document.getElementById("load2").addEventListener("click", async () => {
+  out2.textContent = "";
+  status2.textContent = "loading…";
+  try {
+    const resp = await fetch("./externdemo2.wasm");
+    if (!resp.ok) {
+      status2.textContent = "externdemo2.wasm not built — run web/build.ps1 first";
+      return;
+    }
+    const bytes = await resp.arrayBuffer();
+    // `greet` returns a String — an i32 result is ambiguous in wasm, so name it.
+    const r = await runVela(bytes, {
+      exportReturns: { greet: "string" },
+      onStdout: (s) => (out2.textContent += s),
+    });
+    velaExports = r.exports;
+    status2.innerHTML =
+      `<span class="ok">exit ${r.exitCode}</span> · exports: ${Object.keys(velaExports).join(", ")}`;
+    document.getElementById("callrow").style.display = "flex";
+    document.getElementById("greetrow").style.display = "flex";
+  } catch (e) {
+    status2.textContent = "trap";
+    out2.textContent += `\n${e}`;
+  }
+});
+
+document.getElementById("callAdd").addEventListener("click", () => {
+  if (!velaExports) return;
+  const a = Number(document.getElementById("addA").value);
+  const b = Number(document.getElementById("addB").value);
+  // Int64 args cross as BigInt; the result is a BigInt too.
+  const r = velaExports.velaAdd(a, b);
+  document.getElementById("addOut").textContent = `= ${r}  (BigInt: ${typeof r === "bigint"})`;
+});
+
+document.getElementById("callGreet").addEventListener("click", () => {
+  if (!velaExports) return;
+  const name = document.getElementById("greetName").value;
+  // A JS string in, a decoded Vela-built string back.
+  const r = velaExports.greet(name);
+  document.getElementById("greetOut").textContent = JSON.stringify(r);
 });
 </script>
 </body>
