@@ -8,6 +8,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use crate::ast::*;
 use crate::consteval::{self, ConstVal};
@@ -152,6 +153,11 @@ pub fn check_accum_with_let_types(
     // A monotone fixpoint over the call graph (starts optimistic, shrinks).
     let fn_names: std::collections::HashSet<String> =
         program.functions.iter().map(|f| f.name.clone()).collect();
+    // Module-state bindings (RFC-0013). A function that reads OR writes any
+    // global is not spawn-safe (module state is shared by definition), and the
+    // fixpoint below spreads that transitively to every caller.
+    let global_names: std::collections::HashSet<String> =
+        program.globals.iter().map(|g| g.name.clone()).collect();
     // A protocol-method call site (`n.burp()`) collects the *surface* name, but
     // impl bodies live under mangled names (`Noise__Int__burp`). Expand each
     // surface method name to every registered impl so those call-graph edges
@@ -191,6 +197,7 @@ pub fn check_accum_with_let_types(
                 && no_modify
                 && !calls.iter().any(|c| SPAWN_FORBIDDEN.contains(&c.as_str()))
                 && !contains_drop(&f.body)
+                && !touches_globals(f, &global_names)
         })
         .map(|f| f.name.clone())
         .collect();
@@ -262,7 +269,14 @@ pub fn check_accum_with_let_types(
         region_floor: RefCell::new(Vec::new()),
         let_types: RefCell::new(HashMap::new()),
         errors: RefCell::new(Vec::new()),
+        globals: RefCell::new(HashMap::new()),
     };
+
+    // 2b. Module state (RFC-0013): check each initializer in declaration order,
+    //     record the binding's type, and register it so functions see it. Errors
+    //     accumulate; a failed global still binds (as `Err`) so bodies referring
+    //     to it don't cascade "unknown variable".
+    checker.check_globals(program, &mut out);
 
     // 3. Validate each type decl (base kind, referenced-type existence, predicate).
     for t in &program.type_decls {
@@ -397,6 +411,11 @@ struct Checker<'a> {
     /// A failed `let`/`for` binds its name to [`Type::Err`] so later uses don't
     /// cascade "unknown variable".
     errors: RefCell<Vec<String>>,
+    /// Module-state bindings (RFC-0013): name -> (type, mutable). Populated once
+    /// (in declaration order) before any function is checked; every function's
+    /// scope stack bottoms out on these as an outermost frame below its params.
+    /// The declared type is the annotation, or the initializer's inferred type.
+    globals: RefCell<HashMap<String, Binding>>,
 }
 
 /// What an enum variant name resolves to.
@@ -803,15 +822,83 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Check every module-state binding (RFC-0013) in declaration order and
+    /// record its type in `self.globals`. Each initializer is checked in a scope
+    /// containing only the *earlier* globals (so a later-global read is rejected)
+    /// and may not call user or extern functions. A failed global still binds (as
+    /// `Type::Err`) so function bodies referring to it don't cascade.
+    fn check_globals(&self, program: &Program, out: &mut Vec<Diagnostic>) {
+        // Names whose call is forbidden in an initializer: every user/extern
+        // function and every protocol method. Builtins (`print`, `cell`, `str`,
+        // …), constructors (`Some`, enum variants, `Age(n)`) are not in this set.
+        let mut forbidden: HashSet<String> =
+            program.functions.iter().map(|f| f.name.clone()).collect();
+        for p in &program.protocols {
+            for m in &p.methods {
+                forbidden.insert(m.name.clone());
+            }
+        }
+        let all_globals: HashSet<&str> =
+            program.globals.iter().map(|g| g.name.as_str()).collect();
+        // Ready-so-far names (the earlier globals) grow as we go.
+        let mut ready: HashSet<String> = HashSet::new();
+        for g in &program.globals {
+            let bty = (|| -> Result<Type, String> {
+                // Initializer restrictions (walked before typing so the messages
+                // are precise): no user/extern call, no later-global read.
+                init_restrictions(&g.init, &forbidden, &all_globals, &ready, &g.name, g.line)?;
+                if let Some(declared) = &g.ty {
+                    self.ensure_type_exists(declared, g.line)?;
+                }
+                // Type-check the initializer against the annotation, seeing only
+                // the earlier globals.
+                let scope: Vec<HashMap<String, Binding>> =
+                    vec![self.globals.borrow().clone()];
+                let vty = self.expr(&g.init, &scope, g.ty.as_ref(), None)?;
+                if self.base(&vty) == Type::Unit {
+                    return Err(format!(
+                        "line {}: cannot bind module state `{}` to a Unit value",
+                        g.line, g.name
+                    ));
+                }
+                if let Some(declared) = &g.ty {
+                    if !self.coercible(&vty, declared) {
+                        return Err(format!(
+                            "line {}: `{}` declared {declared} but initializer is {vty}",
+                            g.line, g.name
+                        ));
+                    }
+                    self.prove_coercion(&g.init, declared, g.line)?;
+                }
+                Ok(g.ty.clone().unwrap_or(vty))
+            })();
+            let binding = match bty {
+                Ok(t) => Binding { ty: t, mutable: g.mutable },
+                Err(s) => {
+                    let mut d = Diagnostic::from_rendered(s, "check");
+                    d.file = g.module.clone();
+                    out.push(d);
+                    Binding { ty: Type::Err, mutable: g.mutable }
+                }
+            };
+            self.globals.borrow_mut().insert(g.name.clone(), binding);
+            ready.insert(g.name.clone());
+        }
+    }
+
     fn function(&self, f: &Function) -> Result<(), String> {
         *self.cur_bounds.borrow_mut() = f.type_bounds.clone();
         self.errors.borrow_mut().clear();
-        let mut scope: Vec<HashMap<String, Binding>> = vec![HashMap::new()];
+        // Frame 0 is the module-state bindings (RFC-0013) — the outermost scope,
+        // below the parameters; a local (param/let/for) with the same name
+        // shadows a global, since `lookup` walks frames from the top.
+        let mut scope: Vec<HashMap<String, Binding>> = vec![self.globals.borrow().clone()];
+        scope.push(HashMap::new());
         for p in &f.params {
             // A `modify` parameter is mutable inside the body (that is the point);
             // others are read-only bindings.
             let mutable = p.capability == Capability::Modify;
-            scope[0].insert(p.name.clone(), Binding { ty: p.ty.clone(), mutable });
+            scope.last_mut().unwrap().insert(p.name.clone(), Binding { ty: p.ty.clone(), mutable });
         }
         // `block` no longer propagates the first error via `?`; it pushes each
         // statement's error to the `errors` sink and continues, so every
@@ -1118,6 +1205,14 @@ impl<'a> Checker<'a> {
                 // `drop name;` reclaims a heap value. The binding must exist and
                 // hold something that owns heap memory. (Use-after-drop is caught
                 // separately by move checking, which treats this as a consume.)
+                // Module state (RFC-0013) is never dropped — it has module
+                // lifetime and is reclaimed only at process exit.
+                if self.resolves_to_global(scope, name) {
+                    return Err(format!(
+                        "line {line}: cannot `drop` module state `{name}` — it lives for the \
+                         whole module and is reclaimed at process exit"
+                    ));
+                }
                 let b = self
                     .lookup(scope, name)
                     .ok_or_else(|| format!("line {line}: `drop` of unbound variable `{name}`"))?;
@@ -2827,6 +2922,18 @@ impl<'a> Checker<'a> {
         None
     }
 
+    /// Whether `name` resolves to a module-state binding (frame 0) rather than a
+    /// local: the topmost frame that binds it is the globals frame. A local of
+    /// the same name (any higher frame) shadows it, so this returns `false` then.
+    fn resolves_to_global(&self, scope: &Vec<HashMap<String, Binding>>, name: &str) -> bool {
+        for (i, frame) in scope.iter().enumerate().rev() {
+            if frame.contains_key(name) {
+                return i == 0;
+            }
+        }
+        false
+    }
+
     /// The element type of the array a `pop`/`swapRemove` receiver names, after
     /// checking it is a plain `mut` `Array<T>` binding (RFC-0011). A fixed-size
     /// `Array<T, N>` cannot shrink, so it is rejected with a message naming
@@ -2998,6 +3105,192 @@ fn contains_drop(b: &Block) -> bool {
         }
         _ => false,
     })
+}
+
+/// Whether a function reads or writes any module-state binding (RFC-0013), so it
+/// cannot be spawned. A local (param / `let` / `for`-var) with the same name
+/// shadows the global and does not count. Slightly conservative: a name both
+/// shadowed and used as a global in disjoint scopes is treated as a touch.
+fn touches_globals(f: &Function, globals: &std::collections::HashSet<String>) -> bool {
+    if globals.is_empty() {
+        return false;
+    }
+    let mut local: std::collections::HashSet<String> =
+        f.params.iter().map(|p| p.name.clone()).collect();
+    collect_binders_block(&f.body, &mut local);
+    global_ref_block(&f.body, globals, &local)
+}
+
+/// Collect every name a block binds locally (`let`, `for`-in variable). Params
+/// are seeded by the caller.
+fn collect_binders_block(b: &Block, out: &mut std::collections::HashSet<String>) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let { name, .. } => {
+                out.insert(name.clone());
+            }
+            Stmt::ForIn { var, body, .. } => {
+                out.insert(var.clone());
+                collect_binders_block(body, out);
+            }
+            Stmt::If { then_block, else_block, .. } => {
+                collect_binders_block(then_block, out);
+                if let Some(eb) = else_block {
+                    collect_binders_block(eb, out);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::Region { body, .. } => {
+                collect_binders_block(body, out)
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether a block references a global (reads it via `Var`, or writes it via
+/// `Assign`/`SetField`/`IndexSet`) that no local of the same name shadows.
+fn global_ref_block(
+    b: &Block,
+    globals: &std::collections::HashSet<String>,
+    local: &std::collections::HashSet<String>,
+) -> bool {
+    let is_global = |n: &str| globals.contains(n) && !local.contains(n);
+    b.stmts.iter().any(|s| match s {
+        Stmt::Let { value, .. } | Stmt::Expr(value) => global_ref_expr(value, globals, local),
+        Stmt::Assign { name, value, .. }
+        | Stmt::SetField { name, value, .. } => {
+            is_global(name) || global_ref_expr(value, globals, local)
+        }
+        Stmt::IndexSet { name, index, value, .. } => {
+            is_global(name)
+                || global_ref_expr(index, globals, local)
+                || global_ref_expr(value, globals, local)
+        }
+        Stmt::Return { value: Some(e), .. } => global_ref_expr(e, globals, local),
+        Stmt::Return { value: None, .. } => false,
+        Stmt::If { cond, then_block, else_block, .. } => {
+            global_ref_expr(cond, globals, local)
+                || global_ref_block(then_block, globals, local)
+                || else_block.as_ref().is_some_and(|eb| global_ref_block(eb, globals, local))
+        }
+        Stmt::While { cond, body, .. } => {
+            global_ref_expr(cond, globals, local) || global_ref_block(body, globals, local)
+        }
+        Stmt::ForIn { iter, body, .. } => {
+            global_ref_expr(iter, globals, local) || global_ref_block(body, globals, local)
+        }
+        Stmt::Drop { name, .. } => is_global(name),
+        Stmt::Region { body, .. } => global_ref_block(body, globals, local),
+    })
+}
+
+fn global_ref_expr(
+    e: &Expr,
+    globals: &std::collections::HashSet<String>,
+    local: &std::collections::HashSet<String>,
+) -> bool {
+    let is_global = |n: &str| globals.contains(n) && !local.contains(n);
+    match e {
+        Expr::Var { name, .. } => is_global(name),
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => false,
+        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
+            global_ref_expr(expr, globals, local)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            global_ref_expr(lhs, globals, local) || global_ref_expr(rhs, globals, local)
+        }
+        Expr::Call { args, .. } | Expr::Spawn { args, .. } | Expr::TryConstruct { args, .. } => {
+            args.iter().any(|a| global_ref_expr(a, globals, local))
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            global_ref_expr(scrutinee, globals, local)
+                || arms.iter().any(|a| global_ref_expr(&a.body, globals, local))
+        }
+        Expr::StructLit { fields, .. } => {
+            fields.iter().any(|(_, v)| global_ref_expr(v, globals, local))
+        }
+        Expr::ArrayLit { elems, .. } => elems.iter().any(|v| global_ref_expr(v, globals, local)),
+    }
+}
+
+/// Enforce a module-state initializer's restrictions (RFC-0013): it may not call
+/// a user or extern function (or protocol method), and may not read a global
+/// that is declared later (or itself). Returns the first violation.
+fn init_restrictions(
+    e: &Expr,
+    forbidden: &HashSet<String>,
+    all_globals: &HashSet<&str>,
+    ready: &HashSet<String>,
+    own_name: &str,
+    line: usize,
+) -> Result<(), String> {
+    match e {
+        Expr::Var { name, .. } => {
+            if all_globals.contains(name.as_str()) && !ready.contains(name) {
+                if name == own_name {
+                    return Err(format!(
+                        "line {line}: module state `{own_name}` may not read itself in its \
+                         own initializer"
+                    ));
+                }
+                return Err(format!(
+                    "line {line}: initializer of `{own_name}` reads `{name}`, a module-state \
+                     binding declared later — a global may only read earlier ones"
+                ));
+            }
+            Ok(())
+        }
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
+        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
+            init_restrictions(expr, forbidden, all_globals, ready, own_name, line)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            init_restrictions(lhs, forbidden, all_globals, ready, own_name, line)?;
+            init_restrictions(rhs, forbidden, all_globals, ready, own_name, line)
+        }
+        Expr::Call { name, args, .. } => {
+            if forbidden.contains(name) {
+                return Err(format!(
+                    "line {line}: initializer of `{own_name}` may not call `{name}` — a \
+                     module-state initializer runs before `main`, so it may use only \
+                     literals, operators, and built-ins (no user or extern calls)"
+                ));
+            }
+            for a in args {
+                init_restrictions(a, forbidden, all_globals, ready, own_name, line)?;
+            }
+            Ok(())
+        }
+        Expr::Spawn { name, .. } => Err(format!(
+            "line {line}: initializer of `{own_name}` may not `spawn {name}` — a \
+             module-state initializer runs before `main` (no user calls)"
+        )),
+        Expr::TryConstruct { args, .. } => {
+            for a in args {
+                init_restrictions(a, forbidden, all_globals, ready, own_name, line)?;
+            }
+            Ok(())
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            init_restrictions(scrutinee, forbidden, all_globals, ready, own_name, line)?;
+            for a in &arms.iter().map(|a| &a.body).collect::<Vec<_>>() {
+                init_restrictions(a, forbidden, all_globals, ready, own_name, line)?;
+            }
+            Ok(())
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields {
+                init_restrictions(v, forbidden, all_globals, ready, own_name, line)?;
+            }
+            Ok(())
+        }
+        Expr::ArrayLit { elems, .. } => {
+            for v in elems {
+                init_restrictions(v, forbidden, all_globals, ready, own_name, line)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// The names of every function/builtin called (or spawned) anywhere in a block.
@@ -4337,5 +4630,141 @@ mod tests {
         let bad = "fn f(s: String) -> Bool { return s =~ \"[z-a]\"; } \
                    fn main() -> Int64 { return 0; }";
         assert!(check_src(bad).unwrap_err().contains("invalid regex"));
+    }
+
+    // ---- module state (RFC-0013) ---------------------------------------
+
+    #[test]
+    fn global_inferred_and_annotated_types_check() {
+        let ok = "let mut hits = 0\n\
+                  let banner: String = \"hi\"\n\
+                  fn bump() -> Int64 { hits = hits + 1 return hits }\n\
+                  fn name() -> String { return banner }\n\
+                  fn main() -> Int64 { return bump() }";
+        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
+    }
+
+    #[test]
+    fn assigning_non_mut_global_is_an_error() {
+        let e = check_src(
+            "let banner = \"hi\"\n\
+             fn f() -> Int64 { banner = \"bye\" return 0 }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("without `mut`"), "{e}");
+    }
+
+    #[test]
+    fn validated_global_rejects_provably_invalid_constant() {
+        let e = check_src(
+            "type Age = Int64 where value >= 0\n\
+             let mut a: Age = -1\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("does not satisfy") || e.contains("Age"), "{e}");
+    }
+
+    #[test]
+    fn initializer_may_not_call_user_function() {
+        let e = check_src(
+            "fn seed() -> Int64 { return 7 }\n\
+             let x = seed()\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("may not call"), "{e}");
+    }
+
+    #[test]
+    fn initializer_may_not_read_a_later_global() {
+        let e = check_src(
+            "let a = b\n\
+             let b = 1\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("declared later"), "{e}");
+    }
+
+    #[test]
+    fn initializer_may_not_read_itself() {
+        let e = check_src(
+            "let a = a\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("read itself"), "{e}");
+    }
+
+    #[test]
+    fn function_touching_a_global_is_not_spawnable() {
+        // `bump` writes a global, so it is not isolated; spawning it is rejected.
+        let e = check_src(
+            "let mut hits = 0\n\
+             fn bump() -> Int64 { hits = hits + 1 return hits }\n\
+             fn main() -> Int64 { let t = spawn bump() return t.join() }",
+        )
+        .unwrap_err();
+        assert!(e.contains("isolated") || e.contains("spawn") || e.contains("pure"), "{e}");
+    }
+
+    #[test]
+    fn spawn_impurity_is_transitive_through_globals() {
+        // `outer` calls `bump` (which touches a global); spawning `outer` fails.
+        let e = check_src(
+            "let mut hits = 0\n\
+             fn bump() -> Int64 { hits = hits + 1 return hits }\n\
+             fn outer() -> Int64 { return bump() }\n\
+             fn main() -> Int64 { let t = spawn outer() return t.join() }",
+        )
+        .unwrap_err();
+        assert!(e.contains("isolated") || e.contains("spawn") || e.contains("pure"), "{e}");
+    }
+
+    #[test]
+    fn local_shadowing_a_global_may_be_spawned() {
+        // A local `hits` shadows the global inside `pure`, so `pure` is isolated.
+        let ok = "let mut hits = 0\n\
+                  fn pure() -> Int64 { let hits = 5 return hits + 1 }\n\
+                  fn main() -> Int64 { let t = spawn pure() return t.join() }";
+        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
+    }
+
+    #[test]
+    fn dropping_a_global_is_an_error() {
+        let e = check_src(
+            "let s = \"hi\"\n\
+             fn f() -> Int64 { drop s return 0 }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("module state"), "{e}");
+    }
+
+    #[test]
+    fn a_local_shadows_a_global() {
+        // `hits` as a local `let` shadows the global; assigning the immutable
+        // local is the error (not the global's mutability).
+        let e = check_src(
+            "let mut hits = 0\n\
+             fn f() -> Int64 { let hits = 1 hits = 2 return hits }\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("without `mut`"), "{e}");
+    }
+
+    #[test]
+    fn where_predicate_may_not_reference_a_global() {
+        // A global is not a constant; a refinement predicate can't see it.
+        let e = check_src(
+            "let lo = 3\n\
+             type T = Int64 where value >= lo\n\
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("unknown variable") || e.contains("lo"), "{e}");
     }
 }

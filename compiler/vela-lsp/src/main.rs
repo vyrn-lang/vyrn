@@ -369,6 +369,8 @@ fn to_document_symbol(sym: &vela_frontend::Symbol) -> Option<DocumentSymbol> {
         SymbolKind::Method => lsp_types::SymbolKind::METHOD,
         SymbolKind::Type => lsp_types::SymbolKind::STRUCT,
         SymbolKind::Variant => lsp_types::SymbolKind::ENUM_MEMBER,
+        // Module state (RFC-0013) shows as a variable in the outline.
+        SymbolKind::Global => lsp_types::SymbolKind::VARIABLE,
         SymbolKind::Field | SymbolKind::Param | SymbolKind::Local => return None,
     };
     let range = lsp_range(sym.line, sym.col, sym.end_col);
@@ -450,6 +452,8 @@ fn to_lsp_kind(kind: SymbolKind) -> CompletionItemKind {
         SymbolKind::Type => CompletionItemKind::CLASS,
         SymbolKind::Variant => CompletionItemKind::ENUM_MEMBER,
         SymbolKind::Field => CompletionItemKind::FIELD,
+        // Module state (RFC-0013) completes as a variable.
+        SymbolKind::Global => CompletionItemKind::VARIABLE,
         // Locals are never returned by `completions` (top-level only), but the
         // match must be exhaustive — map them to VARIABLE for safety.
         SymbolKind::Param | SymbolKind::Local => CompletionItemKind::VARIABLE,

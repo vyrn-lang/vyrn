@@ -1,6 +1,6 @@
 # RFC-0013 — Module State & the Host-Driven Event Loop
 
-- **Status:** Draft — approved for implementation
+- **Status:** Implemented
 - **Depends on:** RFC-0012 (`export extern fn` — re-entrant host calls),
   RFC-0004 (ownership), RFC-0003 (validated types)
 

@@ -100,10 +100,54 @@ Unlike an import, calling an `export extern fn` never traps — it is an ordinar
 function — so `externdemo2.vela` is fully three-way parity-capable
 (interp == native == wasm).
 
+## The event loop — module state + the host loop (RFC-0013)
+
+`export extern` made a module callable after `main` returns; the missing half was
+**state that survives between entries**. A top-level `let [mut] name = init` in
+the root module is *module state*: visible to every function, initialized once
+(in declaration order, before `main`), and alive for the whole module lifetime.
+
+```vela
+let mut hits = 0                          // module state — survives between calls
+
+fn main() -> Int64 { return 0 }           // set-up only; the host drives from here
+
+export extern fn onTick() -> Int64 {      // the host calls this on each timer fire
+    hits = hits + 1
+    return hits
+}
+export extern fn reset() { hits = 0 }     // …and this from a button
+```
+
+```js
+const { exports } = await runVela(bytes);
+setInterval(() => render(Number(exports.onTick())), 800);  // the host owns the loop
+resetButton.onclick = () => exports.reset();
+```
+
+A wasm module can't block the page or suspend mid-function, so a Vela "event
+loop" is an **inversion**: the host owns the loop and calls exported handlers;
+Vela owns the state and the logic — the same shape wasm components and every
+embedded runtime use, with no new control flow in the language. On native and
+wasm each global is one LLVM `internal global` (`zeroinitializer`) whose
+initializer runs in a synthesized `@__vela_globals_init` called from
+`vela_entry` *before* `main`; the interpreter seeds a persistent frame the same
+way. Stores validate like any value boundary; module state is never dropped
+(safe-leak), can't be `consume`d or `drop`ped, and any function that reads or
+writes a global is not spawn-safe (transitively — shared state by definition).
+
+[examples/eventloop.vela](../examples/eventloop.vela) drives the handlers in a
+deterministic in-`main` loop, so it is a normal three-way parity citizen
+(interp == native == wasm). The live version is
+[eventloop.html](eventloop.html): a timer renders the count and a button calls
+`reset()`, all against the counter held in the running module's state.
+
 ## What this is (and isn't) yet
 
-This is the browser direction through stage 2 (WASI shim demo) and RFC-0012 M1+M2
-(extern imports *and* exports): the full pipeline — validated types, protocols,
-schemas, regex DFAs, the arena runtime, host calls in both directions — runs in
-a browser today. What it does NOT have yet: an event-loop story (callbacks,
-timers, promises from JS into running Vela), tracked in ROADMAP.md.
+This is the browser direction through stage 2 (WASI shim demo), RFC-0012 M1+M2
+(extern imports *and* exports), and RFC-0013 (module state + the host-driven
+event loop): the full pipeline — validated types, protocols, schemas, regex
+DFAs, the arena runtime, host calls in both directions, and now stateful
+handlers driven by a host loop — runs in a browser today. What it does NOT have
+yet: `async`/`await`, promises/JSPI suspension, or callbacks-as-values across
+the JS boundary, tracked in ROADMAP.md.

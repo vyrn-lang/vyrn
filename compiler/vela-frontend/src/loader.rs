@@ -300,6 +300,7 @@ fn load_modules(
                     functions: Vec::new(),
                     protocols: Vec::new(),
                     impls: Vec::new(),
+                    globals: Vec::new(),
                     log_level: DEFAULT_LOG_LEVEL,
                     log_sink: LogSink::Stderr,
                 },
@@ -339,6 +340,23 @@ fn load_modules(
                 "load",
                 format!("`{key}`: only the root module may configure `logging {{ .. }}`"),
             )]);
+        }
+
+        // Module state is root-only (RFC-0013): an imported library stays
+        // stateless, the same discipline as root-only `logging`. A top-level
+        // `let` in a non-root module is a load error.
+        if !is_root {
+            if let Some(g) = program.globals.first() {
+                return Err(vec![Diagnostic::error(
+                    g.line,
+                    0,
+                    "load",
+                    format!(
+                        "`{key}`: module state is root-only — a top-level `let` may only appear \
+                         in the root module (imported modules stay stateless)"
+                    ),
+                )]);
+            }
         }
 
         // Attribute decls to this module (root stays `None` so single-file
@@ -449,6 +467,11 @@ fn link(modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>
             for sig in &p.methods {
                 method_protocol.insert(sig.name.clone(), p.name.clone());
             }
+        }
+        // Module-state bindings (RFC-0013) join the top-level namespace: a
+        // global may not share a name with any other top-level declaration.
+        for g in &m.program.globals {
+            register(&g.name, &m.key, false, g.line, &mut errors);
         }
     }
 
@@ -905,6 +928,26 @@ mod tests {
         let root = "import { f } from \"./lib\" fn main() -> Int64 { return f() }";
         let e = load_err(root, &[("lib.vela", lib)]);
         assert!(e.contains("only the root module may configure `logging"), "{e}");
+    }
+
+    #[test]
+    fn non_root_module_state_is_an_error() {
+        // RFC-0013: a top-level `let` may only appear in the root module.
+        let lib = "let mut count = 0 export fn f() -> Int64 { return count }";
+        let root = "import { f } from \"./lib\" fn main() -> Int64 { return f() }";
+        let e = load_err(root, &[("lib.vela", lib)]);
+        assert!(e.contains("module state is root-only"), "{e}");
+    }
+
+    #[test]
+    fn global_name_collides_with_a_function() {
+        // A global may not share a name with any other top-level declaration.
+        let lib = "export fn tally() -> Int64 { return 1 }";
+        let root = "import { tally } from \"./lib\" \
+                    let tally = 0 \
+                    fn main() -> Int64 { return tally }";
+        let e = load_err(root, &[("lib.vela", lib)]);
+        assert!(e.contains("must be unique"), "{e}");
     }
 }
 

@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vela × the host-driven event loop</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1a1a1a; --bg: #fdfdfd; --dim: #6b6b6b;
+    --card: #f3f3f3; --accent: #7c5cff; --err: #c0392b; --ok: #2e9e5b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8e8e8; --bg: #131316; --dim: #9a9aa2; --card: #1e1e24; --err: #ff7b6b; --ok: #5ad18a; }
+  }
+  body {
+    margin: 0 auto; max-width: 46rem; padding: 2rem 1.25rem 4rem;
+    font: 16px/1.55 system-ui, sans-serif; color: var(--fg); background: var(--bg);
+  }
+  h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
+  .sub { color: var(--dim); margin: 0 0 1.5rem; }
+  .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+  button {
+    font: inherit; padding: .4rem .8rem; border-radius: 8px; border: 1px solid var(--dim);
+    background: var(--card); color: var(--fg); cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  pre {
+    background: var(--card); border-radius: 10px; padding: .9rem 1rem;
+    overflow-x: auto; min-height: 2.4rem; white-space: pre-wrap; margin: 0;
+  }
+  .label { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 1.1rem 0 .3rem; }
+  #ticklog:empty::before, #stdout:empty::before { content: "(empty)"; color: var(--dim); }
+  #status { color: var(--dim); }
+  .ok { color: var(--ok); }
+  code { background: var(--card); padding: .1rem .35rem; border-radius: 5px; }
+  a { color: var(--accent); }
+  .counter {
+    font: 700 4rem/1 system-ui, sans-serif; text-align: center;
+    padding: 1.4rem; background: var(--card); border-radius: 14px; margin: 0;
+    color: var(--accent);
+  }
+</style>
+</head>
+<body>
+<h1>Vela × the host-driven event loop</h1>
+<p class="sub">
+  <code>examples/eventloop.vela</code> keeps a counter in <strong>module
+  state</strong> (RFC-0013): a top-level <code>let mut hits = 0</code> that
+  survives between calls. A wasm module can't block the page or suspend, so the
+  <em>host owns the loop</em> — Vela owns the state and the logic. After
+  <code>_start</code> runs <code>main</code> once, the timer below calls the
+  exported <code>onTick()</code> handler on each fire and the button calls
+  <code>reset()</code>. The count you see is live Vela module state.
+  <a href="./index.html">← plain demo</a> · <a href="./externdemo.html">extern / exports demo →</a>
+</p>
+
+<div class="row">
+  <button class="primary" id="load">Load eventloop.wasm</button>
+  <span id="status"></span>
+</div>
+
+<div class="label">live count (module state <code>hits</code>)</div>
+<pre class="counter" id="count">–</pre>
+
+<div class="row">
+  <button id="start" disabled>Start ticking</button>
+  <button id="stop" disabled>Stop</button>
+  <button id="reset" disabled>reset()</button>
+</div>
+
+<div class="label">the host loop, tick by tick</div>
+<pre id="ticklog"></pre>
+
+<div class="label">program stdout (from main, on load)</div>
+<pre id="stdout"></pre>
+
+<script type="module">
+import { runVela } from "./wasi-min.js";
+
+const status = document.getElementById("status");
+const out = document.getElementById("stdout");
+const ticklog = document.getElementById("ticklog");
+const countEl = document.getElementById("count");
+const loadBtn = document.getElementById("load");
+const startBtn = document.getElementById("start");
+const stopBtn = document.getElementById("stop");
+const resetBtn = document.getElementById("reset");
+
+const TICK_MS = 800;
+let velaExports = null;
+let timer = null;
+let ticks = 0;
+
+function setRunning(on) {
+  startBtn.disabled = on || !velaExports;
+  stopBtn.disabled = !on;
+  resetBtn.disabled = !velaExports;
+}
+
+function startLoop() {
+  if (timer || !velaExports) return;
+  timer = setInterval(() => {
+    // The host's loop: call the exported handler, render its result. onTick()
+    // reads AND writes the module-state counter, so it advances every fire —
+    // proof that state survives between entries.
+    const n = Number(velaExports.onTick());
+    ticks += 1;
+    countEl.textContent = n;
+    ticklog.textContent += `tick ${ticks}: onTick() -> ${n}\n`;
+  }, TICK_MS);
+  setRunning(true);
+}
+
+function stopLoop() {
+  if (timer) { clearInterval(timer); timer = null; }
+  setRunning(false);
+}
+
+loadBtn.addEventListener("click", async () => {
+  stopLoop();
+  out.textContent = ""; ticklog.textContent = ""; ticks = 0;
+  status.textContent = "loading…";
+  try {
+    const resp = await fetch("./eventloop.wasm");
+    if (!resp.ok) {
+      status.textContent = "eventloop.wasm not built — run web/build.ps1 first";
+      return;
+    }
+    const bytes = await resp.arrayBuffer();
+    // _start runs main once (which also inits module state before main). The
+    // exported handlers are then callable on the live instance.
+    const r = await runVela(bytes, { onStdout: (s) => (out.textContent += s) });
+    velaExports = r.exports;
+    countEl.textContent = "0";
+    status.innerHTML =
+      `<span class="ok">exit ${r.exitCode}</span> · exports: ${Object.keys(velaExports).join(", ")}`;
+    setRunning(false);
+    startLoop(); // begin the host loop immediately, like a page would
+  } catch (e) {
+    status.textContent = "trap";
+    out.textContent += `\n${e}`;
+  }
+});
+
+startBtn.addEventListener("click", startLoop);
+stopBtn.addEventListener("click", stopLoop);
+
+resetBtn.addEventListener("click", () => {
+  if (!velaExports) return;
+  velaExports.reset();          // sets the module-state counter back to 0
+  countEl.textContent = "0";
+  ticklog.textContent += `reset() -> counter back to 0\n`;
+});
+</script>
+</body>
+</html>

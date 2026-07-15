@@ -54,9 +54,26 @@ memory: `greet(String) -> String` round-trips a string both ways.
 Because they never trap (only body-less imports do),
 `examples/externdemo2.vela` stays fully three-way parity-capable
 (interp == native == wasm); the browser round trip is in the M2 section of
-`web/externdemo.html`. Next on the browser path: an event-loop story —
-the long-range goal is same-language server (native SSR) + client (wasm),
-with validated types as the wire contract.
+`web/externdemo.html`. **The event-loop story ships too (RFC-0013)**:
+`export extern` gave a live module callable after `main` returns; **module
+state** — a top-level `let [mut] name = init` in the root module — gives it
+state that *survives between entries*, so a handler called at t=1s finds the
+counter `main` set up at t=0. A wasm module can't block the page or suspend,
+so a Vela "event loop" is an inversion: **the host owns the loop** (a browser
+`setInterval`, later a server runtime) and calls exported handlers; Vela owns
+the state and the logic — the same shape wasm components and every embedded
+runtime use, with no new control flow. Globals initialize once, in declaration
+order, before `main` (native/wasm run them in a synthesized
+`@__vela_globals_init` called from `vela_entry`; the interpreter seeds a
+persistent frame). They validate on every store like any value boundary, are
+never dropped (module lifetime, safe-leak), can't be `consume`d or `drop`ped,
+and any function that touches one is not spawn-safe (module state is shared by
+definition) — transitively. `examples/eventloop.vela` drives the handlers in a
+deterministic in-`main` loop so it is a normal three-way parity citizen; the
+live version is `web/eventloop.html`, where a timer renders the count and a
+button calls `reset()`. Next on the browser path: the long-range goal is
+same-language server (native SSR) + client (wasm), with validated types as the
+wire contract.
 
 A 2026-07-15 hardening pass fixed ~40 reviewed defects: native
 use-after-free/heap-corruption bugs (cell `set`, region escapes, `list` in

@@ -1104,6 +1104,11 @@ pub fn emit(program: &Program) -> Result<String, String> {
             collect_strings_expr(pred, &mut literals, &type_map);
         }
     }
+    // Module-state initializers (RFC-0013) are lowered in `@__vela_globals_init`,
+    // so any string literal they mention must be pooled too.
+    for g in &program.globals {
+        collect_strings_expr(&g.init, &mut literals, &type_map);
+    }
     for (i, s) in literals.iter().enumerate() {
         let name = format!("@.str.{i}");
         let (escaped, len) = llvm_str(s);
@@ -1127,6 +1132,9 @@ pub fn emit(program: &Program) -> Result<String, String> {
         if let Some(pred) = &t.predicate {
             collect_regex_expr(pred, &mut regex_patterns);
         }
+    }
+    for g in &program.globals {
+        collect_regex_expr(&g.init, &mut regex_patterns);
     }
     let mut regex_globals: HashMap<String, (String, String, u32)> = HashMap::new();
     for (i, pat) in regex_patterns.iter().enumerate() {
@@ -1208,6 +1216,63 @@ pub fn emit(program: &Program) -> Result<String, String> {
     let ownership = vela_frontend::own::analyze(program);
     let droppable_map = &ownership.droppable;
 
+    let protocol_methods: HashMap<String, String> = program
+        .protocols
+        .iter()
+        .flat_map(|p| p.methods.iter().map(|m| (m.name.clone(), p.name.clone())))
+        .collect();
+
+    // ---- module state (RFC-0013) ----------------------------------------
+    // One LLVM global per binding (`@g.<name>`, `zeroinitializer`), plus a
+    // synthesized `@__vela_globals_init()` that runs every initializer's stores
+    // in declaration order (heap-valued inits — arrays, strings — work because
+    // this runs at runtime). It is called from `vela_entry` BEFORE `main`. Reads
+    // and writes elsewhere resolve through `globals_map` via `Gen::lookup`.
+    let mut globals_map: HashMap<String, (String, Type)> = HashMap::new();
+    let mut globals_init_ir = String::new();
+    if !program.globals.is_empty() {
+        let mut gi = Gen::new(
+            &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
+            &funcs, droppable_map, &regex_globals,
+        );
+        gi.log_level = program.log_level;
+        gi.log_sink = program.log_sink.clone();
+        gi.protocol_methods = protocol_methods.clone();
+        let mut decls = String::new();
+        for g in &program.globals {
+            let (v, vty) = gi.gen_expr(&g.init)?;
+            let ty = match &g.ty {
+                Some(t) => t.clone(),
+                None => vty.clone(),
+            };
+            // Coerce into the declared/inferred type (record width subtyping,
+            // sized-int wrapping, and automatic validation via `emit_validation`).
+            let (v, _) = gi.coerce(v, &vty, &ty)?;
+            let sym = format!("@g.{}", sanitize(&g.name));
+            let ll = gi.llt(&ty);
+            gi.emit(format!("store {ll} {v}, ptr {sym}"));
+            // A later initializer may read this one — register it so its `Var`
+            // resolves through `lookup`'s globals fallback.
+            gi.globals.insert(g.name.clone(), (sym.clone(), ty.clone()));
+            decls.push_str(&format!("{sym} = internal global {ll} zeroinitializer\n"));
+            globals_map.insert(g.name.clone(), (sym, ty));
+        }
+        globals_init_ir.push_str("define internal void @__vela_globals_init() {\n");
+        globals_init_ir.push_str("entry:\n");
+        for a in &gi.allocas {
+            globals_init_ir.push_str(a);
+            globals_init_ir.push('\n');
+        }
+        for b in &gi.body {
+            globals_init_ir.push_str(b);
+            globals_init_ir.push('\n');
+        }
+        globals_init_ir.push_str("  ret void\n");
+        globals_init_ir.push_str("}\n\n");
+        out.push_str(&decls);
+        out.push('\n');
+    }
+
     // 1. Non-generic functions (main + others), collecting instantiations.
     for f in &program.functions {
         if !f.type_params.is_empty() {
@@ -1225,11 +1290,8 @@ pub fn emit(program: &Program) -> Result<String, String> {
         );
         gen.log_level = program.log_level;
         gen.log_sink = program.log_sink.clone();
-        gen.protocol_methods = program
-            .protocols
-            .iter()
-            .flat_map(|p| p.methods.iter().map(|m| (m.name.clone(), p.name.clone())))
-            .collect();
+        gen.protocol_methods = protocol_methods.clone();
+        gen.globals = globals_map.clone();
         gen.function(f, &sym, &mut out)?;
         out.push('\n');
         let insts = std::mem::take(&mut gen.instantiations);
@@ -1251,16 +1313,17 @@ pub fn emit(program: &Program) -> Result<String, String> {
         );
         gen.log_level = program.log_level;
         gen.log_sink = program.log_sink.clone();
-        gen.protocol_methods = program
-            .protocols
-            .iter()
-            .flat_map(|p| p.methods.iter().map(|m| (m.name.clone(), p.name.clone())))
-            .collect();
+        gen.protocol_methods = protocol_methods.clone();
+        gen.globals = globals_map.clone();
         gen.function(f, &sym, &mut out)?;
         out.push('\n');
         let insts = std::mem::take(&mut gen.instantiations);
         enqueue(&emitted, &mut queue, insts);
     }
+
+    // The module-state initializer function (RFC-0013), defined after the user
+    // functions (textual order is immaterial to LLVM).
+    out.push_str(&globals_init_ir);
 
     // C entry point: call Vela's main and reduce its i64 to a process exit code.
     // Mask to the low 8 bits so the result matches the interpreter (which does
@@ -1273,6 +1336,11 @@ pub fn emit(program: &Program) -> Result<String, String> {
     if file_sink {
         out.push_str("  %lf = call ptr @fopen(ptr @.logpath, ptr @.logmode)\n");
         out.push_str("  store ptr %lf, ptr @__vela_log_file\n");
+    }
+    // Initialize module state (RFC-0013) before `main` runs — and therefore
+    // before any exported extern handler the host calls afterward.
+    if !program.globals.is_empty() {
+        out.push_str("  call void @__vela_globals_init()\n");
     }
     out.push_str("  %r = call i64 @vela_main()\n");
     // Flush and close the log file after running (before returning the code).
@@ -1347,6 +1415,10 @@ struct Gen<'a> {
     /// Compiled `=~` patterns: pattern text -> (table global, accepting global,
     /// DFA start state). The globals are emitted once in the module preamble.
     regex_globals: &'a HashMap<String, (String, String, u32)>,
+    /// Module-state bindings (RFC-0013): name -> (LLVM global symbol, type). A
+    /// variable read/write that misses the local scope falls back to these,
+    /// loading/storing through the global just like an alloca slot.
+    globals: HashMap<String, (String, Type)>,
 }
 
 impl<'a> Gen<'a> {
@@ -1389,6 +1461,7 @@ impl<'a> Gen<'a> {
             log_sink: LogSink::Stderr,
             protocol_methods: HashMap::new(),
             regex_globals,
+            globals: HashMap::new(),
         }
     }
 
@@ -1710,7 +1783,10 @@ impl<'a> Gen<'a> {
                 }
             }
         }
-        None
+        // Fall back to module state (RFC-0013): an LLVM global is itself a
+        // pointer, so its symbol works everywhere a slot pointer is used
+        // (`load`/`store`/`getelementptr`), giving reads and writes for free.
+        self.globals.get(name).cloned()
     }
 
     fn function(&mut self, f: &Function, sym: &str, out: &mut String) -> Result<(), String> {
@@ -5164,5 +5240,40 @@ mod tests {
         assert!(ir.contains("@.trap.aoob"), "reuses the array OOB trap: {ir}");
         assert!(ir.contains("insertvalue { ptr, i64, i64 }"), "header write-back: {ir}");
         assert!(ir.contains("sub i64"), "length decrement: {ir}");
+    }
+
+    // ---- module state (RFC-0013) ---------------------------------------
+
+    #[test]
+    fn globals_emit_declaration_and_init_before_main() {
+        let src = "let mut hits: Int64 = 0 \
+                   let banner = \"hi\" \
+                   fn bump() -> Int64 { hits = hits + 1 return hits } \
+                   fn main() -> Int64 { return bump() }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        // One internal global per binding, zero-initialized.
+        assert!(ir.contains("@g.hits = internal global i64 zeroinitializer"), "{ir}");
+        assert!(ir.contains("@g.banner = internal global ptr zeroinitializer"), "{ir}");
+        // A synthesized init function, called from `vela_entry` before main.
+        assert!(ir.contains("define internal void @__vela_globals_init()"), "{ir}");
+        let init_at = ir.find("call void @__vela_globals_init()").expect("init call");
+        let main_at = ir.find("call i64 @vela_main()").expect("main call");
+        assert!(init_at < main_at, "init must run before main");
+        // Reads and writes go through the global.
+        assert!(ir.contains("load i64, ptr @g.hits"), "read through global: {ir}");
+        assert!(ir.contains("store i64 %"), "write through global: {ir}");
+    }
+
+    #[test]
+    fn validated_global_store_emits_inline_validation() {
+        // A non-constant store into a validated global runs the predicate inline
+        // and traps through the per-type message.
+        let src = "type Age = Int64 where value >= 18 \
+                   let mut a: Age = Age(20) \
+                   fn setAge(n: Int64) -> Int64 { a = n return 0 } \
+                   fn main() -> Int64 { return setAge(30) }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("@.trap.verr.Age"), "per-type validation trap: {ir}");
+        assert!(ir.contains("store i64 %") && ir.contains("@g.a"), "store through global: {ir}");
     }
 }

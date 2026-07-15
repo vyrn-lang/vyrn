@@ -16,7 +16,10 @@
 //! The LSP calls [`analyze`] on open/change and serves hover/go-to-def/completion
 //! from the cached [`Analysis`].
 
-use crate::ast::{self, Block, EnumVariant, Function, MethodSig, ProtocolDecl, Stmt, Type, TypeDecl};
+use crate::ast::{
+    self, Block, EnumVariant, Expr, Function, GlobalDecl, MethodSig, ProtocolDecl, Stmt, Type,
+    TypeDecl,
+};
 use crate::checker;
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{self, Tok};
@@ -37,6 +40,8 @@ pub enum SymbolKind {
     Param,
     /// A `let` binding or a `for`-in loop variable, local to a function body.
     Local,
+    /// A top-level module-state binding (RFC-0013): `let [mut] name = init`.
+    Global,
 }
 
 /// A top-level declaration the LSP can hover / jump to / complete.
@@ -757,6 +762,9 @@ fn decl_lines(program: &ast::Program) -> Vec<usize> {
     for i in &program.impls {
         v.push(i.line);
     }
+    for g in &program.globals {
+        v.push(g.line);
+    }
     v.sort_unstable();
     v
 }
@@ -804,6 +812,20 @@ fn index_symbols(
             col,
             end_col,
             detail: function_detail(f),
+            file: None,
+        });
+    }
+
+    // Module-state bindings (RFC-0013): top-level `let [mut] name [: Type] = ..`.
+    for g in &program.globals {
+        let (col, end_col) = name_col_on_line(tok_info, &g.name, g.line);
+        out.push(Symbol {
+            name: g.name.clone(),
+            kind: SymbolKind::Global,
+            line: g.line,
+            col,
+            end_col,
+            detail: global_detail(g),
             file: None,
         });
     }
@@ -1170,6 +1192,34 @@ fn function_detail(f: &Function) -> String {
     format!("{} {}{}({}) -> {}", kw, f.name, tp, params, type_to_string(&f.ret))
 }
 
+/// Hover text for a module-state binding (RFC-0013), e.g. `let mut hits: Int64`.
+/// The type is the annotation when present, else a best-effort inference from a
+/// literal initializer (the common `let mut hits = 0` case), else omitted.
+fn global_detail(g: &GlobalDecl) -> String {
+    let kw = if g.mutable { "let mut" } else { "let" };
+    let ty = g.ty.clone().or_else(|| infer_literal_type(&g.init));
+    match ty {
+        Some(t) => format!("{} {}: {}", kw, g.name, type_to_string(&t)),
+        None => format!("{} {}", kw, g.name),
+    }
+}
+
+/// A best-effort type for a literal initializer, for hover only (the checker is
+/// authoritative). Covers scalars and homogeneous array literals of scalars.
+fn infer_literal_type(e: &Expr) -> Option<Type> {
+    match e {
+        Expr::Int(_) => Some(Type::Int),
+        Expr::Float(_) => Some(Type::Float),
+        Expr::Bool(_) => Some(Type::Bool),
+        Expr::Str(_) => Some(Type::Str),
+        Expr::Unary { expr, .. } => infer_literal_type(expr),
+        Expr::ArrayLit { elems, .. } => {
+            elems.first().and_then(infer_literal_type).map(|t| Type::Array(Box::new(t)))
+        }
+        _ => None,
+    }
+}
+
 fn method_sig_detail(m: &MethodSig) -> String {
     // MethodSig.params are types only (names are dropped by the parser); the
     // receiver `self` is implied and prepended.
@@ -1347,5 +1397,30 @@ fn builtin_methods_for(ty: &Type) -> Vec<BuiltinMethod> {
             .collect(),
         Type::Task(_) => vec![by_name("join")].into_iter().flatten().collect(),
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn module_state_is_indexed_with_hover_detail() {
+        // RFC-0013: globals appear in the symbol index (hover / go-to-def /
+        // completion). The annotated one shows its type; the unannotated one
+        // infers from its literal initializer.
+        let src = "let mut hits = 0\n\
+                   let banner: String = \"hi\"\n\
+                   fn main() -> Int64 { return hits }";
+        let a = analyze(src);
+        let hits = a.symbols.iter().find(|s| s.name == "hits").expect("hits symbol");
+        assert_eq!(hits.kind, SymbolKind::Global);
+        assert_eq!(hits.detail, "let mut hits: Int64");
+        assert_eq!(hits.line, 1);
+        assert!(hits.col > 0, "has a name column for go-to-def");
+
+        let banner = a.symbols.iter().find(|s| s.name == "banner").expect("banner symbol");
+        assert_eq!(banner.kind, SymbolKind::Global);
+        assert_eq!(banner.detail, "let banner: String");
     }
 }

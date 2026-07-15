@@ -1,0 +1,48 @@
+/// RFC-0013 — Module State & the Host-Driven Event Loop.
+///
+/// Module state (a top-level `let`) survives between calls, so an exported
+/// handler the host invokes — a browser timer, later a server runtime — can
+/// accumulate results across entries. The host owns the loop; Vela owns the
+/// state and the logic. `main` sets things up and returns; a real host then
+/// drives the exported handlers on its own schedule (see `web/eventloop.html`).
+///
+/// Here `main` also drives the handlers in a deterministic loop, so this example
+/// is a normal three-way parity citizen (interp == native == wasm) — the
+/// exported functions are ordinary Vela functions with no host imports.
+
+// Module state: shared by every function, initialized once before `main`.
+let mut hits: Int64 = 0
+let mut total: Int64 = 0
+let banner = "vela counter"
+
+fn main() -> Int64 {
+    print(banner)
+    // Drive the handlers deterministically, exactly as a host timer would.
+    let mut i = 0
+    while i < 3 {
+        let n = onTick()
+        print("tick -> \{n}")
+        i = i + 1
+    }
+    print("total after 3 ticks: \{total}")
+    // The button handler resets the counter but leaves the running total.
+    reset()
+    print("after reset -> \{hits}")
+    // One more tick proves the module state persisted across the reset.
+    let n = onTick()
+    print("tick -> \{n}")
+    return 0
+}
+
+/// The host calls this on every timer fire: bump the counter, fold it into a
+/// running total, and hand the new count back for rendering.
+export extern fn onTick() -> Int64 {
+    hits = hits + 1
+    total = total + hits
+    return hits
+}
+
+/// The host calls this from a button: reset the live counter to zero.
+export extern fn reset() {
+    hits = 0
+}

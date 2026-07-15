@@ -277,6 +277,7 @@ impl Parser {
         let mut functions = Vec::new();
         let mut protocols = Vec::new();
         let mut impls = Vec::new();
+        let mut globals = Vec::new();
         let mut log_level = DEFAULT_LOG_LEVEL;
         let mut log_sink = LogSink::Stderr;
         let mut saw_logging = false;
@@ -336,6 +337,14 @@ impl Parser {
                     Ok(i) => impls.push(i),
                     Err(d) => { errors.push(d); self.sync_to_decl(); }
                 },
+                // Top-level `let [mut] name [: Type] = init` — module state
+                // (RFC-0013). Shares the `let` keyword with body-local bindings;
+                // recognized here at brace depth 0. `export let` is rejected by
+                // the `export` guard above (module state is not importable in v1).
+                Tok::Let => match self.global_decl() {
+                    Ok(mut g) => { g.doc = doc; globals.push(g); }
+                    Err(d) => { errors.push(d); self.sync_to_decl(); }
+                },
                 // `extern fn ..` — a JS-interop import (RFC-0012). `extern` is a
                 // contextual starter (a plain identifier elsewhere); recognize it
                 // only when `fn` follows, so a variable named `extern` is unharmed.
@@ -373,15 +382,15 @@ impl Parser {
                     errors.push(Diagnostic::error(
                         self.line(), self.col(), "parse",
                         format!(
-                            "expected `fn`, `type`, `protocol`, `impl`, or `logging` at top \
-                             level, found {other:?}"
+                            "expected `fn`, `type`, `protocol`, `impl`, `let`, or `logging` at \
+                             top level, found {other:?}"
                         ),
                     ));
                     self.advance(); // consume the stray token so progress is guaranteed
                 }
             }
         }
-        (Program { imports, type_decls, functions, protocols, impls, log_level, log_sink }, errors)
+        (Program { imports, type_decls, functions, protocols, impls, globals, log_level, log_sink }, errors)
     }
 
     /// Recovery sync point: advance until the cursor sits on a top-level
@@ -404,6 +413,7 @@ impl Parser {
                 Tok::LBrace => { depth += 1; self.advance(); }
                 Tok::RBrace => { if depth > 0 { depth -= 1; } self.advance(); }
                 Tok::Fn | Tok::Type | Tok::Protocol | Tok::Impl | Tok::Import | Tok::Export
+                | Tok::Let
                     if depth == 0 =>
                 {
                     return
@@ -1220,6 +1230,43 @@ impl Parser {
         Ok(Block { stmts })
     }
 
+    /// A top-level module-state binding (RFC-0013):
+    /// `let [mut] name [: Type] = initializer`. The initializer is REQUIRED —
+    /// a bare `let x` / `let x: T` (no `=`) is a parse error (module state has
+    /// no default value; `before main` runs every initializer once).
+    fn global_decl(&mut self) -> Result<GlobalDecl, Diagnostic> {
+        let line = self.line();
+        self.eat(&Tok::Let)?;
+        let mutable = if *self.peek() == Tok::Mut {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        let name = self.expect_ident()?;
+        let ty = if *self.peek() == Tok::Colon {
+            self.advance();
+            Some(self.type_()?)
+        } else {
+            None
+        };
+        if *self.peek() != Tok::Eq {
+            return Err(Diagnostic::error(
+                self.line(),
+                self.col(),
+                "parse",
+                format!(
+                    "module state `{name}` needs an initializer: write `let {name} = <value>` \
+                     (top-level `let` has no default value)"
+                ),
+            ));
+        }
+        self.eat(&Tok::Eq)?;
+        let init = self.expr()?;
+        self.eat_semi();
+        Ok(GlobalDecl { name, mutable, ty, init, doc: None, module: None, line })
+    }
+
     fn stmt(&mut self) -> Result<Stmt, Diagnostic> {
         let line = self.line();
         match self.peek() {
@@ -1875,6 +1922,46 @@ mod tests {
                    fn main() -> Int64 { return 0 }";
         let e = parse(lex(src).unwrap()).unwrap_err();
         assert!(e.message.contains("named record type"), "{}", e.message);
+    }
+
+    #[test]
+    fn parses_top_level_let_module_state() {
+        // RFC-0013: `let [mut] name [: Type] = init` at the top level.
+        let src = "let mut hits: Int64 = 0\n\
+                   let banner = \"hi\"\n\
+                   fn main() -> Int64 { return 0 }";
+        let p = parse_src(src);
+        assert_eq!(p.globals.len(), 2);
+        assert_eq!(p.globals[0].name, "hits");
+        assert!(p.globals[0].mutable);
+        assert_eq!(p.globals[0].ty, Some(Type::Int));
+        assert_eq!(p.globals[1].name, "banner");
+        assert!(!p.globals[1].mutable);
+        assert_eq!(p.globals[1].ty, None);
+    }
+
+    #[test]
+    fn top_level_let_requires_initializer() {
+        let src = "let mut hits: Int64\nfn main() -> Int64 { return 0 }";
+        let e = parse(lex(src).unwrap()).unwrap_err();
+        assert!(e.message.contains("needs an initializer"), "{}", e.message);
+    }
+
+    #[test]
+    fn top_level_let_doc_comment_attaches() {
+        let src = "/// the live counter\nlet mut hits = 0\nfn main() -> Int64 { return 0 }";
+        let p = parse_src(src);
+        assert_eq!(p.globals[0].doc.as_deref(), Some("the live counter"));
+    }
+
+    #[test]
+    fn bad_top_level_let_recovers_to_next_decl() {
+        // A malformed global (name is not an identifier) must not swallow the
+        // following function — recovery syncs to the next top-level `fn`.
+        let src = "let 123 = 5\nfn main() -> Int64 { return 0 }";
+        let (p, errors) = parse_accum(lex(src).unwrap());
+        assert!(!errors.is_empty(), "expected a parse error for the bad global");
+        assert!(p.functions.iter().any(|f| f.name == "main"), "recovered to `main`");
     }
 
     #[test]

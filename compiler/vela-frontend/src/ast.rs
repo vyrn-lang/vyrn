@@ -15,6 +15,11 @@ pub struct Program {
     pub protocols: Vec<ProtocolDecl>,
     /// `impl P for T { .. }` blocks — a type's methods for a protocol.
     pub impls: Vec<ImplBlock>,
+    /// Top-level `let [mut] name [: Type] = initializer` module-state bindings
+    /// (RFC-0013). Root-module-only (the loader rejects them in imported
+    /// modules); initialized once, in declaration order, before `main`. Every
+    /// function sees them as an outermost scope frame below its parameters.
+    pub globals: Vec<GlobalDecl>,
     /// The logging threshold ordinal (RFC-0008), set by a `logging { level: X }`
     /// block. A log call below it is dropped at compile time. Defaults to
     /// [`DEFAULT_LOG_LEVEL`] (Info) when there is no config block.
@@ -51,6 +56,27 @@ pub fn log_level_ordinal(name: &str) -> Option<usize> {
         "error" => Some(4),
         _ => None,
     }
+}
+
+/// A top-level module-state binding (RFC-0013): `let [mut] name [: Type] = init`.
+/// The initializer is required. Unlike a `let` statement it lives for the whole
+/// module lifetime, is shared by every function, and is never dropped.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlobalDecl {
+    pub name: String,
+    /// `let mut ..` — reassignable via `name = value` in any function body.
+    pub mutable: bool,
+    /// An explicit type annotation, or `None` to infer from the initializer.
+    pub ty: Option<Type>,
+    /// The initializer expression (required). Restricted by the checker: no user
+    /// or extern calls, and no read of a global declared later.
+    pub init: Expr,
+    /// `///` documentation (markdown), attached by the parser; `None` if absent.
+    pub doc: Option<String>,
+    /// The module (file) this decl came from; `None` for the root. Set by the
+    /// loader — though globals are root-only, this keeps diagnostics uniform.
+    pub module: Option<String>,
+    pub line: usize,
 }
 
 /// A named type declaration. Two shapes exist in v0.1:

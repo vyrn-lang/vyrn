@@ -11,7 +11,7 @@ if (-not $env:WASI_SYSROOT) {
     if ($sysroot) { $env:WASI_SYSROOT = $sysroot.FullName }
 }
 
-foreach ($name in "fib", "enum", "reflection", "jsonschema", "externdemo", "externdemo2") {
+foreach ($name in "fib", "enum", "reflection", "jsonschema", "externdemo", "externdemo2", "eventloop") {
     cargo run -q --manifest-path "$root\compiler\Cargo.toml" -p vela-cli -- `
         build "$root\examples\$name.vela" --target wasm -o "$PSScriptRoot\$name.wasm"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -19,4 +19,4 @@ foreach ($name in "fib", "enum", "reflection", "jsonschema", "externdemo", "exte
     # the .wasm.
     Remove-Item "$PSScriptRoot\$name.ll", "$PSScriptRoot\$name.shim.c" -ErrorAction SilentlyContinue
 }
-Write-Host "built: fib enum reflection jsonschema externdemo externdemo2 -> web\*.wasm"
+Write-Host "built: fib enum reflection jsonschema externdemo externdemo2 eventloop -> web\*.wasm"

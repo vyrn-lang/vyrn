@@ -390,7 +390,26 @@ fn run_inner(program: &Program) -> Result<i64, String> {
             .flatten()
             .collect(),
         region_depth: std::cell::Cell::new(0),
+        globals: RefCell::new(HashMap::new()),
     };
+    // Initialize module state (RFC-0013) once, in declaration order, before
+    // `main`. Each initializer runs in a fresh empty local scope; a read of an
+    // earlier global falls back to the persistent frame already populated below.
+    // The declared/annotated type is remembered so later assignments coerce.
+    let init_globals = || -> Result<(), Ctrl> {
+        for g in &program.globals {
+            let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+            let mut v = interp.expr(&g.init, &mut scope)?;
+            if let Some(t) = &g.ty {
+                v = interp.coerce(v, t)?;
+            }
+            interp.globals.borrow_mut().insert(g.name.clone(), Slot { v, ty: g.ty.clone() });
+        }
+        Ok(())
+    };
+    if let Err(Ctrl::Err(s)) = init_globals() {
+        return Err(s);
+    }
     match interp.call("main", &[]) {
         Ok(Val::Int(n)) => Ok(n),
         Ok(other) => Err(format!("main returned {other:?}, expected Int64")),
@@ -424,6 +443,11 @@ struct Interp<'a> {
     /// on a fixed 64-slot arena stack and traps past it; the interpreter
     /// enforces the same bound so the two stay observably identical.
     region_depth: std::cell::Cell<usize>,
+    /// Persistent module-state frame (RFC-0013): every function-call scope stack
+    /// bottoms out on this. Populated once (in declaration order) before
+    /// `main`; variable reads/writes fall back to it when the local scope misses.
+    /// Slot-typed so reassignments coerce (and auto-validate) exactly like locals.
+    globals: RefCell<HashMap<String, Slot>>,
 }
 
 /// A scope binding: the current value plus the declared type, when one exists
@@ -566,8 +590,11 @@ impl<'a> Interp<'a> {
                 let v = self.expr(value, scope)?;
                 // Reassignment flows through the binding's declared type — the
                 // same coercion (and automatic validation) as the original let.
-                let declared =
-                    scope.iter().rev().find_map(|f| f.get(name).and_then(|s| s.ty.clone()));
+                let declared = scope
+                    .iter()
+                    .rev()
+                    .find_map(|f| f.get(name).and_then(|s| s.ty.clone()))
+                    .or_else(|| self.globals.borrow().get(name).and_then(|s| s.ty.clone()));
                 let v = match &declared {
                     Some(t) => self.coerce(v, t)?,
                     None => v,
@@ -578,6 +605,11 @@ impl<'a> Interp<'a> {
                         return Ok(Flow::Normal);
                     }
                 }
+                // Fall back to module state (RFC-0013): a `mut` global write.
+                if let Some(slot) = self.globals.borrow_mut().get_mut(name) {
+                    slot.v = v;
+                    return Ok(Flow::Normal);
+                }
                 Err(format!("assignment to unbound variable `{name}`").into())
             }
             Stmt::SetField { name, field, value, .. } => {
@@ -587,6 +619,10 @@ impl<'a> Interp<'a> {
                         map.insert(field.clone(), v);
                         return Ok(Flow::Normal);
                     }
+                }
+                if let Some(Slot { v: Val::Record(map), .. }) = self.globals.borrow_mut().get_mut(name) {
+                    map.insert(field.clone(), v);
+                    return Ok(Flow::Normal);
                 }
                 Err(format!("field assignment to unbound record `{name}`").into())
             }
@@ -604,12 +640,15 @@ impl<'a> Interp<'a> {
                 // Coerce into the element type of the array binding's declared
                 // type (validated element types validate here, exactly like a
                 // `push` argument or an annotated `let`).
-                let elem_ty = scope.iter().rev().find_map(|f| {
-                    f.get(name).and_then(|s| match &s.ty {
-                        Some(Type::Array(t)) | Some(Type::ArrayN(t, _)) => Some((**t).clone()),
-                        _ => None,
-                    })
-                });
+                let elem_of = |s: &Slot| match &s.ty {
+                    Some(Type::Array(t)) | Some(Type::ArrayN(t, _)) => Some((**t).clone()),
+                    _ => None,
+                };
+                let elem_ty = scope
+                    .iter()
+                    .rev()
+                    .find_map(|f| f.get(name).and_then(elem_of))
+                    .or_else(|| self.globals.borrow().get(name).and_then(elem_of));
                 if let Some(t) = &elem_ty {
                     v = self.coerce(v, t)?;
                 }
@@ -621,6 +660,13 @@ impl<'a> Interp<'a> {
                         items[idx as usize] = v;
                         return Ok(Flow::Normal);
                     }
+                }
+                if let Some(Slot { v: Val::Array(items), .. }) = self.globals.borrow_mut().get_mut(name) {
+                    if idx < 0 || idx as usize >= items.len() {
+                        return Err(format!("array index {idx} out of bounds").into());
+                    }
+                    items[idx as usize] = v;
+                    return Ok(Flow::Normal);
                 }
                 Err(format!("index-assignment to unbound array `{name}`").into())
             }
@@ -673,7 +719,12 @@ impl<'a> Interp<'a> {
                 // later (illegally aliased) use traps, matching the native
                 // backend. Strings and arrays are reclaimed by the host, which is
                 // not observable, so dropping them has no runtime effect here.
-                let v = scope.iter().rev().find_map(|f| f.get(name)).map(|s| s.v.clone());
+                let v = scope
+                    .iter()
+                    .rev()
+                    .find_map(|f| f.get(name))
+                    .map(|s| s.v.clone())
+                    .or_else(|| self.globals.borrow().get(name).map(|s| s.v.clone()));
                 if let Some(Val::Ref { slot, gen }) = v {
                     self.cell_release(slot, gen)?;
                 }
@@ -721,6 +772,10 @@ impl<'a> Interp<'a> {
                     if let Some(slot) = frame.get(name) {
                         return Ok(slot.v.clone());
                     }
+                }
+                // Fall back to module state (RFC-0013).
+                if let Some(slot) = self.globals.borrow().get(name) {
+                    return Ok(slot.v.clone());
                 }
                 Err(format!("unbound variable `{name}`").into())
             }
@@ -798,6 +853,12 @@ impl<'a> Interp<'a> {
                                 return Ok(Val::Option(popped.map(Box::new)));
                             }
                         }
+                        if let Some(Slot { v: Val::Array(items), .. }) =
+                            self.globals.borrow_mut().get_mut(recv)
+                        {
+                            let popped = items.pop();
+                            return Ok(Val::Option(popped.map(Box::new)));
+                        }
                     }
                     return Err("`pop` needs a mutable array binding".into());
                 }
@@ -822,6 +883,14 @@ impl<'a> Interp<'a> {
                             }
                             return Ok(items.swap_remove(idx as usize));
                         }
+                    }
+                    if let Some(Slot { v: Val::Array(items), .. }) =
+                        self.globals.borrow_mut().get_mut(&recv)
+                    {
+                        if idx < 0 || idx as usize >= items.len() {
+                            return Err(format!("array index {idx} out of bounds").into());
+                        }
+                        return Ok(items.swap_remove(idx as usize));
                     }
                     return Err("`swapRemove` needs a mutable array binding".into());
                 }
@@ -1062,10 +1131,17 @@ impl<'a> Interp<'a> {
                         let (ret, finals) = self.call_capturing(name, &vals)?;
                         for i in modifies {
                             if let Expr::Var { name: vn, .. } = &args[i] {
+                                let mut wrote = false;
                                 for frame in scope.iter_mut().rev() {
                                     if let Some(slot) = frame.get_mut(vn) {
                                         slot.v = finals[i].clone();
+                                        wrote = true;
                                         break;
+                                    }
+                                }
+                                if !wrote {
+                                    if let Some(slot) = self.globals.borrow_mut().get_mut(vn) {
+                                        slot.v = finals[i].clone();
                                     }
                                 }
                             }
@@ -2861,5 +2937,53 @@ mod tests {
                    fn main() -> Int64 { let mut a: Array<Age> = [Age(20)]; \
                    let mut n = 5; a[0] = n; return 0; }";
         assert_eq!(run(src).unwrap_err(), "validation failed for `Age`");
+    }
+
+    // ---- module state (RFC-0013) ---------------------------------------
+
+    #[test]
+    fn global_mutation_persists_across_calls() {
+        // Each `bump` sees the previous call's write to the shared global.
+        let src = "let mut hits = 0 \
+                   fn bump() -> Int64 { hits = hits + 1 return hits } \
+                   fn main() -> Int64 { let a = bump() let b = bump() let c = bump() \
+                                        return a + b + c }";
+        assert_eq!(run(src).unwrap(), 6); // 1 + 2 + 3
+    }
+
+    #[test]
+    fn globals_initialize_in_declaration_order() {
+        // `b`'s initializer reads the earlier global `a`.
+        let src = "let a = 10 \
+                   let b = a + 5 \
+                   fn main() -> Int64 { return b }";
+        assert_eq!(run(src).unwrap(), 15);
+    }
+
+    #[test]
+    fn validated_global_traps_at_runtime_on_bad_store() {
+        // A non-constant store into a validated global validates at runtime.
+        let src = "type Age = Int64 where value >= 18 \
+                   let mut a: Age = Age(20) \
+                   fn setAge(n: Int64) -> Int64 { a = n return 0 } \
+                   fn main() -> Int64 { return setAge(5) }";
+        assert_eq!(run(src).unwrap_err(), "validation failed for `Age`");
+    }
+
+    #[test]
+    fn local_shadows_global_in_interp() {
+        // A local `hits` shadows the global; the global stays untouched.
+        let src = "let mut hits = 100 \
+                   fn f() -> Int64 { let hits = 1 return hits } \
+                   fn main() -> Int64 { let a = f() return a + hits }";
+        assert_eq!(run(src).unwrap(), 101); // local 1 + global 100
+    }
+
+    #[test]
+    fn string_global_reads_back() {
+        let src = "let banner = \"vela\" \
+                   fn f() -> Int64 { return banner.length } \
+                   fn main() -> Int64 { return f() }";
+        assert_eq!(run(src).unwrap(), 4);
     }
 }

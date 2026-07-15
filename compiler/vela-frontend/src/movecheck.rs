@@ -34,7 +34,8 @@ pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
         .iter()
         .map(|f| (f.name.clone(), f.params.iter().map(|p| p.capability).collect()))
         .collect();
-    let mc = MoveCheck { caps: &caps, errors: RefCell::new(Vec::new()) };
+    let globals: HashSet<String> = program.globals.iter().map(|g| g.name.clone()).collect();
+    let mc = MoveCheck { caps: &caps, globals: &globals, errors: RefCell::new(Vec::new()) };
     let mut out = Vec::new();
     for f in &program.functions {
         mc.errors.borrow_mut().clear();
@@ -60,6 +61,9 @@ pub fn check(program: &Program) -> Result<(), String> {
 
 struct MoveCheck<'a> {
     caps: &'a HashMap<String, Vec<Capability>>,
+    /// Module-state binding names (RFC-0013). A global may never be passed to a
+    /// `consume` parameter — nothing may take ownership of module state.
+    globals: &'a HashSet<String>,
     /// Per-function statement-boundary error sink (RFC-0006 accumulation).
     /// Cleared at the start of each function, drained by `check_accum`.
     errors: RefCell<Vec<String>>,
@@ -275,7 +279,10 @@ impl MoveCheck<'_> {
                 for (i, arg) in args.iter().enumerate() {
                     self.expr(arg, consumed, scope)?;
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
-                        if let Expr::Var { name: v, .. } = arg {
+                        if let Expr::Var { name: v, line: vl } = arg {
+                            if !Self::in_scope(scope, v) {
+                                self.reject_consume_global(v, name, false, *vl)?;
+                            }
                             consumed
                                 .entry(v.clone())
                                 .or_insert((*line, format!("`{name}(..)`")));
@@ -297,7 +304,10 @@ impl MoveCheck<'_> {
                 for (i, arg) in args.iter().enumerate() {
                     self.expr(arg, consumed, scope)?;
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
-                        if let Expr::Var { name: v, .. } = arg {
+                        if let Expr::Var { name: v, line: vl } = arg {
+                            if !Self::in_scope(scope, v) {
+                                self.reject_consume_global(v, name, true, *vl)?;
+                            }
                             consumed
                                 .entry(v.clone())
                                 .or_insert((*line, format!("`spawn {name}(..)`")));
@@ -307,6 +317,32 @@ impl MoveCheck<'_> {
                 Ok(())
             }
         }
+    }
+
+    /// Reject passing a module-state binding to a `consume` parameter (RFC-0013):
+    /// nothing may take ownership of module state. A local of the same name is
+    /// tracked in `scope` elsewhere; this only fires when `v` is genuinely a
+    /// global. The `scope` shadowing check is done by the caller having already
+    /// excluded locals — here we only know the name is a global if it is in the
+    /// global set AND not shadowed, which the type checker's scope resolves; for
+    /// move checking a global is never in `scope`'s binder sets, so membership in
+    /// `globals` alone (when not a param/let) is decisive.
+    fn reject_consume_global(
+        &self,
+        v: &str,
+        callee: &str,
+        spawned: bool,
+        line: usize,
+    ) -> Result<(), String> {
+        if self.globals.contains(v) {
+            let form = if spawned { format!("spawn {callee}(..)") } else { format!("{callee}(..)") };
+            return Err(format!(
+                "line {line}: module state `{v}` may not be passed to a `consume` parameter \
+                 via `{form}` — nothing may take ownership of module state (it lives for the \
+                 whole module and is never dropped)"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -383,6 +419,29 @@ mod tests {
                                       let z = take(x); return t.join() + z; }";
         let e = run(src).unwrap_err();
         assert!(e.contains("already consumed by `spawn take(..)`"), "{e}");
+    }
+
+    #[test]
+    fn rejects_passing_global_to_consume_param() {
+        // RFC-0013: nothing may take ownership of module state.
+        let src = "type T = { id: Int64 } \
+                   let g = T { id: 1 } \
+                   fn take(t: consume T) -> Int64 { return t.id; } \
+                   fn use_it() -> Int64 { return take(g); } \
+                   fn main() -> Int64 { return 0; }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("module state") && e.contains("consume"), "{e}");
+    }
+
+    #[test]
+    fn local_shadowing_global_may_be_consumed() {
+        // A local `g` shadows the global, so consuming it is fine.
+        let src = "type T = { id: Int64 } \
+                   let g = T { id: 1 } \
+                   fn take(t: consume T) -> Int64 { return t.id; } \
+                   fn use_it() -> Int64 { let g = T { id: 2 } return take(g); } \
+                   fn main() -> Int64 { return 0; }";
+        assert!(run(src).is_ok(), "{:?}", run(src));
     }
 
     #[test]
