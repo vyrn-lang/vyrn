@@ -6,7 +6,7 @@ and the one decision the rest of the language waits on.
 **Every feature below is verified three ways**: the clang-compiled native
 binary AND the `wasm32-wasi` module produce byte-identical stdout, stderr, and
 exit codes against the tree-walking interpreter (the reference semantics),
-across **45 examples** and **561 tests** (0 warnings) — including every runtime
+across **45 examples** and **573 tests** (0 warnings) — including every runtime
 trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere)
 and the canonical I/O error strings (RFC-0014).
 The permanent corpus harness is

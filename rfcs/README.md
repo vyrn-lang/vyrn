@@ -21,6 +21,14 @@ prototype to answer.
 | [0007](RFC-0007-string-templates.md) | String Templates | `\{ }` interpolation, tagged templates, injection-safe `sql`/`latex` |
 | [0008](RFC-0008-logging.md) | Logging | SLF4J-style facade + Logback-style backend; retires `print` |
 | [0009](RFC-0009-error-model.md) | Error Model | `Issue` + accumulating `Validation<T>` with i18n keys |
+| [0010](RFC-0010-modules.md) | Modules | `import`/`export`, loader/linker, JSON-Schema type imports, `vela.json` manifest, lock-pinned reproducible remotes |
+| [0011](RFC-0011-array-mutation.md) | In-Place Array Mutation | `a[i] = v` / `pop` / `swapRemove`, and `a[i].field = v` write-through |
+| [0012](RFC-0012-js-interop.md) | JS Interop (`extern`) | Host imports/exports on wasm; the first feature whose behavior differs per backend |
+| [0013](RFC-0013-module-state-event-loop.md) | Module State & Event Loop | Top-level `let` state, host-driven handler dispatch |
+| [0014](RFC-0014-input-io.md) | Input I/O | `args()`, `readLine`, file + byte builtins, canonical I/O errors |
+| [0015](RFC-0015-testing.md) | Testing | `test` blocks, `assert`/`assertEq`, `velac test` |
+| [0016](RFC-0016-server.md) | The Server | `velac serve`, `Request`/`Response`, the async decision |
+| [0017](RFC-0017-formatter.md) | Canonical Formatter | `velac fmt`: one style, no options |
 
 ## Status legend
 
@@ -31,9 +39,12 @@ Each RFC header carries a status:
 - **Implemented** — reflected in `compiler/` and covered by tests.
 - **Superseded by RFC-XXXX** — kept for history.
 
-Everything here is currently **Draft**, distilled from the founding design
-conversation. Nothing has been battle-tested against a real implementation yet;
-expect the memory model (RFC-0004) to move the most.
+The early RFCs (0001–0009) began as **Draft**, distilled from the founding
+design conversation; most of the surface they describe — and RFCs 0010–0016 —
+is now **Implemented** in `compiler/` and covered by the three-way parity
+corpus (each RFC header carries its own status). RFC-0004's memory model is the
+part still expected to move; RFC-0017 (the formatter) is approved but not yet
+built.
 
 ## Process
 
