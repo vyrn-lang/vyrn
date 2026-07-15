@@ -148,6 +148,7 @@ fn open_enum() -> LspClient {
     assert!(caps.get("hoverProvider").is_some(), "hover advertised");
     assert!(caps.get("definitionProvider").is_some(), "definition advertised");
     assert!(caps.get("completionProvider").is_some(), "completion advertised");
+    assert!(caps.get("documentSymbolProvider").is_some(), "document symbols advertised");
 
     // initialized notification (the client sends this after initialize).
     client.send(&serde_json::json!({
@@ -277,6 +278,66 @@ fn hover_definition_completion_on_enum_vela() {
     client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "exit" }));
     // Let the process exit; ignore its status (it may already be gone). Drop
     // will call kill+wait again, which is harmless on an exited child.
+    let _ = client.child.wait();
+}
+
+/// `textDocument/documentSymbol` returns this document's own top-level
+/// declarations as a flat list: the `Shape` type, its `Circle`/`Rect`/`Unit`
+/// variants, and the `area`/`main` functions — each with the correct 0-based
+/// declaration line and LSP `SymbolKind`. Guards capability advertisement, the
+/// `file.is_none()` filter (no imported symbols here to skip), and the kind
+/// mapping (Type→Struct, Variant→EnumMember, Function→Function).
+#[test]
+fn document_symbol_lists_top_level_declarations() {
+    let mut client = open_enum();
+    let mut ids = Ids::new();
+
+    // `open_enum` advertised hover/def/completion; documentSymbol must be too.
+    // (Re-initialize handshake already happened; assert via the earlier caps is
+    // covered by open_enum. Here we exercise the request itself.)
+    let sym_id = ids.next();
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": sym_id,
+        "method": "textDocument/documentSymbol",
+        "params": { "textDocument": { "uri": enum_uri() } }
+    }));
+    let resp = client.read_response(&sym_id);
+    let items = resp
+        .get("result")
+        .and_then(|r| r.as_array())
+        .expect("documentSymbol result is a list");
+
+    // Build name → (0-based line, kind) from the flat DocumentSymbol list.
+    // LSP SymbolKind numbers: Method=6, Function=12, EnumMember=22, Struct=23.
+    let mut by_name: std::collections::HashMap<&str, (i64, i64)> = std::collections::HashMap::new();
+    for it in items {
+        let name = it.get("name").and_then(|n| n.as_str()).expect("symbol name");
+        let line = it.pointer("/range/start/line").and_then(|l| l.as_i64()).expect("range line");
+        let kind = it.get("kind").and_then(|k| k.as_i64()).expect("symbol kind");
+        by_name.insert(name, (line, kind));
+    }
+
+    for expected in ["Shape", "Circle", "Rect", "Unit", "area", "main"] {
+        assert!(by_name.contains_key(expected), "documentSymbol missing {expected}: {by_name:?}");
+    }
+    // Declaration lines (0-based): `type Shape` on file line 4 → 3; variants on
+    // 5/6/7 → 4/5/6; `fn area` on 10 → 9; `fn main` on 18 → 17.
+    assert_eq!(by_name["Shape"].0, 3, "Shape declared on 0-based line 3");
+    assert_eq!(by_name["Circle"].0, 4, "Circle variant on 0-based line 4");
+    assert_eq!(by_name["area"].0, 9, "area declared on 0-based line 9");
+    assert_eq!(by_name["main"].0, 17, "main declared on 0-based line 17");
+    // Kind mapping.
+    assert_eq!(by_name["Shape"].1, 23, "type → Struct(23)");
+    assert_eq!(by_name["Circle"].1, 22, "variant → EnumMember(22)");
+    assert_eq!(by_name["area"].1, 12, "function → Function(12)");
+    assert_eq!(by_name["main"].1, 12, "function → Function(12)");
+
+    // shutdown.
+    let shutdown_id = ids.next();
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "id": shutdown_id, "method": "shutdown" }));
+    let _ = client.read_response(&shutdown_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "exit" }));
     let _ = client.child.wait();
 }
 

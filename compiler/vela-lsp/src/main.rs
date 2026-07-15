@@ -30,10 +30,11 @@ use lsp_types::notification::{
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    Diagnostic as LspDiagnostic, DiagnosticSeverity, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeParams, InitializeResult,
-    Location, MarkupContent, MarkupKind, OneOf, Position, PublishDiagnosticsParams, Range,
-    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    Diagnostic as LspDiagnostic, DiagnosticSeverity, DocumentSymbol, DocumentSymbolParams,
+    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverParams, InitializeParams, InitializeResult, Location, MarkupContent, MarkupKind, OneOf,
+    Position, PublishDiagnosticsParams, Range, ServerCapabilities, ServerInfo,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 
 use vela_frontend::{analyze, completions, member_completions, resolve, Analysis, SymbolKind};
@@ -212,6 +213,7 @@ fn handle_initialize(connection: &Connection) -> Result<(), ()> {
             trigger_characters: Some(vec![".".into()]),
             ..Default::default()
         }),
+        document_symbol_provider: Some(OneOf::Left(true)),
         ..Default::default()
     };
     let result = InitializeResult {
@@ -259,6 +261,9 @@ fn handle_request(server: &Server, req: Request) -> Response {
         "textDocument/hover" => Response::new_ok(req.id, handle_hover(server, req.params)),
         "textDocument/definition" => Response::new_ok(req.id, handle_definition(server, req.params)),
         "textDocument/completion" => Response::new_ok(req.id, handle_completion(server, req.params)),
+        "textDocument/documentSymbol" => {
+            Response::new_ok(req.id, handle_document_symbol(server, req.params))
+        }
         _ => Response {
             id: req.id,
             result: None,
@@ -332,6 +337,55 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
     .collect();
     // Always return a list (possibly empty) — the client filters by prefix.
     Some(CompletionResponse::Array(items))
+}
+
+/// Answer `textDocument/documentSymbol` from the cached symbol index: the
+/// document's own top-level declarations (functions, methods, types, variants),
+/// as a FLAT list. Imported cross-file symbols carry a `file` and are skipped —
+/// they are not declared in this document (and their columns index the other
+/// file's token stream, so they have no valid range here).
+fn handle_document_symbol(
+    server: &Server,
+    params: serde_json::Value,
+) -> Option<DocumentSymbolResponse> {
+    let p: DocumentSymbolParams = serde_json::from_value(params).ok()?;
+    let (analysis, _uri) = lookup(server, &p.text_document.uri)?;
+    let symbols: Vec<DocumentSymbol> = analysis
+        .symbols
+        .iter()
+        .filter(|s| s.file.is_none())
+        .filter_map(to_document_symbol)
+        .collect();
+    Some(DocumentSymbolResponse::Nested(symbols))
+}
+
+/// Map one frontend [`Symbol`](vela_frontend::Symbol) to an LSP `DocumentSymbol`.
+/// Field/Param/Local never appear in the top-level index; they are dropped
+/// defensively (the match must stay exhaustive). `col == 0` means "whole line"
+/// and `lsp_range` maps it to character 0.
+fn to_document_symbol(sym: &vela_frontend::Symbol) -> Option<DocumentSymbol> {
+    let kind = match sym.kind {
+        SymbolKind::Function => lsp_types::SymbolKind::FUNCTION,
+        SymbolKind::Method => lsp_types::SymbolKind::METHOD,
+        SymbolKind::Type => lsp_types::SymbolKind::STRUCT,
+        SymbolKind::Variant => lsp_types::SymbolKind::ENUM_MEMBER,
+        SymbolKind::Field | SymbolKind::Param | SymbolKind::Local => return None,
+    };
+    let range = lsp_range(sym.line, sym.col, sym.end_col);
+    let detail = if sym.detail.is_empty() { None } else { Some(sym.detail.clone()) };
+    // `deprecated` is a deprecated field of `DocumentSymbol` but the struct has
+    // no `Default`, so it must be named; silence the lint locally.
+    #[allow(deprecated)]
+    Some(DocumentSymbol {
+        name: sym.name.clone(),
+        detail,
+        kind,
+        tags: None,
+        deprecated: None,
+        range,
+        selection_range: range,
+        children: None,
+    })
 }
 
 /// Whether the cursor at 1-based `(line, col)` is in a `.foo` member-access
