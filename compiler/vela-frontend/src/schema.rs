@@ -36,13 +36,13 @@ pub enum Json {
 }
 
 impl Json {
-    fn get(&self, key: &str) -> Option<&Json> {
+    pub fn get(&self, key: &str) -> Option<&Json> {
         match self {
             Json::Obj(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v),
             _ => None,
         }
     }
-    fn as_str(&self) -> Option<&str> {
+    pub fn as_str(&self) -> Option<&str> {
         match self {
             Json::Str(s) => Some(s),
             _ => None,

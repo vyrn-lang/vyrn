@@ -87,10 +87,10 @@ pub fn run(source: &str) -> Result<i64, String> {
 pub fn load(
     root_source: &str,
     root_path: &str,
-    std_root: Option<&str>,
+    opts: &loader::LoadOptions,
     resolver: &dyn loader::ModuleResolver,
 ) -> Result<ast::Program, Vec<diagnostics::Diagnostic>> {
-    let program = loader::load(root_source, root_path, std_root, resolver)?;
+    let program = loader::load(root_source, root_path, opts, resolver)?;
     let mut diags = checker::check_accum(&program);
     if diags.is_empty() {
         diags.extend(movecheck::check_accum(&program));

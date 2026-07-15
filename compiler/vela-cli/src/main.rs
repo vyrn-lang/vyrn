@@ -1,30 +1,64 @@
 //! `velac` — the Vela driver.
 //!
 //! Usage:
-//!   velac run     <file.vela>            Type-check and interpret; process exits with main's value.
-//!   velac check   <file.vela>            Type-check only; print "ok" or every diagnostic.
-//!   velac emit-ir <file.vela>            Print textual LLVM IR to stdout.
-//!   velac build   <file.vela> [-o out]   Compile to a native executable via clang.
+//!   velac run     [file.vela]            Type-check and interpret; process exits with main's value.
+//!   velac check   [file.vela]            Type-check only; print "ok" or every diagnostic.
+//!   velac emit-ir [file.vela]            Print textual LLVM IR to stdout.
+//!   velac build   [file.vela] [-o out] [--target wasm]
+//!                                        Compile to a native executable (or wasm) via clang.
+//!   velac new     <name>                 Scaffold a project (vela.json + src/main.vela).
+//!   velac deps                           Print the resolved module graph.
+//!
+//! The file argument is optional whenever a `vela.json` manifest (found by
+//! walking up from the current directory) declares a `"main"`. The manifest's
+//! `"dependencies"` map bare import specifiers to real ones.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+const USAGE: &str = "usage: velac <run|check|emit-ir|build> [file.vela] [-o out] [--target wasm]\n       velac new <name> | velac deps";
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("usage: velac <run|check|emit-ir|build> <file.vela> [-o out]");
+    if args.len() < 2 {
+        eprintln!("{USAGE}");
         return ExitCode::from(2);
     }
-    let (cmd, path) = (&args[1], &args[2]);
+    let cmd = args[1].as_str();
+
+    if cmd == "new" {
+        let Some(name) = args.get(2) else {
+            eprintln!("usage: velac new <name>");
+            return ExitCode::from(2);
+        };
+        return scaffold(name);
+    }
+    if cmd == "deps" {
+        return deps();
+    }
+
+    // The remaining commands take an optional file; without one, the manifest
+    // supplies `main`.
+    let (path, rest) = match args.get(2).filter(|a| !a.starts_with('-')) {
+        Some(p) => (p.clone(), &args[3..]),
+        None => match manifest_main() {
+            Some(p) => (p, &args[2..]),
+            None => {
+                eprintln!("error: no input file, and no vela.json with a `main` found");
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+        },
+    };
 
     if cmd == "build" {
-        return build(path, &args[3..]);
+        return build(&path, rest);
     }
-
-    if args.len() != 3 {
-        eprintln!("usage: velac <run|check|emit-ir> <file.vela>");
+    if !rest.is_empty() {
+        eprintln!("{USAGE}");
         return ExitCode::from(2);
     }
+    let path = path.as_str();
 
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -34,7 +68,7 @@ fn main() -> ExitCode {
         }
     };
 
-    match cmd.as_str() {
+    match cmd {
         "check" => match load_program(path, &source) {
             Ok(_) => {
                 println!("ok");
@@ -112,13 +146,156 @@ fn std_root() -> Option<String> {
     None
 }
 
+/// The project manifest (`vela.json`), parsed with the frontend's own JSON
+/// parser. All fields optional; unknown keys are ignored (forward compat).
+struct Manifest {
+    /// Directory the manifest lives in (slash-separated).
+    dir: String,
+    main: Option<String>,
+    dependencies: Vec<(String, String)>,
+}
+
+/// Find `vela.json` by walking up from `start` (a directory).
+fn find_manifest(start: &Path) -> Option<Manifest> {
+    let mut dir = start.to_path_buf();
+    loop {
+        let candidate = dir.join("vela.json");
+        if candidate.is_file() {
+            let text = std::fs::read_to_string(&candidate).ok()?;
+            let doc = match vela_frontend::schema::parse_json(&text) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("warning: {} is not valid JSON: {e}", candidate.display());
+                    return None;
+                }
+            };
+            use vela_frontend::schema::Json;
+            let main = match doc.get("main") {
+                Some(Json::Str(s)) => Some(s.clone()),
+                _ => None,
+            };
+            let dependencies = match doc.get("dependencies") {
+                Some(Json::Obj(entries)) => entries
+                    .iter()
+                    .filter_map(|(k, v)| match v {
+                        Json::Str(s) => Some((k.clone(), s.clone())),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            return Some(Manifest {
+                dir: dir.to_string_lossy().replace('\\', "/"),
+                main,
+                dependencies,
+            });
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
+}
+
+/// The manifest's `main`, resolved relative to the manifest's directory.
+fn manifest_main() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let m = find_manifest(&cwd)?;
+    let main = m.main?;
+    Some(format!("{}/{main}", m.dir))
+}
+
+/// LoadOptions for a root file: std root + the nearest manifest's aliases.
+fn load_options(root: &str) -> vela_frontend::loader::LoadOptions {
+    let mut opts =
+        vela_frontend::loader::LoadOptions { std_root: std_root(), ..Default::default() };
+    let start = Path::new(root)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(m) = start.and_then(|d| find_manifest(&d)) {
+        opts.aliases = m.dependencies.into_iter().collect();
+        opts.alias_base = m.dir;
+    }
+    opts
+}
+
+/// `velac new <name>` — scaffold vela.json + src/main.vela + .gitignore.
+fn scaffold(name: &str) -> ExitCode {
+    let root = Path::new(name);
+    if root.exists() {
+        eprintln!("error: `{name}` already exists");
+        return ExitCode::FAILURE;
+    }
+    let manifest = format!(
+        "{{\n    \"name\": \"{name}\",\n    \"main\": \"src/main.vela\",\n    \"dependencies\": {{}}\n}}\n"
+    );
+    let main_vela = format!(
+        "fn main() -> Int64 {{\n    print(\"hello from {name}\")\n    return 0\n}}\n"
+    );
+    let files: &[(&str, &str)] = &[
+        ("vela.json", &manifest),
+        ("src/main.vela", &main_vela),
+        (".gitignore", "*.exe\n*.ll\n*.wasm\n*.shim.c\n"),
+    ];
+    for (rel, content) in files {
+        let path = root.join(rel);
+        if let Some(dir) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!("error: cannot create {}: {e}", dir.display());
+                return ExitCode::FAILURE;
+            }
+        }
+        if let Err(e) = std::fs::write(&path, content) {
+            eprintln!("error: cannot write {}: {e}", path.display());
+            return ExitCode::FAILURE;
+        }
+    }
+    println!("created {name}/ (vela.json, src/main.vela) — try: cd {name} && velac run");
+    ExitCode::SUCCESS
+}
+
+/// `velac deps` — print the resolved module graph of the project's main.
+fn deps() -> ExitCode {
+    let Some(main) = manifest_main() else {
+        eprintln!("error: no vela.json with a `main` found upward from here");
+        return ExitCode::FAILURE;
+    };
+    let source = match std::fs::read_to_string(&main) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {main}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let root_key = main.trim_start_matches(r"\\?\").replace('\\', "/");
+    let opts = load_options(&root_key);
+    match vela_frontend::loader::module_graph(&source, &root_key, &opts, &FsResolver) {
+        Ok(graph) => {
+            for (module, imports) in graph {
+                println!("{module}");
+                for i in imports {
+                    println!("  -> {i}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(diags) => {
+            for d in &diags {
+                let file = d.file.as_deref().unwrap_or(&root_key);
+                eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// Load + check a root file through the module loader, printing diagnostics
 /// (with their originating file) on failure.
 fn load_program(path: &str, source: &str) -> Result<vela_frontend::ast::Program, ExitCode> {
     // Strip Windows' verbatim prefix (`\\?\C:\..`) — it survives neither the
     // slash normalization nor readable diagnostics.
     let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
-    match vela_frontend::load(source, &root_key, std_root().as_deref(), &FsResolver) {
+    let opts = load_options(&root_key);
+    match vela_frontend::load(source, &root_key, &opts, &FsResolver) {
         Ok(p) => Ok(p),
         Err(diags) => {
             for d in &diags {

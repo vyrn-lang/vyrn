@@ -83,13 +83,7 @@ fn dir_of(resolved: &str) -> &str {
 }
 
 /// Resolve an import specifier written inside `importer` to a module key.
-/// `std_root` is the std-library directory (`None` = std unavailable, e.g. a
-/// bare test resolver without one).
-fn resolve_spec(
-    spec: &str,
-    importer: &str,
-    std_root: Option<&str>,
-) -> Result<String, String> {
+fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String, String> {
     let with_ext = |p: String| {
         if p.ends_with(".vela") || p.ends_with(".json") {
             p
@@ -98,7 +92,7 @@ fn resolve_spec(
         }
     };
     if let Some(rest) = spec.strip_prefix("std/") {
-        let root = std_root.ok_or_else(|| {
+        let root = opts.std_root.as_deref().ok_or_else(|| {
             "std library not available (no std root configured)".to_string()
         })?;
         return Ok(normalize(&with_ext(format!("{root}/{rest}"))));
@@ -109,9 +103,42 @@ fn resolve_spec(
             if base.is_empty() { spec.to_string() } else { format!("{base}/{spec}") };
         return Ok(normalize(&with_ext(joined)));
     }
+    // A bare specifier resolves through the manifest's dependency map; the
+    // mapped target is itself a specifier, rooted at the manifest's directory.
+    if let Some(target) = opts.aliases.get(spec) {
+        if target.starts_with("./") || target.starts_with("../") {
+            let joined = if opts.alias_base.is_empty() {
+                target.clone()
+            } else {
+                format!("{}/{target}", opts.alias_base)
+            };
+            return Ok(normalize(&with_ext(joined)));
+        }
+        if target.starts_with("std/") {
+            return resolve_spec(target, importer, opts);
+        }
+        return Err(format!(
+            "manifest maps `{spec}` to `{target}`, which is not a supported \
+             specifier yet (remote imports land in the next milestone)"
+        ));
+    }
     Err(format!(
-        "cannot resolve import `{spec}`: use a relative path (`./name`), or `std/name`"
+        "cannot resolve import `{spec}`: use a relative path (`./name`), `std/name`, \
+         or declare it in vela.json's `dependencies`"
     ))
+}
+
+/// Options for a load: the std root plus the project manifest's dependency
+/// aliases (RFC-0010 M3). `aliases` maps bare specifiers (`"pad"`) to real
+/// specifiers; relative mapped values resolve against `alias_base` (the
+/// manifest's directory), NOT the importing file.
+#[derive(Default)]
+pub struct LoadOptions {
+    pub std_root: Option<String>,
+    pub aliases: std::collections::HashMap<String, String>,
+    /// Directory the manifest lives in (slash-separated); base for relative
+    /// alias targets. Empty = current directory.
+    pub alias_base: String,
 }
 
 /// One parsed module awaiting linking.
@@ -130,9 +157,31 @@ struct Module {
 pub fn load(
     root_source: &str,
     root_path: &str,
-    std_root: Option<&str>,
+    opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
 ) -> Result<Program, Vec<Diagnostic>> {
+    let (modules, root_key) = load_modules(root_source, root_path, opts, resolver)?;
+    link(modules, &root_key)
+}
+
+/// The module dependency graph: every (module key, resolved import targets)
+/// pair reachable from the root — powers `velac deps`.
+pub fn module_graph(
+    root_source: &str,
+    root_path: &str,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+) -> Result<Vec<(String, Vec<String>)>, Vec<Diagnostic>> {
+    let (modules, _) = load_modules(root_source, root_path, opts, resolver)?;
+    Ok(modules.into_iter().map(|m| (m.key, m.import_targets)).collect())
+}
+
+fn load_modules(
+    root_source: &str,
+    root_path: &str,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+) -> Result<(Vec<Module>, String), Vec<Diagnostic>> {
     let root_key = normalize(root_path);
     let mut modules: Vec<Module> = Vec::new();
     let mut states: HashMap<String, bool> = HashMap::new(); // false = loading
@@ -141,7 +190,7 @@ pub fn load(
     fn visit(
         key: &str,
         source: Option<&str>,
-        std_root: Option<&str>,
+        opts: &LoadOptions,
         resolver: &dyn ModuleResolver,
         modules: &mut Vec<Module>,
         states: &mut HashMap<String, bool>,
@@ -244,14 +293,14 @@ pub fn load(
         // Resolve and load imports depth-first.
         let mut import_targets = Vec::new();
         for imp in &program.imports {
-            let target = resolve_spec(&imp.path, key, std_root).map_err(|e| {
+            let target = resolve_spec(&imp.path, key, opts).map_err(|e| {
                 let mut d = Diagnostic::error(imp.line, 0, "load", e);
                 if !is_root {
                     d.file = Some(key.to_string());
                 }
                 vec![d]
             })?;
-            visit(&target, None, std_root, resolver, modules, states, stack, root_key)?;
+            visit(&target, None, opts, resolver, modules, states, stack, root_key)?;
             import_targets.push(target);
         }
 
@@ -264,7 +313,7 @@ pub fn load(
     visit(
         &root_key,
         Some(root_source),
-        std_root,
+        opts,
         resolver,
         &mut modules,
         &mut states,
@@ -272,7 +321,7 @@ pub fn load(
         &root_key,
     )?;
 
-    link(modules, &root_key)
+    Ok((modules, root_key))
 }
 
 /// Whether a type decl is one of the parser-injected builtins (`Value`,
@@ -649,8 +698,12 @@ mod tests {
         MapResolver(entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
     }
 
+    fn opts() -> LoadOptions {
+        LoadOptions { std_root: Some("std".into()), ..Default::default() }
+    }
+
     fn run_multi(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
-        let program = load(root, "main.vela", Some("std"), &map(files))
+        let program = load(root, "main.vela", &opts(), &map(files))
             .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
         let diags = crate::checker::check_accum(&program);
         if let Some(d) = diags.first() {
@@ -660,7 +713,7 @@ mod tests {
     }
 
     fn load_err(root: &str, files: &[(&str, &str)]) -> String {
-        match load(root, "main.vela", Some("std"), &map(files)) {
+        match load(root, "main.vela", &opts(), &map(files)) {
             Ok(_) => panic!("expected a load error"),
             Err(ds) => ds.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("\n"),
         }

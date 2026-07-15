@@ -6,7 +6,7 @@ and the one decision the rest of the language waits on.
 **Every feature below is verified three ways**: the clang-compiled native
 binary AND the `wasm32-wasi` module produce byte-identical stdout, stderr, and
 exit codes against the tree-walking interpreter (the reference semantics),
-across **37 examples** and **404 tests** (0 warnings) — including every runtime
+across **37 examples** and **408 tests** (0 warnings) — including every runtime
 trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere).
 The permanent corpus harness is
 `cargo test -p vela-cli --test parity -- --ignored` (needs clang; the wasm
@@ -50,8 +50,15 @@ from a schema document — the exact inverse of `jsonSchema(T)` (bounds/lengths/
 patterns become `where` clauses, `required` steers `Option<T>`, `$defs` and
 `#/$defs/..` refs resolve, constrained fields become synthetic `User.age`
 types), byte-exact round-trip with the emitter, and any inexpressible keyword
-is a hard error. Next: the `vela.json` manifest + build tool, and reproducible
-remote imports (github:/gist:/https: with lockfile + content-addressed cache).
+is a hard error. **Project manifest** (M3): an optional `vela.json`
+(`name`/`main`/`dependencies`) found by walking up from the cwd — `velac run/
+check/build` need no file argument in a project, bare import specifiers
+(`import { x } from "money"`) resolve through the `dependencies` map (an
+import map; targets are relative-to-manifest or `std/` for now), and `velac
+new <name>` scaffolds a runnable project, `velac deps` prints the resolved
+module graph. Bare `velac run file.vela` stays manifest-free forever. Next:
+reproducible remote imports (github:/gist:/https: with vela.lock +
+content-addressed cache + `velac add/update/vendor`).
 
 ---
 
