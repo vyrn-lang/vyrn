@@ -135,12 +135,35 @@ function registerRun(context, vsc) {
 }
 
 /**
+ * The Vela repo root that owns `startDir`: the nearest ancestor containing
+ * `compiler/Cargo.toml`. Walking up from the FILE (not the workspace folder)
+ * is what makes the run command work when a subdirectory — `examples/`, a
+ * project scaffold — is opened as the workspace: the workspace root then has
+ * no `compiler/`, but an ancestor does.
+ *
+ * @param {string} startDir
+ * @returns {string | null}
+ */
+function findRepoRoot(startDir) {
+  let dir = startDir;
+  for (let i = 0; i < 12; i++) {
+    if (fs.existsSync(path.join(dir, "compiler", "Cargo.toml"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null; // filesystem root
+    dir = parent;
+  }
+  return null;
+}
+
+/**
  * Run a `.vela` file with velac in the integrated terminal. Resolution order for
  * the compiler (first hit wins):
  *   1. the `vela.velacPath` setting, if set;
- *   2. `${workspaceFolder}/compiler/target/release/velac.exe`, if it exists;
- *   3. `${workspaceFolder}/compiler/target/debug/velac.exe`, if it exists;
- *   4. fallback: `cargo run -q --manifest-path <ws>/compiler/Cargo.toml -p vela-cli -- run <file>`.
+ *   2. `<repo>/compiler/target/release/velac.exe`, if it exists;
+ *   3. `<repo>/compiler/target/debug/velac.exe`, if it exists;
+ *   4. `cargo run -q --manifest-path <repo>/compiler/Cargo.toml -p vela-cli -- run <file>`;
+ *   5. no repo found at all: bare `velac run <file>` (PATH install).
+ * `<repo>` is found by walking up from the file (see [findRepoRoot]).
  *
  * @param {typeof import("vscode")} vsc
  * @param {import("vscode").Uri=} uri  the file to run (defaults to the active editor)
@@ -153,35 +176,36 @@ function runFile(vsc, uri) {
   }
   const file = target.fsPath;
 
-  // The workspace folder anchors the compiler paths. Prefer the folder that
-  // owns the file; fall back to the first folder, then the file's directory
-  // (single-file open with no workspace).
-  const wsFolder =
-    (vsc.workspace.getWorkspaceFolder(target) &&
-      vsc.workspace.getWorkspaceFolder(target).uri.fsPath) ||
-    (vsc.workspace.workspaceFolders &&
-      vsc.workspace.workspaceFolders[0] &&
-      vsc.workspace.workspaceFolders[0].uri.fsPath) ||
-    path.dirname(file);
-
   const exe = process.platform === "win32" ? "velac.exe" : "velac";
   const cfg = vsc.workspace.getConfiguration("vela");
   const velacPath = cfg.get("velacPath", "");
+  const repo = findRepoRoot(path.dirname(file));
 
   let command;
-  const release = path.join(wsFolder, "compiler", "target", "release", exe);
-  const debug = path.join(wsFolder, "compiler", "target", "debug", exe);
   if (velacPath) {
     command = invoke(velacPath, ["run", file]);
-  } else if (fs.existsSync(release)) {
-    command = invoke(release, ["run", file]);
-  } else if (fs.existsSync(debug)) {
-    command = invoke(debug, ["run", file]);
+  } else if (repo) {
+    const release = path.join(repo, "compiler", "target", "release", exe);
+    const debug = path.join(repo, "compiler", "target", "debug", exe);
+    if (fs.existsSync(release)) {
+      command = invoke(release, ["run", file]);
+    } else if (fs.existsSync(debug)) {
+      command = invoke(debug, ["run", file]);
+    } else {
+      const manifest = path.join(repo, "compiler", "Cargo.toml");
+      // `cargo` is a bare program name on PATH, so it runs in any shell without
+      // a call operator; only its arguments need quoting.
+      command = `cargo run -q --manifest-path ${quote(manifest)} -p vela-cli -- run ${quote(file)}`;
+    }
   } else {
-    const manifest = path.join(wsFolder, "compiler", "Cargo.toml");
-    // `cargo` is a bare program name on PATH, so it runs in any shell without a
-    // call operator; only its arguments need quoting.
-    command = `cargo run -q --manifest-path ${quote(manifest)} -p vela-cli -- run ${quote(file)}`;
+    // Not inside a Vela repo: assume an installed `velac` on PATH (and point
+    // at the setting if that guess is wrong).
+    command = `velac run ${quote(file)}`;
+    vsc.window.setStatusBarMessage(
+      'Vela: no compiler/ found above this file — using `velac` from PATH ' +
+        '(set "vela.velacPath" if that is not what you want)',
+      8000
+    );
   }
 
   // Reuse a single named terminal rather than spawning one per click.
