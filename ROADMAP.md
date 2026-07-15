@@ -34,6 +34,14 @@ sized-int operand truncation, Float64 refinements, NaN, division traps),
 validated-type soundness holes (nominal predicated records, match-arm
 laundering, `modify` width subtyping, generic capability checks, spawn purity
 through protocols, movecheck gaps), and a lexer/parser diagnostics batch.
+A follow-up closed three more from that review's deferred list: the `?`
+propagate path now frees in-scope owned temporaries exactly like `return`
+(was leaking every owned local on the early exit); region nesting past the
+arena stack's 64 slots now traps (`error: region nesting exceeds 64`) in
+both backends instead of corrupting memory past the fixed `[64 x ptr]`
+global — and the checker's return-path analysis learned that a `region`
+body that always returns satisfies the enclosing function (it runs exactly
+once, unlike a loop).
 
 **Modules (RFC-0010)**: `import { names } from "./path"` / `export fn|type|protocol`
 — TS-style, resolved relative to the importing file (`.vela` appended), with

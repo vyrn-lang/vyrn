@@ -1041,10 +1041,13 @@ impl<'a> Checker<'a> {
                 // Record the frame count at entry so the escape guard can tell
                 // region-local bindings (freed at exit) from outer ones.
                 self.region_floor.borrow_mut().push(scope.len());
-                self.block(body, ret, scope);
+                let body_returns = self.block(body, ret, scope);
                 self.region_floor.borrow_mut().pop();
-                // A region never guarantees a return for its enclosing block.
-                Ok(false)
+                // Unlike a loop, a region body runs exactly once — if it
+                // returns on all paths, so does the enclosing block (both
+                // backends already handle the early exit: the arena is leaked,
+                // never double-freed).
+                Ok(body_returns)
             }
         }
     }

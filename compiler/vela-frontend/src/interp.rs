@@ -389,6 +389,7 @@ fn run_inner(program: &Program) -> Result<i64, String> {
             })
             .flatten()
             .collect(),
+        region_depth: std::cell::Cell::new(0),
     };
     match interp.call("main", &[]) {
         Ok(Val::Int(n)) => Ok(n),
@@ -419,6 +420,10 @@ struct Interp<'a> {
     protocol_methods: HashMap<String, String>,
     /// Enum variant name -> its enum's name, for dispatching on enum receivers.
     variant_enum: HashMap<String, String>,
+    /// Current `region { .. }` nesting depth. The native runtime runs regions
+    /// on a fixed 64-slot arena stack and traps past it; the interpreter
+    /// enforces the same bound so the two stay observably identical.
+    region_depth: std::cell::Cell<usize>,
 }
 
 /// A scope binding: the current value plus the declared type, when one exists
@@ -639,7 +644,18 @@ impl<'a> Interp<'a> {
             // interpreter — it runs its body in a fresh scope and the host
             // reclaims memory. Deterministic freeing is observable only in the
             // native backend; the two agree on output and exit code.
-            Stmt::Region { body, .. } => self.block(body, scope),
+            Stmt::Region { body, .. } => {
+                // Match the native arena runtime's fixed 64-slot region stack:
+                // entering a 65th nested region traps there, so trap here with
+                // the same message (interp == native, incl. traps).
+                if self.region_depth.get() >= 64 {
+                    return Err("region nesting exceeds 64".into());
+                }
+                self.region_depth.set(self.region_depth.get() + 1);
+                let r = self.block(body, scope);
+                self.region_depth.set(self.region_depth.get() - 1);
+                r
+            }
         }
     }
 
@@ -2605,5 +2621,27 @@ mod tests {
             }
         ";
         assert_eq!(run(src).unwrap(), 10); // 0+1+2+3+4
+    }
+
+    /// The native arena runtime has a fixed 64-slot region stack and traps on
+    /// a 65th nested region; the interpreter enforces the identical bound with
+    /// the identical message — depth accumulates dynamically across calls.
+    #[test]
+    fn region_nesting_is_bounded_at_64() {
+        let src = |n: i64| {
+            format!(
+                "fn deep(n: Int64) -> Int64 {{
+                     if n == 0 {{ return 0; }}
+                     region {{
+                         return deep(n - 1);
+                     }}
+                 }}
+                 fn main() -> Int64 {{ return deep({n}); }}"
+            )
+        };
+        // 64 nested regions fill the stack exactly — fine.
+        assert_eq!(run(&src(64)).unwrap(), 0);
+        // The 65th traps, wording shared with the native runtime.
+        assert_eq!(run(&src(65)).unwrap_err(), "region nesting exceeds 64");
     }
 }

@@ -26,10 +26,19 @@ use vela_frontend::own::DropKind;
 const REGION_RUNTIME: &str = "\
 @__vela_region_sp = global i64 0
 @__vela_region_heads = global [64 x ptr] zeroinitializer
+@.trap.regiondepth = private unnamed_addr constant [34 x i8] c\"error: region nesting exceeds 64\\0A\\00\"
 
 define void @__vela_region_enter() {
 entry:
   %sp = load i64, ptr @__vela_region_sp
+  %over = icmp sge i64 %sp, 64
+  br i1 %over, label %trap, label %ok
+trap:
+  %e = call ptr @__vela_stderr()
+  %w = call i32 @fputs(ptr @.trap.regiondepth, ptr %e)
+  call void @exit(i32 1)
+  unreachable
+ok:
   %slot = getelementptr [64 x ptr], ptr @__vela_region_heads, i64 0, i64 %sp
   store ptr null, ptr %slot
   %sp1 = add i64 %sp, 1
@@ -928,9 +937,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // ---- region / arena runtime (RFC-0004 §4) ---------------------------
     // A `region { .. }` block gives heap allocations a deterministic lifetime:
     // everything allocated while the region is on the stack is freed when the
-    // block exits. Implementation: a stack (max depth 64) of singly-linked
-    // allocation lists. Each region allocation reserves 8 extra header bytes
-    // holding the "next" link; `exit` walks the current list and frees it.
+    // block exits. Implementation: a stack (max depth 64; entering a 65th
+    // nested region traps, and the interpreter enforces the same bound) of
+    // singly-linked allocation lists. Each region allocation reserves 8 extra
+    // header bytes holding the "next" link; `exit` walks the list and frees it.
     // `concat` routes through the arena at runtime when a region is active.
     out.push_str(REGION_RUNTIME);
 
@@ -2460,6 +2470,10 @@ impl<'a> Gen<'a> {
 
         // propagate: the enclosing function returns Option/Result ({ i1, i64, i64 }).
         self.emit_label(&prop_l);
+        // Free in-scope owned temporaries before the early return, exactly as
+        // `return` does (the propagated aggregate never aliases one — a value
+        // that escapes into it is not droppable by definition).
+        self.emit_all_drops();
         self.emit_modify_copyout();
         self.emit_term(format!("ret {{ i1, i64, i64 }} {agg}"));
 
@@ -4527,6 +4541,44 @@ mod tests {
         // `?` tests the tag and returns the aggregate on the propagate path.
         assert!(ir.contains("try.prop"), "? should have a propagate block: {ir}");
         assert!(ir.contains("ret { i1, i64, i64 }"), "? should propagate the aggregate: {ir}");
+    }
+
+    #[test]
+    fn question_mark_frees_owned_locals_on_propagate() {
+        // `s` is an owned, non-escaping heap string alive across the `?`; the
+        // propagate path must free it exactly like `return` does (previously
+        // it leaked every owned local on the early exit).
+        let src = "fn f() -> Result<Int64, Int64> { return Ok(1); } \
+                   fn g() -> Result<Int64, Int64> { \
+                       let s = concat(\"a\", \"b\"); \
+                       let x = f()?; \
+                       let n = len(s); \
+                       return Ok(x + n); } \
+                   fn main() -> Int64 { return 0; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        let prop = ir.find("try.prop").expect("propagate block present");
+        let ret = prop + ir[prop..].find("ret { i1, i64, i64 }").expect("propagate returns");
+        assert!(
+            ir[prop..ret].contains("call void @free(ptr"),
+            "owned string must be freed on the propagate path:\n{}",
+            &ir[prop..ret]
+        );
+    }
+
+    #[test]
+    fn region_enter_traps_past_depth_64() {
+        // The arena stack is a fixed [64 x ptr]; entering a 65th nested region
+        // must trap (stderr + exit 1), not write past the global.
+        let src = "fn main() -> Int64 { region { } return 0; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(
+            ir.contains("error: region nesting exceeds 64"),
+            "region-depth trap message present: {ir}"
+        );
+        assert!(
+            ir.contains("%over = icmp sge i64 %sp, 64"),
+            "region_enter bounds-checks the stack pointer: {ir}"
+        );
     }
 
     #[test]
