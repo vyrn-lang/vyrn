@@ -1,6 +1,8 @@
 # RFC-0014 — Input: Args, Stdin, Files, Bytes
 
-- **Status:** Draft — approved for implementation
+- **Status:** Implemented (M1 + M2) — three-way parity verified (interp ==
+  native == wasm, byte-identical including the canonical error strings);
+  `examples/input.vela`, `examples/files.vela`, `examples/args.vela`
 - **Depends on:** RFC-0005 (`Option`/`Result`), RFC-0012 (the browser has its
   own input story — `extern`; this RFC is about native/WASI input)
 
@@ -50,6 +52,20 @@ so **error payloads are canonical Vela wording, never OS text**:
   native side reuses the existing UTF-8 validator DFA; the interpreter gets
   this from Rust naturally — the *wording* is what must match).
 - `writeFile` → `Err("cannot write `<path>`")`.
+
+**The NUL rule (implementation decision).** A NUL byte *is* valid UTF-8, but
+cannot live in a NUL-terminated Vela String — silently truncating on native
+would diverge from the interpreter. So NUL is rejected explicitly, checked
+*before* UTF-8 validation, with its own canonical wording:
+
+- `readFile` of a file containing a NUL byte →
+  `Err("`<path>` contains a NUL byte")`.
+- `stringFromBytes` of bytes containing NUL → `Err("bytes contain a NUL
+  byte")` (and invalid UTF-8 → `Err("bytes are not valid UTF-8")` as below).
+- `readLine` of a line containing a NUL — and likewise a line that is not
+  valid UTF-8 — reads as `None` (an Option has no error channel; the line is
+  simply not representable as a String). Subsequent lines still stream.
+- `readFileBytes` has **no** NUL/UTF-8 rules — raw bytes are the point.
 
 Coarse on purpose: parity-exact today beats errno detail that diverges. Finer
 error enums can come later behind the same canonical strings.
@@ -104,6 +120,12 @@ an empty world. Real browser input remains the `extern` story (RFC-0012).
   `stringFromBytes(s.bytes()) == Ok(s)` is a pinned test.
 - If Array<UInt8> needs deep codegen surgery, M2 may land separately — M1
   must not block on it.
+
+*As implemented:* `Array<UInt8>` needed no codegen surgery beyond `bytes(s)`
+itself, which previously produced an i64-stride `Array<Int64>` — it now
+returns a true i8-stride `Array<UInt8>` in all three backends. M2 shipped
+with M1; the round-trip law is pinned in the interpreter tests, and
+`examples/files.vela` exercises the byte surface under three-way parity.
 
 ## Out of scope
 

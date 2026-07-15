@@ -6,8 +6,9 @@ and the one decision the rest of the language waits on.
 **Every feature below is verified three ways**: the clang-compiled native
 binary AND the `wasm32-wasi` module produce byte-identical stdout, stderr, and
 exit codes against the tree-walking interpreter (the reference semantics),
-across **37 examples** and **418 tests** (0 warnings) — including every runtime
-trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere).
+across **43 examples** and **533 tests** (0 warnings) — including every runtime
+trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere)
+and the canonical I/O error strings (RFC-0014).
 The permanent corpus harness is
 `cargo test -p vela-cli --test parity -- --ignored` (needs clang; the wasm
 column runs when `tools/` holds a wasi-sysroot + wasmtime, or via
@@ -21,10 +22,15 @@ libc-portable: stream handles and all size_t-sensitive calls (`strlen`,
 shim with 64-bit-clean prototypes, and the C `main` lives in the shim (the IR
 exports `vela_entry`), so MSVC, glibc, and wasi-libc all link the same module.
 Exit codes are portable in 0..126 (WASI's constraint). **The browser demo
-ships** (`web/`): a hand-rolled ~100-line WASI preview1 shim (`wasi-min.js`,
-zero dependencies) runs any `velac`-built module in a page — a velac module
-imports exactly five preview1 functions (`fd_write`, `fd_fdstat_get`,
-`fd_close`, `fd_seek`, `proc_exit`), stdout/stderr stream into the page, and
+ships** (`web/`): a hand-rolled WASI preview1 shim (`wasi-min.js`, zero
+dependencies) runs any `velac`-built module in a page — a compute-only velac
+module imports five preview1 functions (`fd_write`, `fd_fdstat_get`,
+`fd_close`, `fd_seek`, `proc_exit`); a module using input (RFC-0014) pulls in
+seven more (`args_get`, `args_sizes_get`, `fd_read`, `fd_fdstat_set_flags`,
+`fd_prestat_get`, `fd_prestat_dir_name`, `path_open`), which the shim serves
+with *graceful degradation* — no argv, stdin at EOF, no filesystem — so
+`args()` is empty, `readLine()` is `None`, and `readFile` yields its canonical
+`Err` in-page instead of crashing. stdout/stderr stream into the page, and
 trap parity holds end-to-end (division by zero prints the canonical
 `error: division by zero` + exit 1 in the browser, byte-identical to interp
 and native). `web/build.ps1` builds the example modules; any static server
@@ -142,6 +148,26 @@ Remote modules are sandboxed: relative imports stay inside their pinned base,
 no local paths, no bare specifiers. Zero new crates (hand-rolled SHA-256 with
 NIST vectors; `curl`/`git ls-remote` subprocesses, all in vela-cli).
 
+**Input I/O (RFC-0014)**: a Vela program can finally *read* — the "computes
+from constants only" gap is closed. `args() -> Array<String>` (argv[1..];
+`velac run prog.vela x y` forwards trailing arguments), `readLine() ->
+Option<String>` (one stdin line, `\r\n`/`\n` stripped, `None` at EOF, repeated
+calls stream), `readFile(p) -> Result<String, String>`, `writeFile(p, c) ->
+Result<Bool, String>` — plus the byte layer: `readFileBytes(p) ->
+Result<Array<UInt8>, String>`, `bytes(s) -> Array<UInt8>` (now a true
+i8-stride byte array), and `stringFromBytes(b)` with the pinned round-trip law
+`stringFromBytes(bytes(s)) == Ok(s)`. All are effects (spawn-forbidden, never
+constant). **Error payloads are canonical Vela wording, never OS text** —
+``Err("cannot read `p`")``, ``Err("`p` is not valid UTF-8")``, ``Err("`p`
+contains a NUL byte")`` (NUL is valid UTF-8 but cannot live in a
+NUL-terminated String, so it is rejected explicitly), ``Err("cannot write
+`p`")`` — byte-identical across all three backends; the wording lives in ONE
+place (the codegen's `@.io.*` globals; the interpreter matches it). The parity
+harness gained the I/O conventions: an `examples/<name>.stdin` fixture pipes
+into all three backends, every run's cwd is `examples/`, and wasmtime gets
+`--dir .` — `examples/input.vela`, `examples/files.vela`, and
+`examples/args.vela` are ordinary three-way parity citizens.
+
 ---
 
 ## Shipped
@@ -149,6 +175,9 @@ NIST vectors; `curl`/`git ls-remote` subprocesses, all in vela-cli).
 ### Language core
 - `Int64` / `Bool`, `let`/`mut`, arithmetic, `if`/`else`, `while`, `for`-in over
   arrays, functions, `print`.
+- **Input I/O (RFC-0014)** — `args()`, `readLine()`, `readFile`/`writeFile`,
+  `readFileBytes`/`bytes`/`stringFromBytes`, with canonical (never-OS) error
+  strings; see the narrative above.
 - Immutable string literals (`==`, `!=`, record fields), statically allocated.
   Concatenate two Strings with `a + b`; a String's byte length is the `s.length`
   field. (The old `concat(a, b)` / `len(s)` free-functions were removed — a
