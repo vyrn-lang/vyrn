@@ -1,0 +1,24 @@
+/// Modules (RFC-0010): `import { names } from "path"` brings another file's
+/// `export`ed functions and types into scope. Paths are relative to the
+/// importing file (`.vela` appended), and `std/...` is the standard library —
+/// itself written in Vela. Everything links into one program, so validated
+/// types, monomorphization, and interp == native == wasm parity all apply
+/// across module boundaries.
+
+import { scale, Percent } from "./lib/mathutil"
+import { clamp } from "std/math"
+import { repeat, joinWith } from "std/strings"
+
+fn main() -> Int64 {
+    // A validated type imported from another module auto-validates here.
+    let half: Percent = 50
+    print(scale(300, half))              // 150
+
+    print(clamp(999, 0, 100))            // 100 — std, written in Vela
+
+    print(repeat("ab", 3))               // ababab
+    let parts = list(["x", "y", "z"])
+    print(joinWith(parts, ", "))         // x, y, z
+
+    return 0
+}

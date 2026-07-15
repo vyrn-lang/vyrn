@@ -4,6 +4,10 @@
 /// entry point.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
+    /// `import { a, b } from "path"` declarations (RFC-0010 modules). Consumed
+    /// by the loader, which links every imported module into this one Program;
+    /// downstream stages (checker/interp/codegen) never see them.
+    pub imports: Vec<ImportDecl>,
     pub type_decls: Vec<TypeDecl>,
     pub functions: Vec<Function>,
     /// Protocol declarations (RFC-0002 §5 / traits): a named set of method
@@ -54,9 +58,26 @@ pub fn log_level_ordinal(name: &str) -> Option<usize> {
 ///   (RFC-0003) — `base` is `Int`/`Bool` with an optional `predicate`;
 /// - a structural record, e.g. `type User = { name: Int, age: Int };`
 ///   (RFC-0002) — `base` is a [`Type::Record`] and `predicate` is `None`.
+/// One `import { names } from "path"` declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportDecl {
+    /// The names brought into scope. `import type { .. }` (JSON Schema
+    /// imports) also lands here; the loader dispatches on the path's extension.
+    pub names: Vec<String>,
+    /// The specifier as written: relative (`./lib`), `std/name`, or (later
+    /// milestones) a manifest alias / remote specifier.
+    pub path: String,
+    pub line: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeDecl {
     pub name: String,
+    /// `export type ..` — importable from other modules (RFC-0010).
+    pub exported: bool,
+    /// The module (file) this decl came from; `None` for the root / single-file
+    /// programs. Set by the loader; used to attribute diagnostics to files.
+    pub module: Option<String>,
     /// `///` documentation (markdown), attached by the parser; `None` if absent.
     pub doc: Option<String>,
     /// Generic parameters, e.g. `type Box<T> = { value: T }`; empty otherwise.
@@ -90,6 +111,10 @@ pub struct EnumVariant {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProtocolDecl {
     pub name: String,
+    /// `export protocol ..` — importable from other modules (RFC-0010).
+    pub exported: bool,
+    /// Source module for diagnostics; `None` for the root. Set by the loader.
+    pub module: Option<String>,
     /// `///` documentation (markdown), attached by the parser; `None` if absent.
     pub doc: Option<String>,
     pub methods: Vec<MethodSig>,
@@ -122,6 +147,10 @@ pub struct ImplBlock {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
     pub name: String,
+    /// `export fn ..` — importable from other modules (RFC-0010).
+    pub exported: bool,
+    /// Source module for diagnostics; `None` for the root. Set by the loader.
+    pub module: Option<String>,
     /// `///` documentation (markdown), attached by the parser; `None` if absent.
     pub doc: Option<String>,
     pub type_params: Vec<String>,

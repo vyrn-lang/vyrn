@@ -6,7 +6,7 @@ and the one decision the rest of the language waits on.
 **Every feature below is verified three ways**: the clang-compiled native
 binary AND the `wasm32-wasi` module produce byte-identical stdout, stderr, and
 exit codes against the tree-walking interpreter (the reference semantics),
-across **35 examples** and **384 tests** (0 warnings) — including every runtime
+across **36 examples** and **396 tests** (0 warnings) — including every runtime
 trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere).
 The permanent corpus harness is
 `cargo test -p vela-cli --test parity -- --ignored` (needs clang; the wasm
@@ -34,6 +34,19 @@ sized-int operand truncation, Float64 refinements, NaN, division traps),
 validated-type soundness holes (nominal predicated records, match-arm
 laundering, `modify` width subtyping, generic capability checks, spawn purity
 through protocols, movecheck gaps), and a lexer/parser diagnostics batch.
+
+**Modules (RFC-0010)**: `import { names } from "./path"` / `export fn|type|protocol`
+— TS-style, resolved relative to the importing file (`.vela` appended), with
+`std/...` reserved for the standard library (itself written in Vela: `std/math`,
+`std/strings` — parity for free). A loader/linker stage parses each file once,
+enforces exports/visibility (a module only sees foreign names it imported;
+importing an enum brings its variants, a protocol its methods), rejects cycles
+and cross-module name collisions, then links everything into ONE Program — the
+checker, interpreter, both code generators, and the parity harness are unaware
+modules exist. I/O lives behind a `ModuleResolver` trait (filesystem in the
+CLI, in-memory maps in tests). Next: JSON Schema type imports, the `vela.json`
+manifest + build tool, and reproducible remote imports (github:/gist:/https:
+with lockfile + content-addressed cache).
 
 ---
 

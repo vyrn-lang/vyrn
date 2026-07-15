@@ -16,6 +16,7 @@ pub mod consteval;
 pub mod diagnostics;
 pub mod interp;
 pub mod lexer;
+pub mod loader;
 pub mod movecheck;
 pub mod own;
 pub mod parser;
@@ -75,4 +76,27 @@ pub fn diagnostics(source: &str) -> Vec<diagnostics::Diagnostic> {
 pub fn run(source: &str) -> Result<i64, String> {
     let program = check(source)?;
     interp::run(&program)
+}
+
+/// Load a multi-module program (RFC-0010): parse `root_source`, resolve every
+/// `import` transitively through `resolver`, link into one [`ast::Program`],
+/// then type-check and move-check it. Single-file programs (no imports) take
+/// exactly the old path semantically — [`check`]/[`run`] remain the simple
+/// single-source entry points.
+pub fn load(
+    root_source: &str,
+    root_path: &str,
+    std_root: Option<&str>,
+    resolver: &dyn loader::ModuleResolver,
+) -> Result<ast::Program, Vec<diagnostics::Diagnostic>> {
+    let program = loader::load(root_source, root_path, std_root, resolver)?;
+    let mut diags = checker::check_accum(&program);
+    if diags.is_empty() {
+        diags.extend(movecheck::check_accum(&program));
+    }
+    if diags.is_empty() {
+        Ok(program)
+    } else {
+        Err(diags)
+    }
 }

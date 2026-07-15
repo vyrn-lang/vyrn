@@ -35,6 +35,8 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     // and match `VInt`/`VBool`/`VStr` — the tag surface — without a `use`.
     program.type_decls.push(TypeDecl {
         name: "Value".to_string(),
+        exported: false,
+        module: None,
         doc: None,
         type_params: Vec::new(),
         base: Type::Enum(vec![
@@ -50,6 +52,8 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     // `template"a\{x}b"` yields one of these; any code can read its fields.
     program.type_decls.push(TypeDecl {
         name: "Template".to_string(),
+        exported: false,
+        module: None,
         doc: None,
         type_params: Vec::new(),
         base: Type::Record(vec![
@@ -68,6 +72,8 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     // so every problem is reported at once and each carries a translation key.
     program.type_decls.push(TypeDecl {
         name: "Issue".to_string(),
+        exported: false,
+        module: None,
         doc: None,
         type_params: Vec::new(),
         base: Type::Record(vec![
@@ -80,6 +86,8 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     });
     program.type_decls.push(TypeDecl {
         name: "Validation".to_string(),
+        exported: false,
+        module: None,
         doc: None,
         type_params: vec!["T".to_string()],
         base: Type::Enum(vec![
@@ -97,6 +105,8 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     // `where` predicate implies. Turn it into OpenAPI/JSON in ordinary code.
     program.type_decls.push(TypeDecl {
         name: "Schema".to_string(),
+        exported: false,
+        module: None,
         doc: None,
         type_params: Vec::new(),
         base: Type::Record(vec![
@@ -238,6 +248,7 @@ impl Parser {
     /// next top-level starter, and continue — so one bad `fn` doesn't hide a
     /// later bad `type`. Returns the partial program plus every diagnostic.
     fn program_accum(&mut self) -> (Program, Vec<Diagnostic>) {
+        let mut imports = Vec::new();
         let mut type_decls = Vec::new();
         let mut functions = Vec::new();
         let mut protocols = Vec::new();
@@ -256,20 +267,41 @@ impl Parser {
             if *self.peek() == Tok::Eof {
                 break; // trailing docs at end of file
             }
+            // `export` marks the FOLLOWING declaration importable (RFC-0010).
+            let exported = if *self.peek() == Tok::Export {
+                self.advance();
+                if !matches!(self.peek(), Tok::Fn | Tok::Type | Tok::Protocol) {
+                    errors.push(Diagnostic::error(
+                        self.line(), self.col(), "parse",
+                        "`export` must be followed by `fn`, `type`, or `protocol`"
+                            .to_string(),
+                    ));
+                    self.sync_to_decl();
+                    continue;
+                }
+                true
+            } else {
+                false
+            };
             match self.peek() {
+                Tok::Import => match self.import_decl() {
+                    Ok(i) => imports.push(i),
+                    Err(d) => { errors.push(d); self.sync_to_decl(); }
+                },
                 Tok::Type => match self.type_decl() {
                     Ok(mut ds) => {
                         ds[0].doc = doc; // synthetic field types carry no doc
+                        ds[0].exported = exported;
                         type_decls.extend(ds);
                     }
                     Err(d) => { errors.push(d); self.sync_to_decl(); }
                 },
                 Tok::Fn => match self.function() {
-                    Ok(mut f) => { f.doc = doc; functions.push(f); }
+                    Ok(mut f) => { f.doc = doc; f.exported = exported; functions.push(f); }
                     Err(d) => { errors.push(d); self.sync_to_decl(); }
                 },
                 Tok::Protocol => match self.protocol_decl() {
-                    Ok(mut p) => { p.doc = doc; protocols.push(p); }
+                    Ok(mut p) => { p.doc = doc; p.exported = exported; protocols.push(p); }
                     Err(d) => { errors.push(d); self.sync_to_decl(); }
                 },
                 Tok::Impl => match self.impl_block() {
@@ -306,7 +338,7 @@ impl Parser {
                 }
             }
         }
-        (Program { type_decls, functions, protocols, impls, log_level, log_sink }, errors)
+        (Program { imports, type_decls, functions, protocols, impls, log_level, log_sink }, errors)
     }
 
     /// Recovery sync point: advance until the cursor sits on a top-level
@@ -328,7 +360,11 @@ impl Parser {
             match self.peek() {
                 Tok::LBrace => { depth += 1; self.advance(); }
                 Tok::RBrace => { if depth > 0 { depth -= 1; } self.advance(); }
-                Tok::Fn | Tok::Type | Tok::Protocol | Tok::Impl if depth == 0 => return,
+                Tok::Fn | Tok::Type | Tok::Protocol | Tok::Impl | Tok::Import | Tok::Export
+                    if depth == 0 =>
+                {
+                    return
+                }
                 Tok::Ident(name) if depth == 0 && name == "logging" => return,
                 _ => { self.advance(); }
             }
@@ -372,7 +408,7 @@ impl Parser {
             methods.push(MethodSig { name: mname, params, ret, line: mline });
         }
         self.eat(&Tok::RBrace)?;
-        Ok(ProtocolDecl { name, doc: None, methods, line })
+        Ok(ProtocolDecl { exported: false, module: None, name, doc: None, methods, line })
     }
 
     /// `impl P for T { fn m(self, ..) -> R { .. } .. }` — a type's methods for a
@@ -426,6 +462,8 @@ impl Parser {
         };
         let body = self.block()?;
         Ok(Function {
+            exported: false,
+            module: None,
             name,
             doc: None,
             type_params: Vec::new(),
@@ -517,6 +555,62 @@ impl Parser {
 
     /// `type Name = Base [where <predicate>] ;` (validated scalar), or
     /// `type Name = { field: Type, ... } ;` (structural record).
+    /// `import { a, b } from "path"` — `from` is contextual (a plain
+    /// identifier elsewhere). `import type { .. }` is accepted for JSON Schema
+    /// imports; the loader dispatches on the path's extension.
+    fn import_decl(&mut self) -> Result<ImportDecl, Diagnostic> {
+        let line = self.line();
+        self.eat(&Tok::Import)?;
+        // Optional `type` marker (JSON Schema imports read naturally).
+        if *self.peek() == Tok::Type {
+            self.advance();
+        }
+        self.eat(&Tok::LBrace)?;
+        let mut names = Vec::new();
+        while *self.peek() != Tok::RBrace {
+            names.push(self.expect_ident()?);
+            if *self.peek() == Tok::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.eat(&Tok::RBrace)?;
+        if names.is_empty() {
+            return Err(Diagnostic::error(
+                line,
+                self.col(),
+                "parse",
+                "an import must name at least one binding: `import { name } from \"..\"`"
+                    .to_string(),
+            ));
+        }
+        match self.advance() {
+            Tok::Ident(kw) if kw == "from" => {}
+            other => {
+                return Err(Diagnostic::error(
+                    line,
+                    self.col(),
+                    "parse",
+                    format!("expected `from` after the import list, found {other:?}"),
+                ))
+            }
+        }
+        let path = match self.advance() {
+            Tok::Str(p) => p,
+            other => {
+                return Err(Diagnostic::error(
+                    line,
+                    self.col(),
+                    "parse",
+                    format!("expected a module path string after `from`, found {other:?}"),
+                ))
+            }
+        };
+        self.eat_semi();
+        Ok(ImportDecl { names, path, line })
+    }
+
     fn type_decl(&mut self) -> Result<Vec<TypeDecl>, Diagnostic> {
         let line = self.line();
         self.eat(&Tok::Type)?;
@@ -577,6 +671,8 @@ impl Parser {
                     .find(|f| f.name == fname)
                     .expect("collected predicate names an existing field");
                 decls.push(TypeDecl {
+                    exported: false,
+                    module: None,
                     name: synthetic.clone(),
                     doc: None,
                     type_params: Vec::new(),
@@ -586,7 +682,19 @@ impl Parser {
                 });
             }
         }
-        decls.insert(0, TypeDecl { name, doc: None, type_params, base, predicate, line });
+        decls.insert(
+            0,
+            TypeDecl {
+                name,
+                exported: false,
+                module: None,
+                doc: None,
+                type_params,
+                base,
+                predicate,
+                line,
+            },
+        );
         Ok(decls)
     }
 
@@ -759,7 +867,7 @@ impl Parser {
 
         let body = self.block()?;
         self.type_params.clear();
-        Ok(Function { name, doc: None, type_params, type_bounds, params, ret, body, line })
+        Ok(Function { name, exported: false, module: None, doc: None, type_params, type_bounds, params, ret, body, line })
     }
 
     /// A type, possibly an intersection `A & B & ...` (sugar for nested

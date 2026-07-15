@@ -31,6 +31,10 @@ pub enum Tok {
     In,
     Drop,
     Protocol,
+    /// `import` — bring exported names from another module into scope.
+    Import,
+    /// `export` — mark a top-level declaration importable (RFC-0010).
+    Export,
     Impl,
     Vself,
     Return,
@@ -466,6 +470,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                 "in" => Tok::In,
                 "drop" => Tok::Drop,
                 "protocol" => Tok::Protocol,
+                "import" => Tok::Import,
+                "export" => Tok::Export,
                 "impl" => Tok::Impl,
                 "self" => Tok::Vself,
                 "return" => Tok::Return,

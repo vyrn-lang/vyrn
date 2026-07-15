@@ -25,6 +25,10 @@ pub enum Severity {
 /// means "point" (the LSP treats it as a single character).
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
+    /// The module (file) the problem is in, when it is not the root document —
+    /// set by the loader/checker for multi-file programs (RFC-0010). `None`
+    /// means "the file being compiled" (single-file programs, or the root).
+    pub file: Option<String>,
     /// 1-based source line.
     pub line: usize,
     /// 1-based start column, or `0` for "whole line / unknown column".
@@ -42,6 +46,7 @@ impl Diagnostic {
     /// the whole line is the relevant range.
     pub fn error(line: usize, col: usize, stage: &'static str, message: String) -> Self {
         Diagnostic {
+            file: None,
             line,
             col,
             end_col: 0,

@@ -1,0 +1,22 @@
+/// std/math — numeric helpers, written in Vela itself. Being ordinary Vela,
+/// everything here gets interpreter == native == wasm parity for free.
+
+export fn min(a: Int64, b: Int64) -> Int64 {
+    if a < b { return a }
+    return b
+}
+
+export fn max(a: Int64, b: Int64) -> Int64 {
+    if a > b { return a }
+    return b
+}
+
+export fn abs(x: Int64) -> Int64 {
+    if x < 0 { return 0 - x }
+    return x
+}
+
+/// Clamp `x` into the inclusive range [lo, hi].
+export fn clamp(x: Int64, lo: Int64, hi: Int64) -> Int64 {
+    return max(lo, min(x, hi))
+}

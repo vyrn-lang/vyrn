@@ -34,17 +34,21 @@ pub fn check_accum_with_let_types(
     let mut types: HashMap<String, TypeDecl> = HashMap::new();
     for t in &program.type_decls {
         if matches!(t.name.as_str(), "Int64" | "Bool" | "Unit") {
-            out.push(Diagnostic::from_rendered(
+            let mut d = Diagnostic::from_rendered(
                 format!("line {}: cannot redefine built-in type `{}`", t.line, t.name),
                 "check",
-            ));
+            );
+            d.file = t.module.clone();
+            out.push(d);
             continue;
         }
         if types.contains_key(&t.name) {
-            out.push(Diagnostic::from_rendered(
+            let mut d = Diagnostic::from_rendered(
                 format!("line {}: type `{}` defined twice", t.line, t.name),
                 "check",
-            ));
+            );
+            d.file = t.module.clone();
+            out.push(d);
             continue;
         }
         types.insert(t.name.clone(), t.clone());
@@ -297,11 +301,15 @@ pub fn check_accum_with_let_types(
             Ok(())
         })();
         if let Err(s) = r {
-            out.push(Diagnostic::from_rendered(s, "check"));
+            let mut d = Diagnostic::from_rendered(s, "check");
+            d.file = f.module.clone();
+            out.push(d);
         }
         // Drain the rest of this function's accumulated body errors.
         for s in checker.errors.borrow_mut().drain(..) {
-            out.push(Diagnostic::from_rendered(s, "check"));
+            let mut d = Diagnostic::from_rendered(s, "check");
+            d.file = f.module.clone();
+            out.push(d);
         }
     }
 

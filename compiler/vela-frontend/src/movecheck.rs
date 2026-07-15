@@ -40,7 +40,9 @@ pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
         mc.errors.borrow_mut().clear();
         mc.function(f);
         for s in mc.errors.borrow_mut().drain(..) {
-            out.push(Diagnostic::from_rendered(s, "movecheck"));
+            let mut d = Diagnostic::from_rendered(s, "movecheck");
+            d.file = f.module.clone();
+            out.push(d);
         }
     }
     out

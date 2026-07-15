@@ -35,38 +35,33 @@ fn main() -> ExitCode {
     };
 
     match cmd.as_str() {
-        "check" => {
-            let diags = vela_frontend::diagnostics(&source);
-            if diags.is_empty() {
+        "check" => match load_program(path, &source) {
+            Ok(_) => {
                 println!("ok");
                 ExitCode::SUCCESS
-            } else {
-                for d in &diags {
-                    // `file:line:col: message` — the conventional compiler
-                    // diagnostic shape editors can parse. col is 0 when a stage
-                    // knows only the line (checker/movecheck); emit `0`.
-                    eprintln!("{}:{}:{}: {}", path, d.line, d.col, d.message);
-                }
-                ExitCode::FAILURE
             }
-        }
-        "run" => match vela_frontend::run(&source) {
-            Ok(code) => {
-                // main's return value becomes the process exit code (0..=255).
-                ExitCode::from((code & 0xff) as u8)
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                ExitCode::FAILURE
-            }
+            Err(code) => code,
         },
-        "emit-ir" => {
-            let program = match vela_frontend::check(&source) {
+        "run" => {
+            let program = match load_program(path, &source) {
                 Ok(p) => p,
+                Err(code) => return code,
+            };
+            match vela_frontend::interp::run(&program) {
+                Ok(code) => {
+                    // main's return value becomes the process exit code (0..=255).
+                    ExitCode::from((code & 0xff) as u8)
+                }
                 Err(e) => {
                     eprintln!("error: {e}");
-                    return ExitCode::FAILURE;
+                    ExitCode::FAILURE
                 }
+            }
+        }
+        "emit-ir" => {
+            let program = match load_program(path, &source) {
+                Ok(p) => p,
+                Err(code) => return code,
             };
             match vela_codegen::emit(&program) {
                 Ok(ir) => {
@@ -82,6 +77,55 @@ fn main() -> ExitCode {
         other => {
             eprintln!("unknown command `{other}` (expected run, check, emit-ir, or build)");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// Filesystem module resolver for multi-file programs (RFC-0010): resolved
+/// specifiers are normalized slash-paths relative to the root file.
+struct FsResolver;
+
+impl vela_frontend::loader::ModuleResolver for FsResolver {
+    fn read(&self, resolved: &str) -> Result<String, String> {
+        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
+    }
+}
+
+/// The std-library root: `$VELA_STD`, or `std/` found by walking up from the
+/// executable (dev builds live at `<repo>/compiler/target/<profile>/velac`,
+/// so the repo's `std/` is a few levels up). `None` if not found — only an
+/// error if a program actually imports `std/...`.
+fn std_root() -> Option<String> {
+    if let Ok(p) = std::env::var("VELA_STD") {
+        if Path::new(&p).exists() {
+            return Some(p.replace('\\', "/"));
+        }
+    }
+    let mut dir = std::env::current_exe().ok()?;
+    for _ in 0..5 {
+        dir = dir.parent()?.to_path_buf();
+        let cand = dir.join("std");
+        if cand.is_dir() {
+            return Some(cand.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    None
+}
+
+/// Load + check a root file through the module loader, printing diagnostics
+/// (with their originating file) on failure.
+fn load_program(path: &str, source: &str) -> Result<vela_frontend::ast::Program, ExitCode> {
+    // Strip Windows' verbatim prefix (`\\?\C:\..`) — it survives neither the
+    // slash normalization nor readable diagnostics.
+    let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    match vela_frontend::load(source, &root_key, std_root().as_deref(), &FsResolver) {
+        Ok(p) => Ok(p),
+        Err(diags) => {
+            for d in &diags {
+                let file = d.file.as_deref().unwrap_or(&root_key);
+                eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
+            }
+            Err(ExitCode::FAILURE)
         }
     }
 }
@@ -156,12 +200,9 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         }
     };
 
-    let program = match vela_frontend::check(&source) {
+    let program = match load_program(path, &source) {
         Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
     let ir = match vela_codegen::emit(&program) {
         Ok(ir) => ir,

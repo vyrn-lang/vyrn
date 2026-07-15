@@ -1,0 +1,12 @@
+/// A local library module for examples/modules.vela. Only `export`ed names are
+/// importable; `double` is private to this file.
+
+export type Percent = Int64 where value >= 0 && value <= 100
+
+export fn scale(value: Int64, pct: Percent) -> Int64 {
+    return double(value) * pct / 200
+}
+
+fn double(x: Int64) -> Int64 {
+    return x * 2
+}
