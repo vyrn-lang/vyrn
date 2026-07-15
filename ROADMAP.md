@@ -5,7 +5,7 @@ and the one decision the rest of the language waits on.
 
 **Every feature below is verified**: the clang-compiled native binary produces
 byte-identical stdout, stderr, and exit codes against the tree-walking
-interpreter (the reference semantics), across **55 examples** and **371 tests**
+interpreter (the reference semantics), across **56 examples** and **378 tests**
 (0 warnings) — including every runtime trap path (one canonical `error: ...`
 wording on stderr, exit 1, in both backends). The permanent corpus harness is
 `cargo test -p vela-cli --test parity -- --ignored` (needs clang; its
@@ -30,10 +30,19 @@ through protocols, movecheck gaps), and a lexer/parser diagnostics batch.
 - Immutable string literals (`==`, `!=`, record fields), statically allocated.
 
 ### Types
-- **Validated types** — `type Age = Int64 where value >= 18`. Provable constants
-  rejected at compile time; others checked at runtime; zero cost when proven.
-- **Nominal types** over `Int64`/`Bool`/`String`, and **fallible construction**
-  `Age?(n) -> Option<Age>`.
+- **Validated types** — `type Age = Int64 where value >= 18`, with **automatic,
+  exhaustive validation**: every value boundary (`let` annotation, assignment,
+  call argument, return, record field, array element) checks a plain value
+  flowing into a validated type by itself — no explicit constructor call
+  needed. Provably-false constants are compile errors; provably-true ones cost
+  nothing; dynamic values trap at runtime (`error: validation failed for
+  \`T\``, both backends byte-identical). Field mutation on validated data is
+  rejected — rebuild the value, which re-validates. Explicit `Age(n)` and
+  fallible `Age?(n) -> Option<Age>` remain.
+- **Nominal types** over `Int64`/`Bool`/`String` (a nominal type *without* a
+  predicate still requires explicit construction — it is documentation).
+- Every numeric type names its size: `Int8`–`Int64`, `UInt8`–`UInt64`,
+  `Float32`/`Float64`. There is no unsized `Int`/`Float`.
 - **Structural records** with width subtyping and mutable fields (`c.x = ...`).
 - **Transformers** — `Omit` / `Pick` / `Merge` / `Partial` / `Readonly`, plus
   intersection `A & B`. Pure type-level, erased before codegen.

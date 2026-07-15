@@ -424,14 +424,12 @@ impl<'a> Checker<'a> {
         if let (Type::Result(a, e1), Type::Result(b, e2)) = (from, to) {
             return self.assignable(a, b) && self.assignable(e1, e2);
         }
-        // A record type with a cross-field `where` predicate is NOMINAL: only
-        // the exact named type may flow in. Width subtyping would smuggle in
-        // structurally-identical values that never ran the invariant check
-        // (`Plain { start: 10, end: 3 }` as a `Range where start < end`);
-        // explicit construction `Range { .. }` is what validates.
+        // `assignable` is the STRICT relation: a predicated named type admits
+        // only itself here. Value boundaries use `coercible`, which adds the
+        // automatic-validation rule on top.
         if let Type::Named(n) = to {
             if let Some(d) = self.types.get(n) {
-                if d.predicate.is_some() && matches!(d.base, Type::Record(_)) {
+                if d.predicate.is_some() {
                     return matches!(from, Type::Named(m) if m == n);
                 }
             }
@@ -445,6 +443,83 @@ impl<'a> Checker<'a> {
             });
         }
         false
+    }
+
+    /// Whether `from` may flow into `to` at a **value boundary** (a `let`
+    /// annotation, an assignment, a call argument, a return, a record field, an
+    /// array element): everything `assignable` allows, **plus automatic
+    /// validation** — a value structurally compatible with a predicated named
+    /// type's base may flow in, and the boundary itself runs the `where`
+    /// predicate (a provably-false constant is rejected at compile time by
+    /// [`Self::prove_coercion`]; anything else is checked at runtime by both
+    /// backends, trapping with `validation failed for \`T\``).
+    ///
+    /// The rule applies at the top level only: a payload inside an
+    /// `Option`/`Result`/`Array` *type* does not auto-coerce — each element is
+    /// validated at its own literal/argument boundary instead.
+    fn coercible(&self, from: &Type, to: &Type) -> bool {
+        if self.assignable(from, to) {
+            return true;
+        }
+        if let Type::Named(n) = to {
+            if let Some(d) = self.types.get(n) {
+                if d.predicate.is_some() {
+                    return self.assignable(from, &d.base);
+                }
+            }
+        }
+        false
+    }
+
+    /// Compile-time half of automatic validation: when a constant expression
+    /// flows into a predicated named type, evaluate the predicate now — a
+    /// provably-false value is a compile error (RFC-0003's rule: what the
+    /// compiler can prove costs nothing and fails early). Non-constant values
+    /// pass through to the runtime check. Also proves record literals whose
+    /// fields are all constants against a cross-field predicate.
+    fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), String> {
+        let decl = match to {
+            Type::Named(n) => match self.types.get(n) {
+                Some(d) if d.predicate.is_some() => d,
+                _ => return Ok(()),
+            },
+            _ => return Ok(()),
+        };
+        let pred = decl.predicate.as_ref().unwrap();
+        // Scalar constant: bind `value`.
+        if let Some(cv) = consteval::eval(expr, &HashMap::new()) {
+            let mut env = HashMap::new();
+            env.insert("value".to_string(), cv.clone());
+            if consteval::eval(pred, &env).and_then(ConstVal::as_bool) == Some(false) {
+                return Err(format!(
+                    "line {line}: {cv} does not satisfy `{}` (predicate `where {}` is false)",
+                    decl.name,
+                    pred_summary(pred),
+                ));
+            }
+            return Ok(());
+        }
+        // Record literal with all-constant fields: bind each field name.
+        if let (Expr::StructLit { fields, .. }, Type::Record(_)) = (expr, &decl.base) {
+            let mut env = HashMap::new();
+            for (fname, fexpr) in fields {
+                match consteval::eval(fexpr, &HashMap::new()) {
+                    Some(cv) => {
+                        env.insert(fname.clone(), cv);
+                    }
+                    None => return Ok(()), // not fully constant — runtime check
+                }
+            }
+            if consteval::eval(pred, &env).and_then(ConstVal::as_bool) == Some(false) {
+                return Err(format!(
+                    "line {line}: this value does not satisfy `{}` (predicate `where {}` \
+                     is false)",
+                    decl.name,
+                    pred_summary(pred),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn ensure_type_exists(&self, ty: &Type, line: usize) -> Result<(), String> {
@@ -769,11 +844,12 @@ impl<'a> Checker<'a> {
                 }
                 let vty = self.expr(value, scope, ty.as_ref(), Some(ret))?;
                 if let Some(declared) = ty {
-                    if !self.assignable(&vty, declared) {
+                    if !self.coercible(&vty, declared) {
                         return Err(format!(
                             "line {line}: `{name}` declared {declared} but initializer is {vty}"
                         ));
                     }
+                    self.prove_coercion(value, declared, *line)?;
                 }
                 if self.base(&vty) == Type::Unit {
                     return Err(format!("line {line}: cannot bind `{name}` to a Unit value"));
@@ -799,12 +875,13 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 let vty = self.expr(value, scope, Some(&b.ty), Some(ret))?;
-                if !self.assignable(&vty, &b.ty) {
+                if !self.coercible(&vty, &b.ty) {
                     return Err(format!(
                         "line {line}: `{name}` is {} but assigned {}",
                         b.ty, vty
                     ));
                 }
+                self.prove_coercion(value, &b.ty, *line)?;
                 self.region_store_guard(name, &b.ty, scope, *line)?;
                 Ok(false)
             }
@@ -817,6 +894,19 @@ impl<'a> Checker<'a> {
                         "line {line}: cannot mutate a field of `{name}` (declared without `mut`)"
                     ));
                 }
+                // Validated data is rebuilt, not mutated: a field write on a
+                // record with a cross-field `where` could break the invariant
+                // mid-update, so it must go through whole-value reassignment
+                // (`r = T { .. }`), which re-validates automatically.
+                if let Type::Named(n) = &b.ty {
+                    if self.types.get(n).is_some_and(|d| d.predicate.is_some()) {
+                        return Err(format!(
+                            "line {line}: cannot mutate a field of `{n}` in place (its \
+                             `where` invariant could be broken mid-update); rebuild it: \
+                             `{name} = {n} {{ .. }}`"
+                        ));
+                    }
+                }
                 let fields = crate::types::record_fields(&b.ty, self.types).ok_or_else(|| {
                     format!("line {line}: `{name}` is not a record, so it has no field `{field}`")
                 })?;
@@ -825,8 +915,21 @@ impl<'a> Checker<'a> {
                     .find(|f| &f.name == field)
                     .map(|f| f.ty.clone())
                     .ok_or_else(|| format!("line {line}: record `{name}` has no field `{field}`"))?;
+                // A predicated FIELD type cannot be written in place either: the
+                // interpreter's record values are type-erased, so the field's
+                // check has no reliable runtime hook there. Only the exact named
+                // type (already validated at its own construction) may flow in.
+                let field_is_predicated = matches!(&fty, Type::Named(fnm)
+                    if self.types.get(fnm).is_some_and(|d| d.predicate.is_some()));
                 let vty = self.expr(value, scope, Some(&fty), Some(ret))?;
-                if !self.assignable(&vty, &fty) {
+                if field_is_predicated {
+                    if !self.assignable(&vty, &fty) {
+                        return Err(format!(
+                            "line {line}: field `{field}` is {fty} (validated); assign an \
+                             already-constructed `{fty}` value, e.g. `{fty}(..)`"
+                        ));
+                    }
+                } else if !self.coercible(&vty, &fty) {
                     return Err(format!(
                         "line {line}: field `{field}` is {fty} but assigned {vty}"
                     ));
@@ -839,7 +942,15 @@ impl<'a> Checker<'a> {
                     Some(e) => self.expr(e, scope, Some(ret), Some(ret))?,
                     None => Type::Unit,
                 };
-                if !self.assignable(&vty, ret) {
+                if self.coercible(&vty, ret) {
+                    if let Some(e) = value {
+                        if let Err(msg) = self.prove_coercion(e, ret, *line) {
+                            self.errors.borrow_mut().push(msg);
+                            return Ok(true);
+                        }
+                    }
+                }
+                if !self.coercible(&vty, ret) {
                     // Report the mismatch but still count this path as returning:
                     // a `return <wrong type>` does return, so it must NOT also
                     // trigger the "must return on all paths" diagnostic (that
@@ -1213,11 +1324,12 @@ impl<'a> Checker<'a> {
                 }
                 for (arg, pty) in args.iter().zip(params) {
                     let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
-                    if !self.assignable(&aty, pty) {
+                    if !self.coercible(&aty, pty) {
                         return Err(format!(
                             "line {line}: `spawn {name}` argument expects {pty}, found {aty}"
                         ));
                     }
+                    self.prove_coercion(arg, pty, *line)?;
                 }
                 Ok(Type::Task(Box::new(ret.clone())))
             }
@@ -1240,14 +1352,23 @@ impl<'a> Checker<'a> {
                     _ => None,
                 };
                 let first = self.expr(&elems[0], scope, elem_expected.as_ref(), fn_ret)?;
-                let elem_ty = elem_expected.unwrap_or(first);
+                let elem_ty = elem_expected.unwrap_or(first.clone());
+                // Every element (including the first) is a value boundary into
+                // the element type — auto-validated when it is predicated.
+                if !self.coercible(&first, &elem_ty) {
+                    return Err(format!(
+                        "line {line}: array elements must share a type: expected {elem_ty},                          found {first}"
+                    ));
+                }
+                self.prove_coercion(&elems[0], &elem_ty, *line)?;
                 for e in &elems[1..] {
                     let t = self.expr(e, scope, Some(&elem_ty), fn_ret)?;
-                    if !self.assignable(&t, &elem_ty) {
+                    if !self.coercible(&t, &elem_ty) {
                         return Err(format!(
                             "line {line}: array elements must share a type: expected {elem_ty}, found {t}"
                         ));
                     }
+                    self.prove_coercion(e, &elem_ty, *line)?;
                 }
                 Ok(Type::ArrayN(Box::new(elem_ty), elems.len()))
             }
@@ -1285,6 +1406,7 @@ impl<'a> Checker<'a> {
             }
             let vty = self.expr(value, scope, Some(&field.ty), fn_ret)?;
             self.unify(&field.ty, &vty, &mut subst, line)?;
+            self.prove_coercion(value, &field.ty, line)?;
         }
         // Every declared field must be provided.
         for f in &rfields {
@@ -1881,11 +2003,12 @@ impl<'a> Checker<'a> {
                 }
             };
             let v = self.expr(&args[1], scope, Some(&elem), fn_ret)?;
-            if !self.assignable(&v, &elem) {
+            if !self.coercible(&v, &elem) {
                 return Err(format!(
                     "line {line}: `set` value is {v} but the cell holds {elem}"
                 ));
             }
+            self.prove_coercion(&args[1], &elem, line)?;
             // A store through a cell is a store into wherever the cell lives:
             // `set(outer, <heap>)` inside a `region` would dangle at exit.
             if let Expr::Var { name: cname, .. } = &args[0] {
@@ -1940,11 +2063,12 @@ impl<'a> Checker<'a> {
                 }
             };
             let v = self.expr(&args[1], scope, Some(&elem), fn_ret)?;
-            if !self.assignable(&v, &elem) {
+            if !self.coercible(&v, &elem) {
                 return Err(format!(
                     "line {line}: `push` value is {v} but the array holds {elem}"
                 ));
             }
+            self.prove_coercion(&args[1], &elem, line)?;
             // `push(outer, <heap elem>)` inside a `region` stores a value that
             // dies with the region into a buffer that outlives it (the rebind
             // form `a = push(a, ..)` is caught by the Assign guard; this catches
@@ -2119,11 +2243,12 @@ impl<'a> Checker<'a> {
                 return Err(format!("line {line}: nested Option/Result is not supported in v0.1"));
             }
             if let Some(want) = &inner_expected {
-                if !self.assignable(&aty, want) {
+                if !self.coercible(&aty, want) {
                     return Err(format!(
                         "line {line}: `Some` payload is {aty} but Option<{want}> was expected"
                     ));
                 }
+                self.prove_coercion(&args[0], want, line)?;
                 return Ok(Type::Option(Box::new(want.clone())));
             }
             return Ok(Type::Option(Box::new(aty)));
@@ -2152,7 +2277,8 @@ impl<'a> Checker<'a> {
                 }
             };
             let want_ty = if name == "Ok" { &t } else { &e };
-            if !self.assignable(&aty, want_ty) {
+            self.prove_coercion(&args[0], want_ty, line)?;
+            if !self.coercible(&aty, want_ty) {
                 return Err(format!(
                     "line {line}: `{name}` payload is {aty} but {want_ty} was expected"
                 ));
@@ -2233,11 +2359,12 @@ impl<'a> Checker<'a> {
                     }
                     for (arg, pty) in args[1..].iter().zip(&sig.params) {
                         let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
-                        if !self.assignable(&aty, pty) {
+                        if !self.coercible(&aty, pty) {
                             return Err(format!(
                                 "line {line}: `{name}` argument is {aty}, expected {pty}"
                             ));
                         }
+                        self.prove_coercion(arg, pty, line)?;
                     }
                     return Ok(sig.ret.clone());
                 }
@@ -2328,12 +2455,13 @@ impl<'a> Checker<'a> {
         let caps = self.caps.get(name);
         for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
             let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
-            if !self.assignable(&aty, pty) {
+            if !self.coercible(&aty, pty) {
                 return Err(format!(
                     "line {line}: `{name}` argument {} expects {pty}, found {aty}",
                     i + 1
                 ));
             }
+            self.prove_coercion(arg, pty, line)?;
             // A `modify` parameter receives the caller's binding by reference —
             // full discipline checked in the shared helper.
             if caps.and_then(|c| c.get(i)) == Some(&Capability::Modify) {
@@ -2441,7 +2569,7 @@ impl<'a> Checker<'a> {
                 _ => Err(format!("line {line}: expected {pty}, found {aty}")),
             },
             _ => {
-                if !self.assignable(aty, pty) {
+                if !self.coercible(aty, pty) {
                     Err(format!("line {line}: argument expects {pty}, found {aty}"))
                 } else {
                     Ok(())
@@ -2992,20 +3120,34 @@ mod tests {
         assert!(check_src(src).is_ok());
     }
 
-    // ---- soundness: validated types cannot be bypassed --------------------
+    // ---- automatic validation: no path skips a `where` predicate ----------
 
     #[test]
-    fn rejects_structural_record_as_predicated_named() {
-        // A predicated record is nominal: a structurally-identical plain record
-        // must not flow in without running the invariant.
-        let src = "type Range = { start: Int64, end: Int64 } where start < end \
-                   type Plain = { start: Int64, end: Int64 } \
+    fn structural_record_into_predicated_named_is_auto_checked() {
+        // A structurally-compatible record may flow into a predicated record
+        // type — the boundary runs the invariant. A provably-violating
+        // constant literal is a COMPILE error…
+        let bad = "type Range = { start: Int64, end: Int64 } where start < end \
                    fn span(r: Range) -> Int64 { return r.end - r.start } \
                    fn main() -> Int64 { \
-                       let p = Plain { start: 10, end: 3 } \
-                       return span(p) }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("expects Range, found Plain"), "{e}");
+                       return span(Range { start: 10, end: 3 }) }";
+        let e = check_src(bad).unwrap_err();
+        assert!(e.contains("violates `where start < end`"), "{e}");
+        // …a constant PLAIN record at the boundary is proven there too…
+        let bad2 = "type Range = { start: Int64, end: Int64 } where start < end \
+                    type Plain = { start: Int64, end: Int64 } \
+                    fn span(r: Range) -> Int64 { return r.end - r.start } \
+                    fn main() -> Int64 { \
+                        return span(Plain { start: 10, end: 3 }) }";
+        let e2 = check_src(bad2).unwrap_err();
+        assert!(e2.contains("does not satisfy `Range`"), "{e2}");
+        // …and a dynamic one compiles (the runtime check traps if violated).
+        let dynamic = "type Range = { start: Int64, end: Int64 } where start < end \
+                       type Plain = { start: Int64, end: Int64 } \
+                       fn span(r: Range) -> Int64 { return r.end - r.start } \
+                       fn mk(a: Int64, b: Int64) -> Plain { return Plain { start: a, end: b } } \
+                       fn main() -> Int64 { return span(mk(1, 5)) }";
+        assert!(check_src(dynamic).is_ok(), "{:?}", check_src(dynamic));
     }
 
     #[test]
@@ -3019,15 +3161,21 @@ mod tests {
     }
 
     #[test]
-    fn match_arm_cannot_launder_validated_scalar() {
-        // A raw-Int arm joins the match to Int, so returning it as `Age`
-        // fails — the refinement can't be skipped via arm unification.
+    fn match_arm_result_is_auto_validated_at_return() {
+        // A raw-Int arm joins the match to Int64; returning it as `Age` is a
+        // checked coercion at the return boundary (runtime trap if invalid) —
+        // never an unchecked laundering.
         let src = "type Age = Int64 where value >= 18 \
                    fn pick(o: Option<Int64>) -> Age { \
-                       return match o { Some(x) => 5, None => 5 } } \
+                       return match o { Some(x) => x, None => 18 } } \
                    fn main() -> Int64 { return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("return type mismatch"), "{e}");
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+        // A provably-invalid CONSTANT return is rejected at compile time.
+        let bad = "type Age = Int64 where value >= 18 \
+                   fn five() -> Age { return 5 } \
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(bad).unwrap_err();
+        assert!(e.contains("does not satisfy `Age`"), "{e}");
     }
 
     #[test]
@@ -3100,6 +3248,66 @@ mod tests {
         assert!(e.contains("nested Option/Result"), "{e}");
     }
 
+    #[test]
+    fn setfield_on_predicated_record_is_rejected() {
+        // In-place field mutation could break the cross-field invariant —
+        // rebuild the whole value instead (which re-validates).
+        let src = "type Range = { start: Int64, end: Int64 } where start < end \
+                   fn main() -> Int64 { \
+                       let mut r = Range { start: 1, end: 5 } \
+                       r.start = 10 \
+                       return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("cannot mutate a field of `Range`"), "{e}");
+    }
+
+    #[test]
+    fn setfield_into_predicated_field_needs_constructed_value() {
+        let src = "type Age = Int64 where value >= 18 \
+                   type User = { age: Age } \
+                   fn main() -> Int64 { \
+                       let mut u = User { age: 30 } \
+                       u.age = 5 \
+                       return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("assign an already-constructed `Age`"), "{e}");
+        // With an explicitly constructed (and therefore validated) value it's fine.
+        let ok = "type Age = Int64 where value >= 18 \
+                  type User = { age: Age } \
+                  fn main() -> Int64 { \
+                      let mut u = User { age: 30 } \
+                      u.age = Age(21) \
+                      return 0 }";
+        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
+    }
+
+    #[test]
+    fn constant_violations_are_compile_errors_at_every_boundary() {
+        let cases = [
+            // let annotation
+            "type Age = Int64 where value >= 18 \
+             fn main() -> Int64 { let a: Age = 5 return 0 }",
+            // call argument
+            "type Age = Int64 where value >= 18 \
+             fn g(a: Age) -> Int64 { return 0 } \
+             fn main() -> Int64 { return g(5) }",
+            // assignment
+            "type Age = Int64 where value >= 18 \
+             fn main() -> Int64 { let mut a: Age = 20 a = 5 return 0 }",
+            // record field
+            "type Age = Int64 where value >= 18 \
+             type User = { age: Age } \
+             fn main() -> Int64 { let u = User { age: 5 } return 0 }",
+            // array element
+            "type Age = Int64 where value >= 18 \
+             fn main() -> Int64 { let xs: Array<Age, 2> = [20, 5] return 0 }",
+        ];
+        for src in cases {
+            let e = check_src(src).unwrap_err();
+            assert!(e.contains("does not satisfy `Age`"), "case: {src}\ngot: {e}");
+        }
+    }
+
     // ---- integer literal ranges ------------------------------------------
 
     #[test]
@@ -3166,18 +3374,23 @@ mod tests {
     }
 
     #[test]
-    fn validated_decays_to_base_but_not_reverse() {
-        // an Age is usable as an Int...
+    fn validated_decays_to_base_and_reverse_is_auto_checked() {
+        // an Age is usable as an Int64...
         let ok = "type Age = Int64 where value >= 18; \
                   fn f(n: Int64) -> Int64 { return n; } \
                   fn main() -> Int64 { return f(Age(20)); }";
         assert!(check_src(ok).is_ok());
-        // ...but a raw Int is NOT usable as an Age without construction
-        let bad = "type Age = Int64 where value >= 18; \
+        // ...and a raw Int64 flows into an Age with an automatic check: a
+        // valid constant is proven free, an invalid one is a compile error.
+        let ok2 = "type Age = Int64 where value >= 18; \
                    fn g(a: Age) -> Int64 { return 0; } \
                    fn main() -> Int64 { return g(20); }";
+        assert!(check_src(ok2).is_ok(), "{:?}", check_src(ok2));
+        let bad = "type Age = Int64 where value >= 18; \
+                   fn g(a: Age) -> Int64 { return 0; } \
+                   fn main() -> Int64 { return g(5); }";
         let e = check_src(bad).unwrap_err();
-        assert!(e.contains("expects Age, found Int64"), "{e}");
+        assert!(e.contains("does not satisfy `Age`"), "{e}");
     }
 
     #[test]

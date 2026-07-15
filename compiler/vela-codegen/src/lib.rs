@@ -1374,6 +1374,44 @@ impl<'a> Gen<'a> {
     /// rebuild for structural record width subtyping (RFC-0002). For everything
     /// else the bit pattern is unchanged and only the reported type differs.
     fn coerce(&mut self, op: String, from: &Type, to: &Type) -> Result<(String, Type), String> {
+        // AUTOMATIC VALIDATION: a value flowing into a predicated named type
+        // coerces to its base, then runs the `where` predicate inline and traps
+        // with the canonical message — mirroring the interpreter's `coerce`.
+        // The exact same named type skips the check (it was validated when it
+        // was constructed/coerced originally).
+        if let Type::Named(n) = to {
+            if from != to {
+                if let Some(decl) = self.types.get(n).cloned() {
+                    if decl.predicate.is_some() {
+                        let (v, _) = self.coerce(op, from, &decl.base)?;
+                        self.emit_validation(&decl, &v)?;
+                        return Ok((v, to.clone()));
+                    }
+                }
+            }
+        }
+        // Fixed arrays coerce element-wise (unrolled), so `[x, y]` flowing into
+        // an `Array<Age, 2>` validates every element.
+        if let (Type::ArrayN(fi, fnn), Type::ArrayN(ti, tn)) =
+            (&self.resolve(from), &self.resolve(to))
+        {
+            if fi != ti && fnn == tn {
+                let fell = self.llt(fi);
+                let from_ll = format!("[{fnn} x {fell}]");
+                let tell = self.llt(ti);
+                let to_ll = format!("[{tn} x {tell}]");
+                let mut cur = "undef".to_string();
+                for i in 0..*tn {
+                    let ext = self.fresh_tmp();
+                    self.emit(format!("{ext} = extractvalue {from_ll} {op}, {i}"));
+                    let (cv, _) = self.coerce(ext, fi, ti)?;
+                    let ins = self.fresh_tmp();
+                    self.emit(format!("{ins} = insertvalue {to_ll} {cur}, {tell} {cv}, {i}"));
+                    cur = ins;
+                }
+                return Ok((cur, to.clone()));
+            }
+        }
         // A plain integer flowing into a sized-integer slot truncates to `iN`
         // (matching the interpreter's `wrap_intn`). Same-width is a no-op.
         if let Type::IntN { bits, .. } = self.resolve(to) {
@@ -3524,27 +3562,44 @@ impl<'a> Gen<'a> {
     /// predicate check that prints and `exit(1)`s on failure.
     fn gen_construction(&mut self, decl: &TypeDecl, arg: &Expr) -> Result<(String, Type), String> {
         let named = Type::Named(decl.name.clone());
-        let base_ll = self.llt(&decl.base);
         let (v, _) = self.gen_expr(arg)?;
-
+        // A constant was already proven by the checker (a violation is a
+        // compile error), so only dynamic values pay for a runtime check.
         let is_const = vela_frontend::consteval::eval(arg, &HashMap::new()).is_some();
-        if is_const || decl.predicate.is_none() {
-            return Ok((v, named));
+        if !is_const {
+            self.emit_validation(decl, &v)?;
         }
-        let pred = decl.predicate.as_ref().unwrap();
+        Ok((v, named))
+    }
 
-        // Bind `value` to the argument, evaluate the predicate, branch on it.
+    /// Emit the inline runtime check that a value satisfies `decl`'s `where`
+    /// predicate, trapping with the canonical per-type message otherwise. A
+    /// scalar base binds `value`; a record base binds every field (the
+    /// cross-field predicate references them by name). Shared by explicit
+    /// construction (`Age(n)`) and every automatic-validation coercion.
+    fn emit_validation(&mut self, decl: &TypeDecl, v: &str) -> Result<(), String> {
+        let Some(pred) = decl.predicate.clone() else { return Ok(()) };
         self.scope.push(Vec::new());
-        let slot = self.declare("value", &decl.base);
-        self.emit(format!("store {base_ll} {v}, ptr {slot}"));
-        let (cond, _) = self.gen_expr(pred)?;
+        if let Type::Record(fields) = &decl.base.clone() {
+            let rec_ll = self.llt(&decl.base);
+            for (i, f) in fields.iter().enumerate() {
+                let ext = self.fresh_tmp();
+                self.emit(format!("{ext} = extractvalue {rec_ll} {v}, {i}"));
+                let slot = self.declare(&f.name, &f.ty);
+                let fll = self.llt(&f.ty);
+                self.emit(format!("store {fll} {ext}, ptr {slot}"));
+            }
+        } else {
+            let base_ll = self.llt(&decl.base);
+            let slot = self.declare("value", &decl.base);
+            self.emit(format!("store {base_ll} {v}, ptr {slot}"));
+        }
+        let (cond, _) = self.gen_expr(&pred)?;
+        self.scope.pop();
         let nok = self.fresh_tmp();
         self.emit(format!("{nok} = xor i1 {cond}, true"));
         self.trap_if(&nok, &format!("@.trap.verr.{}", decl.name), "vfail");
-        let result = self.fresh_tmp();
-        self.emit(format!("{result} = load {base_ll}, ptr {slot}"));
-        self.scope.pop();
-        Ok((result, named))
+        Ok(())
     }
 }
 
@@ -3910,6 +3965,30 @@ mod tests {
         assert!(ir.contains("define i32 @main()"));
         assert!(ir.contains("@printf"));
         assert!(ir.contains("add i64"));
+    }
+
+    #[test]
+    fn implicit_coercion_into_validated_type_emits_check() {
+        // A dynamic raw Int64 argument flowing into an `Age` parameter runs
+        // the predicate inline and traps through the per-type message.
+        let src = "type Age = Int64 where value >= 18 \
+                   fn g(a: Age) -> Int64 { return a } \
+                   fn main() -> Int64 { let mut x = 30 x = x - 1 return g(x) }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("@.trap.verr.Age"), "coercion validates: {ir}");
+    }
+
+    #[test]
+    fn same_named_type_coercion_emits_no_double_check() {
+        // Passing an already-Age value to an Age parameter re-checks nothing.
+        let src = "type Age = Int64 where value >= 18 \
+                   fn g(a: Age) -> Int64 { return a } \
+                   fn h(a: Age) -> Int64 { return g(a) } \
+                   fn main() -> Int64 { return 0 }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        // Only the (elided-const) explicit paths exist: no vfail label at all,
+        // since no dynamic coercion crosses a type boundary.
+        assert!(!ir.contains("vfail"), "no redundant checks: {ir}");
     }
 
     #[test]

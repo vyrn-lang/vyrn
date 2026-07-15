@@ -421,6 +421,22 @@ struct Interp<'a> {
     variant_enum: HashMap<String, String>,
 }
 
+/// A scope binding: the current value plus the declared type, when one exists
+/// (a `let` annotation or a function parameter). The type is what a later
+/// assignment must coerce — and therefore auto-validate — back into, mirroring
+/// the native backend's typed stores.
+#[derive(Clone)]
+struct Slot {
+    v: Val,
+    ty: Option<Type>,
+}
+
+impl Slot {
+    fn untyped(v: Val) -> Slot {
+        Slot { v, ty: None }
+    }
+}
+
 impl<'a> Interp<'a> {
     fn call(&self, name: &str, args: &[Val]) -> Result<Val, Ctrl> {
         Ok(self.call_capturing(name, args)?.0)
@@ -433,10 +449,12 @@ impl<'a> Interp<'a> {
             .funcs
             .get(name)
             .ok_or_else(|| Ctrl::Err(format!("call to unknown function `{name}`")))?;
-        let mut scope: Vec<HashMap<String, Val>> = vec![HashMap::new()];
+        let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
         for (p, v) in f.params.iter().zip(args) {
-            // Coerce each argument to its parameter type (sized-int wrapping).
-            scope[0].insert(p.name.clone(), self.coerce(v.clone(), &p.ty));
+            // Coerce each argument to its parameter type (sized-int wrapping,
+            // and automatic validation into predicated types).
+            let coerced = self.coerce(v.clone(), &p.ty)?;
+            scope[0].insert(p.name.clone(), Slot { v: coerced, ty: Some(p.ty.clone()) });
         }
         // A `?` inside the body surfaces as Ctrl::Return; catch it as the result.
         let ret = match self.block(&f.body, &mut scope) {
@@ -446,11 +464,11 @@ impl<'a> Interp<'a> {
             Err(e) => return Err(e),
         };
         // Coerce the return value to the declared return type.
-        let ret = self.coerce(ret, &f.ret);
+        let ret = self.coerce(ret, &f.ret)?;
         let finals = f
             .params
             .iter()
-            .map(|p| scope[0].get(&p.name).cloned().unwrap_or(Val::Unit))
+            .map(|p| scope[0].get(&p.name).map(|s| s.v.clone()).unwrap_or(Val::Unit))
             .collect();
         Ok((ret, finals))
     }
@@ -465,7 +483,7 @@ impl<'a> Interp<'a> {
         Ok(v)
     }
 
-    fn block(&self, block: &Block, scope: &mut Vec<HashMap<String, Val>>) -> Result<Flow, Ctrl> {
+    fn block(&self, block: &Block, scope: &mut Vec<HashMap<String, Slot>>) -> Result<Flow, Ctrl> {
         scope.push(HashMap::new());
         // Values reclaimed when this frame exits (normally or via `return`),
         // mirroring the native backend's block-exit drops. Only a reference
@@ -486,8 +504,8 @@ impl<'a> Interp<'a> {
                     if let Stmt::Let { name, .. } = stmt {
                         if let Some(kind) = self.droppable.get(&(stmt as *const Stmt as usize)) {
                             if *kind == crate::own::DropKind::ReleaseRef {
-                                if let Some(v) = scope.last().unwrap().get(name) {
-                                    drops.push(v.clone());
+                                if let Some(slot) = scope.last().unwrap().get(name) {
+                                    drops.push(slot.v.clone());
                                 }
                             }
                         }
@@ -517,22 +535,32 @@ impl<'a> Interp<'a> {
         Ok(())
     }
 
-    fn stmt(&self, stmt: &Stmt, scope: &mut Vec<HashMap<String, Val>>) -> Result<Flow, Ctrl> {
+    fn stmt(&self, stmt: &Stmt, scope: &mut Vec<HashMap<String, Slot>>) -> Result<Flow, Ctrl> {
         match stmt {
             Stmt::Let { name, value, ty, .. } => {
                 let mut v = self.expr(value, scope)?;
-                // A sized-integer annotation wraps the initializer to its width.
+                // An annotation coerces the initializer (sized-int wrapping,
+                // automatic validation) and is remembered so reassignments run
+                // through the same coercion.
                 if let Some(t) = ty {
-                    v = self.coerce(v, t);
+                    v = self.coerce(v, t)?;
                 }
-                scope.last_mut().unwrap().insert(name.clone(), v);
+                scope.last_mut().unwrap().insert(name.clone(), Slot { v, ty: ty.clone() });
                 Ok(Flow::Normal)
             }
             Stmt::Assign { name, value, .. } => {
                 let v = self.expr(value, scope)?;
+                // Reassignment flows through the binding's declared type — the
+                // same coercion (and automatic validation) as the original let.
+                let declared =
+                    scope.iter().rev().find_map(|f| f.get(name).and_then(|s| s.ty.clone()));
+                let v = match &declared {
+                    Some(t) => self.coerce(v, t)?,
+                    None => v,
+                };
                 for frame in scope.iter_mut().rev() {
-                    if frame.contains_key(name) {
-                        frame.insert(name.clone(), v);
+                    if let Some(slot) = frame.get_mut(name) {
+                        slot.v = v;
                         return Ok(Flow::Normal);
                     }
                 }
@@ -541,7 +569,7 @@ impl<'a> Interp<'a> {
             Stmt::SetField { name, field, value, .. } => {
                 let v = self.expr(value, scope)?;
                 for frame in scope.iter_mut().rev() {
-                    if let Some(Val::Record(map)) = frame.get_mut(name) {
+                    if let Some(Slot { v: Val::Record(map), .. }) = frame.get_mut(name) {
                         map.insert(field.clone(), v);
                         return Ok(Flow::Normal);
                     }
@@ -583,7 +611,7 @@ impl<'a> Interp<'a> {
                     // Fresh frame per iteration holding the loop variable; the
                     // body's own inner frame nests inside it.
                     scope.push(HashMap::new());
-                    scope.last_mut().unwrap().insert(var.clone(), item);
+                    scope.last_mut().unwrap().insert(var.clone(), Slot::untyped(item));
                     let flow = self.block(body, scope);
                     scope.pop();
                     if let Flow::Return(v) = flow? {
@@ -597,7 +625,7 @@ impl<'a> Interp<'a> {
                 // later (illegally aliased) use traps, matching the native
                 // backend. Strings and arrays are reclaimed by the host, which is
                 // not observable, so dropping them has no runtime effect here.
-                let v = scope.iter().rev().find_map(|f| f.get(name)).cloned();
+                let v = scope.iter().rev().find_map(|f| f.get(name)).map(|s| s.v.clone());
                 if let Some(Val::Ref { slot, gen }) = v {
                     self.cell_release(slot, gen)?;
                 }
@@ -615,7 +643,7 @@ impl<'a> Interp<'a> {
         }
     }
 
-    fn expr(&self, expr: &Expr, scope: &mut Vec<HashMap<String, Val>>) -> Result<Val, Ctrl> {
+    fn expr(&self, expr: &Expr, scope: &mut Vec<HashMap<String, Slot>>) -> Result<Val, Ctrl> {
         match expr {
             Expr::Int(n) => Ok(Val::Int(*n)),
             Expr::Float(x) => Ok(Val::Float(*x)),
@@ -631,8 +659,8 @@ impl<'a> Interp<'a> {
                     return Ok(Val::Enum(name.clone(), Vec::new()));
                 }
                 for frame in scope.iter().rev() {
-                    if let Some(v) = frame.get(name) {
-                        return Ok(v.clone());
+                    if let Some(slot) = frame.get(name) {
+                        return Ok(slot.v.clone());
                     }
                 }
                 Err(format!("unbound variable `{name}`").into())
@@ -939,8 +967,8 @@ impl<'a> Interp<'a> {
                         for i in modifies {
                             if let Expr::Var { name: vn, .. } = &args[i] {
                                 for frame in scope.iter_mut().rev() {
-                                    if frame.contains_key(vn) {
-                                        frame.insert(vn.clone(), finals[i].clone());
+                                    if let Some(slot) = frame.get_mut(vn) {
+                                        slot.v = finals[i].clone();
                                         break;
                                     }
                                 }
@@ -970,13 +998,29 @@ impl<'a> Interp<'a> {
                     let v = self.expr(value, scope)?;
                     map.insert(fname.clone(), v);
                 }
+                // Each field value flows through its declared field type —
+                // sized-int wrapping and automatic validation for predicated
+                // field types (`age: Age` from a raw Int64 runs Age's check).
+                // Generic field types (Params) pass through coerce untouched.
+                if let Some(Type::Record(rfields)) =
+                    self.types.get(name.as_str()).map(|d| &d.base)
+                {
+                    for f in rfields {
+                        if let Some(v) = map.remove(&f.name) {
+                            map.insert(f.name.clone(), self.coerce(v, &f.ty)?);
+                        }
+                    }
+                }
                 // Enforce a cross-field `where` invariant, if the record declares
                 // one (e.g. `{ start, end } where start < end`). The predicate
                 // runs under the runtime evaluator with every field bound, so
                 // Float/sized-int fields compare with exact runtime semantics.
                 if let Some(decl) = self.types.get(name.as_str()) {
                     if let Some(pred) = &decl.predicate {
-                        let mut env = vec![map.clone()];
+                        let mut env = vec![map
+                            .iter()
+                            .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
+                            .collect::<HashMap<_, _>>()];
                         match self.expr(pred, &mut env)? {
                             Val::Bool(true) => {}
                             Val::Bool(false) => {
@@ -1055,7 +1099,8 @@ impl<'a> Interp<'a> {
             None => return Ok(true),
             Some(p) => p,
         };
-        let mut scope = vec![HashMap::from([("value".to_string(), v.clone())])];
+        let mut scope =
+            vec![HashMap::from([("value".to_string(), Slot::untyped(v.clone()))])];
         match self.expr(pred, &mut scope)? {
             Val::Bool(b) => Ok(b),
             other => Err(format!(
@@ -1071,7 +1116,7 @@ impl<'a> Interp<'a> {
         &self,
         sv: Val,
         arms: &[MatchArm],
-        scope: &mut Vec<HashMap<String, Val>>,
+        scope: &mut Vec<HashMap<String, Slot>>,
     ) -> Result<Val, Ctrl> {
         for arm in arms {
             // (does this arm match?, payload bindings)
@@ -1091,7 +1136,7 @@ impl<'a> Interp<'a> {
             }
             scope.push(HashMap::new());
             for (name, val) in bindings {
-                scope.last_mut().unwrap().insert(name, val);
+                scope.last_mut().unwrap().insert(name, Slot::untyped(val));
             }
             let result = self.expr(&arm.body, scope);
             scope.pop();
@@ -1285,22 +1330,92 @@ impl<'a> Interp<'a> {
         }
     }
 
-    /// Convert a value to `ty` at a typed boundary (let/param/return). A plain
-    /// integer flowing into a sized-integer slot wraps to that width, matching the
-    /// native backend's `iN` truncation. Other cases pass through. (`IntN` never
-    /// hides behind a named type — validated types have Int/Bool/String bases.)
-    fn coerce(&self, v: Val, ty: &Type) -> Val {
+    /// Convert a value to `ty` at a typed boundary (let/param/return/field/
+    /// element/assign). A plain integer flowing into a sized-integer slot wraps
+    /// to that width, matching the native backend's `iN` truncation; a float in
+    /// a `Float32` slot rounds to single precision.
+    ///
+    /// This is also where **automatic validation** happens: a value entering a
+    /// predicated named type runs its `where` predicate and traps with the
+    /// canonical `validation failed for \`T\`` when it does not hold. The walk
+    /// is exhaustive — record fields, Option/Result payloads, and array
+    /// elements are coerced (and therefore validated) recursively.
+    fn coerce(&self, v: Val, ty: &Type) -> Result<Val, Ctrl> {
         match (ty, v) {
             (Type::IntN { bits, signed }, Val::Int(n)) => {
-                Val::IntN { v: wrap_intn(n, *bits, *signed), bits: *bits, signed: *signed }
+                Ok(Val::IntN { v: wrap_intn(n, *bits, *signed), bits: *bits, signed: *signed })
             }
             (Type::IntN { bits, signed }, Val::IntN { v, .. }) => {
-                Val::IntN { v: wrap_intn(v, *bits, *signed), bits: *bits, signed: *signed }
+                Ok(Val::IntN { v: wrap_intn(v, *bits, *signed), bits: *bits, signed: *signed })
             }
             // A float literal in a `Float32` slot rounds to single precision; an
             // already-f32 value stays put.
-            (Type::Float32, Val::Float(f)) => Val::Float32(f as f32),
-            (_, v) => v,
+            (Type::Float32, Val::Float(f)) => Ok(Val::Float32(f as f32)),
+            (Type::Named(n), v) => {
+                let Some(decl) = self.types.get(n.as_str()) else { return Ok(v) };
+                // Coerce toward the base first (a record base coerces fields;
+                // a scalar base wraps), then run the predicate on the result.
+                let v = self.coerce(v, &decl.base)?;
+                if let Some(pred) = &decl.predicate {
+                    // A record base has a cross-field predicate (field names in
+                    // scope); a scalar base binds `value`.
+                    let holds = if matches!(decl.base, Type::Record(_)) {
+                        match &v {
+                            Val::Record(map) => {
+                                let mut env = vec![map
+                            .iter()
+                            .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
+                            .collect::<HashMap<_, _>>()];
+                                match self.expr(pred, &mut env)? {
+                                    Val::Bool(b) => b,
+                                    other => {
+                                        return Err(format!(
+                                            "cross-field predicate for `{n}` did not \
+                                             evaluate to Bool (got {other:?})"
+                                        )
+                                        .into())
+                                    }
+                                }
+                            }
+                            _ => true, // not a record value — nothing to check
+                        }
+                    } else {
+                        self.validates(decl, &v)?
+                    };
+                    if !holds {
+                        let msg = if matches!(decl.base, Type::Record(_)) {
+                            format!("validation failed: `{n}` violates its `where` clause")
+                        } else {
+                            format!("validation failed for `{n}`")
+                        };
+                        return Err(msg.into());
+                    }
+                }
+                Ok(v)
+            }
+            (Type::Record(fields), Val::Record(mut map)) => {
+                for f in fields {
+                    if let Some(fv) = map.remove(&f.name) {
+                        map.insert(f.name.clone(), self.coerce(fv, &f.ty)?);
+                    }
+                }
+                Ok(Val::Record(map))
+            }
+            (Type::Option(inner), Val::Option(Some(p))) => {
+                Ok(Val::Option(Some(Box::new(self.coerce(*p, inner)?))))
+            }
+            (Type::Result(tok, terr), Val::Result(is_ok, p)) => {
+                let inner = if is_ok { tok } else { terr };
+                Ok(Val::Result(is_ok, Box::new(self.coerce(*p, inner)?)))
+            }
+            (Type::Array(inner), Val::Array(items)) | (Type::ArrayN(inner, _), Val::Array(items)) => {
+                let mut out = Vec::with_capacity(items.len());
+                for it in items {
+                    out.push(self.coerce(it, inner)?);
+                }
+                Ok(Val::Array(out))
+            }
+            (_, v) => Ok(v),
         }
     }
 
@@ -2049,6 +2164,51 @@ mod tests {
                    fn mk(n: Int64) -> Age { return Age(n); } \
                    fn main() -> Int64 { let a = mk(5); return 0; }";
         assert_eq!(run(src).unwrap_err(), "validation failed for `Age`");
+    }
+
+    #[test]
+    fn auto_validation_traps_dynamic_violations_at_each_boundary() {
+        // Argument boundary.
+        let arg = "type Age = Int64 where value >= 18 \
+                   fn g(a: Age) -> Int64 { return a } \
+                   fn main() -> Int64 { let mut x = 30 x = x - 25 return g(x) }";
+        assert_eq!(run(arg).unwrap_err(), "validation failed for `Age`");
+        // Assignment boundary (the binding's declared type is remembered).
+        let assign = "type Age = Int64 where value >= 18 \
+                      fn main() -> Int64 { let mut a: Age = 20 a = a - 15 return a }";
+        assert_eq!(run(assign).unwrap_err(), "validation failed for `Age`");
+        // Return boundary (a raw match join validates on the way out).
+        let ret = "type Age = Int64 where value >= 18 \
+                   fn pick(o: Option<Int64>) -> Age { \
+                       return match o { Some(x) => x, None => 18 } } \
+                   fn main() -> Int64 { return pick(Some(5)) }";
+        assert_eq!(run(ret).unwrap_err(), "validation failed for `Age`");
+        // Record-field boundary.
+        let field = "type Age = Int64 where value >= 18 \
+                     type User = { age: Age } \
+                     fn mk(n: Int64) -> User { return User { age: n } } \
+                     fn main() -> Int64 { let u = mk(5) return 0 }";
+        assert_eq!(run(field).unwrap_err(), "validation failed for `Age`");
+        // Cross-field record coercion (structural value into a predicated type).
+        let xf = "type Range = { start: Int64, end: Int64 } where start < end \
+                  type Plain = { start: Int64, end: Int64 } \
+                  fn span(r: Range) -> Int64 { return r.end - r.start } \
+                  fn mk(a: Int64, b: Int64) -> Plain { return Plain { start: a, end: b } } \
+                  fn main() -> Int64 { return span(mk(9, 3)) }";
+        assert_eq!(run(xf).unwrap_err(), "validation failed: `Range` violates its `where` clause");
+    }
+
+    #[test]
+    fn auto_validation_passes_valid_dynamic_values() {
+        let src = "type Age = Int64 where value >= 18 \
+                   fn g(a: Age) -> Int64 { return a } \
+                   fn main() -> Int64 { \
+                       let a: Age = 25 \
+                       let mut m: Age = 21 \
+                       m = m + 1 \
+                       let xs: Array<Age, 2> = [19, 20] \
+                       return g(a) + m + xs[1] }";
+        assert_eq!(run(src).unwrap(), 25 + 22 + 20);
     }
 
     #[test]
