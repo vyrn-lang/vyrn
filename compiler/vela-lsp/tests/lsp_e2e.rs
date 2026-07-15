@@ -495,6 +495,36 @@ fn imports_resolve_across_files() {
     let diags = notif["params"]["diagnostics"].as_array().unwrap();
     assert!(diags.is_empty(), "import resolved via loader, expected no diagnostics: {diags:?}");
 
+    // Cross-file go-to-definition: `double` at the call site (0-based line 3,
+    // `    return double(21)`, char 12 is inside the name) → a Location in
+    // lib.vela on its declaration line.
+    let def_id = serde_json::json!(2);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": def_id, "method": "textDocument/definition",
+        "params": {
+            "textDocument": { "uri": uri.clone() },
+            "position": { "line": 3, "character": 12 }
+        }
+    }));
+    let resp = client.read_response(&def_id);
+    let loc = &resp["result"];
+    let target = loc["uri"].as_str().expect("definition returns a Location");
+    assert!(target.ends_with("lib.vela"), "definition jumps into the imported file: {target}");
+    assert_eq!(loc["range"]["start"]["line"], 0, "lands on `export fn double`");
+
+    // Cross-file hover: the same position shows the imported signature.
+    let hover_id = serde_json::json!(3);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": hover_id, "method": "textDocument/hover",
+        "params": {
+            "textDocument": { "uri": uri.clone() },
+            "position": { "line": 3, "character": 12 }
+        }
+    }));
+    let resp = client.read_response(&hover_id);
+    let hover = resp["result"]["contents"]["value"].as_str().expect("hover has content");
+    assert!(hover.contains("double"), "hover shows the imported signature: {hover}");
+
     // Edit the import to a nonexistent module → a load diagnostic appears.
     let bad_text = root_text.replace("./lib", "./gone");
     client.send(&serde_json::json!({

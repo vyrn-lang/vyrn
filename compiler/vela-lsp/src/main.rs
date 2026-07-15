@@ -295,6 +295,13 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
     if !r.definition {
         return None;
     }
+    // Cross-file: an imported symbol carries its source module. Local module
+    // keys are absolute slash paths (→ a file URI); a remote key (`github:...`)
+    // isn't a jumpable file, so it gets hover but no definition.
+    let uri = match &r.target_file {
+        Some(f) => Url::from_file_path(f).ok()?,
+        None => uri,
+    };
     Some(GotoDefinitionResponse::Scalar(Location {
         uri,
         range: lsp_range(r.target_line, r.target_col, r.target_end_col),

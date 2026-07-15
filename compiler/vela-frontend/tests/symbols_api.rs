@@ -547,9 +547,11 @@ fn member_completions_empty_without_receiver_type() {
     // Line 1, col 1 — no dot at/before the cursor → no member context.
     assert!(member_completions(&a, 1, 1).is_empty(), "no dot → no members");
 }
+
 /// `analyze_linked` resolves imports through the loader: a two-file program
-/// that would show "unknown function" under plain `analyze` is clean, and the
-/// symbol index still covers only the root document (not imported decls).
+/// that would show "unknown function" under plain `analyze` is clean, the
+/// imported name is indexed as a cross-file symbol (hover + go-to-definition
+/// into `lib.vela`), and it appears in completions.
 #[test]
 fn analyze_linked_resolves_imports() {
     let root = "import { double } from \"./lib\"\n\nfn main() -> Int64 {\n    return double(21)\n}\n";
@@ -567,10 +569,47 @@ fn analyze_linked_resolves_imports() {
     let opts = vela_frontend::loader::LoadOptions::default();
     let a = vela_frontend::analyze_linked(root, "main.vela", &opts, &resolver);
     assert!(a.diagnostics.is_empty(), "linked analyze should be clean: {:?}", a.diagnostics);
-    // Root-only symbol index: `main` yes, imported `double` no.
     let syms = names(&a);
     assert!(syms.contains("main"));
-    assert!(!syms.contains("double"), "imported decls are not root symbols");
+
+    // The imported symbol is indexed with its source file...
+    let d = a.symbols.iter().find(|s| s.name == "double").expect("imported symbol indexed");
+    assert_eq!(d.file.as_deref(), Some("lib.vela"));
+    assert_eq!(d.line, 1, "declaration line in the imported file");
+    assert_eq!(d.col, 0, "foreign columns are unknown (whole-line)");
+
+    // ...resolves at the call site (line 4: `    return double(21)` — col 12
+    // is inside `double`) with the cross-file target...
+    let r = resolve(&a, 4, 13).expect("call site resolves");
+    assert_eq!(r.name, "double");
+    assert_eq!(r.target_file.as_deref(), Some("lib.vela"));
+    assert_eq!(r.target_line, 1);
+    assert!(r.definition, "an imported symbol has a real declaration to jump to");
+    assert!(r.hover.contains("double"), "hover shows the signature: {}", r.hover);
+
+    // ...and is offered as a completion.
+    let labels: HashSet<String> = completions(&a).into_iter().map(|c| c.label).collect();
+    assert!(labels.contains("double"), "imported names complete: {labels:?}");
+}
+
+/// Importing a name that collides with a root declaration is a LINK error
+/// (top-level names are unique program-wide), and on a failed link the root's
+/// own symbols stay indexed — hover/go-to-def keep working while the user
+/// fixes the collision, resolving to the root declaration (`file: None`).
+#[test]
+fn import_collision_errors_but_root_index_survives() {
+    let root = "import { helper } from \"./lib\"\n\nfn helper(x: Int64) -> Int64 {\n    return x\n}\n\nfn main() -> Int64 {\n    return helper(1)\n}\n";
+    let lib = "export fn helper(x: Int64) -> Int64 {\n    return x + 1\n}\n";
+    let resolver = vela_frontend::loader::MapResolver(
+        [("lib.vela".to_string(), lib.to_string())].into_iter().collect(),
+    );
+    let opts = vela_frontend::loader::LoadOptions::default();
+    let a = vela_frontend::analyze_linked(root, "main.vela", &opts, &resolver);
+    assert!(!a.diagnostics.is_empty(), "the name collision must be reported");
+    // Line 8: `    return helper(1)` — cursor inside `helper`.
+    let r = resolve(&a, 8, 13).expect("call site still resolves");
+    assert_eq!(r.target_file, None, "resolves to the root declaration");
+    assert_eq!(r.target_line, 3, "jumps to the local `fn helper`");
 }
 
 /// An error INSIDE an imported module is surfaced in the root document's

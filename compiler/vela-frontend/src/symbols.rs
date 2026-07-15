@@ -49,6 +49,11 @@ pub struct Symbol {
     pub end_col: usize,
     /// Hover / signature text.
     pub detail: String,
+    /// The module file this symbol was declared in — `None` for the open
+    /// document itself, `Some(path)` for a symbol imported from another file
+    /// (only populated by [`analyze_linked`]). Foreign symbols have `col == 0`
+    /// (their token columns belong to the other file's token stream).
+    pub file: Option<String>,
 }
 
 /// An identifier token's source range, cached for cursor → token mapping.
@@ -120,6 +125,11 @@ pub struct Resolution {
     pub target_line: usize,
     pub target_col: usize,
     pub target_end_col: usize,
+    /// The file the declaration lives in — `None` for the open document,
+    /// `Some(path)` for an imported symbol (cross-file go-to-definition).
+    /// A remote module key (`github:...`) is not a jumpable path; the LSP
+    /// returns "no definition" for those.
+    pub target_file: Option<String>,
     /// Detail text (for hover).
     pub hover: String,
     /// Whether there is a real source declaration to jump to. `false` for a
@@ -269,7 +279,14 @@ fn analyze_inner(
 
     let decl_lines = decl_lines(&program);
     let fn_lines = fn_lines(&program);
-    let symbols = index_symbols(&program, &tok_info, &decl_lines);
+    let mut symbols = index_symbols(&program, &tok_info, &decl_lines);
+    // Cross-file symbols: declarations the root imports, indexed from the
+    // linked program with their source file, so hover shows the signature and
+    // go-to-definition jumps into the imported module. A no-op without a
+    // linker (a plain-`analyze` program has no `module`-tagged decls).
+    if let Some(linked) = &checked {
+        symbols.extend(index_imported_symbols(&program, linked));
+    }
     let locals = index_locals(&program, &tok_info, &let_types);
 
     Analysis {
@@ -442,13 +459,15 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         }
     }
 
-    // Fall back to top-level symbols. Prefer a user-defined one (line > 0); among
-    // those, the latest declaration wins (max_by_key returns the last on ties).
+    // Fall back to top-level symbols. A symbol of the open document (`file:
+    // None`) wins over an imported one of the same name (module scoping: the
+    // local declaration shadows); among candidates, the latest declaration
+    // wins (max_by_key returns the last on ties).
     let best = analysis
         .symbols
         .iter()
         .filter(|s| s.name == tok.text)
-        .max_by_key(|s| s.line);
+        .max_by_key(|s| (s.file.is_none(), s.line));
     if let Some(best) = best {
         return Some(Resolution {
             name: best.name.clone(),
@@ -456,6 +475,7 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
             target_line: best.line,
             target_col: best.col,
             target_end_col: best.end_col,
+            target_file: best.file.clone(),
             hover: best.detail.clone(),
             definition: true,
         });
@@ -470,6 +490,7 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         target_line: 0,
         target_col: 0,
         target_end_col: 0,
+        target_file: None,
         hover: b.detail.to_string(),
         definition: false,
     })
@@ -651,6 +672,7 @@ fn index_symbols(
             col,
             end_col,
             detail: function_detail(f),
+            file: None,
         });
     }
 
@@ -664,6 +686,7 @@ fn index_symbols(
                 col,
                 end_col,
                 detail: function_detail(m),
+                file: None,
             });
         }
     }
@@ -677,6 +700,7 @@ fn index_symbols(
             col,
             end_col,
             detail: protocol_detail(p),
+            file: None,
         });
         for m in &p.methods {
             let (col, end_col) = name_col_on_line(tok_info, &m.name, m.line);
@@ -687,6 +711,7 @@ fn index_symbols(
                 col,
                 end_col,
                 detail: method_sig_detail(m),
+                file: None,
             });
         }
     }
@@ -707,6 +732,7 @@ fn index_symbols(
             col,
             end_col,
             detail: type_decl_detail(t, &program.type_decls),
+            file: None,
         });
         if let Type::Enum(variants) = &t.base {
             // Variants carry no AST line; find the name token between this decl's
@@ -727,7 +753,106 @@ fn index_symbols(
                     col,
                     end_col,
                     detail: variant_detail(&t.name, v),
+                    file: None,
                 });
+            }
+        }
+    }
+
+    out
+}
+
+/// Index the declarations the root document imports, out of the fully linked
+/// program (RFC-0010). Only names the root's `import`s actually bring into
+/// scope are indexed — plus what they imply: an imported enum's variants and an
+/// imported protocol's methods (per-module visibility works the same way).
+/// Columns are 0 (the foreign file's token stream isn't at hand — jump targets
+/// land on the declaration line), and `file` carries the source module so the
+/// LSP can build a cross-file `Location`.
+fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Symbol> {
+    let imported: std::collections::HashSet<&str> = root
+        .imports
+        .iter()
+        .flat_map(|i| i.names.iter().map(|s| s.as_str()))
+        .collect();
+    if imported.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+
+    for f in &linked.functions {
+        if let Some(file) = &f.module {
+            if imported.contains(f.name.as_str()) {
+                out.push(Symbol {
+                    name: f.name.clone(),
+                    kind: SymbolKind::Function,
+                    line: f.line,
+                    col: 0,
+                    end_col: 0,
+                    detail: function_detail(f),
+                    file: Some(file.clone()),
+                });
+            }
+        }
+    }
+
+    for p in &linked.protocols {
+        if let Some(file) = &p.module {
+            if imported.contains(p.name.as_str()) {
+                out.push(Symbol {
+                    name: p.name.clone(),
+                    kind: SymbolKind::Type,
+                    line: p.line,
+                    col: 0,
+                    end_col: 0,
+                    detail: protocol_detail(p),
+                    file: Some(file.clone()),
+                });
+                for m in &p.methods {
+                    out.push(Symbol {
+                        name: m.name.clone(),
+                        kind: SymbolKind::Method,
+                        line: m.line,
+                        col: 0,
+                        end_col: 0,
+                        detail: method_sig_detail(m),
+                        file: Some(file.clone()),
+                    });
+                }
+            }
+        }
+    }
+
+    for t in &linked.type_decls {
+        // Same exclusions as the root indexer: parser-injected builtins
+        // (line == 0) and synthetic inline-refinement types (`User.age`).
+        if t.line == 0 || t.name.contains('.') {
+            continue;
+        }
+        if let Some(file) = &t.module {
+            if imported.contains(t.name.as_str()) {
+                out.push(Symbol {
+                    name: t.name.clone(),
+                    kind: SymbolKind::Type,
+                    line: t.line,
+                    col: 0,
+                    end_col: 0,
+                    detail: type_decl_detail(t, &linked.type_decls),
+                    file: Some(file.clone()),
+                });
+                if let Type::Enum(variants) = &t.base {
+                    for v in variants {
+                        out.push(Symbol {
+                            name: v.name.clone(),
+                            kind: SymbolKind::Variant,
+                            line: t.line,
+                            col: 0,
+                            end_col: 0,
+                            detail: variant_detail(&t.name, v),
+                            file: Some(file.clone()),
+                        });
+                    }
+                }
             }
         }
     }
@@ -859,6 +984,7 @@ fn local_resolution(b: &LocalBinding) -> Resolution {
         target_line: b.line,
         target_col: b.col,
         target_end_col: b.end_col,
+        target_file: None,
         hover: local_detail(b),
         definition: true,
     }

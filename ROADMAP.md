@@ -198,8 +198,13 @@ NIST vectors; `curl`/`git ls-remote` subprocesses, all in vela-cli).
   top-level functions, types, and variants of the open document, plus local
   bindings (params, `let`s, `for`-in vars) — a local shadows a same-named
   top-level symbol; local hover shows the declared type for params and annotated
-  lets. Cross-file hover/go-to-def (jumping *into* the imported file) is a
-  deferred enhancement.
+  lets. **Cross-file hover/go-to-definition**: names the root imports are
+  indexed from the linked program with their source file — hover shows the
+  imported signature, F12 jumps into the imported module (declaration line;
+  columns are whole-line, the foreign token stream isn't indexed). An imported
+  enum brings its variants, an imported protocol its methods. Remote modules
+  (`github:...`) get hover but no jump (no local file). Imported names appear
+  in completions.
 - **VS Code extension** (`editor/vscode/`) — plain-JavaScript (no compile step)
   extension that spawns `vela-lsp` and ships a TextMate grammar for colors. `F5`
   from the repo root runs it against `examples/`: colored, squiggled, with hover
