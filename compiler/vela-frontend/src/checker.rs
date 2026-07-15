@@ -272,12 +272,20 @@ pub fn check_accum_with_let_types(
     }
 
     // 4. main signature. A missing/wrong `main` is a whole-program error (line 0);
-    // it does not stop function bodies from being checked below.
+    // it does not stop function bodies from being checked below. A program with
+    // no `main` but WITH exported declarations is a LIBRARY MODULE (RFC-0010) —
+    // it exists to be imported, so demanding an entry point is noise (both in
+    // `velac check lib.vela` and in the editor). Running one still fails
+    // cleanly: the interpreter/backends report the missing `main` themselves.
+    let is_library = program.functions.iter().map(|f| f.exported).any(|e| e)
+        || program.type_decls.iter().any(|t| t.exported)
+        || program.protocols.iter().any(|p| p.exported);
     match sigs.get("main") {
-        None => out.push(Diagnostic::from_rendered(
+        None if !is_library => out.push(Diagnostic::from_rendered(
             "no `main` function found".to_string(),
             "check",
         )),
+        None => {}
         Some(main) if !main.0.is_empty() || main.1 != Type::Int => out.push(Diagnostic::from_rendered(
             "`main` must have signature `fn main() -> Int64`".to_string(),
             "check",
@@ -3184,6 +3192,18 @@ mod tests {
     }
 
     // ---- extern (RFC-0012 M1) --------------------------------------------
+
+    /// A file with exported declarations is a library module (RFC-0010): it
+    /// exists to be imported, so `check` must not demand a `main`. A file with
+    /// neither exports nor `main` is still an error (a script missing its
+    /// entry point).
+    #[test]
+    fn library_modules_do_not_need_main() {
+        assert!(check_src("export fn double(x: Int64) -> Int64 { return x * 2 }").is_ok());
+        assert!(check_src("export type Age = Int64 where value >= 18").is_ok());
+        let e = check_src("fn helper(x: Int64) -> Int64 { return x }").unwrap_err();
+        assert!(e.contains("no `main` function found"), "{e}");
+    }
 
     #[test]
     fn extern_signatures_accept_the_abi_domain() {
