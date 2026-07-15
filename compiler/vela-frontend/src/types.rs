@@ -147,7 +147,10 @@ pub fn json_schema_string(decl: &TypeDecl, types: &HashMap<String, TypeDecl>) ->
 /// instead (honest-lossy, like every other unmappable form here).
 fn type_schema(ty: &Type, types: &HashMap<String, TypeDecl>, visiting: &mut Vec<String>) -> String {
     match ty {
-        Type::Int | Type::IntN { .. } => "{\"type\":\"integer\"}".to_string(),
+        // The default Int64 is "just an integer"; a *sized* int is a deliberate
+        // wire-width choice, so its bounds are part of the contract.
+        Type::Int => "{\"type\":\"integer\"}".to_string(),
+        Type::IntN { bits, signed } => intn_schema(*bits, *signed, &[]),
         Type::Float | Type::Float32 => "{\"type\":\"number\"}".to_string(),
         Type::Bool => "{\"type\":\"boolean\"}".to_string(),
         Type::Str => "{\"type\":\"string\"}".to_string(),
@@ -175,8 +178,57 @@ fn type_schema(ty: &Type, types: &HashMap<String, TypeDecl>, visiting: &mut Vec<
             }
         }
         Type::Record(fields) => record_schema(fields, types, visiting),
+        // A payload-less sum type is exactly a JSON Schema `enum` of its
+        // variant names; payload variants have no faithful encoding, so they
+        // get the honest-lossy `$comment` (like every unmappable form here).
+        Type::Enum(variants) => {
+            if variants.iter().all(|v| v.payload.is_empty()) {
+                let names: Vec<String> =
+                    variants.iter().map(|v| format!("\"{}\"", json_escape(&v.name))).collect();
+                format!("{{\"enum\":[{}]}}", names.join(","))
+            } else {
+                "{\"$comment\":\"enum with payload variants (validated at runtime)\"}"
+                    .to_string()
+            }
+        }
         _ => "{}".to_string(),
     }
+}
+
+/// The schema for a sized integer: `"integer"` plus its width bounds, merged
+/// with any predicate-derived constraints in `extra` (a predicate bound on the
+/// same key wins — it is checked against the width at runtime anyway, and a
+/// JSON object cannot repeat a key). `UInt64`'s maximum (2^64 − 1) exceeds
+/// what a Vela `where` clause (an `Int64` literal) can express on re-import,
+/// so only its `minimum` is emitted.
+fn intn_schema(bits: u8, signed: bool, extra: &[(String, String)]) -> String {
+    const BOUND_KEYS: [&str; 4] =
+        ["minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum"];
+    let mut parts = vec!["\"type\":\"integer\"".to_string()];
+    let has = |k: &str| extra.iter().any(|(ek, _)| ek == k);
+    // Bound keywords in the importer's canonical clause order, so
+    // emit → import → re-emit is byte-stable regardless of how the source
+    // predicate ordered its comparisons. Width defaults fill a bound family
+    // (min/max) only when the predicate left it open. Arithmetic shifts of
+    // the i64 extremes are well-defined for every width (a plain `1 << bits`
+    // would overflow at 64).
+    for key in BOUND_KEYS {
+        if let Some((_, v)) = extra.iter().find(|(ek, _)| ek == key) {
+            parts.push(format!("\"{key}\":{v}"));
+        } else if key == "minimum" && !has("exclusiveMinimum") {
+            let lo: i64 = if signed { i64::MIN >> (64 - bits) } else { 0 };
+            parts.push(format!("\"minimum\":{lo}"));
+        } else if key == "maximum" && !has("exclusiveMaximum") && !(bits == 64 && !signed) {
+            let hi: i64 = if signed { i64::MAX >> (64 - bits) } else { (1i64 << bits) - 1 };
+            parts.push(format!("\"maximum\":{hi}"));
+        }
+    }
+    for (k, v) in extra {
+        if !BOUND_KEYS.contains(&k.as_str()) {
+            parts.push(format!("\"{k}\":{v}"));
+        }
+    }
+    format!("{{{}}}", parts.join(","))
 }
 
 /// The schema for a named declaration: a validated scalar carries its `where`
@@ -188,7 +240,20 @@ fn named_schema(
 ) -> String {
     let pred = decl.predicate.as_ref();
     match &decl.base {
-        Type::Int | Type::IntN { .. } => scalar_with_constraints("integer", pred),
+        Type::Int => scalar_with_constraints("integer", pred),
+        // A refined sized int merges its width bounds with the predicate's
+        // constraints (predicate wins on a shared key); a predicate the
+        // keyword model can't fully capture is documented, as for scalars.
+        Type::IntN { bits, signed } => {
+            let mut cs = Vec::new();
+            let complete = pred.map(|p| collect_constraints(p, &mut cs)).unwrap_or(true);
+            let s = intn_schema(*bits, *signed, &cs);
+            if complete {
+                s
+            } else {
+                format!("{},{}}}", &s[..s.len() - 1], unmapped_comment(pred.unwrap()))
+            }
+        }
         Type::Float | Type::Float32 => scalar_with_constraints("number", pred),
         Type::Bool => "{\"type\":\"boolean\"}".to_string(),
         Type::Str => string_with_constraints(pred),
@@ -209,6 +274,16 @@ fn named_schema(
 /// (→ `pattern`). Two or more patterns are combined with `allOf` (a JSON object
 /// has at most one `pattern`). A form the model can't capture is documented in a
 /// `$comment` (as for scalars).
+///
+/// Length semantics (decided): Vela's `value.length` counts **bytes** (native
+/// `strlen`, interp `str::len`), while JSON Schema's `minLength`/`maxLength`
+/// count Unicode code points. The two agree exactly on ASCII — which is what
+/// length refinements are used for in practice (usernames, codes, keys). For
+/// multi-byte text they diverge per bound: a code-point `maxLength` is looser
+/// than Vela's byte check (every code point is ≥ 1 byte), a code-point
+/// `minLength` can be stricter. Emitting the numbers unchanged is the honest
+/// mapping; the runtime refinement remains the source of truth (the same
+/// stance every `$comment` fallback takes).
 fn string_with_constraints(pred: Option<&Expr>) -> String {
     let mut parts = vec!["\"type\":\"string\"".to_string()];
     if let Some(p) = pred {
@@ -783,5 +858,57 @@ mod json_schema_tests {
         assert!(s.contains("\"type\":\"object\""), "still an object: {s}");
         assert!(s.contains("\"required\":[\"a\",\"b\"]"), "required intact: {s}");
         assert!(s.contains("\"$comment\":\"constrained by: a < b\""), "documents invariant: {s}");
+    }
+
+    #[test]
+    fn sized_ints_emit_width_bounds() {
+        // A sized int is a deliberate wire-width choice; its bounds are part
+        // of the contract. The default Int64 stays a bare "integer".
+        assert_eq!(
+            schema_of("type Byte = UInt8", "Byte"),
+            "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\
+             \"type\":\"integer\",\"minimum\":0,\"maximum\":255}"
+        );
+        assert_eq!(
+            schema_of("type Small = Int16", "Small"),
+            "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\
+             \"type\":\"integer\",\"minimum\":-32768,\"maximum\":32767}"
+        );
+        // UInt64's maximum exceeds an Int64 literal (unimportable) — min only.
+        assert_eq!(
+            schema_of("type Big = UInt64", "Big"),
+            "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\
+             \"type\":\"integer\",\"minimum\":0}"
+        );
+    }
+
+    #[test]
+    fn refined_sized_int_merges_bounds_canonically() {
+        // The predicate wins its bound family; the width fills the other.
+        // Keys stay in the importer's canonical order (minimum before
+        // maximum) even though the width max is not from the predicate.
+        assert_eq!(
+            schema_of("type Small = UInt8 where value >= 3", "Small"),
+            "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\
+             \"type\":\"integer\",\"minimum\":3,\"maximum\":255}"
+        );
+    }
+
+    #[test]
+    fn payloadless_enum_emits_enum_schema() {
+        assert_eq!(
+            schema_of("type Color = | Red | Green | Blue", "Color"),
+            "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\
+             \"enum\":[\"Red\",\"Green\",\"Blue\"]}"
+        );
+    }
+
+    #[test]
+    fn payload_enum_documents_lossiness() {
+        let s = schema_of("type Shape = | Circle(Int64) | Unit", "Shape");
+        assert!(
+            s.contains("\"$comment\":\"enum with payload variants"),
+            "payload enums are honest-lossy: {s}"
+        );
     }
 }

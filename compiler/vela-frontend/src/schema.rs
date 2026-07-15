@@ -340,6 +340,33 @@ fn convert(
         return Ok((Type::Named(target.to_string()), None, vec![target.to_string()]));
     }
 
+    // `enum` of strings → a payload-less Vela enum (each entry a nullary
+    // variant) — the inverse of the emitter's sum-type encoding.
+    if let Some(Json::Arr(items)) = schema.get("enum") {
+        for (k, _) in fields {
+            if k != "enum" && !INFORMATIONAL.contains(&k.as_str()) {
+                return Err(format!(
+                    "{module}: type `{name}`: unsupported keyword `{k}` alongside `enum` \
+                     (Vela imports schemas exactly or not at all)"
+                ));
+            }
+        }
+        let mut variants = Vec::new();
+        for it in items {
+            match it {
+                Json::Str(s) => {
+                    variants.push(crate::ast::EnumVariant { name: s.clone(), payload: Vec::new() })
+                }
+                _ => {
+                    return Err(format!(
+                        "{module}: type `{name}`: `enum` entries must all be strings"
+                    ))
+                }
+            }
+        }
+        return Ok((Type::Enum(variants), None, Vec::new()));
+    }
+
     let ty = schema.get("type").and_then(|t| t.as_str()).ok_or_else(|| {
         format!("{module}: type `{name}`: schema has no `type` (or `$ref`)")
     })?;
@@ -702,5 +729,85 @@ mod tests {
         let reemitted =
             crate::types::json_schema_string(&reimported["User"], &reimported);
         assert_eq!(emitted, reemitted, "schema round-trip must be exact");
+    }
+
+    /// A `{"enum": [..]}` schema imports as a payload-less Vela enum, and the
+    /// emitter's enum encoding round-trips byte-exactly.
+    #[test]
+    fn imports_enum_schemas_and_round_trips() {
+        let decls = synthesize(
+            r#"{"title": "Color", "enum": ["Red", "Green", "Blue"]}"#,
+            Some(&["Color".to_string()]),
+            "t.json",
+        )
+        .unwrap();
+        let color = decls.iter().find(|d| d.name == "Color").unwrap();
+        match &color.base {
+            Type::Enum(vs) => {
+                assert_eq!(
+                    vs.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+                    ["Red", "Green", "Blue"]
+                );
+                assert!(vs.iter().all(|v| v.payload.is_empty()));
+            }
+            other => panic!("expected an enum, got {other:?}"),
+        }
+        // Round trip: emit from Vela, import, re-emit — byte-equal.
+        let src = "type Color = | Red | Green | Blue\nfn main() -> Int64 { return 0 }";
+        let program = crate::check(src).unwrap();
+        let types: HashMap<String, TypeDecl> =
+            program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        let emitted = crate::types::json_schema_string(&types["Color"], &types);
+        let doc = emitted.replacen("{", "{\"title\":\"Color\",", 1);
+        let decls = synthesize(&doc, Some(&["Color".to_string()]), "t.json").unwrap();
+        let reimported: HashMap<String, TypeDecl> =
+            decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        assert_eq!(
+            emitted,
+            crate::types::json_schema_string(&reimported["Color"], &reimported),
+            "enum schema round-trip must be exact"
+        );
+    }
+
+    /// Non-string `enum` entries and extra keywords alongside `enum` are hard
+    /// errors (exactly-or-not-at-all).
+    #[test]
+    fn enum_schema_rejects_non_strings_and_extras() {
+        let err = synthesize(
+            r#"{"title": "Bad", "enum": ["A", 3]}"#,
+            Some(&["Bad".to_string()]),
+            "t.json",
+        )
+        .unwrap_err();
+        assert!(err.contains("`enum` entries must all be strings"), "{err}");
+        let err = synthesize(
+            r#"{"title": "Bad", "enum": ["A"], "type": "string"}"#,
+            Some(&["Bad".to_string()]),
+            "t.json",
+        )
+        .unwrap_err();
+        assert!(err.contains("unsupported keyword `type` alongside `enum`"), "{err}");
+    }
+
+    /// A sized-int type emits its width bounds and round-trips: the import
+    /// synthesizes an Int64 + `where` refinement whose re-emission is
+    /// byte-identical (the wire contract is the bounds, not the Rust width).
+    #[test]
+    fn sized_int_bounds_round_trip() {
+        let src = "type Byte = UInt8\nfn main() -> Int64 { return 0 }";
+        let program = crate::check(src).unwrap();
+        let types: HashMap<String, TypeDecl> =
+            program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        let emitted = crate::types::json_schema_string(&types["Byte"], &types);
+        assert!(emitted.contains("\"minimum\":0,\"maximum\":255"), "{emitted}");
+        let doc = emitted.replacen("{", "{\"title\":\"Byte\",", 1);
+        let decls = synthesize(&doc, Some(&["Byte".to_string()]), "t.json").unwrap();
+        let reimported: HashMap<String, TypeDecl> =
+            decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        assert_eq!(
+            emitted,
+            crate::types::json_schema_string(&reimported["Byte"], &reimported),
+            "sized-int schema round-trip must be exact"
+        );
     }
 }
