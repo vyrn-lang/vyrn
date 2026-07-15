@@ -30,6 +30,9 @@ pub enum SymbolKind {
     Type,
     Variant,
     Method,
+    /// A record field (member completion only — fields are not standalone
+    /// declarations, so they never appear in the symbol index).
+    Field,
     /// A function parameter.
     Param,
     /// A `let` binding or a `for`-in loop variable, local to a function body.
@@ -114,6 +117,21 @@ pub struct Analysis {
     /// (functions + impl methods), so a cursor inside a type/protocol decl is
     /// not mistaken for being in the preceding function.
     pub fn_lines: Vec<usize>,
+    /// User protocol methods per implementing type (`impl P for T` → T's
+    /// methods), for `.foo` member completion on a concrete receiver. Indexed
+    /// from the linked program when available, so imported impls count.
+    pub impl_members: Vec<(Type, Completion)>,
+    /// Each protocol's methods by protocol name, for `.foo` member completion
+    /// on a bounded generic receiver (`fn f<T: Show>(x: T)` → `x.` offers
+    /// `Show`'s methods).
+    pub protocol_members: Vec<(String, Completion)>,
+    /// Per-function type-parameter bounds: `(fn decl line, type param, bound
+    /// names)` — how a `Named("T")` receiver finds its protocols.
+    pub type_param_bounds: Vec<(usize, String, Vec<String>)>,
+    /// Record fields by declaring type name, for `.foo` member completion on a
+    /// record receiver (`u: User` → `u.` offers `age`). Refined fields render
+    /// as written (`age: Int64 where value >= 18`).
+    pub record_fields: Vec<(String, Completion)>,
 }
 
 /// Answer to "what is at this cursor": the declaration it resolves to.
@@ -289,6 +307,64 @@ fn analyze_inner(
     }
     let locals = index_locals(&program, &tok_info, &let_types);
 
+    // Protocol/impl member tables for `.foo` completion (RFC-0002 §5). Impls
+    // and protocols come from the linked program when available (imported
+    // impls count — coherence makes them global); bounds come from the root's
+    // functions (only root bodies have a cursor).
+    let member_src = checked.as_ref().unwrap_or(&program);
+    let mut impl_members = Vec::new();
+    for imp in &member_src.impls {
+        for m in &imp.methods {
+            impl_members.push((
+                imp.ty.clone(),
+                Completion {
+                    label: m.name.clone(),
+                    kind: SymbolKind::Method,
+                    detail: function_detail(m),
+                },
+            ));
+        }
+    }
+    let mut protocol_members = Vec::new();
+    for p in &member_src.protocols {
+        for m in &p.methods {
+            protocol_members.push((
+                p.name.clone(),
+                Completion {
+                    label: m.name.clone(),
+                    kind: SymbolKind::Method,
+                    detail: method_sig_detail(m),
+                },
+            ));
+        }
+    }
+    let type_param_bounds = program
+        .functions
+        .iter()
+        .chain(program.impls.iter().flat_map(|i| i.methods.iter()))
+        .flat_map(|f| f.type_bounds.iter().map(|(tp, bs)| (f.line, tp.clone(), bs.clone())))
+        .collect();
+    let mut record_fields = Vec::new();
+    for t in &member_src.type_decls {
+        // Skip synthetic inline-refinement decls (`User.age`) — their parent
+        // record is the one whose fields matter.
+        if t.name.contains('.') {
+            continue;
+        }
+        if let Type::Record(fields) = &t.base {
+            for f in fields {
+                record_fields.push((
+                    t.name.clone(),
+                    Completion {
+                        label: f.name.clone(),
+                        kind: SymbolKind::Field,
+                        detail: field_detail(f, &member_src.type_decls),
+                    },
+                ));
+            }
+        }
+    }
+
     Analysis {
         diagnostics: diags,
         symbols,
@@ -296,6 +372,10 @@ fn analyze_inner(
         locals,
         decl_lines,
         fn_lines,
+        impl_members,
+        protocol_members,
+        type_param_bounds,
+        record_fields,
     }
 }
 
@@ -308,6 +388,10 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         locals: Vec::new(),
         decl_lines: Vec::new(),
         fn_lines: Vec::new(),
+        impl_members: Vec::new(),
+        protocol_members: Vec::new(),
+        type_param_bounds: Vec::new(),
+        record_fields: Vec::new(),
     }
 }
 
@@ -534,10 +618,10 @@ pub fn completions(analysis: &Analysis) -> Vec<Completion> {
 /// type. The caller (the LSP) treats empty as "no member suggestions" and falls
 /// back to top-level [`completions`] only when not in a `.foo` context at all.
 ///
-/// Method-call resolution for user `protocol`/`impl` methods is intentionally
-/// not handled here: the checker does not resolve them (impl methods are not in
-/// its function table), and no example or test exercises them. That stays
-/// deferred until the checker grows a real method-dispatch path.
+/// User `protocol`/`impl` methods (RFC-0002 §5) are offered too: a concrete
+/// receiver gets the methods of every `impl P for T` matching its type; a
+/// bounded generic receiver (`fn f<T: Show>(x: T)` → `x.`) gets each bound
+/// protocol's methods — mirroring the checker's static dispatch.
 pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<Completion> {
     // Resolve the receiver's type (see `resolve_receiver_type`); if it can't be
     // typed, there is nothing to suggest after the dot.
@@ -559,9 +643,57 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
     if matches!(ty, Type::Array(_) | Type::ArrayN(..)) {
         out.push(Completion {
             label: "length".to_string(),
-            kind: SymbolKind::Type,
+            kind: SymbolKind::Field,
             detail: "length: Int64 — element count (read-only)".to_string(),
         });
+    }
+    // Record fields: a named record receiver offers its declaration's fields;
+    // an inline structural receiver offers its own.
+    match &ty {
+        Type::Named(n) => {
+            for (tn, c) in &analysis.record_fields {
+                if tn == n {
+                    out.push(c.clone());
+                }
+            }
+        }
+        Type::Record(fields) => {
+            for f in fields {
+                out.push(Completion {
+                    label: f.name.clone(),
+                    kind: SymbolKind::Field,
+                    detail: format!("{}: {}", f.name, type_to_string(&f.ty)),
+                });
+            }
+        }
+        _ => {}
+    }
+    // User protocol methods (RFC-0002 §5). Concrete receiver: every
+    // `impl P for T` whose T equals the receiver's type contributes its
+    // methods (`n: Int64` + `impl Show for Int64` → `n.show`).
+    for (t, c) in &analysis.impl_members {
+        if *t == ty {
+            out.push(c.clone());
+        }
+    }
+    // Bounded generic receiver: `x: T` inside `fn f<T: Show>` offers `Show`'s
+    // method signatures — exactly what the checker's static dispatch permits.
+    // (A type-parameter reference parses as `Type::Param`; `Named` is matched
+    // too, defensively, since the two render identically.)
+    if let Type::Named(n) | Type::Param(n) = &ty {
+        if let Some(fn_line) = enclosing_fn_line(analysis, line) {
+            for (fl, tp, bounds) in &analysis.type_param_bounds {
+                if *fl == fn_line && tp == n {
+                    for b in bounds {
+                        for (pn, c) in &analysis.protocol_members {
+                            if pn == b {
+                                out.push(c.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     out
 }
@@ -1045,6 +1177,27 @@ fn protocol_detail(p: &ProtocolDecl) -> String {
     }
 }
 
+/// Render one record field as the user wrote it — a synthetic
+/// inline-refinement field type (`User.age`) is expanded back to
+/// `age: Int64 where value >= 18`.
+fn field_detail(f: &ast::Field, all: &[TypeDecl]) -> String {
+    if let Type::Named(n) = &f.ty {
+        if n.contains('.') {
+            if let Some(d) = all.iter().find(|d| d.name == *n) {
+                if let Some(pred) = &d.predicate {
+                    return format!(
+                        "{}: {} where {}",
+                        f.name,
+                        type_to_string(&d.base),
+                        crate::checker::pred_summary(pred)
+                    );
+                }
+            }
+        }
+    }
+    format!("{}: {}", f.name, type_to_string(&f.ty))
+}
+
 fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl]) -> String {
     match &t.base {
         Type::Enum(vs) => {
@@ -1052,26 +1205,8 @@ fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl]) -> String {
             format!("type {} = {}", t.name, arms)
         }
         Type::Record(fields) => {
-            // A synthetic inline-refinement field type (`User.age`) renders as
-            // the user wrote it: `age: Int64 where value >= 18`.
-            let render = |f: &ast::Field| -> String {
-                if let Type::Named(n) = &f.ty {
-                    if n.contains('.') {
-                        if let Some(d) = all.iter().find(|d| d.name == *n) {
-                            if let Some(pred) = &d.predicate {
-                                return format!(
-                                    "{}: {} where {}",
-                                    f.name,
-                                    type_to_string(&d.base),
-                                    crate::checker::pred_summary(pred)
-                                );
-                            }
-                        }
-                    }
-                }
-                format!("{}: {}", f.name, type_to_string(&f.ty))
-            };
-            let fs = fields.iter().map(render).collect::<Vec<_>>().join(", ");
+            let fs =
+                fields.iter().map(|f| field_detail(f, all)).collect::<Vec<_>>().join(", ");
             format!("type {} = {{ {} }}", t.name, fs)
         }
         _ => {

@@ -642,3 +642,53 @@ fn analyze_linked_missing_module_still_indexes_root() {
     assert!(!a.diagnostics.is_empty(), "unresolvable import must be reported");
     assert!(names(&a).contains("main"), "root symbols survive a load failure");
 }
+
+/// `.foo` member completion offers user protocol methods (RFC-0002 §5):
+/// a concrete receiver gets the methods of the matching `impl P for T`; a
+/// bounded generic receiver (`fn f<T: Show>(x: T)` -> `x.`) gets the bound
+/// protocol's method signatures. Mirrors the checker's static dispatch.
+#[test]
+fn member_completion_offers_protocol_methods() {
+    let src = "protocol Show {\n    fn show(self) -> String\n}\n\nimpl Show for Int64 {\n    fn show(self) -> String { return str(self) }\n}\n\nfn describe<T: Show>(x: T) -> String {\n    return x.show()\n}\n\nfn main() -> Int64 {\n    let n: Int64 = 5\n    let s = n.show()\n    return 0\n}\n";
+    let a = analyze(src);
+    assert!(a.diagnostics.is_empty(), "clean program: {:?}", a.diagnostics);
+
+    // Concrete receiver: line 15 `    let s = n.show()` - cursor inside `show`
+    // (the dot is at col 14). `n: Int64` + `impl Show for Int64` -> show.
+    let labels: HashSet<String> =
+        member_completions(&a, 15, 15).into_iter().map(|c| c.label).collect();
+    assert!(labels.contains("show"), "impl method offered for Int64 receiver: {labels:?}");
+
+    // Bounded generic receiver: line 10 `    return x.show()` in
+    // `describe<T: Show>` - the bound protocol's methods are offered.
+    let labels: HashSet<String> =
+        member_completions(&a, 10, 14).into_iter().map(|c| c.label).collect();
+    assert!(labels.contains("show"), "protocol method offered for bounded T: {labels:?}");
+
+    // An unbounded/unknown receiver offers nothing from protocols; and hover
+    // on `show` at the call site resolves to a real declaration (the impl
+    // method - a user symbol, so go-to-definition works).
+    let r = resolve(&a, 15, 15).expect("method name resolves");
+    assert_eq!(r.name, "show");
+    assert!(r.definition, "user impl method has a source declaration");
+    assert!(r.hover.contains("show"), "hover shows the signature: {}", r.hover);
+}
+
+/// `.foo` member completion on a record receiver offers the record's fields,
+/// with refined fields rendered as the user wrote them.
+#[test]
+fn member_completion_offers_record_fields() {
+    let src = "type User = { age: Int64 where value >= 18, name: String }\nfn main() -> Int64 {\n    let u: User = User { age: 21, name: \"max\" }\n    let a = u.age\n    return 0\n}\n";
+    let a = analyze(src);
+    assert!(a.diagnostics.is_empty(), "clean program: {:?}", a.diagnostics);
+    // Line 4 `    let a = u.age` - the dot is at col 14, cursor inside `age`.
+    let items = member_completions(&a, 4, 15);
+    let by_label: std::collections::HashMap<String, String> =
+        items.into_iter().map(|c| (c.label, c.detail)).collect();
+    assert!(by_label.contains_key("name"), "plain field offered: {by_label:?}");
+    assert_eq!(
+        by_label.get("age").map(String::as_str),
+        Some("age: Int64 where value >= 18"),
+        "refined field renders as written: {by_label:?}"
+    );
+}

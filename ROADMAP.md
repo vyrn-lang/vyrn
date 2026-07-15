@@ -264,16 +264,17 @@ on the reclamation decision above.
   (`velac check` and the LSP now report each). What stays first-error is recovery
   *within* a declaration (two errors in one body still report the first) — the
   same statement/declaration boundary the checker and movecheck accumulate at.
-- **User `protocol`/`impl` method-call resolution** (`x.foo()` → an `impl`
-  method). Built-in method calls (`arr.push`, `log.info`, `Ref.get`, …) now
-  resolve for hover and `.foo` member completion: the receiver's type is read
-  from the local index and the built-ins for that type are offered. What stays
-  deferred is *user-defined* method dispatch: the checker's `call()` resolves
-  `recv.foo(args)` only as the free call `foo(recv, …)` against the top-level
-  function table (`sigs`) — `impl` methods are not in that table, so the
-  checker itself does not resolve them yet, and no example/test exercises
-  `protocol`/`impl`. That grows a real method-dispatch path in the checker
-  first; the LSP then surfaces it.
+- **User `protocol`/`impl` method-call resolution — shipped.** The checker
+  resolves `x.foo()` through its protocol registries (RFC-0002 §5, static
+  dispatch), and the LSP surfaces it: `.foo` member completion offers the
+  methods of every `impl P for T` matching a concrete receiver's type, and a
+  bounded generic receiver (`fn f<T: Show>(x: T)` → `x.`) offers each bound
+  protocol's method signatures. Hover on the method name at a call site
+  resolves to the `impl` method declaration (a user symbol, so F12 works).
+  Built-in method calls (`arr.push`, `log.info`, `Ref.get`, …) resolve the
+  same way, and record-field member completion works too: `u.` on a record
+  receiver offers the declaration's fields, with refined fields rendered as
+  written (`age: Int64 where value >= 18`).
 
 ---
 

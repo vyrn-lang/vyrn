@@ -395,6 +395,7 @@ fn to_lsp_kind(kind: SymbolKind) -> CompletionItemKind {
         SymbolKind::Function | SymbolKind::Method => CompletionItemKind::FUNCTION,
         SymbolKind::Type => CompletionItemKind::CLASS,
         SymbolKind::Variant => CompletionItemKind::ENUM_MEMBER,
+        SymbolKind::Field => CompletionItemKind::FIELD,
         // Locals are never returned by `completions` (top-level only), but the
         // match must be exhaustive — map them to VARIABLE for safety.
         SymbolKind::Param | SymbolKind::Local => CompletionItemKind::VARIABLE,
