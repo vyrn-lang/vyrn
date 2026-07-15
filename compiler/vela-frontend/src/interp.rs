@@ -321,17 +321,24 @@ fn parse_int(s: &str) -> Option<i64> {
 /// Windows). Run the interpreter on a dedicated thread with a large stack so
 /// recursion depth is bounded by the program, not the platform default.
 pub fn run(program: &Program) -> Result<i64, String> {
+    run_with_args(program, &[])
+}
+
+/// Like [`run`], but supplies the program's command-line arguments (RFC-0014
+/// `args()`). These are the arguments *after* the program name (argv[1..]); the
+/// native/wasm backends read the same slice from their C `main`'s `argv`.
+pub fn run_with_args(program: &Program, args: &[String]) -> Result<i64, String> {
     std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
-            .spawn_scoped(s, || run_inner(program))
+            .spawn_scoped(s, || run_inner(program, args))
             .expect("failed to spawn interpreter thread")
             .join()
             .unwrap_or_else(|_| Err("interpreter thread panicked (likely stack overflow)".into()))
     })
 }
 
-fn run_inner(program: &Program) -> Result<i64, String> {
+fn run_inner(program: &Program, prog_args: &[String]) -> Result<i64, String> {
     // The same ownership analysis the native backend uses to reclaim heap
     // values at block exit. Freeing a string/array buffer is invisible from
     // inside the language, but auto-*releasing* a reference cell is not: the
@@ -391,6 +398,7 @@ fn run_inner(program: &Program) -> Result<i64, String> {
             .collect(),
         region_depth: std::cell::Cell::new(0),
         globals: RefCell::new(HashMap::new()),
+        args: prog_args.to_vec(),
     };
     // Initialize module state (RFC-0013) once, in declaration order, before
     // `main`. Each initializer runs in a fresh empty local scope; a read of an
@@ -448,6 +456,8 @@ struct Interp<'a> {
     /// `main`; variable reads/writes fall back to it when the local scope misses.
     /// Slot-typed so reassignments coerce (and auto-validate) exactly like locals.
     globals: RefCell<HashMap<String, Slot>>,
+    /// The program's command-line arguments (RFC-0014 `args()`), argv[1..].
+    args: Vec<String>,
 }
 
 /// A scope binding: the current value plus the declared type, when one exists
@@ -970,11 +980,14 @@ impl<'a> Interp<'a> {
                         (Val::Str(a), Val::Str(b)) => Ok(Val::Bool(a.ends_with(b.as_str()))),
                         _ => Err("endsWith of non-Strings".into()),
                     },
-                    // `bytes` decodes the UTF-8 bytes; `chars` the code points.
+                    // `bytes` decodes the UTF-8 bytes as UInt8 (RFC-0014 M2);
+                    // `chars` the code points as Int64.
                     "bytes" => match &vals[0] {
-                        Val::Str(s) => {
-                            Ok(Val::Array(s.bytes().map(|b| Val::Int(b as i64)).collect()))
-                        }
+                        Val::Str(s) => Ok(Val::Array(
+                            s.bytes()
+                                .map(|b| Val::IntN { v: b as i64, bits: 8, signed: false })
+                                .collect(),
+                        )),
                         _ => Err("bytes of non-String".into()),
                     },
                     "chars" => match &vals[0] {
@@ -982,6 +995,149 @@ impl<'a> Interp<'a> {
                             Ok(Val::Array(s.chars().map(|c| Val::Int(c as i64)).collect()))
                         }
                         _ => Err("chars of non-String".into()),
+                    },
+                    // Input I/O (RFC-0014). Error payloads are canonical Vela
+                    // wording (never Rust `io::Error` text) — kept byte-identical
+                    // to the codegen's format strings so all three backends agree.
+                    "args" => {
+                        Ok(Val::Array(self.args.iter().map(|s| Val::Str(s.clone())).collect()))
+                    }
+                    "readLine" => {
+                        use std::io::BufRead;
+                        // Read one raw line (bytes up to and including `\n`, or
+                        // EOF). Locking the global stdin per call still streams:
+                        // the buffer lives in the shared handle, not the guard.
+                        let mut buf: Vec<u8> = Vec::new();
+                        let n = std::io::stdin().lock().read_until(b'\n', &mut buf).unwrap_or(0);
+                        if n == 0 {
+                            return Ok(Val::Option(None)); // EOF
+                        }
+                        // Strip a trailing `\n`, then a trailing `\r` (so Windows
+                        // and POSIX pipes read identically).
+                        if buf.last() == Some(&b'\n') {
+                            buf.pop();
+                            if buf.last() == Some(&b'\r') {
+                                buf.pop();
+                            }
+                        }
+                        // A NUL byte cannot live in a NUL-terminated Vela String,
+                        // so a line containing one is not representable → None
+                        // (the parity-safe rule; documented in RFC-0014).
+                        if buf.contains(&0) {
+                            return Ok(Val::Option(None));
+                        }
+                        match String::from_utf8(buf) {
+                            Ok(s) => Ok(Val::Option(Some(Box::new(Val::Str(s))))),
+                            // Not valid UTF-8: not representable as a String → None
+                            // (native rejects the same way via the UTF-8 DFA).
+                            Err(_) => Ok(Val::Option(None)),
+                        }
+                    }
+                    "readFile" => {
+                        let path = match &vals[0] {
+                            Val::Str(s) => s.clone(),
+                            other => return Err(format!("readFile of non-String {other:?}").into()),
+                        };
+                        match std::fs::read(&path) {
+                            Ok(bytes) => {
+                                // NUL first: a NUL byte IS valid UTF-8, but cannot
+                                // survive in a NUL-terminated String, so it is
+                                // rejected with its own canonical wording before
+                                // the UTF-8 check (matches the native ordering).
+                                if bytes.contains(&0) {
+                                    return Ok(Val::Result(
+                                        false,
+                                        Box::new(Val::Str(format!("`{path}` contains a NUL byte"))),
+                                    ));
+                                }
+                                match String::from_utf8(bytes) {
+                                    Ok(s) => Ok(Val::Result(true, Box::new(Val::Str(s)))),
+                                    Err(_) => Ok(Val::Result(
+                                        false,
+                                        Box::new(Val::Str(format!(
+                                            "`{path}` is not valid UTF-8"
+                                        ))),
+                                    )),
+                                }
+                            }
+                            Err(_) => Ok(Val::Result(
+                                false,
+                                Box::new(Val::Str(format!("cannot read `{path}`"))),
+                            )),
+                        }
+                    }
+                    "writeFile" => {
+                        let path = match &vals[0] {
+                            Val::Str(s) => s.clone(),
+                            other => return Err(format!("writeFile of non-String {other:?}").into()),
+                        };
+                        let contents = match &vals[1] {
+                            Val::Str(s) => s.clone(),
+                            other => return Err(format!("writeFile of non-String {other:?}").into()),
+                        };
+                        match std::fs::write(&path, contents.as_bytes()) {
+                            Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
+                            Err(_) => Ok(Val::Result(
+                                false,
+                                Box::new(Val::Str(format!("cannot write `{path}`"))),
+                            )),
+                        }
+                    }
+                    // RFC-0014 M2 (bytes): binary read + the byte<->String bridge.
+                    "readFileBytes" => {
+                        let path = match &vals[0] {
+                            Val::Str(s) => s.clone(),
+                            other => {
+                                return Err(format!("readFileBytes of non-String {other:?}").into())
+                            }
+                        };
+                        match std::fs::read(&path) {
+                            Ok(bytes) => Ok(Val::Result(
+                                true,
+                                Box::new(Val::Array(
+                                    bytes
+                                        .into_iter()
+                                        .map(|b| Val::IntN { v: b as i64, bits: 8, signed: false })
+                                        .collect(),
+                                )),
+                            )),
+                            Err(_) => Ok(Val::Result(
+                                false,
+                                Box::new(Val::Str(format!("cannot read `{path}`"))),
+                            )),
+                        }
+                    }
+                    "stringFromBytes" => match &vals[0] {
+                        Val::Array(elems) => {
+                            let mut bytes = Vec::with_capacity(elems.len());
+                            for e in elems {
+                                match e {
+                                    Val::IntN { v, .. } => bytes.push(*v as u8),
+                                    Val::Int(v) => bytes.push(*v as u8),
+                                    other => {
+                                        return Err(format!(
+                                            "stringFromBytes element is not a byte: {other:?}"
+                                        )
+                                        .into())
+                                    }
+                                }
+                            }
+                            // Same NUL-then-UTF-8 ordering as `readFile`.
+                            if bytes.contains(&0) {
+                                return Ok(Val::Result(
+                                    false,
+                                    Box::new(Val::Str("bytes contain a NUL byte".to_string())),
+                                ));
+                            }
+                            match String::from_utf8(bytes) {
+                                Ok(s) => Ok(Val::Result(true, Box::new(Val::Str(s)))),
+                                Err(_) => Ok(Val::Result(
+                                    false,
+                                    Box::new(Val::Str("bytes are not valid UTF-8".to_string())),
+                                )),
+                            }
+                        }
+                        other => Err(format!("stringFromBytes of non-Array {other:?}").into()),
                     },
                     // Text encodings: encoders return a String; decoders return
                     // `Option<String>` (None on malformed input or non-UTF-8 result).
@@ -1664,6 +1820,130 @@ mod tests {
     #[test]
     fn arithmetic_and_return() {
         assert_eq!(run("fn main() -> Int64 { return 2 + 3 * 4; }").unwrap(), 14);
+    }
+
+    // ---- input I/O (RFC-0014) ---------------------------------------------
+    // `readLine` streams real stdin, so it is exercised by the parity harness's
+    // `.stdin` fixtures (examples/input.vela) rather than unit-mocked here;
+    // these cover the file and byte builtins, whose errors must be the
+    // CANONICAL wording (never `io::Error` text).
+
+    /// A unique temp path (forward slashes, so it can embed in Vela source).
+    fn temp_path(tag: &str) -> String {
+        let p = std::env::temp_dir().join(format!(
+            "vela-io-test-{tag}-{}.txt",
+            std::process::id()
+        ));
+        p.to_string_lossy().replace('\\', "/")
+    }
+
+    #[test]
+    fn write_then_read_file_roundtrip() {
+        let path = temp_path("roundtrip");
+        let src = format!(
+            "fn main() -> Int64 {{ \
+                 let w = writeFile(\"{path}\", \"alpha\\nbeta\") \
+                 let ok = match w {{ Ok(b) => b, Err(e) => false }} \
+                 if ok == false {{ return 1 }} \
+                 let r = readFile(\"{path}\") \
+                 return match r {{ \
+                     Ok(s) => s.length, \
+                     Err(e) => 2, \
+                 }} }}"
+        );
+        // "alpha\nbeta" is 10 bytes.
+        assert_eq!(run(&src).unwrap(), 10);
+        let _ = std::fs::remove_file(path.replace('/', "\\"));
+    }
+
+    #[test]
+    fn read_file_missing_yields_canonical_err() {
+        let src = "fn main() -> Int64 { \
+                       let r = readFile(\"vela-io-test-definitely-missing.txt\") \
+                       let msg = match r { Ok(s) => s, Err(e) => e } \
+                       if msg == \"cannot read `vela-io-test-definitely-missing.txt`\" { \
+                           return 1 } \
+                       return 0 }";
+        assert_eq!(run(src).unwrap(), 1);
+    }
+
+    #[test]
+    fn read_file_rejects_invalid_utf8_and_nul_canonically() {
+        let bad = temp_path("badutf8");
+        let nul = temp_path("nul");
+        std::fs::write(bad.replace('/', "\\"), [0x63u8, 0xE9, 0x21]).unwrap();
+        std::fs::write(nul.replace('/', "\\"), [0x61u8, 0x00, 0x62]).unwrap();
+        let src = format!(
+            "fn msgOf(r: Result<String, String>) -> String {{ \
+                 return match r {{ Ok(s) => \"ok\", Err(e) => e }} }} \
+             fn main() -> Int64 {{ \
+                 let a = msgOf(readFile(\"{bad}\")) \
+                 let b = msgOf(readFile(\"{nul}\")) \
+                 if a != \"`{bad}` is not valid UTF-8\" {{ return 1 }} \
+                 if b != \"`{nul}` contains a NUL byte\" {{ return 2 }} \
+                 return 0 }}"
+        );
+        assert_eq!(run(&src).unwrap(), 0);
+        let _ = std::fs::remove_file(bad.replace('/', "\\"));
+        let _ = std::fs::remove_file(nul.replace('/', "\\"));
+    }
+
+    #[test]
+    fn string_bytes_roundtrip_is_pinned() {
+        // RFC-0014 M2's pinned law: stringFromBytes(s.bytes()) == Ok(s).
+        let src = "fn main() -> Int64 { \
+                       let s = \"héllo ☕ wörld\" \
+                       let back = match stringFromBytes(bytes(s)) { \
+                           Ok(t) => t, \
+                           Err(e) => e, \
+                       } \
+                       if back == s { return 1 } \
+                       return 0 }";
+        assert_eq!(run(src).unwrap(), 1);
+    }
+
+    #[test]
+    fn string_from_bytes_rejects_invalid_utf8() {
+        // 0xFF is never valid UTF-8. Build it via an Array<UInt8> literal.
+        let src = "fn main() -> Int64 { \
+                       let b: Array<UInt8> = [104, 255] \
+                       let msg = match stringFromBytes(b) { Ok(s) => s, Err(e) => e } \
+                       if msg == \"bytes are not valid UTF-8\" { return 1 } \
+                       return 0 }";
+        assert_eq!(run(src).unwrap(), 1);
+    }
+
+    #[test]
+    fn string_from_bytes_rejects_nul() {
+        let src = "fn main() -> Int64 { \
+                       let b: Array<UInt8> = [104, 0, 105] \
+                       let msg = match stringFromBytes(b) { Ok(s) => s, Err(e) => e } \
+                       if msg == \"bytes contain a NUL byte\" { return 1 } \
+                       return 0 }";
+        assert_eq!(run(src).unwrap(), 1);
+    }
+
+    #[test]
+    fn read_file_bytes_reads_binary() {
+        let path = temp_path("binary");
+        std::fs::write(path.replace('/', "\\"), [0u8, 1, 2, 0xFF, 0]).unwrap();
+        let src = format!(
+            "fn main() -> Int64 {{ \
+                 return match readFileBytes(\"{path}\") {{ \
+                     Ok(b) => b.length, \
+                     Err(e) => -1, \
+                 }} }}"
+        );
+        // Binary read: NUL and invalid-UTF-8 bytes are fine, all 5 come back.
+        assert_eq!(run(&src).unwrap(), 5);
+        let _ = std::fs::remove_file(path.replace('/', "\\"));
+    }
+
+    #[test]
+    fn args_default_to_empty() {
+        // `run` (no args) must present an empty argv[1..] — the parity harness
+        // runs every example argument-less on all three backends.
+        assert_eq!(run("fn main() -> Int64 { return args().length }").unwrap(), 0);
     }
 
     #[test]

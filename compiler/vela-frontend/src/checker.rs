@@ -60,6 +60,7 @@ pub fn check_accum_with_let_types(
         "release", "array", "push", "at", "alen", "afree", "str", "parse", "join", "logger",
         "contains", "startsWith", "endsWith", "bytes", "chars",
         "hexEncode", "hexDecode", "base64Encode", "base64Decode", "urlEncode", "urlDecode",
+        "args", "readLine", "readFile", "writeFile", "readFileBytes", "stringFromBytes",
         "trace", "debug", "info", "warn", "error", "value", "list", "schemaOf", "jsonSchema",
         "toString", "pop", "swapRemove",
         "Int", "Int64", "Int32", "Int16", "Int8", "Float", "Float64", "Float32",
@@ -2071,6 +2072,97 @@ impl<'a> Checker<'a> {
             return Ok(Type::Unit);
         }
 
+        // Input I/O effects (RFC-0014). Free builtins like `print`/`logger`; each
+        // joins `SPAWN_FORBIDDEN` and is never constant (`Expr::Call` never folds).
+        // Error payloads are canonical Vela wording (never OS text) — the parity
+        // rule; the strings are built at the use site in the interpreter and by
+        // the codegen, kept byte-identical.
+        if name == "args" {
+            if !args.is_empty() {
+                return Err(format!("line {line}: `args` takes no arguments, got {}", args.len()));
+            }
+            return Ok(Type::Array(Box::new(Type::Str)));
+        }
+        if name == "readLine" {
+            if !args.is_empty() {
+                return Err(format!(
+                    "line {line}: `readLine` takes no arguments, got {}",
+                    args.len()
+                ));
+            }
+            return Ok(Type::Option(Box::new(Type::Str)));
+        }
+        if name == "readFile" {
+            if args.len() != 1 {
+                return Err(format!("line {line}: `readFile` takes 1 argument, got {}", args.len()));
+            }
+            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
+            if matches!(t, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if t != Type::Str {
+                return Err(format!("line {line}: `readFile` needs a String path, found {t}"));
+            }
+            return Ok(Type::Result(Box::new(Type::Str), Box::new(Type::Str)));
+        }
+        if name == "writeFile" {
+            if args.len() != 2 {
+                return Err(format!(
+                    "line {line}: `writeFile` takes 2 arguments, got {}",
+                    args.len()
+                ));
+            }
+            for a in args {
+                let t = self.base(&self.expr(a, scope, Some(&Type::Str), fn_ret)?);
+                if matches!(t, Type::Err) {
+                    return Ok(Type::Err);
+                }
+                if t != Type::Str {
+                    return Err(format!("line {line}: `writeFile` needs String arguments, found {t}"));
+                }
+            }
+            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
+        }
+        // RFC-0014 M2 (bytes): binary read + the byte<->String bridge.
+        if name == "readFileBytes" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `readFileBytes` takes 1 argument, got {}",
+                    args.len()
+                ));
+            }
+            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
+            if matches!(t, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if t != Type::Str {
+                return Err(format!("line {line}: `readFileBytes` needs a String path, found {t}"));
+            }
+            return Ok(Type::Result(
+                Box::new(Type::Array(Box::new(Type::IntN { bits: 8, signed: false }))),
+                Box::new(Type::Str),
+            ));
+        }
+        if name == "stringFromBytes" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `stringFromBytes` takes 1 argument, got {}",
+                    args.len()
+                ));
+            }
+            let want = Type::Array(Box::new(Type::IntN { bits: 8, signed: false }));
+            let t = self.base(&self.expr(&args[0], scope, Some(&want), fn_ret)?);
+            if matches!(t, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if t != want {
+                return Err(format!(
+                    "line {line}: `stringFromBytes` needs an Array<UInt8>, found {t}"
+                ));
+            }
+            return Ok(Type::Result(Box::new(Type::Str), Box::new(Type::Str)));
+        }
+
         // (`len(String)` was removed — see the migration hint above; its byte
         // length now lives on the `String.length` field, resolved at `Expr::Field`.)
 
@@ -2121,8 +2213,9 @@ impl<'a> Checker<'a> {
             return Ok(Type::Option(Box::new(Type::Str)));
         }
 
-        // built-in: bytes(String) -> Array<Int> (the raw UTF-8 bytes) and
-        // chars(String) -> Array<Int> (the Unicode scalar values / code points).
+        // built-in: bytes(String) -> Array<UInt8> (the raw UTF-8 bytes — RFC-0014
+        // M2; `stringFromBytes` is the fallible inverse) and chars(String) ->
+        // Array<Int> (the Unicode scalar values / code points).
         if matches!(name, "bytes" | "chars") {
             if args.len() != 1 {
                 return Err(format!("line {line}: `{name}` takes 1 argument, got {}", args.len()));
@@ -2134,7 +2227,9 @@ impl<'a> Checker<'a> {
             if t != Type::Str {
                 return Err(format!("line {line}: `{name}` needs a String, found {t}"));
             }
-            return Ok(Type::Array(Box::new(Type::Int)));
+            let elem =
+                if name == "bytes" { Type::IntN { bits: 8, signed: false } } else { Type::Int };
+            return Ok(Type::Array(Box::new(elem)));
         }
 
         // Internal string concat (`a + b` on Strings, and interpolation): the
@@ -3076,6 +3171,9 @@ fn render_int_literal(n: i64) -> String {
 /// methods. `get` is a read-only slab access and is allowed.
 const SPAWN_FORBIDDEN: &[&str] = &[
     "print", "cell", "set", "release", "afree", "trace", "debug", "info", "warn", "error",
+    // Input I/O effects (RFC-0014): observe/mutate the outside world (stdin
+    // cursor, the filesystem), so they must not cross a task boundary.
+    "args", "readLine", "readFile", "writeFile", "readFileBytes", "stringFromBytes",
 ];
 
 /// Whether a type may appear in an `extern` signature (RFC-0012 ABI). The scalar
@@ -3436,6 +3534,80 @@ mod tests {
         let e = check_src("fn main() -> Int64 { let c = cell(1); set(c, \"x\"); return 0; }")
             .unwrap_err();
         assert!(e.contains("the cell holds"), "{e}");
+    }
+
+    // ---- input I/O (RFC-0014) ---------------------------------------------
+
+    #[test]
+    fn io_builtins_have_the_rfc_signatures() {
+        // Types flow: args() -> Array<String>, readLine() -> Option<String>,
+        // readFile -> Result<String, String>, writeFile -> Result<Bool, String>,
+        // readFileBytes -> Result<Array<UInt8>, String>,
+        // stringFromBytes(Array<UInt8>) -> Result<String, String>.
+        let src = "fn main() -> Int64 { \
+                       let a: Array<String> = args() \
+                       let l: Option<String> = readLine() \
+                       let r: Result<String, String> = readFile(\"p\") \
+                       let w: Result<Bool, String> = writeFile(\"p\", \"c\") \
+                       let b: Result<Array<UInt8>, String> = readFileBytes(\"p\") \
+                       let s: Result<String, String> = stringFromBytes(bytes(\"x\")) \
+                       return a.length }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn io_builtins_reject_wrong_arguments() {
+        let e = check_src("fn main() -> Int64 { let r = readFile(5); return 0 }").unwrap_err();
+        assert!(e.contains("`readFile` needs a String path"), "{e}");
+        let e = check_src("fn main() -> Int64 { let r = writeFile(\"p\"); return 0 }")
+            .unwrap_err();
+        assert!(e.contains("`writeFile` takes 2 arguments"), "{e}");
+        let e = check_src("fn main() -> Int64 { let a = args(1); return 0 }").unwrap_err();
+        assert!(e.contains("`args` takes no arguments"), "{e}");
+        let e = check_src("fn main() -> Int64 { let l = readLine(\"x\"); return 0 }")
+            .unwrap_err();
+        assert!(e.contains("`readLine` takes no arguments"), "{e}");
+        let e =
+            check_src("fn main() -> Int64 { let s = stringFromBytes(\"x\"); return 0 }")
+                .unwrap_err();
+        assert!(e.contains("`stringFromBytes` needs an Array<UInt8>"), "{e}");
+    }
+
+    #[test]
+    fn io_builtins_are_spawn_forbidden() {
+        // A function touching stdin/files/argv is an effect — never a task.
+        for body in ["let l = readLine()", "let r = readFile(\"p\")",
+                     "let w = writeFile(\"p\", \"c\")", "let a = args()"] {
+            let src = format!(
+                "fn job() -> Int64 {{ {body} return 0 }} \
+                 fn main() -> Int64 {{ let t = spawn job() return t.join() }}"
+            );
+            let e = check_src(&src).unwrap_err();
+            assert!(e.contains("is not allowed"), "{body}: {e}");
+        }
+    }
+
+    #[test]
+    fn io_builtins_are_not_constant_in_predicates() {
+        // `where` predicates are const-only; an I/O call can never satisfy one.
+        let e = check_src(
+            "type P = String where readFile(value) == Ok(\"x\") \
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("call"), "{e}");
+    }
+
+    #[test]
+    fn bytes_returns_uint8_array() {
+        // RFC-0014 M2: `bytes(s)` is Array<UInt8> (was Array<Int64>).
+        let ok = "fn main() -> Int64 { let b: Array<UInt8> = bytes(\"hi\") return b.length }";
+        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
+        let e = check_src(
+            "fn main() -> Int64 { let b: Array<Int64> = bytes(\"hi\") return b.length }",
+        )
+        .unwrap_err();
+        assert!(e.contains("Array<UInt8>"), "{e}");
     }
 
     #[test]

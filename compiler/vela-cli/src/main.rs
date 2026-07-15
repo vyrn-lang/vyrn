@@ -18,7 +18,7 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: velac <run|check|emit-ir|build> [file.vela] [-o out] [--target wasm] [--offline]\n       velac new <name> | velac add <specifier> [--name alias] | velac update [alias] | velac vendor [--check] | velac deps";
+const USAGE: &str = "usage: velac <run|check|emit-ir|build> [file.vela] [-o out] [--target wasm] [--offline]\n       velac run [file.vela] [args...]   (trailing args reach the program's args())\n       velac new <name> | velac add <specifier> [--name alias] | velac update [alias] | velac vendor [--check] | velac deps";
 
 /// `--offline` flag or `VELA_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
@@ -77,10 +77,13 @@ fn main() -> ExitCode {
     if cmd == "build" {
         return build(&path, rest);
     }
-    if !rest.is_empty() {
+    // `run` forwards any trailing arguments to the program as `args()`
+    // (RFC-0014); the other commands take no extra arguments.
+    if !rest.is_empty() && cmd != "run" {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     }
+    let prog_args = rest.to_vec();
     let path = path.as_str();
 
     let source = match std::fs::read_to_string(path) {
@@ -104,7 +107,7 @@ fn main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            match vela_frontend::interp::run(&program) {
+            match vela_frontend::interp::run_with_args(&program, &prog_args) {
                 Ok(code) => {
                     // main's return value becomes the process exit code (0..=255).
                     ExitCode::from((code & 0xff) as u8)
@@ -605,6 +608,9 @@ fn json_pretty(j: &vela_frontend::schema::Json, depth: usize) -> String {
 /// shim is compiled by clang next to the IR on every target — MSVC, glibc,
 /// and wasi-libc alike.
 const RUNTIME_SHIM: &str = r#"
+/* MSVC's UCRT deprecates fopen in favor of fopen_s; the portable spelling is
+   intentional (glibc and wasi-libc have no fopen_s), so silence the advisory. */
+#define _CRT_SECURE_NO_WARNINGS
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -655,10 +661,110 @@ int __vela_snprintf(char* buf, unsigned long long n, const char* fmt, ...) {
     return r;
 }
 
+/* ---- input I/O (RFC-0014) ----------------------------------------------- */
+/* argv is stashed by `main` and served to `args()` as argv[1..]. wasi-libc
+   populates argv identically on the wasm target (the host provides args_get). */
+static int __vela_argc = 0;
+static char** __vela_argv = 0;
+long long __vela_args_count(void) {
+    return (long long)(__vela_argc > 1 ? __vela_argc - 1 : 0);
+}
+const char* __vela_args_get(long long i) { return __vela_argv[i + 1]; }
+
+/* readLine: one line from stdin as a malloc'd, NUL-terminated buffer with its
+   trailing \r?\n stripped; *outlen is its byte length. Returns NULL at EOF (no
+   bytes) and also for a line containing an embedded NUL byte, which cannot live
+   in a NUL-terminated Vela String (the parity-safe rule, RFC-0014). The codegen
+   validates UTF-8 (via the shared DFA); an invalid line reads as None too. */
+char* __vela_read_line(unsigned long long* outlen) {
+    int c = getchar();
+    if (c == EOF) return 0;
+    unsigned long long cap = 64, len = 0;
+    char* buf = (char*)__vela_malloc(cap);
+    int had_nul = 0;
+    while (c != EOF && c != '\n') {
+        if (c == 0) had_nul = 1;
+        if (len + 2 >= cap) { cap *= 2; buf = (char*)__vela_realloc(buf, cap); }
+        buf[len++] = (char)c;
+        c = getchar();
+    }
+    if (len > 0 && buf[len - 1] == '\r') len--;
+    buf[len] = '\0';
+    if (had_nul) { free(buf); return 0; }
+    *outlen = len;
+    return buf;
+}
+
+/* readFile: whole file into a malloc'd, NUL-terminated buffer (*out, *outlen).
+   Status: 0 ok, 1 io-error (missing/permission/directory/read error), 3 the
+   file contains an embedded NUL byte. UTF-8 validation (status 2) is done by
+   the codegen after this returns, reusing the shared DFA. A read loop (not
+   fseek/ftell) keeps it portable across regular files, pipes, and wasi-libc. */
+int __vela_read_file(const char* path, char** out, unsigned long long* outlen) {
+    FILE* f = fopen(path, "rb");
+    if (f == 0) return 1;
+    unsigned long long cap = 1024, len = 0;
+    char* buf = (char*)__vela_malloc(cap);
+    for (;;) {
+        if (len + 1 >= cap) { cap *= 2; buf = (char*)__vela_realloc(buf, cap); }
+        size_t got = fread(buf + len, 1, (size_t)(cap - len - 1), f);
+        len += (unsigned long long)got;
+        if (got == 0) break;
+    }
+    int bad = ferror(f);
+    fclose(f);
+    if (bad) { free(buf); return 1; }
+    buf[len] = '\0';
+    for (unsigned long long k = 0; k < len; k++) {
+        if (buf[k] == 0) { free(buf); return 3; }
+    }
+    *out = buf;
+    *outlen = len;
+    return 0;
+}
+
+/* readFileBytes (M2): binary read, no UTF-8/NUL checks. Status 0 ok / 1 io. */
+int __vela_read_file_bytes(const char* path, char** out, unsigned long long* outlen) {
+    FILE* f = fopen(path, "rb");
+    if (f == 0) return 1;
+    unsigned long long cap = 1024, len = 0;
+    char* buf = (char*)__vela_malloc(cap);
+    for (;;) {
+        if (len + 1 >= cap) { cap *= 2; buf = (char*)__vela_realloc(buf, cap); }
+        size_t got = fread(buf + len, 1, (size_t)(cap - len), f);
+        len += (unsigned long long)got;
+        if (got == 0) break;
+    }
+    int bad = ferror(f);
+    fclose(f);
+    if (bad) { free(buf); return 1; }
+    *out = buf;
+    *outlen = len;
+    return 0;
+}
+
+/* writeFile: create/truncate + write all bytes. Status 0 ok / 1 io-error. A
+   Vela String is NUL-terminated and never contains a NUL, so strlen is its
+   full length. */
+int __vela_write_file(const char* path, const char* contents) {
+    FILE* f = fopen(path, "wb");
+    if (f == 0) return 1;
+    size_t n = strlen(contents);
+    size_t wrote = fwrite(contents, 1, n, f);
+    int bad = (wrote != n);
+    if (fclose(f) != 0) bad = 1;
+    return bad ? 1 : 0;
+}
+
 /* The real C entry point: every target's crt (MSVC, glibc, wasi-libc) knows
-   how to call a plain C main; the IR only exports vela_entry. */
+   how to call a plain C main; the IR only exports vela_entry. argv is stashed
+   for `args()` (RFC-0014). */
 extern int vela_entry(void);
-int main(void) { return vela_entry(); }
+int main(int argc, char** argv) {
+    __vela_argc = argc;
+    __vela_argv = argv;
+    return vela_entry();
+}
 "#;
 
 /// C trap stubs for the program's `extern` imports (RFC-0012), one per `extern

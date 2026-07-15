@@ -736,15 +736,15 @@ none:
 
 ";
 
-/// `bytes(s)` / `chars(s)`: build an `Array<Int>` ({ptr,len,cap}) of a string's
-/// raw UTF-8 bytes, or of its decoded Unicode code points (a two-pass UTF-8 decode
-/// — count leaders, then decode each 1–4 byte sequence).
+/// `bytes(s)` / `chars(s)`: build an `Array<UInt8>` ({ptr,len,cap}, i8 stride —
+/// RFC-0014 M2) of a string's raw UTF-8 bytes, or an `Array<Int>` of its decoded
+/// Unicode code points (a two-pass UTF-8 decode — count leaders, then decode
+/// each 1–4 byte sequence).
 const STRING_RUNTIME: &str = "\
 define {ptr, i64, i64} @__vela_str_bytes(ptr %s) {
 entry:
   %len = call i64 @__vela_strlen(ptr %s)
-  %sz = mul i64 %len, 8
-  %data = call ptr @__vela_malloc(i64 %sz)
+  %data = call ptr @__vela_malloc(i64 %len)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %i2, %body ]
@@ -753,9 +753,8 @@ loop:
 body:
   %sp = getelementptr i8, ptr %s, i64 %i
   %b = load i8, ptr %sp
-  %v = zext i8 %b to i64
-  %dp = getelementptr i64, ptr %data, i64 %i
-  store i64 %v, ptr %dp
+  %dp = getelementptr i8, ptr %data, i64 %i
+  store i8 %b, ptr %dp
   %i2 = add i64 %i, 1
   br label %loop
 ret:
@@ -880,6 +879,88 @@ done:
 
 ";
 
+/// Input-I/O runtime (RFC-0014). `@__vela_args` materializes argv[1..] as an
+/// `Array<String>` triple (elements point directly at argv — never freed, per
+/// RFC-0011's array-element rule). `@__vela_read_err`/`@__vela_write_err` build
+/// the canonical error payloads from the `@.io.*` format globals, so the wording
+/// lives in exactly one place (the codegen). The read/write/line primitives are
+/// C helpers in vela-cli's shim; these IR helpers wrap them.
+const IO_RUNTIME: &str = "\
+define {ptr, i64, i64} @__vela_args() {
+entry:
+  %n = call i64 @__vela_args_count()
+  %sz = mul i64 %n, 8
+  %data = call ptr @__vela_malloc(i64 %sz)
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i2, %body ]
+  %done = icmp uge i64 %i, %n
+  br i1 %done, label %ret, label %body
+body:
+  %s = call ptr @__vela_args_get(i64 %i)
+  %dp = getelementptr ptr, ptr %data, i64 %i
+  store ptr %s, ptr %dp
+  %i2 = add i64 %i, 1
+  br label %loop
+ret:
+  %r0 = insertvalue {ptr, i64, i64} undef, ptr %data, 0
+  %r1 = insertvalue {ptr, i64, i64} %r0, i64 %n, 1
+  %r2 = insertvalue {ptr, i64, i64} %r1, i64 %n, 2
+  ret {ptr, i64, i64} %r2
+}
+
+define ptr @__vela_read_err(ptr %path, i32 %status) {
+entry:
+  %is2 = icmp eq i32 %status, 2
+  %is3 = icmp eq i32 %status, 3
+  %f1 = select i1 %is2, ptr @.io.utf8err, ptr @.io.readerr
+  %fmt = select i1 %is3, ptr @.io.nulerr, ptr %f1
+  %plen = call i64 @__vela_strlen(ptr %path)
+  %bsz = add i64 %plen, 40
+  %buf = call ptr @__vela_malloc(i64 %bsz)
+  call i32 (ptr, i64, ptr, ...) @__vela_snprintf(ptr %buf, i64 %bsz, ptr %fmt, ptr %path)
+  ret ptr %buf
+}
+
+define ptr @__vela_write_err(ptr %path) {
+entry:
+  %plen = call i64 @__vela_strlen(ptr %path)
+  %bsz = add i64 %plen, 40
+  %buf = call ptr @__vela_malloc(i64 %bsz)
+  call i32 (ptr, i64, ptr, ...) @__vela_snprintf(ptr %buf, i64 %bsz, ptr @.io.writeerr, ptr %path)
+  ret ptr %buf
+}
+
+define ptr @__vela_bytes_dup(ptr %data, i64 %len) {
+entry:
+  %bsz = add i64 %len, 1
+  %buf = call ptr @__vela_malloc(i64 %bsz)
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i2, %cont ]
+  %done = icmp uge i64 %i, %len
+  br i1 %done, label %ok, label %body
+body:
+  %sp = getelementptr i8, ptr %data, i64 %i
+  %b = load i8, ptr %sp
+  %isnul = icmp eq i8 %b, 0
+  br i1 %isnul, label %bad, label %cont
+cont:
+  %dp = getelementptr i8, ptr %buf, i64 %i
+  store i8 %b, ptr %dp
+  %i2 = add i64 %i, 1
+  br label %loop
+bad:
+  call void @free(ptr %buf)
+  ret ptr null
+ok:
+  %tp = getelementptr i8, ptr %buf, i64 %len
+  store i8 0, ptr %tp
+  ret ptr %buf
+}
+
+";
+
 /// The private LLVM symbol for an `extern` import (RFC-0012). Prefixed so it
 /// cannot collide with a real C symbol on the native target: the generated C
 /// trap stub defines exactly this name, and the wasm import name is carried
@@ -958,6 +1039,16 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare i32 @fputs(ptr, ptr)\n");
     out.push_str("declare ptr @fopen(ptr, ptr)\n");
     out.push_str("declare i32 @fclose(ptr)\n");
+    // Input I/O (RFC-0014): the C shim in vela-cli provides these; the error
+    // wording is built here in the IR (see the `@.io.*` format globals and the
+    // `@__vela_read_err`/`@__vela_write_err`/`@__vela_args` helpers below) so the
+    // canonical strings live in exactly one place.
+    out.push_str("declare i64 @__vela_args_count()\n");
+    out.push_str("declare ptr @__vela_args_get(i64)\n");
+    out.push_str("declare ptr @__vela_read_line(ptr)\n");
+    out.push_str("declare i32 @__vela_read_file(ptr, ptr, ptr)\n");
+    out.push_str("declare i32 @__vela_read_file_bytes(ptr, ptr, ptr)\n");
+    out.push_str("declare i32 @__vela_write_file(ptr, ptr)\n");
     // `extern` imports (RFC-0012): each body-less `extern fn` becomes a wasm
     // import from the fixed `vela` namespace. We emit ONE target-neutral IR —
     // a `declare` carrying the wasm-import attributes plus a real `call` at each
@@ -1084,6 +1175,26 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // would print `-nan(ind)`.
     out.push_str("@.fmt.nan = private unnamed_addr constant [5 x i8] c\"NaN\\0A\\00\"\n");
     out.push_str("@.str.nan = private unnamed_addr constant [4 x i8] c\"NaN\\00\"\n");
+
+    // Input-I/O error wording (RFC-0014): canonical Vela strings, NEVER OS text,
+    // so every backend produces byte-identical `Err` payloads. `%s` is the path;
+    // the message is built at runtime (`@__vela_read_err`/`@__vela_write_err`).
+    // These are payload strings (no trailing newline — unlike the trap globals).
+    for (name, msg) in [
+        ("@.io.readerr", "cannot read `%s`"),
+        ("@.io.writeerr", "cannot write `%s`"),
+        ("@.io.utf8err", "`%s` is not valid UTF-8"),
+        ("@.io.nulerr", "`%s` contains a NUL byte"),
+        // Byte-bridge errors (M2, no path): fixed payloads for `stringFromBytes`.
+        ("@.io.bnul", "bytes contain a NUL byte"),
+        ("@.io.butf8", "bytes are not valid UTF-8"),
+    ] {
+        let (escaped, len) = llvm_str(msg);
+        out.push_str(&format!(
+            "{name} = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n"
+        ));
+    }
+    out.push_str(IO_RUNTIME);
 
     // Emit one global per distinct string literal; map content -> global name.
     // Built before string collection so `jsonSchema`/`schemaOf` can seed their
@@ -3160,15 +3271,303 @@ impl<'a> Gen<'a> {
             self.emit(format!("{t} = call {{ i1, i64, i64 }} {helper}(ptr {v})"));
             return Ok((t, Type::Option(Box::new(Type::Str))));
         }
-        // bytes(s) / chars(s): decode a string into an Array<Int> of bytes or of
-        // Unicode code points (runtime helpers do the UTF-8 work).
+        // bytes(s) / chars(s): decode a string into an Array<UInt8> of bytes
+        // (i8 stride — RFC-0014 M2) or an Array<Int> of Unicode code points
+        // (runtime helpers do the UTF-8 work).
         if matches!(name, "bytes" | "chars") {
             let (v, _) = self.gen_expr(&args[0])?;
             let helper =
                 if name == "bytes" { "@__vela_str_bytes" } else { "@__vela_str_chars" };
             let t = self.fresh_tmp();
             self.emit(format!("{t} = call {{ ptr, i64, i64 }} {helper}(ptr {v})"));
-            return Ok((t, Type::Array(Box::new(Type::Int))));
+            let elem = if name == "bytes" {
+                Type::IntN { bits: 8, signed: false }
+            } else {
+                Type::Int
+            };
+            return Ok((t, Type::Array(Box::new(elem))));
+        }
+
+        // ---- input I/O (RFC-0014) -----------------------------------------
+        // Effects like `print`: the C shim does the syscalls; the IR builds the
+        // canonical error payloads (via `@__vela_read_err`/`@__vela_write_err`
+        // and the `@.io.*` globals) so the wording lives in ONE place.
+        if name == "args" {
+            let t = self.fresh_tmp();
+            self.emit(format!("{t} = call {{ ptr, i64, i64 }} @__vela_args()"));
+            return Ok((t, Type::Array(Box::new(Type::Str))));
+        }
+        if name == "readLine" {
+            // ptr = __vela_read_line(&len): NULL at EOF (or an embedded NUL —
+            // unrepresentable in a NUL-terminated String). A non-NULL line is
+            // UTF-8-validated with the shared DFA; invalid reads as None too,
+            // exactly like the interpreter's `String::from_utf8` failure.
+            let lenp = self.fresh_alloca("i64");
+            let p = self.fresh_tmp();
+            self.emit(format!("{p} = call ptr @__vela_read_line(ptr {lenp})"));
+            let isnull = self.fresh_tmp();
+            self.emit(format!("{isnull} = icmp eq ptr {p}, null"));
+            let none_l = self.fresh_label("rl.none");
+            let chk_l = self.fresh_label("rl.chk");
+            let bad_l = self.fresh_label("rl.bad");
+            let ok_l = self.fresh_label("rl.ok");
+            let end_l = self.fresh_label("rl.end");
+            self.emit_term(format!("br i1 {isnull}, label %{none_l}, label %{chk_l}"));
+            self.emit_label(&chk_l);
+            let len = self.fresh_tmp();
+            let valid = self.fresh_tmp();
+            self.emit(format!("{len} = load i64, ptr {lenp}"));
+            self.emit(format!("{valid} = call i1 @__vela_utf8valid(ptr {p}, i64 {len})"));
+            self.emit_term(format!("br i1 {valid}, label %{ok_l}, label %{bad_l}"));
+            self.emit_label(&bad_l);
+            self.emit(format!("call void @free(ptr {p})"));
+            self.emit_term(format!("br label %{none_l}"));
+            self.emit_label(&none_l);
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&ok_l);
+            let w0 = self.fresh_tmp();
+            let s0 = self.fresh_tmp();
+            let s1 = self.fresh_tmp();
+            let s2 = self.fresh_tmp();
+            self.emit(format!("{w0} = ptrtoint ptr {p} to i64"));
+            self.emit(format!("{s0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"));
+            self.emit(format!("{s1} = insertvalue {{ i1, i64, i64 }} {s0}, i64 {w0}, 1"));
+            self.emit(format!("{s2} = insertvalue {{ i1, i64, i64 }} {s1}, i64 0, 2"));
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&end_l);
+            let r = self.fresh_tmp();
+            self.emit(format!(
+                "{r} = phi {{ i1, i64, i64 }} [ {{ i1 0, i64 0, i64 0 }}, %{none_l} ], \
+                 [ {s2}, %{ok_l} ]"
+            ));
+            return Ok((r, Type::Option(Box::new(Type::Str))));
+        }
+        if name == "readFile" {
+            // status = __vela_read_file(path, &buf, &len): 0 ok / 1 io / 3 NUL,
+            // then the shared UTF-8 DFA decides status 2. The Err payload is
+            // rendered by @__vela_read_err from the status.
+            let (path, _) = self.gen_expr(&args[0])?;
+            let outp = self.fresh_alloca("ptr");
+            let lenp = self.fresh_alloca("i64");
+            let st = self.fresh_tmp();
+            self.emit(format!(
+                "{st} = call i32 @__vela_read_file(ptr {path}, ptr {outp}, ptr {lenp})"
+            ));
+            let isok = self.fresh_tmp();
+            self.emit(format!("{isok} = icmp eq i32 {st}, 0"));
+            let entry_b = self.cur_block.clone();
+            let chk_l = self.fresh_label("rf.chk");
+            let badutf_l = self.fresh_label("rf.badutf");
+            let err_l = self.fresh_label("rf.err");
+            let ok_l = self.fresh_label("rf.ok");
+            let end_l = self.fresh_label("rf.end");
+            self.emit_term(format!("br i1 {isok}, label %{chk_l}, label %{err_l}"));
+            self.emit_label(&chk_l);
+            let buf = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            let valid = self.fresh_tmp();
+            self.emit(format!("{buf} = load ptr, ptr {outp}"));
+            self.emit(format!("{len} = load i64, ptr {lenp}"));
+            self.emit(format!("{valid} = call i1 @__vela_utf8valid(ptr {buf}, i64 {len})"));
+            self.emit_term(format!("br i1 {valid}, label %{ok_l}, label %{badutf_l}"));
+            self.emit_label(&badutf_l);
+            self.emit(format!("call void @free(ptr {buf})"));
+            self.emit_term(format!("br label %{err_l}"));
+            self.emit_label(&err_l);
+            let stphi = self.fresh_tmp();
+            self.emit(format!(
+                "{stphi} = phi i32 [ {st}, %{entry_b} ], [ 2, %{badutf_l} ]"
+            ));
+            let msg = self.fresh_tmp();
+            self.emit(format!("{msg} = call ptr @__vela_read_err(ptr {path}, i32 {stphi})"));
+            let ew = self.fresh_tmp();
+            let e0 = self.fresh_tmp();
+            let e1 = self.fresh_tmp();
+            let e2 = self.fresh_tmp();
+            self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
+            self.emit(format!("{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"));
+            self.emit(format!("{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"));
+            self.emit(format!("{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"));
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&ok_l);
+            let ow = self.fresh_tmp();
+            let o0 = self.fresh_tmp();
+            let o1 = self.fresh_tmp();
+            let o2 = self.fresh_tmp();
+            self.emit(format!("{ow} = ptrtoint ptr {buf} to i64"));
+            self.emit(format!("{o0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"));
+            self.emit(format!("{o1} = insertvalue {{ i1, i64, i64 }} {o0}, i64 {ow}, 1"));
+            self.emit(format!("{o2} = insertvalue {{ i1, i64, i64 }} {o1}, i64 0, 2"));
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&end_l);
+            let r = self.fresh_tmp();
+            self.emit(format!(
+                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], [ {o2}, %{ok_l} ]"
+            ));
+            return Ok((r, Type::Result(Box::new(Type::Str), Box::new(Type::Str))));
+        }
+        if name == "writeFile" {
+            let (path, _) = self.gen_expr(&args[0])?;
+            let (contents, _) = self.gen_expr(&args[1])?;
+            let st = self.fresh_tmp();
+            self.emit(format!(
+                "{st} = call i32 @__vela_write_file(ptr {path}, ptr {contents})"
+            ));
+            let isok = self.fresh_tmp();
+            self.emit(format!("{isok} = icmp eq i32 {st}, 0"));
+            let ok_l = self.fresh_label("wf.ok");
+            let err_l = self.fresh_label("wf.err");
+            let end_l = self.fresh_label("wf.end");
+            self.emit_term(format!("br i1 {isok}, label %{ok_l}, label %{err_l}"));
+            self.emit_label(&err_l);
+            let msg = self.fresh_tmp();
+            self.emit(format!("{msg} = call ptr @__vela_write_err(ptr {path})"));
+            let ew = self.fresh_tmp();
+            let e0 = self.fresh_tmp();
+            let e1 = self.fresh_tmp();
+            let e2 = self.fresh_tmp();
+            self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
+            self.emit(format!("{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"));
+            self.emit(format!("{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"));
+            self.emit(format!("{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"));
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&ok_l);
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&end_l);
+            let r = self.fresh_tmp();
+            // Ok(true): tag 1, payload word0 = 1 (Bool true zext).
+            self.emit(format!(
+                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], \
+                 [ {{ i1 1, i64 1, i64 0 }}, %{ok_l} ]"
+            ));
+            return Ok((r, Type::Result(Box::new(Type::Bool), Box::new(Type::Str))));
+        }
+        if name == "readFileBytes" {
+            // Binary read (M2): no UTF-8/NUL rules — the whole point of bytes.
+            let (path, _) = self.gen_expr(&args[0])?;
+            let outp = self.fresh_alloca("ptr");
+            let lenp = self.fresh_alloca("i64");
+            let st = self.fresh_tmp();
+            self.emit(format!(
+                "{st} = call i32 @__vela_read_file_bytes(ptr {path}, ptr {outp}, ptr {lenp})"
+            ));
+            let isok = self.fresh_tmp();
+            self.emit(format!("{isok} = icmp eq i32 {st}, 0"));
+            let ok_l = self.fresh_label("rfb.ok");
+            let err_l = self.fresh_label("rfb.err");
+            let end_l = self.fresh_label("rfb.end");
+            self.emit_term(format!("br i1 {isok}, label %{ok_l}, label %{err_l}"));
+            self.emit_label(&err_l);
+            let msg = self.fresh_tmp();
+            // status is always 1 (io) here — reuse the read-error renderer.
+            self.emit(format!("{msg} = call ptr @__vela_read_err(ptr {path}, i32 1)"));
+            let ew = self.fresh_tmp();
+            let e0 = self.fresh_tmp();
+            let e1 = self.fresh_tmp();
+            let e2 = self.fresh_tmp();
+            self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
+            self.emit(format!("{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"));
+            self.emit(format!("{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"));
+            self.emit(format!("{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"));
+            let err_end = self.cur_block.clone();
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&ok_l);
+            // Build the Array<UInt8> triple {buf, len, len}, box it (an Array is
+            // wider than the two payload words), and wrap in Ok.
+            let buf = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!("{buf} = load ptr, ptr {outp}"));
+            self.emit(format!("{len} = load i64, ptr {lenp}"));
+            let a0 = self.fresh_tmp();
+            let a1 = self.fresh_tmp();
+            let a2 = self.fresh_tmp();
+            self.emit(format!("{a0} = insertvalue {{ ptr, i64, i64 }} undef, ptr {buf}, 0"));
+            self.emit(format!("{a1} = insertvalue {{ ptr, i64, i64 }} {a0}, i64 {len}, 1"));
+            self.emit(format!("{a2} = insertvalue {{ ptr, i64, i64 }} {a1}, i64 {len}, 2"));
+            let elem_ty = Type::Array(Box::new(Type::IntN { bits: 8, signed: false }));
+            let (w0, w1) = self.encode_payload(&a2, &elem_ty);
+            let o0 = self.fresh_tmp();
+            let o1 = self.fresh_tmp();
+            let o2 = self.fresh_tmp();
+            self.emit(format!("{o0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"));
+            self.emit(format!("{o1} = insertvalue {{ i1, i64, i64 }} {o0}, i64 {w0}, 1"));
+            self.emit(format!("{o2} = insertvalue {{ i1, i64, i64 }} {o1}, i64 {w1}, 2"));
+            let ok_end = self.cur_block.clone();
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&end_l);
+            let r = self.fresh_tmp();
+            self.emit(format!(
+                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_end} ], [ {o2}, %{ok_end} ]"
+            ));
+            return Ok((r, Type::Result(Box::new(elem_ty), Box::new(Type::Str))));
+        }
+        if name == "stringFromBytes" {
+            // Copy the bytes into a fresh NUL-terminated buffer (null result =
+            // an embedded NUL byte), then UTF-8-validate with the shared DFA.
+            // The fixed error payloads are strcpy'd to the heap so an Err string
+            // is always owned storage, like every other I/O error payload.
+            let (arr, _) = self.gen_expr(&args[0])?;
+            let data = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {arr}, 0"));
+            self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {arr}, 1"));
+            let buf = self.fresh_tmp();
+            self.emit(format!("{buf} = call ptr @__vela_bytes_dup(ptr {data}, i64 {len})"));
+            let isnull = self.fresh_tmp();
+            self.emit(format!("{isnull} = icmp eq ptr {buf}, null"));
+            let nul_l = self.fresh_label("sfb.nul");
+            let chk_l = self.fresh_label("sfb.chk");
+            let badutf_l = self.fresh_label("sfb.badutf");
+            let err_l = self.fresh_label("sfb.err");
+            let ok_l = self.fresh_label("sfb.ok");
+            let end_l = self.fresh_label("sfb.end");
+            self.emit_term(format!("br i1 {isnull}, label %{nul_l}, label %{chk_l}"));
+            self.emit_label(&nul_l);
+            self.emit_term(format!("br label %{err_l}"));
+            self.emit_label(&chk_l);
+            let valid = self.fresh_tmp();
+            self.emit(format!("{valid} = call i1 @__vela_utf8valid(ptr {buf}, i64 {len})"));
+            self.emit_term(format!("br i1 {valid}, label %{ok_l}, label %{badutf_l}"));
+            self.emit_label(&badutf_l);
+            self.emit(format!("call void @free(ptr {buf})"));
+            self.emit_term(format!("br label %{err_l}"));
+            self.emit_label(&err_l);
+            let src = self.fresh_tmp();
+            self.emit(format!(
+                "{src} = phi ptr [ @.io.bnul, %{nul_l} ], [ @.io.butf8, %{badutf_l} ]"
+            ));
+            let mlen = self.fresh_tmp();
+            let msz = self.fresh_tmp();
+            self.emit(format!("{mlen} = call i64 @__vela_strlen(ptr {src})"));
+            self.emit(format!("{msz} = add i64 {mlen}, 1"));
+            let msg = self.fresh_tmp();
+            self.emit(format!("{msg} = call ptr @__vela_malloc(i64 {msz})"));
+            self.emit(format!("call ptr @strcpy(ptr {msg}, ptr {src})"));
+            let ew = self.fresh_tmp();
+            let e0 = self.fresh_tmp();
+            let e1 = self.fresh_tmp();
+            let e2 = self.fresh_tmp();
+            self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
+            self.emit(format!("{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"));
+            self.emit(format!("{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"));
+            self.emit(format!("{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"));
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&ok_l);
+            let ow = self.fresh_tmp();
+            let o0 = self.fresh_tmp();
+            let o1 = self.fresh_tmp();
+            let o2 = self.fresh_tmp();
+            self.emit(format!("{ow} = ptrtoint ptr {buf} to i64"));
+            self.emit(format!("{o0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"));
+            self.emit(format!("{o1} = insertvalue {{ i1, i64, i64 }} {o0}, i64 {ow}, 1"));
+            self.emit(format!("{o2} = insertvalue {{ i1, i64, i64 }} {o1}, i64 0, 2"));
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&end_l);
+            let r = self.fresh_tmp();
+            self.emit(format!(
+                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], [ {o2}, %{ok_l} ]"
+            ));
+            return Ok((r, Type::Result(Box::new(Type::Str), Box::new(Type::Str))));
         }
         // contains(a, b): strstr(a, b) != null.
         if name == "contains" {
@@ -4473,6 +4872,70 @@ mod tests {
         assert!(ir.contains("add i64"));
     }
 
+    // ---- input I/O (RFC-0014) -------------------------------------------
+
+    #[test]
+    fn read_file_lowers_to_shim_call_with_canonical_messages() {
+        let src = "fn main() -> Int64 { \
+                       let r = readFile(\"cfg.txt\") \
+                       return match r { Ok(s) => s.length, Err(e) => e.length } }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        // The shim primitive plus the single-source canonical error strings.
+        assert!(ir.contains("call i32 @__vela_read_file(ptr"), "{ir}");
+        assert!(ir.contains("@__vela_read_err"), "{ir}");
+        assert!(ir.contains("c\"cannot read `%s`\\00\""), "{ir}");
+        assert!(ir.contains("c\"`%s` is not valid UTF-8\\00\""), "{ir}");
+        assert!(ir.contains("c\"`%s` contains a NUL byte\\00\""), "{ir}");
+        // The UTF-8 validation reuses the shared DFA.
+        assert!(ir.contains("call i1 @__vela_utf8valid(ptr"), "{ir}");
+    }
+
+    #[test]
+    fn write_file_lowers_to_shim_call_with_canonical_message() {
+        let src = "fn main() -> Int64 { \
+                       let w = writeFile(\"o.txt\", \"x\") \
+                       return match w { Ok(b) => 0, Err(e) => e.length } }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("call i32 @__vela_write_file(ptr"), "{ir}");
+        assert!(ir.contains("c\"cannot write `%s`\\00\""), "{ir}");
+    }
+
+    #[test]
+    fn args_and_read_line_lower_to_runtime_calls() {
+        let src = "fn main() -> Int64 { \
+                       let a = args() \
+                       let l = readLine() \
+                       let n = match l { Some(s) => s.length, None => 0 } \
+                       return a.length + n }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("call { ptr, i64, i64 } @__vela_args()"), "{ir}");
+        assert!(ir.contains("call ptr @__vela_read_line(ptr"), "{ir}");
+    }
+
+    #[test]
+    fn bytes_array_uses_i8_stride() {
+        // RFC-0014 M2: Array<UInt8> elements are one byte, not eight — the
+        // indexed read must load an `i8` through an i8-typed gep.
+        let src = "fn main() -> Int64 { \
+                       let b = bytes(\"hi\") \
+                       let x = b[0] \
+                       return b.length }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("getelementptr i8, ptr"), "{ir}");
+        assert!(ir.contains("load i8, ptr"), "{ir}");
+    }
+
+    #[test]
+    fn string_from_bytes_validates_and_pins_error_strings() {
+        let src = "fn main() -> Int64 { \
+                       let r = stringFromBytes(bytes(\"hi\")) \
+                       return match r { Ok(s) => s.length, Err(e) => e.length } }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("call ptr @__vela_bytes_dup(ptr"), "{ir}");
+        assert!(ir.contains("c\"bytes contain a NUL byte\\00\""), "{ir}");
+        assert!(ir.contains("c\"bytes are not valid UTF-8\\00\""), "{ir}");
+    }
+
     #[test]
     fn implicit_coercion_into_validated_type_emits_check() {
         // A dynamic raw Int64 argument flowing into an `Age` parameter runs
@@ -4783,8 +5246,11 @@ mod tests {
         assert!(ir.contains("load i64"), "expected an element load: {ir}");
     }
 
-    // The region runtime (`__vela_region_exit`) always contributes exactly one
-    // `call void @free`, so an *auto*-free is a free beyond that baseline.
+    // The always-present runtime contributes exactly RUNTIME_FREES `call void
+    // @free` occurrences (one in `__vela_region_exit`, one in the
+    // `__vela_bytes_dup` NUL path), so an *auto*-free is a free beyond that
+    // baseline.
+    const RUNTIME_FREES: usize = 2;
     fn free_calls(ir: &str) -> usize {
         ir.matches("call void @free(ptr").count()
     }
@@ -4794,7 +5260,10 @@ mod tests {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let s = a + b; let n = s.length; return n; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(free_calls(&ir) > 1, "expected an auto-free beyond the runtime: {ir}");
+        assert!(
+            free_calls(&ir) > RUNTIME_FREES,
+            "expected an auto-free beyond the runtime: {ir}"
+        );
     }
 
     #[test]
@@ -4803,7 +5272,11 @@ mod tests {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                    let s = a + b; let t = s; return t.length; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert_eq!(free_calls(&ir), 1, "only the runtime free should be present: {ir}");
+        assert_eq!(
+            free_calls(&ir),
+            RUNTIME_FREES,
+            "only the runtime frees should be present: {ir}"
+        );
     }
 
     #[test]
@@ -4835,8 +5308,12 @@ mod tests {
                    fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                        let g = make(a, b); return g.length; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        // One runtime free + exactly one auto-free (in `main`, for `g`).
-        assert_eq!(free_calls(&ir), 2, "caller should free the owned result once: {ir}");
+        // The runtime frees + exactly one auto-free (in `main`, for `g`).
+        assert_eq!(
+            free_calls(&ir),
+            RUNTIME_FREES + 1,
+            "caller should free the owned result once: {ir}"
+        );
     }
 
     #[test]
