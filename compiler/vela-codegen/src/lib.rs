@@ -40,7 +40,7 @@ entry:
 define ptr @__vela_region_alloc(i64 %n) {
 entry:
   %tot = add i64 %n, 8
-  %raw = call ptr @malloc(i64 %tot)
+  %raw = call ptr @__vela_malloc(i64 %tot)
   %sp = load i64, ptr @__vela_region_sp
   %idx = sub i64 %sp, 1
   %slot = getelementptr [64 x ptr], ptr @__vela_region_heads, i64 0, i64 %idx
@@ -90,7 +90,7 @@ const CELL_RUNTIME: &str = "\
 
 define void @__vela_cell_trap() {
 entry:
-  %e = call ptr @__acrt_iob_func(i32 2)
+  %e = call ptr @__vela_stderr()
   %r = call i32 @fputs(ptr @.fmt.uaf, ptr %e)
   call void @exit(i32 1)
   unreachable
@@ -112,7 +112,7 @@ fresh:
   %oob = icmp sge i64 %top, 65536
   br i1 %oob, label %overflow, label %ok
 overflow:
-  %eo = call ptr @__acrt_iob_func(i32 2)
+  %eo = call ptr @__vela_stderr()
   %ro = call i32 @fputs(ptr @.fmt.oom, ptr %eo)
   call void @exit(i32 1)
   unreachable
@@ -242,10 +242,10 @@ fin:
 
 define ptr @__vela_hex_encode(ptr %s) {
 entry:
-  %len = call i64 @strlen(ptr %s)
+  %len = call i64 @__vela_strlen(ptr %s)
   %outlen = mul i64 %len, 2
   %sz = add i64 %outlen, 1
-  %out = call ptr @malloc(i64 %sz)
+  %out = call ptr @__vela_malloc(i64 %sz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %i2, %body ]
@@ -274,14 +274,14 @@ fin:
 
 define {i1, i64, i64} @__vela_hex_decode(ptr %s) {
 entry:
-  %len = call i64 @strlen(ptr %s)
+  %len = call i64 @__vela_strlen(ptr %s)
   %odd = and i64 %len, 1
   %isodd = icmp ne i64 %odd, 0
   br i1 %isodd, label %none, label %ok0
 ok0:
   %outlen = lshr i64 %len, 1
   %sz = add i64 %outlen, 1
-  %out = call ptr @malloc(i64 %sz)
+  %out = call ptr @__vela_malloc(i64 %sz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %ok0 ], [ %i2, %cont ]
@@ -329,10 +329,10 @@ none:
 
 define ptr @__vela_url_encode(ptr %s) {
 entry:
-  %len = call i64 @strlen(ptr %s)
+  %len = call i64 @__vela_strlen(ptr %s)
   %cap = mul i64 %len, 3
   %sz = add i64 %cap, 1
-  %out = call ptr @malloc(i64 %sz)
+  %out = call ptr @__vela_malloc(i64 %sz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %i2, %cont ]
@@ -395,9 +395,9 @@ fin:
 
 define {i1, i64, i64} @__vela_url_decode(ptr %s) {
 entry:
-  %len = call i64 @strlen(ptr %s)
+  %len = call i64 @__vela_strlen(ptr %s)
   %sz = add i64 %len, 1
-  %out = call ptr @malloc(i64 %sz)
+  %out = call ptr @__vela_malloc(i64 %sz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %inext, %cont ]
@@ -471,12 +471,12 @@ define i8 @__vela_b64char(i64 %idx) {
 
 define ptr @__vela_b64_encode(ptr %s) {
 entry:
-  %len = call i64 @strlen(ptr %s)
+  %len = call i64 @__vela_strlen(ptr %s)
   %p2 = add i64 %len, 2
   %grp = udiv i64 %p2, 3
   %outlen = mul i64 %grp, 4
   %sz = add i64 %outlen, 1
-  %out = call ptr @malloc(i64 %sz)
+  %out = call ptr @__vela_malloc(i64 %sz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %i3, %body ]
@@ -618,7 +618,7 @@ define i32 @__vela_b64val(i8 %c) {
 
 define {i1, i64, i64} @__vela_b64_decode(ptr %s) {
 entry:
-  %len = call i64 @strlen(ptr %s)
+  %len = call i64 @__vela_strlen(ptr %s)
   %m4 = and i64 %len, 3
   %notmul4 = icmp ne i64 %m4, 0
   %empty = icmp eq i64 %len, 0
@@ -626,7 +626,7 @@ entry:
 ok0:
   %cap = mul i64 %len, 1
   %sz = add i64 %cap, 1
-  %out = call ptr @malloc(i64 %sz)
+  %out = call ptr @__vela_malloc(i64 %sz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %ok0 ], [ %i4, %store ]
@@ -733,9 +733,9 @@ none:
 const STRING_RUNTIME: &str = "\
 define {ptr, i64, i64} @__vela_str_bytes(ptr %s) {
 entry:
-  %len = call i64 @strlen(ptr %s)
+  %len = call i64 @__vela_strlen(ptr %s)
   %sz = mul i64 %len, 8
-  %data = call ptr @malloc(i64 %sz)
+  %data = call ptr @__vela_malloc(i64 %sz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %i2, %body ]
@@ -758,7 +758,7 @@ ret:
 
 define {ptr, i64, i64} @__vela_str_chars(ptr %s) {
 entry:
-  %len = call i64 @strlen(ptr %s)
+  %len = call i64 @__vela_strlen(ptr %s)
   br label %cloop
 cloop:
   %ci = phi i64 [ 0, %entry ], [ %ci2, %cbody ]
@@ -776,7 +776,7 @@ cbody:
   br label %cloop
 alloc:
   %sz = mul i64 %cn, 8
-  %data = call ptr @malloc(i64 %sz)
+  %data = call ptr @__vela_malloc(i64 %sz)
   br label %dloop
 dloop:
   %di = phi i64 [ 0, %alloc ], [ %di2, %store ]
@@ -881,21 +881,25 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // matching the interpreter.
     out.push_str("declare void @exit(i32)\n");
     out.push_str("declare i32 @strcmp(ptr, ptr)\n");
-    out.push_str("declare i32 @strncmp(ptr, ptr, i64)\n");
+    out.push_str("declare i32 @__vela_strncmp(ptr, ptr, i64)\n");
     out.push_str("declare ptr @strstr(ptr, ptr)\n");
     // Heap + string runtime (dynamic strings). Allocations are not yet freed —
     // the reclamation strategy is RFC-0004's open question.
-    out.push_str("declare i64 @strlen(ptr)\n");
-    out.push_str("declare ptr @malloc(i64)\n");
-    out.push_str("declare ptr @realloc(ptr, i64)\n");
+    out.push_str("declare i64 @__vela_strlen(ptr)\n");
+    out.push_str("declare ptr @__vela_malloc(i64)\n");
+    out.push_str("declare ptr @__vela_realloc(ptr, i64)\n");
     out.push_str("declare void @free(ptr)\n");
     out.push_str("declare ptr @strcpy(ptr, ptr)\n");
     out.push_str("declare ptr @strcat(ptr, ptr)\n");
-    out.push_str("declare i32 @snprintf(ptr, i64, ptr, ...)\n");
-    // Logging (RFC-0008): fprintf to stderr. On the MSVC C runtime `stderr` is
-    // `__acrt_iob_func(2)` (there is no direct `@stderr` global).
+    out.push_str("declare i32 @__vela_snprintf(ptr, i64, ptr, ...)\n");
+    // Logging (RFC-0008) and traps: fprintf/fputs to stderr. `stderr` is a C
+    // macro with no portable symbol, so the stream handles come from a tiny C
+    // shim (`__vela_stderr`/`__vela_stdout`, embedded in vela-cli and compiled
+    // by clang alongside this IR) that works on every libc (MSVC, glibc,
+    // wasi-libc).
     out.push_str("declare i32 @fprintf(ptr, ptr, ...)\n");
-    out.push_str("declare ptr @__acrt_iob_func(i32)\n");
+    out.push_str("declare ptr @__vela_stderr()\n");
+    out.push_str("declare ptr @__vela_stdout()\n");
     // Runtime traps (division, and eventually every trap) fputs to stderr with
     // the interpreter's exact `error: ...` wording, then exit(1).
     out.push_str("declare i32 @fputs(ptr, ptr)\n");
@@ -1183,7 +1187,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // Mask to the low 8 bits so the result matches the interpreter (which does
     // `code & 0xff`) and the POSIX 0–255 exit-status convention — otherwise a
     // return value > 255 would diverge on Windows, which preserves the full i32.
-    out.push_str("define i32 @main() {\n");
+    out.push_str("define i32 @vela_entry() {\n");
     out.push_str("entry:\n");
     // Open the log file before running, if the program logs to one.
     let file_sink = matches!(program.log_sink, LogSink::File(_));
@@ -1499,7 +1503,7 @@ impl<'a> Gen<'a> {
         if self.region_depth > 0 {
             self.emit(format!("{buf} = call ptr @__vela_region_alloc(i64 {size})"));
         } else {
-            self.emit(format!("{buf} = call ptr @malloc(i64 {size})"));
+            self.emit(format!("{buf} = call ptr @__vela_malloc(i64 {size})"));
         }
         buf
     }
@@ -1513,7 +1517,7 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("br i1 {cond}, label %{trap_l}, label %{ok_l}"));
         self.emit_label(&trap_l);
         let e = self.fresh_tmp();
-        self.emit(format!("{e} = call ptr @__acrt_iob_func(i32 2)"));
+        self.emit(format!("{e} = call ptr @__vela_stderr()"));
         self.emit(format!("call i32 @fputs(ptr {msg_global}, ptr {e})"));
         self.emit("call void @exit(i32 1)".into());
         self.emit_term("unreachable".into());
@@ -1836,7 +1840,7 @@ impl<'a> Gen<'a> {
                 let (data, len) = match &resolved {
                     Type::Str => {
                         let len = self.fresh_tmp();
-                        self.emit(format!("{len} = call i64 @strlen(ptr {av})"));
+                        self.emit(format!("{len} = call i64 @__vela_strlen(ptr {av})"));
                         (av.clone(), len)
                     }
                     Type::ArrayN(_, n) => {
@@ -2033,7 +2037,7 @@ impl<'a> Gen<'a> {
                         // `str.length` is the byte length via `strlen`.
                         Type::Str => {
                             let len = self.fresh_tmp();
-                            self.emit(format!("{len} = call i64 @strlen(ptr {v})"));
+                            self.emit(format!("{len} = call i64 @__vela_strlen(ptr {v})"));
                             return Ok((len, Type::Int));
                         }
                         _ => {}
@@ -2342,7 +2346,7 @@ impl<'a> Gen<'a> {
         let size = self.fresh_tmp();
         let p = self.fresh_tmp();
         self.emit(format!("{size} = ptrtoint ptr getelementptr ({ll}, ptr null, i64 1) to i64"));
-        self.emit(format!("{p} = call ptr @malloc(i64 {size})"));
+        self.emit(format!("{p} = call ptr @__vela_malloc(i64 {size})"));
         self.emit(format!("store {ll} {v}, ptr {p}"));
         let iv = self.fresh_tmp();
         self.emit(format!("{iv} = ptrtoint ptr {p} to i64"));
@@ -2783,12 +2787,12 @@ impl<'a> Gen<'a> {
                 let lvl = format!("@.lvl.{name}");
                 let stream = self.fresh_tmp();
                 match &self.log_sink {
-                    // MSVC: stdout/stderr are `__acrt_iob_func(1)`/`(2)`.
+                    // Stream handles come from the portable C shim.
                     LogSink::Stderr => {
-                        self.emit(format!("{stream} = call ptr @__acrt_iob_func(i32 2)"))
+                        self.emit(format!("{stream} = call ptr @__vela_stderr()"))
                     }
                     LogSink::Stdout => {
-                        self.emit(format!("{stream} = call ptr @__acrt_iob_func(i32 1)"))
+                        self.emit(format!("{stream} = call ptr @__vela_stdout()"))
                     }
                     // The file is opened once in `@main` (below).
                     LogSink::File(_) => {
@@ -2806,7 +2810,7 @@ impl<'a> Gen<'a> {
         if name == "len" {
             let (v, _) = self.gen_expr(&args[0])?;
             let t = self.fresh_tmp();
-            self.emit(format!("{t} = call i64 @strlen(ptr {v})"));
+            self.emit(format!("{t} = call i64 @__vela_strlen(ptr {v})"));
             return Ok((t, Type::Int));
         }
         // Text encodings. Encoders return a fresh String; decoders return the
@@ -2860,8 +2864,8 @@ impl<'a> Gen<'a> {
             let lb = self.fresh_tmp();
             let c = self.fresh_tmp();
             let r = self.fresh_tmp();
-            self.emit(format!("{lb} = call i64 @strlen(ptr {b})"));
-            self.emit(format!("{c} = call i32 @strncmp(ptr {a}, ptr {b}, i64 {lb})"));
+            self.emit(format!("{lb} = call i64 @__vela_strlen(ptr {b})"));
+            self.emit(format!("{c} = call i32 @__vela_strncmp(ptr {a}, ptr {b}, i64 {lb})"));
             self.emit(format!("{r} = icmp eq i32 {c}, 0"));
             return Ok((r, Type::Bool));
         }
@@ -2871,8 +2875,8 @@ impl<'a> Gen<'a> {
             let (b, _) = self.gen_expr(&args[1])?;
             let la = self.fresh_tmp();
             let lb = self.fresh_tmp();
-            self.emit(format!("{la} = call i64 @strlen(ptr {a})"));
-            self.emit(format!("{lb} = call i64 @strlen(ptr {b})"));
+            self.emit(format!("{la} = call i64 @__vela_strlen(ptr {a})"));
+            self.emit(format!("{lb} = call i64 @__vela_strlen(ptr {b})"));
             let fits = self.fresh_tmp();
             self.emit(format!("{fits} = icmp uge i64 {la}, {lb}"));
             let cmp_l = self.fresh_label("ew.cmp");
@@ -2886,7 +2890,7 @@ impl<'a> Gen<'a> {
             let eq = self.fresh_tmp();
             self.emit(format!("{off} = sub i64 {la}, {lb}"));
             self.emit(format!("{p} = getelementptr i8, ptr {a}, i64 {off}"));
-            self.emit(format!("{c} = call i32 @strncmp(ptr {p}, ptr {b}, i64 {lb})"));
+            self.emit(format!("{c} = call i32 @__vela_strncmp(ptr {p}, ptr {b}, i64 {lb})"));
             self.emit(format!("{eq} = icmp eq i32 {c}, 0"));
             let cmp_end = self.cur_block.clone();
             self.emit_term(format!("br label %{end_l}"));
@@ -2907,8 +2911,8 @@ impl<'a> Gen<'a> {
             let (b, _) = self.gen_expr(&args[1])?;
             let la = self.fresh_tmp();
             let lb = self.fresh_tmp();
-            self.emit(format!("{la} = call i64 @strlen(ptr {a})"));
-            self.emit(format!("{lb} = call i64 @strlen(ptr {b})"));
+            self.emit(format!("{la} = call i64 @__vela_strlen(ptr {a})"));
+            self.emit(format!("{lb} = call i64 @__vela_strlen(ptr {b})"));
             let sum = self.fresh_tmp();
             let tot = self.fresh_tmp();
             self.emit(format!("{sum} = add i64 {la}, {lb}"));
@@ -2917,7 +2921,7 @@ impl<'a> Gen<'a> {
             if self.region_depth > 0 {
                 self.emit(format!("{buf} = call ptr @__vela_region_alloc(i64 {tot})"));
             } else {
-                self.emit(format!("{buf} = call ptr @malloc(i64 {tot})"));
+                self.emit(format!("{buf} = call ptr @__vela_malloc(i64 {tot})"));
             }
             self.emit(format!("call ptr @strcpy(ptr {buf}, ptr {a})"));
             self.emit(format!("call ptr @strcat(ptr {buf}, ptr {b})"));
@@ -2933,7 +2937,7 @@ impl<'a> Gen<'a> {
                 Type::Int => {
                     let buf = self.heap_alloc("24");
                     self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @snprintf(ptr {buf}, i64 24, ptr @.fmt.ld, i64 {v})"
+                        "call i32 (ptr, i64, ptr, ...) @__vela_snprintf(ptr {buf}, i64 24, ptr @.fmt.ld, i64 {v})"
                     ));
                     return Ok((buf, Type::Str));
                 }
@@ -2952,7 +2956,7 @@ impl<'a> Gen<'a> {
                     };
                     let buf = self.heap_alloc("24");
                     self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @snprintf(ptr {buf}, i64 24, ptr {fmt}, i64 {w})"
+                        "call i32 (ptr, i64, ptr, ...) @__vela_snprintf(ptr {buf}, i64 24, ptr {fmt}, i64 {w})"
                     ));
                     return Ok((buf, Type::Str));
                 }
@@ -2967,7 +2971,7 @@ impl<'a> Gen<'a> {
                     self.emit(format!("{fmt} = select i1 {nan}, ptr @.str.nan, ptr @.fmt.lf"));
                     let buf = self.heap_alloc("512");
                     self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @snprintf(ptr {buf}, i64 512, ptr {fmt}, double {v})"
+                        "call i32 (ptr, i64, ptr, ...) @__vela_snprintf(ptr {buf}, i64 512, ptr {fmt}, double {v})"
                     ));
                     return Ok((buf, Type::Str));
                 }
@@ -2981,7 +2985,7 @@ impl<'a> Gen<'a> {
                     self.emit(format!("{fmt} = select i1 {nan}, ptr @.str.nan, ptr @.fmt.lf"));
                     let buf = self.heap_alloc("512");
                     self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @snprintf(ptr {buf}, i64 512, ptr {fmt}, double {d})"
+                        "call i32 (ptr, i64, ptr, ...) @__vela_snprintf(ptr {buf}, i64 512, ptr {fmt}, double {d})"
                     ));
                     return Ok((buf, Type::Str));
                 }
@@ -3000,7 +3004,7 @@ impl<'a> Gen<'a> {
                     // strdup: copy so the rendered value is independently owned.
                     let len = self.fresh_tmp();
                     let sz = self.fresh_tmp();
-                    self.emit(format!("{len} = call i64 @strlen(ptr {v})"));
+                    self.emit(format!("{len} = call i64 @__vela_strlen(ptr {v})"));
                     self.emit(format!("{sz} = add i64 {len}, 1"));
                     let buf = self.heap_alloc(&sz);
                     self.emit(format!("call ptr @strcpy(ptr {buf}, ptr {v})"));
@@ -3112,7 +3116,7 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{size} = ptrtoint ptr getelementptr ({ll}, ptr null, i64 1) to i64"
             ));
-            self.emit(format!("{payload} = call ptr @malloc(i64 {size})"));
+            self.emit(format!("{payload} = call ptr @__vela_malloc(i64 {size})"));
             self.emit(format!("store {ll} {v}, ptr {payload}"));
             let slot = self.fresh_tmp();
             self.emit(format!("{slot} = call i64 @__vela_cell_alloc(ptr {payload})"));
@@ -3200,7 +3204,7 @@ impl<'a> Gen<'a> {
             self.emit(format!("{nc} = select i1 {capzero}, i64 4, i64 {dbl}"));
             self.emit(format!("{esz} = ptrtoint ptr getelementptr ({ell}, ptr null, i64 1) to i64"));
             self.emit(format!("{nb} = mul i64 {nc}, {esz}"));
-            self.emit(format!("{nd} = call ptr @realloc(ptr {data}, i64 {nb})"));
+            self.emit(format!("{nd} = call ptr @__vela_realloc(ptr {data}, i64 {nb})"));
             self.emit_term(format!("br label %{ready_l}"));
             // ready: choose data/cap, store the new element, rebuild the triple.
             self.emit_label(&ready_l);
@@ -3232,7 +3236,7 @@ impl<'a> Gen<'a> {
             let emit_trap = |g: &mut Self, fmt: &str| {
                 g.emit_label(&bad_l);
                 let e = g.fresh_tmp();
-                g.emit(format!("{e} = call ptr @__acrt_iob_func(i32 2)"));
+                g.emit(format!("{e} = call ptr @__vela_stderr()"));
                 g.emit(format!(
                     "call i32 (ptr, ptr, ...) @fprintf(ptr {e}, ptr {fmt}, i64 {iv})"
                 ));
@@ -3281,7 +3285,7 @@ impl<'a> Gen<'a> {
                 // byte and zero-extend to i64 (the byte's value).
                 Type::Str => {
                     let len = self.fresh_tmp();
-                    self.emit(format!("{len} = call i64 @strlen(ptr {av})"));
+                    self.emit(format!("{len} = call i64 @__vela_strlen(ptr {av})"));
                     let oob = self.fresh_tmp();
                     self.emit(format!("{oob} = icmp uge i64 {iv}, {len}"));
                     self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
@@ -3357,7 +3361,7 @@ impl<'a> Gen<'a> {
                     // this buffer with `realloc` and array cleanup uses `free`,
                     // both of which are undefined on an arena interior pointer.
                     let buf = self.fresh_tmp();
-                    self.emit(format!("{buf} = call ptr @malloc(i64 {sz})"));
+                    self.emit(format!("{buf} = call ptr @__vela_malloc(i64 {sz})"));
                     self.emit(format!("store {aggty} {v}, ptr {buf}"));
                     let a = self.fresh_tmp();
                     let b = self.fresh_tmp();
@@ -3962,7 +3966,7 @@ mod tests {
         let program = check("fn main() -> Int64 { let x = 2 + 3; print(x); return x; }").unwrap();
         let ir = emit(&program).unwrap();
         assert!(ir.contains("define i64 @vela_main("));
-        assert!(ir.contains("define i32 @main()"));
+        assert!(ir.contains("define i32 @vela_entry()"));
         assert!(ir.contains("@printf"));
         assert!(ir.contains("add i64"));
     }
@@ -4066,11 +4070,11 @@ mod tests {
 
     #[test]
     fn logging_lowers_to_fprintf_stderr() {
-        // `log.info(..)` emits an fprintf to stderr (`__acrt_iob_func(2)`) with
+        // `log.info(..)` emits an fprintf to stderr (via the shim) with
         // the level-name global.
         let src = "fn main() -> Int64 { let log = logger(\"m\"); log.info(\"hi\"); return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("@__acrt_iob_func(i32 2)"), "stderr handle: {ir}");
+        assert!(ir.contains("@__vela_stderr()"), "stderr handle: {ir}");
         assert!(ir.contains("@fprintf"), "fprintf: {ir}");
         assert!(ir.contains("@.lvl.info"), "level name global: {ir}");
     }
@@ -4080,7 +4084,7 @@ mod tests {
         let src = "logging { sink: stdout } \
                    fn main() -> Int64 { let l = logger(\"m\"); l.error(\"x\"); return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("@__acrt_iob_func(i32 1)"), "stdout is stream 1: {ir}");
+        assert!(ir.contains("@__vela_stdout()"), "stdout via the shim: {ir}");
     }
 
     #[test]
@@ -4129,7 +4133,7 @@ mod tests {
         let src = "fn main() -> Int64 { let n = 7; let ok = true; \
                    let s = \"n=\\{n} ok=\\{ok}\"; return len(s); }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("@snprintf"), "str(Int64) -> snprintf: {ir}");
+        assert!(ir.contains("@__vela_snprintf"), "str(Int64) -> snprintf: {ir}");
         assert!(ir.contains("select i1"), "str(Bool) -> select true/false: {ir}");
         assert!(ir.contains("@strcpy"), "bool/str render copies: {ir}");
         assert!(ir.contains("@.str.true"), "no-newline bool global: {ir}");
@@ -4363,7 +4367,7 @@ mod tests {
     fn string_length_lowers_to_strlen() {
         let src = "fn main() -> Int64 { let s = \"hi\"; return s.length; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call i64 @strlen"), "str .length → strlen: {ir}");
+        assert!(ir.contains("call i64 @__vela_strlen"), "str .length → strlen: {ir}");
     }
 
     #[test]
@@ -4405,7 +4409,7 @@ mod tests {
         assert!(c.contains("call ptr @strstr"), "contains → strstr: {c}");
         let s = emit(&check("fn f(s: String) -> Bool { return startsWith(s, \"x\"); } \
                              fn main() -> Int64 { return 0; }").unwrap()).unwrap();
-        assert!(s.contains("call i32 @strncmp"), "startsWith → strncmp: {s}");
+        assert!(s.contains("call i32 @__vela_strncmp"), "startsWith → strncmp: {s}");
     }
 
     #[test]
@@ -4416,7 +4420,7 @@ mod tests {
                    fn mk(s: String) -> Name { return Name(s); } \
                    fn main() -> Int64 { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call i64 @strlen"), "refinement uses strlen: {ir}");
+        assert!(ir.contains("call i64 @__vela_strlen"), "refinement uses strlen: {ir}");
         assert!(ir.contains("@.trap.verr.Name"), "refinement traps: {ir}");
     }
 

@@ -31,12 +31,39 @@ fn norm(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n")
 }
 
+/// The wasm toolchain, when present: the wasi-libc sysroot (for `velac build
+/// --target wasm`) and a wasmtime executable to run the module. Discovered
+/// from `$WASI_SYSROOT` / `$VELA_WASMTIME`, falling back to the repo's
+/// `tools/` directory. `None` disables the third parity column with a notice
+/// (machines without the toolchain still verify interp == native).
+fn wasm_toolchain() -> Option<(PathBuf, PathBuf)> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let sysroot = std::env::var("WASI_SYSROOT")
+        .map(PathBuf::from)
+        .ok()
+        .filter(|p| p.exists())
+        .or_else(|| Some(root.join("tools/wasi-sysroot-25.0")).filter(|p| p.exists()))?;
+    let wasmtime = std::env::var("VELA_WASMTIME")
+        .map(PathBuf::from)
+        .ok()
+        .filter(|p| p.exists())
+        .or_else(|| {
+            Some(root.join("tools/wasmtime-v46.0.1-x86_64-windows/wasmtime.exe"))
+                .filter(|p| p.exists())
+        })?;
+    Some((sysroot, wasmtime))
+}
+
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vela-cli --test parity -- --ignored"]
 fn examples_interp_native_parity() {
     let dir = examples_dir();
     let out_dir = std::env::temp_dir().join("vela-parity");
     std::fs::create_dir_all(&out_dir).unwrap();
+    let wasm = wasm_toolchain();
+    if wasm.is_none() {
+        eprintln!("NOTE: wasm toolchain not found — verifying interp == native only");
+    }
 
     let mut names: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap()
@@ -81,9 +108,45 @@ fn examples_interp_native_parity() {
                  stdout interp: {i_out:?}\n  stdout native: {n_out:?}\n  \
                  stderr interp: {i_err:?}\n  stderr native: {n_err:?}"
             ));
-        } else {
-            eprintln!("ok    {name}");
+            continue;
         }
+
+        // Third column: the same program compiled to wasm32-wasi must match
+        // the interpreter byte-for-byte too (wasm writes LF like the interp;
+        // norm() makes it moot either way).
+        if let Some((sysroot, wasmtime)) = &wasm {
+            let module = out_dir.join(format!("{name}.wasm"));
+            let build = velac()
+                .arg("build")
+                .arg(path)
+                .arg("--target")
+                .arg("wasm")
+                .arg("-o")
+                .arg(&module)
+                .env("WASI_SYSROOT", sysroot)
+                .output()
+                .expect("build wasm");
+            if !build.status.success() {
+                failures.push(format!(
+                    "{name}: wasm build failed:\n{}{}",
+                    norm(&build.stdout),
+                    norm(&build.stderr)
+                ));
+                continue;
+            }
+            let w = Command::new(wasmtime).arg(&module).output().expect("run wasm");
+            let (w_out, w_err) = (norm(&w.stdout), norm(&w.stderr));
+            let w_code = w.status.code();
+            if i_out != w_out || i_err != w_err || i_code != w_code {
+                failures.push(format!(
+                    "{name}: WASM DIVERGED\n  exit: interp {i_code:?} vs wasm {w_code:?}\n  \
+                     stdout interp: {i_out:?}\n  stdout wasm: {w_out:?}\n  \
+                     stderr interp: {i_err:?}\n  stderr wasm: {w_err:?}"
+                ));
+                continue;
+            }
+        }
+        eprintln!("ok    {name}");
     }
 
     eprintln!(

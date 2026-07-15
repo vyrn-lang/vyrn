@@ -16,3 +16,4 @@ editor/vscode/server/
 # OS noise
 Thumbs.db
 .DS_Store
+tools/

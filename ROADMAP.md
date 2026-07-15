@@ -3,13 +3,28 @@
 The forward-looking companion to the [RFCs](rfcs/). What ships today, what's next,
 and the one decision the rest of the language waits on.
 
-**Every feature below is verified**: the clang-compiled native binary produces
-byte-identical stdout, stderr, and exit codes against the tree-walking
-interpreter (the reference semantics), across **35 examples** and **384 tests**
-(0 warnings) — including every runtime trap path (one canonical `error: ...`
-wording on stderr, exit 1, in both backends). The permanent corpus harness is
-`cargo test -p vela-cli --test parity -- --ignored` (needs clang; its
-known-divergent list is empty and must stay that way).
+**Every feature below is verified three ways**: the clang-compiled native
+binary AND the `wasm32-wasi` module produce byte-identical stdout, stderr, and
+exit codes against the tree-walking interpreter (the reference semantics),
+across **35 examples** and **384 tests** (0 warnings) — including every runtime
+trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere).
+The permanent corpus harness is
+`cargo test -p vela-cli --test parity -- --ignored` (needs clang; the wasm
+column runs when `tools/` holds a wasi-sysroot + wasmtime, or via
+`$WASI_SYSROOT`/`$VELA_WASMTIME`; the known-divergent list is empty and must
+stay that way).
+
+**WebAssembly**: `velac build prog.vela --target wasm` compiles the same
+LLVM IR against wasi-libc (`--target=wasm32-wasip1`). The runtime is
+libc-portable: stream handles and all size_t-sensitive calls (`strlen`,
+`malloc`, `realloc`, `strncmp`, `snprintf`) route through a tiny embedded C
+shim with 64-bit-clean prototypes, and the C `main` lives in the shim (the IR
+exports `vela_entry`), so MSVC, glibc, and wasi-libc all link the same module.
+Exit codes are portable in 0..126 (WASI's constraint). Next steps on the
+browser path: a JS interop layer (`extern` imports/exports + string glue), a
+browser WASI shim demo, then modules/std-lib and an event-loop story — the
+long-range goal is same-language server (native SSR) + client (wasm), with
+validated types as the wire contract.
 
 A 2026-07-15 hardening pass fixed ~40 reviewed defects: native
 use-after-free/heap-corruption bugs (cell `set`, region escapes, `list` in

@@ -33,5 +33,8 @@ fn main() -> Int64 {
 
     let total = join(a) + join(b) + join(c) + join(f)
     print(total)                       // 103 + 106 + 130 + 6765 = 7104
-    return total
+    // Exit codes are portable only in 0..126 (WASI's rule); print the result
+    // and return a small success/failure indicator instead.
+    if total == 7104 { return 0 }
+    return 1
 }

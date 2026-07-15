@@ -30,5 +30,8 @@ fn main() -> Int64 {
     print(miss)
 
     drop m
-    return hit + miss   // 199
+    // hit + miss = 199, but exit codes are portable only in 0..126 (WASI's
+    // rule) — report success instead.
+    if hit + miss == 199 { return 0 }
+    return 1
 }
