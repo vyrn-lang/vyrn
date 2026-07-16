@@ -11,6 +11,10 @@ examples/data/*.tmp.txt
 # Browser-demo modules (regenerable via web/build.ps1)
 web/*.wasm
 web/*.shim.c
+# `vyrn dev` scratch: the client wasm it rebuilds on each start (RFC-0019)
+.vyrn-dev/
+*.wasm
+*.shim.c
 
 # Editor / tooling
 editor/**/node_modules/

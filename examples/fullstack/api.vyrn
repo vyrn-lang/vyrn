@@ -1,0 +1,32 @@
+/// The RPC contract (RFC-0019) — an ORDINARY Vyrn module, zero RPC annotations.
+///
+/// The procedures are simply this module's exported functions; their request and
+/// response types are ordinary (validated) records. `std/rpc`'s generators read
+/// this module's interface (RFC-0021 `moduleInterface`) and synthesize the
+/// server router, the browser client, and an in-process test double from it. The
+/// validated types below are the point: `fromJson` runs every `where` clause on
+/// the server, so a bad `age` on the wire comes back as structured 422 issues —
+/// no hand-written validation anywhere.
+
+/// A human age: the `where` runs on every decode boundary (server-side).
+export type Age = Int64 where value >= 0 && value <= 130
+
+/// A non-empty, bounded display name.
+export type Username = String where value.length >= 1 && value.length <= 20
+
+export type GetUserReq = { id: Int64 }
+export type CreateUserReq = { name: Username, age: Age }
+export type User = { id: Int64, name: Username, age: Age }
+
+/// Look up a user by id. No database here (an imported module is stateless), so
+/// the result is derived deterministically from the id — enough to show a real,
+/// typed round trip.
+export fn getUser(req: GetUserReq) -> User {
+    return User { id: req.id, name: "user\{req.id}", age: 30 }
+}
+
+/// "Create" a user. The request is already validated by the time the body runs
+/// (decode enforced `Username`/`Age`), so this just echoes it back with an id.
+export fn createUser(req: CreateUserReq) -> User {
+    return User { id: 1000, name: req.name, age: req.age }
+}

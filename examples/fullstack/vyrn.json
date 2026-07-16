@@ -1,0 +1,6 @@
+{
+  "name": "fullstack",
+  "server": "server.vyrn",
+  "client": "client.vyrn",
+  "public": "public"
+}

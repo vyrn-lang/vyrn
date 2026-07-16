@@ -1,0 +1,77 @@
+/// The browser client root (RFC-0019). `rpcClient("./api")` re-emits the
+/// contract's types and synthesizes, per procedure, a same-named stub (fires the
+/// wire call) and an `export extern fn vyrnRpcDone<Proc>` completion dispatcher
+/// that hands a decoded `Validation<T>` to the plain `on<Proc>` handlers below.
+///
+/// `vyrn dev` builds this to wasm; `web/vyrn-rpc.js` provides the transport and
+/// `web/vyrn-query.js` the cache. The page never sees a Request/Response — it
+/// calls typed stubs and reads results the handlers stash in module state.
+import { getUser, createUser, GetUserReq, CreateUserReq, User } from rpcClient("./api")
+import { rpcClient } from "std/rpc"
+
+// Module state (root-only): the last result / issues, read by the page.
+let mut userLine: String = "(none yet)"
+let mut issueLine: String = ""
+
+fn setUser(s: String) {
+    userLine = s
+}
+fn setIssues(s: String) {
+    issueLine = s
+}
+
+/// Render an accumulated issue list as `path: message; ...` for the page.
+fn renderIssues(issues: Array<Issue>) -> String {
+    let mut out = ""
+    let mut i = 0
+    for issue in issues {
+        if i > 0 {
+            out = out + "; "
+        }
+        out = out + issues[i].path + ": " + issues[i].message
+        i = i + 1
+    }
+    return out
+}
+
+/// A two-statement success arm, factored out (match arms are single expressions).
+fn showCreated(u: User) {
+    setUser("created id=\{u.id} name=\{u.name} age=\{u.age}")
+    setIssues("")
+}
+
+/// The completion handler for `getUser` — a decoded `Validation<User>`.
+fn onGetUser(id: Int64, res: Validation<User>) {
+    match res {
+        Valid(u) => setUser("id=\{u.id} name=\{u.name} age=\{u.age}"),
+        Invalid(issues) => setIssues(renderIssues(issues)),
+    }
+}
+
+/// The completion handler for `createUser`. A bad `age` on the wire arrives here
+/// as `Invalid` carrying the SERVER's own accumulated issues.
+fn onCreateUser(id: Int64, res: Validation<User>) {
+    match res {
+        Valid(u) => showCreated(u),
+        Invalid(issues) => setIssues(renderIssues(issues)),
+    }
+}
+
+// ---- the page's entry points (exported to JS) ------------------------------
+
+/// Fire a typed `getUser` round trip; the reply flows to `onGetUser`.
+export extern fn loadUser(id: Int64) {
+    getUser(GetUserReq { id: id })
+}
+
+/// The last result line and the last issue line, for the page to render.
+export extern fn uiUser() -> String {
+    return userLine
+}
+export extern fn uiIssues() -> String {
+    return issueLine
+}
+
+fn main() -> Int64 {
+    return 0
+}

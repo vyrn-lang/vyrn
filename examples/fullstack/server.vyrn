@@ -1,0 +1,35 @@
+/// The server root (RFC-0019). `rpcServer("./api")` synthesizes `rpcHandle`
+/// (POST /rpc/<name>, GET /rpc/$schema) from the contract's interface; `handle`
+/// plugs it into the RFC-0016 convention and falls through to the app's own
+/// pages. `vyrn dev` serves this alongside the built client wasm + static
+/// assets; `vyrn serve server.vyrn` runs just this (the RPC API, no page shell).
+import { rpcServer } from "std/rpc"
+import { rpcHandle } from rpcServer("./api")
+
+fn handle(req: Request) -> Response {
+    return match rpcHandle(req) {
+        Some(r) => r,
+        None => pages(req),
+    }
+}
+
+/// The non-RPC routes. Under `vyrn dev` the static `public/index.html` answers
+/// `/` first (static-first precedence); this fallback is what a bare `vyrn serve`
+/// shows, and what any unknown path gets.
+fn pages(req: Request) -> Response {
+    if req.path == "/" {
+        return Response {
+            status: 200,
+            contentType: "text/html",
+            body: "<h1>vyrn fullstack</h1><p>RPC API is live at <code>/rpc/*</code>. Run <code>vyrn dev</code> for the page.</p>",
+        }
+    }
+    return Response { status: 404, contentType: "text/plain", body: "not found" }
+}
+
+fn main() -> Int64 {
+    // Drive `handle` once so `vyrn run server.vyrn` is a quick smoke test.
+    let schema = handle(Request { method: "GET", path: "/rpc/$schema", body: "" })
+    print("$schema -> \{schema.status}")
+    return 0
+}

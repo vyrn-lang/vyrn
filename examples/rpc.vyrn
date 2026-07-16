@@ -1,0 +1,51 @@
+/// Typed RPC as a library (RFC-0019) — the deterministic, in-process flavor, so
+/// this is an ordinary three-way parity citizen (interp == native == wasm).
+///
+/// `rpcInProcess("./fullstack/api")` reads the SAME contract the browser demo
+/// serves and synthesizes `call<Proc>` dispatchers that run the real procedures
+/// and hand the result to the plain `on<Proc>` handlers below — no wire, no
+/// externs, no host. The wire flavors (`rpcServer` / `rpcClient`) add a network
+/// and a JS runtime, so they live in `examples/fullstack/` under `vyrn dev`;
+/// this file keeps the contract's logic covered by the parity corpus.
+///
+/// Inspect the synthesized dispatch module with:  vyrn emit-gen examples/rpc.vyrn
+import { rpcInProcess } from "std/rpc"
+import { callGetUser, callCreateUser } from rpcInProcess("./fullstack/api")
+import { GetUserReq, CreateUserReq, User } from "./fullstack/api"
+
+// Module state: the last dispatch result, filled by the handlers below.
+let mut line: String = "(none)"
+
+/// The completion handler for `getUser` — in-process, always `Valid`.
+fn onGetUser(id: Int64, res: Validation<User>) {
+    line = match res {
+        Valid(u) => "getUser -> \{u.name} (age \{u.age})",
+        Invalid(issues) => "getUser failed",
+    }
+}
+
+/// The completion handler for `createUser`.
+fn onCreateUser(id: Int64, res: Validation<User>) {
+    line = match res {
+        Valid(u) => "createUser -> id \{u.id} \{u.name}",
+        Invalid(issues) => "createUser failed",
+    }
+}
+
+fn main() -> Int64 {
+    callGetUser(GetUserReq { id: 7 })
+    print(line)
+    callCreateUser(CreateUserReq { name: "Ada", age: 36 })
+    print(line)
+    return 0
+}
+
+test "in-process getUser runs the real contract procedure" {
+    callGetUser(GetUserReq { id: 42 })
+    assertEq(line, "getUser -> user42 (age 30)")
+}
+
+test "in-process createUser echoes its validated fields" {
+    callCreateUser(CreateUserReq { name: "Grace", age: 45 })
+    assertEq(line, "createUser -> id 1000 Grace")
+}

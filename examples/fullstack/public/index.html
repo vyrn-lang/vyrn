@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>vyrn fullstack — typed RPC</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        max-width: 720px; margin: 2rem auto; padding: 0 1rem;
+      }
+      h1 { font-size: 1.4rem; margin-bottom: 0.2rem; }
+      .sub { opacity: 0.7; margin-top: 0; }
+      section {
+        border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+        border-radius: 10px; padding: 1rem 1.1rem; margin: 1rem 0;
+      }
+      h2 { font-size: 1rem; margin: 0 0 0.6rem; }
+      button {
+        font: inherit; padding: 0.4rem 0.8rem; margin: 0.15rem 0.3rem 0.15rem 0;
+        border-radius: 7px; border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+        background: color-mix(in srgb, currentColor 8%, transparent); cursor: pointer;
+      }
+      button:hover { background: color-mix(in srgb, currentColor 16%, transparent); }
+      input {
+        font: inherit; padding: 0.35rem 0.5rem; border-radius: 6px; width: 6rem;
+        border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+        background: transparent; color: inherit;
+      }
+      label { display: inline-flex; gap: 0.35rem; align-items: center; margin-right: 0.6rem; }
+      .out {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+        white-space: pre-wrap; word-break: break-word; margin-top: 0.5rem;
+        padding: 0.5rem 0.7rem; border-radius: 6px;
+        background: color-mix(in srgb, currentColor 6%, transparent); min-height: 1.2rem;
+      }
+      .issues { color: #c0392b; }
+      @media (prefers-color-scheme: dark) { .issues { color: #ff8a80; } }
+      .metric { font-variant-numeric: tabular-nums; font-weight: 600; }
+      code { font-family: ui-monospace, monospace; font-size: 0.92em; }
+    </style>
+  </head>
+  <body>
+    <h1>vyrn fullstack — typed RPC as a library</h1>
+    <p class="sub">
+      One contract (<code>api.vyrn</code>), three generators. The wasm client
+      below calls typed procedures; the server validates every payload with the
+      contract's <code>where</code> clauses and returns structured issues.
+    </p>
+
+    <section>
+      <h2>Typed round trip</h2>
+      <label>id <input id="uid" type="number" value="7" /></label>
+      <button id="fetchBtn">getUser (typed stub)</button>
+      <div class="out" id="userOut">—</div>
+    </section>
+
+    <section>
+      <h2>Validated submit — server-side 422</h2>
+      <label>name <input id="cname" value="Bob" style="width: 8rem" /></label>
+      <label>age <input id="cage" type="number" value="200" /></label>
+      <button id="goodBtn">submit</button>
+      <button id="badBtn">submit age 200 (invalid)</button>
+      <div class="out issues" id="issueOut"></div>
+      <p class="sub">
+        Age 200 fails <code>Age = Int64 where value &lt;= 130</code> during
+        <code>fromJson</code> on the server — the issues below come straight off
+        the wire, not from client code.
+      </p>
+    </section>
+
+    <section>
+      <h2>Query cache — dedupe &amp; invalidate</h2>
+      <button id="dedupeBtn">two rapid getUser(#7) clicks</button>
+      <button id="invalidateBtn">invalidate + refetch</button>
+      <div class="out">network fetches: <span class="metric" id="fetchCount">0</span></div>
+      <p class="sub">
+        The colada (<code>vyrn-query.js</code>) keys by (proc, request). Two
+        in-flight calls for the same key share one fetch; invalidate forces a new
+        one. Both drive the same <code>vyrnRpcDoneGetUser</code> dispatcher.
+      </p>
+    </section>
+
+    <section>
+      <h2>Procedure registry</h2>
+      <button id="schemaBtn">GET /rpc/$schema</button>
+      <div class="out" id="schemaOut"></div>
+    </section>
+
+    <script type="module">
+      import { runVyrnRpc } from "/vyrn-runtime/vyrn-rpc.js";
+      import { createQueryClient } from "/vyrn-runtime/vyrn-query.js";
+
+      const $ = (id) => document.getElementById(id);
+
+      async function main() {
+        const bytes = await (await fetch("/client.wasm")).arrayBuffer();
+        // Instantiate with the RPC transport wired; name the String-returning
+        // getters so the export glue decodes them.
+        const { exports } = await runVyrnRpc(bytes, {
+          baseUrl: "",
+          exportReturns: { uiUser: "string", uiIssues: "string" },
+        });
+        const qc = createQueryClient({ exports, baseUrl: "" });
+
+        // A tiny render loop: mirror the Vyrn module state onto the page. The
+        // dispatchers update that state whenever a reply (network or cache)
+        // arrives, so the panels stay live without explicit callbacks.
+        setInterval(() => {
+          $("userOut").textContent = exports.uiUser() || "—";
+          $("issueOut").textContent = exports.uiIssues() || "";
+          $("fetchCount").textContent = String(qc.fetchCount);
+        }, 120);
+
+        // Typed round trip via the generated Vyrn stub.
+        $("fetchBtn").onclick = () => {
+          exports.loadUser(BigInt($("uid").value || "0"));
+        };
+
+        // Validated submit — build raw JSON so an invalid age actually reaches
+        // the server (a validated Vyrn value could never be constructed at 200).
+        const submit = (name, age) =>
+          qc.query("createUser", JSON.stringify({ name, age: Number(age) }));
+        $("goodBtn").onclick = () => submit($("cname").value, $("cage").value);
+        $("badBtn").onclick = () => submit("Bob", 200);
+
+        // Cache demo: two rapid queries for the same key dedupe to one fetch.
+        $("dedupeBtn").onclick = () => {
+          const key = JSON.stringify({ id: 7 });
+          qc.query("getUser", key, { staleTime: 10000 });
+          qc.query("getUser", key, { staleTime: 10000 });
+        };
+        $("invalidateBtn").onclick = () => {
+          qc.invalidate("getUser");
+          qc.query("getUser", JSON.stringify({ id: 7 }), { staleTime: 10000 });
+        };
+
+        // The procedure registry, straight from the server.
+        $("schemaBtn").onclick = async () => {
+          const res = await fetch("/rpc/$schema");
+          const text = await res.text();
+          try {
+            $("schemaOut").textContent = JSON.stringify(JSON.parse(text), null, 2);
+          } catch {
+            $("schemaOut").textContent = text;
+          }
+        };
+      }
+
+      main().catch((e) => {
+        document.body.insertAdjacentHTML(
+          "beforeend",
+          `<pre style="color:#c0392b">boot error: ${e && e.message ? e.message : e}</pre>`
+        );
+      });
+    </script>
+  </body>
+</html>
