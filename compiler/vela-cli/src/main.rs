@@ -4,16 +4,11 @@
 //!   velac run     [file.vela]            Type-check and interpret; process exits with main's value.
 //!   velac check   [file.vela]            Type-check only; print "ok" or every diagnostic.
 //!   velac emit-ir [file.vela]            Print textual LLVM IR to stdout.
-//!   velac build   [file.vela] [-o out] [--target wasm] [--server|--client]
+//!   velac build   [file.vela] [-o out] [--target wasm]
 //!                                        Compile to a native executable (or wasm) via clang.
-//!                                        `--server`/`--client` (RFC-0019) pick a compile ROLE
-//!                                        and, without a file, the vela.json `server`/`client` root
-//!                                        (`--client` implies the browser wasm target).
 //!   velac test    [file.vela] [--name <substring>]
 //!                                        Run the root file's `test` blocks under the interpreter.
-//!   velac serve   [file.vela] [--port N] Run `fn handle(req: Request) -> Response` and/or the
-//!                                        file's `rpc fn` procedures (mounted at POST /rpc/<name>,
-//!                                        GET /rpc/$schema) as an HTTP host.
+//!   velac serve   [file.vela] [--port N] Run `fn handle(req: Request) -> Response` as an HTTP host.
 //!   velac new     <name>                 Scaffold a project (vela.json + src/main.vela).
 //!   velac deps                           Print the resolved module graph.
 //!
@@ -26,7 +21,7 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: velac <run|check|emit-ir|build|test|serve|fmt> [file.vela] [-o out] [--target wasm] [--offline]\n       velac run [file.vela] [args...]   (trailing args reach the program's args())\n       velac build [file.vela] [-o out] [--target wasm] [--server|--client]   (--client = browser wasm, client role; roots from vela.json server/client)\n       velac test [file.vela] [--name <substring>]\n       velac serve [file.vela] [--port N]   (HTTP host; `fn handle(req: Request) -> Response` and/or `rpc fn` procedures at /rpc/*)\n       velac fmt [file.vela ...] [--check]   (canonical formatter; no files = project main + local imports)\n       velac new <name> | velac add <specifier> [--name alias] | velac update [alias] | velac vendor [--check] | velac deps";
+const USAGE: &str = "usage: velac <run|check|emit-ir|build|test|serve|fmt> [file.vela] [-o out] [--target wasm] [--offline]\n       velac run [file.vela] [args...]   (trailing args reach the program's args())\n       velac test [file.vela] [--name <substring>]\n       velac serve [file.vela] [--port N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       velac fmt [file.vela ...] [--check]   (canonical formatter; no files = project main + local imports)\n       velac new <name> | velac add <specifier> [--name alias] | velac update [alias] | velac vendor [--check] | velac deps";
 
 /// `--offline` flag or `VELA_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
@@ -70,12 +65,6 @@ fn main() -> ExitCode {
     if cmd == "fmt" {
         return fmt_cmd(&args[2..]);
     }
-    // `build` does its own root + role resolution (RFC-0019 `--server`/`--client`
-    // select the manifest's fullstack roots), so it is handled before the generic
-    // "file or manifest main" resolution the other commands share.
-    if cmd == "build" {
-        return build(&args[2..]);
-    }
 
     // The remaining commands take an optional file; without one, the manifest
     // supplies `main`.
@@ -91,6 +80,9 @@ fn main() -> ExitCode {
         },
     };
 
+    if cmd == "build" {
+        return build(&path, rest);
+    }
     if cmd == "test" {
         return test_cmd(&path, rest);
     }
@@ -198,10 +190,6 @@ struct Manifest {
     /// Directory the manifest lives in (slash-separated).
     dir: String,
     main: Option<String>,
-    /// The fullstack roots (RFC-0019): `"server"` (native server-role binary)
-    /// and `"client"` (browser wasm, client role). Optional.
-    server: Option<String>,
-    client: Option<String>,
     dependencies: Vec<(String, String)>,
 }
 
@@ -224,12 +212,6 @@ fn find_manifest(start: &Path) -> Option<Manifest> {
                 Some(Json::Str(s)) => Some(s.clone()),
                 _ => None,
             };
-            let str_key = |k: &str| match doc.get(k) {
-                Some(Json::Str(s)) => Some(s.clone()),
-                _ => None,
-            };
-            let server = str_key("server");
-            let client = str_key("client");
             let dependencies = match doc.get("dependencies") {
                 Some(Json::Obj(entries)) => entries
                     .iter()
@@ -243,8 +225,6 @@ fn find_manifest(start: &Path) -> Option<Manifest> {
             return Some(Manifest {
                 dir: dir.to_string_lossy().replace('\\', "/"),
                 main,
-                server,
-                client,
                 dependencies,
             });
         }
@@ -258,19 +238,6 @@ fn manifest_main() -> Option<String> {
     let m = find_manifest(&cwd)?;
     let main = m.main?;
     Some(format!("{}/{main}", m.dir))
-}
-
-/// The manifest's fullstack `server`/`client` root (RFC-0019), resolved relative
-/// to the manifest's directory.
-fn manifest_role_root(key: &str) -> Option<String> {
-    let cwd = std::env::current_dir().ok()?;
-    let m = find_manifest(&cwd)?;
-    let root = match key {
-        "server" => m.server,
-        "client" => m.client,
-        _ => None,
-    }?;
-    Some(format!("{}/{root}", m.dir))
 }
 
 /// LoadOptions for a root file: std root + the nearest manifest's aliases.
@@ -533,22 +500,12 @@ fn save_lock(resolver: &remote::RemoteResolver) -> Result<(), ExitCode> {
 /// Load + check a root file through the module loader, printing diagnostics
 /// (with their originating file) on failure.
 fn load_program(path: &str, source: &str) -> Result<vela_frontend::ast::Program, ExitCode> {
-    load_program_role(path, source, vela_frontend::ast::CompileRole::Server)
-}
-
-/// Load + type-check a program for an explicit compile role (RFC-0019). Server
-/// role is the default everywhere except `velac build --client`.
-fn load_program_role(
-    path: &str,
-    source: &str,
-    role: vela_frontend::ast::CompileRole,
-) -> Result<vela_frontend::ast::Program, ExitCode> {
     // Strip Windows' verbatim prefix (`\\?\C:\..`) — it survives neither the
     // slash normalization nor readable diagnostics.
     let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
-    let result = vela_frontend::load_with_role(source, &root_key, &opts, &resolver, role);
+    let result = vela_frontend::load(source, &root_key, &opts, &resolver);
     // Pins are kept even when a later stage fails — fetched is pinned.
     save_lock(&resolver)?;
     match result {
@@ -1456,9 +1413,8 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
         Err(code) => return code,
     };
 
-    // `velac serve` needs SOMETHING to serve: either `fn handle(req: Request) ->
-    // Response` (RFC-0016) or at least one `rpc fn` procedure (RFC-0019). A file
-    // with neither has no routes to mount.
+    // `velac serve` requires `fn handle(req: Request) -> Response` (exactly this
+    // signature — the checker's no-`main` exemption uses the same rule).
     use vela_frontend::ast::Type;
     let has_handle = program.functions.iter().any(|f| {
         f.name == "handle"
@@ -1467,27 +1423,12 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
             && f.params[0].ty == Type::Named("Request".to_string())
             && f.ret == Type::Named("Response".to_string())
     });
-    let has_rpc = program.functions.iter().any(|f| f.is_rpc);
-    if !has_handle && !has_rpc {
+    if !has_handle {
         eprintln!(
-            "error: `velac serve` needs `fn handle(req: Request) -> Response` \
-             or at least one `rpc fn` procedure in {path}"
+            "error: `velac serve` needs `fn handle(req: Request) -> Response` in {path}"
         );
         return ExitCode::FAILURE;
     }
-
-    // Root-scoped mount surface (RFC-0019 security rule): mount ONLY the
-    // procedures visible in the SERVER ROOT module — declared in the root file or
-    // imported BY NAME into it. A transitively-imported third-party module cannot
-    // add endpoints; the root's import list IS the route table. (In-process
-    // `rpc()` from any module still calls any procedure — only the WIRE surface is
-    // root-scoped.)
-    let mounted = std::sync::Arc::new(root_mounted_procs(&source, &program));
-
-    // The `GET /rpc/$schema` registry (RFC-0019): a protocol-neutral list of the
-    // MOUNTED procedures with each one's request/response JSON Schema (or `null`).
-    // Computed once from the type declarations (the `jsonSchema` emitter).
-    let rpc_schema = std::sync::Arc::new(rpc_schema_json(&program, &mounted));
 
     // Bind before running `main`, so a port clash fails fast and cleanly. A
     // `--port 0` lets the OS pick a free port; report the one it chose.
@@ -1502,8 +1443,8 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
     let file_label = path.to_string();
 
     // The interpreter thread owns one live `Interp` (module state persists); it
-    // runs `main` once, then invokes this accept loop with the serve host.
-    let result = vela_frontend::interp::serve(&program, move |host| {
+    // runs `main` once, then invokes this accept loop with a per-request handler.
+    let result = vela_frontend::interp::serve(&program, move |call_handle| {
         use std::io::Write;
         // `main` (if any) has already run; flush its stdout so its startup
         // output precedes the serving banner regardless of buffering mode.
@@ -1511,7 +1452,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
         eprintln!("serving {file_label} on http://localhost:{actual_port}");
         for stream in listener.incoming() {
             match stream {
-                Ok(mut s) => serve_one(&mut s, host, &rpc_schema, &mounted),
+                Ok(mut s) => serve_one(&mut s, call_handle),
                 Err(_) => continue,
             }
         }
@@ -1541,38 +1482,15 @@ enum ParseError {
 /// running — one bad request must not kill it).
 fn serve_one(
     stream: &mut std::net::TcpStream,
-    host: &mut dyn vela_frontend::interp::ServeHost,
-    rpc_schema: &str,
-    mounted: &std::collections::HashSet<String>,
+    call_handle: &mut dyn FnMut(
+        vela_frontend::interp::ServeRequest,
+    ) -> Result<vela_frontend::interp::ServeResponse, String>,
 ) {
     match parse_request(stream) {
         Ok(req) => {
             let method = req.method.clone();
             let path = req.path.clone();
-            // The typed-procedure mounts (RFC-0019) own the `/rpc/` prefix; the
-            // path minus any query string is the route.
-            let route = path.split('?').next().unwrap_or("");
-            if route == "/rpc/$schema" {
-                if method == "GET" {
-                    eprintln!("{method} {path} -> 200");
-                    write_response(stream, 200, "application/json", rpc_schema.as_bytes());
-                } else {
-                    eprintln!("{method} {path} -> 405");
-                    write_response(stream, 405, "text/plain", b"method not allowed");
-                }
-                return;
-            }
-            if let Some(name) = route.strip_prefix("/rpc/") {
-                serve_rpc(stream, host, mounted, &method, &path, name, &req.content_type, &req.body);
-                return;
-            }
-            // Otherwise fall to the RFC-0016 `handle` (if the file defines one).
-            if !host.has_handle() {
-                eprintln!("{method} {path} -> 404");
-                write_response(stream, 404, "text/plain", b"not found");
-                return;
-            }
-            match host.handle(req) {
+            match call_handle(req) {
                 Ok(resp) => {
                     eprintln!("{method} {path} -> {}", resp.status);
                     write_response(stream, resp.status, &resp.content_type, resp.body.as_bytes());
@@ -1592,152 +1510,6 @@ fn serve_one(
         Err(ParseError::Bad) => {
             eprintln!("- - -> 400");
             write_response(stream, 400, "text/plain", b"bad request");
-        }
-    }
-}
-
-/// One `POST /rpc/<name>` request (RFC-0019). The codec seam: a body must be
-/// `application/json` (else 415). Decode → `Invalid` ⇒ 422 with the `Issue`
-/// array; success ⇒ 200 `application/json` (or 204 for a `Unit`-returning
-/// procedure). Unknown procedure ⇒ 404. A procedure trap ⇒ logged 500 (the
-/// server survives — RFC-0016).
-fn serve_rpc(
-    stream: &mut std::net::TcpStream,
-    host: &mut dyn vela_frontend::interp::ServeHost,
-    mounted: &std::collections::HashSet<String>,
-    method: &str,
-    path: &str,
-    name: &str,
-    content_type: &str,
-    body: &str,
-) {
-    use vela_frontend::interp::RpcOutcome;
-    if method != "POST" {
-        eprintln!("{method} {path} -> 405");
-        write_response(stream, 405, "text/plain", b"method not allowed");
-        return;
-    }
-    // Root-scoped mount surface (RFC-0019): a procedure that is not visible in
-    // the server root — e.g. one reachable only through a transitively-imported
-    // module — is NOT an endpoint. It is a 404, indistinguishable from a name
-    // that does not exist, so a dependency cannot probe for hidden procedures.
-    if !mounted.contains(name) {
-        eprintln!("{method} {path} -> 404");
-        write_response(stream, 404, "text/plain", b"not found");
-        return;
-    }
-    if content_type != "application/json" {
-        eprintln!("{method} {path} -> 415");
-        write_response(stream, 415, "text/plain", b"unsupported media type (expected application/json)");
-        return;
-    }
-    match host.rpc(name, body) {
-        Ok(RpcOutcome::Unknown) => {
-            eprintln!("{method} {path} -> 404");
-            write_response(stream, 404, "text/plain", b"not found");
-        }
-        Ok(RpcOutcome::Invalid(issues)) => {
-            eprintln!("{method} {path} -> 422");
-            write_response(stream, 422, "application/json", issues.as_bytes());
-        }
-        Ok(RpcOutcome::Ok { unit: true, .. }) => {
-            eprintln!("{method} {path} -> 204");
-            write_response(stream, 204, "application/json", b"");
-        }
-        Ok(RpcOutcome::Ok { body, unit: false }) => {
-            eprintln!("{method} {path} -> 200");
-            write_response(stream, 200, "application/json", body.as_bytes());
-        }
-        Err(msg) => {
-            eprintln!("error: {msg}");
-            eprintln!("{method} {path} -> 500");
-            write_response(stream, 500, "text/plain", b"internal error");
-        }
-    }
-}
-
-/// The root-scoped RPC mount surface (RFC-0019 security rule): the set of
-/// procedure names `velac serve` exposes over HTTP. A procedure is mounted iff
-/// it is visible in the SERVER ROOT module — declared in the root file, or
-/// imported BY NAME into it. A procedure reachable only through a
-/// transitively-imported module is intentionally NOT mounted (a dependency
-/// cannot add endpoints). The root's own AST (re-parsed from `source`, since the
-/// linker clears the merged `imports`) is the route table; `program` is the
-/// linked whole, used only to confirm an imported name is actually a procedure.
-fn root_mounted_procs(
-    source: &str,
-    program: &vela_frontend::ast::Program,
-) -> std::collections::HashSet<String> {
-    use std::collections::HashSet;
-    let root = vela_frontend::parser::parse_accum(
-        vela_frontend::lexer::lex(source).unwrap_or_default(),
-    )
-    .0;
-    let linked_rpc: HashSet<&str> =
-        program.functions.iter().filter(|f| f.is_rpc).map(|f| f.name.as_str()).collect();
-    let mut mounted: HashSet<String> = HashSet::new();
-    // Procedures declared in the root file.
-    for f in root.functions.iter().filter(|f| f.is_rpc) {
-        mounted.insert(f.name.clone());
-    }
-    // Procedures imported BY NAME into the root (that really are procedures).
-    for imp in &root.imports {
-        for n in &imp.names {
-            if linked_rpc.contains(n.as_str()) {
-                mounted.insert(n.clone());
-            }
-        }
-    }
-    mounted
-}
-
-/// Build the `GET /rpc/$schema` registry body (RFC-0019):
-/// `{"procedures":[{"name","request":<jsonSchema|null>,"response":<jsonSchema|null>}]}`.
-/// Procedures appear in declaration order; the request/response schemas come from
-/// the same emitter as the `jsonSchema` builtin (`null` for a parameterless
-/// request or a `Unit` return).
-fn rpc_schema_json(
-    program: &vela_frontend::ast::Program,
-    mounted: &std::collections::HashSet<String>,
-) -> String {
-    use vela_frontend::ast::Type;
-    let types: std::collections::HashMap<String, vela_frontend::ast::TypeDecl> =
-        program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
-    let mut procs = Vec::new();
-    // Only the MOUNTED (root-visible) procedures are listed — the registry
-    // reflects exactly the wire surface, never a dependency's internal procedures.
-    for f in program.functions.iter().filter(|f| f.is_rpc && mounted.contains(&f.name)) {
-        let request = match f.params.first() {
-            Some(p) => vela_frontend::types::rpc_payload_schema(&p.ty, &types)
-                .unwrap_or_else(|| "null".to_string()),
-            None => "null".to_string(),
-        };
-        let response = if matches!(f.ret, Type::Unit) {
-            "null".to_string()
-        } else {
-            vela_frontend::types::rpc_payload_schema(&f.ret, &types)
-                .unwrap_or_else(|| "null".to_string())
-        };
-        let mut name = String::new();
-        json_escape_into(&f.name, &mut name);
-        procs.push(format!(
-            "{{\"name\":\"{name}\",\"request\":{request},\"response\":{response}}}"
-        ));
-    }
-    format!("{{\"procedures\":[{}]}}", procs.join(","))
-}
-
-/// Minimal JSON string escaping for the schema registry's procedure names.
-fn json_escape_into(s: &str, out: &mut String) {
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
         }
     }
 }
@@ -1789,7 +1561,6 @@ fn parse_request(
     // Headers: `name: value`, name compared case-insensitively.
     let mut content_length: usize = 0;
     let mut chunked = false;
-    let mut content_type = String::new();
     for line in lines {
         if line.is_empty() {
             continue;
@@ -1801,15 +1572,6 @@ fn parse_request(
             content_length = value.parse::<usize>().map_err(|_| ParseError::Bad)?;
         } else if lname == "transfer-encoding" && value.to_ascii_lowercase().contains("chunked") {
             chunked = true;
-        } else if lname == "content-type" {
-            // Lowercase, and drop any `; charset=..` parameter — the codec seam
-            // (RFC-0019) negotiates on the media type alone.
-            content_type = value
-                .split(';')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_ascii_lowercase();
         }
     }
     if chunked {
@@ -1834,7 +1596,7 @@ fn parse_request(
     // decoding would silently corrupt it).
     let body = String::from_utf8(body).map_err(|_| ParseError::Bad)?;
 
-    Ok(vela_frontend::interp::ServeRequest { method, path: target, body, content_type })
+    Ok(vela_frontend::interp::ServeRequest { method, path: target, body })
 }
 
 /// A minimal status-code → reason-phrase table. Unknown codes get an empty
@@ -1858,7 +1620,6 @@ fn reason_phrase(status: i64) -> &'static str {
         405 => "Method Not Allowed",
         409 => "Conflict",
         410 => "Gone",
-        415 => "Unsupported Media Type",
         418 => "I'm a teapot",
         422 => "Unprocessable Entity",
         429 => "Too Many Requests",
@@ -1885,16 +1646,10 @@ fn write_response(stream: &mut std::net::TcpStream, status: i64, content_type: &
     let _ = stream.flush();
 }
 
-fn build(rest: &[String]) -> ExitCode {
-    // parse optional `-o <out>` / `--target wasm` / `--server` / `--client`, plus
-    // an optional positional file. `--server`/`--client` (RFC-0019) select a
-    // compile ROLE and, without an explicit file, the manifest's fullstack root.
-    use vela_frontend::ast::CompileRole;
+fn build(path: &str, rest: &[String]) -> ExitCode {
+    // parse optional `-o <out>` / `--target wasm`
     let mut out: Option<String> = None;
     let mut wasm = false;
-    let mut server_flag = false;
-    let mut client_flag = false;
-    let mut file: Option<String> = None;
     let mut i = 0;
     while i < rest.len() {
         if rest[i] == "-o" && i + 1 < rest.len() {
@@ -1909,59 +1664,11 @@ fn build(rest: &[String]) -> ExitCode {
                 }
             }
             i += 2;
-        } else if rest[i] == "--server" {
-            server_flag = true;
-            i += 1;
-        } else if rest[i] == "--client" {
-            client_flag = true;
-            i += 1;
-        } else if !rest[i].starts_with('-') && file.is_none() {
-            file = Some(rest[i].clone());
-            i += 1;
         } else {
             eprintln!("build: unexpected argument `{}`", rest[i]);
             return ExitCode::from(2);
         }
     }
-    if server_flag && client_flag {
-        eprintln!("build: `--server` and `--client` are mutually exclusive");
-        return ExitCode::from(2);
-    }
-    // The client role is a browser build: it implies `--target wasm`.
-    let role = if client_flag { CompileRole::Client } else { CompileRole::Server };
-    if client_flag {
-        wasm = true;
-    }
-
-    // Resolve the root: an explicit file wins; otherwise `--client`/`--server`
-    // take the manifest's `client`/`server` key, and a plain `build` its `main`.
-    let path = match file {
-        Some(f) => f,
-        None => {
-            let picked = if client_flag {
-                manifest_role_root("client")
-            } else if server_flag {
-                manifest_role_root("server")
-            } else {
-                manifest_main()
-            };
-            match picked {
-                Some(p) => p,
-                None => {
-                    let what = if client_flag {
-                        "a `client` root"
-                    } else if server_flag {
-                        "a `server` root"
-                    } else {
-                        "a `main`"
-                    };
-                    eprintln!("error: no input file, and no vela.json with {what} found");
-                    return ExitCode::from(2);
-                }
-            }
-        }
-    };
-    let path = path.as_str();
 
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -1971,11 +1678,11 @@ fn build(rest: &[String]) -> ExitCode {
         }
     };
 
-    let program = match load_program_role(path, &source, role) {
+    let program = match load_program(path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let ir = match vela_codegen::emit_with_role(&program, role) {
+    let ir = match vela_codegen::emit(&program) {
         Ok(ir) => ir,
         Err(e) => {
             eprintln!("error: {e}");

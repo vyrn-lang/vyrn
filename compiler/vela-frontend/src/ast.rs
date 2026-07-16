@@ -230,30 +230,6 @@ pub struct Function {
     /// `is_export_extern` are mutually exclusive (import vs. exported impl); the
     /// checker additionally enforces the extern ABI type domain on its signature.
     pub is_export_extern: bool,
-    /// `rpc fn ..` — a typed procedure (RFC-0019). A contextual modifier (the
-    /// `extern` precedent), recognized only when `fn` follows. Otherwise an
-    /// ORDINARY function in every respect — it has a required body that is fully
-    /// checked, runs under the interpreter, is callable/testable, and is a plain
-    /// `define` in server-role codegen. The flag marks it as a wire-callable
-    /// procedure: the checker enforces the 0-or-1-parameter arity and codability
-    /// (RFC-0018) of its parameter and return types, the `rpc()` builtin verifies
-    /// its first argument names one of these, and `velac serve` mounts each as
-    /// `POST /rpc/<name>`. In CLIENT role (`velac build --client`) the body is
-    /// type-checked but NOT lowered and a *direct* call is a checker error.
-    pub is_rpc: bool,
-}
-
-/// Which side of a fullstack build is being compiled (RFC-0019). Server role —
-/// the default everywhere except `velac build --client` — lowers `rpc fn` bodies
-/// fully and dispatches `rpc()` in-process (encode → call → encode → `onRpc`).
-/// Client role type-checks the bodies for identical diagnostics but does not
-/// lower them, rejects a *direct* call to a procedure, and lowers `rpc()` to a
-/// wasm host import the browser runtime (`vela-rpc.js`) satisfies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CompileRole {
-    #[default]
-    Server,
-    Client,
 }
 
 /// A capability declares what a function does with a parameter (RFC-0004):

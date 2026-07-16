@@ -256,44 +256,6 @@ pub fn json_schema_string(decl: &TypeDecl, types: &HashMap<String, TypeDecl>) ->
     }
 }
 
-/// The JSON Schema **document** for an arbitrary type used as an RPC request or
-/// response payload (RFC-0019 `/rpc/$schema`). Returns `None` for a `Unit`
-/// payload (a parameterless request, or a `Unit`-returning procedure) — the
-/// registry emits `null` there. A named declared type reuses
-/// [`json_schema_string`] (so it round-trips through the RFC-0010 importer); a
-/// structural or scalar payload gets a self-contained document with the same
-/// dialect and `$defs` handling.
-pub fn rpc_payload_schema(ty: &Type, types: &HashMap<String, TypeDecl>) -> Option<String> {
-    if matches!(resolve(ty, types), Type::Unit) {
-        return None;
-    }
-    if let Type::Named(n) = ty {
-        if let Some(d) = types.get(n) {
-            return Some(json_schema_string(d, types));
-        }
-    }
-    let dialect = "\"$schema\":\"https://json-schema.org/draft/2020-12/schema\"";
-    // A sentinel root name no user type can spell, so a self-reference (if any)
-    // still renders as a `$ref` into `$defs` rather than the root back-edge.
-    let mut cx = SchemaCx { types, root: "\u{0}", defs: Vec::new() };
-    let inner = type_schema(ty, &mut cx);
-    let body = if cx.defs.is_empty() {
-        inner
-    } else {
-        let defs: Vec<String> = cx
-            .defs
-            .iter()
-            .map(|(n, s)| format!("\"{}\":{}", json_escape(n), s.as_deref().unwrap_or("{}")))
-            .collect();
-        format!("{},\"$defs\":{{{}}}}}", &inner[..inner.len() - 1], defs.join(","))
-    };
-    Some(if body == "{}" {
-        format!("{{{dialect}}}")
-    } else {
-        format!("{{{dialect},{}", &body[1..])
-    })
-}
-
 /// Shared state of one `json_schema_string` rendering.
 struct SchemaCx<'a> {
     types: &'a HashMap<String, TypeDecl>,

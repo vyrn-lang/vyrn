@@ -833,19 +833,6 @@ mod tests {
     }
 
     #[test]
-    fn rpc_procedure_is_importable_and_dispatches_in_process_across_modules() {
-        // A `rpc fn` is implicitly exported (RFC-0019), so another module can
-        // import it by name and dispatch it in-process with `rpc()` — the id
-        // (deterministic, from 1) is `main`'s return value.
-        let lib = "export type Req = { id: Int64 } \
-                   rpc fn getUser(req: Req) -> Req { return req }";
-        let root = "import { getUser, Req } from \"./lib\" \
-                    export extern fn onRpc(id: Int64, status: Int64, body: String) { print(\"cb\") } \
-                    fn main() -> Int64 { return rpc(getUser, Req { id: 9 }) }";
-        assert_eq!(run_multi(root, &[("lib.vela", lib)]).unwrap(), 1);
-    }
-
-    #[test]
     fn validated_type_auto_validates_across_modules() {
         let lib = "export type Age = Int64 where value >= 18";
         let root = "import { Age } from \"./lib\" \

@@ -367,16 +367,7 @@ impl Parser {
                 // contextual starter, recognized only when `fn` follows it.
                 let is_export_extern = matches!(self.peek(), Tok::Ident(n) if n == "extern")
                     && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
-                // `export rpc fn ..` (RFC-0019) is REDUNDANT — a procedure is
-                // always exported — but we route it through (recognizing `rpc`
-                // before `fn`) so the `rpc fn` arm can emit the precise "redundant
-                // `export`" diagnostic rather than this generic one.
-                let is_export_rpc = matches!(self.peek(), Tok::Ident(n) if n == "rpc")
-                    && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
-                if !matches!(self.peek(), Tok::Fn | Tok::Type | Tok::Protocol)
-                    && !is_export_extern
-                    && !is_export_rpc
-                {
+                if !matches!(self.peek(), Tok::Fn | Tok::Type | Tok::Protocol) && !is_export_extern {
                     errors.push(Diagnostic::error(
                         self.line(), self.col(), "parse",
                         "`export` must be followed by `fn`, `type`, `protocol`, or `extern fn`"
@@ -434,36 +425,6 @@ impl Parser {
                     // to JS (M2). The `exported` flag decides which shape is legal.
                     match self.extern_function(exported) {
                         Ok(mut f) => { f.doc = doc; functions.push(f); }
-                        Err(d) => { errors.push(d); self.sync_to_decl(); }
-                    }
-                }
-                // `rpc fn ..` — a typed procedure (RFC-0019). `rpc` is a
-                // contextual starter (a plain identifier elsewhere); recognize it
-                // only when `fn` follows. Body required — it parses exactly like an
-                // ordinary function, then carries `is_rpc` so the checker/backends
-                // treat it as wire-callable. A procedure IMPLIES `export` (a client
-                // must import its name for the typed `rpc()` call), so it is always
-                // module-importable and `export rpc fn` is redundant — a one-way-to-
-                // spell-it error (the fmt/canonical-style ethos).
-                Tok::Ident(name)
-                    if name == "rpc"
-                        && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
-                {
-                    if exported {
-                        errors.push(Diagnostic::error(
-                            self.line(), self.col(), "parse",
-                            "redundant `export`: `rpc fn` procedures are always exported"
-                                .to_string(),
-                        ));
-                    }
-                    self.advance(); // `rpc` (a contextual Ident)
-                    match self.function() {
-                        Ok(mut f) => {
-                            f.doc = doc;
-                            f.exported = true; // a procedure is inherently public
-                            f.is_rpc = true;
-                            functions.push(f);
-                        }
                         Err(d) => { errors.push(d); self.sync_to_decl(); }
                     }
                 }
@@ -548,14 +509,6 @@ impl Parser {
                 Tok::Ident(name)
                     if depth == 0
                         && name == "extern"
-                        && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
-                {
-                    return
-                }
-                // `rpc fn ..` is a top-level starter (RFC-0019) — resume there.
-                Tok::Ident(name)
-                    if depth == 0
-                        && name == "rpc"
                         && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
                 {
                     return
@@ -676,7 +629,6 @@ impl Parser {
             line,
             is_extern: false,
             is_export_extern: false,
-            is_rpc: false,
         })
     }
 
@@ -1072,7 +1024,7 @@ impl Parser {
 
         let body = self.block()?;
         self.type_params.clear();
-        Ok(Function { name, exported: false, module: None, doc: None, type_params, type_bounds, params, ret, body, line, is_extern: false, is_export_extern: false, is_rpc: false })
+        Ok(Function { name, exported: false, module: None, doc: None, type_params, type_bounds, params, ret, body, line, is_extern: false, is_export_extern: false })
     }
 
     /// `test "name" { body }` — a test declaration (RFC-0015). `test` is a
@@ -1172,7 +1124,6 @@ impl Parser {
                 line,
                 is_extern: false,
                 is_export_extern: true,
-                is_rpc: false,
             });
         }
         if has_body {
@@ -1197,7 +1148,6 @@ impl Parser {
             line,
             is_extern: true,
             is_export_extern: false,
-            is_rpc: false,
         })
     }
 
@@ -2195,51 +2145,6 @@ mod tests {
         assert!(matches!(f.body.stmts[0], Stmt::Let { .. }));
         assert!(matches!(f.body.stmts[2], Stmt::Assign { .. }));
         assert!(matches!(f.body.stmts[3], Stmt::Return { value: Some(_), .. }));
-    }
-
-    #[test]
-    fn rpc_fn_implies_export() {
-        // `rpc fn` sets `is_rpc` and is ALWAYS exported (a procedure is public —
-        // the client imports its name). Zero- and one-parameter forms both parse.
-        let src = "type Req = { id: Int64 } \
-                   rpc fn one(req: Req) -> Req { return req } \
-                   rpc fn zero() -> Int64 { return 0 }";
-        let p = parse_src(src);
-        let one = p.functions.iter().find(|f| f.name == "one").expect("one");
-        assert!(one.is_rpc && one.exported && one.params.len() == 1);
-        let zero = p.functions.iter().find(|f| f.name == "zero").expect("zero");
-        assert!(zero.is_rpc && zero.exported && zero.params.is_empty());
-    }
-
-    #[test]
-    fn redundant_export_on_rpc_fn_errors() {
-        let toks = lex("rpc fn p() -> Int64 { return 0 }").unwrap();
-        assert!(parse_accum(toks).1.is_empty(), "plain rpc fn is fine");
-        let toks = lex("export rpc fn p() -> Int64 { return 0 }").unwrap();
-        let errs = parse_accum(toks).1;
-        assert!(
-            errs.iter().any(|d| d.message.contains("redundant `export`")),
-            "export rpc fn must error: {errs:?}"
-        );
-    }
-
-    #[test]
-    fn rpc_fn_body_is_required() {
-        // A body-less `rpc fn` is a parse error (unlike `extern fn`, which is a
-        // body-less import) — `rpc fn` parses through the ordinary `function()`.
-        let toks = lex("rpc fn p(x: Int64) -> Int64").unwrap();
-        let (_, errs) = parse_accum(toks);
-        assert!(!errs.is_empty(), "body-less rpc fn must error");
-    }
-
-    #[test]
-    fn rpc_is_still_usable_as_an_identifier() {
-        // `rpc` is only a modifier immediately before `fn`; elsewhere it is a
-        // plain identifier (a variable name here).
-        let src = "fn main() -> Int64 { let rpc = 5 return rpc }";
-        let p = parse_src(src);
-        let f = &p.functions[0];
-        assert!(matches!(f.body.stmts[0], Stmt::Let { .. }));
     }
 
     #[test]

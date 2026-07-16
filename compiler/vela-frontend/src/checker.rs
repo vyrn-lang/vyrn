@@ -29,18 +29,6 @@ use crate::diagnostics::Diagnostic;
 pub fn check_accum_with_let_types(
     program: &Program,
 ) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
-    check_accum_with_let_types_role(program, CompileRole::Server)
-}
-
-/// Like [`check_accum_with_let_types`] but for an explicit compile role
-/// (RFC-0019). Server role (the default) lowers `rpc fn` bodies and dispatches
-/// `rpc()` in-process; CLIENT role additionally rejects a *direct* call to a
-/// procedure ("call it through `rpc()`") — the bodies still type-check so the
-/// shared contract module cannot rot silently.
-pub fn check_accum_with_let_types_role(
-    program: &Program,
-    role: CompileRole,
-) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
     let mut out = Vec::new();
 
     // 1. Collect and validate type declarations.
@@ -74,7 +62,7 @@ pub fn check_accum_with_let_types_role(
         "hexEncode", "hexDecode", "base64Encode", "base64Decode", "urlEncode", "urlDecode",
         "args", "readLine", "readFile", "writeFile", "readFileBytes", "stringFromBytes",
         "trace", "debug", "info", "warn", "error", "value", "list", "schemaOf", "jsonSchema",
-        "toJson", "fromJson", "rpc",
+        "toJson", "fromJson",
         "toString", "pop", "swapRemove", "assert", "assertEq",
         "Int", "Int64", "Int32", "Int16", "Int8", "Float", "Float64", "Float32",
         "UInt8", "UInt16", "UInt32", "UInt64",
@@ -269,10 +257,6 @@ pub fn check_accum_with_let_types_role(
         }
     }
 
-    // Procedure registry (RFC-0019): every `rpc fn`'s name.
-    let rpc_procs: HashSet<String> =
-        program.functions.iter().filter(|f| f.is_rpc).map(|f| f.name.clone()).collect();
-
     let checker = Checker {
         sigs: &sigs,
         caps: &caps,
@@ -289,8 +273,6 @@ pub fn check_accum_with_let_types_role(
         errors: RefCell::new(Vec::new()),
         globals: RefCell::new(HashMap::new()),
         in_test: RefCell::new(false),
-        rpc_procs: &rpc_procs,
-        role,
     };
 
     // 2b. Module state (RFC-0013): check each initializer in declaration order,
@@ -339,81 +321,6 @@ pub fn check_accum_with_let_types_role(
             "check",
         )),
         _ => {}
-    }
-
-    // 4b. Procedures (RFC-0019). A `rpc fn` is wire-callable: at most one
-    //     parameter, and its parameter/return types must be codable (RFC-0018)
-    //     so they can cross the transport. The return may be `Unit`. We require
-    //     `decodable` (the stricter of the two codability domains — it forbids a
-    //     fixed `Array<T, N>` whose length is unknown until the data arrives), so
-    //     the type round-trips in BOTH directions of the call.
-    for f in program.functions.iter().filter(|f| f.is_rpc) {
-        if f.params.len() > 1 {
-            let mut d = Diagnostic::from_rendered(
-                format!(
-                    "line {}: rpc fn `{}` takes 0 or 1 parameter, got {}",
-                    f.line, f.name, f.params.len()
-                ),
-                "check",
-            );
-            d.file = f.module.clone();
-            out.push(d);
-        }
-        if let Some(p) = f.params.first() {
-            if let Err(off) = crate::codec::decodable(&p.ty, &types) {
-                let mut d = Diagnostic::from_rendered(
-                    format!(
-                        "line {}: rpc fn `{}` parameter `{}` has type `{off}`, which cannot cross \
-                         the wire (not a codable type, RFC-0018)",
-                        f.line, f.name, p.name
-                    ),
-                    "check",
-                );
-                d.file = f.module.clone();
-                out.push(d);
-            }
-        }
-        if !matches!(f.ret, Type::Unit) {
-            if let Err(off) = crate::codec::decodable(&f.ret, &types) {
-                let mut d = Diagnostic::from_rendered(
-                    format!(
-                        "line {}: rpc fn `{}` returns `{off}`, which cannot cross the wire \
-                         (not a codable type, RFC-0018)",
-                        f.line, f.name
-                    ),
-                    "check",
-                );
-                d.file = f.module.clone();
-                out.push(d);
-            }
-        }
-    }
-
-    // 4c. The `onRpc` convention (RFC-0019). If the program CALLS `rpc()`, the
-    //     response is delivered to a handler named `onRpc`; without it the call's
-    //     result is silently dropped. The convention is load-bearing, so catch a
-    //     missing handler at compile time. Required shape (mirrors the RFC):
-    //     `export extern fn onRpc(id: Int64, status: Int64, body: String)`.
-    let uses_rpc = program.functions.iter().any(|f| fn_calls(&f.body).contains("rpc"))
-        || program.tests.iter().any(|t| fn_calls(&t.body).contains("rpc"));
-    if uses_rpc {
-        let has_on_rpc = program.functions.iter().any(|f| {
-            f.name == "onRpc"
-                && f.is_export_extern
-                && f.params.len() == 3
-                && f.params[0].ty == Type::Int
-                && f.params[1].ty == Type::Int
-                && f.params[2].ty == Type::Str
-                && matches!(f.ret, Type::Unit)
-        });
-        if !has_on_rpc {
-            out.push(Diagnostic::from_rendered(
-                "a program that calls `rpc()` must define \
-                 `export extern fn onRpc(id: Int64, status: Int64, body: String)` (RFC-0019)"
-                    .to_string(),
-                "check",
-            ));
-        }
     }
 
     // 5. Check functions. Each function is checked independently: a bad parameter
@@ -510,7 +417,6 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             line: t.line,
             is_extern: false,
             is_export_extern: false,
-            is_rpc: false,
         };
         if let Err(s) = checker.function(&synthetic) {
             let mut d = Diagnostic::from_rendered(s, "check");
@@ -533,13 +439,6 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
 /// bounded accumulation behavior and the retained `let`/`for`-var types.
 pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
     check_accum_with_let_types(program).0
-}
-
-/// Type-check for an explicit compile role (RFC-0019). `check_accum` is this
-/// with [`CompileRole::Server`]; `velac build --client` uses [`CompileRole::Client`]
-/// so a direct call to a procedure surfaces as a diagnostic.
-pub fn check_accum_with_role(program: &Program, role: CompileRole) -> Vec<Diagnostic> {
-    check_accum_with_let_types_role(program, role).0
 }
 
 /// Type-check the program, returning the first problem found (rendered as the
@@ -600,13 +499,6 @@ struct Checker<'a> {
     /// only when this is set; in ordinary code they are a checker error pointing
     /// at validated types / `Result`.
     in_test: RefCell<bool>,
-    /// Names of the program's `rpc fn` procedures (RFC-0019). Used by the `rpc()`
-    /// builtin (its first argument must name one) and by the client-role
-    /// direct-call rejection.
-    rpc_procs: &'a HashSet<String>,
-    /// Which side of the fullstack build this is (RFC-0019). In `Client` role a
-    /// *direct* call to a procedure is an error — it must go through `rpc()`.
-    role: CompileRole,
 }
 
 /// What an enum variant name resolves to.
@@ -2872,59 +2764,6 @@ impl<'a> Checker<'a> {
             }
             return Ok(Type::App("Validation".to_string(), vec![target]));
         }
-        // built-in: rpc(procedure [, req]) -> Int64 (RFC-0019) — a typed remote
-        // call. The procedure is named as an *identifier* (the `schemaOf`/`fromJson`
-        // precedent: an identifier-first-arg builtin, no function values needed);
-        // the checker verifies it names an `rpc fn` and that `req` matches its
-        // parameter. Returns a request id. Behaviour differs by transport (in-
-        // process on the server, a host import in the browser), but the type is
-        // the same everywhere.
-        if name == "rpc" {
-            if args.is_empty() || args.len() > 2 {
-                return Err(format!(
-                    "line {line}: `rpc` takes a procedure and an optional request, got {} argument(s)",
-                    args.len()
-                ));
-            }
-            let proc = match &args[0] {
-                Expr::Var { name: p, .. } if self.rpc_procs.contains(p) => p.clone(),
-                Expr::Var { name: p, .. } if self.sigs.contains_key(p) => {
-                    return Err(format!(
-                        "line {line}: `{p}` is not an `rpc fn` — `rpc()` only calls procedures"
-                    ))
-                }
-                Expr::Var { name: p, .. } => {
-                    return Err(format!("line {line}: `rpc`'s first argument must name an `rpc fn`, found `{p}`"))
-                }
-                _ => return Err(format!("line {line}: `rpc`'s first argument must name an `rpc fn`")),
-            };
-            // The procedure's declared parameter (if any) is what `req` must match.
-            let (params, _) = self.sigs.get(&proc).expect("rpc proc has a signature");
-            let param_ty = params.first().cloned();
-            match (param_ty, args.get(1)) {
-                (None, None) => {}
-                (None, Some(_)) => {
-                    return Err(format!(
-                        "line {line}: rpc fn `{proc}` takes no request, but one was supplied"
-                    ))
-                }
-                (Some(_), None) => {
-                    return Err(format!(
-                        "line {line}: rpc fn `{proc}` takes a request, but none was supplied"
-                    ))
-                }
-                (Some(pty), Some(arg)) => {
-                    let aty = self.expr(arg, scope, Some(&pty), fn_ret)?;
-                    if !self.coercible(&aty, &pty) {
-                        return Err(format!(
-                            "line {line}: rpc fn `{proc}` expects a request of type {pty}, found {aty}"
-                        ));
-                    }
-                    self.prove_coercion(arg, &pty, line)?;
-                }
-            }
-            return Ok(Type::Int);
-        }
         // built-in: value(x) -> Value — box a scalar into the interpolation value
         // type (RFC-0007). What a tagged template's holes desugar to.
         if name == "value" {
@@ -3117,15 +2956,6 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // Client role (RFC-0019): a `rpc fn` has no body on the client — its
-        // signature is a remote stub. A *direct* call is therefore an error; the
-        // call must go through `rpc()` (which lowers to a host import).
-        if self.role == CompileRole::Client && self.rpc_procs.contains(name) {
-            return Err(format!(
-                "line {line}: call `{name}` through `rpc()` on the client (a direct call to \
-                 a procedure has no body in the client build)"
-            ));
-        }
         let (params, ret) = self
             .sigs
             .get(name)
@@ -3846,86 +3676,6 @@ mod tests {
 
     fn check_src(s: &str) -> Result<(), String> {
         check(&parse(lex(s).unwrap()).unwrap())
-    }
-
-    fn check_src_role(s: &str, role: CompileRole) -> Result<(), String> {
-        let program = parse(lex(s).unwrap()).unwrap();
-        match check_accum_with_role(&program, role).into_iter().next() {
-            Some(d) => Err(d.render()),
-            None => Ok(()),
-        }
-    }
-
-    // ---- typed procedures (RFC-0019) ------------------------------------
-
-    const ON_RPC: &str =
-        "export extern fn onRpc(id: Int64, status: Int64, body: String) { print(\"cb\") }";
-
-    #[test]
-    fn accepts_rpc_fn_and_rpc_call() {
-        let src = format!(
-            "type Req = {{ id: Int64 }} \
-             rpc fn getUser(req: Req) -> Req {{ return req }} \
-             {ON_RPC} \
-             fn main() -> Int64 {{ let x = rpc(getUser, Req {{ id: 1 }}) return 0 }}"
-        );
-        assert!(check_src(&src).is_ok(), "{:?}", check_src(&src));
-    }
-
-    #[test]
-    fn rejects_noncodable_rpc_parameter() {
-        let src = "type Shape = | Circle(Int64) | Square \
-                   rpc fn bad(s: Shape) -> Int64 { return 0 } \
-                   fn main() -> Int64 { return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("cannot cross the wire"), "{e}");
-    }
-
-    #[test]
-    fn rejects_rpc_call_arg_mismatch() {
-        let src = format!(
-            "type Req = {{ id: Int64 }} \
-             rpc fn p(req: Req) -> Req {{ return req }} \
-             {ON_RPC} \
-             fn main() -> Int64 {{ let x = rpc(p, 42) return 0 }}"
-        );
-        let e = check_src(&src).unwrap_err();
-        assert!(e.contains("expects a request of type Req"), "{e}");
-    }
-
-    #[test]
-    fn rejects_rpc_on_non_procedure() {
-        let src = format!(
-            "fn helper(x: Int64) -> Int64 {{ return x }} \
-             {ON_RPC} \
-             fn main() -> Int64 {{ let x = rpc(helper, 5) return 0 }}"
-        );
-        let e = check_src(&src).unwrap_err();
-        assert!(e.contains("is not an `rpc fn`"), "{e}");
-    }
-
-    #[test]
-    fn rejects_missing_on_rpc_handler() {
-        let src = "type Req = { id: Int64 } \
-                   rpc fn p(req: Req) -> Req { return req } \
-                   fn main() -> Int64 { let x = rpc(p, Req { id: 1 }) return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("must define") && e.contains("onRpc"), "{e}");
-    }
-
-    #[test]
-    fn client_role_rejects_direct_procedure_call() {
-        let src = format!(
-            "type Req = {{ id: Int64 }} \
-             rpc fn p(req: Req) -> Req {{ return req }} \
-             {ON_RPC} \
-             export extern fn go(id: Int64) -> Int64 {{ let r = p(Req {{ id: id }}) return r.id }}"
-        );
-        // Server role: the direct call is fine (the body exists).
-        assert!(check_src_role(&src, CompileRole::Server).is_ok());
-        // Client role: it must be routed through `rpc()`.
-        let e = check_src_role(&src, CompileRole::Client).unwrap_err();
-        assert!(e.contains("through `rpc()` on the client"), "{e}");
     }
 
     #[test]

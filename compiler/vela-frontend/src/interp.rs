@@ -480,39 +480,6 @@ pub struct ServeRequest {
     pub method: String,
     pub path: String,
     pub body: String,
-    /// The request's `Content-Type` header (lowercased, parameters stripped),
-    /// or `""` when absent. Not part of the Vela `Request` record — the HTTP
-    /// host uses it to negotiate the codec on `/rpc/*` (RFC-0019: 415 unless
-    /// `application/json`).
-    pub content_type: String,
-}
-
-/// The result of dispatching one typed procedure over the HTTP transport
-/// (RFC-0019). A trap in the procedure is reported through the `Result::Err`
-/// channel instead (the host answers 500 and keeps running).
-pub enum RpcOutcome {
-    /// No `rpc fn` by that wire name → 404.
-    Unknown,
-    /// The request body failed to decode → 422; the payload is the
-    /// `{"issues":[...]}` document (the `Issue` array, encoded).
-    Invalid(String),
-    /// Success. `body` is the JSON-encoded response; `unit` ⇒ the procedure
-    /// returns `Unit` (204, no body).
-    Ok { body: String, unit: bool },
-}
-
-/// What the HTTP host ([`crate::interp::serve`]'s `run_loop`) drives: the file's
-/// `handle` (RFC-0016) plus the typed-procedure mounts (RFC-0019). One live
-/// interpreter backs all of it, so module state persists across requests.
-pub trait ServeHost {
-    /// Call the served `handle(req: Request) -> Response` (RFC-0016).
-    fn handle(&mut self, req: ServeRequest) -> Result<ServeResponse, String>;
-    /// Whether the file defines a served `handle`.
-    fn has_handle(&self) -> bool;
-    /// Dispatch a typed procedure by wire name over a JSON request body: decode
-    /// into the procedure's parameter, call it, encode the response. `Err` means
-    /// the procedure trapped.
-    fn rpc(&mut self, name: &str, body: &str) -> Result<RpcOutcome, String>;
 }
 
 /// The fields a served `handle` returned — the interpreter reads them back out
@@ -539,7 +506,8 @@ pub struct ServeResponse {
 /// thread like `run`/`run_tests`, so deep `handle` recursion cannot overflow.
 pub fn serve<F>(program: &Program, run_loop: F) -> Result<(), String>
 where
-    F: FnOnce(&mut dyn ServeHost) -> Result<(), String> + Send,
+    F: FnOnce(&mut dyn FnMut(ServeRequest) -> Result<ServeResponse, String>) -> Result<(), String>
+        + Send,
 {
     std::thread::scope(|s| {
         std::thread::Builder::new()
@@ -551,26 +519,32 @@ where
     })
 }
 
-/// The live-interpreter HTTP host (RFC-0016 + RFC-0019). One [`Interp`] backs
-/// every request, so module state persists; a per-request trap unwinds only the
-/// local scope, leaving the global frame intact for the next request.
-struct ServeHostImpl<'a> {
-    interp: Interp<'a>,
-    has_handle: bool,
-}
-
-impl ServeHost for ServeHostImpl<'_> {
-    fn has_handle(&self) -> bool {
-        self.has_handle
+fn serve_inner<F>(program: &Program, run_loop: F) -> Result<(), String>
+where
+    F: FnOnce(&mut dyn FnMut(ServeRequest) -> Result<ServeResponse, String>) -> Result<(), String>,
+{
+    let interp = new_interp(program, &[])?;
+    if let Err(Ctrl::Err(s)) = interp.init_globals(program) {
+        return Err(s);
     }
-
-    fn handle(&mut self, req: ServeRequest) -> Result<ServeResponse, String> {
+    // `main` is optional in a served file (RFC-0016). When present it runs once,
+    // before the first request (mirroring `_start`); a nonzero return aborts.
+    if interp.funcs.contains_key("main") {
+        match interp.call("main", &[]) {
+            Ok(Val::Int(0)) => {}
+            Ok(Val::Int(n)) => return Err(format!("main returned {n}, aborting serve")),
+            Ok(other) => return Err(format!("main returned {other:?}, expected Int64")),
+            Err(Ctrl::Err(s)) => return Err(s),
+            Err(Ctrl::Return(_)) => return Err("internal: `?` propagated past main".into()),
+        }
+    }
+    let mut handler = |req: ServeRequest| -> Result<ServeResponse, String> {
         let request = Val::Record(HashMap::from([
             ("method".to_string(), Val::Str(req.method)),
             ("path".to_string(), Val::Str(req.path)),
             ("body".to_string(), Val::Str(req.body)),
         ]));
-        match self.interp.call("handle", &[request]) {
+        match interp.call("handle", &[request]) {
             Ok(Val::Record(map)) => {
                 let status = match map.get("status") {
                     Some(Val::Int(n)) => *n,
@@ -595,69 +569,8 @@ impl ServeHost for ServeHostImpl<'_> {
             Err(Ctrl::Err(s)) => Err(s),
             Err(Ctrl::Return(_)) => Err("internal: `?` propagated past handle".into()),
         }
-    }
-
-    fn rpc(&mut self, name: &str, body: &str) -> Result<RpcOutcome, String> {
-        let f = match self.interp.funcs.get(name) {
-            Some(f) if f.is_rpc => *f,
-            _ => return Ok(RpcOutcome::Unknown),
-        };
-        // Decode the request into the procedure's parameter (if any), then call
-        // it. A decode failure accumulates `Issue`s → 422; a valid request runs
-        // the procedure (a trap propagates as `Err` → 500). The response is
-        // encoded with the same codec as `toJson`.
-        let call_args: Vec<Val> = match f.params.first() {
-            Some(p) => match self.interp.decode_top_ty(&p.ty, body) {
-                Val::Enum(tag, mut payload) if tag == "Valid" => vec![payload.remove(0)],
-                Val::Enum(tag, payload) if tag == "Invalid" => {
-                    let issues = payload.into_iter().next().unwrap_or(Val::Array(Vec::new()));
-                    return Ok(RpcOutcome::Invalid(self.interp.encode_issues(&issues)));
-                }
-                _ => return Err("internal: decode did not yield a Validation".into()),
-            },
-            None => Vec::new(),
-        };
-        match self.interp.call(name, &call_args) {
-            Ok(result) => {
-                if matches!(f.ret, Type::Unit) {
-                    Ok(RpcOutcome::Ok { body: String::new(), unit: true })
-                } else {
-                    let mut out = String::new();
-                    match self.interp.encode_val(&result, &f.ret, &mut out) {
-                        Ok(()) => Ok(RpcOutcome::Ok { body: out, unit: false }),
-                        Err(Ctrl::Err(s)) => Err(s),
-                        Err(Ctrl::Return(_)) => Err("internal: `?` past encode".into()),
-                    }
-                }
-            }
-            Err(Ctrl::Err(s)) => Err(s),
-            Err(Ctrl::Return(_)) => Err("internal: `?` propagated past procedure".into()),
-        }
-    }
-}
-
-fn serve_inner<F>(program: &Program, run_loop: F) -> Result<(), String>
-where
-    F: FnOnce(&mut dyn ServeHost) -> Result<(), String>,
-{
-    let interp = new_interp(program, &[])?;
-    if let Err(Ctrl::Err(s)) = interp.init_globals(program) {
-        return Err(s);
-    }
-    // `main` is optional in a served file (RFC-0016). When present it runs once,
-    // before the first request (mirroring `_start`); a nonzero return aborts.
-    if interp.funcs.contains_key("main") {
-        match interp.call("main", &[]) {
-            Ok(Val::Int(0)) => {}
-            Ok(Val::Int(n)) => return Err(format!("main returned {n}, aborting serve")),
-            Ok(other) => return Err(format!("main returned {other:?}, expected Int64")),
-            Err(Ctrl::Err(s)) => return Err(s),
-            Err(Ctrl::Return(_)) => return Err("internal: `?` propagated past main".into()),
-        }
-    }
-    let has_handle = interp.funcs.contains_key("handle");
-    let mut host = ServeHostImpl { interp, has_handle };
-    run_loop(&mut host)
+    };
+    run_loop(&mut handler)
 }
 
 /// Build a fresh interpreter over `program` (shared setup for `run` and
@@ -729,7 +642,6 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         region_depth: std::cell::Cell::new(0),
         globals: RefCell::new(HashMap::new()),
         args: prog_args.to_vec(),
-        rpc_next_id: std::cell::Cell::new(0),
     };
     Ok(interp)
 }
@@ -768,10 +680,6 @@ struct Interp<'a> {
     globals: RefCell<HashMap<String, Slot>>,
     /// The program's command-line arguments (RFC-0014 `args()`), argv[1..].
     args: Vec<String>,
-    /// The next RPC request id (RFC-0019). `rpc()` pre-increments this, so ids
-    /// run 1, 2, 3, … per program run — deterministic, so client logic tested
-    /// in-process against real procedures is byte-identical across backends.
-    rpc_next_id: std::cell::Cell<i64>,
 }
 
 /// A scope binding: the current value plus the declared type, when one exists
@@ -1259,47 +1167,6 @@ impl<'a> Interp<'a> {
                         }
                     };
                     return Ok(self.decode_top(&tn, &s));
-                }
-                // `rpc(procedure [, req])` (RFC-0019) — server-role / interp
-                // dispatch is IN-PROCESS and synchronous: call the procedure with
-                // the typed request value, encode its result with the JSON codec,
-                // and invoke `onRpc(id, 200, body)` BEFORE returning the request
-                // id. Ids run 1, 2, 3, … per run (deterministic). A trap inside
-                // the procedure is an ordinary call trap — it propagates (the HTTP
-                // host, not this path, is what turns a trap into a 500).
-                if name == "rpc" {
-                    let proc = match args.first() {
-                        Some(Expr::Var { name: p, .. }) => p.clone(),
-                        _ => return Err("`rpc` needs a procedure name".into()),
-                    };
-                    // The procedure was validated by the checker; fetch its
-                    // signature for the request coercion and response encoding.
-                    let f = *self
-                        .funcs
-                        .get(proc.as_str())
-                        .ok_or_else(|| Ctrl::Err(format!("`rpc` names unknown procedure `{proc}`")))?;
-                    // Evaluate the request argument (if the procedure takes one)
-                    // and dispatch directly — the value is already typed/valid.
-                    let call_args: Vec<Val> = match args.get(1) {
-                        Some(a) => vec![self.expr(a, scope)?],
-                        None => Vec::new(),
-                    };
-                    let id = self.rpc_next_id.get() + 1;
-                    self.rpc_next_id.set(id);
-                    let result = self.call(&proc, &call_args)?; // trap propagates
-                    // Encode the response. A `Unit`-returning procedure has no
-                    // JSON body; deliver `null` to `onRpc` (the HTTP transport uses
-                    // 204 no-body — a different transport, self-consistent here).
-                    let body = if matches!(f.ret, Type::Unit) {
-                        "null".to_string()
-                    } else {
-                        let mut out = String::new();
-                        self.encode_val(&result, &f.ret, &mut out)?;
-                        out
-                    };
-                    // Deliver synchronously to the convention handler.
-                    self.call("onRpc", &[Val::Int(id), Val::Int(200), Val::Str(body)])?;
-                    return Ok(Val::Int(id));
                 }
                 // `a.pop()` (RFC-0011) — remove and return the last element as
                 // `Option<T>` (`None` on empty), mutating the receiver in place.
@@ -2332,13 +2199,6 @@ impl<'a> Interp<'a> {
     /// Decode `s` into `Validation<tn>` (RFC-0018). Never traps; a parse error
     /// or any accumulated `Issue` yields `Invalid([Issue])`.
     fn decode_top(&self, tn: &str, s: &str) -> Val {
-        self.decode_top_ty(&Type::Named(tn.to_string()), s)
-    }
-
-    /// Like [`decode_top`], but into an arbitrary target type — used by the HTTP
-    /// procedure host (RFC-0019), whose parameter may be any codable type, not
-    /// just a named one.
-    fn decode_top_ty(&self, target: &Type, s: &str) -> Val {
         let json = match crate::codec::parse(s) {
             Ok(j) => j,
             Err(e) => {
@@ -2347,30 +2207,13 @@ impl<'a> Interp<'a> {
             }
         };
         let mut issues = Vec::new();
-        let v = self.decode_val(&json, target, "", &mut issues);
+        let target = Type::Named(tn.to_string());
+        let v = self.decode_val(&json, &target, "", &mut issues);
         if issues.is_empty() {
             Val::Enum("Valid".to_string(), vec![v.unwrap_or(Val::Unit)])
         } else {
             Val::Enum("Invalid".to_string(), vec![Val::Array(issues)])
         }
-    }
-
-    /// Encode an `Issue` array (RFC-0009) into the `{"issues":[...]}` document
-    /// the HTTP host returns on a 422 (RFC-0019). Each element is an `Issue`
-    /// record, so encoding reuses the canonical record encoder — the field order
-    /// (`key`, `path`, `message`) is exactly the injected `Issue` type's.
-    fn encode_issues(&self, issues: &Val) -> String {
-        let mut out = String::from("{\"issues\":[");
-        if let Val::Array(items) = issues {
-            for (i, it) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                let _ = self.encode_val(it, &Type::Named("Issue".to_string()), &mut out);
-            }
-        }
-        out.push_str("]}");
-        out
     }
 
     /// Walk a parsed JSON node against a target type, building the value and
@@ -2648,37 +2491,6 @@ mod tests {
     #[test]
     fn arithmetic_and_return() {
         assert_eq!(run("fn main() -> Int64 { return 2 + 3 * 4; }").unwrap(), 14);
-    }
-
-    // ---- typed procedures (RFC-0019) ------------------------------------
-
-    #[test]
-    fn rpc_dispatch_runs_on_rpc_before_returning_and_ids_increment() {
-        // `onRpc` records the id it saw into module state. After the first
-        // `rpc()` returns, `seen` is already 1 — proving `onRpc` fired
-        // synchronously before the call returned. The second call's id is 2.
-        let src = "let mut seen: Int64 = 0 \
-                   type Req = { id: Int64 } \
-                   rpc fn p(req: Req) -> Req { return req } \
-                   export extern fn onRpc(id: Int64, status: Int64, body: String) { seen = id } \
-                   fn main() -> Int64 { \
-                       let a = rpc(p, Req { id: 9 }) \
-                       let checkpoint = seen \
-                       let b = rpc(p, Req { id: 9 }) \
-                       return checkpoint * 100 + b \
-                   }";
-        // checkpoint == 1 (onRpc ran before rpc returned) and b == 2 (ids ++).
-        assert_eq!(run(src).unwrap(), 102);
-    }
-
-    #[test]
-    fn rpc_procedure_trap_propagates() {
-        let src = "type Req = { id: Int64 } \
-                   rpc fn boom(req: Req) -> Req { let z = req.id - req.id let bad = req.id / z return req } \
-                   export extern fn onRpc(id: Int64, status: Int64, body: String) { print(\"x\") } \
-                   fn main() -> Int64 { let a = rpc(boom, Req { id: 5 }) return a }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("division by zero"), "{e}");
     }
 
     // ---- testing (RFC-0015) ---------------------------------------------

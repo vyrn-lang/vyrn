@@ -1007,14 +1007,6 @@ fn extern_decl_params(f: &Function) -> String {
 
 /// Emit a complete LLVM IR module for `program`.
 pub fn emit(program: &Program) -> Result<String, String> {
-    emit_with_role(program, CompileRole::Server)
-}
-
-/// Lower `program` to LLVM IR for an explicit compile role (RFC-0019). Server
-/// role (what `emit` uses) lowers `rpc fn` bodies fully and dispatches `rpc()`
-/// in-process; CLIENT role omits the procedure bodies (their signatures are
-/// remote stubs) and lowers `rpc()` to a wasm host import (`vela`.`__rpc`).
-pub fn emit_with_role(program: &Program, role: CompileRole) -> Result<String, String> {
     let mut out = String::new();
     // module preamble: printf/abort + format strings (opaque-pointer style)
     out.push_str("; Vela v0.1 — generated LLVM IR (target: LLVM 15+)\n");
@@ -1108,31 +1100,6 @@ pub fn emit_with_role(program: &Program, role: CompileRole) -> Result<String, St
             "attributes #{grp} = {{ \"wasm-import-module\"=\"vela\" \"wasm-import-name\"=\"{}\" }}\n",
             f.name
         ));
-    }
-    // Typed procedures (RFC-0019). A program with any `rpc fn` gets the RPC
-    // request-id counter (server role, for in-process dispatch) OR the browser
-    // host import (client role). The client-role ABI the browser runtime
-    // (`vela-rpc.js`) satisfies is `vela`.`__rpc`:
-    //   i64 __rpc(ptr namePtr, i64 nameLen, ptr bodyPtr, i64 bodyLen)
-    // where the two `(ptr, len)` pairs are UTF-8 slices in the module's linear
-    // memory — the procedure name and the request's JSON body (a null `bodyPtr`
-    // with `bodyLen` 0 means a parameterless procedure). It returns the request
-    // id; the response is delivered later through the exported `onRpc`.
-    let has_rpc = program.functions.iter().any(|f| f.is_rpc);
-    match role {
-        CompileRole::Server if has_rpc => {
-            out.push_str("@__vela_rpc_next_id = global i64 0\n");
-        }
-        CompileRole::Client if has_rpc => {
-            let grp = 200; // distinct from the extern import groups (100+)
-            out.push_str(&format!(
-                "declare i64 @__vela_rpc_call(ptr, i64, ptr, i64) #{grp}\n"
-            ));
-            extern_attr_groups.push_str(&format!(
-                "attributes #{grp} = {{ \"wasm-import-module\"=\"vela\" \"wasm-import-name\"=\"__rpc\" }}\n"
-            ));
-        }
-        _ => {}
     }
     // For a `file(..)` sink: a global stream handle plus the path/mode constants.
     if let LogSink::File(path) = &program.log_sink {
@@ -1292,13 +1259,6 @@ pub fn emit_with_role(program: &Program, role: CompileRole) -> Result<String, St
     for s in collect_codec_strings(program, &type_map) {
         if !literals.contains(&s) {
             literals.push(s);
-        }
-    }
-    // Typed procedures (RFC-0019): a client-role `rpc()` sends the procedure's
-    // wire name (its identifier) to the host import, so pool the name literal.
-    for f in program.functions.iter().filter(|f| f.is_rpc) {
-        if !literals.contains(&f.name) {
-            literals.push(f.name.clone());
         }
     }
     for (i, s) in literals.iter().enumerate() {
@@ -1495,13 +1455,6 @@ pub fn emit_with_role(program: &Program, role: CompileRole) -> Result<String, St
         if f.is_extern {
             continue;
         }
-        // Client role (RFC-0019): a `rpc fn` body is NOT lowered — its signature
-        // is a remote stub only. Direct calls are a checker error, and `rpc()`
-        // routes through the host import, so nothing references the body; omitting
-        // the `define` is what lets wasm-ld's GC drop the server-only code.
-        if role == CompileRole::Client && f.is_rpc {
-            continue;
-        }
         let sym = if f.name == "main" { "vela_main".to_string() } else { format!("vela_{}", f.name) };
         let mut gen = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
@@ -1511,7 +1464,6 @@ pub fn emit_with_role(program: &Program, role: CompileRole) -> Result<String, St
         gen.log_sink = program.log_sink.clone();
         gen.protocol_methods = protocol_methods.clone();
         gen.globals = globals_map.clone();
-        gen.role = role;
         gen.function(f, &sym, &mut out)?;
         out.push('\n');
         let insts = std::mem::take(&mut gen.instantiations);
@@ -1535,7 +1487,6 @@ pub fn emit_with_role(program: &Program, role: CompileRole) -> Result<String, St
         gen.log_sink = program.log_sink.clone();
         gen.protocol_methods = protocol_methods.clone();
         gen.globals = globals_map.clone();
-        gen.role = role;
         gen.function(f, &sym, &mut out)?;
         out.push('\n');
         let insts = std::mem::take(&mut gen.instantiations);
@@ -1621,14 +1572,6 @@ pub fn emit_with_role(program: &Program, role: CompileRole) -> Result<String, St
     // The module-state initializer function (RFC-0013), defined after the user
     // functions (textual order is immaterial to LLVM).
     out.push_str(&globals_init_ir);
-
-    // A file with no `main` (a library module — RFC-0010 — or a client-role
-    // build whose entry is the exported handlers, RFC-0019) still links a trivial
-    // `@vela_main` so the C entry below resolves. It returns 0; the real surface
-    // is the exported functions the host calls.
-    if !program.functions.iter().any(|f| f.name == "main") {
-        out.push_str("define i64 @vela_main() {\nentry:\n  ret i64 0\n}\n");
-    }
 
     // C entry point: call Vela's main and reduce its i64 to a process exit code.
     // Mask to the low 8 bits so the result matches the interpreter (which does
@@ -1724,9 +1667,6 @@ struct Gen<'a> {
     /// variable read/write that misses the local scope falls back to these,
     /// loading/storing through the global just like an alloca slot.
     globals: HashMap<String, (String, Type)>,
-    /// The compile role (RFC-0019). Server lowers `rpc()` to in-process dispatch;
-    /// Client lowers it to the `vela`.`__rpc` host import.
-    role: CompileRole,
 }
 
 impl<'a> Gen<'a> {
@@ -1770,7 +1710,6 @@ impl<'a> Gen<'a> {
             protocol_methods: HashMap::new(),
             regex_globals,
             globals: HashMap::new(),
-            role: CompileRole::Server,
         }
     }
 
@@ -3362,80 +3301,6 @@ impl<'a> Gen<'a> {
             };
             let (s, _) = self.gen_expr(&args[1])?;
             return self.gen_from_json(&tn, &s);
-        }
-        // `rpc(procedure [, req])` (RFC-0019). Behaviour is role-dependent:
-        //   - SERVER: in-process dispatch — bump the request-id counter, call the
-        //     procedure directly, encode its result, and invoke `onRpc(id, 200,
-        //     body)` synchronously before yielding the id. Byte-identical to the
-        //     interpreter (a trap in the procedure propagates as an ordinary call).
-        //   - CLIENT: call the `vela`.`__rpc` host import with the procedure name
-        //     and the request's JSON body; the browser runtime returns the id and
-        //     later delivers the response through the exported `onRpc`.
-        if name == "rpc" {
-            let proc = match args.first() {
-                Some(Expr::Var { name: p, .. }) => p.clone(),
-                _ => return Err("`rpc` needs a procedure name".to_string()),
-            };
-            let req_args = &args[1..];
-            match self.role {
-                CompileRole::Server => {
-                    let old = self.fresh_tmp();
-                    self.emit(format!("{old} = load i64, ptr @__vela_rpc_next_id"));
-                    let id = self.fresh_tmp();
-                    self.emit(format!("{id} = add i64 {old}, 1"));
-                    self.emit(format!("store i64 {id}, ptr @__vela_rpc_next_id"));
-                    // Dispatch to the procedure in-process (a normal call).
-                    let (result, retty) = self.gen_call(&proc, req_args)?;
-                    // Encode the response — a `Unit` return has no JSON body, so
-                    // deliver `null` (the HTTP transport uses 204 instead).
-                    let node = if matches!(self.resolve(&retty), Type::Unit) {
-                        let n = self.fresh_tmp();
-                        self.emit(format!("{n} = call ptr @__vela_vj_null()"));
-                        n
-                    } else {
-                        self.emit_encode(&result, &retty)?
-                    };
-                    let body = self.fresh_tmp();
-                    self.emit(format!("{body} = call ptr @__vela_vj_encode(ptr {node})"));
-                    // Deliver synchronously to the convention handler.
-                    self.emit(format!("call void @vela_onRpc(i64 {id}, i64 200, ptr {body})"));
-                    return Ok((id, Type::Int));
-                }
-                CompileRole::Client => {
-                    let name_global = self
-                        .str_globals
-                        .get(&proc)
-                        .ok_or_else(|| format!("rpc: procedure name `{proc}` was not pooled"))?
-                        .clone();
-                    let name_len = self.fresh_tmp();
-                    self.emit(format!("{name_len} = call i64 @__vela_strlen(ptr {name_global})"));
-                    // The request body: encode the argument, or an empty slice for
-                    // a parameterless procedure.
-                    let (body_ptr, body_len) = if let Some(arg) = req_args.first() {
-                        let (v, vty) = self.gen_expr(arg)?;
-                        let pty =
-                            self.param_types.get(&proc).and_then(|p| p.first().cloned());
-                        let (v, cty) = match &pty {
-                            Some(p) => self.coerce(v, &vty, p)?,
-                            None => (v, vty),
-                        };
-                        let node = self.emit_encode(&v, &cty)?;
-                        let bp = self.fresh_tmp();
-                        self.emit(format!("{bp} = call ptr @__vela_vj_encode(ptr {node})"));
-                        let bl = self.fresh_tmp();
-                        self.emit(format!("{bl} = call i64 @__vela_strlen(ptr {bp})"));
-                        (bp, bl)
-                    } else {
-                        ("null".to_string(), "0".to_string())
-                    };
-                    let id = self.fresh_tmp();
-                    self.emit(format!(
-                        "{id} = call i64 @__vela_rpc_call(ptr {name_global}, i64 {name_len}, \
-                         ptr {body_ptr}, i64 {body_len})"
-                    ));
-                    return Ok((id, Type::Int));
-                }
-            }
         }
         // Numeric conversion `Int32(x)`, `Float64(x)`, ...
         if let Some(target) = vela_frontend::types::numeric_conv_target(name) {
@@ -6159,43 +6024,6 @@ mod tests {
         assert!(ir.contains("define i32 @vela_entry()"));
         assert!(ir.contains("@printf"));
         assert!(ir.contains("add i64"));
-    }
-
-    // ---- typed procedures (RFC-0019) ------------------------------------
-
-    const RPC_SRC: &str = "type Req = { id: Int64 } \
-        type Res = { v: Int64 } \
-        rpc fn getUser(req: Req) -> Res { return Res { v: req.id } } \
-        export extern fn onRpc(id: Int64, status: Int64, body: String) { print(\"cb\") } \
-        fn main() -> Int64 { let a = rpc(getUser, Req { id: 5 }) return 0 }";
-
-    #[test]
-    fn server_role_rpc_lowers_to_in_process_dispatch() {
-        let ir = emit(&check(RPC_SRC).unwrap()).unwrap();
-        // The request-id counter, the procedure call, response encode, and the
-        // synchronous onRpc delivery — all in-process, no host import.
-        assert!(ir.contains("@__vela_rpc_next_id = global i64 0"), "counter:\n{ir}");
-        assert!(ir.contains("@vela_getUser("), "procedure call:\n{ir}");
-        assert!(ir.contains("@__vela_vj_encode(ptr"), "encode:\n{ir}");
-        assert!(ir.contains("call void @vela_onRpc(i64"), "onRpc delivery:\n{ir}");
-        assert!(!ir.contains("__vela_rpc_call"), "server role has no host import:\n{ir}");
-        // The procedure body IS present (server lowers it fully).
-        assert!(ir.contains("define"), "has defines");
-    }
-
-    #[test]
-    fn client_role_rpc_lowers_to_host_import_and_omits_bodies() {
-        let program = check(RPC_SRC).unwrap();
-        let ir = emit_with_role(&program, CompileRole::Client).unwrap();
-        // The `vela`.`__rpc` host import declaration and its call.
-        assert!(ir.contains("declare i64 @__vela_rpc_call(ptr, i64, ptr, i64)"), "import:\n{ir}");
-        assert!(ir.contains("\"wasm-import-name\"=\"__rpc\""), "import name:\n{ir}");
-        assert!(ir.contains("call i64 @__vela_rpc_call(ptr"), "import call:\n{ir}");
-        // The procedure body is NOT lowered (a remote stub), and no in-process
-        // dispatch machinery is emitted.
-        assert!(!ir.contains("define i64 @vela_getUser("), "procedure body omitted:\n{ir}");
-        assert!(!ir.contains("@__vela_rpc_next_id"), "no server counter:\n{ir}");
-        assert!(!ir.contains("call void @vela_onRpc"), "no in-process onRpc call:\n{ir}");
     }
 
     // ---- input I/O (RFC-0014) -------------------------------------------
