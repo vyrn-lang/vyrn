@@ -34,6 +34,7 @@ prototype to answer.
 | [0020](RFC-0020-i18n.md) | i18n | **Implemented (M1 + M2)**: M1 finite string types & interpolation containment (a proven `"nav.\{s}.label" ⊆ TransKey` skips its runtime check + literal completion); M2 the `std/i18n` generator on RFC-0021 — a Vyrn-authored JSON + ICU reader that flattens locales, checks cross-locale drift, and compiles each message (interpolation / plural via CLDR rules / select) into ordinary Vyrn, emitting `TransKey`, a `Locale` enum + module state, and per-key typed functions with `///` docs |
 | [0021](RFC-0021-generator-imports.md) | Generator Imports | **Implemented**: `gen fn` + `import { .. } from gen(args)` — comptime-pure module synthesis, mediated `readFile`/`listDir`/`moduleInterface`, content-addressed cache |
 | [0022](RFC-0022-ergonomics.md) | Ergonomics Batch | **Implemented**: `else if` chaining; string ordering (`< <= > >=`, byte-wise); `s[i] : UInt8` (aligned with `bytes(s)`); import aliasing (`import { X as Y }`, alias-aware LSP) — the last erases RFC-0019's `call<Proc>` deviation |
+| [0023](RFC-0023-function-values.md) | Function Values | **Implemented**: `fn`-typed parameters + lambda literals (`\|x\| expr`), parameter-only and call-argument-only, read-only captures, per-lambda monomorphization — zero runtime function pointers in any backend; ships generic `std/arrays` (`map`/`filter`/`fold`/`any`/`all`) |
 
 ## Status legend
 

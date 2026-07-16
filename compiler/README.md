@@ -102,6 +102,29 @@ may read via mediated, path-scoped `readFile`/`listDir`/`moduleInterface`.
 Generation is deterministic and cached (`~/.vyrn/cache/gen`), so rebuilds and the
 LSP hit the cache. `vyrn emit-gen <file>` dumps the synthesized source.
 
+### Function values (RFC-0023)
+
+A `fn`-typed parameter takes a lambda literal or a named function; there are no
+runtime function values (every use is monomorphized away — no function pointer in
+any backend):
+
+```vyrn
+import { map, filter, fold } from "std/arrays"
+
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2, 3]
+    let doubled = map(xs, |x| x * 2)          // lambda literal
+    let bump = 10
+    let bumped = map(xs, |x| x + bump)         // captures `bump` by read
+    return fold(bumped, 0, |acc, x| acc + x)   // 46
+}
+```
+
+`fn(T) -> R` is legal only as a parameter type; a lambda (`|x| expr` /
+`|x, y| { block }` / `|| expr`) or a named function is legal only as such an
+argument. Captures are read-only and fixed at the call site. `std/arrays` ships
+`map`/`filter`/`fold`/`any`/`all` fully generic.
+
 ### Validated types (RFC-0003)
 
 ```bash

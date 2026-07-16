@@ -1,6 +1,6 @@
 # RFC-0023 — Function Values, Monomorphized (Closures v1)
 
-- **Status:** Draft — approved for implementation (after RFC-0022)
+- **Status:** Implemented (2026-07-16)
 - **Depends on:** RFC-0002 §5 (protocols — the dispatch machinery this
   rides), RFC-0004 (ownership — the constraint that shapes everything)
 - **Evidence:** the query cache wants continuations (RFC-0019 deferred it
@@ -101,3 +101,58 @@ does NOT rework std/rpc.
 Everything in "deliberately defers", plus: currying/partial application,
 function composition operators, `async` interactions (none exist),
 capture-by-move syntax, mutable capture.
+
+## Implementation notes (as landed)
+
+- **Surface.** `Type::Fn(params, ret)` parses as `fn(T, U) -> R` (and `fn(T)`
+  / `fn()` for a Unit return) in any type position, but the checker restricts
+  it to a top-level function parameter — "function types are parameter-only in
+  v1" — rejecting it in records, arrays, `Option`/`Result`, generic arguments,
+  returns, `let` annotations, module state, and `extern`/`gen` signatures (and
+  nested inside another `fn`). Lambda literals are `|x| expr`, `|x, y| { block }`,
+  and the zero-parameter `|| expr` (the empty pipe pair is the single `||`
+  token); a bare `|` in expression position unambiguously opens a lambda (there
+  is no bitwise-or operator). A lambda is legal only as a call argument in a
+  `fn`-typed parameter position; a named function is accepted there too.
+
+- **Capture-timing lock.** Captures are materialized where the lambda *argument*
+  is evaluated — the outer call site — in every backend. The interpreter takes a
+  by-value snapshot of the enclosing locals at that point; the monomorphized
+  backends evaluate the capture expressions as the extra arguments of the
+  specialized callee at that same point. A binding reassigned between the outer
+  call and the callee's inner invocations of the parameter is therefore never
+  observed, identically everywhere. Module state is *not* captured — a global
+  read inside a lambda resolves live (and makes the enclosing call chain
+  non-spawn-safe, as always).
+
+- **Nesting decision.** A lambda body **may** call functions that themselves
+  take `fn` parameters (an ordinary call), but **may not** contain another
+  lambda *literal* in v1 — nested literals would compound monomorphization for
+  no proven need. The checker rejects a nested literal explicitly.
+
+- **Generic `map`/`filter`/`fold`: no wall.** `std/arrays` ships them fully
+  generic (`map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U>`, etc.). The
+  checker infers in two passes — the ordinary arguments bind the inbound type
+  parameters (`T` from `xs: Array<T>`) first, then each `fn`-typed argument's
+  body infers the outbound one (`U`). Making this work needed one small,
+  general fix: `unify`/`solve_param` now infer through `Array`/`ArrayN`/`Ref`
+  element types (previously only `Option`/`Result`/generic-app did).
+
+- **Monomorphization + dedup.** Each lambda literal is lifted to a top-level
+  function `@__vyrn_lambda_<fn>_<ordinal>_<shape>` whose leading parameters are
+  its captures; the symbol keys on the enclosing function, the lambda's
+  source-order ordinal, and its concrete capture/parameter/return shape, so two
+  instantiations of a generic function lift distinct correctly-typed copies while
+  identical ones dedup. Each `fn`-taking callee is specialized per
+  (callee, type args, target symbols) — `twice(|x| x*2)`, `twice(|x| x+off)`,
+  and `twice(double)` are three instances; the parameter's captures arrive as
+  the instance's extra trailing parameters, and a call to the parameter becomes
+  a direct call to the target. A received `fn` parameter passed onward
+  (pass-through) forwards its target and its capture parameters transitively.
+  **Zero function pointers** in any backend — asserted by an IR test that every
+  emitted `call` names a `@symbol`.
+
+- **Verified.** interp == native == wasm byte-identical, including the
+  `examples/lambdas.vyrn` parity citizen. The in-memory Inkwell backend
+  (`vyrn-codegen-llvm`, excluded from the default workspace) was **not** taught
+  the new lowering — it remains a subset backend.

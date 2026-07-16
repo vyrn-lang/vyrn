@@ -338,6 +338,34 @@ keeps the name. That erased RFC-0019's `call<Proc>` deviation: `rpcInProcess` no
 emits same-named `<proc>` dispatchers via `getUser as getUser__real`. The LSP is
 alias-aware (hover shows `— alias of getUser`, go-to-def jumps to the source).
 
+**Function values, and the bill we refused (RFC-0023).** The library code kept
+asking for `map`/`filter`/`fold` and the query cache kept wanting continuations —
+higher-order functions. Vyrn is ownership-based with three backends that must
+agree byte-for-byte, and heap closures with captured environments are exactly
+where that gets expensive (escape analysis, capture lifetimes, boxing,
+invalidation). So v1 refuses the bill: a function value exists **only as a call
+argument, and every use is monomorphized away at compile time**. A `fn(T) -> R`
+type is legal only as a function parameter; a lambda literal (`|x| x * 2`,
+`|x, y| { .. }`, `|| e`) or a named function is legal only where such a parameter
+is expected. Captures are read-only, fixed at the outer call site (so the three
+backends see the same values with no lifetime question to answer). Each lambda
+becomes a synthesized top-level function whose leading parameters are its
+captures; each `fn`-taking callee is specialized per (lambda/named-fn) argument —
+`twice(|x| x*2)` and `twice(double)` are two mangled instances, and the call to
+the parameter becomes a direct call. The consequence is the whole point: **zero
+function pointers in any backend** — the interpreter, native IR, and wasm all see
+ordinary direct calls, so parity is inherited and the wasm binary gains no
+indirect-call table (an IR test asserts every emitted `call` names a symbol).
+`std/arrays` ships `map`/`filter`/`fold`/`any`/`all` **fully generic** —
+`map<T, U>(xs: Array<T>, f: fn(T) -> U)` monomorphizes cleanly once the checker
+infers `T` from the array and `U` from the lambda's body — and
+`examples/lambdas.vyrn` is a normal three-way parity citizen. What stays deferred
+is the *stored*-closure bill: returning functions, function-typed fields, storing
+continuations, dynamic dispatch on function values. When real usage demands
+storage the escalation path is explicit (a captured-state record implementing a
+`Call` protocol, building on this lowering rather than replacing it); until then
+the query cache stays host-side and the `on<Proc>` RPC convention stands.
+
 ---
 
 ## Shipped
