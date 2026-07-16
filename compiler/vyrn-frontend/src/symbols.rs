@@ -145,6 +145,19 @@ pub struct Analysis {
     /// Top-level function name → parameter types, so string-literal completion
     /// can find the expected type at a call argument position.
     pub fn_param_types: Vec<(String, Vec<Type>)>,
+    /// RFC-0027: each `import * as ns` binding and the exported symbols reachable
+    /// through it, so `ns.` completes and `ns.member` hovers / jumps into the
+    /// source module. Populated only by [`analyze_linked`].
+    pub namespaces: Vec<NamespaceInfo>,
+}
+
+/// One `import * as ns` binding and the exported declarations it exposes
+/// (RFC-0027). Each member carries its source file + line for cross-file
+/// go-to-definition, exactly like an ordinary imported [`Symbol`].
+#[derive(Debug, Clone)]
+pub struct NamespaceInfo {
+    pub name: String,
+    pub members: Vec<Symbol>,
 }
 
 /// Answer to "what is at this cursor": the declaration it resolves to.
@@ -330,6 +343,10 @@ fn analyze_inner(
     if let Some(linked) = &checked {
         symbols.extend(index_imported_symbols(&program, linked));
     }
+    // RFC-0027: namespace bindings and their reachable exports (for `ns.`
+    // completion and `ns.member` hover / go-to-definition). Needs the linker to
+    // resolve each namespace import to its source module.
+    let namespaces = index_namespaces(source, &program, linker);
     let locals = index_locals(&program, &tok_info, &let_types);
 
     // Protocol/impl member tables for `.foo` completion (RFC-0002 §5). Impls
@@ -421,6 +438,7 @@ fn analyze_inner(
         record_fields,
         finite_string_types,
         fn_param_types,
+        namespaces,
     }
 }
 
@@ -439,6 +457,7 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         record_fields: Vec::new(),
         finite_string_types: Vec::new(),
         fn_param_types: Vec::new(),
+        namespaces: Vec::new(),
     }
 }
 
@@ -590,6 +609,51 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         }
     }
 
+    // RFC-0027: `ns.member` — the member token, preceded by an in-scope (un-
+    // shadowed) namespace, resolves to that module's export (hover + cross-file
+    // go-to-definition). Checked before top-level symbols so a same-named local
+    // decl doesn't capture a qualified member reference.
+    if let Some(recv) = receiver_before_dot(analysis, tok.line, tok.col) {
+        let shadowed = enclosing_fn_line(analysis, line).is_some_and(|fl| {
+            analysis.locals.iter().any(|b| b.fn_line == fl && b.name == recv && b.line <= line)
+        });
+        if !shadowed {
+            if let Some(nsi) = analysis.namespaces.iter().find(|n| n.name == recv) {
+                if let Some(m) = nsi.members.iter().find(|m| m.name == tok.text) {
+                    return Some(Resolution {
+                        name: m.name.clone(),
+                        kind: m.kind,
+                        target_line: m.line,
+                        target_col: m.col,
+                        target_end_col: m.end_col,
+                        target_file: m.file.clone(),
+                        hover: format!("{}\n\n— via namespace `{}`", m.detail, recv),
+                        definition: m.file.is_some(),
+                    });
+                }
+            }
+        }
+    }
+
+    // RFC-0027: hovering the namespace binding itself (`ns` in `import * as ns`
+    // or in `ns.member`) — a compile-time name, not a value.
+    if let Some(nsi) = analysis.namespaces.iter().find(|n| n.name == tok.text) {
+        return Some(Resolution {
+            name: nsi.name.clone(),
+            kind: SymbolKind::Type,
+            target_line: 0,
+            target_col: 0,
+            target_end_col: 0,
+            target_file: None,
+            hover: format!(
+                "namespace `{}` — {} exported member(s) (a compile-time name, not a value)",
+                nsi.name,
+                nsi.members.len()
+            ),
+            definition: false,
+        });
+    }
+
     // Fall back to top-level symbols. A symbol of the open document (`file:
     // None`) wins over an imported one of the same name (module scoping: the
     // local declaration shadows); among candidates, the latest declaration
@@ -670,6 +734,29 @@ pub fn completions(analysis: &Analysis) -> Vec<Completion> {
 /// bounded generic receiver (`fn f<T: Show>(x: T)` → `x.`) gets each bound
 /// protocol's methods — mirroring the checker's static dispatch.
 pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<Completion> {
+    // RFC-0027: if the receiver names an in-scope namespace (and isn't shadowed
+    // by a local), offer that module's exported members after the dot.
+    if let Some(recv) = receiver_before_dot(analysis, line, col) {
+        let shadowed = enclosing_fn_line(analysis, line).is_some_and(|fl| {
+            analysis
+                .locals
+                .iter()
+                .any(|b| b.fn_line == fl && b.name == recv && b.line <= line)
+        });
+        if !shadowed {
+            if let Some(nsi) = analysis.namespaces.iter().find(|n| n.name == recv) {
+                return nsi
+                    .members
+                    .iter()
+                    .map(|s| Completion {
+                        label: s.name.clone(),
+                        kind: s.kind,
+                        detail: format!("{}\n\n— via namespace `{}`", s.detail, recv),
+                    })
+                    .collect();
+            }
+        }
+    }
     // Resolve the receiver's type (see `resolve_receiver_type`); if it can't be
     // typed, there is nothing to suggest after the dot.
     let ty = match resolve_receiver_type(analysis, line, col) {
@@ -862,25 +949,26 @@ fn expected_string_type(
 /// (unannotated lets whose type the checker couldn't infer, or a top-level
 /// receiver — only locals are method receivers in practice). Cloned so the
 /// caller owns the type independent of the borrow on `analysis`.
-fn resolve_receiver_type(analysis: &Analysis, line: usize, col: usize) -> Option<Type> {
-    // The dot at or before the cursor on this line — the anchor of the member
-    // access. The cursor may sit right after the dot (trigger) or partway through
-    // the partial member name (`arr.pu`); either way the dot is the nearest one
-    // at or before the cursor.
+/// The identifier text immediately before the dot at/preceding the cursor on
+/// `line` — the receiver of a `.foo` member access. Shared by member-type
+/// resolution (methods/fields) and namespace member completion (RFC-0027).
+fn receiver_before_dot(analysis: &Analysis, line: usize, col: usize) -> Option<String> {
     let dot = analysis
         .tokens
         .iter()
         .filter(|t| t.line == line && t.text == "." && t.col <= col)
         .max_by_key(|t| t.col)?;
-    // The identifier immediately before the dot on the same line — the
-    // receiver. The greatest end_col <= dot.col is the token abutting the dot
-    // (whitespace between them is fine; no other token sits between an ident and
-    // its dot in valid Vyrn).
     let recv = analysis
         .tokens
         .iter()
         .filter(|t| t.line == line && t.text != "." && t.end_col <= dot.col)
         .max_by_key(|t| t.end_col)?;
+    Some(recv.text.clone())
+}
+
+fn resolve_receiver_type(analysis: &Analysis, line: usize, col: usize) -> Option<Type> {
+    // The identifier immediately before the dot on the same line — the receiver.
+    let recv = receiver_before_dot(analysis, line, col)?;
     // Resolve the receiver's type from the local index (params/lets/for-vars —
     // the only things you call methods on in practice). Top-level receivers
     // (functions) aren't method receivers, so they're not handled.
@@ -888,7 +976,7 @@ fn resolve_receiver_type(analysis: &Analysis, line: usize, col: usize) -> Option
     let binding = analysis
         .locals
         .iter()
-        .filter(|b| b.fn_line == fn_line && b.name == recv.text && b.line <= line)
+        .filter(|b| b.fn_line == fn_line && b.name == recv && b.line <= line)
         .max_by_key(|b| b.line)?;
     binding.ty.clone()
 }
@@ -1193,6 +1281,106 @@ fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Sym
         }
     }
 
+    out
+}
+
+/// Index the document's `import * as ns` bindings (RFC-0027) and the exported
+/// declarations each exposes. Each namespace's source module is resolved through
+/// the loader (aligning the module graph's root targets with the root's imports),
+/// then parsed for its exported decls — so members show ORIGINAL names (not the
+/// loader's collision-rename symbols) with correct source lines for jumping in.
+fn index_namespaces(
+    source: &str,
+    root: &ast::Program,
+    linker: Option<(&str, &crate::loader::LoadOptions, &dyn crate::loader::ModuleResolver)>,
+) -> Vec<NamespaceInfo> {
+    let Some((root_path, opts, resolver)) = linker else { return Vec::new() };
+    if !root.imports.iter().any(|i| i.namespace.is_some()) {
+        return Vec::new();
+    }
+    // The root module's resolved import targets, in `root.imports` order.
+    let Ok(graph) = crate::loader::module_graph(source, root_path, opts, resolver) else {
+        return Vec::new();
+    };
+    let root_key = crate::loader::normalize(root_path);
+    let Some((_, targets)) = graph.iter().find(|(k, _)| *k == root_key) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (imp, target) in root.imports.iter().zip(targets) {
+        if let Some(ns) = &imp.namespace {
+            out.push(NamespaceInfo {
+                name: ns.clone(),
+                members: namespace_members(target, resolver),
+            });
+        }
+    }
+    out
+}
+
+/// The exported declarations of `target` as hover/goto-ready [`Symbol`]s. Parses
+/// the target's own source (so names/lines are the module's, and a collision
+/// rename in the linked program never leaks into what the editor shows). A target
+/// that can't be read (a synthesized generator module has no file) yields no
+/// members — completion after that `ns.` simply offers nothing.
+fn namespace_members(target: &str, resolver: &dyn crate::loader::ModuleResolver) -> Vec<Symbol> {
+    let Ok(text) = resolver.read(target) else { return Vec::new() };
+    let Ok(tokens) = lexer::lex(&text) else { return Vec::new() };
+    let (program, _errs) = parser::parse_accum(tokens);
+    let mut out = Vec::new();
+    for f in &program.functions {
+        if f.exported {
+            out.push(Symbol {
+                name: f.name.clone(),
+                kind: SymbolKind::Function,
+                line: f.line,
+                col: 0,
+                end_col: 0,
+                detail: function_detail(f),
+                file: Some(target.to_string()),
+            });
+        }
+    }
+    for p in &program.protocols {
+        if p.exported {
+            out.push(Symbol {
+                name: p.name.clone(),
+                kind: SymbolKind::Type,
+                line: p.line,
+                col: 0,
+                end_col: 0,
+                detail: protocol_detail(p),
+                file: Some(target.to_string()),
+            });
+        }
+    }
+    for t in &program.type_decls {
+        if t.line == 0 || t.name.contains('.') || !t.exported {
+            continue;
+        }
+        out.push(Symbol {
+            name: t.name.clone(),
+            kind: SymbolKind::Type,
+            line: t.line,
+            col: 0,
+            end_col: 0,
+            detail: type_decl_detail(t, &program.type_decls),
+            file: Some(target.to_string()),
+        });
+        if let Type::Enum(variants) = &t.base {
+            for v in variants {
+                out.push(Symbol {
+                    name: v.name.clone(),
+                    kind: SymbolKind::Variant,
+                    line: t.line,
+                    col: 0,
+                    end_col: 0,
+                    detail: variant_detail(&t.name, v),
+                    file: Some(target.to_string()),
+                });
+            }
+        }
+    }
     out
 }
 
@@ -1682,6 +1870,50 @@ mod tests {
             !a.symbols.iter().any(|s| s.name == "getUser" && s.file.is_some()),
             "original name is hidden by the alias"
         );
+    }
+
+    #[test]
+    fn analyze_linked_indexes_namespace_members() {
+        // RFC-0027: `import * as ns` indexes the module's exports for `ns.`
+        // completion and `ns.member` hover / cross-file go-to-definition.
+        use crate::loader::{LoadOptions, MapResolver};
+        let files: std::collections::HashMap<String, String> = [(
+            "api.vyrn".to_string(),
+            "export type User = { id: Int64 }\n\
+             export fn getUser(id: Int64) -> User { return User { id: id } }".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let resolver = MapResolver(files);
+        let root = "import * as api from \"./api\"\n\
+                    fn main() -> Int64 { let u = api.getUser(1) return u.id }";
+        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver);
+        assert!(a.diagnostics.is_empty(), "diags: {:?}", a.diagnostics);
+
+        // The namespace binding and its members are recorded.
+        let nsi = a.namespaces.iter().find(|n| n.name == "api").expect("namespace `api` indexed");
+        assert!(nsi.members.iter().any(|m| m.name == "getUser"), "getUser member");
+        assert!(nsi.members.iter().any(|m| m.name == "User"), "User member");
+
+        // Columns are 1-based; line 2 is the `fn main` body.
+        let body = root.lines().nth(1).unwrap();
+        let getuser_col = body.find("getUser").unwrap() + 1;
+
+        // Completion at the `getUser` member position offers the module's exports.
+        let comps = member_completions(&a, 2, getuser_col);
+        assert!(comps.iter().any(|c| c.label == "getUser"), "completions: {comps:?}");
+        assert!(comps.iter().all(|c| c.detail.contains("via namespace `api`")), "via-namespace note");
+
+        // Go-to-definition on the `getUser` in `api.getUser` jumps into api.vyrn.
+        let r = resolve(&a, 2, getuser_col).expect("resolve api.getUser");
+        assert_eq!(r.name, "getUser");
+        assert_eq!(r.target_file.as_deref(), Some("api.vyrn"), "cross-file go-to-def");
+        assert!(r.hover.contains("via namespace `api`"), "hover note: {}", r.hover);
+
+        // Hovering the `api` binding shows the namespace hover (not a value).
+        let acol = body.find("api.").unwrap() + 1;
+        let rn = resolve(&a, 2, acol).expect("resolve namespace name");
+        assert!(rn.hover.contains("namespace `api`"), "namespace hover: {}", rn.hover);
     }
 
     // ---- RFC-0020 M1: string-literal completion -----------------------------
