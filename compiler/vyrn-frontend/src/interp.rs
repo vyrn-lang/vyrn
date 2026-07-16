@@ -3283,7 +3283,7 @@ mod tests {
         );
         // "alpha\nbeta" is 10 bytes.
         assert_eq!(run(&src).unwrap(), 10);
-        let _ = std::fs::remove_file(path.replace('/', "\\"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -3301,8 +3301,8 @@ mod tests {
     fn read_file_rejects_invalid_utf8_and_nul_canonically() {
         let bad = temp_path("badutf8");
         let nul = temp_path("nul");
-        std::fs::write(bad.replace('/', "\\"), [0x63u8, 0xE9, 0x21]).unwrap();
-        std::fs::write(nul.replace('/', "\\"), [0x61u8, 0x00, 0x62]).unwrap();
+        std::fs::write(&bad, [0x63u8, 0xE9, 0x21]).unwrap();
+        std::fs::write(&nul, [0x61u8, 0x00, 0x62]).unwrap();
         let src = format!(
             "fn msgOf(r: Result<String, String>) -> String {{ \
                  return match r {{ Ok(s) => \"ok\", Err(e) => e }} }} \
@@ -3314,8 +3314,8 @@ mod tests {
                  return 0 }}"
         );
         assert_eq!(run(&src).unwrap(), 0);
-        let _ = std::fs::remove_file(bad.replace('/', "\\"));
-        let _ = std::fs::remove_file(nul.replace('/', "\\"));
+        let _ = std::fs::remove_file(&bad);
+        let _ = std::fs::remove_file(&nul);
     }
 
     #[test]
@@ -3356,7 +3356,7 @@ mod tests {
     #[test]
     fn read_file_bytes_reads_binary() {
         let path = temp_path("binary");
-        std::fs::write(path.replace('/', "\\"), [0u8, 1, 2, 0xFF, 0]).unwrap();
+        std::fs::write(&path, [0u8, 1, 2, 0xFF, 0]).unwrap();
         let src = format!(
             "fn main() -> Int64 {{ \
                  return match readFileBytes(\"{path}\") {{ \
@@ -3366,7 +3366,7 @@ mod tests {
         );
         // Binary read: NUL and invalid-UTF-8 bytes are fine, all 5 come back.
         assert_eq!(run(&src).unwrap(), 5);
-        let _ = std::fs::remove_file(path.replace('/', "\\"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
