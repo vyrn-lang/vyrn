@@ -2650,6 +2650,37 @@ mod tests {
         assert_eq!(run("fn main() -> Int64 { return 2 + 3 * 4; }").unwrap(), 14);
     }
 
+    // ---- typed procedures (RFC-0019) ------------------------------------
+
+    #[test]
+    fn rpc_dispatch_runs_on_rpc_before_returning_and_ids_increment() {
+        // `onRpc` records the id it saw into module state. After the first
+        // `rpc()` returns, `seen` is already 1 — proving `onRpc` fired
+        // synchronously before the call returned. The second call's id is 2.
+        let src = "let mut seen: Int64 = 0 \
+                   type Req = { id: Int64 } \
+                   rpc fn p(req: Req) -> Req { return req } \
+                   export extern fn onRpc(id: Int64, status: Int64, body: String) { seen = id } \
+                   fn main() -> Int64 { \
+                       let a = rpc(p, Req { id: 9 }) \
+                       let checkpoint = seen \
+                       let b = rpc(p, Req { id: 9 }) \
+                       return checkpoint * 100 + b \
+                   }";
+        // checkpoint == 1 (onRpc ran before rpc returned) and b == 2 (ids ++).
+        assert_eq!(run(src).unwrap(), 102);
+    }
+
+    #[test]
+    fn rpc_procedure_trap_propagates() {
+        let src = "type Req = { id: Int64 } \
+                   rpc fn boom(req: Req) -> Req { let z = req.id - req.id let bad = req.id / z return req } \
+                   export extern fn onRpc(id: Int64, status: Int64, body: String) { print(\"x\") } \
+                   fn main() -> Int64 { let a = rpc(boom, Req { id: 5 }) return a }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("division by zero"), "{e}");
+    }
+
     // ---- testing (RFC-0015) ---------------------------------------------
 
     #[test]

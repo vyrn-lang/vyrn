@@ -1794,6 +1794,7 @@ fn reason_phrase(status: i64) -> &'static str {
         405 => "Method Not Allowed",
         409 => "Conflict",
         410 => "Gone",
+        415 => "Unsupported Media Type",
         418 => "I'm a teapot",
         422 => "Unprocessable Entity",
         429 => "Too Many Requests",

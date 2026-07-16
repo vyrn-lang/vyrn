@@ -3848,6 +3848,86 @@ mod tests {
         check(&parse(lex(s).unwrap()).unwrap())
     }
 
+    fn check_src_role(s: &str, role: CompileRole) -> Result<(), String> {
+        let program = parse(lex(s).unwrap()).unwrap();
+        match check_accum_with_role(&program, role).into_iter().next() {
+            Some(d) => Err(d.render()),
+            None => Ok(()),
+        }
+    }
+
+    // ---- typed procedures (RFC-0019) ------------------------------------
+
+    const ON_RPC: &str =
+        "export extern fn onRpc(id: Int64, status: Int64, body: String) { print(\"cb\") }";
+
+    #[test]
+    fn accepts_rpc_fn_and_rpc_call() {
+        let src = format!(
+            "type Req = {{ id: Int64 }} \
+             rpc fn getUser(req: Req) -> Req {{ return req }} \
+             {ON_RPC} \
+             fn main() -> Int64 {{ let x = rpc(getUser, Req {{ id: 1 }}) return 0 }}"
+        );
+        assert!(check_src(&src).is_ok(), "{:?}", check_src(&src));
+    }
+
+    #[test]
+    fn rejects_noncodable_rpc_parameter() {
+        let src = "type Shape = | Circle(Int64) | Square \
+                   rpc fn bad(s: Shape) -> Int64 { return 0 } \
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("cannot cross the wire"), "{e}");
+    }
+
+    #[test]
+    fn rejects_rpc_call_arg_mismatch() {
+        let src = format!(
+            "type Req = {{ id: Int64 }} \
+             rpc fn p(req: Req) -> Req {{ return req }} \
+             {ON_RPC} \
+             fn main() -> Int64 {{ let x = rpc(p, 42) return 0 }}"
+        );
+        let e = check_src(&src).unwrap_err();
+        assert!(e.contains("expects a request of type Req"), "{e}");
+    }
+
+    #[test]
+    fn rejects_rpc_on_non_procedure() {
+        let src = format!(
+            "fn helper(x: Int64) -> Int64 {{ return x }} \
+             {ON_RPC} \
+             fn main() -> Int64 {{ let x = rpc(helper, 5) return 0 }}"
+        );
+        let e = check_src(&src).unwrap_err();
+        assert!(e.contains("is not an `rpc fn`"), "{e}");
+    }
+
+    #[test]
+    fn rejects_missing_on_rpc_handler() {
+        let src = "type Req = { id: Int64 } \
+                   rpc fn p(req: Req) -> Req { return req } \
+                   fn main() -> Int64 { let x = rpc(p, Req { id: 1 }) return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("must define") && e.contains("onRpc"), "{e}");
+    }
+
+    #[test]
+    fn client_role_rejects_direct_procedure_call() {
+        let src = format!(
+            "type Req = {{ id: Int64 }} \
+             rpc fn p(req: Req) -> Req {{ return req }} \
+             {ON_RPC} \
+             export extern fn go(id: Int64) -> Int64 {{ let r = p(Req {{ id: id }}) return r.id }}"
+        );
+        // Server role: the direct call is fine (the body exists).
+        assert!(check_src_role(&src, CompileRole::Server).is_ok());
+        // Client role: it must be routed through `rpc()`.
+        let e = check_src_role(&src, CompileRole::Client).unwrap_err();
+        assert!(e.contains("through `rpc()` on the client"), "{e}");
+    }
+
     #[test]
     fn accepts_valid_program() {
         assert!(check_src("fn main() -> Int64 { let x = 2 + 3; print(x); return x; }").is_ok());

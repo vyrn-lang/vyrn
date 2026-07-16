@@ -6161,6 +6161,43 @@ mod tests {
         assert!(ir.contains("add i64"));
     }
 
+    // ---- typed procedures (RFC-0019) ------------------------------------
+
+    const RPC_SRC: &str = "type Req = { id: Int64 } \
+        type Res = { v: Int64 } \
+        rpc fn getUser(req: Req) -> Res { return Res { v: req.id } } \
+        export extern fn onRpc(id: Int64, status: Int64, body: String) { print(\"cb\") } \
+        fn main() -> Int64 { let a = rpc(getUser, Req { id: 5 }) return 0 }";
+
+    #[test]
+    fn server_role_rpc_lowers_to_in_process_dispatch() {
+        let ir = emit(&check(RPC_SRC).unwrap()).unwrap();
+        // The request-id counter, the procedure call, response encode, and the
+        // synchronous onRpc delivery — all in-process, no host import.
+        assert!(ir.contains("@__vela_rpc_next_id = global i64 0"), "counter:\n{ir}");
+        assert!(ir.contains("@vela_getUser("), "procedure call:\n{ir}");
+        assert!(ir.contains("@__vela_vj_encode(ptr"), "encode:\n{ir}");
+        assert!(ir.contains("call void @vela_onRpc(i64"), "onRpc delivery:\n{ir}");
+        assert!(!ir.contains("__vela_rpc_call"), "server role has no host import:\n{ir}");
+        // The procedure body IS present (server lowers it fully).
+        assert!(ir.contains("define"), "has defines");
+    }
+
+    #[test]
+    fn client_role_rpc_lowers_to_host_import_and_omits_bodies() {
+        let program = check(RPC_SRC).unwrap();
+        let ir = emit_with_role(&program, CompileRole::Client).unwrap();
+        // The `vela`.`__rpc` host import declaration and its call.
+        assert!(ir.contains("declare i64 @__vela_rpc_call(ptr, i64, ptr, i64)"), "import:\n{ir}");
+        assert!(ir.contains("\"wasm-import-name\"=\"__rpc\""), "import name:\n{ir}");
+        assert!(ir.contains("call i64 @__vela_rpc_call(ptr"), "import call:\n{ir}");
+        // The procedure body is NOT lowered (a remote stub), and no in-process
+        // dispatch machinery is emitted.
+        assert!(!ir.contains("define i64 @vela_getUser("), "procedure body omitted:\n{ir}");
+        assert!(!ir.contains("@__vela_rpc_next_id"), "no server counter:\n{ir}");
+        assert!(!ir.contains("call void @vela_onRpc"), "no in-process onRpc call:\n{ir}");
+    }
+
     // ---- input I/O (RFC-0014) -------------------------------------------
 
     #[test]

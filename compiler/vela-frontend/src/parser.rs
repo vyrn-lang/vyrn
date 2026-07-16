@@ -2186,6 +2186,39 @@ mod tests {
     }
 
     #[test]
+    fn rpc_fn_parses_as_a_flagged_function() {
+        // `rpc fn` and `export rpc fn` both set `is_rpc`; the body is an ordinary
+        // function body. Zero- and one-parameter forms both parse.
+        let src = "type Req = { id: Int64 } \
+                   rpc fn one(req: Req) -> Req { return req } \
+                   export rpc fn zero() -> Int64 { return 0 }";
+        let p = parse_src(src);
+        let one = p.functions.iter().find(|f| f.name == "one").expect("one");
+        assert!(one.is_rpc && !one.exported && one.params.len() == 1);
+        let zero = p.functions.iter().find(|f| f.name == "zero").expect("zero");
+        assert!(zero.is_rpc && zero.exported && zero.params.is_empty());
+    }
+
+    #[test]
+    fn rpc_fn_body_is_required() {
+        // A body-less `rpc fn` is a parse error (unlike `extern fn`, which is a
+        // body-less import) — `rpc fn` parses through the ordinary `function()`.
+        let toks = lex("rpc fn p(x: Int64) -> Int64").unwrap();
+        let (_, errs) = parse_accum(toks);
+        assert!(!errs.is_empty(), "body-less rpc fn must error");
+    }
+
+    #[test]
+    fn rpc_is_still_usable_as_an_identifier() {
+        // `rpc` is only a modifier immediately before `fn`; elsewhere it is a
+        // plain identifier (a variable name here).
+        let src = "fn main() -> Int64 { let rpc = 5 return rpc }";
+        let p = parse_src(src);
+        let f = &p.functions[0];
+        assert!(matches!(f.body.stmts[0], Stmt::Let { .. }));
+    }
+
+    #[test]
     fn inline_field_where_desugars_to_synthetic_validated_type() {
         let src = "type User = { name: String where value.length >= 3, age: Int64 } \
                    fn main() -> Int64 { return 0 }";
