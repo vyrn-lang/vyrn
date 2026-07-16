@@ -1,6 +1,6 @@
 //! A tree-walking interpreter for the v0.1 subset.
 //!
-//! This exists so Vela programs actually *run* today, with no LLVM. It is also
+//! This exists so Vyrn programs actually *run* today, with no LLVM. It is also
 //! the executable reference semantics that the codegen backends must match.
 //!
 //! Control flow uses [`Ctrl`] in the error channel: a real error, or a
@@ -366,7 +366,7 @@ fn parse_int(s: &str) -> Option<i64> {
 
 /// Run the program's `main` and return its integer result.
 ///
-/// The tree-walking interpreter recurses once per Vela call, so a deeply
+/// The tree-walking interpreter recurses once per Vyrn call, so a deeply
 /// recursive program can exhaust the OS main-thread stack (only ~1 MB on
 /// Windows). Run the interpreter on a dedicated thread with a large stack so
 /// recursion depth is bounded by the program, not the platform default.
@@ -404,7 +404,7 @@ fn run_inner(program: &Program, prog_args: &[String]) -> Result<i64, String> {
 /// Run the ROOT module's `test` blocks (RFC-0015) under the interpreter, in
 /// declaration order. Only tests with no `module` tag (the root's) run; an
 /// imported module's tests are skipped (they still type-check). `filter`, when
-/// present, keeps only tests whose name contains it (`velac test --name`).
+/// present, keeps only tests whose name contains it (`vyrn test --name`).
 ///
 /// `on_result` is invoked once per run test, AFTER its body finishes — so any
 /// `print` output the body produced has already streamed to stdout, and the
@@ -473,7 +473,7 @@ where
     Ok((passed, failed))
 }
 
-/// One HTTP request handed to a served `handle` (RFC-0016). The host (`velac
+/// One HTTP request handed to a served `handle` (RFC-0016). The host (`vyrn
 /// serve`) fills these from the wire; the interpreter turns each into a
 /// `Request` record before calling `handle`.
 pub struct ServeRequest {
@@ -700,7 +700,7 @@ impl Slot {
 
 impl<'a> Interp<'a> {
     /// Initialize module state (RFC-0013) once, in declaration order, before
-    /// `main` (or, under `velac test`, before the first test). Each initializer
+    /// `main` (or, under `vyrn test`, before the first test). Each initializer
     /// runs in a fresh empty local scope; a read of an earlier global falls back
     /// to the persistent frame populated as we go. The declared/annotated type is
     /// remembered so later assignments coerce.
@@ -1074,7 +1074,7 @@ impl<'a> Interp<'a> {
             Expr::Call { name, args, line } => {
                 // Test builtins (RFC-0015): `assert` / `assertEq`. A failing
                 // assertion traps the current test with a canonical message; the
-                // `velac test` runner catches it and marks the test FAILED.
+                // `vyrn test` runner catches it and marks the test FAILED.
                 if name == "assert" {
                     match self.expr(&args[0], scope)? {
                         Val::Bool(true) => return Ok(Val::Unit),
@@ -1313,7 +1313,7 @@ impl<'a> Interp<'a> {
                         }
                         _ => Err("chars of non-String".into()),
                     },
-                    // Input I/O (RFC-0014). Error payloads are canonical Vela
+                    // Input I/O (RFC-0014). Error payloads are canonical Vyrn
                     // wording (never Rust `io::Error` text) — kept byte-identical
                     // to the codegen's format strings so all three backends agree.
                     "args" => {
@@ -1337,7 +1337,7 @@ impl<'a> Interp<'a> {
                                 buf.pop();
                             }
                         }
-                        // A NUL byte cannot live in a NUL-terminated Vela String,
+                        // A NUL byte cannot live in a NUL-terminated Vyrn String,
                         // so a line containing one is not representable → None
                         // (the parity-safe rule; documented in RFC-0014).
                         if buf.contains(&0) {
@@ -2531,14 +2531,14 @@ mod tests {
 
     // ---- input I/O (RFC-0014) ---------------------------------------------
     // `readLine` streams real stdin, so it is exercised by the parity harness's
-    // `.stdin` fixtures (examples/input.vela) rather than unit-mocked here;
+    // `.stdin` fixtures (examples/input.vyrn) rather than unit-mocked here;
     // these cover the file and byte builtins, whose errors must be the
     // CANONICAL wording (never `io::Error` text).
 
-    /// A unique temp path (forward slashes, so it can embed in Vela source).
+    /// A unique temp path (forward slashes, so it can embed in Vyrn source).
     fn temp_path(tag: &str) -> String {
         let p = std::env::temp_dir().join(format!(
-            "vela-io-test-{tag}-{}.txt",
+            "vyrn-io-test-{tag}-{}.txt",
             std::process::id()
         ));
         p.to_string_lossy().replace('\\', "/")
@@ -2566,9 +2566,9 @@ mod tests {
     #[test]
     fn read_file_missing_yields_canonical_err() {
         let src = "fn main() -> Int64 { \
-                       let r = readFile(\"vela-io-test-definitely-missing.txt\") \
+                       let r = readFile(\"vyrn-io-test-definitely-missing.txt\") \
                        let msg = match r { Ok(s) => s, Err(e) => e } \
-                       if msg == \"cannot read `vela-io-test-definitely-missing.txt`\" { \
+                       if msg == \"cannot read `vyrn-io-test-definitely-missing.txt`\" { \
                            return 1 } \
                        return 0 }";
         assert_eq!(run(src).unwrap(), 1);
@@ -3770,8 +3770,8 @@ mod tests {
     #[test]
     fn dynamic_string_concat_and_len() {
         let src = "fn g(n: String) -> String { return \"Hi, \" + n + \"!\"; } \
-                   fn main() -> Int64 { return g(\"Vela\").length; }";
-        assert_eq!(run(src).unwrap(), 9); // "Hi, Vela!" = 9 bytes
+                   fn main() -> Int64 { return g(\"Vyrn\").length; }";
+        assert_eq!(run(src).unwrap(), 9); // "Hi, Vyrn!" = 9 bytes
     }
 
     #[test]
@@ -3839,12 +3839,12 @@ mod tests {
     }
 
     /// An `export extern fn` (RFC-0012 M2) is a normal function: calling it from
-    /// Vela runs its body — no trap anywhere. Only body-less imports trap
+    /// Vyrn runs its body — no trap anywhere. Only body-less imports trap
     /// off-wasm, so an export-extern-using program stays three-way-parity-capable.
     #[test]
     fn export_extern_is_a_normal_call() {
-        let src = "export extern fn velaAdd(a: Int64, b: Int64) -> Int64 { return a + b }\n\
-                   fn main() -> Int64 { return velaAdd(40, 2) }";
+        let src = "export extern fn vyrnAdd(a: Int64, b: Int64) -> Int64 { return a + b }\n\
+                   fn main() -> Int64 { return vyrnAdd(40, 2) }";
         assert_eq!(run(src).unwrap(), 42);
     }
 
@@ -3968,7 +3968,7 @@ mod tests {
 
     #[test]
     fn string_global_reads_back() {
-        let src = "let banner = \"vela\" \
+        let src = "let banner = \"vyrn\" \
                    fn f() -> Int64 { return banner.length } \
                    fn main() -> Int64 { return f() }";
         assert_eq!(run(src).unwrap(), 4);

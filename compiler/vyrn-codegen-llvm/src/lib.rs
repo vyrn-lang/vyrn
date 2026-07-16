@@ -1,15 +1,15 @@
-//! Inkwell (in-memory LLVM) backend for the Vela v0 subset.
+//! Inkwell (in-memory LLVM) backend for the Vyrn v0 subset.
 //!
 //! This is the "proper" backend the design chose (Rust + Inkwell). It builds an
 //! LLVM module in memory and can emit an object file directly, rather than going
-//! through textual IR like [`vela_codegen`].
+//! through textual IR like [`vyrn_codegen`].
 //!
 //! **Build requirement:** a matching LLVM toolchain and the right `inkwell`
 //! feature (see `Cargo.toml`). This crate is *excluded* from the default
 //! workspace so `cargo build`/`cargo test` at the repo root never needs LLVM.
 //!
 //! **Status:** written to mirror the interpreter's semantics
-//! ([`vela_frontend::interp`]) and the text emitter, but not yet compiled in the
+//! ([`vyrn_frontend::interp`]) and the text emitter, but not yet compiled in the
 //! authoring environment (no LLVM was present). Expect to make small
 //! version-specific adjustments to the `inkwell` API when you first build it.
 //!
@@ -31,12 +31,12 @@ use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::values::{BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, IntPredicate, OptimizationLevel};
 
-use vela_frontend::ast::*;
+use vyrn_frontend::ast::*;
 
 /// Compile `program` to a native object file at `out_path`.
 pub fn compile_to_object(program: &Program, out_path: &Path) -> Result<(), String> {
     let context = Context::create();
-    let module = context.create_module("vela");
+    let module = context.create_module("vyrn");
     let builder = context.create_builder();
 
     let mut cg = Codegen {
@@ -84,7 +84,7 @@ pub fn compile_to_object(program: &Program, out_path: &Path) -> Result<(), Strin
 /// Emit the textual LLVM IR (handy for debugging / comparing with the text backend).
 pub fn emit_ir(program: &Program) -> Result<String, String> {
     let context = Context::create();
-    let module = context.create_module("vela");
+    let module = context.create_module("vyrn");
     let builder = context.create_builder();
     let mut cg = Codegen {
         ctx: &context,
@@ -138,7 +138,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             Type::Option(_) | Type::Result(..) => Some(self.option_ty().into()),
             // Records, enums, generics, transformers, references, arrays, and
             // tasks are not supported by this backend (the text-IR backend in
-            // `vela-codegen` is the feature-complete native path).
+            // `vyrn-codegen` is the feature-complete native path).
             _ => None,
         }
     }
@@ -161,9 +161,9 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
 
     fn sym(name: &str) -> String {
         if name == "main" {
-            "vela_main".to_string()
+            "vyrn_main".to_string()
         } else {
-            format!("vela_{name}")
+            format!("vyrn_{name}")
         }
     }
 
@@ -394,7 +394,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             Expr::Call { name, args, .. } => self.gen_call(fv, name, args, scope),
             Expr::Match { scrutinee, arms, .. } => self.gen_match(fv, scrutinee, arms, scope),
             Expr::Try { expr, .. } => self.gen_try(fv, expr, scope),
-            // Records are not supported by the Inkwell backend yet; use `velac run`.
+            // Records are not supported by the Inkwell backend yet; use `vyrn run`.
             Expr::StructLit { name, .. } => {
                 Err(format!("record literal `{name} {{ .. }}` is not supported by the native backend"))
             }
@@ -636,7 +636,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             let (v, ty) = self.gen_expr(fv, &args[0], scope)?;
             if self.resolve(&ty) != Type::Int {
                 return Err(format!(
-                    "native backend supports Int payloads only (`{name}` payload is {ty:?}); use `velac run`"
+                    "native backend supports Int payloads only (`{name}` payload is {ty:?}); use `vyrn run`"
                 ));
             }
             let undef = self.option_ty().get_undef();
@@ -692,7 +692,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
         let (v, _) = self.gen_expr(fv, arg, scope)?;
         let named = Type::Named(decl.name.clone());
 
-        let is_const = vela_frontend::consteval::eval(arg, &HashMap::new()).is_some();
+        let is_const = vyrn_frontend::consteval::eval(arg, &HashMap::new()).is_some();
         let pred = match &decl.predicate {
             Some(p) if !is_const => p,
             _ => return Ok((v, named)), // proven, or no predicate: no runtime check
@@ -716,7 +716,7 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
         self.builder.position_at_end(fail_bb);
         let msg = self
             .builder
-            .build_global_string_ptr("Vela: validation failed\n", "verr")
+            .build_global_string_ptr("Vyrn: validation failed\n", "verr")
             .map_err(err)?
             .as_pointer_value();
         self.builder
@@ -734,16 +734,16 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
     }
 
     fn emit_c_main(&mut self) {
-        // define i32 @main() { %r = call i64 @vela_main(); ret i32 trunc(%r) }
+        // define i32 @main() { %r = call i64 @vyrn_main(); ret i32 trunc(%r) }
         let i32t = self.ctx.i32_type();
         let main_ty = i32t.fn_type(&[], false);
         let main_fn = self.module.add_function("main", main_ty, None);
         let bb = self.ctx.append_basic_block(main_fn, "entry");
         self.builder.position_at_end(bb);
-        let vela_main = self.functions["main"];
+        let vyrn_main = self.functions["main"];
         let r = self
             .builder
-            .build_call(vela_main, &[], "r")
+            .build_call(vyrn_main, &[], "r")
             .unwrap()
             .try_as_basic_value()
             .basic()
@@ -778,7 +778,7 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vela_frontend::check;
+    use vyrn_frontend::check;
 
     #[test]
     fn minimal_llvm_context() {
@@ -801,8 +801,8 @@ mod tests {
         let program = check(src).unwrap();
         // This actually drives the LLVM C API via inkwell and verifies the module.
         let ir = emit_ir(&program).unwrap();
-        assert!(ir.contains("define i64 @vela_main("), "{ir}");
-        assert!(ir.contains("define i64 @vela_fib("), "{ir}");
+        assert!(ir.contains("define i64 @vyrn_main("), "{ir}");
+        assert!(ir.contains("define i64 @vyrn_fib("), "{ir}");
         assert!(ir.contains("define i32 @main()"), "{ir}");
     }
 
@@ -811,7 +811,7 @@ mod tests {
         let src = "fn main() -> Int { let mut i = 0; let mut s = 0; \
                    while i < 10 { s = s + i; i = i + 1; } return s; }";
         let program = check(src).unwrap();
-        let out = std::env::temp_dir().join("vela_inkwell_test.o");
+        let out = std::env::temp_dir().join("vyrn_inkwell_test.o");
         compile_to_object(&program, &out).unwrap();
         let meta = std::fs::metadata(&out).unwrap();
         assert!(meta.len() > 0, "object file should be non-empty");
@@ -829,8 +829,8 @@ mod tests {
         ";
         let program = check(src).unwrap();
         let dir = std::env::temp_dir();
-        let obj = dir.join("vela_ink_e2e.o");
-        let exe = dir.join("vela_ink_e2e.exe");
+        let obj = dir.join("vyrn_ink_e2e.o");
+        let exe = dir.join("vyrn_ink_e2e.exe");
         compile_to_object(&program, &obj).unwrap();
 
         let clang = r"C:\Program Files\LLVM\bin\clang.exe";

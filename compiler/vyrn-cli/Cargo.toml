@@ -1,13 +1,13 @@
 [package]
-name = "vela-cli"
+name = "vyrn-cli"
 version = "0.0.0"
 edition = "2021"
-description = "The velac driver: check, run (interpret), or emit LLVM IR for a .vela file."
+description = "The vyrn driver: check, run (interpret), or emit LLVM IR for a .vyrn file."
 
 [dependencies]
-vela-frontend = { path = "../vela-frontend" }
-vela-codegen = { path = "../vela-codegen" }
+vyrn-frontend = { path = "../vyrn-frontend" }
+vyrn-codegen = { path = "../vyrn-codegen" }
 
 [[bin]]
-name = "velac"
+name = "vyrn"
 path = "src/main.rs"

@@ -1,4 +1,4 @@
-//! `vela_frontend::fmt` — the canonical formatter (RFC-0017).
+//! `vyrn_frontend::fmt` — the canonical formatter (RFC-0017).
 //!
 //! One style, no options. The printer works over the comment-preserving token
 //! stream ([`crate::lexer::lex_with_trivia`]) and only ever decides the

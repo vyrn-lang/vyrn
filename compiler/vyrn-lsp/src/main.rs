@@ -1,11 +1,11 @@
-//! A minimal, synchronous Language Server Protocol server for Vela.
+//! A minimal, synchronous Language Server Protocol server for Vyrn.
 //!
 //! Design goals (per the project's "easy maintained" constraint):
 //!   * No async runtime — a plain blocking `lsp-server` loop on the main thread.
 //!   * No duplication of the compiler. The only compiler calls are
-//!     [`vela_frontend::analyze`] (diagnostics + a symbol index, in one pass) and
-//!     the [`vela_frontend::resolve`] / [`vela_frontend::completions`] /
-//!     [`vela_frontend::member_completions`] queries over its result. This server
+//!     [`vyrn_frontend::analyze`] (diagnostics + a symbol index, in one pass) and
+//!     the [`vyrn_frontend::resolve`] / [`vyrn_frontend::completions`] /
+//!     [`vyrn_frontend::member_completions`] queries over its result. This server
 //!     is a pure adapter: text in, LSP diagnostics / hover / go-to-definition /
 //!     completion out.
 //!   * Hover, go-to-definition, and completion cover top-level functions, types,
@@ -37,16 +37,16 @@ use lsp_types::{
     TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
 };
 
-use vela_frontend::{analyze, completions, member_completions, resolve, Analysis, SymbolKind};
+use vyrn_frontend::{analyze, completions, member_completions, resolve, Analysis, SymbolKind};
 
 // ---------------------------------------------------------------------------
 // Multi-file analysis (RFC-0010). A document with `import`s is analyzed via
 // `analyze_linked`, which resolves the imports through the module loader so
 // imported names stop showing as "unknown" in the editor. The resolver below
 // is deliberately READ-ONLY and offline: local files come from disk; remote
-// modules come from `./vela_vendor` or `~/.vela/cache` *only if* `vela.lock`
+// modules come from `./vyrn_vendor` or `~/.vyrn/cache` *only if* `vyrn.lock`
 // already pins them (the editor never touches the network — fetching and
-// pinning stay `velac`'s job).
+// pinning stay `vyrn`'s job).
 // ---------------------------------------------------------------------------
 
 /// Analyze `text`, linking imports when the document has a real filesystem
@@ -57,7 +57,7 @@ fn analyze_doc(uri: &Url, text: &str) -> Analysis {
         Err(()) => return analyze(text),
     };
     let mut opts =
-        vela_frontend::loader::LoadOptions { std_root: std_root(), ..Default::default() };
+        vyrn_frontend::loader::LoadOptions { std_root: std_root(), ..Default::default() };
     let manifest_dir = std::path::Path::new(&path)
         .parent()
         .and_then(|d| find_manifest(d))
@@ -67,15 +67,15 @@ fn analyze_doc(uri: &Url, text: &str) -> Analysis {
             dir
         });
     let resolver = EditorResolver { manifest_dir };
-    vela_frontend::analyze_linked(text, &path, &opts, &resolver)
+    vyrn_frontend::analyze_linked(text, &path, &opts, &resolver)
 }
 
-/// The std-library root: `$VELA_STD`, or `std/` found by walking up from the
+/// The std-library root: `$VYRN_STD`, or `std/` found by walking up from the
 /// executable (the bundled server lives at `<repo>/editor/vscode/server/`,
-/// dev builds under `<repo>/compiler/vela-lsp/target/<profile>/` — both are
-/// within five levels of the repo's `std/`). Mirrors `velac`'s discovery.
+/// dev builds under `<repo>/compiler/vyrn-lsp/target/<profile>/` — both are
+/// within five levels of the repo's `std/`). Mirrors `vyrn`'s discovery.
 fn std_root() -> Option<String> {
-    if let Ok(p) = std::env::var("VELA_STD") {
+    if let Ok(p) = std::env::var("VYRN_STD") {
         if std::path::Path::new(&p).exists() {
             return Some(p.replace('\\', "/"));
         }
@@ -91,17 +91,17 @@ fn std_root() -> Option<String> {
     None
 }
 
-/// Find `vela.json` by walking up from `start`; returns the manifest's
+/// Find `vyrn.json` by walking up from `start`; returns the manifest's
 /// directory (slash-separated) and its `dependencies` import map. A compact
-/// duplicate of `velac`'s reader (the CLI is a binary crate, not linkable).
+/// duplicate of `vyrn`'s reader (the CLI is a binary crate, not linkable).
 fn find_manifest(start: &std::path::Path) -> Option<(String, Vec<(String, String)>)> {
-    use vela_frontend::schema::Json;
+    use vyrn_frontend::schema::Json;
     let mut dir = start.to_path_buf();
     loop {
-        let candidate = dir.join("vela.json");
+        let candidate = dir.join("vyrn.json");
         if candidate.is_file() {
             let text = std::fs::read_to_string(&candidate).ok()?;
-            let doc = vela_frontend::schema::parse_json(&text).ok()?;
+            let doc = vyrn_frontend::schema::parse_json(&text).ok()?;
             let deps = match doc.get("dependencies") {
                 Some(Json::Obj(entries)) => entries
                     .iter()
@@ -119,26 +119,26 @@ fn find_manifest(start: &std::path::Path) -> Option<(String, Vec<(String, String
 }
 
 /// Read-only module resolver for the editor: local paths from disk; remote
-/// specifiers served from the project's `vela_vendor/` or the user cache — but
-/// only when `vela.lock` pins them. Never fetches.
+/// specifiers served from the project's `vyrn_vendor/` or the user cache — but
+/// only when `vyrn.lock` pins them. Never fetches.
 struct EditorResolver {
-    /// Directory holding `vela.json` (and thus `vela.lock` / `vela_vendor/`),
+    /// Directory holding `vyrn.json` (and thus `vyrn.lock` / `vyrn_vendor/`),
     /// if the document is inside a project.
     manifest_dir: Option<String>,
 }
 
-impl vela_frontend::loader::ModuleResolver for EditorResolver {
+impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
     fn read(&self, resolved: &str) -> Result<String, String> {
-        if !vela_frontend::loader::is_remote(resolved) {
+        if !vyrn_frontend::loader::is_remote(resolved) {
             return std::fs::read_to_string(resolved).map_err(|e| e.to_string());
         }
         let dir = self
             .manifest_dir
             .as_deref()
-            .ok_or_else(|| "remote import outside a vela.json project".to_string())?;
-        let lock = std::fs::read_to_string(std::path::Path::new(dir).join("vela.lock"))
-            .map_err(|_| format!("`{resolved}` is not pinned yet — run `velac check` once to fetch it"))?;
-        // vela.lock is TSV: `specifier ⇥ resolved-url ⇥ sha256`, keyed by the
+            .ok_or_else(|| "remote import outside a vyrn.json project".to_string())?;
+        let lock = std::fs::read_to_string(std::path::Path::new(dir).join("vyrn.lock"))
+            .map_err(|_| format!("`{resolved}` is not pinned yet — run `vyrn check` once to fetch it"))?;
+        // vyrn.lock is TSV: `specifier ⇥ resolved-url ⇥ sha256`, keyed by the
         // exact specifier string the loader hands us.
         let sha = lock
             .lines()
@@ -149,20 +149,20 @@ impl vela_frontend::loader::ModuleResolver for EditorResolver {
             .find(|(spec, _)| *spec == resolved)
             .map(|(_, sha)| sha.to_string())
             .ok_or_else(|| {
-                format!("`{resolved}` is not pinned in vela.lock — run `velac check` once to fetch it")
+                format!("`{resolved}` is not pinned in vyrn.lock — run `vyrn check` once to fetch it")
             })?;
         let home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_else(|_| ".".to_string());
         for blob_dir in [
-            std::path::Path::new(dir).join("vela_vendor/sha256"),
-            std::path::Path::new(&home).join(".vela/cache/sha256"),
+            std::path::Path::new(dir).join("vyrn_vendor/sha256"),
+            std::path::Path::new(&home).join(".vyrn/cache/sha256"),
         ] {
             if let Ok(text) = std::fs::read_to_string(blob_dir.join(&sha)) {
                 return Ok(text);
             }
         }
-        Err(format!("`{resolved}` is pinned but not cached — run `velac check` once to fetch it"))
+        Err(format!("`{resolved}` is pinned but not cached — run `vyrn check` once to fetch it"))
     }
 }
 
@@ -214,14 +214,14 @@ fn handle_initialize(connection: &Connection) -> Result<(), ()> {
             ..Default::default()
         }),
         document_symbol_provider: Some(OneOf::Left(true)),
-        // Whole-document formatting (RFC-0017): the handler runs `vela_frontend::fmt`
+        // Whole-document formatting (RFC-0017): the handler runs `vyrn_frontend::fmt`
         // and returns one full-range replace. VS Code format-on-save then works.
         document_formatting_provider: Some(OneOf::Left(true)),
         ..Default::default()
     };
     let result = InitializeResult {
         capabilities,
-        server_info: Some(ServerInfo { name: "vela-lsp".into(), version: Some("0.1.0".into()) }),
+        server_info: Some(ServerInfo { name: "vyrn-lsp".into(), version: Some("0.1.0".into()) }),
     };
     let value = serde_json::to_value(result).unwrap();
     connection.initialize_finish(id, value).map_err(|_| ())?;
@@ -372,7 +372,7 @@ fn handle_formatting(server: &Server, params: serde_json::Value) -> Option<Vec<T
     let p: DocumentFormattingParams = serde_json::from_value(params).ok()?;
     let text = server.docs.get(&p.text_document.uri)?;
     // A lex error (or the internal safety tripwire) → `None` → null result.
-    let formatted = vela_frontend::fmt(text).ok()?;
+    let formatted = vyrn_frontend::fmt(text).ok()?;
     if &formatted == text {
         return Some(vec![]);
     }
@@ -401,11 +401,11 @@ fn whole_document_range(text: &str) -> Range {
     }
 }
 
-/// Map one frontend [`Symbol`](vela_frontend::Symbol) to an LSP `DocumentSymbol`.
+/// Map one frontend [`Symbol`](vyrn_frontend::Symbol) to an LSP `DocumentSymbol`.
 /// Field/Param/Local never appear in the top-level index; they are dropped
 /// defensively (the match must stay exhaustive). `col == 0` means "whole line"
 /// and `lsp_range` maps it to character 0.
-fn to_document_symbol(sym: &vela_frontend::Symbol) -> Option<DocumentSymbol> {
+fn to_document_symbol(sym: &vyrn_frontend::Symbol) -> Option<DocumentSymbol> {
     let kind = match sym.kind {
         SymbolKind::Function => lsp_types::SymbolKind::FUNCTION,
         SymbolKind::Method => lsp_types::SymbolKind::METHOD,
@@ -556,7 +556,7 @@ fn publish(
     connection: &Connection,
     uri: &Url,
     source: &str,
-    diags: &[vela_frontend::diagnostics::Diagnostic],
+    diags: &[vyrn_frontend::diagnostics::Diagnostic],
 ) {
     let mapped: Vec<LspDiagnostic> = diags
         .iter()
@@ -579,12 +579,12 @@ fn publish(
                     end: Position { line, character: end_char },
                 },
                 severity: Some(match d.severity {
-                    vela_frontend::diagnostics::Severity::Error => DiagnosticSeverity::ERROR,
-                    vela_frontend::diagnostics::Severity::Warning => DiagnosticSeverity::WARNING,
+                    vyrn_frontend::diagnostics::Severity::Error => DiagnosticSeverity::ERROR,
+                    vyrn_frontend::diagnostics::Severity::Warning => DiagnosticSeverity::WARNING,
                 }),
                 code: None,
                 code_description: None,
-                source: Some("vela".into()),
+                source: Some("vyrn".into()),
                 message: d.message.clone(),
                 related_information: None,
                 tags: None,
@@ -602,7 +602,7 @@ fn publish(
 /// of range. Uses `str::lines`, so a trailing `\r`/`\n` is not counted — this is
 /// the visible line length. (LSP positions are UTF-16 code units; for the
 /// *end* of a whole-line squiggle this is a cosmetic detail the client clamps
-/// to the line end, and Vela sources are overwhelmingly ASCII.)
+/// to the line end, and Vyrn sources are overwhelmingly ASCII.)
 fn line_char_len(source: &str, line_idx: usize) -> u32 {
     source.lines().nth(line_idx).map(|l| l.chars().count() as u32).unwrap_or(0)
 }

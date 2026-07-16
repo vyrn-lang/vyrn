@@ -1,4 +1,4 @@
-//! Integration tests for the symbol-query API (`vela_frontend::analyze` /
+//! Integration tests for the symbol-query API (`vyrn_frontend::analyze` /
 //! `resolve` / `completions`) — the core layer the LSP consumes for hover,
 //! go-to-definition, and completion.
 //!
@@ -9,16 +9,16 @@
 
 use std::collections::HashSet;
 
-use vela_frontend::{analyze, completions, member_completions, resolve, SymbolKind};
+use vyrn_frontend::{analyze, completions, member_completions, resolve, SymbolKind};
 
-/// The real `examples/enum.vela`, located relative to this crate's manifest dir
+/// The real `examples/enum.vyrn`, located relative to this crate's manifest dir
 /// (so the test tracks the actual example, not a stale inline copy).
-fn enum_vela() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/enum.vela");
-    std::fs::read_to_string(path).expect("examples/enum.vela should exist")
+fn enum_vyrn() -> String {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/enum.vyrn");
+    std::fs::read_to_string(path).expect("examples/enum.vyrn should exist")
 }
 
-fn names(a: &vela_frontend::Analysis) -> HashSet<String> {
+fn names(a: &vyrn_frontend::Analysis) -> HashSet<String> {
     a.symbols.iter().map(|s| s.name.clone()).collect()
 }
 
@@ -27,8 +27,8 @@ fn names(a: &vela_frontend::Analysis) -> HashSet<String> {
 /// is filtered out — it has no real source position.
 #[test]
 fn indexes_enum_example_symbols() {
-    let a = analyze(&enum_vela());
-    assert!(a.diagnostics.is_empty(), "enum.vela should be clean: {:?}", a.diagnostics);
+    let a = analyze(&enum_vyrn());
+    assert!(a.diagnostics.is_empty(), "enum.vyrn should be clean: {:?}", a.diagnostics);
     let n = names(&a);
     for expected in ["Shape", "Circle", "Rect", "Unit", "area", "main"] {
         assert!(n.contains(expected), "missing symbol {expected}: {:?}", n);
@@ -43,8 +43,8 @@ fn indexes_enum_example_symbols() {
 /// go-to-definition land on the exact name, not the whole line.
 #[test]
 fn symbols_have_precise_name_columns() {
-    let a = analyze(&enum_vela());
-    let by_name: std::collections::HashMap<&str, &vela_frontend::Symbol> =
+    let a = analyze(&enum_vyrn());
+    let by_name: std::collections::HashMap<&str, &vyrn_frontend::Symbol> =
         a.symbols.iter().map(|s| (s.name.as_str(), s)).collect();
     // `type Shape =` on line 4: "type" cols 1-4, space 5, "Shape" cols 6-10.
     let shape = by_name["Shape"];
@@ -67,7 +67,7 @@ fn symbols_have_precise_name_columns() {
 /// declaration (line 5) with a useful detail string.
 #[test]
 fn resolve_variant_at_call_site() {
-    let a = analyze(&enum_vela());
+    let a = analyze(&enum_vyrn());
     // Line 19: `    let a = area(Circle(2));` — "Circle" cols 18-23.
     let r = resolve(&a, 19, 18).expect("Circle at (19,18) should resolve");
     assert_eq!(r.kind, SymbolKind::Variant);
@@ -81,7 +81,7 @@ fn resolve_variant_at_call_site() {
 /// full signature (params with names + types, return type).
 #[test]
 fn resolve_function_at_call_site() {
-    let a = analyze(&enum_vela());
+    let a = analyze(&enum_vyrn());
     // Line 19: "area" cols 13-16.
     let r = resolve(&a, 19, 13).expect("area at (19,13) should resolve");
     assert_eq!(r.kind, SymbolKind::Function);
@@ -94,7 +94,7 @@ fn resolve_function_at_call_site() {
 /// a rendering of its enum arms.
 #[test]
 fn resolve_type_at_annotation() {
-    let a = analyze(&enum_vela());
+    let a = analyze(&enum_vyrn());
     // Line 10: `fn area(s: Shape) -> Int {` — "Shape" cols 12-16.
     let r = resolve(&a, 10, 12).expect("Shape at (10,12) should resolve");
     assert_eq!(r.kind, SymbolKind::Type);
@@ -106,7 +106,7 @@ fn resolve_type_at_annotation() {
 /// A cursor not on an identifier resolves to nothing.
 #[test]
 fn resolve_returns_none_off_identifier() {
-    let a = analyze(&enum_vela());
+    let a = analyze(&enum_vyrn());
     // Line 10, col 1 is the `f` of `fn` — a keyword token, not an Ident, so no
     // TokenInfo covers it.
     assert!(resolve(&a, 10, 1).is_none());
@@ -116,7 +116,7 @@ fn resolve_returns_none_off_identifier() {
 /// injected `Value` family is absent.
 #[test]
 fn completions_list_top_level() {
-    let a = analyze(&enum_vela());
+    let a = analyze(&enum_vyrn());
     let labels: HashSet<String> = completions(&a).into_iter().map(|c| c.label).collect();
     for expected in ["Shape", "Circle", "Rect", "Unit", "area", "main"] {
         assert!(labels.contains(expected), "completion missing {expected}: {:?}", labels);
@@ -176,14 +176,14 @@ fn parse_error_still_indexes_symbols() {
 /// the rendered first message rather than the vecs directly.)
 #[test]
 fn diagnostics_delegate_matches_analyze() {
-    let a = analyze(&enum_vela());
-    assert_eq!(a.diagnostics.len(), vela_frontend::diagnostics(&enum_vela()).len());
+    let a = analyze(&enum_vyrn());
+    assert_eq!(a.diagnostics.len(), vyrn_frontend::diagnostics(&enum_vyrn()).len());
     assert!(a.diagnostics.is_empty());
 
     // A broken file: both report one parse diagnostic with the same message.
     let bad = "fn main() -> Int64 { let x = ; return x; }";
     let ab = analyze(bad);
-    let db = vela_frontend::diagnostics(bad);
+    let db = vyrn_frontend::diagnostics(bad);
     assert_eq!(ab.diagnostics.len(), db.len());
     assert_eq!(ab.diagnostics.len(), 1);
     assert_eq!(ab.diagnostics[0].render(), db[0].render());
@@ -193,18 +193,18 @@ fn diagnostics_delegate_matches_analyze() {
 // locals: params, lets, for-in vars (hover + go-to-definition on variables)
 // ---------------------------------------------------------------------------
 
-/// The real `examples/foreach.vela` — a clean file with an annotated `let`, a
+/// The real `examples/foreach.vyrn` — a clean file with an annotated `let`, a
 /// mutable unannotated `let`, and `for`-in loop variables.
-fn foreach_vela() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/foreach.vela");
-    std::fs::read_to_string(path).expect("examples/foreach.vela should exist")
+fn foreach_vyrn() -> String {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/foreach.vyrn");
+    std::fs::read_to_string(path).expect("examples/foreach.vyrn should exist")
 }
 
 /// Hovering a parameter at a use site resolves to the param, with its declared
 /// type, and go-to-definition lands on the param name (not the function name).
 #[test]
 fn resolve_param_at_use_site() {
-    let a = analyze(&enum_vela());
+    let a = analyze(&enum_vyrn());
     // Line 11: `    return match s {` — `s` is at col 18 (1-based).
     let r = resolve(&a, 11, 18).expect("param s at (11,18) should resolve");
     assert_eq!(r.kind, SymbolKind::Param);
@@ -219,8 +219,8 @@ fn resolve_param_at_use_site() {
 /// declared type.
 #[test]
 fn resolve_annotated_let() {
-    let a = analyze(&foreach_vela());
-    assert!(a.diagnostics.is_empty(), "foreach.vela should be clean: {:?}", a.diagnostics);
+    let a = analyze(&foreach_vyrn());
+    assert!(a.diagnostics.is_empty(), "foreach.vyrn should be clean: {:?}", a.diagnostics);
     // Line 13: `    for s in squares {` — `squares` is at col 14.
     let r = resolve(&a, 13, 14).expect("squares at (13,14) should resolve");
     assert_eq!(r.kind, SymbolKind::Local);
@@ -235,7 +235,7 @@ fn resolve_annotated_let() {
 /// worked before; this just adds the type.)
 #[test]
 fn resolve_mutable_unannotated_let() {
-    let a = analyze(&foreach_vela());
+    let a = analyze(&foreach_vyrn());
     // Line 14: `        total = total + s;` — the first `total` is at col 9.
     let r = resolve(&a, 14, 9).expect("total at (14,9) should resolve");
     assert_eq!(r.kind, SymbolKind::Local);
@@ -249,7 +249,7 @@ fn resolve_mutable_unannotated_let() {
 /// element type (`for s: Int`).
 #[test]
 fn resolve_for_var() {
-    let a = analyze(&foreach_vela());
+    let a = analyze(&foreach_vyrn());
     // Line 14: `        total = total + s;` — the loop var `s` is at col 25.
     let r = resolve(&a, 14, 25).expect("for-var s at (14,25) should resolve");
     assert_eq!(r.kind, SymbolKind::Local);
@@ -288,7 +288,7 @@ fn main() -> Int64 {
 /// local-then-top-level fallback still reaches top-level names.
 #[test]
 fn local_falls_back_to_top_level_symbol() {
-    let a = analyze(&enum_vela());
+    let a = analyze(&enum_vyrn());
     // Line 19: `    let a = area(Circle(2));` — `area` is at col 13.
     let r = resolve(&a, 19, 13).expect("area at (19,13) should resolve");
     assert_eq!(r.kind, SymbolKind::Function);
@@ -564,7 +564,7 @@ fn member_completions_empty_without_receiver_type() {
 /// `analyze_linked` resolves imports through the loader: a two-file program
 /// that would show "unknown function" under plain `analyze` is clean, the
 /// imported name is indexed as a cross-file symbol (hover + go-to-definition
-/// into `lib.vela`), and it appears in completions.
+/// into `lib.vyrn`), and it appears in completions.
 #[test]
 fn analyze_linked_resolves_imports() {
     let root = "import { double } from \"./lib\"\n\nfn main() -> Int64 {\n    return double(21)\n}\n";
@@ -576,18 +576,18 @@ fn analyze_linked_resolves_imports() {
         "plain analyze should flag the imported name"
     );
 
-    let resolver = vela_frontend::loader::MapResolver(
-        [("lib.vela".to_string(), lib.to_string())].into_iter().collect(),
+    let resolver = vyrn_frontend::loader::MapResolver(
+        [("lib.vyrn".to_string(), lib.to_string())].into_iter().collect(),
     );
-    let opts = vela_frontend::loader::LoadOptions::default();
-    let a = vela_frontend::analyze_linked(root, "main.vela", &opts, &resolver);
+    let opts = vyrn_frontend::loader::LoadOptions::default();
+    let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver);
     assert!(a.diagnostics.is_empty(), "linked analyze should be clean: {:?}", a.diagnostics);
     let syms = names(&a);
     assert!(syms.contains("main"));
 
     // The imported symbol is indexed with its source file...
     let d = a.symbols.iter().find(|s| s.name == "double").expect("imported symbol indexed");
-    assert_eq!(d.file.as_deref(), Some("lib.vela"));
+    assert_eq!(d.file.as_deref(), Some("lib.vyrn"));
     assert_eq!(d.line, 1, "declaration line in the imported file");
     assert_eq!(d.col, 0, "foreign columns are unknown (whole-line)");
 
@@ -595,7 +595,7 @@ fn analyze_linked_resolves_imports() {
     // is inside `double`) with the cross-file target...
     let r = resolve(&a, 4, 13).expect("call site resolves");
     assert_eq!(r.name, "double");
-    assert_eq!(r.target_file.as_deref(), Some("lib.vela"));
+    assert_eq!(r.target_file.as_deref(), Some("lib.vyrn"));
     assert_eq!(r.target_line, 1);
     assert!(r.definition, "an imported symbol has a real declaration to jump to");
     assert!(r.hover.contains("double"), "hover shows the signature: {}", r.hover);
@@ -613,11 +613,11 @@ fn analyze_linked_resolves_imports() {
 fn import_collision_errors_but_root_index_survives() {
     let root = "import { helper } from \"./lib\"\n\nfn helper(x: Int64) -> Int64 {\n    return x\n}\n\nfn main() -> Int64 {\n    return helper(1)\n}\n";
     let lib = "export fn helper(x: Int64) -> Int64 {\n    return x + 1\n}\n";
-    let resolver = vela_frontend::loader::MapResolver(
-        [("lib.vela".to_string(), lib.to_string())].into_iter().collect(),
+    let resolver = vyrn_frontend::loader::MapResolver(
+        [("lib.vyrn".to_string(), lib.to_string())].into_iter().collect(),
     );
-    let opts = vela_frontend::loader::LoadOptions::default();
-    let a = vela_frontend::analyze_linked(root, "main.vela", &opts, &resolver);
+    let opts = vyrn_frontend::loader::LoadOptions::default();
+    let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver);
     assert!(!a.diagnostics.is_empty(), "the name collision must be reported");
     // Line 8: `    return helper(1)` — cursor inside `helper`.
     let r = resolve(&a, 8, 13).expect("call site still resolves");
@@ -631,15 +631,15 @@ fn import_collision_errors_but_root_index_survives() {
 fn analyze_linked_adopts_foreign_errors() {
     let root = "import { bad } from \"./lib\"\n\nfn main() -> Int64 {\n    return bad(1)\n}\n";
     let lib = "export fn bad(x: Int64) -> Int64 {\n    return \"nope\"\n}\n";
-    let resolver = vela_frontend::loader::MapResolver(
-        [("lib.vela".to_string(), lib.to_string())].into_iter().collect(),
+    let resolver = vyrn_frontend::loader::MapResolver(
+        [("lib.vyrn".to_string(), lib.to_string())].into_iter().collect(),
     );
-    let opts = vela_frontend::loader::LoadOptions::default();
-    let a = vela_frontend::analyze_linked(root, "main.vela", &opts, &resolver);
+    let opts = vyrn_frontend::loader::LoadOptions::default();
+    let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver);
     let d = a
         .diagnostics
         .iter()
-        .find(|d| d.message.starts_with("in lib.vela:"))
+        .find(|d| d.message.starts_with("in lib.vyrn:"))
         .expect("foreign error should be adopted with an `in <file>:` prefix");
     assert_eq!(d.line, 0, "foreign diagnostics anchor at line 0");
 }
@@ -649,9 +649,9 @@ fn analyze_linked_adopts_foreign_errors() {
 #[test]
 fn analyze_linked_missing_module_still_indexes_root() {
     let root = "import { f } from \"./gone\"\n\nfn main() -> Int64 {\n    return 0\n}\n";
-    let resolver = vela_frontend::loader::MapResolver(Default::default());
-    let opts = vela_frontend::loader::LoadOptions::default();
-    let a = vela_frontend::analyze_linked(root, "main.vela", &opts, &resolver);
+    let resolver = vyrn_frontend::loader::MapResolver(Default::default());
+    let opts = vyrn_frontend::loader::LoadOptions::default();
+    let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver);
     assert!(!a.diagnostics.is_empty(), "unresolvable import must be reported");
     assert!(names(&a).contains("main"), "root symbols survive a load failure");
 }

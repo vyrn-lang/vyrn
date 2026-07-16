@@ -337,7 +337,7 @@ fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
 /// with any predicate-derived constraints in `extra` (a predicate bound on the
 /// same key wins — it is checked against the width at runtime anyway, and a
 /// JSON object cannot repeat a key). `UInt64`'s maximum (2^64 − 1) exceeds
-/// what a Vela `where` clause (an `Int64` literal) can express on re-import,
+/// what a Vyrn `where` clause (an `Int64` literal) can express on re-import,
 /// so only its `minimum` is emitted.
 fn intn_schema(bits: u8, signed: bool, extra: &[(String, String)]) -> String {
     const BOUND_KEYS: [&str; 4] =
@@ -409,12 +409,12 @@ fn named_schema(decl: &TypeDecl, cx: &mut SchemaCx) -> String {
 /// has at most one `pattern`). A form the model can't capture is documented in a
 /// `$comment` (as for scalars).
 ///
-/// Length semantics (decided): Vela's `value.length` counts **bytes** (native
+/// Length semantics (decided): Vyrn's `value.length` counts **bytes** (native
 /// `strlen`, interp `str::len`), while JSON Schema's `minLength`/`maxLength`
 /// count Unicode code points. The two agree exactly on ASCII — which is what
 /// length refinements are used for in practice (usernames, codes, keys). For
 /// multi-byte text they diverge per bound: a code-point `maxLength` is looser
-/// than Vela's byte check (every code point is ≥ 1 byte), a code-point
+/// than Vyrn's byte check (every code point is ≥ 1 byte), a code-point
 /// `minLength` can be stricter. Emitting the numbers unchanged is the honest
 /// mapping; the runtime refinement remains the source of truth (the same
 /// stance every `$comment` fallback takes).
@@ -456,7 +456,7 @@ fn collect_string_constraints(pred: &Expr, out: &mut Vec<(String, String)>) -> b
         let b = collect_string_constraints(rhs, out);
         return a && b;
     }
-    // `value =~ "pat"` → a JSON Schema `pattern`. Vela's `=~` is a full match, so
+    // `value =~ "pat"` → a JSON Schema `pattern`. Vyrn's `=~` is a full match, so
     // anchor it (`^…$`); the subset is a subset of ECMA-262 with identical meaning.
     if *op == BinOp::Match {
         if is_value(lhs) {

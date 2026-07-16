@@ -3,20 +3,20 @@
 version = 4
 
 [[package]]
-name = "vela-cli"
+name = "vyrn-cli"
 version = "0.0.0"
 dependencies = [
- "vela-codegen",
- "vela-frontend",
+ "vyrn-codegen",
+ "vyrn-frontend",
 ]
 
 [[package]]
-name = "vela-codegen"
+name = "vyrn-codegen"
 version = "0.0.0"
 dependencies = [
- "vela-frontend",
+ "vyrn-frontend",
 ]
 
 [[package]]
-name = "vela-frontend"
+name = "vyrn-frontend"
 version = "0.0.0"

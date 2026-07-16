@@ -1,18 +1,18 @@
-//! `velac` — the Vela driver.
+//! `vyrn` — the Vyrn driver.
 //!
 //! Usage:
-//!   velac run     [file.vela]            Type-check and interpret; process exits with main's value.
-//!   velac check   [file.vela]            Type-check only; print "ok" or every diagnostic.
-//!   velac emit-ir [file.vela]            Print textual LLVM IR to stdout.
-//!   velac build   [file.vela] [-o out] [--target wasm]
+//!   vyrn run     [file.vyrn]            Type-check and interpret; process exits with main's value.
+//!   vyrn check   [file.vyrn]            Type-check only; print "ok" or every diagnostic.
+//!   vyrn emit-ir [file.vyrn]            Print textual LLVM IR to stdout.
+//!   vyrn build   [file.vyrn] [-o out] [--target wasm]
 //!                                        Compile to a native executable (or wasm) via clang.
-//!   velac test    [file.vela] [--name <substring>]
+//!   vyrn test    [file.vyrn] [--name <substring>]
 //!                                        Run the root file's `test` blocks under the interpreter.
-//!   velac serve   [file.vela] [--port N] Run `fn handle(req: Request) -> Response` as an HTTP host.
-//!   velac new     <name>                 Scaffold a project (vela.json + src/main.vela).
-//!   velac deps                           Print the resolved module graph.
+//!   vyrn serve   [file.vyrn] [--port N] Run `fn handle(req: Request) -> Response` as an HTTP host.
+//!   vyrn new     <name>                 Scaffold a project (vyrn.json + src/main.vyrn).
+//!   vyrn deps                           Print the resolved module graph.
 //!
-//! The file argument is optional whenever a `vela.json` manifest (found by
+//! The file argument is optional whenever a `vyrn.json` manifest (found by
 //! walking up from the current directory) declares a `"main"`. The manifest's
 //! `"dependencies"` map bare import specifiers to real ones.
 
@@ -21,12 +21,12 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: velac <run|check|emit-ir|build|test|serve|fmt> [file.vela] [-o out] [--target wasm] [--offline]\n       velac run [file.vela] [args...]   (trailing args reach the program's args())\n       velac test [file.vela] [--name <substring>]\n       velac serve [file.vela] [--port N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       velac fmt [file.vela ...] [--check]   (canonical formatter; no files = project main + local imports)\n       velac new <name> | velac add <specifier> [--name alias] | velac update [alias] | velac vendor [--check] | velac deps";
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|build|test|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn serve [file.vyrn] [--port N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
-/// `--offline` flag or `VELA_OFFLINE=1`: never touch the network; a lock+cache
+/// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
 fn offline(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--offline") || std::env::var("VELA_OFFLINE").is_ok()
+    args.iter().any(|a| a == "--offline") || std::env::var("VYRN_OFFLINE").is_ok()
 }
 
 fn main() -> ExitCode {
@@ -34,7 +34,7 @@ fn main() -> ExitCode {
     let is_offline = offline(&args);
     if is_offline {
         // Normalized so every later resolver construction sees it.
-        std::env::set_var("VELA_OFFLINE", "1");
+        std::env::set_var("VYRN_OFFLINE", "1");
     }
     args.retain(|a| a != "--offline");
     if args.len() < 2 {
@@ -45,7 +45,7 @@ fn main() -> ExitCode {
 
     if cmd == "new" {
         let Some(name) = args.get(2) else {
-            eprintln!("usage: velac new <name>");
+            eprintln!("usage: vyrn new <name>");
             return ExitCode::from(2);
         };
         return scaffold(name);
@@ -73,7 +73,7 @@ fn main() -> ExitCode {
         None => match manifest_main() {
             Some(p) => (p, &args[2..]),
             None => {
-                eprintln!("error: no input file, and no vela.json with a `main` found");
+                eprintln!("error: no input file, and no vyrn.json with a `main` found");
                 eprintln!("{USAGE}");
                 return ExitCode::from(2);
             }
@@ -119,7 +119,7 @@ fn main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            match vela_frontend::interp::run_with_args(&program, &prog_args) {
+            match vyrn_frontend::interp::run_with_args(&program, &prog_args) {
                 Ok(code) => {
                     // main's return value becomes the process exit code (0..=255).
                     ExitCode::from((code & 0xff) as u8)
@@ -135,7 +135,7 @@ fn main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            match vela_codegen::emit(&program) {
+            match vyrn_codegen::emit(&program) {
                 Ok(ir) => {
                     print!("{ir}");
                     ExitCode::SUCCESS
@@ -157,18 +157,18 @@ fn main() -> ExitCode {
 /// specifiers are normalized slash-paths relative to the root file.
 struct FsResolver;
 
-impl vela_frontend::loader::ModuleResolver for FsResolver {
+impl vyrn_frontend::loader::ModuleResolver for FsResolver {
     fn read(&self, resolved: &str) -> Result<String, String> {
         std::fs::read_to_string(resolved).map_err(|e| e.to_string())
     }
 }
 
-/// The std-library root: `$VELA_STD`, or `std/` found by walking up from the
-/// executable (dev builds live at `<repo>/compiler/target/<profile>/velac`,
+/// The std-library root: `$VYRN_STD`, or `std/` found by walking up from the
+/// executable (dev builds live at `<repo>/compiler/target/<profile>/vyrn`,
 /// so the repo's `std/` is a few levels up). `None` if not found — only an
 /// error if a program actually imports `std/...`.
 fn std_root() -> Option<String> {
-    if let Ok(p) = std::env::var("VELA_STD") {
+    if let Ok(p) = std::env::var("VYRN_STD") {
         if Path::new(&p).exists() {
             return Some(p.replace('\\', "/"));
         }
@@ -184,7 +184,7 @@ fn std_root() -> Option<String> {
     None
 }
 
-/// The project manifest (`vela.json`), parsed with the frontend's own JSON
+/// The project manifest (`vyrn.json`), parsed with the frontend's own JSON
 /// parser. All fields optional; unknown keys are ignored (forward compat).
 struct Manifest {
     /// Directory the manifest lives in (slash-separated).
@@ -193,21 +193,21 @@ struct Manifest {
     dependencies: Vec<(String, String)>,
 }
 
-/// Find `vela.json` by walking up from `start` (a directory).
+/// Find `vyrn.json` by walking up from `start` (a directory).
 fn find_manifest(start: &Path) -> Option<Manifest> {
     let mut dir = start.to_path_buf();
     loop {
-        let candidate = dir.join("vela.json");
+        let candidate = dir.join("vyrn.json");
         if candidate.is_file() {
             let text = std::fs::read_to_string(&candidate).ok()?;
-            let doc = match vela_frontend::schema::parse_json(&text) {
+            let doc = match vyrn_frontend::schema::parse_json(&text) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("warning: {} is not valid JSON: {e}", candidate.display());
                     return None;
                 }
             };
-            use vela_frontend::schema::Json;
+            use vyrn_frontend::schema::Json;
             let main = match doc.get("main") {
                 Some(Json::Str(s)) => Some(s.clone()),
                 _ => None,
@@ -241,9 +241,9 @@ fn manifest_main() -> Option<String> {
 }
 
 /// LoadOptions for a root file: std root + the nearest manifest's aliases.
-fn load_options(root: &str) -> vela_frontend::loader::LoadOptions {
+fn load_options(root: &str) -> vyrn_frontend::loader::LoadOptions {
     let mut opts =
-        vela_frontend::loader::LoadOptions { std_root: std_root(), ..Default::default() };
+        vyrn_frontend::loader::LoadOptions { std_root: std_root(), ..Default::default() };
     let start = Path::new(root)
         .parent()
         .map(|p| p.to_path_buf())
@@ -256,7 +256,7 @@ fn load_options(root: &str) -> vela_frontend::loader::LoadOptions {
     opts
 }
 
-/// `velac new <name>` — scaffold vela.json + src/main.vela + .gitignore.
+/// `vyrn new <name>` — scaffold vyrn.json + src/main.vyrn + .gitignore.
 fn scaffold(name: &str) -> ExitCode {
     let root = Path::new(name);
     if root.exists() {
@@ -264,14 +264,14 @@ fn scaffold(name: &str) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let manifest = format!(
-        "{{\n    \"name\": \"{name}\",\n    \"main\": \"src/main.vela\",\n    \"dependencies\": {{}}\n}}\n"
+        "{{\n    \"name\": \"{name}\",\n    \"main\": \"src/main.vyrn\",\n    \"dependencies\": {{}}\n}}\n"
     );
-    let main_vela = format!(
+    let main_vyrn = format!(
         "fn main() -> Int64 {{\n    print(\"hello from {name}\")\n    return 0\n}}\n"
     );
     let files: &[(&str, &str)] = &[
-        ("vela.json", &manifest),
-        ("src/main.vela", &main_vela),
+        ("vyrn.json", &manifest),
+        ("src/main.vyrn", &main_vyrn),
         (".gitignore", "*.exe\n*.ll\n*.wasm\n*.shim.c\n"),
     ];
     for (rel, content) in files {
@@ -287,14 +287,14 @@ fn scaffold(name: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    println!("created {name}/ (vela.json, src/main.vela) — try: cd {name} && velac run");
+    println!("created {name}/ (vyrn.json, src/main.vyrn) — try: cd {name} && vyrn run");
     ExitCode::SUCCESS
 }
 
-/// `velac deps` — print the resolved module graph of the project's main.
+/// `vyrn deps` — print the resolved module graph of the project's main.
 fn deps() -> ExitCode {
     let Some(main) = manifest_main() else {
-        eprintln!("error: no vela.json with a `main` found upward from here");
+        eprintln!("error: no vyrn.json with a `main` found upward from here");
         return ExitCode::FAILURE;
     };
     let source = match std::fs::read_to_string(&main) {
@@ -306,7 +306,7 @@ fn deps() -> ExitCode {
     };
     let root_key = main.trim_start_matches(r"\\?\").replace('\\', "/");
     let opts = load_options(&root_key);
-    match vela_frontend::loader::module_graph(&source, &root_key, &opts, &FsResolver) {
+    match vyrn_frontend::loader::module_graph(&source, &root_key, &opts, &FsResolver) {
         Ok(graph) => {
             for (module, imports) in graph {
                 println!("{module}");
@@ -326,7 +326,7 @@ fn deps() -> ExitCode {
     }
 }
 
-/// `velac fmt [file ...] [--check]` (RFC-0017) — the canonical formatter.
+/// `vyrn fmt [file ...] [--check]` (RFC-0017) — the canonical formatter.
 ///
 /// With explicit files, formats each in place. With no files, formats the
 /// project `main` plus its LOCAL (non-remote) imports, discovered through the
@@ -350,7 +350,7 @@ fn fmt_cmd(rest: &[String]) -> ExitCode {
         files
     };
     if targets.is_empty() {
-        eprintln!("error: no input files, and no vela.json with a `main` found");
+        eprintln!("error: no input files, and no vyrn.json with a `main` found");
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     }
@@ -370,7 +370,7 @@ fn fmt_cmd(rest: &[String]) -> ExitCode {
         // Normalize to LF for a stable comparison; the formatter emits LF and one
         // trailing newline. (Repo files are LF; a CRLF checkout still formats to LF.)
         let normalized = source.replace("\r\n", "\n");
-        match vela_frontend::fmt(&normalized) {
+        match vyrn_frontend::fmt(&normalized) {
             Ok(formatted) => {
                 if formatted != source {
                     if check {
@@ -414,7 +414,7 @@ fn fmt_cmd(rest: &[String]) -> ExitCode {
 }
 
 /// The project's `main` plus its local (non-remote) imports, as file paths — the
-/// default target set for a bare `velac fmt`. Remote imports (github:/gist:/https:)
+/// default target set for a bare `vyrn fmt`. Remote imports (github:/gist:/https:)
 /// are pinned artifacts, never formatted in place.
 fn fmt_project_files() -> Result<Vec<String>, ExitCode> {
     let Some(main) = manifest_main() else {
@@ -430,14 +430,14 @@ fn fmt_project_files() -> Result<Vec<String>, ExitCode> {
     let root_key = main.trim_start_matches(r"\\?\").replace('\\', "/");
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
-    match vela_frontend::loader::module_graph(&source, &root_key, &opts, &resolver) {
+    match vyrn_frontend::loader::module_graph(&source, &root_key, &opts, &resolver) {
         Ok(graph) => {
             // Module keys are the local modules' file paths (and remote specifiers,
             // which we exclude). De-duplicate while preserving order.
             let mut seen = std::collections::HashSet::new();
             let mut out = Vec::new();
             for (module, _imports) in graph {
-                if vela_frontend::loader::is_remote(&module) {
+                if vyrn_frontend::loader::is_remote(&module) {
                     continue;
                 }
                 if seen.insert(module.clone()) {
@@ -467,10 +467,10 @@ fn lock_home(root_key: &str) -> (PathBuf, Option<String>) {
         .filter(|p| !p.as_os_str().is_empty())
         .or_else(|| std::env::current_dir().ok());
     if let Some(m) = start.clone().and_then(|d| find_manifest(&d)) {
-        return (Path::new(&m.dir).join("vela.lock"), Some(m.dir));
+        return (Path::new(&m.dir).join("vyrn.lock"), Some(m.dir));
     }
     let dir = start.unwrap_or_else(|| PathBuf::from("."));
-    (dir.join("vela.lock"), None)
+    (dir.join("vyrn.lock"), None)
 }
 
 /// Build the CLI resolver (fs + lock/cache/network remote handling).
@@ -479,7 +479,7 @@ fn make_resolver(root_key: &str) -> remote::RemoteResolver {
     remote::RemoteResolver {
         lock: std::cell::RefCell::new(remote::Lock::load(lock_path)),
         project_dir,
-        offline: std::env::var("VELA_OFFLINE").is_ok(),
+        offline: std::env::var("VYRN_OFFLINE").is_ok(),
     }
 }
 
@@ -499,13 +499,13 @@ fn save_lock(resolver: &remote::RemoteResolver) -> Result<(), ExitCode> {
 
 /// Load + check a root file through the module loader, printing diagnostics
 /// (with their originating file) on failure.
-fn load_program(path: &str, source: &str) -> Result<vela_frontend::ast::Program, ExitCode> {
+fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program, ExitCode> {
     // Strip Windows' verbatim prefix (`\\?\C:\..`) — it survives neither the
     // slash normalization nor readable diagnostics.
     let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
-    let result = vela_frontend::load(source, &root_key, &opts, &resolver);
+    let result = vyrn_frontend::load(source, &root_key, &opts, &resolver);
     // Pins are kept even when a later stage fails — fetched is pinned.
     save_lock(&resolver)?;
     match result {
@@ -520,19 +520,19 @@ fn load_program(path: &str, source: &str) -> Result<vela_frontend::ast::Program,
     }
 }
 
-/// `velac add <specifier> [--name alias]` — fetch + pin a remote module and
-/// record it in vela.json's dependencies.
+/// `vyrn add <specifier> [--name alias]` — fetch + pin a remote module and
+/// record it in vyrn.json's dependencies.
 fn add(rest: &[String], _offline: bool) -> ExitCode {
     let Some(spec) = rest.first().filter(|s| !s.starts_with('-')) else {
-        eprintln!("usage: velac add <github:|gist:|https: specifier> [--name alias]");
+        eprintln!("usage: vyrn add <github:|gist:|https: specifier> [--name alias]");
         return ExitCode::from(2);
     };
-    let spec = if spec.ends_with(".vela") || spec.ends_with(".json") {
+    let spec = if spec.ends_with(".vyrn") || spec.ends_with(".json") {
         spec.clone()
     } else {
-        format!("{spec}.vela")
+        format!("{spec}.vyrn")
     };
-    if !vela_frontend::loader::is_remote(&spec) {
+    if !vyrn_frontend::loader::is_remote(&spec) {
         eprintln!("error: `add` takes a remote specifier (github:/gist:/https:)");
         return ExitCode::FAILURE;
     }
@@ -552,14 +552,14 @@ fn add(rest: &[String], _offline: bool) -> ExitCode {
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(manifest) = find_manifest(&cwd) else {
-        eprintln!("error: no vela.json found — run `velac new` or create one first");
+        eprintln!("error: no vyrn.json found — run `vyrn new` or create one first");
         return ExitCode::FAILURE;
     };
 
     // Fetch + pin now, so `add` fails fast on typos and the build is offline-
     // ready immediately.
-    let resolver = make_resolver(&format!("{}/vela.json", manifest.dir));
-    if let Err(e) = vela_frontend::loader::ModuleResolver::read(&resolver, &spec) {
+    let resolver = make_resolver(&format!("{}/vyrn.json", manifest.dir));
+    if let Err(e) = vyrn_frontend::loader::ModuleResolver::read(&resolver, &spec) {
         eprintln!("error: {e}");
         return ExitCode::FAILURE;
     }
@@ -567,18 +567,18 @@ fn add(rest: &[String], _offline: bool) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Record the alias in vela.json (a small textual JSON rewrite through the
+    // Record the alias in vyrn.json (a small textual JSON rewrite through the
     // frontend's parser + this serializer keeps key order stable).
-    let manifest_path = Path::new(&manifest.dir).join("vela.json");
+    let manifest_path = Path::new(&manifest.dir).join("vyrn.json");
     let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|_| "{}".into());
-    let doc = match vela_frontend::schema::parse_json(&text) {
+    let doc = match vyrn_frontend::schema::parse_json(&text) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("error: vela.json is not valid JSON: {e}");
+            eprintln!("error: vyrn.json is not valid JSON: {e}");
             return ExitCode::FAILURE;
         }
     };
-    use vela_frontend::schema::Json;
+    use vyrn_frontend::schema::Json;
     let mut fields = match doc {
         Json::Obj(f) => f,
         _ => Vec::new(),
@@ -600,27 +600,27 @@ fn add(rest: &[String], _offline: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `velac update [alias]` — re-resolve floating refs (all remote deps, or just
+/// `vyrn update [alias]` — re-resolve floating refs (all remote deps, or just
 /// one alias) and rewrite their pins.
 fn update(alias: Option<&str>) -> ExitCode {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(manifest) = find_manifest(&cwd) else {
-        eprintln!("error: no vela.json found");
+        eprintln!("error: no vyrn.json found");
         return ExitCode::FAILURE;
     };
-    let (lock_path, project_dir) = lock_home(&format!("{}/vela.json", manifest.dir));
+    let (lock_path, project_dir) = lock_home(&format!("{}/vyrn.json", manifest.dir));
     let mut lock = remote::Lock::load(lock_path);
     let targets: Vec<(String, String)> = manifest
         .dependencies
         .iter()
         .filter(|(name, spec)| {
-            vela_frontend::loader::is_remote(spec) && alias.is_none_or(|a| a == name)
+            vyrn_frontend::loader::is_remote(spec) && alias.is_none_or(|a| a == name)
         })
         .map(|(n, s)| {
-            let s = if s.ends_with(".vela") || s.ends_with(".json") {
+            let s = if s.ends_with(".vyrn") || s.ends_with(".json") {
                 s.clone()
             } else {
-                format!("{s}.vela")
+                format!("{s}.vyrn")
             };
             (n.clone(), s)
         })
@@ -640,7 +640,7 @@ fn update(alias: Option<&str>) -> ExitCode {
         offline: false,
     };
     for (_, spec) in &targets {
-        if let Err(e) = vela_frontend::loader::ModuleResolver::read(&resolver, spec) {
+        if let Err(e) = vyrn_frontend::loader::ModuleResolver::read(&resolver, spec) {
             eprintln!("error: {e}");
             return ExitCode::FAILURE;
         }
@@ -651,15 +651,15 @@ fn update(alias: Option<&str>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `velac vendor [--check]` — copy every locked blob into ./vela_vendor (or
+/// `vyrn vendor [--check]` — copy every locked blob into ./vyrn_vendor (or
 /// verify it is already there), making the checkout self-contained forever.
 fn vendor(check: bool) -> ExitCode {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(manifest) = find_manifest(&cwd) else {
-        eprintln!("error: no vela.json found");
+        eprintln!("error: no vyrn.json found");
         return ExitCode::FAILURE;
     };
-    let (lock_path, _) = lock_home(&format!("{}/vela.json", manifest.dir));
+    let (lock_path, _) = lock_home(&format!("{}/vyrn.json", manifest.dir));
     let lock = remote::Lock::load(lock_path);
     let vend = remote::vendor_dir(&manifest.dir);
     let cache = remote::cache_dir();
@@ -711,8 +711,8 @@ fn vendor(check: bool) -> ExitCode {
 }
 
 /// Pretty-print a Json value (4-space indent, stable key order).
-fn json_pretty(j: &vela_frontend::schema::Json, depth: usize) -> String {
-    use vela_frontend::schema::Json;
+fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
+    use vyrn_frontend::schema::Json;
     let pad = "    ".repeat(depth + 1);
     let close = "    ".repeat(depth);
     match j {
@@ -761,43 +761,43 @@ const RUNTIME_SHIM: &str = r#"
 #include <stdlib.h>
 #include <string.h>
 
-void* __vela_stderr(void) { return stderr; }
-void* __vela_stdout(void) { return stdout; }
+void* __vyrn_stderr(void) { return stderr; }
+void* __vyrn_stdout(void) { return stdout; }
 
 /* size_t-clean wrappers: the IR always passes/returns 64-bit sizes, so these
    adapt on ILP32 targets (wasm32) and are transparent on LP64/LLP64. */
-unsigned long long __vela_strlen(const char* s) { return (unsigned long long)strlen(s); }
+unsigned long long __vyrn_strlen(const char* s) { return (unsigned long long)strlen(s); }
 
 /* Allocation failure is a trap, not a null dereference: the emitted IR never
    null-checks (every alloc site would need a branch), so the single choke
    point checks instead. The size guard matters on ILP32 (wasm32): without it
    a 64-bit request silently truncates in the (size_t) cast, and a huge size
    could wrap to a tiny allocation - a buffer overflow, not an error. */
-static void* __vela_alloc_check(void* p, unsigned long long n) {
+static void* __vyrn_alloc_check(void* p, unsigned long long n) {
     if (p == NULL && n > 0) {
         fputs("error: out of memory\n", stderr);
         exit(1);
     }
     return p;
 }
-void* __vela_malloc(unsigned long long n) {
+void* __vyrn_malloc(unsigned long long n) {
     if (n > (unsigned long long)(size_t)-1) {
         fputs("error: out of memory\n", stderr);
         exit(1);
     }
-    return __vela_alloc_check(malloc((size_t)n), n);
+    return __vyrn_alloc_check(malloc((size_t)n), n);
 }
-void* __vela_realloc(void* p, unsigned long long n) {
+void* __vyrn_realloc(void* p, unsigned long long n) {
     if (n > (unsigned long long)(size_t)-1) {
         fputs("error: out of memory\n", stderr);
         exit(1);
     }
-    return __vela_alloc_check(realloc(p, (size_t)n), n);
+    return __vyrn_alloc_check(realloc(p, (size_t)n), n);
 }
-int __vela_strncmp(const char* a, const char* b, unsigned long long n) {
+int __vyrn_strncmp(const char* a, const char* b, unsigned long long n) {
     return strncmp(a, b, (size_t)n);
 }
-int __vela_snprintf(char* buf, unsigned long long n, const char* fmt, ...) {
+int __vyrn_snprintf(char* buf, unsigned long long n, const char* fmt, ...) {
     va_list ap;
     int r;
     va_start(ap, fmt);
@@ -809,27 +809,27 @@ int __vela_snprintf(char* buf, unsigned long long n, const char* fmt, ...) {
 /* ---- input I/O (RFC-0014) ----------------------------------------------- */
 /* argv is stashed by `main` and served to `args()` as argv[1..]. wasi-libc
    populates argv identically on the wasm target (the host provides args_get). */
-static int __vela_argc = 0;
-static char** __vela_argv = 0;
-long long __vela_args_count(void) {
-    return (long long)(__vela_argc > 1 ? __vela_argc - 1 : 0);
+static int __vyrn_argc = 0;
+static char** __vyrn_argv = 0;
+long long __vyrn_args_count(void) {
+    return (long long)(__vyrn_argc > 1 ? __vyrn_argc - 1 : 0);
 }
-const char* __vela_args_get(long long i) { return __vela_argv[i + 1]; }
+const char* __vyrn_args_get(long long i) { return __vyrn_argv[i + 1]; }
 
 /* readLine: one line from stdin as a malloc'd, NUL-terminated buffer with its
    trailing \r?\n stripped; *outlen is its byte length. Returns NULL at EOF (no
    bytes) and also for a line containing an embedded NUL byte, which cannot live
-   in a NUL-terminated Vela String (the parity-safe rule, RFC-0014). The codegen
+   in a NUL-terminated Vyrn String (the parity-safe rule, RFC-0014). The codegen
    validates UTF-8 (via the shared DFA); an invalid line reads as None too. */
-char* __vela_read_line(unsigned long long* outlen) {
+char* __vyrn_read_line(unsigned long long* outlen) {
     int c = getchar();
     if (c == EOF) return 0;
     unsigned long long cap = 64, len = 0;
-    char* buf = (char*)__vela_malloc(cap);
+    char* buf = (char*)__vyrn_malloc(cap);
     int had_nul = 0;
     while (c != EOF && c != '\n') {
         if (c == 0) had_nul = 1;
-        if (len + 2 >= cap) { cap *= 2; buf = (char*)__vela_realloc(buf, cap); }
+        if (len + 2 >= cap) { cap *= 2; buf = (char*)__vyrn_realloc(buf, cap); }
         buf[len++] = (char)c;
         c = getchar();
     }
@@ -845,13 +845,13 @@ char* __vela_read_line(unsigned long long* outlen) {
    file contains an embedded NUL byte. UTF-8 validation (status 2) is done by
    the codegen after this returns, reusing the shared DFA. A read loop (not
    fseek/ftell) keeps it portable across regular files, pipes, and wasi-libc. */
-int __vela_read_file(const char* path, char** out, unsigned long long* outlen) {
+int __vyrn_read_file(const char* path, char** out, unsigned long long* outlen) {
     FILE* f = fopen(path, "rb");
     if (f == 0) return 1;
     unsigned long long cap = 1024, len = 0;
-    char* buf = (char*)__vela_malloc(cap);
+    char* buf = (char*)__vyrn_malloc(cap);
     for (;;) {
-        if (len + 1 >= cap) { cap *= 2; buf = (char*)__vela_realloc(buf, cap); }
+        if (len + 1 >= cap) { cap *= 2; buf = (char*)__vyrn_realloc(buf, cap); }
         size_t got = fread(buf + len, 1, (size_t)(cap - len - 1), f);
         len += (unsigned long long)got;
         if (got == 0) break;
@@ -869,13 +869,13 @@ int __vela_read_file(const char* path, char** out, unsigned long long* outlen) {
 }
 
 /* readFileBytes (M2): binary read, no UTF-8/NUL checks. Status 0 ok / 1 io. */
-int __vela_read_file_bytes(const char* path, char** out, unsigned long long* outlen) {
+int __vyrn_read_file_bytes(const char* path, char** out, unsigned long long* outlen) {
     FILE* f = fopen(path, "rb");
     if (f == 0) return 1;
     unsigned long long cap = 1024, len = 0;
-    char* buf = (char*)__vela_malloc(cap);
+    char* buf = (char*)__vyrn_malloc(cap);
     for (;;) {
-        if (len + 1 >= cap) { cap *= 2; buf = (char*)__vela_realloc(buf, cap); }
+        if (len + 1 >= cap) { cap *= 2; buf = (char*)__vyrn_realloc(buf, cap); }
         size_t got = fread(buf + len, 1, (size_t)(cap - len), f);
         len += (unsigned long long)got;
         if (got == 0) break;
@@ -889,9 +889,9 @@ int __vela_read_file_bytes(const char* path, char** out, unsigned long long* out
 }
 
 /* writeFile: create/truncate + write all bytes. Status 0 ok / 1 io-error. A
-   Vela String is NUL-terminated and never contains a NUL, so strlen is its
+   Vyrn String is NUL-terminated and never contains a NUL, so strlen is its
    full length. */
-int __vela_write_file(const char* path, const char* contents) {
+int __vyrn_write_file(const char* path, const char* contents) {
     FILE* f = fopen(path, "wb");
     if (f == 0) return 1;
     size_t n = strlen(contents);
@@ -904,7 +904,7 @@ int __vela_write_file(const char* path, const char* contents) {
 /* ---- JSON codec runtime (RFC-0018) -------------------------------------- */
 /* A tagged JSON DOM plus a parser, canonical encoder, and a decode-side issue
    accumulator. The per-type encode/decode functions are GENERATED as LLVM IR
-   (see vela-codegen); this shim owns the parity-critical string work — number
+   (see vyrn-codegen); this shim owns the parity-critical string work — number
    formatting, escaping, and the parser error wording — so the native output is
    byte-identical to the interpreter's `crate::codec`. */
 
@@ -920,62 +920,62 @@ struct VJ {
     VJMember* mem; unsigned long long nmem, capmem;     /* VJ_OBJ */
 };
 
-static char* __vela_dup(const char* s) {
+static char* __vyrn_dup(const char* s) {
     unsigned long long n = strlen(s);
-    char* r = (char*)__vela_malloc(n + 1);
+    char* r = (char*)__vyrn_malloc(n + 1);
     memcpy(r, s, n + 1);
     return r;
 }
-static VJ* __vela_vj_new(int kind) {
-    VJ* v = (VJ*)__vela_malloc(sizeof(VJ));
+static VJ* __vyrn_vj_new(int kind) {
+    VJ* v = (VJ*)__vyrn_malloc(sizeof(VJ));
     v->kind = kind; v->bval = 0; v->text = 0; v->is_int = 0;
     v->items = 0; v->nitems = 0; v->capitems = 0;
     v->mem = 0; v->nmem = 0; v->capmem = 0;
     return v;
 }
-VJ* __vela_vj_obj(void) { return __vela_vj_new(VJ_OBJ); }
-VJ* __vela_vj_arr(void) { return __vela_vj_new(VJ_ARR); }
-VJ* __vela_vj_null(void) { return __vela_vj_new(VJ_NULL); }
-VJ* __vela_vj_bool(int b) { VJ* v = __vela_vj_new(VJ_BOOL); v->bval = b ? 1 : 0; return v; }
-static VJ* __vela_vj_num_text(const char* t, int is_int) {
-    VJ* v = __vela_vj_new(VJ_NUM); v->text = __vela_dup(t); v->is_int = is_int; return v;
+VJ* __vyrn_vj_obj(void) { return __vyrn_vj_new(VJ_OBJ); }
+VJ* __vyrn_vj_arr(void) { return __vyrn_vj_new(VJ_ARR); }
+VJ* __vyrn_vj_null(void) { return __vyrn_vj_new(VJ_NULL); }
+VJ* __vyrn_vj_bool(int b) { VJ* v = __vyrn_vj_new(VJ_BOOL); v->bval = b ? 1 : 0; return v; }
+static VJ* __vyrn_vj_num_text(const char* t, int is_int) {
+    VJ* v = __vyrn_vj_new(VJ_NUM); v->text = __vyrn_dup(t); v->is_int = is_int; return v;
 }
-VJ* __vela_vj_int(long long x) {
-    char buf[32]; __vela_snprintf(buf, 32, "%lld", x); return __vela_vj_num_text(buf, 1);
+VJ* __vyrn_vj_int(long long x) {
+    char buf[32]; __vyrn_snprintf(buf, 32, "%lld", x); return __vyrn_vj_num_text(buf, 1);
 }
-VJ* __vela_vj_uint(unsigned long long x) {
-    char buf[32]; __vela_snprintf(buf, 32, "%llu", x); return __vela_vj_num_text(buf, 1);
+VJ* __vyrn_vj_uint(unsigned long long x) {
+    char buf[32]; __vyrn_snprintf(buf, 32, "%llu", x); return __vyrn_vj_num_text(buf, 1);
 }
-VJ* __vela_vj_float(double x) {
+VJ* __vyrn_vj_float(double x) {
     /* NaN renders as `NaN` (matching the interpreter's Rust formatting). */
-    if (x != x) return __vela_vj_num_text("NaN", 0);
-    char buf[512]; __vela_snprintf(buf, 512, "%f", x); return __vela_vj_num_text(buf, 0);
+    if (x != x) return __vyrn_vj_num_text("NaN", 0);
+    char buf[512]; __vyrn_snprintf(buf, 512, "%f", x); return __vyrn_vj_num_text(buf, 0);
 }
-VJ* __vela_vj_str(const char* s) { VJ* v = __vela_vj_new(VJ_STR); v->text = __vela_dup(s); return v; }
-void __vela_vj_push(VJ* a, VJ* c) {
+VJ* __vyrn_vj_str(const char* s) { VJ* v = __vyrn_vj_new(VJ_STR); v->text = __vyrn_dup(s); return v; }
+void __vyrn_vj_push(VJ* a, VJ* c) {
     if (a->nitems + 1 > a->capitems) {
         a->capitems = a->capitems ? a->capitems * 2 : 4;
-        a->items = (VJ**)__vela_realloc(a->items, a->capitems * sizeof(VJ*));
+        a->items = (VJ**)__vyrn_realloc(a->items, a->capitems * sizeof(VJ*));
     }
     a->items[a->nitems++] = c;
 }
-void __vela_vj_set(VJ* o, const char* key, VJ* c) {
+void __vyrn_vj_set(VJ* o, const char* key, VJ* c) {
     if (o->nmem + 1 > o->capmem) {
         o->capmem = o->capmem ? o->capmem * 2 : 4;
-        o->mem = (VJMember*)__vela_realloc(o->mem, o->capmem * sizeof(VJMember));
+        o->mem = (VJMember*)__vyrn_realloc(o->mem, o->capmem * sizeof(VJMember));
     }
-    o->mem[o->nmem].key = __vela_dup(key);
+    o->mem[o->nmem].key = __vyrn_dup(key);
     o->mem[o->nmem].val = c;
     o->nmem++;
 }
 
 /* ---- growable byte buffer (encoder) ------------------------------------- */
 typedef struct { char* p; unsigned long long len, cap; } VSB;
-static void vsb_init(VSB* s) { s->cap = 64; s->len = 0; s->p = (char*)__vela_malloc(s->cap); s->p[0] = 0; }
+static void vsb_init(VSB* s) { s->cap = 64; s->len = 0; s->p = (char*)__vyrn_malloc(s->cap); s->p[0] = 0; }
 static void vsb_ensure(VSB* s, unsigned long long extra) {
     if (s->len + extra + 1 > s->cap) {
         while (s->len + extra + 1 > s->cap) s->cap *= 2;
-        s->p = (char*)__vela_realloc(s->p, s->cap);
+        s->p = (char*)__vyrn_realloc(s->p, s->cap);
     }
 }
 static void vsb_putc(VSB* s, char c) { vsb_ensure(s, 1); s->p[s->len++] = c; s->p[s->len] = 0; }
@@ -991,12 +991,12 @@ static void vsb_escape(VSB* s, const char* t) {
         else if (c == '\n') vsb_puts(s, "\\n");
         else if (c == '\t') vsb_puts(s, "\\t");
         else if (c == '\r') vsb_puts(s, "\\r");
-        else if (c < 0x20) { char b[8]; __vela_snprintf(b, 8, "\\u%04x", (unsigned)c); vsb_puts(s, b); }
+        else if (c < 0x20) { char b[8]; __vyrn_snprintf(b, 8, "\\u%04x", (unsigned)c); vsb_puts(s, b); }
         else vsb_putc(s, (char)c);
     }
     vsb_putc(s, '"');
 }
-static void __vela_vj_write(VSB* s, VJ* v) {
+static void __vyrn_vj_write(VSB* s, VJ* v) {
     unsigned long long i;
     switch (v->kind) {
         case VJ_NULL: vsb_puts(s, "null"); break;
@@ -1005,7 +1005,7 @@ static void __vela_vj_write(VSB* s, VJ* v) {
         case VJ_STR: vsb_escape(s, v->text); break;
         case VJ_ARR:
             vsb_putc(s, '[');
-            for (i = 0; i < v->nitems; i++) { if (i) vsb_putc(s, ','); __vela_vj_write(s, v->items[i]); }
+            for (i = 0; i < v->nitems; i++) { if (i) vsb_putc(s, ','); __vyrn_vj_write(s, v->items[i]); }
             vsb_putc(s, ']');
             break;
         default: /* VJ_OBJ */
@@ -1014,21 +1014,21 @@ static void __vela_vj_write(VSB* s, VJ* v) {
                 if (i) vsb_putc(s, ',');
                 vsb_escape(s, v->mem[i].key);
                 vsb_putc(s, ':');
-                __vela_vj_write(s, v->mem[i].val);
+                __vyrn_vj_write(s, v->mem[i].val);
             }
             vsb_putc(s, '}');
             break;
     }
 }
-char* __vela_vj_encode(VJ* v) { VSB s; vsb_init(&s); __vela_vj_write(&s, v); return s.p; }
+char* __vyrn_vj_encode(VJ* v) { VSB s; vsb_init(&s); __vyrn_vj_write(&s, v); return s.p; }
 
 /* ---- parser (byte positions; wording mirrors crate::codec) -------------- */
 typedef struct { const char* b; unsigned long long i, n; char* err; } VJP;
 static void vjp_err_pos(VJP* p, const char* what) {
-    char buf[64]; __vela_snprintf(buf, 64, "%s at position %llu", what, p->i);
-    p->err = __vela_dup(buf);
+    char buf[64]; __vyrn_snprintf(buf, 64, "%s at position %llu", what, p->i);
+    p->err = __vyrn_dup(buf);
 }
-static void vjp_err_end(VJP* p) { p->err = __vela_dup("unexpected end of input"); }
+static void vjp_err_end(VJP* p) { p->err = __vyrn_dup("unexpected end of input"); }
 static void vjp_ws(VJP* p) {
     while (p->i < p->n) {
         char c = p->b[p->i];
@@ -1105,9 +1105,9 @@ static VJ* vjp_num(VJP* p) {
         while (vjp_isdigit(p)) p->i++;
     }
     unsigned long long len = p->i - start;
-    char* t = (char*)__vela_malloc(len + 1);
+    char* t = (char*)__vyrn_malloc(len + 1);
     memcpy(t, p->b + start, len); t[len] = 0;
-    return __vela_vj_num_text(t, is_int);
+    return __vyrn_vj_num_text(t, is_int);
 }
 static VJ* vjp_lit(VJP* p, const char* word, VJ* v) {
     for (const char* w = word; *w; w++) {
@@ -1119,7 +1119,7 @@ static VJ* vjp_lit(VJP* p, const char* word, VJ* v) {
 }
 static VJ* vjp_obj(VJP* p) {
     p->i++;                                     /* '{' */
-    VJ* o = __vela_vj_obj();
+    VJ* o = __vyrn_vj_obj();
     vjp_ws(p);
     if (p->i < p->n && p->b[p->i] == '}') { p->i++; return o; }
     for (;;) {
@@ -1133,7 +1133,7 @@ static VJ* vjp_obj(VJP* p) {
         vjp_ws(p);
         VJ* v = vjp_value(p);
         if (!v) return 0;
-        __vela_vj_set(o, k, v);
+        __vyrn_vj_set(o, k, v);
         vjp_ws(p);
         if (p->i < p->n && p->b[p->i] == ',') { p->i++; continue; }
         if (p->i < p->n && p->b[p->i] == '}') { p->i++; return o; }
@@ -1143,14 +1143,14 @@ static VJ* vjp_obj(VJP* p) {
 }
 static VJ* vjp_arr(VJP* p) {
     p->i++;                                     /* '[' */
-    VJ* a = __vela_vj_arr();
+    VJ* a = __vyrn_vj_arr();
     vjp_ws(p);
     if (p->i < p->n && p->b[p->i] == ']') { p->i++; return a; }
     for (;;) {
         vjp_ws(p);
         VJ* v = vjp_value(p);
         if (!v) return 0;
-        __vela_vj_push(a, v);
+        __vyrn_vj_push(a, v);
         vjp_ws(p);
         if (p->i < p->n && p->b[p->i] == ',') { p->i++; continue; }
         if (p->i < p->n && p->b[p->i] == ']') { p->i++; return a; }
@@ -1163,15 +1163,15 @@ static VJ* vjp_value(VJP* p) {
     char c = p->b[p->i];
     if (c == '{') return vjp_obj(p);
     if (c == '[') return vjp_arr(p);
-    if (c == '"') { char* s = vjp_string(p); if (!s) return 0; return __vela_vj_str(s); }
-    if (c == 't') return vjp_lit(p, "true", __vela_vj_bool(1));
-    if (c == 'f') return vjp_lit(p, "false", __vela_vj_bool(0));
-    if (c == 'n') return vjp_lit(p, "null", __vela_vj_null());
+    if (c == '"') { char* s = vjp_string(p); if (!s) return 0; return __vyrn_vj_str(s); }
+    if (c == 't') return vjp_lit(p, "true", __vyrn_vj_bool(1));
+    if (c == 'f') return vjp_lit(p, "false", __vyrn_vj_bool(0));
+    if (c == 'n') return vjp_lit(p, "null", __vyrn_vj_null());
     if (c == '-' || (c >= '0' && c <= '9')) return vjp_num(p);
     vjp_err_pos(p, "unexpected character");
     return 0;
 }
-VJ* __vela_json_parse(const char* src, char** errout) {
+VJ* __vyrn_json_parse(const char* src, char** errout) {
     VJP p; p.b = src; p.i = 0; p.n = strlen(src); p.err = 0;
     vjp_ws(&p);
     VJ* v = vjp_value(&p);
@@ -1182,19 +1182,19 @@ VJ* __vela_json_parse(const char* src, char** errout) {
 }
 
 /* ---- decode-side accessors + issue accumulator -------------------------- */
-int __vela_vj_kind(VJ* v) { return v->kind; }
-VJ* __vela_vj_get(VJ* o, const char* key) {
+int __vyrn_vj_kind(VJ* v) { return v->kind; }
+VJ* __vyrn_vj_get(VJ* o, const char* key) {
     unsigned long long i;
     for (i = 0; i < o->nmem; i++) if (strcmp(o->mem[i].key, key) == 0) return o->mem[i].val;
     return 0;
 }
-int __vela_vj_bool_get(VJ* v) { return v->bval; }
-long long __vela_vj_len(VJ* a) { return (long long)a->nitems; }
-VJ* __vela_vj_at(VJ* a, long long i) { return a->items[i]; }
-const char* __vela_vj_str_get(VJ* v) { return v->text; }
+int __vyrn_vj_bool_get(VJ* v) { return v->bval; }
+long long __vyrn_vj_len(VJ* a) { return (long long)a->nitems; }
+VJ* __vyrn_vj_at(VJ* a, long long i) { return a->items[i]; }
+const char* __vyrn_vj_str_get(VJ* v) { return v->text; }
 /* Parse a number node into an integer target: 0 ok (*out set), 1 rejected
    (non-integer syntax, or out of range for the width/signedness). */
-int __vela_vj_asint(VJ* v, int bits, int is_signed, long long* out) {
+int __vyrn_vj_asint(VJ* v, int bits, int is_signed, long long* out) {
     if (v->kind != VJ_NUM || !v->is_int) return 1;
     char* end;
     if (is_signed) {
@@ -1220,8 +1220,8 @@ int __vela_vj_asint(VJ* v, int bits, int is_signed, long long* out) {
     *out = (long long)x;
     return 0;
 }
-double __vela_vj_asfloat(VJ* v) { return strtod(v->text, 0); }
-const char* __vela_vj_kindname(int kind) {
+double __vyrn_vj_asfloat(VJ* v) { return strtod(v->text, 0); }
+const char* __vyrn_vj_kindname(int kind) {
     switch (kind) {
         case VJ_NULL: return "null";
         case VJ_BOOL: return "boolean";
@@ -1232,73 +1232,73 @@ const char* __vela_vj_kindname(int kind) {
     }
 }
 /* `expected <what>, found <kind>` — the runtime half of a `json.type` Issue. */
-char* __vela_json_type_msg(const char* expected, int kind) {
-    const char* found = __vela_vj_kindname(kind);
+char* __vyrn_json_type_msg(const char* expected, int kind) {
+    const char* found = __vyrn_vj_kindname(kind);
     unsigned long long n = strlen("expected , found ") + strlen(expected) + strlen(found) + 1;
-    char* r = (char*)__vela_malloc(n);
-    __vela_snprintf(r, n, "expected %s, found %s", expected, found);
+    char* r = (char*)__vyrn_malloc(n);
+    __vyrn_snprintf(r, n, "expected %s, found %s", expected, found);
     return r;
 }
-char* __vela_json_field_path(const char* parent, const char* field) {
-    if (parent[0] == 0) return __vela_dup(field);
+char* __vyrn_json_field_path(const char* parent, const char* field) {
+    if (parent[0] == 0) return __vyrn_dup(field);
     unsigned long long n = strlen(parent) + 1 + strlen(field) + 1;
-    char* r = (char*)__vela_malloc(n);
-    __vela_snprintf(r, n, "%s.%s", parent, field);
+    char* r = (char*)__vyrn_malloc(n);
+    __vyrn_snprintf(r, n, "%s.%s", parent, field);
     return r;
 }
-char* __vela_json_index_path(const char* parent, long long i) {
+char* __vyrn_json_index_path(const char* parent, long long i) {
     unsigned long long n = strlen(parent) + 2 + 24 + 1;
-    char* r = (char*)__vela_malloc(n);
-    __vela_snprintf(r, n, "%s[%lld]", parent, i);
+    char* r = (char*)__vyrn_malloc(n);
+    __vyrn_snprintf(r, n, "%s[%lld]", parent, i);
     return r;
 }
 typedef struct { char* key; char* path; char* message; } VIssue;
 typedef struct { VIssue* items; unsigned long long n, cap; } VIssues;
-VIssues* __vela_issues_new(void) {
-    VIssues* s = (VIssues*)__vela_malloc(sizeof(VIssues));
+VIssues* __vyrn_issues_new(void) {
+    VIssues* s = (VIssues*)__vyrn_malloc(sizeof(VIssues));
     s->items = 0; s->n = 0; s->cap = 0; return s;
 }
-void __vela_issues_push(VIssues* s, const char* key, const char* path, const char* message) {
+void __vyrn_issues_push(VIssues* s, const char* key, const char* path, const char* message) {
     if (s->n + 1 > s->cap) {
         s->cap = s->cap ? s->cap * 2 : 4;
-        s->items = (VIssue*)__vela_realloc(s->items, s->cap * sizeof(VIssue));
+        s->items = (VIssue*)__vyrn_realloc(s->items, s->cap * sizeof(VIssue));
     }
-    s->items[s->n].key = __vela_dup(key);
-    s->items[s->n].path = __vela_dup(path);
-    s->items[s->n].message = __vela_dup(message);
+    s->items[s->n].key = __vyrn_dup(key);
+    s->items[s->n].path = __vyrn_dup(path);
+    s->items[s->n].message = __vyrn_dup(message);
     s->n++;
 }
-long long __vela_issues_len(VIssues* s) { return (long long)s->n; }
-const char* __vela_issue_key(VIssues* s, long long i) { return s->items[i].key; }
-const char* __vela_issue_path(VIssues* s, long long i) { return s->items[i].path; }
-const char* __vela_issue_msg(VIssues* s, long long i) { return s->items[i].message; }
+long long __vyrn_issues_len(VIssues* s) { return (long long)s->n; }
+const char* __vyrn_issue_key(VIssues* s, long long i) { return s->items[i].key; }
+const char* __vyrn_issue_path(VIssues* s, long long i) { return s->items[i].path; }
+const char* __vyrn_issue_msg(VIssues* s, long long i) { return s->items[i].message; }
 
 /* The real C entry point: every target's crt (MSVC, glibc, wasi-libc) knows
-   how to call a plain C main; the IR only exports vela_entry. argv is stashed
+   how to call a plain C main; the IR only exports vyrn_entry. argv is stashed
    for `args()` (RFC-0014). */
-extern int vela_entry(void);
+extern int vyrn_entry(void);
 int main(int argc, char** argv) {
-    __vela_argc = argc;
-    __vela_argv = argv;
-    return vela_entry();
+    __vyrn_argc = argc;
+    __vyrn_argv = argv;
+    return vyrn_entry();
 }
 "#;
 
 /// C trap stubs for the program's `extern` imports (RFC-0012), one per `extern
 /// fn`, appended to the shim on the **native** target only. Each defines the
-/// import symbol (`__vela_extern_<name>`, matching codegen) as a function that
+/// import symbol (`__vyrn_extern_<name>`, matching codegen) as a function that
 /// prints the canonical trap and exits — so a native binary that reaches an
 /// `extern` call behaves exactly like the interpreter (`error: extern \`name\`
 /// is not available on this target`), rather than failing to link. The declared
 /// `(void)` signature is intentional: the stub never returns (it `exit`s), so
 /// the caller's argument/return registers are never observed.
-fn extern_trap_stubs(program: &vela_frontend::ast::Program) -> String {
+fn extern_trap_stubs(program: &vyrn_frontend::ast::Program) -> String {
     let mut s = String::new();
     for f in program.functions.iter().filter(|f| f.is_extern) {
-        // `f.name` is a Vela identifier (alphanumeric + `_`), safe to inline
+        // `f.name` is a Vyrn identifier (alphanumeric + `_`), safe to inline
         // into both a C symbol and a C string literal.
         s.push_str(&format!(
-            "void __vela_extern_{name}(void) {{ \
+            "void __vyrn_extern_{name}(void) {{ \
              fputs(\"error: extern `{name}` is not available on this target\\n\", stderr); \
              exit(1); }}\n",
             name = f.name
@@ -1307,9 +1307,9 @@ fn extern_trap_stubs(program: &vela_frontend::ast::Program) -> String {
     s
 }
 
-/// `velac build <file.vela> [-o out] [--target wasm]` — emit IR, then invoke
+/// `vyrn build <file.vyrn> [-o out] [--target wasm]` — emit IR, then invoke
 /// clang to link a native executable (or a `wasm32-wasi` module).
-/// `velac test [file] [--name <substring>]` (RFC-0015) — load + check the root
+/// `vyrn test [file] [--name <substring>]` (RFC-0015) — load + check the root
 /// file, then run its `test` blocks under the interpreter in declaration order.
 /// Prints `test "name" ... ok` / `... FAILED: <message>` per test and a
 /// `N passed, M failed` summary; exits 1 if any test failed. A file with no
@@ -1361,7 +1361,7 @@ fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
         }
         let _ = stdout.flush();
     };
-    match vela_frontend::interp::run_tests(&program, filter.as_deref(), on_result) {
+    match vyrn_frontend::interp::run_tests(&program, filter.as_deref(), on_result) {
         Ok((passed, failed)) => {
             println!("\n{passed} passed, {failed} failed");
             if failed > 0 {
@@ -1377,7 +1377,7 @@ fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
     }
 }
 
-/// `velac serve [file] [--port N]` (RFC-0016) — a hand-rolled HTTP/1.1 host on
+/// `vyrn serve [file] [--port N]` (RFC-0016) — a hand-rolled HTTP/1.1 host on
 /// `std::net` (no crates), running the file's `handle` under the interpreter.
 /// Sequential accept loop, one request at a time: module state is race-free by
 /// construction. Default port 8080.
@@ -1413,9 +1413,9 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
         Err(code) => return code,
     };
 
-    // `velac serve` requires `fn handle(req: Request) -> Response` (exactly this
+    // `vyrn serve` requires `fn handle(req: Request) -> Response` (exactly this
     // signature — the checker's no-`main` exemption uses the same rule).
-    use vela_frontend::ast::Type;
+    use vyrn_frontend::ast::Type;
     let has_handle = program.functions.iter().any(|f| {
         f.name == "handle"
             && !f.is_extern
@@ -1425,7 +1425,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
     });
     if !has_handle {
         eprintln!(
-            "error: `velac serve` needs `fn handle(req: Request) -> Response` in {path}"
+            "error: `vyrn serve` needs `fn handle(req: Request) -> Response` in {path}"
         );
         return ExitCode::FAILURE;
     }
@@ -1444,7 +1444,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
 
     // The interpreter thread owns one live `Interp` (module state persists); it
     // runs `main` once, then invokes this accept loop with a per-request handler.
-    let result = vela_frontend::interp::serve(&program, move |call_handle| {
+    let result = vyrn_frontend::interp::serve(&program, move |call_handle| {
         use std::io::Write;
         // `main` (if any) has already run; flush its stdout so its startup
         // output precedes the serving banner regardless of buffering mode.
@@ -1467,7 +1467,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
     }
 }
 
-/// Why a request never reached Vela.
+/// Why a request never reached Vyrn.
 enum ParseError {
     /// Malformed request line/headers → 400.
     Bad,
@@ -1476,15 +1476,15 @@ enum ParseError {
     Chunked { method: String, path: String },
 }
 
-/// Handle one connection: parse the request, call Vela's `handle`, write the
-/// response, close. Malformed input answers 400 without reaching Vela; a chunked
-/// body answers 501; a Vela trap is logged and answered 500 (the server keeps
+/// Handle one connection: parse the request, call Vyrn's `handle`, write the
+/// response, close. Malformed input answers 400 without reaching Vyrn; a chunked
+/// body answers 501; a Vyrn trap is logged and answered 500 (the server keeps
 /// running — one bad request must not kill it).
 fn serve_one(
     stream: &mut std::net::TcpStream,
     call_handle: &mut dyn FnMut(
-        vela_frontend::interp::ServeRequest,
-    ) -> Result<vela_frontend::interp::ServeResponse, String>,
+        vyrn_frontend::interp::ServeRequest,
+    ) -> Result<vyrn_frontend::interp::ServeResponse, String>,
 ) {
     match parse_request(stream) {
         Ok(req) => {
@@ -1526,7 +1526,7 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
 /// insensitive) up to CRLF CRLF, then exactly `Content-Length` body bytes.
 fn parse_request(
     stream: &mut std::net::TcpStream,
-) -> Result<vela_frontend::interp::ServeRequest, ParseError> {
+) -> Result<vyrn_frontend::interp::ServeRequest, ParseError> {
     use std::io::Read;
     // Read until the header terminator (CRLF CRLF), guarding header size.
     let mut buf: Vec<u8> = Vec::new();
@@ -1592,11 +1592,11 @@ fn parse_request(
         }
     }
     body.truncate(content_length);
-    // A Vela `String` is UTF-8; a body that isn't is a bad request (lossy
+    // A Vyrn `String` is UTF-8; a body that isn't is a bad request (lossy
     // decoding would silently corrupt it).
     let body = String::from_utf8(body).map_err(|_| ParseError::Bad)?;
 
-    Ok(vela_frontend::interp::ServeRequest { method, path: target, body })
+    Ok(vyrn_frontend::interp::ServeRequest { method, path: target, body })
 }
 
 /// A minimal status-code → reason-phrase table. Unknown codes get an empty
@@ -1682,7 +1682,7 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let ir = match vela_codegen::emit(&program) {
+    let ir = match vyrn_codegen::emit(&program) {
         Ok(ir) => ir,
         Err(e) => {
             eprintln!("error: {e}");
@@ -1711,7 +1711,7 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
     }
     // The portable shim, plus (native only) a trap stub per `extern` import
     // (RFC-0012). On wasm the stubs are OMITTED so each `extern` resolves to the
-    // host page's `vela` import namespace; on native there is no host, so the
+    // host page's `vyrn` import namespace; on native there is no host, so the
     // stub satisfies the symbol by printing the canonical "not available on this
     // target" message and exiting — the same wording the interpreter traps with.
     let mut shim = RUNTIME_SHIM.to_string();
@@ -1780,14 +1780,14 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         // their `wasm-export-name` attribute (a GC root, no flag needed). But if
         // any takes a `String` parameter, the JS shim must allocate the argument
         // buffer inside the module before calling in, so the module's own
-        // allocator has to be reachable. `__vela_malloc` lives in the C shim (no
+        // allocator has to be reachable. `__vyrn_malloc` lives in the C shim (no
         // IR attribute to hang off), so force-export it with a linker flag.
         let needs_malloc_export = program.functions.iter().any(|f| {
             f.is_export_extern
-                && f.params.iter().any(|p| matches!(p.ty, vela_frontend::ast::Type::Str))
+                && f.params.iter().any(|p| matches!(p.ty, vyrn_frontend::ast::Type::Str))
         });
         if needs_malloc_export {
-            cmd.arg("-Wl,--export=__vela_malloc");
+            cmd.arg("-Wl,--export=__vyrn_malloc");
         }
     }
     let status = cmd.status();

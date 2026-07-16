@@ -1,4 +1,4 @@
-//! Integration tests for `velac serve` (RFC-0016): spawn the real `velac`
+//! Integration tests for `vyrn serve` (RFC-0016): spawn the real `vyrn`
 //! binary as an HTTP host and drive it with raw `std::net::TcpStream` requests.
 //!
 //! Each test picks a free port by binding an ephemeral listener, reading its
@@ -42,7 +42,7 @@ fn handle(req: Request) -> Response {
 }
 "#;
 
-/// A running `velac serve` child plus drained stdout/stderr buffers. The `Drop`
+/// A running `vyrn serve` child plus drained stdout/stderr buffers. The `Drop`
 /// impl kills the process so a panicking test never leaks a listening server.
 struct Serve {
     child: Child,
@@ -72,7 +72,7 @@ impl Drop for TempFile {
 }
 
 /// Bind an ephemeral port, read it, drop the listener, and return the port.
-/// The tiny window before `velac serve` re-binds is an accepted race.
+/// The tiny window before `vyrn serve` re-binds is an accepted race.
 fn free_port() -> u16 {
     let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
     let port = l.local_addr().unwrap().port();
@@ -115,7 +115,7 @@ fn wait_for(acc: &Arc<Mutex<String>>, needle: &str, timeout: Duration) -> String
     }
 }
 
-/// Spawn `velac serve <tmp> --port <free>` on `SERVER_SRC` and wait for the
+/// Spawn `vyrn serve <tmp> --port <free>` on `SERVER_SRC` and wait for the
 /// startup line before returning.
 fn start_server() -> Serve {
     let unique = format!(
@@ -123,12 +123,12 @@ fn start_server() -> Serve {
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     );
-    let path = std::env::temp_dir().join(format!("vela-serve-{unique}.vela"));
+    let path = std::env::temp_dir().join(format!("vyrn-serve-{unique}.vyrn"));
     std::fs::write(&path, SERVER_SRC).expect("write temp server");
     let file = TempFile { path: path.clone() };
 
     let port = free_port();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_velac"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .arg("serve")
         .arg(&path)
         .arg("--port")
@@ -136,7 +136,7 @@ fn start_server() -> Serve {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn velac serve");
+        .expect("spawn vyrn serve");
 
     let stdout = drain(child.stdout.take().unwrap());
     let stderr = drain(child.stderr.take().unwrap());
@@ -203,7 +203,7 @@ fn handler_trap_yields_500_and_server_survives() {
 }
 
 #[test]
-fn garbage_request_yields_400_without_reaching_vela() {
+fn garbage_request_yields_400_without_reaching_vyrn() {
     let s = start_server();
     let (status, body) = request(s.port, "this is not http\r\n\r\n");
     assert_eq!(status, "HTTP/1.1 400 Bad Request", "garbage -> 400");

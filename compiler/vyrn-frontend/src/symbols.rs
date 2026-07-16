@@ -12,7 +12,7 @@
 //!
 //! [`analyze`] runs the whole pipeline once per document (lex → parse → check →
 //! movecheck) and returns diagnostics + a symbol index + the identifier tokens.
-//! `vela_frontend::diagnostics` delegates to it, so there is a single pipeline.
+//! `vyrn_frontend::diagnostics` delegates to it, so there is a single pipeline.
 //! The LSP calls [`analyze`] on open/change and serves hover/go-to-def/completion
 //! from the cached [`Analysis`].
 
@@ -483,8 +483,8 @@ fn backtick_tokens(msg: &str) -> Vec<&str> {
 /// diagnostic stays line-only: a graceful whole-line fallback.
 ///
 /// This is positions-only: it touches no message text and doesn't change
-/// `render()` (so the `check()` shim and the message half of `velac check`
-/// output are unchanged). The `:col:` prefix in `velac check` becomes precise
+/// `render()` (so the `check()` shim and the message half of `vyrn check`
+/// output are unchanged). The `:col:` prefix in `vyrn check` becomes precise
 /// for pinned diagnostics, as it already was for `match`.
 fn pin_diagnostics(
     diags: &mut [Diagnostic],
@@ -735,7 +735,7 @@ fn resolve_receiver_type(analysis: &Analysis, line: usize, col: usize) -> Option
     // The identifier immediately before the dot on the same line — the
     // receiver. The greatest end_col <= dot.col is the token abutting the dot
     // (whitespace between them is fine; no other token sits between an ident and
-    // its dot in valid Vela).
+    // its dot in valid Vyrn).
     let recv = analysis
         .tokens
         .iter()

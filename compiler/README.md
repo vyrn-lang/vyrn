@@ -1,6 +1,6 @@
-# Vela compiler (prototype)
+# Vyrn compiler (prototype)
 
-A Rust workspace implementing the **v0.1 subset** of Vela. Every feature below is
+A Rust workspace implementing the **v0.1 subset** of Vyrn. Every feature below is
 verified to produce identical results under the tree-walking interpreter and the
 clang-compiled native binary:
 
@@ -52,45 +52,45 @@ The default workspace has **zero external dependencies**:
 ```bash
 cd compiler
 cargo test        # 188 tests across lexer/parser/checker/interpreter/codegen/movecheck/ownership
-cargo build       # builds the `velac` binary
+cargo build       # builds the `vyrn` binary
 ```
 
 | Crate | Role |
 |-------|------|
-| `vela-frontend` | lexer → parser → AST → type checker → move checker → tree-walking **interpreter**; also the structured-`Diagnostic` API (`diagnostics(source)`) |
-| `vela-codegen`  | emits **textual LLVM IR** (a string; no LLVM libs to produce it) |
-| `vela-cli`      | the `velac` driver |
-| `vela-lsp`      | Language Server Protocol server (excluded — pulls `lsp-server`/`lsp-types`; see below) |
+| `vyrn-frontend` | lexer → parser → AST → type checker → move checker → tree-walking **interpreter**; also the structured-`Diagnostic` API (`diagnostics(source)`) |
+| `vyrn-codegen`  | emits **textual LLVM IR** (a string; no LLVM libs to produce it) |
+| `vyrn-cli`      | the `vyrn` driver |
+| `vyrn-lsp`      | Language Server Protocol server (excluded — pulls `lsp-server`/`lsp-types`; see below) |
 
 ## Running programs
 
 ```bash
 # interpret (process exits with main's return value)
-cargo run -p vela-cli -- run    ../examples/fib.vela     # prints 55, exit code 55
-cargo run -p vela-cli -- run    ../examples/fib.vela     # exit code 55
+cargo run -p vyrn-cli -- run    ../examples/fib.vyrn     # prints 55, exit code 55
+cargo run -p vyrn-cli -- run    ../examples/fib.vyrn     # exit code 55
 
 # type-check only
-cargo run -p vela-cli -- check  ../examples/fib.vela     # -> ok
+cargo run -p vyrn-cli -- check  ../examples/fib.vyrn     # -> ok
 # type-check, multi-error: reports every type/ownership error across all functions
 #   e.g. a return-type mismatch in f() and an arithmetic error in g() are BOTH shown:
-#   bad.vela:1:0: return type mismatch: expected Int64, found Bool
-#   bad.vela:2:0: arithmetic needs matching numeric operands, found Int64 and String
+#   bad.vyrn:1:0: return type mismatch: expected Int64, found Bool
+#   bad.vyrn:2:0: arithmetic needs matching numeric operands, found Int64 and String
 
 # emit LLVM IR to stdout
-cargo run -p vela-cli -- emit-ir ../examples/fib.vela
+cargo run -p vyrn-cli -- emit-ir ../examples/fib.vyrn
 ```
 
 ### Validated types (RFC-0003)
 
 ```bash
 # compile-time rejection of a provably-invalid value:
-echo 'type Age = Int64 where value >= 18; fn main() -> Int64 { let b = Age(5); return 0; }' > bad.vela
-cargo run -p vela-cli -- check bad.vela
+echo 'type Age = Int64 where value >= 18; fn main() -> Int64 { let b = Age(5); return 0; }' > bad.vyrn
+cargo run -p vyrn-cli -- check bad.vyrn
 #   error: line 1: 5 does not satisfy `Age` (predicate `where value >= 18` is false)
 
-# runtime validation compiled to native code (see examples/validate_fail.vela):
-cargo run -p vela-cli -- build ../examples/validate_fail.vela -o vfail.exe
-./vfail.exe ; echo $?     # prints "Vela: validation failed", exit 1
+# runtime validation compiled to native code (see examples/validate_fail.vyrn):
+cargo run -p vyrn-cli -- build ../examples/validate_fail.vyrn -o vfail.exe
+./vfail.exe ; echo $?     # prints "Vyrn: validation failed", exit 1
 ```
 
 ## Getting a native executable  ✅ verified working
@@ -101,25 +101,25 @@ subcommand does emit-IR + link in one shot:
 
 ```bash
 # one-shot: emits <out>.ll next to the binary, then links with clang
-cargo run -p vela-cli -- build ../examples/fib.vela -o fib.exe
+cargo run -p vyrn-cli -- build ../examples/fib.vyrn -o fib.exe
 ./fib.exe ; echo $?      # prints 55, exit code 55
 ```
 
-`velac build` finds clang via `$CLANG`, then PATH, then
+`vyrn build` finds clang via `$CLANG`, then PATH, then
 `C:\Program Files\LLVM\bin\clang.exe`. Or do it by hand:
 
 ```bash
-cargo run -p vela-cli -- emit-ir ../examples/fib.vela > fib.ll
+cargo run -p vyrn-cli -- emit-ir ../examples/fib.vyrn > fib.ll
 clang fib.ll -o fib.exe
 ```
 
 > Note: native output uses the platform C runtime, so on Windows `print` lines end
-> with `\r\n`; the interpreter (`velac run`) uses `\n`. Same text, same exit codes
+> with `\r\n`; the interpreter (`vyrn run`) uses `\n`. Same text, same exit codes
 > — a benign line-ending artifact, not a semantic difference.
 
 ## The Inkwell backend (works — needs an external LLVM 22 dev install)
 
-`vela-codegen-llvm/` is the "proper" backend the design chose (Rust + Inkwell):
+`vyrn-codegen-llvm/` is the "proper" backend the design chose (Rust + Inkwell):
 it builds an LLVM module in memory and writes an object file directly. It is
 kept **excluded** from the default workspace only so the commands above never
 require an LLVM install — but it **builds, links, and runs** against a full LLVM
@@ -128,14 +128,14 @@ end — link with `clang` into an exe whose exit code matches the interpreter
 (`fib(10)=55`).
 
 ```bash
-cd vela-codegen-llvm
+cd vyrn-codegen-llvm
 cargo test --features llvm22-1      # env + link flags come from .cargo/config.toml
 ```
 
 **Scope:** only the v0.1 subset — `Int64`/`Bool`/arithmetic/`if`/`while`/`print`/
 `Option`/`Result`/validated types. Records, enums, generics, strings, `Ref`,
 arrays, and `spawn` return explicit "unsupported" errors. The text-IR backend in
-`vela-codegen` is the full reference native backend; this one is a proof that the
+`vyrn-codegen` is the full reference native backend; this one is a proof that the
 in-memory LLVM path the design chose is viable.
 
 > **What it took to build on Windows** (all wired into `.cargo/config.toml`,
@@ -157,10 +157,10 @@ in-memory LLVM path the design chose is viable.
 ## Editor support — diagnostics + symbol query + LSP (core API)
 
 Structured diagnostics and a symbol query are **core** responsibilities of the
-front end, not editor-specific add-ons. `vela_frontend::diagnostics(source)`
+front end, not editor-specific add-ons. `vyrn_frontend::diagnostics(source)`
 returns every problem as a `Diagnostic { line, col, end_col, severity, stage,
-message }` with a precise position, and `vela_frontend::analyze(source)` runs
-the same pipeline *plus* a symbol index — both `velac check` and the LSP
+message }` with a precise position, and `vyrn_frontend::analyze(source)` runs
+the same pipeline *plus* a symbol index — both `vyrn check` and the LSP
 consume the *same* API, no duplication.
 
 - **Accumulation** is bounded: the lexer and parser stop at the first problem
@@ -168,9 +168,9 @@ consume the *same* API, no duplication.
   across all functions and types is reported — an error in one function does
   not suppress errors in the others. Inside a single function body the check is
   still first-error.
-- **`velac check`** prints each as `file:line:col: message` (`col` is `0` when a
+- **`vyrn check`** prints each as `file:line:col: message` (`col` is `0` when a
   stage knows only the line).
-- **`vela_frontend::analyze`** (`src/symbols.rs`) returns an `Analysis {
+- **`vyrn_frontend::analyze`** (`src/symbols.rs`) returns an `Analysis {
   diagnostics, symbols, tokens, locals, decl_lines, fn_lines }` in one parse:
   the diagnostics, a `Symbol` per top-level function/type/variant/method (with a
   precise name column reused from the lexer's `Token.col` — the AST carries line
@@ -186,7 +186,7 @@ consume the *same* API, no duplication.
   are unique (no shadowing), so top-level resolution is robust; local scope is
   line-based (an over-approximation — a `let` inside an `if` is treated as
   visible to the function's end; acceptable for hover/go-to-def).
-- **`vela-lsp`** is a tiny, **synchronous** `lsp-server` server (no tokio, no
+- **`vyrn-lsp`** is a tiny, **synchronous** `lsp-server` server (no tokio, no
   async) and a **pure adapter**: it calls `analyze` once on open/change, caches
   the `Analysis`, and serves `textDocument/publishDiagnostics`, `/hover`,
   `/definition`, and `/completion` from it — a request never re-parses. It is
@@ -194,8 +194,8 @@ consume the *same* API, no duplication.
   build it explicitly:
 
   ```bash
-  cargo build --manifest-path compiler/vela-lsp/Cargo.toml
-  # binary: compiler/vela-lsp/target/debug/vela-lsp(.exe)
+  cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml
+  # binary: compiler/vyrn-lsp/target/debug/vyrn-lsp(.exe)
   ```
 
   Hover/go-to-definition/completion cover top-level functions, types, and
@@ -210,34 +210,34 @@ consume the *same* API, no duplication.
 ### VS Code extension (`editor/vscode/`)
 
 A minimal, **plain-JavaScript** extension (no TypeScript compile step) that
-spawns the `vela-lsp` binary and contributes a TextMate grammar for colors. To
+spawns the `vyrn-lsp` binary and contributes a TextMate grammar for colors. To
 try it: open this repo in VS Code and press **F5** (build the server first with
 the `cargo build` above — the launch config no longer rebuilds it, to avoid a
 Windows file-lock on the running binary aborting the launch); an Extension
-Development Host window opens with `.vela` files colored, squiggled, and with
+Development Host window opens with `.vyrn` files colored, squiggled, and with
 hover / F12 go-to-definition / completion. See `editor/vscode/README.md`.
 
 ## Semantics contract
 
 All three execution paths — the interpreter, the text-IR backend, and the
 Inkwell backend — must agree. The interpreter in
-`vela-frontend/src/interp.rs` is the executable reference; its unit tests
+`vyrn-frontend/src/interp.rs` is the executable reference; its unit tests
 (`fib`, `while`+`mut`, arithmetic) plus the `examples/` are the shared
 conformance cases. Verified match points include: `print` of a `Bool` prints
 `true`/`false`; a compile-time-proven validated construction has no runtime
 check; a failed runtime validation exits with code 1 (native prints
-`Vela: validation failed`, interpreter prints a detailed message).
+`Vyrn: validation failed`, interpreter prints a detailed message).
 
 ## Layout
 
 ```
 compiler/
-├── Cargo.toml              workspace (excludes vela-codegen-llvm and vela-lsp)
-├── vela-frontend/          lexer, parser, ast, checker, movecheck, interp, types, diagnostics (+ tests)
-├── vela-codegen/           textual LLVM IR emitter (+ unit tests)
-├── vela-cli/               velac: run | check | emit-ir | build
-├── vela-lsp/               LSP server (excluded — pulls lsp-server/lsp-types)
-└── vela-codegen-llvm/      Inkwell backend (works; excluded — needs LLVM 22 dev SDK)
+├── Cargo.toml              workspace (excludes vyrn-codegen-llvm and vyrn-lsp)
+├── vyrn-frontend/          lexer, parser, ast, checker, movecheck, interp, types, diagnostics (+ tests)
+├── vyrn-codegen/           textual LLVM IR emitter (+ unit tests)
+├── vyrn-cli/               vyrn: run | check | emit-ir | build
+├── vyrn-lsp/               LSP server (excluded — pulls lsp-server/lsp-types)
+└── vyrn-codegen-llvm/      Inkwell backend (works; excluded — needs LLVM 22 dev SDK)
 
 editor/vscode/             VS Code extension: extension.js (LSP client) + TextMate grammar
 ```

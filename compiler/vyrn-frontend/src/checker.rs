@@ -292,13 +292,13 @@ pub fn check_accum_with_let_types(
     // it does not stop function bodies from being checked below. A program with
     // no `main` but WITH exported declarations is a LIBRARY MODULE (RFC-0010) —
     // it exists to be imported, so demanding an entry point is noise (both in
-    // `velac check lib.vela` and in the editor). Running one still fails
+    // `vyrn check lib.vyrn` and in the editor). Running one still fails
     // cleanly: the interpreter/backends report the missing `main` themselves.
     // A file with tests (RFC-0015) needs no `main` either — it exists to be
-    // tested (`velac test`), extending the library-module rule (exports OR tests
+    // tested (`vyrn test`), extending the library-module rule (exports OR tests
     // ⇒ no `main` required). RFC-0016 extends it once more: a file that defines
     // `handle` with EXACTLY `fn handle(req: Request) -> Response` is a served
-    // module (`velac serve` drives it), so it needs no `main`. The signature
+    // module (`vyrn serve` drives it), so it needs no `main`. The signature
     // must match exactly — any other `handle` is an ordinary function that does
     // not exempt `main`.
     let has_served_handle = sigs.get("handle").is_some_and(|(params, ret)| {
@@ -2208,7 +2208,7 @@ impl<'a> Checker<'a> {
 
         // Input I/O effects (RFC-0014). Free builtins like `print`/`logger`; each
         // joins `SPAWN_FORBIDDEN` and is never constant (`Expr::Call` never folds).
-        // Error payloads are canonical Vela wording (never OS text) — the parity
+        // Error payloads are canonical Vyrn wording (never OS text) — the parity
         // rule; the strings are built at the use site in the interpreter and by
         // the codegen, kept byte-identical.
         if name == "args" {
@@ -3979,9 +3979,9 @@ mod tests {
     #[test]
     fn export_extern_with_body_checks_and_enforces_the_abi_domain() {
         // A well-formed exported extern: normal body, ABI-domain signature.
-        let src = "export extern fn velaAdd(a: Int64, b: Int64) -> Int64 { return a + b } \
+        let src = "export extern fn vyrnAdd(a: Int64, b: Int64) -> Int64 { return a + b } \
                    export extern fn greet(name: String) -> String { return name } \
-                   fn main() -> Int64 { return velaAdd(1, 2) }";
+                   fn main() -> Int64 { return vyrnAdd(1, 2) }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
 
         // The signature must satisfy the same ABI domain as an import — a
@@ -3996,7 +3996,7 @@ mod tests {
 
     #[test]
     fn export_extern_body_is_checked_like_any_fn() {
-        // The body is a normal Vela body — a type error inside it is reported.
+        // The body is a normal Vyrn body — a type error inside it is reported.
         let e = check_src(
             "export extern fn f(a: Int64) -> Int64 { return a + \"x\" } \
              fn main() -> Int64 { return 0 }",

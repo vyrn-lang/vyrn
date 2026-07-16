@@ -1,58 +1,58 @@
-//! Textual LLVM IR backend for the Vela v0 subset.
+//! Textual LLVM IR backend for the Vyrn v0 subset.
 //!
 //! This emits LLVM IR as a string — no LLVM libraries required to *produce* it.
 //! Feed the output to a `clang`/`llc` (LLVM 15+, opaque pointers) to get a
 //! native object/executable:
 //!
 //! ```text
-//! velac emit-ir prog.vela > prog.ll
+//! vyrn emit-ir prog.vyrn > prog.ll
 //! clang prog.ll -o prog
 //! ```
 //!
 //! Local variables use `alloca`/`load`/`store` (LLVM's `mem2reg` promotes them
 //! to SSA registers), which keeps the emitter simple. `&&`/`||` short-circuit
-//! via branches + `phi`, matching the interpreter in [`vela_frontend::interp`].
+//! via branches + `phi`, matching the interpreter in [`vyrn_frontend::interp`].
 //!
-//! The Inkwell (in-memory LLVM) backend in the excluded `vela-codegen-llvm`
+//! The Inkwell (in-memory LLVM) backend in the excluded `vyrn-codegen-llvm`
 //! crate will eventually replace this; both must agree with the interpreter.
 
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use vela_frontend::ast::*;
-use vela_frontend::own::DropKind;
+use vyrn_frontend::ast::*;
+use vyrn_frontend::own::DropKind;
 
 /// LLVM IR for the region/arena runtime (see the preamble comment in `emit`).
 const REGION_RUNTIME: &str = "\
-@__vela_region_sp = global i64 0
-@__vela_region_heads = global [64 x ptr] zeroinitializer
+@__vyrn_region_sp = global i64 0
+@__vyrn_region_heads = global [64 x ptr] zeroinitializer
 @.trap.regiondepth = private unnamed_addr constant [34 x i8] c\"error: region nesting exceeds 64\\0A\\00\"
 
-define void @__vela_region_enter() {
+define void @__vyrn_region_enter() {
 entry:
-  %sp = load i64, ptr @__vela_region_sp
+  %sp = load i64, ptr @__vyrn_region_sp
   %over = icmp sge i64 %sp, 64
   br i1 %over, label %trap, label %ok
 trap:
-  %e = call ptr @__vela_stderr()
+  %e = call ptr @__vyrn_stderr()
   %w = call i32 @fputs(ptr @.trap.regiondepth, ptr %e)
   call void @exit(i32 1)
   unreachable
 ok:
-  %slot = getelementptr [64 x ptr], ptr @__vela_region_heads, i64 0, i64 %sp
+  %slot = getelementptr [64 x ptr], ptr @__vyrn_region_heads, i64 0, i64 %sp
   store ptr null, ptr %slot
   %sp1 = add i64 %sp, 1
-  store i64 %sp1, ptr @__vela_region_sp
+  store i64 %sp1, ptr @__vyrn_region_sp
   ret void
 }
 
-define ptr @__vela_region_alloc(i64 %n) {
+define ptr @__vyrn_region_alloc(i64 %n) {
 entry:
   %tot = add i64 %n, 8
-  %raw = call ptr @__vela_malloc(i64 %tot)
-  %sp = load i64, ptr @__vela_region_sp
+  %raw = call ptr @__vyrn_malloc(i64 %tot)
+  %sp = load i64, ptr @__vyrn_region_sp
   %idx = sub i64 %sp, 1
-  %slot = getelementptr [64 x ptr], ptr @__vela_region_heads, i64 0, i64 %idx
+  %slot = getelementptr [64 x ptr], ptr @__vyrn_region_heads, i64 0, i64 %idx
   %prev = load ptr, ptr %slot
   store ptr %prev, ptr %raw
   store ptr %raw, ptr %slot
@@ -60,12 +60,12 @@ entry:
   ret ptr %user
 }
 
-define void @__vela_region_exit() {
+define void @__vyrn_region_exit() {
 entry:
-  %sp = load i64, ptr @__vela_region_sp
+  %sp = load i64, ptr @__vyrn_region_sp
   %idx = sub i64 %sp, 1
-  store i64 %idx, ptr @__vela_region_sp
-  %slot = getelementptr [64 x ptr], ptr @__vela_region_heads, i64 0, i64 %idx
+  store i64 %idx, ptr @__vyrn_region_sp
+  %slot = getelementptr [64 x ptr], ptr @__vyrn_region_heads, i64 0, i64 %idx
   %head = load ptr, ptr %slot
   br label %loop
 loop:
@@ -89,91 +89,91 @@ done:
 /// reference used after `release` fails a cheap check instead of dangling. A
 /// released slot is reused with a bumped generation, invalidating old references.
 const CELL_RUNTIME: &str = "\
-@__vela_cell_gen = global [65536 x i64] zeroinitializer
-@__vela_cell_ptr_arr = global [65536 x ptr] zeroinitializer
-@__vela_cell_top = global i64 0
-@__vela_cell_free = global [65536 x i64] zeroinitializer
-@__vela_cell_freetop = global i64 0
+@__vyrn_cell_gen = global [65536 x i64] zeroinitializer
+@__vyrn_cell_ptr_arr = global [65536 x ptr] zeroinitializer
+@__vyrn_cell_top = global i64 0
+@__vyrn_cell_free = global [65536 x i64] zeroinitializer
+@__vyrn_cell_freetop = global i64 0
 @.fmt.uaf = private unnamed_addr constant [37 x i8] c\"error: reference used after release\\0A\\00\"
 @.fmt.oom = private unnamed_addr constant [31 x i8] c\"error: out of reference cells\\0A\\00\"
 
-define void @__vela_cell_trap() {
+define void @__vyrn_cell_trap() {
 entry:
-  %e = call ptr @__vela_stderr()
+  %e = call ptr @__vyrn_stderr()
   %r = call i32 @fputs(ptr @.fmt.uaf, ptr %e)
   call void @exit(i32 1)
   unreachable
 }
 
-define i64 @__vela_cell_alloc(ptr %p) {
+define i64 @__vyrn_cell_alloc(ptr %p) {
 entry:
-  %ft = load i64, ptr @__vela_cell_freetop
+  %ft = load i64, ptr @__vyrn_cell_freetop
   %hasfree = icmp sgt i64 %ft, 0
   br i1 %hasfree, label %reuse, label %fresh
 reuse:
   %ft1 = sub i64 %ft, 1
-  store i64 %ft1, ptr @__vela_cell_freetop
-  %fp = getelementptr [65536 x i64], ptr @__vela_cell_free, i64 0, i64 %ft1
+  store i64 %ft1, ptr @__vyrn_cell_freetop
+  %fp = getelementptr [65536 x i64], ptr @__vyrn_cell_free, i64 0, i64 %ft1
   %rslot = load i64, ptr %fp
   br label %done
 fresh:
-  %top = load i64, ptr @__vela_cell_top
+  %top = load i64, ptr @__vyrn_cell_top
   %oob = icmp sge i64 %top, 65536
   br i1 %oob, label %overflow, label %ok
 overflow:
-  %eo = call ptr @__vela_stderr()
+  %eo = call ptr @__vyrn_stderr()
   %ro = call i32 @fputs(ptr @.fmt.oom, ptr %eo)
   call void @exit(i32 1)
   unreachable
 ok:
   %top1 = add i64 %top, 1
-  store i64 %top1, ptr @__vela_cell_top
+  store i64 %top1, ptr @__vyrn_cell_top
   br label %done
 done:
   %slot = phi i64 [ %rslot, %reuse ], [ %top, %ok ]
-  %pp = getelementptr [65536 x ptr], ptr @__vela_cell_ptr_arr, i64 0, i64 %slot
+  %pp = getelementptr [65536 x ptr], ptr @__vyrn_cell_ptr_arr, i64 0, i64 %slot
   store ptr %p, ptr %pp
   ret i64 %slot
 }
 
-define i64 @__vela_cell_getgen(i64 %slot) {
+define i64 @__vyrn_cell_getgen(i64 %slot) {
 entry:
-  %gp = getelementptr [65536 x i64], ptr @__vela_cell_gen, i64 0, i64 %slot
+  %gp = getelementptr [65536 x i64], ptr @__vyrn_cell_gen, i64 0, i64 %slot
   %g = load i64, ptr %gp
   ret i64 %g
 }
 
-define ptr @__vela_cell_ptr(i64 %slot) {
+define ptr @__vyrn_cell_ptr(i64 %slot) {
 entry:
-  %pp = getelementptr [65536 x ptr], ptr @__vela_cell_ptr_arr, i64 0, i64 %slot
+  %pp = getelementptr [65536 x ptr], ptr @__vyrn_cell_ptr_arr, i64 0, i64 %slot
   %p = load ptr, ptr %pp
   ret ptr %p
 }
 
-define void @__vela_cell_check(i64 %slot, i64 %gen) {
+define void @__vyrn_cell_check(i64 %slot, i64 %gen) {
 entry:
-  %gp = getelementptr [65536 x i64], ptr @__vela_cell_gen, i64 0, i64 %slot
+  %gp = getelementptr [65536 x i64], ptr @__vyrn_cell_gen, i64 0, i64 %slot
   %cur = load i64, ptr %gp
   %ok = icmp eq i64 %cur, %gen
   br i1 %ok, label %pass, label %fail
 fail:
-  call void @__vela_cell_trap()
+  call void @__vyrn_cell_trap()
   unreachable
 pass:
   ret void
 }
 
-define void @__vela_cell_release_slot(i64 %slot) {
+define void @__vyrn_cell_release_slot(i64 %slot) {
 entry:
-  %gp = getelementptr [65536 x i64], ptr @__vela_cell_gen, i64 0, i64 %slot
+  %gp = getelementptr [65536 x i64], ptr @__vyrn_cell_gen, i64 0, i64 %slot
   %g = load i64, ptr %gp
   %g1 = add i64 %g, 1
   store i64 %g1, ptr %gp
-  %ft = load i64, ptr @__vela_cell_freetop
-  %fp = getelementptr [65536 x i64], ptr @__vela_cell_free, i64 0, i64 %ft
+  %ft = load i64, ptr @__vyrn_cell_freetop
+  %fp = getelementptr [65536 x i64], ptr @__vyrn_cell_free, i64 0, i64 %ft
   store i64 %slot, ptr %fp
   %ft1 = add i64 %ft, 1
-  store i64 %ft1, ptr @__vela_cell_freetop
+  store i64 %ft1, ptr @__vyrn_cell_freetop
   ret void
 }
 
@@ -181,12 +181,12 @@ entry:
 
 /// Text-encoding runtime (hex / base64 / url) plus the shared helpers: a strict
 /// UTF-8 validator (Björn Höhrmann's DFA — matches Rust's `from_utf8`) used by the
-/// decoders, and hex-digit conversions. The `@__vela_utf8d` and `@__vela_b64alpha`
+/// decoders, and hex-digit conversions. The `@__vyrn_utf8d` and `@__vyrn_b64alpha`
 /// tables are emitted separately (generated in `emit`). Decoders return the
 /// Option aggregate `{ i1 tag, i64 word0, i64 word1 }` (word0 = `ptrtoint` of the
 /// result string on `Some`; all-zero on `None`).
 const ENCODING_RUNTIME: &str = "\
-define i8 @__vela_hexdigit(i8 %n) {
+define i8 @__vyrn_hexdigit(i8 %n) {
   %lt = icmp ult i8 %n, 10
   %d0 = add i8 %n, 48
   %da = add i8 %n, 87
@@ -194,7 +194,7 @@ define i8 @__vela_hexdigit(i8 %n) {
   ret i8 %r
 }
 
-define i8 @__vela_hexdigit_uc(i8 %n) {
+define i8 @__vyrn_hexdigit_uc(i8 %n) {
   %lt = icmp ult i8 %n, 10
   %d0 = add i8 %n, 48
   %da = add i8 %n, 55
@@ -202,7 +202,7 @@ define i8 @__vela_hexdigit_uc(i8 %n) {
   ret i8 %r
 }
 
-define i32 @__vela_hexval(i8 %c) {
+define i32 @__vyrn_hexval(i8 %c) {
   %cz = zext i8 %c to i32
   %d0 = icmp uge i32 %cz, 48
   %d9 = icmp ule i32 %cz, 57
@@ -222,7 +222,7 @@ define i32 @__vela_hexval(i8 %c) {
   ret i32 %r3
 }
 
-define i1 @__vela_utf8valid(ptr %s, i64 %len) {
+define i1 @__vyrn_utf8valid(ptr %s, i64 %len) {
 entry:
   br label %loop
 loop:
@@ -234,12 +234,12 @@ body:
   %bp = getelementptr i8, ptr %s, i64 %i
   %b = load i8, ptr %bp
   %bz = zext i8 %b to i64
-  %tp = getelementptr i8, ptr @__vela_utf8d, i64 %bz
+  %tp = getelementptr i8, ptr @__vyrn_utf8d, i64 %bz
   %ty = load i8, ptr %tp
   %tyz = zext i8 %ty to i64
   %a = add i64 256, %st
   %idx = add i64 %a, %tyz
-  %sp = getelementptr i8, ptr @__vela_utf8d, i64 %idx
+  %sp = getelementptr i8, ptr @__vyrn_utf8d, i64 %idx
   %sv = load i8, ptr %sp
   %st2 = zext i8 %sv to i64
   %i2 = add i64 %i, 1
@@ -249,12 +249,12 @@ fin:
   ret i1 %ok
 }
 
-define ptr @__vela_hex_encode(ptr %s) {
+define ptr @__vyrn_hex_encode(ptr %s) {
 entry:
-  %len = call i64 @__vela_strlen(ptr %s)
+  %len = call i64 @__vyrn_strlen(ptr %s)
   %outlen = mul i64 %len, 2
   %sz = add i64 %outlen, 1
-  %out = call ptr @__vela_malloc(i64 %sz)
+  %out = call ptr @__vyrn_malloc(i64 %sz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %i2, %body ]
@@ -265,8 +265,8 @@ body:
   %b = load i8, ptr %bp
   %hi = lshr i8 %b, 4
   %lo = and i8 %b, 15
-  %hc = call i8 @__vela_hexdigit(i8 %hi)
-  %lc = call i8 @__vela_hexdigit(i8 %lo)
+  %hc = call i8 @__vyrn_hexdigit(i8 %hi)
+  %lc = call i8 @__vyrn_hexdigit(i8 %lo)
   %o = mul i64 %i, 2
   %op0 = getelementptr i8, ptr %out, i64 %o
   store i8 %hc, ptr %op0
@@ -281,16 +281,16 @@ fin:
   ret ptr %out
 }
 
-define {i1, i64, i64} @__vela_hex_decode(ptr %s) {
+define {i1, i64, i64} @__vyrn_hex_decode(ptr %s) {
 entry:
-  %len = call i64 @__vela_strlen(ptr %s)
+  %len = call i64 @__vyrn_strlen(ptr %s)
   %odd = and i64 %len, 1
   %isodd = icmp ne i64 %odd, 0
   br i1 %isodd, label %none, label %ok0
 ok0:
   %outlen = lshr i64 %len, 1
   %sz = add i64 %outlen, 1
-  %out = call ptr @__vela_malloc(i64 %sz)
+  %out = call ptr @__vyrn_malloc(i64 %sz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %ok0 ], [ %i2, %cont ]
@@ -303,8 +303,8 @@ body:
   %hc = load i8, ptr %hip
   %lop = getelementptr i8, ptr %s, i64 %lidx
   %lc = load i8, ptr %lop
-  %hv = call i32 @__vela_hexval(i8 %hc)
-  %lv = call i32 @__vela_hexval(i8 %lc)
+  %hv = call i32 @__vyrn_hexval(i8 %hc)
+  %lv = call i32 @__vyrn_hexval(i8 %lc)
   %hbad = icmp slt i32 %hv, 0
   %lbad = icmp slt i32 %lv, 0
   %bad = or i1 %hbad, %lbad
@@ -321,7 +321,7 @@ cont:
 valid:
   %ep = getelementptr i8, ptr %out, i64 %outlen
   store i8 0, ptr %ep
-  %v = call i1 @__vela_utf8valid(ptr %out, i64 %outlen)
+  %v = call i1 @__vyrn_utf8valid(ptr %out, i64 %outlen)
   br i1 %v, label %some, label %none
 some:
   %w0 = ptrtoint ptr %out to i64
@@ -336,12 +336,12 @@ none:
   ret {i1, i64, i64} %n2
 }
 
-define ptr @__vela_url_encode(ptr %s) {
+define ptr @__vyrn_url_encode(ptr %s) {
 entry:
-  %len = call i64 @__vela_strlen(ptr %s)
+  %len = call i64 @__vyrn_strlen(ptr %s)
   %cap = mul i64 %len, 3
   %sz = add i64 %cap, 1
-  %out = call ptr @__vela_malloc(i64 %sz)
+  %out = call ptr @__vyrn_malloc(i64 %sz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %i2, %cont ]
@@ -380,8 +380,8 @@ plain:
 pct:
   %hi = lshr i8 %b, 4
   %lo = and i8 %b, 15
-  %hc = call i8 @__vela_hexdigit_uc(i8 %hi)
-  %lc = call i8 @__vela_hexdigit_uc(i8 %lo)
+  %hc = call i8 @__vyrn_hexdigit_uc(i8 %hi)
+  %lc = call i8 @__vyrn_hexdigit_uc(i8 %lo)
   %p0 = getelementptr i8, ptr %out, i64 %o
   store i8 37, ptr %p0
   %o_1 = add i64 %o, 1
@@ -402,11 +402,11 @@ fin:
   ret ptr %out
 }
 
-define {i1, i64, i64} @__vela_url_decode(ptr %s) {
+define {i1, i64, i64} @__vyrn_url_decode(ptr %s) {
 entry:
-  %len = call i64 @__vela_strlen(ptr %s)
+  %len = call i64 @__vyrn_strlen(ptr %s)
   %sz = add i64 %len, 1
-  %out = call ptr @__vela_malloc(i64 %sz)
+  %out = call ptr @__vyrn_malloc(i64 %sz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %inext, %cont ]
@@ -434,8 +434,8 @@ pctok:
   %hc = load i8, ptr %hip
   %lop = getelementptr i8, ptr %s, i64 %i2
   %lc = load i8, ptr %lop
-  %hv = call i32 @__vela_hexval(i8 %hc)
-  %lv = call i32 @__vela_hexval(i8 %lc)
+  %hv = call i32 @__vyrn_hexval(i8 %hc)
+  %lv = call i32 @__vyrn_hexval(i8 %lc)
   %hbad = icmp slt i32 %hv, 0
   %lbad = icmp slt i32 %lv, 0
   %bad = or i1 %hbad, %lbad
@@ -457,7 +457,7 @@ cont:
 valid:
   %ep = getelementptr i8, ptr %out, i64 %o
   store i8 0, ptr %ep
-  %v = call i1 @__vela_utf8valid(ptr %out, i64 %o)
+  %v = call i1 @__vyrn_utf8valid(ptr %out, i64 %o)
   br i1 %v, label %some, label %none
 some:
   %w0 = ptrtoint ptr %out to i64
@@ -472,20 +472,20 @@ none:
   ret {i1, i64, i64} %n2
 }
 
-define i8 @__vela_b64char(i64 %idx) {
-  %p = getelementptr i8, ptr @__vela_b64alpha, i64 %idx
+define i8 @__vyrn_b64char(i64 %idx) {
+  %p = getelementptr i8, ptr @__vyrn_b64alpha, i64 %idx
   %c = load i8, ptr %p
   ret i8 %c
 }
 
-define ptr @__vela_b64_encode(ptr %s) {
+define ptr @__vyrn_b64_encode(ptr %s) {
 entry:
-  %len = call i64 @__vela_strlen(ptr %s)
+  %len = call i64 @__vyrn_strlen(ptr %s)
   %p2 = add i64 %len, 2
   %grp = udiv i64 %p2, 3
   %outlen = mul i64 %grp, 4
   %sz = add i64 %outlen, 1
-  %out = call ptr @__vela_malloc(i64 %sz)
+  %out = call ptr @__vyrn_malloc(i64 %sz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %i3, %body ]
@@ -516,10 +516,10 @@ body:
   %d2 = lshr i64 %n, 6
   %d2m = and i64 %d2, 63
   %d3m = and i64 %n, 63
-  %c0 = call i8 @__vela_b64char(i64 %d0m)
-  %c1 = call i8 @__vela_b64char(i64 %d1m)
-  %c2 = call i8 @__vela_b64char(i64 %d2m)
-  %c3 = call i8 @__vela_b64char(i64 %d3m)
+  %c0 = call i8 @__vyrn_b64char(i64 %d0m)
+  %c1 = call i8 @__vyrn_b64char(i64 %d1m)
+  %c2 = call i8 @__vyrn_b64char(i64 %d2m)
+  %c3 = call i8 @__vyrn_b64char(i64 %d3m)
   %o0p = getelementptr i8, ptr %out, i64 %o
   store i8 %c0, ptr %o0p
   %oo1 = add i64 %o, 1
@@ -546,8 +546,8 @@ one:
   %e0m = and i64 %e0, 63
   %e1 = lshr i64 %tn, 12
   %e1m = and i64 %e1, 63
-  %ec0 = call i8 @__vela_b64char(i64 %e0m)
-  %ec1 = call i8 @__vela_b64char(i64 %e1m)
+  %ec0 = call i8 @__vyrn_b64char(i64 %e0m)
+  %ec1 = call i8 @__vyrn_b64char(i64 %e1m)
   %e0p = getelementptr i8, ptr %out, i64 %o
   store i8 %ec0, ptr %e0p
   %eo1 = add i64 %o, 1
@@ -580,9 +580,9 @@ two:
   %g1m = and i64 %g1, 63
   %g2 = lshr i64 %fn, 6
   %g2m = and i64 %g2, 63
-  %gc0 = call i8 @__vela_b64char(i64 %g0m)
-  %gc1 = call i8 @__vela_b64char(i64 %g1m)
-  %gc2 = call i8 @__vela_b64char(i64 %g2m)
+  %gc0 = call i8 @__vyrn_b64char(i64 %g0m)
+  %gc1 = call i8 @__vyrn_b64char(i64 %g1m)
+  %gc2 = call i8 @__vyrn_b64char(i64 %g2m)
   %g0p = getelementptr i8, ptr %out, i64 %o
   store i8 %gc0, ptr %g0p
   %go1 = add i64 %o, 1
@@ -601,7 +601,7 @@ fin:
   ret ptr %out
 }
 
-define i32 @__vela_b64val(i8 %c) {
+define i32 @__vyrn_b64val(i8 %c) {
   %cz = zext i8 %c to i32
   %ua = icmp uge i32 %cz, 65
   %uz = icmp ule i32 %cz, 90
@@ -625,9 +625,9 @@ define i32 @__vela_b64val(i8 %c) {
   ret i32 %r5
 }
 
-define {i1, i64, i64} @__vela_b64_decode(ptr %s) {
+define {i1, i64, i64} @__vyrn_b64_decode(ptr %s) {
 entry:
-  %len = call i64 @__vela_strlen(ptr %s)
+  %len = call i64 @__vyrn_strlen(ptr %s)
   %m4 = and i64 %len, 3
   %notmul4 = icmp ne i64 %m4, 0
   %empty = icmp eq i64 %len, 0
@@ -635,7 +635,7 @@ entry:
 ok0:
   %cap = mul i64 %len, 1
   %sz = add i64 %cap, 1
-  %out = call ptr @__vela_malloc(i64 %sz)
+  %out = call ptr @__vyrn_malloc(i64 %sz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %ok0 ], [ %i4, %store ]
@@ -669,10 +669,10 @@ chkpad:
   %illegal = and i1 %pad2, %pad2butnot3
   br i1 %illegal, label %none, label %vals
 vals:
-  %v0 = call i32 @__vela_b64val(i8 %c0)
-  %v1 = call i32 @__vela_b64val(i8 %c1)
-  %v2raw = call i32 @__vela_b64val(i8 %c2)
-  %v3raw = call i32 @__vela_b64val(i8 %c3)
+  %v0 = call i32 @__vyrn_b64val(i8 %c0)
+  %v1 = call i32 @__vyrn_b64val(i8 %c1)
+  %v2raw = call i32 @__vyrn_b64val(i8 %c2)
+  %v3raw = call i32 @__vyrn_b64val(i8 %c3)
   %v2 = select i1 %pad2, i32 0, i32 %v2raw
   %v3 = select i1 %pad3, i32 0, i32 %v3raw
   %b0bad = icmp slt i32 %v0, 0
@@ -719,7 +719,7 @@ store:
 valid:
   %ep = getelementptr i8, ptr %out, i64 %o
   store i8 0, ptr %ep
-  %v = call i1 @__vela_utf8valid(ptr %out, i64 %o)
+  %v = call i1 @__vyrn_utf8valid(ptr %out, i64 %o)
   br i1 %v, label %some, label %none
 some:
   %w0 = ptrtoint ptr %out to i64
@@ -741,10 +741,10 @@ none:
 /// Unicode code points (a two-pass UTF-8 decode — count leaders, then decode
 /// each 1–4 byte sequence).
 const STRING_RUNTIME: &str = "\
-define {ptr, i64, i64} @__vela_str_bytes(ptr %s) {
+define {ptr, i64, i64} @__vyrn_str_bytes(ptr %s) {
 entry:
-  %len = call i64 @__vela_strlen(ptr %s)
-  %data = call ptr @__vela_malloc(i64 %len)
+  %len = call i64 @__vyrn_strlen(ptr %s)
+  %data = call ptr @__vyrn_malloc(i64 %len)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %i2, %body ]
@@ -764,9 +764,9 @@ ret:
   ret {ptr, i64, i64} %r2
 }
 
-define {ptr, i64, i64} @__vela_str_chars(ptr %s) {
+define {ptr, i64, i64} @__vyrn_str_chars(ptr %s) {
 entry:
-  %len = call i64 @__vela_strlen(ptr %s)
+  %len = call i64 @__vyrn_strlen(ptr %s)
   br label %cloop
 cloop:
   %ci = phi i64 [ 0, %entry ], [ %ci2, %cbody ]
@@ -784,7 +784,7 @@ cbody:
   br label %cloop
 alloc:
   %sz = mul i64 %cn, 8
-  %data = call ptr @__vela_malloc(i64 %sz)
+  %data = call ptr @__vyrn_malloc(i64 %sz)
   br label %dloop
 dloop:
   %di = phi i64 [ 0, %alloc ], [ %di2, %store ]
@@ -851,7 +851,7 @@ ret:
 /// The `=~` regex runner: run a complete DFA (transition table + accepting bytes,
 /// both emitted per pattern) over a NUL-terminated string, reporting a full match.
 const REGEX_RUNTIME: &str = "\
-define i1 @__vela_regex_run(ptr %s, ptr %table, i64 %start, ptr %accept) {
+define i1 @__vyrn_regex_run(ptr %s, ptr %table, i64 %start, ptr %accept) {
 entry:
   br label %loop
 loop:
@@ -879,25 +879,25 @@ done:
 
 ";
 
-/// Input-I/O runtime (RFC-0014). `@__vela_args` materializes argv[1..] as an
+/// Input-I/O runtime (RFC-0014). `@__vyrn_args` materializes argv[1..] as an
 /// `Array<String>` triple (elements point directly at argv — never freed, per
-/// RFC-0011's array-element rule). `@__vela_read_err`/`@__vela_write_err` build
+/// RFC-0011's array-element rule). `@__vyrn_read_err`/`@__vyrn_write_err` build
 /// the canonical error payloads from the `@.io.*` format globals, so the wording
 /// lives in exactly one place (the codegen). The read/write/line primitives are
-/// C helpers in vela-cli's shim; these IR helpers wrap them.
+/// C helpers in vyrn-cli's shim; these IR helpers wrap them.
 const IO_RUNTIME: &str = "\
-define {ptr, i64, i64} @__vela_args() {
+define {ptr, i64, i64} @__vyrn_args() {
 entry:
-  %n = call i64 @__vela_args_count()
+  %n = call i64 @__vyrn_args_count()
   %sz = mul i64 %n, 8
-  %data = call ptr @__vela_malloc(i64 %sz)
+  %data = call ptr @__vyrn_malloc(i64 %sz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %i2, %body ]
   %done = icmp uge i64 %i, %n
   br i1 %done, label %ret, label %body
 body:
-  %s = call ptr @__vela_args_get(i64 %i)
+  %s = call ptr @__vyrn_args_get(i64 %i)
   %dp = getelementptr ptr, ptr %data, i64 %i
   store ptr %s, ptr %dp
   %i2 = add i64 %i, 1
@@ -909,32 +909,32 @@ ret:
   ret {ptr, i64, i64} %r2
 }
 
-define ptr @__vela_read_err(ptr %path, i32 %status) {
+define ptr @__vyrn_read_err(ptr %path, i32 %status) {
 entry:
   %is2 = icmp eq i32 %status, 2
   %is3 = icmp eq i32 %status, 3
   %f1 = select i1 %is2, ptr @.io.utf8err, ptr @.io.readerr
   %fmt = select i1 %is3, ptr @.io.nulerr, ptr %f1
-  %plen = call i64 @__vela_strlen(ptr %path)
+  %plen = call i64 @__vyrn_strlen(ptr %path)
   %bsz = add i64 %plen, 40
-  %buf = call ptr @__vela_malloc(i64 %bsz)
-  call i32 (ptr, i64, ptr, ...) @__vela_snprintf(ptr %buf, i64 %bsz, ptr %fmt, ptr %path)
+  %buf = call ptr @__vyrn_malloc(i64 %bsz)
+  call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr %buf, i64 %bsz, ptr %fmt, ptr %path)
   ret ptr %buf
 }
 
-define ptr @__vela_write_err(ptr %path) {
+define ptr @__vyrn_write_err(ptr %path) {
 entry:
-  %plen = call i64 @__vela_strlen(ptr %path)
+  %plen = call i64 @__vyrn_strlen(ptr %path)
   %bsz = add i64 %plen, 40
-  %buf = call ptr @__vela_malloc(i64 %bsz)
-  call i32 (ptr, i64, ptr, ...) @__vela_snprintf(ptr %buf, i64 %bsz, ptr @.io.writeerr, ptr %path)
+  %buf = call ptr @__vyrn_malloc(i64 %bsz)
+  call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr %buf, i64 %bsz, ptr @.io.writeerr, ptr %path)
   ret ptr %buf
 }
 
-define ptr @__vela_bytes_dup(ptr %data, i64 %len) {
+define ptr @__vyrn_bytes_dup(ptr %data, i64 %len) {
 entry:
   %bsz = add i64 %len, 1
-  %buf = call ptr @__vela_malloc(i64 %bsz)
+  %buf = call ptr @__vyrn_malloc(i64 %bsz)
   br label %loop
 loop:
   %i = phi i64 [ 0, %entry ], [ %i2, %cont ]
@@ -964,9 +964,9 @@ ok:
 /// The private LLVM symbol for an `extern` import (RFC-0012). Prefixed so it
 /// cannot collide with a real C symbol on the native target: the generated C
 /// trap stub defines exactly this name, and the wasm import name is carried
-/// separately by the `wasm-import-name` attribute (the raw Vela name).
+/// separately by the `wasm-import-name` attribute (the raw Vyrn name).
 fn extern_symbol(name: &str) -> String {
-    format!("__vela_extern_{name}")
+    format!("__vyrn_extern_{name}")
 }
 
 /// The extern (JS-boundary) ABI value type for one primitive, per the RFC-0012
@@ -1009,84 +1009,84 @@ fn extern_decl_params(f: &Function) -> String {
 pub fn emit(program: &Program) -> Result<String, String> {
     let mut out = String::new();
     // module preamble: printf/abort + format strings (opaque-pointer style)
-    out.push_str("; Vela v0.1 — generated LLVM IR (target: LLVM 15+)\n");
+    out.push_str("; Vyrn v0.1 — generated LLVM IR (target: LLVM 15+)\n");
     out.push_str("declare i32 @printf(ptr, ...)\n");
     // exit() (not abort()) so stdio buffers flush and the exit code is a clean 1,
     // matching the interpreter.
     out.push_str("declare void @exit(i32)\n");
     out.push_str("declare i32 @strcmp(ptr, ptr)\n");
-    out.push_str("declare i32 @__vela_strncmp(ptr, ptr, i64)\n");
+    out.push_str("declare i32 @__vyrn_strncmp(ptr, ptr, i64)\n");
     out.push_str("declare ptr @strstr(ptr, ptr)\n");
     // Heap + string runtime (dynamic strings). Allocations are not yet freed —
     // the reclamation strategy is RFC-0004's open question.
-    out.push_str("declare i64 @__vela_strlen(ptr)\n");
-    out.push_str("declare ptr @__vela_malloc(i64)\n");
-    out.push_str("declare ptr @__vela_realloc(ptr, i64)\n");
+    out.push_str("declare i64 @__vyrn_strlen(ptr)\n");
+    out.push_str("declare ptr @__vyrn_malloc(i64)\n");
+    out.push_str("declare ptr @__vyrn_realloc(ptr, i64)\n");
     out.push_str("declare void @free(ptr)\n");
     out.push_str("declare ptr @strcpy(ptr, ptr)\n");
     out.push_str("declare ptr @strcat(ptr, ptr)\n");
-    out.push_str("declare i32 @__vela_snprintf(ptr, i64, ptr, ...)\n");
+    out.push_str("declare i32 @__vyrn_snprintf(ptr, i64, ptr, ...)\n");
     // Logging (RFC-0008) and traps: fprintf/fputs to stderr. `stderr` is a C
     // macro with no portable symbol, so the stream handles come from a tiny C
-    // shim (`__vela_stderr`/`__vela_stdout`, embedded in vela-cli and compiled
+    // shim (`__vyrn_stderr`/`__vyrn_stdout`, embedded in vyrn-cli and compiled
     // by clang alongside this IR) that works on every libc (MSVC, glibc,
     // wasi-libc).
     out.push_str("declare i32 @fprintf(ptr, ptr, ...)\n");
-    out.push_str("declare ptr @__vela_stderr()\n");
-    out.push_str("declare ptr @__vela_stdout()\n");
+    out.push_str("declare ptr @__vyrn_stderr()\n");
+    out.push_str("declare ptr @__vyrn_stdout()\n");
     // Runtime traps (division, and eventually every trap) fputs to stderr with
     // the interpreter's exact `error: ...` wording, then exit(1).
     out.push_str("declare i32 @fputs(ptr, ptr)\n");
     out.push_str("declare ptr @fopen(ptr, ptr)\n");
     out.push_str("declare i32 @fclose(ptr)\n");
-    // Input I/O (RFC-0014): the C shim in vela-cli provides these; the error
+    // Input I/O (RFC-0014): the C shim in vyrn-cli provides these; the error
     // wording is built here in the IR (see the `@.io.*` format globals and the
-    // `@__vela_read_err`/`@__vela_write_err`/`@__vela_args` helpers below) so the
+    // `@__vyrn_read_err`/`@__vyrn_write_err`/`@__vyrn_args` helpers below) so the
     // canonical strings live in exactly one place.
-    out.push_str("declare i64 @__vela_args_count()\n");
-    out.push_str("declare ptr @__vela_args_get(i64)\n");
-    out.push_str("declare ptr @__vela_read_line(ptr)\n");
-    out.push_str("declare i32 @__vela_read_file(ptr, ptr, ptr)\n");
-    out.push_str("declare i32 @__vela_read_file_bytes(ptr, ptr, ptr)\n");
-    out.push_str("declare i32 @__vela_write_file(ptr, ptr)\n");
+    out.push_str("declare i64 @__vyrn_args_count()\n");
+    out.push_str("declare ptr @__vyrn_args_get(i64)\n");
+    out.push_str("declare ptr @__vyrn_read_line(ptr)\n");
+    out.push_str("declare i32 @__vyrn_read_file(ptr, ptr, ptr)\n");
+    out.push_str("declare i32 @__vyrn_read_file_bytes(ptr, ptr, ptr)\n");
+    out.push_str("declare i32 @__vyrn_write_file(ptr, ptr)\n");
     // JSON codec runtime (RFC-0018): the DOM builders/accessors, the parser,
     // the canonical encoder, and the decode-side issue accumulator live in the
     // C shim; the per-type encode/decode logic is generated as IR below.
-    out.push_str("declare ptr @__vela_vj_obj()\n");
-    out.push_str("declare ptr @__vela_vj_arr()\n");
-    out.push_str("declare ptr @__vela_vj_null()\n");
-    out.push_str("declare ptr @__vela_vj_bool(i1)\n");
-    out.push_str("declare ptr @__vela_vj_int(i64)\n");
-    out.push_str("declare ptr @__vela_vj_uint(i64)\n");
-    out.push_str("declare ptr @__vela_vj_float(double)\n");
-    out.push_str("declare ptr @__vela_vj_str(ptr)\n");
-    out.push_str("declare void @__vela_vj_push(ptr, ptr)\n");
-    out.push_str("declare void @__vela_vj_set(ptr, ptr, ptr)\n");
-    out.push_str("declare ptr @__vela_vj_encode(ptr)\n");
-    out.push_str("declare ptr @__vela_json_parse(ptr, ptr)\n");
-    out.push_str("declare i32 @__vela_vj_kind(ptr)\n");
-    out.push_str("declare i32 @__vela_vj_bool_get(ptr)\n");
-    out.push_str("declare ptr @__vela_vj_get(ptr, ptr)\n");
-    out.push_str("declare i64 @__vela_vj_len(ptr)\n");
-    out.push_str("declare ptr @__vela_vj_at(ptr, i64)\n");
-    out.push_str("declare ptr @__vela_vj_str_get(ptr)\n");
-    out.push_str("declare i32 @__vela_vj_asint(ptr, i32, i32, ptr)\n");
-    out.push_str("declare double @__vela_vj_asfloat(ptr)\n");
-    out.push_str("declare ptr @__vela_json_type_msg(ptr, i32)\n");
-    out.push_str("declare ptr @__vela_json_field_path(ptr, ptr)\n");
-    out.push_str("declare ptr @__vela_json_index_path(ptr, i64)\n");
-    out.push_str("declare ptr @__vela_issues_new()\n");
-    out.push_str("declare void @__vela_issues_push(ptr, ptr, ptr, ptr)\n");
-    out.push_str("declare i64 @__vela_issues_len(ptr)\n");
-    out.push_str("declare ptr @__vela_issue_key(ptr, i64)\n");
-    out.push_str("declare ptr @__vela_issue_path(ptr, i64)\n");
-    out.push_str("declare ptr @__vela_issue_msg(ptr, i64)\n");
+    out.push_str("declare ptr @__vyrn_vj_obj()\n");
+    out.push_str("declare ptr @__vyrn_vj_arr()\n");
+    out.push_str("declare ptr @__vyrn_vj_null()\n");
+    out.push_str("declare ptr @__vyrn_vj_bool(i1)\n");
+    out.push_str("declare ptr @__vyrn_vj_int(i64)\n");
+    out.push_str("declare ptr @__vyrn_vj_uint(i64)\n");
+    out.push_str("declare ptr @__vyrn_vj_float(double)\n");
+    out.push_str("declare ptr @__vyrn_vj_str(ptr)\n");
+    out.push_str("declare void @__vyrn_vj_push(ptr, ptr)\n");
+    out.push_str("declare void @__vyrn_vj_set(ptr, ptr, ptr)\n");
+    out.push_str("declare ptr @__vyrn_vj_encode(ptr)\n");
+    out.push_str("declare ptr @__vyrn_json_parse(ptr, ptr)\n");
+    out.push_str("declare i32 @__vyrn_vj_kind(ptr)\n");
+    out.push_str("declare i32 @__vyrn_vj_bool_get(ptr)\n");
+    out.push_str("declare ptr @__vyrn_vj_get(ptr, ptr)\n");
+    out.push_str("declare i64 @__vyrn_vj_len(ptr)\n");
+    out.push_str("declare ptr @__vyrn_vj_at(ptr, i64)\n");
+    out.push_str("declare ptr @__vyrn_vj_str_get(ptr)\n");
+    out.push_str("declare i32 @__vyrn_vj_asint(ptr, i32, i32, ptr)\n");
+    out.push_str("declare double @__vyrn_vj_asfloat(ptr)\n");
+    out.push_str("declare ptr @__vyrn_json_type_msg(ptr, i32)\n");
+    out.push_str("declare ptr @__vyrn_json_field_path(ptr, ptr)\n");
+    out.push_str("declare ptr @__vyrn_json_index_path(ptr, i64)\n");
+    out.push_str("declare ptr @__vyrn_issues_new()\n");
+    out.push_str("declare void @__vyrn_issues_push(ptr, ptr, ptr, ptr)\n");
+    out.push_str("declare i64 @__vyrn_issues_len(ptr)\n");
+    out.push_str("declare ptr @__vyrn_issue_key(ptr, i64)\n");
+    out.push_str("declare ptr @__vyrn_issue_path(ptr, i64)\n");
+    out.push_str("declare ptr @__vyrn_issue_msg(ptr, i64)\n");
     // `extern` imports (RFC-0012): each body-less `extern fn` becomes a wasm
-    // import from the fixed `vela` namespace. We emit ONE target-neutral IR —
+    // import from the fixed `vyrn` namespace. We emit ONE target-neutral IR —
     // a `declare` carrying the wasm-import attributes plus a real `call` at each
     // use site (see `gen_extern_call`). On the wasm target the import resolves
-    // against the host page's `vela` object; on native the symbol is satisfied
-    // by a per-extern C trap stub that vela-cli links in (printing the canonical
+    // against the host page's `vyrn` object; on native the symbol is satisfied
+    // by a per-extern C trap stub that vyrn-cli links in (printing the canonical
     // "not available on this target" message and exiting), so a single binary
     // stays honest instead of silently stubbing. Attribute groups are collected
     // here and appended at module end.
@@ -1097,13 +1097,13 @@ pub fn emit(program: &Program) -> Result<String, String> {
         let grp = 100 + i; // arbitrary, distinct ids; no other groups in this IR
         out.push_str(&format!("declare {ret} @{}({params}) #{grp}\n", extern_symbol(&f.name)));
         extern_attr_groups.push_str(&format!(
-            "attributes #{grp} = {{ \"wasm-import-module\"=\"vela\" \"wasm-import-name\"=\"{}\" }}\n",
+            "attributes #{grp} = {{ \"wasm-import-module\"=\"vyrn\" \"wasm-import-name\"=\"{}\" }}\n",
             f.name
         ));
     }
     // For a `file(..)` sink: a global stream handle plus the path/mode constants.
     if let LogSink::File(path) = &program.log_sink {
-        out.push_str("@__vela_log_file = global ptr null\n");
+        out.push_str("@__vyrn_log_file = global ptr null\n");
         let (escaped, len) = llvm_str(path);
         out.push_str(&format!(
             "@.logpath = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n"
@@ -1140,10 +1140,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
     let utf8d = utf8d_table();
     let table_body = utf8d.iter().map(|b| format!("i8 {b}")).collect::<Vec<_>>().join(", ");
     out.push_str(&format!(
-        "@__vela_utf8d = private unnamed_addr constant [364 x i8] [{table_body}]\n"
+        "@__vyrn_utf8d = private unnamed_addr constant [364 x i8] [{table_body}]\n"
     ));
     out.push_str(
-        "@__vela_b64alpha = private unnamed_addr constant [64 x i8] \
+        "@__vyrn_b64alpha = private unnamed_addr constant [64 x i8] \
          c\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\"\n",
     );
     out.push_str(ENCODING_RUNTIME);
@@ -1208,9 +1208,9 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("@.fmt.nan = private unnamed_addr constant [5 x i8] c\"NaN\\0A\\00\"\n");
     out.push_str("@.str.nan = private unnamed_addr constant [4 x i8] c\"NaN\\00\"\n");
 
-    // Input-I/O error wording (RFC-0014): canonical Vela strings, NEVER OS text,
+    // Input-I/O error wording (RFC-0014): canonical Vyrn strings, NEVER OS text,
     // so every backend produces byte-identical `Err` payloads. `%s` is the path;
-    // the message is built at runtime (`@__vela_read_err`/`@__vela_write_err`).
+    // the message is built at runtime (`@__vyrn_read_err`/`@__vyrn_write_err`).
     // These are payload strings (no trailing newline — unlike the trap globals).
     for (name, msg) in [
         ("@.io.readerr", "cannot read `%s`"),
@@ -1247,7 +1247,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             collect_strings_expr(pred, &mut literals, &type_map);
         }
     }
-    // Module-state initializers (RFC-0013) are lowered in `@__vela_globals_init`,
+    // Module-state initializers (RFC-0013) are lowered in `@__vyrn_globals_init`,
     // so any string literal they mention must be pooled too.
     for g in &program.globals {
         collect_strings_expr(&g.init, &mut literals, &type_map);
@@ -1272,9 +1272,9 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // JSON codec (RFC-0018): a per-enum table of variant-name string pointers,
     // indexed by tag, so `toJson` on an enum reads its name in O(1).
     for t in &program.type_decls {
-        if let Type::Enum(vs) = &vela_frontend::types::resolve(&Type::Named(t.name.clone()), &type_map)
+        if let Type::Enum(vs) = &vyrn_frontend::types::resolve(&Type::Named(t.name.clone()), &type_map)
         {
-            if vela_frontend::codec::encodable(&Type::Named(t.name.clone()), &type_map).is_err() {
+            if vyrn_frontend::codec::encodable(&Type::Named(t.name.clone()), &type_map).is_err() {
                 continue;
             }
             let elems: Vec<String> = vs
@@ -1292,7 +1292,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push('\n');
 
     // Compile every distinct `=~` pattern to a DFA and emit its transition table
-    // and accepting-state array as globals (the runner `@__vela_regex_run` walks
+    // and accepting-state array as globals (the runner `@__vyrn_regex_run` walks
     // them). The map lets `gen_binary` find a pattern's globals at the use site.
     let mut regex_patterns: Vec<String> = Vec::new();
     for f in &program.functions {
@@ -1311,7 +1311,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     let mut regex_globals: HashMap<String, (String, String, u32)> = HashMap::new();
     for (i, pat) in regex_patterns.iter().enumerate() {
         // The checker already proved every pattern compiles.
-        let dfa = vela_frontend::regex::compile(pat).expect("regex validated by checker");
+        let dfa = vyrn_frontend::regex::compile(pat).expect("regex validated by checker");
         let table_name = format!("@.rx.{i}.table");
         let accept_name = format!("@.rx.{i}.accept");
         let table_body =
@@ -1385,7 +1385,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
 
     // Whole-program ownership: which functions return owned heap values, and
     // which `let` bindings each function must free at block exit (RFC-0004 §4).
-    let ownership = vela_frontend::own::analyze(program);
+    let ownership = vyrn_frontend::own::analyze(program);
     let droppable_map = &ownership.droppable;
 
     let protocol_methods: HashMap<String, String> = program
@@ -1396,9 +1396,9 @@ pub fn emit(program: &Program) -> Result<String, String> {
 
     // ---- module state (RFC-0013) ----------------------------------------
     // One LLVM global per binding (`@g.<name>`, `zeroinitializer`), plus a
-    // synthesized `@__vela_globals_init()` that runs every initializer's stores
+    // synthesized `@__vyrn_globals_init()` that runs every initializer's stores
     // in declaration order (heap-valued inits — arrays, strings — work because
-    // this runs at runtime). It is called from `vela_entry` BEFORE `main`. Reads
+    // this runs at runtime). It is called from `vyrn_entry` BEFORE `main`. Reads
     // and writes elsewhere resolve through `globals_map` via `Gen::lookup`.
     let mut globals_map: HashMap<String, (String, Type)> = HashMap::new();
     let mut globals_init_ir = String::new();
@@ -1429,7 +1429,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             decls.push_str(&format!("{sym} = internal global {ll} zeroinitializer\n"));
             globals_map.insert(g.name.clone(), (sym, ty));
         }
-        globals_init_ir.push_str("define internal void @__vela_globals_init() {\n");
+        globals_init_ir.push_str("define internal void @__vyrn_globals_init() {\n");
         globals_init_ir.push_str("entry:\n");
         for a in &gi.allocas {
             globals_init_ir.push_str(a);
@@ -1455,7 +1455,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         if f.is_extern {
             continue;
         }
-        let sym = if f.name == "main" { "vela_main".to_string() } else { format!("vela_{}", f.name) };
+        let sym = if f.name == "main" { "vyrn_main".to_string() } else { format!("vyrn_{}", f.name) };
         let mut gen = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
             &funcs, droppable_map, &regex_globals,
@@ -1500,13 +1500,13 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // handled inline by the emitters, so they need no standalone function.
     for t in &program.type_decls {
         let named = Type::Named(t.name.clone());
-        if !matches!(vela_frontend::types::resolve(&named, &types), Type::Record(_)) {
+        if !matches!(vyrn_frontend::types::resolve(&named, &types), Type::Record(_)) {
             continue;
         }
         let decl = types[&t.name].clone();
-        // Encoder: `@__vela_enc_T({llt} %v) -> ptr`.
-        if vela_frontend::codec::encodable(&named, &types).is_ok() {
-            let fields = match vela_frontend::types::resolve(&named, &types) {
+        // Encoder: `@__vyrn_enc_T({llt} %v) -> ptr`.
+        if vyrn_frontend::codec::encodable(&named, &types).is_ok() {
+            let fields = match vyrn_frontend::types::resolve(&named, &types) {
                 Type::Record(fs) => fs,
                 _ => unreachable!(),
             };
@@ -1517,14 +1517,14 @@ pub fn emit(program: &Program) -> Result<String, String> {
             gen.protocol_methods = protocol_methods.clone();
             let ll = gen.llt(&named);
             let obj = gen.fresh_tmp();
-            gen.emit(format!("{obj} = call ptr @__vela_vj_obj()"));
+            gen.emit(format!("{obj} = call ptr @__vyrn_vj_obj()"));
             for (i, f) in fields.iter().enumerate() {
                 let fv = gen.fresh_tmp();
                 gen.emit(format!("{fv} = extractvalue {ll} %arg0, {i}"));
                 gen.emit_encode_field(&obj, &fv, f)?;
             }
             gen.emit_term(format!("ret ptr {obj}"));
-            writeln!(out, "define ptr @__vela_enc_{}({ll} %arg0) {{", t.name).unwrap();
+            writeln!(out, "define ptr @__vyrn_enc_{}({ll} %arg0) {{", t.name).unwrap();
             out.push_str("entry:\n");
             for a in &gen.allocas {
                 out.push_str(a);
@@ -1536,8 +1536,8 @@ pub fn emit(program: &Program) -> Result<String, String> {
             }
             out.push_str("}\n\n");
         }
-        // Decoder: `@__vela_dec_T(ptr %vj, ptr %path, ptr %issues) -> {llt}`.
-        if vela_frontend::codec::decodable(&named, &types).is_ok() {
+        // Decoder: `@__vyrn_dec_T(ptr %vj, ptr %path, ptr %issues) -> {llt}`.
+        if vyrn_frontend::codec::decodable(&named, &types).is_ok() {
             let mut gen = Gen::new(
                 &ret_types, &param_types, &param_caps, &types, &variants, &str_globals,
                 &empty_subst, &funcs, droppable_map, &regex_globals,
@@ -1545,14 +1545,14 @@ pub fn emit(program: &Program) -> Result<String, String> {
             gen.protocol_methods = protocol_methods.clone();
             let ll = gen.llt(&named);
             let rec_decl = TypeDecl {
-                base: vela_frontend::types::resolve(&named, &types),
+                base: vyrn_frontend::types::resolve(&named, &types),
                 ..decl.clone()
             };
             let r = gen.emit_decode_record_body("%arg0", "%arg1", "%arg2", &rec_decl)?;
             gen.emit_term(format!("ret {ll} {r}"));
             writeln!(
                 out,
-                "define {ll} @__vela_dec_{}(ptr %arg0, ptr %arg1, ptr %arg2) {{",
+                "define {ll} @__vyrn_dec_{}(ptr %arg0, ptr %arg1, ptr %arg2) {{",
                 t.name
             )
             .unwrap();
@@ -1573,27 +1573,27 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // functions (textual order is immaterial to LLVM).
     out.push_str(&globals_init_ir);
 
-    // C entry point: call Vela's main and reduce its i64 to a process exit code.
+    // C entry point: call Vyrn's main and reduce its i64 to a process exit code.
     // Mask to the low 8 bits so the result matches the interpreter (which does
     // `code & 0xff`) and the POSIX 0–255 exit-status convention — otherwise a
     // return value > 255 would diverge on Windows, which preserves the full i32.
-    out.push_str("define i32 @vela_entry() {\n");
+    out.push_str("define i32 @vyrn_entry() {\n");
     out.push_str("entry:\n");
     // Open the log file before running, if the program logs to one.
     let file_sink = matches!(program.log_sink, LogSink::File(_));
     if file_sink {
         out.push_str("  %lf = call ptr @fopen(ptr @.logpath, ptr @.logmode)\n");
-        out.push_str("  store ptr %lf, ptr @__vela_log_file\n");
+        out.push_str("  store ptr %lf, ptr @__vyrn_log_file\n");
     }
     // Initialize module state (RFC-0013) before `main` runs — and therefore
     // before any exported extern handler the host calls afterward.
     if !program.globals.is_empty() {
-        out.push_str("  call void @__vela_globals_init()\n");
+        out.push_str("  call void @__vyrn_globals_init()\n");
     }
-    out.push_str("  %r = call i64 @vela_main()\n");
+    out.push_str("  %r = call i64 @vyrn_main()\n");
     // Flush and close the log file after running (before returning the code).
     if file_sink {
-        out.push_str("  %lfc = load ptr, ptr @__vela_log_file\n");
+        out.push_str("  %lfc = load ptr, ptr @__vyrn_log_file\n");
         out.push_str("  %ignore = call i32 @fclose(ptr %lfc)\n");
     }
     out.push_str("  %m = and i64 %r, 255\n");
@@ -1647,7 +1647,7 @@ struct Gen<'a> {
     /// Lexical `region` nesting depth, for routing `concat` (arena vs `malloc`).
     region_depth: usize,
     /// Identities of `let`s whose heap binding is reclaimed at block exit (and
-    /// how), for the function currently being emitted (from `vela_frontend::own`).
+    /// how), for the function currently being emitted (from `vyrn_frontend::own`).
     droppable: HashMap<usize, DropKind>,
     /// Per-function droppable maps for the whole program (looked up per emit).
     droppable_map: &'a HashMap<String, HashMap<usize, DropKind>>,
@@ -1717,14 +1717,14 @@ impl<'a> Gen<'a> {
     /// this instantiation, then delegate to the shared resolver (which also
     /// evaluates the `Omit`/`Pick`/`Merge` transformers).
     fn resolve(&self, ty: &Type) -> Type {
-        let t = vela_frontend::types::substitute(ty, self.subst);
-        vela_frontend::types::resolve(&t, self.types)
+        let t = vyrn_frontend::types::substitute(ty, self.subst);
+        vyrn_frontend::types::resolve(&t, self.types)
     }
 
     /// The fields of `ty` if it is (resolves to) a record.
     fn record_fields(&self, ty: &Type) -> Option<Vec<Field>> {
-        let t = vela_frontend::types::substitute(ty, self.subst);
-        vela_frontend::types::record_fields(&t, self.types)
+        let t = vyrn_frontend::types::substitute(ty, self.subst);
+        vyrn_frontend::types::record_fields(&t, self.types)
     }
 
     /// The widest payload count of the named enum (0 if not an enum).
@@ -1925,9 +1925,9 @@ impl<'a> Gen<'a> {
     fn heap_alloc(&mut self, size: &str) -> String {
         let buf = self.fresh_tmp();
         if self.region_depth > 0 {
-            self.emit(format!("{buf} = call ptr @__vela_region_alloc(i64 {size})"));
+            self.emit(format!("{buf} = call ptr @__vyrn_region_alloc(i64 {size})"));
         } else {
-            self.emit(format!("{buf} = call ptr @__vela_malloc(i64 {size})"));
+            self.emit(format!("{buf} = call ptr @__vyrn_malloc(i64 {size})"));
         }
         buf
     }
@@ -1941,8 +1941,8 @@ impl<'a> Gen<'a> {
     fn emit_str_concat(&mut self, a: &str, b: &str) -> String {
         let la = self.fresh_tmp();
         let lb = self.fresh_tmp();
-        self.emit(format!("{la} = call i64 @__vela_strlen(ptr {a})"));
-        self.emit(format!("{lb} = call i64 @__vela_strlen(ptr {b})"));
+        self.emit(format!("{la} = call i64 @__vyrn_strlen(ptr {a})"));
+        self.emit(format!("{lb} = call i64 @__vyrn_strlen(ptr {b})"));
         let sum = self.fresh_tmp();
         let tot = self.fresh_tmp();
         self.emit(format!("{sum} = add i64 {la}, {lb}"));
@@ -1977,7 +1977,7 @@ impl<'a> Gen<'a> {
         self.emit(format!("{szp} = getelementptr {aggty}, ptr null, i64 1"));
         self.emit(format!("{sz} = ptrtoint ptr {szp} to i64"));
         let buf = self.fresh_tmp();
-        self.emit(format!("{buf} = call ptr @__vela_malloc(i64 {sz})"));
+        self.emit(format!("{buf} = call ptr @__vyrn_malloc(i64 {sz})"));
         self.emit(format!("store {aggty} {v}, ptr {buf}"));
         let a = self.fresh_tmp();
         let b = self.fresh_tmp();
@@ -1997,7 +1997,7 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("br i1 {cond}, label %{trap_l}, label %{ok_l}"));
         self.emit_label(&trap_l);
         let e = self.fresh_tmp();
-        self.emit(format!("{e} = call ptr @__vela_stderr()"));
+        self.emit(format!("{e} = call ptr @__vyrn_stderr()"));
         self.emit(format!("call i32 @fputs(ptr {msg_global}, ptr {e})"));
         self.emit("call void @exit(i32 1)".into());
         self.emit_term("unreachable".into());
@@ -2090,12 +2090,12 @@ impl<'a> Gen<'a> {
 
         // `export extern fn` (RFC-0012 M2): the same `define` gains an inline
         // `wasm-export-name` attribute so wasm-ld exports the function under its
-        // Vela name (not the internal `vela_<name>` symbol). The attribute is a
+        // Vyrn name (not the internal `vyrn_<name>` symbol). The attribute is a
         // GC root, so no `-Wl,--export` flag is needed for the function itself;
         // on native targets LLVM simply ignores the string attribute. Note the
         // String ABI asymmetry vs. an import (M1): an exported fn's `String`
         // parameter is a single `ptr` (the normal lowering) because the JS caller
-        // CAN allocate — it grabs `__vela_malloc`, copies UTF-8 + a NUL, and
+        // CAN allocate — it grabs `__vyrn_malloc`, copies UTF-8 + a NUL, and
         // passes the pointer. An import can't allocate, so it takes `(ptr, len)`.
         let export_attr = if f.is_export_extern {
             format!(" \"wasm-export-name\"=\"{}\"", f.name)
@@ -2181,10 +2181,10 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{r} = load {{ i64, i64 }}, ptr {slot}"));
                 self.emit(format!("{s} = extractvalue {{ i64, i64 }} {r}, 0"));
                 self.emit(format!("{g} = extractvalue {{ i64, i64 }} {r}, 1"));
-                self.emit(format!("call void @__vela_cell_check(i64 {s}, i64 {g})"));
-                self.emit(format!("{p} = call ptr @__vela_cell_ptr(i64 {s})"));
+                self.emit(format!("call void @__vyrn_cell_check(i64 {s}, i64 {g})"));
+                self.emit(format!("{p} = call ptr @__vyrn_cell_ptr(i64 {s})"));
                 self.emit(format!("call void @free(ptr {p})"));
-                self.emit(format!("call void @__vela_cell_release_slot(i64 {s})"));
+                self.emit(format!("call void @__vyrn_cell_release_slot(i64 {s})"));
             }
             DropKind::AfreeArr => {
                 // Auto-afree: free the array's final backing buffer (field 0).
@@ -2200,7 +2200,7 @@ impl<'a> Gen<'a> {
     fn gen_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
             Stmt::Let { name, value, ty: decl_ty, .. } => {
-                // Node-address identity — must match `vela_frontend::own`, which
+                // Node-address identity — must match `vyrn_frontend::own`, which
                 // ran on this same borrowed AST.
                 let key = stmt as *const Stmt as usize;
                 let (v, vty) = self.gen_expr(value)?;
@@ -2390,7 +2390,7 @@ impl<'a> Gen<'a> {
                 let (data, len) = match &resolved {
                     Type::Str => {
                         let len = self.fresh_tmp();
-                        self.emit(format!("{len} = call i64 @__vela_strlen(ptr {av})"));
+                        self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {av})"));
                         (av.clone(), len)
                     }
                     Type::ArrayN(_, n) => {
@@ -2493,12 +2493,12 @@ impl<'a> Gen<'a> {
                 // region allocated. If the body always returns (terminates the
                 // block), the exit call is unreachable and skipped — that path
                 // leaks, which is safe (never a use-after-free).
-                self.emit("call void @__vela_region_enter()".into());
+                self.emit("call void @__vyrn_region_enter()".into());
                 self.region_depth += 1;
                 self.gen_block(body)?;
                 self.region_depth -= 1;
                 if !self.terminated {
-                    self.emit("call void @__vela_region_exit()".into());
+                    self.emit("call void @__vyrn_region_exit()".into());
                 }
                 Ok(())
             }
@@ -2587,7 +2587,7 @@ impl<'a> Gen<'a> {
                         // `str.length` is the byte length via `strlen`.
                         Type::Str => {
                             let len = self.fresh_tmp();
-                            self.emit(format!("{len} = call i64 @__vela_strlen(ptr {v})"));
+                            self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {v})"));
                             return Ok((len, Type::Int));
                         }
                         _ => {}
@@ -2651,7 +2651,7 @@ impl<'a> Gen<'a> {
             .ok_or_else(|| format!("unknown type `{name}`"))?;
         if self.resolve(&decl.base) != Type::Int {
             return Err(format!(
-                "native fallible construction supports Int64-based types only (`{name}`); use `velac run`"
+                "native fallible construction supports Int64-based types only (`{name}`); use `vyrn run`"
             ));
         }
         let (v, _) = self.gen_expr(arg)?;
@@ -2717,7 +2717,7 @@ impl<'a> Gen<'a> {
         let mut coerced: Vec<(String, String, Type)> = Vec::new();
         for (i, decl_f) in rfields.iter().enumerate() {
             let (v, vty) = vals[i].clone();
-            let field_ty = vela_frontend::types::substitute(&decl_f.ty, &solved);
+            let field_ty = vyrn_frontend::types::substitute(&decl_f.ty, &solved);
             let (v, _) = self.coerce(v, &vty, &field_ty)?;
             let field_ll = self.llt(&field_ty);
             let ins = self.fresh_tmp();
@@ -2732,7 +2732,7 @@ impl<'a> Gen<'a> {
         if let Some(decl) = self.types.get(name).cloned() {
             if let Some(pred) = &decl.predicate {
                 let all_const = fields.iter().all(|(_, e)| {
-                    vela_frontend::consteval::eval(e, &HashMap::new()).is_some()
+                    vyrn_frontend::consteval::eval(e, &HashMap::new()).is_some()
                 });
                 if !all_const {
                     self.scope.push(Vec::new());
@@ -2896,7 +2896,7 @@ impl<'a> Gen<'a> {
         let size = self.fresh_tmp();
         let p = self.fresh_tmp();
         self.emit(format!("{size} = ptrtoint ptr getelementptr ({ll}, ptr null, i64 1) to i64"));
-        self.emit(format!("{p} = call ptr @__vela_malloc(i64 {size})"));
+        self.emit(format!("{p} = call ptr @__vyrn_malloc(i64 {size})"));
         self.emit(format!("store {ll} {v}, ptr {p}"));
         let iv = self.fresh_tmp();
         self.emit(format!("{iv} = ptrtoint ptr {p} to i64"));
@@ -3063,7 +3063,7 @@ impl<'a> Gen<'a> {
                 .ok_or_else(|| format!("regex pattern not compiled: {pat}"))?;
             let t = self.fresh_tmp();
             self.emit(format!(
-                "{t} = call i1 @__vela_regex_run(ptr {s}, ptr {table}, i64 {start}, ptr {accept})"
+                "{t} = call i1 @__vyrn_regex_run(ptr {s}, ptr {table}, i64 {start}, ptr {accept})"
             ));
             return Ok((t, Type::Bool));
         }
@@ -3249,7 +3249,7 @@ impl<'a> Gen<'a> {
     fn emit_array_oob_trap(&mut self, label: &str, iv: &str) {
         self.emit_label(label);
         let e = self.fresh_tmp();
-        self.emit(format!("{e} = call ptr @__vela_stderr()"));
+        self.emit(format!("{e} = call ptr @__vyrn_stderr()"));
         self.emit(format!(
             "call i32 (ptr, ptr, ...) @fprintf(ptr {e}, ptr @.trap.aoob, i64 {iv})"
         ));
@@ -3263,7 +3263,7 @@ impl<'a> Gen<'a> {
         if name == "schemaOf" {
             let sl = match args.first() {
                 Some(Expr::Var { name: tn, .. }) if self.types.contains_key(tn) => {
-                    vela_frontend::types::schema_struct_lit(&self.types[tn])
+                    vyrn_frontend::types::schema_struct_lit(&self.types[tn])
                 }
                 _ => return Err("`schemaOf` needs a declared type name".to_string()),
             };
@@ -3275,7 +3275,7 @@ impl<'a> Gen<'a> {
         if name == "jsonSchema" {
             let json = match args.first() {
                 Some(Expr::Var { name: tn, .. }) if self.types.contains_key(tn) => {
-                    vela_frontend::types::json_schema_string(&self.types[tn], self.types)
+                    vyrn_frontend::types::json_schema_string(&self.types[tn], self.types)
                 }
                 _ => return Err("`jsonSchema` needs a declared type name".to_string()),
             };
@@ -3288,7 +3288,7 @@ impl<'a> Gen<'a> {
             let (v, vty) = self.gen_expr(&args[0])?;
             let node = self.emit_encode(&v, &vty)?;
             let s = self.fresh_tmp();
-            self.emit(format!("{s} = call ptr @__vela_vj_encode(ptr {node})"));
+            self.emit(format!("{s} = call ptr @__vyrn_vj_encode(ptr {node})"));
             return Ok((s, Type::Str));
         }
         // `fromJson(TypeName, s)` (RFC-0018): parse, decode, and package into a
@@ -3303,7 +3303,7 @@ impl<'a> Gen<'a> {
             return self.gen_from_json(&tn, &s);
         }
         // Numeric conversion `Int32(x)`, `Float64(x)`, ...
-        if let Some(target) = vela_frontend::types::numeric_conv_target(name) {
+        if let Some(target) = vyrn_frontend::types::numeric_conv_target(name) {
             if args.len() == 1 {
                 let (v, sty) = self.gen_expr(&args[0])?;
                 return self.gen_numeric_conv(v, &sty, &target);
@@ -3386,14 +3386,14 @@ impl<'a> Gen<'a> {
                 match &self.log_sink {
                     // Stream handles come from the portable C shim.
                     LogSink::Stderr => {
-                        self.emit(format!("{stream} = call ptr @__vela_stderr()"))
+                        self.emit(format!("{stream} = call ptr @__vyrn_stderr()"))
                     }
                     LogSink::Stdout => {
-                        self.emit(format!("{stream} = call ptr @__vela_stdout()"))
+                        self.emit(format!("{stream} = call ptr @__vyrn_stdout()"))
                     }
                     // The file is opened once in `@main` (below).
                     LogSink::File(_) => {
-                        self.emit(format!("{stream} = load ptr, ptr @__vela_log_file"))
+                        self.emit(format!("{stream} = load ptr, ptr @__vyrn_log_file"))
                     }
                 }
                 self.emit(format!(
@@ -3404,15 +3404,15 @@ impl<'a> Gen<'a> {
         }
 
         // (`len(String)` was removed; a String's byte length is the `.length`
-        // field, lowered at `Expr::Field` via `@__vela_strlen`.)
+        // field, lowered at `Expr::Field` via `@__vyrn_strlen`.)
         // Text encodings. Encoders return a fresh String; decoders return the
         // Option<String> aggregate (runtime helpers do the work + UTF-8 checking).
         if matches!(name, "hexEncode" | "base64Encode" | "urlEncode") {
             let (v, _) = self.gen_expr(&args[0])?;
             let helper = match name {
-                "hexEncode" => "@__vela_hex_encode",
-                "base64Encode" => "@__vela_b64_encode",
-                _ => "@__vela_url_encode",
+                "hexEncode" => "@__vyrn_hex_encode",
+                "base64Encode" => "@__vyrn_b64_encode",
+                _ => "@__vyrn_url_encode",
             };
             let t = self.fresh_tmp();
             self.emit(format!("{t} = call ptr {helper}(ptr {v})"));
@@ -3421,9 +3421,9 @@ impl<'a> Gen<'a> {
         if matches!(name, "hexDecode" | "base64Decode" | "urlDecode") {
             let (v, _) = self.gen_expr(&args[0])?;
             let helper = match name {
-                "hexDecode" => "@__vela_hex_decode",
-                "base64Decode" => "@__vela_b64_decode",
-                _ => "@__vela_url_decode",
+                "hexDecode" => "@__vyrn_hex_decode",
+                "base64Decode" => "@__vyrn_b64_decode",
+                _ => "@__vyrn_url_decode",
             };
             let t = self.fresh_tmp();
             self.emit(format!("{t} = call {{ i1, i64, i64 }} {helper}(ptr {v})"));
@@ -3435,7 +3435,7 @@ impl<'a> Gen<'a> {
         if matches!(name, "bytes" | "chars") {
             let (v, _) = self.gen_expr(&args[0])?;
             let helper =
-                if name == "bytes" { "@__vela_str_bytes" } else { "@__vela_str_chars" };
+                if name == "bytes" { "@__vyrn_str_bytes" } else { "@__vyrn_str_chars" };
             let t = self.fresh_tmp();
             self.emit(format!("{t} = call {{ ptr, i64, i64 }} {helper}(ptr {v})"));
             let elem = if name == "bytes" {
@@ -3448,21 +3448,21 @@ impl<'a> Gen<'a> {
 
         // ---- input I/O (RFC-0014) -----------------------------------------
         // Effects like `print`: the C shim does the syscalls; the IR builds the
-        // canonical error payloads (via `@__vela_read_err`/`@__vela_write_err`
+        // canonical error payloads (via `@__vyrn_read_err`/`@__vyrn_write_err`
         // and the `@.io.*` globals) so the wording lives in ONE place.
         if name == "args" {
             let t = self.fresh_tmp();
-            self.emit(format!("{t} = call {{ ptr, i64, i64 }} @__vela_args()"));
+            self.emit(format!("{t} = call {{ ptr, i64, i64 }} @__vyrn_args()"));
             return Ok((t, Type::Array(Box::new(Type::Str))));
         }
         if name == "readLine" {
-            // ptr = __vela_read_line(&len): NULL at EOF (or an embedded NUL —
+            // ptr = __vyrn_read_line(&len): NULL at EOF (or an embedded NUL —
             // unrepresentable in a NUL-terminated String). A non-NULL line is
             // UTF-8-validated with the shared DFA; invalid reads as None too,
             // exactly like the interpreter's `String::from_utf8` failure.
             let lenp = self.fresh_alloca("i64");
             let p = self.fresh_tmp();
-            self.emit(format!("{p} = call ptr @__vela_read_line(ptr {lenp})"));
+            self.emit(format!("{p} = call ptr @__vyrn_read_line(ptr {lenp})"));
             let isnull = self.fresh_tmp();
             self.emit(format!("{isnull} = icmp eq ptr {p}, null"));
             let none_l = self.fresh_label("rl.none");
@@ -3475,7 +3475,7 @@ impl<'a> Gen<'a> {
             let len = self.fresh_tmp();
             let valid = self.fresh_tmp();
             self.emit(format!("{len} = load i64, ptr {lenp}"));
-            self.emit(format!("{valid} = call i1 @__vela_utf8valid(ptr {p}, i64 {len})"));
+            self.emit(format!("{valid} = call i1 @__vyrn_utf8valid(ptr {p}, i64 {len})"));
             self.emit_term(format!("br i1 {valid}, label %{ok_l}, label %{bad_l}"));
             self.emit_label(&bad_l);
             self.emit(format!("call void @free(ptr {p})"));
@@ -3501,15 +3501,15 @@ impl<'a> Gen<'a> {
             return Ok((r, Type::Option(Box::new(Type::Str))));
         }
         if name == "readFile" {
-            // status = __vela_read_file(path, &buf, &len): 0 ok / 1 io / 3 NUL,
+            // status = __vyrn_read_file(path, &buf, &len): 0 ok / 1 io / 3 NUL,
             // then the shared UTF-8 DFA decides status 2. The Err payload is
-            // rendered by @__vela_read_err from the status.
+            // rendered by @__vyrn_read_err from the status.
             let (path, _) = self.gen_expr(&args[0])?;
             let outp = self.fresh_alloca("ptr");
             let lenp = self.fresh_alloca("i64");
             let st = self.fresh_tmp();
             self.emit(format!(
-                "{st} = call i32 @__vela_read_file(ptr {path}, ptr {outp}, ptr {lenp})"
+                "{st} = call i32 @__vyrn_read_file(ptr {path}, ptr {outp}, ptr {lenp})"
             ));
             let isok = self.fresh_tmp();
             self.emit(format!("{isok} = icmp eq i32 {st}, 0"));
@@ -3526,7 +3526,7 @@ impl<'a> Gen<'a> {
             let valid = self.fresh_tmp();
             self.emit(format!("{buf} = load ptr, ptr {outp}"));
             self.emit(format!("{len} = load i64, ptr {lenp}"));
-            self.emit(format!("{valid} = call i1 @__vela_utf8valid(ptr {buf}, i64 {len})"));
+            self.emit(format!("{valid} = call i1 @__vyrn_utf8valid(ptr {buf}, i64 {len})"));
             self.emit_term(format!("br i1 {valid}, label %{ok_l}, label %{badutf_l}"));
             self.emit_label(&badutf_l);
             self.emit(format!("call void @free(ptr {buf})"));
@@ -3537,7 +3537,7 @@ impl<'a> Gen<'a> {
                 "{stphi} = phi i32 [ {st}, %{entry_b} ], [ 2, %{badutf_l} ]"
             ));
             let msg = self.fresh_tmp();
-            self.emit(format!("{msg} = call ptr @__vela_read_err(ptr {path}, i32 {stphi})"));
+            self.emit(format!("{msg} = call ptr @__vyrn_read_err(ptr {path}, i32 {stphi})"));
             let ew = self.fresh_tmp();
             let e0 = self.fresh_tmp();
             let e1 = self.fresh_tmp();
@@ -3569,7 +3569,7 @@ impl<'a> Gen<'a> {
             let (contents, _) = self.gen_expr(&args[1])?;
             let st = self.fresh_tmp();
             self.emit(format!(
-                "{st} = call i32 @__vela_write_file(ptr {path}, ptr {contents})"
+                "{st} = call i32 @__vyrn_write_file(ptr {path}, ptr {contents})"
             ));
             let isok = self.fresh_tmp();
             self.emit(format!("{isok} = icmp eq i32 {st}, 0"));
@@ -3579,7 +3579,7 @@ impl<'a> Gen<'a> {
             self.emit_term(format!("br i1 {isok}, label %{ok_l}, label %{err_l}"));
             self.emit_label(&err_l);
             let msg = self.fresh_tmp();
-            self.emit(format!("{msg} = call ptr @__vela_write_err(ptr {path})"));
+            self.emit(format!("{msg} = call ptr @__vyrn_write_err(ptr {path})"));
             let ew = self.fresh_tmp();
             let e0 = self.fresh_tmp();
             let e1 = self.fresh_tmp();
@@ -3607,7 +3607,7 @@ impl<'a> Gen<'a> {
             let lenp = self.fresh_alloca("i64");
             let st = self.fresh_tmp();
             self.emit(format!(
-                "{st} = call i32 @__vela_read_file_bytes(ptr {path}, ptr {outp}, ptr {lenp})"
+                "{st} = call i32 @__vyrn_read_file_bytes(ptr {path}, ptr {outp}, ptr {lenp})"
             ));
             let isok = self.fresh_tmp();
             self.emit(format!("{isok} = icmp eq i32 {st}, 0"));
@@ -3618,7 +3618,7 @@ impl<'a> Gen<'a> {
             self.emit_label(&err_l);
             let msg = self.fresh_tmp();
             // status is always 1 (io) here — reuse the read-error renderer.
-            self.emit(format!("{msg} = call ptr @__vela_read_err(ptr {path}, i32 1)"));
+            self.emit(format!("{msg} = call ptr @__vyrn_read_err(ptr {path}, i32 1)"));
             let ew = self.fresh_tmp();
             let e0 = self.fresh_tmp();
             let e1 = self.fresh_tmp();
@@ -3670,7 +3670,7 @@ impl<'a> Gen<'a> {
             self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {arr}, 0"));
             self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {arr}, 1"));
             let buf = self.fresh_tmp();
-            self.emit(format!("{buf} = call ptr @__vela_bytes_dup(ptr {data}, i64 {len})"));
+            self.emit(format!("{buf} = call ptr @__vyrn_bytes_dup(ptr {data}, i64 {len})"));
             let isnull = self.fresh_tmp();
             self.emit(format!("{isnull} = icmp eq ptr {buf}, null"));
             let nul_l = self.fresh_label("sfb.nul");
@@ -3684,7 +3684,7 @@ impl<'a> Gen<'a> {
             self.emit_term(format!("br label %{err_l}"));
             self.emit_label(&chk_l);
             let valid = self.fresh_tmp();
-            self.emit(format!("{valid} = call i1 @__vela_utf8valid(ptr {buf}, i64 {len})"));
+            self.emit(format!("{valid} = call i1 @__vyrn_utf8valid(ptr {buf}, i64 {len})"));
             self.emit_term(format!("br i1 {valid}, label %{ok_l}, label %{badutf_l}"));
             self.emit_label(&badutf_l);
             self.emit(format!("call void @free(ptr {buf})"));
@@ -3696,10 +3696,10 @@ impl<'a> Gen<'a> {
             ));
             let mlen = self.fresh_tmp();
             let msz = self.fresh_tmp();
-            self.emit(format!("{mlen} = call i64 @__vela_strlen(ptr {src})"));
+            self.emit(format!("{mlen} = call i64 @__vyrn_strlen(ptr {src})"));
             self.emit(format!("{msz} = add i64 {mlen}, 1"));
             let msg = self.fresh_tmp();
-            self.emit(format!("{msg} = call ptr @__vela_malloc(i64 {msz})"));
+            self.emit(format!("{msg} = call ptr @__vyrn_malloc(i64 {msz})"));
             self.emit(format!("call ptr @strcpy(ptr {msg}, ptr {src})"));
             let ew = self.fresh_tmp();
             let e0 = self.fresh_tmp();
@@ -3744,8 +3744,8 @@ impl<'a> Gen<'a> {
             let lb = self.fresh_tmp();
             let c = self.fresh_tmp();
             let r = self.fresh_tmp();
-            self.emit(format!("{lb} = call i64 @__vela_strlen(ptr {b})"));
-            self.emit(format!("{c} = call i32 @__vela_strncmp(ptr {a}, ptr {b}, i64 {lb})"));
+            self.emit(format!("{lb} = call i64 @__vyrn_strlen(ptr {b})"));
+            self.emit(format!("{c} = call i32 @__vyrn_strncmp(ptr {a}, ptr {b}, i64 {lb})"));
             self.emit(format!("{r} = icmp eq i32 {c}, 0"));
             return Ok((r, Type::Bool));
         }
@@ -3755,8 +3755,8 @@ impl<'a> Gen<'a> {
             let (b, _) = self.gen_expr(&args[1])?;
             let la = self.fresh_tmp();
             let lb = self.fresh_tmp();
-            self.emit(format!("{la} = call i64 @__vela_strlen(ptr {a})"));
-            self.emit(format!("{lb} = call i64 @__vela_strlen(ptr {b})"));
+            self.emit(format!("{la} = call i64 @__vyrn_strlen(ptr {a})"));
+            self.emit(format!("{lb} = call i64 @__vyrn_strlen(ptr {b})"));
             let fits = self.fresh_tmp();
             self.emit(format!("{fits} = icmp uge i64 {la}, {lb}"));
             let cmp_l = self.fresh_label("ew.cmp");
@@ -3770,7 +3770,7 @@ impl<'a> Gen<'a> {
             let eq = self.fresh_tmp();
             self.emit(format!("{off} = sub i64 {la}, {lb}"));
             self.emit(format!("{p} = getelementptr i8, ptr {a}, i64 {off}"));
-            self.emit(format!("{c} = call i32 @__vela_strncmp(ptr {p}, ptr {b}, i64 {lb})"));
+            self.emit(format!("{c} = call i32 @__vyrn_strncmp(ptr {p}, ptr {b}, i64 {lb})"));
             self.emit(format!("{eq} = icmp eq i32 {c}, 0"));
             let cmp_end = self.cur_block.clone();
             self.emit_term(format!("br label %{end_l}"));
@@ -3802,7 +3802,7 @@ impl<'a> Gen<'a> {
                 Type::Int => {
                     let buf = self.heap_alloc("24");
                     self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @__vela_snprintf(ptr {buf}, i64 24, ptr @.fmt.ld, i64 {v})"
+                        "call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr {buf}, i64 24, ptr @.fmt.ld, i64 {v})"
                     ));
                     return Ok((buf, Type::Str));
                 }
@@ -3821,7 +3821,7 @@ impl<'a> Gen<'a> {
                     };
                     let buf = self.heap_alloc("24");
                     self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @__vela_snprintf(ptr {buf}, i64 24, ptr {fmt}, i64 {w})"
+                        "call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr {buf}, i64 24, ptr {fmt}, i64 {w})"
                     ));
                     return Ok((buf, Type::Str));
                 }
@@ -3836,7 +3836,7 @@ impl<'a> Gen<'a> {
                     self.emit(format!("{fmt} = select i1 {nan}, ptr @.str.nan, ptr @.fmt.lf"));
                     let buf = self.heap_alloc("512");
                     self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @__vela_snprintf(ptr {buf}, i64 512, ptr {fmt}, double {v})"
+                        "call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr {buf}, i64 512, ptr {fmt}, double {v})"
                     ));
                     return Ok((buf, Type::Str));
                 }
@@ -3850,7 +3850,7 @@ impl<'a> Gen<'a> {
                     self.emit(format!("{fmt} = select i1 {nan}, ptr @.str.nan, ptr @.fmt.lf"));
                     let buf = self.heap_alloc("512");
                     self.emit(format!(
-                        "call i32 (ptr, i64, ptr, ...) @__vela_snprintf(ptr {buf}, i64 512, ptr {fmt}, double {d})"
+                        "call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr {buf}, i64 512, ptr {fmt}, double {d})"
                     ));
                     return Ok((buf, Type::Str));
                 }
@@ -3869,7 +3869,7 @@ impl<'a> Gen<'a> {
                     // strdup: copy so the rendered value is independently owned.
                     let len = self.fresh_tmp();
                     let sz = self.fresh_tmp();
-                    self.emit(format!("{len} = call i64 @__vela_strlen(ptr {v})"));
+                    self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {v})"));
                     self.emit(format!("{sz} = add i64 {len}, 1"));
                     let buf = self.heap_alloc(&sz);
                     self.emit(format!("call ptr @strcpy(ptr {buf}, ptr {v})"));
@@ -3981,12 +3981,12 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{size} = ptrtoint ptr getelementptr ({ll}, ptr null, i64 1) to i64"
             ));
-            self.emit(format!("{payload} = call ptr @__vela_malloc(i64 {size})"));
+            self.emit(format!("{payload} = call ptr @__vyrn_malloc(i64 {size})"));
             self.emit(format!("store {ll} {v}, ptr {payload}"));
             let slot = self.fresh_tmp();
-            self.emit(format!("{slot} = call i64 @__vela_cell_alloc(ptr {payload})"));
+            self.emit(format!("{slot} = call i64 @__vyrn_cell_alloc(ptr {payload})"));
             let g = self.fresh_tmp();
-            self.emit(format!("{g} = call i64 @__vela_cell_getgen(i64 {slot})"));
+            self.emit(format!("{g} = call i64 @__vyrn_cell_getgen(i64 {slot})"));
             let a = self.fresh_tmp();
             let b = self.fresh_tmp();
             self.emit(format!("{a} = insertvalue {{ i64, i64 }} undef, i64 {slot}, 0"));
@@ -4004,9 +4004,9 @@ impl<'a> Gen<'a> {
             self.emit(format!("{slot} = extractvalue {{ i64, i64 }} {r}, 0"));
             self.emit(format!("{g} = extractvalue {{ i64, i64 }} {r}, 1"));
             // Every access first validates the generation (traps on a stale ref).
-            self.emit(format!("call void @__vela_cell_check(i64 {slot}, i64 {g})"));
+            self.emit(format!("call void @__vyrn_cell_check(i64 {slot}, i64 {g})"));
             let payload = self.fresh_tmp();
-            self.emit(format!("{payload} = call ptr @__vela_cell_ptr(i64 {slot})"));
+            self.emit(format!("{payload} = call ptr @__vyrn_cell_ptr(i64 {slot})"));
             let ll = self.llt(&elem);
             match name {
                 "get" => {
@@ -4023,7 +4023,7 @@ impl<'a> Gen<'a> {
                 _ => {
                     // release: free the boxed payload and invalidate the slot.
                     self.emit(format!("call void @free(ptr {payload})"));
-                    self.emit(format!("call void @__vela_cell_release_slot(i64 {slot})"));
+                    self.emit(format!("call void @__vyrn_cell_release_slot(i64 {slot})"));
                     return Ok((String::new(), Type::Unit));
                 }
             }
@@ -4069,7 +4069,7 @@ impl<'a> Gen<'a> {
             self.emit(format!("{nc} = select i1 {capzero}, i64 4, i64 {dbl}"));
             self.emit(format!("{esz} = ptrtoint ptr getelementptr ({ell}, ptr null, i64 1) to i64"));
             self.emit(format!("{nb} = mul i64 {nc}, {esz}"));
-            self.emit(format!("{nd} = call ptr @__vela_realloc(ptr {data}, i64 {nb})"));
+            self.emit(format!("{nd} = call ptr @__vyrn_realloc(ptr {data}, i64 {nb})"));
             self.emit_term(format!("br label %{ready_l}"));
             // ready: choose data/cap, store the new element, rebuild the triple.
             self.emit_label(&ready_l);
@@ -4101,7 +4101,7 @@ impl<'a> Gen<'a> {
             let emit_trap = |g: &mut Self, fmt: &str| {
                 g.emit_label(&bad_l);
                 let e = g.fresh_tmp();
-                g.emit(format!("{e} = call ptr @__vela_stderr()"));
+                g.emit(format!("{e} = call ptr @__vyrn_stderr()"));
                 g.emit(format!(
                     "call i32 (ptr, ptr, ...) @fprintf(ptr {e}, ptr {fmt}, i64 {iv})"
                 ));
@@ -4150,7 +4150,7 @@ impl<'a> Gen<'a> {
                 // byte and zero-extend to i64 (the byte's value).
                 Type::Str => {
                     let len = self.fresh_tmp();
-                    self.emit(format!("{len} = call i64 @__vela_strlen(ptr {av})"));
+                    self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {av})"));
                     let oob = self.fresh_tmp();
                     self.emit(format!("{oob} = icmp uge i64 {iv}, {len}"));
                     self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
@@ -4424,16 +4424,16 @@ impl<'a> Gen<'a> {
             };
             // Substitute generic params (monomorphization) but keep named types,
             // so an enum receiver keys on its name rather than its aggregate.
-            let concrete = vela_frontend::types::substitute(&recv_ty, self.subst);
-            let key = vela_frontend::types::type_key(&concrete)
+            let concrete = vyrn_frontend::types::substitute(&recv_ty, self.subst);
+            let key = vyrn_frontend::types::type_key(&concrete)
                 .ok_or_else(|| format!("cannot dispatch `{name}` on {recv_ty:?}"))?;
-            let mangled = vela_frontend::types::impl_method_name(&proto, &key, name);
+            let mangled = vyrn_frontend::types::impl_method_name(&proto, &key, name);
             return self.gen_call(&mangled, args);
         }
 
         // `extern` call (RFC-0012): emit the real host call. This is the one
         // call whose behavior differs by target — the shared IR carries the
-        // import, and the C trap stub (native) vs the `vela` namespace (wasm)
+        // import, and the C trap stub (native) vs the `vyrn` namespace (wasm)
         // decides what it does. String args cross as `(ptr, len)`.
         if let Some(callee) = self.funcs.get(name).copied() {
             if callee.is_extern {
@@ -4452,7 +4452,7 @@ impl<'a> Gen<'a> {
             let mut arg_vals = Vec::new();
             for a in args {
                 let (v, vty) = self.gen_expr(a)?;
-                arg_tys.push(vela_frontend::types::substitute(&vty, self.subst));
+                arg_tys.push(vyrn_frontend::types::substitute(&vty, self.subst));
                 arg_vals.push(v);
             }
             // Bind each type parameter from the matching argument.
@@ -4470,13 +4470,13 @@ impl<'a> Gen<'a> {
             // Coerce args to their (substituted) parameter types.
             let mut arg_ops = Vec::new();
             for ((p, v), aty) in callee.params.iter().zip(arg_vals).zip(&arg_tys) {
-                let pty = vela_frontend::types::substitute(&p.ty, &call_subst);
+                let pty = vyrn_frontend::types::substitute(&p.ty, &call_subst);
                 let (v, cty) = self.coerce(v, aty, &pty)?;
                 arg_ops.push(format!("{} {v}", self.llt(&cty)));
             }
             self.instantiations.push((name.to_string(), type_args));
 
-            let ret_ty = vela_frontend::types::substitute(&callee.ret, &call_subst);
+            let ret_ty = vyrn_frontend::types::substitute(&callee.ret, &call_subst);
             let retll = self.llt(&ret_ty);
             return if retll == "void" {
                 self.emit(format!("call void @{sym}({})", arg_ops.join(", ")));
@@ -4511,7 +4511,7 @@ impl<'a> Gen<'a> {
             };
             arg_ops.push(format!("{} {v}", self.llt(&pty)));
         }
-        let sym = format!("vela_{name}");
+        let sym = format!("vyrn_{name}");
         let ret = self.ret_types.get(name).cloned().unwrap_or(Type::Int);
         let retll = self.llt(&ret);
         if retll == "void" {
@@ -4527,8 +4527,8 @@ impl<'a> Gen<'a> {
     /// Emit a real call to an `extern` import (RFC-0012). Each argument is
     /// coerced to its declared parameter type, then to the ABI value type; a
     /// `String` crosses as a `(ptr, strlen)` pair. The result is converted from
-    /// the ABI type back to the value's Vela representation. The callee symbol
-    /// (`@__vela_extern_<name>`) resolves to the host import (wasm) or the linked
+    /// the ABI type back to the value's Vyrn representation. The callee symbol
+    /// (`@__vyrn_extern_<name>`) resolves to the host import (wasm) or the linked
     /// C trap stub (native) — the IR is identical either way.
     fn gen_extern_call(&mut self, f: &Function, args: &[Expr]) -> Result<(String, Type), String> {
         let mut arg_ops = Vec::new();
@@ -4540,7 +4540,7 @@ impl<'a> Gen<'a> {
                 // String → (ptr, len): the callee decodes UTF-8 from linear
                 // memory (strings are immutable, so decode-on-cross is safe).
                 let len = self.fresh_tmp();
-                self.emit(format!("{len} = call i64 @__vela_strlen(ptr {v})"));
+                self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {v})"));
                 arg_ops.push(format!("ptr {v}"));
                 arg_ops.push(format!("i64 {len}"));
             } else {
@@ -4617,7 +4617,7 @@ impl<'a> Gen<'a> {
         let (v, _) = self.gen_expr(arg)?;
         // A constant was already proven by the checker (a violation is a
         // compile error), so only dynamic values pay for a runtime check.
-        let is_const = vela_frontend::consteval::eval(arg, &HashMap::new()).is_some();
+        let is_const = vyrn_frontend::consteval::eval(arg, &HashMap::new()).is_some();
         if !is_const {
             self.emit_validation(decl, &v)?;
         }
@@ -4714,7 +4714,7 @@ impl<'a> Gen<'a> {
                 Type::Record(_) if self.types.contains_key(n) => {
                     let ll = self.llt(ty);
                     let r = self.fresh_tmp();
-                    self.emit(format!("{r} = call ptr @__vela_enc_{n}({ll} {val})"));
+                    self.emit(format!("{r} = call ptr @__vyrn_enc_{n}({ll} {val})"));
                     return Ok(r);
                 }
                 Type::Enum(vs) => {
@@ -4729,7 +4729,7 @@ impl<'a> Gen<'a> {
                     let name = self.fresh_tmp();
                     self.emit(format!("{name} = load ptr, ptr {gep}"));
                     let r = self.fresh_tmp();
-                    self.emit(format!("{r} = call ptr @__vela_vj_str(ptr {name})"));
+                    self.emit(format!("{r} = call ptr @__vyrn_vj_str(ptr {name})"));
                     return Ok(r);
                 }
                 _ => {}
@@ -4738,36 +4738,36 @@ impl<'a> Gen<'a> {
         match self.resolve(ty) {
             Type::Int => {
                 let r = self.fresh_tmp();
-                self.emit(format!("{r} = call ptr @__vela_vj_int(i64 {val})"));
+                self.emit(format!("{r} = call ptr @__vyrn_vj_int(i64 {val})"));
                 Ok(r)
             }
             Type::IntN { bits, signed } => {
                 let w = self.widen_i64(val, bits, signed);
                 let fname = if signed { "int" } else { "uint" };
                 let r = self.fresh_tmp();
-                self.emit(format!("{r} = call ptr @__vela_vj_{fname}(i64 {w})"));
+                self.emit(format!("{r} = call ptr @__vyrn_vj_{fname}(i64 {w})"));
                 Ok(r)
             }
             Type::Float => {
                 let r = self.fresh_tmp();
-                self.emit(format!("{r} = call ptr @__vela_vj_float(double {val})"));
+                self.emit(format!("{r} = call ptr @__vyrn_vj_float(double {val})"));
                 Ok(r)
             }
             Type::Float32 => {
                 let d = self.fresh_tmp();
                 self.emit(format!("{d} = fpext float {val} to double"));
                 let r = self.fresh_tmp();
-                self.emit(format!("{r} = call ptr @__vela_vj_float(double {d})"));
+                self.emit(format!("{r} = call ptr @__vyrn_vj_float(double {d})"));
                 Ok(r)
             }
             Type::Bool => {
                 let r = self.fresh_tmp();
-                self.emit(format!("{r} = call ptr @__vela_vj_bool(i1 {val})"));
+                self.emit(format!("{r} = call ptr @__vyrn_vj_bool(i1 {val})"));
                 Ok(r)
             }
             Type::Str => {
                 let r = self.fresh_tmp();
-                self.emit(format!("{r} = call ptr @__vela_vj_str(ptr {val})"));
+                self.emit(format!("{r} = call ptr @__vyrn_vj_str(ptr {val})"));
                 Ok(r)
             }
             Type::Enum(vs) => {
@@ -4793,13 +4793,13 @@ impl<'a> Gen<'a> {
                     self.emit_label(l);
                     let g = self.str_g(&vs[i].name)?;
                     let c = self.fresh_tmp();
-                    self.emit(format!("{c} = call ptr @__vela_vj_str(ptr {g})"));
+                    self.emit(format!("{c} = call ptr @__vyrn_vj_str(ptr {g})"));
                     self.emit(format!("store ptr {c}, ptr {slot}"));
                     self.emit_term(format!("br label %{done}"));
                 }
                 self.emit_label(&dflt);
                 let nul = self.fresh_tmp();
-                self.emit(format!("{nul} = call ptr @__vela_vj_null()"));
+                self.emit(format!("{nul} = call ptr @__vyrn_vj_null()"));
                 self.emit(format!("store ptr {nul}, ptr {slot}"));
                 self.emit_term(format!("br label %{done}"));
                 self.emit_label(&done);
@@ -4811,7 +4811,7 @@ impl<'a> Gen<'a> {
                 // Anonymous record: build the object inline (no recursion risk).
                 let ll = self.llt(ty);
                 let obj = self.fresh_tmp();
-                self.emit(format!("{obj} = call ptr @__vela_vj_obj()"));
+                self.emit(format!("{obj} = call ptr @__vyrn_vj_obj()"));
                 for (i, f) in fields.iter().enumerate() {
                     let fv = self.fresh_tmp();
                     self.emit(format!("{fv} = extractvalue {ll} {val}, {i}"));
@@ -4839,7 +4839,7 @@ impl<'a> Gen<'a> {
                 self.emit_term(format!("br label %{done_l}"));
                 self.emit_label(&none_l);
                 let nul = self.fresh_tmp();
-                self.emit(format!("{nul} = call ptr @__vela_vj_null()"));
+                self.emit(format!("{nul} = call ptr @__vyrn_vj_null()"));
                 self.emit(format!("store ptr {nul}, ptr {slot}"));
                 self.emit_term(format!("br label %{done_l}"));
                 self.emit_label(&done_l);
@@ -4854,7 +4854,7 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {val}, 0"));
                 self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {val}, 1"));
                 let arr = self.fresh_tmp();
-                self.emit(format!("{arr} = call ptr @__vela_vj_arr()"));
+                self.emit(format!("{arr} = call ptr @__vyrn_vj_arr()"));
                 let idx = self.fresh_alloca("i64");
                 self.emit(format!("store i64 0, ptr {idx}"));
                 let cond_l = self.fresh_label("enc.arr.cond");
@@ -4873,7 +4873,7 @@ impl<'a> Gen<'a> {
                 let ev = self.fresh_tmp();
                 self.emit(format!("{ev} = load {ell}, ptr {ep}"));
                 let c = self.emit_encode(&ev, &inner)?;
-                self.emit(format!("call void @__vela_vj_push(ptr {arr}, ptr {c})"));
+                self.emit(format!("call void @__vyrn_vj_push(ptr {arr}, ptr {c})"));
                 let ni = self.fresh_tmp();
                 self.emit(format!("{ni} = add i64 {i}, 1"));
                 self.emit(format!("store i64 {ni}, ptr {idx}"));
@@ -4885,12 +4885,12 @@ impl<'a> Gen<'a> {
                 let ell = self.llt(&inner);
                 let aggty = format!("[{n} x {ell}]");
                 let arr = self.fresh_tmp();
-                self.emit(format!("{arr} = call ptr @__vela_vj_arr()"));
+                self.emit(format!("{arr} = call ptr @__vyrn_vj_arr()"));
                 for i in 0..n {
                     let ev = self.fresh_tmp();
                     self.emit(format!("{ev} = extractvalue {aggty} {val}, {i}"));
                     let c = self.emit_encode(&ev, &inner)?;
-                    self.emit(format!("call void @__vela_vj_push(ptr {arr}, ptr {c})"));
+                    self.emit(format!("call void @__vyrn_vj_push(ptr {arr}, ptr {c})"));
                 }
                 Ok(arr)
             }
@@ -4915,12 +4915,12 @@ impl<'a> Gen<'a> {
             self.emit(format!("{w1} = extractvalue {{ i1, i64, i64 }} {fv}, 2"));
             let iv = self.decode_payload(&w0, &w1, &inner);
             let c = self.emit_encode(&iv, &inner)?;
-            self.emit(format!("call void @__vela_vj_set(ptr {obj}, ptr {key}, ptr {c})"));
+            self.emit(format!("call void @__vyrn_vj_set(ptr {obj}, ptr {key}, ptr {c})"));
             self.emit_term(format!("br label %{skip_l}"));
             self.emit_label(&skip_l);
         } else {
             let c = self.emit_encode(fv, &f.ty)?;
-            self.emit(format!("call void @__vela_vj_set(ptr {obj}, ptr {key}, ptr {c})"));
+            self.emit(format!("call void @__vyrn_vj_set(ptr {obj}, ptr {key}, ptr {c})"));
         }
         Ok(())
     }
@@ -4931,7 +4931,7 @@ impl<'a> Gen<'a> {
         let kg = self.str_g(key)?;
         let mg = self.str_g(msg)?;
         self.emit(format!(
-            "call void @__vela_issues_push(ptr {issues}, ptr {kg}, ptr {path}, ptr {mg})"
+            "call void @__vyrn_issues_push(ptr {issues}, ptr {kg}, ptr {path}, ptr {mg})"
         ));
         Ok(())
     }
@@ -4948,9 +4948,9 @@ impl<'a> Gen<'a> {
         let kg = self.str_g("json.type")?;
         let eg = self.str_g(expected)?;
         let msg = self.fresh_tmp();
-        self.emit(format!("{msg} = call ptr @__vela_json_type_msg(ptr {eg}, i32 {kind})"));
+        self.emit(format!("{msg} = call ptr @__vyrn_json_type_msg(ptr {eg}, i32 {kind})"));
         self.emit(format!(
-            "call void @__vela_issues_push(ptr {issues}, ptr {kg}, ptr {path}, ptr {msg})"
+            "call void @__vyrn_issues_push(ptr {issues}, ptr {kg}, ptr {path}, ptr {msg})"
         ));
         Ok(())
     }
@@ -4973,7 +4973,7 @@ impl<'a> Gen<'a> {
                     let ll = self.llt(ty);
                     let r = self.fresh_tmp();
                     self.emit(format!(
-                        "{r} = call {ll} @__vela_dec_{n}(ptr {vj}, ptr {path}, ptr {issues})"
+                        "{r} = call {ll} @__vyrn_dec_{n}(ptr {vj}, ptr {path}, ptr {issues})"
                     ));
                     return Ok(r);
                 }
@@ -4981,7 +4981,7 @@ impl<'a> Gen<'a> {
                 _ => {
                     let decl = self.types.get(n).cloned().unwrap();
                     let before = self.fresh_tmp();
-                    self.emit(format!("{before} = call i64 @__vela_issues_len(ptr {issues})"));
+                    self.emit(format!("{before} = call i64 @__vyrn_issues_len(ptr {issues})"));
                     let base_val = self.emit_decode(vj, path, issues, &decl.base)?;
                     if decl.predicate.is_some() {
                         self.emit_validate_check(issues, path, &decl, &base_val, &before)?;
@@ -5030,7 +5030,7 @@ impl<'a> Gen<'a> {
         before: &str,
     ) -> Result<(), String> {
         let after = self.fresh_tmp();
-        self.emit(format!("{after} = call i64 @__vela_issues_len(ptr {issues})"));
+        self.emit(format!("{after} = call i64 @__vyrn_issues_len(ptr {issues})"));
         let clean = self.fresh_tmp();
         self.emit(format!("{clean} = icmp eq i64 {before}, {after}"));
         let chk_l = self.fresh_label("dec.val.chk");
@@ -5043,7 +5043,7 @@ impl<'a> Gen<'a> {
         let push_l = self.fresh_label("dec.val.push");
         self.emit_term(format!("br i1 {bad}, label %{push_l}, label %{done_l}"));
         self.emit_label(&push_l);
-        let msg = vela_frontend::codec::validate_message(decl);
+        let msg = vyrn_frontend::codec::validate_message(decl);
         self.push_issue(issues, "validate", path, &msg)?;
         self.emit_term(format!("br label %{done_l}"));
         self.emit_label(&done_l);
@@ -5062,7 +5062,7 @@ impl<'a> Gen<'a> {
         let sflag = if signed { 1 } else { 0 };
         let rc = self.fresh_tmp();
         self.emit(format!(
-            "{rc} = call i32 @__vela_vj_asint(ptr {vj}, i32 {bits}, i32 {sflag}, ptr {outp})"
+            "{rc} = call i32 @__vyrn_vj_asint(ptr {vj}, i32 {bits}, i32 {sflag}, ptr {outp})"
         ));
         let bad = self.fresh_tmp();
         self.emit(format!("{bad} = icmp ne i32 {rc}, 0"));
@@ -5075,7 +5075,7 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("br i1 {bad}, label %{bad_l}, label %{ok_l}"));
         self.emit_label(&bad_l);
         let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
         self.push_type_issue(issues, path, "integer", &kind)?;
         self.emit_term(format!("br label %{done_l}"));
         self.emit_label(&ok_l);
@@ -5104,7 +5104,7 @@ impl<'a> Gen<'a> {
         single: bool,
     ) -> Result<String, String> {
         let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
         let isnum = self.fresh_tmp();
         self.emit(format!("{isnum} = icmp eq i32 {kind}, 2"));
         let ell = if single { "float" } else { "double" };
@@ -5119,7 +5119,7 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("br label %{done_l}"));
         self.emit_label(&ok_l);
         let d = self.fresh_tmp();
-        self.emit(format!("{d} = call double @__vela_vj_asfloat(ptr {vj})"));
+        self.emit(format!("{d} = call double @__vyrn_vj_asfloat(ptr {vj})"));
         let stored = if single {
             let t = self.fresh_tmp();
             self.emit(format!("{t} = fptrunc double {d} to float"));
@@ -5137,7 +5137,7 @@ impl<'a> Gen<'a> {
 
     fn emit_decode_bool(&mut self, vj: &str, path: &str, issues: &str) -> Result<String, String> {
         let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
         let isbool = self.fresh_tmp();
         self.emit(format!("{isbool} = icmp eq i32 {kind}, 1"));
         let slot = self.fresh_alloca("i1");
@@ -5151,7 +5151,7 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("br label %{done_l}"));
         self.emit_label(&ok_l);
         let b = self.fresh_tmp();
-        self.emit(format!("{b} = call i32 @__vela_vj_bool_get(ptr {vj})"));
+        self.emit(format!("{b} = call i32 @__vyrn_vj_bool_get(ptr {vj})"));
         let bt = self.fresh_tmp();
         self.emit(format!("{bt} = icmp ne i32 {b}, 0"));
         self.emit(format!("store i1 {bt}, ptr {slot}"));
@@ -5164,7 +5164,7 @@ impl<'a> Gen<'a> {
 
     fn emit_decode_str(&mut self, vj: &str, path: &str, issues: &str) -> Result<String, String> {
         let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
         let isstr = self.fresh_tmp();
         self.emit(format!("{isstr} = icmp eq i32 {kind}, 3"));
         let slot = self.fresh_alloca("ptr");
@@ -5178,7 +5178,7 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("br label %{done_l}"));
         self.emit_label(&ok_l);
         let s = self.fresh_tmp();
-        self.emit(format!("{s} = call ptr @__vela_vj_str_get(ptr {vj})"));
+        self.emit(format!("{s} = call ptr @__vyrn_vj_str_get(ptr {vj})"));
         self.emit(format!("store ptr {s}, ptr {slot}"));
         self.emit_term(format!("br label %{done_l}"));
         self.emit_label(&done_l);
@@ -5199,9 +5199,9 @@ impl<'a> Gen<'a> {
             _ => return Err("emit_decode_enum on non-enum".to_string()),
         };
         let ll = self.llt(ty);
-        let expected = vela_frontend::codec::enum_expected(&vs);
+        let expected = vyrn_frontend::codec::enum_expected(&vs);
         let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
         let isstr = self.fresh_tmp();
         self.emit(format!("{isstr} = icmp eq i32 {kind}, 3"));
         let slot = self.fresh_alloca(&ll);
@@ -5215,7 +5215,7 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("br label %{done_l}"));
         self.emit_label(&str_l);
         let s = self.fresh_tmp();
-        self.emit(format!("{s} = call ptr @__vela_vj_str_get(ptr {vj})"));
+        self.emit(format!("{s} = call ptr @__vyrn_vj_str_get(ptr {vj})"));
         // Sequential strcmp against each variant name.
         for (i, v) in vs.iter().enumerate() {
             let g = self.str_g(&v.name)?;
@@ -5250,7 +5250,7 @@ impl<'a> Gen<'a> {
         inner: &Type,
     ) -> Result<String, String> {
         let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
         let isnull = self.fresh_tmp();
         self.emit(format!("{isnull} = icmp eq i32 {kind}, 0"));
         let slot = self.fresh_alloca("{ i1, i64, i64 }");
@@ -5287,7 +5287,7 @@ impl<'a> Gen<'a> {
     ) -> Result<String, String> {
         let ell = self.llt(inner);
         let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
         let isarr = self.fresh_tmp();
         self.emit(format!("{isarr} = icmp eq i32 {kind}, 4"));
         let slot = self.fresh_alloca("{ ptr, i64, i64 }");
@@ -5303,14 +5303,14 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("br label %{done_l}"));
         self.emit_label(&ok_l);
         let n = self.fresh_tmp();
-        self.emit(format!("{n} = call i64 @__vela_vj_len(ptr {vj})"));
+        self.emit(format!("{n} = call i64 @__vyrn_vj_len(ptr {vj})"));
         // buffer = n * sizeof(elem)
         let szp = self.fresh_tmp();
         let sz = self.fresh_tmp();
         self.emit(format!("{szp} = getelementptr {ell}, ptr null, i64 {n}"));
         self.emit(format!("{sz} = ptrtoint ptr {szp} to i64"));
         let buf = self.fresh_tmp();
-        self.emit(format!("{buf} = call ptr @__vela_malloc(i64 {sz})"));
+        self.emit(format!("{buf} = call ptr @__vyrn_malloc(i64 {sz})"));
         let idx = self.fresh_alloca("i64");
         self.emit(format!("store i64 0, ptr {idx}"));
         let cond_l = self.fresh_label("dec.arr.cond");
@@ -5325,10 +5325,10 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("br i1 {more}, label %{body_l}, label %{fill_l}"));
         self.emit_label(&body_l);
         let node = self.fresh_tmp();
-        self.emit(format!("{node} = call ptr @__vela_vj_at(ptr {vj}, i64 {i})"));
+        self.emit(format!("{node} = call ptr @__vyrn_vj_at(ptr {vj}, i64 {i})"));
         let childpath = self.fresh_tmp();
         self.emit(format!(
-            "{childpath} = call ptr @__vela_json_index_path(ptr {path}, i64 {i})"
+            "{childpath} = call ptr @__vyrn_json_index_path(ptr {path}, i64 {i})"
         ));
         let ev = self.emit_decode(&node, &childpath, issues, inner)?;
         let ep = self.fresh_tmp();
@@ -5372,10 +5372,10 @@ impl<'a> Gen<'a> {
         let res = self.fresh_alloca(&ll);
         self.emit(format!("store {ll} zeroinitializer, ptr {res}"));
         let before = self.fresh_tmp();
-        self.emit(format!("{before} = call i64 @__vela_issues_len(ptr {issues})"));
+        self.emit(format!("{before} = call i64 @__vyrn_issues_len(ptr {issues})"));
         // Node must be an object.
         let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
         let isobj = self.fresh_tmp();
         self.emit(format!("{isobj} = icmp eq i32 {kind}, 5"));
         let obj_l = self.fresh_label("dec.rec.obj");
@@ -5416,10 +5416,10 @@ impl<'a> Gen<'a> {
         let key = self.str_g(&f.name)?;
         let child = self.fresh_tmp();
         self.emit(format!(
-            "{child} = call ptr @__vela_json_field_path(ptr {path}, ptr {key})"
+            "{child} = call ptr @__vyrn_json_field_path(ptr {path}, ptr {key})"
         ));
         let node = self.fresh_tmp();
-        self.emit(format!("{node} = call ptr @__vela_vj_get(ptr {vj}, ptr {key})"));
+        self.emit(format!("{node} = call ptr @__vyrn_vj_get(ptr {vj}, ptr {key})"));
         let absent = self.fresh_tmp();
         self.emit(format!("{absent} = icmp eq ptr {node}, null"));
         let fll = self.llt(&f.ty);
@@ -5447,7 +5447,7 @@ impl<'a> Gen<'a> {
             let done_l = self.fresh_label("dec.fld.done");
             self.emit_term(format!("br i1 {absent}, label %{missing_l}, label %{present_l}"));
             self.emit_label(&missing_l);
-            let msg = vela_frontend::codec::missing_message(&f.name);
+            let msg = vyrn_frontend::codec::missing_message(&f.name);
             self.push_issue(issues, "json.missing", &child, &msg)?;
             self.emit_term(format!("br label %{done_l}"));
             self.emit_label(&present_l);
@@ -5470,10 +5470,10 @@ impl<'a> Gen<'a> {
         let invalid_tag = self.variants.get("Invalid").map(|(t, _)| *t).unwrap_or(1);
 
         let issues = self.fresh_tmp();
-        self.emit(format!("{issues} = call ptr @__vela_issues_new()"));
+        self.emit(format!("{issues} = call ptr @__vyrn_issues_new()"));
         let errslot = self.fresh_alloca("ptr");
         let vj = self.fresh_tmp();
-        self.emit(format!("{vj} = call ptr @__vela_json_parse(ptr {s}, ptr {errslot})"));
+        self.emit(format!("{vj} = call ptr @__vyrn_json_parse(ptr {s}, ptr {errslot})"));
         let failed = self.fresh_tmp();
         self.emit(format!("{failed} = icmp eq ptr {vj}, null"));
         let resslot = self.fresh_alloca(&vll);
@@ -5490,7 +5490,7 @@ impl<'a> Gen<'a> {
         self.emit(format!("{err} = load ptr, ptr {errslot}"));
         let pk = self.str_g("json.parse")?;
         self.emit(format!(
-            "call void @__vela_issues_push(ptr {issues}, ptr {pk}, ptr {empty}, ptr {err})"
+            "call void @__vyrn_issues_push(ptr {issues}, ptr {pk}, ptr {empty}, ptr {err})"
         ));
         self.emit_term(format!("br label %{invalid_l}"));
 
@@ -5498,7 +5498,7 @@ impl<'a> Gen<'a> {
         self.emit_label(&ok_l);
         let val = self.emit_decode(&vj, &empty, &issues, &target)?;
         let n = self.fresh_tmp();
-        self.emit(format!("{n} = call i64 @__vela_issues_len(ptr {issues})"));
+        self.emit(format!("{n} = call i64 @__vyrn_issues_len(ptr {issues})"));
         let clean = self.fresh_tmp();
         self.emit(format!("{clean} = icmp eq i64 {n}, 0"));
         self.emit_term(format!("br i1 {clean}, label %{valid_l}, label %{invalid_l}"));
@@ -5513,7 +5513,7 @@ impl<'a> Gen<'a> {
         self.emit(format!("store {vll} {v1}, ptr {resslot}"));
         self.emit_term(format!("br label %{done_l}"));
 
-        // Invalid([Issue]) — build the Vela Array<Issue> from the shim's list.
+        // Invalid([Issue]) — build the Vyrn Array<Issue> from the shim's list.
         self.emit_label(&invalid_l);
         let arr = self.build_issue_array(&issues)?;
         let issue_arr_ty = Type::Array(Box::new(Type::Named("Issue".to_string())));
@@ -5531,17 +5531,17 @@ impl<'a> Gen<'a> {
         Ok((r, Type::App("Validation".to_string(), vec![target])))
     }
 
-    /// Materialize the shim's issue list into a Vela `Array<Issue>` value
+    /// Materialize the shim's issue list into a Vyrn `Array<Issue>` value
     /// (`{ ptr, i64, i64 }` of `{ ptr, ptr, ptr }` records).
     fn build_issue_array(&mut self, issues: &str) -> Result<String, String> {
         let n = self.fresh_tmp();
-        self.emit(format!("{n} = call i64 @__vela_issues_len(ptr {issues})"));
+        self.emit(format!("{n} = call i64 @__vyrn_issues_len(ptr {issues})"));
         let szp = self.fresh_tmp();
         let bytes = self.fresh_tmp();
         self.emit(format!("{szp} = getelementptr {{ ptr, ptr, ptr }}, ptr null, i64 {n}"));
         self.emit(format!("{bytes} = ptrtoint ptr {szp} to i64"));
         let buf = self.fresh_tmp();
-        self.emit(format!("{buf} = call ptr @__vela_malloc(i64 {bytes})"));
+        self.emit(format!("{buf} = call ptr @__vyrn_malloc(i64 {bytes})"));
         let idx = self.fresh_alloca("i64");
         self.emit(format!("store i64 0, ptr {idx}"));
         let cond_l = self.fresh_label("iss.cond");
@@ -5558,9 +5558,9 @@ impl<'a> Gen<'a> {
         let k = self.fresh_tmp();
         let p = self.fresh_tmp();
         let m = self.fresh_tmp();
-        self.emit(format!("{k} = call ptr @__vela_issue_key(ptr {issues}, i64 {i})"));
-        self.emit(format!("{p} = call ptr @__vela_issue_path(ptr {issues}, i64 {i})"));
-        self.emit(format!("{m} = call ptr @__vela_issue_msg(ptr {issues}, i64 {i})"));
+        self.emit(format!("{k} = call ptr @__vyrn_issue_key(ptr {issues}, i64 {i})"));
+        self.emit(format!("{p} = call ptr @__vyrn_issue_path(ptr {issues}, i64 {i})"));
+        self.emit(format!("{m} = call ptr @__vyrn_issue_msg(ptr {issues}, i64 {i})"));
         let is0 = self.fresh_tmp();
         let is1 = self.fresh_tmp();
         let is2 = self.fresh_tmp();
@@ -5618,7 +5618,7 @@ fn llvm_str(s: &str) -> (String, usize) {
 
 /// Björn Höhrmann's UTF-8 validation DFA table: 256 byte-class entries followed
 /// by a 108-entry (9 states × 12 classes) transition table. State 0 is ACCEPT,
-/// 12 is REJECT. Used by `@__vela_utf8valid` so the native decoders reject exactly
+/// 12 is REJECT. Used by `@__vyrn_utf8valid` so the native decoders reject exactly
 /// what Rust's `String::from_utf8` rejects (overlong forms, surrogates, > U+10FFFF).
 fn utf8d_table() -> Vec<u8> {
     let mut t = vec![0u8; 256];
@@ -5820,7 +5820,7 @@ fn collect_strings_expr(e: &Expr, out: &mut Vec<String>, types: &HashMap<String,
             if name == "schemaOf" {
                 if let Some(Expr::Var { name: tn, .. }) = args.first() {
                     if let Some(decl) = types.get(tn) {
-                        let sl = vela_frontend::types::schema_struct_lit(decl);
+                        let sl = vyrn_frontend::types::schema_struct_lit(decl);
                         collect_strings_expr(&sl, out, types);
                     }
                 }
@@ -5830,7 +5830,7 @@ fn collect_strings_expr(e: &Expr, out: &mut Vec<String>, types: &HashMap<String,
             if name == "jsonSchema" {
                 if let Some(Expr::Var { name: tn, .. }) = args.first() {
                     if let Some(decl) = types.get(tn) {
-                        let js = vela_frontend::types::json_schema_string(decl, types);
+                        let js = vyrn_frontend::types::json_schema_string(decl, types);
                         if !out.contains(&js) {
                             out.push(js);
                         }
@@ -5892,10 +5892,10 @@ fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
     }
 }
 
-/// The mangled LLVM symbol for a generic instantiation, e.g. `vela_id__Int`.
+/// The mangled LLVM symbol for a generic instantiation, e.g. `vyrn_id__Int`.
 fn mangle_name(name: &str, type_args: &[Type]) -> String {
     let parts: Vec<String> = type_args.iter().map(mangle_ty).collect();
-    format!("vela_{name}__{}", parts.join("_"))
+    format!("vyrn_{name}__{}", parts.join("_"))
 }
 
 fn mangle_ty(t: &Type) -> String {
@@ -5959,7 +5959,7 @@ fn gather_codec_strings(
     out: &mut Vec<String>,
     seen: &mut Vec<String>,
 ) {
-    push_uniq(out, vela_frontend::codec::expected_name(ty, types));
+    push_uniq(out, vyrn_frontend::codec::expected_name(ty, types));
     if let Type::Named(n) = ty {
         if seen.contains(n) {
             return;
@@ -5967,17 +5967,17 @@ fn gather_codec_strings(
         if let Some(d) = types.get(n) {
             seen.push(n.clone());
             if d.predicate.is_some() {
-                push_uniq(out, vela_frontend::codec::validate_message(d));
+                push_uniq(out, vyrn_frontend::codec::validate_message(d));
             }
             gather_codec_strings(&d.base, types, out, seen);
         }
         return;
     }
-    match vela_frontend::types::resolve(ty, types) {
+    match vyrn_frontend::types::resolve(ty, types) {
         Type::Record(fields) => {
             for f in &fields {
                 push_uniq(out, f.name.clone());
-                push_uniq(out, vela_frontend::codec::missing_message(&f.name));
+                push_uniq(out, vyrn_frontend::codec::missing_message(&f.name));
                 gather_codec_strings(&f.ty, types, out, seen);
             }
         }
@@ -6014,14 +6014,14 @@ fn sanitize(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vela_frontend::check;
+    use vyrn_frontend::check;
 
     #[test]
     fn emits_module_with_main_wrapper() {
         let program = check("fn main() -> Int64 { let x = 2 + 3; print(x); return x; }").unwrap();
         let ir = emit(&program).unwrap();
-        assert!(ir.contains("define i64 @vela_main("));
-        assert!(ir.contains("define i32 @vela_entry()"));
+        assert!(ir.contains("define i64 @vyrn_main("));
+        assert!(ir.contains("define i32 @vyrn_entry()"));
         assert!(ir.contains("@printf"));
         assert!(ir.contains("add i64"));
     }
@@ -6035,13 +6035,13 @@ mod tests {
                        return match r { Ok(s) => s.length, Err(e) => e.length } }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // The shim primitive plus the single-source canonical error strings.
-        assert!(ir.contains("call i32 @__vela_read_file(ptr"), "{ir}");
-        assert!(ir.contains("@__vela_read_err"), "{ir}");
+        assert!(ir.contains("call i32 @__vyrn_read_file(ptr"), "{ir}");
+        assert!(ir.contains("@__vyrn_read_err"), "{ir}");
         assert!(ir.contains("c\"cannot read `%s`\\00\""), "{ir}");
         assert!(ir.contains("c\"`%s` is not valid UTF-8\\00\""), "{ir}");
         assert!(ir.contains("c\"`%s` contains a NUL byte\\00\""), "{ir}");
         // The UTF-8 validation reuses the shared DFA.
-        assert!(ir.contains("call i1 @__vela_utf8valid(ptr"), "{ir}");
+        assert!(ir.contains("call i1 @__vyrn_utf8valid(ptr"), "{ir}");
     }
 
     #[test]
@@ -6050,7 +6050,7 @@ mod tests {
                        let w = writeFile(\"o.txt\", \"x\") \
                        return match w { Ok(b) => 0, Err(e) => e.length } }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call i32 @__vela_write_file(ptr"), "{ir}");
+        assert!(ir.contains("call i32 @__vyrn_write_file(ptr"), "{ir}");
         assert!(ir.contains("c\"cannot write `%s`\\00\""), "{ir}");
     }
 
@@ -6062,8 +6062,8 @@ mod tests {
                        let n = match l { Some(s) => s.length, None => 0 } \
                        return a.length + n }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call { ptr, i64, i64 } @__vela_args()"), "{ir}");
-        assert!(ir.contains("call ptr @__vela_read_line(ptr"), "{ir}");
+        assert!(ir.contains("call { ptr, i64, i64 } @__vyrn_args()"), "{ir}");
+        assert!(ir.contains("call ptr @__vyrn_read_line(ptr"), "{ir}");
     }
 
     #[test]
@@ -6085,7 +6085,7 @@ mod tests {
                        let r = stringFromBytes(bytes(\"hi\")) \
                        return match r { Ok(s) => s.length, Err(e) => e.length } }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call ptr @__vela_bytes_dup(ptr"), "{ir}");
+        assert!(ir.contains("call ptr @__vyrn_bytes_dup(ptr"), "{ir}");
         assert!(ir.contains("c\"bytes contain a NUL byte\\00\""), "{ir}");
         assert!(ir.contains("c\"bytes are not valid UTF-8\\00\""), "{ir}");
     }
@@ -6193,7 +6193,7 @@ mod tests {
         // the level-name global.
         let src = "fn main() -> Int64 { let log = logger(\"m\"); log.info(\"hi\"); return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("@__vela_stderr()"), "stderr handle: {ir}");
+        assert!(ir.contains("@__vyrn_stderr()"), "stderr handle: {ir}");
         assert!(ir.contains("@fprintf"), "fprintf: {ir}");
         assert!(ir.contains("@.lvl.info"), "level name global: {ir}");
     }
@@ -6203,7 +6203,7 @@ mod tests {
         let src = "logging { sink: stdout } \
                    fn main() -> Int64 { let l = logger(\"m\"); l.error(\"x\"); return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("@__vela_stdout()"), "stdout via the shim: {ir}");
+        assert!(ir.contains("@__vyrn_stdout()"), "stdout via the shim: {ir}");
     }
 
     #[test]
@@ -6213,7 +6213,7 @@ mod tests {
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("@fopen(ptr @.logpath"), "opens the file: {ir}");
         assert!(ir.contains("@fclose"), "closes the file: {ir}");
-        assert!(ir.contains("load ptr, ptr @__vela_log_file"), "logs to the file handle: {ir}");
+        assert!(ir.contains("load ptr, ptr @__vyrn_log_file"), "logs to the file handle: {ir}");
     }
 
     #[test]
@@ -6240,7 +6240,7 @@ mod tests {
         let src = "fn sql(parts: Array<String>, values: Array<Value>) -> Int64 { return 0; } \
                    fn main() -> Int64 { let x = 5; return sql\"a\\{x}b\"; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call i64 @vela_sql("), "calls the tag: {ir}");
+        assert!(ir.contains("call i64 @vyrn_sql("), "calls the tag: {ir}");
         // Two heap buffers (parts + values) are allocated for the growable arrays.
         assert!(ir.contains("insertvalue { ptr, i64, i64 }"), "builds arrays: {ir}");
     }
@@ -6252,7 +6252,7 @@ mod tests {
         let src = "fn main() -> Int64 { let n = 7; let ok = true; \
                    let s = \"n=\\{n} ok=\\{ok}\"; return s.length; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("@__vela_snprintf"), "str(Int64) -> snprintf: {ir}");
+        assert!(ir.contains("@__vyrn_snprintf"), "str(Int64) -> snprintf: {ir}");
         assert!(ir.contains("select i1"), "str(Bool) -> select true/false: {ir}");
         assert!(ir.contains("@strcpy"), "bool/str render copies: {ir}");
         assert!(ir.contains("@.str.true"), "no-newline bool global: {ir}");
@@ -6264,9 +6264,9 @@ mod tests {
         // used, and `x.toString()` renders via snprintf.
         let src = "fn main() -> Int64 { let a = \"x\"; let n = (5).toString() + a; return n.length; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("@__vela_strlen"), "concat length: {ir}");
+        assert!(ir.contains("@__vyrn_strlen"), "concat length: {ir}");
         assert!(ir.contains("@strcpy") && ir.contains("@strcat"), "concat copy: {ir}");
-        assert!(ir.contains("@__vela_snprintf"), "toString(Int) -> snprintf: {ir}");
+        assert!(ir.contains("@__vyrn_snprintf"), "toString(Int) -> snprintf: {ir}");
     }
 
     #[test]
@@ -6275,7 +6275,7 @@ mod tests {
         // triple (like `list([..])`), then `.length` reads field 1.
         let src = "fn main() -> Int64 { let a: Array<Int64> = [1, 2, 3]; return a.length; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call ptr @__vela_malloc"), "heap copy: {ir}");
+        assert!(ir.contains("call ptr @__vyrn_malloc"), "heap copy: {ir}");
         assert!(ir.contains("insertvalue { ptr, i64, i64 }"), "growable triple: {ir}");
     }
 
@@ -6359,7 +6359,7 @@ mod tests {
 
     #[test]
     fn exit_code_is_masked_to_low_byte() {
-        // `@main` masks vela_main's return so it matches the interpreter's
+        // `@main` masks vyrn_main's return so it matches the interpreter's
         // `code & 0xff` on values > 255 (POSIX exit convention).
         let ir = emit(&check("fn main() -> Int64 { return 285; }").unwrap()).unwrap();
         assert!(ir.contains("and i64 %r, 255"), "{ir}");
@@ -6401,8 +6401,8 @@ mod tests {
     }
 
     // The always-present runtime contributes exactly RUNTIME_FREES `call void
-    // @free` occurrences (one in `__vela_region_exit`, one in the
-    // `__vela_bytes_dup` NUL path), so an *auto*-free is a free beyond that
+    // @free` occurrences (one in `__vyrn_region_exit`, one in the
+    // `__vyrn_bytes_dup` NUL path), so an *auto*-free is a free beyond that
     // baseline.
     const RUNTIME_FREES: usize = 2;
     fn free_calls(ir: &str) -> usize {
@@ -6438,11 +6438,11 @@ mod tests {
         let src = "fn main() -> Int64 { let c = cell(1); set(c, get(c) + 1); \
                    let v = get(c); release(c); return v; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call i64 @__vela_cell_alloc"), "{ir}");
-        assert!(ir.contains("call ptr @__vela_cell_ptr"), "{ir}");
-        assert!(ir.contains("call void @__vela_cell_release_slot"), "{ir}");
+        assert!(ir.contains("call i64 @__vyrn_cell_alloc"), "{ir}");
+        assert!(ir.contains("call ptr @__vyrn_cell_ptr"), "{ir}");
+        assert!(ir.contains("call void @__vyrn_cell_release_slot"), "{ir}");
         // The generation check is what makes a stale reference safe.
-        assert!(ir.contains("call void @__vela_cell_check"), "{ir}");
+        assert!(ir.contains("call void @__vyrn_cell_check"), "{ir}");
     }
 
     #[test]
@@ -6451,7 +6451,7 @@ mod tests {
         // released at block exit (inferred by the ownership analysis).
         let src = "fn main() -> Int64 { let c = cell(1); set(c, get(c) + 1); return get(c); }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call void @__vela_cell_release"), "expected auto-release: {ir}");
+        assert!(ir.contains("call void @__vyrn_cell_release"), "expected auto-release: {ir}");
     }
 
     #[test]
@@ -6477,11 +6477,11 @@ mod tests {
                        region { let s = a + b; n = s.length; } \
                        return n; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call void @__vela_region_enter()"), "{ir}");
-        assert!(ir.contains("call void @__vela_region_exit()"), "{ir}");
+        assert!(ir.contains("call void @__vyrn_region_enter()"), "{ir}");
+        assert!(ir.contains("call void @__vyrn_region_exit()"), "{ir}");
         // concat routes through the arena at runtime.
-        assert!(ir.contains("@__vela_region_alloc"), "{ir}");
-        assert!(ir.contains("load i64, ptr @__vela_region_sp"), "{ir}");
+        assert!(ir.contains("@__vyrn_region_alloc"), "{ir}");
+        assert!(ir.contains("load i64, ptr @__vyrn_region_sp"), "{ir}");
     }
 
     // The runtime preamble contains a fixed number of `call void @exit` (the
@@ -6521,7 +6521,7 @@ mod tests {
     fn string_length_lowers_to_strlen() {
         let src = "fn main() -> Int64 { let s = \"hi\"; return s.length; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call i64 @__vela_strlen"), "str .length → strlen: {ir}");
+        assert!(ir.contains("call i64 @__vyrn_strlen"), "str .length → strlen: {ir}");
     }
 
     #[test]
@@ -6538,22 +6538,22 @@ mod tests {
         let ir = emit(&check("fn main() -> Int64 { \
             let a = hexEncode(\"x\"); let b = base64Encode(\"x\"); let c = urlEncode(\"x\"); \
             let d = hexDecode(\"41\"); return 0; }").unwrap()).unwrap();
-        assert!(ir.contains("call ptr @__vela_hex_encode"), "hexEncode: {ir}");
-        assert!(ir.contains("call ptr @__vela_b64_encode"), "base64Encode: {ir}");
-        assert!(ir.contains("call ptr @__vela_url_encode"), "urlEncode: {ir}");
-        assert!(ir.contains("call { i1, i64, i64 } @__vela_hex_decode"), "hexDecode: {ir}");
+        assert!(ir.contains("call ptr @__vyrn_hex_encode"), "hexEncode: {ir}");
+        assert!(ir.contains("call ptr @__vyrn_b64_encode"), "base64Encode: {ir}");
+        assert!(ir.contains("call ptr @__vyrn_url_encode"), "urlEncode: {ir}");
+        assert!(ir.contains("call { i1, i64, i64 } @__vyrn_hex_decode"), "hexDecode: {ir}");
         // The strict UTF-8 validator DFA + its 364-byte table are present.
-        assert!(ir.contains("@__vela_utf8valid"), "validator: {ir}");
-        assert!(ir.contains("@__vela_utf8d = private"), "DFA table: {ir}");
+        assert!(ir.contains("@__vyrn_utf8valid"), "validator: {ir}");
+        assert!(ir.contains("@__vyrn_utf8d = private"), "DFA table: {ir}");
     }
 
     #[test]
     fn chars_and_bytes_lower_to_runtime() {
         let ir = emit(&check("fn main() -> Int64 { return chars(\"hi\").length + bytes(\"hi\").length; }").unwrap()).unwrap();
-        assert!(ir.contains("call { ptr, i64, i64 } @__vela_str_chars"), "chars → decoder: {ir}");
-        assert!(ir.contains("call { ptr, i64, i64 } @__vela_str_bytes"), "bytes → helper: {ir}");
+        assert!(ir.contains("call { ptr, i64, i64 } @__vyrn_str_chars"), "chars → decoder: {ir}");
+        assert!(ir.contains("call { ptr, i64, i64 } @__vyrn_str_bytes"), "bytes → helper: {ir}");
         // The UTF-8 decoder is defined in the module.
-        assert!(ir.contains("@__vela_str_chars(ptr %s)"), "decoder emitted: {ir}");
+        assert!(ir.contains("@__vyrn_str_chars(ptr %s)"), "decoder emitted: {ir}");
     }
 
     #[test]
@@ -6563,7 +6563,7 @@ mod tests {
         assert!(c.contains("call ptr @strstr"), "contains → strstr: {c}");
         let s = emit(&check("fn f(s: String) -> Bool { return startsWith(s, \"x\"); } \
                              fn main() -> Int64 { return 0; }").unwrap()).unwrap();
-        assert!(s.contains("call i32 @__vela_strncmp"), "startsWith → strncmp: {s}");
+        assert!(s.contains("call i32 @__vyrn_strncmp"), "startsWith → strncmp: {s}");
     }
 
     #[test]
@@ -6574,7 +6574,7 @@ mod tests {
                    fn mk(s: String) -> Name { return Name(s); } \
                    fn main() -> Int64 { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call i64 @__vela_strlen"), "refinement uses strlen: {ir}");
+        assert!(ir.contains("call i64 @__vyrn_strlen"), "refinement uses strlen: {ir}");
         assert!(ir.contains("@.trap.verr.Name"), "refinement traps: {ir}");
     }
 
@@ -6592,7 +6592,7 @@ mod tests {
         let src = "fn f(s: String) -> Bool { return s =~ \"[a-z]+\"; } \
                    fn main() -> Int64 { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call i1 @__vela_regex_run"), "calls the runner: {ir}");
+        assert!(ir.contains("call i1 @__vyrn_regex_run"), "calls the runner: {ir}");
         assert!(ir.contains("@.rx.0.table"), "emits a transition table: {ir}");
         assert!(ir.contains("@.rx.0.accept"), "emits an accepting array: {ir}");
     }
@@ -6622,9 +6622,9 @@ mod tests {
         let src = "fn id<T>(x: T) -> T { return x; } \
                    fn main() -> Int64 { print(id(\"s\")); return id(1); }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("define i64 @vela_id__Int"), "Int64 instance:\n{ir}");
-        assert!(ir.contains("define ptr @vela_id__Str"), "Str instance:\n{ir}");
-        assert!(!ir.contains("@vela_id("), "no un-instantiated generic body:\n{ir}");
+        assert!(ir.contains("define i64 @vyrn_id__Int"), "Int64 instance:\n{ir}");
+        assert!(ir.contains("define ptr @vyrn_id__Str"), "Str instance:\n{ir}");
+        assert!(!ir.contains("@vyrn_id("), "no un-instantiated generic body:\n{ir}");
     }
 
     #[test]
@@ -6642,7 +6642,7 @@ mod tests {
                    fn main() -> Int64 { return f(A(5)); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("switch i64"), "enum match uses a switch:\n{ir}");
-        assert!(ir.contains("@vela_f({ i64, i64 }"), "enum lowers to a 2-word aggregate:\n{ir}");
+        assert!(ir.contains("@vyrn_f({ i64, i64 }"), "enum lowers to a 2-word aggregate:\n{ir}");
         assert!(ir.contains("insertvalue { i64, i64 } undef, i64 0"), "variant A has tag 0:\n{ir}");
     }
 
@@ -6653,7 +6653,7 @@ mod tests {
                    fn main() -> Int64 { let u = User { id: 1, name: 2, pw: 3 }; return f(u); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // Public resolves to a 2-field struct; User is 3 fields; coercion happens.
-        assert!(ir.contains("@vela_f({ i64, i64 }"), "Public layout: {ir}");
+        assert!(ir.contains("@vyrn_f({ i64, i64 }"), "Public layout: {ir}");
         assert!(ir.contains("insertvalue { i64, i64, i64 }"), "User is 3 fields: {ir}");
     }
 
@@ -6664,7 +6664,7 @@ mod tests {
                    fn main() -> Int64 { let u = User { name: 7, age: 30 }; return greet(u); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // greet takes a 1-field record; User is a 2-field record.
-        assert!(ir.contains("@vela_greet({ i64 }"), "greet param layout: {ir}");
+        assert!(ir.contains("@vyrn_greet({ i64 }"), "greet param layout: {ir}");
         assert!(ir.contains("insertvalue { i64, i64 }"), "User is built: {ir}");
         // width-subtyping coercion: rebuild a { i64 } from the User's `name`.
         assert!(ir.contains("insertvalue { i64 } undef"), "coercion to Named: {ir}");
@@ -6724,7 +6724,7 @@ mod tests {
     #[test]
     fn extern_fn_emits_wasm_import_declaration() {
         // RFC-0012: a body-less `extern fn` becomes a `declare` carrying the
-        // wasm-import attributes (namespace `vela`, field = the Vela name) on
+        // wasm-import attributes (namespace `vyrn`, field = the Vyrn name) on
         // the prefixed symbol; a String parameter flattens to a (ptr, i64)
         // pair; the call site passes the pointer plus a computed length.
         let src = "extern fn jsLog(msg: String) \
@@ -6732,20 +6732,20 @@ mod tests {
                    fn main() -> Int64 { jsLog(\"hi\"); return jsAdd(1, 2); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
-            ir.contains("declare void @__vela_extern_jsLog(ptr, i64)"),
+            ir.contains("declare void @__vyrn_extern_jsLog(ptr, i64)"),
             "String param flattens to (ptr, i64): {ir}"
         );
         assert!(
-            ir.contains("declare i64 @__vela_extern_jsAdd(i64, i64)"),
+            ir.contains("declare i64 @__vyrn_extern_jsAdd(i64, i64)"),
             "scalar extern declared with ABI types: {ir}"
         );
         assert!(
-            ir.contains("\"wasm-import-module\"=\"vela\"") &&
+            ir.contains("\"wasm-import-module\"=\"vyrn\"") &&
             ir.contains("\"wasm-import-name\"=\"jsLog\""),
             "wasm import attributes present: {ir}"
         );
         assert!(
-            ir.contains("call i64 @__vela_extern_jsAdd(i64 1, i64 2)"),
+            ir.contains("call i64 @__vyrn_extern_jsAdd(i64 1, i64 2)"),
             "extern call emitted at the use site: {ir}"
         );
     }
@@ -6753,30 +6753,30 @@ mod tests {
     #[test]
     fn export_extern_emits_a_normal_define_with_the_export_attribute() {
         // RFC-0012 M2: an `export extern fn` is a normal `define` under the
-        // internal `vela_<name>` symbol, carrying an inline `wasm-export-name`
-        // attribute so wasm-ld exports it under the bare Vela name. A `String`
+        // internal `vyrn_<name>` symbol, carrying an inline `wasm-export-name`
+        // attribute so wasm-ld exports it under the bare Vyrn name. A `String`
         // parameter is a SINGLE `ptr` (not the import's (ptr,len) pair) — the JS
         // caller allocates the buffer, so decode-side length is a NUL scan.
-        let src = "export extern fn velaAdd(a: Int64, b: Int64) -> Int64 { return a + b } \
+        let src = "export extern fn vyrnAdd(a: Int64, b: Int64) -> Int64 { return a + b } \
                    export extern fn greet(name: String) -> String { return name } \
-                   fn main() -> Int64 { return velaAdd(1, 2) }";
+                   fn main() -> Int64 { return vyrnAdd(1, 2) }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
-            ir.contains("define i64 @vela_velaAdd(i64 %arg0, i64 %arg1) \"wasm-export-name\"=\"velaAdd\" {"),
+            ir.contains("define i64 @vyrn_vyrnAdd(i64 %arg0, i64 %arg1) \"wasm-export-name\"=\"vyrnAdd\" {"),
             "scalar export extern is a normal define with the export attr: {ir}"
         );
         assert!(
-            ir.contains("define ptr @vela_greet(ptr %arg0) \"wasm-export-name\"=\"greet\" {"),
+            ir.contains("define ptr @vyrn_greet(ptr %arg0) \"wasm-export-name\"=\"greet\" {"),
             "String param/return are single ptrs; export attr present: {ir}"
         );
         // It is NOT a body-less import: no declare, no import attributes for it.
         assert!(
-            !ir.contains("@__vela_extern_velaAdd"),
+            !ir.contains("@__vyrn_extern_vyrnAdd"),
             "an export extern is not a wasm import: {ir}"
         );
         // A plain fn keeps no export attribute.
         assert!(
-            ir.contains("define i64 @vela_main(") && !ir.contains("@vela_main() \"wasm-export-name\""),
+            ir.contains("define i64 @vyrn_main(") && !ir.contains("@vyrn_main() \"wasm-export-name\""),
             "a plain fn is not exported: {ir}"
         );
     }
@@ -6821,9 +6821,9 @@ mod tests {
                    fn main() -> Int64 { if t() { return 1; } return 0; }";
         let program = check(src).unwrap();
         let ir = emit(&program).unwrap();
-        assert!(ir.contains("call i1 @vela_t()"), "{ir}");
+        assert!(ir.contains("call i1 @vyrn_t()"), "{ir}");
         // and the branch consumes an i1, never an i64 call result
-        assert!(!ir.contains("call i64 @vela_t()"), "{ir}");
+        assert!(!ir.contains("call i64 @vyrn_t()"), "{ir}");
     }
 
     // ---- in-place array mutation (RFC-0011) -----------------------------
@@ -6885,10 +6885,10 @@ mod tests {
         // One internal global per binding, zero-initialized.
         assert!(ir.contains("@g.hits = internal global i64 zeroinitializer"), "{ir}");
         assert!(ir.contains("@g.banner = internal global ptr zeroinitializer"), "{ir}");
-        // A synthesized init function, called from `vela_entry` before main.
-        assert!(ir.contains("define internal void @__vela_globals_init()"), "{ir}");
-        let init_at = ir.find("call void @__vela_globals_init()").expect("init call");
-        let main_at = ir.find("call i64 @vela_main()").expect("main call");
+        // A synthesized init function, called from `vyrn_entry` before main.
+        assert!(ir.contains("define internal void @__vyrn_globals_init()"), "{ir}");
+        let init_at = ir.find("call void @__vyrn_globals_init()").expect("init call");
+        let main_at = ir.find("call i64 @vyrn_main()").expect("main call");
         assert!(init_at < main_at, "init must run before main");
         // Reads and writes go through the global.
         assert!(ir.contains("load i64, ptr @g.hits"), "read through global: {ir}");

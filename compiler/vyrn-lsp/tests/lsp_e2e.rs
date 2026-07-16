@@ -1,8 +1,8 @@
-//! End-to-end test for the vela-lsp server over the real JSON-RPC wire format.
+//! End-to-end test for the vyrn-lsp server over the real JSON-RPC wire format.
 //!
-//! Spawns the `vela-lsp` binary as a subprocess, speaks Content-Length-framed
+//! Spawns the `vyrn-lsp` binary as a subprocess, speaks Content-Length-framed
 //! JSON-RPC 2.0 over its stdin/stdout, and asserts the three interactive
-//! capabilities work on `examples/enum.vela`:
+//! capabilities work on `examples/enum.vyrn`:
 //!   * `textDocument/hover` over `Circle` at the call site → variant detail.
 //!   * `textDocument/definition` over `area` at the call site → a `Location` on
 //!     the `fn area` declaration line.
@@ -28,9 +28,9 @@ struct LspClient {
 
 impl LspClient {
     fn spawn() -> std::io::Result<Self> {
-        // `CARGO_BIN_EXE_vela-lsp` points at the built server binary (the
-        // `[[bin]] name = "vela-lsp"` in Cargo.toml).
-        let bin = env!("CARGO_BIN_EXE_vela-lsp");
+        // `CARGO_BIN_EXE_vyrn-lsp` points at the built server binary (the
+        // `[[bin]] name = "vyrn-lsp"` in Cargo.toml).
+        let bin = env!("CARGO_BIN_EXE_vyrn-lsp");
         let child = Command::new(bin)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -117,23 +117,23 @@ impl Drop for LspClient {
     }
 }
 
-/// The real `examples/enum.vela`, so the test tracks the actual file.
-fn enum_vela() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/enum.vela");
-    std::fs::read_to_string(path).expect("examples/enum.vela should exist")
+/// The real `examples/enum.vyrn`, so the test tracks the actual file.
+fn enum_vyrn() -> String {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/enum.vyrn");
+    std::fs::read_to_string(path).expect("examples/enum.vyrn should exist")
 }
 
 /// A `file://` URI for the example. The LSP only echoes it back in locations;
 /// the exact form doesn't matter as long as it round-trips.
 fn enum_uri() -> &'static str {
-    "file:///N:/lang/examples/enum.vela"
+    "file:///N:/lang/examples/enum.vyrn"
 }
 
 /// Spawn the server, complete the `initialize` handshake, and open
-/// `enum.vela`. Asserts the three interactive capabilities are advertised.
+/// `enum.vyrn`. Asserts the three interactive capabilities are advertised.
 /// Returns the live client ready for requests.
 fn open_enum() -> LspClient {
-    let mut client = LspClient::spawn().expect("spawn vela-lsp");
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
 
     let init_id = serde_json::json!(1);
     client.send(&serde_json::json!({
@@ -163,9 +163,9 @@ fn open_enum() -> LspClient {
         "params": {
             "textDocument": {
                 "uri": enum_uri(),
-                "languageId": "vela",
+                "languageId": "vyrn",
                 "version": 1,
-                "text": enum_vela()
+                "text": enum_vyrn()
             }
         }
     }));
@@ -184,7 +184,7 @@ impl Ids {
 }
 
 #[test]
-fn hover_definition_completion_on_enum_vela() {
+fn hover_definition_completion_on_enum_vyrn() {
     let mut client = open_enum();
     let mut ids = Ids::new();
 
@@ -402,7 +402,7 @@ fn hover_off_identifier_returns_null_result() {
 /// the wire.
 #[test]
 fn non_exhaustive_match_squiggles_the_match_keyword() {
-    let mut client = LspClient::spawn().expect("spawn vela-lsp");
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
 
     // initialize + initialized.
     let init_id = serde_json::json!(1);
@@ -418,7 +418,7 @@ fn non_exhaustive_match_squiggles_the_match_keyword() {
     // A non-exhaustive `match` (missing variant `B`). The match keyword is on
     // line 3 (1-based) → LSP line 2; `match` is at 1-based cols 13-17 → LSP
     // chars 12-17 (start 12, end 17).
-    let uri = "file:///non/exhaustive.vela";
+    let uri = "file:///non/exhaustive.vyrn";
     let src = "\
 type T = | A(Int64) | B;
 fn f(x: T) -> Int64 {
@@ -433,7 +433,7 @@ fn main() -> Int64 { return 0; }
         "jsonrpc": "2.0",
         "method": "textDocument/didOpen",
         "params": {
-            "textDocument": { "uri": uri, "languageId": "vela", "version": 1, "text": src }
+            "textDocument": { "uri": uri, "languageId": "vyrn", "version": 1, "text": src }
         }
     }));
 
@@ -469,7 +469,7 @@ fn main() -> Int64 { return 0; }
 /// routing → `member_completions` → receiver-type resolution path over the wire.
 #[test]
 fn member_completion_after_dot_lists_array_methods() {
-    let mut client = LspClient::spawn().expect("spawn vela-lsp");
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
     let init_id = serde_json::json!(1);
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "id": init_id, "method": "initialize",
@@ -478,7 +478,7 @@ fn member_completion_after_dot_lists_array_methods() {
     let _ = client.read_response(&init_id);
     client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
 
-    let uri = "file:///member/comp.vela";
+    let uri = "file:///member/comp.vyrn";
     let src = "\
 fn main() -> Int64 {
     let mut a: Array<Int64> = [];
@@ -488,7 +488,7 @@ fn main() -> Int64 {
 ";
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "method": "textDocument/didOpen",
-        "params": { "textDocument": { "uri": uri, "languageId": "vela", "version": 1, "text": src } }
+        "params": { "textDocument": { "uri": uri, "languageId": "vyrn", "version": 1, "text": src } }
     }));
     // Drain the publishDiagnostics from didOpen (the source is clean, so it's
     // an empty list — but it still arrives before our completion response).
@@ -525,19 +525,19 @@ fn main() -> Int64 {
 /// Before `analyze_linked`, every imported name squiggled as unknown.
 #[test]
 fn imports_resolve_across_files() {
-    let dir = std::env::temp_dir().join(format!("vela-lsp-e2e-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        dir.join("lib.vela"),
+        dir.join("lib.vyrn"),
         "export fn double(x: Int64) -> Int64 {\n    return x * 2\n}\n",
     )
     .unwrap();
-    let root_path = dir.join("main.vela");
+    let root_path = dir.join("main.vyrn");
     let root_text = "import { double } from \"./lib\"\n\nfn main() -> Int64 {\n    return double(21)\n}\n";
     std::fs::write(&root_path, root_text).unwrap();
     let uri = format!("file:///{}", root_path.to_string_lossy().replace('\\', "/"));
 
-    let mut client = LspClient::spawn().expect("spawn vela-lsp");
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
     let init_id = serde_json::json!(1);
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "id": init_id, "method": "initialize",
@@ -549,7 +549,7 @@ fn imports_resolve_across_files() {
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "method": "textDocument/didOpen",
         "params": { "textDocument": {
-            "uri": uri.clone(), "languageId": "vela", "version": 1, "text": root_text
+            "uri": uri.clone(), "languageId": "vyrn", "version": 1, "text": root_text
         } }
     }));
     let notif = client.read_notification("textDocument/publishDiagnostics");
@@ -558,7 +558,7 @@ fn imports_resolve_across_files() {
 
     // Cross-file go-to-definition: `double` at the call site (0-based line 3,
     // `    return double(21)`, char 12 is inside the name) → a Location in
-    // lib.vela on its declaration line.
+    // lib.vyrn on its declaration line.
     let def_id = serde_json::json!(2);
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "id": def_id, "method": "textDocument/definition",
@@ -570,7 +570,7 @@ fn imports_resolve_across_files() {
     let resp = client.read_response(&def_id);
     let loc = &resp["result"];
     let target = loc["uri"].as_str().expect("definition returns a Location");
-    assert!(target.ends_with("lib.vela"), "definition jumps into the imported file: {target}");
+    assert!(target.ends_with("lib.vyrn"), "definition jumps into the imported file: {target}");
     assert_eq!(loc["range"]["start"]["line"], 0, "lands on `export fn double`");
 
     // Cross-file hover: the same position shows the imported signature.
@@ -609,7 +609,7 @@ fn imports_resolve_across_files() {
 /// 4-space indent, one trailing newline.
 #[test]
 fn document_formatting_returns_canonical_edit() {
-    let mut client = LspClient::spawn().expect("spawn vela-lsp");
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
     let init_id = serde_json::json!(1);
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "id": init_id, "method": "initialize",
@@ -625,11 +625,11 @@ fn document_formatting_returns_canonical_edit() {
     client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
 
     // Messy input: no indent, cramped operators, trailing semicolons.
-    let uri = "file:///fmt/messy.vela";
+    let uri = "file:///fmt/messy.vyrn";
     let src = "fn main()->Int64{\nlet  x=1+2*3;\nreturn x;\n}\n";
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "method": "textDocument/didOpen",
-        "params": { "textDocument": { "uri": uri, "languageId": "vela", "version": 1, "text": src } }
+        "params": { "textDocument": { "uri": uri, "languageId": "vyrn", "version": 1, "text": src } }
     }));
     let _ = client.read_notification("textDocument/publishDiagnostics");
 
@@ -654,11 +654,11 @@ fn document_formatting_returns_canonical_edit() {
 
     // A document that fails to lex returns a null result (no edit) — never a
     // corrupting change while the user is mid-edit.
-    let bad_uri = "file:///fmt/broken.vela";
+    let bad_uri = "file:///fmt/broken.vyrn";
     let bad_src = "fn main() -> Int64 { let s = \"unterminated }\n";
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "method": "textDocument/didOpen",
-        "params": { "textDocument": { "uri": bad_uri, "languageId": "vela", "version": 1, "text": bad_src } }
+        "params": { "textDocument": { "uri": bad_uri, "languageId": "vyrn", "version": 1, "text": bad_src } }
     }));
     let _ = client.read_notification("textDocument/publishDiagnostics");
     let bad_id = ids.next();

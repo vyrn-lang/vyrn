@@ -1,11 +1,11 @@
 //! Integration tests for the structured-diagnostics core API
-//! (`vela_frontend::diagnostics`).
+//! (`vyrn_frontend::diagnostics`).
 //!
 //! These guard the contract the CLI and the LSP both rely on: how many
 //! diagnostics are produced, with what stage/position, and that the historical
 //! `check()` shim stays byte-identical to `diagnostics()[0].render()`.
 
-use vela_frontend::diagnostics;
+use vyrn_frontend::diagnostics;
 
 /// A valid program produces no diagnostics.
 #[test]
@@ -15,7 +15,7 @@ fn valid_program_is_clean() {
 }
 
 /// Two independent type errors (in two functions) are BOTH reported — the
-/// bounded accumulation the LSP and `velac check` rely on. Order follows the
+/// bounded accumulation the LSP and `vyrn check` rely on. Order follows the
 /// source: f before g.
 #[test]
 fn accumulates_across_functions() {
@@ -59,7 +59,7 @@ fn parse_error_suppresses_downstream() {
 fn check_shim_matches_first_rendered() {
     let src = "fn f() -> Int64 { return true; }\nfn g() -> Int64 { let y = \"s\" + 1; return y; }\nfn main() -> Int64 { return f(); }";
     let diags = diagnostics(src);
-    let via_shim = vela_frontend::check(src).unwrap_err();
+    let via_shim = vyrn_frontend::check(src).unwrap_err();
     // The shim returns the FIRST diagnostic rendered, which is f's error on line 1.
     assert_eq!(via_shim, diags[0].render());
     assert_eq!(via_shim, "line 1: return type mismatch: expected Int64, found Bool");

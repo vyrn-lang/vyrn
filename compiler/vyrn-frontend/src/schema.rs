@@ -1,6 +1,6 @@
 //! JSON Schema type imports (RFC-0010 M2).
 //!
-//! `import type { User } from "./api.schema.json"` synthesizes Vela
+//! `import type { User } from "./api.schema.json"` synthesizes Vyrn
 //! [`TypeDecl`]s from a JSON Schema document — the exact **inverse** of the
 //! `jsonSchema(T)` emitter in [`crate::types`]: `minimum`/`maximum`/
 //! `exclusive*`/`multipleOf`/`not{const}` become `where` clauses over `value`,
@@ -355,14 +355,14 @@ fn convert(
         return Ok((Type::Named(target.to_string()), None, vec![target.to_string()]));
     }
 
-    // `enum` of strings → a payload-less Vela enum (each entry a nullary
+    // `enum` of strings → a payload-less Vyrn enum (each entry a nullary
     // variant) — the inverse of the emitter's sum-type encoding.
     if let Some(Json::Arr(items)) = schema.get("enum") {
         for (k, _) in fields {
             if k != "enum" && !INFORMATIONAL.contains(&k.as_str()) {
                 return Err(format!(
                     "{module}: type `{name}`: unsupported keyword `{k}` alongside `enum` \
-                     (Vela imports schemas exactly or not at all)"
+                     (Vyrn imports schemas exactly or not at all)"
                 ));
             }
         }
@@ -405,7 +405,7 @@ fn convert(
         if !allowed.contains(&k.as_str()) && !INFORMATIONAL.contains(&k.as_str()) {
             return Err(format!(
                 "{module}: type `{name}`: unsupported JSON Schema keyword `{k}` \
-                 (Vela imports schemas exactly or not at all)"
+                 (Vyrn imports schemas exactly or not at all)"
             ));
         }
     }
@@ -467,7 +467,7 @@ fn convert(
                 let inner = inner.strip_suffix('$').unwrap_or(inner);
                 crate::regex::compile(inner).map_err(|e| {
                     format!(
-                        "{module}: type `{name}`: `pattern` `{p}` is outside Vela's \
+                        "{module}: type `{name}`: `pattern` `{p}` is outside Vyrn's \
                          regex subset: {e}"
                     )
                 })?;
@@ -726,7 +726,7 @@ mod tests {
 
     #[test]
     fn round_trips_with_the_jsonschema_emitter() {
-        // Emit a schema from Vela types, import it back, re-emit: byte-equal.
+        // Emit a schema from Vyrn types, import it back, re-emit: byte-equal.
         let src = "type Username = String where value.length >= 3 && value.length <= 16 \
                    type Age = Int64 where value >= 18 && value <= 130 \
                    type User = { name: Username, age: Age, nick: Option<String> } \
@@ -746,7 +746,7 @@ mod tests {
         assert_eq!(emitted, reemitted, "schema round-trip must be exact");
     }
 
-    /// A `{"enum": [..]}` schema imports as a payload-less Vela enum, and the
+    /// A `{"enum": [..]}` schema imports as a payload-less Vyrn enum, and the
     /// emitter's enum encoding round-trips byte-exactly.
     #[test]
     fn imports_enum_schemas_and_round_trips() {
@@ -767,7 +767,7 @@ mod tests {
             }
             other => panic!("expected an enum, got {other:?}"),
         }
-        // Round trip: emit from Vela, import, re-emit — byte-equal.
+        // Round trip: emit from Vyrn, import, re-emit — byte-equal.
         let src = "type Color = | Red | Green | Blue\nfn main() -> Int64 { return 0 }";
         let program = crate::check(src).unwrap();
         let types: HashMap<String, TypeDecl> =

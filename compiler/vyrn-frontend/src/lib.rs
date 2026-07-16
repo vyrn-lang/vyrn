@@ -1,4 +1,4 @@
-//! Vela front end (v0 subset).
+//! Vyrn front end (v0 subset).
 //!
 //! Pipeline: source text -> [`lexer`] -> [`parser`] -> [`ast`] ->
 //! [`checker`] -> [`interp`].
@@ -28,7 +28,7 @@ pub mod symbols;
 pub mod types;
 
 // Re-export the symbol-query API at the crate root so the LSP can spell it as
-// `vela_frontend::analyze` / `::resolve` / `::completions` and use the types
+// `vyrn_frontend::analyze` / `::resolve` / `::completions` and use the types
 // directly. `diagnostics` (below) delegates to `symbols::analyze`, so the whole
 // pipeline lives in one place.
 pub use symbols::{
@@ -37,8 +37,8 @@ pub use symbols::{
 };
 
 // The canonical formatter (RFC-0017). `fmt` the module and `fmt` the function
-// live in different namespaces, so `vela_frontend::fmt(src)` calls the function
-// and `vela_frontend::fmt::` names the module.
+// live in different namespaces, so `vyrn_frontend::fmt(src)` calls the function
+// and `vyrn_frontend::fmt::` names the module.
 pub use fmt::fmt;
 
 /// Parse, type-check, and move-check `source`, returning the checked
@@ -73,7 +73,7 @@ pub fn check(source: &str) -> Result<ast::Program, String> {
 pub fn diagnostics(source: &str) -> Vec<diagnostics::Diagnostic> {
     // The full pipeline (lex → parse → check → movecheck + symbol index) lives in
     // [`symbols::analyze`]; this is the diagnostics-only view of it, kept for the
-    // CLI (`velac check`) and existing tests. Output is byte-identical to the
+    // CLI (`vyrn check`) and existing tests. Output is byte-identical to the
     // inlined version it replaced.
     symbols::analyze(source).diagnostics
 }

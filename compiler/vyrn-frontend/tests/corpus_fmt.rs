@@ -5,7 +5,7 @@
 //!
 //!   1. `fmt(src) == src` — the corpus is already formatted (`fmt --check`
 //!      passes). Any drift here means either a formatter change or a hand-edit
-//!      that skipped `velac fmt`.
+//!      that skipped `vyrn fmt`.
 //!   2. `fmt(fmt(src)) == fmt(src)` — idempotency.
 //!   3. `lex(fmt(src)) == lex(src)` modulo `Semi` — the meaning-preserving
 //!      token invariant (fmt enforces this internally; here it is asserted
@@ -13,9 +13,9 @@
 
 use std::path::PathBuf;
 
-use vela_frontend::lexer::{lex, Tok};
+use vyrn_frontend::lexer::{lex, Tok};
 
-/// Every `.vela` file under examples/ (incl. lib/) and std/.
+/// Every `.vyrn` file under examples/ (incl. lib/) and std/.
 fn corpus() -> Vec<PathBuf> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."); // N:/lang
     let mut files = Vec::new();
@@ -25,7 +25,7 @@ fn corpus() -> Vec<PathBuf> {
             .unwrap_or_else(|e| panic!("corpus dir {} unreadable: {e}", d.display()));
         for entry in rd.flatten() {
             let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("vela") {
+            if p.extension().and_then(|s| s.to_str()) == Some("vyrn") {
                 files.push(p);
             }
         }
@@ -57,7 +57,7 @@ fn corpus_is_canonical() {
     let mut drifted = Vec::new();
     for f in corpus() {
         let src = read_lf(&f);
-        let formatted = vela_frontend::fmt(&src)
+        let formatted = vyrn_frontend::fmt(&src)
             .unwrap_or_else(|e| panic!("fmt {} failed: {}", f.display(), e.render()));
         if formatted != src {
             drifted.push(f.display().to_string());
@@ -65,7 +65,7 @@ fn corpus_is_canonical() {
     }
     assert!(
         drifted.is_empty(),
-        "these corpus files are not canonical (run `velac fmt`):\n  {}",
+        "these corpus files are not canonical (run `vyrn fmt`):\n  {}",
         drifted.join("\n  ")
     );
 }
@@ -74,8 +74,8 @@ fn corpus_is_canonical() {
 fn corpus_fmt_is_idempotent() {
     for f in corpus() {
         let src = read_lf(&f);
-        let once = vela_frontend::fmt(&src).expect("fmt");
-        let twice = vela_frontend::fmt(&once).expect("fmt again");
+        let once = vyrn_frontend::fmt(&src).expect("fmt");
+        let twice = vyrn_frontend::fmt(&once).expect("fmt again");
         assert_eq!(once, twice, "fmt is not idempotent on {}", f.display());
     }
 }
@@ -84,7 +84,7 @@ fn corpus_fmt_is_idempotent() {
 fn corpus_fmt_preserves_tokens_modulo_semi() {
     for f in corpus() {
         let src = read_lf(&f);
-        let formatted = vela_frontend::fmt(&src).expect("fmt");
+        let formatted = vyrn_frontend::fmt(&src).expect("fmt");
         assert_eq!(
             tokens_modulo_semi(&src),
             tokens_modulo_semi(&formatted),
@@ -100,7 +100,7 @@ fn corpus_fmt_preserves_tokens_modulo_semi() {
 fn parse_error_file_still_formats() {
     // `let x =` with no initializer does not parse, but lexes fine.
     let src = "fn main() -> Int64 {\nlet x =\nreturn 0\n}\n";
-    let out = vela_frontend::fmt(src).expect("lexable input formats even if unparseable");
+    let out = vyrn_frontend::fmt(src).expect("lexable input formats even if unparseable");
     // Indentation and spacing still applied; the dangling `=` is preserved.
     assert_eq!(out, "fn main() -> Int64 {\n    let x =\n    return 0\n}\n");
 }

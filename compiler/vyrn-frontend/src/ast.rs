@@ -1,4 +1,4 @@
-//! Abstract syntax tree for the Vela v0 subset.
+//! Abstract syntax tree for the Vyrn v0 subset.
 
 /// A whole program: top-level type declarations plus functions. `main` is the
 /// entry point.
@@ -31,14 +31,14 @@ pub struct Program {
     /// run/build/emit-ir paths (which only walk `functions`) never see them: a
     /// shipped binary contains no tests, and the string pool / regex collection
     /// skip them by construction. Checked as Unit-returning function bodies;
-    /// executed only by `velac test`.
+    /// executed only by `vyrn test`.
     pub tests: Vec<TestDecl>,
 }
 
 /// A `test "name" { body }` declaration (RFC-0015): a named block checked exactly
-/// like a Unit-returning function body and run by `velac test`. The `name` is a
+/// like a Unit-returning function body and run by `vyrn test`. The `name` is a
 /// plain string (unique per file). Only the *root* module's tests are run by
-/// `velac test <root>`; an imported module's tests still type-check but do not
+/// `vyrn test <root>`; an imported module's tests still type-check but do not
 /// run (they run when that module is itself the argument).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TestDecl {
@@ -50,7 +50,7 @@ pub struct TestDecl {
     /// `///` documentation (markdown), attached by the parser; `None` if absent.
     pub doc: Option<String>,
     /// The module (file) this test came from; `None` for the root. Set by the
-    /// loader. `velac test` runs only `None`-module (root) tests.
+    /// loader. `vyrn test` runs only `None`-module (root) tests.
     pub module: Option<String>,
     pub line: usize,
 }
@@ -214,19 +214,19 @@ pub struct Function {
     pub body: Block,
     pub line: usize,
     /// `extern fn ..` — a JS-interop import (RFC-0012). A body-less declaration
-    /// whose implementation the wasm host supplies from the `vela` import
+    /// whose implementation the wasm host supplies from the `vyrn` import
     /// namespace; on native/interpreter a *call* traps (declaring is fine). The
     /// `body` is empty for an extern declaration (M1); `export extern fn` with a
     /// body is M2 (exports). Distinguishes externs everywhere functions are
     /// iterated (codegen emits a `declare`, not a `define`; the checker skips the
     /// body analyses and enforces the extern ABI type domain).
     pub is_extern: bool,
-    /// `export extern fn ..` — a Vela function ADDITIONALLY exported to JS on the
+    /// `export extern fn ..` — a Vyrn function ADDITIONALLY exported to JS on the
     /// wasm target (RFC-0012 M2). Unlike an `is_extern` import this is a *normal*
     /// function in every respect: it has a body that is fully checked, runs under
     /// the interpreter, participates in spawn-purity analysis by that body, and
     /// is a plain `define` in codegen — it only gains a `wasm-export-name`
-    /// attribute so wasm-ld exports it under its Vela name. `is_extern` and
+    /// attribute so wasm-ld exports it under its Vyrn name. `is_extern` and
     /// `is_export_extern` are mutually exclusive (import vs. exported impl); the
     /// checker additionally enforces the extern ABI type domain on its signature.
     pub is_export_extern: bool,
@@ -340,7 +340,7 @@ pub enum Type {
 }
 
 impl std::fmt::Display for Type {
-    /// The user-facing spelling of a type, exactly as it is written in Vela
+    /// The user-facing spelling of a type, exactly as it is written in Vyrn
     /// source: `Int64`, `UInt8`, `Float64`, `String`, `Option<T>`, a named
     /// type by its name, a record by its shape. Diagnostics use this — never
     /// the `Debug` form (`IntN { bits: 8, .. }` / `Named("Age")`).

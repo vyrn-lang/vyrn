@@ -12,7 +12,7 @@
 //!
 //! Rules enforced here:
 //!   * a specifier resolves relative to the importing file (`./`, `../`),
-//!     or against the std root for `std/...`; `.vela` is appended when the
+//!     or against the std root for `std/...`; `.vyrn` is appended when the
 //!     specifier has no extension;
 //!   * import cycles are errors (named in full);
 //!   * an imported name must exist in the target module and be `export`ed;
@@ -122,10 +122,10 @@ fn normalize_remote(key: &str) -> String {
 /// Resolve an import specifier written inside `importer` to a module key.
 fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String, String> {
     let with_ext = |p: String| {
-        if p.ends_with(".vela") || p.ends_with(".json") {
+        if p.ends_with(".vyrn") || p.ends_with(".json") {
             p
         } else {
-            format!("{p}.vela")
+            format!("{p}.vyrn")
         }
     };
     if let Some(rest) = spec.strip_prefix("std/") {
@@ -137,7 +137,7 @@ fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String
     if spec.starts_with("http://") {
         return Err(format!("insecure `http:` import `{spec}` — use https"));
     }
-    // Remote specifiers are their own keys; the resolver (vela-cli) turns them
+    // Remote specifiers are their own keys; the resolver (vyrn-cli) turns them
     // into content via the lockfile/cache/network.
     if is_remote(spec) {
         let key = normalize_remote(&with_ext(spec.to_string()));
@@ -188,7 +188,7 @@ fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String
     }
     Err(format!(
         "cannot resolve import `{spec}`: use a relative path (`./name`), `std/name`, \
-         a remote specifier (github:/gist:/https:), or declare it in vela.json's \
+         a remote specifier (github:/gist:/https:), or declare it in vyrn.json's \
          `dependencies`"
     ))
 }
@@ -230,7 +230,7 @@ pub fn load(
 }
 
 /// The module dependency graph: every (module key, resolved import targets)
-/// pair reachable from the root — powers `velac deps`.
+/// pair reachable from the root — powers `vyrn deps`.
 pub fn module_graph(
     root_source: &str,
     root_path: &str,
@@ -287,7 +287,7 @@ fn load_modules(
         let is_root = key == root_key;
 
         // A `.json` module is a JSON Schema document: synthesize validated
-        // type declarations from it (RFC-0010 M2) instead of parsing Vela.
+        // type declarations from it (RFC-0010 M2) instead of parsing Vyrn.
         // Schema modules import nothing themselves.
         if key.ends_with(".json") {
             let decls = crate::schema::synthesize(&text, None, key)
@@ -373,7 +373,7 @@ fn load_modules(
                 p.module = Some(key.to_string());
             }
             // Tag tests with their module too (RFC-0015): they still type-check,
-            // but `velac test <root>` runs only the root's (`None`-module) tests.
+            // but `vyrn test <root>` runs only the root's (`None`-module) tests.
             for t in &mut program.tests {
                 t.module = Some(key.to_string());
             }
@@ -634,7 +634,7 @@ fn link(modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>
             extra_protocols.extend(p.protocols);
             extra_impls.extend(p.impls);
             // Imported tests keep their `module` tag: they type-check but do not
-            // run under `velac test <root>` (RFC-0015).
+            // run under `vyrn test <root>` (RFC-0015).
             extra_tests.extend(p.tests);
         }
     }
@@ -806,7 +806,7 @@ mod tests {
     }
 
     fn run_multi(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
-        let program = load(root, "main.vela", &opts(), &map(files))
+        let program = load(root, "main.vyrn", &opts(), &map(files))
             .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
         let diags = crate::checker::check_accum(&program);
         if let Some(d) = diags.first() {
@@ -816,7 +816,7 @@ mod tests {
     }
 
     fn load_err(root: &str, files: &[(&str, &str)]) -> String {
-        match load(root, "main.vela", &opts(), &map(files)) {
+        match load(root, "main.vyrn", &opts(), &map(files)) {
             Ok(_) => panic!("expected a load error"),
             Err(ds) => ds.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("\n"),
         }
@@ -829,7 +829,7 @@ mod tests {
                    fn hidden() -> Int64 { return 0 }";
         let root = "import { double, Age } from \"./lib\" \
                     fn main() -> Int64 { let a: Age = 21 return double(a) }";
-        assert_eq!(run_multi(root, &[("lib.vela", lib)]).unwrap(), 42);
+        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 42);
     }
 
     #[test]
@@ -838,7 +838,7 @@ mod tests {
         let root = "import { Age } from \"./lib\" \
                     fn mk(n: Int64) -> Age { return n } \
                     fn main() -> Int64 { let a = mk(5) return 0 }";
-        let e = run_multi(root, &[("lib.vela", lib)]).unwrap_err();
+        let e = run_multi(root, &[("lib.vyrn", lib)]).unwrap_err();
         assert!(e.contains("validation failed for `Age`"), "{e}");
     }
 
@@ -847,7 +847,7 @@ mod tests {
         let lib = "fn secret() -> Int64 { return 1 }";
         let root = "import { secret } from \"./lib\" \
                     fn main() -> Int64 { return secret() }";
-        let e = load_err(root, &[("lib.vela", lib)]);
+        let e = load_err(root, &[("lib.vyrn", lib)]);
         assert!(e.contains("not exported"), "{e}");
     }
 
@@ -855,7 +855,7 @@ mod tests {
     fn importing_a_missing_name_is_an_error() {
         let root = "import { nope } from \"./lib\" \
                     fn main() -> Int64 { return 0 }";
-        let e = load_err(root, &[("lib.vela", "export fn f() -> Int64 { return 1 }")]);
+        let e = load_err(root, &[("lib.vyrn", "export fn f() -> Int64 { return 1 }")]);
         assert!(e.contains("does not define `nope`"), "{e}");
     }
 
@@ -866,7 +866,7 @@ mod tests {
                    export fn wanted() -> Int64 { return 2 }";
         let root = "import { wanted } from \"./lib\" \
                     fn main() -> Int64 { return wanted() + helper() }";
-        let e = load_err(root, &[("lib.vela", lib)]);
+        let e = load_err(root, &[("lib.vyrn", lib)]);
         assert!(e.contains("not imported here"), "{e}");
     }
 
@@ -875,7 +875,7 @@ mod tests {
         let a = "import { b } from \"./b\" export fn a() -> Int64 { return 1 }";
         let b = "import { a } from \"./a\" export fn b() -> Int64 { return 2 }";
         let root = "import { a } from \"./a\" fn main() -> Int64 { return a() }";
-        let e = load_err(root, &[("a.vela", a), ("b.vela", b)]);
+        let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
         assert!(e.contains("import cycle"), "{e}");
     }
 
@@ -886,7 +886,7 @@ mod tests {
         let root = "import { f } from \"./a\" \
                     import { f } from \"./b\" \
                     fn main() -> Int64 { return f() }";
-        let e = load_err(root, &[("a.vela", a), ("b.vela", b)]);
+        let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
         assert!(e.contains("defined in both"), "{e}");
     }
 
@@ -897,7 +897,7 @@ mod tests {
                        return match s { Circle(r) => 3 * r * r, Dot => 0 } }";
         let root = "import { Shape, area } from \"./lib\" \
                     fn main() -> Int64 { return area(Circle(2)) }";
-        assert_eq!(run_multi(root, &[("lib.vela", lib)]).unwrap(), 12);
+        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 12);
     }
 
     #[test]
@@ -906,7 +906,7 @@ mod tests {
                    impl Loud for Int64 { fn shout(self) -> Int64 { return self * 10 } }";
         let root = "import { Loud } from \"./lib\" \
                     fn main() -> Int64 { return 4.shout() }";
-        assert_eq!(run_multi(root, &[("lib.vela", lib)]).unwrap(), 40);
+        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 40);
     }
 
     #[test]
@@ -914,7 +914,7 @@ mod tests {
         let m = "export fn twice(x: Int64) -> Int64 { return x + x }";
         let root = "import { twice } from \"std/math\" \
                     fn main() -> Int64 { return twice(21) }";
-        assert_eq!(run_multi(root, &[("std/math.vela", m)]).unwrap(), 42);
+        assert_eq!(run_multi(root, &[("std/math.vyrn", m)]).unwrap(), 42);
     }
 
     #[test]
@@ -928,7 +928,7 @@ mod tests {
                     import { b } from \"./b\" \
                     fn main() -> Int64 { return a() + b() }";
         assert_eq!(
-            run_multi(root, &[("shared.vela", shared), ("a.vela", a), ("b.vela", b)]).unwrap(),
+            run_multi(root, &[("shared.vyrn", shared), ("a.vyrn", a), ("b.vyrn", b)]).unwrap(),
             32
         );
     }
@@ -937,7 +937,7 @@ mod tests {
     fn non_root_logging_config_is_an_error() {
         let lib = "logging { level: trace } export fn f() -> Int64 { return 1 }";
         let root = "import { f } from \"./lib\" fn main() -> Int64 { return f() }";
-        let e = load_err(root, &[("lib.vela", lib)]);
+        let e = load_err(root, &[("lib.vyrn", lib)]);
         assert!(e.contains("only the root module may configure `logging"), "{e}");
     }
 
@@ -946,7 +946,7 @@ mod tests {
         // RFC-0013: a top-level `let` may only appear in the root module.
         let lib = "let mut count = 0 export fn f() -> Int64 { return count }";
         let root = "import { f } from \"./lib\" fn main() -> Int64 { return f() }";
-        let e = load_err(root, &[("lib.vela", lib)]);
+        let e = load_err(root, &[("lib.vyrn", lib)]);
         assert!(e.contains("module state is root-only"), "{e}");
     }
 
@@ -957,7 +957,7 @@ mod tests {
         let root = "import { tally } from \"./lib\" \
                     let tally = 0 \
                     fn main() -> Int64 { return tally }";
-        let e = load_err(root, &[("lib.vela", lib)]);
+        let e = load_err(root, &[("lib.vyrn", lib)]);
         assert!(e.contains("must be unique"), "{e}");
     }
 }
@@ -968,7 +968,7 @@ mod remote_tests {
     use super::*;
 
     fn load_err_at(root: &str, files: &[(&str, &str)]) -> String {
-        match load(root, "main.vela", &opts(), &map(files)) {
+        match load(root, "main.vyrn", &opts(), &map(files)) {
             Ok(_) => panic!("expected a load error"),
             Err(ds) => ds.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("\n"),
         }
@@ -983,9 +983,9 @@ mod remote_tests {
                     fn main() -> Int64 { return pad(41) }";
         let program = load(
             root,
-            "main.vela",
+            "main.vyrn",
             &opts(),
-            &map(&[("github:acme/strings@v1/src/pad.vela", lib)]),
+            &map(&[("github:acme/strings@v1/src/pad.vyrn", lib)]),
         )
         .unwrap();
         assert_eq!(crate::interp::run(&program).unwrap(), 42);
@@ -999,11 +999,11 @@ mod remote_tests {
                     fn main() -> Int64 { return a() }";
         let program = load(
             root,
-            "main.vela",
+            "main.vyrn",
             &opts(),
             &map(&[
-                ("github:acme/x@abc/src/a.vela", a),
-                ("github:acme/x@abc/src/b.vela", b),
+                ("github:acme/x@abc/src/a.vyrn", a),
+                ("github:acme/x@abc/src/b.vyrn", b),
             ]),
         )
         .unwrap();
@@ -1016,7 +1016,7 @@ mod remote_tests {
                  export fn a() -> Int64 { return 0 }";
         let root = "import { a } from \"github:acme/x@abc/src/a\" \
                     fn main() -> Int64 { return a() }";
-        let e = load_err_at(root, &[("github:acme/x@abc/src/a.vela", a)]);
+        let e = load_err_at(root, &[("github:acme/x@abc/src/a.vyrn", a)]);
         assert!(e.contains("escapes its remote module's base"), "{e}");
     }
 
@@ -1027,7 +1027,7 @@ mod remote_tests {
                     fn main() -> Int64 { return a() }";
         let mut o = opts();
         o.aliases.insert("money".into(), "./money".into());
-        let e = match load(root, "main.vela", &o, &map(&[("gist:demko/abc123/a.vela", a)])) {
+        let e = match load(root, "main.vyrn", &o, &map(&[("gist:demko/abc123/a.vyrn", a)])) {
             Ok(_) => panic!("expected error"),
             Err(ds) => ds[0].message.clone(),
         };

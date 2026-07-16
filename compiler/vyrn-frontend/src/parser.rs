@@ -136,7 +136,7 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     // The server surface (RFC-0016): the `Request` handed to `handle` and the
     // `Response` it returns. Ordinary records (no `where`), injected like
     // `Schema`/`Issue` so every program can name them without a `use` and
-    // `velac serve` can construct/read them across the FFI-free interpreter
+    // `vyrn serve` can construct/read them across the FFI-free interpreter
     // boundary. `path` carries the query string as sent; `body` is the raw
     // request body (`""` when absent). Users construct them freely — `main`
     // calling `handle` directly is the parity story.
@@ -421,7 +421,7 @@ impl Parser {
                         && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
                 {
                     // `extern fn` (no `export`) is a body-less JS *import* (M1);
-                    // `export extern fn ... { body }` is a Vela function *exported*
+                    // `export extern fn ... { body }` is a Vyrn function *exported*
                     // to JS (M2). The `exported` flag decides which shape is legal.
                     match self.extern_function(exported) {
                         Ok(mut f) => { f.doc = doc; functions.push(f); }
@@ -1062,7 +1062,7 @@ impl Parser {
     /// - `extern fn f(..)` (`exported == false`) is a JS *import* (M1): the wasm
     ///   host supplies the body, so a body here is an error (`export extern fn`
     ///   is how you supply one).
-    /// - `export extern fn f(..) { .. }` (`exported == true`) is a Vela function
+    /// - `export extern fn f(..) { .. }` (`exported == true`) is a Vyrn function
     ///   *exported* to JS (M2): it is a normal function that must HAVE a body — a
     ///   body-less one is an error (that shape is an import, which `export` on an
     ///   import is not the way to write). The parameter list and return arrow

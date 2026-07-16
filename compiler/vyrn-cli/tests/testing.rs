@@ -1,17 +1,17 @@
-//! `velac test` integration tests (RFC-0015): exact stdout, exit codes, the
+//! `vyrn test` integration tests (RFC-0015): exact stdout, exit codes, the
 //! `--name` filter, the no-tests case, and IR stripping. Interpreter-only (no
 //! clang), so these run in the default suite.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-fn velac() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_velac"))
+fn vyrn() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_vyrn"))
 }
 
 /// A fresh scratch directory for one test.
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("vela-testing-tests").join(name);
+    let dir = std::env::temp_dir().join("vyrn-testing-tests").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -24,7 +24,7 @@ fn norm(bytes: &[u8]) -> String {
 #[test]
 fn runs_passing_and_failing_tests_with_exact_output() {
     let dir = scratch("mixed");
-    let file = dir.join("t.vela");
+    let file = dir.join("t.vyrn");
     std::fs::write(
         &file,
         "test \"one plus one\" {\n\
@@ -39,7 +39,7 @@ fn runs_passing_and_failing_tests_with_exact_output() {
          }\n",
     )
     .unwrap();
-    let out = velac().arg("test").arg(&file).output().unwrap();
+    let out = vyrn().arg("test").arg(&file).output().unwrap();
     // Any failing test -> exit 1.
     assert_eq!(out.status.code(), Some(1));
     let stdout = norm(&out.stdout);
@@ -55,13 +55,13 @@ fn runs_passing_and_failing_tests_with_exact_output() {
 #[test]
 fn all_passing_exits_zero() {
     let dir = scratch("allpass");
-    let file = dir.join("t.vela");
+    let file = dir.join("t.vyrn");
     std::fs::write(
         &file,
         "test \"a\" { assert(true) }\ntest \"b\" { assertEq(2, 2) }\n",
     )
     .unwrap();
-    let out = velac().arg("test").arg(&file).output().unwrap();
+    let out = vyrn().arg("test").arg(&file).output().unwrap();
     assert!(out.status.success());
     let stdout = norm(&out.stdout);
     assert_eq!(
@@ -74,7 +74,7 @@ fn all_passing_exits_zero() {
 #[test]
 fn name_filter_selects_a_subset() {
     let dir = scratch("filter");
-    let file = dir.join("t.vela");
+    let file = dir.join("t.vyrn");
     std::fs::write(
         &file,
         "test \"alpha\" { assert(true) }\n\
@@ -82,7 +82,7 @@ fn name_filter_selects_a_subset() {
          test \"alphabet\" { assert(true) }\n",
     )
     .unwrap();
-    let out = velac().arg("test").arg(&file).args(["--name", "alpha"]).output().unwrap();
+    let out = vyrn().arg("test").arg(&file).args(["--name", "alpha"]).output().unwrap();
     assert!(out.status.success());
     let stdout = norm(&out.stdout);
     assert_eq!(
@@ -95,9 +95,9 @@ fn name_filter_selects_a_subset() {
 #[test]
 fn no_tests_prints_no_tests_and_exits_zero() {
     let dir = scratch("none");
-    let file = dir.join("t.vela");
+    let file = dir.join("t.vyrn");
     std::fs::write(&file, "fn main() -> Int64 { return 0 }\n").unwrap();
-    let out = velac().arg("test").arg(&file).output().unwrap();
+    let out = vyrn().arg("test").arg(&file).output().unwrap();
     assert!(out.status.success());
     assert_eq!(norm(&out.stdout), "no tests\n");
 }
@@ -106,17 +106,17 @@ fn no_tests_prints_no_tests_and_exits_zero() {
 fn a_file_may_have_both_tests_and_a_main() {
     // `run` executes `main` (tests stripped); `test` runs the tests.
     let dir = scratch("both");
-    let file = dir.join("t.vela");
+    let file = dir.join("t.vyrn");
     std::fs::write(
         &file,
         "test \"t\" { assertEq(6 * 7, 42) }\n\
          fn main() -> Int64 { print(99) return 0 }\n",
     )
     .unwrap();
-    let run = velac().arg("run").arg(&file).output().unwrap();
+    let run = vyrn().arg("run").arg(&file).output().unwrap();
     assert!(run.status.success());
     assert_eq!(norm(&run.stdout).trim(), "99");
-    let test = velac().arg("test").arg(&file).output().unwrap();
+    let test = vyrn().arg("test").arg(&file).output().unwrap();
     assert!(test.status.success());
     assert_eq!(norm(&test.stdout), "test \"t\" ... ok\n\n1 passed, 0 failed\n");
 }
@@ -125,14 +125,14 @@ fn a_file_may_have_both_tests_and_a_main() {
 fn test_bodies_are_stripped_from_emitted_ir() {
     // A test body's unique string literal must not reach codegen.
     let dir = scratch("strip");
-    let file = dir.join("t.vela");
+    let file = dir.join("t.vyrn");
     std::fs::write(
         &file,
         "test \"UNIQUE_TEST_MARKER\" { let s = \"SECRET_IN_TEST_BODY\" print(s.length) }\n\
          fn main() -> Int64 { print(1) return 0 }\n",
     )
     .unwrap();
-    let out = velac().arg("emit-ir").arg(&file).output().unwrap();
+    let out = vyrn().arg("emit-ir").arg(&file).output().unwrap();
     assert!(out.status.success(), "{}", norm(&out.stderr));
     let ir = norm(&out.stdout);
     assert!(!ir.contains("SECRET_IN_TEST_BODY"), "test string leaked into IR");

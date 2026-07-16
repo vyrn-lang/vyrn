@@ -1,4 +1,4 @@
-//! Hand-written lexer for the Vela v0 subset.
+//! Hand-written lexer for the Vyrn v0 subset.
 
 use crate::diagnostics::Diagnostic;
 
@@ -738,7 +738,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
         }
 
         // character literal: `'a'` / `'é'` / `'\u{1F600}'` is the Unicode scalar
-        // value (code point) as an Int — Vela has no distinct char type.
+        // value (code point) as an Int — Vyrn has no distinct char type.
         // Escapes: `\n \t \r \0 \\ \'` and `\u{HEX}`.
         if c == '\'' {
             let start_col = col;

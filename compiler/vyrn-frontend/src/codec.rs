@@ -10,7 +10,7 @@
 //!    order-preserving parser in [`crate::schema`], but one that keeps integers
 //!    *exact* (never through `f64`) by remembering each number's source text and
 //!    whether it was written in integer syntax. The native side mirrors this
-//!    parser byte-for-byte in the C runtime shim (see `vela-cli`), including the
+//!    parser byte-for-byte in the C runtime shim (see `vyrn-cli`), including the
 //!    error wording ([`ParseError`]).
 //! 3. **The Issue vocabulary** — the exact `key`/`message` bytes for every
 //!    decode failure ([`type_message`], [`missing_message`], [`validate_message`],
@@ -97,7 +97,7 @@ impl JsonV {
 // ---------------------------------------------------------------------------
 
 /// A parse failure, carrying the exact `json.parse` message bytes. The C shim
-/// (`__vela_json_parse`) produces the identical strings.
+/// (`__vyrn_json_parse`) produces the identical strings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError(pub String);
 

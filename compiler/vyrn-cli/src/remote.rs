@@ -3,16 +3,16 @@
 //! The frontend treats `github:` / `gist:` / `https:` specifiers as opaque
 //! module keys; this module turns them into content with three guarantees:
 //!
-//!   * **Pinned**: every fetch is recorded in `vela.lock`
+//!   * **Pinned**: every fetch is recorded in `vyrn.lock`
 //!     (`specifier ⇥ resolved-immutable-url ⇥ sha256`, sorted, tab-separated).
-//!     Once locked, only `velac update` changes an entry. Floating refs
+//!     Once locked, only `vyrn update` changes an entry. Floating refs
 //!     (`@main`, `@v1`) are resolved to a commit once, then frozen.
-//!   * **Content-addressed**: bytes live in `~/.vela/cache/sha256/<hex>`
-//!     (and optionally `./vela_vendor/sha256/<hex>` for committed, air-gapped
+//!   * **Content-addressed**: bytes live in `~/.vyrn/cache/sha256/<hex>`
+//!     (and optionally `./vyrn_vendor/sha256/<hex>` for committed, air-gapped
 //!     repos). The hash is verified on EVERY load — a tampered cache fails
 //!     loudly, and any copy of the file obtained anywhere can restore a
 //!     vanished upstream (the left-pad scenario).
-//!   * **Offline-capable**: `--offline` / `VELA_OFFLINE=1` forbids network;
+//!   * **Offline-capable**: `--offline` / `VYRN_OFFLINE=1` forbids network;
 //!     a lock+cache hit needs none.
 //!
 //! Zero new crates: SHA-256 is implemented below (FIPS 180-4, tested against
@@ -107,7 +107,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 // lockfile
 // ---------------------------------------------------------------------------
 
-/// `vela.lock`: `specifier ⇥ resolved-url ⇥ sha256` per line, sorted by
+/// `vyrn.lock`: `specifier ⇥ resolved-url ⇥ sha256` per line, sorted by
 /// specifier. Line-based and diff-friendly by design.
 pub struct Lock {
     pub path: PathBuf,
@@ -148,11 +148,11 @@ pub fn cache_dir() -> PathBuf {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".to_string());
-    Path::new(&home).join(".vela/cache/sha256")
+    Path::new(&home).join(".vyrn/cache/sha256")
 }
 
 pub fn vendor_dir(project_dir: &str) -> PathBuf {
-    Path::new(project_dir).join("vela_vendor/sha256")
+    Path::new(project_dir).join("vyrn_vendor/sha256")
 }
 
 /// Read a content-addressed blob, verifying its hash (tamper-evident).
@@ -183,7 +183,7 @@ fn write_blob(dir: &Path, sha: &str, bytes: &[u8]) -> Result<(), String> {
 /// URLs are already immutable.
 pub fn resolve_to_url(spec: &str) -> Result<String, String> {
     if let Some(rest) = spec.strip_prefix("github:") {
-        // github:owner/repo@ref/path(.vela)
+        // github:owner/repo@ref/path(.vyrn)
         let at = rest.find('@').ok_or("github specifier needs `@ref`")?;
         let (owner_repo, rest) = rest.split_at(at);
         let rest = &rest[1..];
@@ -210,7 +210,7 @@ pub fn resolve_to_url(spec: &str) -> Result<String, String> {
         ));
     }
     if let Some(rest) = spec.strip_prefix("gist:") {
-        // gist:user/id[@rev]/file(.vela)
+        // gist:user/id[@rev]/file(.vyrn)
         let mut segs = rest.splitn(3, '/');
         let user = segs.next().ok_or("gist specifier needs user/id/file")?;
         let id_rev = segs.next().ok_or("gist specifier needs user/id/file")?;
@@ -272,7 +272,7 @@ impl RemoteResolver {
             if self.offline {
                 return Err(format!(
                     "`{spec}` is locked (sha256 {sha}) but not cached, and this is an \
-                     offline build — run once online, `velac vendor`, or drop any copy \
+                     offline build — run once online, `vyrn vendor`, or drop any copy \
                      of the file with that hash into the cache"
                 ));
             }
@@ -280,9 +280,9 @@ impl RemoteResolver {
             let got = sha256_hex(&bytes);
             if got != sha {
                 return Err(format!(
-                    "`{spec}` fetched from {url} hashes {got}, but vela.lock pins {sha} — \
+                    "`{spec}` fetched from {url} hashes {got}, but vyrn.lock pins {sha} — \
                      the upstream changed under an immutable URL; refusing to build \
-                     (run `velac update` to accept the new content deliberately)"
+                     (run `vyrn update` to accept the new content deliberately)"
                 ));
             }
             write_blob(&cache_dir(), &sha, &bytes)?;
@@ -291,7 +291,7 @@ impl RemoteResolver {
         // 2. Unlocked: first resolution (network), then pin.
         if self.offline {
             return Err(format!(
-                "`{spec}` is not in vela.lock and this is an offline build"
+                "`{spec}` is not in vyrn.lock and this is an offline build"
             ));
         }
         let url = resolve_to_url(spec)?;
@@ -311,9 +311,9 @@ impl RemoteResolver {
     }
 }
 
-impl vela_frontend::loader::ModuleResolver for RemoteResolver {
+impl vyrn_frontend::loader::ModuleResolver for RemoteResolver {
     fn read(&self, resolved: &str) -> Result<String, String> {
-        if vela_frontend::loader::is_remote(resolved) {
+        if vyrn_frontend::loader::is_remote(resolved) {
             self.read_remote(resolved)
         } else {
             std::fs::read_to_string(resolved).map_err(|e| e.to_string())
@@ -348,13 +348,13 @@ mod tests {
 
     #[test]
     fn lock_round_trips() {
-        let dir = std::env::temp_dir().join("vela-lock-test");
+        let dir = std::env::temp_dir().join("vyrn-lock-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("vela.lock");
+        let path = dir.join("vyrn.lock");
         let mut lock = Lock::load(path.clone());
         lock.entries.insert(
-            "github:a/b@v1/x.vela".into(),
-            ("https://raw.githubusercontent.com/a/b/deadbeef/x.vela".into(), "abc123".into()),
+            "github:a/b@v1/x.vyrn".into(),
+            ("https://raw.githubusercontent.com/a/b/deadbeef/x.vyrn".into(), "abc123".into()),
         );
         lock.save().unwrap();
         let reloaded = Lock::load(path);
@@ -366,20 +366,20 @@ mod tests {
         // A 40-hex ref needs no network.
         let sha = "a".repeat(40);
         assert_eq!(
-            resolve_to_url(&format!("github:o/r@{sha}/src/x.vela")).unwrap(),
-            format!("https://raw.githubusercontent.com/o/r/{sha}/src/x.vela")
+            resolve_to_url(&format!("github:o/r@{sha}/src/x.vyrn")).unwrap(),
+            format!("https://raw.githubusercontent.com/o/r/{sha}/src/x.vyrn")
         );
         assert_eq!(
-            resolve_to_url("gist:u/abc123/f.vela").unwrap(),
-            "https://gist.githubusercontent.com/u/abc123/raw/f.vela"
+            resolve_to_url("gist:u/abc123/f.vyrn").unwrap(),
+            "https://gist.githubusercontent.com/u/abc123/raw/f.vyrn"
         );
         assert_eq!(
-            resolve_to_url("gist:u/abc123@rev9/f.vela").unwrap(),
-            "https://gist.githubusercontent.com/u/abc123/raw/rev9/f.vela"
+            resolve_to_url("gist:u/abc123@rev9/f.vyrn").unwrap(),
+            "https://gist.githubusercontent.com/u/abc123/raw/rev9/f.vyrn"
         );
         assert_eq!(
-            resolve_to_url("https://x.dev/m.vela").unwrap(),
-            "https://x.dev/m.vela"
+            resolve_to_url("https://x.dev/m.vyrn").unwrap(),
+            "https://x.dev/m.vyrn"
         );
     }
 
@@ -389,18 +389,18 @@ mod tests {
         let sha = sha256_hex(text);
         write_blob(&cache_dir(), &sha, text).unwrap();
 
-        let dir = std::env::temp_dir().join("vela-remote-test");
+        let dir = std::env::temp_dir().join("vyrn-remote-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let mut lock = Lock::load(dir.join("vela.lock"));
+        let mut lock = Lock::load(dir.join("vyrn.lock"));
         lock.entries
-            .insert("https://x.dev/one.vela".into(), ("https://x.dev/one.vela".into(), sha.clone()));
+            .insert("https://x.dev/one.vyrn".into(), ("https://x.dev/one.vyrn".into(), sha.clone()));
         let r = RemoteResolver { lock: RefCell::new(lock), project_dir: None, offline: true };
-        let got = r.read_remote("https://x.dev/one.vela").unwrap();
+        let got = r.read_remote("https://x.dev/one.vyrn").unwrap();
         assert_eq!(got.as_bytes(), text);
 
         // Tamper with the cached blob: the hash check must fail loudly.
         std::fs::write(cache_dir().join(&sha), b"evil").unwrap();
-        let e = r.read_remote("https://x.dev/one.vela").unwrap_err();
+        let e = r.read_remote("https://x.dev/one.vyrn").unwrap_err();
         assert!(e.contains("does not match its recorded sha256"), "{e}");
         // Restore for other test runs.
         write_blob(&cache_dir(), &sha, text).unwrap();
@@ -408,11 +408,11 @@ mod tests {
 
     #[test]
     fn offline_without_lock_is_a_clear_error() {
-        let dir = std::env::temp_dir().join("vela-remote-test2");
+        let dir = std::env::temp_dir().join("vyrn-remote-test2");
         std::fs::create_dir_all(&dir).unwrap();
-        let lock = Lock::load(dir.join("vela.lock"));
+        let lock = Lock::load(dir.join("vyrn.lock"));
         let r = RemoteResolver { lock: RefCell::new(lock), project_dir: None, offline: true };
-        let e = r.read_remote("https://x.dev/never-seen.vela").unwrap_err();
-        assert!(e.contains("not in vela.lock"), "{e}");
+        let e = r.read_remote("https://x.dev/never-seen.vyrn").unwrap_err();
+        assert!(e.contains("not in vyrn.lock"), "{e}");
     }
 }

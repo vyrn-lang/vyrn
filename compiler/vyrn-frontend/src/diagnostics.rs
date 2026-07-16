@@ -1,4 +1,4 @@
-//! Structured diagnostics for the Vela front end.
+//! Structured diagnostics for the Vyrn front end.
 //!
 //! Every stage of the pipeline (lex → parse → check → movecheck) reports problems
 //! as a [`Diagnostic`] rather than a free-form string. A diagnostic carries a
@@ -18,7 +18,7 @@ pub enum Severity {
     Warning,
 }
 
-/// A single problem found in a Vela source, with position and provenance.
+/// A single problem found in a Vyrn source, with position and provenance.
 ///
 /// Positions are 1-based. `col`/`end_col` are `0` when a stage knows only the
 /// line (the whole line is then the natural range); `end_col` of `0` otherwise
