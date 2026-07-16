@@ -414,7 +414,7 @@ fn convert(
         }
         "string" => &["type", "minLength", "maxLength", "pattern", "allOf"],
         "boolean" => &["type"],
-        "object" => &["type", "properties", "required"],
+        "object" => &["type", "properties", "required", "additionalProperties"],
         "array" => &["type", "items"],
         other => {
             return Err(format!(
@@ -544,6 +544,39 @@ fn convert(
             Ok((Type::Array(Box::new(inner)), None, refs))
         }
         "object" => {
+            // An `additionalProperties` object is a `Map<String, V>` (RFC-0028),
+            // the inverse of the emitter. It carries no `properties`/`required`
+            // (a mixed record+index-signature type is not expressible in Vyrn).
+            if let Some(ap) = schema.get("additionalProperties") {
+                if schema.get("properties").is_some() || schema.get("required").is_some() {
+                    return Err(format!(
+                        "{module}: type `{name}`: an `additionalProperties` object (a Map) \
+                         cannot also carry `properties`/`required`"
+                    ));
+                }
+                let (inner, pred, mut r) =
+                    convert(ap, &format!("{name}.value"), module, root, nested)?;
+                refs.append(&mut r);
+                let inner = if pred.is_some() {
+                    // Constrained values become a synthetic validated type so
+                    // each value auto-validates at its boundaries (mirrors the
+                    // array-`items` handling above).
+                    nested.push(TypeDecl {
+                        name: format!("{name}.value"),
+                        exported: false,
+                        module: None,
+                        doc: None,
+                        type_params: Vec::new(),
+                        base: inner,
+                        predicate: pred,
+                        line: 1,
+                    });
+                    Type::Named(format!("{name}.value"))
+                } else {
+                    inner
+                };
+                return Ok((Type::Map(Box::new(Type::Str), Box::new(inner)), None, refs));
+            }
             let props = match schema.get("properties") {
                 Some(Json::Obj(props)) => props.clone(),
                 _ => Vec::new(),
@@ -874,6 +907,39 @@ mod tests {
         let reemitted =
             crate::types::json_schema_string(&reimported["User"], &reimported);
         assert_eq!(emitted, reemitted, "schema round-trip must be exact");
+    }
+
+    /// A `Map<String, V>` field emits `additionalProperties`, and the importer
+    /// round-trips exactly that shape back (RFC-0028): emit → import → re-emit
+    /// byte-equal.
+    #[test]
+    fn map_additional_properties_round_trips() {
+        let src = "type Counts = Map<String, Int64> \
+                   type Bag = { counts: Counts } \
+                   fn main() -> Int64 { return 0 }";
+        let program = crate::check(src).unwrap();
+        let types: HashMap<String, TypeDecl> =
+            program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        let emitted = crate::types::json_schema_string(&types["Bag"], &types);
+        assert!(
+            emitted.contains("\"additionalProperties\":{\"type\":\"integer\"}"),
+            "{emitted}"
+        );
+        let doc = emitted.replacen("{", "{\"title\":\"Bag\",", 1);
+        let decls = synthesize(&doc, Some(&["Bag".to_string()]), "t.json").unwrap();
+        let reimported: HashMap<String, TypeDecl> =
+            decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        let reemitted = crate::types::json_schema_string(&reimported["Bag"], &reimported);
+        assert_eq!(emitted, reemitted, "map schema round-trip must be exact");
+        // The imported field is a `Map<String, Int64>`.
+        let bag = decls.iter().find(|d| d.name == "Bag").unwrap();
+        let Type::Record(fields) = &bag.base else { panic!("record") };
+        // The field's synthetic type resolves to a Map with a String key.
+        let fty = crate::types::resolve(&fields[0].ty, &reimported);
+        assert!(
+            matches!(&fty, Type::Map(k, v) if **k == Type::Str && **v == Type::Int),
+            "{fty:?}"
+        );
     }
 
     /// A `{"enum": [..]}` schema imports as a payload-less Vyrn enum, and the

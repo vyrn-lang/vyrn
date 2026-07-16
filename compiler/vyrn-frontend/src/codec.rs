@@ -353,6 +353,7 @@ pub fn escape_into(s: &str, out: &mut String) {
 pub fn expected_name(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
     match crate::types::resolve(ty, types) {
         Type::Record(_) => "object".to_string(),
+        Type::Map(..) => "object".to_string(),
         Type::Array(_) | Type::ArrayN(..) => "array".to_string(),
         Type::Str => "string".to_string(),
         Type::Int | Type::IntN { .. } => "integer".to_string(),
@@ -461,6 +462,10 @@ fn codable(
             codable(inner, types, decode, seen)
         }
         Type::Array(inner) => codable(inner, types, decode, seen),
+        // A `Map<String, V>` (RFC-0028) is a JSON object; codable when `V` is.
+        // The key is always `String` (the checker enforces it), so only the
+        // value type is checked.
+        Type::Map(_, val) => codable(val, types, decode, seen),
         Type::ArrayN(inner, _) => {
             if decode {
                 Err(display)
@@ -545,6 +550,43 @@ fn enum_codable(
 /// variant \`Name\`)`.
 fn enum_payload_offender(p: &Type, variant: &str) -> String {
     format!("{} (payload of variant `{}`)", type_display(p), variant)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `Map<String, V>` is codable exactly when `V` is (RFC-0028): the key is
+    /// always `String`, so only the value type gates codability.
+    #[test]
+    fn map_codability_follows_the_value_type() {
+        let types = HashMap::new();
+        let ok = Type::Map(Box::new(Type::Str), Box::new(Type::Int));
+        assert!(encodable(&ok, &types).is_ok());
+        assert!(decodable(&ok, &types).is_ok());
+
+        // Nested: Map<String, Array<Int64>> is codable.
+        let nested = Type::Map(
+            Box::new(Type::Str),
+            Box::new(Type::Array(Box::new(Type::Int))),
+        );
+        assert!(encodable(&nested, &types).is_ok());
+        assert!(decodable(&nested, &types).is_ok());
+
+        // A non-codable value type (a `Ref`) makes the whole map non-codable,
+        // and the offender is named.
+        let bad = Type::Map(Box::new(Type::Str), Box::new(Type::Ref(Box::new(Type::Int))));
+        assert_eq!(encodable(&bad, &types).unwrap_err(), "Ref");
+    }
+
+    /// The decode-side `expected` phrase for a map value is `object` (a Map IS a
+    /// JSON object) — the wording that lands in a `json.type` Issue.
+    #[test]
+    fn map_expected_name_is_object() {
+        let types = HashMap::new();
+        let m = Type::Map(Box::new(Type::Str), Box::new(Type::Int));
+        assert_eq!(expected_name(&m, &types), "object");
+    }
 }
 
 /// A user-facing spelling for a type, for the codability rejection message.

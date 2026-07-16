@@ -323,6 +323,13 @@ impl MoveCheck<'_> {
                 }
                 Ok(())
             }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.expr(k, consumed, scope)?;
+                    self.expr(v, consumed, scope)?;
+                }
+                Ok(())
+            }
             // A lambda body (RFC-0023): its untyped params are fresh locals; walk
             // the body so a `consume`-misuse inside it is still caught. Captured
             // bindings are read-only (the checker forbids consuming/dropping them),

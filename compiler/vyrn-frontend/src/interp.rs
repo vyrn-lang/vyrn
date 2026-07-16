@@ -42,6 +42,12 @@ pub enum Val {
     Ref { slot: usize, gen: u64 },
     /// A growable array (`Vec`). Used linearly; `push` returns a new value.
     Array(Vec<Val>),
+    /// A growable, insertion-ordered dictionary (RFC-0028): a `Vec` of
+    /// `(key, value)` pairs kept in first-insertion order — an update rewrites
+    /// the pair in place, a remove shifts later pairs down, a fresh insert
+    /// appends. The `Vec` (not a `HashMap`) is what makes iteration/encoding
+    /// order deterministic and parity-stable.
+    Map(Vec<(String, Val)>),
     /// A function value (RFC-0023) — an internal, non-observable value produced
     /// when a lambda literal or a named function is passed to a `fn`-typed
     /// parameter. The checker guarantees it is never stored, returned, printed, or
@@ -1347,6 +1353,55 @@ impl<'a> Interp<'a> {
             // an out-of-bounds index traps with the read path's wording.
             Stmt::IndexSet { name, index, value, .. } => {
                 let iv = self.expr(index, scope)?;
+                // `m[k] = v` on a Map (RFC-0028) — insert or update in place.
+                // An existing key keeps its slot (order preserved); a new key is
+                // appended. The value coerces into `V` (auto-validation included).
+                if let Val::Str(k) = &iv {
+                    let val_of = |s: &Slot| match &s.ty {
+                        Some(Type::Map(_, v)) => Some((**v).clone()),
+                        _ => None,
+                    };
+                    let is_map = scope
+                        .iter()
+                        .rev()
+                        .find_map(|f| f.get(name).map(|s| matches!(s.v, Val::Map(_))))
+                        .or_else(|| {
+                            self.globals.borrow().get(name).map(|s| matches!(s.v, Val::Map(_)))
+                        })
+                        .unwrap_or(false);
+                    if is_map {
+                        let k = k.clone();
+                        let val_ty = scope
+                            .iter()
+                            .rev()
+                            .find_map(|f| f.get(name).and_then(val_of))
+                            .or_else(|| self.globals.borrow().get(name).and_then(val_of));
+                        let mut v = self.expr(value, scope)?;
+                        if let Some(t) = &val_ty {
+                            v = self.coerce(v, t)?;
+                        }
+                        fn insert_pair(pairs: &mut Vec<(String, Val)>, k: String, v: Val) {
+                            if let Some(slot) = pairs.iter_mut().find(|(pk, _)| pk == &k) {
+                                slot.1 = v;
+                            } else {
+                                pairs.push((k, v));
+                            }
+                        }
+                        for frame in scope.iter_mut().rev() {
+                            if let Some(Slot { v: Val::Map(pairs), .. }) = frame.get_mut(name) {
+                                insert_pair(pairs, k, v);
+                                return Ok(Flow::Normal);
+                            }
+                        }
+                        if let Some(Slot { v: Val::Map(pairs), .. }) =
+                            self.globals.borrow_mut().get_mut(name)
+                        {
+                            insert_pair(pairs, k, v);
+                            return Ok(Flow::Normal);
+                        }
+                        return Err(format!("index-assignment to unbound map `{name}`").into());
+                    }
+                }
                 let idx = match iv {
                     Val::Int(n) => n,
                     other => return Err(format!("array index must be an Int64, found {other:?}").into()),
@@ -1694,6 +1749,40 @@ impl<'a> Interp<'a> {
                         return Ok(items.swap_remove(idx as usize));
                     }
                     return Err("`swapRemove` needs a mutable array binding".into());
+                }
+                // `m.remove(k)` (RFC-0028) — remove the entry for `k`, shifting
+                // later entries down (order-preserving), returning whether it was
+                // present. Mutates the receiver in place, so it is handled here.
+                if name == "@remove" {
+                    let Some(Expr::Var { name: recv, .. }) = args.first() else {
+                        return Err("`remove` needs a mutable map binding".into());
+                    };
+                    let recv = recv.clone();
+                    let key = match self.expr(&args[1], scope)? {
+                        Val::Str(s) => s,
+                        other => {
+                            return Err(format!("a map key must be a String, found {other:?}").into())
+                        }
+                    };
+                    let remove_from = |pairs: &mut Vec<(String, Val)>| -> bool {
+                        if let Some(i) = pairs.iter().position(|(k, _)| k == &key) {
+                            pairs.remove(i);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    for frame in scope.iter_mut().rev() {
+                        if let Some(Slot { v: Val::Map(pairs), .. }) = frame.get_mut(&recv) {
+                            return Ok(Val::Bool(remove_from(pairs)));
+                        }
+                    }
+                    if let Some(Slot { v: Val::Map(pairs), .. }) =
+                        self.globals.borrow_mut().get_mut(&recv)
+                    {
+                        return Ok(Val::Bool(remove_from(pairs)));
+                    }
+                    return Err("`remove` needs a mutable map binding".into());
                 }
                 // A callee with `fn`-typed parameters (RFC-0023): materialize each
                 // such argument into a function value (a lambda snapshots its
@@ -2070,7 +2159,29 @@ impl<'a> Interp<'a> {
                             .get(*i as usize)
                             .map(|b| Val::IntN { v: *b as i64, bits: 8, signed: false })
                             .ok_or_else(|| format!("string index {i} out of bounds").into()),
+                        // `m[k]` on a Map (RFC-0028) → `Option<V>`.
+                        (Val::Map(pairs), Val::Str(k)) => Ok(Val::Option(
+                            pairs
+                                .iter()
+                                .find(|(pk, _)| pk == k)
+                                .map(|(_, v)| Box::new(v.clone())),
+                        )),
                         _ => Err("at of non-Array/Int64".into()),
+                    },
+                    // `m.has(k)` (RFC-0028) — membership test.
+                    "@has" => match (&vals[0], &vals[1]) {
+                        (Val::Map(pairs), Val::Str(k)) => {
+                            Ok(Val::Bool(pairs.iter().any(|(pk, _)| pk == k)))
+                        }
+                        _ => Err("`has` needs a Map and a String key".into()),
+                    },
+                    // `m.keys()` (RFC-0028) — a fresh snapshot Array<String> in
+                    // insertion order (safe to mutate the map while iterating it).
+                    "@keys" => match &vals[0] {
+                        Val::Map(pairs) => {
+                            Ok(Val::Array(pairs.iter().map(|(k, _)| Val::Str(k.clone())).collect()))
+                        }
+                        other => Err(format!("`keys` needs a Map, found {other:?}").into()),
                     },
                     "alen" => match &vals[0] {
                         Val::Array(elems) => Ok(Val::Int(elems.len() as i64)),
@@ -2228,6 +2339,8 @@ impl<'a> Interp<'a> {
                 match v {
                     // `arr.length` is the element count (sugar for `alen`).
                     Val::Array(items) if field == "length" => Ok(Val::Int(items.len() as i64)),
+                    // `map.length` is the entry count (RFC-0028).
+                    Val::Map(pairs) if field == "length" => Ok(Val::Int(pairs.len() as i64)),
                     // `str.length` is the byte length (matches `strlen`).
                     Val::Str(s) if field == "length" => Ok(Val::Int(s.len() as i64)),
                     Val::Record(map) => map
@@ -2256,6 +2369,26 @@ impl<'a> Interp<'a> {
                     vals.push(self.expr(e, scope)?);
                 }
                 Ok(Val::Array(vals))
+            }
+            // A map literal (RFC-0028): evaluate entries in written order as
+            // insertions — a repeated key updates in place (keeps its slot).
+            Expr::MapLit { entries, .. } => {
+                let mut pairs: Vec<(String, Val)> = Vec::with_capacity(entries.len());
+                for (ke, ve) in entries {
+                    let k = match self.expr(ke, scope)? {
+                        Val::Str(s) => s,
+                        other => {
+                            return Err(format!("a map key must be a String, found {other:?}").into())
+                        }
+                    };
+                    let v = self.expr(ve, scope)?;
+                    if let Some(slot) = pairs.iter_mut().find(|(pk, _)| pk == &k) {
+                        slot.1 = v;
+                    } else {
+                        pairs.push((k, v));
+                    }
+                }
+                Ok(Val::Map(pairs))
             }
             // A deterministic fork-join task: the callee is isolated (pure), so
             // running it eagerly here yields the same result any scheduler would.
@@ -2605,6 +2738,15 @@ impl<'a> Interp<'a> {
                 }
                 Ok(Val::Array(out))
             }
+            // A `Map<String, V>` coerces (and thus validates) every value into
+            // `V` — the boundary re-validation for a predicated value type.
+            (Type::Map(_, val), Val::Map(pairs)) => {
+                let mut out = Vec::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    out.push((k, self.coerce(v, val)?));
+                }
+                Ok(Val::Map(out))
+            }
             (_, v) => Ok(v),
         }
     }
@@ -2742,6 +2884,23 @@ impl<'a> Interp<'a> {
                     }
                 }
                 out.push(']');
+            }
+            // A `Map<String, V>` encodes as a JSON object (RFC-0028): keys
+            // JSON-escaped, values via V's codec, in insertion order.
+            Type::Map(_, val) => {
+                out.push('{');
+                if let Val::Map(pairs) = v {
+                    for (i, (k, pv)) in pairs.iter().enumerate() {
+                        if i > 0 {
+                            out.push(',');
+                        }
+                        out.push('"');
+                        crate::codec::escape_into(k, out);
+                        out.push_str("\":");
+                        self.encode_val(pv, &val, out)?;
+                    }
+                }
+                out.push('}');
             }
             Type::Option(inner) => match v {
                 Val::Option(Some(x)) => self.encode_val(x, &inner, out)?,
@@ -2928,6 +3087,30 @@ impl<'a> Interp<'a> {
                     }
                 }
                 Some(Val::Array(out))
+            }
+            // A `Map<String, V>` decodes any JSON object (RFC-0028): document
+            // order becomes insertion order; each value is validated as `V` at
+            // path `field.<key>`. Duplicate keys mirror the record decoder's
+            // first-wins policy (`JsonV::get`/`__vyrn_vj_get`): the first
+            // occurrence's slot and value are kept.
+            Type::Map(_, val) => {
+                let obj_fields = match json {
+                    JsonV::Obj(fs) => fs,
+                    _ => {
+                        issues.push(self.type_issue(path, "object", json));
+                        return None;
+                    }
+                };
+                let mut pairs: Vec<(String, Val)> = Vec::new();
+                for (k, jv) in obj_fields {
+                    let child = crate::codec::field_path(path, k);
+                    if let Some(v) = self.decode_val(jv, val, &child, issues) {
+                        if !pairs.iter().any(|(pk, _)| pk == k) {
+                            pairs.push((k.clone(), v));
+                        }
+                    }
+                }
+                Some(Val::Map(pairs))
             }
             Type::Int => match json {
                 JsonV::Num(n) => match n.as_i64() {

@@ -164,6 +164,7 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
         | Expr::Field { .. }
         | Expr::TryConstruct { .. }
         | Expr::ArrayLit { .. }
+        | Expr::MapLit { .. }
         | Expr::Spawn { .. }
         | Expr::Lambda { .. } => None,
     }
@@ -188,6 +189,9 @@ pub fn contains_call(expr: &Expr) -> bool {
         Expr::Field { expr, .. } => contains_call(expr),
         Expr::TryConstruct { args, .. } => args.iter().any(contains_call),
         Expr::ArrayLit { elems, .. } => elems.iter().any(contains_call),
+        Expr::MapLit { entries, .. } => {
+            entries.iter().any(|(k, v)| contains_call(k) || contains_call(v))
+        }
         Expr::Spawn { .. } => true,
         // A lambda literal is not a constant and never appears in a refinement
         // predicate (the checker forbids it outside a call argument).

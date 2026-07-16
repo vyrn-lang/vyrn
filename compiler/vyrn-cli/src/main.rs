@@ -885,6 +885,47 @@ void* __vyrn_realloc(void* p, unsigned long long n) {
 int __vyrn_strncmp(const char* a, const char* b, unsigned long long n) {
     return strncmp(a, b, (size_t)n);
 }
+
+/* ---- Map<String, V> runtime (RFC-0028) ---------------------------------- */
+/* A Map lowers to { char** keys, char* vals, i64 len, i64 cap } — two parallel
+   growable buffers sharing one length/capacity, in first-insertion order. The
+   value buffer is raw bytes with a per-entry stride `esz` (the value type's
+   size, passed by the caller). Keys are stored by pointer (no copy — matching
+   the array element-store convention). Lookup is a linear strcmp scan. */
+typedef struct { char** keys; char* vals; long long len, cap; } VMap;
+/* Index of `key`, or -1. Operates on a raw keys buffer so read paths (`at`,
+   `has`) can call it with values extracted from an SSA aggregate. */
+long long __vyrn_map_find(char** keys, long long len, const char* key) {
+    long long i;
+    for (i = 0; i < len; i++) if (strcmp(keys[i], key) == 0) return i;
+    return -1;
+}
+/* Ensure room for one more entry, growing both buffers (cap 0 -> 4, else 2x). */
+void __vyrn_map_reserve(VMap* m, long long esz) {
+    if (m->len + 1 > m->cap) {
+        m->cap = m->cap ? m->cap * 2 : 4;
+        m->keys = (char**)__vyrn_realloc(m->keys, (unsigned long long)m->cap * sizeof(char*));
+        m->vals = (char*)__vyrn_realloc(m->vals, (unsigned long long)m->cap * (unsigned long long)esz);
+    }
+}
+/* Remove entry `i`, shifting later entries down so first-insertion order is
+   preserved for the survivors (remove-then-insert therefore moves a key end). */
+void __vyrn_map_remove_at(VMap* m, long long i, long long esz) {
+    long long rest = m->len - i - 1;
+    if (rest > 0) {
+        memmove(m->keys + i, m->keys + i + 1, (size_t)(rest * (long long)sizeof(char*)));
+        memmove(m->vals + i * esz, m->vals + (i + 1) * esz, (size_t)(rest * esz));
+    }
+    m->len--;
+}
+/* A snapshot copy of the key pointers (for `keys()`), owned by the fresh
+   Array<String>; the map may then be mutated without disturbing the snapshot. */
+char** __vyrn_map_keys_copy(char** keys, long long len) {
+    char** r = (char**)__vyrn_malloc((unsigned long long)(len ? len : 1) * sizeof(char*));
+    long long i;
+    for (i = 0; i < len; i++) r[i] = keys[i];
+    return r;
+}
 int __vyrn_snprintf(char* buf, unsigned long long n, const char* fmt, ...) {
     va_list ap;
     int r;

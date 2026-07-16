@@ -1470,6 +1470,18 @@ impl Parser {
                     Type::Array(Box::new(inner))
                 }
             }
+            // `Map<String, V>` (RFC-0028) — a growable insertion-ordered
+            // dictionary. Both type arguments are parsed; the checker enforces
+            // the `String`-key rule (a validated string type resolves to
+            // `String` and is legal, so the check cannot happen here).
+            "Map" => {
+                self.eat(&Tok::Lt)?;
+                let key = self.type_()?;
+                self.eat(&Tok::Comma)?;
+                let val = self.type_()?;
+                self.eat(&Tok::Gt)?;
+                Type::Map(Box::new(key), Box::new(val))
+            }
             "Option" => {
                 self.eat(&Tok::Lt)?;
                 let inner = self.type_()?;
@@ -2015,6 +2027,12 @@ impl Parser {
                             // the checker reports it as an unknown call.
                             "pop" => "@pop".to_string(),
                             "swapRemove" => "@swapRemove".to_string(),
+                            // Map methods (RFC-0028): method-only, unspellable
+                            // internal names so a free `has(m, k)` never reaches
+                            // here and the checker reports it as an unknown call.
+                            "has" => "@has".to_string(),
+                            "remove" => "@remove".to_string(),
+                            "keys" => "@keys".to_string(),
                             _ => name,
                         };
                         e = Expr::Call { name, args, line };
@@ -2116,24 +2134,60 @@ impl Parser {
                 self.eat(&Tok::RParen)?;
                 Ok(e)
             }
-            // A fixed-size array literal `[a, b, c]`.
+            // An array literal `[a, b, c]`, or a map literal `[:]` / `["k": v]`
+            // (RFC-0028). The two are disambiguated by a `:` — `[:]` is the empty
+            // map, and after the first element a `:` marks a key→value pair.
             Tok::LBracket => {
                 let saved = self.no_struct;
                 self.no_struct = false;
-                let mut elems = Vec::new();
-                while *self.peek() != Tok::RBracket {
-                    elems.push(self.expr()?);
-                    if *self.peek() == Tok::Comma {
+                // `[:]` — the contextual empty map literal (its value type comes
+                // from the expected `Map` type, like `[]`/`None`).
+                if *self.peek() == Tok::Colon {
+                    self.advance();
+                    self.no_struct = saved;
+                    self.eat(&Tok::RBracket)?;
+                    return Ok(Expr::MapLit { entries: Vec::new(), line });
+                }
+                if *self.peek() == Tok::RBracket {
+                    self.no_struct = saved;
+                    self.advance();
+                    return Ok(Expr::ArrayLit { elems: Vec::new(), line });
+                }
+                let first = self.expr()?;
+                // A `:` after the first element makes this a map literal.
+                if *self.peek() == Tok::Colon {
+                    self.advance();
+                    let first_val = self.expr()?;
+                    let mut entries = vec![(first, first_val)];
+                    while *self.peek() == Tok::Comma {
                         self.advance();
-                    } else {
-                        break;
+                        if *self.peek() == Tok::RBracket {
+                            break;
+                        }
+                        let k = self.expr()?;
+                        self.eat(&Tok::Colon)?;
+                        let v = self.expr()?;
+                        entries.push((k, v));
+                    }
+                    self.no_struct = saved;
+                    self.eat(&Tok::RBracket)?;
+                    return Ok(Expr::MapLit { entries, line });
+                }
+                // Otherwise a fixed-size array literal `[a, b, c]`.
+                let mut elems = vec![first];
+                if *self.peek() == Tok::Comma {
+                    self.advance();
+                    while *self.peek() != Tok::RBracket {
+                        elems.push(self.expr()?);
+                        if *self.peek() == Tok::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
                     }
                 }
                 self.no_struct = saved;
                 self.eat(&Tok::RBracket)?;
-                // An empty `[]` is a growable/fixed empty array; its element type
-                // comes from the expected type (like `None`). A non-empty literal
-                // is a fixed-size `Array<T, N>`.
                 Ok(Expr::ArrayLit { elems, line })
             }
             Tok::Match => self.match_expr(line),

@@ -781,6 +781,14 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
             detail: "length: Int64 — element count (read-only)".to_string(),
         });
     }
+    // `map.length` is the entry-count field sugar (RFC-0028).
+    if matches!(ty, Type::Map(..)) {
+        out.push(Completion {
+            label: "length".to_string(),
+            kind: SymbolKind::Field,
+            detail: "length: Int64 — entry count (read-only)".to_string(),
+        });
+    }
     // Record fields: a named record receiver offers its declaration's fields;
     // an inline structural receiver offers its own.
     match &ty {
@@ -1719,6 +1727,9 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "afree", detail: "afree(array) -> Unit — free a growable array" },
     BuiltinMethod { name: "pop", detail: "array.pop() -> Option<T> — remove and return the last element (None if empty)" },
     BuiltinMethod { name: "swapRemove", detail: "array.swapRemove(index) -> T — O(1) unordered remove: move the last element into the slot" },
+    BuiltinMethod { name: "has", detail: "map.has(key) -> Bool — whether the map contains the key (RFC-0028)" },
+    BuiltinMethod { name: "remove", detail: "map.remove(key) -> Bool — remove the entry (order-preserving); was it present? (RFC-0028)" },
+    BuiltinMethod { name: "keys", detail: "map.keys() -> Array<String> — a snapshot of the keys, in insertion order (RFC-0028)" },
     BuiltinMethod { name: "get", detail: "get(ref) -> T — read through a generational reference" },
     BuiltinMethod { name: "set", detail: "set(ref, value) -> Unit — write through a generational reference" },
     BuiltinMethod { name: "release", detail: "release(ref) -> Unit — release a generational reference" },
@@ -1759,6 +1770,12 @@ fn builtin_methods_for(ty: &Type) -> Vec<BuiltinMethod> {
         .collect(),
         // A fixed-size `Array<T, N>` cannot shrink — no `pop`/`swapRemove`.
         Type::ArrayN(..) => vec![by_name("push"), by_name("at"), by_name("alen"), by_name("afree")]
+            .into_iter()
+            .flatten()
+            .collect(),
+        // A `Map<String, V>` (RFC-0028): `has`/`remove`/`keys` methods plus the
+        // `.length` field (surfaced by field completion, like a String's length).
+        Type::Map(..) => vec![by_name("has"), by_name("remove"), by_name("keys")]
             .into_iter()
             .flatten()
             .collect(),
@@ -1914,6 +1931,28 @@ mod tests {
         let acol = body.find("api.").unwrap() + 1;
         let rn = resolve(&a, 2, acol).expect("resolve namespace name");
         assert!(rn.hover.contains("namespace `api`"), "namespace hover: {}", rn.hover);
+    }
+
+    // ---- RFC-0028: Map method completion ------------------------------------
+
+    #[test]
+    fn map_receiver_completes_its_method_surface() {
+        // `.` on a Map-typed local offers `has`/`remove`/`keys` and `length`.
+        let src = "fn main() -> Int64 {\n\
+                   let mut m: Map<String, Int64> = [:]\n\
+                   let x = m.has(\"a\")\n\
+                   return 0 }";
+        let a = analyze(src);
+        let line = src.lines().nth(2).unwrap();
+        // Cursor just after `m.` (1-based column).
+        let col = line.find("m.").unwrap() + 3;
+        let comps = member_completions(&a, 3, col);
+        let labels: Vec<&str> = comps.iter().map(|c| c.label.as_str()).collect();
+        for want in ["has", "remove", "keys", "length"] {
+            assert!(labels.contains(&want), "expected `{want}` in {labels:?}");
+        }
+        // Array-only shrinking ops are NOT offered on a Map.
+        assert!(!labels.contains(&"pop"), "map must not offer `pop`: {labels:?}");
     }
 
     // ---- RFC-0020 M1: string-literal completion -----------------------------

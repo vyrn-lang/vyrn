@@ -289,6 +289,14 @@ fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
         Type::Array(inner) | Type::ArrayN(inner, _) => {
             format!("{{\"type\":\"array\",\"items\":{}}}", type_schema(inner, cx))
         }
+        // A `Map<String, V>` (RFC-0028) is a free-form JSON object whose values
+        // all share `V`'s schema: `additionalProperties` carries it.
+        Type::Map(_, val) => {
+            format!(
+                "{{\"type\":\"object\",\"additionalProperties\":{}}}",
+                type_schema(val, cx)
+            )
+        }
         Type::Named(n) => {
             if n == cx.root {
                 return "{\"$ref\":\"#\"}".to_string();
@@ -732,6 +740,9 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
         Type::Ref(inner) => Type::Ref(Box::new(substitute(inner, subst))),
         Type::Array(inner) => Type::Array(Box::new(substitute(inner, subst))),
         Type::ArrayN(inner, n) => Type::ArrayN(Box::new(substitute(inner, subst)), *n),
+        Type::Map(k, v) => {
+            Type::Map(Box::new(substitute(k, subst)), Box::new(substitute(v, subst)))
+        }
         Type::Task(inner) => Type::Task(Box::new(substitute(inner, subst))),
         // A function-value type (RFC-0023): substitute into its parameter and
         // return types so a generic `fn(T) -> U` monomorphizes with the rest.

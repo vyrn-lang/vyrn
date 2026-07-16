@@ -377,6 +377,13 @@ pub enum Type {
     /// A fixed-size array `Array<T, N>` (const generic). Lowers to the value
     /// aggregate `[N x T]` — stack-allocated, no heap.
     ArrayN(Box<Type>, usize),
+    /// A growable, insertion-ordered dictionary `Map<String, V>` (RFC-0028). The
+    /// two boxes are the key and value types; keys are `String` in v1 (the
+    /// checker rejects a non-`String` key spelling with a named diagnostic).
+    /// Lowers to `{ ptr keys, ptr values, i64 len, i64 cap }` — two parallel
+    /// growable buffers sharing one length/capacity, preserving first-insertion
+    /// order (an update keeps the slot; remove-then-insert moves to the end).
+    Map(Box<Type>, Box<Type>),
     /// A handle to a concurrent task's result (RFC-0004 §Q4). Lowers to the
     /// result type `T` itself (a deterministic fork-join needs no boxing).
     Task(Box<Type>),
@@ -446,6 +453,7 @@ impl std::fmt::Display for Type {
             Type::Ref(t) => write!(f, "Ref<{t}>"),
             Type::Array(t) => write!(f, "Array<{t}>"),
             Type::ArrayN(t, n) => write!(f, "Array<{t}, {n}>"),
+            Type::Map(k, v) => write!(f, "Map<{k}, {v}>"),
             Type::Task(t) => write!(f, "Task<{t}>"),
             Type::Logger => write!(f, "Logger"),
             Type::Fn(params, ret) => {
@@ -627,6 +635,10 @@ pub enum Expr {
     },
     /// A fixed-size array literal `[a, b, c]` — type `Array<T, N>`.
     ArrayLit { elems: Vec<Expr>, line: usize },
+    /// A map literal (RFC-0028): the empty `[:]` (contextual, like `[]`) or a
+    /// non-empty `["a": 1, "b": 2]`. Each entry is a `(key, value)` expression
+    /// pair in written order; the value type comes from the expected `Map` type.
+    MapLit { entries: Vec<(Expr, Expr)>, line: usize },
     /// `spawn f(args)` — run a *pure* function as a concurrent task, yielding a
     /// `Task<T>` (RFC-0004 §Q4). The callee must be isolated (no I/O, no shared
     /// mutable state); the result is deterministic regardless of scheduling.
@@ -685,6 +697,7 @@ impl Expr {
             | Expr::Field { line, .. }
             | Expr::TryConstruct { line, .. }
             | Expr::ArrayLit { line, .. }
+            | Expr::MapLit { line, .. }
             | Expr::Spawn { line, .. }
             | Expr::Lambda { line, .. } => *line,
         }

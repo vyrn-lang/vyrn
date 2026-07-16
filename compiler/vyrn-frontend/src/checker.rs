@@ -570,16 +570,22 @@ impl<'a> Checker<'a> {
         // A transparent alias to `Result`/`Option` (RFC-0024, e.g. `type
         // DeleteResult = Result<Bool, String>`) is interchangeable with its
         // resolved form — it carries no `where` obligation of its own.
+        let transparent = |b: &Type| {
+            matches!(
+                b,
+                Type::Result(..) | Type::Option(..) | Type::Map(..) | Type::Array(_) | Type::ArrayN(..)
+            )
+        };
         if let Type::Named(n) = to {
             if let Some(d) = self.types.get(n) {
-                if d.predicate.is_none() && matches!(d.base, Type::Result(..) | Type::Option(..)) {
+                if d.predicate.is_none() && transparent(&d.base) {
                     return self.assignable(from, &d.base);
                 }
             }
         }
         if let Type::Named(n) = from {
             if let Some(d) = self.types.get(n) {
-                if d.predicate.is_none() && matches!(d.base, Type::Result(..) | Type::Option(..)) {
+                if d.predicate.is_none() && transparent(&d.base) {
                     return self.assignable(&d.base, to);
                 }
             }
@@ -597,6 +603,14 @@ impl<'a> Checker<'a> {
         }
         if let (Type::Result(a, e1), Type::Result(b, e2)) = (from, to) {
             return self.assignable(a, b) && self.assignable(e1, e2);
+        }
+        // A Map is covariant in its value type (keys are always String; values
+        // are immutable at a read boundary) — RFC-0028.
+        if let (Type::Map(ka, va), Type::Map(kb, vb)) = (from, to) {
+            return self.assignable(ka, kb) && self.assignable(va, vb);
+        }
+        if let (Type::Array(a), Type::Array(b)) = (from, to) {
+            return self.assignable(a, b);
         }
         // `assignable` is the STRICT relation: a predicated named type admits
         // only itself here. Value boundaries use `coercible`, which adds the
@@ -810,6 +824,19 @@ impl<'a> Checker<'a> {
             Type::Array(inner) | Type::ArrayN(inner, _) | Type::Ref(inner) | Type::Task(inner) => {
                 self.ensure_type_exists(inner, line)?
             }
+            // `Map<String, V>` (RFC-0028): keys are `String` in v1. A validated
+            // string type is a legal key (it resolves to `String`); any other
+            // key spelling is rejected here with the named diagnostic.
+            Type::Map(key, val) => {
+                self.ensure_type_exists(key, line)?;
+                self.ensure_type_exists(val, line)?;
+                if crate::types::resolve(key, self.types) != Type::Str {
+                    return Err(format!(
+                        "line {line}: a `Map` key must be `String` in v1, found `{key}` \
+                         (RFC-0028; validated string types are allowed)"
+                    ));
+                }
+            }
             // A generic parameter is always valid in the context the parser
             // produced it (it only tags names declared in `<...>`).
             Type::Param(_) => {}
@@ -923,6 +950,21 @@ impl<'a> Checker<'a> {
                     "line {}: a `{}` alias cannot have a `where` clause",
                     t.line,
                     if matches!(t.base, Type::Result(..)) { "Result" } else { "Option" }
+                ));
+            }
+            self.ensure_type_exists(&t.base, t.line)?;
+            return Ok(());
+        }
+        // A transparent alias to a `Map`/`Array` (RFC-0028/RFC-0011), so a codable
+        // collection can be named and handed to `fromJson`/`jsonSchema` by name
+        // (the same rationale as the `Result`/`Option` aliases above). No `where`
+        // clause; the element/value types must exist.
+        if matches!(t.base, Type::Map(..) | Type::Array(_) | Type::ArrayN(..)) {
+            if t.predicate.is_some() {
+                return Err(format!(
+                    "line {}: a `{}` alias cannot have a `where` clause",
+                    t.line,
+                    if matches!(t.base, Type::Map(..)) { "Map" } else { "Array" }
                 ));
             }
             self.ensure_type_exists(&t.base, t.line)?;
@@ -1330,12 +1372,36 @@ impl<'a> Checker<'a> {
                         "line {line}: cannot store into `{name}` (declared without `mut`)"
                     ));
                 }
+                // `m[k] = v` on a Map (RFC-0028) inserts or updates in place: the
+                // key coerces to `String`, the value to `V` (auto-validated when
+                // `V` is predicated, exactly like an array element store).
+                if let Type::Map(_, val) = self.base(&b.ty) {
+                    let k = self.base(&self.expr(index, scope, Some(&Type::Str), Some(ret))?);
+                    if !matches!(k, Type::Err)
+                        && crate::types::resolve(&k, self.types) != Type::Str
+                    {
+                        return Err(format!(
+                            "line {line}: a map key must be a String, found {k}"
+                        ));
+                    }
+                    let vty = self.expr(value, scope, Some(&val), Some(ret))?;
+                    if !self.coercible(&vty, &val) {
+                        return Err(format!(
+                            "line {line}: `{name}` holds values of type {val} but the stored \
+                             value is {vty}"
+                        ));
+                    }
+                    self.prove_coercion(value, &val, *line)?;
+                    self.prove_string_interpolation(value, &val, scope, Some(ret), *line)?;
+                    self.region_store_guard(name, &val, scope, *line)?;
+                    return Ok(false);
+                }
                 let elem = match self.base(&b.ty) {
                     Type::Array(inner) | Type::ArrayN(inner, _) => (*inner).clone(),
                     Type::Err => return Ok(false),
                     other => {
                         return Err(format!(
-                            "line {line}: `{name}[i] = ..` needs an Array, found {other}"
+                            "line {line}: `{name}[i] = ..` needs an Array or Map, found {other}"
                         ))
                     }
                 };
@@ -1451,9 +1517,9 @@ impl<'a> Checker<'a> {
                     .lookup(scope, name)
                     .ok_or_else(|| format!("line {line}: `drop` of unbound variable `{name}`"))?;
                 match self.base(&b.ty) {
-                    Type::Str | Type::Array(_) | Type::Ref(_) => Ok(false),
+                    Type::Str | Type::Array(_) | Type::Ref(_) | Type::Map(..) => Ok(false),
                     other => Err(format!(
-                        "line {line}: `drop` needs a heap value (String, Array, or Ref), \
+                        "line {line}: `drop` needs a heap value (String, Array, Map, or Ref), \
                          but `{name}` is {other}"
                     )),
                 }
@@ -1487,6 +1553,9 @@ impl<'a> Checker<'a> {
             // Array buffers and the cell slab are always malloc'd (never in the
             // region arena), so only their *contents* can dangle.
             Type::Array(inner) | Type::ArrayN(inner, _) => self.contains_heap(&inner),
+            // A Map's buffers are malloc'd; its keys are always heap (String) and
+            // its values may be — either way it carries heap (RFC-0028).
+            Type::Map(..) => true,
             Type::Ref(inner) | Type::Task(inner) => self.contains_heap(&inner),
             Type::Record(fs) => fs.iter().any(|f| self.contains_heap(&f.ty)),
             Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(|p| self.contains_heap(p))),
@@ -1708,6 +1777,8 @@ impl<'a> Checker<'a> {
                     // `alen` builtin, resolved here so it doesn't shadow record
                     // fields (a `.length` on a record still reads its field).
                     Type::Array(_) | Type::ArrayN(..) if field == "length" => Ok(Type::Int),
+                    // `map.length` is the entry count (RFC-0028).
+                    Type::Map(..) if field == "length" => Ok(Type::Int),
                     // `str.length` is the byte length (matches `strlen`/`Str::len`).
                     Type::Str if field == "length" => Ok(Type::Int),
                     Type::Record(rfields) => rfields
@@ -1822,6 +1893,53 @@ impl<'a> Checker<'a> {
                 } else {
                     Ok(Type::ArrayN(Box::new(elem_ty), elems.len()))
                 }
+            }
+            // A map literal (RFC-0028): `[:]` (empty, contextual) or
+            // `["k": v, ...]`. Keys coerce to `String`, values to the expected
+            // map's value type (auto-validated when predicated).
+            Expr::MapLit { entries, line } => {
+                let (key_ty, val_expected) = match expected {
+                    Some(Type::Map(k, v)) => (Some((**k).clone()), Some((**v).clone())),
+                    _ => (None, None),
+                };
+                if entries.is_empty() {
+                    return match (&key_ty, &val_expected) {
+                        (Some(k), Some(v)) => {
+                            Ok(Type::Map(Box::new(k.clone()), Box::new(v.clone())))
+                        }
+                        _ => Err(format!(
+                            "line {line}: cannot infer the type of `[:]`; annotate it, \
+                             e.g. `let m: Map<String, Int64> = [:];`"
+                        )),
+                    };
+                }
+                // The value type is the expected one, else inferred from the
+                // first value. The key type is `String` (the expected key type
+                // when present — a validated string type stays honest).
+                let key_ty = key_ty.unwrap_or(Type::Str);
+                let first_val =
+                    self.expr(&entries[0].1, scope, val_expected.as_ref(), fn_ret)?;
+                let val_ty = val_expected.unwrap_or(first_val);
+                for (k, v) in entries {
+                    let kt = self.expr(k, scope, Some(&key_ty), fn_ret)?;
+                    if crate::types::resolve(&self.base(&kt), self.types) != Type::Str {
+                        return Err(format!(
+                            "line {line}: a map key must be a String, found {kt}"
+                        ));
+                    }
+                    self.prove_coercion(k, &key_ty, *line)?;
+                    self.prove_string_interpolation(k, &key_ty, scope, fn_ret, *line)?;
+                    let vt = self.expr(v, scope, Some(&val_ty), fn_ret)?;
+                    if !self.coercible(&vt, &val_ty) {
+                        return Err(format!(
+                            "line {line}: map values must share a type: expected {val_ty}, \
+                             found {vt}"
+                        ));
+                    }
+                    self.prove_coercion(v, &val_ty, *line)?;
+                    self.prove_string_interpolation(v, &val_ty, scope, fn_ret, *line)?;
+                }
+                Ok(Type::Map(Box::new(key_ty), Box::new(val_ty)))
             }
             // A lambda literal reaching the general expression checker is in an
             // illegal position (RFC-0023): a valid one is intercepted inside
@@ -2813,6 +2931,20 @@ impl<'a> Checker<'a> {
                 return Err(format!("line {line}: `at` takes 2 arguments, got {}", args.len()));
             }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
+            // `m[k]` on a Map (RFC-0028): the key coerces to `String` and the
+            // result is `Option<V>` (a missing key is `None`, never a trap).
+            if let Type::Map(_, val) = self.base(&at) {
+                let k = self.base(&self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?);
+                if matches!(k, Type::Err) {
+                    return Ok(Type::Err);
+                }
+                if crate::types::resolve(&k, self.types) != Type::Str {
+                    return Err(format!(
+                        "line {line}: a map key must be a String, found {k}"
+                    ));
+                }
+                return Ok(Type::Option(val));
+            }
             let elem = match self.base(&at) {
                 Type::Array(inner) | Type::ArrayN(inner, _) => (*inner).clone(),
                 // `s[i]` on a String yields the byte at that index as a `UInt8`
@@ -2897,6 +3029,54 @@ impl<'a> Checker<'a> {
                 ));
             }
             return Ok(elem);
+        }
+        // Map methods (RFC-0028), all method-only (unspellable `@` names). `has`
+        // and `keys` are read-only; `remove` mutates and requires a `mut` binding.
+        if name == "@has" || name == "@remove" || name == "@keys" {
+            let op = &name[1..];
+            let mt = self.expr(&args[0], scope, None, fn_ret)?;
+            let val = match self.base(&mt) {
+                Type::Map(_, v) => (*v).clone(),
+                Type::Err => return Ok(Type::Err),
+                other => {
+                    return Err(format!(
+                        "line {line}: `{op}` needs a Map as its receiver, found {other}"
+                    ))
+                }
+            };
+            let _ = val;
+            if name == "@keys" {
+                if args.len() != 1 {
+                    return Err(format!("line {line}: `keys` takes no arguments"));
+                }
+                return Ok(Type::Array(Box::new(Type::Str)));
+            }
+            // `has(k)` / `remove(k)` take one String key.
+            if args.len() != 2 {
+                return Err(format!("line {line}: `{op}` takes 1 argument (a key)"));
+            }
+            if name == "@remove" {
+                // Mutating: the receiver must be a plain `mut` Map binding.
+                if let Expr::Var { name: recv, .. } = &args[0] {
+                    let b = self.lookup(scope, recv).ok_or_else(|| {
+                        format!("line {line}: `remove` on unknown variable `{recv}`")
+                    })?;
+                    if !b.mutable {
+                        return Err(format!(
+                            "line {line}: cannot `remove` from `{recv}` (declared without `mut`)"
+                        ));
+                    }
+                } else {
+                    return Err(format!(
+                        "line {line}: `remove` needs a plain map variable as its receiver"
+                    ));
+                }
+            }
+            let k = self.base(&self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?);
+            if !matches!(k, Type::Err) && crate::types::resolve(&k, self.types) != Type::Str {
+                return Err(format!("line {line}: a map key must be a String, found {k}"));
+            }
+            return Ok(Type::Bool);
         }
         // Numeric conversion: `Int32(x)`, `Float64(x)`, etc. — resize/round a
         // number to the named numeric type. No implicit conversions elsewhere.
@@ -3770,8 +3950,9 @@ impl<'a> Checker<'a> {
             },
             // A generic `Array<T>` / `Array<T, N>` binds `T` from the element type
             // (RFC-0023 relies on this so `map<T, U>(xs: Array<T>, ..)` infers `T`).
-            Type::Array(inner) => match aty {
-                Type::Array(a) => self.unify(inner, a, subst, line),
+            // A transparent named alias to a collection resolves first.
+            Type::Array(inner) => match crate::types::resolve(aty, self.types) {
+                Type::Array(a) => self.unify(inner, &a, subst, line),
                 _ => Err(format!("line {line}: expected {pty}, found {aty}")),
             },
             Type::ArrayN(inner, n) => match aty {
@@ -3780,6 +3961,15 @@ impl<'a> Checker<'a> {
             },
             Type::Ref(inner) => match aty {
                 Type::Ref(a) => self.unify(inner, a, subst, line),
+                _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+            },
+            // A generic `Map<String, V>` binds `V` from the value type. A
+            // transparent named alias to a map resolves first.
+            Type::Map(pk, pv) => match crate::types::resolve(aty, self.types) {
+                Type::Map(ak, av) => {
+                    self.unify(pk, &ak, subst, line)?;
+                    self.unify(pv, &av, subst, line)
+                }
                 _ => Err(format!("line {line}: expected {pty}, found {aty}")),
             },
             _ => {
@@ -3943,6 +4133,7 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
         Expr::Field { expr, field, .. } => format!("{}.{field}", pred_summary(expr)),
         Expr::TryConstruct { name, .. } => format!("{name}?(..)"),
         Expr::ArrayLit { .. } => "[..]".to_string(),
+        Expr::MapLit { .. } => "[..:..]".to_string(),
         Expr::Spawn { name, .. } => format!("spawn {name}(..)"),
         Expr::Lambda { params, .. } => format!("|{}| ..", params.join(", ")),
     }
@@ -3958,6 +4149,7 @@ fn has_nested_wrap(ty: &Type) -> bool {
             wrapped(a) || wrapped(b) || has_nested_wrap(a) || has_nested_wrap(b)
         }
         Type::Array(t) | Type::ArrayN(t, _) | Type::Ref(t) | Type::Task(t) => has_nested_wrap(t),
+        Type::Map(k, v) => has_nested_wrap(k) || has_nested_wrap(v),
         Type::Record(fs) => fs.iter().any(|f| has_nested_wrap(&f.ty)),
         _ => false,
     }
@@ -4381,6 +4573,9 @@ fn global_ref_expr(
             fields.iter().any(|(_, v)| global_ref_expr(v, globals, local))
         }
         Expr::ArrayLit { elems, .. } => elems.iter().any(|v| global_ref_expr(v, globals, local)),
+        Expr::MapLit { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| global_ref_expr(k, globals, local) || global_ref_expr(v, globals, local)),
         // A lambda body (RFC-0023) that reads module state makes the enclosing
         // call chain non-spawn-safe — the effect is attributed to the
         // instantiation site (this function).
@@ -4464,6 +4659,13 @@ fn init_restrictions(
         }
         Expr::ArrayLit { elems, .. } => {
             for v in elems {
+                init_restrictions(v, forbidden, all_globals, ready, own_name, line)?;
+            }
+            Ok(())
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                init_restrictions(k, forbidden, all_globals, ready, own_name, line)?;
                 init_restrictions(v, forbidden, all_globals, ready, own_name, line)?;
             }
             Ok(())
@@ -4560,6 +4762,12 @@ fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
         }
         Expr::ArrayLit { elems, .. } => {
             for v in elems {
+                calls_expr(v, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                calls_expr(k, out);
                 calls_expr(v, out);
             }
         }
@@ -6516,5 +6724,80 @@ mod tests {
     fn extern_cannot_take_fn_param() {
         let src = "extern fn e(f: fn(Int64) -> Int64) -> Int64\nfn main() -> Int64 { return 0 }";
         assert!(check_src(src).unwrap_err().contains("extern"), "{:?}", check_src(src));
+    }
+
+    // ---- Map<String, V> (RFC-0028) -------------------------------------
+
+    #[test]
+    fn map_surface_typechecks() {
+        // Insert, honest Option lookup, has/remove/length/keys over the surface.
+        let src = "fn main() -> Int64 {\n\
+             let mut m: Map<String, Int64> = [:]\n\
+             m[\"a\"] = 1\n\
+             let hit = match m[\"a\"] { Some(v) => v, None => 0 }\n\
+             let present = m.has(\"a\")\n\
+             let gone = m.remove(\"a\")\n\
+             let n = m.length\n\
+             for k in m.keys() { print(k) }\n\
+             return hit + n }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn map_rejects_non_string_key() {
+        let src = "fn f(m: Map<Int64, Int64>) -> Int64 { return 0 }\n\
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("Map` key must be `String`"), "{e}");
+    }
+
+    #[test]
+    fn map_allows_validated_string_key() {
+        // A validated string type resolves to `String`, so it is a legal key.
+        let src = "type Name = String where value.length >= 1\n\
+                   fn f(m: Map<Name, Int64>) -> Int64 { return 0 }\n\
+                   fn main() -> Int64 { return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn map_lookup_is_option() {
+        // `m[k]` is `Option<V>` — matching `Some/None` is required to read `V`.
+        let src = "fn main() -> Int64 {\n\
+             let mut m: Map<String, Int64> = [:]\n\
+             m[\"a\"] = 1\n\
+             return m[\"a\"] }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("Option"), "{e}");
+    }
+
+    #[test]
+    fn map_has_no_equality() {
+        let src = "fn main() -> Int64 {\n\
+             let a: Map<String, Int64> = [:]\n\
+             let b: Map<String, Int64> = [:]\n\
+             if a == b { return 1 }\n\
+             return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("scalar operands"), "{e}");
+    }
+
+    #[test]
+    fn map_value_type_must_match() {
+        let src = "fn main() -> Int64 {\n\
+             let mut m: Map<String, Int64> = [:]\n\
+             m[\"a\"] = true\n\
+             return 0 }";
+        assert!(check_src(src).is_err());
+    }
+
+    #[test]
+    fn map_alias_is_codable_by_name() {
+        let src = "type M = Map<String, Int64>\n\
+             fn main() -> Int64 {\n\
+             let v = fromJson(M, \"{}\")\n\
+             print(jsonSchema(M))\n\
+             return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 }

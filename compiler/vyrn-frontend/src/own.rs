@@ -42,6 +42,9 @@ pub enum DropKind {
     ReleaseRef,
     /// A growable array — `afree` the backing buffer.
     AfreeArr,
+    /// A `Map<String, V>` (RFC-0028) — free both parallel backing buffers
+    /// (keys and values). Elements are a safe leak, exactly as for arrays.
+    FreeMap,
 }
 
 /// Whole-program ownership facts.
@@ -133,6 +136,7 @@ fn returns_owned_kind(ty: &Type) -> Option<DropKind> {
         Type::Str => Some(DropKind::FreeStr),
         Type::Ref(_) => Some(DropKind::ReleaseRef),
         Type::Array(_) => Some(DropKind::AfreeArr),
+        Type::Map(..) => Some(DropKind::FreeMap),
         _ => None,
     }
 }
@@ -241,7 +245,11 @@ impl Analysis<'_> {
                     // Arrays are reassigned in place (`a = push(a, x)`), so a
                     // `mut` array can still own a buffer; strings/refs must be
                     // single-assignment to be tracked.
-                    let assignable_ok = !*mutable || kind == DropKind::AfreeArr;
+                    // A `mut` Map is mutated in place (`m[k] = v`) and keeps its
+                    // identity, so — like an array — it can still own its buffers.
+                    let assignable_ok = !*mutable
+                        || kind == DropKind::AfreeArr
+                        || kind == DropKind::FreeMap;
                     if assignable_ok && !region_owns {
                         let key = id(s);
                         self.live.last_mut().unwrap().insert(name.clone(), key);
@@ -360,6 +368,8 @@ impl Analysis<'_> {
             Expr::Call { name, .. } if name == "array" || name == "push" => {
                 Some(DropKind::AfreeArr)
             }
+            // A map literal (`[:]` / `["k": v]`) allocates a fresh Map (RFC-0028).
+            Expr::MapLit { .. } => Some(DropKind::FreeMap),
             Expr::Call { name, .. } => self.owned.get(name).copied(),
             _ => None,
         }
@@ -435,6 +445,10 @@ impl Analysis<'_> {
                         // not free its buffer, so the receiver stays a live owner
                         // (a safe read); the removed element is a safe leak.
                         | "@pop" | "@swapRemove"
+                        // Map methods (RFC-0028) mutate/read in place but never
+                        // free the map's buffers, so the receiver stays a live
+                        // owner (a safe read); `@keys` returns a fresh snapshot.
+                        | "@has" | "@remove" | "@keys"
                         | "trace" | "debug" | "info" | "warn" | "error"
                 ) {
                     for a in args {
@@ -465,6 +479,12 @@ impl Analysis<'_> {
             Expr::ArrayLit { elems, .. } => {
                 for e in elems {
                     self.visit(e);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.visit(k);
+                    self.visit(v);
                 }
             }
             Expr::Spawn { args, .. } => {

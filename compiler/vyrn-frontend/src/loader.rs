@@ -1493,6 +1493,12 @@ impl NsResolver<'_> {
                     self.walk_expr(e2, locals);
                 }
             }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries.iter_mut() {
+                    self.walk_expr(k, locals);
+                    self.walk_expr(v, locals);
+                }
+            }
             Expr::Lambda { params, body, .. } => {
                 let mut inner = locals.clone();
                 for p in params.iter() {
@@ -1869,6 +1875,12 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
                     expr(e2, *line, out);
                 }
             }
+            Expr::MapLit { entries, line } => {
+                for (k, v) in entries {
+                    expr(k, *line, out);
+                    expr(v, *line, out);
+                }
+            }
             // A lambda body (RFC-0023) references names too — walk it so a call
             // or constructor used only inside a lambda is still visibility-checked.
             Expr::Lambda { body, line, .. } => match body {
@@ -2004,6 +2016,12 @@ fn rewrite_expr(e: &mut Expr, map: &HashMap<String, String>) {
         Expr::ArrayLit { elems, .. } => {
             for e2 in elems {
                 rewrite_expr(e2, map);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                rewrite_expr(k, map);
+                rewrite_expr(v, map);
             }
         }
         // A lambda body (RFC-0023): rewrite referenced names inside it (its own
