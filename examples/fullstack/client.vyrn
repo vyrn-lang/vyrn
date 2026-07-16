@@ -1,17 +1,37 @@
-/// The browser client root (RFC-0019). `rpcClient("./api")` re-emits the
-/// contract's types and synthesizes, per procedure, a same-named stub (fires the
-/// wire call) and an `export extern fn vyrnRpcDone<Proc>` completion dispatcher
-/// that hands a decoded `Validation<T>` to the plain `on<Proc>` handlers below.
+/// The browser client root (RFC-0019 + RFC-0026 M2). The RPC layer is
+/// UNCHANGED: `rpcClient("./api")` re-emits the contract types and synthesizes,
+/// per procedure, a same-named stub (fires the wire call) plus an
+/// `export extern fn vyrnRpcDone<Proc>` completion dispatcher that hands a
+/// decoded `Validation<T>` to the plain `on<Proc>` handlers below.
 ///
-/// `vyrn dev` builds this to wasm; `web/vyrn-rpc.js` provides the transport and
-/// `web/vyrn-query.js` the cache. The page never sees a Request/Response — it
-/// calls typed stubs and reads results the handlers stash in module state.
+/// What changed vs. the string-getter version: the page no longer polls
+/// `uiUser()` / `uiIssues()` and hand-builds DOM. Instead this module exposes a
+/// pure `view()` over its module state and exports `vyrnView() = toJson(view())`;
+/// `web/vyrn-dom.js` renders and diffs it. UI events (an id input, two buttons)
+/// dispatch to the `export extern fn` handlers by name, which fire the same
+/// typed round trips. When a reply lands, the dispatcher updates module state
+/// and the host re-renders (the page re-invokes `vyrnView()` after each
+/// completion). Server behavior and the wire protocol are identical.
 import { getUser, createUser, deleteUser, GetUserReq, CreateUserReq, User, DeleteReq, DeleteResult } from rpcClient("./api")
 import { rpcClient } from "std/rpc"
+import { el, text, cls, attr, on, empty, toHtmlString, Html, Attr } from "std/html"
 
-// Module state (root-only): the last result / issues, read by the page.
+/// A named `Int64` alias so `fromJson` can parse the id-input string (a handler
+/// arg arrives as `String`; `fromJson` needs a declared type name). A
+/// non-numeric input decodes to `Invalid`, which we map to 0.
+type IntId = Int64
+
+// ---- module state (root-only): what the view reads -------------------------
 let mut userLine: String = "(none yet)"
 let mut issueLine: String = ""
+let mut idText: String = "7"
+
+fn parseId(s: String) -> Int64 {
+    return match fromJson(IntId, s) {
+        Valid(n) => n,
+        Invalid(issues) => 0,
+    }
+}
 
 fn setUser(s: String) {
     userLine = s
@@ -20,7 +40,7 @@ fn setIssues(s: String) {
     issueLine = s
 }
 
-/// Render an accumulated issue list as `path: message; ...` for the page.
+/// Render an accumulated issue list as `path: message; ...` for the view.
 fn renderIssues(issues: Array<Issue>) -> String {
     let mut out = ""
     let mut i = 0
@@ -39,6 +59,8 @@ fn showCreated(u: User) {
     setUser("created id=\{u.id} name=\{u.name} age=\{u.age}")
     setIssues("")
 }
+
+// ---- RPC completion handlers (unchanged logic) -----------------------------
 
 /// The completion handler for `getUser` — a decoded `Validation<User>`.
 fn onGetUser(id: Int64, res: Validation<User>) {
@@ -70,25 +92,60 @@ fn onDeleteUser(id: Int64, res: Validation<DeleteResult>) {
     }
 }
 
+// ---- the view (pure) -------------------------------------------------------
+
+fn view() -> Html {
+    return el("main", [], [
+            el("h1", [], [text("vyrn fullstack — typed RPC through view()")]),
+            el("section", [Id("roundtrip")], [
+                    el("h2", [], [text("Typed round trip")]),
+                    el("label", [], [
+                            text("id "),
+                            el("input", [Id("uid"), attr("type", "number"), attr("value", idText), on("input", "setId", "")], []),
+                        ]),
+                    el("button", [Id("fetchBtn"), on("click", "loadUser", "")], [text("getUser (typed stub)")]),
+                    el("button", [Id("delBtn"), on("click", "removeUser", "")], [text("deleteUser (Result)")]),
+                    el("p", [Id("userOut"), cls("out")], [text(userLine)]),
+                ]),
+            el("section", [Id("issues")], [
+                    el("h2", [], [text("Issues (server-side, off the wire)")]),
+                    el("p", [Id("issueOut"), cls("out issues")], [issueNode()]),
+                ]),
+        ])
+}
+
+/// The issue line, or an empty node when there is nothing to show.
+fn issueNode() -> Html {
+    if issueLine.length == 0 {
+        return empty()
+    }
+    return text(issueLine)
+}
+
 // ---- the page's entry points (exported to JS) ------------------------------
 
-/// Fire a typed `getUser` round trip; the reply flows to `onGetUser`.
-export extern fn loadUser(id: Int64) {
-    getUser(GetUserReq { id: id })
+/// Store the id-input value on each keystroke (the `input` handler ABI sends the
+/// control's current value).
+export extern fn setId(arg: String) {
+    idText = arg
 }
 
-/// Fire a typed `deleteUser` round trip; the `Result` reply flows to
-/// `onDeleteUser`.
-export extern fn removeUser(id: Int64) {
-    deleteUser(DeleteReq { id: id })
+/// Fire a typed `getUser` round trip for the current id; the reply flows to
+/// `onGetUser`, then the host re-renders.
+export extern fn loadUser(arg: String) {
+    getUser(GetUserReq { id: parseId(idText) })
 }
 
-/// The last result line and the last issue line, for the page to render.
-export extern fn uiUser() -> String {
-    return userLine
+/// Fire a typed `deleteUser` round trip for the current id; the `Result` reply
+/// flows to `onDeleteUser`. Deleting id 0 is refused by the server (a 200 with
+/// `Err`), shown as `refused: ...`.
+export extern fn removeUser(arg: String) {
+    deleteUser(DeleteReq { id: parseId(idText) })
 }
-export extern fn uiIssues() -> String {
-    return issueLine
+
+/// The view, as JSON, for `web/vyrn-dom.js`.
+export extern fn vyrnView() -> String {
+    return toJson(view())
 }
 
 fn main() -> Int64 {

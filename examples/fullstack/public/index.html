@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>vyrn fullstack — typed RPC</title>
+    <title>vyrn fullstack — typed RPC + vyrn-dom</title>
     <style>
       :root { color-scheme: light dark; }
       body {
@@ -12,7 +12,7 @@
       }
       h1 { font-size: 1.4rem; margin-bottom: 0.2rem; }
       .sub { opacity: 0.7; margin-top: 0; }
-      section {
+      #app section, section.shell {
         border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
         border-radius: 10px; padding: 1rem 1.1rem; margin: 1rem 0;
       }
@@ -37,109 +37,98 @@
       }
       .issues { color: #c0392b; }
       @media (prefers-color-scheme: dark) { .issues { color: #ff8a80; } }
-      .metric { font-variant-numeric: tabular-nums; font-weight: 600; }
       code { font-family: ui-monospace, monospace; font-size: 0.92em; }
+      #status { opacity: 0.7; }
+      #status .ok { color: #2e9e5b; }
     </style>
   </head>
   <body>
-    <h1>vyrn fullstack — typed RPC as a library</h1>
+    <h1>vyrn fullstack — typed RPC, rendered by <code>vyrn-dom.js</code></h1>
     <p class="sub">
-      One contract (<code>api.vyrn</code>), three generators. The wasm client
-      below calls typed procedures; the server validates every payload with the
-      contract's <code>where</code> clauses and returns structured issues.
+      One contract (<code>api.vyrn</code>), unchanged server + RPC. The client
+      now exposes a pure <code>view()</code> (RFC-0026); <code>vyrn-dom.js</code>
+      builds the DOM, delegates the id input + buttons to <code>export extern</code>
+      handlers by name, and re-renders after each typed reply lands.
     </p>
 
-    <section>
-      <h2>Typed round trip</h2>
-      <label>id <input id="uid" type="number" value="7" /></label>
-      <button id="fetchBtn">getUser (typed stub)</button>
-      <div class="out" id="userOut">—</div>
-    </section>
+    <p id="status">loading client.wasm…</p>
 
-    <section>
+    <!-- The Vyrn view() mounts here. -->
+    <div id="app"></div>
+
+    <!-- Two demonstrations that are inherently RAW (a typed client can neither
+         construct an invalid Age nor is $schema a procedure): they call the
+         transport / server directly, and their results flow into the SAME
+         view() via the RPC dispatcher + a re-render. -->
+    <section class="shell">
       <h2>Validated submit — server-side 422</h2>
-      <label>name <input id="cname" value="Bob" style="width: 8rem" /></label>
-      <label>age <input id="cage" type="number" value="200" /></label>
-      <button id="goodBtn">submit</button>
-      <button id="badBtn">submit age 200 (invalid)</button>
-      <div class="out issues" id="issueOut"></div>
+      <button id="badBtn">create user with age 200 (raw wire)</button>
       <p class="sub">
         Age 200 fails <code>Age = Int64 where value &lt;= 130</code> during
-        <code>fromJson</code> on the server — the issues below come straight off
-        the wire, not from client code.
+        <code>fromJson</code> on the server; the accumulated issues appear in the
+        <em>Issues</em> panel above — decoded by the client's
+        <code>onCreateUser</code> handler, off the wire.
       </p>
     </section>
 
-    <section>
-      <h2>Query cache — dedupe &amp; invalidate</h2>
-      <button id="dedupeBtn">two rapid getUser(#7) clicks</button>
-      <button id="invalidateBtn">invalidate + refetch</button>
-      <div class="out">network fetches: <span class="metric" id="fetchCount">0</span></div>
-      <p class="sub">
-        The colada (<code>vyrn-query.js</code>) keys by (proc, request). Two
-        in-flight calls for the same key share one fetch; invalidate forces a new
-        one. Both drive the same <code>vyrnRpcDoneGetUser</code> dispatcher.
-      </p>
-    </section>
-
-    <section>
+    <section class="shell">
       <h2>Procedure registry</h2>
       <button id="schemaBtn">GET /rpc/$schema</button>
       <div class="out" id="schemaOut"></div>
     </section>
 
     <script type="module">
-      import { runVyrnRpc } from "/vyrn-runtime/vyrn-rpc.js";
-      import { createQueryClient } from "/vyrn-runtime/vyrn-query.js";
+      import { mount } from "/vyrn-runtime/vyrn-dom.js";
+      import { makeRpcTransport } from "/vyrn-runtime/vyrn-rpc.js";
 
       const $ = (id) => document.getElementById(id);
+      const status = $("status");
 
       async function main() {
         const bytes = await (await fetch("/client.wasm")).arrayBuffer();
-        // Instantiate with the RPC transport wired; name the String-returning
-        // getters so the export glue decodes them.
-        const { exports } = await runVyrnRpc(bytes, {
-          baseUrl: "",
-          exportReturns: { uiUser: "string", uiIssues: "string" },
+
+        // The RPC transport supplies the `vyrnRpcCall` extern; vyrn-dom owns the
+        // instance, the DOM, and the render loop.
+        const rpc = makeRpcTransport({ baseUrl: "" });
+        const app = await mount(bytes, $("app"), {
+          extern: { vyrnRpcCall: rpc.vyrnRpcCall },
         });
-        const qc = createQueryClient({ exports, baseUrl: "" });
 
-        // A tiny render loop: mirror the Vyrn module state onto the page. The
-        // dispatchers update that state whenever a reply (network or cache)
-        // arrives, so the panels stay live without explicit callbacks.
-        setInterval(() => {
-          $("userOut").textContent = exports.uiUser() || "—";
-          $("issueOut").textContent = exports.uiIssues() || "";
-          $("fetchCount").textContent = String(qc.fetchCount);
-        }, 120);
+        // Bind the transport to the module's dispatchers, wrapped so that every
+        // completion (which updates module state via on<Proc>) triggers a
+        // re-render — the reply is async, so there is no event to piggyback on.
+        rpc.bind(
+          new Proxy(app.exports, {
+            get(target, prop) {
+              const v = target[prop];
+              if (
+                typeof prop === "string" &&
+                prop.startsWith("vyrnRpcDone") &&
+                typeof v === "function"
+              ) {
+                return (...args) => {
+                  const r = v(...args);
+                  app.rerender();
+                  return r;
+                };
+              }
+              return v;
+            },
+          })
+        );
 
-        // Typed round trip via the generated Vyrn stub.
-        $("fetchBtn").onclick = () => {
-          exports.loadUser(BigInt($("uid").value || "0"));
+        status.innerHTML = `<span class="ok">mounted</span> · client.wasm exports: ${Object.keys(app.exports).join(", ")}`;
+
+        // Raw create with an invalid age — the one payload a typed stub could
+        // never build. The transport POSTs it; the server 422s; the reply flows
+        // to onCreateUser -> module state -> re-render (issues panel).
+        $("badBtn").onclick = () => {
+          rpc.vyrnRpcCall("createUser", JSON.stringify({ name: "Bob", age: 200 }));
         };
 
-        // Validated submit — build raw JSON so an invalid age actually reaches
-        // the server (a validated Vyrn value could never be constructed at 200).
-        const submit = (name, age) =>
-          qc.query("createUser", JSON.stringify({ name, age: Number(age) }));
-        $("goodBtn").onclick = () => submit($("cname").value, $("cage").value);
-        $("badBtn").onclick = () => submit("Bob", 200);
-
-        // Cache demo: two rapid queries for the same key dedupe to one fetch.
-        $("dedupeBtn").onclick = () => {
-          const key = JSON.stringify({ id: 7 });
-          qc.query("getUser", key, { staleTime: 10000 });
-          qc.query("getUser", key, { staleTime: 10000 });
-        };
-        $("invalidateBtn").onclick = () => {
-          qc.invalidate("getUser");
-          qc.query("getUser", JSON.stringify({ id: 7 }), { staleTime: 10000 });
-        };
-
-        // The procedure registry, straight from the server.
+        // The procedure registry — a raw GET, straight from the server.
         $("schemaBtn").onclick = async () => {
-          const res = await fetch("/rpc/$schema");
-          const text = await res.text();
+          const text = await (await fetch("/rpc/$schema")).text();
           try {
             $("schemaOut").textContent = JSON.stringify(JSON.parse(text), null, 2);
           } catch {
@@ -149,10 +138,7 @@
       }
 
       main().catch((e) => {
-        document.body.insertAdjacentHTML(
-          "beforeend",
-          `<pre style="color:#c0392b">boot error: ${e && e.message ? e.message : e}</pre>`
-        );
+        status.innerHTML = `<span style="color:#c0392b">boot error: ${e && e.message ? e.message : e}</span>`;
       });
     </script>
   </body>
