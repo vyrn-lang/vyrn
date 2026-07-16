@@ -1,0 +1,10 @@
+/// A dynamic route WITHOUT a loader (`GET /items/:id`). Its `Params` field name
+/// matches the `[id]` segment; the synthesized router parses the segment as an
+/// `Int64` (a non-integer 404s before this code runs) and hands it in.
+import { el, text, Html } from "std/html"
+
+export type Params = { id: Int64 }
+
+export fn page(p: Params) -> Html {
+    return el("main", [], [el("h1", [], [text("Item \{p.id}")])])
+}

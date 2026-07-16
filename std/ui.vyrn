@@ -1,0 +1,1058 @@
+/// std/ui — the pages generator (RFC-0026 M3), file-based routing as a library
+/// on RFC-0021 generator imports. One `gen fn`, `pages(dir)`, scans a directory
+/// of ORDINARY `.vyrn` page modules at compile time (sandboxed, deterministic,
+/// cached) and synthesizes a router module. The compiler knows nothing about
+/// routing — everything below is plain, comptime-pure Vyrn over `listDir`,
+/// `moduleInterface` (RFC-0021), `std/html` (RFC-0026 M1), the `Request`/
+/// `Response` server surface (RFC-0016), `fromJson` (RFC-0018), and the
+/// regex-validated string types (RFC-0020).
+///
+///   import { pages } from "std/ui"
+///   import { route } from pages("./pages")
+///   fn handle(req: Request) -> Response { return route(req) }
+///
+/// Directory conventions (v1):
+///   pages/index.vyrn        → GET /
+///   pages/items/index.vyrn  → GET /items
+///   pages/items/[id].vyrn   → GET /items/:id     (single-segment dynamic param)
+///
+/// A page module EXPORTS:
+///   - `fn page(p: Params) -> Html`  — or `fn page() -> Html` for a page with no
+///     dynamic segments and no loader.
+///   - `type Params = { id: Int64, … }` when it has `[bracket]` segments — the
+///     field NAMES must match the segments exactly (checked via `moduleInterface`
+///     at generation time). v1 supports `Int64` params only.
+///   - optionally `fn load(p: Params) -> Validation<Data>` and then
+///     `fn page(p: Params, d: Data) -> Html`. On `Invalid` the synthesized router
+///     renders an error page (422) built with `std/html`, listing the issues.
+///
+/// The synthesized module EXPORTS `route(req: Request) -> Response`: it matches
+/// the path, parses+validates each dynamic segment against its declared type (an
+/// `Int64` segment that is not an integer 404s, never reaching user code), runs
+/// `load`, renders the page through `document(…)`, and returns the `Response`. An
+/// unknown path is a 404 page. It also emits `type RoutePath` — a regex-validated
+/// string of the whole route language — plus a `href<Route>(…)` helper per dynamic
+/// route and a `<route>Path()` helper per static route (typed URLs).
+///
+/// Generation failures — a Params/segment mismatch, an unsupported param type, or
+/// a route collision — fail the load with a diagnostic naming the offending file
+/// (the std/rpc identifier-carrying convention: the offense rides a bare
+/// top-level identifier so parsing fails immediately, attributed to the generator
+/// call site).
+///
+/// Inspect the synthesized module with:  vyrn emit-gen <file>
+
+// ===========================================================================
+// Byte / string helpers — all comptime-pure (plain string building), so they are
+// legal in a `gen fn` and its transitive callees.
+// ===========================================================================
+
+/// The bytes `ba[s..e)` as a String ("" on the impossible non-UTF-8 slice of
+/// validated input).
+fn uiSliceStr(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
+    let mut out: Array<UInt8> = []
+    let mut i = s
+    while i < e {
+        out.push(ba[i])
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(err) => "",
+    }
+}
+
+/// True for an ASCII space, tab, CR, or LF.
+fn uiIsWs(b: UInt8) -> Bool {
+    return b == 32 || b == 9 || b == 10 || b == 13
+}
+
+/// `s` with leading and trailing ASCII whitespace removed.
+fn uiTrimStr(s: String) -> String {
+    let ba = bytes(s)
+    let mut start = 0
+    let mut foundStart = false
+    let mut i = 0
+    while i < ba.length && foundStart == false {
+        if uiIsWs(ba[i]) {
+            i = i + 1
+        } else {
+            start = i
+            foundStart = true
+        }
+    }
+    if foundStart == false {
+        return ""
+    }
+    let mut end = ba.length
+    let mut moving = true
+    while moving {
+        if end > start && uiIsWs(ba[end - 1]) {
+            end = end - 1
+        } else {
+            moving = false
+        }
+    }
+    return uiSliceStr(ba, start, end)
+}
+
+/// Uppercase the first ASCII byte of `s`.
+fn uiUpperFirst(s: String) -> String {
+    let ba = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    for b in ba {
+        if i == 0 && b >= 97 && b <= 122 {
+            out.push(b - 32)
+        } else {
+            out.push(b)
+        }
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(err) => s,
+    }
+}
+
+/// Join `parts` with `sep` between them.
+fn uiJoinList(parts: Array<String>, sep: String) -> String {
+    let mut out = ""
+    let mut i = 0
+    for p in parts {
+        if i > 0 {
+            out = out + sep
+        }
+        out = out + p
+        i = i + 1
+    }
+    return out
+}
+
+/// `arr` with `s` appended (value semantics — the input is unchanged).
+fn uiAppendStr(arr: Array<String>, s: String) -> Array<String> {
+    let mut out = arr
+    out.push(s)
+    return out
+}
+
+/// Whether `arr` contains `x`.
+fn uiContainsStr(arr: Array<String>, x: String) -> Bool {
+    for s in arr {
+        if s == x {
+            return true
+        }
+    }
+    return false
+}
+
+/// The interpolation-hole source fragment for `name` — the two chars `\` `{`,
+/// then the name, then `}`. Built from a lone backslash literal so the lexer
+/// never mistakes it for an escape inside THIS module.
+fn uiHole(name: String) -> String {
+    return "\\" + "{" + name + "}"
+}
+
+/// `key` with every non-alphanumeric byte turned into `_`, so a file path is a
+/// legal identifier fragment inside a load-diagnostic name.
+fn uiIdentOf(key: String) -> String {
+    let ba = bytes(key)
+    let mut out: Array<UInt8> = []
+    for b in ba {
+        if (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) {
+            out.push(b)
+        } else {
+            out.push(95)
+        }
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(err) => "id",
+    }
+}
+
+// ---- emitting Vyrn source: escape a raw string as a `"…"` literal -----------
+
+/// The second byte of a Vyrn string-literal escape for `b`, or 0 when `b` needs
+/// no escaping.
+fn uiEscSecond(b: UInt8) -> UInt8 {
+    if b == 92 {
+        return 92
+    }
+    if b == 34 {
+        return 34
+    }
+    if b == 10 {
+        return 110
+    }
+    if b == 13 {
+        return 114
+    }
+    if b == 9 {
+        return 116
+    }
+    return 0
+}
+
+/// `raw` wrapped and escaped as a Vyrn string literal (quotes included).
+fn uiStrLit(raw: String) -> String {
+    let ba = bytes(raw)
+    let mut out: Array<UInt8> = []
+    out.push(34)
+    for b in ba {
+        let s = uiEscSecond(b)
+        if s == 0 {
+            out.push(b)
+        } else {
+            out.push(92)
+            out.push(s)
+        }
+    }
+    out.push(34)
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(err) => "\"\"",
+    }
+}
+
+/// A regex-safe rendering of a literal static segment for a `value =~ "…"`
+/// alternative: each regex metacharacter is backslash-escaped, and because the
+/// result is emitted INTO a Vyrn string literal (re-lexed by the compiler) a
+/// single output backslash must appear as two.
+fn uiRegexEscapeLit(seg: String) -> String {
+    let ba = bytes(seg)
+    let mut out: Array<UInt8> = []
+    for b in ba {
+        if b == 46 || b == 92 || b == 40 || b == 41 || b == 91 || b == 93
+        || b == 123 || b == 125 || b == 124 || b == 42 || b == 43 || b == 63
+        || b == 94 || b == 36 {
+            out.push(92)
+            out.push(92)
+            out.push(b)
+        } else {
+            out.push(b)
+        }
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(err) => seg,
+    }
+}
+
+// ===========================================================================
+// Path / route segment helpers.
+// ===========================================================================
+
+/// A `.vyrn` file name with the extension stripped (`[id].vyrn` → `[id]`).
+fn uiStem(name: String) -> String {
+    let ba = bytes(name)
+    return uiSliceStr(ba, 0, ba.length - 5)
+}
+
+/// Whether a route segment token is dynamic (`[name]`).
+fn uiIsDynSeg(s: String) -> Bool {
+    return s.startsWith("[") && s.endsWith("]")
+}
+
+/// The parameter name inside a dynamic segment token (`[id]` → `id`).
+fn uiDynName(s: String) -> String {
+    let ba = bytes(s)
+    return uiSliceStr(ba, 1, ba.length - 1)
+}
+
+/// The route segment tokens for a file `st` under `prefix`: `index` contributes
+/// nothing (the directory's own route), `[id]` a dynamic token, anything else a
+/// static token.
+fn uiRouteSegsFor(prefix: Array<String>, st: String) -> Array<String> {
+    if st == "index" {
+        return prefix
+    }
+    return uiAppendStr(prefix, st)
+}
+
+/// The dynamic parameter names of a segment list, in order.
+fn uiDynNamesOf(segs: Array<String>) -> Array<String> {
+    let mut out: Array<String> = []
+    for s in segs {
+        if uiIsDynSeg(s) {
+            out.push(uiDynName(s))
+        }
+    }
+    return out
+}
+
+/// A collision key: static tokens verbatim, every dynamic token as `:`. Two
+/// pages with the same key claim the same route.
+fn uiCollisionKey(segs: Array<String>) -> String {
+    let mut parts: Array<String> = []
+    for s in segs {
+        if uiIsDynSeg(s) {
+            parts.push(":")
+        } else {
+            parts.push(s)
+        }
+    }
+    return "/" + uiJoinList(parts, "/")
+}
+
+/// The human display pattern (`/users/:id`) used for titles and diagnostics.
+fn uiUrlPatternOf(segs: Array<String>) -> String {
+    if segs.length == 0 {
+        return "/"
+    }
+    let mut parts: Array<String> = []
+    for s in segs {
+        if uiIsDynSeg(s) {
+            parts.push(":" + uiDynName(s))
+        } else {
+            parts.push(s)
+        }
+    }
+    return "/" + uiJoinList(parts, "/")
+}
+
+/// The regex branch for a route (static tokens literal; an `Int64` param as its
+/// integer-spelling regex). The root route is the bare `/`.
+fn uiRoutePathBranch(segs: Array<String>) -> String {
+    if segs.length == 0 {
+        return "/"
+    }
+    let mut parts: Array<String> = []
+    for s in segs {
+        if uiIsDynSeg(s) {
+            parts.push("(0|-?[1-9][0-9]*)")
+        } else {
+            parts.push(uiRegexEscapeLit(s))
+        }
+    }
+    return "/" + uiJoinList(parts, "/")
+}
+
+/// The camelCase name of a static route's typed-URL helper (`/items/sub` →
+/// `itemsSubPath`; `/` → `rootPath`).
+fn uiStaticHelperName(segs: Array<String>) -> String {
+    if segs.length == 0 {
+        return "rootPath"
+    }
+    let mut out = ""
+    let mut i = 0
+    for s in segs {
+        if i == 0 {
+            out = out + s
+        } else {
+            out = out + uiUpperFirst(s)
+        }
+        i = i + 1
+    }
+    return out + "Path"
+}
+
+/// The name of a dynamic route's typed-URL helper: `href` + PascalCase of its
+/// STATIC segments (`/users/[id]` → `hrefUsers`).
+fn uiDynHelperName(segs: Array<String>) -> String {
+    let mut out = "href"
+    for s in segs {
+        if uiIsDynSeg(s) == false {
+            out = out + uiUpperFirst(s)
+        }
+    }
+    return out
+}
+
+/// The typed-URL body of a dynamic helper: a Vyrn string literal with a uiHole per
+/// dynamic segment (`/users/[id]` → `"/users/\{id}"`).
+fn uiDynHelperBody(segs: Array<String>) -> String {
+    let mut parts: Array<String> = []
+    for s in segs {
+        if uiIsDynSeg(s) {
+            parts.push(uiHole(uiDynName(s)))
+        } else {
+            parts.push(s)
+        }
+    }
+    return "\"/" + uiJoinList(parts, "/") + "\""
+}
+
+// ===========================================================================
+// Record-field parsing — pull field names + type spellings out of a Params (or
+// Data) type's canonical `moduleInterface` source text.
+// ===========================================================================
+
+/// Parallel field name / type arrays parsed from a record type declaration.
+type UiFields = { names: Array<String>, types: Array<String> }
+
+/// The record body between the first `{` and the last `}` of `source`.
+fn uiRecordBody(source: String) -> String {
+    let ba = bytes(source)
+    let mut open = 0 - 1
+    let mut close = 0 - 1
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == 123 && open < 0 {
+            open = i
+        }
+        if ba[i] == 125 {
+            close = i
+        }
+        i = i + 1
+    }
+    if open < 0 || close <= open {
+        return ""
+    }
+    return uiSliceStr(ba, open + 1, close)
+}
+
+/// Split a record body on commas at generic depth 0 (`Array<A, B>` stays whole).
+fn uiSplitFields(body: String) -> Array<String> {
+    let ba = bytes(body)
+    let mut parts: Array<String> = []
+    let mut depth = 0
+    let mut start = 0
+    let mut i = 0
+    while i < ba.length {
+        let b = ba[i]
+        if b == 60 {
+            depth = depth + 1
+        } else if b == 62 {
+            depth = depth - 1
+        } else if b == 44 && depth == 0 {
+            parts.push(uiSliceStr(ba, start, i))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    parts.push(uiSliceStr(ba, start, ba.length))
+    return parts
+}
+
+/// Parse a record type's fields from its declaration source.
+fn uiParseFields(source: String) -> UiFields {
+    let body = uiRecordBody(source)
+    let mut names: Array<String> = []
+    let mut types: Array<String> = []
+    for part in uiSplitFields(body) {
+        let trimmed = uiTrimStr(part)
+        if trimmed.length > 0 {
+            let pb = bytes(trimmed)
+            let mut colon = 0 - 1
+            let mut i = 0
+            while i < pb.length && colon < 0 {
+                if pb[i] == 58 {
+                    colon = i
+                }
+                i = i + 1
+            }
+            if colon >= 0 {
+                names.push(uiTrimStr(uiSliceStr(pb, 0, colon)))
+                types.push(uiTrimStr(uiSliceStr(pb, colon + 1, pb.length)))
+            }
+        }
+    }
+    return UiFields { names: names, types: types }
+}
+
+/// The declared type spelling of field `name`, or "" when absent.
+fn uiFieldType(f: UiFields, name: String) -> String {
+    let mut i = 0
+    while i < f.names.length {
+        if f.names[i] == name {
+            return f.types[i]
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+/// Whether a param type spelling is supported as a dynamic segment (v1: `Int64`).
+fn uiSupportedParamType(spelling: String) -> Bool {
+    return spelling == "Int64"
+}
+
+// ===========================================================================
+// moduleInterface queries.
+// ===========================================================================
+
+fn uiHasFn(iface: ModuleInterface, name: String) -> Bool {
+    for f in iface.functions {
+        if f.name == name {
+            return true
+        }
+    }
+    return false
+}
+
+/// The parameter count of exported function `name`, or -1 when it is absent.
+fn uiFnArity(iface: ModuleInterface, name: String) -> Int64 {
+    for f in iface.functions {
+        if f.name == name {
+            return f.params.length
+        }
+    }
+    return 0 - 1
+}
+
+/// The return-type spelling of exported function `name` ("" when absent).
+fn uiFnRet(iface: ModuleInterface, name: String) -> String {
+    for f in iface.functions {
+        if f.name == name {
+            return f.ret
+        }
+    }
+    return ""
+}
+
+fn uiHasType(iface: ModuleInterface, name: String) -> Bool {
+    for t in iface.types {
+        if t.name == name {
+            return true
+        }
+    }
+    return false
+}
+
+fn uiTypeSource(iface: ModuleInterface, name: String) -> String {
+    for t in iface.types {
+        if t.name == name {
+            return t.source
+        }
+    }
+    return ""
+}
+
+// ===========================================================================
+// Page inspection — one collected route per page module.
+// ===========================================================================
+
+/// One discovered page and everything the emitter needs about it. `err` is ""
+/// for a clean page, else one or more diagnostic identifier lines.
+type UiPageInfo = {
+    modPath: String,
+    fileId: String,
+    segs: Array<String>,
+    urlPattern: String,
+    dynNames: Array<String>,
+    hasLoad: Bool,
+    pageArity: Int64,
+    err: String,
+}
+
+/// A load-diagnostic identifier line (parsing it fails, naming the offense).
+fn uiErrLine(tag: String, detail: String) -> String {
+    return tag + "__" + detail + "\n"
+}
+
+/// Reflect a page module and validate its exported surface against its route
+/// segments, returning the collected `UiPageInfo` (with `err` set on any violation).
+/// A `gen fn` because it calls `moduleInterface` (generation-only, RFC-0021), so
+/// its body is never lowered into a shipped binary.
+gen fn uiInspectPage(modPath: String, segs: Array<String>) -> UiPageInfo {
+    let fid = uiIdentOf(modPath)
+    let dyns = uiDynNamesOf(segs)
+    let iface = moduleInterface(modPath)
+    let mut err = ""
+
+    if uiHasFn(iface, "page") == false {
+        err = err + uiErrLine("PAGES_MISSING_PAGE_EXPORT", fid)
+        return UiPageInfo {
+            modPath: modPath,
+            fileId: fid,
+            segs: segs,
+            urlPattern: uiUrlPatternOf(segs),
+            dynNames: dyns,
+            hasLoad: false,
+            pageArity: 0,
+            err: err,
+        }
+    }
+
+    let arity = uiFnArity(iface, "page")
+    let hasLoad = uiHasFn(iface, "load")
+    let needParams = dyns.length > 0 || hasLoad
+
+    // Params: field names must match the dynamic segments exactly, and every
+    // param type must be supported.
+    if needParams {
+        if uiHasType(iface, "Params") == false {
+            err = err + uiErrLine("PAGES_MISSING_PARAMS_TYPE", fid)
+        } else {
+            let f = uiParseFields(uiTypeSource(iface, "Params"))
+            for d in dyns {
+                if uiContainsStr(f.names, d) == false {
+                    err = err + uiErrLine("PAGES_PARAM_MISMATCH", fid + "__segment_" + d + "_absent_from_Params")
+                }
+            }
+            let mut i = 0
+            while i < f.names.length {
+                let fn2 = f.names[i]
+                if uiContainsStr(dyns, fn2) == false {
+                    err = err + uiErrLine("PAGES_PARAM_MISMATCH", fid + "__Params_field_" + fn2 + "_has_no_segment")
+                }
+                if uiSupportedParamType(f.types[i]) == false {
+                    err = err + uiErrLine("PAGES_UNSUPPORTED_PARAM_TYPE", fid + "__" + fn2 + "_is_" + uiIdentOf(f.types[i]))
+                }
+                i = i + 1
+            }
+        }
+    }
+
+    // Signature / loader agreement.
+    if hasLoad {
+        if arity != 2 {
+            err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__loader_page_must_be_page_p_Params_d_Data")
+        }
+        if uiFnArity(iface, "load") != 1 {
+            err = err + uiErrLine("PAGES_LOAD_SIGNATURE", fid + "__load_must_take_one_Params_parameter")
+        }
+        if uiFnRet(iface, "load").startsWith("Validation<") == false {
+            err = err + uiErrLine("PAGES_LOAD_SIGNATURE", fid + "__load_must_return_Validation_Data")
+        }
+        if uiHasType(iface, "Data") == false {
+            err = err + uiErrLine("PAGES_MISSING_DATA_TYPE", fid)
+        }
+    } else {
+        if dyns.length > 0 && arity != 1 {
+            err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__dynamic_page_must_be_page_p_Params")
+        }
+        if dyns.length == 0 && arity != 0 {
+            err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__static_page_must_be_page_without_parameters")
+        }
+    }
+
+    return UiPageInfo {
+        modPath: modPath,
+        fileId: fid,
+        segs: segs,
+        urlPattern: uiUrlPatternOf(segs),
+        dynNames: dyns,
+        hasLoad: hasLoad,
+        pageArity: arity,
+        err: err,
+    }
+}
+
+/// Whether `path` is a directory (a `listDir` that succeeds), used to recurse
+/// into nested static route directories. A regular file lists as an error. A
+/// `gen fn` (calls `listDir`, generation-only) so codegen never lowers it.
+gen fn uiIsDir(path: String) -> Bool {
+    return match listDir(path) {
+        Ok(ns) => true,
+        Err(err) => false,
+    }
+}
+
+/// Recursively scan `dir` (accumulating the route-segment `prefix`) into the flat
+/// list of pages it and its subdirectories contain. A `gen fn` (calls `listDir`
+/// and `uiInspectPage`, both generation-only) so codegen never lowers it.
+gen fn uiScanPages(dir: String, prefix: Array<String>) -> Array<UiPageInfo> {
+    let entries = match listDir(dir) {
+        Ok(ns) => ns,
+        Err(err) => [],
+    }
+    let mut out: Array<UiPageInfo> = []
+    for name in entries {
+        if name.endsWith(".vyrn") {
+            let st = uiStem(name)
+            let modPath = dir + "/" + st
+            out.push(uiInspectPage(modPath, uiRouteSegsFor(prefix, st)))
+        } else {
+            let sub = dir + "/" + name
+            if uiIsDir(sub) {
+                for kid in uiScanPages(sub, uiAppendStr(prefix, name)) {
+                    out.push(kid)
+                }
+            }
+        }
+    }
+    return out
+}
+
+/// Detect two pages claiming the same route. One diagnostic line per collision,
+/// naming both files.
+fn uiCollisionErrors(pages: Array<UiPageInfo>) -> String {
+    let mut err = ""
+    let mut i = 0
+    while i < pages.length {
+        let mut j = i + 1
+        while j < pages.length {
+            if uiCollisionKey(pages[i].segs) == uiCollisionKey(pages[j].segs) {
+                err = err + uiErrLine("PAGES_ROUTE_COLLISION", uiIdentOf(uiCollisionKey(pages[i].segs)) + "__" + pages[i].fileId + "__and__" + pages[j].fileId)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return err
+}
+
+// ===========================================================================
+// Emitting the synthesized router module.
+// ===========================================================================
+
+/// The fixed runtime block shared by every generated router: the segment
+/// splitter, the Option probe, the 404 page, and the error page. Prefixed
+/// (`uiRoute…`) so it never clashes with page or app names.
+fn uiFixedRuntime() -> String {
+    let mut out = ""
+    out = out + "fn uiRouteSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> String {\n"
+    out = out + "    let mut acc: Array<UInt8> = []\n"
+    out = out + "    let mut i = s\n"
+    out = out + "    while i < e {\n"
+    out = out + "        acc.push(ba[i])\n"
+    out = out + "        i = i + 1\n"
+    out = out + "    }\n"
+    out = out + "    return match stringFromBytes(acc) {\n"
+    out = out + "        Ok(v) => v,\n"
+    out = out + "        Err(err) => \"\",\n"
+    out = out + "    }\n"
+    out = out + "}\n"
+    // Split the path into non-empty segments (query stripped, slashes collapsed).
+    out = out + "fn uiRouteSegments(path: String) -> Array<String> {\n"
+    out = out + "    let ba = bytes(path)\n"
+    out = out + "    let mut segs: Array<String> = []\n"
+    out = out + "    let mut start = 0\n"
+    out = out + "    let mut i = 0\n"
+    out = out + "    let mut stop = ba.length\n"
+    out = out + "    while i < ba.length {\n"
+    out = out + "        if ba[i] == 63 {\n"
+    out = out + "            stop = i\n"
+    out = out + "            i = ba.length\n"
+    out = out + "        } else {\n"
+    out = out + "            i = i + 1\n"
+    out = out + "        }\n"
+    out = out + "    }\n"
+    out = out + "    i = 0\n"
+    out = out + "    while i < stop {\n"
+    out = out + "        if ba[i] == 47 {\n"
+    out = out + "            if i > start {\n"
+    out = out + "                segs.push(uiRouteSlice(ba, start, i))\n"
+    out = out + "            }\n"
+    out = out + "            start = i + 1\n"
+    out = out + "        }\n"
+    out = out + "        i = i + 1\n"
+    out = out + "    }\n"
+    out = out + "    if stop > start {\n"
+    out = out + "        segs.push(uiRouteSlice(ba, start, stop))\n"
+    out = out + "    }\n"
+    out = out + "    return segs\n"
+    out = out + "}\n"
+    out = out + "fn uiRouteNone(o: Option<Response>) -> Bool {\n"
+    out = out + "    return match o {\n"
+    out = out + "        Some(r) => false,\n"
+    out = out + "        None => true,\n"
+    out = out + "    }\n"
+    out = out + "}\n"
+    out = out + "fn uiRouteNotFound() -> Response {\n"
+    out = out + "    return Response { status: 404, contentType: \"text/html\", body: document(\"Not Found\", [], el(\"main\", [], [el(\"h1\", [], [text(\"404 — Not Found\")])])) }\n"
+    out = out + "}\n"
+    out = out + "fn uiRouteIssue(iss: Issue) -> Html {\n"
+    out = out + "    return el(\"li\", [], [text(iss.path + \": \" + iss.message)])\n"
+    out = out + "}\n"
+    out = out + "fn uiRouteError(issues: Array<Issue>) -> Html {\n"
+    out = out + "    let mut items: Array<Html> = []\n"
+    out = out + "    for iss in issues {\n"
+    out = out + "        items.push(uiRouteIssue(iss))\n"
+    out = out + "    }\n"
+    out = out + "    return el(\"main\", [], [el(\"h1\", [], [text(\"Unable to load this page\")]), el(\"ul\", [], items)])\n"
+    out = out + "}\n"
+    return out
+}
+
+/// The `try`/`render` pair for one page, indexed `n` (its import-alias suffix).
+fn uiEmitRoute(p: UiPageInfo, n: Int64) -> String {
+    let idx = n.toString()
+    let mut out = ""
+    let segCount = p.segs.length.toString()
+
+    // uiTry<n>: structural match + dynamic-segment parse, returning Option<Response>.
+    out = out + "fn uiTry" + idx + "(segs: Array<String>) -> Option<Response> {\n"
+    out = out + "    if segs.length != " + segCount + " {\n        return None\n    }\n"
+    let mut i = 0
+    for s in p.segs {
+        if uiIsDynSeg(s) == false {
+            out = out + "    if segs[" + i.toString() + "] != " + uiStrLit(s) + " {\n        return None\n    }\n"
+        }
+        i = i + 1
+    }
+    // The dynamic segments, parsed left-to-right into a nested match.
+    out = out + "    return " + uiEmitDynMatch(p, 0, idx) + "\n}\n"
+
+    // uiRender<n>: build Params, run load (if any), render through document().
+    out = out + uiEmitRender(p, idx)
+    return out
+}
+
+/// The nested `fromJson` parse over the dynamic segments (position `k` in
+/// `dynNames`), ending in `Some(uiRender<idx>(args))`. With no dynamic segments
+/// it is simply `Some(uiRender<idx>())`.
+fn uiEmitDynMatch(p: UiPageInfo, k: Int64, idx: String) -> String {
+    if k >= p.dynNames.length {
+        return "Some(uiRender" + idx + "(" + uiJoinList(uiDynArgs(p.dynNames), ", ") + "))"
+    }
+    // Find the segment index of the k-th dynamic segment.
+    let segIdx = uiDynSegIndex(p.segs, k)
+    let vv = "v" + k.toString()
+    let mut out = "match fromJson(UiRouteInt, segs[" + segIdx.toString() + "]) {\n"
+    out = out + "        Valid(" + vv + ") => " + uiEmitDynMatch(p, k + 1, idx) + ",\n"
+    out = out + "        Invalid(issues) => None,\n"
+    out = out + "    }"
+    return out
+}
+
+/// The forwarded argument names `v0, v1, …` for a page's dynamic segments.
+fn uiDynArgs(dynNames: Array<String>) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < dynNames.length {
+        out.push("v" + i.toString())
+        i = i + 1
+    }
+    return out
+}
+
+/// The index into `segs` of the `k`-th dynamic segment.
+fn uiDynSegIndex(segs: Array<String>, k: Int64) -> Int64 {
+    let mut seen = 0
+    let mut i = 0
+    while i < segs.length {
+        if uiIsDynSeg(segs[i]) {
+            if seen == k {
+                return i
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+/// The `uiRender<idx>` function: build `Params`, optionally `load`, then render.
+fn uiEmitRender(p: UiPageInfo, idx: String) -> String {
+    let title = uiStrLit(p.urlPattern)
+    // Parameter list `(v0: Int64, v1: Int64)` matching the dynamic segments.
+    let mut params: Array<String> = []
+    let mut ai = 0
+    while ai < p.dynNames.length {
+        params.push("v" + ai.toString() + ": Int64")
+        ai = ai + 1
+    }
+    let mut out = "fn uiRender" + idx + "(" + uiJoinList(params, ", ") + ") -> Response {\n"
+
+    if p.pageArity == 0 {
+        // Static page, no params, no loader.
+        out = out + "    return Response { status: 200, contentType: \"text/html\", body: document(" + title + ", [], page__r" + idx + "()) }\n}\n"
+        return out
+    }
+
+    // A Params value, its fields named by the dynamic segments.
+    out = out + "    let p = Params__r" + idx + " { " + uiParamFieldInits(p.segs) + " }\n"
+    if p.hasLoad {
+        out = out + "    return match load__r" + idx + "(p) {\n"
+        out = out + "        Valid(d) => Response { status: 200, contentType: \"text/html\", body: document(" + title + ", [], page__r" + idx + "(p, d)) },\n"
+        out = out + "        Invalid(issues) => Response { status: 422, contentType: \"text/html\", body: document(\"Error\", [], uiRouteError(issues)) },\n"
+        out = out + "    }\n}\n"
+    } else {
+        out = out + "    return Response { status: 200, contentType: \"text/html\", body: document(" + title + ", [], page__r" + idx + "(p)) }\n}\n"
+    }
+    return out
+}
+
+/// The Params record-literal field inits (`id: v0, slug: v1`) for a page's
+/// dynamic segments.
+fn uiParamFieldInits(segs: Array<String>) -> String {
+    let mut parts: Array<String> = []
+    let mut k = 0
+    for s in segs {
+        if uiIsDynSeg(s) {
+            parts.push(uiDynName(s) + ": v" + k.toString())
+            k = k + 1
+        }
+    }
+    return uiJoinList(parts, ", ")
+}
+
+/// The import line for one page, aliasing its same-named exports so multiple
+/// pages coexist (RFC-0022 co-naming — the router's dummy `page`/`Params`/
+/// `load`/`Data` decls below force each foreign decl to a fresh symbol).
+fn uiEmitImport(p: UiPageInfo, idx: String) -> String {
+    let mut names: Array<String> = []
+    names.push("page as page__r" + idx)
+    if p.dynNames.length > 0 || p.hasLoad {
+        names.push("Params as Params__r" + idx)
+    }
+    if p.hasLoad {
+        names.push("load as load__r" + idx)
+        names.push("Data as Data__r" + idx)
+    }
+    return "import { " + uiJoinList(names, ", ") + " } from " + uiStrLit(p.modPath) + "\n"
+}
+
+/// The typed-URL helper for one route: a `href<Route>(…)` for a dynamic route, a
+/// `<route>Path()` for a static one. Both return the validated `RoutePath`.
+fn uiEmitTypedUrl(p: UiPageInfo) -> String {
+    if p.dynNames.length > 0 {
+        let mut params: Array<String> = []
+        for s in p.segs {
+            if uiIsDynSeg(s) {
+                params.push(uiDynName(s) + ": Int64")
+            }
+        }
+        return "export fn " + uiDynHelperName(p.segs) + "(" + uiJoinList(params, ", ") + ") -> RoutePath {\n    return " + uiDynHelperBody(p.segs) + "\n}\n"
+    }
+    return "export fn " + uiStaticHelperName(p.segs) + "() -> RoutePath {\n    return " + uiStrLit(uiUrlPatternOf(p.segs)) + "\n}\n"
+}
+
+/// Assemble the whole synthesized router module from the collected pages.
+fn uiBuildModule(pages: Array<UiPageInfo>) -> String {
+    let mut out = "/// Generated by std/ui `pages` (RFC-0026 M3) — do not edit.\n"
+    out = out + "import { el, text, empty, document, toHtmlString, Html, Attr } from \"std/html\"\n"
+
+    // Per-page imports (aliased) + which dummy decls the co-naming needs.
+    let mut anyParams = false
+    let mut anyLoad = false
+    let mut i = 0
+    while i < pages.length {
+        out = out + uiEmitImport(pages[i], i.toString())
+        if pages[i].dynNames.length > 0 || pages[i].hasLoad {
+            anyParams = true
+        }
+        if pages[i].hasLoad {
+            anyLoad = true
+        }
+        i = i + 1
+    }
+
+    // The co-naming dummies (RFC-0022): a local decl of each imported name forces
+    // every aliased page export to a distinct fresh symbol, so same-named exports
+    // across pages never collide in the flat namespace. These are inert.
+    out = out + "fn page() -> Int64 { return 0 }\n"
+    if anyParams {
+        out = out + "type Params = Int64\n"
+    }
+    if anyLoad {
+        out = out + "fn load() -> Int64 { return 0 }\n"
+        out = out + "type Data = Int64\n"
+    }
+
+    // Segment parsing for `Int64` dynamic params.
+    out = out + "type UiRouteInt = Int64\n"
+
+    // RoutePath — the regex-validated string of the whole route language.
+    out = out + "export type RoutePath = String where value =~ \"("
+    i = 0
+    while i < pages.length {
+        if i > 0 {
+            out = out + "|"
+        }
+        out = out + uiRoutePathBranch(pages[i].segs)
+        i = i + 1
+    }
+    out = out + ")\"\n"
+
+    // Typed-URL helpers.
+    i = 0
+    while i < pages.length {
+        out = out + uiEmitTypedUrl(pages[i])
+        i = i + 1
+    }
+
+    // The fixed runtime + per-page try/render pairs.
+    out = out + uiFixedRuntime()
+    i = 0
+    while i < pages.length {
+        out = out + uiEmitRoute(pages[i], i)
+        i = i + 1
+    }
+
+    // route(): static routes first, then dynamic, first hit wins.
+    out = out + "export fn route(req: Request) -> Response {\n"
+    out = out + "    let segs = uiRouteSegments(req.path)\n"
+    out = out + "    let mut hit: Option<Response> = None\n"
+    for order in uiDispatchOrder(pages) {
+        out = out + "    if uiRouteNone(hit) {\n        hit = uiTry" + order.toString() + "(segs)\n    }\n"
+    }
+    out = out + "    return match hit {\n        Some(r) => r,\n        None => uiRouteNotFound(),\n    }\n}\n"
+    return out
+}
+
+/// The page indices ordered for dispatch: fewer dynamic segments first, so a
+/// fully-static route always wins over a dynamic one at the same depth.
+fn uiDispatchOrder(pages: Array<UiPageInfo>) -> Array<Int64> {
+    let mut order: Array<Int64> = []
+    let mut want = 0
+    let mut maxDyn = 0
+    for p in pages {
+        if p.dynNames.length > maxDyn {
+            maxDyn = p.dynNames.length
+        }
+    }
+    while want <= maxDyn {
+        let mut i = 0
+        while i < pages.length {
+            if pages[i].dynNames.length == want {
+                order.push(i)
+            }
+            i = i + 1
+        }
+        want = want + 1
+    }
+    return order
+}
+
+// ===========================================================================
+// The generator.
+// ===========================================================================
+
+/// `pages(dir)` — scan `dir` for page modules and synthesize the router module.
+export gen fn pages(dir: String) -> String {
+    let infos = uiScanPages(dir, [])
+    if infos.length == 0 {
+        return "PAGES_ERROR__no_page_modules_found_under_the_pages_directory\n"
+    }
+    let mut err = ""
+    for p in infos {
+        err = err + p.err
+    }
+    err = err + uiCollisionErrors(infos)
+    if err != "" {
+        return err
+    }
+    return uiBuildModule(infos)
+}
+
+// ===========================================================================
+// Tests — the pure helpers are covered without file I/O by feeding them strings.
+// ===========================================================================
+
+test "route segments and dynamic detection" {
+    assertEq(uiUrlPatternOf(["users", "[id]"]), "/users/:id")
+    assertEq(uiCollisionKey(["users", "[id]"]), "/users/:")
+    assert(uiIsDynSeg("[id]"))
+    assertEq(uiDynName("[id]"), "id")
+    assertEq(uiRoutePathBranch(["users", "[id]"]), "/users/(0|-?[1-9][0-9]*)")
+    assertEq(uiRoutePathBranch([]), "/")
+}
+
+test "typed-URL helper names and bodies" {
+    assertEq(uiStaticHelperName([]), "rootPath")
+    assertEq(uiStaticHelperName(["items"]), "itemsPath")
+    assertEq(uiDynHelperName(["users", "[id]"]), "hrefUsers")
+    assertEq(uiDynHelperBody(["users", "[id]"]), "\"/users/" + uiHole("id") + "\"")
+}
+
+test "record-field parsing pulls names and types" {
+    let f = uiParseFields("export type Params = { id: Int64, slug: String }")
+    assertEq(f.names.length, 2)
+    assertEq(f.names[0], "id")
+    assertEq(f.types[0], "Int64")
+    assertEq(f.names[1], "slug")
+    assertEq(f.types[1], "String")
+    assert(uiSupportedParamType("Int64"))
+    assertEq(uiSupportedParamType("String"), false)
+}
+
+test "uiStem and route mapping" {
+    assertEq(uiStem("index.vyrn"), "index")
+    assertEq(uiStem("[id].vyrn"), "[id]")
+    assertEq(uiRouteSegsFor(["items"], "index").length, 1)
+    assertEq(uiRouteSegsFor(["items"], "[id]").length, 2)
+}

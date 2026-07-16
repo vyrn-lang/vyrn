@@ -1,0 +1,24 @@
+/// A dynamic route WITH a loader (`GET /users/:id`). `load` "fetches" the user
+/// and returns a `Validation<Data>`; on `Invalid` the synthesized router renders
+/// a 422 error page (built with std/html) listing the issues. Here id 0 is
+/// refused, so `/users/0` exercises the error path while `/users/7` renders.
+import { el, text, Html } from "std/html"
+
+export type Params = { id: Int64 }
+export type Data = { name: String, age: Int64 }
+
+/// No database here (an imported module is stateless), so the user is derived
+/// from the id — except id 0, which has no user and yields an `Invalid`.
+export fn load(p: Params) -> Validation<Data> {
+    if p.id == 0 {
+        return Invalid([Issue { key: "user.missing", path: "id", message: "no user with id 0" }])
+    }
+    return Valid(Data { name: "user\{p.id}", age: 30 })
+}
+
+export fn page(p: Params, d: Data) -> Html {
+    return el("main", [], [
+            el("h1", [], [text("User \{p.id}")]),
+            el("p", [], [text("\{d.name}, age \{d.age}")]),
+        ])
+}

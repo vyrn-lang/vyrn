@@ -1,0 +1,6 @@
+/// A nested static route (`GET /items`) — `items/index.vyrn`.
+import { el, text, Html } from "std/html"
+
+export fn page() -> Html {
+    return el("main", [], [el("h1", [], [text("Items")])])
+}
