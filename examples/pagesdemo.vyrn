@@ -29,14 +29,11 @@ fn main() -> Int64 {
     show("GET", "/items/5") // 200 — dynamic, no loader
     show("GET", "/items/abc") // 404 — non-integer segment never reaches user code
     show("GET", "/users/7") // 200 — loader Valid
+    show("GET", "/users/0") // 422 — loader Invalid renders an error page
     show("GET", "/nope") // 404 — unknown path
-    // NOTE: the loader-Invalid path (`/users/0` → a 422 error page) is exercised
-    // in the `test` block below rather than here. It destructures
-    // `Invalid(Array<Issue>)`, and the native/wasm backends currently corrupt an
-    // `Array` payload extracted from an enum variant (the interpreter is correct);
-    // keeping it in a test — which `vyrn build` excludes — keeps this a clean
-    // interp/native/wasm parity citizen while still covering the behavior. See the
-    // handoff note accompanying this change.
+    // The loader-Invalid path (`/users/0` → a 422 error page) destructures
+    // `Invalid(Array<Issue>)`. It runs in `main` as a full parity citizen: the
+    // enum `Array` payload now extracts correctly on every backend (RFC-0026).
 
     // Typed URLs: static helpers and per-route dynamic helpers, all `RoutePath`.
     print(rootPath()) // /
