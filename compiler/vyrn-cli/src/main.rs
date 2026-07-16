@@ -10,6 +10,8 @@
 //!   vyrn test    [file.vyrn] [--name <substring>]
 //!                                        Run the root file's `test` blocks under the interpreter.
 //!   vyrn serve   [file.vyrn] [--port N] Run `fn handle(req: Request) -> Response` as an HTTP host.
+//!   vyrn dev     [--port N]             Fullstack (RFC-0019): build the client to wasm, serve the
+//!                                        server root + static assets + the browser runtimes.
 //!   vyrn new     <name>                 Scaffold a project (vyrn.json + src/main.vyrn).
 //!   vyrn deps                           Print the resolved module graph.
 //!
@@ -22,7 +24,7 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn serve [file.vyrn] [--port N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn serve [file.vyrn] [--port N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
@@ -65,6 +67,9 @@ fn main() -> ExitCode {
     }
     if cmd == "fmt" {
         return fmt_cmd(&args[2..]);
+    }
+    if cmd == "dev" {
+        return dev_cmd(&args[2..]);
     }
 
     // The remaining commands take an optional file; without one, the manifest
@@ -222,6 +227,26 @@ fn std_root() -> Option<String> {
     for _ in 0..5 {
         dir = dir.parent()?.to_path_buf();
         let cand = dir.join("std");
+        if cand.is_dir() {
+            return Some(cand.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    None
+}
+
+/// The `web/` root holding the browser runtimes (`wasi-min.js`, `vyrn-rpc.js`,
+/// `vyrn-query.js`) — `$VYRN_WEB`, or `web/` found by walking up from the
+/// executable (the sibling of `std/`). `vyrn dev` serves these to the page.
+fn web_root() -> Option<String> {
+    if let Ok(p) = std::env::var("VYRN_WEB") {
+        if Path::new(&p).exists() {
+            return Some(p.replace('\\', "/"));
+        }
+    }
+    let mut dir = std::env::current_exe().ok()?;
+    for _ in 0..5 {
+        dir = dir.parent()?.to_path_buf();
+        let cand = dir.join("web");
         if cand.is_dir() {
             return Some(cand.to_string_lossy().replace('\\', "/"));
         }
@@ -1508,6 +1533,253 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// `vyrn dev [--port N]` (RFC-0019) — the fullstack convenience command.
+///
+/// Reads `vyrn.json`'s `"server"` / `"client"` (+ optional `"public"`, default
+/// `public`), builds the client to wasm (a plain wasm build — no roles), then
+/// serves the server root's `handle` over HTTP with static assets in front.
+///
+/// Routing precedence (LOCKED): a GET whose path names an existing static asset
+/// is served from disk; everything else — every POST, and any GET that is not a
+/// static file (so all of `/rpc/*`) — goes to the server's `handle`. Static
+/// sources, in order: the built `/client.wasm`, the runtimes under
+/// `/vyrn-runtime/<name>`, then files under the public dir (`/` → `index.html`).
+fn dev_cmd(rest: &[String]) -> ExitCode {
+    let mut port: u16 = 8080;
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i] == "--port" && i + 1 < rest.len() {
+            match rest[i + 1].parse::<u16>() {
+                Ok(p) => port = p,
+                Err(_) => {
+                    eprintln!("dev: --port needs a number in 0..=65535");
+                    return ExitCode::from(2);
+                }
+            }
+            i += 2;
+        } else {
+            eprintln!("dev: unexpected argument `{}`", rest[i]);
+            return ExitCode::from(2);
+        }
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let Some(manifest) = find_manifest(&cwd) else {
+        eprintln!("error: `vyrn dev` needs a vyrn.json with `server` and `client` keys");
+        return ExitCode::FAILURE;
+    };
+    let manifest_path = Path::new(&manifest.dir).join("vyrn.json");
+    let text = std::fs::read_to_string(&manifest_path).unwrap_or_default();
+    let doc = match vyrn_frontend::schema::parse_json(&text) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: vyrn.json is not valid JSON: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    use vyrn_frontend::schema::Json;
+    let get_str = |key: &str| -> Option<String> {
+        match doc.get(key) {
+            Some(Json::Str(s)) => Some(s.clone()),
+            _ => None,
+        }
+    };
+    let Some(server_rel) = get_str("server") else {
+        eprintln!("error: vyrn.json is missing a `\"server\"` entry (the module with `handle`)");
+        return ExitCode::FAILURE;
+    };
+    let Some(client_rel) = get_str("client") else {
+        eprintln!("error: vyrn.json is missing a `\"client\"` entry (the wasm module to build)");
+        return ExitCode::FAILURE;
+    };
+    let public_rel = get_str("public").unwrap_or_else(|| "public".to_string());
+    let server_path = format!("{}/{server_rel}", manifest.dir);
+    let client_path = format!("{}/{client_rel}", manifest.dir);
+    let public_dir = PathBuf::from(format!("{}/{public_rel}", manifest.dir));
+
+    let Some(web_dir) = web_root() else {
+        eprintln!("error: could not find the `web/` runtime directory (set VYRN_WEB)");
+        return ExitCode::FAILURE;
+    };
+
+    // Build the client to wasm into a dev scratch dir served at `/client.wasm`.
+    let dev_dir = PathBuf::from(format!("{}/.vyrn-dev", manifest.dir));
+    if let Err(e) = std::fs::create_dir_all(&dev_dir) {
+        eprintln!("error: cannot create {}: {e}", dev_dir.display());
+        return ExitCode::FAILURE;
+    }
+    let wasm_out = dev_dir.join("client.wasm");
+    let _ = std::fs::remove_file(&wasm_out); // a stale wasm must not mask a failed build
+    eprintln!("dev: building client {client_rel} -> wasm");
+    let build_code = build(
+        &client_path,
+        &["--target".to_string(), "wasm".to_string(), "-o".to_string(), wasm_out.to_string_lossy().into_owned()],
+    );
+    if !wasm_out.is_file() {
+        return build_code;
+    }
+
+    // Load the server root (must define `handle`, like `vyrn serve`).
+    let source = match std::fs::read_to_string(&server_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {server_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let program = match load_program(&server_path, &source) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    use vyrn_frontend::ast::Type;
+    let has_handle = program.functions.iter().any(|f| {
+        f.name == "handle"
+            && !f.is_extern
+            && f.params.len() == 1
+            && f.params[0].ty == Type::Named("Request".to_string())
+            && f.ret == Type::Named("Response".to_string())
+    });
+    if !has_handle {
+        eprintln!("error: the server root `{server_rel}` needs `fn handle(req: Request) -> Response`");
+        return ExitCode::FAILURE;
+    }
+
+    let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: cannot bind port {port}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
+    let assets = DevAssets { public_dir, web_dir, wasm: wasm_out };
+
+    let result = vyrn_frontend::interp::serve(&program, move |call_handle| {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        eprintln!("dev: serving {server_rel} on http://localhost:{actual_port}");
+        eprintln!("dev:   /rpc/*         -> server `handle` (rpcHandle + your pages)");
+        eprintln!("dev:   /client.wasm   -> built from {client_rel}");
+        eprintln!("dev:   /vyrn-runtime/ -> web runtimes (wasi-min.js, vyrn-rpc.js, vyrn-query.js)");
+        eprintln!("dev:   /              -> {}/", assets.public_dir.display());
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut s) => dev_serve_one(&mut s, &assets, call_handle),
+                Err(_) => continue,
+            }
+        }
+        Ok(())
+    });
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Static asset roots for `vyrn dev`.
+struct DevAssets {
+    public_dir: PathBuf,
+    web_dir: String,
+    wasm: PathBuf,
+}
+
+/// Resolve a GET path to a static file per the locked precedence, or `None` if
+/// no static asset matches (so the request falls through to `handle`). Rejects
+/// any path containing a `..` segment (no traversal out of a root).
+fn dev_static_path(path: &str, assets: &DevAssets) -> Option<PathBuf> {
+    // Strip a query string; work on the raw path.
+    let raw = path.split('?').next().unwrap_or(path);
+    if raw.split('/').any(|seg| seg == "..") {
+        return None;
+    }
+    if raw == "/client.wasm" {
+        return assets.wasm.is_file().then(|| assets.wasm.clone());
+    }
+    if let Some(name) = raw.strip_prefix("/vyrn-runtime/") {
+        if !name.is_empty() {
+            let p = Path::new(&assets.web_dir).join(name);
+            return p.is_file().then_some(p);
+        }
+        return None;
+    }
+    // Public dir: `/` → index.html, else the path under public/.
+    let rel = if raw == "/" { "index.html" } else { raw.trim_start_matches('/') };
+    let p = assets.public_dir.join(rel);
+    p.is_file().then_some(p)
+}
+
+/// The `Content-Type` for a static asset, by extension.
+fn dev_content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json",
+        Some("wasm") => "application/wasm",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("png") => "image/png",
+        _ => "application/octet-stream",
+    }
+}
+
+/// One `vyrn dev` connection: static-first for a matching GET, otherwise the
+/// server's `handle` (all POSTs, `/rpc/*`, and non-file GETs).
+fn dev_serve_one(
+    stream: &mut std::net::TcpStream,
+    assets: &DevAssets,
+    call_handle: &mut dyn FnMut(
+        vyrn_frontend::interp::ServeRequest,
+    ) -> Result<vyrn_frontend::interp::ServeResponse, String>,
+) {
+    let req = match parse_request(stream) {
+        Ok(r) => r,
+        Err(ParseError::Chunked { method, path }) => {
+            eprintln!("{method} {path} -> 501");
+            write_response(stream, 501, "text/plain", b"chunked transfer-encoding not supported");
+            return;
+        }
+        Err(ParseError::Bad) => {
+            eprintln!("- - -> 400");
+            write_response(stream, 400, "text/plain", b"bad request");
+            return;
+        }
+    };
+    // Static assets: GET (or HEAD) only, so nothing shadows a POST /rpc/*.
+    if req.method == "GET" || req.method == "HEAD" {
+        if let Some(file) = dev_static_path(&req.path, assets) {
+            match std::fs::read(&file) {
+                Ok(bytes) => {
+                    eprintln!("{} {} -> 200 (static)", req.method, req.path);
+                    write_response(stream, 200, dev_content_type(&file), &bytes);
+                }
+                Err(_) => {
+                    eprintln!("{} {} -> 500", req.method, req.path);
+                    write_response(stream, 500, "text/plain", b"cannot read asset");
+                }
+            }
+            return;
+        }
+    }
+    // Otherwise: into Vyrn's `handle` (rpcHandle + the app's own routes).
+    let method = req.method.clone();
+    let path = req.path.clone();
+    match call_handle(req) {
+        Ok(resp) => {
+            eprintln!("{method} {path} -> {}", resp.status);
+            write_response(stream, resp.status, &resp.content_type, resp.body.as_bytes());
+        }
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            eprintln!("{method} {path} -> 500");
+            write_response(stream, 500, "text/plain", b"internal error");
         }
     }
 }
