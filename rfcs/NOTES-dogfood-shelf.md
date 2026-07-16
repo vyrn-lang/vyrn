@@ -21,13 +21,15 @@ shelf is the first program to combine these libraries in one build*; the existin
    The RPC contract module and page modules are both *imported* (non-root), so
    neither can touch the app's `books` store. `rpcServer` is unusable; I
    hand-wrote the entire server RPC dispatch in the root. (language, structural)
-2. **BUG: flat-namespace resolver ignores local shadowing.** A local/param/loop
-   var whose name matches *another linked module's* top-level export is mis-read
-   as an un-imported cross-module reference. This makes `std/i18n` un-linkable
-   with `std/html` (`on`) and `std/ui` (`t`). Hit 4×. (compiler)
-3. **BUG: generator cache collides on the arg string alone.** `rpcClient("./api")`
-   from shelf served *fullstack's* `api.vyrn`. The cache key omits the importer
-   dir and resolved inputs. (tooling)
+2. **BUG (FIXED, ef7522c): flat-namespace resolver ignores local shadowing.** A
+   local/param/loop var whose name matches *another linked module's* top-level
+   export was mis-read as an un-imported cross-module reference. This made
+   `std/i18n` un-linkable with `std/html` (`on`) and `std/ui` (`t`). Hit 4×.
+   The visibility scan is now scope-aware. (compiler)
+3. **BUG (FIXED, b3a07c6): generator cache collides on the arg string alone.**
+   `rpcClient("./api")` from shelf served *fullstack's* `api.vyrn`. The cache key
+   omitted the importer dir and resolved inputs; it now folds the resolved input
+   roots in. (tooling)
 4. **i18n cannot be used inside a `.vyx`, and pre-generating it forfeits the
    locale state carve-out.** All labels resolve in the root and pass as props
    (prop explosion); `setLocale` had to be stripped and `Locale` threaded by hand.
@@ -41,6 +43,13 @@ shelf is the first program to combine these libraries in one build*; the existin
 ## HARD BUGS (wrong behavior — reported, worked around in-app with marked comments)
 
 ### BUG 1 — Generator output cache collides across importers with the same arg string
+
+> **FIXED** (b3a07c6): `generator_sources_hash` now folds the RESOLVED input
+> roots (the arg paths rebased onto the importing module's directory) into the
+> cache key, so two importers in different dirs with the same relative arg no
+> longer share an entry. Pre-fix cache entries self-heal (key-format change =
+> clean miss). Shelf's globally-unique generator args are no longer required.
+
 
 `compiler/vyrn-frontend/src/loader.rs::generator_sources_hash` (~line 702) keys
 the on-disk cache (`~/.vyrn/cache/gen`) on **generator source ++ generator name ++
@@ -70,6 +79,14 @@ That is *why* the directories aren't named `api`/`pages`/`locales`/`components`.
 into `sources_hash`.
 
 ### BUG 2 — Flat-namespace resolver mis-resolves a local as an un-imported foreign export
+
+> **FIXED** (ef7522c): the link-time visibility scan is now scope-aware — it
+> binds params, `let`, `for`/`while`/lambda vars and match binds before checking
+> foreign references (a scanner modeled on the RFC-0027 `NsResolver` walk), so a
+> local shadowing a foreign export is never mistaken for an un-imported
+> reference. The shelf renames (`loc`/`cls`/`t`) are removed and the app links
+> `std/html` + `std/ui` + the i18n module cleanly.
+
 
 A **local variable, parameter, or loop binding** whose name equals a **top-level
 export of another linked module** is reported as
@@ -275,8 +292,8 @@ consequences:
 
 | # | Candidate | Evidence in shelf | Scope | Kind |
 |---|-----------|-------------------|-------|------|
-| P0 | **Name resolution binds locals before foreign exports** | BUG 2, hit 4×; blocks i18n+UI entirely | small, high-value | compiler |
-| P0 | **Generator cache key includes importer dir / resolved inputs** | BUG 1; wrong module served | small | tooling |
+| ~~P0~~ DONE | **Name resolution binds locals before foreign exports** (ef7522c) | BUG 2, hit 4×; blocked i18n+UI entirely | small, high-value | compiler |
+| ~~P0~~ DONE | **Generator cache key includes importer dir / resolved inputs** (b3a07c6) | BUG 1; wrong module served | small | tooling |
 | P1 | **State access for generator-consumer modules** (context param, `export let`, or extend the carve-out) | rpcServer unusable; pages can't read the store; contract bodies are dead | large | language |
 | P1 | **i18n usable inside `.vyx`** (fix nested-generator path resolution) | every label passed as a prop; 14-field `Labels` | medium | generator |
 | P2 | **Pre-generation keeps locale state** (carve-out for checked-in generated modules) OR a stateless-by-design i18n surface | had to strip `setLocale`, thread `loc` everywhere | medium | language+lib |
