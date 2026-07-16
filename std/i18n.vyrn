@@ -105,23 +105,6 @@ fn trimStr(s: String) -> String {
     return sliceStr(ba, start, end)
 }
 
-/// Lexicographic byte comparison: whether `a` sorts after `b`.
-fn strGreater(a: String, b: String) -> Bool {
-    let ba = bytes(a)
-    let bb = bytes(b)
-    let mut i = 0
-    while i < ba.length && i < bb.length {
-        if ba[i] > bb[i] {
-            return true
-        }
-        if ba[i] < bb[i] {
-            return false
-        }
-        i = i + 1
-    }
-    return ba.length > bb.length
-}
-
 /// Uppercase the first ASCII byte of `s`.
 fn upperFirst(s: String) -> String {
     let ba = bytes(s)
@@ -389,13 +372,11 @@ fn parseLocaleJson(src: String) -> LocaleData {
                 if i < e && ba[i] == 44 {
                     i = i + 1
                 }
+            } else if c == 123 {
+                prefix.push(ks.value)
+                i = i + 1
             } else {
-                if c == 123 {
-                    prefix.push(ks.value)
-                    i = i + 1
-                } else {
-                    return dataError("unsupported value (only strings and nested objects are allowed)")
-                }
+                return dataError("unsupported value (only strings and nested objects are allowed)")
             }
         }
     }
@@ -431,28 +412,26 @@ fn readLiteral(ba: Array<UInt8>, i: Int64, e: Int64, stopHash: Bool) -> LitRead 
                 }
                 j = j + 1
             }
+        } else if quoted {
+            out.push(b)
+            j = j + 1
         } else {
-            if quoted {
-                out.push(b)
-                j = j + 1
-            } else {
-                if b == 123 || b == 125 {
-                    let v = match stringFromBytes(out) {
-                        Ok(v) => v,
-                        Err(err) => "",
-                    }
-                    return LitRead { text: v, next: j, hash: false }
+            if b == 123 || b == 125 {
+                let v = match stringFromBytes(out) {
+                    Ok(v) => v,
+                    Err(err) => "",
                 }
-                if stopHash && b == 35 {
-                    let v = match stringFromBytes(out) {
-                        Ok(v) => v,
-                        Err(err) => "",
-                    }
-                    return LitRead { text: v, next: j, hash: true }
-                }
-                out.push(b)
-                j = j + 1
+                return LitRead { text: v, next: j, hash: false }
             }
+            if stopHash && b == 35 {
+                let v = match stringFromBytes(out) {
+                    Ok(v) => v,
+                    Err(err) => "",
+                }
+                return LitRead { text: v, next: j, hash: true }
+            }
+            out.push(b)
+            j = j + 1
         }
     }
     let v = match stringFromBytes(out) {
@@ -480,25 +459,19 @@ fn matchBrace(ba: Array<UInt8>, open: Int64, e: Int64) -> Int64 {
                 }
                 i = i + 1
             }
-        } else {
-            if quoted {
-                i = i + 1
-            } else {
-                if b == 123 {
-                    depth = depth + 1
-                    i = i + 1
-                } else {
-                    if b == 125 {
-                        depth = depth - 1
-                        i = i + 1
-                        if depth == 0 {
-                            return i
-                        }
-                    } else {
-                        i = i + 1
-                    }
-                }
+        } else if quoted {
+            i = i + 1
+        } else if b == 123 {
+            depth = depth + 1
+            i = i + 1
+        } else if b == 125 {
+            depth = depth - 1
+            i = i + 1
+            if depth == 0 {
+                return i
             }
+        } else {
+            i = i + 1
         }
     }
     return i
@@ -525,28 +498,20 @@ fn splitTopCommas(ba: Array<UInt8>, s: Int64, e: Int64) -> Array<String> {
                 }
                 i = i + 1
             }
+        } else if quoted {
+            i = i + 1
+        } else if b == 123 {
+            depth = depth + 1
+            i = i + 1
+        } else if b == 125 {
+            depth = depth - 1
+            i = i + 1
+        } else if b == 44 && depth == 0 {
+            parts.push(trimStr(sliceStr(ba, segStart, i)))
+            i = i + 1
+            segStart = i
         } else {
-            if quoted {
-                i = i + 1
-            } else {
-                if b == 123 {
-                    depth = depth + 1
-                    i = i + 1
-                } else {
-                    if b == 125 {
-                        depth = depth - 1
-                        i = i + 1
-                    } else {
-                        if b == 44 && depth == 0 {
-                            parts.push(trimStr(sliceStr(ba, segStart, i)))
-                            i = i + 1
-                            segStart = i
-                        } else {
-                            i = i + 1
-                        }
-                    }
-                }
-            }
+            i = i + 1
         }
     }
     parts.push(trimStr(sliceStr(ba, segStart, e)))
@@ -643,7 +608,7 @@ fn joinSortedSelectors(br: Branches) -> String {
     let mut i = 1
     while i < names.length {
         let mut j = i
-        while j > 0 && strGreater(names[j - 1], names[j]) {
+        while j > 0 && names[j - 1] > names[j] {
             let tmp = names[j - 1]
             names[j - 1] = names[j]
             names[j] = tmp
@@ -677,58 +642,54 @@ fn scanArgs(msg: String) -> ArgScan {
         i = lit.next
         if i >= e {
             i = e
-        } else {
-            if ba[i] == 125 {
-                i = i + 1
+        } else if ba[i] == 125 {
+            i = i + 1
+        } else if ba[i] == 123 {
+            let close = matchBrace(ba, i, e)
+            let parts = splitTopCommas(ba, i + 1, close - 1)
+            if parts.length == 1 {
+                names.push(parts[0])
+                kinds.push("string")
+                branches.push("")
             } else {
-                if ba[i] == 123 {
-                    let close = matchBrace(ba, i, e)
-                    let parts = splitTopCommas(ba, i + 1, close - 1)
-                    if parts.length == 1 {
-                        names.push(parts[0])
-                        kinds.push("string")
+                let kw = parts[1]
+                if kw == "plural" || kw == "select" {
+                    let blobStart = i + 1
+                    // The branch blob is everything after "name, kw,".
+                    let blob = branchBlob(ba, blobStart, close - 1)
+                    let br = parseBranches(blob)
+                    names.push(parts[0])
+                    if kw == "plural" {
+                        kinds.push("plural")
                         branches.push("")
                     } else {
-                        let kw = parts[1]
-                        if kw == "plural" || kw == "select" {
-                            let blobStart = i + 1
-                            // The branch blob is everything after "name, kw,".
-                            let blob = branchBlob(ba, blobStart, close - 1)
-                            let br = parseBranches(blob)
-                            names.push(parts[0])
-                            if kw == "plural" {
-                                kinds.push("plural")
-                                branches.push("")
-                            } else {
-                                kinds.push("select")
-                                branches.push(joinSortedSelectors(br))
+                        kinds.push("select")
+                        branches.push(joinSortedSelectors(br))
+                    }
+                    // Recurse into branch texts for simple args.
+                    for txt in br.texts {
+                        let sub = scanArgs(txt)
+                        if sub.ok == false {
+                            return sub
+                        }
+                        let mut si = 0
+                        while si < sub.names.length {
+                            if sub.kinds[si] != "string" {
+                                return argError("nested plural/select is not supported (v1)")
                             }
-                            // Recurse into branch texts for simple args.
-                            for txt in br.texts {
-                                let sub = scanArgs(txt)
-                                if sub.ok == false {
-                                    return sub
-                                }
-                                let mut si = 0
-                                while si < sub.names.length {
-                                    if sub.kinds[si] != "string" {
-                                        return argError("nested plural/select is not supported (v1)")
-                                    }
-                                    names.push(sub.names[si])
-                                    kinds.push(sub.kinds[si])
-                                    branches.push(sub.branches[si])
-                                    si = si + 1
-                                }
-                            }
-                        } else {
-                            return argError("unknown argument type (expected `plural` or `select`)")
+                            names.push(sub.names[si])
+                            kinds.push(sub.kinds[si])
+                            branches.push(sub.branches[si])
+                            si = si + 1
                         }
                     }
-                    i = close
                 } else {
-                    i = i + 1
+                    return argError("unknown argument type (expected `plural` or `select`)")
                 }
             }
+            i = close
+        } else {
+            i = i + 1
         }
     }
     return dedupeArgs(names, kinds, branches)
@@ -754,30 +715,22 @@ fn branchBlob(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
                 }
                 i = i + 1
             }
-        } else {
-            if quoted {
-                i = i + 1
-            } else {
-                if b == 123 {
-                    depth = depth + 1
-                    i = i + 1
-                } else {
-                    if b == 125 {
-                        depth = depth - 1
-                        i = i + 1
-                    } else {
-                        if b == 44 && depth == 0 {
-                            commas = commas + 1
-                            i = i + 1
-                            if commas == 2 {
-                                return sliceStr(ba, i, e)
-                            }
-                        } else {
-                            i = i + 1
-                        }
-                    }
-                }
+        } else if quoted {
+            i = i + 1
+        } else if b == 123 {
+            depth = depth + 1
+            i = i + 1
+        } else if b == 125 {
+            depth = depth - 1
+            i = i + 1
+        } else if b == 44 && depth == 0 {
+            commas = commas + 1
+            i = i + 1
+            if commas == 2 {
+                return sliceStr(ba, i, e)
             }
+        } else {
+            i = i + 1
         }
     }
     return ""
@@ -820,7 +773,7 @@ fn argSignature(sc: ArgScan) -> String {
     let mut a = 1
     while a < items.length {
         let mut b = a
-        while b > 0 && strGreater(items[b - 1], items[b]) {
+        while b > 0 && items[b - 1] > items[b] {
             let tmp = items[b - 1]
             items[b - 1] = items[b]
             items[b] = tmp
@@ -924,31 +877,27 @@ fn compileBody(msg: String, tag: String, ind: String, pluralVar: String) -> Stri
             if b == 35 && pluralVar != "" {
                 code = code + ind + "acc = acc + " + pluralVar + ".toString()\n"
                 i = i + 1
-            } else {
-                if b == 125 {
-                    i = i + 1
+            } else if b == 125 {
+                i = i + 1
+            } else if b == 123 {
+                let close = matchBrace(ba, i, e)
+                let parts = splitTopCommas(ba, i + 1, close - 1)
+                if parts.length == 1 {
+                    code = code + ind + "acc = acc + " + parts[0] + "\n"
                 } else {
-                    if b == 123 {
-                        let close = matchBrace(ba, i, e)
-                        let parts = splitTopCommas(ba, i + 1, close - 1)
-                        if parts.length == 1 {
-                            code = code + ind + "acc = acc + " + parts[0] + "\n"
-                        } else {
-                            let argName = parts[0]
-                            let kw = parts[1]
-                            let blob = branchBlob(ba, i + 1, close - 1)
-                            let br = parseBranches(blob)
-                            if kw == "plural" {
-                                code = code + compilePlural(br, tag, ind, argName)
-                            } else {
-                                code = code + compileSelect(br, tag, ind, argName)
-                            }
-                        }
-                        i = close
+                    let argName = parts[0]
+                    let kw = parts[1]
+                    let blob = branchBlob(ba, i + 1, close - 1)
+                    let br = parseBranches(blob)
+                    if kw == "plural" {
+                        code = code + compilePlural(br, tag, ind, argName)
                     } else {
-                        i = i + 1
+                        code = code + compileSelect(br, tag, ind, argName)
                     }
                 }
+                i = close
+            } else {
+                i = i + 1
             }
         }
     }
@@ -1000,25 +949,22 @@ fn compileSelect(br: Branches, tag: String, ind: String, argName: String) -> Str
     return emitChain(clauses, bodies, otherBody, ind)
 }
 
-/// Assemble a nested `if … else { if … else { … } }` chain (Vyrn has no
-/// `else if`). With no clauses, the else body is emitted bare (a locale with
-/// only `other`).
+/// Assemble a flat `if … else if … else { … }` chain (RFC-0022). With no
+/// clauses, the else body is emitted bare (a locale with only `other`).
 fn emitChain(clauses: Array<String>, bodies: Array<String>, otherBody: String, ind: String) -> String {
     if clauses.length == 0 {
         return otherBody
     }
-    return emitChainAt(clauses, bodies, otherBody, ind, 0)
-}
-
-fn emitChainAt(clauses: Array<String>, bodies: Array<String>, otherBody: String, ind: String, idx: Int64) -> String {
-    let mut code = ind + "if " + clauses[idx] + " {\n"
-    code = code + bodies[idx]
-    code = code + ind + "} else {\n"
-    if idx + 1 < clauses.length {
-        code = code + emitChainAt(clauses, bodies, otherBody, ind, idx + 1)
-    } else {
-        code = code + otherBody
+    let mut code = ind + "if " + clauses[0] + " {\n"
+    code = code + bodies[0]
+    let mut i = 1
+    while i < clauses.length {
+        code = code + ind + "} else if " + clauses[i] + " {\n"
+        code = code + bodies[i]
+        i = i + 1
     }
+    code = code + ind + "} else {\n"
+    code = code + otherBody
     code = code + ind + "}\n"
     return code
 }
