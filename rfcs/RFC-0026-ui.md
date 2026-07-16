@@ -197,6 +197,42 @@ pages/
 `pages/` + `route(req)`; generation-failure tests (param/type mismatch,
 colliding routes); `vyrn emit-gen` goldens.
 
+**M3 — as landed.** Shipped as `std/ui.vyrn` (`pages(dir)`, zero compiler
+changes); the fullstack demo rebuilt on `pages/index.vyrn` + `pages/users/[id].vyrn`
+(a loader page) with the RPC endpoints byte-unchanged (`handle` checks `/rpc/*`
+first, then `route`); `examples/pagesdemo.vyrn` a three-way parity citizen;
+`emit-gen` goldens + the three generation-failure tests in
+`compiler/vyrn-cli/tests/pages.rs`. Notes for the next round:
+
+- **Dynamic params are `Int64`-only in v1.** A `String`/other param spelling is
+  an `PAGES_UNSUPPORTED_PARAM_TYPE` load diagnostic (naming the file). The
+  integer-spelling regex + `fromJson(Int64, seg)` validation is the whole
+  supported surface; named/validated param types are a follow-up.
+- **Many same-named page exports coexist via RFC-0022 co-naming.** The
+  synthesized router imports each page's `page`/`Params`/`load`/`Data` under
+  per-route aliases *and* declares an inert local `page`/`Params`/`load`/`Data`,
+  which forces every aliased foreign decl to a fresh symbol (the flat namespace
+  otherwise collides). This is the RPC same-named-stub mechanism generalised to
+  N modules; it works, but it is a load-bearing trick worth a first-class
+  "import module M as namespace" primitive eventually.
+- **Interpolation containment does NOT see through `@str(Int64)`** (the RFC's
+  anticipated fallback). An `Int64` hole is not a finite string type, and the
+  param's `RoutePath` branch (`-?[1-9][0-9]*`) is an infinite language, so
+  `template_language` returns `NotApplicable`: the `href…` helpers emit an
+  ordinary runtime `RoutePath` validation (which always passes on an integer
+  spelling). Static route *literals* ARE checked at compile time against
+  `RoutePath` (the consteval auto-validation path). No checker hack was added.
+- **Native/wasm codegen wall (reported, not worked around):** an enum variant
+  carrying an `Array` payload corrupts the array when destructured — `.length`
+  reads garbage, iteration segfaults — on BOTH compiled backends (the
+  interpreter is correct). This hits `Validation`'s `Invalid(Array<Issue>)`, so
+  the loader-`Invalid` error page renders correctly under the interpreter (and
+  thus `vyrn dev`/`serve` and the browser) but not in a compiled binary. The
+  existing corpus never exercised it (RPC's in-process flavor only yields
+  `Valid`). `pagesdemo`'s `main()` therefore stays on the `Valid`/404 paths (a
+  clean interp==native==wasm citizen) and covers the error page in a
+  `test` block (which `vyrn build` excludes). This deserves its own fix/RFC.
+
 ## M4 — `.vyx` component files (the DX layer)
 
 `gen fn components(dir: String) -> String` compiles single-file components to
