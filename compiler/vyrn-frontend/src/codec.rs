@@ -359,14 +359,21 @@ pub fn expected_name(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         Type::Float | Type::Float32 => "number".to_string(),
         Type::Bool => "boolean".to_string(),
         Type::Enum(vs) => enum_expected(&vs),
+        Type::Result(..) => result_expected(),
         _ => "value".to_string(),
     }
 }
 
-/// `one of \`A\`, \`B\`` for a payload-less enum target.
+/// `one of \`A\`, \`B\`` for an enum target — lists every variant name (payload
+/// or not), the uniformity rule for the `json.type` expected-one-of message.
 pub fn enum_expected(vs: &[EnumVariant]) -> String {
     let names: Vec<String> = vs.iter().map(|v| format!("`{}`", v.name)).collect();
     format!("one of {}", names.join(", "))
+}
+
+/// `one of \`Ok\`, \`Err\`` for a `Result<T, E>` decode target.
+pub fn result_expected() -> String {
+    "one of `Ok`, `Err`".to_string()
 }
 
 /// `json.type` message: `expected <what>, found <kind>`.
@@ -432,14 +439,23 @@ fn codable(
     // A named type is described by the *spelling the user wrote* in error
     // messages, but we recurse through its structural form.
     let display = type_display(ty);
+    // `Validation<T>` stays off the wire in v1 (its `Invalid` carries an
+    // `Array<Issue>` and its `Valid` a generic payload) — an explicit reject so
+    // the diagnostic names `Validation` rather than a generic-parameter leaf
+    // (RFC-0024 out-of-scope; a one-line follow-up if ever wanted).
+    if is_validation(ty) {
+        return Err("Validation".to_string());
+    }
     match ty {
         Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool | Type::Str => {
             Ok(())
         }
         Type::Option(inner) => {
-            // v0.1: no nested Option/Result — the checker rejects those already,
-            // but a nested Option is a decode hazard, so name it here too.
-            if matches!(**inner, Type::Option(_) | Type::Result(..)) {
+            // A nested Option is a decode hazard (double `null`), so name it here.
+            // An `Option<Result<..>>` / `Option<Enum>` IS codable (RFC-0024): a
+            // payload enum/Result never encodes as `null`, so the wire form stays
+            // unambiguous.
+            if matches!(**inner, Type::Option(_)) {
                 return Err(display);
             }
             codable(inner, types, decode, seen)
@@ -458,13 +474,16 @@ fn codable(
             }
             Ok(())
         }
-        Type::Enum(vs) => {
-            // Payload-less enums only (↔ JSON strings).
-            if vs.iter().all(|v| v.payload.is_empty()) {
-                Ok(())
-            } else {
-                Err(display)
-            }
+        // A payload enum is codable when every variant's payloads are (RFC-0024).
+        // A rejection names the offending variant + payload type so the diagnostic
+        // is precise (`Task<Int64> (payload of variant \`Boxed\`)`).
+        Type::Enum(vs) => enum_codable(vs, types, decode, seen),
+        // `Result<T, E>` flows through as a two-variant payload enum
+        // (`{"Ok":<T>}` / `{"Err":<E>}`): codable when both payloads are.
+        Type::Result(t, e) => {
+            codable(t, types, decode, seen).map_err(|_| enum_payload_offender(t, "Ok"))?;
+            codable(e, types, decode, seen).map_err(|_| enum_payload_offender(e, "Err"))?;
+            Ok(())
         }
         Type::Named(n) => {
             if seen.iter().any(|s| s == n) {
@@ -476,16 +495,56 @@ fn codable(
                     seen.push(n.clone());
                     let r = codable(&d.base, types, decode, seen);
                     seen.pop();
-                    // Re-badge a structural rejection with the user's type name.
-                    r.map_err(|_| n.clone())
+                    // Preserve a payload-enum's precise variant/payload offender;
+                    // re-badge any other structural rejection with the user's name.
+                    r.map_err(|e| {
+                        if matches!(&d.base, Type::Enum(vs) if vs.iter().any(|v| !v.payload.is_empty()))
+                            || matches!(d.base, Type::Result(..))
+                        {
+                            e
+                        } else {
+                            n.clone()
+                        }
+                    })
                 }
             }
         }
-        // Everything else is off the wire in v1: Result/payload enums, Ref,
-        // Task, Template, Logger, type transformers, Param, Unit, Err.
-        Type::Result(..) => Err(display),
+        // Everything else is off the wire in v1: Ref, Task, Template, Logger,
+        // type transformers, Param, Unit, Err.
         _ => Err(display),
     }
+}
+
+/// Whether `ty` is a `Validation<..>` (either the bare `Named`/`App` spelling or
+/// a resolved enum with the built-in `Valid`/`Invalid` variants).
+fn is_validation(ty: &Type) -> bool {
+    match ty {
+        Type::Named(n) => n == "Validation",
+        Type::App(n, _) => n == "Validation",
+        _ => false,
+    }
+}
+
+/// A payload enum is codable when every variant's payloads are. The error names
+/// the first offending variant + payload type.
+fn enum_codable(
+    vs: &[EnumVariant],
+    types: &HashMap<String, TypeDecl>,
+    decode: bool,
+    seen: &mut Vec<String>,
+) -> Result<(), String> {
+    for v in vs {
+        for p in &v.payload {
+            codable(p, types, decode, seen).map_err(|_| enum_payload_offender(p, &v.name))?;
+        }
+    }
+    Ok(())
+}
+
+/// The rejection message for a non-codable enum payload: `<type> (payload of
+/// variant \`Name\`)`.
+fn enum_payload_offender(p: &Type, variant: &str) -> String {
+    format!("{} (payload of variant `{}`)", type_display(p), variant)
 }
 
 /// A user-facing spelling for a type, for the codability rejection message.

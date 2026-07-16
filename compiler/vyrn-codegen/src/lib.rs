@@ -1090,6 +1090,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare ptr @__vyrn_vj_get(ptr, ptr)\n");
     out.push_str("declare i64 @__vyrn_vj_len(ptr)\n");
     out.push_str("declare ptr @__vyrn_vj_at(ptr, i64)\n");
+    out.push_str("declare ptr @__vyrn_vj_at_or_null(ptr, i64)\n");
+    out.push_str("declare i64 @__vyrn_vj_obj_len(ptr)\n");
+    out.push_str("declare ptr @__vyrn_vj_obj_key(ptr, i64)\n");
+    out.push_str("declare ptr @__vyrn_vj_obj_at(ptr, i64)\n");
     out.push_str("declare ptr @__vyrn_vj_str_get(ptr)\n");
     out.push_str("declare i32 @__vyrn_vj_asint(ptr, i32, i32, ptr)\n");
     out.push_str("declare double @__vyrn_vj_asfloat(ptr)\n");
@@ -1614,6 +1618,71 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 ..decl.clone()
             };
             let r = gen.emit_decode_record_body("%arg0", "%arg1", "%arg2", &rec_decl)?;
+            gen.emit_term(format!("ret {ll} {r}"));
+            writeln!(
+                out,
+                "define {ll} @__vyrn_dec_{}(ptr %arg0, ptr %arg1, ptr %arg2) {{",
+                t.name
+            )
+            .unwrap();
+            out.push_str("entry:\n");
+            for a in &gen.allocas {
+                out.push_str(a);
+                out.push('\n');
+            }
+            for b in &gen.body {
+                out.push_str(b);
+                out.push('\n');
+            }
+            out.push_str("}\n\n");
+        }
+    }
+
+    // JSON codec v2 (RFC-0024): a per-enum encode/decode function for every
+    // codable named PAYLOAD enum, so a self-referential payload (through a
+    // record/array/its own type) resolves to a call — the record precedent.
+    // Pure-nullary enums keep their inline string encoding (no function).
+    for t in &program.type_decls {
+        if !t.type_params.is_empty() {
+            continue; // generic enums monomorphize at concrete use sites (inline)
+        }
+        let named = Type::Named(t.name.clone());
+        let vs = match vyrn_frontend::types::resolve(&named, &types) {
+            Type::Enum(vs) if vs.iter().any(|v| !v.payload.is_empty()) => vs,
+            _ => continue,
+        };
+        // Encoder: `@__vyrn_enc_T({ll} %arg0) -> ptr`.
+        if vyrn_frontend::codec::encodable(&named, &types).is_ok() {
+            let mut gen = Gen::new(
+                &ret_types, &param_types, &param_caps, &types, &variants, &str_globals,
+                &empty_subst, &funcs, droppable_map, &regex_globals,
+            );
+            gen.protocol_methods = protocol_methods.clone();
+            let ll = gen.llt(&named);
+            let r = gen.emit_encode_enum_body("%arg0", &vs, &ll)?;
+            gen.emit_term(format!("ret ptr {r}"));
+            writeln!(out, "define ptr @__vyrn_enc_{}({ll} %arg0) {{", t.name).unwrap();
+            out.push_str("entry:\n");
+            for a in &gen.allocas {
+                out.push_str(a);
+                out.push('\n');
+            }
+            for b in &gen.body {
+                out.push_str(b);
+                out.push('\n');
+            }
+            out.push_str("}\n\n");
+        }
+        // Decoder: `@__vyrn_dec_T(ptr %vj, ptr %path, ptr %issues) -> {ll}`.
+        if vyrn_frontend::codec::decodable(&named, &types).is_ok() {
+            let mut gen = Gen::new(
+                &ret_types, &param_types, &param_caps, &types, &variants, &str_globals,
+                &empty_subst, &funcs, droppable_map, &regex_globals,
+            );
+            gen.protocol_methods = protocol_methods.clone();
+            let ll = gen.llt(&named);
+            let expected = vyrn_frontend::codec::enum_expected(&vs);
+            let r = gen.emit_decode_enum_payload("%arg0", "%arg1", "%arg2", &vs, &ll, &expected)?;
             gen.emit_term(format!("ret {ll} {r}"));
             writeln!(
                 out,
@@ -5441,18 +5510,28 @@ impl<'a> Gen<'a> {
                     return Ok(r);
                 }
                 Type::Enum(vs) => {
+                    // A pure-nullary enum reads its variant name from the table in
+                    // O(1) — byte-identical to the payload-less RFC-0018 encoding.
+                    // A payload-bearing enum routes to its generated encoder (a tag
+                    // switch), so a self-referential payload resolves to a call.
+                    if vs.iter().all(|v| v.payload.is_empty()) {
+                        let ll = self.llt(ty);
+                        let tag = self.fresh_tmp();
+                        self.emit(format!("{tag} = extractvalue {ll} {val}, 0"));
+                        let gep = self.fresh_tmp();
+                        let count = vs.len();
+                        self.emit(format!(
+                            "{gep} = getelementptr [{count} x ptr], ptr @.enumnames.{n}, i64 0, i64 {tag}"
+                        ));
+                        let name = self.fresh_tmp();
+                        self.emit(format!("{name} = load ptr, ptr {gep}"));
+                        let r = self.fresh_tmp();
+                        self.emit(format!("{r} = call ptr @__vyrn_vj_str(ptr {name})"));
+                        return Ok(r);
+                    }
                     let ll = self.llt(ty);
-                    let tag = self.fresh_tmp();
-                    self.emit(format!("{tag} = extractvalue {ll} {val}, 0"));
-                    let gep = self.fresh_tmp();
-                    let count = vs.len();
-                    self.emit(format!(
-                        "{gep} = getelementptr [{count} x ptr], ptr @.enumnames.{n}, i64 0, i64 {tag}"
-                    ));
-                    let name = self.fresh_tmp();
-                    self.emit(format!("{name} = load ptr, ptr {gep}"));
                     let r = self.fresh_tmp();
-                    self.emit(format!("{r} = call ptr @__vyrn_vj_str(ptr {name})"));
+                    self.emit(format!("{r} = call ptr @__vyrn_enc_{n}({ll} {val})"));
                     return Ok(r);
                 }
                 _ => {}
@@ -5494,42 +5573,12 @@ impl<'a> Gen<'a> {
                 Ok(r)
             }
             Type::Enum(vs) => {
-                // Anonymous enum (rare): materialize the name via a switch.
+                // Anonymous enum (rare): encode inline via a tag switch (RFC-0024
+                // wire tagging — nullary bare string, payload object/array).
                 let ll = self.llt(ty);
-                let tag = self.fresh_tmp();
-                self.emit(format!("{tag} = extractvalue {ll} {val}, 0"));
-                let slot = self.fresh_alloca("ptr");
-                let done = self.fresh_label("enc.enum.done");
-                let mut cases = Vec::new();
-                let mut labels = Vec::new();
-                for i in 0..vs.len() {
-                    let l = self.fresh_label("enc.enum.case");
-                    cases.push(format!("i64 {i}, label %{l}"));
-                    labels.push(l);
-                }
-                let dflt = self.fresh_label("enc.enum.dflt");
-                self.emit_term(format!(
-                    "switch i64 {tag}, label %{dflt} [ {} ]",
-                    cases.join(" ")
-                ));
-                for (i, l) in labels.iter().enumerate() {
-                    self.emit_label(l);
-                    let g = self.str_g(&vs[i].name)?;
-                    let c = self.fresh_tmp();
-                    self.emit(format!("{c} = call ptr @__vyrn_vj_str(ptr {g})"));
-                    self.emit(format!("store ptr {c}, ptr {slot}"));
-                    self.emit_term(format!("br label %{done}"));
-                }
-                self.emit_label(&dflt);
-                let nul = self.fresh_tmp();
-                self.emit(format!("{nul} = call ptr @__vyrn_vj_null()"));
-                self.emit(format!("store ptr {nul}, ptr {slot}"));
-                self.emit_term(format!("br label %{done}"));
-                self.emit_label(&done);
-                let r = self.fresh_tmp();
-                self.emit(format!("{r} = load ptr, ptr {slot}"));
-                Ok(r)
+                self.emit_encode_enum_body(val, &vs, &ll)
             }
+            Type::Result(t, e) => self.emit_encode_result(val, &t, &e),
             Type::Record(fields) => {
                 // Anonymous record: build the object inline (no recursion risk).
                 let ll = self.llt(ty);
@@ -5621,6 +5670,114 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Encode one enum/Result variant to its RFC-0024 wire form, returning the
+    /// `VJ*` register: nullary is a bare string; a single payload is
+    /// `{"Tag":<value>}`; two or more is `{"Tag":[v1,...]}`.
+    fn emit_encode_wire_variant(
+        &mut self,
+        name: &str,
+        payloads: &[(String, Type)],
+    ) -> Result<String, String> {
+        let nameg = self.str_g(name)?;
+        if payloads.is_empty() {
+            let r = self.fresh_tmp();
+            self.emit(format!("{r} = call ptr @__vyrn_vj_str(ptr {nameg})"));
+            return Ok(r);
+        }
+        let obj = self.fresh_tmp();
+        self.emit(format!("{obj} = call ptr @__vyrn_vj_obj()"));
+        if payloads.len() == 1 {
+            let (pv, pty) = &payloads[0];
+            let c = self.emit_encode(pv, pty)?;
+            self.emit(format!("call void @__vyrn_vj_set(ptr {obj}, ptr {nameg}, ptr {c})"));
+        } else {
+            let arr = self.fresh_tmp();
+            self.emit(format!("{arr} = call ptr @__vyrn_vj_arr()"));
+            for (pv, pty) in payloads {
+                let c = self.emit_encode(pv, pty)?;
+                self.emit(format!("call void @__vyrn_vj_push(ptr {arr}, ptr {c})"));
+            }
+            self.emit(format!("call void @__vyrn_vj_set(ptr {obj}, ptr {nameg}, ptr {arr})"));
+        }
+        Ok(obj)
+    }
+
+    /// Encode a payload enum aggregate `val` (type `ll`) by switching on its tag
+    /// and emitting each variant's wire form. Returns the `VJ*` register.
+    fn emit_encode_enum_body(
+        &mut self,
+        val: &str,
+        vs: &[EnumVariant],
+        ll: &str,
+    ) -> Result<String, String> {
+        let tag = self.fresh_tmp();
+        self.emit(format!("{tag} = extractvalue {ll} {val}, 0"));
+        let slot = self.fresh_alloca("ptr");
+        let done = self.fresh_label("enc.enum.done");
+        let dflt = self.fresh_label("enc.enum.dflt");
+        let mut cases = Vec::new();
+        let mut labels = Vec::new();
+        for i in 0..vs.len() {
+            let l = self.fresh_label("enc.enum.case");
+            cases.push(format!("i64 {i}, label %{l}"));
+            labels.push(l);
+        }
+        self.emit_term(format!("switch i64 {tag}, label %{dflt} [ {} ]", cases.join(" ")));
+        for (i, l) in labels.iter().enumerate() {
+            self.emit_label(l);
+            let v = &vs[i];
+            let mut payloads = Vec::new();
+            for (pi, pty) in v.payload.iter().enumerate() {
+                let raw = self.fresh_tmp();
+                self.emit(format!("{raw} = extractvalue {ll} {val}, {}", pi + 1));
+                let pv = self.unbox_payload(&raw, pty);
+                payloads.push((pv, pty.clone()));
+            }
+            let c = self.emit_encode_wire_variant(&v.name, &payloads)?;
+            self.emit(format!("store ptr {c}, ptr {slot}"));
+            self.emit_term(format!("br label %{done}"));
+        }
+        self.emit_label(&dflt);
+        let nul = self.fresh_tmp();
+        self.emit(format!("{nul} = call ptr @__vyrn_vj_null()"));
+        self.emit(format!("store ptr {nul}, ptr {slot}"));
+        self.emit_term(format!("br label %{done}"));
+        self.emit_label(&done);
+        let r = self.fresh_tmp();
+        self.emit(format!("{r} = load ptr, ptr {slot}"));
+        Ok(r)
+    }
+
+    /// Encode a `Result<T, E>` value `val` (`{ i1, i64, i64 }`) as `{"Ok":<T>}` /
+    /// `{"Err":<E>}` (RFC-0024).
+    fn emit_encode_result(&mut self, val: &str, t: &Type, e: &Type) -> Result<String, String> {
+        let tag = self.fresh_tmp();
+        let w0 = self.fresh_tmp();
+        let w1 = self.fresh_tmp();
+        self.emit(format!("{tag} = extractvalue {{ i1, i64, i64 }} {val}, 0"));
+        self.emit(format!("{w0} = extractvalue {{ i1, i64, i64 }} {val}, 1"));
+        self.emit(format!("{w1} = extractvalue {{ i1, i64, i64 }} {val}, 2"));
+        let slot = self.fresh_alloca("ptr");
+        let ok_l = self.fresh_label("enc.res.ok");
+        let err_l = self.fresh_label("enc.res.err");
+        let done_l = self.fresh_label("enc.res.done");
+        self.emit_term(format!("br i1 {tag}, label %{ok_l}, label %{err_l}"));
+        self.emit_label(&ok_l);
+        let okv = self.decode_payload(&w0, &w1, t);
+        let okc = self.emit_encode_wire_variant("Ok", &[(okv, t.clone())])?;
+        self.emit(format!("store ptr {okc}, ptr {slot}"));
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&err_l);
+        let errv = self.decode_payload(&w0, &w1, e);
+        let errc = self.emit_encode_wire_variant("Err", &[(errv, e.clone())])?;
+        self.emit(format!("store ptr {errc}, ptr {slot}"));
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&done_l);
+        let r = self.fresh_tmp();
+        self.emit(format!("{r} = load ptr, ptr {slot}"));
+        Ok(r)
+    }
+
     /// Encode one record field into `obj`, honoring the None-field omission for
     /// an `Option`-typed field (Some -> set the decoded payload; None -> omit).
     fn emit_encode_field(&mut self, obj: &str, fv: &str, f: &Field) -> Result<(), String> {
@@ -5700,7 +5857,20 @@ impl<'a> Gen<'a> {
                     ));
                     return Ok(r);
                 }
-                Type::Enum(_) => return self.emit_decode_enum(vj, path, issues, ty),
+                Type::Enum(vs) => {
+                    // A pure-nullary enum decodes inline (string matching,
+                    // byte-identical to RFC-0018). A payload enum routes to its
+                    // generated decoder so self-referential payloads call back.
+                    if vs.iter().all(|v| v.payload.is_empty()) {
+                        return self.emit_decode_enum(vj, path, issues, ty);
+                    }
+                    let ll = self.llt(ty);
+                    let r = self.fresh_tmp();
+                    self.emit(format!(
+                        "{r} = call {ll} @__vyrn_dec_{n}(ptr {vj}, ptr {path}, ptr {issues})"
+                    ));
+                    return Ok(r);
+                }
                 _ => {
                     let decl = self.types.get(n).cloned().unwrap();
                     let before = self.fresh_tmp();
@@ -5721,6 +5891,7 @@ impl<'a> Gen<'a> {
             Type::Bool => self.emit_decode_bool(vj, path, issues),
             Type::Str => self.emit_decode_str(vj, path, issues),
             Type::Enum(_) => self.emit_decode_enum(vj, path, issues, ty),
+            Type::Result(t, e) => self.emit_decode_result(vj, path, issues, &t, &e),
             Type::Option(inner) => self.emit_decode_option(vj, path, issues, &inner),
             Type::Array(inner) => self.emit_decode_array(vj, path, issues, &inner),
             Type::Record(_) => {
@@ -5923,6 +6094,11 @@ impl<'a> Gen<'a> {
         };
         let ll = self.llt(ty);
         let expected = vyrn_frontend::codec::enum_expected(&vs);
+        // A payload enum has the richer RFC-0024 wire form (object tags); a
+        // pure-nullary enum is the byte-identical RFC-0018 string form.
+        if vs.iter().any(|v| !v.payload.is_empty()) {
+            return self.emit_decode_enum_payload(vj, path, issues, &vs, &ll, &expected);
+        }
         let kind = self.fresh_tmp();
         self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
         let isstr = self.fresh_tmp();
@@ -5962,6 +6138,231 @@ impl<'a> Gen<'a> {
         self.emit_label(&done_l);
         let r = self.fresh_tmp();
         self.emit(format!("{r} = load {ll}, ptr {slot}"));
+        Ok(r)
+    }
+
+    /// The RFC-0024 payload-enum decoder: a bare string is a nullary variant; a
+    /// one-key object `{"Tag":..}` names a payload variant (single payload direct,
+    /// tuple payload as an array). Any other shape / unknown key is the locked
+    /// expected-one-of `json.type` Issue. Returns the enum aggregate register.
+    fn emit_decode_enum_payload(
+        &mut self,
+        vj: &str,
+        path: &str,
+        issues: &str,
+        vs: &[EnumVariant],
+        ll: &str,
+        expected: &str,
+    ) -> Result<String, String> {
+        let kind = self.fresh_tmp();
+        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
+        let slot = self.fresh_alloca(ll);
+        self.emit(format!("store {ll} zeroinitializer, ptr {slot}"));
+        let isstr = self.fresh_tmp();
+        self.emit(format!("{isstr} = icmp eq i32 {kind}, 3"));
+        let str_l = self.fresh_label("dec.penum.str");
+        let notstr_l = self.fresh_label("dec.penum.notstr");
+        let obj_l = self.fresh_label("dec.penum.obj");
+        let key_l = self.fresh_label("dec.penum.key");
+        let mismatch_l = self.fresh_label("dec.penum.mismatch");
+        let done_l = self.fresh_label("dec.penum.done");
+        self.emit_term(format!("br i1 {isstr}, label %{str_l}, label %{notstr_l}"));
+        // Shared mismatch: `expected one of ..., found <kind>` (kind is still live).
+        self.emit_label(&mismatch_l);
+        self.push_type_issue(issues, path, expected, &kind)?;
+        self.emit_term(format!("br label %{done_l}"));
+        // String → a nullary variant.
+        self.emit_label(&str_l);
+        let s = self.fresh_tmp();
+        self.emit(format!("{s} = call ptr @__vyrn_vj_str_get(ptr {vj})"));
+        for (i, v) in vs.iter().enumerate() {
+            if !v.payload.is_empty() {
+                continue; // a payload variant as a bare string is a mismatch
+            }
+            let g = self.str_g(&v.name)?;
+            let cmp = self.fresh_tmp();
+            self.emit(format!("{cmp} = call i32 @strcmp(ptr {s}, ptr {g})"));
+            let eq = self.fresh_tmp();
+            self.emit(format!("{eq} = icmp eq i32 {cmp}, 0"));
+            let hit_l = self.fresh_label("dec.penum.shit");
+            let next_l = self.fresh_label("dec.penum.snext");
+            self.emit_term(format!("br i1 {eq}, label %{hit_l}, label %{next_l}"));
+            self.emit_label(&hit_l);
+            let e = self.fresh_tmp();
+            self.emit(format!("{e} = insertvalue {ll} zeroinitializer, i64 {i}, 0"));
+            self.emit(format!("store {ll} {e}, ptr {slot}"));
+            self.emit_term(format!("br label %{done_l}"));
+            self.emit_label(&next_l);
+        }
+        self.emit_term(format!("br label %{mismatch_l}"));
+        // Not a string → must be a single-key object.
+        self.emit_label(&notstr_l);
+        let isobj = self.fresh_tmp();
+        self.emit(format!("{isobj} = icmp eq i32 {kind}, 5"));
+        self.emit_term(format!("br i1 {isobj}, label %{obj_l}, label %{mismatch_l}"));
+        self.emit_label(&obj_l);
+        let n = self.fresh_tmp();
+        self.emit(format!("{n} = call i64 @__vyrn_vj_obj_len(ptr {vj})"));
+        let one = self.fresh_tmp();
+        self.emit(format!("{one} = icmp eq i64 {n}, 1"));
+        self.emit_term(format!("br i1 {one}, label %{key_l}, label %{mismatch_l}"));
+        self.emit_label(&key_l);
+        let key = self.fresh_tmp();
+        self.emit(format!("{key} = call ptr @__vyrn_vj_obj_key(ptr {vj}, i64 0)"));
+        let valj = self.fresh_tmp();
+        self.emit(format!("{valj} = call ptr @__vyrn_vj_obj_at(ptr {vj}, i64 0)"));
+        for (i, v) in vs.iter().enumerate() {
+            if v.payload.is_empty() {
+                continue; // a nullary variant spelled as an object is a mismatch
+            }
+            let g = self.str_g(&v.name)?;
+            let cmp = self.fresh_tmp();
+            self.emit(format!("{cmp} = call i32 @strcmp(ptr {key}, ptr {g})"));
+            let eq = self.fresh_tmp();
+            self.emit(format!("{eq} = icmp eq i32 {cmp}, 0"));
+            let hit_l = self.fresh_label("dec.penum.phit");
+            let next_l = self.fresh_label("dec.penum.pnext");
+            self.emit_term(format!("br i1 {eq}, label %{hit_l}, label %{next_l}"));
+            self.emit_label(&hit_l);
+            let child = self.fresh_tmp();
+            self.emit(format!("{child} = call ptr @__vyrn_json_field_path(ptr {path}, ptr {g})"));
+            self.emit_decode_enum_payload_arm(&valj, &child, issues, i, &v.payload, ll, slot.as_str(), &done_l)?;
+            self.emit_label(&next_l);
+        }
+        self.emit_term(format!("br label %{mismatch_l}"));
+        self.emit_label(&done_l);
+        let r = self.fresh_tmp();
+        self.emit(format!("{r} = load {ll}, ptr {slot}"));
+        Ok(r)
+    }
+
+    /// Decode the payload(s) of a matched payload variant (`tag` index `idx`) from
+    /// `valj` at `child` path, build the enum aggregate, store it, and jump to
+    /// `done_l`. A single payload decodes directly; two or more read a JSON array
+    /// positionally (missing slots decode from `null`, a length mismatch surfaces
+    /// as the element's own type Issue at `child[i]`).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_decode_enum_payload_arm(
+        &mut self,
+        valj: &str,
+        child: &str,
+        issues: &str,
+        idx: usize,
+        payload: &[Type],
+        ll: &str,
+        slot: &str,
+        done_l: &str,
+    ) -> Result<(), String> {
+        if payload.len() == 1 {
+            let iv = self.emit_decode(valj, child, issues, &payload[0])?;
+            let bx = self.box_payload(&iv, &payload[0]);
+            let a = self.fresh_tmp();
+            let b = self.fresh_tmp();
+            self.emit(format!("{a} = insertvalue {ll} zeroinitializer, i64 {idx}, 0"));
+            self.emit(format!("{b} = insertvalue {ll} {a}, i64 {bx}, 1"));
+            self.emit(format!("store {ll} {b}, ptr {slot}"));
+            self.emit_term(format!("br label %{done_l}"));
+            return Ok(());
+        }
+        // Tuple payload: the value must be a JSON array.
+        let kv = self.fresh_tmp();
+        self.emit(format!("{kv} = call i32 @__vyrn_vj_kind(ptr {valj})"));
+        let isarr = self.fresh_tmp();
+        self.emit(format!("{isarr} = icmp eq i32 {kv}, 4"));
+        let ok_l = self.fresh_label("dec.penum.tok");
+        let bad_l = self.fresh_label("dec.penum.tbad");
+        self.emit_term(format!("br i1 {isarr}, label %{ok_l}, label %{bad_l}"));
+        self.emit_label(&bad_l);
+        self.push_type_issue(issues, child, "array", &kv)?;
+        let z = self.fresh_tmp();
+        self.emit(format!("{z} = insertvalue {ll} zeroinitializer, i64 {idx}, 0"));
+        self.emit(format!("store {ll} {z}, ptr {slot}"));
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&ok_l);
+        let mut cur = self.fresh_tmp();
+        self.emit(format!("{cur} = insertvalue {ll} zeroinitializer, i64 {idx}, 0"));
+        for (j, pty) in payload.iter().enumerate() {
+            let node = self.fresh_tmp();
+            self.emit(format!("{node} = call ptr @__vyrn_vj_at_or_null(ptr {valj}, i64 {j})"));
+            let ipath = self.fresh_tmp();
+            self.emit(format!("{ipath} = call ptr @__vyrn_json_index_path(ptr {child}, i64 {j})"));
+            let iv = self.emit_decode(&node, &ipath, issues, pty)?;
+            let bx = self.box_payload(&iv, pty);
+            let next = self.fresh_tmp();
+            self.emit(format!("{next} = insertvalue {ll} {cur}, i64 {bx}, {}", j + 1));
+            cur = next;
+        }
+        self.emit(format!("store {ll} {cur}, ptr {slot}"));
+        self.emit_term(format!("br label %{done_l}"));
+        Ok(())
+    }
+
+    /// Decode a `Result<T, E>` from `{"Ok":<T>}` / `{"Err":<E>}` (RFC-0024) into a
+    /// `{ i1, i64, i64 }` aggregate. Any other shape is the locked expected-one-of
+    /// (`one of \`Ok\`, \`Err\``) `json.type` Issue.
+    fn emit_decode_result(
+        &mut self,
+        vj: &str,
+        path: &str,
+        issues: &str,
+        t: &Type,
+        e: &Type,
+    ) -> Result<String, String> {
+        let expected = vyrn_frontend::codec::result_expected();
+        let kind = self.fresh_tmp();
+        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
+        let slot = self.fresh_alloca("{ i1, i64, i64 }");
+        self.emit(format!("store {{ i1, i64, i64 }} zeroinitializer, ptr {slot}"));
+        let isobj = self.fresh_tmp();
+        self.emit(format!("{isobj} = icmp eq i32 {kind}, 5"));
+        let obj_l = self.fresh_label("dec.res.obj");
+        let key_l = self.fresh_label("dec.res.key");
+        let mismatch_l = self.fresh_label("dec.res.mismatch");
+        let done_l = self.fresh_label("dec.res.done");
+        self.emit_term(format!("br i1 {isobj}, label %{obj_l}, label %{mismatch_l}"));
+        self.emit_label(&mismatch_l);
+        self.push_type_issue(issues, path, &expected, &kind)?;
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&obj_l);
+        let n = self.fresh_tmp();
+        self.emit(format!("{n} = call i64 @__vyrn_vj_obj_len(ptr {vj})"));
+        let one = self.fresh_tmp();
+        self.emit(format!("{one} = icmp eq i64 {n}, 1"));
+        self.emit_term(format!("br i1 {one}, label %{key_l}, label %{mismatch_l}"));
+        self.emit_label(&key_l);
+        let key = self.fresh_tmp();
+        self.emit(format!("{key} = call ptr @__vyrn_vj_obj_key(ptr {vj}, i64 0)"));
+        let valj = self.fresh_tmp();
+        self.emit(format!("{valj} = call ptr @__vyrn_vj_obj_at(ptr {vj}, i64 0)"));
+        // Two arms: `Ok` (tag 1) and `Err` (tag 0).
+        for (is_ok, name, arm_ty) in [(1, "Ok", t), (0, "Err", e)] {
+            let g = self.str_g(name)?;
+            let cmp = self.fresh_tmp();
+            self.emit(format!("{cmp} = call i32 @strcmp(ptr {key}, ptr {g})"));
+            let eq = self.fresh_tmp();
+            self.emit(format!("{eq} = icmp eq i32 {cmp}, 0"));
+            let hit_l = self.fresh_label("dec.res.hit");
+            let next_l = self.fresh_label("dec.res.next");
+            self.emit_term(format!("br i1 {eq}, label %{hit_l}, label %{next_l}"));
+            self.emit_label(&hit_l);
+            let child = self.fresh_tmp();
+            self.emit(format!("{child} = call ptr @__vyrn_json_field_path(ptr {path}, ptr {g})"));
+            let iv = self.emit_decode(&valj, &child, issues, arm_ty)?;
+            let (w0, w1) = self.encode_payload(&iv, arm_ty);
+            let a = self.fresh_tmp();
+            let b = self.fresh_tmp();
+            let c = self.fresh_tmp();
+            self.emit(format!("{a} = insertvalue {{ i1, i64, i64 }} undef, i1 {is_ok}, 0"));
+            self.emit(format!("{b} = insertvalue {{ i1, i64, i64 }} {a}, i64 {w0}, 1"));
+            self.emit(format!("{c} = insertvalue {{ i1, i64, i64 }} {b}, i64 {w1}, 2"));
+            self.emit(format!("store {{ i1, i64, i64 }} {c}, ptr {slot}"));
+            self.emit_term(format!("br label %{done_l}"));
+            self.emit_label(&next_l);
+        }
+        self.emit_term(format!("br label %{mismatch_l}"));
+        self.emit_label(&done_l);
+        let r = self.fresh_tmp();
+        self.emit(format!("{r} = load {{ i1, i64, i64 }}, ptr {slot}"));
         Ok(r)
     }
 
@@ -6687,6 +7088,15 @@ fn collect_codec_strings(program: &Program, types: &HashMap<String, TypeDecl>) -
     for t in &program.type_decls {
         gather_codec_strings(&Type::Named(t.name.clone()), types, &mut out, &mut seen);
     }
+    // Also cover types that appear only in a function signature — a bare
+    // `Result<T, E>` return (RFC-0024) is `toJson`'d without ever being a named
+    // type_decl, so its `Ok`/`Err`/payload strings must still be pooled.
+    for f in &program.functions {
+        for p in &f.params {
+            gather_codec_strings(&p.ty, types, &mut out, &mut seen);
+        }
+        gather_codec_strings(&f.ret, types, &mut out, &mut seen);
+    }
     out.sort();
     out.dedup();
     out
@@ -6731,7 +7141,22 @@ fn gather_codec_strings(
         Type::Enum(vs) => {
             for v in &vs {
                 push_uniq(out, v.name.clone());
+                // A tuple payload decodes from a JSON array — its mismatch Issue
+                // reads `expected array, found <kind>` (RFC-0024).
+                if v.payload.len() >= 2 {
+                    push_uniq(out, "array".to_string());
+                }
+                for p in &v.payload {
+                    gather_codec_strings(p, types, out, seen);
+                }
             }
+        }
+        // `Result<T, E>` on the wire is a two-variant payload enum (RFC-0024).
+        Type::Result(t, e) => {
+            push_uniq(out, "Ok".to_string());
+            push_uniq(out, "Err".to_string());
+            gather_codec_strings(&t, types, out, seen);
+            gather_codec_strings(&e, types, out, seen);
         }
         Type::Option(inner) | Type::Array(inner) | Type::ArrayN(inner, _) => {
             gather_codec_strings(&inner, types, out, seen);

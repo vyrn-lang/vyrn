@@ -1275,6 +1275,17 @@ VJ* __vyrn_vj_get(VJ* o, const char* key) {
 int __vyrn_vj_bool_get(VJ* v) { return v->bval; }
 long long __vyrn_vj_len(VJ* a) { return (long long)a->nitems; }
 VJ* __vyrn_vj_at(VJ* a, long long i) { return a->items[i]; }
+/* An array element, or a fresh `null` node when `i` is out of range — the
+   RFC-0024 tuple-payload decode treats a short array's missing slots as null. */
+VJ* __vyrn_vj_at_or_null(VJ* a, long long i) {
+    if (i < 0 || (unsigned long long)i >= a->nitems) return __vyrn_vj_null();
+    return a->items[i];
+}
+/* Object member count / i-th key / i-th value — the RFC-0024 payload-enum
+   decode enforces "exactly one key" and reads it back. */
+long long __vyrn_vj_obj_len(VJ* o) { return (long long)o->nmem; }
+const char* __vyrn_vj_obj_key(VJ* o, long long i) { return o->mem[i].key; }
+VJ* __vyrn_vj_obj_at(VJ* o, long long i) { return o->mem[i].val; }
 const char* __vyrn_vj_str_get(VJ* v) { return v->text; }
 /* Parse a number node into an integer target: 0 ok (*out set), 1 rejected
    (non-integer syntax, or out of range for the width/signedness). */

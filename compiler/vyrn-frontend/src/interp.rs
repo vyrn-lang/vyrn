@@ -2570,6 +2570,25 @@ impl<'a> Interp<'a> {
                 if let Some(t) = crate::types::numeric_conv_target(name) {
                     return Some(t);
                 }
+                // A `Result` constructor: the taken arm's payload type is what
+                // encode needs; the other parameter is a placeholder (RFC-0024,
+                // mirroring codegen's `Ok`/`Err` typing).
+                if name == "Ok" {
+                    return Some(Type::Result(
+                        Box::new(self.type_of(args.first()?, scope)?),
+                        Box::new(Type::Unit),
+                    ));
+                }
+                if name == "Err" {
+                    return Some(Type::Result(
+                        Box::new(Type::Unit),
+                        Box::new(self.type_of(args.first()?, scope)?),
+                    ));
+                }
+                // An enum variant constructor (`Circle(2)`) resolves to its enum.
+                if let Some(en) = self.enum_of_variant(name) {
+                    return Some(Type::Named(en));
+                }
                 self.funcs.get(name.as_str()).map(|f| f.ret.clone())
             }
             Expr::TryConstruct { name, .. } => {
@@ -2577,6 +2596,19 @@ impl<'a> Interp<'a> {
             }
             _ => None,
         }
+    }
+
+    /// The name of the enum declaration that has a variant named `variant`, if
+    /// any — used by `toJson` to recover an enum constructor's static type.
+    fn enum_of_variant(&self, variant: &str) -> Option<String> {
+        for (name, decl) in self.type_map.iter() {
+            if let Type::Enum(vs) = &decl.base {
+                if vs.iter().any(|v| v.name == variant) {
+                    return Some(name.clone());
+                }
+            }
+        }
+        None
     }
 
     /// Encode a value to canonical JSON (RFC-0018), driven by its static type:
@@ -2634,12 +2666,22 @@ impl<'a> Interp<'a> {
                 }
                 out.push('"');
             }
-            Type::Enum(_) => {
-                out.push('"');
-                if let Val::Enum(name, _) = v {
-                    crate::codec::escape_into(name, out);
+            Type::Enum(vs) => {
+                // RFC-0024 wire tagging: a nullary variant is a bare string
+                // (byte-identical to the payload-less encoding); one payload is
+                // `{"Tag":<value>}`; two+ is `{"Tag":[v1,v2,...]}`.
+                if let Val::Enum(name, payloads) = v {
+                    let variant = vs.iter().find(|vt| &vt.name == name);
+                    let ptys = variant.map(|vt| vt.payload.as_slice()).unwrap_or(&[]);
+                    self.encode_variant(name, payloads, ptys, out)?;
                 }
-                out.push('"');
+            }
+            Type::Result(t, e) => {
+                // `Result<T, E>` on the wire (RFC-0024): `{"Ok":<T>}` / `{"Err":<E>}`.
+                if let Val::Result(is_ok, payload) = v {
+                    let (tag, pty) = if *is_ok { ("Ok", &*t) } else { ("Err", &*e) };
+                    self.encode_variant(tag, std::slice::from_ref(&**payload), std::slice::from_ref(pty), out)?;
+                }
             }
             Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool => {
                 out.push_str(&scalar_to_string(v));
@@ -2648,6 +2690,44 @@ impl<'a> Interp<'a> {
                 return Err(format!("toJson: cannot encode type {other}").into());
             }
         }
+        Ok(())
+    }
+
+    /// Encode one enum/Result variant to its RFC-0024 wire form: a nullary
+    /// variant is a bare JSON string; a single payload is `{"Tag":<value>}`; two
+    /// or more payloads is `{"Tag":[v1,v2,...]}`.
+    fn encode_variant(
+        &self,
+        tag: &str,
+        payloads: &[Val],
+        ptys: &[Type],
+        out: &mut String,
+    ) -> Result<(), Ctrl> {
+        if ptys.is_empty() {
+            out.push('"');
+            crate::codec::escape_into(tag, out);
+            out.push('"');
+            return Ok(());
+        }
+        out.push('{');
+        out.push('"');
+        crate::codec::escape_into(tag, out);
+        out.push_str("\":");
+        if ptys.len() == 1 {
+            let pv = payloads.first().unwrap_or(&Val::Unit);
+            self.encode_val(pv, &ptys[0], out)?;
+        } else {
+            out.push('[');
+            for (i, pty) in ptys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let pv = payloads.get(i).unwrap_or(&Val::Unit);
+                self.encode_val(pv, pty, out)?;
+            }
+            out.push(']');
+        }
+        out.push('}');
         Ok(())
     }
 
@@ -2816,19 +2896,23 @@ impl<'a> Interp<'a> {
             },
             Type::Enum(vs) => {
                 let expected = crate::codec::enum_expected(vs);
-                match json {
-                    JsonV::Str(s) if vs.iter().any(|v| &v.name == s) => {
-                        Some(Val::Enum(s.clone(), Vec::new()))
-                    }
-                    _ => {
-                        issues.push(self.issue_val(
-                            "json.type",
-                            path,
-                            &crate::codec::type_message(&expected, json.kind()),
-                        ));
-                        None
-                    }
-                }
+                self.decode_variant(json, vs, &expected, path, issues)
+            }
+            Type::Result(t, e) => {
+                // `Result<T, E>` decodes from `{"Ok":<T>}` / `{"Err":<E>}`
+                // (RFC-0024) — a two-variant payload enum with single payloads.
+                let vs = vec![
+                    EnumVariant { name: "Ok".to_string(), payload: vec![(**t).clone()] },
+                    EnumVariant { name: "Err".to_string(), payload: vec![(**e).clone()] },
+                ];
+                let expected = crate::codec::result_expected();
+                self.decode_variant(json, &vs, &expected, path, issues)
+                    .map(|ev| match ev {
+                        Val::Enum(name, mut ps) => {
+                            Val::Result(name == "Ok", Box::new(ps.pop().unwrap_or(Val::Unit)))
+                        }
+                        other => other,
+                    })
             }
             Type::Option(inner) => match json {
                 JsonV::Null => Some(Val::Option(None)),
@@ -2837,6 +2921,71 @@ impl<'a> Interp<'a> {
                     .map(|x| Val::Option(Some(Box::new(x)))),
             },
             _ => None,
+        }
+    }
+
+    /// Decode a payload enum / `Result` from its RFC-0024 wire form. A bare
+    /// string is a nullary variant; a one-key object `{"Tag":..}` names a payload
+    /// variant (single payload direct, tuple payload as an array). Exactly one
+    /// wire form per value: a payload variant as a bare string, a nullary variant
+    /// as an object, an unknown key, or a multi/zero-key object all fail with the
+    /// locked expected-one-of `json.type` Issue.
+    fn decode_variant(
+        &self,
+        json: &crate::codec::JsonV,
+        vs: &[EnumVariant],
+        expected: &str,
+        path: &str,
+        issues: &mut Vec<Val>,
+    ) -> Option<Val> {
+        use crate::codec::JsonV;
+        let mismatch = |me: &Self, issues: &mut Vec<Val>| {
+            issues.push(me.issue_val(
+                "json.type",
+                path,
+                &crate::codec::type_message(expected, json.kind()),
+            ));
+            None
+        };
+        match json {
+            JsonV::Str(s) => match vs.iter().find(|v| &v.name == s) {
+                Some(v) if v.payload.is_empty() => Some(Val::Enum(s.clone(), Vec::new())),
+                _ => mismatch(self, issues),
+            },
+            JsonV::Obj(members) => {
+                if members.len() != 1 {
+                    return mismatch(self, issues);
+                }
+                let (key, val) = &members[0];
+                match vs.iter().find(|v| &v.name == key) {
+                    Some(v) if !v.payload.is_empty() => {
+                        let child = crate::codec::field_path(path, key);
+                        let ptys = &v.payload;
+                        if ptys.len() == 1 {
+                            let pv = self.decode_val(val, &ptys[0], &child, issues);
+                            Some(Val::Enum(key.clone(), vec![pv.unwrap_or(Val::Unit)]))
+                        } else {
+                            let items = match val {
+                                JsonV::Arr(items) => items.clone(),
+                                _ => {
+                                    issues.push(self.type_issue(&child, "array", val));
+                                    return None;
+                                }
+                            };
+                            let mut payloads = Vec::new();
+                            for (i, pty) in ptys.iter().enumerate() {
+                                let node = items.get(i).cloned().unwrap_or(JsonV::Null);
+                                let ipath = crate::codec::index_path(&child, i);
+                                let iv = self.decode_val(&node, pty, &ipath, issues);
+                                payloads.push(iv.unwrap_or(Val::Unit));
+                            }
+                            Some(Val::Enum(key.clone(), payloads))
+                        }
+                    }
+                    _ => mismatch(self, issues),
+                }
+            }
+            _ => mismatch(self, issues),
         }
     }
 

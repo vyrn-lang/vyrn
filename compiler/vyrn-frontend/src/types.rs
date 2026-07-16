@@ -316,21 +316,63 @@ fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
             }
         }
         Type::Record(fields) => record_schema(fields, cx),
-        // A payload-less sum type is exactly a JSON Schema `enum` of its
-        // variant names; payload variants have no faithful encoding, so they
-        // get the honest-lossy `$comment` (like every unmappable form here).
+        // A payload-less sum type is exactly a JSON Schema `enum` of its variant
+        // names (unchanged). A payload sum type emits the RFC-0024 externally-
+        // tagged `oneOf`, which the importer recognizes back into an enum decl.
         Type::Enum(variants) => {
             if variants.iter().all(|v| v.payload.is_empty()) {
                 let names: Vec<String> =
                     variants.iter().map(|v| format!("\"{}\"", json_escape(&v.name))).collect();
                 format!("{{\"enum\":[{}]}}", names.join(","))
             } else {
-                "{\"$comment\":\"enum with payload variants (validated at runtime)\"}"
-                    .to_string()
+                enum_oneof_schema(variants, cx)
             }
+        }
+        // `Result<T, E>` on the wire is a two-variant single-payload enum
+        // (`{"Ok":<T>}` / `{"Err":<E>}`) — emit the identical `oneOf` (RFC-0024).
+        Type::Result(t, e) => {
+            let variants = vec![
+                EnumVariant { name: "Ok".to_string(), payload: vec![(**t).clone()] },
+                EnumVariant { name: "Err".to_string(), payload: vec![(**e).clone()] },
+            ];
+            enum_oneof_schema(&variants, cx)
         }
         _ => "{}".to_string(),
     }
+}
+
+/// The RFC-0024 `oneOf` schema for a payload enum: nullary variants as
+/// `{"const":"Name"}`, single-payload variants as a one-property object, tuple
+/// payloads via `prefixItems` + `"items":false` (the honest draft-2020-12 tuple
+/// form the importer round-trips). Variant order is declaration order.
+fn enum_oneof_schema(variants: &[EnumVariant], cx: &mut SchemaCx) -> String {
+    let branches: Vec<String> = variants
+        .iter()
+        .map(|v| {
+            let name = json_escape(&v.name);
+            match v.payload.len() {
+                0 => format!("{{\"const\":\"{name}\"}}"),
+                1 => {
+                    let p = type_schema(&v.payload[0], cx);
+                    format!(
+                        "{{\"type\":\"object\",\"properties\":{{\"{name}\":{p}}},\"required\":[\"{name}\"]}}"
+                    )
+                }
+                _ => {
+                    let items: Vec<String> =
+                        v.payload.iter().map(|p| type_schema(p, cx)).collect();
+                    let tuple = format!(
+                        "{{\"type\":\"array\",\"prefixItems\":[{}],\"items\":false}}",
+                        items.join(",")
+                    );
+                    format!(
+                        "{{\"type\":\"object\",\"properties\":{{\"{name}\":{tuple}}},\"required\":[\"{name}\"]}}"
+                    )
+                }
+            }
+        })
+        .collect();
+    format!("{{\"oneOf\":[{}]}}", branches.join(","))
 }
 
 /// The schema for a sized integer: `"integer"` plus its width bounds, merged
@@ -1045,11 +1087,30 @@ mod json_schema_tests {
     }
 
     #[test]
-    fn payload_enum_documents_lossiness() {
-        let s = schema_of("type Shape = | Circle(Int64) | Unit", "Shape");
+    fn payload_enum_emits_oneof() {
+        // RFC-0024: a payload enum is externally tagged, arity-shaped `oneOf`.
+        let s = schema_of("type Shape = | Circle(Int64) | Rect(Int64, Int64) | Unit", "Shape");
+        assert_eq!(
+            s,
+            "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\
+             \"oneOf\":[\
+             {\"type\":\"object\",\"properties\":{\"Circle\":{\"type\":\"integer\"}},\"required\":[\"Circle\"]},\
+             {\"type\":\"object\",\"properties\":{\"Rect\":{\"type\":\"array\",\
+             \"prefixItems\":[{\"type\":\"integer\"},{\"type\":\"integer\"}],\"items\":false}},\"required\":[\"Rect\"]},\
+             {\"const\":\"Unit\"}]}"
+        );
+    }
+
+    #[test]
+    fn result_emits_ok_err_oneof() {
+        let s = schema_of("type R = { r: Result<Int64, String> }", "R");
         assert!(
-            s.contains("\"$comment\":\"enum with payload variants"),
-            "payload enums are honest-lossy: {s}"
+            s.contains(
+                "\"oneOf\":[\
+                 {\"type\":\"object\",\"properties\":{\"Ok\":{\"type\":\"integer\"}},\"required\":[\"Ok\"]},\
+                 {\"type\":\"object\",\"properties\":{\"Err\":{\"type\":\"string\"}},\"required\":[\"Err\"]}]"
+            ),
+            "{s}"
         );
     }
 }

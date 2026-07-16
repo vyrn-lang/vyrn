@@ -567,6 +567,23 @@ impl<'a> Checker<'a> {
         if matches!(from, Type::Err) || matches!(to, Type::Err) {
             return true;
         }
+        // A transparent alias to `Result`/`Option` (RFC-0024, e.g. `type
+        // DeleteResult = Result<Bool, String>`) is interchangeable with its
+        // resolved form — it carries no `where` obligation of its own.
+        if let Type::Named(n) = to {
+            if let Some(d) = self.types.get(n) {
+                if d.predicate.is_none() && matches!(d.base, Type::Result(..) | Type::Option(..)) {
+                    return self.assignable(from, &d.base);
+                }
+            }
+        }
+        if let Type::Named(n) = from {
+            if let Some(d) = self.types.get(n) {
+                if d.predicate.is_none() && matches!(d.base, Type::Result(..) | Type::Option(..)) {
+                    return self.assignable(&d.base, to);
+                }
+            }
+        }
         // A nominal/validated `Named` type decays to its base scalar for reading
         // (an `Age` is an `Int`, a `UserId` is a `String`).
         if let Type::Named(_) = from {
@@ -893,6 +910,22 @@ impl<'a> Checker<'a> {
                     self.ensure_type_exists(p, t.line)?;
                 }
             }
+            return Ok(());
+        }
+        // A transparent alias to a built-in generic wrapper: `type DeleteResult =
+        // Result<Bool, String>` / `type Maybe = Option<Int64>`. Allowed so a
+        // codable `Result`/`Option` can be named and handed to `fromJson`/
+        // `jsonSchema` by name (RFC-0024's RPC ripple). No `where` clause (its
+        // payloads carry their own refinements); the payload types must exist.
+        if matches!(t.base, Type::Result(..) | Type::Option(..)) {
+            if t.predicate.is_some() {
+                return Err(format!(
+                    "line {}: a `{}` alias cannot have a `where` clause",
+                    t.line,
+                    if matches!(t.base, Type::Result(..)) { "Result" } else { "Option" }
+                ));
+            }
+            self.ensure_type_exists(&t.base, t.line)?;
             return Ok(());
         }
         // A transformer alias, e.g. `type Public = Omit<User, password>;`.
@@ -3037,7 +3070,10 @@ impl<'a> Checker<'a> {
             if args.len() != 1 {
                 return Err(format!("line {line}: `{name}` takes 1 argument, got {}", args.len()));
             }
-            let want = match expected {
+            // Resolve a named alias (`type DeleteResult = Result<..>`) so the
+            // expected `Result<T, E>` is visible for payload inference (RFC-0024).
+            let expected_res = expected.map(|e| crate::types::resolve(e, self.types));
+            let want = match &expected_res {
                 Some(Type::Result(t, e)) => Some((name == "Ok").then(|| (**t).clone()).unwrap_or_else(|| (**e).clone())),
                 _ => None,
             };
@@ -3045,7 +3081,7 @@ impl<'a> Checker<'a> {
             if matches!(aty, Type::Option(_) | Type::Result(..)) {
                 return Err(format!("line {line}: nested Option/Result is not supported in v0.1"));
             }
-            let (t, e) = match expected {
+            let (t, e) = match &expected_res {
                 Some(Type::Result(t, e)) => ((**t).clone(), (**e).clone()),
                 _ => {
                     return Err(format!(
@@ -4465,6 +4501,55 @@ mod tests {
     fn rejects_type_mismatch() {
         let e = check_src("fn main() -> Int64 { return true; }").unwrap_err();
         assert!(e.contains("return type mismatch"), "{e}");
+    }
+
+    // ---- codability of payload enums / Result (RFC-0024) ----------------
+
+    #[test]
+    fn payload_enum_is_codable() {
+        let src = "type Shape = | Circle(Int64) | Rect(Int64, Int64) | Unit \
+                   fn f(s: Shape) -> String { return toJson(s) } \
+                   fn g(s: String) -> Validation<Shape> { return fromJson(Shape, s) } \
+                   fn main() -> Int64 { return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn result_is_codable_and_named_aliases_work() {
+        let src = "type R = Result<Bool, String> \
+                   fn f(x: R) -> String { return toJson(x) } \
+                   fn g(s: String) -> Validation<R> { return fromJson(R, s) } \
+                   fn main() -> Int64 { return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn enum_with_noncodable_payload_names_the_variant() {
+        let src = "type Bad = | Boxed(Logger) | Empty \
+                   fn f(b: Bad) -> String { return toJson(b) } \
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("cannot encode"), "{e}");
+        assert!(e.contains("variant `Boxed`"), "names the offending variant: {e}");
+    }
+
+    #[test]
+    fn validation_stays_non_codable() {
+        let src = "fn f(s: String) -> String { \
+                       let v = fromJson(Issue, s) \
+                       return toJson(v) } \
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("cannot encode `Validation`"), "{e}");
+    }
+
+    #[test]
+    fn option_of_result_is_codable() {
+        let src = "type Wrap = { r: Option<Result<Int64, String>> } \
+                   fn f(w: Wrap) -> String { return toJson(w) } \
+                   fn g(s: String) -> Validation<Wrap> { return fromJson(Wrap, s) } \
+                   fn main() -> Int64 { return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
     // ---- comptime purity (RFC-0021) -------------------------------------
