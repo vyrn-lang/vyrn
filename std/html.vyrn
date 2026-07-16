@@ -1,0 +1,290 @@
+/// std/html — the view tree and the string renderer (RFC-0026 M1).
+///
+/// A UI in Vyrn is a pure function returning an `Html` tree (The Elm
+/// Architecture — no stored closures, no runtime reactivity, a host that owns
+/// the loop). This module is plain, pure Vyrn: it compiles the same under the
+/// interpreter, the native binary, and wasm, and every view built with it is a
+/// three-way parity citizen. The compiler knows nothing about UI — `Html` is an
+/// ordinary self-recursive payload enum (RFC-0024's recursion-safe per-type
+/// codec carries it across the wire unchanged), and everything below is
+/// constructors + string building.
+///
+///   import { el, text, cls, attr, on, keyed, empty, toHtmlString, document } from "std/html"
+///
+/// Two consumers share this one tree:
+///   - the SERVER renders `toHtmlString(view())` (SSR);
+///   - the CLIENT ships `toJson(view())` to `web/vyrn-dom.js`, which builds and
+///     diffs the real DOM. Both are pure, so components are snapshot-testable
+///     in `vyrn test` via `assertEq(toHtmlString(..), "..")`.
+///
+/// This module is comptime-pure (plain string building over `bytes`/
+/// `stringFromBytes`), so it is equally usable from a `gen fn` and its callees.
+
+// ===========================================================================
+// The tree
+// ===========================================================================
+
+/// A single attribute on an element.
+///
+///   - `Cls(v)` — `class="v"`.
+///   - `Id(v)`  — `id="v"`.
+///   - `A(n, v)` — any attribute: `A("href", "/items")` → `href="/items"`.
+///   - `On(event, handler, payload)` — a named event binding. Renders as two
+///     attributes so neither name nor payload needs in-attribute delimiters:
+///     `On("click", "removeItem", "42")` → `data-on-click="removeItem"
+///     data-arg-click="42"`. `web/vyrn-dom.js` walks to the nearest
+///     `data-on-<event>` and invokes the root-exported `export extern fn` of
+///     that name (RFC-0026 M2's handler ABI).
+///   - `Key(k)` — list identity for the M2 keyed differ. Renders as
+///     `data-key="k"` so a server-rendered list carries the same identity the
+///     client tree does.
+export type Attr =
+    | Cls(String)
+    | Id(String)
+    | A(String, String)
+    | On(String, String, String)
+    | Key(String)
+
+/// A node in the view tree.
+///
+///   - `Empty` — renders as nothing; the unit of conditionals (`{#if}` with no
+///     else lowers to `Empty`).
+///   - `Text(s)` — ALWAYS escaped (`& < > "`).
+///   - `Raw(s)` — NOT escaped: the loud, greppable escape hatch, the only way
+///     to emit markup from a string.
+///   - `El(tag, attrs, kids)` — an element. `Html` is self-recursive through
+///     `Array<Html>` here; the codec handles the recursion.
+export type Html =
+    | Empty
+    | Text(String)
+    | Raw(String)
+    | El(String, Array<Attr>, Array<Html>)
+
+/// A host subscription — effects as data, the Elm answer to timers and global
+/// key listeners. An app optionally exports `vyrnSubs() -> String` returning
+/// `toJson(subs())`; after each render `web/vyrn-dom.js` diffs the declared
+/// list by value and wires what appeared / unwires what disappeared, so there
+/// is nothing to leak.
+///
+///   - `Every(ms, handler)` — call the root-exported `handler` every `ms`
+///     milliseconds.
+///   - `Keydown(key, handler)` — call `handler` when `key` (a `KeyboardEvent.key`
+///     value, e.g. `"Enter"`, `"Escape"`) is pressed anywhere on the document.
+///
+/// `Sub` lives here, alongside `Html`, on purpose: it is codable library data a
+/// client app hands straight to the host runtime, and keeping it in `std/html`
+/// means the whole UI-runtime surface (`Html` + `Sub`) is one import. The
+/// vocabulary is deliberately tiny — it grows by demand, and third parties can
+/// define their own `Sub`-like types with their own runtime.
+export type Sub =
+    | Every(Int64, String)
+    | Keydown(String, String)
+
+// ===========================================================================
+// Constructors — trivial, so view code reads as structure
+// ===========================================================================
+
+/// An element: `el("li", [cls("row")], [text("hi")])`.
+export fn el(tag: String, attrs: Array<Attr>, kids: Array<Html>) -> Html {
+    return El(tag, attrs, kids)
+}
+
+/// An escaped text node.
+export fn text(s: String) -> Html {
+    return Text(s)
+}
+
+/// The empty node (renders as nothing).
+export fn empty() -> Html {
+    return Empty
+}
+
+/// A `class="…"` attribute.
+export fn cls(s: String) -> Attr {
+    return Cls(s)
+}
+
+/// An arbitrary `name="value"` attribute.
+export fn attr(n: String, v: String) -> Attr {
+    return A(n, v)
+}
+
+/// An event binding: `on("click", "removeItem", "42")`.
+export fn on(event: String, handler: String, payload: String) -> Attr {
+    return On(event, handler, payload)
+}
+
+/// Attach a list-identity `Key` to an element for the M2 keyed differ. Keying a
+/// non-element node is a no-op (the differ only reorders element children), so
+/// this is total.
+export fn keyed(k: String, node: Html) -> Html {
+    return match node {
+        El(tag, attrs, kids) => El(tag, withKey(attrs, k), kids),
+        Empty => node,
+        Text(s) => node,
+        Raw(s) => node,
+    }
+}
+
+/// `attrs` with a trailing `Key(k)`.
+fn withKey(attrs: Array<Attr>, k: String) -> Array<Attr> {
+    let mut out = attrs
+    out.push(Key(k))
+    return out
+}
+
+// ===========================================================================
+// Escaping — byte-level so multi-byte UTF-8 passes through untouched (the
+// special characters are all ASCII < 128 and never appear as a continuation
+// byte of a multi-byte sequence).
+// ===========================================================================
+
+/// Append every byte of `src` onto `dst`, returning the grown array.
+fn appendBytes(dst: Array<UInt8>, src: Array<UInt8>) -> Array<UInt8> {
+    let mut out = dst
+    for b in src {
+        out.push(b)
+    }
+    return out
+}
+
+/// Decode a built byte buffer back to a `String` (the input is always valid
+/// UTF-8 by construction, so the `Err` arm is unreachable).
+fn bytesToStr(buf: Array<UInt8>) -> String {
+    return match stringFromBytes(buf) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+}
+
+/// Escape a text node's content: `&` `<` `>` `"`.
+fn escapeText(s: String) -> String {
+    let raw = bytes(s)
+    let mut out: Array<UInt8> = []
+    for b in raw {
+        if b == 38 {
+            out = appendBytes(out, bytes("&amp;"))
+        } else if b == 60 {
+            out = appendBytes(out, bytes("&lt;"))
+        } else if b == 62 {
+            out = appendBytes(out, bytes("&gt;"))
+        } else if b == 34 {
+            out = appendBytes(out, bytes("&quot;"))
+        } else {
+            out.push(b)
+        }
+    }
+    return bytesToStr(out)
+}
+
+/// Escape an attribute value: `&` `"` (the two characters that can break out of
+/// a double-quoted attribute).
+fn escapeAttr(s: String) -> String {
+    let raw = bytes(s)
+    let mut out: Array<UInt8> = []
+    for b in raw {
+        if b == 38 {
+            out = appendBytes(out, bytes("&amp;"))
+        } else if b == 34 {
+            out = appendBytes(out, bytes("&quot;"))
+        } else {
+            out.push(b)
+        }
+    }
+    return bytesToStr(out)
+}
+
+// ===========================================================================
+// The renderer — `toHtmlString` is TOTAL: it never traps on any input.
+// ===========================================================================
+
+/// The HTML void-element set (the spec list): rendered without a closing tag,
+/// and any children are ignored.
+fn isVoid(tag: String) -> Bool {
+    let voids = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]
+    for v in voids {
+        if v == tag {
+            return true
+        }
+    }
+    return false
+}
+
+/// One rendered attribute, with its leading space: ` class="row"`.
+fn renderAttr(a: Attr) -> String {
+    return match a {
+        Cls(v) => attrPair("class", v),
+        Id(v) => attrPair("id", v),
+        A(n, v) => attrPair(n, v),
+        On(event, handler, payload) => onPair(event, handler, payload),
+        Key(k) => attrPair("data-key", k),
+    }
+}
+
+/// ` name="escaped-value"`.
+fn attrPair(n: String, v: String) -> String {
+    return " " + n + "=\"" + escapeAttr(v) + "\""
+}
+
+/// ` data-on-<event>="handler" data-arg-<event>="payload"`. The event name
+/// forms part of the attribute NAME (not escapable, and always a controlled
+/// identifier like `click`); handler and payload are attribute values.
+fn onPair(event: String, handler: String, payload: String) -> String {
+    let mut out = " data-on-" + event + "=\"" + escapeAttr(handler) + "\""
+    out = out + " data-arg-" + event + "=\"" + escapeAttr(payload) + "\""
+    return out
+}
+
+/// All attributes concatenated.
+fn renderAttrs(attrs: Array<Attr>) -> String {
+    let mut out = ""
+    for a in attrs {
+        out = out + renderAttr(a)
+    }
+    return out
+}
+
+/// All children rendered and concatenated.
+fn renderKids(kids: Array<Html>) -> String {
+    let mut out = ""
+    for k in kids {
+        out = out + toHtmlString(k)
+    }
+    return out
+}
+
+/// Render one element. A void element emits no closing tag and ignores its
+/// children (documented, so `toHtmlString` stays total).
+fn renderEl(tag: String, attrs: Array<Attr>, kids: Array<Html>) -> String {
+    let open = "<" + tag + renderAttrs(attrs) + ">"
+    if isVoid(tag) {
+        return open
+    }
+    return open + renderKids(kids) + "</" + tag + ">"
+}
+
+/// Render a view tree to an HTML string (SSR). Text is escaped, attribute
+/// values are escaped, `Raw` bypasses, void elements self-close. Total: any
+/// `Html` value renders to a string, never a trap.
+export fn toHtmlString(h: Html) -> String {
+    return match h {
+        Empty => "",
+        Text(s) => escapeText(s),
+        Raw(s) => s,
+        El(tag, attrs, kids) => renderEl(tag, attrs, kids),
+    }
+}
+
+/// Wrap a view in a full `<!doctype html>` page. `title` is escaped as text;
+/// `head` is a list of head nodes (meta/link/script via `el`/`Raw`); `body` is
+/// the page body tree. Used by SSR and by M3's route dispatcher.
+export fn document(title: String, head: Array<Html>, body: Html) -> String {
+    let mut out = "<!doctype html>\n<html>\n<head>\n"
+    out = out + "<meta charset=\"utf-8\">\n"
+    out = out + "<title>" + escapeText(title) + "</title>\n"
+    out = out + renderKids(head)
+    out = out + "</head>\n<body>\n"
+    out = out + toHtmlString(body)
+    out = out + "\n</body>\n</html>\n"
+    return out
+}

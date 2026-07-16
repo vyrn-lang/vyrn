@@ -1,0 +1,103 @@
+/// std/html — the view tree and the SSR renderer (RFC-0026 M1).
+///
+/// A view is a pure function returning an `Html` tree; `toHtmlString` renders
+/// it to markup (the server path), and the same tree crosses to the browser as
+/// JSON for `web/vyrn-dom.js` (the client path). This example exercises every
+/// `Html`/`Attr` variant, the escaping rules, void elements, and keyed nodes —
+/// all pure, so it is an ordinary interp == native == wasm parity citizen.
+///
+///   - `Text` escapes `& < > "`; attribute values escape `& "`.
+///   - `Raw` bypasses escaping (the loud markup escape hatch).
+///   - void elements (`br`, `img`, `input`, …) self-close and ignore children.
+///   - `on(event, handler, payload)` → `data-on-<event>` + `data-arg-<event>`.
+///   - `keyed(k, node)` attaches list identity (`data-key`) for the M2 differ.
+import { el, text, cls, attr, on, keyed, empty, toHtmlString, document, Html, Attr } from "std/html"
+
+/// A small keyed list — the shape the M2 keyed differ reorders.
+fn itemRow(id: Int64, label: String) -> Html {
+    return keyed("\{id}", el("li", [cls("row"), attr("data-id", "\{id}")], [
+                el("span", [cls("label")], [text(label)]),
+                el("button", [on("click", "removeItem", "\{id}")], [text("remove")]),
+            ]))
+}
+
+/// The page body: a heading, an escaping torture line, void elements, a form
+/// input with an `input` handler, a raw-markup island, and a keyed list.
+fn cartBody() -> Html {
+    return el("main", [Id("app")], [
+            el("h1", [], [text("Cart & <friends>")]),
+            el("p", [attr("title", "a \"quoted\" & <angled> hint")], [
+                    text("5 < 6 and 6 > 5, always."),
+                ]),
+            el("hr", [], []),
+            el("img", [attr("src", "/logo.png"), attr("alt", "logo & mark")], [
+                    // children of a void element are ignored on render:
+                    text("this text never appears"),
+                ]),
+            el("form", [], [
+                    el("input", [attr("name", "q"), on("input", "onQuery", "")], []),
+                ]),
+            Raw("<aside class=\"promo\">raw <b>markup</b> passes through</aside>"),
+            el("ul", [cls("items")], [
+                    itemRow(1, "Widget"),
+                    itemRow(2, "Gadget & Co"),
+                    empty(),
+                    itemRow(3, "Sprocket"),
+                ]),
+        ])
+}
+
+fn main() -> Int64 {
+    // The body on its own.
+    print(toHtmlString(cartBody()))
+    print("----")
+    // A full document wrapper (SSR shell). The <title> is escaped as text.
+    print(document("Cart & Checkout", [
+                el("meta", [attr("name", "viewport"), attr("content", "width=device-width")], []),
+            ], cartBody()))
+    return 0
+}
+
+test "text escapes the four entities" {
+    assertEq(toHtmlString(text("a & b < c > d \" e")), "a &amp; b &lt; c &gt; d &quot; e")
+}
+
+test "attribute values escape amp and quote only, not angle brackets" {
+    let node = el("p", [attr("data-x", "a & \"b\" < c")], [])
+    assertEq(toHtmlString(node), "<p data-x=\"a &amp; &quot;b&quot; < c\"></p>")
+}
+
+test "raw bypasses escaping" {
+    assertEq(toHtmlString(Raw("<b>&</b>")), "<b>&</b>")
+}
+
+test "empty renders as nothing" {
+    assertEq(toHtmlString(empty()), "")
+}
+
+test "void elements self-close and ignore children" {
+    assertEq(toHtmlString(el("br", [], [text("ignored")])), "<br>")
+    assertEq(toHtmlString(el("img", [attr("src", "/x.png")], [])), "<img src=\"/x.png\">")
+}
+
+test "on renders two data attributes" {
+    let node = el("button", [on("click", "removeItem", "42")], [])
+    assertEq(toHtmlString(node), "<button data-on-click=\"removeItem\" data-arg-click=\"42\"></button>")
+}
+
+test "keyed attaches data-key to an element" {
+    assertEq(toHtmlString(keyed("7", el("li", [], []))), "<li data-key=\"7\"></li>")
+}
+
+test "keyed on a non-element is a no-op" {
+    assertEq(toHtmlString(keyed("7", text("hi"))), "hi")
+}
+
+test "class and id shorthands" {
+    assertEq(toHtmlString(el("div", [cls("card"), Id("main")], [])), "<div class=\"card\" id=\"main\"></div>")
+}
+
+test "nested elements render depth-first in order" {
+    let node = el("ul", [], [el("li", [], [text("a")]), el("li", [], [text("b")])])
+    assertEq(toHtmlString(node), "<ul><li>a</li><li>b</li></ul>")
+}
