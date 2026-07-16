@@ -59,16 +59,16 @@ fn emit_gen_shows_the_synthesized_router() {
     assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let src = String::from_utf8_lossy(&out.stdout);
 
-    // Page exports are imported under per-route aliases (RFC-0022 co-naming).
-    assert!(src.contains("import { page as page__r0 }"), "aliased page import:\n{src}");
-    assert!(
-        src.contains("Params as Params__r") && src.contains("load as load__r") && src.contains("Data as Data__r"),
-        "aliased Params/load/Data imports:\n{src}"
-    );
-    // The co-naming dummies that force each foreign decl to a fresh symbol.
-    assert!(src.contains("fn page() -> Int64"), "page dummy:\n{src}");
-    assert!(src.contains("type Params = Int64"), "Params dummy:\n{src}");
-    assert!(src.contains("type Data = Int64"), "Data dummy:\n{src}");
+    // Page modules are bound under per-route namespaces (RFC-0027): same-named
+    // exports across pages coexist with no aliasing and no co-naming dummies.
+    assert!(src.contains("import * as p0 from \"./pages/index\""), "namespace page import:\n{src}");
+    assert!(src.contains("p0.page()"), "namespaced static page call:\n{src}");
+    assert!(src.contains(".Params { "), "namespaced Params construction:\n{src}");
+    assert!(src.contains(".load(p)"), "namespaced load call:\n{src}");
+    assert!(src.contains(".page(p, d)"), "namespaced loader page call:\n{src}");
+    // The obsolete co-naming dummies are gone.
+    assert!(!src.contains("fn page() -> Int64"), "no page dummy:\n{src}");
+    assert!(!src.contains("type Params = Int64"), "no Params dummy:\n{src}");
 
     // RoutePath — the regex-validated string of the whole route language, with an
     // Int64 param as its integer-spelling regex.
