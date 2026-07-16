@@ -65,6 +65,14 @@ tests). Highlights:
   end: `type Age = Int64 where value >= 18;`. Provably-invalid constants are
   compile errors; valid ones cost nothing at runtime; non-constant values are
   checked at runtime. See [`examples/validate.vyrn`](examples/validate.vyrn).
+- **Finite string types & interpolation containment (RFC-0020 M1)** — a
+  validated `String` whose regex denotes a *finite* language is a finite string
+  type. An interpolation `"nav.\{s}.label"` over finite holes is itself a finite
+  language, and flowing it into a validated type checks `L ⊆ T` by DFA
+  containment (a product-automaton walk, not the union cross-product TypeScript
+  expands): proven ⇒ the runtime check is erased; not contained ⇒ a compile error
+  naming the offending key. The editor completes `t("` with every key. See
+  [`examples/finitekeys.vyrn`](examples/finitekeys.vyrn).
 - **`Option<T>`, `Result<T, E>`, `match`, and `?` (RFC-0005) implemented** end to
   end — no null; absence/failure are explicit values, read via exhaustive
   `match`, and `?` propagates `None`/`Err` out of a function. `Option` **and**

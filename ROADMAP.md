@@ -279,6 +279,28 @@ protocol roadmap (Connect/gRPC, `.proto`/SDL emitters, JSON-RPC/MCP, SSE) is now
 compiler. See `examples/fullstack/` (`vyrn dev`, then a typed round trip, a
 validated 422, and a cache demo in the page).
 
+**Finite string types check containment, not cross-products (RFC-0020 M1).** A
+validated `String` whose regex denotes a *finite* language is a finite string
+type, and the checker gains two automata-backed powers. A string interpolation
+`"nav.\{s}.label"` whose every hole is a finite string type is itself a finite
+language (the concatenation of the literal parts and the hole languages), and
+coercing it into a validated string type `T` checks `L ⊆ T` by a DFA
+**containment** walk — complement `T`, product with `L`, look for a reachable
+accepting state — not by enumerating the union of possibilities the way
+TypeScript expands template-literal types (which is why `tsc` hard-caps near
+100k combinations). Proven ⇒ the runtime validation is *erased* from the native
+code (`navLabel` in `examples/finitekeys.vyrn` is checked once and costs nothing
+after); not contained ⇒ a compile error naming the shortest offending key the
+product automaton found (`"nav.settings.label" (a possible value of this
+interpolation) does not satisfy \`TransKey\``). The same finiteness underwrites
+editor completion: inside a string literal whose expected type is finite,
+`t("` offers every key. Containment applies when both sides are pure `value =~`
+regex conjunctions (a length clause keeps the ordinary runtime check); the
+interpreter leaves its check in place as a proven no-op, so `interp == native ==
+wasm` is untouched. This is M1 and independent of i18n; **M2 (the locale
+message-catalog generator) is now a library on RFC-0021** built over these
+finite key types.
+
 ---
 
 ## Shipped
