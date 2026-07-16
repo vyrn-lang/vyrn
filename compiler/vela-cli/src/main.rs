@@ -1413,8 +1413,9 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
         Err(code) => return code,
     };
 
-    // `velac serve` requires `fn handle(req: Request) -> Response` (exactly this
-    // signature — the checker's no-`main` exemption uses the same rule).
+    // `velac serve` needs SOMETHING to serve: either `fn handle(req: Request) ->
+    // Response` (RFC-0016) or at least one `rpc fn` procedure (RFC-0019). A file
+    // with neither has no routes to mount.
     use vela_frontend::ast::Type;
     let has_handle = program.functions.iter().any(|f| {
         f.name == "handle"
@@ -1423,12 +1424,19 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
             && f.params[0].ty == Type::Named("Request".to_string())
             && f.ret == Type::Named("Response".to_string())
     });
-    if !has_handle {
+    let has_rpc = program.functions.iter().any(|f| f.is_rpc);
+    if !has_handle && !has_rpc {
         eprintln!(
-            "error: `velac serve` needs `fn handle(req: Request) -> Response` in {path}"
+            "error: `velac serve` needs `fn handle(req: Request) -> Response` \
+             or at least one `rpc fn` procedure in {path}"
         );
         return ExitCode::FAILURE;
     }
+
+    // The `GET /rpc/$schema` registry (RFC-0019): a protocol-neutral list of the
+    // procedures with each one's request/response JSON Schema (or `null`).
+    // Computed once from the type declarations (the `jsonSchema` emitter).
+    let rpc_schema = std::sync::Arc::new(rpc_schema_json(&program));
 
     // Bind before running `main`, so a port clash fails fast and cleanly. A
     // `--port 0` lets the OS pick a free port; report the one it chose.
@@ -1443,8 +1451,8 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
     let file_label = path.to_string();
 
     // The interpreter thread owns one live `Interp` (module state persists); it
-    // runs `main` once, then invokes this accept loop with a per-request handler.
-    let result = vela_frontend::interp::serve(&program, move |call_handle| {
+    // runs `main` once, then invokes this accept loop with the serve host.
+    let result = vela_frontend::interp::serve(&program, move |host| {
         use std::io::Write;
         // `main` (if any) has already run; flush its stdout so its startup
         // output precedes the serving banner regardless of buffering mode.
@@ -1452,7 +1460,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
         eprintln!("serving {file_label} on http://localhost:{actual_port}");
         for stream in listener.incoming() {
             match stream {
-                Ok(mut s) => serve_one(&mut s, call_handle),
+                Ok(mut s) => serve_one(&mut s, host, &rpc_schema),
                 Err(_) => continue,
             }
         }
@@ -1482,15 +1490,37 @@ enum ParseError {
 /// running — one bad request must not kill it).
 fn serve_one(
     stream: &mut std::net::TcpStream,
-    call_handle: &mut dyn FnMut(
-        vela_frontend::interp::ServeRequest,
-    ) -> Result<vela_frontend::interp::ServeResponse, String>,
+    host: &mut dyn vela_frontend::interp::ServeHost,
+    rpc_schema: &str,
 ) {
     match parse_request(stream) {
         Ok(req) => {
             let method = req.method.clone();
             let path = req.path.clone();
-            match call_handle(req) {
+            // The typed-procedure mounts (RFC-0019) own the `/rpc/` prefix; the
+            // path minus any query string is the route.
+            let route = path.split('?').next().unwrap_or("");
+            if route == "/rpc/$schema" {
+                if method == "GET" {
+                    eprintln!("{method} {path} -> 200");
+                    write_response(stream, 200, "application/json", rpc_schema.as_bytes());
+                } else {
+                    eprintln!("{method} {path} -> 405");
+                    write_response(stream, 405, "text/plain", b"method not allowed");
+                }
+                return;
+            }
+            if let Some(name) = route.strip_prefix("/rpc/") {
+                serve_rpc(stream, host, &method, &path, name, &req.content_type, &req.body);
+                return;
+            }
+            // Otherwise fall to the RFC-0016 `handle` (if the file defines one).
+            if !host.has_handle() {
+                eprintln!("{method} {path} -> 404");
+                write_response(stream, 404, "text/plain", b"not found");
+                return;
+            }
+            match host.handle(req) {
                 Ok(resp) => {
                     eprintln!("{method} {path} -> {}", resp.status);
                     write_response(stream, resp.status, &resp.content_type, resp.body.as_bytes());
@@ -1510,6 +1540,102 @@ fn serve_one(
         Err(ParseError::Bad) => {
             eprintln!("- - -> 400");
             write_response(stream, 400, "text/plain", b"bad request");
+        }
+    }
+}
+
+/// One `POST /rpc/<name>` request (RFC-0019). The codec seam: a body must be
+/// `application/json` (else 415). Decode → `Invalid` ⇒ 422 with the `Issue`
+/// array; success ⇒ 200 `application/json` (or 204 for a `Unit`-returning
+/// procedure). Unknown procedure ⇒ 404. A procedure trap ⇒ logged 500 (the
+/// server survives — RFC-0016).
+fn serve_rpc(
+    stream: &mut std::net::TcpStream,
+    host: &mut dyn vela_frontend::interp::ServeHost,
+    method: &str,
+    path: &str,
+    name: &str,
+    content_type: &str,
+    body: &str,
+) {
+    use vela_frontend::interp::RpcOutcome;
+    if method != "POST" {
+        eprintln!("{method} {path} -> 405");
+        write_response(stream, 405, "text/plain", b"method not allowed");
+        return;
+    }
+    if content_type != "application/json" {
+        eprintln!("{method} {path} -> 415");
+        write_response(stream, 415, "text/plain", b"unsupported media type (expected application/json)");
+        return;
+    }
+    match host.rpc(name, body) {
+        Ok(RpcOutcome::Unknown) => {
+            eprintln!("{method} {path} -> 404");
+            write_response(stream, 404, "text/plain", b"not found");
+        }
+        Ok(RpcOutcome::Invalid(issues)) => {
+            eprintln!("{method} {path} -> 422");
+            write_response(stream, 422, "application/json", issues.as_bytes());
+        }
+        Ok(RpcOutcome::Ok { unit: true, .. }) => {
+            eprintln!("{method} {path} -> 204");
+            write_response(stream, 204, "application/json", b"");
+        }
+        Ok(RpcOutcome::Ok { body, unit: false }) => {
+            eprintln!("{method} {path} -> 200");
+            write_response(stream, 200, "application/json", body.as_bytes());
+        }
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            eprintln!("{method} {path} -> 500");
+            write_response(stream, 500, "text/plain", b"internal error");
+        }
+    }
+}
+
+/// Build the `GET /rpc/$schema` registry body (RFC-0019):
+/// `{"procedures":[{"name","request":<jsonSchema|null>,"response":<jsonSchema|null>}]}`.
+/// Procedures appear in declaration order; the request/response schemas come from
+/// the same emitter as the `jsonSchema` builtin (`null` for a parameterless
+/// request or a `Unit` return).
+fn rpc_schema_json(program: &vela_frontend::ast::Program) -> String {
+    use vela_frontend::ast::Type;
+    let types: std::collections::HashMap<String, vela_frontend::ast::TypeDecl> =
+        program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+    let mut procs = Vec::new();
+    for f in program.functions.iter().filter(|f| f.is_rpc) {
+        let request = match f.params.first() {
+            Some(p) => vela_frontend::types::rpc_payload_schema(&p.ty, &types)
+                .unwrap_or_else(|| "null".to_string()),
+            None => "null".to_string(),
+        };
+        let response = if matches!(f.ret, Type::Unit) {
+            "null".to_string()
+        } else {
+            vela_frontend::types::rpc_payload_schema(&f.ret, &types)
+                .unwrap_or_else(|| "null".to_string())
+        };
+        let mut name = String::new();
+        json_escape_into(&f.name, &mut name);
+        procs.push(format!(
+            "{{\"name\":\"{name}\",\"request\":{request},\"response\":{response}}}"
+        ));
+    }
+    format!("{{\"procedures\":[{}]}}", procs.join(","))
+}
+
+/// Minimal JSON string escaping for the schema registry's procedure names.
+fn json_escape_into(s: &str, out: &mut String) {
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
         }
     }
 }
@@ -1561,6 +1687,7 @@ fn parse_request(
     // Headers: `name: value`, name compared case-insensitively.
     let mut content_length: usize = 0;
     let mut chunked = false;
+    let mut content_type = String::new();
     for line in lines {
         if line.is_empty() {
             continue;
@@ -1572,6 +1699,15 @@ fn parse_request(
             content_length = value.parse::<usize>().map_err(|_| ParseError::Bad)?;
         } else if lname == "transfer-encoding" && value.to_ascii_lowercase().contains("chunked") {
             chunked = true;
+        } else if lname == "content-type" {
+            // Lowercase, and drop any `; charset=..` parameter — the codec seam
+            // (RFC-0019) negotiates on the media type alone.
+            content_type = value
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
         }
     }
     if chunked {
@@ -1596,7 +1732,7 @@ fn parse_request(
     // decoding would silently corrupt it).
     let body = String::from_utf8(body).map_err(|_| ParseError::Bad)?;
 
-    Ok(vela_frontend::interp::ServeRequest { method, path: target, body })
+    Ok(vela_frontend::interp::ServeRequest { method, path: target, body, content_type })
 }
 
 /// A minimal status-code → reason-phrase table. Unknown codes get an empty
