@@ -32,7 +32,7 @@ import { BookView, TagCount, Labels } from "../types"
             <h2>{labels.tagsHdr}</h2>
             <ul class="taglist">
                 <li><button class="tag" @click="clearFilter">{labels.filterAll}</button></li>
-                {#for t in tags key={t.name}}<TagItem name={t.name} label={t.label} count={t.count} klass={t.cls}/>{/for}
+                {#for t in tags key={t.name}}<TagItem name={t.name} label={t.label} count={t.count} cls={t.cls}/>{/for}
             </ul>
         </aside>
     </div>

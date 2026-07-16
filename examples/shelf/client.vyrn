@@ -40,7 +40,7 @@ let mut draftTitle: String = ""
 let mut draftUrl: String = ""
 let mut draftTags: String = ""
 let mut issues: String = ""
-let mut lang: Locale = En
+let mut loc: Locale = En
 let mut detailStatus: String = "loading…"
 let mut detailTitle: String = ""
 let mut detailUrl: String = ""
@@ -88,20 +88,20 @@ fn renderIssues(iss: Array<Issue>) -> String {
 /// widgets receive resolved strings).
 fn labels() -> Labels {
     return Labels {
-        add: tr.tShelfAdd(lang),
-        title: tr.tShelfTitle(lang),
-        url: tr.tShelfUrl(lang),
-        tags: tr.tShelfTagsField(lang),
-        save: tr.tShelfSave(lang),
-        rate: tr.tShelfRateLabel(lang),
-        del: tr.tShelfDelete(lang),
-        confirm: tr.tShelfConfirm(lang),
-        cancel: tr.tShelfCancel(lang),
-        unrated: tr.tShelfUnrated(lang),
-        empty: tr.tShelfEmpty(lang),
-        tagsHdr: tr.tShelfTags(lang),
-        filterAll: tr.tShelfFilterAll(lang),
-        lang: tr.tLangSwitch(lang),
+        add: tr.tShelfAdd(loc),
+        title: tr.tShelfTitle(loc),
+        url: tr.tShelfUrl(loc),
+        tags: tr.tShelfTagsField(loc),
+        save: tr.tShelfSave(loc),
+        rate: tr.tShelfRateLabel(loc),
+        del: tr.tShelfDelete(loc),
+        confirm: tr.tShelfConfirm(loc),
+        cancel: tr.tShelfCancel(loc),
+        unrated: tr.tShelfUnrated(loc),
+        empty: tr.tShelfEmpty(loc),
+        tagsHdr: tr.tShelfTags(loc),
+        filterAll: tr.tShelfFilterAll(loc),
+        lang: tr.tLangSwitch(loc),
     }
 }
 
@@ -142,14 +142,14 @@ fn tagViews() -> Array<TagCount> {
             None => 0,
         }
         let label = match tr.transKey("tag." + name) {
-            Some(k) => tr.tr(lang, k),
+            Some(k) => tr.t(loc, k),
             None => name,
         }
-        let mut tagCls = "tag"
+        let mut cls = "tag"
         if filter == name {
-            tagCls = "tag active"
+            cls = "tag active"
         }
-        out.push(TagCount { name: name, label: label, count: count, cls: tagCls })
+        out.push(TagCount { name: name, label: label, count: count, cls: cls })
     }
     return out
 }
@@ -161,17 +161,17 @@ fn listView() -> Html {
         labels(),
         bookViews(),
         tagViews(),
-        tr.tShelfCount(lang, books.length),
+        tr.tShelfCount(loc, books.length),
         issues,
         draftTitle,
         draftUrl,
         draftTags,
-        tr.tLangSwitch(lang),
+        tr.tLangSwitch(loc),
     )
 }
 
 fn detailView() -> Html {
-    let mut rating = tr.tShelfUnrated(lang)
+    let mut rating = tr.tShelfUnrated(loc)
     if detailRating > 0 {
         rating = "★ \{detailRating}"
     }
@@ -365,7 +365,7 @@ export extern fn clearFilter(arg: String) {
 }
 
 export extern fn toggleLang(arg: String) {
-    lang = match lang {
+    loc = match loc {
         En => Uk,
         Uk => En,
     }
