@@ -1,6 +1,7 @@
 # RFC-0027 — `import * as ns`: Namespaced Imports
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented — see `compiler/` and the three-way parity corpus
+  (`examples/namespace.vyrn` + `examples/lib/{shapes,metrics}.vyrn`)
 - **Depends on:** RFC-0010 (modules — the flat import namespace this fixes),
   RFC-0022 (import aliasing — the co-naming trick this obsoletes for its
   worst cases), RFC-0021 (generator imports — synthesized modules must be
@@ -99,3 +100,78 @@ Re-exports (`export * from`), nested namespaces, namespace values /
 first-class modules, renaming members at the namespace boundary
 (`ns.foo as bar` — selective imports already do this), wildcard VALUE
 imports (`import * from` — never; the flat namespace is the disease).
+
+---
+
+## Implementation notes & decisions (as landed)
+
+- **AST / parser.** `ImportDecl` gained `namespace: Option<String>` (`names`
+  empty when set); `import * as ns from <source>` reuses the existing import
+  source parser, so string paths AND generator calls (`import * as ui from
+  pages("./pages")`) both work. Plain member-access cannot spell three
+  positions, so the parser was extended minimally to emit EXISTING nodes with a
+  dotted spelling the loader strips: `ns.Type { .. }` → `StructLit` named
+  `"ns.Type"`; `ns.Type` / `ns.Box<T>` in type position → `Type::Named`/`App`
+  named `"ns.Type"`; `ns.Color.Red` match patterns → `Pattern::Variant("ns.
+  Color.Red", ..)`. Everything else already parsed: `ns.fn(x)` and
+  `ns.Enum.Variant(x)` are method-call sugar (`Call` whose first arg is the
+  `ns`/`ns.Enum` receiver), and `ns.member` / `ns.Enum.Variant` are `Field`
+  chains.
+
+- **Where resolution hooks in.** All reinterpretation lives in the loader's
+  `resolve_aliases` pass (the RFC-0022 mechanism), BEFORE register/visibility/
+  merge, so the checker/interp/codegen/codec/LSP stay namespace-unaware —
+  **zero backend changes**. Order: collect + validate namespace bindings →
+  co-naming rename decisions (RFC-0022) → **namespace rename decisions** → build
+  rewrite maps → apply foreign renames → apply alias rewrites + normalize
+  imports → **Pass 5: `NsResolver`** walks each namespaced module scope-aware and
+  folds every `ns.member` use to the resolved program-wide symbol.
+
+- **Renames only on collision.** A namespaced module's export is renamed to a
+  fresh `member__fromN` symbol only when its name is declared by ≥2 modules
+  (otherwise it keeps its name — no churn). `ns.member` and any selective
+  importer of the same decl both resolve to that symbol via the existing
+  co-naming machinery, which is what lets two namespaced modules export the same
+  name and coexist (the whole point).
+
+- **Resolution-order subtlety.** `ns.fn(x)` and `someFn(ns.Type, x)` parse
+  IDENTICALLY (`Call` with a `Field`/`Var` first arg). They are told apart by a
+  per-module **exported-enum-variant set**: `Call{name, [ns.Enum, ..]}` is
+  variant construction only when `name` is a variant of that namespaced module's
+  enums; otherwise `ns.Type` is a type-name argument and the `Field` arm rewrites
+  it. `NsResolver` tracks locals (params, `let`, `for`, lambda params, match
+  binds) so a local binding shadows a namespace (well-defined, per the locked
+  semantics). Diagnostics landed as specified: namespace-is-not-a-value,
+  duplicate/colliding namespace names, exported-only (`no exported member`),
+  and one-level-deep (`a.b.thing` → `no exported member \`b\``).
+
+- **Shadowing diagnostic.** The diagnostic layer is error-only (no warning
+  class), so the "discouraged" shadowing case is simply well-defined and silent
+  rather than warned — a local binding shadows a namespace, as documented here.
+
+- **Consumers migrated.** The std/ui pages router (`std/ui.vyrn`) now emits
+  `import * as p<idx> from "<page>"` and references `p<idx>.page` /
+  `p<idx>.Params { .. }` / `p<idx>.load(p)`, deleting the RFC-0022 inert-dummy
+  co-naming trick (`fn page()`/`type Params`/… no longer emitted). The `.vyx`
+  consumers were left alone: the current corpus already sidesteps flat-namespace
+  collisions by naming (components like `Listing`/`IssuePanel`, and the fullstack
+  client imports only the root `app`), so namespacing them would be churn with no
+  benefit — the router was the genuine win. `examples/namespace.vyrn` is the new
+  parity citizen (expression, type, generic-arg, enum-variant construction +
+  patterns, type-name argument, and a namespaced generator import).
+
+- **Editor.** `analyze_linked` indexes each `import * as ns` binding and the
+  target module's EXPORTED decls (parsed from the module's own source, so names/
+  lines are the module's — a collision rename never leaks into the editor):
+  completion after `ns.` offers the exports (noted "— via namespace `ns`"),
+  hover on `ns.member` shows the decl with that note, go-to-definition jumps into
+  the source module, and hovering the `ns` binding shows a "not a value" summary.
+  A synthesized generator namespace has no readable file, so its `ns.` offers
+  nothing (graceful). `fmt` prints `import * as ns from ..` as a stable header
+  line (re-lex invariant holds). `editor/vscode/server/vyrn-lsp.exe` was rebuilt
+  (release) and redeployed.
+
+- **Known limitation.** Enum variants are global (not renamed), so two
+  DIFFERENT namespaced modules exporting an enum with the same variant name
+  (`ns1.A.Red` and `ns2.B.Red`) would collide on the bare `Red` — the same
+  pre-existing flat-variant limitation, not made worse. No corpus case hits it.
