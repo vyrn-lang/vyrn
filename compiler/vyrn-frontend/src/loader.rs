@@ -1698,7 +1698,10 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
         };
 
         for f in &m.program.functions {
-            for c in fn_body_names(&f.body) {
+            // Scope-aware: a name bound by a local (param, `let`, loop/lambda var,
+            // match bind) shadows a like-named foreign export and is never a
+            // cross-module reference at that use site.
+            for c in fn_body_ref_names(f) {
                 check_name(&c.0, c.1, "function", &mut errors);
             }
             for p in &f.params {
@@ -1892,6 +1895,165 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
     }
     block(b, &mut out);
     out
+}
+
+/// Scope-aware reference scan for the link-time visibility check: every name a
+/// function references that could name a program-level declaration, MINUS any
+/// name bound by a local in scope — params, `let`, `for`/lambda variables, and
+/// match binds. A local shadows a like-named foreign export, so at that use site
+/// it is never a cross-module reference: the flat namespace binds locals before
+/// imports (RFC-0027, one level below imports). Type-position names (`let x: T`
+/// annotations, and the caller's param/return/bound types) are always kept — a
+/// value local never shadows a type. Unlike [`fn_body_names`], this seeds the
+/// scope with the function's params, so a param that shadows a foreign export is
+/// not mistaken for an un-imported reference.
+fn fn_body_ref_names(f: &Function) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    let mut locals: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
+    scope_block(&f.body, &mut locals, &mut out);
+    out
+}
+
+fn scope_block(b: &Block, locals: &mut HashSet<String>, out: &mut Vec<(String, usize)>) {
+    for s in &b.stmts {
+        scope_stmt(s, locals, out);
+    }
+}
+
+fn scope_stmt(s: &Stmt, locals: &mut HashSet<String>, out: &mut Vec<(String, usize)>) {
+    match s {
+        Stmt::Let { name, value, ty, line, .. } => {
+            if let Some(t) = ty {
+                for n in type_names(t) {
+                    out.push((n, *line));
+                }
+            }
+            scope_expr(value, *line, locals, out);
+            // In scope for subsequent statements (and shadows a like-named export
+            // from here on).
+            locals.insert(name.clone());
+        }
+        Stmt::Assign { value, line, .. } | Stmt::SetField { value, line, .. } => {
+            scope_expr(value, *line, locals, out)
+        }
+        Stmt::IndexSet { index, value, line, .. } => {
+            scope_expr(index, *line, locals, out);
+            scope_expr(value, *line, locals, out);
+        }
+        Stmt::Return { value: Some(e), line } => scope_expr(e, *line, locals, out),
+        Stmt::Return { value: None, .. } => {}
+        Stmt::If { cond, then_block, else_block, line } => {
+            scope_expr(cond, *line, locals, out);
+            let mut inner = locals.clone();
+            scope_block(then_block, &mut inner, out);
+            if let Some(eb) = else_block {
+                let mut inner2 = locals.clone();
+                scope_block(eb, &mut inner2, out);
+            }
+        }
+        Stmt::While { cond, body, line } => {
+            scope_expr(cond, *line, locals, out);
+            let mut inner = locals.clone();
+            scope_block(body, &mut inner, out);
+        }
+        Stmt::ForIn { var, iter, body, line } => {
+            scope_expr(iter, *line, locals, out);
+            let mut inner = locals.clone();
+            inner.insert(var.clone());
+            scope_block(body, &mut inner, out);
+        }
+        Stmt::Drop { .. } => {}
+        Stmt::Expr(e) => scope_expr(e, 0, locals, out),
+        Stmt::Region { body, .. } => {
+            let mut inner = locals.clone();
+            scope_block(body, &mut inner, out);
+        }
+    }
+}
+
+fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(String, usize)>) {
+    match e {
+        Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
+            if !locals.contains(name) {
+                out.push((name.clone(), *line));
+            }
+            for a in args {
+                scope_expr(a, *line, locals, out);
+            }
+        }
+        Expr::StructLit { name, fields, line } => {
+            if !locals.contains(name) {
+                out.push((name.clone(), *line));
+            }
+            for (_, v) in fields {
+                scope_expr(v, *line, locals, out);
+            }
+        }
+        Expr::TryConstruct { name, args, line } => {
+            if !locals.contains(name) {
+                out.push((name.clone(), *line));
+            }
+            for a in args {
+                scope_expr(a, *line, locals, out);
+            }
+        }
+        Expr::Var { name, line } => {
+            if !locals.contains(name) {
+                out.push((name.clone(), *line));
+            }
+        }
+        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+            scope_expr(expr, line, locals, out)
+        }
+        Expr::Binary { lhs, rhs, line, .. } => {
+            scope_expr(lhs, *line, locals, out);
+            scope_expr(rhs, *line, locals, out);
+        }
+        Expr::Match { scrutinee, arms, line } => {
+            scope_expr(scrutinee, *line, locals, out);
+            for arm in arms {
+                let mut inner = locals.clone();
+                match &arm.pattern {
+                    Pattern::Variant(v, binds) => {
+                        // The variant constructor is a reference; its binds are new locals.
+                        if !inner.contains(v) {
+                            out.push((v.clone(), *line));
+                        }
+                        for b in binds {
+                            inner.insert(b.clone());
+                        }
+                    }
+                    Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => {
+                        inner.insert(b.clone());
+                    }
+                    Pattern::None => {}
+                }
+                scope_expr(&arm.body, *line, &inner, out);
+            }
+        }
+        Expr::ArrayLit { elems, line } => {
+            for e2 in elems {
+                scope_expr(e2, *line, locals, out);
+            }
+        }
+        Expr::MapLit { entries, line } => {
+            for (k, v) in entries {
+                scope_expr(k, *line, locals, out);
+                scope_expr(v, *line, locals, out);
+            }
+        }
+        Expr::Lambda { params, body, line } => {
+            let mut inner = locals.clone();
+            for p in params {
+                inner.insert(p.clone());
+            }
+            match body {
+                LambdaBody::Expr(e2) => scope_expr(e2, *line, &inner, out),
+                LambdaBody::Block(b2) => scope_block(b2, &mut inner, out),
+            }
+        }
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
+    }
 }
 
 /// Every named/applied type mentioned anywhere inside `ty`.
@@ -2427,6 +2589,140 @@ mod tests {
                     fn main() -> Int64 { return tally }";
         let e = load_err(root, &[("lib.vyrn", lib)]);
         assert!(e.contains("must be unique"), "{e}");
+    }
+
+    // ---- flat-namespace local shadowing (dogfood BUG 2) ------------------
+    // A local/param/loop/lambda/match binding whose name equals ANOTHER linked
+    // module's export must never be mis-resolved as an un-imported foreign
+    // reference. The visibility scan is scope-aware; locals bind before imports.
+
+    #[test]
+    fn local_let_shadows_a_foreign_export_of_the_same_name() {
+        // The shelf shape: module `ui` has a local `t`; module `strings` exports
+        // `t`. Both are linked (root imports from each). `ui`'s local `t` is NOT
+        // a reference to `strings`'s `t`.
+        let strings = "export fn t() -> Int64 { return 99 } \
+                       export fn label() -> Int64 { return 1 }";
+        let ui = "import { label } from \"./strings\" \
+                  export fn render() -> Int64 { let t = 5 return t + label() }";
+        let root = "import { render } from \"./ui\" \
+                    import { t } from \"./strings\" \
+                    fn main() -> Int64 { return render() + t() }";
+        assert_eq!(
+            run_multi(root, &[("strings.vyrn", strings), ("ui.vyrn", ui)]).unwrap(),
+            5 + 1 + 99
+        );
+    }
+
+    #[test]
+    fn param_shadows_a_foreign_global_of_the_same_name() {
+        // The shelf `loc` shape: a generated/library fn's PARAM `loc` shadows the
+        // root's module-state global `loc`.
+        let lib = "export fn greet(loc: Int64) -> Int64 { return loc + 1 }";
+        let root = "import { greet } from \"./lib\" \
+                    let mut loc = 10 \
+                    fn main() -> Int64 { return greet(loc) }";
+        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 11);
+    }
+
+    #[test]
+    fn for_loop_var_shadows_a_foreign_export() {
+        // The `std/ui` loop-var `t` shape.
+        let strings = "export fn t() -> Int64 { return 7 }";
+        let lib = "export fn total(xs: Array<Int64>) -> Int64 { \
+                       let mut sum = 0 for t in xs { sum = sum + t } return sum }";
+        let root = "import { total } from \"./lib\" \
+                    import { t } from \"./strings\" \
+                    fn main() -> Int64 { let xs: Array<Int64> = [1, 2, 3] return total(xs) + t() }";
+        assert_eq!(
+            run_multi(root, &[("strings.vyrn", strings), ("lib.vyrn", lib)]).unwrap(),
+            6 + 7
+        );
+    }
+
+    #[test]
+    fn match_bind_shadows_a_foreign_export() {
+        let lib = "export fn why() -> Int64 { return 100 }";
+        let root = "import { why } from \"./lib\" \
+                    fn pick(x: Result<Int64, Int64>) -> Int64 { \
+                        return match x { Ok(why) => why, Err(e) => e } } \
+                    fn main() -> Int64 { return pick(Ok(3)) + why() }";
+        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 3 + 100);
+    }
+
+    #[test]
+    fn a_genuinely_unimported_foreign_name_still_errors() {
+        // Guard against over-fixing: a bare use that is NOT shadowed by any local
+        // must still be flagged.
+        let lib = "export fn helper() -> Int64 { return 1 } \
+                   export fn wanted() -> Int64 { return 2 }";
+        let root = "import { wanted } from \"./lib\" \
+                    fn main() -> Int64 { return wanted() + helper() }";
+        let e = load_err(root, &[("lib.vyrn", lib)]);
+        assert!(e.contains("not imported here"), "{e}");
+    }
+
+    #[test]
+    fn a_local_shadow_does_not_hide_a_later_genuine_reference() {
+        // `t` is a local only inside the `for`; a use of `t` OUTSIDE that scope is
+        // still a genuine foreign reference — and here `lib` never imported it, so
+        // it must error even though a same-named local exists elsewhere in the fn.
+        let strings = "export fn t() -> Int64 { return 7 }";
+        let lib = "export fn f(xs: Array<Int64>) -> Int64 { \
+                       let mut s = 0 for t in xs { s = s + t } return s + t() }";
+        let root = "import { f } from \"./lib\" \
+                    import { t } from \"./strings\" \
+                    fn main() -> Int64 { let xs: Array<Int64> = [1] return f(xs) + t() }";
+        let e = load_err(root, &[("strings.vyrn", strings), ("lib.vyrn", lib)]);
+        assert!(e.contains("not imported here"), "{e}");
+    }
+
+    #[test]
+    fn namespaced_module_local_shadows_another_modules_export() {
+        // Interaction with RFC-0027: a namespaced module `ui` has a local `t`
+        // while `strings` (also linked) exports `t`.
+        let strings = "export fn t() -> Int64 { return 40 }";
+        let ui = "export fn render() -> Int64 { let t = 2 return t }";
+        let root = "import * as ui from \"./ui\" \
+                    import { t } from \"./strings\" \
+                    fn main() -> Int64 { return ui.render() + t() }";
+        assert_eq!(
+            run_multi(root, &[("strings.vyrn", strings), ("ui.vyrn", ui)]).unwrap(),
+            2 + 40
+        );
+    }
+
+    #[test]
+    fn co_named_stub_with_a_local_shadowing_another_export() {
+        // Interaction with RFC-0022 co-naming AND local shadowing at once: the
+        // root stubs `getUser` (co-naming) and also has a local `t` shadowing
+        // `strings`'s exported `t`.
+        let lib = "export fn getUser(id: Int64) -> Int64 { return id * 100 }";
+        let strings = "export fn t() -> Int64 { return 5 }";
+        let root = "import { getUser as getUserReal } from \"./lib\" \
+                    import { t } from \"./strings\" \
+                    fn getUser(id: Int64) -> Int64 { let t = 1 return getUserReal(id) + t } \
+                    fn main() -> Int64 { return getUser(2) + t() }";
+        assert_eq!(
+            run_multi(root, &[("lib.vyrn", lib), ("strings.vyrn", strings)]).unwrap(),
+            201 + 5
+        );
+    }
+
+    #[test]
+    fn generated_module_param_shadows_a_foreign_export() {
+        // The `.vyx` `cls` shape: a generator-synthesized module has a fn whose
+        // PARAM `cls` shadows `std/html`'s exported `cls`, both linked together.
+        let html = "export fn cls(s: String) -> String { return s }";
+        let gen = "export gen fn widgets(dir: String) -> String { \
+                       return \"export fn item(cls: String) -> String { return cls }\" }";
+        let root = "import { cls } from \"./html\" \
+                    import { widgets } from \"./gen\" \
+                    import { item } from widgets(\"./w\") \
+                    fn main() -> Int64 { let a = cls(\"x\") let b = item(\"y\") return 0 }";
+        // Links html (exports `cls`) + the synthesized module (param `cls`) with
+        // no false \"cls not imported\" error.
+        assert_eq!(run_multi(root, &[("html.vyrn", html), ("gen.vyrn", gen)]).unwrap(), 0);
     }
 
     // ---- RFC-0027: namespaced imports ------------------------------------
