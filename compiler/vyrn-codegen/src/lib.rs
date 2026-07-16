@@ -1455,6 +1455,14 @@ pub fn emit(program: &Program) -> Result<String, String> {
         if f.is_extern {
             continue;
         }
+        // A `gen fn` (RFC-0021) runs only in the compiler's interpreter at
+        // generation time — it is never called in a shipped binary. Its body may
+        // use generation-only builtins (`listDir`/`moduleInterface`) with no
+        // native/wasm lowering, so it is not emitted as a `define` here. (A
+        // program that *calls* one at runtime should use `vyrn run`/`vyrn test`.)
+        if f.is_gen {
+            continue;
+        }
         let sym = if f.name == "main" { "vyrn_main".to_string() } else { format!("vyrn_{}", f.name) };
         let mut gen = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,

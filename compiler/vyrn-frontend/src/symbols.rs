@@ -1473,4 +1473,31 @@ mod tests {
         assert_eq!(t.line, 1);
         assert!(t.col > 0, "anchored at the `test` keyword for go-to");
     }
+
+    #[test]
+    fn analyze_linked_runs_a_generator_import() {
+        // RFC-0021: editor analysis resolves a generator-call import through the
+        // loader — the generator runs, its module links, and the imported name is
+        // indexed for hover / go-to-def (via the read-only resolver + cache).
+        use crate::loader::{LoadOptions, MapResolver};
+        let files: std::collections::HashMap<String, String> = [(
+            "gen.vyrn".to_string(),
+            "export gen fn mk(d: String) -> String { \
+                 return \"export fn magic() -> Int64 { return 7 }\" }"
+                .to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let resolver = MapResolver(files);
+        let root = "import { mk } from \"./gen\"\n\
+                    import { magic } from mk(\"./data\")\n\
+                    fn main() -> Int64 { return magic() }";
+        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver);
+        assert!(
+            a.diagnostics.is_empty(),
+            "diags: {:?}",
+            a.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
+        );
+        assert!(a.symbols.iter().any(|s| s.name == "magic"), "generated `magic` is indexed");
+    }
 }

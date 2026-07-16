@@ -164,6 +164,43 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
         }
         Err(format!("`{resolved}` is pinned but not cached — run `vyrn check` once to fetch it"))
     }
+
+    /// Generation-time `listDir` (RFC-0021): read the local directory. The
+    /// generator's inputs are local files, so this is a plain read-only listing.
+    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
+        let entries = std::fs::read_dir(resolved).map_err(|_| format!("cannot list `{resolved}`"))?;
+        let mut names: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+
+    /// Participate in the shared generator cache (RFC-0021) so per-keystroke
+    /// re-analysis reuses a build's generation instead of re-running it. Same
+    /// `~/.vyrn/cache/gen` the CLI writes (honors `VYRN_GEN_CACHE_DIR`).
+    fn gen_cache_get(&self, key: &str) -> Option<String> {
+        std::fs::read_to_string(gen_cache_dir().join(key)).ok()
+    }
+    fn gen_cache_put(&self, key: &str, value: &str) {
+        let dir = gen_cache_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(key), value);
+    }
+}
+
+/// The shared generator cache directory (`~/.vyrn/cache/gen`, overridable with
+/// `VYRN_GEN_CACHE_DIR`) — kept byte-identical to the CLI's so a build and the
+/// editor reuse each other's generation.
+fn gen_cache_dir() -> std::path::PathBuf {
+    if let Ok(d) = std::env::var("VYRN_GEN_CACHE_DIR") {
+        return std::path::PathBuf::from(d);
+    }
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    std::path::Path::new(&home).join(".vyrn/cache/gen")
 }
 
 fn main() {

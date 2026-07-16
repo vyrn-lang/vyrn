@@ -1,0 +1,43 @@
+/// A small, honest compile-time generator (RFC-0021).
+///
+/// `palette(dir)` reads a data file and a data directory under `dir` — both
+/// mediated and scoped to `dir` — and emits an ordinary Vyrn module: a validated
+/// `Count` type plus typed constant accessors. The emitted module is compiled
+/// and run like any other code, so it is a normal three-way parity citizen.
+///
+/// A `gen fn` is comptime-pure: it may read (mediated `readFile`/`listDir`) but
+/// not write, spawn, use module state, or call an `extern`.
+export gen fn palette(dir: String) -> String {
+    // Count colors in the CSV by counting commas (immune to trailing newlines
+    // and CRLF, so the emitted source is reproducible across checkouts).
+    let csv = match readFile(dir + "/palette.csv") {
+        Ok(text) => text,
+        Err(e) => "",
+    }
+    let mut commas = 0
+    for c in csv.chars() {
+        if c == 44 {
+            commas = commas + 1
+        }
+    }
+    let numColors = commas + 1
+
+    // List the theme files (names are sorted for determinism).
+    let themes = match listDir(dir + "/themes") {
+        Ok(names) => names,
+        Err(e) => [],
+    }
+    let numThemes = themes.length
+    let mut theme0 = "none"
+    if themes.length > 0 {
+        theme0 = themes[0]
+    }
+
+    // Emit the module source. Constants derive their names from the inputs.
+    let mut out = "/// Generated from ./data by the `palette` generator (RFC-0021).\n"
+    out = out + "export type Count = Int64 where value >= 1\n"
+    out = out + "export fn colorCount() -> Count { return " + numColors.toString() + " }\n"
+    out = out + "export fn themeCount() -> Count { return " + numThemes.toString() + " }\n"
+    out = out + "export fn firstTheme() -> String { return \"" + theme0 + "\" }\n"
+    return out
+}
