@@ -567,39 +567,128 @@ where
             Err(Ctrl::Return(_)) => return Err("internal: `?` propagated past main".into()),
         }
     }
-    let mut handler = |req: ServeRequest| -> Result<ServeResponse, String> {
-        let request = Val::Record(HashMap::from([
-            ("method".to_string(), Val::Str(req.method)),
-            ("path".to_string(), Val::Str(req.path)),
-            ("body".to_string(), Val::Str(req.body)),
-        ]));
-        match interp.call("handle", &[request]) {
-            Ok(Val::Record(map)) => {
-                let status = match map.get("status") {
-                    Some(Val::Int(n)) => *n,
-                    Some(Val::IntN { v, .. }) => *v,
-                    _ => return Err("handle returned a Response without an Int64 `status`".into()),
-                };
-                let content_type = match map.get("contentType") {
-                    Some(Val::Str(s)) => s.clone(),
-                    _ => {
-                        return Err(
-                            "handle returned a Response without a String `contentType`".into()
-                        )
-                    }
-                };
-                let body = match map.get("body") {
-                    Some(Val::Str(s)) => s.clone(),
-                    _ => return Err("handle returned a Response without a String `body`".into()),
-                };
-                Ok(ServeResponse { status, content_type, body })
-            }
-            Ok(other) => Err(format!("handle returned {other:?}, expected a Response record")),
-            Err(Ctrl::Err(s)) => Err(s),
-            Err(Ctrl::Return(_)) => Err("internal: `?` propagated past handle".into()),
-        }
-    };
+    let mut handler = |req: ServeRequest| handle_request(&interp, req);
     run_loop(&mut handler)
+}
+
+/// Marshal one host request into a `Request` record, call `handle` on this
+/// interpreter, and read the `Response` record back out — the shared body of
+/// [`serve`] (one interpreter) and [`serve_pool`] (one per worker, RFC-0025).
+fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeResponse, String> {
+    let request = Val::Record(HashMap::from([
+        ("method".to_string(), Val::Str(req.method)),
+        ("path".to_string(), Val::Str(req.path)),
+        ("body".to_string(), Val::Str(req.body)),
+    ]));
+    match interp.call("handle", &[request]) {
+        Ok(Val::Record(map)) => {
+            let status = match map.get("status") {
+                Some(Val::Int(n)) => *n,
+                Some(Val::IntN { v, .. }) => *v,
+                _ => return Err("handle returned a Response without an Int64 `status`".into()),
+            };
+            let content_type = match map.get("contentType") {
+                Some(Val::Str(s)) => s.clone(),
+                _ => return Err("handle returned a Response without a String `contentType`".into()),
+            };
+            let body = match map.get("body") {
+                Some(Val::Str(s)) => s.clone(),
+                _ => return Err("handle returned a Response without a String `body`".into()),
+            };
+            Ok(ServeResponse { status, content_type, body })
+        }
+        Ok(other) => Err(format!("handle returned {other:?}, expected a Response record")),
+        Err(Ctrl::Err(s)) => Err(s),
+        Err(Ctrl::Return(_)) => Err("internal: `?` propagated past handle".into()),
+    }
+}
+
+/// Run a served program with a POOL of `workers` interpreter-owning threads
+/// (RFC-0025, `vyrn serve --workers N`). Soundness is the CALLER'S gate: the
+/// CLI refuses `--workers` when `handle` transitively touches module state
+/// ([`crate::checker::module_state_use`]), so nothing a worker can observe is
+/// shared between workers.
+///
+/// The landed decisions, precisely:
+/// - `main` (and module-state initialization) runs ONCE, on a setup
+///   interpreter, before any worker starts — its output appears exactly once,
+///   like the sequential loop. A missing `main` is fine; a nonzero return or
+///   a setup trap aborts the serve before any thread spawns.
+/// - EACH worker then builds a fully independent `Interp` and runs
+///   `init_globals` again on its own copy: an interpreter needs a well-formed
+///   global frame to exist, but the gated `handle` can never read or write
+///   one — the per-worker copies are unobservable by construction. (Any
+///   `print` inside an initializer would repeat per worker; initializers that
+///   print AND a module-state-free `handle` is a shape that cannot observe
+///   its own globals, so this stays a documented non-goal, not a soundness
+///   hole.)
+/// - `worker(i, handler)` runs on worker `i`'s big-stack thread with that
+///   worker's private handler; the CLI loops it over an spmc channel of
+///   connections.
+/// - `accept()` runs on the calling thread once every worker thread has been
+///   spawned — it owns the listener (this crate stays network-free). When it
+///   returns, its channel sender drops, the workers' `recv` fails, and the
+///   scope joins them.
+pub fn serve_pool<W, A>(
+    program: &Program,
+    workers: usize,
+    worker: W,
+    accept: A,
+) -> Result<(), String>
+where
+    W: Fn(usize, &mut dyn FnMut(ServeRequest) -> Result<ServeResponse, String>) + Send + Sync,
+    A: FnOnce() -> Result<(), String> + Send,
+{
+    std::thread::scope(|s| {
+        // Setup: module state + `main`, once, before any worker exists.
+        let setup: Result<(), String> = std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn_scoped(s, || -> Result<(), String> {
+                let interp = new_interp(program, &[])?;
+                if let Err(Ctrl::Err(e)) = interp.init_globals(program) {
+                    return Err(e);
+                }
+                if interp.funcs.contains_key("main") {
+                    match interp.call("main", &[]) {
+                        Ok(Val::Int(0)) => {}
+                        Ok(Val::Int(n)) => return Err(format!("main returned {n}, aborting serve")),
+                        Ok(other) => return Err(format!("main returned {other:?}, expected Int64")),
+                        Err(Ctrl::Err(e)) => return Err(e),
+                        Err(Ctrl::Return(_)) => {
+                            return Err("internal: `?` propagated past main".into())
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .expect("failed to spawn setup interpreter thread")
+            .join()
+            .unwrap_or_else(|_| Err("interpreter thread panicked (likely stack overflow)".into()));
+        setup?;
+
+        let worker = &worker;
+        for i in 0..workers {
+            std::thread::Builder::new()
+                .stack_size(256 * 1024 * 1024)
+                .spawn_scoped(s, move || {
+                    let interp = match new_interp(program, &[]) {
+                        Ok(it) => it,
+                        Err(e) => {
+                            eprintln!("error: worker {i}: {e}");
+                            return;
+                        }
+                    };
+                    if let Err(Ctrl::Err(e)) = interp.init_globals(program) {
+                        eprintln!("error: worker {i}: {e}");
+                        return;
+                    }
+                    let mut handler = |req: ServeRequest| handle_request(&interp, req);
+                    worker(i, &mut handler);
+                })
+                .expect("failed to spawn worker interpreter thread");
+        }
+        accept()
+    })
 }
 
 /// The result of running a generator (RFC-0021): the synthesized module source

@@ -4203,6 +4203,85 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
 /// cannot be spawned. A local (param / `let` / `for`-var) with the same name
 /// shadows the global and does not count. Slightly conservative: a name both
 /// shadowed and used as a global in disjoint scopes is treated as a touch.
+/// RFC-0025 (`vyrn serve --workers`): does `root` — transitively — read or
+/// write module state? Each worker owns a fully independent interpreter, so
+/// module state is the ONE thing a parallel `handle` cannot touch soundly
+/// (it is shared by definition; per-worker copies would silently diverge).
+/// Returns the shortest call chain `root -> .. -> offender` plus the name of
+/// a touched global, or `None` when the whole call tree is module-state-free.
+///
+/// Deliberately narrower than spawn-safety: `print`, logging, and file I/O
+/// are thread-compatible host effects (each access-log/output line stays
+/// atomic) and do NOT gate workers — only shared mutable state does.
+pub fn module_state_use(program: &Program, root: &str) -> Option<(Vec<String>, String)> {
+    let global_names: std::collections::HashSet<String> =
+        program.globals.iter().map(|g| g.name.clone()).collect();
+    if global_names.is_empty() {
+        return None;
+    }
+    let funcs: HashMap<&str, &Function> =
+        program.functions.iter().map(|f| (f.name.as_str(), f)).collect();
+    // Surface method names expand to every registered impl, exactly like the
+    // spawn-safety fixpoint — otherwise a global-touching impl reached through
+    // a protocol method call would hide from the walk.
+    let mut method_impls: HashMap<String, Vec<String>> = HashMap::new();
+    for imp in &program.impls {
+        if let Some(key) = crate::types::type_key(&imp.ty) {
+            for m in &imp.methods {
+                method_impls
+                    .entry(m.name.clone())
+                    .or_default()
+                    .push(crate::types::impl_method_name(&imp.protocol, &key, &m.name));
+            }
+        }
+    }
+    // BFS from `root` with parent links, so the first hit yields the shortest
+    // chain (deterministic: candidates visit in sorted order).
+    let mut parent: HashMap<String, Option<String>> =
+        HashMap::from([(root.to_string(), None)]);
+    let mut queue: std::collections::VecDeque<String> =
+        std::collections::VecDeque::from([root.to_string()]);
+    while let Some(cur) = queue.pop_front() {
+        let Some(f) = funcs.get(cur.as_str()) else { continue };
+        if touches_globals(f, &global_names) {
+            let mut names: Vec<&String> = program.globals.iter().map(|g| &g.name).collect();
+            names.sort();
+            let which = names
+                .into_iter()
+                .find(|g| {
+                    let single: std::collections::HashSet<String> =
+                        std::iter::once((*g).clone()).collect();
+                    touches_globals(f, &single)
+                })
+                .cloned()
+                .unwrap_or_default();
+            let mut chain = vec![cur.clone()];
+            let mut p = parent[&cur].clone();
+            while let Some(prev) = p {
+                p = parent[&prev].clone();
+                chain.push(prev);
+            }
+            chain.reverse();
+            return Some((chain, which));
+        }
+        let mut callees: Vec<String> = Vec::new();
+        for c in fn_calls(&f.body) {
+            if let Some(impls) = method_impls.get(&c) {
+                callees.extend(impls.iter().cloned());
+            }
+            callees.push(c);
+        }
+        callees.sort();
+        for callee in callees {
+            if funcs.contains_key(callee.as_str()) && !parent.contains_key(&callee) {
+                parent.insert(callee.clone(), Some(cur.clone()));
+                queue.push_back(callee);
+            }
+        }
+    }
+    None
+}
+
 fn touches_globals(f: &Function, globals: &std::collections::HashSet<String>) -> bool {
     if globals.is_empty() {
         return false;
@@ -4509,6 +4588,33 @@ mod tests {
     #[test]
     fn accepts_valid_program() {
         assert!(check_src("fn main() -> Int64 { let x = 2 + 3; print(x); return x; }").is_ok());
+    }
+
+    // ---- module_state_use (RFC-0025, the `--workers` gate) ----------------
+
+    #[test]
+    fn module_state_use_reports_the_call_chain_and_global() {
+        let src = "let mut hits: Int64 = 0\n\
+                   fn bump() -> Int64 { hits = hits + 1\n return hits }\n\
+                   fn respond() -> Int64 { return bump() }\n\
+                   fn handle(n: Int64) -> Int64 { return respond() }\n";
+        let program = parse(lex(src).unwrap()).unwrap();
+        let (chain, global) = module_state_use(&program, "handle").expect("stateful");
+        assert_eq!(chain, vec!["handle", "respond", "bump"]);
+        assert_eq!(global, "hits");
+    }
+
+    #[test]
+    fn module_state_use_is_none_for_a_pure_tree_even_with_globals_present() {
+        // Other functions may touch the global; only `handle`'s call tree counts.
+        // `print` and file I/O do NOT gate workers — module state is THE gate.
+        let src = "let mut hits: Int64 = 0\n\
+                   fn other() -> Int64 { hits = hits + 1\n return hits }\n\
+                   fn pure(n: Int64) -> Int64 { return n * 2 }\n\
+                   fn handle(n: Int64) -> Int64 { print(n)\n let r = readFile(\"x\")\n \
+                       return pure(n) }\n";
+        let program = parse(lex(src).unwrap()).unwrap();
+        assert!(module_state_use(&program, "handle").is_none());
     }
 
     #[test]

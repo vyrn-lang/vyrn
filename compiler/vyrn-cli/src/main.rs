@@ -9,8 +9,12 @@
 //!                                        Compile to a native executable (or wasm) via clang.
 //!   vyrn test    [file.vyrn] [--name <substring>]
 //!                                        Run the root file's `test` blocks under the interpreter.
-//!   vyrn serve   [file.vyrn] [--port N] Run `fn handle(req: Request) -> Response` as an HTTP host.
-//!   vyrn dev     [--port N]             Fullstack (RFC-0019): build the client to wasm, serve the
+//!   vyrn serve   [file.vyrn] [--port N] [--workers N]
+//!                                        Run `fn handle(req: Request) -> Response` as an HTTP host.
+//!                                        `--workers N` (RFC-0025) serves in parallel — refused when
+//!                                        `handle` touches module state (the isolation gate).
+//!   vyrn dev     [--port N] [--workers N]
+//!                                        Fullstack (RFC-0019): build the client to wasm, serve the
 //!                                        server root + static assets + the browser runtimes.
 //!   vyrn new     <name>                 Scaffold a project (vyrn.json + src/main.vyrn).
 //!   vyrn deps                           Print the resolved module graph.
@@ -24,7 +28,7 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn serve [file.vyrn] [--port N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
@@ -1635,6 +1639,7 @@ fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
 fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
     // Optional `--port N` (default 8080).
     let mut port: u16 = 8080;
+    let mut workers: Option<usize> = None;
     let mut i = 0;
     while i < rest.len() {
         if rest[i] == "--port" && i + 1 < rest.len() {
@@ -1642,6 +1647,15 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
                 Ok(p) => port = p,
                 Err(_) => {
                     eprintln!("serve: --port needs a number in 0..=65535");
+                    return ExitCode::from(2);
+                }
+            }
+            i += 2;
+        } else if rest[i] == "--workers" && i + 1 < rest.len() {
+            match rest[i + 1].parse::<usize>() {
+                Ok(n) if n >= 1 => workers = Some(n),
+                _ => {
+                    eprintln!("serve: --workers needs a positive number");
                     return ExitCode::from(2);
                 }
             }
@@ -1693,6 +1707,52 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
     let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
     let file_label = path.to_string();
 
+    // `--workers N` (RFC-0025): N worker threads, each owning an independent
+    // interpreter, gated on the isolation analysis — refused (with the call
+    // path) when `handle` touches module state.
+    if let Some(n) = workers {
+        if let Some(exit) = refuse_workers_if_stateful(&program) {
+            return exit;
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<std::net::TcpStream>();
+        let rx = std::sync::Mutex::new(rx);
+        let result = vyrn_frontend::interp::serve_pool(
+            &program,
+            n,
+            |_i, call_handle| loop {
+                // spmc over std: each idle worker takes the next connection.
+                let stream = rx.lock().unwrap().recv();
+                match stream {
+                    Ok(mut s) => serve_one(&mut s, call_handle),
+                    Err(_) => break, // accept loop gone; drain out
+                }
+            },
+            move || {
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                eprintln!("serving {file_label} on http://localhost:{actual_port} with {n} workers");
+                for stream in listener.incoming() {
+                    match stream {
+                        Ok(s) => {
+                            if tx.send(s).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                Ok(())
+            },
+        );
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     // The interpreter thread owns one live `Interp` (module state persists); it
     // runs `main` once, then invokes this accept loop with a per-request handler.
     let result = vyrn_frontend::interp::serve(&program, move |call_handle| {
@@ -1718,6 +1778,23 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
     }
 }
 
+/// The RFC-0025 worker gate: `--workers` requires a module-state-free `handle`
+/// (transitively — the existing isolation analysis answers the question).
+/// Prints the refusal naming the offending call path and returns the exit code
+/// when parallel serving is unsound; `None` means workers are fine. Other
+/// effects (`print`, file I/O) are deliberately allowed — each log/output line
+/// stays atomic; only shared mutable state gates parallelism.
+fn refuse_workers_if_stateful(program: &vyrn_frontend::ast::Program) -> Option<ExitCode> {
+    let (chain, global) = vyrn_frontend::checker::module_state_use(program, "handle")?;
+    let path = chain.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(" -> ");
+    eprintln!(
+        "error: `--workers` needs a module-state-free `handle`: {path} reads or writes \
+         module state `{global}` (shared by definition) — run without `--workers` for \
+         the sequential loop"
+    );
+    Some(ExitCode::FAILURE)
+}
+
 /// `vyrn dev [--port N]` (RFC-0019) — the fullstack convenience command.
 ///
 /// Reads `vyrn.json`'s `"server"` / `"client"` (+ optional `"public"`, default
@@ -1731,6 +1808,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
 /// `/vyrn-runtime/<name>`, then files under the public dir (`/` → `index.html`).
 fn dev_cmd(rest: &[String]) -> ExitCode {
     let mut port: u16 = 8080;
+    let mut workers: Option<usize> = None;
     let mut i = 0;
     while i < rest.len() {
         if rest[i] == "--port" && i + 1 < rest.len() {
@@ -1738,6 +1816,15 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
                 Ok(p) => port = p,
                 Err(_) => {
                     eprintln!("dev: --port needs a number in 0..=65535");
+                    return ExitCode::from(2);
+                }
+            }
+            i += 2;
+        } else if rest[i] == "--workers" && i + 1 < rest.len() {
+            match rest[i + 1].parse::<usize>() {
+                Ok(n) if n >= 1 => workers = Some(n),
+                _ => {
+                    eprintln!("dev: --workers needs a positive number");
                     return ExitCode::from(2);
                 }
             }
@@ -1839,7 +1926,7 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
     let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
     let assets = DevAssets { public_dir, web_dir, wasm: wasm_out };
 
-    let result = vyrn_frontend::interp::serve(&program, move |call_handle| {
+    let banner = move |assets: &DevAssets| {
         use std::io::Write;
         let _ = std::io::stdout().flush();
         eprintln!("dev: serving {server_rel} on http://localhost:{actual_port}");
@@ -1847,6 +1934,54 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
         eprintln!("dev:   /client.wasm   -> built from {client_rel}");
         eprintln!("dev:   /vyrn-runtime/ -> web runtimes (wasi-min.js, vyrn-rpc.js, vyrn-query.js)");
         eprintln!("dev:   /              -> {}/", assets.public_dir.display());
+    };
+
+    // `--workers N` passes through to the same RFC-0025 pool as `vyrn serve`,
+    // behind the same module-state gate.
+    if let Some(n) = workers {
+        if let Some(exit) = refuse_workers_if_stateful(&program) {
+            return exit;
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<std::net::TcpStream>();
+        let rx = std::sync::Mutex::new(rx);
+        let assets = &assets;
+        let result = vyrn_frontend::interp::serve_pool(
+            &program,
+            n,
+            |_i, call_handle| loop {
+                let stream = rx.lock().unwrap().recv();
+                match stream {
+                    Ok(mut s) => dev_serve_one(&mut s, assets, call_handle),
+                    Err(_) => break,
+                }
+            },
+            move || {
+                banner(assets);
+                eprintln!("dev:   workers        -> {n}");
+                for stream in listener.incoming() {
+                    match stream {
+                        Ok(s) => {
+                            if tx.send(s).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                Ok(())
+            },
+        );
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    let result = vyrn_frontend::interp::serve(&program, move |call_handle| {
+        banner(&assets);
         for stream in listener.incoming() {
             match stream {
                 Ok(mut s) => dev_serve_one(&mut s, &assets, call_handle),
