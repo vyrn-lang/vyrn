@@ -37,7 +37,10 @@ use lsp_types::{
     TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
 };
 
-use vyrn_frontend::{analyze, completions, member_completions, resolve, Analysis, SymbolKind};
+use vyrn_frontend::{
+    analyze, completions, member_completions, resolve, string_literal_completions, Analysis,
+    SymbolKind,
+};
 
 // ---------------------------------------------------------------------------
 // Multi-file analysis (RFC-0010). A document with `import`s is analyzed via
@@ -363,7 +366,12 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
     // (e.g. `arr.` → push/at/alen/afree/length). Otherwise → all top-level
     // symbols; the client filters by the prefix the user typed.
     let raw = server.docs.get(uri);
-    let items = if is_member_context(raw, line, col) {
+    // RFC-0020 M1: inside a string literal whose expected type is a finite
+    // string type, offer that type's language (`t("` → every key). Falls back to
+    // member / top-level completion otherwise.
+    let items = if is_string_literal_context(raw, line, col) {
+        raw.map(|src| string_literal_completions(analysis, src, line, col)).unwrap_or_default()
+    } else if is_member_context(raw, line, col) {
         member_completions(analysis, line, col)
     } else {
         completions(analysis)
@@ -498,6 +506,38 @@ fn is_member_context(text: Option<&String>, line: usize, col: usize) -> bool {
         }
     }
     i < bytes.len() && bytes[i] == b'.'
+}
+
+/// Whether the 1-based `(line, col)` cursor is inside a double-quoted string
+/// literal: an odd number of unescaped `"` precede it on the line (RFC-0020
+/// string-literal completion). A best-effort per-line scan — good enough to
+/// route completion; the frontend re-lexes to pin the exact literal and its
+/// expected type.
+fn is_string_literal_context(text: Option<&String>, line: usize, col: usize) -> bool {
+    let line_text = match text.and_then(|t| t.lines().nth(line.saturating_sub(1))) {
+        Some(l) => l,
+        None => return false,
+    };
+    let mut in_str = false;
+    let mut escaped = false;
+    // Count characters strictly before the cursor (col is 1-based).
+    for (idx, ch) in line_text.chars().enumerate() {
+        if idx + 1 >= col {
+            break;
+        }
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+        } else if ch == '"' {
+            in_str = true;
+        }
+    }
+    in_str
 }
 
 /// Look up the cached [`Analysis`] for a document. Returns `None` (→ a null

@@ -519,6 +519,58 @@ fn main() -> Int64 {
     assert!(!labels.contains(&"main"), "top-level `main` leaked into member completion: {labels:?}");
 }
 
+/// RFC-0020 M1: `textDocument/completion` inside a string literal whose expected
+/// type is a finite string type offers that type's whole language (`t("` → every
+/// key), NOT the top-level symbol list.
+#[test]
+fn string_literal_completion_offers_finite_keys() {
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+        "params": { "capabilities": {}, "processId": null }
+    }));
+    let _ = client.read_response(&init_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+
+    let uri = "file:///finite/keys.vyrn";
+    let src = "\
+type TransKey = String where value =~ \"nav\\\\.(home|about)\\\\.label\"
+fn t(key: TransKey) -> Int64 { return 0 }
+fn main() -> Int64 {
+    return t(\"\")
+}
+";
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": { "textDocument": { "uri": uri, "languageId": "vyrn", "version": 1, "text": src } }
+    }));
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let mut ids = Ids::new();
+    let comp_id = ids.next();
+    // Line 4 (1-based) `    return t("")` → LSP line 3. The opening `"` is at
+    // 1-based col 14; the cursor sits between the quotes at 0-based char 14.
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": comp_id, "method": "textDocument/completion",
+        "params": {
+            "textDocument": { "uri": uri },
+            "position": { "line": 3, "character": 14 }
+        }
+    }));
+    let comp_resp = client.read_response(&comp_id);
+    let items = comp_resp
+        .get("result")
+        .and_then(|r| r.as_array())
+        .expect("string-literal completion result is a list");
+    let labels: Vec<&str> =
+        items.iter().filter_map(|i| i.get("label").and_then(|l| l.as_str())).collect();
+    assert!(labels.contains(&"nav.home.label"), "missing key: {labels:?}");
+    assert!(labels.contains(&"nav.about.label"), "missing key: {labels:?}");
+    // The top-level symbols must not leak into the string-literal context.
+    assert!(!labels.contains(&"main"), "top-level `main` leaked: {labels:?}");
+}
+
 /// Multi-file awareness (RFC-0010): a document importing from a sibling file
 /// gets CLEAN diagnostics (the loader resolves the import), and an import of a
 /// nonexistent module produces a diagnostic instead of silent breakage.

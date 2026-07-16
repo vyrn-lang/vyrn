@@ -137,6 +137,14 @@ pub struct Analysis {
     /// record receiver (`u: User` → `u.` offers `age`). Refined fields render
     /// as written (`age: Int64 where value >= 18`).
     pub record_fields: Vec<(String, Completion)>,
+    /// RFC-0020 M1: for every **finite** validated string type, its full
+    /// enumerated language (up to a cap). Powers string-literal completion —
+    /// `t("` offers every `TransKey`. A type with more than the cap members (or
+    /// an infinite / non-regex type) is absent, so the LSP simply offers nothing.
+    pub finite_string_types: Vec<(String, Vec<String>)>,
+    /// Top-level function name → parameter types, so string-literal completion
+    /// can find the expected type at a call argument position.
+    pub fn_param_types: Vec<(String, Vec<Type>)>,
 }
 
 /// Answer to "what is at this cursor": the declaration it resolves to.
@@ -382,6 +390,24 @@ fn analyze_inner(
         }
     }
 
+    // RFC-0020 M1: enumerate each finite string type's language once (≤ cap), and
+    // record top-level fn parameter types, for string-literal completion.
+    const STRING_COMPLETION_CAP: usize = 1000;
+    let mut finite_string_types = Vec::new();
+    for t in &member_src.type_decls {
+        if t.name.contains('.') {
+            continue;
+        }
+        if let Some(domain) = crate::finite::enumerate_type(t, STRING_COMPLETION_CAP) {
+            finite_string_types.push((t.name.clone(), domain));
+        }
+    }
+    let fn_param_types = member_src
+        .functions
+        .iter()
+        .map(|f| (f.name.clone(), f.params.iter().map(|p| p.ty.clone()).collect()))
+        .collect();
+
     Analysis {
         diagnostics: diags,
         symbols,
@@ -393,6 +419,8 @@ fn analyze_inner(
         protocol_members,
         type_param_bounds,
         record_fields,
+        finite_string_types,
+        fn_param_types,
     }
 }
 
@@ -409,6 +437,8 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         protocol_members: Vec::new(),
         type_param_bounds: Vec::new(),
         record_fields: Vec::new(),
+        finite_string_types: Vec::new(),
+        fn_param_types: Vec::new(),
     }
 }
 
@@ -713,6 +743,116 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
         }
     }
     out
+}
+
+/// RFC-0020 M1: completions for the *content* of a string literal whose expected
+/// type is a finite validated string type — `t("` offers every key. Returns the
+/// enumerated language of the expected type (up to the analysis cap), or an empty
+/// list when the cursor is not inside a string whose expected type is a known
+/// finite string type (an over-cap or infinite type has no entry, so it too
+/// yields nothing).
+///
+/// v1 expected-type detection (from the token stream): the string literal is
+/// either
+/// - a direct argument of a call `f(… "…" …)` to a known top-level function,
+///   mapped to that parameter's type by comma position, or
+/// - the initializer of an annotated `let name: T = "…"`.
+pub fn string_literal_completions(
+    analysis: &Analysis,
+    source: &str,
+    line: usize,
+    col: usize,
+) -> Vec<Completion> {
+    let Some(ty_name) = expected_string_type(analysis, source, line, col) else {
+        return Vec::new();
+    };
+    let Some((_, domain)) = analysis.finite_string_types.iter().find(|(n, _)| n == &ty_name) else {
+        return Vec::new();
+    };
+    domain
+        .iter()
+        .map(|k| Completion {
+            label: k.clone(),
+            kind: SymbolKind::Variant,
+            detail: format!("{ty_name} — a key of this finite string type"),
+        })
+        .collect()
+}
+
+/// The name of the validated string type expected at the string literal under
+/// the cursor, if that context is a call argument or an annotated `let`.
+/// Re-lexes `source` (cheap) to work over positioned tokens including the string
+/// literal, `(`, `,`, `:`, and `let` — which the cached identifier/dot token
+/// index does not carry.
+fn expected_string_type(
+    analysis: &Analysis,
+    source: &str,
+    line: usize,
+    col: usize,
+) -> Option<String> {
+    let toks = lexer::lex(source).ok()?;
+    // Find the string-literal token whose span contains the cursor. The lexer
+    // records the opening-quote column; the content spans the literal's rendered
+    // length plus the two quotes (a lower bound that is exact for un-escaped
+    // ASCII keys — the only place this matters).
+    let str_idx = toks.iter().position(|t| {
+        if t.line != line {
+            return false;
+        }
+        if let Tok::Str(s) = &t.tok {
+            let start = t.col;
+            let end = t.col + s.chars().count() + 2; // + the two quotes
+            col >= start && col <= end
+        } else {
+            false
+        }
+    })?;
+
+    // Case A: annotated `let name : T = "…"`. The tokens immediately before the
+    // string are `… : TypeIdent =`, so `toks[str_idx-3..str_idx]` is `: T =`.
+    if str_idx >= 3
+        && toks[str_idx - 1].tok == Tok::Eq
+        && toks[str_idx - 3].tok == Tok::Colon
+    {
+        if let Tok::Ident(tn) = &toks[str_idx - 2].tok {
+            return Some(tn.clone());
+        }
+    }
+
+    // Case B: a call argument `f( a0 , a1 , "…" , … )`. Scan left from the string
+    // to the enclosing `(`, counting top-level commas for the argument index and
+    // capturing the callee identifier just before the `(`.
+    let mut depth = 0i32;
+    let mut arg_index = 0usize;
+    let mut i = str_idx;
+    while i > 0 {
+        i -= 1;
+        match &toks[i].tok {
+            Tok::RParen => depth += 1,
+            Tok::LParen => {
+                if depth == 0 {
+                    // The callee is the identifier right before this `(`.
+                    if i >= 1 {
+                        if let Tok::Ident(callee) = &toks[i - 1].tok {
+                            let params = analysis
+                                .fn_param_types
+                                .iter()
+                                .find(|(n, _)| n == callee)
+                                .map(|(_, p)| p)?;
+                            if let Some(Type::Named(tn)) = params.get(arg_index) {
+                                return Some(tn.clone());
+                            }
+                        }
+                    }
+                    return None;
+                }
+                depth -= 1;
+            }
+            Tok::Comma if depth == 0 => arg_index += 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Resolve the type of the receiver of a `.foo` access at `(line, col)` — the
@@ -1499,5 +1639,66 @@ mod tests {
             a.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
         );
         assert!(a.symbols.iter().any(|s| s.name == "magic"), "generated `magic` is indexed");
+    }
+
+    // ---- RFC-0020 M1: string-literal completion -----------------------------
+
+    const TRANSKEY: &str =
+        "type TransKey = String where value =~ \"nav\\\\.(home|about)\\\\.label\"\n";
+
+    #[test]
+    fn finite_string_type_is_enumerated_in_analysis() {
+        let a = analyze(&format!("{TRANSKEY}fn main() -> Int64 {{ return 0 }}"));
+        let (_, domain) = a
+            .finite_string_types
+            .iter()
+            .find(|(n, _)| n == "TransKey")
+            .expect("TransKey enumerated");
+        assert_eq!(domain, &vec!["nav.about.label".to_string(), "nav.home.label".to_string()]);
+    }
+
+    #[test]
+    fn string_literal_completion_at_a_call_argument() {
+        let src = format!(
+            "{TRANSKEY}fn t(key: TransKey) -> Int64 {{ return 0 }}\n\
+             fn main() -> Int64 {{ return t(\"\") }}"
+        );
+        // The `""` opens at col 31 on line 3; cursor inside at col 32.
+        let items = string_literal_completions(&analyze(&src), &src, 3, 32);
+        let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, vec!["nav.about.label", "nav.home.label"]);
+    }
+
+    #[test]
+    fn string_literal_completion_at_an_annotated_let() {
+        let src = format!(
+            "{TRANSKEY}fn main() -> Int64 {{ let k: TransKey = \"\"  return 0 }}"
+        );
+        // Line 2: `... let k: TransKey = ""  ...` — the `""` opens at col 40.
+        let items = string_literal_completions(&analyze(&src), &src, 2, 41);
+        let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, vec!["nav.about.label", "nav.home.label"]);
+    }
+
+    #[test]
+    fn over_cap_or_infinite_type_offers_nothing() {
+        // An infinite regex string type is never enumerated, so a literal at its
+        // argument position offers no completions.
+        let src = "type Any = String where value =~ \"[a-z]+\"\n\
+                   fn f(x: Any) -> Int64 { return 0 }\n\
+                   fn main() -> Int64 { return f(\"\") }";
+        let a = analyze(src);
+        assert!(a.finite_string_types.iter().all(|(n, _)| n != "Any"));
+        assert!(string_literal_completions(&a, src, 3, 32).is_empty());
+    }
+
+    #[test]
+    fn string_literal_completion_outside_a_typed_context_is_empty() {
+        // A plain-String argument has no finite domain → nothing to offer.
+        let src = format!(
+            "{TRANSKEY}fn g(s: String) -> Int64 {{ return 0 }}\n\
+             fn main() -> Int64 {{ return g(\"\") }}"
+        );
+        assert!(string_literal_completions(&analyze(&src), &src, 3, 32).is_empty());
     }
 }
