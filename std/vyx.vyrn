@@ -36,6 +36,10 @@
 ///                               → On(event, "handler", (scalar).toString())
 ///   class="…" / class={e}       → Cls;  other="…" / other={e} → A(name, …)
 ///
+/// Whitespace rule: an all-whitespace text run that spans a newline (indentation
+/// between block tags) is dropped; a same-line whitespace run is one significant
+/// inline space; other runs have their whitespace collapsed to single spaces.
+///
 /// Every generation failure is an identifier-carrying load diagnostic naming the
 /// `.vyx` file and line (the std/ui / std/rpc convention). Inspect the whole
 /// synthesized module with:  vyrn emit-gen <file>
@@ -247,6 +251,16 @@ fn vyxFind(ba: Array<UInt8>, needle: Array<UInt8>, from: Int64) -> Int64 {
         i = i + 1
     }
     return 0 - 1
+}
+
+/// Whether `s` contains an ASCII newline (LF).
+fn vyxHasNewline(s: String) -> Bool {
+    for b in bytes(s) {
+        if b == 10 {
+            return true
+        }
+    }
+    return false
 }
 
 /// Collapse each run of ASCII whitespace in `s` to a single space (interior runs
@@ -554,9 +568,18 @@ fn vyxParseNodes(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxPar
             while k < e && ba[k] != 60 && ba[k] != 123 {
                 k = k + 1
             }
-            let collapsed = vyxCollapseWs(vyxSlice(ba, j, k))
-            if vyxTrim(collapsed).length > 0 {
-                nodes.push(VNText(collapsed))
+            let raw = vyxSlice(ba, j, k)
+            // Whitespace rule: an all-whitespace run that spans a newline is
+            // insignificant indentation between block tags and is dropped; a
+            // same-line whitespace run is a significant inline space (kept as
+            // one space); any other run has its whitespace collapsed to single
+            // spaces (a single leading/trailing space survives).
+            if vyxTrim(raw).length == 0 {
+                if vyxHasNewline(raw) == false && raw.length > 0 {
+                    nodes.push(VNText(" "))
+                }
+            } else {
+                nodes.push(VNText(vyxCollapseWs(raw)))
             }
             j = k
         }
