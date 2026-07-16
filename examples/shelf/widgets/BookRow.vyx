@@ -1,0 +1,27 @@
+<script>
+props {
+    id: Int64,
+    title: String,
+    url: String,
+    rating: Int64,
+    tagsText: String,
+    confirming: Bool,
+    unratedLabel: String,
+    delLabel: String,
+    confirmLabel: String,
+    cancelLabel: String,
+}
+</script>
+
+<template>
+<li class="book">
+    <div class="meta">
+        <a class="title" href={url}>{title}</a>
+        <span class="tags">{tagsText}</span>
+    </div>
+    <div class="row">
+        <button class="rate" @click="cycleRate(id)">{#if rating > 0}★ {rating}{:else}{unratedLabel}{/if}</button>
+        {#if confirming}<button class="danger" @click="confirmDelete(id)">{confirmLabel}</button><button @click="cancelDelete(id)">{cancelLabel}</button>{:else}<button @click="askDelete(id)">{delLabel}</button>{/if}
+    </div>
+</li>
+</template>

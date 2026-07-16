@@ -1,0 +1,38 @@
+{
+    "app": {
+        "title": "Shelf",
+        "tagline": "A tiny library of books and bookmarks."
+    },
+    "nav": {
+        "home": { "label": "Shelf" },
+        "about": { "label": "About" }
+    },
+    "shelf": {
+        "count": "{n, plural, one {# book} other {# books}}",
+        "empty": "No books yet — add one below.",
+        "tags": "Tags",
+        "add": "Add a book",
+        "title": "Title",
+        "url": "URL",
+        "tagsField": "Tags (comma separated)",
+        "save": "Save",
+        "rateLabel": "Rate",
+        "unrated": "unrated",
+        "delete": "Delete",
+        "confirm": "Really delete?",
+        "cancel": "Cancel",
+        "filterAll": "all"
+    },
+    "tag": {
+        "fiction": "Fiction",
+        "reference": "Reference",
+        "web": "Web"
+    },
+    "book": {
+        "notFound": "No book with id {id}.",
+        "reserved": "Id {id} is reserved and cannot be shown."
+    },
+    "lang": {
+        "switch": "Мова: українська"
+    }
+}

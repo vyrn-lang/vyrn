@@ -1,0 +1,10 @@
+/// GET / — the home shell. Stateless (a page module is non-root and cannot read
+/// the store); the browser client mounts into `#app` and fetches the shelf.
+/// Server render is English; the client offers the en/uk toggle.
+import { homePage } from "../view"
+import { Locale } from "../strings_gen"
+import { Html } from "std/html"
+
+export fn page() -> Html {
+    return homePage(En)
+}

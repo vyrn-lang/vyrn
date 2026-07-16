@@ -1,0 +1,399 @@
+/// The browser client ROOT. It holds all client-side view state (the fetched
+/// books, the tag histogram Map, the draft form, the delete-confirm id, the tag
+/// filter, the current locale) and drives the reactive UI through vyrn-dom.js.
+///
+/// RPC: the typed stubs + completion dispatchers come from `rpcClient("./contract")`,
+/// imported namespaced (`import * as api`, RFC-0027) — `api.listBooks()`,
+/// `api.addBook(api.AddBookReq { .. })`, and the payload types (`api.BookList`,
+/// `api.BookResult`, …) the completion handlers pattern-match. The ADD path
+/// validates the draft with `fromJson` (returns `Invalid` rather than trapping)
+/// before firing the stub; a genuine SERVER 422 is demoed from app.js, because a
+/// typed stub can never CONSTRUCT an invalid `AddBookReq` (it would trap).
+import { rpcClient } from "std/rpc"
+import * as api from rpcClient("./contract")
+import * as tr from "./strings_gen"
+import { Locale } from "./strings_gen"
+import { splitTrim } from "./util"
+import { BookView, TagCount, Labels } from "./types"
+import { components } from "std/vyx"
+import { shelfApp, bookCard } from components("./widgets")
+import { Html, toHtmlString } from "std/html"
+
+/// An UNVALIDATED mirror of `AddBookReq` — building this never traps, so a bad
+/// draft can be encoded then run through `fromJson` (which returns `Invalid`
+/// instead of trapping), surfacing the SAME Issues the server would. A real
+/// server 422 is demoed from app.js (a typed stub can never send invalid data).
+type RawAdd = { title: String, url: String, tags: Array<String> }
+
+/// A parseable Int64 alias (a handler arg arrives as String).
+type IntArg = Int64
+
+// ---- client view state (root-only module state) ----------------------------
+
+let mut mode: String = "list"
+let mut detailId: Int64 = 0
+let mut books: Array<api.Book> = []
+let mut tagMap: Map<String, Int64> = [:]
+let mut filter: String = ""
+let mut confirmId: Int64 = -1
+let mut draftTitle: String = ""
+let mut draftUrl: String = ""
+let mut draftTags: String = ""
+let mut issues: String = ""
+let mut lang: Locale = En
+let mut detailStatus: String = "loading…"
+let mut detailTitle: String = ""
+let mut detailUrl: String = ""
+let mut detailRating: Int64 = 0
+let mut detailTags: String = ""
+
+// ---- helpers ---------------------------------------------------------------
+
+fn parseId(s: String) -> Int64 {
+    return match fromJson(IntArg, s) {
+        Valid(n) => n,
+        Invalid(issues) => -1,
+    }
+}
+
+/// Join a book's tags with ", ".
+fn tagsText(tags: Array<api.Tag>) -> String {
+    let mut out = ""
+    let mut i = 0
+    for t in tags {
+        if i > 0 {
+            out = out + ", "
+        }
+        out = out + t
+        i = i + 1
+    }
+    return out
+}
+
+/// Render an accumulated issue list as "path: message; …".
+fn renderIssues(iss: Array<Issue>) -> String {
+    let mut out = ""
+    let mut i = 0
+    for issue in iss {
+        if i > 0 {
+            out = out + "; "
+        }
+        out = out + issue.path + ": " + issue.message
+        i = i + 1
+    }
+    return out
+}
+
+/// The label bundle for the current locale (i18n cannot live in a `.vyx`, so the
+/// widgets receive resolved strings).
+fn labels() -> Labels {
+    return Labels {
+        add: tr.tShelfAdd(lang),
+        title: tr.tShelfTitle(lang),
+        url: tr.tShelfUrl(lang),
+        tags: tr.tShelfTagsField(lang),
+        save: tr.tShelfSave(lang),
+        rate: tr.tShelfRateLabel(lang),
+        del: tr.tShelfDelete(lang),
+        confirm: tr.tShelfConfirm(lang),
+        cancel: tr.tShelfCancel(lang),
+        unrated: tr.tShelfUnrated(lang),
+        empty: tr.tShelfEmpty(lang),
+        tagsHdr: tr.tShelfTags(lang),
+        filterAll: tr.tShelfFilterAll(lang),
+        lang: tr.tLangSwitch(lang),
+    }
+}
+
+/// The books to show, filtered by the active tag, as `BookView`s.
+fn bookViews() -> Array<BookView> {
+    let mut out: Array<BookView> = []
+    for b in books {
+        let mut show = filter.length == 0
+        if show == false {
+            for t in b.tags {
+                if t == filter {
+                    show = true
+                }
+            }
+        }
+        if show {
+            out.push(BookView {
+                    id: b.id,
+                    title: b.title,
+                    url: b.url,
+                    rating: b.rating,
+                    tagsText: tagsText(b.tags),
+                    confirming: b.id == confirmId,
+                })
+        }
+    }
+    return out
+}
+
+/// The tag histogram as `TagCount`s, with a DYNAMIC-KEY i18n label lookup
+/// (`transKey("tag." + name)`) so known tags are localized and unknown ones fall
+/// back to the raw name. Iterates the wire `Map` via `keys()`.
+fn tagViews() -> Array<TagCount> {
+    let mut out: Array<TagCount> = []
+    for name in tagMap.keys() {
+        let count = match tagMap[name] {
+            Some(c) => c,
+            None => 0,
+        }
+        let label = match tr.transKey("tag." + name) {
+            Some(k) => tr.tr(lang, k),
+            None => name,
+        }
+        let mut tagCls = "tag"
+        if filter == name {
+            tagCls = "tag active"
+        }
+        out.push(TagCount { name: name, label: label, count: count, cls: tagCls })
+    }
+    return out
+}
+
+// ---- the view --------------------------------------------------------------
+
+fn listView() -> Html {
+    return shelfApp(
+        labels(),
+        bookViews(),
+        tagViews(),
+        tr.tShelfCount(lang, books.length),
+        issues,
+        draftTitle,
+        draftUrl,
+        draftTags,
+        tr.tLangSwitch(lang),
+    )
+}
+
+fn detailView() -> Html {
+    let mut rating = tr.tShelfUnrated(lang)
+    if detailRating > 0 {
+        rating = "★ \{detailRating}"
+    }
+    return bookCard(detailTitle, detailUrl, rating, detailTags, detailStatus)
+}
+
+fn view() -> Html {
+    if mode == "detail" {
+        return detailView()
+    }
+    return listView()
+}
+
+// ---- RPC completion handlers (called by the generated dispatchers) ----------
+
+fn onListBooks(id: Int64, res: Validation<api.BookList>) {
+    match res {
+        Valid(l) => setBooks(l),
+        Invalid(iss) => setIssues(renderIssues(iss)),
+    }
+}
+fn setBooks(l: api.BookList) {
+    books = l.books
+}
+
+fn onTagCounts(id: Int64, res: Validation<api.TagCounts>) {
+    match res {
+        Valid(m) => setTags(m),
+        Invalid(iss) => setIssues(renderIssues(iss)),
+    }
+}
+fn setTags(m: api.TagCounts) {
+    tagMap = m
+}
+
+fn onGetBook(id: Int64, res: Validation<api.BookResult>) {
+    match res {
+        Valid(r) => showDetail(r),
+        Invalid(iss) => setDetailStatus(renderIssues(iss)),
+    }
+}
+fn showDetail(r: api.BookResult) {
+    match r {
+        Ok(b) => fillDetail(b),
+        Err(why) => setDetailStatus(why),
+    }
+}
+fn fillDetail(b: api.Book) {
+    detailTitle = b.title
+    detailUrl = b.url
+    detailRating = b.rating
+    detailTags = tagsText(b.tags)
+    detailStatus = ""
+}
+fn setDetailStatus(s: String) {
+    detailStatus = s
+}
+
+fn onAddBook(id: Int64, res: Validation<api.BookResult>) {
+    match res {
+        Valid(r) => afterAdd(r),
+        Invalid(iss) => setIssues(renderIssues(iss)),
+    }
+}
+fn afterAdd(r: api.BookResult) {
+    match r {
+        Ok(b) => addSucceeded(),
+        Err(why) => setIssues(why),
+    }
+}
+fn addSucceeded() {
+    draftTitle = ""
+    draftUrl = ""
+    draftTags = ""
+    issues = ""
+    refetch()
+}
+
+fn onDeleteBook(id: Int64, res: Validation<api.DeleteResult>) {
+    match res {
+        Valid(r) => afterDelete(r),
+        Invalid(iss) => setIssues(renderIssues(iss)),
+    }
+}
+fn afterDelete(r: api.DeleteResult) {
+    match r {
+        Ok(done) => refetchClear(),
+        Err(why) => setIssues(why),
+    }
+}
+fn refetchClear() {
+    confirmId = -1
+    issues = ""
+    refetch()
+}
+
+fn onRateBook(id: Int64, res: Validation<api.BookResult>) {
+    match res {
+        Valid(r) => afterRate(r),
+        Invalid(iss) => setIssues(renderIssues(iss)),
+    }
+}
+fn afterRate(r: api.BookResult) {
+    match r {
+        Ok(b) => refetch(),
+        Err(why) => setIssues(why),
+    }
+}
+
+fn setIssues(s: String) {
+    issues = s
+}
+
+/// Re-read the shelf and the tag histogram (each completion re-renders).
+fn refetch() {
+    api.listBooks()
+    api.tagCounts()
+}
+
+// ---- event handlers (exported to JS, one String arg — the locked ABI) -------
+
+export extern fn bootList(arg: String) {
+    mode = "list"
+    refetch()
+}
+
+export extern fn bootDetail(arg: String) {
+    mode = "detail"
+    detailId = parseId(arg)
+    detailStatus = "loading…"
+    api.getBook(api.IdReq { id: detailId })
+}
+
+export extern fn setDraftTitle(arg: String) {
+    draftTitle = arg
+}
+export extern fn setDraftUrl(arg: String) {
+    draftUrl = arg
+}
+export extern fn setDraftTags(arg: String) {
+    draftTags = arg
+}
+
+/// Validate the draft with `fromJson` (which returns `Invalid` instead of
+/// trapping, unlike constructing `AddBookReq` directly). Valid => fire the typed
+/// stub (a real server round trip); Invalid => surface the Issues in the UI.
+export extern fn submitAdd(arg: String) {
+    let raw = RawAdd { title: draftTitle, url: draftUrl, tags: splitTrim(draftTags, 44) }
+    match fromJson(api.AddBookReq, toJson(raw)) {
+        Valid(req) => api.addBook(req),
+        Invalid(iss) => setIssues(renderIssues(iss)),
+    }
+}
+
+export extern fn askDelete(arg: String) {
+    confirmId = parseId(arg)
+}
+export extern fn cancelDelete(arg: String) {
+    confirmId = -1
+}
+export extern fn confirmDelete(arg: String) {
+    deleteById(parseId(arg))
+}
+fn deleteById(id: Int64) {
+    api.deleteBook(api.IdReq { id: id })
+}
+
+/// Cycle a book's rating 0/5 -> 1 -> … -> 5 -> 1 (always a valid 1..5 request).
+export extern fn cycleRate(arg: String) {
+    let id = parseId(arg)
+    let next = nextRating(id)
+    api.rateBook(api.RateReq { id: id, rating: next })
+}
+fn nextRating(id: Int64) -> Int64 {
+    for b in books {
+        if b.id == id {
+            if b.rating >= 5 {
+                return 1
+            }
+            return b.rating + 1
+        }
+    }
+    return 1
+}
+
+export extern fn setFilter(arg: String) {
+    filter = arg
+}
+export extern fn clearFilter(arg: String) {
+    filter = ""
+}
+
+export extern fn toggleLang(arg: String) {
+    lang = match lang {
+        En => Uk,
+        Uk => En,
+    }
+}
+
+/// The view as JSON for vyrn-dom.js.
+export extern fn vyrnView() -> String {
+    return toJson(view())
+}
+
+fn main() -> Int64 {
+    return 0
+}
+
+test "splitTrim parses a comma tag string, trimming and dropping empties" {
+    let r = splitTrim("fiction, web ,, reference ", 44)
+    assertEq(r.length, 3)
+    assertEq(r[0], "fiction")
+    assertEq(r[1], "web")
+    assertEq(r[2], "reference")
+}
+
+test "parseId maps integers and rejects non-integers" {
+    assertEq(parseId("42"), 42)
+    assertEq(parseId("abc"), -1)
+}
+
+test "bookCard renders a labeled card (view snapshot of a .vyx component)" {
+    let html = toHtmlString(bookCard("Dune", "https://x.dev/d", "★ 4", "fiction", ""))
+    assertEq(html, "<div class=\"card\"><div class=\"cardbody\"><h3><a href=\"https://x.dev/d\">Dune</a></h3><p class=\"rating\">★ 4</p><p class=\"tags\">fiction</p></div></div>")
+}

@@ -1,0 +1,76 @@
+/// Shared server-side view helpers: the page shell (localized nav) and the
+/// static page bodies. Lives in the APP ROOT so paths resolve, and imports the
+/// PRE-GENERATED, stateless i18n module (see strings_gen.vyrn for why). Every
+/// translation call threads an explicit `loc: Locale` — the generator's stateful
+/// `setLocale` had to be dropped, so locale is a plain argument here.
+import { el, text, Html, Attr } from "std/html"
+import { Locale, tAppTitle, tAppTagline, tNavHomeLabel, tNavAboutLabel, tShelfCount } from "./strings_gen"
+
+/// A nav link.
+fn navLink(href: String, label: String) -> Html {
+    return el("a", [A("href", href)], [text(label)])
+}
+
+/// The page chrome around `kids`: stylesheet, localized header + nav.
+export fn shell(loc: Locale, kids: Array<Html>) -> Html {
+    return el("div", [Id("root")], [
+            el("link", [A("rel", "stylesheet"), A("href", "/style.css")], []),
+            el("header", [], [
+                    el("h1", [], [text(tAppTitle(loc))]),
+                    el("nav", [], [
+                            navLink("/", tNavHomeLabel(loc)),
+                            navLink("/about", tNavAboutLabel(loc)),
+                        ]),
+                ]),
+            el("main", [], kids),
+        ])
+}
+
+/// The home page body — the client mounts into `#app` and fetches the shelf.
+export fn homePage(loc: Locale) -> Html {
+    return shell(loc, [
+            el("p", [Cls("sub")], [text(tAppTagline(loc))]),
+            el("div", [Id("app")], [el("p", [Cls("sub")], [text("loading shelf…")])]),
+            el("script", [A("type", "module"), A("src", "/app.js")], []),
+        ])
+}
+
+/// One row of the plural table: locale label, then the plural rendered in `loc`.
+fn pluralRow(loc: Locale, label: String, n: Int64) -> Html {
+    return el("tr", [], [
+            el("td", [], [text(label)]),
+            el("td", [], [text("\{n}")]),
+            el("td", [], [text(tShelfCount(loc, n))]),
+        ])
+}
+
+/// The About page: static prose plus a live CLDR-plural demonstration rendered
+/// in English AND Ukrainian (one/few/many) side by side — locale is just an
+/// argument now, so both render in one pass with no global to flip back.
+export fn aboutPage(loc: Locale) -> Html {
+    return shell(loc, [
+            el("h2", [], [text("About")]),
+            el("p", [], [text("Shelf is a tiny dogfood app exercising the whole Vyrn UI stack: std/html, std/ui pages, std/rpc, std/i18n, and Map on the wire.")]),
+            el("h3", [], [text("CLDR plurals")]),
+            el("p", [Cls("sub")], [text("The same message for counts 1 / 2 / 5 — English has two forms, Ukrainian has three (one / few / many).")]),
+            el("table", [Cls("plurals")], [
+                    el("thead", [], [el("tr", [], [el("th", [], [text("locale")]), el("th", [], [text("n")]), el("th", [], [text("message")])])]),
+                    el("tbody", [], [
+                            pluralRow(En, "en", 1), pluralRow(En, "en", 2), pluralRow(En, "en", 5),
+                            pluralRow(Uk, "uk", 1), pluralRow(Uk, "uk", 2), pluralRow(Uk, "uk", 5),
+                        ]),
+                ]),
+        ])
+}
+
+/// The book-detail shell: the client hydrates `#book` with the real record via
+/// the `getBook` RPC (a page module cannot read the store). `id` is already
+/// validated as an integer by the router.
+export fn detailPage(loc: Locale, id: Int64) -> Html {
+    return shell(loc, [
+            el("p", [], [navLink("/", tNavHomeLabel(loc))]),
+            el("h2", [], [text("Book #\{id}")]),
+            el("div", [Id("book"), A("data-book-id", "\{id}")], [el("p", [Cls("sub")], [text("loading book…")])]),
+            el("script", [A("type", "module"), A("src", "/app.js")], []),
+        ])
+}

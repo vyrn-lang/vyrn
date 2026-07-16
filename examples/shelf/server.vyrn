@@ -1,0 +1,238 @@
+/// The shelf server ROOT. It owns the `books` store (module state — root-only,
+/// RFC-0013) and is therefore the ONLY module that can touch it. Two consequences
+/// drive this whole file (see rfcs/NOTES-dogfood-shelf.md):
+///
+///   * `rpcServer("./contract")` is UNUSABLE for a stateful backend: it would call
+///     the contract module's procedure bodies, and an imported contract may not
+///     hold state. So the RPC server half is HAND-WRITTEN below, honoring the exact
+///     wire shape `rpcClient` expects (200 = toJson(result); 422 =
+///     `{"issues":[...]}`). This is the code `rpcServer` would have generated.
+///   * The `std/ui` pages generator's page modules are ALSO non-root, so they
+///     cannot read the store either. `pages("./routes")` therefore serves only the
+///     stateless shell/about/detail-shell routes; the live data is fetched by the
+///     browser client over RPC.
+import { hasPrefix, dropPrefix } from "./util"
+import { pages } from "std/ui"
+import { route } from pages("./routes")
+import { Book, Tag, Stars, BookList, TagCounts, IdReq, AddBookReq, RateReq, BookResult, DeleteResult } from "./contract"
+import { Locale, tShelfCount } from "./strings_gen"
+
+/// The wrapper `rpcClient` decodes a 422 body into (RFC-0019 wire contract).
+type RpcIssues = { issues: Array<Issue> }
+
+// ---- the store (module state — the point of this app) ----------------------
+
+let mut books: Array<Book> = [
+    Book { id: 0, title: "The Pragmatic Programmer", url: "https://pragprog.com/titles/tpp20", tags: ["reference", "web"], rating: 5 },
+    Book { id: 1, title: "Dune", url: "https://example.com/dune", tags: ["fiction"], rating: 4 },
+    Book { id: 2, title: "SICP", url: "https://mitpress.mit.edu/sicp", tags: ["reference"], rating: 0 },
+]
+let mut nextId: Int64 = 3
+
+// ---- store operations (only the root can do these) -------------------------
+
+/// A fresh deep copy of a book (so a value can leave the store without moving
+/// module state out — FRICTION: no structural copy, done by hand).
+fn copyBook(b: Book) -> Book {
+    let mut tags: Array<Tag> = []
+    for t in b.tags {
+        tags.push(t)
+    }
+    return Book { id: b.id, title: b.title, url: b.url, tags: tags, rating: b.rating }
+}
+
+/// A snapshot list of every book.
+fn allBooks() -> BookList {
+    let mut out: Array<Book> = []
+    for b in books {
+        out.push(copyBook(b))
+    }
+    return BookList { books: out }
+}
+
+/// The book with `id`, as a `BookResult` (`Err` when absent).
+fn findBook(id: Int64) -> BookResult {
+    for b in books {
+        if b.id == id {
+            return Ok(copyBook(b))
+        }
+    }
+    return Err("no book with id \{id}")
+}
+
+/// Add a book (already validated by `fromJson`); returns the stored copy.
+fn addBookToStore(req: AddBookReq) -> BookResult {
+    let id = nextId
+    let mut tags: Array<Tag> = []
+    for t in req.tags {
+        tags.push(t)
+    }
+    books.push(Book { id: id, title: req.title, url: req.url, tags: tags, rating: 0 })
+    nextId = nextId + 1
+    return findBook(id)
+}
+
+/// Delete by id. The seed book (id 0) is refused — an application outcome.
+fn deleteFromStore(id: Int64) -> DeleteResult {
+    if id == 0 {
+        return Err("the seed book cannot be deleted")
+    }
+    let mut kept: Array<Book> = []
+    let mut found = false
+    for b in books {
+        if b.id == id {
+            found = true
+        } else {
+            kept.push(copyBook(b))
+        }
+    }
+    books = kept
+    if found {
+        return Ok(true)
+    }
+    return Err("no book with id \{id}")
+}
+
+/// Set a book's rating (already validated 1..5). `Err` when absent.
+fn rateInStore(id: Int64, rating: Int64) -> BookResult {
+    let mut i = 0
+    while i < books.length {
+        if books[i].id == id {
+            let s: Stars = rating
+            books[i].rating = s
+            return findBook(id)
+        }
+        i = i + 1
+    }
+    return Err("no book with id \{id}")
+}
+
+/// Fold the shelf into a tag histogram — the `Map<String, Int64>` pillar,
+/// in-language.
+fn computeTagCounts() -> TagCounts {
+    let mut m: Map<String, Int64> = [:]
+    for b in books {
+        for t in b.tags {
+            let cur = match m[t] {
+                Some(c) => c,
+                None => 0,
+            }
+            m[t] = cur + 1
+        }
+    }
+    return m
+}
+
+// ---- the hand-written RPC server (what rpcServer would have generated) ------
+
+fn rpcResponse(status: Int64, body: String) -> Response {
+    return Response { status: status, contentType: "application/json", body: body }
+}
+
+fn issues422(issues: Array<Issue>) -> Response {
+    return rpcResponse(422, toJson(RpcIssues { issues: issues }))
+}
+
+/// Dispatch a `POST /rpc/<name>` against the store. Decode with the contract's
+/// validated types (a bad field => 422 issues), run the store op, encode.
+fn rpcDispatch(name: String, body: String) -> Response {
+    if name == "listBooks" {
+        return rpcResponse(200, toJson(allBooks()))
+    }
+    if name == "tagCounts" {
+        return rpcResponse(200, toJson(computeTagCounts()))
+    }
+    if name == "getBook" {
+        return match fromJson(IdReq, body) {
+            Valid(req) => rpcResponse(200, toJson(findBook(req.id))),
+            Invalid(issues) => issues422(issues),
+        }
+    }
+    if name == "addBook" {
+        return match fromJson(AddBookReq, body) {
+            Valid(req) => rpcResponse(200, toJson(addBookToStore(req))),
+            Invalid(issues) => issues422(issues),
+        }
+    }
+    if name == "deleteBook" {
+        return match fromJson(IdReq, body) {
+            Valid(req) => rpcResponse(200, toJson(deleteFromStore(req.id))),
+            Invalid(issues) => issues422(issues),
+        }
+    }
+    if name == "rateBook" {
+        return match fromJson(RateReq, body) {
+            Valid(req) => rpcResponse(200, toJson(rateInStore(req.id, req.rating))),
+            Invalid(issues) => issues422(issues),
+        }
+    }
+    return rpcResponse(404, "{\"issues\":[]}")
+}
+
+// ---- handle: RPC first, then the stateless page routes ---------------------
+
+fn handle(req: Request) -> Response {
+    if req.method == "POST" && hasPrefix(req.path, "/rpc/") {
+        return rpcDispatch(dropPrefix(req.path, "/rpc/"), req.body)
+    }
+    return route(req)
+}
+
+fn main() -> Int64 {
+    // Drive `handle` so `vyrn run server.vyrn` is a read-only smoke test of the
+    // store (no mutation, so the served shelf starts at the 3 seed books).
+    let list = handle(Request { method: "POST", path: "/rpc/listBooks", body: "" })
+    print("listBooks -> \{list.status}")
+    let tags = handle(Request { method: "POST", path: "/rpc/tagCounts", body: "" })
+    print("tagCounts -> \{tags.status}: \{tags.body}")
+    let bad = handle(Request { method: "POST", path: "/rpc/addBook", body: "{\"title\":\"\",\"url\":\"not-a-url\",\"tags\":[]}" })
+    print("addBook(bad) -> \{bad.status}: \{bad.body}")
+    let home = handle(Request { method: "GET", path: "/", body: "" })
+    print("/ -> \{home.status}")
+    return 0
+}
+
+/// Look a tag's count up in a `TagCounts` map (-1 when absent), for tests.
+fn countOf(m: TagCounts, tag: String) -> Int64 {
+    return match m[tag] {
+        Some(c) => c,
+        None => -1,
+    }
+}
+
+test "tag folding over the seed shelf builds the right Map (insertion order)" {
+    let m = computeTagCounts()
+    assertEq(m.length, 3)
+    assertEq(countOf(m, "reference"), 2)
+    assertEq(countOf(m, "web"), 1)
+    assertEq(countOf(m, "fiction"), 1)
+    // First-insertion order: reference (book 0), web (book 0), fiction (book 1).
+    assertEq(m.keys()[0], "reference")
+    assertEq(m.keys()[1], "web")
+    assertEq(m.keys()[2], "fiction")
+}
+
+test "listBooks dispatch returns the three seed books" {
+    let r = rpcDispatch("listBooks", "")
+    assertEq(r.status, 200)
+    let snap = allBooks()
+    assertEq(snap.books.length, 3)
+    assertEq(snap.books[0].title, "The Pragmatic Programmer")
+}
+
+test "an invalid addBook body is a 422 carrying accumulated Issues (no mutation)" {
+    let before = allBooks()
+    let r = rpcDispatch("addBook", "{\"title\":\"\",\"url\":\"nope\",\"tags\":[]}")
+    assertEq(r.status, 422)
+    // The store is unchanged — a 422 never reached the store op.
+    assertEq(allBooks().books.length, before.books.length)
+}
+
+test "CLDR plurals render one/few/many correctly in both locales" {
+    assertEq(tShelfCount(En, 1), "1 book")
+    assertEq(tShelfCount(En, 5), "5 books")
+    assertEq(tShelfCount(Uk, 1), "1 книга")
+    assertEq(tShelfCount(Uk, 2), "2 книги")
+    assertEq(tShelfCount(Uk, 5), "5 книг")
+    assertEq(tShelfCount(Uk, 21), "21 книга")
+}

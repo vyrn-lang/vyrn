@@ -1,0 +1,6 @@
+{
+  "name": "shelf",
+  "server": "server.vyrn",
+  "client": "client.vyrn",
+  "public": "public"
+}

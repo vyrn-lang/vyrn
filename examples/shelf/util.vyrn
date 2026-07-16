@@ -1,0 +1,106 @@
+/// Local string helpers the app needs but `std/strings` does not provide
+/// (FRICTION #? in NOTES: no `startsWith` / `substring` / `split` in std, so a
+/// path router and a "a, b, c" tag parser must byte-walk by hand). Ordinary
+/// stateless Vyrn — imported by both the server root and the client root.
+
+/// True when `s` begins with `p`.
+export fn hasPrefix(s: String, p: String) -> Bool {
+    let sb = bytes(s)
+    let pb = bytes(p)
+    if pb.length > sb.length {
+        return false
+    }
+    let mut i = 0
+    while i < pb.length {
+        if sb[i] != pb[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// `s` with the leading `p` removed (unchanged when `s` does not start with `p`).
+export fn dropPrefix(s: String, p: String) -> String {
+    if hasPrefix(s, p) == false {
+        return s
+    }
+    let sb = bytes(s)
+    let pb = bytes(p)
+    let mut out: Array<UInt8> = []
+    let mut i = pb.length
+    while i < sb.length {
+        out.push(sb[i])
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(e) => s,
+    }
+}
+
+/// ASCII whitespace test.
+fn isSpace(b: UInt8) -> Bool {
+    return b == 32 || b == 9 || b == 10 || b == 13
+}
+
+/// `s` with leading/trailing ASCII whitespace removed.
+export fn trim(s: String) -> String {
+    let sb = bytes(s)
+    let mut a = 0
+    let mut b = sb.length
+    while a < b && isSpace(sb[a]) {
+        a = a + 1
+    }
+    while b > a && isSpace(sb[b - 1]) {
+        b = b - 1
+    }
+    let mut out: Array<UInt8> = []
+    let mut i = a
+    while i < b {
+        out.push(sb[i])
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+}
+
+/// Split `s` on the single-byte separator `sep` (given as its code point), each
+/// part trimmed, empty parts dropped. `"fiction, web ,"` -> ["fiction", "web"].
+export fn splitTrim(s: String, sep: UInt8) -> Array<String> {
+    let sb = bytes(s)
+    let mut parts: Array<String> = []
+    let mut start = 0
+    let mut i = 0
+    while i < sb.length {
+        if sb[i] == sep {
+            let piece = trim(sliceOf(sb, start, i))
+            if piece.length > 0 {
+                parts.push(piece)
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    let last = trim(sliceOf(sb, start, sb.length))
+    if last.length > 0 {
+        parts.push(last)
+    }
+    return parts
+}
+
+/// The bytes `sb[a..b)` as a String.
+fn sliceOf(sb: Array<UInt8>, a: Int64, b: Int64) -> String {
+    let mut out: Array<UInt8> = []
+    let mut i = a
+    while i < b {
+        out.push(sb[i])
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+}

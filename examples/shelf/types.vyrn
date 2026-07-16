@@ -1,0 +1,38 @@
+/// Client view-model types, in their OWN module so both the client root and the
+/// `.vyx` widgets can import them without a cycle (the client imports the widgets;
+/// the widgets import these). Pure records — no state, no behavior.
+
+/// A book as the UI shows it: the store fields flattened for a template, plus the
+/// per-row delete-confirm flag (client-only view state).
+export type BookView = {
+    id: Int64,
+    title: String,
+    url: String,
+    rating: Int64,
+    tagsText: String,
+    confirming: Bool,
+}
+
+/// One tag histogram entry (the client turns the wire `Map<String,Int64>` into a
+/// list of these so a `{#for}` can render it). `cls` is a precomputed class
+/// string ("tag" / "tag active") because a `.vyx` `class={..}` needs a String.
+export type TagCount = { name: String, label: String, count: Int64, cls: String }
+
+/// Every localized label the widgets need, resolved once in the client root
+/// (i18n cannot be used inside a `.vyx` — see NOTES — so labels arrive as props).
+export type Labels = {
+    add: String,
+    title: String,
+    url: String,
+    tags: String,
+    save: String,
+    rate: String,
+    del: String,
+    confirm: String,
+    cancel: String,
+    unrated: String,
+    empty: String,
+    tagsHdr: String,
+    filterAll: String,
+    lang: String,
+}

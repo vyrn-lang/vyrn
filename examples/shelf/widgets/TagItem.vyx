@@ -1,0 +1,9 @@
+<script>
+// prop is `klass`, not `cls`: a `.vyx` param named `cls` collides with
+// std/html's exported `cls()` (flat-namespace shadowing bug — see NOTES).
+props { name: String, label: String, count: Int64, klass: String }
+</script>
+
+<template>
+<li><button class={klass} @click="setFilter(name)">{label} ({count})</button></li>
+</template>

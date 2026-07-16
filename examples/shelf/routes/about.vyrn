@@ -1,0 +1,9 @@
+/// GET /about — a static, fully server-rendered page (localized, with a live
+/// CLDR-plural demonstration in English and Ukrainian).
+import { aboutPage } from "../view"
+import { Locale } from "../strings_gen"
+import { Html } from "std/html"
+
+export fn page() -> Html {
+    return aboutPage(En)
+}

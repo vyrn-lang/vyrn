@@ -1,0 +1,40 @@
+<script>
+// The only widget that imports the shared record types — children take scalars,
+// so no type is imported by two components (the .vyx generator would otherwise
+// emit a duplicate import into the one synthesized module). See NOTES.
+props {
+    labels: Labels,
+    books: Array<BookView>,
+    tags: Array<TagCount>,
+    count: String,
+    issues: String,
+    draftTitle: String,
+    draftUrl: String,
+    draftTags: String,
+    langLabel: String,
+}
+import { BookView, TagCount, Labels } from "../types"
+</script>
+
+<template>
+<div class="shelf">
+    <div class="bar">
+        <span class="count">{count}</span>
+        <button class="lang" @click="toggleLang">{langLabel}</button>
+    </div>
+    {#if issues.length > 0}<p class="issues">{issues}</p>{:else}<span class="noissues"></span>{/if}
+    <div class="cols">
+        <div class="col-main">
+            <AddForm addLabel={labels.add} titleLabel={labels.title} urlLabel={labels.url} tagsLabel={labels.tags} saveLabel={labels.save} draftTitle={draftTitle} draftUrl={draftUrl} draftTags={draftTags}/>
+            {#if books.length > 0}<ul class="books">{#for b in books key={b.id}}<BookRow id={b.id} title={b.title} url={b.url} rating={b.rating} tagsText={b.tagsText} confirming={b.confirming} unratedLabel={labels.unrated} delLabel={labels.del} confirmLabel={labels.confirm} cancelLabel={labels.cancel}/>{/for}</ul>{:else}<p class="empty">{labels.empty}</p>{/if}
+        </div>
+        <aside class="sidebar">
+            <h2>{labels.tagsHdr}</h2>
+            <ul class="taglist">
+                <li><button class="tag" @click="clearFilter">{labels.filterAll}</button></li>
+                {#for t in tags key={t.name}}<TagItem name={t.name} label={t.label} count={t.count} klass={t.cls}/>{/for}
+            </ul>
+        </aside>
+    </div>
+</div>
+</template>

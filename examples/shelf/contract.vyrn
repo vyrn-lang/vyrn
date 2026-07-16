@@ -1,0 +1,88 @@
+/// The shelf RPC contract (RFC-0019) — an ORDINARY Vyrn module of validated
+/// types and procedure signatures. `rpcClient("./contract")` (in `client.vyrn`) reads
+/// this module's interface (RFC-0021 `moduleInterface`) and synthesizes the
+/// browser stubs + completion dispatchers + verbatim type re-declarations.
+///
+/// FRICTION (see rfcs/NOTES-dogfood-shelf.md #1): the procedure BODIES below are
+/// deliberately inert placeholders. The real, stateful implementations live in
+/// the ROOT (`server.vyrn`), because module state is root-only (RFC-0013) and an
+/// imported contract module may never hold the `books` store. `rpcServer` would
+/// call THESE bodies — so it is unusable for a stateful backend; the server half
+/// is hand-written in the root instead. These bodies exist only so the client
+/// generator can reflect each procedure's shape; they are never executed (the
+/// client fires the wire; the server dispatches by hand).
+
+/// A book id (non-negative). A plain Int64 on the wire.
+export type BookId = Int64 where value >= 0
+
+/// A star rating a user may SET: 1..5 (0 is not a settable value — a fresh book
+/// is unrated, `Stars` 0, but you cannot `rateBook` to 0). Out of range => 422.
+export type Rating = Int64 where value >= 1 && value <= 5
+
+/// The rating STORED on a book: 0 means unrated, 1..5 rated.
+export type Stars = Int64 where value >= 0 && value <= 5
+
+/// A non-empty, bounded title.
+export type Title = String where value.length >= 1 && value.length <= 80
+
+/// A URL: must look like http(s)://…  (a real regex-validated string, RFC-0020).
+/// A bad URL fails `fromJson` on the server => structured 422 issues.
+export type Url = String where value =~ "https?://.+"
+
+/// A short tag label.
+export type Tag = String where value.length >= 1 && value.length <= 20
+
+/// A stored book. Every field is validated on every decode boundary.
+export type Book = { id: BookId, title: Title, url: Url, tags: Array<Tag>, rating: Stars }
+
+// ---- request / response shapes (named so fromJson/jsonSchema can take them) --
+
+export type IdReq = { id: BookId }
+export type AddBookReq = { title: Title, url: Url, tags: Array<Tag> }
+export type RateReq = { id: BookId, rating: Rating }
+
+/// A list wrapper (a bare `Array<Book>` is codable, but a named record keeps the
+/// wire an object and reads better as a procedure return).
+export type BookList = { books: Array<Book> }
+
+/// Application-level outcomes (RFC-0024): an `Err` is a 200 carrying `{"Err":..}`,
+/// distinct from a 422 request-validation failure.
+export type BookResult = Result<Book, String>
+export type DeleteResult = Result<Bool, String>
+
+/// Tag -> count. A `Map<String, Int64>` crossing the wire as a JSON object
+/// (RFC-0028) — the map pillar end to end.
+export type TagCounts = Map<String, Int64>
+
+// ---- procedures (INERT placeholder bodies — real impl is server.vyrn) --------
+
+/// List every book. Zero-param => POST with an empty body.
+export fn listBooks() -> BookList {
+    return BookList { books: [] }
+}
+
+/// Fetch one book by id; `Err` when absent.
+export fn getBook(req: IdReq) -> BookResult {
+    return Err("contract stub — real impl is server.vyrn")
+}
+
+/// Add a book (title/url/tags validated on decode); `Err` when refused.
+export fn addBook(req: AddBookReq) -> BookResult {
+    return Err("contract stub — real impl is server.vyrn")
+}
+
+/// Delete a book by id; `Err` when refused (e.g. the seed/root book).
+export fn deleteBook(req: IdReq) -> DeleteResult {
+    return Err("contract stub — real impl is server.vyrn")
+}
+
+/// Set a book's rating (1..5, validated); `Err` when the book is absent.
+export fn rateBook(req: RateReq) -> BookResult {
+    return Err("contract stub — real impl is server.vyrn")
+}
+
+/// Tag histogram over the whole shelf.
+export fn tagCounts() -> TagCounts {
+    let m: Map<String, Int64> = [:]
+    return m
+}
