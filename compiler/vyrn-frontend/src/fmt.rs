@@ -407,6 +407,19 @@ mod tests {
     }
 
     #[test]
+    fn formats_namespace_imports() {
+        // RFC-0027: `import * as ns from ..` — a header line like any other import.
+        assert_eq!(
+            f("import   *   as   api   from   \"./api\"\n"),
+            "import * as api from \"./api\"\n"
+        );
+        assert_eq!(
+            f("import * as ui from pages(\"./pages\")\n"),
+            "import * as ui from pages(\"./pages\")\n"
+        );
+    }
+
+    #[test]
     fn indents_by_brace_depth() {
         let src = "fn main() -> Int64 {\nlet x = 1\nreturn x\n}\n";
         assert_eq!(f(src), "fn main() -> Int64 {\n    let x = 1\n    return x\n}\n");

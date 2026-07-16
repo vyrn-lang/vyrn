@@ -814,6 +814,104 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         }
     }
 
+    // Exported top-level decl names per module — the surface a namespace import
+    // (RFC-0027) can reach (`ns.member` reaches EXPORTED decls only). Also a
+    // program-wide count of how many modules declare each name, so a namespaced
+    // module's export is renamed to a fresh symbol only when keeping its name
+    // would collide in the flat namespace.
+    let mut module_exports: HashMap<String, HashSet<String>> = HashMap::new();
+    // Variant names of a module's EXPORTED enums — lets the namespace resolver
+    // tell `ns.Enum.Variant(payload)` construction (a variant call) apart from
+    // `someFn(ns.Type, ..)` (a type-name argument), which parse identically.
+    let mut module_variants: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut name_module_count: HashMap<String, usize> = HashMap::new();
+    for m in modules.iter() {
+        let variants = module_variants.entry(m.key.clone()).or_default();
+        for t in &m.program.type_decls {
+            if t.line != 0 && t.exported {
+                if let Type::Enum(vs) = &t.base {
+                    for v in vs {
+                        variants.insert(v.name.clone());
+                    }
+                }
+            }
+        }
+        let set = module_exports.entry(m.key.clone()).or_default();
+        let mut ex = |n: &str, exported: bool| {
+            if exported {
+                set.insert(n.to_string());
+            }
+        };
+        for t in &m.program.type_decls {
+            if t.line != 0 {
+                ex(&t.name, t.exported);
+            }
+        }
+        for f in &m.program.functions {
+            ex(&f.name, f.exported);
+        }
+        for p in &m.program.protocols {
+            ex(&p.name, p.exported);
+        }
+        // Globals are never `export`ed (module state is root-only), so they are
+        // not namespace-reachable.
+        for n in module_decls.get(&m.key).into_iter().flatten() {
+            *name_module_count.entry(n.clone()).or_insert(0) += 1;
+        }
+    }
+
+    // Namespace bindings (RFC-0027): module key -> [(ns name, target module)].
+    // Validated here for collisions before any reference reinterpretation.
+    let mut ns_bindings: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for m in modules.iter() {
+        let mine = module_decls.get(&m.key).cloned().unwrap_or_default();
+        let import_locals: HashSet<String> = m
+            .program
+            .imports
+            .iter()
+            .flat_map(|imp| imp.names.iter())
+            .map(|n| n.local().to_string())
+            .collect();
+        let mut seen_ns: HashSet<String> = HashSet::new();
+        let binds = ns_bindings.entry(m.key.clone()).or_default();
+        for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
+            let Some(ns) = &imp.namespace else { continue };
+            let mut ok = true;
+            if !seen_ns.insert(ns.clone()) {
+                errors.push(with_file(
+                    Diagnostic::error(
+                        imp.line,
+                        0,
+                        "load",
+                        format!("namespace `{ns}` is bound twice in this module"),
+                    ),
+                    m,
+                    root_key,
+                ));
+                ok = false;
+            }
+            if mine.contains(ns) || import_locals.contains(ns) {
+                errors.push(with_file(
+                    Diagnostic::error(
+                        imp.line,
+                        0,
+                        "load",
+                        format!(
+                            "namespace `{ns}` collides with a top-level declaration or import \
+                             of the same name in this module"
+                        ),
+                    ),
+                    m,
+                    root_key,
+                ));
+                ok = false;
+            }
+            if ok {
+                binds.push((ns.clone(), target.clone()));
+            }
+        }
+    }
+
     // (target module, original) -> fresh symbol, for co-naming renames.
     let mut foreign_renames: HashMap<(String, String), String> = HashMap::new();
     let mint = |original: &str, all: &mut HashSet<String>| -> String {
@@ -919,6 +1017,28 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         }
     }
 
+    // Namespace renames (RFC-0027): a namespaced module keeps its exports OUT of
+    // the flat namespace, so an export whose name is also declared elsewhere is
+    // renamed to a fresh program-wide symbol (the same `member__fromN` mechanics
+    // co-naming uses). `ns.member` and any selective importer both resolve to
+    // that symbol; a name unique to its module keeps it (no churn). This is what
+    // lets two namespaced modules export the same name and coexist.
+    let namespaced_targets: HashSet<String> =
+        ns_bindings.values().flatten().map(|(_, t)| t.clone()).collect();
+    for target in &namespaced_targets {
+        let exports = module_exports.get(target).cloned().unwrap_or_default();
+        // Deterministic order so the minted suffixes are stable across runs.
+        let mut names: Vec<&String> = exports.iter().collect();
+        names.sort();
+        for name in names {
+            if name_module_count.get(name).copied().unwrap_or(0) >= 2 {
+                foreign_renames
+                    .entry((target.clone(), name.clone()))
+                    .or_insert_with(|| mint(name, &mut all_names));
+            }
+        }
+    }
+
     // Pass 2: per-module reference-rewrite maps (alias/local -> resolved decl).
     let mut rewrites: HashMap<String, HashMap<String, String>> = HashMap::new();
     for m in modules.iter() {
@@ -961,6 +1081,429 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                 n.original = resolved;
                 n.alias = None;
             }
+        }
+    }
+
+    // Pass 5 (RFC-0027): reinterpret `ns.member` uses in each namespaced module
+    // into the resolved program-wide symbol. Runs after the alias/co-naming
+    // rewrites so the two never interfere (alias rewriting touches plain names;
+    // this touches `ns.`-headed member access, which alias rewriting leaves
+    // alone). Local bindings shadow namespaces — the walk is scope-aware.
+    for m in modules.iter_mut() {
+        let binds: HashMap<String, String> = match ns_bindings.get(&m.key) {
+            Some(b) if !b.is_empty() => b.iter().cloned().collect(),
+            _ => continue,
+        };
+        let mut nr = NsResolver {
+            ns: binds,
+            foreign_renames: &foreign_renames,
+            module_exports: &module_exports,
+            module_variants: &module_variants,
+            module_key: m.key.clone(),
+            root_key: root_key.to_string(),
+            errors,
+        };
+        nr.resolve_program(&mut m.program);
+    }
+}
+
+/// Reinterprets namespace-qualified references (`ns.member`, RFC-0027) inside one
+/// importing module into the resolved program-wide decl symbols. A namespace is a
+/// compile-time name, not a value: any surviving bare use of it is an error.
+struct NsResolver<'a> {
+    /// The module's in-scope namespaces: `ns` name -> target module key.
+    ns: HashMap<String, String>,
+    foreign_renames: &'a HashMap<(String, String), String>,
+    /// Exported decl names (originals) per module — the namespace-reachable surface.
+    module_exports: &'a HashMap<String, HashSet<String>>,
+    /// Exported-enum variant names per module (disambiguates variant construction
+    /// from type-name arguments).
+    module_variants: &'a HashMap<String, HashSet<String>>,
+    module_key: String,
+    root_key: String,
+    errors: &'a mut Vec<Diagnostic>,
+}
+
+impl NsResolver<'_> {
+    fn err(&mut self, line: usize, msg: String) {
+        let mut d = Diagnostic::error(line, 0, "load", msg);
+        if self.module_key != self.root_key {
+            d.file = Some(self.module_key.clone());
+        }
+        self.errors.push(d);
+    }
+
+    /// The program-wide symbol a namespace member resolves to (honoring any
+    /// collision rename), or an error if the target does not EXPORT it.
+    fn resolve_member(&mut self, ns: &str, member: &str, line: usize) -> Option<String> {
+        let target = self.ns.get(ns).cloned()?;
+        let exported = self.module_exports.get(&target).is_some_and(|s| s.contains(member));
+        if !exported {
+            self.err(
+                line,
+                format!(
+                    "namespace `{ns}` (module `{target}`) has no exported member `{member}` — \
+                     namespaces reach exported declarations only, one level deep"
+                ),
+            );
+            return None;
+        }
+        Some(
+            self.foreign_renames
+                .get(&(target, member.to_string()))
+                .cloned()
+                .unwrap_or_else(|| member.to_string()),
+        )
+    }
+
+    fn resolve_program(&mut self, p: &mut Program) {
+        for f in &mut p.functions {
+            let mut locals: HashSet<String> =
+                f.params.iter().map(|pm| pm.name.clone()).collect();
+            self.walk_type_positions_fn(f, &locals.clone());
+            self.walk_block(&mut f.body, &mut locals);
+        }
+        for im in &mut p.impls {
+            self.rewrite_type(&mut im.ty);
+            for m in &mut im.methods {
+                let mut locals: HashSet<String> =
+                    m.params.iter().map(|pm| pm.name.clone()).collect();
+                self.walk_type_positions_fn(m, &locals.clone());
+                self.walk_block(&mut m.body, &mut locals);
+            }
+        }
+        for t in &mut p.type_decls {
+            if t.line == 0 {
+                continue;
+            }
+            self.rewrite_type(&mut t.base);
+            if let Some(pred) = &mut t.predicate {
+                let mut locals: HashSet<String> = std::iter::once("value".to_string()).collect();
+                self.walk_expr(pred, &mut locals);
+            }
+        }
+        for g in &mut p.globals {
+            if let Some(ty) = &mut g.ty {
+                self.rewrite_type(ty);
+            }
+            let mut locals = HashSet::new();
+            self.walk_expr(&mut g.init, &mut locals);
+        }
+        for t in &mut p.tests {
+            let mut locals = HashSet::new();
+            self.walk_block(&mut t.body, &mut locals);
+        }
+    }
+
+    /// Rewrite namespace-qualified types in a function's signature (params, return,
+    /// bounds are plain protocol names handled via bounds map below).
+    fn walk_type_positions_fn(&mut self, f: &mut Function, _locals: &HashSet<String>) {
+        for pm in &mut f.params {
+            self.rewrite_type(&mut pm.ty);
+        }
+        self.rewrite_type(&mut f.ret);
+        for bounds in f.type_bounds.values_mut() {
+            for b in bounds.iter_mut() {
+                // `<T: ns.Show>` — a bound is a bare protocol name; the parser
+                // never produces a dotted bound, but a namespaced protocol bound
+                // is written `ns.Show` and lands as one dotted string here only if
+                // the type parser routed it through `Type::Named`. Bounds are
+                // plain strings, so a dotted bound would already have failed to
+                // parse; nothing to do beyond the (rare) dotted spelling.
+                if let Some((ns, member)) = b.split_once('.') {
+                    let line = f.line;
+                    if let Some(sym) = self.resolve_member(ns, member, line) {
+                        *b = sym;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rewrite a namespace-qualified named/applied type (`ns.User`, `ns.Box<T>`)
+    /// into its resolved decl name, recursing through the whole type tree.
+    fn rewrite_type(&mut self, ty: &mut Type) {
+        match ty {
+            Type::Named(n) => {
+                if let Some((ns, member)) = n.clone().split_once('.') {
+                    if self.ns.contains_key(ns) {
+                        if let Some(sym) = self.resolve_member(ns, member, 0) {
+                            *n = sym;
+                        }
+                    }
+                }
+            }
+            Type::App(n, args) => {
+                if let Some((ns, member)) = n.clone().split_once('.') {
+                    if self.ns.contains_key(ns) {
+                        if let Some(sym) = self.resolve_member(ns, member, 0) {
+                            *n = sym;
+                        }
+                    }
+                }
+                for a in args {
+                    self.rewrite_type(a);
+                }
+            }
+            Type::Option(a) | Type::Ref(a) | Type::Array(a) | Type::Task(a) | Type::Partial(a)
+            | Type::ArrayN(a, _) | Type::Omit(a, _) | Type::Pick(a, _) => self.rewrite_type(a),
+            Type::Result(a, b) | Type::Merge(a, b) => {
+                self.rewrite_type(a);
+                self.rewrite_type(b);
+            }
+            Type::Record(fs) => {
+                for f in fs {
+                    self.rewrite_type(&mut f.ty);
+                }
+            }
+            Type::Enum(vs) => {
+                for v in vs {
+                    for pl in &mut v.payload {
+                        self.rewrite_type(pl);
+                    }
+                }
+            }
+            Type::Fn(params, ret) => {
+                for pt in params {
+                    self.rewrite_type(pt);
+                }
+                self.rewrite_type(ret);
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether `ns` is an in-scope namespace at this use (not shadowed by a local).
+    fn is_ns(&self, ns: &str, locals: &HashSet<String>) -> bool {
+        self.ns.contains_key(ns) && !locals.contains(ns)
+    }
+
+    fn walk_block(&mut self, b: &mut Block, locals: &mut HashSet<String>) {
+        for s in &mut b.stmts {
+            self.walk_stmt(s, locals);
+        }
+    }
+
+    fn walk_stmt(&mut self, s: &mut Stmt, locals: &mut HashSet<String>) {
+        match s {
+            Stmt::Let { name, value, ty, .. } => {
+                if let Some(t) = ty {
+                    self.rewrite_type(t);
+                }
+                self.walk_expr(value, locals);
+                // The binding is in scope for subsequent statements (and shadows a
+                // like-named namespace from here on).
+                locals.insert(name.clone());
+            }
+            Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => {
+                self.walk_expr(value, locals)
+            }
+            Stmt::IndexSet { index, value, .. } => {
+                self.walk_expr(index, locals);
+                self.walk_expr(value, locals);
+            }
+            Stmt::Return { value: Some(e), .. } => self.walk_expr(e, locals),
+            Stmt::Return { value: None, .. } => {}
+            Stmt::If { cond, then_block, else_block, .. } => {
+                self.walk_expr(cond, locals);
+                let mut inner = locals.clone();
+                self.walk_block(then_block, &mut inner);
+                if let Some(eb) = else_block {
+                    let mut inner2 = locals.clone();
+                    self.walk_block(eb, &mut inner2);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                self.walk_expr(cond, locals);
+                let mut inner = locals.clone();
+                self.walk_block(body, &mut inner);
+            }
+            Stmt::ForIn { var, iter, body, .. } => {
+                self.walk_expr(iter, locals);
+                let mut inner = locals.clone();
+                inner.insert(var.clone());
+                self.walk_block(body, &mut inner);
+            }
+            Stmt::Drop { .. } => {}
+            Stmt::Expr(e) => self.walk_expr(e, locals),
+            Stmt::Region { body, .. } => {
+                let mut inner = locals.clone();
+                self.walk_block(body, &mut inner);
+            }
+        }
+    }
+
+    fn walk_expr(&mut self, e: &mut Expr, locals: &HashSet<String>) {
+        match e {
+            // `ns.fn(args)` and `ns.Enum.Variant(payload)` both arrive as method
+            // sugar — the receiver is the first argument.
+            Expr::Call { name, args, line } => {
+                let l = *line;
+                // `ns.member(rest)` — first arg is the bare namespace.
+                if let Some(Expr::Var { name: head, .. }) = args.first() {
+                    if self.is_ns(head, locals) {
+                        let head = head.clone();
+                        if let Some(sym) = self.resolve_member(&head, name, l) {
+                            *name = sym;
+                        }
+                        args.remove(0);
+                        for a in args.iter_mut() {
+                            self.walk_expr(a, locals);
+                        }
+                        return;
+                    }
+                }
+                // `ns.Enum.Variant(payload)` — first arg is `ns.Enum` field access
+                // AND the call name is a variant of that namespaced module's enums.
+                // Otherwise this is `someFn(ns.Type, ..)` (a type-name argument),
+                // which parses identically — fall through and let the `Field` arm
+                // rewrite `ns.Type`.
+                if let Some(Expr::Field { expr: inner, .. }) = args.first() {
+                    if let Expr::Var { name: head, .. } = inner.as_ref() {
+                        let is_variant_call = self.is_ns(head, locals)
+                            && self
+                                .ns
+                                .get(head)
+                                .and_then(|t| self.module_variants.get(t))
+                                .is_some_and(|vs| vs.contains(name));
+                        if is_variant_call {
+                            // The variant name is global (variants are not renamed);
+                            // drop the qualifier receiver and keep the call name.
+                            args.remove(0);
+                            for a in args.iter_mut() {
+                                self.walk_expr(a, locals);
+                            }
+                            return;
+                        }
+                    }
+                }
+                for a in args.iter_mut() {
+                    self.walk_expr(a, locals);
+                }
+            }
+            Expr::Spawn { args, .. } | Expr::TryConstruct { args, .. } => {
+                for a in args.iter_mut() {
+                    self.walk_expr(a, locals);
+                }
+            }
+            Expr::StructLit { name, fields, line } => {
+                // `ns.Type { .. }` — the parser encoded the qualifier as `ns.Type`.
+                if let Some((ns, member)) = name.clone().split_once('.') {
+                    if self.is_ns(ns, locals) {
+                        if let Some(sym) = self.resolve_member(ns, member, *line) {
+                            *name = sym;
+                        }
+                    } else {
+                        let (ns, line) = (ns.to_string(), *line);
+                        self.err(line, format!("`{ns}` is not an in-scope namespace"));
+                    }
+                }
+                for (_, v) in fields.iter_mut() {
+                    self.walk_expr(v, locals);
+                }
+            }
+            Expr::Field { expr, field, line } => {
+                let l = *line;
+                // `ns.member` (type-name value / function value / nullary access).
+                if let Expr::Var { name: head, .. } = expr.as_ref() {
+                    if self.is_ns(head, locals) {
+                        let head = head.clone();
+                        if let Some(sym) = self.resolve_member(&head, field, l) {
+                            *e = Expr::Var { name: sym, line: l };
+                        }
+                        return;
+                    }
+                }
+                // `ns.Enum.Variant` (nullary variant) — `ns.Enum` is the inner field.
+                if let Expr::Field { expr: inner, field: enum_name, .. } = expr.as_ref() {
+                    if let Expr::Var { name: head, .. } = inner.as_ref() {
+                        if self.is_ns(head, locals) {
+                            let (head, enum_name, variant) =
+                                (head.clone(), enum_name.clone(), field.clone());
+                            let is_variant = self
+                                .ns
+                                .get(&head)
+                                .and_then(|t| self.module_variants.get(t))
+                                .is_some_and(|vs| vs.contains(&variant));
+                            if is_variant {
+                                let _ = self.resolve_member(&head, &enum_name, l);
+                                *e = Expr::Var { name: variant, line: l };
+                            } else {
+                                self.err(
+                                    l,
+                                    format!(
+                                        "`{head}.{enum_name}.{variant}` is not a namespaced enum \
+                                         variant (namespaces are one level deep)"
+                                    ),
+                                );
+                            }
+                            return;
+                        }
+                    }
+                }
+                self.walk_expr(expr, locals);
+            }
+            Expr::Var { name, line } => {
+                if self.is_ns(name, locals) {
+                    let (name, line) = (name.clone(), *line);
+                    self.err(line, format!("namespace `{name}` is not a value"));
+                }
+            }
+            Expr::Unary { expr, .. } | Expr::Try { expr, .. } => self.walk_expr(expr, locals),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.walk_expr(lhs, locals);
+                self.walk_expr(rhs, locals);
+            }
+            Expr::Match { scrutinee, arms, line } => {
+                let l = *line;
+                self.walk_expr(scrutinee, locals);
+                for arm in arms.iter_mut() {
+                    let mut inner = locals.clone();
+                    match &mut arm.pattern {
+                        Pattern::Variant(v, binds) => {
+                            // `ns.Enum.Variant` pattern — reduce the dotted path to
+                            // the bare variant (variants are global; the enum need
+                            // only be an exported member of the namespace).
+                            if let Some(idx) = v.find('.') {
+                                let ns = v[..idx].to_string();
+                                let rest = &v[idx + 1..];
+                                let variant =
+                                    rest.rsplit('.').next().unwrap_or(rest).to_string();
+                                let enum_name =
+                                    rest.split('.').next().unwrap_or(rest).to_string();
+                                if self.ns.contains_key(&ns) {
+                                    let _ = self.resolve_member(&ns, &enum_name, l);
+                                    *v = variant;
+                                }
+                            }
+                            for b in binds.iter() {
+                                inner.insert(b.clone());
+                            }
+                        }
+                        Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => {
+                            inner.insert(b.clone());
+                        }
+                        Pattern::None => {}
+                    }
+                    self.walk_expr(&mut arm.body, &mut inner);
+                }
+            }
+            Expr::ArrayLit { elems, .. } => {
+                for e2 in elems.iter_mut() {
+                    self.walk_expr(e2, locals);
+                }
+            }
+            Expr::Lambda { params, body, .. } => {
+                let mut inner = locals.clone();
+                for p in params.iter() {
+                    inner.insert(p.clone());
+                }
+                match body {
+                    LambdaBody::Expr(e2) => self.walk_expr(e2, &inner),
+                    LambdaBody::Block(b2) => self.walk_block(b2, &mut inner),
+                }
+            }
+            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
         }
     }
 }
@@ -1032,6 +1575,17 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     for m in &modules {
         let mut visible: HashSet<String> = HashSet::new(); // foreign names imported here
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
+            // A namespace import (`import * as ns`, RFC-0027) makes every EXPORTED
+            // decl of the target reachable via `ns.member` — the same surface a
+            // selective import could reach. The `ns.member` uses were already
+            // reinterpreted into these decls' symbols, so grant them visibility.
+            if imp.namespace.is_some() {
+                for (name, (def_module, exported)) in &owner {
+                    if def_module == target && *exported {
+                        visible.insert(name.clone());
+                    }
+                }
+            }
             for imp_name in &imp.names {
                 // Aliases were folded into the flat namespace by `resolve_aliases`
                 // (RFC-0022): every import is now a bare import of a real decl name.
@@ -1855,6 +2409,144 @@ mod tests {
                     fn main() -> Int64 { return tally }";
         let e = load_err(root, &[("lib.vyrn", lib)]);
         assert!(e.contains("must be unique"), "{e}");
+    }
+
+    // ---- RFC-0027: namespaced imports ------------------------------------
+
+    #[test]
+    fn namespace_calls_and_type_positions() {
+        let api = "export type User = { id: Int64 } \
+                   export fn getUser(id: Int64) -> User { return User { id: id } }";
+        let root = "import * as api from \"./api\" \
+                    fn main() -> Int64 { \
+                        let u: api.User = api.getUser(7) \
+                        return u.id }";
+        assert_eq!(run_multi(root, &[("api.vyrn", api)]).unwrap(), 7);
+    }
+
+    #[test]
+    fn namespace_record_construction() {
+        let api = "export type Req = { id: Int64 } \
+                   export fn take(r: Req) -> Int64 { return r.id }";
+        let root = "import * as api from \"./api\" \
+                    fn main() -> Int64 { return api.take(api.Req { id: 41 }) + 1 }";
+        assert_eq!(run_multi(root, &[("api.vyrn", api)]).unwrap(), 42);
+    }
+
+    #[test]
+    fn namespace_enum_variant_construction_and_match() {
+        let lib = "export type Color = | Red | Green | Blue";
+        let root = "import * as c from \"./lib\" \
+                    fn rank(x: c.Color) -> Int64 { \
+                        return match x { c.Color.Red => 1, c.Color.Green => 2, c.Color.Blue => 3 } } \
+                    fn main() -> Int64 { return rank(c.Color.Green) }";
+        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 2);
+    }
+
+    #[test]
+    fn namespace_enum_variant_with_payload() {
+        let lib = "export type Shape = | Circle(Int64) | Dot \
+                   export fn area(s: Shape) -> Int64 { return match s { Circle(r) => r * r, Dot => 0 } }";
+        let root = "import * as g from \"./lib\" \
+                    fn main() -> Int64 { return g.area(g.Shape.Circle(6)) }";
+        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 36);
+    }
+
+    #[test]
+    fn two_namespaced_modules_share_an_export_name() {
+        // The whole point: two modules both export `render`, coexisting under
+        // distinct namespaces without a flat-namespace collision.
+        let a = "export fn render() -> Int64 { return 1 }";
+        let b = "export fn render() -> Int64 { return 20 }";
+        let root = "import * as a from \"./a\" \
+                    import * as b from \"./b\" \
+                    fn main() -> Int64 { return a.render() + b.render() }";
+        assert_eq!(run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]).unwrap(), 21);
+    }
+
+    #[test]
+    fn namespace_composes_with_selective_import() {
+        // A module may both selectively import and namespace the same module;
+        // they resolve to the same decls.
+        let api = "export fn getUser(id: Int64) -> Int64 { return id * 10 }";
+        let root = "import { getUser } from \"./api\" \
+                    import * as api from \"./api\" \
+                    fn main() -> Int64 { return getUser(2) + api.getUser(3) }";
+        assert_eq!(run_multi(root, &[("api.vyrn", api)]).unwrap(), 50);
+    }
+
+    #[test]
+    fn namespace_type_name_argument() {
+        // `fromJson(ns.User, s)` / `jsonSchema(ns.User)` — type-name arguments.
+        let api = "export type User = { id: Int64, name: String }";
+        let root = "import * as api from \"./api\" \
+                    fn main() -> Int64 { \
+                        return match fromJson(api.User, \"{\\\"id\\\":5,\\\"name\\\":\\\"a\\\"}\") { \
+                            Valid(u) => u.id, Invalid(iss) => 0 } }";
+        assert_eq!(run_multi(root, &[("api.vyrn", api)]).unwrap(), 5);
+    }
+
+    #[test]
+    fn local_binding_shadows_a_namespace() {
+        // A local `api` shadows the namespace; `api.field` is then field access on
+        // the local record, not a qualified reference.
+        let api = "export type T = { field: Int64 } export fn mk() -> T { return T { field: 9 } }";
+        let root = "import * as api from \"./api\" \
+                    fn main() -> Int64 { \
+                        let rec = api.mk() \
+                        let api = rec \
+                        return api.field }";
+        assert_eq!(run_multi(root, &[("api.vyrn", api)]).unwrap(), 9);
+    }
+
+    #[test]
+    fn namespace_used_as_a_value_is_an_error() {
+        let api = "export fn f() -> Int64 { return 1 }";
+        let root = "import * as api from \"./api\" \
+                    fn main() -> Int64 { let x = api return 0 }";
+        let e = load_err(root, &[("api.vyrn", api)]);
+        assert!(e.contains("namespace `api` is not a value"), "{e}");
+    }
+
+    #[test]
+    fn namespace_member_must_be_exported() {
+        let api = "fn secret() -> Int64 { return 1 } export fn ok() -> Int64 { return 2 }";
+        let root = "import * as api from \"./api\" \
+                    fn main() -> Int64 { return api.secret() }";
+        let e = load_err(root, &[("api.vyrn", api)]);
+        assert!(e.contains("no exported member `secret`"), "{e}");
+    }
+
+    #[test]
+    fn namespaces_are_one_level_deep() {
+        // `./a` namespaces `./b`; a root namespace of `./a` cannot reach `b.thing`.
+        let b = "export fn thing() -> Int64 { return 7 }";
+        let a = "import * as b from \"./b\" export fn viaA() -> Int64 { return b.thing() }";
+        let root = "import * as a from \"./a\" \
+                    fn main() -> Int64 { return a.b.thing() }";
+        let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
+        assert!(e.contains("no exported member `b`"), "{e}");
+    }
+
+    #[test]
+    fn namespace_name_colliding_with_a_decl_is_an_error() {
+        let api = "export fn f() -> Int64 { return 1 }";
+        let root = "import * as api from \"./api\" \
+                    fn api() -> Int64 { return 0 } \
+                    fn main() -> Int64 { return 0 }";
+        let e = load_err(root, &[("api.vyrn", api)]);
+        assert!(e.contains("collides with a top-level declaration"), "{e}");
+    }
+
+    #[test]
+    fn duplicate_namespace_name_is_an_error() {
+        let a = "export fn f() -> Int64 { return 1 }";
+        let b = "export fn g() -> Int64 { return 2 }";
+        let root = "import * as x from \"./a\" \
+                    import * as x from \"./b\" \
+                    fn main() -> Int64 { return 0 }";
+        let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
+        assert!(e.contains("bound twice"), "{e}");
     }
 }
 

@@ -815,6 +815,37 @@ impl Parser {
     fn import_decl(&mut self) -> Result<ImportDecl, Diagnostic> {
         let line = self.line();
         self.eat(&Tok::Import)?;
+        // Namespace import `import * as ns from <source>` (RFC-0027): binds ONE
+        // name and pulls none of the target's exports into the flat namespace.
+        if *self.peek() == Tok::Star {
+            self.advance();
+            match self.advance() {
+                Tok::Ident(kw) if kw == "as" => {}
+                other => {
+                    return Err(Diagnostic::error(
+                        line,
+                        self.col(),
+                        "parse",
+                        format!("expected `as` after `import *`, found {other:?}"),
+                    ))
+                }
+            }
+            let ns = self.expect_ident()?;
+            match self.advance() {
+                Tok::Ident(kw) if kw == "from" => {}
+                other => {
+                    return Err(Diagnostic::error(
+                        line,
+                        self.col(),
+                        "parse",
+                        format!("expected `from` after `import * as {ns}`, found {other:?}"),
+                    ))
+                }
+            }
+            let source = self.import_source(line)?;
+            self.eat_semi();
+            return Ok(ImportDecl { names: Vec::new(), namespace: Some(ns), source, line });
+        }
         // Optional `type` marker (JSON Schema imports read naturally).
         if *self.peek() == Tok::Type {
             self.advance();
@@ -860,12 +891,19 @@ impl Parser {
                 ))
             }
         }
-        // `from` may be followed by a module path string, or a generator call
-        // `gen(args...)` — an import target synthesized at compile time (RFC-0021).
-        let source = match self.peek().clone() {
+        let source = self.import_source(line)?;
+        self.eat_semi();
+        Ok(ImportDecl { names, namespace: None, source, line })
+    }
+
+    /// The right-hand side after `from`: a module path string, or a generator
+    /// call `gen(args...)` synthesized at compile time (RFC-0021). Shared by
+    /// selective/aliased imports and namespace imports (RFC-0027).
+    fn import_source(&mut self, line: usize) -> Result<ImportSource, Diagnostic> {
+        match self.peek().clone() {
             Tok::Str(p) => {
                 self.advance();
-                ImportSource::Path(p)
+                Ok(ImportSource::Path(p))
             }
             Tok::Ident(gen_name) if matches!(self.tokens[self.pos + 1].tok, Tok::LParen) => {
                 let call_line = self.line();
@@ -881,22 +919,18 @@ impl Parser {
                     }
                 }
                 self.eat(&Tok::RParen)?;
-                ImportSource::Generator { name: gen_name, args, line: call_line }
+                Ok(ImportSource::Generator { name: gen_name, args, line: call_line })
             }
-            other => {
-                return Err(Diagnostic::error(
-                    line,
-                    self.col(),
-                    "parse",
-                    format!(
-                        "expected a module path string or a generator call after `from`, \
-                         found {other:?}"
-                    ),
-                ))
-            }
-        };
-        self.eat_semi();
-        Ok(ImportDecl { names, source, line })
+            other => Err(Diagnostic::error(
+                line,
+                self.col(),
+                "parse",
+                format!(
+                    "expected a module path string or a generator call after `from`, \
+                     found {other:?}"
+                ),
+            )),
+        }
     }
 
     fn type_decl(&mut self) -> Result<Vec<TypeDecl>, Diagnostic> {
@@ -1330,6 +1364,32 @@ impl Parser {
             return Ok(Type::Fn(params, Box::new(ret)));
         }
         let name = self.expect_ident()?;
+        // Namespace-qualified type `ns.User` / `ns.Box<T>` (RFC-0027): the dotted
+        // name rides `Type::Named`/`Type::App`; the loader verifies `ns` is an
+        // in-scope namespace and rewrites it to the plain resolved decl name, so
+        // the checker/backends never see a dotted type.
+        if *self.peek() == Tok::Dot {
+            let mut full = name;
+            while *self.peek() == Tok::Dot {
+                self.advance();
+                full = format!("{full}.{}", self.expect_ident()?);
+            }
+            if *self.peek() == Tok::Lt {
+                self.advance();
+                let mut args = Vec::new();
+                while *self.peek() != Tok::Gt {
+                    args.push(self.type_()?);
+                    if *self.peek() == Tok::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.eat(&Tok::Gt)?;
+                return Ok(Type::App(full, args));
+            }
+            return Ok(Type::Named(full));
+        }
         Ok(match name.as_str() {
             // Every numeric type carries its size in its name. `Int64` is the
             // default integer (what an unannotated literal infers to), but it
@@ -1958,6 +2018,20 @@ impl Parser {
                             _ => name,
                         };
                         e = Expr::Call { name, args, line };
+                    } else if *self.peek() == Tok::LBrace
+                        && !self.no_struct
+                        && matches!(&e, Expr::Var { .. })
+                    {
+                        // Namespace-qualified record construction `ns.Type { .. }`
+                        // (RFC-0027). Plain member access cannot represent it (a
+                        // `Field` followed by `{` is otherwise a parse error), so
+                        // the head must be a bare identifier — a namespace. The
+                        // qualifier rides the struct name as `"ns.Type"`; the
+                        // loader splits on the dot, verifies `ns` is an in-scope
+                        // namespace, and rewrites it to the plain resolved decl,
+                        // so the checker/backends never see a dotted name.
+                        let Expr::Var { name: ns, .. } = e else { unreachable!() };
+                        e = self.struct_lit(format!("{ns}.{name}"), line)?;
                     } else {
                         // Property / field access `recv.name` (e.g. `arr.length`).
                         e = Expr::Field { expr: Box::new(e), field: name, line };
@@ -2310,7 +2384,30 @@ impl Parser {
 
     fn pattern(&mut self) -> Result<Pattern, Diagnostic> {
         let line = self.line();
-        let name = self.expect_ident()?;
+        let mut name = self.expect_ident()?;
+        // Namespace-qualified variant pattern `ns.Color.Red` (RFC-0027): the
+        // dotted path rides `Pattern::Variant`'s name; the loader verifies `ns`
+        // is an in-scope namespace and reduces it to the bare variant name.
+        if *self.peek() == Tok::Dot {
+            while *self.peek() == Tok::Dot {
+                self.advance();
+                name = format!("{name}.{}", self.expect_ident()?);
+            }
+            let mut binds = Vec::new();
+            if *self.peek() == Tok::LParen {
+                self.advance();
+                while *self.peek() != Tok::RParen {
+                    binds.push(self.expect_ident()?);
+                    if *self.peek() == Tok::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.eat(&Tok::RParen)?;
+            }
+            return Ok(Pattern::Variant(name, binds));
+        }
         match name.as_str() {
             "Some" => Ok(Pattern::Some(self.pattern_binding()?)),
             "Ok" => Ok(Pattern::Ok(self.pattern_binding()?)),
@@ -2406,6 +2503,35 @@ mod tests {
             "fn f() -> Int64 { if a { return 1 } else { if b { return 2 } else { return 3 } } }",
         );
         assert_eq!(sugar.functions[0].body, nested.functions[0].body);
+    }
+
+    #[test]
+    fn namespace_import_parses() {
+        // RFC-0027: `import * as ns from <source>` binds a namespace, no flat names.
+        let p = parse_src(
+            "import * as api from \"./api\" \
+             import * as ui from pages(\"./pages\") \
+             fn main() -> Int64 { return 0 }",
+        );
+        assert_eq!(p.imports[0].namespace.as_deref(), Some("api"));
+        assert!(p.imports[0].names.is_empty());
+        assert!(matches!(&p.imports[0].source, ImportSource::Path(s) if s == "./api"));
+        assert_eq!(p.imports[1].namespace.as_deref(), Some("ui"));
+        assert!(matches!(&p.imports[1].source, ImportSource::Generator { name, .. } if name == "pages"));
+    }
+
+    #[test]
+    fn namespace_qualified_type_and_record_parse() {
+        // `ns.User` in a type position and `ns.Req { .. }` record construction.
+        let p = parse_src(
+            "import * as api from \"./api\" \
+             fn main() -> Int64 { let r: api.User = api.Req { id: 1 } return 0 }",
+        );
+        let Stmt::Let { ty: Some(ty), value, .. } = &p.functions[0].body.stmts[0] else {
+            panic!("let with type")
+        };
+        assert_eq!(*ty, Type::Named("api.User".into()));
+        assert!(matches!(value, Expr::StructLit { name, .. } if name == "api.Req"));
     }
 
     #[test]

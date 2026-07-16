@@ -139,8 +139,16 @@ impl ImportName {
 pub struct ImportDecl {
     /// The bindings brought into scope, each an `original`/`alias` pair
     /// (RFC-0022). `import type { .. }` (JSON Schema imports) also lands here;
-    /// the loader dispatches on the path's extension.
+    /// the loader dispatches on the path's extension. Empty for a namespace
+    /// import (`import * as ns from ..`, RFC-0027), which binds no flat names.
     pub names: Vec<ImportName>,
+    /// `import * as ns from <source>` (RFC-0027): the ONE namespace name `ns`
+    /// bound in this module. `None` for an ordinary selective/aliased import.
+    /// None of the target's exports enter the flat namespace — the loader
+    /// reinterprets each `ns.member` use into a qualified reference and folds it
+    /// to the foreign decl's program-wide symbol, so everything downstream stays
+    /// namespace-unaware.
+    pub namespace: Option<String>,
     /// Where the names come from: an ordinary module specifier, or a compile-time
     /// generator call (RFC-0021).
     pub source: ImportSource,
