@@ -642,6 +642,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         region_depth: std::cell::Cell::new(0),
         globals: RefCell::new(HashMap::new()),
         args: prog_args.to_vec(),
+        rpc_next_id: std::cell::Cell::new(0),
     };
     Ok(interp)
 }
@@ -680,6 +681,10 @@ struct Interp<'a> {
     globals: RefCell<HashMap<String, Slot>>,
     /// The program's command-line arguments (RFC-0014 `args()`), argv[1..].
     args: Vec<String>,
+    /// The next RPC request id (RFC-0019). `rpc()` pre-increments this, so ids
+    /// run 1, 2, 3, … per program run — deterministic, so client logic tested
+    /// in-process against real procedures is byte-identical across backends.
+    rpc_next_id: std::cell::Cell<i64>,
 }
 
 /// A scope binding: the current value plus the declared type, when one exists
@@ -1167,6 +1172,47 @@ impl<'a> Interp<'a> {
                         }
                     };
                     return Ok(self.decode_top(&tn, &s));
+                }
+                // `rpc(procedure [, req])` (RFC-0019) — server-role / interp
+                // dispatch is IN-PROCESS and synchronous: call the procedure with
+                // the typed request value, encode its result with the JSON codec,
+                // and invoke `onRpc(id, 200, body)` BEFORE returning the request
+                // id. Ids run 1, 2, 3, … per run (deterministic). A trap inside
+                // the procedure is an ordinary call trap — it propagates (the HTTP
+                // host, not this path, is what turns a trap into a 500).
+                if name == "rpc" {
+                    let proc = match args.first() {
+                        Some(Expr::Var { name: p, .. }) => p.clone(),
+                        _ => return Err("`rpc` needs a procedure name".into()),
+                    };
+                    // The procedure was validated by the checker; fetch its
+                    // signature for the request coercion and response encoding.
+                    let f = *self
+                        .funcs
+                        .get(proc.as_str())
+                        .ok_or_else(|| Ctrl::Err(format!("`rpc` names unknown procedure `{proc}`")))?;
+                    // Evaluate the request argument (if the procedure takes one)
+                    // and dispatch directly — the value is already typed/valid.
+                    let call_args: Vec<Val> = match args.get(1) {
+                        Some(a) => vec![self.expr(a, scope)?],
+                        None => Vec::new(),
+                    };
+                    let id = self.rpc_next_id.get() + 1;
+                    self.rpc_next_id.set(id);
+                    let result = self.call(&proc, &call_args)?; // trap propagates
+                    // Encode the response. A `Unit`-returning procedure has no
+                    // JSON body; deliver `null` to `onRpc` (the HTTP transport uses
+                    // 204 no-body — a different transport, self-consistent here).
+                    let body = if matches!(f.ret, Type::Unit) {
+                        "null".to_string()
+                    } else {
+                        let mut out = String::new();
+                        self.encode_val(&result, &f.ret, &mut out)?;
+                        out
+                    };
+                    // Deliver synchronously to the convention handler.
+                    self.call("onRpc", &[Val::Int(id), Val::Int(200), Val::Str(body)])?;
+                    return Ok(Val::Int(id));
                 }
                 // `a.pop()` (RFC-0011) — remove and return the last element as
                 // `Option<T>` (`None` on empty), mutating the receiver in place.

@@ -367,10 +367,17 @@ impl Parser {
                 // contextual starter, recognized only when `fn` follows it.
                 let is_export_extern = matches!(self.peek(), Tok::Ident(n) if n == "extern")
                     && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
-                if !matches!(self.peek(), Tok::Fn | Tok::Type | Tok::Protocol) && !is_export_extern {
+                // `export rpc fn ..` (RFC-0019) — `rpc` is likewise a contextual
+                // starter, recognized only when `fn` follows it.
+                let is_export_rpc = matches!(self.peek(), Tok::Ident(n) if n == "rpc")
+                    && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
+                if !matches!(self.peek(), Tok::Fn | Tok::Type | Tok::Protocol)
+                    && !is_export_extern
+                    && !is_export_rpc
+                {
                     errors.push(Diagnostic::error(
                         self.line(), self.col(), "parse",
-                        "`export` must be followed by `fn`, `type`, `protocol`, or `extern fn`"
+                        "`export` must be followed by `fn`, `type`, `protocol`, `extern fn`, or `rpc fn`"
                             .to_string(),
                     ));
                     self.sync_to_decl();
@@ -425,6 +432,26 @@ impl Parser {
                     // to JS (M2). The `exported` flag decides which shape is legal.
                     match self.extern_function(exported) {
                         Ok(mut f) => { f.doc = doc; functions.push(f); }
+                        Err(d) => { errors.push(d); self.sync_to_decl(); }
+                    }
+                }
+                // `rpc fn ..` — a typed procedure (RFC-0019). `rpc` is a
+                // contextual starter (a plain identifier elsewhere); recognize it
+                // only when `fn` follows. Body required — it parses exactly like an
+                // ordinary function, then carries `is_rpc` so the checker/backends
+                // treat it as wire-callable.
+                Tok::Ident(name)
+                    if name == "rpc"
+                        && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
+                {
+                    self.advance(); // `rpc` (a contextual Ident)
+                    match self.function() {
+                        Ok(mut f) => {
+                            f.doc = doc;
+                            f.exported = exported;
+                            f.is_rpc = true;
+                            functions.push(f);
+                        }
                         Err(d) => { errors.push(d); self.sync_to_decl(); }
                     }
                 }
@@ -509,6 +536,14 @@ impl Parser {
                 Tok::Ident(name)
                     if depth == 0
                         && name == "extern"
+                        && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
+                {
+                    return
+                }
+                // `rpc fn ..` is a top-level starter (RFC-0019) — resume there.
+                Tok::Ident(name)
+                    if depth == 0
+                        && name == "rpc"
                         && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
                 {
                     return
@@ -629,6 +664,7 @@ impl Parser {
             line,
             is_extern: false,
             is_export_extern: false,
+            is_rpc: false,
         })
     }
 
@@ -1024,7 +1060,7 @@ impl Parser {
 
         let body = self.block()?;
         self.type_params.clear();
-        Ok(Function { name, exported: false, module: None, doc: None, type_params, type_bounds, params, ret, body, line, is_extern: false, is_export_extern: false })
+        Ok(Function { name, exported: false, module: None, doc: None, type_params, type_bounds, params, ret, body, line, is_extern: false, is_export_extern: false, is_rpc: false })
     }
 
     /// `test "name" { body }` — a test declaration (RFC-0015). `test` is a
@@ -1124,6 +1160,7 @@ impl Parser {
                 line,
                 is_extern: false,
                 is_export_extern: true,
+                is_rpc: false,
             });
         }
         if has_body {
@@ -1148,6 +1185,7 @@ impl Parser {
             line,
             is_extern: true,
             is_export_extern: false,
+            is_rpc: false,
         })
     }
 

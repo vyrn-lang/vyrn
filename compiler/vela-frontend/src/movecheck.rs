@@ -62,6 +62,7 @@ pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
             line: t.line,
             is_extern: false,
             is_export_extern: false,
+            is_rpc: false,
         };
         mc.errors.borrow_mut().clear();
         mc.function(&synthetic);
