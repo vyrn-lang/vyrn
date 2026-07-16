@@ -218,6 +218,39 @@ field, not `functions`) — so a file with BOTH tests and a `main`
 file with tests (or exports) needs no `main` (the library-module rule). An
 imported module's tests type-check but do not run under `vyrn test <root>`.
 
+**Generator imports (RFC-0021) — the crutch-shedding story.** The compiler was
+starting to accrete file-format knowledge — JSON Schema (`import type`), then a
+proposed translations flavor. Each was a crutch for the same missing general
+mechanism: *user code that runs at compile time and synthesizes a module*. Vyrn
+now has it, with unusually strong guarantees because the compiler already
+contains a deterministic interpreter, a capability-mediated resolver, and a
+content-addressed cache. `gen fn` is a contextual modifier (the `extern`/`test`
+precedent) — an ordinary function otherwise (callable, testable, formatted,
+distributable, `github:`-pinnable). An **import target may be a `gen fn` call**
+whose arguments are compile-time constants: `import { t, TransKey } from
+i18n("./locales")`. The loader runs the call in the interpreter and links the
+returned `String` as a synthesized module through the ordinary pipeline —
+checker, backends, parity, and the LSP stay module-unaware, as always. A `gen
+fn` and its transitive callees are held to a **comptime-purity** analysis (the
+spawn-isolation sibling): no `extern`/`spawn`/module-state/`writeFile`/
+`readLine`/`args`, so *same inputs ⇒ same output* mechanically. Its permitted,
+mediated inputs — `readFile`, the new `listDir`, and **`moduleInterface(path)`**
+(the `schemaOf`-generalized-to-a-module reflection primitive that makes typed
+RPC a library) — route through the resolver, scoped to the call's constant path
+arguments and recorded as cache inputs. Deterministic + declared inputs ⇒
+content-addressed output: `sha256(generator sources ++ args ++ inputs)` keys
+`~/.vyrn/cache/gen`, so cold generation runs once and rebuilds / per-keystroke
+LSP re-analysis hit the cache. Guardrails (a step budget and a 4 MB output cap)
+keep runaway generators loud, not hung; a generator trap becomes a load
+diagnostic at the import site; `vyrn emit-gen <file>` dumps every synthesized
+module. The generated code is ordinary Vyrn, so it inherits three-way parity for
+free — `examples/gendemo.vyrn` reads a data file + directory at compile time,
+emits a validated type and typed constants, and is a byte-identical interp ==
+native == wasm citizen. **This is the foundation RFC-0019 (typed RPC) and
+RFC-0020 M2 (i18n) are now built on** — with one reflection primitive, whole
+layers become libraries and the language sheds format knowledge instead of
+accreting it.
+
 ---
 
 ## Shipped

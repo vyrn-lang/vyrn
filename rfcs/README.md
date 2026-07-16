@@ -30,7 +30,9 @@ prototype to answer.
 | [0016](RFC-0016-server.md) | The Server | `vyrn serve`, `Request`/`Response`, the async decision |
 | [0017](RFC-0017-formatter.md) | Canonical Formatter | `vyrn fmt`: one style, no options |
 | [0018](RFC-0018-json-codec.md) | The JSON Codec | `toJson`/`fromJson`: canonical encode, decode into `Validation<T>` with accumulated `Issue`s |
-| [0019](RFC-0019-rpc.md) | Typed RPC | Draft: the codec as an RPC layer, end-to-end typed calls |
+| [0019](RFC-0019-rpc.md) | Typed RPC | Draft: the codec as an RPC layer, end-to-end typed calls — a library over RFC-0021's `moduleInterface` |
+| [0020](RFC-0020-i18n.md) | i18n | Draft: locale message catalogs; the flagship file-reading generator (built on RFC-0021) |
+| [0021](RFC-0021-generator-imports.md) | Generator Imports | **Implemented**: `gen fn` + `import { .. } from gen(args)` — comptime-pure module synthesis, mediated `readFile`/`listDir`/`moduleInterface`, content-addressed cache |
 
 ## Status legend
 
@@ -47,8 +49,12 @@ is now **Implemented** in `compiler/` and covered by the three-way parity
 corpus (each RFC header carries its own status). RFC-0004's memory model is the
 part still expected to move; RFC-0017 (the formatter, `vyrn fmt` + LSP
 `textDocument/formatting`) and RFC-0018 (the JSON codec, `toJson`/`fromJson`)
-are now **Implemented** too. RFC-0019 (typed RPC over the codec) is the open
-draft.
+are now **Implemented** too. RFC-0021 (generator imports — user code that runs
+at compile time and synthesizes a module) is **Implemented** and is the
+mechanism RFC-0019 (typed RPC) and RFC-0020 (i18n) are now designed as libraries
+over: with the `moduleInterface` reflection primitive and mediated file reading,
+both shed their compiler-flavored special cases. Those two remain the open
+drafts, now with a foundation to build on.
 
 ## Process
 
