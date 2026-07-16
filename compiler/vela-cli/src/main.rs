@@ -4,11 +4,16 @@
 //!   velac run     [file.vela]            Type-check and interpret; process exits with main's value.
 //!   velac check   [file.vela]            Type-check only; print "ok" or every diagnostic.
 //!   velac emit-ir [file.vela]            Print textual LLVM IR to stdout.
-//!   velac build   [file.vela] [-o out] [--target wasm]
+//!   velac build   [file.vela] [-o out] [--target wasm] [--server|--client]
 //!                                        Compile to a native executable (or wasm) via clang.
+//!                                        `--server`/`--client` (RFC-0019) pick a compile ROLE
+//!                                        and, without a file, the vela.json `server`/`client` root
+//!                                        (`--client` implies the browser wasm target).
 //!   velac test    [file.vela] [--name <substring>]
 //!                                        Run the root file's `test` blocks under the interpreter.
-//!   velac serve   [file.vela] [--port N] Run `fn handle(req: Request) -> Response` as an HTTP host.
+//!   velac serve   [file.vela] [--port N] Run `fn handle(req: Request) -> Response` and/or the
+//!                                        file's `rpc fn` procedures (mounted at POST /rpc/<name>,
+//!                                        GET /rpc/$schema) as an HTTP host.
 //!   velac new     <name>                 Scaffold a project (vela.json + src/main.vela).
 //!   velac deps                           Print the resolved module graph.
 //!
@@ -21,7 +26,7 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: velac <run|check|emit-ir|build|test|serve|fmt> [file.vela] [-o out] [--target wasm] [--offline]\n       velac run [file.vela] [args...]   (trailing args reach the program's args())\n       velac test [file.vela] [--name <substring>]\n       velac serve [file.vela] [--port N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       velac fmt [file.vela ...] [--check]   (canonical formatter; no files = project main + local imports)\n       velac new <name> | velac add <specifier> [--name alias] | velac update [alias] | velac vendor [--check] | velac deps";
+const USAGE: &str = "usage: velac <run|check|emit-ir|build|test|serve|fmt> [file.vela] [-o out] [--target wasm] [--offline]\n       velac run [file.vela] [args...]   (trailing args reach the program's args())\n       velac build [file.vela] [-o out] [--target wasm] [--server|--client]   (--client = browser wasm, client role; roots from vela.json server/client)\n       velac test [file.vela] [--name <substring>]\n       velac serve [file.vela] [--port N]   (HTTP host; `fn handle(req: Request) -> Response` and/or `rpc fn` procedures at /rpc/*)\n       velac fmt [file.vela ...] [--check]   (canonical formatter; no files = project main + local imports)\n       velac new <name> | velac add <specifier> [--name alias] | velac update [alias] | velac vendor [--check] | velac deps";
 
 /// `--offline` flag or `VELA_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.

@@ -1,6 +1,8 @@
 # RFC-0019 — Typed Procedures: RPC, the Fullstack Build, and Transports
 
-- **Status:** Draft — approved for implementation
+- **Status:** Core implemented (procedures, HTTP mounts, in-process dispatch,
+  role-based fullstack build); `velac dev` + the browser runtimes
+  (`vela-rpc.js`/`vela-query.js`) and the `examples/fullstack/` demo pending.
 - **Depends on:** RFC-0018 (JSON codec), RFC-0016 (`velac serve`), RFC-0012/13
   (extern + host-owns-the-loop), RFC-0010 (modules/manifest)
 

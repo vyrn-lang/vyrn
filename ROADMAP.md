@@ -6,7 +6,7 @@ and the one decision the rest of the language waits on.
 **Every feature below is verified three ways**: the clang-compiled native
 binary AND the `wasm32-wasi` module produce byte-identical stdout, stderr, and
 exit codes against the tree-walking interpreter (the reference semantics),
-across **46 examples** and **606 tests** (0 warnings) — including every runtime
+across **47 examples** and **628 tests** (0 warnings) — including every runtime
 trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere)
 and the canonical I/O error strings (RFC-0014). The whole corpus is kept
 canonical by `velac fmt` (RFC-0017) and re-verified by the parity harness.
@@ -178,6 +178,36 @@ upstream is deleted (any copy of a file with the locked hash restores it).
 Remote modules are sandboxed: relative imports stay inside their pinned base,
 no local paths, no bare specifiers. Zero new crates (hand-rolled SHA-256 with
 NIST vectors; `curl`/`git ls-remote` subprocesses, all in vela-cli).
+
+**Typed procedures — RPC's core (RFC-0019)**: define a procedure once, call it
+with full type safety, get accumulated validation on bad input for free. `rpc
+fn getUser(req: GetUserReq) -> User { .. }` is a contextual modifier (the
+`extern` precedent) — an ordinary function that is ALSO wire-callable: 0-or-1
+parameter, its parameter/return types must be codable (RFC-0018; the checker
+names any offender). The `rpc(getUser, req) -> Int64` builtin names the
+procedure as an *identifier* (the `schemaOf`/`fromJson` precedent) and checks
+the request against its parameter; the response is delivered to a convention
+handler `export extern fn onRpc(id, status, body)` (a missing one is a compile
+error). Three transports share the `(name, request bytes) → (status, response
+bytes)` contract: **in-process** (server role / interpreter / native / wasm) —
+`rpc()` encodes, calls, encodes, and invokes `onRpc` synchronously before
+returning a deterministic id (client logic is testable against real procedures
+with zero mocks, and it is a normal three-way parity citizen —
+`examples/rpcbasic.vela`); **HTTP** — `velac serve` mounts `POST /rpc/<name>`
+(415 unless `application/json`; a decode failure ⇒ 422 with the exact
+`{"issues":[..]}` bytes; unknown ⇒ 404; a `Unit` return ⇒ 204; a trap ⇒ logged
+500) plus `GET /rpc/$schema`, a protocol-neutral registry feeding the
+`jsonSchema` emitter; and **browser** — the client-role build. The
+**role-based fullstack build** shares ONE contract module: `vela.json` gains
+`server`/`client` roots, `velac build --server` is the native server binary and
+`velac build --client` the browser wasm (client ROLE + wasm). Both roles
+type-check the `rpc fn` bodies (identical diagnostics — the contract cannot rot
+silently); the server lowers them fully, the client lowers each as a remote
+stub (a *direct* call is a checker error — "call it through `rpc()`") and
+lowers `rpc()` to a wasm host import (`vela`.`__rpc`), while `onRpc` exports via
+the RFC-0012 M2 machinery. Still pending: `velac dev`, the
+`vela-rpc.js`/`vela-query.js` browser runtimes, and the `examples/fullstack/`
+demo (a later stage).
 
 **Input I/O (RFC-0014)**: a Vela program can finally *read* — the "computes
 from constants only" gap is closed. `args() -> Array<String>` (argv[1..];
