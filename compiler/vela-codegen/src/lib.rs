@@ -1049,6 +1049,38 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare i32 @__vela_read_file(ptr, ptr, ptr)\n");
     out.push_str("declare i32 @__vela_read_file_bytes(ptr, ptr, ptr)\n");
     out.push_str("declare i32 @__vela_write_file(ptr, ptr)\n");
+    // JSON codec runtime (RFC-0018): the DOM builders/accessors, the parser,
+    // the canonical encoder, and the decode-side issue accumulator live in the
+    // C shim; the per-type encode/decode logic is generated as IR below.
+    out.push_str("declare ptr @__vela_vj_obj()\n");
+    out.push_str("declare ptr @__vela_vj_arr()\n");
+    out.push_str("declare ptr @__vela_vj_null()\n");
+    out.push_str("declare ptr @__vela_vj_bool(i1)\n");
+    out.push_str("declare ptr @__vela_vj_int(i64)\n");
+    out.push_str("declare ptr @__vela_vj_uint(i64)\n");
+    out.push_str("declare ptr @__vela_vj_float(double)\n");
+    out.push_str("declare ptr @__vela_vj_str(ptr)\n");
+    out.push_str("declare void @__vela_vj_push(ptr, ptr)\n");
+    out.push_str("declare void @__vela_vj_set(ptr, ptr, ptr)\n");
+    out.push_str("declare ptr @__vela_vj_encode(ptr)\n");
+    out.push_str("declare ptr @__vela_json_parse(ptr, ptr)\n");
+    out.push_str("declare i32 @__vela_vj_kind(ptr)\n");
+    out.push_str("declare i32 @__vela_vj_bool_get(ptr)\n");
+    out.push_str("declare ptr @__vela_vj_get(ptr, ptr)\n");
+    out.push_str("declare i64 @__vela_vj_len(ptr)\n");
+    out.push_str("declare ptr @__vela_vj_at(ptr, i64)\n");
+    out.push_str("declare ptr @__vela_vj_str_get(ptr)\n");
+    out.push_str("declare i32 @__vela_vj_asint(ptr, i32, i32, ptr)\n");
+    out.push_str("declare double @__vela_vj_asfloat(ptr)\n");
+    out.push_str("declare ptr @__vela_json_type_msg(ptr, i32)\n");
+    out.push_str("declare ptr @__vela_json_field_path(ptr, ptr)\n");
+    out.push_str("declare ptr @__vela_json_index_path(ptr, i64)\n");
+    out.push_str("declare ptr @__vela_issues_new()\n");
+    out.push_str("declare void @__vela_issues_push(ptr, ptr, ptr, ptr)\n");
+    out.push_str("declare i64 @__vela_issues_len(ptr)\n");
+    out.push_str("declare ptr @__vela_issue_key(ptr, i64)\n");
+    out.push_str("declare ptr @__vela_issue_path(ptr, i64)\n");
+    out.push_str("declare ptr @__vela_issue_msg(ptr, i64)\n");
     // `extern` imports (RFC-0012): each body-less `extern fn` becomes a wasm
     // import from the fixed `vela` namespace. We emit ONE target-neutral IR —
     // a `declare` carrying the wasm-import attributes plus a real `call` at each
@@ -1220,6 +1252,15 @@ pub fn emit(program: &Program) -> Result<String, String> {
     for g in &program.globals {
         collect_strings_expr(&g.init, &mut literals, &type_map);
     }
+    // JSON codec (RFC-0018): every constant the generated encode/decode
+    // functions reference — field keys, enum variant names, `expected <what>`
+    // phrases, `json.missing`/`validate` messages, and the fixed Issue keys —
+    // must be in the pool before the functions are emitted.
+    for s in collect_codec_strings(program, &type_map) {
+        if !literals.contains(&s) {
+            literals.push(s);
+        }
+    }
     for (i, s) in literals.iter().enumerate() {
         let name = format!("@.str.{i}");
         let (escaped, len) = llvm_str(s);
@@ -1227,6 +1268,26 @@ pub fn emit(program: &Program) -> Result<String, String> {
             "{name} = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n"
         ));
         str_globals.insert(s.clone(), name);
+    }
+    // JSON codec (RFC-0018): a per-enum table of variant-name string pointers,
+    // indexed by tag, so `toJson` on an enum reads its name in O(1).
+    for t in &program.type_decls {
+        if let Type::Enum(vs) = &vela_frontend::types::resolve(&Type::Named(t.name.clone()), &type_map)
+        {
+            if vela_frontend::codec::encodable(&Type::Named(t.name.clone()), &type_map).is_err() {
+                continue;
+            }
+            let elems: Vec<String> = vs
+                .iter()
+                .map(|v| format!("ptr {}", str_globals[&v.name]))
+                .collect();
+            out.push_str(&format!(
+                "@.enumnames.{} = private unnamed_addr constant [{} x ptr] [{}]\n",
+                t.name,
+                vs.len(),
+                elems.join(", ")
+            ));
+        }
     }
     out.push('\n');
 
@@ -1430,6 +1491,82 @@ pub fn emit(program: &Program) -> Result<String, String> {
         out.push('\n');
         let insts = std::mem::take(&mut gen.instantiations);
         enqueue(&emitted, &mut queue, insts);
+    }
+
+    // JSON codec (RFC-0018): a per-record-type encoder/decoder, synthesized
+    // like `emit_validation`. Generated for every codable named record type so
+    // nested/recursive references resolve to a call (textual order is
+    // immaterial to LLVM). Enums, options, arrays, and validated scalars are
+    // handled inline by the emitters, so they need no standalone function.
+    for t in &program.type_decls {
+        let named = Type::Named(t.name.clone());
+        if !matches!(vela_frontend::types::resolve(&named, &types), Type::Record(_)) {
+            continue;
+        }
+        let decl = types[&t.name].clone();
+        // Encoder: `@__vela_enc_T({llt} %v) -> ptr`.
+        if vela_frontend::codec::encodable(&named, &types).is_ok() {
+            let fields = match vela_frontend::types::resolve(&named, &types) {
+                Type::Record(fs) => fs,
+                _ => unreachable!(),
+            };
+            let mut gen = Gen::new(
+                &ret_types, &param_types, &param_caps, &types, &variants, &str_globals,
+                &empty_subst, &funcs, droppable_map, &regex_globals,
+            );
+            gen.protocol_methods = protocol_methods.clone();
+            let ll = gen.llt(&named);
+            let obj = gen.fresh_tmp();
+            gen.emit(format!("{obj} = call ptr @__vela_vj_obj()"));
+            for (i, f) in fields.iter().enumerate() {
+                let fv = gen.fresh_tmp();
+                gen.emit(format!("{fv} = extractvalue {ll} %arg0, {i}"));
+                gen.emit_encode_field(&obj, &fv, f)?;
+            }
+            gen.emit_term(format!("ret ptr {obj}"));
+            writeln!(out, "define ptr @__vela_enc_{}({ll} %arg0) {{", t.name).unwrap();
+            out.push_str("entry:\n");
+            for a in &gen.allocas {
+                out.push_str(a);
+                out.push('\n');
+            }
+            for b in &gen.body {
+                out.push_str(b);
+                out.push('\n');
+            }
+            out.push_str("}\n\n");
+        }
+        // Decoder: `@__vela_dec_T(ptr %vj, ptr %path, ptr %issues) -> {llt}`.
+        if vela_frontend::codec::decodable(&named, &types).is_ok() {
+            let mut gen = Gen::new(
+                &ret_types, &param_types, &param_caps, &types, &variants, &str_globals,
+                &empty_subst, &funcs, droppable_map, &regex_globals,
+            );
+            gen.protocol_methods = protocol_methods.clone();
+            let ll = gen.llt(&named);
+            let rec_decl = TypeDecl {
+                base: vela_frontend::types::resolve(&named, &types),
+                ..decl.clone()
+            };
+            let r = gen.emit_decode_record_body("%arg0", "%arg1", "%arg2", &rec_decl)?;
+            gen.emit_term(format!("ret {ll} {r}"));
+            writeln!(
+                out,
+                "define {ll} @__vela_dec_{}(ptr %arg0, ptr %arg1, ptr %arg2) {{",
+                t.name
+            )
+            .unwrap();
+            out.push_str("entry:\n");
+            for a in &gen.allocas {
+                out.push_str(a);
+                out.push('\n');
+            }
+            for b in &gen.body {
+                out.push_str(b);
+                out.push('\n');
+            }
+            out.push_str("}\n\n");
+        }
     }
 
     // The module-state initializer function (RFC-0013), defined after the user
@@ -3144,6 +3281,27 @@ impl<'a> Gen<'a> {
             };
             return self.gen_expr(&Expr::Str(json));
         }
+        // `toJson(x)` (RFC-0018): encode `x` into a JSON DOM node, then render it
+        // canonically via the shim's stringifier (which owns escaping + number
+        // formatting, so the bytes match the interpreter's `scalar_to_string`).
+        if name == "toJson" {
+            let (v, vty) = self.gen_expr(&args[0])?;
+            let node = self.emit_encode(&v, &vty)?;
+            let s = self.fresh_tmp();
+            self.emit(format!("{s} = call ptr @__vela_vj_encode(ptr {node})"));
+            return Ok((s, Type::Str));
+        }
+        // `fromJson(TypeName, s)` (RFC-0018): parse, decode, and package into a
+        // `Validation<T>` — `Valid(T)` if no Issue accumulated, else
+        // `Invalid([Issue])` built from the shim's issue list.
+        if name == "fromJson" {
+            let tn = match args.first() {
+                Some(Expr::Var { name: tn, .. }) if self.types.contains_key(tn) => tn.clone(),
+                _ => return Err("`fromJson` needs a declared type name".to_string()),
+            };
+            let (s, _) = self.gen_expr(&args[1])?;
+            return self.gen_from_json(&tn, &s);
+        }
         // Numeric conversion `Int32(x)`, `Float64(x)`, ...
         if let Some(target) = vela_frontend::types::numeric_conv_target(name) {
             if args.len() == 1 {
@@ -4495,6 +4653,936 @@ impl<'a> Gen<'a> {
         self.trap_if(&nok, &format!("@.trap.verr.{}", decl.name), "vfail");
         Ok(())
     }
+
+    /// Lower a refined type's `where` predicate to an `i1` (true = holds),
+    /// binding the value under check: a record base binds each field name; a
+    /// scalar base binds `value`. This is the ONE place a predicate is lowered
+    /// — both the trap path (`emit_validation`) and the JSON decode `validate`
+    /// path (RFC-0018) derive from it, so the two never drift.
+    fn emit_predicate_cond(&mut self, decl: &TypeDecl, v: &str) -> Result<String, String> {
+        let pred = decl.predicate.clone().expect("predicate present");
+        self.scope.push(Vec::new());
+        if let Type::Record(fields) = &decl.base.clone() {
+            let rec_ll = self.llt(&decl.base);
+            for (i, f) in fields.iter().enumerate() {
+                let ext = self.fresh_tmp();
+                self.emit(format!("{ext} = extractvalue {rec_ll} {v}, {i}"));
+                let slot = self.declare(&f.name, &f.ty);
+                let fll = self.llt(&f.ty);
+                self.emit(format!("store {fll} {ext}, ptr {slot}"));
+            }
+        } else {
+            let base_ll = self.llt(&decl.base);
+            let slot = self.declare("value", &decl.base);
+            self.emit(format!("store {base_ll} {v}, ptr {slot}"));
+        }
+        let (cond, _) = self.gen_expr(&pred)?;
+        self.scope.pop();
+        Ok(cond)
+    }
+
+    // ---- JSON codec (RFC-0018): per-type encode/decode IR ---------------
+    // The parity-critical string work (number formatting, escaping, parse
+    // errors, message assembly) lives in the C shim; these emitters walk the
+    // static type, producing the DOM (encode) or consuming it (decode) and
+    // accumulating `Issue`s through the shim's accumulator.
+
+    /// A pooled string-literal global's symbol (every codec constant is seeded
+    /// into the pool up front by `collect_codec_strings`).
+    fn str_g(&self, s: &str) -> Result<String, String> {
+        self.str_globals.get(s).cloned().ok_or_else(|| format!("codec string not pooled: {s:?}"))
+    }
+
+    /// Widen a sized integer to `i64` for the `vj_int`/`vj_uint` builders.
+    fn widen_i64(&mut self, val: &str, bits: u8, signed: bool) -> String {
+        if bits >= 64 {
+            return val.to_string();
+        }
+        let t = self.fresh_tmp();
+        let ext = if signed { "sext" } else { "zext" };
+        self.emit(format!("{t} = {ext} i{bits} {val} to i64"));
+        t
+    }
+
+    /// Emit IR that encodes a value `val` of type `ty` into a JSON DOM node
+    /// (`VJ*`), returning the register holding it.
+    fn emit_encode(&mut self, val: &str, ty: &Type) -> Result<String, String> {
+        // A named record routes to its generated encoder (recursion-safe); a
+        // named enum reads its variant name from the per-enum name table.
+        if let Type::Named(n) = ty {
+            match self.resolve(ty) {
+                Type::Record(_) if self.types.contains_key(n) => {
+                    let ll = self.llt(ty);
+                    let r = self.fresh_tmp();
+                    self.emit(format!("{r} = call ptr @__vela_enc_{n}({ll} {val})"));
+                    return Ok(r);
+                }
+                Type::Enum(vs) => {
+                    let ll = self.llt(ty);
+                    let tag = self.fresh_tmp();
+                    self.emit(format!("{tag} = extractvalue {ll} {val}, 0"));
+                    let gep = self.fresh_tmp();
+                    let count = vs.len();
+                    self.emit(format!(
+                        "{gep} = getelementptr [{count} x ptr], ptr @.enumnames.{n}, i64 0, i64 {tag}"
+                    ));
+                    let name = self.fresh_tmp();
+                    self.emit(format!("{name} = load ptr, ptr {gep}"));
+                    let r = self.fresh_tmp();
+                    self.emit(format!("{r} = call ptr @__vela_vj_str(ptr {name})"));
+                    return Ok(r);
+                }
+                _ => {}
+            }
+        }
+        match self.resolve(ty) {
+            Type::Int => {
+                let r = self.fresh_tmp();
+                self.emit(format!("{r} = call ptr @__vela_vj_int(i64 {val})"));
+                Ok(r)
+            }
+            Type::IntN { bits, signed } => {
+                let w = self.widen_i64(val, bits, signed);
+                let fname = if signed { "int" } else { "uint" };
+                let r = self.fresh_tmp();
+                self.emit(format!("{r} = call ptr @__vela_vj_{fname}(i64 {w})"));
+                Ok(r)
+            }
+            Type::Float => {
+                let r = self.fresh_tmp();
+                self.emit(format!("{r} = call ptr @__vela_vj_float(double {val})"));
+                Ok(r)
+            }
+            Type::Float32 => {
+                let d = self.fresh_tmp();
+                self.emit(format!("{d} = fpext float {val} to double"));
+                let r = self.fresh_tmp();
+                self.emit(format!("{r} = call ptr @__vela_vj_float(double {d})"));
+                Ok(r)
+            }
+            Type::Bool => {
+                let r = self.fresh_tmp();
+                self.emit(format!("{r} = call ptr @__vela_vj_bool(i1 {val})"));
+                Ok(r)
+            }
+            Type::Str => {
+                let r = self.fresh_tmp();
+                self.emit(format!("{r} = call ptr @__vela_vj_str(ptr {val})"));
+                Ok(r)
+            }
+            Type::Enum(vs) => {
+                // Anonymous enum (rare): materialize the name via a switch.
+                let ll = self.llt(ty);
+                let tag = self.fresh_tmp();
+                self.emit(format!("{tag} = extractvalue {ll} {val}, 0"));
+                let slot = self.fresh_alloca("ptr");
+                let done = self.fresh_label("enc.enum.done");
+                let mut cases = Vec::new();
+                let mut labels = Vec::new();
+                for i in 0..vs.len() {
+                    let l = self.fresh_label("enc.enum.case");
+                    cases.push(format!("i64 {i}, label %{l}"));
+                    labels.push(l);
+                }
+                let dflt = self.fresh_label("enc.enum.dflt");
+                self.emit_term(format!(
+                    "switch i64 {tag}, label %{dflt} [ {} ]",
+                    cases.join(" ")
+                ));
+                for (i, l) in labels.iter().enumerate() {
+                    self.emit_label(l);
+                    let g = self.str_g(&vs[i].name)?;
+                    let c = self.fresh_tmp();
+                    self.emit(format!("{c} = call ptr @__vela_vj_str(ptr {g})"));
+                    self.emit(format!("store ptr {c}, ptr {slot}"));
+                    self.emit_term(format!("br label %{done}"));
+                }
+                self.emit_label(&dflt);
+                let nul = self.fresh_tmp();
+                self.emit(format!("{nul} = call ptr @__vela_vj_null()"));
+                self.emit(format!("store ptr {nul}, ptr {slot}"));
+                self.emit_term(format!("br label %{done}"));
+                self.emit_label(&done);
+                let r = self.fresh_tmp();
+                self.emit(format!("{r} = load ptr, ptr {slot}"));
+                Ok(r)
+            }
+            Type::Record(fields) => {
+                // Anonymous record: build the object inline (no recursion risk).
+                let ll = self.llt(ty);
+                let obj = self.fresh_tmp();
+                self.emit(format!("{obj} = call ptr @__vela_vj_obj()"));
+                for (i, f) in fields.iter().enumerate() {
+                    let fv = self.fresh_tmp();
+                    self.emit(format!("{fv} = extractvalue {ll} {val}, {i}"));
+                    self.emit_encode_field(&obj, &fv, f)?;
+                }
+                Ok(obj)
+            }
+            Type::Option(inner) => {
+                // A bare Option: Some -> encode the payload, None -> `null`.
+                let tag = self.fresh_tmp();
+                self.emit(format!("{tag} = extractvalue {{ i1, i64, i64 }} {val}, 0"));
+                let slot = self.fresh_alloca("ptr");
+                let some_l = self.fresh_label("enc.opt.some");
+                let none_l = self.fresh_label("enc.opt.none");
+                let done_l = self.fresh_label("enc.opt.done");
+                self.emit_term(format!("br i1 {tag}, label %{some_l}, label %{none_l}"));
+                self.emit_label(&some_l);
+                let w0 = self.fresh_tmp();
+                let w1 = self.fresh_tmp();
+                self.emit(format!("{w0} = extractvalue {{ i1, i64, i64 }} {val}, 1"));
+                self.emit(format!("{w1} = extractvalue {{ i1, i64, i64 }} {val}, 2"));
+                let iv = self.decode_payload(&w0, &w1, &inner);
+                let c = self.emit_encode(&iv, &inner)?;
+                self.emit(format!("store ptr {c}, ptr {slot}"));
+                self.emit_term(format!("br label %{done_l}"));
+                self.emit_label(&none_l);
+                let nul = self.fresh_tmp();
+                self.emit(format!("{nul} = call ptr @__vela_vj_null()"));
+                self.emit(format!("store ptr {nul}, ptr {slot}"));
+                self.emit_term(format!("br label %{done_l}"));
+                self.emit_label(&done_l);
+                let r = self.fresh_tmp();
+                self.emit(format!("{r} = load ptr, ptr {slot}"));
+                Ok(r)
+            }
+            Type::Array(inner) => {
+                let ell = self.llt(&inner);
+                let data = self.fresh_tmp();
+                let len = self.fresh_tmp();
+                self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {val}, 0"));
+                self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {val}, 1"));
+                let arr = self.fresh_tmp();
+                self.emit(format!("{arr} = call ptr @__vela_vj_arr()"));
+                let idx = self.fresh_alloca("i64");
+                self.emit(format!("store i64 0, ptr {idx}"));
+                let cond_l = self.fresh_label("enc.arr.cond");
+                let body_l = self.fresh_label("enc.arr.body");
+                let done_l = self.fresh_label("enc.arr.done");
+                self.emit_term(format!("br label %{cond_l}"));
+                self.emit_label(&cond_l);
+                let i = self.fresh_tmp();
+                self.emit(format!("{i} = load i64, ptr {idx}"));
+                let more = self.fresh_tmp();
+                self.emit(format!("{more} = icmp slt i64 {i}, {len}"));
+                self.emit_term(format!("br i1 {more}, label %{body_l}, label %{done_l}"));
+                self.emit_label(&body_l);
+                let ep = self.fresh_tmp();
+                self.emit(format!("{ep} = getelementptr {ell}, ptr {data}, i64 {i}"));
+                let ev = self.fresh_tmp();
+                self.emit(format!("{ev} = load {ell}, ptr {ep}"));
+                let c = self.emit_encode(&ev, &inner)?;
+                self.emit(format!("call void @__vela_vj_push(ptr {arr}, ptr {c})"));
+                let ni = self.fresh_tmp();
+                self.emit(format!("{ni} = add i64 {i}, 1"));
+                self.emit(format!("store i64 {ni}, ptr {idx}"));
+                self.emit_term(format!("br label %{cond_l}"));
+                self.emit_label(&done_l);
+                Ok(arr)
+            }
+            Type::ArrayN(inner, n) => {
+                let ell = self.llt(&inner);
+                let aggty = format!("[{n} x {ell}]");
+                let arr = self.fresh_tmp();
+                self.emit(format!("{arr} = call ptr @__vela_vj_arr()"));
+                for i in 0..n {
+                    let ev = self.fresh_tmp();
+                    self.emit(format!("{ev} = extractvalue {aggty} {val}, {i}"));
+                    let c = self.emit_encode(&ev, &inner)?;
+                    self.emit(format!("call void @__vela_vj_push(ptr {arr}, ptr {c})"));
+                }
+                Ok(arr)
+            }
+            other => Err(format!("toJson: cannot encode {other:?}")),
+        }
+    }
+
+    /// Encode one record field into `obj`, honoring the None-field omission for
+    /// an `Option`-typed field (Some -> set the decoded payload; None -> omit).
+    fn emit_encode_field(&mut self, obj: &str, fv: &str, f: &Field) -> Result<(), String> {
+        let key = self.str_g(&f.name)?;
+        if let Type::Option(inner) = self.resolve(&f.ty) {
+            let tag = self.fresh_tmp();
+            self.emit(format!("{tag} = extractvalue {{ i1, i64, i64 }} {fv}, 0"));
+            let set_l = self.fresh_label("enc.fld.set");
+            let skip_l = self.fresh_label("enc.fld.skip");
+            self.emit_term(format!("br i1 {tag}, label %{set_l}, label %{skip_l}"));
+            self.emit_label(&set_l);
+            let w0 = self.fresh_tmp();
+            let w1 = self.fresh_tmp();
+            self.emit(format!("{w0} = extractvalue {{ i1, i64, i64 }} {fv}, 1"));
+            self.emit(format!("{w1} = extractvalue {{ i1, i64, i64 }} {fv}, 2"));
+            let iv = self.decode_payload(&w0, &w1, &inner);
+            let c = self.emit_encode(&iv, &inner)?;
+            self.emit(format!("call void @__vela_vj_set(ptr {obj}, ptr {key}, ptr {c})"));
+            self.emit_term(format!("br label %{skip_l}"));
+            self.emit_label(&skip_l);
+        } else {
+            let c = self.emit_encode(fv, &f.ty)?;
+            self.emit(format!("call void @__vela_vj_set(ptr {obj}, ptr {key}, ptr {c})"));
+        }
+        Ok(())
+    }
+
+    /// Push a decode `Issue` into the shim's accumulator with a constant key and
+    /// message and a (runtime) path register.
+    fn push_issue(&mut self, issues: &str, key: &str, path: &str, msg: &str) -> Result<(), String> {
+        let kg = self.str_g(key)?;
+        let mg = self.str_g(msg)?;
+        self.emit(format!(
+            "call void @__vela_issues_push(ptr {issues}, ptr {kg}, ptr {path}, ptr {mg})"
+        ));
+        Ok(())
+    }
+
+    /// Push a `json.type` Issue whose message (`expected X, found <kind>`) is
+    /// assembled at runtime from a constant `expected` phrase and the node kind.
+    fn push_type_issue(
+        &mut self,
+        issues: &str,
+        path: &str,
+        expected: &str,
+        kind: &str,
+    ) -> Result<(), String> {
+        let kg = self.str_g("json.type")?;
+        let eg = self.str_g(expected)?;
+        let msg = self.fresh_tmp();
+        self.emit(format!("{msg} = call ptr @__vela_json_type_msg(ptr {eg}, i32 {kind})"));
+        self.emit(format!(
+            "call void @__vela_issues_push(ptr {issues}, ptr {kg}, ptr {path}, ptr {msg})"
+        ));
+        Ok(())
+    }
+
+    /// Emit IR that decodes DOM node `vj` (assumed non-null) into a value of
+    /// type `ty`, accumulating Issues under `path`. Returns the value register.
+    fn emit_decode(
+        &mut self,
+        vj: &str,
+        path: &str,
+        issues: &str,
+        ty: &Type,
+    ) -> Result<String, String> {
+        // A named record routes to its generated decoder; a named validated
+        // scalar decodes its base then runs the `where` clause (accumulating a
+        // `validate` Issue) — but only if the base decoded cleanly.
+        if let Type::Named(n) = ty {
+            match self.resolve(ty) {
+                Type::Record(_) if self.types.contains_key(n) => {
+                    let ll = self.llt(ty);
+                    let r = self.fresh_tmp();
+                    self.emit(format!(
+                        "{r} = call {ll} @__vela_dec_{n}(ptr {vj}, ptr {path}, ptr {issues})"
+                    ));
+                    return Ok(r);
+                }
+                Type::Enum(_) => return self.emit_decode_enum(vj, path, issues, ty),
+                _ => {
+                    let decl = self.types.get(n).cloned().unwrap();
+                    let before = self.fresh_tmp();
+                    self.emit(format!("{before} = call i64 @__vela_issues_len(ptr {issues})"));
+                    let base_val = self.emit_decode(vj, path, issues, &decl.base)?;
+                    if decl.predicate.is_some() {
+                        self.emit_validate_check(issues, path, &decl, &base_val, &before)?;
+                    }
+                    return Ok(base_val);
+                }
+            }
+        }
+        match self.resolve(ty) {
+            Type::Int => self.emit_decode_int(vj, path, issues, 64, true),
+            Type::IntN { bits, signed } => self.emit_decode_int(vj, path, issues, bits, signed),
+            Type::Float => self.emit_decode_float(vj, path, issues, false),
+            Type::Float32 => self.emit_decode_float(vj, path, issues, true),
+            Type::Bool => self.emit_decode_bool(vj, path, issues),
+            Type::Str => self.emit_decode_str(vj, path, issues),
+            Type::Enum(_) => self.emit_decode_enum(vj, path, issues, ty),
+            Type::Option(inner) => self.emit_decode_option(vj, path, issues, &inner),
+            Type::Array(inner) => self.emit_decode_array(vj, path, issues, &inner),
+            Type::Record(_) => {
+                // Anonymous record decode target: inline via a temporary decl.
+                let tmp = TypeDecl {
+                    name: String::new(),
+                    exported: false,
+                    module: None,
+                    doc: None,
+                    type_params: Vec::new(),
+                    base: self.resolve(ty),
+                    predicate: None,
+                    line: 0,
+                };
+                self.emit_decode_record_body(vj, path, issues, &tmp)
+            }
+            other => Err(format!("fromJson: cannot decode {other:?}")),
+        }
+    }
+
+    /// After a validated type's base decoded, run its predicate and push a
+    /// `validate` Issue if it is false — but skip the check when the base decode
+    /// already accumulated an Issue (mirrors the interpreter's `?`-guarded walk).
+    fn emit_validate_check(
+        &mut self,
+        issues: &str,
+        path: &str,
+        decl: &TypeDecl,
+        base_val: &str,
+        before: &str,
+    ) -> Result<(), String> {
+        let after = self.fresh_tmp();
+        self.emit(format!("{after} = call i64 @__vela_issues_len(ptr {issues})"));
+        let clean = self.fresh_tmp();
+        self.emit(format!("{clean} = icmp eq i64 {before}, {after}"));
+        let chk_l = self.fresh_label("dec.val.chk");
+        let done_l = self.fresh_label("dec.val.done");
+        self.emit_term(format!("br i1 {clean}, label %{chk_l}, label %{done_l}"));
+        self.emit_label(&chk_l);
+        let cond = self.emit_predicate_cond(decl, base_val)?;
+        let bad = self.fresh_tmp();
+        self.emit(format!("{bad} = xor i1 {cond}, true"));
+        let push_l = self.fresh_label("dec.val.push");
+        self.emit_term(format!("br i1 {bad}, label %{push_l}, label %{done_l}"));
+        self.emit_label(&push_l);
+        let msg = vela_frontend::codec::validate_message(decl);
+        self.push_issue(issues, "validate", path, &msg)?;
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&done_l);
+        Ok(())
+    }
+
+    fn emit_decode_int(
+        &mut self,
+        vj: &str,
+        path: &str,
+        issues: &str,
+        bits: u8,
+        signed: bool,
+    ) -> Result<String, String> {
+        let outp = self.fresh_alloca("i64");
+        let sflag = if signed { 1 } else { 0 };
+        let rc = self.fresh_tmp();
+        self.emit(format!(
+            "{rc} = call i32 @__vela_vj_asint(ptr {vj}, i32 {bits}, i32 {sflag}, ptr {outp})"
+        ));
+        let bad = self.fresh_tmp();
+        self.emit(format!("{bad} = icmp ne i32 {rc}, 0"));
+        let ill = if bits >= 64 { "i64".to_string() } else { format!("i{bits}") };
+        let slot = self.fresh_alloca(&ill);
+        self.emit(format!("store {ill} 0, ptr {slot}"));
+        let bad_l = self.fresh_label("dec.int.bad");
+        let ok_l = self.fresh_label("dec.int.ok");
+        let done_l = self.fresh_label("dec.int.done");
+        self.emit_term(format!("br i1 {bad}, label %{bad_l}, label %{ok_l}"));
+        self.emit_label(&bad_l);
+        let kind = self.fresh_tmp();
+        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        self.push_type_issue(issues, path, "integer", &kind)?;
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&ok_l);
+        let v = self.fresh_tmp();
+        self.emit(format!("{v} = load i64, ptr {outp}"));
+        let stored = if bits >= 64 {
+            v.clone()
+        } else {
+            let t = self.fresh_tmp();
+            self.emit(format!("{t} = trunc i64 {v} to i{bits}"));
+            t
+        };
+        self.emit(format!("store {ill} {stored}, ptr {slot}"));
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&done_l);
+        let r = self.fresh_tmp();
+        self.emit(format!("{r} = load {ill}, ptr {slot}"));
+        Ok(r)
+    }
+
+    fn emit_decode_float(
+        &mut self,
+        vj: &str,
+        path: &str,
+        issues: &str,
+        single: bool,
+    ) -> Result<String, String> {
+        let kind = self.fresh_tmp();
+        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        let isnum = self.fresh_tmp();
+        self.emit(format!("{isnum} = icmp eq i32 {kind}, 2"));
+        let ell = if single { "float" } else { "double" };
+        let slot = self.fresh_alloca(ell);
+        self.emit(format!("store {ell} 0.0, ptr {slot}"));
+        let ok_l = self.fresh_label("dec.flt.ok");
+        let bad_l = self.fresh_label("dec.flt.bad");
+        let done_l = self.fresh_label("dec.flt.done");
+        self.emit_term(format!("br i1 {isnum}, label %{ok_l}, label %{bad_l}"));
+        self.emit_label(&bad_l);
+        self.push_type_issue(issues, path, "number", &kind)?;
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&ok_l);
+        let d = self.fresh_tmp();
+        self.emit(format!("{d} = call double @__vela_vj_asfloat(ptr {vj})"));
+        let stored = if single {
+            let t = self.fresh_tmp();
+            self.emit(format!("{t} = fptrunc double {d} to float"));
+            t
+        } else {
+            d.clone()
+        };
+        self.emit(format!("store {ell} {stored}, ptr {slot}"));
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&done_l);
+        let r = self.fresh_tmp();
+        self.emit(format!("{r} = load {ell}, ptr {slot}"));
+        Ok(r)
+    }
+
+    fn emit_decode_bool(&mut self, vj: &str, path: &str, issues: &str) -> Result<String, String> {
+        let kind = self.fresh_tmp();
+        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        let isbool = self.fresh_tmp();
+        self.emit(format!("{isbool} = icmp eq i32 {kind}, 1"));
+        let slot = self.fresh_alloca("i1");
+        self.emit(format!("store i1 false, ptr {slot}"));
+        let ok_l = self.fresh_label("dec.bool.ok");
+        let bad_l = self.fresh_label("dec.bool.bad");
+        let done_l = self.fresh_label("dec.bool.done");
+        self.emit_term(format!("br i1 {isbool}, label %{ok_l}, label %{bad_l}"));
+        self.emit_label(&bad_l);
+        self.push_type_issue(issues, path, "boolean", &kind)?;
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&ok_l);
+        let b = self.fresh_tmp();
+        self.emit(format!("{b} = call i32 @__vela_vj_bool_get(ptr {vj})"));
+        let bt = self.fresh_tmp();
+        self.emit(format!("{bt} = icmp ne i32 {b}, 0"));
+        self.emit(format!("store i1 {bt}, ptr {slot}"));
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&done_l);
+        let r = self.fresh_tmp();
+        self.emit(format!("{r} = load i1, ptr {slot}"));
+        Ok(r)
+    }
+
+    fn emit_decode_str(&mut self, vj: &str, path: &str, issues: &str) -> Result<String, String> {
+        let kind = self.fresh_tmp();
+        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        let isstr = self.fresh_tmp();
+        self.emit(format!("{isstr} = icmp eq i32 {kind}, 3"));
+        let slot = self.fresh_alloca("ptr");
+        self.emit(format!("store ptr null, ptr {slot}"));
+        let ok_l = self.fresh_label("dec.str.ok");
+        let bad_l = self.fresh_label("dec.str.bad");
+        let done_l = self.fresh_label("dec.str.done");
+        self.emit_term(format!("br i1 {isstr}, label %{ok_l}, label %{bad_l}"));
+        self.emit_label(&bad_l);
+        self.push_type_issue(issues, path, "string", &kind)?;
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&ok_l);
+        let s = self.fresh_tmp();
+        self.emit(format!("{s} = call ptr @__vela_vj_str_get(ptr {vj})"));
+        self.emit(format!("store ptr {s}, ptr {slot}"));
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&done_l);
+        let r = self.fresh_tmp();
+        self.emit(format!("{r} = load ptr, ptr {slot}"));
+        Ok(r)
+    }
+
+    fn emit_decode_enum(
+        &mut self,
+        vj: &str,
+        path: &str,
+        issues: &str,
+        ty: &Type,
+    ) -> Result<String, String> {
+        let vs = match self.resolve(ty) {
+            Type::Enum(vs) => vs,
+            _ => return Err("emit_decode_enum on non-enum".to_string()),
+        };
+        let ll = self.llt(ty);
+        let expected = vela_frontend::codec::enum_expected(&vs);
+        let kind = self.fresh_tmp();
+        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        let isstr = self.fresh_tmp();
+        self.emit(format!("{isstr} = icmp eq i32 {kind}, 3"));
+        let slot = self.fresh_alloca(&ll);
+        self.emit(format!("store {ll} zeroinitializer, ptr {slot}"));
+        let str_l = self.fresh_label("dec.enum.str");
+        let notstr_l = self.fresh_label("dec.enum.notstr");
+        let done_l = self.fresh_label("dec.enum.done");
+        self.emit_term(format!("br i1 {isstr}, label %{str_l}, label %{notstr_l}"));
+        self.emit_label(&notstr_l);
+        self.push_type_issue(issues, path, &expected, &kind)?;
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&str_l);
+        let s = self.fresh_tmp();
+        self.emit(format!("{s} = call ptr @__vela_vj_str_get(ptr {vj})"));
+        // Sequential strcmp against each variant name.
+        for (i, v) in vs.iter().enumerate() {
+            let g = self.str_g(&v.name)?;
+            let cmp = self.fresh_tmp();
+            self.emit(format!("{cmp} = call i32 @strcmp(ptr {s}, ptr {g})"));
+            let eq = self.fresh_tmp();
+            self.emit(format!("{eq} = icmp eq i32 {cmp}, 0"));
+            let hit_l = self.fresh_label("dec.enum.hit");
+            let next_l = self.fresh_label("dec.enum.next");
+            self.emit_term(format!("br i1 {eq}, label %{hit_l}, label %{next_l}"));
+            self.emit_label(&hit_l);
+            let e = self.fresh_tmp();
+            self.emit(format!("{e} = insertvalue {ll} zeroinitializer, i64 {i}, 0"));
+            self.emit(format!("store {ll} {e}, ptr {slot}"));
+            self.emit_term(format!("br label %{done_l}"));
+            self.emit_label(&next_l);
+        }
+        // No variant matched.
+        self.push_type_issue(issues, path, &expected, &kind)?;
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&done_l);
+        let r = self.fresh_tmp();
+        self.emit(format!("{r} = load {ll}, ptr {slot}"));
+        Ok(r)
+    }
+
+    fn emit_decode_option(
+        &mut self,
+        vj: &str,
+        path: &str,
+        issues: &str,
+        inner: &Type,
+    ) -> Result<String, String> {
+        let kind = self.fresh_tmp();
+        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        let isnull = self.fresh_tmp();
+        self.emit(format!("{isnull} = icmp eq i32 {kind}, 0"));
+        let slot = self.fresh_alloca("{ i1, i64, i64 }");
+        let none_l = self.fresh_label("dec.opt.none");
+        let some_l = self.fresh_label("dec.opt.some");
+        let done_l = self.fresh_label("dec.opt.done");
+        self.emit_term(format!("br i1 {isnull}, label %{none_l}, label %{some_l}"));
+        self.emit_label(&none_l);
+        self.emit(format!("store {{ i1, i64, i64 }} {{ i1 0, i64 0, i64 0 }}, ptr {slot}"));
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&some_l);
+        let iv = self.emit_decode(vj, path, issues, inner)?;
+        let (w0, w1) = self.encode_payload(&iv, inner);
+        let a = self.fresh_tmp();
+        let b = self.fresh_tmp();
+        let c = self.fresh_tmp();
+        self.emit(format!("{a} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"));
+        self.emit(format!("{b} = insertvalue {{ i1, i64, i64 }} {a}, i64 {w0}, 1"));
+        self.emit(format!("{c} = insertvalue {{ i1, i64, i64 }} {b}, i64 {w1}, 2"));
+        self.emit(format!("store {{ i1, i64, i64 }} {c}, ptr {slot}"));
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&done_l);
+        let r = self.fresh_tmp();
+        self.emit(format!("{r} = load {{ i1, i64, i64 }}, ptr {slot}"));
+        Ok(r)
+    }
+
+    fn emit_decode_array(
+        &mut self,
+        vj: &str,
+        path: &str,
+        issues: &str,
+        inner: &Type,
+    ) -> Result<String, String> {
+        let ell = self.llt(inner);
+        let kind = self.fresh_tmp();
+        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        let isarr = self.fresh_tmp();
+        self.emit(format!("{isarr} = icmp eq i32 {kind}, 4"));
+        let slot = self.fresh_alloca("{ ptr, i64, i64 }");
+        self.emit(format!(
+            "store {{ ptr, i64, i64 }} {{ ptr null, i64 0, i64 0 }}, ptr {slot}"
+        ));
+        let ok_l = self.fresh_label("dec.arr.ok");
+        let bad_l = self.fresh_label("dec.arr.bad");
+        let done_l = self.fresh_label("dec.arr.done");
+        self.emit_term(format!("br i1 {isarr}, label %{ok_l}, label %{bad_l}"));
+        self.emit_label(&bad_l);
+        self.push_type_issue(issues, path, "array", &kind)?;
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&ok_l);
+        let n = self.fresh_tmp();
+        self.emit(format!("{n} = call i64 @__vela_vj_len(ptr {vj})"));
+        // buffer = n * sizeof(elem)
+        let szp = self.fresh_tmp();
+        let sz = self.fresh_tmp();
+        self.emit(format!("{szp} = getelementptr {ell}, ptr null, i64 {n}"));
+        self.emit(format!("{sz} = ptrtoint ptr {szp} to i64"));
+        let buf = self.fresh_tmp();
+        self.emit(format!("{buf} = call ptr @__vela_malloc(i64 {sz})"));
+        let idx = self.fresh_alloca("i64");
+        self.emit(format!("store i64 0, ptr {idx}"));
+        let cond_l = self.fresh_label("dec.arr.cond");
+        let body_l = self.fresh_label("dec.arr.body");
+        let fill_l = self.fresh_label("dec.arr.fill");
+        self.emit_term(format!("br label %{cond_l}"));
+        self.emit_label(&cond_l);
+        let i = self.fresh_tmp();
+        self.emit(format!("{i} = load i64, ptr {idx}"));
+        let more = self.fresh_tmp();
+        self.emit(format!("{more} = icmp slt i64 {i}, {n}"));
+        self.emit_term(format!("br i1 {more}, label %{body_l}, label %{fill_l}"));
+        self.emit_label(&body_l);
+        let node = self.fresh_tmp();
+        self.emit(format!("{node} = call ptr @__vela_vj_at(ptr {vj}, i64 {i})"));
+        let childpath = self.fresh_tmp();
+        self.emit(format!(
+            "{childpath} = call ptr @__vela_json_index_path(ptr {path}, i64 {i})"
+        ));
+        let ev = self.emit_decode(&node, &childpath, issues, inner)?;
+        let ep = self.fresh_tmp();
+        self.emit(format!("{ep} = getelementptr {ell}, ptr {buf}, i64 {i}"));
+        self.emit(format!("store {ell} {ev}, ptr {ep}"));
+        let ni = self.fresh_tmp();
+        self.emit(format!("{ni} = add i64 {i}, 1"));
+        self.emit(format!("store i64 {ni}, ptr {idx}"));
+        self.emit_term(format!("br label %{cond_l}"));
+        self.emit_label(&fill_l);
+        let a = self.fresh_tmp();
+        let b = self.fresh_tmp();
+        let c = self.fresh_tmp();
+        self.emit(format!("{a} = insertvalue {{ ptr, i64, i64 }} undef, ptr {buf}, 0"));
+        self.emit(format!("{b} = insertvalue {{ ptr, i64, i64 }} {a}, i64 {n}, 1"));
+        self.emit(format!("{c} = insertvalue {{ ptr, i64, i64 }} {b}, i64 {n}, 2"));
+        self.emit(format!("store {{ ptr, i64, i64 }} {c}, ptr {slot}"));
+        self.emit_term(format!("br label %{done_l}"));
+        self.emit_label(&done_l);
+        let r = self.fresh_tmp();
+        self.emit(format!("{r} = load {{ ptr, i64, i64 }}, ptr {slot}"));
+        Ok(r)
+    }
+
+    /// The body of a record decoder: check the node is an object, decode each
+    /// field (honoring Option absent-or-null and required-field-missing), then
+    /// run the record's cross-field `where` clause if all fields decoded
+    /// cleanly. `decl.base` must be a `Record`. Returns the record value.
+    fn emit_decode_record_body(
+        &mut self,
+        vj: &str,
+        path: &str,
+        issues: &str,
+        decl: &TypeDecl,
+    ) -> Result<String, String> {
+        let fields = match &decl.base {
+            Type::Record(fs) => fs.clone(),
+            _ => return Err("emit_decode_record_body on non-record".to_string()),
+        };
+        let ll = self.llt(&decl.base);
+        let res = self.fresh_alloca(&ll);
+        self.emit(format!("store {ll} zeroinitializer, ptr {res}"));
+        let before = self.fresh_tmp();
+        self.emit(format!("{before} = call i64 @__vela_issues_len(ptr {issues})"));
+        // Node must be an object.
+        let kind = self.fresh_tmp();
+        self.emit(format!("{kind} = call i32 @__vela_vj_kind(ptr {vj})"));
+        let isobj = self.fresh_tmp();
+        self.emit(format!("{isobj} = icmp eq i32 {kind}, 5"));
+        let obj_l = self.fresh_label("dec.rec.obj");
+        let bad_l = self.fresh_label("dec.rec.bad");
+        let ret_l = self.fresh_label("dec.rec.ret");
+        self.emit_term(format!("br i1 {isobj}, label %{obj_l}, label %{bad_l}"));
+        self.emit_label(&bad_l);
+        self.push_type_issue(issues, path, "object", &kind)?;
+        self.emit_term(format!("br label %{ret_l}"));
+        self.emit_label(&obj_l);
+        for (i, f) in fields.iter().enumerate() {
+            self.emit_decode_field(vj, path, issues, &res, &ll, i, f)?;
+        }
+        // Cross-field predicate, only if the fields decoded cleanly.
+        if decl.predicate.is_some() {
+            let rec_val = self.fresh_tmp();
+            self.emit(format!("{rec_val} = load {ll}, ptr {res}"));
+            self.emit_validate_check(issues, path, decl, &rec_val, &before)?;
+        }
+        self.emit_term(format!("br label %{ret_l}"));
+        self.emit_label(&ret_l);
+        let r = self.fresh_tmp();
+        self.emit(format!("{r} = load {ll}, ptr {res}"));
+        Ok(r)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_decode_field(
+        &mut self,
+        vj: &str,
+        path: &str,
+        issues: &str,
+        res: &str,
+        rec_ll: &str,
+        i: usize,
+        f: &Field,
+    ) -> Result<(), String> {
+        let key = self.str_g(&f.name)?;
+        let child = self.fresh_tmp();
+        self.emit(format!(
+            "{child} = call ptr @__vela_json_field_path(ptr {path}, ptr {key})"
+        ));
+        let node = self.fresh_tmp();
+        self.emit(format!("{node} = call ptr @__vela_vj_get(ptr {vj}, ptr {key})"));
+        let absent = self.fresh_tmp();
+        self.emit(format!("{absent} = icmp eq ptr {node}, null"));
+        let fll = self.llt(&f.ty);
+        let fp = self.fresh_tmp();
+        self.emit(format!("{fp} = getelementptr {rec_ll}, ptr {res}, i64 0, i32 {i}"));
+        if let Type::Option(_) = self.resolve(&f.ty) {
+            // Absent -> None; present -> emit_decode (which maps null -> None).
+            let none_l = self.fresh_label("dec.fld.none");
+            let present_l = self.fresh_label("dec.fld.present");
+            let done_l = self.fresh_label("dec.fld.done");
+            self.emit_term(format!("br i1 {absent}, label %{none_l}, label %{present_l}"));
+            self.emit_label(&none_l);
+            self.emit(format!(
+                "store {fll} {{ i1 0, i64 0, i64 0 }}, ptr {fp}"
+            ));
+            self.emit_term(format!("br label %{done_l}"));
+            self.emit_label(&present_l);
+            let fv = self.emit_decode(&node, &child, issues, &f.ty)?;
+            self.emit(format!("store {fll} {fv}, ptr {fp}"));
+            self.emit_term(format!("br label %{done_l}"));
+            self.emit_label(&done_l);
+        } else {
+            let missing_l = self.fresh_label("dec.fld.missing");
+            let present_l = self.fresh_label("dec.fld.present");
+            let done_l = self.fresh_label("dec.fld.done");
+            self.emit_term(format!("br i1 {absent}, label %{missing_l}, label %{present_l}"));
+            self.emit_label(&missing_l);
+            let msg = vela_frontend::codec::missing_message(&f.name);
+            self.push_issue(issues, "json.missing", &child, &msg)?;
+            self.emit_term(format!("br label %{done_l}"));
+            self.emit_label(&present_l);
+            let fv = self.emit_decode(&node, &child, issues, &f.ty)?;
+            self.emit(format!("store {fll} {fv}, ptr {fp}"));
+            self.emit_term(format!("br label %{done_l}"));
+            self.emit_label(&done_l);
+        }
+        Ok(())
+    }
+
+    /// Orchestrate `fromJson`: parse, decode into `tn`, and package the result
+    /// as `Validation<T>` — `Valid(T)` when no Issue accumulated, else
+    /// `Invalid([Issue])` materialized from the shim's issue list.
+    fn gen_from_json(&mut self, tn: &str, s: &str) -> Result<(String, Type), String> {
+        let target = Type::Named(tn.to_string());
+        let vll = enum_ll(1); // Validation<T> = { i64 tag, i64 payload }
+        let empty = self.str_g("")?;
+        let valid_tag = self.variants.get("Valid").map(|(t, _)| *t).unwrap_or(0);
+        let invalid_tag = self.variants.get("Invalid").map(|(t, _)| *t).unwrap_or(1);
+
+        let issues = self.fresh_tmp();
+        self.emit(format!("{issues} = call ptr @__vela_issues_new()"));
+        let errslot = self.fresh_alloca("ptr");
+        let vj = self.fresh_tmp();
+        self.emit(format!("{vj} = call ptr @__vela_json_parse(ptr {s}, ptr {errslot})"));
+        let failed = self.fresh_tmp();
+        self.emit(format!("{failed} = icmp eq ptr {vj}, null"));
+        let resslot = self.fresh_alloca(&vll);
+        let fail_l = self.fresh_label("fj.parsefail");
+        let ok_l = self.fresh_label("fj.parseok");
+        let valid_l = self.fresh_label("fj.valid");
+        let invalid_l = self.fresh_label("fj.invalid");
+        let done_l = self.fresh_label("fj.done");
+        self.emit_term(format!("br i1 {failed}, label %{fail_l}, label %{ok_l}"));
+
+        // parse failure -> single json.parse Issue (message from the shim).
+        self.emit_label(&fail_l);
+        let err = self.fresh_tmp();
+        self.emit(format!("{err} = load ptr, ptr {errslot}"));
+        let pk = self.str_g("json.parse")?;
+        self.emit(format!(
+            "call void @__vela_issues_push(ptr {issues}, ptr {pk}, ptr {empty}, ptr {err})"
+        ));
+        self.emit_term(format!("br label %{invalid_l}"));
+
+        // parse ok -> decode, then branch on whether any Issue accumulated.
+        self.emit_label(&ok_l);
+        let val = self.emit_decode(&vj, &empty, &issues, &target)?;
+        let n = self.fresh_tmp();
+        self.emit(format!("{n} = call i64 @__vela_issues_len(ptr {issues})"));
+        let clean = self.fresh_tmp();
+        self.emit(format!("{clean} = icmp eq i64 {n}, 0"));
+        self.emit_term(format!("br i1 {clean}, label %{valid_l}, label %{invalid_l}"));
+
+        // Valid(val)
+        self.emit_label(&valid_l);
+        let boxed = self.box_payload(&val, &target);
+        let v0 = self.fresh_tmp();
+        let v1 = self.fresh_tmp();
+        self.emit(format!("{v0} = insertvalue {vll} undef, i64 {valid_tag}, 0"));
+        self.emit(format!("{v1} = insertvalue {vll} {v0}, i64 {boxed}, 1"));
+        self.emit(format!("store {vll} {v1}, ptr {resslot}"));
+        self.emit_term(format!("br label %{done_l}"));
+
+        // Invalid([Issue]) — build the Vela Array<Issue> from the shim's list.
+        self.emit_label(&invalid_l);
+        let arr = self.build_issue_array(&issues)?;
+        let issue_arr_ty = Type::Array(Box::new(Type::Named("Issue".to_string())));
+        let boxed_arr = self.box_payload(&arr, &issue_arr_ty);
+        let i0 = self.fresh_tmp();
+        let i1 = self.fresh_tmp();
+        self.emit(format!("{i0} = insertvalue {vll} undef, i64 {invalid_tag}, 0"));
+        self.emit(format!("{i1} = insertvalue {vll} {i0}, i64 {boxed_arr}, 1"));
+        self.emit(format!("store {vll} {i1}, ptr {resslot}"));
+        self.emit_term(format!("br label %{done_l}"));
+
+        self.emit_label(&done_l);
+        let r = self.fresh_tmp();
+        self.emit(format!("{r} = load {vll}, ptr {resslot}"));
+        Ok((r, Type::App("Validation".to_string(), vec![target])))
+    }
+
+    /// Materialize the shim's issue list into a Vela `Array<Issue>` value
+    /// (`{ ptr, i64, i64 }` of `{ ptr, ptr, ptr }` records).
+    fn build_issue_array(&mut self, issues: &str) -> Result<String, String> {
+        let n = self.fresh_tmp();
+        self.emit(format!("{n} = call i64 @__vela_issues_len(ptr {issues})"));
+        let szp = self.fresh_tmp();
+        let bytes = self.fresh_tmp();
+        self.emit(format!("{szp} = getelementptr {{ ptr, ptr, ptr }}, ptr null, i64 {n}"));
+        self.emit(format!("{bytes} = ptrtoint ptr {szp} to i64"));
+        let buf = self.fresh_tmp();
+        self.emit(format!("{buf} = call ptr @__vela_malloc(i64 {bytes})"));
+        let idx = self.fresh_alloca("i64");
+        self.emit(format!("store i64 0, ptr {idx}"));
+        let cond_l = self.fresh_label("iss.cond");
+        let body_l = self.fresh_label("iss.body");
+        let done_l = self.fresh_label("iss.done");
+        self.emit_term(format!("br label %{cond_l}"));
+        self.emit_label(&cond_l);
+        let i = self.fresh_tmp();
+        self.emit(format!("{i} = load i64, ptr {idx}"));
+        let more = self.fresh_tmp();
+        self.emit(format!("{more} = icmp slt i64 {i}, {n}"));
+        self.emit_term(format!("br i1 {more}, label %{body_l}, label %{done_l}"));
+        self.emit_label(&body_l);
+        let k = self.fresh_tmp();
+        let p = self.fresh_tmp();
+        let m = self.fresh_tmp();
+        self.emit(format!("{k} = call ptr @__vela_issue_key(ptr {issues}, i64 {i})"));
+        self.emit(format!("{p} = call ptr @__vela_issue_path(ptr {issues}, i64 {i})"));
+        self.emit(format!("{m} = call ptr @__vela_issue_msg(ptr {issues}, i64 {i})"));
+        let is0 = self.fresh_tmp();
+        let is1 = self.fresh_tmp();
+        let is2 = self.fresh_tmp();
+        self.emit(format!("{is0} = insertvalue {{ ptr, ptr, ptr }} undef, ptr {k}, 0"));
+        self.emit(format!("{is1} = insertvalue {{ ptr, ptr, ptr }} {is0}, ptr {p}, 1"));
+        self.emit(format!("{is2} = insertvalue {{ ptr, ptr, ptr }} {is1}, ptr {m}, 2"));
+        let slot = self.fresh_tmp();
+        self.emit(format!("{slot} = getelementptr {{ ptr, ptr, ptr }}, ptr {buf}, i64 {i}"));
+        self.emit(format!("store {{ ptr, ptr, ptr }} {is2}, ptr {slot}"));
+        let ni = self.fresh_tmp();
+        self.emit(format!("{ni} = add i64 {i}, 1"));
+        self.emit(format!("store i64 {ni}, ptr {idx}"));
+        self.emit_term(format!("br label %{cond_l}"));
+        self.emit_label(&done_l);
+        let a0 = self.fresh_tmp();
+        let a1 = self.fresh_tmp();
+        let a2 = self.fresh_tmp();
+        self.emit(format!("{a0} = insertvalue {{ ptr, i64, i64 }} undef, ptr {buf}, 0"));
+        self.emit(format!("{a1} = insertvalue {{ ptr, i64, i64 }} {a0}, i64 {n}, 1"));
+        self.emit(format!("{a2} = insertvalue {{ ptr, i64, i64 }} {a1}, i64 {n}, 2"));
+        Ok(a2)
+    }
 }
 
 /// Whether a pattern matches the tag-1 variant (`Some`/`Ok`). Only used on the
@@ -4836,6 +5924,72 @@ fn mangle_ty(t: &Type) -> String {
         Type::Logger => "Logger".into(),
         // Checker recovery sentinel; never reaches codegen in a valid program.
         Type::Err => "Err".into(),
+    }
+}
+
+/// Every string constant the generated JSON codec functions (RFC-0018) will
+/// reference: field keys, enum variant names, `expected <what>` phrases,
+/// `json.missing`/`validate` messages, and the fixed Issue keys. Seeded into
+/// the module string pool before the functions are emitted so `str_g` resolves.
+fn collect_codec_strings(program: &Program, types: &HashMap<String, TypeDecl>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for k in ["", "json.parse", "json.type", "json.missing", "validate"] {
+        out.push(k.to_string());
+    }
+    let mut seen: Vec<String> = Vec::new();
+    for t in &program.type_decls {
+        gather_codec_strings(&Type::Named(t.name.clone()), types, &mut out, &mut seen);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn push_uniq(out: &mut Vec<String>, s: String) {
+    if !out.contains(&s) {
+        out.push(s);
+    }
+}
+
+/// Walk a type collecting the codec's constant strings. `seen` breaks cycles
+/// (a record reachable through `Array<Self>`).
+fn gather_codec_strings(
+    ty: &Type,
+    types: &HashMap<String, TypeDecl>,
+    out: &mut Vec<String>,
+    seen: &mut Vec<String>,
+) {
+    push_uniq(out, vela_frontend::codec::expected_name(ty, types));
+    if let Type::Named(n) = ty {
+        if seen.contains(n) {
+            return;
+        }
+        if let Some(d) = types.get(n) {
+            seen.push(n.clone());
+            if d.predicate.is_some() {
+                push_uniq(out, vela_frontend::codec::validate_message(d));
+            }
+            gather_codec_strings(&d.base, types, out, seen);
+        }
+        return;
+    }
+    match vela_frontend::types::resolve(ty, types) {
+        Type::Record(fields) => {
+            for f in &fields {
+                push_uniq(out, f.name.clone());
+                push_uniq(out, vela_frontend::codec::missing_message(&f.name));
+                gather_codec_strings(&f.ty, types, out, seen);
+            }
+        }
+        Type::Enum(vs) => {
+            for v in &vs {
+                push_uniq(out, v.name.clone());
+            }
+        }
+        Type::Option(inner) | Type::Array(inner) | Type::ArrayN(inner, _) => {
+            gather_codec_strings(&inner, types, out, seen);
+        }
+        _ => {}
     }
 }
 

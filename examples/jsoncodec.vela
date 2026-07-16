@@ -1,0 +1,71 @@
+/// The JSON codec — RFC-0018. `toJson` / `fromJson`, where validated types earn
+/// their keep: decoding runs every `where` clause and reports failures as
+/// structured, accumulated `Issue`s (RFC-0009) instead of trapping.
+///
+///   toJson(x) -> String                      canonical, deterministic
+///   fromJson(TypeName, s) -> Validation<T>    never traps; every problem at once
+///
+/// Encoding is canonical: record fields in declaration order, no whitespace,
+/// numbers rendered exactly as Vela's `toString`, `None` fields omitted, a bare
+/// `Option` as `null`. Decoding ignores unknown fields, accepts absent-or-null
+/// for an `Option`, parses integers exactly, and accumulates one `Issue` per
+/// failure — each with a `key`, a dotted/indexed `path`, and a `message`.
+
+/// A validated age: the `where` clause runs on construction AND on decode.
+type Age = Int64 where value >= 0 && value <= 130
+
+/// A validated non-empty username.
+type Username = String where value.length >= 1
+
+/// A payload-less enum encodes to / decodes from a JSON string.
+type Role = | Guest | Member | Admin
+
+type User = { name: Username, age: Age, role: Role, nick: Option<String> }
+
+/// Print each accumulated Issue as `key | path | message` — the bytes here are
+/// identical under the interpreter, the native binary, and wasm.
+fn report(issues: Array<Issue>) -> Int64 {
+    let mut i = 0
+    for issue in issues {
+        print("\{issues[i].key} | \{issues[i].path} | \{issues[i].message}")
+        i = i + 1
+    }
+    return issues.length
+}
+
+fn showUser(u: User) -> Int64 {
+    print("decoded \{u.name}, age \{u.age.toString()}")
+    return 0
+}
+
+fn main() -> Int64 {
+    // Encode: canonical output, declaration order, `None` omitted.
+    let ada = User { name: "Ada", age: 36, role: Admin, nick: Some("Countess") }
+    print(toJson(ada))
+    let bob = User { name: "Bob", age: 41, role: Member, nick: None }
+    print(toJson(bob))
+
+    // Decode a good payload — unknown fields ignored, `nick` absent -> None.
+    let good = "{\"name\":\"Cid\",\"age\":29,\"role\":\"Guest\",\"team\":\"blue\"}"
+    let okCount = match fromJson(User, good) {
+        Valid(u) => showUser(u),
+        Invalid(issues) => report(issues),
+    }
+
+    // Decode a bad payload — every problem reported at once, in field order: an
+    // empty username fails its `where`, age 200 is out of range, role is not a
+    // known variant, and `nick` is simply absent (that is fine).
+    let bad = "{\"name\":\"\",\"age\":200,\"role\":\"Wizard\"}"
+    let badCount = match fromJson(User, bad) {
+        Valid(u) => 0,
+        Invalid(issues) => report(issues),
+    }
+
+    // Decode malformed JSON — a single `json.parse` Issue at the root.
+    let broken = match fromJson(User, "{ not json") {
+        Valid(u) => 0,
+        Invalid(issues) => report(issues),
+    }
+
+    return okCount + badCount + broken
+}

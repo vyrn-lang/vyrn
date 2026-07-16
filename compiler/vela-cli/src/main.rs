@@ -755,6 +755,7 @@ const RUNTIME_SHIM: &str = r#"
 /* MSVC's UCRT deprecates fopen in favor of fopen_s; the portable spelling is
    intentional (glibc and wasi-libc have no fopen_s), so silence the advisory. */
 #define _CRT_SECURE_NO_WARNINGS
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -899,6 +900,378 @@ int __vela_write_file(const char* path, const char* contents) {
     if (fclose(f) != 0) bad = 1;
     return bad ? 1 : 0;
 }
+
+/* ---- JSON codec runtime (RFC-0018) -------------------------------------- */
+/* A tagged JSON DOM plus a parser, canonical encoder, and a decode-side issue
+   accumulator. The per-type encode/decode functions are GENERATED as LLVM IR
+   (see vela-codegen); this shim owns the parity-critical string work — number
+   formatting, escaping, and the parser error wording — so the native output is
+   byte-identical to the interpreter's `crate::codec`. */
+
+enum { VJ_NULL = 0, VJ_BOOL = 1, VJ_NUM = 2, VJ_STR = 3, VJ_ARR = 4, VJ_OBJ = 5 };
+typedef struct VJ VJ;
+typedef struct { char* key; VJ* val; } VJMember;
+struct VJ {
+    int kind;
+    int bval;                                   /* VJ_BOOL */
+    char* text;                                 /* VJ_NUM verbatim / VJ_STR bytes */
+    int is_int;                                 /* VJ_NUM: integer syntax? */
+    VJ** items; unsigned long long nitems, capitems;   /* VJ_ARR */
+    VJMember* mem; unsigned long long nmem, capmem;     /* VJ_OBJ */
+};
+
+static char* __vela_dup(const char* s) {
+    unsigned long long n = strlen(s);
+    char* r = (char*)__vela_malloc(n + 1);
+    memcpy(r, s, n + 1);
+    return r;
+}
+static VJ* __vela_vj_new(int kind) {
+    VJ* v = (VJ*)__vela_malloc(sizeof(VJ));
+    v->kind = kind; v->bval = 0; v->text = 0; v->is_int = 0;
+    v->items = 0; v->nitems = 0; v->capitems = 0;
+    v->mem = 0; v->nmem = 0; v->capmem = 0;
+    return v;
+}
+VJ* __vela_vj_obj(void) { return __vela_vj_new(VJ_OBJ); }
+VJ* __vela_vj_arr(void) { return __vela_vj_new(VJ_ARR); }
+VJ* __vela_vj_null(void) { return __vela_vj_new(VJ_NULL); }
+VJ* __vela_vj_bool(int b) { VJ* v = __vela_vj_new(VJ_BOOL); v->bval = b ? 1 : 0; return v; }
+static VJ* __vela_vj_num_text(const char* t, int is_int) {
+    VJ* v = __vela_vj_new(VJ_NUM); v->text = __vela_dup(t); v->is_int = is_int; return v;
+}
+VJ* __vela_vj_int(long long x) {
+    char buf[32]; __vela_snprintf(buf, 32, "%lld", x); return __vela_vj_num_text(buf, 1);
+}
+VJ* __vela_vj_uint(unsigned long long x) {
+    char buf[32]; __vela_snprintf(buf, 32, "%llu", x); return __vela_vj_num_text(buf, 1);
+}
+VJ* __vela_vj_float(double x) {
+    /* NaN renders as `NaN` (matching the interpreter's Rust formatting). */
+    if (x != x) return __vela_vj_num_text("NaN", 0);
+    char buf[512]; __vela_snprintf(buf, 512, "%f", x); return __vela_vj_num_text(buf, 0);
+}
+VJ* __vela_vj_str(const char* s) { VJ* v = __vela_vj_new(VJ_STR); v->text = __vela_dup(s); return v; }
+void __vela_vj_push(VJ* a, VJ* c) {
+    if (a->nitems + 1 > a->capitems) {
+        a->capitems = a->capitems ? a->capitems * 2 : 4;
+        a->items = (VJ**)__vela_realloc(a->items, a->capitems * sizeof(VJ*));
+    }
+    a->items[a->nitems++] = c;
+}
+void __vela_vj_set(VJ* o, const char* key, VJ* c) {
+    if (o->nmem + 1 > o->capmem) {
+        o->capmem = o->capmem ? o->capmem * 2 : 4;
+        o->mem = (VJMember*)__vela_realloc(o->mem, o->capmem * sizeof(VJMember));
+    }
+    o->mem[o->nmem].key = __vela_dup(key);
+    o->mem[o->nmem].val = c;
+    o->nmem++;
+}
+
+/* ---- growable byte buffer (encoder) ------------------------------------- */
+typedef struct { char* p; unsigned long long len, cap; } VSB;
+static void vsb_init(VSB* s) { s->cap = 64; s->len = 0; s->p = (char*)__vela_malloc(s->cap); s->p[0] = 0; }
+static void vsb_ensure(VSB* s, unsigned long long extra) {
+    if (s->len + extra + 1 > s->cap) {
+        while (s->len + extra + 1 > s->cap) s->cap *= 2;
+        s->p = (char*)__vela_realloc(s->p, s->cap);
+    }
+}
+static void vsb_putc(VSB* s, char c) { vsb_ensure(s, 1); s->p[s->len++] = c; s->p[s->len] = 0; }
+static void vsb_puts(VSB* s, const char* t) {
+    unsigned long long n = strlen(t); vsb_ensure(s, n); memcpy(s->p + s->len, t, n); s->len += n; s->p[s->len] = 0;
+}
+static void vsb_escape(VSB* s, const char* t) {
+    vsb_putc(s, '"');
+    for (const unsigned char* q = (const unsigned char*)t; *q; q++) {
+        unsigned char c = *q;
+        if (c == '"') vsb_puts(s, "\\\"");
+        else if (c == '\\') vsb_puts(s, "\\\\");
+        else if (c == '\n') vsb_puts(s, "\\n");
+        else if (c == '\t') vsb_puts(s, "\\t");
+        else if (c == '\r') vsb_puts(s, "\\r");
+        else if (c < 0x20) { char b[8]; __vela_snprintf(b, 8, "\\u%04x", (unsigned)c); vsb_puts(s, b); }
+        else vsb_putc(s, (char)c);
+    }
+    vsb_putc(s, '"');
+}
+static void __vela_vj_write(VSB* s, VJ* v) {
+    unsigned long long i;
+    switch (v->kind) {
+        case VJ_NULL: vsb_puts(s, "null"); break;
+        case VJ_BOOL: vsb_puts(s, v->bval ? "true" : "false"); break;
+        case VJ_NUM: vsb_puts(s, v->text); break;
+        case VJ_STR: vsb_escape(s, v->text); break;
+        case VJ_ARR:
+            vsb_putc(s, '[');
+            for (i = 0; i < v->nitems; i++) { if (i) vsb_putc(s, ','); __vela_vj_write(s, v->items[i]); }
+            vsb_putc(s, ']');
+            break;
+        default: /* VJ_OBJ */
+            vsb_putc(s, '{');
+            for (i = 0; i < v->nmem; i++) {
+                if (i) vsb_putc(s, ',');
+                vsb_escape(s, v->mem[i].key);
+                vsb_putc(s, ':');
+                __vela_vj_write(s, v->mem[i].val);
+            }
+            vsb_putc(s, '}');
+            break;
+    }
+}
+char* __vela_vj_encode(VJ* v) { VSB s; vsb_init(&s); __vela_vj_write(&s, v); return s.p; }
+
+/* ---- parser (byte positions; wording mirrors crate::codec) -------------- */
+typedef struct { const char* b; unsigned long long i, n; char* err; } VJP;
+static void vjp_err_pos(VJP* p, const char* what) {
+    char buf[64]; __vela_snprintf(buf, 64, "%s at position %llu", what, p->i);
+    p->err = __vela_dup(buf);
+}
+static void vjp_err_end(VJP* p) { p->err = __vela_dup("unexpected end of input"); }
+static void vjp_ws(VJP* p) {
+    while (p->i < p->n) {
+        char c = p->b[p->i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') p->i++; else break;
+    }
+}
+static int vjp_hex(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+static VJ* vjp_value(VJP* p);
+static char* vjp_string(VJP* p) {
+    p->i++;                                     /* opening quote */
+    VSB s; vsb_init(&s);
+    for (;;) {
+        if (p->i >= p->n) { vjp_err_end(p); return 0; }
+        unsigned char c = (unsigned char)p->b[p->i];
+        if (c == '"') { p->i++; return s.p; }
+        if (c == '\\') {
+            p->i++;
+            if (p->i >= p->n) { vjp_err_end(p); return 0; }
+            char e = p->b[p->i];
+            if (e == '"') vsb_putc(&s, '"');
+            else if (e == '\\') vsb_putc(&s, '\\');
+            else if (e == '/') vsb_putc(&s, '/');
+            else if (e == 'n') vsb_putc(&s, '\n');
+            else if (e == 't') vsb_putc(&s, '\t');
+            else if (e == 'r') vsb_putc(&s, '\r');
+            else if (e == 'b') vsb_putc(&s, '\b');
+            else if (e == 'f') vsb_putc(&s, '\f');
+            else if (e == 'u') {
+                unsigned int cp = 0; int k;
+                for (k = 0; k < 4; k++) {
+                    p->i++;
+                    if (p->i >= p->n) { vjp_err_end(p); return 0; }
+                    int h = vjp_hex((unsigned char)p->b[p->i]);
+                    if (h < 0) { vjp_err_pos(p, "unexpected character"); return 0; }
+                    cp = cp * 16 + (unsigned)h;
+                }
+                if (cp >= 0xD800 && cp <= 0xDFFF) { vjp_err_pos(p, "unexpected character"); return 0; }
+                if (cp < 0x80) vsb_putc(&s, (char)cp);
+                else if (cp < 0x800) {
+                    vsb_putc(&s, (char)(0xC0 | (cp >> 6)));
+                    vsb_putc(&s, (char)(0x80 | (cp & 0x3F)));
+                } else {
+                    vsb_putc(&s, (char)(0xE0 | (cp >> 12)));
+                    vsb_putc(&s, (char)(0x80 | ((cp >> 6) & 0x3F)));
+                    vsb_putc(&s, (char)(0x80 | (cp & 0x3F)));
+                }
+            } else { vjp_err_pos(p, "unexpected character"); return 0; }
+            p->i++;
+        } else if (c < 0x20) { vjp_err_pos(p, "unexpected character"); return 0; }
+        else { vsb_putc(&s, (char)c); p->i++; }
+    }
+}
+static int vjp_isdigit(VJP* p) { return p->i < p->n && p->b[p->i] >= '0' && p->b[p->i] <= '9'; }
+static VJ* vjp_num(VJP* p) {
+    unsigned long long start = p->i;
+    int is_int = 1;
+    if (p->i < p->n && p->b[p->i] == '-') p->i++;
+    if (!vjp_isdigit(p)) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
+    while (vjp_isdigit(p)) p->i++;
+    if (p->i < p->n && p->b[p->i] == '.') {
+        is_int = 0; p->i++;
+        if (!vjp_isdigit(p)) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
+        while (vjp_isdigit(p)) p->i++;
+    }
+    if (p->i < p->n && (p->b[p->i] == 'e' || p->b[p->i] == 'E')) {
+        is_int = 0; p->i++;
+        if (p->i < p->n && (p->b[p->i] == '+' || p->b[p->i] == '-')) p->i++;
+        if (!vjp_isdigit(p)) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
+        while (vjp_isdigit(p)) p->i++;
+    }
+    unsigned long long len = p->i - start;
+    char* t = (char*)__vela_malloc(len + 1);
+    memcpy(t, p->b + start, len); t[len] = 0;
+    return __vela_vj_num_text(t, is_int);
+}
+static VJ* vjp_lit(VJP* p, const char* word, VJ* v) {
+    for (const char* w = word; *w; w++) {
+        if (p->i >= p->n) { vjp_err_end(p); return 0; }
+        if (p->b[p->i] != *w) { vjp_err_pos(p, "unexpected character"); return 0; }
+        p->i++;
+    }
+    return v;
+}
+static VJ* vjp_obj(VJP* p) {
+    p->i++;                                     /* '{' */
+    VJ* o = __vela_vj_obj();
+    vjp_ws(p);
+    if (p->i < p->n && p->b[p->i] == '}') { p->i++; return o; }
+    for (;;) {
+        vjp_ws(p);
+        if (!(p->i < p->n && p->b[p->i] == '"')) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
+        char* k = vjp_string(p);
+        if (!k) return 0;
+        vjp_ws(p);
+        if (!(p->i < p->n && p->b[p->i] == ':')) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
+        p->i++;
+        vjp_ws(p);
+        VJ* v = vjp_value(p);
+        if (!v) return 0;
+        __vela_vj_set(o, k, v);
+        vjp_ws(p);
+        if (p->i < p->n && p->b[p->i] == ',') { p->i++; continue; }
+        if (p->i < p->n && p->b[p->i] == '}') { p->i++; return o; }
+        if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character");
+        return 0;
+    }
+}
+static VJ* vjp_arr(VJP* p) {
+    p->i++;                                     /* '[' */
+    VJ* a = __vela_vj_arr();
+    vjp_ws(p);
+    if (p->i < p->n && p->b[p->i] == ']') { p->i++; return a; }
+    for (;;) {
+        vjp_ws(p);
+        VJ* v = vjp_value(p);
+        if (!v) return 0;
+        __vela_vj_push(a, v);
+        vjp_ws(p);
+        if (p->i < p->n && p->b[p->i] == ',') { p->i++; continue; }
+        if (p->i < p->n && p->b[p->i] == ']') { p->i++; return a; }
+        if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character");
+        return 0;
+    }
+}
+static VJ* vjp_value(VJP* p) {
+    if (p->i >= p->n) { vjp_err_end(p); return 0; }
+    char c = p->b[p->i];
+    if (c == '{') return vjp_obj(p);
+    if (c == '[') return vjp_arr(p);
+    if (c == '"') { char* s = vjp_string(p); if (!s) return 0; return __vela_vj_str(s); }
+    if (c == 't') return vjp_lit(p, "true", __vela_vj_bool(1));
+    if (c == 'f') return vjp_lit(p, "false", __vela_vj_bool(0));
+    if (c == 'n') return vjp_lit(p, "null", __vela_vj_null());
+    if (c == '-' || (c >= '0' && c <= '9')) return vjp_num(p);
+    vjp_err_pos(p, "unexpected character");
+    return 0;
+}
+VJ* __vela_json_parse(const char* src, char** errout) {
+    VJP p; p.b = src; p.i = 0; p.n = strlen(src); p.err = 0;
+    vjp_ws(&p);
+    VJ* v = vjp_value(&p);
+    if (!v) { *errout = p.err; return 0; }
+    vjp_ws(&p);
+    if (p.i != p.n) { vjp_err_pos(&p, "trailing characters"); *errout = p.err; return 0; }
+    return v;
+}
+
+/* ---- decode-side accessors + issue accumulator -------------------------- */
+int __vela_vj_kind(VJ* v) { return v->kind; }
+VJ* __vela_vj_get(VJ* o, const char* key) {
+    unsigned long long i;
+    for (i = 0; i < o->nmem; i++) if (strcmp(o->mem[i].key, key) == 0) return o->mem[i].val;
+    return 0;
+}
+int __vela_vj_bool_get(VJ* v) { return v->bval; }
+long long __vela_vj_len(VJ* a) { return (long long)a->nitems; }
+VJ* __vela_vj_at(VJ* a, long long i) { return a->items[i]; }
+const char* __vela_vj_str_get(VJ* v) { return v->text; }
+/* Parse a number node into an integer target: 0 ok (*out set), 1 rejected
+   (non-integer syntax, or out of range for the width/signedness). */
+int __vela_vj_asint(VJ* v, int bits, int is_signed, long long* out) {
+    if (v->kind != VJ_NUM || !v->is_int) return 1;
+    char* end;
+    if (is_signed) {
+        errno = 0;
+        long long x = strtoll(v->text, &end, 10);
+        if (errno != 0 || *end != 0) return 1;
+        if (bits < 64) {
+            long long mx = (1LL << (bits - 1)) - 1;
+            long long mn = -(1LL << (bits - 1));
+            if (x < mn || x > mx) return 1;
+        }
+        *out = x;
+        return 0;
+    }
+    if (v->text[0] == '-') return 1;
+    errno = 0;
+    unsigned long long x = strtoull(v->text, &end, 10);
+    if (errno != 0 || *end != 0) return 1;
+    if (bits < 64) {
+        unsigned long long mx = (1ULL << bits) - 1ULL;
+        if (x > mx) return 1;
+    }
+    *out = (long long)x;
+    return 0;
+}
+double __vela_vj_asfloat(VJ* v) { return strtod(v->text, 0); }
+const char* __vela_vj_kindname(int kind) {
+    switch (kind) {
+        case VJ_NULL: return "null";
+        case VJ_BOOL: return "boolean";
+        case VJ_NUM: return "number";
+        case VJ_STR: return "string";
+        case VJ_ARR: return "array";
+        default: return "object";
+    }
+}
+/* `expected <what>, found <kind>` — the runtime half of a `json.type` Issue. */
+char* __vela_json_type_msg(const char* expected, int kind) {
+    const char* found = __vela_vj_kindname(kind);
+    unsigned long long n = strlen("expected , found ") + strlen(expected) + strlen(found) + 1;
+    char* r = (char*)__vela_malloc(n);
+    __vela_snprintf(r, n, "expected %s, found %s", expected, found);
+    return r;
+}
+char* __vela_json_field_path(const char* parent, const char* field) {
+    if (parent[0] == 0) return __vela_dup(field);
+    unsigned long long n = strlen(parent) + 1 + strlen(field) + 1;
+    char* r = (char*)__vela_malloc(n);
+    __vela_snprintf(r, n, "%s.%s", parent, field);
+    return r;
+}
+char* __vela_json_index_path(const char* parent, long long i) {
+    unsigned long long n = strlen(parent) + 2 + 24 + 1;
+    char* r = (char*)__vela_malloc(n);
+    __vela_snprintf(r, n, "%s[%lld]", parent, i);
+    return r;
+}
+typedef struct { char* key; char* path; char* message; } VIssue;
+typedef struct { VIssue* items; unsigned long long n, cap; } VIssues;
+VIssues* __vela_issues_new(void) {
+    VIssues* s = (VIssues*)__vela_malloc(sizeof(VIssues));
+    s->items = 0; s->n = 0; s->cap = 0; return s;
+}
+void __vela_issues_push(VIssues* s, const char* key, const char* path, const char* message) {
+    if (s->n + 1 > s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 4;
+        s->items = (VIssue*)__vela_realloc(s->items, s->cap * sizeof(VIssue));
+    }
+    s->items[s->n].key = __vela_dup(key);
+    s->items[s->n].path = __vela_dup(path);
+    s->items[s->n].message = __vela_dup(message);
+    s->n++;
+}
+long long __vela_issues_len(VIssues* s) { return (long long)s->n; }
+const char* __vela_issue_key(VIssues* s, long long i) { return s->items[i].key; }
+const char* __vela_issue_path(VIssues* s, long long i) { return s->items[i].path; }
+const char* __vela_issue_msg(VIssues* s, long long i) { return s->items[i].message; }
 
 /* The real C entry point: every target's crt (MSVC, glibc, wasi-libc) knows
    how to call a plain C main; the IR only exports vela_entry. argv is stashed
