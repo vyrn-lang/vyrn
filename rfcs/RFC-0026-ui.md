@@ -1,6 +1,10 @@
 # RFC-0026 — The UI Layer: `std/html`, Pages, Components, and Compiled Reactivity
 
-- **Status:** Draft (design locked, implementation staged M1→M4; M5+ deferred)
+- **Status:** Implemented — M1–M4 shipped (see the per-milestone as-landed
+  notes); M5+ remains deferred by design. One deviation: `.vyx` **pages**
+  took the RFC's sanctioned fallback (`components` shipped standalone;
+  `.vyrn` pages compose `.vyx` components — see the M4 notes for why the
+  loader/Params call convention doesn't fit a pure template).
 - **Depends on:** RFC-0012 (extern, both directions), RFC-0013 (module state +
   host-owns-the-loop), RFC-0016 (`serve`/`handle`), RFC-0018/0024 (the codec —
   the view tree crosses the boundary as a codable enum), RFC-0019 (`std/rpc` —
