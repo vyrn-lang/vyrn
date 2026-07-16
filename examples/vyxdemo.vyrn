@@ -1,0 +1,52 @@
+/// Single-file `.vyx` components as a library (RFC-0026 M4) on generator imports
+/// (RFC-0021). `components("./vyxcomp")` compiles every `<Name>.vyx` in the
+/// directory into ONE module of pure view functions; sibling tags (`<Row/>` in
+/// `List`) resolve internally. Because the views are pure, rendering them to a
+/// string with `toHtmlString` is an ordinary interp == native == wasm parity
+/// citizen — the SSR string is the parity surface.
+///
+///   examples/vyxcomp/Row.vyx    → fn row(item)            (if/else-if/else, @click, @input, dynamic class, helper)
+///   examples/vyxcomp/Listing.vyx → fn listing(items)       (keyed {#for}, component nesting)
+///   examples/vyxcomp/Panel.vyx  → fn panel(title, children) ({@raw}, {children})
+///
+/// Inspect the synthesized module with:  vyrn emit-gen examples/vyxdemo.vyrn
+import { components } from "std/vyx"
+import { row, listing, panel } from components("./vyxcomp")
+import { toHtmlString, Html } from "std/html"
+import { Item } from "./vyxcomp/models"
+
+fn demo() -> Html {
+    let items: Array<Item> = [
+        Item { id: 1, name: "Widget", qty: 9, tag: "a" },
+        Item { id: 2, name: "Gadget", qty: 1, tag: "b" },
+        Item { id: 3, name: "Gizmo", qty: 3, tag: "c" },
+    ]
+    return panel("Inventory", [listing(items)])
+}
+
+fn main() -> Int64 {
+    print(toHtmlString(demo()))
+    return 0
+}
+
+test "the compiled components render the expected SSR string" {
+    let html = toHtmlString(demo())
+    // Component nesting + {children}: Panel wraps the List.
+    assert(html.contains("<section class=\"panel\">"))
+    assert(html.contains("<h2 class=\"title\">Inventory</h2>"))
+    // {@raw} passes markup through unescaped.
+    assert(html.contains("<hr class=\"sep\"/>"))
+    // Keyed {#for} emits a data-key per item, in order.
+    assert(html.contains("<li class=\"row\" data-key=\"1\">"))
+    assert(html.contains("data-key=\"2\""))
+    assert(html.contains("data-key=\"3\""))
+    // if / else-if / else, one branch per quantity.
+    assert(html.contains("lots (9)"))
+    assert(html.contains("last one"))
+    assert(html.contains("3 left"))
+    // @click with an Int64 arg and @input, lowered to the data-on/data-arg ABI.
+    assert(html.contains("data-on-click=\"removeRow\" data-arg-click=\"1\""))
+    assert(html.contains("data-on-input=\"setQty\""))
+    // A dynamic class computed by a pass-through helper.
+    assert(html.contains("<em class=\"hot\">"))
+}

@@ -1,0 +1,20 @@
+<script>
+props { item: Item }
+import { Item } from "./models"
+
+fn qtyClass(q: Int64) -> String {
+    if q > 5 {
+        return "hot"
+    }
+    return "cool"
+}
+</script>
+
+<template>
+<li class="row">
+    <span class="name">{item.name}</span>
+    {#if item.qty > 5}<em class={qtyClass(item.qty)}>lots ({item.qty})</em>{:else if item.qty == 1}<em class="one">last one</em>{:else}<em class="some">{item.qty} left</em>{/if}
+    <button class="rm" @click="removeRow(item.id)">remove</button>
+    <input class="q" @input="setQty(item.name)"/>
+</li>
+</template>

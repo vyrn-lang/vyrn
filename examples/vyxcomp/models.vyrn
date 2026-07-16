@@ -1,0 +1,6 @@
+/// The shared record type for the `.vyx` component demo (RFC-0026 M4). Lives in
+/// the component directory so the generator's rebased `./models` import and the
+/// app's `./vyxcomp/models` import resolve to the same module; it is not scanned
+/// (only `.vyx` files are) and not a top-level example (so the parity harness
+/// never runs it directly).
+export type Item = { id: Int64, name: String, qty: Int64, tag: String }

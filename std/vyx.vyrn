@@ -1,0 +1,1625 @@
+/// std/vyx — the `.vyx` single-file component compiler (RFC-0026 M4), a template
+/// compiler written in comptime-pure Vyrn on RFC-0021 generator imports. One
+/// `gen fn`, `components(dir)`, reads every `<Name>.vyx` file in `dir` at compile
+/// time (sandboxed, deterministic, cached), parses its `<script>`/`<template>`
+/// sections with a byte-walking parser (the ICU parser's big sibling), and
+/// synthesizes ONE module exporting one pure view function per component. The
+/// compiler knows nothing about templates — everything below is plain Vyrn over
+/// `listDir`/`readFile` (RFC-0021) emitting `std/html` (RFC-0026 M1) hyperscript.
+///
+///   import { components } from "std/vyx"
+///   import { itemRow, cart } from components("./components")
+///
+/// This is a SIBLING file to `std/ui` (the pages router), not a section of it, on
+/// purpose: the router and the template compiler are two independent libraries on
+/// the same mechanism, each large enough to read on its own, and their generated
+/// helpers live in separate namespaces (`ui`-prefixed vs `vyx`-prefixed) so the
+/// two never intermix. `std/ui`'s `pages` calls into this file only for the
+/// optional `.vyx`-page sugar (see `vyxCompileComponent`, exported).
+///
+/// A `.vyx` file has two sections:
+///   <script>   — an optional `props { name: Type, … }` block (the view fn's
+///                parameters), optional `import { … } from "…"` lines (passed
+///                through, relative paths REBASED so they resolve from the
+///                synthesized module), and optional plain `fn` helpers (passed
+///                through, module-internal).
+///   <template> — exactly ONE root element, compiled to the view fn body.
+///
+/// Template grammar (locked, RFC-0026 M4):
+///   {expr}                      → text((expr).toString())     (always escaped)
+///   {@raw expr}                 → Raw(expr)                    (NOT escaped)
+///   {children}                  → splices the trailing children param
+///   {#if c} … {:else if c} … {:else} … {/if}   → nested Empty-elided conditionals
+///   {#for x in xs key={k}} … {/for}            → keyed loop (key REQUIRED)
+///   <Capitalized p={e}/> / <Capitalized>…</Capitalized>  → sibling component call
+///   @click="handler(scalar)" (also @input/@change/@submit/@keydown)
+///                               → On(event, "handler", (scalar).toString())
+///   class="…" / class={e}       → Cls;  other="…" / other={e} → A(name, …)
+///
+/// Every generation failure is an identifier-carrying load diagnostic naming the
+/// `.vyx` file and line (the std/ui / std/rpc convention). Inspect the whole
+/// synthesized module with:  vyrn emit-gen <file>
+
+// ===========================================================================
+// Byte / string helpers — all comptime-pure, legal in a `gen fn` and its callees.
+// ===========================================================================
+
+/// The bytes `ba[s..e)` as a String ("" on the impossible non-UTF-8 slice).
+fn vyxSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
+    let mut out: Array<UInt8> = []
+    let mut i = s
+    while i < e {
+        out.push(ba[i])
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(err) => "",
+    }
+}
+
+/// True for an ASCII space, tab, CR, or LF.
+fn vyxIsWs(b: UInt8) -> Bool {
+    return b == 32 || b == 9 || b == 10 || b == 13
+}
+
+/// True for an ASCII letter, digit, or `_` (identifier bytes).
+fn vyxIsIdent(b: UInt8) -> Bool {
+    return (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) || b == 95
+}
+
+/// `s` with leading and trailing ASCII whitespace removed.
+fn vyxTrim(s: String) -> String {
+    let ba = bytes(s)
+    let mut start = 0
+    let mut found = false
+    let mut i = 0
+    while i < ba.length && found == false {
+        if vyxIsWs(ba[i]) {
+            i = i + 1
+        } else {
+            start = i
+            found = true
+        }
+    }
+    if found == false {
+        return ""
+    }
+    let mut end = ba.length
+    let mut moving = true
+    while moving {
+        if end > start && vyxIsWs(ba[end - 1]) {
+            end = end - 1
+        } else {
+            moving = false
+        }
+    }
+    return vyxSlice(ba, start, end)
+}
+
+/// Lowercase the first ASCII byte of `s` (`ItemRow` → `itemRow`).
+fn vyxLowerFirst(s: String) -> String {
+    let ba = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    for b in ba {
+        if i == 0 && b >= 65 && b <= 90 {
+            out.push(b + 32)
+        } else {
+            out.push(b)
+        }
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(err) => s,
+    }
+}
+
+/// `key` with every non-identifier byte turned into `_`, so a file path is a
+/// legal identifier fragment inside a load-diagnostic name.
+fn vyxIdentOf(key: String) -> String {
+    let ba = bytes(key)
+    let mut out: Array<UInt8> = []
+    for b in ba {
+        if vyxIsIdent(b) {
+            out.push(b)
+        } else {
+            out.push(95)
+        }
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(err) => "id",
+    }
+}
+
+/// Whether `arr` contains `x`.
+fn vyxContains(arr: Array<String>, x: String) -> Bool {
+    for s in arr {
+        if s == x {
+            return true
+        }
+    }
+    return false
+}
+
+/// `arr` with `s` appended (value semantics — the input is unchanged).
+fn vyxAppend(arr: Array<String>, s: String) -> Array<String> {
+    let mut out = arr
+    out.push(s)
+    return out
+}
+
+/// Join `parts` with `sep` between them.
+fn vyxJoin(parts: Array<String>, sep: String) -> String {
+    let mut out = ""
+    let mut i = 0
+    for p in parts {
+        if i > 0 {
+            out = out + sep
+        }
+        out = out + p
+        i = i + 1
+    }
+    return out
+}
+
+/// The 1-based line number of byte offset `off` within `ba` (newlines before it).
+fn vyxLineAt(ba: Array<UInt8>, off: Int64) -> Int64 {
+    let mut line = 1
+    let mut i = 0
+    while i < off && i < ba.length {
+        if ba[i] == 10 {
+            line = line + 1
+        }
+        i = i + 1
+    }
+    return line
+}
+
+// ---- emitting Vyrn source: escape a raw string as a `"…"` literal -----------
+
+/// The second byte of a Vyrn string-literal escape for `b`, or 0 when `b` needs
+/// no escaping.
+fn vyxEscSecond(b: UInt8) -> UInt8 {
+    if b == 92 {
+        return 92
+    }
+    if b == 34 {
+        return 34
+    }
+    if b == 10 {
+        return 110
+    }
+    if b == 13 {
+        return 114
+    }
+    if b == 9 {
+        return 116
+    }
+    return 0
+}
+
+/// `raw` wrapped and escaped as a Vyrn string literal (quotes included). UTF-8
+/// bytes pass through untouched, so template text is embedded verbatim.
+fn vyxStrLit(raw: String) -> String {
+    let ba = bytes(raw)
+    let mut out: Array<UInt8> = []
+    out.push(34)
+    for b in ba {
+        let s = vyxEscSecond(b)
+        if s == 0 {
+            out.push(b)
+        } else {
+            out.push(92)
+            out.push(s)
+        }
+    }
+    out.push(34)
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(err) => "\"\"",
+    }
+}
+
+// ---- substring search + slicing over the raw file bytes ---------------------
+
+/// The index of the first occurrence of `needle` in `ba` at or after `from`, or
+/// -1 when absent.
+fn vyxFind(ba: Array<UInt8>, needle: Array<UInt8>, from: Int64) -> Int64 {
+    if needle.length == 0 {
+        return from
+    }
+    let mut i = from
+    while i + needle.length <= ba.length {
+        let mut j = 0
+        let mut ok = true
+        while j < needle.length && ok {
+            if ba[i + j] != needle[j] {
+                ok = false
+            }
+            j = j + 1
+        }
+        if ok {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+/// Collapse each run of ASCII whitespace in `s` to a single space (interior runs
+/// become one space; a single leading/trailing space survives). An all-whitespace
+/// run collapses to a single space, which the caller drops.
+fn vyxCollapseWs(s: String) -> String {
+    let ba = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut inWs = false
+    for b in ba {
+        if vyxIsWs(b) {
+            if inWs == false {
+                out.push(32)
+                inWs = true
+            }
+        } else {
+            out.push(b)
+            inWs = false
+        }
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(err) => s,
+    }
+}
+
+// ===========================================================================
+// The template AST — a self-recursive node tree (the checker carries the
+// recursion; RFC-0026 M1's `Html` proves the shape). All line numbers are
+// ABSOLUTE byte-line positions in the `.vyx` file, so diagnostics and emit-gen
+// origin comments name the source line.
+// ===========================================================================
+
+/// One attribute on a template element. `dyn` = braced `{expr}` value; `evt` = an
+/// `@event` binding (its `name` has the `@` stripped).
+type VyxAttr = { name: String, value: String, dyn: Bool, evt: Bool, line: Int64 }
+
+/// A node in a parsed template.
+type VyxNode =
+    | VNText(String)
+    | VNInterp(String, Int64)
+    | VNRaw(String, Int64)
+    | VNChildren
+    | VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64)
+    | VNIf(Array<String>, Array<VyxBody>, VyxBody, Bool)
+    | VNFor(String, String, String, Array<VyxNode>, Int64)
+
+/// A node-list wrapper, so an `Array<VyxNode>` can nest inside another node's
+/// payload (an if-chain's per-branch bodies) without an `Array<Array<…>>`.
+type VyxBody = { nodes: Array<VyxNode> }
+
+// ===========================================================================
+// Brace-block reader — classify a `{…}` token and find its end (quote-aware, so a
+// `}` inside an expression string literal does not close the block early).
+// ===========================================================================
+
+/// A classified brace token: `kind` ∈ interp | raw | children | if | for |
+/// elseif | else | endif | endfor; `inner` is the relevant payload (expression,
+/// condition, or `#for` header); `next` is the index past the closing `}`.
+type VyxBrace = { kind: String, inner: String, next: Int64, err: String }
+
+/// The index just past the `}` matching the `{` at `open`. Skips `"…"` string
+/// literals (with `\"` escapes) so their braces are ignored. Returns `e` (with no
+/// match) when the block is unterminated.
+fn vyxMatchBrace(ba: Array<UInt8>, open: Int64, e: Int64) -> Int64 {
+    let mut depth = 0
+    let mut i = open
+    while i < e {
+        let b = ba[i]
+        if b == 34 {
+            i = i + 1
+            while i < e && ba[i] != 34 {
+                if ba[i] == 92 {
+                    i = i + 1
+                }
+                i = i + 1
+            }
+            i = i + 1
+        } else if b == 123 {
+            depth = depth + 1
+            i = i + 1
+        } else if b == 125 {
+            depth = depth - 1
+            i = i + 1
+            if depth == 0 {
+                return i
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    return e
+}
+
+/// Whether `s` begins with `p` (byte-wise).
+fn vyxStarts(s: String, p: String) -> Bool {
+    return s.startsWith(p)
+}
+
+/// `s` with its first `n` bytes dropped, trimmed.
+fn vyxAfter(s: String, n: Int64) -> String {
+    let ba = bytes(s)
+    return vyxTrim(vyxSlice(ba, n, ba.length))
+}
+
+/// Read and classify the brace block whose `{` is at `i`.
+fn vyxReadBrace(ba: Array<UInt8>, i: Int64, e: Int64) -> VyxBrace {
+    let close = vyxMatchBrace(ba, i, e)
+    if close > e || (close == e && (e == 0 || ba[e - 1] != 125)) {
+        return VyxBrace { kind: "err", inner: "", next: e, err: "unterminated" }
+    }
+    let innerRaw = vyxSlice(ba, i + 1, close - 1)
+    let t = vyxTrim(innerRaw)
+    if vyxStarts(t, "#if") {
+        return VyxBrace { kind: "if", inner: vyxAfter(t, 3), next: close, err: "" }
+    }
+    if vyxStarts(t, "#for") {
+        return VyxBrace { kind: "for", inner: vyxAfter(t, 4), next: close, err: "" }
+    }
+    if vyxStarts(t, ":else if") {
+        return VyxBrace { kind: "elseif", inner: vyxAfter(t, 8), next: close, err: "" }
+    }
+    if t == ":else" {
+        return VyxBrace { kind: "else", inner: "", next: close, err: "" }
+    }
+    if vyxStarts(t, "/if") {
+        return VyxBrace { kind: "endif", inner: "", next: close, err: "" }
+    }
+    if vyxStarts(t, "/for") {
+        return VyxBrace { kind: "endfor", inner: "", next: close, err: "" }
+    }
+    if vyxStarts(t, "@raw") {
+        return VyxBrace { kind: "raw", inner: vyxAfter(t, 4), next: close, err: "" }
+    }
+    if t == "children" {
+        return VyxBrace { kind: "children", inner: "", next: close, err: "" }
+    }
+    return VyxBrace { kind: "interp", inner: t, next: close, err: "" }
+}
+
+// ===========================================================================
+// The parser — recursive descent over the template section. `parseNodes` reads a
+// run of sibling nodes until a stop token (a `</…>` close tag, or an `{:else…}` /
+// `{/…}` control token) and reports which one via `stop`, leaving `next` AT the
+// stop token for the caller to consume.
+// ===========================================================================
+
+/// The result of parsing a run of sibling nodes.
+type VyxParse = { nodes: Array<VyxNode>, next: Int64, stop: String, err: String }
+
+/// The result of parsing one element's or component's opening tag attributes.
+type VyxAttrs = { attrs: Array<VyxAttr>, next: Int64, selfClose: Bool, err: String }
+
+/// A tag name plus whether its first letter is uppercase (a component).
+type VyxTag = { name: String, isComp: Bool, next: Int64 }
+
+/// Read a tag name starting at `i` (just past `<`).
+fn vyxReadTagName(ba: Array<UInt8>, i: Int64, e: Int64) -> VyxTag {
+    let mut j = i
+    while j < e && (vyxIsIdent(ba[j]) || ba[j] == 45) {
+        j = j + 1
+    }
+    let name = vyxSlice(ba, i, j)
+    let isComp = name.length > 0 && bytes(name)[0] >= 65 && bytes(name)[0] <= 90
+    return VyxTag { name: name, isComp: isComp, next: j }
+}
+
+/// Parse a tag's attributes, starting at `i` (just past the tag name), up to the
+/// closing `>` or `/>`.
+fn vyxParseAttrs(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxAttrs {
+    let mut attrs: Array<VyxAttr> = []
+    let mut j = i
+    while j < e {
+        while j < e && vyxIsWs(ba[j]) {
+            j = j + 1
+        }
+        if j >= e {
+            return VyxAttrs { attrs: attrs, next: j, selfClose: false, err: vyxErr("VYX_UNCLOSED_TAG", fileId, vyxLineAt(ba, i)) }
+        }
+        if ba[j] == 62 {
+            return VyxAttrs { attrs: attrs, next: j + 1, selfClose: false, err: "" }
+        }
+        if ba[j] == 47 {
+            if j + 1 < e && ba[j + 1] == 62 {
+                return VyxAttrs { attrs: attrs, next: j + 2, selfClose: true, err: "" }
+            }
+            j = j + 1
+        } else {
+            let attrLine = vyxLineAt(ba, j)
+            let evt = ba[j] == 64
+            let mut nameStart = j
+            if evt {
+                nameStart = j + 1
+            }
+            let mut k = nameStart
+            while k < e && (vyxIsIdent(ba[k]) || ba[k] == 45) {
+                k = k + 1
+            }
+            let name = vyxSlice(ba, nameStart, k)
+            // Skip whitespace before a possible `=`.
+            let mut m = k
+            while m < e && vyxIsWs(ba[m]) {
+                m = m + 1
+            }
+            if m < e && ba[m] == 61 {
+                m = m + 1
+                while m < e && vyxIsWs(ba[m]) {
+                    m = m + 1
+                }
+                if m < e && ba[m] == 34 {
+                    let vEnd = vyxScanQuote(ba, m, e)
+                    attrs.push(VyxAttr { name: name, value: vyxSlice(ba, m + 1, vEnd - 1), dyn: false, evt: evt, line: attrLine })
+                    j = vEnd
+                } else if m < e && ba[m] == 123 {
+                    let vEnd = vyxMatchBrace(ba, m, e)
+                    attrs.push(VyxAttr { name: name, value: vyxTrim(vyxSlice(ba, m + 1, vEnd - 1)), dyn: true, evt: evt, line: attrLine })
+                    j = vEnd
+                } else {
+                    return VyxAttrs { attrs: attrs, next: m, selfClose: false, err: vyxErr("VYX_BAD_ATTR_VALUE", fileId, attrLine) }
+                }
+            } else {
+                // A valueless attribute renders as `name=""`.
+                attrs.push(VyxAttr { name: name, value: "", dyn: false, evt: evt, line: attrLine })
+                j = k
+            }
+        }
+    }
+    return VyxAttrs { attrs: attrs, next: j, selfClose: false, err: vyxErr("VYX_UNCLOSED_TAG", fileId, vyxLineAt(ba, i)) }
+}
+
+/// The index just past the `"` closing the string literal whose `"` is at `q`.
+fn vyxScanQuote(ba: Array<UInt8>, q: Int64, e: Int64) -> Int64 {
+    let mut i = q + 1
+    while i < e && ba[i] != 34 {
+        if ba[i] == 92 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return i + 1
+}
+
+/// A load-diagnostic identifier line (parsing it fails, naming the offense).
+fn vyxErr(tag: String, fileId: String, line: Int64) -> String {
+    return tag + "__" + fileId + "__line_" + line.toString() + "\n"
+}
+
+/// A load-diagnostic identifier line with an extra detail fragment.
+fn vyxErrDetail(tag: String, fileId: String, line: Int64, detail: String) -> String {
+    return tag + "__" + fileId + "__line_" + line.toString() + "__" + vyxIdentOf(detail) + "\n"
+}
+
+/// Parse a run of sibling nodes from `i` up to a stop token.
+fn vyxParseNodes(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxParse {
+    let mut nodes: Array<VyxNode> = []
+    let mut j = i
+    while j < e {
+        let b = ba[j]
+        if b == 60 {
+            if j + 1 < e && ba[j + 1] == 47 {
+                // A closing `</…>` belongs to the caller.
+                return VyxParse { nodes: nodes, next: j, stop: "close", err: "" }
+            }
+            let er = vyxParseElem(ba, j, e, fileId)
+            if er.err != "" {
+                return VyxParse { nodes: nodes, next: er.next, stop: "", err: er.err }
+            }
+            nodes.push(er.node)
+            j = er.next
+        } else if b == 123 {
+            let br = vyxReadBrace(ba, j, e)
+            if br.err != "" {
+                return VyxParse { nodes: nodes, next: j, stop: "", err: vyxErr("VYX_UNTERMINATED_BRACE", fileId, vyxLineAt(ba, j)) }
+            }
+            if br.kind == "elseif" || br.kind == "else" || br.kind == "endif" || br.kind == "endfor" {
+                return VyxParse { nodes: nodes, next: j, stop: br.kind, err: "" }
+            }
+            if br.kind == "interp" {
+                nodes.push(VNInterp(br.inner, vyxLineAt(ba, j)))
+                j = br.next
+            } else if br.kind == "raw" {
+                nodes.push(VNRaw(br.inner, vyxLineAt(ba, j)))
+                j = br.next
+            } else if br.kind == "children" {
+                nodes.push(VNChildren)
+                j = br.next
+            } else if br.kind == "if" {
+                let r = vyxParseIf(ba, br.next, e, fileId, br.inner, vyxLineAt(ba, j))
+                if r.err != "" {
+                    return VyxParse { nodes: nodes, next: r.next, stop: "", err: r.err }
+                }
+                nodes.push(r.node)
+                j = r.next
+            } else {
+                let r = vyxParseFor(ba, br.next, e, fileId, br.inner, vyxLineAt(ba, j))
+                if r.err != "" {
+                    return VyxParse { nodes: nodes, next: r.next, stop: "", err: r.err }
+                }
+                nodes.push(r.node)
+                j = r.next
+            }
+        } else {
+            // A literal text run up to the next `<` or `{`.
+            let mut k = j
+            while k < e && ba[k] != 60 && ba[k] != 123 {
+                k = k + 1
+            }
+            let collapsed = vyxCollapseWs(vyxSlice(ba, j, k))
+            if vyxTrim(collapsed).length > 0 {
+                nodes.push(VNText(collapsed))
+            }
+            j = k
+        }
+    }
+    return VyxParse { nodes: nodes, next: j, stop: "", err: "" }
+}
+
+/// One parsed node plus the index past it.
+type VyxNodeR = { node: VyxNode, next: Int64, err: String }
+
+/// Parse one element or component starting at `<` (`i`).
+fn vyxParseElem(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxNodeR {
+    let line = vyxLineAt(ba, i)
+    let tag = vyxReadTagName(ba, i + 1, e)
+    if tag.name.length == 0 {
+        return VyxNodeR { node: VNText(""), next: e, err: vyxErr("VYX_BAD_TAG", fileId, line) }
+    }
+    let pa = vyxParseAttrs(ba, tag.next, e, fileId)
+    if pa.err != "" {
+        return VyxNodeR { node: VNText(""), next: pa.next, err: pa.err }
+    }
+    if pa.selfClose {
+        return VyxNodeR { node: VNElem(tag.name, tag.isComp, pa.attrs, [], line), next: pa.next, err: "" }
+    }
+    // Paired tag: parse children, then require the matching close tag.
+    let kids = vyxParseNodes(ba, pa.next, e, fileId)
+    if kids.err != "" {
+        return VyxNodeR { node: VNText(""), next: kids.next, err: kids.err }
+    }
+    if kids.stop != "close" {
+        return VyxNodeR { node: VNText(""), next: kids.next, err: vyxErrDetail("VYX_UNCLOSED_ELEMENT", fileId, line, tag.name) }
+    }
+    // Consume `</name>`.
+    let ct = vyxReadTagName(ba, kids.next + 2, e)
+    if ct.name != tag.name {
+        return VyxNodeR { node: VNText(""), next: kids.next, err: vyxErrDetail("VYX_MISMATCHED_TAG", fileId, line, tag.name + "_vs_" + ct.name) }
+    }
+    let mut m = ct.next
+    while m < e && ba[m] != 62 {
+        m = m + 1
+    }
+    return VyxNodeR { node: VNElem(tag.name, tag.isComp, pa.attrs, kids.nodes, line), next: m + 1, err: "" }
+}
+
+/// Parse an `{#if}` chain from just past the opening `{#if cond}` brace.
+fn vyxParseIf(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String, firstCond: String, line: Int64) -> VyxNodeR {
+    let mut conds: Array<String> = [firstCond]
+    let mut bodies: Array<VyxBody> = []
+    let mut elseBody = VyxBody { nodes: [] }
+    let mut hasElse = false
+    let mut cur = i
+    let mut building = true
+    while building {
+        let pr = vyxParseNodes(ba, cur, e, fileId)
+        if pr.err != "" {
+            return VyxNodeR { node: VNText(""), next: pr.next, err: pr.err }
+        }
+        bodies.push(VyxBody { nodes: pr.nodes })
+        if pr.stop == "elseif" {
+            let br = vyxReadBrace(ba, pr.next, e)
+            conds.push(br.inner)
+            cur = br.next
+        } else if pr.stop == "else" {
+            let br = vyxReadBrace(ba, pr.next, e)
+            let pe = vyxParseNodes(ba, br.next, e, fileId)
+            if pe.err != "" {
+                return VyxNodeR { node: VNText(""), next: pe.next, err: pe.err }
+            }
+            elseBody = VyxBody { nodes: pe.nodes }
+            hasElse = true
+            if pe.stop != "endif" {
+                return VyxNodeR { node: VNText(""), next: pe.next, err: vyxErr("VYX_UNCLOSED_IF", fileId, line) }
+            }
+            let br2 = vyxReadBrace(ba, pe.next, e)
+            cur = br2.next
+            building = false
+        } else if pr.stop == "endif" {
+            let br = vyxReadBrace(ba, pr.next, e)
+            cur = br.next
+            building = false
+        } else {
+            return VyxNodeR { node: VNText(""), next: pr.next, err: vyxErr("VYX_UNCLOSED_IF", fileId, line) }
+        }
+    }
+    return VyxNodeR { node: VNIf(conds, bodies, elseBody, hasElse), next: cur, err: "" }
+}
+
+/// A parsed `#for` header: loop variable, iterable expression, key expression.
+type VyxForHdr = { var: String, iter: String, key: String, err: String }
+
+/// Parse a `#for` header: `x in <iterexpr> key={<keyexpr>}` (or `key="literal"`).
+fn vyxParseForHeader(header: String, fileId: String, line: Int64) -> VyxForHdr {
+    let ba = bytes(header)
+    // The loop variable is the first token.
+    let mut i = 0
+    while i < ba.length && vyxIsWs(ba[i]) {
+        i = i + 1
+    }
+    let vStart = i
+    while i < ba.length && (vyxIsIdent(ba[i])) {
+        i = i + 1
+    }
+    let varName = vyxSlice(ba, vStart, i)
+    while i < ba.length && vyxIsWs(ba[i]) {
+        i = i + 1
+    }
+    // Expect the `in` keyword.
+    if i + 1 >= ba.length || ba[i] != 105 || ba[i + 1] != 110 {
+        return VyxForHdr { var: "", iter: "", key: "", err: vyxErr("VYX_BAD_FOR_HEADER", fileId, line) }
+    }
+    i = i + 2
+    // The key clause: find " key=" (the last occurrence, so the iterable may not
+    // contain it). Everything between `in` and the key clause is the iterable.
+    let keyPat = bytes(" key=")
+    let kAt = vyxFindLast(ba, keyPat, i)
+    if kAt < 0 {
+        return VyxForHdr { var: varName, iter: "", key: "", err: vyxErr("VYX_MISSING_FOR_KEY", fileId, line) }
+    }
+    let iter = vyxTrim(vyxSlice(ba, i, kAt))
+    let valStart = kAt + keyPat.length
+    let mut key = ""
+    if valStart < ba.length && ba[valStart] == 123 {
+        let vEnd = vyxMatchBrace(ba, valStart, ba.length)
+        key = vyxTrim(vyxSlice(ba, valStart + 1, vEnd - 1))
+    } else if valStart < ba.length && ba[valStart] == 34 {
+        let vEnd = vyxScanQuote(ba, valStart, ba.length)
+        key = vyxSlice(ba, valStart, vEnd)
+    } else {
+        return VyxForHdr { var: varName, iter: iter, key: "", err: vyxErr("VYX_MISSING_FOR_KEY", fileId, line) }
+    }
+    if iter.length == 0 || varName.length == 0 || key.length == 0 {
+        return VyxForHdr { var: varName, iter: iter, key: key, err: vyxErr("VYX_BAD_FOR_HEADER", fileId, line) }
+    }
+    return VyxForHdr { var: varName, iter: iter, key: key, err: "" }
+}
+
+/// The index of the LAST occurrence of `needle` in `ba` at or after `from`, or -1.
+fn vyxFindLast(ba: Array<UInt8>, needle: Array<UInt8>, from: Int64) -> Int64 {
+    let mut found = 0 - 1
+    let mut at = vyxFind(ba, needle, from)
+    while at >= 0 {
+        found = at
+        at = vyxFind(ba, needle, at + 1)
+    }
+    return found
+}
+
+/// Parse a `{#for}` block from just past the opening `{#for …}` brace.
+fn vyxParseFor(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String, header: String, line: Int64) -> VyxNodeR {
+    let h = vyxParseForHeader(header, fileId, line)
+    if h.err != "" {
+        return VyxNodeR { node: VNText(""), next: i, err: h.err }
+    }
+    let pr = vyxParseNodes(ba, i, e, fileId)
+    if pr.err != "" {
+        return VyxNodeR { node: VNText(""), next: pr.next, err: pr.err }
+    }
+    if pr.stop != "endfor" {
+        return VyxNodeR { node: VNText(""), next: pr.next, err: vyxErr("VYX_UNCLOSED_FOR", fileId, line) }
+    }
+    let br = vyxReadBrace(ba, pr.next, e)
+    return VyxNodeR { node: VNFor(h.var, h.iter, h.key, pr.nodes, line), next: br.next, err: "" }
+}
+
+// ===========================================================================
+// Section extraction + script parsing.
+// ===========================================================================
+
+/// A section's content bounds within the file (`found=false` when absent).
+type VyxSection = { found: Bool, start: Int64, end: Int64 }
+
+/// The content bounds of `<name> … </name>` in `ba` (between the open tag's `>`
+/// and the closing tag's `<`).
+fn vyxSection(ba: Array<UInt8>, name: String) -> VyxSection {
+    let openAt = vyxFind(ba, bytes("<" + name + ">"), 0)
+    if openAt < 0 {
+        return VyxSection { found: false, start: 0, end: 0 }
+    }
+    let contentStart = openAt + name.length + 2
+    let closeAt = vyxFind(ba, bytes("</" + name + ">"), contentStart)
+    if closeAt < 0 {
+        return VyxSection { found: false, start: 0, end: 0 }
+    }
+    return VyxSection { found: true, start: contentStart, end: closeAt }
+}
+
+/// The parsed `<script>` section: props (parallel name/type arrays), rebased
+/// import lines, and pass-through helper source. `err` is set on a props fault.
+type VyxScript = {
+    propNames: Array<String>,
+    propTypes: Array<String>,
+    imports: Array<String>,
+    helpers: String,
+    err: String,
+}
+
+/// Split a record body on commas at generic (`<>`) depth 0.
+fn vyxSplitFields(body: String) -> Array<String> {
+    let ba = bytes(body)
+    let mut parts: Array<String> = []
+    let mut depth = 0
+    let mut start = 0
+    let mut i = 0
+    while i < ba.length {
+        let b = ba[i]
+        if b == 60 {
+            depth = depth + 1
+        } else if b == 62 {
+            depth = depth - 1
+        } else if b == 44 && depth == 0 {
+            parts.push(vyxSlice(ba, start, i))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    parts.push(vyxSlice(ba, start, ba.length))
+    return parts
+}
+
+/// Rebase one `import … from "spec"` line: a relative `spec` (`./` or `../`) is
+/// prefixed with `dir` so it resolves from the synthesized module (whose imports
+/// resolve against the app file, not the `.vyx` file); bare specifiers (`std/…`,
+/// `github:…`) pass through unchanged.
+fn vyxRebaseImport(line: String, dir: String) -> String {
+    let ba = bytes(line)
+    let fromAt = vyxFind(ba, bytes(" from "), 0)
+    if fromAt < 0 {
+        return line
+    }
+    let q1 = vyxFind(ba, bytes("\""), fromAt)
+    if q1 < 0 {
+        return line
+    }
+    let q2 = vyxFind(ba, bytes("\""), q1 + 1)
+    if q2 < 0 {
+        return line
+    }
+    let spec = vyxSlice(ba, q1 + 1, q2)
+    if spec.startsWith("./") || spec.startsWith("../") {
+        let rebased = dir + "/" + spec
+        return vyxSlice(ba, 0, q1 + 1) + rebased + vyxSlice(ba, q2, ba.length)
+    }
+    return line
+}
+
+/// Parse the `<script>` section text: pull the single `props {…}` block, collect
+/// (and rebase) import lines, and pass everything else through as helper source.
+fn vyxParseScript(script: String, dir: String, fileId: String) -> VyxScript {
+    let ba = bytes(script)
+    // Locate a `props` keyword followed (after whitespace) by `{`.
+    let propsAt = vyxFindKeyword(ba, "props")
+    let mut propNames: Array<String> = []
+    let mut propTypes: Array<String> = []
+    let mut bodyEnd = 0 - 1
+    let mut bodyStart = 0 - 1
+    if propsAt >= 0 {
+        let mut i = propsAt + 5
+        while i < ba.length && vyxIsWs(ba[i]) {
+            i = i + 1
+        }
+        if i >= ba.length || ba[i] != 123 {
+            return vyxScriptErr(vyxErr("VYX_BAD_PROPS", fileId, 0))
+        }
+        bodyStart = i
+        bodyEnd = vyxMatchBrace(ba, i, ba.length)
+        // A second props block is an error.
+        if vyxFindKeyword2(ba, "props", bodyEnd) >= 0 {
+            return vyxScriptErr(vyxErr("VYX_MULTIPLE_PROPS", fileId, 0))
+        }
+        let fields = vyxSplitFields(vyxSlice(ba, bodyStart + 1, bodyEnd - 1))
+        for part in fields {
+            let trimmed = vyxTrim(part)
+            if trimmed.length > 0 {
+                let pb = bytes(trimmed)
+                let mut colon = 0 - 1
+                let mut k = 0
+                while k < pb.length && colon < 0 {
+                    if pb[k] == 58 {
+                        colon = k
+                    }
+                    k = k + 1
+                }
+                if colon < 0 {
+                    return vyxScriptErr(vyxErr("VYX_BAD_PROPS", fileId, 0))
+                }
+                propNames.push(vyxTrim(vyxSlice(pb, 0, colon)))
+                propTypes.push(vyxTrim(vyxSlice(pb, colon + 1, pb.length)))
+            }
+        }
+    }
+    // The rest of the script, with the props block sliced out.
+    let mut rest = script
+    if bodyStart >= 0 {
+        rest = vyxSlice(ba, 0, propsAt) + vyxSlice(ba, bodyEnd, ba.length)
+    }
+    // Line-wise: `import` lines (rebased) vs. pass-through helpers.
+    let mut imports: Array<String> = []
+    let mut helpers = ""
+    for line in vyxLines(rest) {
+        let t = vyxTrim(line)
+        if t.startsWith("import ") {
+            imports.push(vyxRebaseImport(t, dir))
+        } else if t.length > 0 {
+            helpers = helpers + line + "\n"
+        }
+    }
+    return VyxScript { propNames: propNames, propTypes: propTypes, imports: imports, helpers: helpers, err: "" }
+}
+
+/// A `VyxScript` carrying only an error.
+fn vyxScriptErr(err: String) -> VyxScript {
+    return VyxScript { propNames: [], propTypes: [], imports: [], helpers: "", err: err }
+}
+
+/// The index of a `props`-style keyword at a token boundary (preceded by start or
+/// whitespace, followed by whitespace or `{`), or -1.
+fn vyxFindKeyword(ba: Array<UInt8>, kw: String) -> Int64 {
+    return vyxFindKeyword2(ba, kw, 0)
+}
+
+fn vyxFindKeyword2(ba: Array<UInt8>, kw: String, from: Int64) -> Int64 {
+    let nb = bytes(kw)
+    let mut at = vyxFind(ba, nb, from)
+    while at >= 0 {
+        let before = at == 0 || vyxIsWs(ba[at - 1])
+        let afterAt = at + nb.length
+        let after = afterAt >= ba.length || vyxIsWs(ba[afterAt]) || ba[afterAt] == 123
+        if before && after {
+            return at
+        }
+        at = vyxFind(ba, nb, at + 1)
+    }
+    return 0 - 1
+}
+
+/// Split `s` into lines (LF-separated, CR stripped).
+fn vyxLines(s: String) -> Array<String> {
+    let ba = bytes(s)
+    let mut lines: Array<String> = []
+    let mut start = 0
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == 10 {
+            let mut end = i
+            if end > start && ba[end - 1] == 13 {
+                end = end - 1
+            }
+            lines.push(vyxSlice(ba, start, end))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start < ba.length {
+        lines.push(vyxSlice(ba, start, ba.length))
+    }
+    return lines
+}
+
+// ===========================================================================
+// A compiled component — the intermediate the assembler emits from.
+// ===========================================================================
+
+/// One parsed `.vyx` component: its tag name, view-fn name, props, imports,
+/// helpers, root node, whether it uses `{children}`, and any parse error.
+type VyxComp = {
+    name: String,
+    fnName: String,
+    fileId: String,
+    propNames: Array<String>,
+    propTypes: Array<String>,
+    imports: Array<String>,
+    helpers: String,
+    root: VyxNode,
+    takesChildren: Bool,
+    err: String,
+}
+
+/// Whether any node in `nodes` (transitively) is `{children}`.
+fn vyxUsesChildren(nodes: Array<VyxNode>) -> Bool {
+    for n in nodes {
+        if vyxNodeUsesChildren(n) {
+            return true
+        }
+    }
+    return false
+}
+
+fn vyxNodeUsesChildren(n: VyxNode) -> Bool {
+    return match n {
+        VNChildren => true,
+        VNElem(t, c, a, kids, l) => vyxUsesChildren(kids),
+        VNIf(conds, bodies, els, has) => vyxIfUsesChildren(bodies, els, has),
+        VNFor(v, it, k, body, l) => vyxUsesChildren(body),
+        VNText(s) => false,
+        VNInterp(x, l) => false,
+        VNRaw(x, l) => false,
+    }
+}
+
+fn vyxIfUsesChildren(bodies: Array<VyxBody>, els: VyxBody, has: Bool) -> Bool {
+    for b in bodies {
+        if vyxUsesChildren(b.nodes) {
+            return true
+        }
+    }
+    if has {
+        return vyxUsesChildren(els.nodes)
+    }
+    return false
+}
+
+/// Compile one `.vyx` source into a `VyxComp` (parse only — component-call
+/// resolution happens later, once every sibling name is known). `compName` is the
+/// file stem; `dir` rebases relative imports. EXPORTED so `std/ui`'s `pages` can
+/// reuse it for `.vyx` pages.
+export fn vyxCompileComponent(compName: String, source: String, dir: String) -> VyxComp {
+    let ba = bytes(source)
+    let fileId = vyxIdentOf(compName + ".vyx")
+    let fnName = vyxLowerFirst(compName)
+
+    let scriptSec = vyxSection(ba, "script")
+    let templateSec = vyxSection(ba, "template")
+    if templateSec.found == false {
+        return vyxCompErr(compName, fnName, fileId, vyxErr("VYX_NO_TEMPLATE", fileId, 0))
+    }
+
+    let mut propNames: Array<String> = []
+    let mut propTypes: Array<String> = []
+    let mut imports: Array<String> = []
+    let mut helpers = ""
+    if scriptSec.found {
+        let sc = vyxParseScript(vyxSlice(ba, scriptSec.start, scriptSec.end), dir, fileId)
+        if sc.err != "" {
+            return vyxCompErr(compName, fnName, fileId, sc.err)
+        }
+        propNames = sc.propNames
+        propTypes = sc.propTypes
+        imports = sc.imports
+        helpers = sc.helpers
+    }
+
+    // Parse the template (over absolute file offsets, for true line numbers).
+    let parsed = vyxParseNodes(ba, templateSec.start, templateSec.end, fileId)
+    if parsed.err != "" {
+        return vyxCompErr(compName, fnName, fileId, parsed.err)
+    }
+    // Exactly one root element (whitespace-only text is already dropped).
+    let roots = vyxElementRoots(parsed.nodes)
+    if roots.length == 0 {
+        return vyxCompErr(compName, fnName, fileId, vyxErr("VYX_NO_ROOT", fileId, 0))
+    }
+    if roots.length > 1 {
+        return vyxCompErr(compName, fnName, fileId, vyxErr("VYX_MULTIPLE_ROOTS", fileId, vyxRootLine(roots)))
+    }
+    let root = roots[0]
+    return VyxComp {
+        name: compName,
+        fnName: fnName,
+        fileId: fileId,
+        propNames: propNames,
+        propTypes: propTypes,
+        imports: imports,
+        helpers: helpers,
+        root: root,
+        takesChildren: vyxUsesChildren([root]),
+        err: "",
+    }
+}
+
+/// The element/component roots among the top-level nodes (a bare interpolation or
+/// control block at the root is not a valid single root).
+fn vyxElementRoots(nodes: Array<VyxNode>) -> Array<VyxNode> {
+    let mut out: Array<VyxNode> = []
+    for n in nodes {
+        let keep = match n {
+            VNElem(t, c, a, k, l) => true,
+            VNText(s) => false,
+            VNInterp(x, l) => true,
+            VNRaw(x, l) => true,
+            VNChildren => true,
+            VNIf(cc, bb, ee, hh) => true,
+            VNFor(v, it, kk, bd, l) => true,
+        }
+        if keep {
+            out.push(n)
+        }
+    }
+    return out
+}
+
+/// The line of the second root (for the multiple-roots diagnostic).
+fn vyxRootLine(roots: Array<VyxNode>) -> Int64 {
+    return match roots[1] {
+        VNElem(t, c, a, k, l) => l,
+        VNInterp(x, l) => l,
+        VNRaw(x, l) => l,
+        VNFor(v, it, kk, bd, l) => l,
+        VNChildren => 0,
+        VNText(s) => 0,
+        VNIf(cc, bb, ee, hh) => 0,
+    }
+}
+
+/// A `VyxComp` carrying only an error.
+fn vyxCompErr(name: String, fnName: String, fileId: String, err: String) -> VyxComp {
+    return VyxComp {
+        name: name,
+        fnName: fnName,
+        fileId: fileId,
+        propNames: [],
+        propTypes: [],
+        imports: [],
+        helpers: "",
+        root: VNText(""),
+        takesChildren: false,
+        err: err,
+    }
+}
+
+// ===========================================================================
+// Code generation — a post-order walk emitting `std/html` hyperscript. Every
+// element builds a `mut Array<Html>` accumulator (named by its unique tree path),
+// so `{#if}` / `{#for}` / `{children}` all lower to ordinary imperative pushes.
+// ===========================================================================
+
+/// The registry of sibling components, for resolving `<Capitalized>` tags.
+type VyxRegistry = { names: Array<String>, comps: Array<VyxComp> }
+
+fn vyxLookup(reg: VyxRegistry, name: String) -> Int64 {
+    let mut i = 0
+    while i < reg.names.length {
+        if reg.names[i] == name {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+/// Emit the statements pushing every node in `nodes` into accumulator `acc`,
+/// under tree-path `path`. Accumulates component-resolution errors into `errs`
+/// (returned via the result).
+type VyxEmit = { code: String, err: String }
+
+fn vyxEmitChildren(nodes: Array<VyxNode>, acc: String, path: String, reg: VyxRegistry, fileId: String) -> VyxEmit {
+    let mut code = ""
+    let mut err = ""
+    let mut j = 0
+    for n in nodes {
+        let r = vyxEmitPush(n, acc, path + "_" + j.toString(), reg, fileId)
+        code = code + r.code
+        err = err + r.err
+        j = j + 1
+    }
+    return VyxEmit { code: code, err: err }
+}
+
+/// Emit the statements that push one node into `acc`.
+fn vyxEmitPush(n: VyxNode, acc: String, path: String, reg: VyxRegistry, fileId: String) -> VyxEmit {
+    return match n {
+        VNText(s) => VyxEmit { code: acc + ".push(text(" + vyxStrLit(s) + "))\n", err: "" },
+        VNInterp(x, l) => VyxEmit { code: "// vyx " + fileId + " line " + l.toString() + "\n" + acc + ".push(text((" + x + ").toString()))\n", err: "" },
+        VNRaw(x, l) => VyxEmit { code: "// vyx " + fileId + " line " + l.toString() + "\n" + acc + ".push(Raw(" + x + "))\n", err: "" },
+        VNChildren => VyxEmit { code: "for vyxCh in children {\n" + acc + ".push(vyxCh)\n}\n", err: "" },
+        VNElem(tag, isComp, attrs, kids, l) => vyxEmitElem(tag, isComp, attrs, kids, l, acc, path, reg, fileId),
+        VNIf(conds, bodies, els, has) => vyxEmitIf(conds, bodies, els, has, acc, path, reg, fileId),
+        VNFor(v, it, k, body, l) => vyxEmitFor(v, it, k, body, l, acc, path, reg, fileId),
+    }
+}
+
+/// Emit an element (or dispatch to a component call).
+fn vyxEmitElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, reg: VyxRegistry, fileId: String) -> VyxEmit {
+    if isComp {
+        return vyxEmitComp(tag, attrs, kids, line, acc, path, reg, fileId)
+    }
+    let kacc = "k" + path
+    let kids2 = vyxEmitChildren(kids, kacc, path, reg, fileId)
+    let ae = vyxEmitAttrs(attrs, fileId)
+    let code = "let mut " + kacc + ": Array<Html> = []\n" + kids2.code + acc + ".push(el(" + vyxStrLit(tag) + ", [" + ae.code + "], " + kacc + "))\n"
+    return VyxEmit { code: code, err: kids2.err + ae.err }
+}
+
+/// Emit a component call, resolving props by name against the component's
+/// declaration and passing `{children}` when it accepts them.
+fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, reg: VyxRegistry, fileId: String) -> VyxEmit {
+    let idx = vyxLookup(reg, tag)
+    if idx < 0 {
+        return VyxEmit { code: acc + ".push(empty())\n", err: vyxErrDetail("VYX_UNKNOWN_COMPONENT", fileId, line, tag) }
+    }
+    let comp = reg.comps[idx]
+    let mut err = ""
+    // Each declared prop, in order, mapped to the tag's attribute value.
+    let mut args: Array<String> = []
+    let mut pi = 0
+    while pi < comp.propNames.length {
+        let pn = comp.propNames[pi]
+        let av = vyxFindAttr(attrs, pn)
+        if av.found == false {
+            err = err + vyxErrDetail("VYX_MISSING_PROP", fileId, line, tag + "_" + pn)
+            args.push("empty()")
+        } else if av.dyn {
+            args.push(av.value)
+        } else {
+            args.push(vyxStrLit(av.value))
+        }
+        pi = pi + 1
+    }
+    // Reject unknown / event attributes on a component.
+    for a in attrs {
+        if a.evt {
+            err = err + vyxErrDetail("VYX_EVENT_ON_COMPONENT", fileId, a.line, tag + "_" + a.name)
+        } else if vyxContains(comp.propNames, a.name) == false {
+            err = err + vyxErrDetail("VYX_UNKNOWN_PROP", fileId, a.line, tag + "_" + a.name)
+        }
+    }
+    let hasKids = vyxTrim(vyxChildText(kids)).length > 0 || kids.length > 0
+    if comp.takesChildren {
+        let kacc = "k" + path
+        let kids2 = vyxEmitChildren(kids, kacc, path, reg, fileId)
+        let code = "let mut " + kacc + ": Array<Html> = []\n" + kids2.code + acc + ".push(" + comp.fnName + "(" + vyxJoinArgs(args) + kacc + "))\n"
+        return VyxEmit { code: code, err: err + kids2.err }
+    }
+    if hasKids {
+        err = err + vyxErrDetail("VYX_UNEXPECTED_CHILDREN", fileId, line, tag)
+    }
+    return VyxEmit { code: acc + ".push(" + comp.fnName + "(" + vyxJoinArgsClose(args) + "))\n", err: err }
+}
+
+/// The argument prefix `a, b, ` (trailing separator) for a call that appends a
+/// children accumulator; "" for no args.
+fn vyxJoinArgs(args: Array<String>) -> String {
+    let mut out = ""
+    for a in args {
+        out = out + a + ", "
+    }
+    return out
+}
+
+/// The complete argument list `a, b` for a childless call.
+fn vyxJoinArgsClose(args: Array<String>) -> String {
+    return vyxJoin(args, ", ")
+}
+
+/// Whether the paired children hold any non-whitespace content (text only — a
+/// coarse signal used to reject children on a childless component).
+fn vyxChildText(kids: Array<VyxNode>) -> String {
+    let mut out = ""
+    for n in kids {
+        out = out + match n {
+            VNText(s) => s,
+            VNInterp(x, l) => "x",
+            VNRaw(x, l) => "x",
+            VNChildren => "c",
+            VNElem(t, c, a, k, l) => "e",
+            VNIf(cc, bb, ee, hh) => "i",
+            VNFor(v, it, kk, bd, l) => "f",
+        }
+    }
+    return out
+}
+
+/// A found attribute value.
+type VyxAttrFound = { found: Bool, value: String, dyn: Bool }
+
+fn vyxFindAttr(attrs: Array<VyxAttr>, name: String) -> VyxAttrFound {
+    for a in attrs {
+        if a.evt == false && a.name == name {
+            return VyxAttrFound { found: true, value: a.value, dyn: a.dyn }
+        }
+    }
+    return VyxAttrFound { found: false, value: "", dyn: false }
+}
+
+/// Emit an `{#if}` chain: each branch fills its own accumulator, then splices it
+/// into `acc`; a missing `{:else}` elides to Empty (nothing pushed).
+fn vyxEmitIf(conds: Array<String>, bodies: Array<VyxBody>, els: VyxBody, has: Bool, acc: String, path: String, reg: VyxRegistry, fileId: String) -> VyxEmit {
+    let mut code = ""
+    let mut err = ""
+    let mut bi = 0
+    while bi < conds.length {
+        let mut head = "if "
+        if bi > 0 {
+            head = "} else if "
+        }
+        let bacc = "k" + path + "_b" + bi.toString()
+        let inner = vyxEmitChildren(bodies[bi].nodes, bacc, path + "_b" + bi.toString(), reg, fileId)
+        err = err + inner.err
+        code = code + head + conds[bi] + " {\n"
+        code = code + "let mut " + bacc + ": Array<Html> = []\n" + inner.code
+        code = code + "for vyxN in " + bacc + " {\n" + acc + ".push(vyxN)\n}\n"
+        bi = bi + 1
+    }
+    if has {
+        let eacc = "k" + path + "_be"
+        let inner = vyxEmitChildren(els.nodes, eacc, path + "_be", reg, fileId)
+        err = err + inner.err
+        code = code + "} else {\n"
+        code = code + "let mut " + eacc + ": Array<Html> = []\n" + inner.code
+        code = code + "for vyxN in " + eacc + " {\n" + acc + ".push(vyxN)\n}\n"
+    }
+    code = code + "}\n"
+    return VyxEmit { code: code, err: err }
+}
+
+/// Emit a `{#for}` loop: each iteration fills a fresh accumulator, then splices it
+/// into `acc` with a `Key` (the key expression rendered to a String).
+fn vyxEmitFor(v: String, it: String, key: String, body: Array<VyxNode>, line: Int64, acc: String, path: String, reg: VyxRegistry, fileId: String) -> VyxEmit {
+    let facc = "k" + path + "_f"
+    let inner = vyxEmitChildren(body, facc, path + "_f", reg, fileId)
+    let mut code = "// vyx " + fileId + " line " + line.toString() + "\n"
+    code = code + "for " + v + " in " + it + " {\n"
+    code = code + "let mut " + facc + ": Array<Html> = []\n" + inner.code
+    code = code + "for vyxN in " + facc + " {\n" + acc + ".push(keyed((" + key + ").toString(), vyxN))\n}\n"
+    code = code + "}\n"
+    return VyxEmit { code: code, err: inner.err }
+}
+
+// ---- attributes -------------------------------------------------------------
+
+/// Emit the comma-joined `Attr` constructors for a tag's attributes. `class` →
+/// `Cls`; `@event` → `On`; everything else → `A(name, value)`.
+fn vyxEmitAttrs(attrs: Array<VyxAttr>, fileId: String) -> VyxEmit {
+    let mut parts: Array<String> = []
+    let mut err = ""
+    for a in attrs {
+        if a.evt {
+            let ev = vyxEmitEvent(a, fileId)
+            parts.push(ev.code)
+            err = err + ev.err
+        } else if a.name == "class" {
+            if a.dyn {
+                parts.push("Cls(" + a.value + ")")
+            } else {
+                parts.push("Cls(" + vyxStrLit(a.value) + ")")
+            }
+        } else {
+            if a.dyn {
+                parts.push("A(" + vyxStrLit(a.name) + ", " + a.value + ")")
+            } else {
+                parts.push("A(" + vyxStrLit(a.name) + ", " + vyxStrLit(a.value) + ")")
+            }
+        }
+    }
+    return VyxEmit { code: vyxJoin(parts, ", "), err: err }
+}
+
+/// Emit one `@event="handler(scalar)"` binding as `On(event, "handler",
+/// payload)`. Exactly one handler name plus at most one scalar argument (the v1
+/// restriction — module state is root-only, handlers are root-exported externs).
+fn vyxEmitEvent(a: VyxAttr, fileId: String) -> VyxEmit {
+    let spec = vyxTrim(a.value)
+    let sb = bytes(spec)
+    // Split the handler name from an optional `(arg)`.
+    let paren = vyxFind(sb, bytes("("), 0)
+    if paren < 0 {
+        if vyxIsIdentifier(spec) == false {
+            return VyxEmit { code: "On(" + vyxStrLit(a.name) + ", \"\", \"\")", err: vyxErrDetail("VYX_BAD_EVENT_HANDLER", fileId, a.line, a.name) }
+        }
+        return VyxEmit { code: "On(" + vyxStrLit(a.name) + ", " + vyxStrLit(spec) + ", \"\")", err: "" }
+    }
+    let handler = vyxTrim(vyxSlice(sb, 0, paren))
+    if vyxIsIdentifier(handler) == false {
+        return VyxEmit { code: "On(" + vyxStrLit(a.name) + ", \"\", \"\")", err: vyxErrDetail("VYX_BAD_EVENT_HANDLER", fileId, a.line, a.name) }
+    }
+    let closeParen = vyxFindLast(sb, bytes(")"), paren)
+    let argExpr = vyxTrim(vyxSlice(sb, paren + 1, closeParen))
+    if argExpr.length == 0 {
+        return VyxEmit { code: "On(" + vyxStrLit(a.name) + ", " + vyxStrLit(handler) + ", \"\")", err: "" }
+    }
+    // At most one scalar argument: a top-level comma means more than one.
+    if vyxHasTopComma(bytes(argExpr)) {
+        return VyxEmit { code: "On(" + vyxStrLit(a.name) + ", " + vyxStrLit(handler) + ", \"\")", err: vyxErrDetail("VYX_NON_SCALAR_EVENT_ARG", fileId, a.line, a.name) }
+    }
+    return VyxEmit { code: "On(" + vyxStrLit(a.name) + ", " + vyxStrLit(handler) + ", (" + argExpr + ").toString())", err: "" }
+}
+
+/// Whether `s` is a single Vyrn identifier (letters/digits/_; not digit-first).
+fn vyxIsIdentifier(s: String) -> Bool {
+    let ba = bytes(s)
+    if ba.length == 0 {
+        return false
+    }
+    if ba[0] >= 48 && ba[0] <= 57 {
+        return false
+    }
+    for b in ba {
+        if vyxIsIdent(b) == false {
+            return false
+        }
+    }
+    return true
+}
+
+/// Whether `ba` has a comma at paren/generic/bracket depth 0 (more than one arg).
+fn vyxHasTopComma(ba: Array<UInt8>) -> Bool {
+    let mut depth = 0
+    let mut i = 0
+    while i < ba.length {
+        let b = ba[i]
+        if b == 40 || b == 91 || b == 60 {
+            depth = depth + 1
+        } else if b == 41 || b == 93 || b == 62 {
+            depth = depth - 1
+        } else if b == 34 {
+            i = vyxScanQuote(ba, i, ba.length) - 1
+        } else if b == 44 && depth == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ===========================================================================
+// Assembling the synthesized module.
+// ===========================================================================
+
+/// The view-function signature for a component: `fn name(p: T, …, children:
+/// Array<Html>) -> Html` (the children param only when the template uses it).
+fn vyxEmitSignature(comp: VyxComp) -> String {
+    let mut params: Array<String> = []
+    let mut i = 0
+    while i < comp.propNames.length {
+        params.push(comp.propNames[i] + ": " + comp.propTypes[i])
+        i = i + 1
+    }
+    if comp.takesChildren {
+        params.push("children: Array<Html>")
+    }
+    return "export fn " + comp.fnName + "(" + vyxJoin(params, ", ") + ") -> Html {\n"
+}
+
+/// Emit one component's view function. The single root is returned directly (its
+/// children built into a fresh accumulator first).
+fn vyxEmitComponent(comp: VyxComp, reg: VyxRegistry) -> VyxEmit {
+    let mut out = vyxEmitSignature(comp)
+    let rootEmit = vyxEmitRoot(comp.root, reg, comp.fileId)
+    out = out + rootEmit.code + "}\n"
+    return VyxEmit { code: out, err: rootEmit.err }
+}
+
+/// Emit the root node as `let …; return <expr>` (the view fn returns one `Html`).
+fn vyxEmitRoot(root: VyxNode, reg: VyxRegistry, fileId: String) -> VyxEmit {
+    return match root {
+        VNElem(tag, isComp, attrs, kids, l) => vyxEmitRootElem(tag, isComp, attrs, kids, l, reg, fileId),
+        VNText(s) => VyxEmit { code: "return text(" + vyxStrLit(s) + ")\n", err: "" },
+        VNInterp(x, l) => VyxEmit { code: "return text((" + x + ").toString())\n", err: "" },
+        VNRaw(x, l) => VyxEmit { code: "return Raw(" + x + ")\n", err: "" },
+        VNChildren => VyxEmit { code: "let mut kr: Array<Html> = []\nfor vyxCh in children {\nkr.push(vyxCh)\n}\nreturn el(\"div\", [], kr)\n", err: "" },
+        VNIf(cc, bb, ee, hh) => vyxEmitRootWrap(root, reg, fileId),
+        VNFor(v, it, k, bd, l) => vyxEmitRootWrap(root, reg, fileId),
+    }
+}
+
+/// A root element/component returned directly.
+fn vyxEmitRootElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, reg: VyxRegistry, fileId: String) -> VyxEmit {
+    if isComp {
+        let pushed = vyxEmitComp(tag, attrs, kids, line, "kr", "r", reg, fileId)
+        let code = "let mut kr: Array<Html> = []\n" + pushed.code + "return kr[0]\n"
+        return VyxEmit { code: code, err: pushed.err }
+    }
+    let kids2 = vyxEmitChildren(kids, "kr", "r", reg, fileId)
+    let ae = vyxEmitAttrs(attrs, fileId)
+    let code = "let mut kr: Array<Html> = []\n" + kids2.code + "return el(" + vyxStrLit(tag) + ", [" + ae.code + "], kr)\n"
+    return VyxEmit { code: code, err: kids2.err + ae.err }
+}
+
+/// A root that is a bare `{#if}` / `{#for}` — pushed into a `<div>` wrapper (kept
+/// simple; the common root is a real element).
+fn vyxEmitRootWrap(root: VyxNode, reg: VyxRegistry, fileId: String) -> VyxEmit {
+    let pushed = vyxEmitPush(root, "kr", "r", reg, fileId)
+    let code = "let mut kr: Array<Html> = []\n" + pushed.code + "return el(\"div\", [], kr)\n"
+    return VyxEmit { code: code, err: pushed.err }
+}
+
+/// Assemble the whole synthesized module from the compiled components.
+fn vyxBuildModule(comps: Array<VyxComp>) -> String {
+    let reg = VyxRegistry { names: vyxCompNames(comps), comps: comps }
+    let mut out = "/// Generated by std/vyx `components` (RFC-0026 M4) — do not edit.\n"
+    out = out + "import { el, text, keyed, empty, Html, Attr } from \"std/html\"\n"
+
+    // Pass-through imports from every component (deduped by exact line).
+    let mut seen: Array<String> = []
+    for c in comps {
+        for imp in c.imports {
+            if vyxContains(seen, imp) == false {
+                seen.push(imp)
+                out = out + imp + "\n"
+            }
+        }
+    }
+    // Pass-through helpers (module-internal, flat namespace across components).
+    for c in comps {
+        if vyxTrim(c.helpers).length > 0 {
+            out = out + c.helpers
+        }
+    }
+    // One view function per component.
+    let mut err = ""
+    for c in comps {
+        let e = vyxEmitComponent(c, reg)
+        out = out + e.code
+        err = err + e.err
+    }
+    if err != "" {
+        return err
+    }
+    return out
+}
+
+/// The tag names of all compiled components.
+fn vyxCompNames(comps: Array<VyxComp>) -> Array<String> {
+    let mut out: Array<String> = []
+    for c in comps {
+        out.push(c.name)
+    }
+    return out
+}
+
+// ===========================================================================
+// The generator.
+// ===========================================================================
+
+/// `components(dir)` — compile every `<Name>.vyx` file under `dir` into ONE module
+/// exporting one view function per component. Sibling component tags resolve
+/// internally (no cross-module imports). A generation failure returns identifier
+/// diagnostic lines naming the offending `.vyx` file and line.
+export gen fn components(dir: String) -> String {
+    let entries = match listDir(dir) {
+        Ok(ns) => ns,
+        Err(err) => [],
+    }
+    let mut comps: Array<VyxComp> = []
+    let mut err = ""
+    for name in entries {
+        if name.endsWith(".vyx") {
+            let nb = bytes(name)
+            let stem = vyxSlice(nb, 0, nb.length - 4)
+            let src = match readFile(dir + "/" + name) {
+                Ok(v) => v,
+                Err(e) => "",
+            }
+            let comp = vyxCompileComponent(stem, src, dir)
+            if comp.err != "" {
+                err = err + comp.err
+            }
+            comps.push(comp)
+        }
+    }
+    if comps.length == 0 {
+        return "VYX_ERROR__no_vyx_files_found_under_the_components_directory\n"
+    }
+    if err != "" {
+        return err
+    }
+    return vyxBuildModule(comps)
+}
+
+// ===========================================================================
+// Tests — the pure helpers (parsing + codegen) are covered without file I/O by
+// feeding them source strings directly.
+// ===========================================================================
+
+test "section extraction finds script and template bounds" {
+    let src = "<script>props { x: Int64 }</script>\n<template><li>hi</li></template>"
+    let ba = bytes(src)
+    let s = vyxSection(ba, "script")
+    let t = vyxSection(ba, "template")
+    assert(s.found)
+    assert(t.found)
+    assertEq(vyxSlice(ba, t.start, t.end), "<li>hi</li>")
+}
+
+test "props parse pulls names and types" {
+    let sc = vyxParseScript("props { item: Item, count: Int64 }", "./components", "c_vyx")
+    assertEq(sc.err, "")
+    assertEq(sc.propNames.length, 2)
+    assertEq(sc.propNames[0], "item")
+    assertEq(sc.propTypes[0], "Item")
+    assertEq(sc.propNames[1], "count")
+    assertEq(sc.propTypes[1], "Int64")
+}
+
+test "relative imports are rebased, bare imports pass through" {
+    assertEq(vyxRebaseImport("import { t } from \"../i18n\"", "./components"), "import { t } from \"./components/../i18n\"")
+    assertEq(vyxRebaseImport("import { x } from \"std/html\"", "./components"), "import { x } from \"std/html\"")
+}
+
+test "a simple component compiles to a view function" {
+    let src = "<script>props { title: String }</script><template><li class=\"row\">{title}</li></template>"
+    let comp = vyxCompileComponent("Item", src, "./c")
+    assertEq(comp.err, "")
+    assertEq(comp.fnName, "item")
+    assertEq(comp.takesChildren, false)
+    let out = vyxBuildModule([comp])
+    assert(out.contains("export fn item(title: String) -> Html"))
+    assert(out.contains("Cls(\"row\")"))
+    assert(out.contains("text((title).toString())"))
+}
+
+test "an if-chain lowers to nested conditionals" {
+    let src = "<template><ul>{#if n > 1}<b>many</b>{:else}<i>one</i>{/if}</ul></template>"
+    let comp = vyxCompileComponent("Lst", src, "./c")
+    assertEq(comp.err, "")
+    let out = vyxBuildModule([comp])
+    assert(out.contains("if n > 1 {"))
+    assert(out.contains("} else {"))
+}
+
+test "a keyed for-loop lowers to keyed pushes" {
+    let src = "<template><ul>{#for x in xs key={x.id}}<li>{x.name}</li>{/for}</ul></template>"
+    let comp = vyxCompileComponent("Lst", src, "./c")
+    assertEq(comp.err, "")
+    let out = vyxBuildModule([comp])
+    assert(out.contains("for x in xs {"))
+    assert(out.contains("keyed((x.id).toString()"))
+}
+
+test "an event handler lowers to On with a scalar payload" {
+    let src = "<template><button @click=\"remove(item.id)\">x</button></template>"
+    let comp = vyxCompileComponent("Btn", src, "./c")
+    assertEq(comp.err, "")
+    let out = vyxBuildModule([comp])
+    assert(out.contains("On(\"click\", \"remove\", (item.id).toString())"))
+}
+
+test "a missing for-key is a generation diagnostic" {
+    let src = "<template><ul>{#for x in xs}<li>{x}</li>{/for}</ul></template>"
+    let comp = vyxCompileComponent("Lst", src, "./c")
+    assert(comp.err.contains("VYX_MISSING_FOR_KEY"))
+}
+
+test "multiple roots are rejected" {
+    let src = "<template><li>a</li><li>b</li></template>"
+    let comp = vyxCompileComponent("Two", src, "./c")
+    assert(comp.err.contains("VYX_MULTIPLE_ROOTS"))
+}
+
+test "an unclosed element is rejected" {
+    let src = "<template><li>oops</template>"
+    let comp = vyxCompileComponent("Bad", src, "./c")
+    assert(comp.err.contains("VYX_UNCLOSED_ELEMENT"))
+}
+
+test "a non-scalar event arg is rejected" {
+    let src = "<template><button @click=\"go(a, b)\">x</button></template>"
+    let comp = vyxCompileComponent("Btn", src, "./c")
+    let out = vyxBuildModule([comp])
+    assert(out.contains("VYX_NON_SCALAR_EVENT_ARG"))
+}
+
+test "an unknown component tag is rejected" {
+    let src = "<template><ul><Missing x={1}/></ul></template>"
+    let comp = vyxCompileComponent("Host", src, "./c")
+    let out = vyxBuildModule([comp])
+    assert(out.contains("VYX_UNKNOWN_COMPONENT"))
+}
+
+test "a component uses children when the template does" {
+    let src = "<template><section>{children}</section></template>"
+    let comp = vyxCompileComponent("Shell", src, "./c")
+    assertEq(comp.err, "")
+    assert(comp.takesChildren)
+    let out = vyxBuildModule([comp])
+    assert(out.contains("export fn shell(children: Array<Html>) -> Html"))
+}

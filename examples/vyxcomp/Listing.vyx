@@ -1,0 +1,10 @@
+<script>
+props { items: Array<Item> }
+import { Item } from "./models"
+</script>
+
+<template>
+<ul class="listing">
+    {#for it in items key={it.id}}<Row item={it}/>{/for}
+</ul>
+</template>

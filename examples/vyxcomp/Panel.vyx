@@ -1,0 +1,11 @@
+<script>
+props { title: String }
+</script>
+
+<template>
+<section class="panel">
+    <h2 class="title">{title}</h2>
+    {@raw "<hr class=\"sep\"/>"}
+    {children}
+</section>
+</template>
