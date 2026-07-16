@@ -152,12 +152,60 @@ deterministic in-`main` loop, so it is a normal three-way parity citizen
 [eventloop.html](eventloop.html): a timer renders the count and a button calls
 `reset()`, all against the counter held in the running module's state.
 
+## Typed RPC — the browser client (RFC-0019)
+
+Two more zero-dependency runtimes turn a `std/rpc` `rpcClient` wasm module into a
+typed browser client. They build only on the `extern` import/export ABI above —
+no framework, nothing new in the shim.
+
+- **[vyrn-rpc.js](vyrn-rpc.js) — the transport.** A `rpcClient` module imports
+  one shared extern, `vyrn.vyrnRpcCall(name, body) -> Int64`, and exports one
+  completion dispatcher per procedure, `vyrnRpcDone<Proc>(id, status, body)`.
+  `makeRpcTransport({ baseUrl })` supplies the extern (a `fetch` `POST` to
+  `<baseUrl>/rpc/<name>`) and, when the request settles, calls the matching
+  dispatcher back into the module — so your plain Vyrn `onGetUser(id, res)` runs
+  with a decoded `Validation<T>`. The proc→dispatcher name is the shared
+  convention: `vyrnRpcDone` + the procedure name with its first letter uppercased
+  (`getUser` → `vyrnRpcDoneGetUser`). A network failure reports **status 0**,
+  which the generated unifier turns into an `rpc.transport` "unreachable" `Issue`.
+  `runVyrnRpc(bytes, { baseUrl })` wires it onto `runVyrn` in one call.
+
+  ```js
+  import { runVyrnRpc } from "./vyrn-rpc.js";
+  const { exports } = await runVyrnRpc(bytes, {
+    baseUrl: "",
+    exportReturns: { uiUser: "string" },   // name any String-returning getters
+  });
+  exports.loadUser(7n);   // your exported wrapper fires the typed stub; the
+                          // reply flows to the Vyrn `onGetUser` handler
+  ```
+
+- **[vyrn-query.js](vyrn-query.js) — the cache ("colada").** ~110 lines, zero
+  deps. `createQueryClient({ exports, baseUrl })` keys requests by
+  `(proc, requestJson)`: concurrent callers share one in-flight fetch (dedupe), a
+  settled entry is served within `staleTime`, `invalidate(proc | key)` drops
+  entries and `refetch` forces a new one; `fetchCount` is observable. It drives
+  the *same* dispatchers, so it is a cache in front of the transport, not a
+  parallel path. Deliberately not TanStack Query — no retries, no focus
+  revalidation, no GC.
+
+**`vyrn dev`** ties it together for local development: it reads `vyrn.json`'s
+`server` / `client` (+ optional `public`), builds the client to wasm (a *plain*
+wasm build), and serves the server root's `handle` with static assets in front.
+Precedence is locked: a GET naming an existing static asset — the built
+`/client.wasm`, the runtimes under `/vyrn-runtime/*`, or a file under the public
+dir (`/` → `index.html`) — is served from disk; every POST and every `/rpc/*` GET
+goes to `handle`. See [examples/fullstack/](../examples/fullstack/): `vyrn dev`,
+then the page does a typed round trip, a validated submit that renders the
+server's own 422 issues, and a query-cache dedupe + invalidate demo.
+
 ## What this is (and isn't) yet
 
 This is the browser direction through stage 2 (WASI shim demo), RFC-0012 M1+M2
-(extern imports *and* exports), and RFC-0013 (module state + the host-driven
-event loop): the full pipeline — validated types, protocols, schemas, regex
-DFAs, the arena runtime, host calls in both directions, and now stateful
-handlers driven by a host loop — runs in a browser today. What it does NOT have
-yet: `async`/`await`, promises/JSPI suspension, or callbacks-as-values across
-the JS boundary, tracked in ROADMAP.md.
+(extern imports *and* exports), RFC-0013 (module state + the host-driven event
+loop), and RFC-0019 (typed RPC as a library, with `vyrn dev` + the two runtimes
+above): the full pipeline — validated types, protocols, schemas, regex DFAs, the
+arena runtime, host calls in both directions, stateful handlers driven by a host
+loop, and end-to-end typed client/server calls — runs in a browser today. What it
+does NOT have yet: `async`/`await`, promises/JSPI suspension, or
+callbacks-as-values across the JS boundary, tracked in ROADMAP.md.

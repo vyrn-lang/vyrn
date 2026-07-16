@@ -30,7 +30,7 @@ prototype to answer.
 | [0016](RFC-0016-server.md) | The Server | `vyrn serve`, `Request`/`Response`, the async decision |
 | [0017](RFC-0017-formatter.md) | Canonical Formatter | `vyrn fmt`: one style, no options |
 | [0018](RFC-0018-json-codec.md) | The JSON Codec | `toJson`/`fromJson`: canonical encode, decode into `Validation<T>` with accumulated `Issue`s |
-| [0019](RFC-0019-rpc.md) | Typed RPC | Draft: the codec as an RPC layer, end-to-end typed calls — a library over RFC-0021's `moduleInterface` |
+| [0019](RFC-0019-rpc.md) | Typed RPC | **Implemented**: the codec as an RPC layer, end-to-end typed calls — a library (`std/rpc`) over RFC-0021's `moduleInterface`, with `vyrn dev` + browser runtimes |
 | [0020](RFC-0020-i18n.md) | i18n | Draft: locale message catalogs; the flagship file-reading generator (built on RFC-0021) |
 | [0021](RFC-0021-generator-imports.md) | Generator Imports | **Implemented**: `gen fn` + `import { .. } from gen(args)` — comptime-pure module synthesis, mediated `readFile`/`listDir`/`moduleInterface`, content-addressed cache |
 

@@ -251,6 +251,34 @@ RFC-0020 M2 (i18n) are now built on** — with one reflection primitive, whole
 layers become libraries and the language sheds format knowledge instead of
 accreting it.
 
+**Typed RPC is now that library, not a language feature (RFC-0019).** The
+withdrawn `rpc fn` keyword — a compilation-role, client/server-split design that
+baked a domain into the language — is gone; in its place is `std/rpc`, three
+ordinary `gen fn`s over an ordinary contract module (its exported functions *are*
+the procedures, their records the payloads). `rpcServer("./api")` synthesizes
+`rpcHandle(req) -> Option<Response>` plugging into the RFC-0016 `handle`
+convention: `POST /rpc/<name>` decode-call-encode (a bad payload comes back as
+`422 {"issues":[...]}` — the contract's `where` clauses run inside `fromJson`, so
+validation is the codec, not hand-written), and `GET /rpc/$schema` a procedure
+registry built from `jsonSchema()` calls. `rpcClient("./api")` re-emits the
+contract's types verbatim and, per procedure, a same-named stub over one shared
+`vyrnRpcCall` extern plus an `export extern fn vyrnRpcDone<Proc>` dispatcher that
+unifies the reply into a `Validation<T>` and hands it to your plain
+`onGetUser(id, res)` — 200 decodes, 422 carries the server's own issues, a
+transport failure is one `rpc.transport` `Issue`. `rpcInProcess("./api")` is the
+deterministic test/SSR double (same real logic, no wire), keeping the contract in
+the parity corpus (`examples/rpc.vyrn`, interp == native == wasm). The host side
+is small and outside the compiler: `web/vyrn-rpc.js` (the `fetch` transport that
+routes completions back to the dispatchers by name — it made the request, so it
+knows the owner), `web/vyrn-query.js` (a ~110-line zero-dep query cache: dedupe,
+stale-while-cached, invalidate), and **`vyrn dev`**, which reads `vyrn.json`'s
+`server`/`client`, builds the client to wasm (a *plain* wasm build — no roles),
+and serves the server root's `handle` with static assets in front. The whole
+protocol roadmap (Connect/gRPC, `.proto`/SDL emitters, JSON-RPC/MCP, SSE) is now
+*more generators and more host adapters*, and none of it will ever touch the
+compiler. See `examples/fullstack/` (`vyrn dev`, then a typed round trip, a
+validated 422, and a cache demo in the page).
+
 ---
 
 ## Shipped
