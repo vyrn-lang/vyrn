@@ -2065,12 +2065,15 @@ impl<'a> Checker<'a> {
                     Err(format!("line {line}: `%` needs matching integer operands, found {l} and {r}"))
                 }
             }
+            // Ordering: matching numeric operands, or two Strings (byte-wise
+            // lexicographic — byte order, NOT locale collation, consistent with
+            // `s.length` and `bytes(s)` counting bytes; RFC-0022).
             Lt | LtEq | Gt | GtEq => {
-                if l == r && numeric(&l) {
+                if l == r && (numeric(&l) || l == Type::Str) {
                     Ok(Type::Bool)
                 } else {
                     Err(format!(
-                        "line {line}: comparison needs matching numeric operands, \
+                        "line {line}: comparison needs matching numeric or String operands, \
                          found {l} and {r}"
                     ))
                 }
@@ -2666,8 +2669,11 @@ impl<'a> Checker<'a> {
             let at = self.expr(&args[0], scope, None, fn_ret)?;
             let elem = match self.base(&at) {
                 Type::Array(inner) | Type::ArrayN(inner, _) => (*inner).clone(),
-                // `s[i]` on a String yields the byte at that index as an Int.
-                Type::Str => Type::Int,
+                // `s[i]` on a String yields the byte at that index as a `UInt8`
+                // (RFC-0022 — consistent with `bytes(s): Array<UInt8>` and
+                // `s.length` counting bytes; mixed arithmetic needs an explicit
+                // `Int64(s[i])`).
+                Type::Str => Type::IntN { bits: 8, signed: false },
                 Type::Err => return Ok(Type::Err),
                 other => {
                     return Err(format!(
@@ -4129,6 +4135,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("Array<UInt8>"), "{e}");
+    }
+
+    #[test]
+    fn string_index_is_uint8() {
+        // RFC-0022: `s[i]` is a UInt8 — it flows into a UInt8 slot, and returning
+        // it as Int64 without an explicit `Int64(..)` is a type error.
+        let ok = "fn main() -> Int64 { let s = \"hi\" let b: UInt8 = s[0] return Int64(b) }";
+        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
+        let e = check_src("fn main() -> Int64 { let s = \"hi\" return s[0] }").unwrap_err();
+        assert!(e.contains("expected Int64, found UInt8"), "{e}");
+    }
+
+    #[test]
+    fn string_ordering_type_rule() {
+        // RFC-0022: `< <= > >=` accept two Strings and yield Bool. Mixing a String
+        // with a non-String is rejected with the numeric-or-String wording.
+        for op in ["<", "<=", ">", ">="] {
+            let ok = format!("fn main() -> Int64 {{ if \"a\" {op} \"b\" {{ return 1 }} return 0 }}");
+            assert!(check_src(&ok).is_ok(), "{op}: {:?}", check_src(&ok));
+        }
+        let e = check_src("fn main() -> Int64 { if \"a\" < 3 { return 1 } return 0 }").unwrap_err();
+        assert!(e.contains("numeric or String"), "{e}");
     }
 
     #[test]

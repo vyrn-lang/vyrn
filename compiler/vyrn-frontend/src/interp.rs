@@ -1797,11 +1797,13 @@ impl<'a> Interp<'a> {
                             .get(*i as usize)
                             .cloned()
                             .ok_or_else(|| format!("array index {i} out of bounds").into()),
-                        // `s[i]` on a String is the byte at index `i` (bounds-checked).
+                        // `s[i]` on a String is the byte at index `i` as a
+                        // `UInt8` (bounds-checked) — same value shape as an
+                        // element of `bytes(s)` (RFC-0022).
                         (Val::Str(s), Val::Int(i)) => s
                             .as_bytes()
                             .get(*i as usize)
-                            .map(|b| Val::Int(*b as i64))
+                            .map(|b| Val::IntN { v: *b as i64, bits: 8, signed: false })
                             .ok_or_else(|| format!("string index {i} out of bounds").into()),
                         _ => Err("at of non-Array/Int64".into()),
                     },
@@ -2217,6 +2219,12 @@ impl<'a> Interp<'a> {
                 Add => Ok(Val::Str(format!("{a}{b}"))),
                 Eq => Ok(Val::Bool(a == b)),
                 NotEq => Ok(Val::Bool(a != b)),
+                // Ordering is byte-wise lexicographic (UTF-8 byte order — Rust's
+                // `str` `Ord` is exactly memcmp, so this matches the native shim).
+                Lt => Ok(Val::Bool(a.as_bytes() < b.as_bytes())),
+                LtEq => Ok(Val::Bool(a.as_bytes() <= b.as_bytes())),
+                Gt => Ok(Val::Bool(a.as_bytes() > b.as_bytes())),
+                GtEq => Ok(Val::Bool(a.as_bytes() >= b.as_bytes())),
                 // `s =~ "pat"`: compile the (literal) pattern and full-match.
                 Match => match crate::regex::compile(&b) {
                     Ok(dfa) => Ok(Val::Bool(dfa.matches(&a))),
@@ -3448,9 +3456,32 @@ mod tests {
     }
 
     #[test]
+    fn string_ordering_is_bytewise_lexicographic() {
+        // RFC-0022: `< <= > >=` on Strings, byte order (not collation). Each
+        // returns 1 when the ordering holds. Covers prefixes, empties, equality,
+        // and a multibyte case where byte order puts "é" (0xC3..) after "z" (0x7A).
+        let cases: &[(&str, i64)] = &[
+            ("\"ab\" < \"b\"", 1),   // 'a' < 'b'
+            ("\"a\" < \"ab\"", 1),   // shorter prefix sorts first
+            ("\"ab\" < \"ab\"", 0),  // equal: strictly-less is false
+            ("\"ab\" <= \"ab\"", 1), // equal: <= holds
+            ("\"b\" > \"ab\"", 1),
+            ("\"\" < \"a\"", 1), // empty precedes anything
+            ("\"\" <= \"\"", 1),
+            ("\"z\" < \"\u{e9}\"", 1), // 0x7A < 0xC3 (leading UTF-8 byte)
+            ("\"\u{e9}\" > \"z\"", 1),
+        ];
+        for (expr, want) in cases {
+            let src = format!("fn main() -> Int64 {{ if {expr} {{ return 1 }} return 0 }}");
+            assert_eq!(run(&src).unwrap(), *want, "for `{expr}`");
+        }
+    }
+
+    #[test]
     fn string_indexing_and_char_literal() {
-        // `s[1]` is the byte 'e' (101); a char literal is that byte value.
-        let src = "fn main() -> Int64 { let s = \"hello\"; return s[1]; }";
+        // `s[1]` is the byte 'e' (101) as a `UInt8` (RFC-0022) — `Int64(..)`
+        // widens it for an Int64 return; a char literal adapts to the byte.
+        let src = "fn main() -> Int64 { let s = \"hello\"; return Int64(s[1]); }";
         assert_eq!(run(src).unwrap(), 101);
         let cmp = "fn main() -> Int64 { let s = \"hello\"; if s[0] == 'h' { return 1; } return 0; }";
         assert_eq!(run(cmp).unwrap(), 1);
@@ -3458,7 +3489,7 @@ mod tests {
 
     #[test]
     fn string_index_out_of_bounds_traps() {
-        let src = "fn main() -> Int64 { let s = \"hi\"; return s[5]; }";
+        let src = "fn main() -> Int64 { let s = \"hi\"; return Int64(s[5]); }";
         assert!(run(src).unwrap_err().contains("out of bounds"));
     }
 

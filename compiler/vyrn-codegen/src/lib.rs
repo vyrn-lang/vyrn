@@ -3137,12 +3137,27 @@ impl<'a> Gen<'a> {
             lty = Type::Float32;
         }
 
-        // String equality compares contents via strcmp, not pointers.
-        if matches!(op, BinOp::Eq | BinOp::NotEq) && self.resolve(&lty) == Type::Str {
+        // String comparison lowers to `strcmp` (contents, not pointers). Its
+        // sign is byte-wise lexicographic — each differing byte compared as
+        // `unsigned char` — which is exactly the interpreter's `str` byte-order
+        // `Ord` (Vyrn strings never contain an interior NUL, so strcmp reads the
+        // whole content). Equality tests the result `== 0` / `!= 0`; ordering
+        // tests its sign against 0 with a signed `icmp` (`slt`/`sle`/`sgt`/`sge`).
+        if matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq)
+            && self.resolve(&lty) == Type::Str
+        {
             let c = self.fresh_tmp();
             self.emit(format!("{c} = call i32 @strcmp(ptr {l}, ptr {r})"));
             let t = self.fresh_tmp();
-            let pred = if op == BinOp::Eq { "eq" } else { "ne" };
+            let pred = match op {
+                BinOp::Eq => "eq",
+                BinOp::NotEq => "ne",
+                BinOp::Lt => "slt",
+                BinOp::LtEq => "sle",
+                BinOp::Gt => "sgt",
+                BinOp::GtEq => "sge",
+                _ => unreachable!(),
+            };
             self.emit(format!("{t} = icmp {pred} i32 {c}, 0"));
             return Ok((t, Type::Bool));
         }
@@ -4218,7 +4233,8 @@ impl<'a> Gen<'a> {
                     return Ok((v, elem));
                 }
                 // `s[i]` on a String: bounds-check against strlen, then load the
-                // byte and zero-extend to i64 (the byte's value).
+                // byte as a `UInt8` (RFC-0022) — an `i8` SSA value, the same
+                // representation as an element of `bytes(s)`, no zero-extension.
                 Type::Str => {
                     let len = self.fresh_tmp();
                     self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {av})"));
@@ -4229,11 +4245,9 @@ impl<'a> Gen<'a> {
                     self.emit_label(&ok_l);
                     let ep = self.fresh_tmp();
                     let byte = self.fresh_tmp();
-                    let v = self.fresh_tmp();
                     self.emit(format!("{ep} = getelementptr i8, ptr {av}, i64 {iv}"));
                     self.emit(format!("{byte} = load i8, ptr {ep}"));
-                    self.emit(format!("{v} = zext i8 {byte} to i64"));
-                    return Ok((v, Type::Int));
+                    return Ok((byte, Type::IntN { bits: 8, signed: false }));
                 }
                 _ => return Err("at on a non-Array value".into()),
             }
@@ -6597,10 +6611,12 @@ mod tests {
 
     #[test]
     fn string_index_lowers_to_byte_load() {
-        let src = "fn main() -> Int64 { let s = \"hi\"; return s[0]; }";
+        // `s[i]` is a `UInt8` (RFC-0022): the byte loads as `i8` and stays
+        // `i8` (no zero-extension) — an explicit `Int64(..)` is what widens it.
+        let src = "fn main() -> Int64 { let s = \"hi\"; return Int64(s[0]); }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("load i8"), "loads a byte: {ir}");
-        assert!(ir.contains("zext i8") && ir.contains("to i64"), "zero-extends: {ir}");
+        assert!(ir.contains("zext i8") && ir.contains("to i64"), "Int64(..) widens: {ir}");
         assert!(ir.contains("@.trap.soob"), "bounds-checked: {ir}");
     }
 
@@ -6704,6 +6720,15 @@ mod tests {
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("@.str.0 = private"), "string global:\n{ir}");
         assert!(ir.contains("call i32 @strcmp"), "== uses strcmp:\n{ir}");
+    }
+
+    #[test]
+    fn string_ordering_lowers_to_strcmp_sign() {
+        // RFC-0022: `<` on Strings is `strcmp(..) slt 0` (byte-wise sign test).
+        let src = "fn main() -> Int64 { if \"a\" < \"b\" { return 1; } return 0; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("call i32 @strcmp"), "ordering uses strcmp:\n{ir}");
+        assert!(ir.contains("icmp slt i32"), "signed sign-test against 0:\n{ir}");
     }
 
     #[test]
