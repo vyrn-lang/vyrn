@@ -4643,4 +4643,58 @@ mod tests {
                        return 5; }";
         assert_eq!(run(src).unwrap(), 1);
     }
+
+    // ---- function values (RFC-0023) -------------------------------------
+
+    const TWICE: &str = "fn twice(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {\n\
+         let mut out: Array<Int64> = []\n\
+         for x in xs { out.push(f(x)) }\n\
+         return out }\n\
+         fn sum(xs: Array<Int64>) -> Int64 {\n\
+             let mut s = 0  for x in xs { s = s + x }  return s }\n";
+
+    #[test]
+    fn lambda_argument_runs() {
+        let src = format!("{TWICE}fn main() -> Int64 {{ return sum(twice([1, 2, 3], |x| x * 2)) }}");
+        assert_eq!(run(&src).unwrap(), 12);
+    }
+
+    #[test]
+    fn lambda_captures_by_read() {
+        let src = format!(
+            "{TWICE}fn main() -> Int64 {{ let off = 10  return sum(twice([1, 2, 3], |x| x + off)) }}"
+        );
+        assert_eq!(run(&src).unwrap(), 36);
+    }
+
+    #[test]
+    fn named_function_as_value() {
+        let src = format!(
+            "{TWICE}fn dbl(n: Int64) -> Int64 {{ return n * 2 }}\n\
+             fn main() -> Int64 {{ return sum(twice([1, 2, 3], dbl)) }}"
+        );
+        assert_eq!(run(&src).unwrap(), 12);
+    }
+
+    #[test]
+    fn passthrough_and_empty_array() {
+        let src = format!(
+            "{TWICE}fn outer(xs: Array<Int64>, g: fn(Int64) -> Int64) -> Array<Int64> {{ return twice(xs, g) }}\n\
+             fn main() -> Int64 {{ let e: Array<Int64> = []  let z = sum(outer(e, |x| x + 1))\n\
+             let bump = 5  return z + sum(outer([1, 2], |x| x + bump)) }}"
+        );
+        // empty → 0; outer([1,2], +5) → [6,7] → 13.
+        assert_eq!(run(&src).unwrap(), 13);
+    }
+
+    #[test]
+    fn generic_map_runs() {
+        let src = "fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> {\n\
+             let mut out: Array<U> = []  for x in xs { out.push(f(x)) }  return out }\n\
+             fn main() -> Int64 {\n\
+                 let ys: Array<Int64> = [1, 2, 3]\n\
+                 let zs = map(ys, |x| x * x)\n\
+                 let mut s = 0  for z in zs { s = s + z }  return s }";
+        assert_eq!(run(src).unwrap(), 14);
+    }
 }

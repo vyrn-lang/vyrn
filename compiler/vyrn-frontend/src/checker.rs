@@ -788,6 +788,11 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // Container types recurse so a nested `fn(..)` (RFC-0023) is caught
+            // anywhere inside them (e.g. `Array<fn(Int64) -> Int64>`).
+            Type::Array(inner) | Type::ArrayN(inner, _) | Type::Ref(inner) | Type::Task(inner) => {
+                self.ensure_type_exists(inner, line)?
+            }
             // A generic parameter is always valid in the context the parser
             // produced it (it only tags names declared in `<...>`).
             Type::Param(_) => {}
@@ -6177,5 +6182,134 @@ mod tests {
              type Key = String where value =~ \"nav\\\\.(home|about)\\\\.label\"\n\
              fn main() -> Int64 { let s: Section = \"home\"  let k: Key = \"nav.\\{s}.label\"  return 0 }";
         assert!(check_src(letb).is_ok(), "{:?}", check_src(letb));
+    }
+
+    // ---- RFC-0023 function values ---------------------------------------
+
+    const TWICE: &str = "fn twice(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {\n\
+         let mut out: Array<Int64> = []\n\
+         for x in xs { out.push(f(x)) }\n\
+         return out }\n";
+
+    #[test]
+    fn accepts_lambda_and_named_fn_argument() {
+        let src = format!(
+            "{TWICE}fn dbl(n: Int64) -> Int64 {{ return n * 2 }}\n\
+             fn main() -> Int64 {{ let a = twice([1, 2], |x| x * 2)  let b = twice([1, 2], dbl)  return 0 }}"
+        );
+        assert!(check_src(&src).is_ok(), "{:?}", check_src(&src));
+    }
+
+    #[test]
+    fn fn_type_only_in_parameter_position() {
+        // Return type.
+        let ret = "fn f() -> fn(Int64) -> Int64 { return 0 } fn main() -> Int64 { return 0 }";
+        assert!(check_src(ret).unwrap_err().contains("parameter-only"), "{:?}", check_src(ret));
+        // `let` annotation.
+        let letb = "fn main() -> Int64 { let g: fn(Int64) -> Int64 = 0  return 0 }";
+        assert!(check_src(letb).unwrap_err().contains("parameter-only"), "{:?}", check_src(letb));
+        // Record field.
+        let rec = "type R = { f: fn(Int64) -> Int64 } fn main() -> Int64 { return 0 }";
+        assert!(check_src(rec).unwrap_err().contains("parameter-only"), "{:?}", check_src(rec));
+        // Array element.
+        let arr = "fn f(xs: Array<fn(Int64) -> Int64>) -> Int64 { return 0 } fn main() -> Int64 { return 0 }";
+        assert!(check_src(arr).unwrap_err().contains("parameter-only"), "{:?}", check_src(arr));
+    }
+
+    #[test]
+    fn lambda_only_as_call_argument() {
+        let src = "fn main() -> Int64 { let g = |x| x * 2  return 0 }";
+        assert!(
+            check_src(src).unwrap_err().contains("only allowed as an argument"),
+            "{:?}",
+            check_src(src)
+        );
+    }
+
+    #[test]
+    fn lambda_arity_mismatch_is_rejected() {
+        let src = format!("{TWICE}fn main() -> Int64 {{ let a = twice([1], |x, y| x + y)  return 0 }}");
+        assert!(check_src(&src).unwrap_err().contains("parameter"), "{:?}", check_src(&src));
+    }
+
+    #[test]
+    fn lambda_return_type_mismatch_is_rejected() {
+        let src = format!("{TWICE}fn main() -> Int64 {{ let a = twice([1], |x| x > 0)  return 0 }}");
+        let e = check_src(&src).unwrap_err();
+        assert!(e.contains("returns Bool") || e.contains("expects it to return"), "{e}");
+    }
+
+    #[test]
+    fn cannot_assign_to_captured_binding() {
+        let src = format!(
+            "{TWICE}fn main() -> Int64 {{ let mut c = 0  let a = twice([1], |x| {{ c = c + x  return c }})  return 0 }}"
+        );
+        assert!(
+            check_src(&src).unwrap_err().contains("cannot assign to the captured"),
+            "{:?}",
+            check_src(&src)
+        );
+    }
+
+    #[test]
+    fn cannot_drop_captured_binding() {
+        let src = "fn apply(s: String, f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
+             fn main() -> Int64 { let name = \"hi\"  let r = apply(name, |x| { drop name  return x })  return 0 }";
+        assert!(check_src(src).unwrap_err().contains("cannot `drop` the captured"), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn cannot_consume_captured_binding() {
+        let src = "fn take(s: consume String) -> Int64 { return 1 }\n\
+             fn apply(s: String, f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
+             fn main() -> Int64 { let name = \"hi\"  let r = apply(name, |x| { let z = take(name)  return x })  return 0 }";
+        assert!(check_src(src).unwrap_err().contains("cannot consume the captured"), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn nested_lambda_literal_is_rejected() {
+        let src = format!(
+            "{TWICE}fn main() -> Int64 {{ let a = twice([1], |x| twice([x], |y| y + 1).length)  return 0 }}"
+        );
+        assert!(
+            check_src(&src).unwrap_err().contains("another lambda literal"),
+            "{:?}",
+            check_src(&src)
+        );
+    }
+
+    #[test]
+    fn passthrough_fn_param_is_accepted() {
+        let src = format!(
+            "{TWICE}fn outer(xs: Array<Int64>, g: fn(Int64) -> Int64) -> Array<Int64> {{ return twice(xs, g) }}\n\
+             fn main() -> Int64 {{ let a = outer([1, 2], |x| x + 1)  return 0 }}"
+        );
+        assert!(check_src(&src).is_ok(), "{:?}", check_src(&src));
+    }
+
+    #[test]
+    fn generic_map_infers_return_type() {
+        let src = "fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> {\n\
+             let mut out: Array<U> = []\n\
+             for x in xs { out.push(f(x)) }\n\
+             return out }\n\
+             fn main() -> Int64 { let ys: Array<Int64> = [1, 2]  let zs = map(ys, |x| x > 0)  return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn lambda_reading_module_state_poisons_spawn() {
+        // A lambda that reads a global makes the enclosing function non-spawn-safe.
+        let src = "let g: Int64 = 5\n\
+             fn apply(x: Int64, f: fn(Int64) -> Int64) -> Int64 { return f(x) }\n\
+             fn worker(x: Int64) -> Int64 { return apply(x, |y| y + g) }\n\
+             fn main() -> Int64 { let t = spawn worker(1)  return t.join() }";
+        assert!(check_src(src).unwrap_err().contains("not allowed"), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn extern_cannot_take_fn_param() {
+        let src = "extern fn e(f: fn(Int64) -> Int64) -> Int64\nfn main() -> Int64 { return 0 }";
+        assert!(check_src(src).unwrap_err().contains("extern"), "{:?}", check_src(src));
     }
 }

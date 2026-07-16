@@ -6773,6 +6773,51 @@ mod tests {
         assert!(ir.contains("add i64"));
     }
 
+    // ---- function values (RFC-0023) -------------------------------------
+
+    const HO: &str = "fn twice(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {\n\
+         let mut out: Array<Int64> = []\n\
+         for x in xs { out.push(f(x)) }\n\
+         return out }\n\
+         fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
+         fn main() -> Int64 {\n\
+             let a = twice([1, 2, 3], |x| x * 2)\n\
+             let off = 10\n\
+             let b = twice([1, 2, 3], |x| x + off)\n\
+             let c = twice([1, 2, 3], dbl)\n\
+             return 0 }";
+
+    #[test]
+    fn lambdas_monomorphize_with_no_indirect_calls() {
+        let ir = emit(&check(HO).unwrap()).unwrap();
+        // Each lambda literal is lifted to its own top-level function...
+        assert!(ir.contains("@__vyrn_lambda_main_"), "lifted lambda missing:\n{ir}");
+        // ...and `twice` is specialized per target (three distinct instances).
+        assert!(ir.matches("@vyrn_twice__ho").count() >= 3, "specializations missing:\n{ir}");
+        // The unspecialized `twice` shell is NEVER emitted (it has a `fn` param).
+        assert!(!ir.contains("define { ptr, i64, i64 } @vyrn_twice("), "shell emitted:\n{ir}");
+        // Critically: no indirect calls anywhere — every `call` names a `@symbol`.
+        for line in ir.lines() {
+            let t = line.trim_start();
+            if t.contains(" = call ") || t.starts_with("call ") {
+                assert!(
+                    t.contains("@"),
+                    "indirect (function-pointer) call emitted:\n  {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_captured_lambda_takes_a_capture_parameter() {
+        let ir = emit(&check(HO).unwrap()).unwrap();
+        // `|x| x + off` lifts to a two-parameter function (the capture, then x).
+        assert!(
+            ir.contains("@__vyrn_lambda_main_1_Int64Int64RInt64(i64 %arg0, i64 %arg1)"),
+            "captured lambda should take (capture, param):\n{ir}"
+        );
+    }
+
     // ---- input I/O (RFC-0014) -------------------------------------------
 
     #[test]

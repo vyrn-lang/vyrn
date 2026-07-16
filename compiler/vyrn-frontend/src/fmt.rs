@@ -422,6 +422,25 @@ mod tests {
     }
 
     #[test]
+    fn lambdas_and_fn_types(/* RFC-0023 */) {
+        // `fn(T) -> R` type: `fn(` tight, arrow spaced.
+        assert_eq!(
+            f("fn g(f:fn(Int64)->Int64)->Int64{return f(1)}\n"),
+            "fn g(f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n"
+        );
+        // Lambda pipes tight inside, one space after the closing pipe.
+        assert_eq!(
+            f("fn m()->Int64{let a=g(|x|x*2)  return 0}\n"),
+            "fn m() -> Int64 { let a = g(|x| x * 2) return 0 }\n"
+        );
+        // Multi-parameter and zero-parameter forms.
+        assert_eq!(
+            f("fn m()->Int64{let a=z(|x,y|x+y)  let b=n(||7)  return 0}\n"),
+            "fn m() -> Int64 { let a = z(|x, y| x + y) let b = n(|| 7) return 0 }\n"
+        );
+    }
+
+    #[test]
     fn generic_angles_have_no_spaces() {
         assert_eq!(f("type Box<T> = { value: T }\n"), "type Box<T> = { value: T }\n");
         assert_eq!(

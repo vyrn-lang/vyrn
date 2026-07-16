@@ -2873,4 +2873,72 @@ mod tests {
         let e = parse(lex(src).unwrap()).unwrap_err();
         assert!(e.message.contains("plain array variable"), "{}", e.message);
     }
+
+    // ---- function values (RFC-0023) -------------------------------------
+
+    fn only_arg(p: &Program) -> Expr {
+        // The single call argument of `f(<arg>)` in `main`'s first statement.
+        match &p.functions.last().unwrap().body.stmts[0] {
+            Stmt::Let { value: Expr::Call { args, .. }, .. } => args[0].clone(),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_fn_type_in_parameter() {
+        let p = parse_src("fn f(g: fn(Int64, Bool) -> Int64) -> Int64 { return 0 }");
+        assert_eq!(
+            p.functions[0].params[0].ty,
+            Type::Fn(vec![Type::Int, Type::Bool], Box::new(Type::Int))
+        );
+        // `fn()` (no arrow) is a Unit-returning function type.
+        let q = parse_src("fn f(g: fn()) -> Int64 { return 0 }");
+        assert_eq!(q.functions[0].params[0].ty, Type::Fn(vec![], Box::new(Type::Unit)));
+    }
+
+    #[test]
+    fn parses_expression_lambda() {
+        let p = parse_src("fn f(g: fn(Int64) -> Int64) -> Int64 { return 0 }\n\
+                           fn main() -> Int64 { let a = f(|x| x * 2)  return 0 }");
+        match only_arg(&p) {
+            Expr::Lambda { params, body, .. } => {
+                assert_eq!(params, vec!["x".to_string()]);
+                assert!(matches!(body, LambdaBody::Expr(_)));
+            }
+            other => panic!("expected lambda, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_block_and_multiparam_and_niladic_lambda() {
+        let p = parse_src("fn f(g: fn(Int64, Int64) -> Int64) -> Int64 { return 0 }\n\
+                           fn main() -> Int64 { let a = f(|x, y| { return x + y })  return 0 }");
+        match only_arg(&p) {
+            Expr::Lambda { params, body, .. } => {
+                assert_eq!(params, vec!["x".to_string(), "y".to_string()]);
+                assert!(matches!(body, LambdaBody::Block(_)));
+            }
+            other => panic!("expected lambda, got {other:?}"),
+        }
+        // `||` is the zero-parameter lambda.
+        let q = parse_src("fn f(g: fn() -> Int64) -> Int64 { return 0 }\n\
+                           fn main() -> Int64 { let a = f(|| 7)  return 0 }");
+        match only_arg(&q) {
+            Expr::Lambda { params, .. } => assert!(params.is_empty()),
+            other => panic!("expected niladic lambda, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lambda_body_precedence_spans_or() {
+        // `|x| a || b` — the body is the whole `a || b`, not just `a`.
+        let p = parse_src("fn f(g: fn(Bool) -> Bool) -> Int64 { return 0 }\n\
+                           fn main() -> Int64 { let a = f(|x| x || false)  return 0 }");
+        match only_arg(&p) {
+            Expr::Lambda { body: LambdaBody::Expr(e), .. } => {
+                assert!(matches!(*e, Expr::Binary { op: BinOp::Or, .. }));
+            }
+            other => panic!("expected lambda with Or body, got {other:?}"),
+        }
+    }
 }
