@@ -774,8 +774,201 @@ fn is_injected(t: &TypeDecl) -> bool {
     t.line == 0
 }
 
-fn link(modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>> {
+/// Resolve import aliasing (RFC-0022) into the flat namespace *before* the
+/// register/visibility/merge machinery, which is deliberately alias-unaware.
+///
+/// For each `import { X as Y } from M`:
+///   * the alias `Y` is checked for collisions in the importing module (against
+///     its own top-level decls and its other imports — everything keys on `Y`);
+///   * references to `Y` are rewritten to the decl they name;
+///   * **co-naming** (the importing module *also* defines a decl called `X` —
+///     the RPC stub pattern) frees the name by renaming `M`'s decl `X` to a
+///     fresh unique symbol program-wide (its definition, `M`'s internal uses,
+///     and every real-name importer), so the local stub keeps `X`.
+///
+/// Afterwards every import is a bare import of a real, globally-unique decl name,
+/// and no reference mentions an alias — so the rest of `link` is untouched. The
+/// unlinked root AST the LSP indexes is a separate parse and keeps its aliases.
+fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_key: &str) {
+    // Top-level decl names per module, and the union of all decl names (to mint
+    // collision-free fresh symbols for co-naming renames).
+    let mut module_decls: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut all_names: HashSet<String> = HashSet::new();
+    for m in modules.iter() {
+        let set = module_decls.entry(m.key.clone()).or_default();
+        let mut add = |n: &str| {
+            set.insert(n.to_string());
+            all_names.insert(n.to_string());
+        };
+        for t in &m.program.type_decls {
+            add(&t.name);
+        }
+        for f in &m.program.functions {
+            add(&f.name);
+        }
+        for p in &m.program.protocols {
+            add(&p.name);
+        }
+        for g in &m.program.globals {
+            add(&g.name);
+        }
+    }
+
+    // (target module, original) -> fresh symbol, for co-naming renames.
+    let mut foreign_renames: HashMap<(String, String), String> = HashMap::new();
+    let mint = |original: &str, all: &mut HashSet<String>| -> String {
+        let mut n = 0usize;
+        loop {
+            let cand = format!("{original}__from{n}");
+            if !all.contains(&cand) {
+                all.insert(cand.clone());
+                return cand;
+            }
+            n += 1;
+        }
+    };
+
+    // Pass 1: alias collision checks + decide co-naming renames.
+    for m in modules.iter() {
+        let mine = module_decls.get(&m.key).cloned().unwrap_or_default();
+        let mut locals_seen: HashSet<String> = HashSet::new();
+        for imp in &m.program.imports {
+            for n in &imp.names {
+                let local = n.local().to_string();
+                // The alias (or bare name) must not clash with another import's
+                // local name, nor — when it differs from the original — with a
+                // top-level decl of this module.
+                if !locals_seen.insert(local.clone()) {
+                    errors.push(with_file(
+                        Diagnostic::error(
+                            imp.line,
+                            0,
+                            "load",
+                            format!("`{local}` is imported twice into this module"),
+                        ),
+                        m,
+                        root_key,
+                    ));
+                }
+                if n.alias.is_some() && mine.contains(&local) {
+                    errors.push(with_file(
+                        Diagnostic::error(
+                            imp.line,
+                            0,
+                            "load",
+                            format!(
+                                "import alias `{local}` clashes with a top-level declaration of \
+                                 the same name in this module"
+                            ),
+                        ),
+                        m,
+                        root_key,
+                    ));
+                }
+            }
+        }
+        // Co-naming: an aliased import whose ORIGINAL name is also defined locally.
+        for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
+            for n in &imp.names {
+                if n.alias.is_some() && mine.contains(&n.original) {
+                    let key = (target.clone(), n.original.clone());
+                    if !foreign_renames.contains_key(&key) {
+                        let s = mint(&n.original, &mut all_names);
+                        foreign_renames.insert(key, s);
+                    }
+                }
+            }
+        }
+        // An aliased import HIDES the original name: it may not be used directly
+        // (unless the module also defines or bare-imports it). This must be caught
+        // before the reference rewrite fuses alias and original into one name.
+        let bare_imported: HashSet<&str> = m
+            .program
+            .imports
+            .iter()
+            .flat_map(|imp| imp.names.iter())
+            .filter(|n| n.alias.is_none())
+            .map(|n| n.original.as_str())
+            .collect();
+        let refs = program_ref_names(&m.program);
+        for imp in &m.program.imports {
+            for n in &imp.names {
+                if let Some(_alias) = &n.alias {
+                    let orig = &n.original;
+                    if !mine.contains(orig)
+                        && !bare_imported.contains(orig.as_str())
+                        && refs.contains(orig)
+                    {
+                        errors.push(with_file(
+                            Diagnostic::error(
+                                imp.line,
+                                0,
+                                "load",
+                                format!(
+                                    "`{orig}` is not in scope — it was imported as `{}`; use \
+                                     that name (or import `{orig}` too)",
+                                    n.local()
+                                ),
+                            ),
+                            m,
+                            root_key,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Pass 2: per-module reference-rewrite maps (alias/local -> resolved decl).
+    let mut rewrites: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for m in modules.iter() {
+        for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
+            for n in &imp.names {
+                let resolved = foreign_renames
+                    .get(&(target.clone(), n.original.clone()))
+                    .cloned()
+                    .unwrap_or_else(|| n.original.clone());
+                if n.alias.is_some() {
+                    // The alias resolves to the decl (renamed or original).
+                    rewrites.entry(m.key.clone()).or_default().insert(n.local().to_string(), resolved);
+                } else if resolved != n.original {
+                    // A bare (real-name) importer of a co-named decl follows the rename.
+                    rewrites.entry(m.key.clone()).or_default().insert(n.original.clone(), resolved);
+                }
+            }
+        }
+    }
+
+    // Pass 3: apply the foreign-decl renames (definition + owning module refs).
+    for ((target, original), s) in &foreign_renames {
+        if let Some(tm) = modules.iter_mut().find(|m| &m.key == target) {
+            rename_decl_in_module(&mut tm.program, original, s);
+        }
+    }
+
+    // Pass 4: apply per-module reference rewrites, and normalize each import to a
+    // bare import of the resolved decl name so register/visibility stay unaware.
+    for m in modules.iter_mut() {
+        if let Some(map) = rewrites.get(&m.key) {
+            rewrite_module_refs(&mut m.program, map);
+        }
+        for (imp, target) in m.program.imports.iter_mut().zip(&m.import_targets) {
+            for n in &mut imp.names {
+                let resolved = foreign_renames
+                    .get(&(target.clone(), n.original.clone()))
+                    .cloned()
+                    .unwrap_or_else(|| n.original.clone());
+                n.original = resolved;
+                n.alias = None;
+            }
+        }
+    }
+}
+
+fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>> {
     let mut errors: Vec<Diagnostic> = Vec::new();
+    // RFC-0022: fold import aliases into the flat namespace up front.
+    resolve_aliases(&mut modules, &mut errors, root_key);
 
     // ---- indexes over all modules ----------------------------------------
     // top-level name -> (module key, exported)
@@ -839,7 +1032,10 @@ fn link(modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>
     for m in &modules {
         let mut visible: HashSet<String> = HashSet::new(); // foreign names imported here
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
-            for name in &imp.names {
+            for imp_name in &imp.names {
+                // Aliases were folded into the flat namespace by `resolve_aliases`
+                // (RFC-0022): every import is now a bare import of a real decl name.
+                let name = &imp_name.original;
                 match owner.get(name) {
                     Some((def_module, exported)) if def_module == target => {
                         if !exported {
@@ -1164,6 +1360,270 @@ fn type_names(ty: &Type) -> Vec<String> {
     out
 }
 
+// ---- alias reference rewriting (RFC-0022) ---------------------------------
+//
+// Import aliasing (`import { X as Y } from M`) is resolved by rewriting, in the
+// importing module's linked AST, every *reference* to the local name `Y` into
+// the actual decl name it stands for. The rewrite runs on the merged program's
+// per-module copies before flattening, so the checker/interp/codegen — which
+// resolve by decl name in one flat namespace — never learn aliases exist. The
+// unlinked root AST that the LSP indexes is untouched, so hover still sees `Y`.
+
+/// A name→name substitution for references (`map.get(n)` or `n` unchanged).
+fn ren<'a>(map: &'a HashMap<String, String>, n: &'a str) -> String {
+    map.get(n).cloned().unwrap_or_else(|| n.to_string())
+}
+
+/// Rewrite every referenced type name in `ty` through `map`.
+fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
+    match ty {
+        Type::Named(n) => *n = ren(map, n),
+        Type::App(n, args) => {
+            *n = ren(map, n);
+            for a in args {
+                rewrite_type(a, map);
+            }
+        }
+        Type::Option(a) | Type::Ref(a) | Type::Array(a) | Type::Task(a) | Type::Partial(a)
+        | Type::ArrayN(a, _) | Type::Omit(a, _) | Type::Pick(a, _) => rewrite_type(a, map),
+        Type::Result(a, b) | Type::Merge(a, b) => {
+            rewrite_type(a, map);
+            rewrite_type(b, map);
+        }
+        Type::Record(fs) => {
+            for f in fs {
+                rewrite_type(&mut f.ty, map);
+            }
+        }
+        Type::Enum(vs) => {
+            for v in vs {
+                for p in &mut v.payload {
+                    rewrite_type(p, map);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Rewrite every referenced name in `e` (call/spawn/struct-lit/try-construct
+/// callees, bare variables, and match-variant constructors) through `map`.
+fn rewrite_expr(e: &mut Expr, map: &HashMap<String, String>) {
+    match e {
+        Expr::Call { name, args, .. }
+        | Expr::Spawn { name, args, .. }
+        | Expr::TryConstruct { name, args, .. } => {
+            *name = ren(map, name);
+            for a in args {
+                rewrite_expr(a, map);
+            }
+        }
+        Expr::StructLit { name, fields, .. } => {
+            *name = ren(map, name);
+            for (_, v) in fields {
+                rewrite_expr(v, map);
+            }
+        }
+        Expr::Var { name, .. } => *name = ren(map, name),
+        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+            rewrite_expr(expr, map)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            rewrite_expr(lhs, map);
+            rewrite_expr(rhs, map);
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            rewrite_expr(scrutinee, map);
+            for arm in arms {
+                if let Pattern::Variant(v, _) = &mut arm.pattern {
+                    *v = ren(map, v);
+                }
+                rewrite_expr(&mut arm.body, map);
+            }
+        }
+        Expr::ArrayLit { elems, .. } => {
+            for e2 in elems {
+                rewrite_expr(e2, map);
+            }
+        }
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
+    }
+}
+
+fn rewrite_block(b: &mut Block, map: &HashMap<String, String>) {
+    for s in &mut b.stmts {
+        rewrite_stmt(s, map);
+    }
+}
+
+fn rewrite_stmt(s: &mut Stmt, map: &HashMap<String, String>) {
+    match s {
+        Stmt::Let { value, ty, .. } => {
+            if let Some(t) = ty {
+                rewrite_type(t, map);
+            }
+            rewrite_expr(value, map);
+        }
+        Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => rewrite_expr(value, map),
+        Stmt::IndexSet { index, value, .. } => {
+            rewrite_expr(index, map);
+            rewrite_expr(value, map);
+        }
+        Stmt::Return { value: Some(e), .. } => rewrite_expr(e, map),
+        Stmt::Return { value: None, .. } => {}
+        Stmt::If { cond, then_block, else_block, .. } => {
+            rewrite_expr(cond, map);
+            rewrite_block(then_block, map);
+            if let Some(eb) = else_block {
+                rewrite_block(eb, map);
+            }
+        }
+        Stmt::While { cond, body, .. } => {
+            rewrite_expr(cond, map);
+            rewrite_block(body, map);
+        }
+        Stmt::ForIn { iter, body, .. } => {
+            rewrite_expr(iter, map);
+            rewrite_block(body, map);
+        }
+        Stmt::Drop { .. } => {}
+        Stmt::Expr(e) => rewrite_expr(e, map),
+        Stmt::Region { body, .. } => rewrite_block(body, map),
+    }
+}
+
+/// Rewrite one function's signature types and body references through `map`.
+fn rewrite_function(f: &mut Function, map: &HashMap<String, String>) {
+    for p in &mut f.params {
+        rewrite_type(&mut p.ty, map);
+    }
+    rewrite_type(&mut f.ret, map);
+    // A `<T: P>` bound naming an aliased protocol resolves through `map` too.
+    for bounds in f.type_bounds.values_mut() {
+        for b in bounds.iter_mut() {
+            *b = ren(map, b);
+        }
+    }
+    rewrite_block(&mut f.body, map);
+}
+
+/// Rewrite every *reference* (types, calls, variables, bounds) in one module's
+/// program through `map`. Declaration names are left alone — a separate step
+/// renames a decl when a foreign name must be freed for a co-named local stub.
+fn rewrite_module_refs(p: &mut Program, map: &HashMap<String, String>) {
+    if map.is_empty() {
+        return;
+    }
+    for f in &mut p.functions {
+        rewrite_function(f, map);
+    }
+    for im in &mut p.impls {
+        im.protocol = ren(map, &im.protocol);
+        rewrite_type(&mut im.ty, map);
+        for m in &mut im.methods {
+            rewrite_function(m, map);
+        }
+    }
+    for t in &mut p.type_decls {
+        rewrite_type(&mut t.base, map);
+        if let Some(pred) = &mut t.predicate {
+            rewrite_expr(pred, map);
+        }
+    }
+    for g in &mut p.globals {
+        if let Some(t) = &mut g.ty {
+            rewrite_type(t, map);
+        }
+        rewrite_expr(&mut g.init, map);
+    }
+    for pr in &mut p.protocols {
+        for m in &mut pr.methods {
+            for t in &mut m.params {
+                rewrite_type(t, map);
+            }
+            rewrite_type(&mut m.ret, map);
+        }
+    }
+    for t in &mut p.tests {
+        rewrite_block(&mut t.body, map);
+    }
+}
+
+/// Every reference name (types and expression callees/variables/variants) used
+/// anywhere in a module's declarations — for the RFC-0022 check that an aliased
+/// import's original name is not also used directly.
+fn program_ref_names(p: &Program) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+    let add_block = |b: &Block, out: &mut HashSet<String>| {
+        for (n, _) in fn_body_names(b) {
+            out.insert(n);
+        }
+    };
+    let add_type = |t: &Type, out: &mut HashSet<String>| {
+        for n in type_names(t) {
+            out.insert(n);
+        }
+    };
+    for f in &p.functions {
+        for pm in &f.params {
+            add_type(&pm.ty, &mut out);
+        }
+        add_type(&f.ret, &mut out);
+        add_block(&f.body, &mut out);
+    }
+    for im in &p.impls {
+        out.insert(im.protocol.clone());
+        add_type(&im.ty, &mut out);
+        for m in &im.methods {
+            for pm in &m.params {
+                add_type(&pm.ty, &mut out);
+            }
+            add_type(&m.ret, &mut out);
+            add_block(&m.body, &mut out);
+        }
+    }
+    for t in &p.type_decls {
+        add_type(&t.base, &mut out);
+    }
+    for g in &p.globals {
+        if let Some(t) = &g.ty {
+            add_type(t, &mut out);
+        }
+    }
+    for t in &p.tests {
+        add_block(&t.body, &mut out);
+    }
+    out
+}
+
+/// Rename a top-level *declaration* (its defining name) from `from` to `to` in
+/// module `p`, and rewrite that module's own references to it. Used to free a
+/// foreign name so a co-naming importer's stub can take it (RFC-0022).
+fn rename_decl_in_module(p: &mut Program, from: &str, to: &str) {
+    for t in &mut p.type_decls {
+        if t.name == from {
+            t.name = to.to_string();
+        }
+    }
+    for f in &mut p.functions {
+        if f.name == from {
+            f.name = to.to_string();
+        }
+    }
+    for pr in &mut p.protocols {
+        if pr.name == from {
+            pr.name = to.to_string();
+        }
+    }
+    for g in &mut p.globals {
+        if g.name == from {
+            g.name = to.to_string();
+        }
+    }
+    let map: HashMap<String, String> = std::iter::once((from.to_string(), to.to_string())).collect();
+    rewrite_module_refs(p, &map);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1201,6 +1661,59 @@ mod tests {
         let root = "import { double, Age } from \"./lib\" \
                     fn main() -> Int64 { let a: Age = 21 return double(a) }";
         assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 42);
+    }
+
+    #[test]
+    fn import_alias_resolves_to_the_original_decl() {
+        // RFC-0022: `getUser as fetchUser` — the alias is the local name and
+        // resolves to the original function/type in the flat namespace.
+        let lib = "export fn getUser(id: Int64) -> Int64 { return id * 10 } \
+                   export type Age = Int64 where value >= 0";
+        let root = "import { getUser as fetchUser, Age as Years } from \"./lib\" \
+                    fn main() -> Int64 { let y: Years = 3 return fetchUser(y) }";
+        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 30);
+    }
+
+    #[test]
+    fn import_alias_hides_the_original_name() {
+        // The original name is not brought into scope by an aliased import.
+        let lib = "export fn getUser(id: Int64) -> Int64 { return id }";
+        let root = "import { getUser as fetchUser } from \"./lib\" \
+                    fn main() -> Int64 { return getUser(1) }";
+        let e = load_err(root, &[("lib.vyrn", lib)]);
+        assert!(e.contains("getUser"), "{e}");
+    }
+
+    #[test]
+    fn import_alias_clashing_with_a_local_decl_is_an_error() {
+        let lib = "export fn getUser(id: Int64) -> Int64 { return id }";
+        let root = "import { getUser as fetchUser } from \"./lib\" \
+                    fn fetchUser() -> Int64 { return 0 } \
+                    fn main() -> Int64 { return 0 }";
+        let e = load_err(root, &[("lib.vyrn", lib)]);
+        assert!(e.contains("clashes with a top-level declaration"), "{e}");
+    }
+
+    #[test]
+    fn import_alias_lets_a_stub_share_the_real_name() {
+        // The co-naming (RPC stub) pattern: the importing module defines its own
+        // `getUser`, importing the real one under an alias it forwards to.
+        let lib = "export fn getUser(id: Int64) -> Int64 { return id * 100 }";
+        let root = "import { getUser as getUserReal } from \"./lib\" \
+                    fn getUser(id: Int64) -> Int64 { return getUserReal(id) + 1 } \
+                    fn main() -> Int64 { return getUser(2) }";
+        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 201);
+    }
+
+    #[test]
+    fn aliased_enum_import_brings_variants_under_own_names() {
+        // Importing an enum under an alias still brings its variants by their
+        // own (unaliased) names (RFC-0022).
+        let lib = "export type Color = | Red | Green | Blue";
+        let root = "import { Color as Hue } from \"./lib\" \
+                    fn pick(h: Hue) -> Int64 { return match h { Red => 1, Green => 2, Blue => 3 } } \
+                    fn main() -> Int64 { let c: Hue = Green return pick(c) }";
+        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 2);
     }
 
     #[test]

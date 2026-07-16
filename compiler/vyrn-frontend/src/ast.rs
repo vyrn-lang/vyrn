@@ -110,12 +110,37 @@ pub struct GlobalDecl {
 ///   (RFC-0003) — `base` is `Int`/`Bool` with an optional `predicate`;
 /// - a structural record, e.g. `type User = { name: Int, age: Int };`
 ///   (RFC-0002) — `base` is a [`Type::Record`] and `predicate` is `None`.
+/// One imported binding: `original` as exported by the source module, bound
+/// locally under `alias` when written `original as alias` (RFC-0022). A bare
+/// `import { User }` has `alias: None` — the local name equals `original`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportName {
+    /// The name as exported by the source module.
+    pub original: String,
+    /// The local name it is bound to here, when different (`... as alias`).
+    pub alias: Option<String>,
+}
+
+impl ImportName {
+    /// A bare (unaliased) import of `name`.
+    pub fn bare(name: impl Into<String>) -> Self {
+        ImportName { original: name.into(), alias: None }
+    }
+    /// The name this binding is known by in the importing module — the alias if
+    /// present, else the original. This is what visibility, collision, and
+    /// movecheck all key on.
+    pub fn local(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.original)
+    }
+}
+
 /// One `import { names } from "path"` declaration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImportDecl {
-    /// The names brought into scope. `import type { .. }` (JSON Schema
-    /// imports) also lands here; the loader dispatches on the path's extension.
-    pub names: Vec<String>,
+    /// The bindings brought into scope, each an `original`/`alias` pair
+    /// (RFC-0022). `import type { .. }` (JSON Schema imports) also lands here;
+    /// the loader dispatches on the path's extension.
+    pub names: Vec<ImportName>,
     /// Where the names come from: an ordinary module specifier, or a compile-time
     /// generator call (RFC-0021).
     pub source: ImportSource,

@@ -822,7 +822,17 @@ impl Parser {
         self.eat(&Tok::LBrace)?;
         let mut names = Vec::new();
         while *self.peek() != Tok::RBrace {
-            names.push(self.expect_ident()?);
+            let original = self.expect_ident()?;
+            // Optional `as alias` (RFC-0022). `as` is contextual: recognized only
+            // between an import name and its comma/`}`, so a variable named `as`
+            // elsewhere is unharmed.
+            let alias = if matches!(self.peek(), Tok::Ident(kw) if kw == "as") {
+                self.advance();
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            names.push(ImportName { original, alias });
             if *self.peek() == Tok::Comma {
                 self.advance();
             } else {
@@ -2370,7 +2380,10 @@ mod tests {
              fn main() -> Int64 { return 0 }",
         );
         let imp = &p.imports[0];
-        assert_eq!(imp.names, vec!["t".to_string(), "TransKey".to_string()]);
+        assert_eq!(
+            imp.names,
+            vec![ImportName::bare("t"), ImportName::bare("TransKey")]
+        );
         match &imp.source {
             ImportSource::Generator { name, args, .. } => {
                 assert_eq!(name, "i18n");
@@ -2386,6 +2399,33 @@ mod tests {
     fn import_from_path_string_still_parses() {
         let p = parse_src("import { x } from \"./lib\" fn main() -> Int64 { return 0 }");
         assert!(matches!(&p.imports[0].source, ImportSource::Path(p) if p == "./lib"));
+    }
+
+    #[test]
+    fn import_aliasing_parses_original_and_alias() {
+        // RFC-0022: `original as alias`; bare names keep `alias: None`.
+        let p = parse_src(
+            "import { getUser as fetchUser, User } from \"./api\" \
+             fn main() -> Int64 { return 0 }",
+        );
+        assert_eq!(
+            p.imports[0].names,
+            vec![
+                ImportName { original: "getUser".into(), alias: Some("fetchUser".into()) },
+                ImportName::bare("User"),
+            ]
+        );
+        assert_eq!(p.imports[0].names[0].local(), "fetchUser");
+        assert_eq!(p.imports[0].names[1].local(), "User");
+    }
+
+    #[test]
+    fn as_is_still_an_identifier_elsewhere() {
+        // `as` is contextual (only special between an import name and its
+        // separator); a variable named `as` is unharmed.
+        let p = parse_src("fn main() -> Int64 { let as = 3 return as }");
+        let f = &p.functions[0];
+        assert!(matches!(&f.body.stmts[0], Stmt::Let { name, .. } if name == "as"));
     }
 
     #[test]

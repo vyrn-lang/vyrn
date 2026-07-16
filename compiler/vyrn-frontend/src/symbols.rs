@@ -1093,26 +1093,39 @@ fn index_symbols(
 /// land on the declaration line), and `file` carries the source module so the
 /// LSP can build a cross-file `Location`.
 fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Symbol> {
-    let imported: std::collections::HashSet<&str> = root
-        .imports
-        .iter()
-        .flat_map(|i| i.names.iter().map(|s| s.as_str()))
-        .collect();
-    if imported.is_empty() {
+    // Map each imported ORIGINAL decl name to the LOCAL name the root refers to
+    // it by (the alias, or the original for a bare import — RFC-0022). Linked
+    // decls are matched by original; the emitted symbol is keyed by the local
+    // name so it lines up with the root's tokens, and an aliased binding notes
+    // `— alias of <original>` in its hover detail.
+    let mut local_of: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for imp in &root.imports {
+        for n in &imp.names {
+            local_of.insert(n.original.as_str(), n.local());
+        }
+    }
+    if local_of.is_empty() {
         return Vec::new();
     }
+    let alias_note = |local: &str, original: &str, detail: String| -> String {
+        if local == original {
+            detail
+        } else {
+            format!("{detail}\n\n— alias of `{original}`")
+        }
+    };
     let mut out = Vec::new();
 
     for f in &linked.functions {
         if let Some(file) = &f.module {
-            if imported.contains(f.name.as_str()) {
+            if let Some(&local) = local_of.get(f.name.as_str()) {
                 out.push(Symbol {
-                    name: f.name.clone(),
+                    name: local.to_string(),
                     kind: SymbolKind::Function,
                     line: f.line,
                     col: 0,
                     end_col: 0,
-                    detail: function_detail(f),
+                    detail: alias_note(local, &f.name, function_detail(f)),
                     file: Some(file.clone()),
                 });
             }
@@ -1121,14 +1134,14 @@ fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Sym
 
     for p in &linked.protocols {
         if let Some(file) = &p.module {
-            if imported.contains(p.name.as_str()) {
+            if let Some(&local) = local_of.get(p.name.as_str()) {
                 out.push(Symbol {
-                    name: p.name.clone(),
+                    name: local.to_string(),
                     kind: SymbolKind::Type,
                     line: p.line,
                     col: 0,
                     end_col: 0,
-                    detail: protocol_detail(p),
+                    detail: alias_note(local, &p.name, protocol_detail(p)),
                     file: Some(file.clone()),
                 });
                 for m in &p.methods {
@@ -1153,14 +1166,14 @@ fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Sym
             continue;
         }
         if let Some(file) = &t.module {
-            if imported.contains(t.name.as_str()) {
+            if let Some(&local) = local_of.get(t.name.as_str()) {
                 out.push(Symbol {
-                    name: t.name.clone(),
+                    name: local.to_string(),
                     kind: SymbolKind::Type,
                     line: t.line,
                     col: 0,
                     end_col: 0,
-                    detail: type_decl_detail(t, &linked.type_decls),
+                    detail: alias_note(local, &t.name, type_decl_detail(t, &linked.type_decls)),
                     file: Some(file.clone()),
                 });
                 if let Type::Enum(variants) = &t.base {
@@ -1639,6 +1652,36 @@ mod tests {
             a.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
         );
         assert!(a.symbols.iter().any(|s| s.name == "magic"), "generated `magic` is indexed");
+    }
+
+    #[test]
+    fn analyze_linked_indexes_an_aliased_import() {
+        // RFC-0022: an aliased import is indexed under the LOCAL name, hover notes
+        // `— alias of <original>`, and go-to-def points at the foreign decl.
+        use crate::loader::{LoadOptions, MapResolver};
+        let files: std::collections::HashMap<String, String> = [(
+            "api.vyrn".to_string(),
+            "export fn getUser(id: Int64) -> Int64 { return id }".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let resolver = MapResolver(files);
+        let root = "import { getUser as fetchUser } from \"./api\"\n\
+                    fn main() -> Int64 { return fetchUser(1) }";
+        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver);
+        assert!(a.diagnostics.is_empty(), "diags: {:?}", a.diagnostics);
+        let sym = a
+            .symbols
+            .iter()
+            .find(|s| s.name == "fetchUser" && s.file.is_some())
+            .expect("aliased import indexed under the local name");
+        assert!(sym.detail.contains("alias of `getUser`"), "hover detail: {}", sym.detail);
+        assert_eq!(sym.file.as_deref(), Some("api.vyrn"), "go-to-def jumps to the source module");
+        // The original name is NOT indexed as an imported symbol.
+        assert!(
+            !a.symbols.iter().any(|s| s.name == "getUser" && s.file.is_some()),
+            "original name is hidden by the alias"
+        );
     }
 
     // ---- RFC-0020 M1: string-literal completion -----------------------------
