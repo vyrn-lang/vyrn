@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: tests (workspace + LSP)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            compiler/target
+            compiler/vyrn-lsp/target
+          key: rust-${{ runner.os }}-${{ hashFiles('compiler/Cargo.lock', 'compiler/vyrn-lsp/Cargo.lock') }}
+      - name: Workspace tests
+        working-directory: compiler
+        run: cargo test --quiet
+      - name: LSP tests (excluded crate)
+        working-directory: compiler
+        run: cargo test --quiet --manifest-path vyrn-lsp/Cargo.toml
+
+  parity:
+    name: three-way parity (interp == native == wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            compiler/target
+          key: rust-parity-${{ runner.os }}-${{ hashFiles('compiler/Cargo.lock') }}
+      - name: wasm toolchain cache
+        id: wasm-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/wasm-tools
+          key: wasm-tools-wasi25-wasmtime46
+      - name: Fetch wasi-sysroot + builtins + wasmtime
+        if: steps.wasm-tools.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/wasm-tools && cd ~/wasm-tools
+          curl -sSfL -o sysroot.tar.gz https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sysroot-25.0.tar.gz
+          curl -sSfL -o builtins.tar.gz https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/libclang_rt.builtins-wasm32-wasi-25.0.tar.gz
+          curl -sSfL -o wasmtime.tar.xz https://github.com/bytecodealliance/wasmtime/releases/download/v46.0.1/wasmtime-v46.0.1-x86_64-linux.tar.xz
+          tar xf sysroot.tar.gz && tar xf builtins.tar.gz && tar xf wasmtime.tar.xz
+      - name: Run the parity harness
+        working-directory: compiler
+        run: |
+          export WASI_SYSROOT=$(echo ~/wasm-tools/wasi-sysroot-*)
+          export WASI_BUILTINS=$(find ~/wasm-tools -name 'libclang_rt.builtins-wasm32.a' | head -1)
+          export VYRN_WASMTIME=$(find ~/wasm-tools -type f -name wasmtime | head -1)
+          echo "sysroot:  $WASI_SYSROOT"
+          echo "builtins: $WASI_BUILTINS"
+          echo "wasmtime: $VYRN_WASMTIME"
+          cargo test --quiet -p vyrn-cli --test parity -- --ignored --nocapture
