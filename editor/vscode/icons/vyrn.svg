@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-label="Vyrn">
+  <path d="M 4.80 6.00 L 16.00 18.60 L 27.20 6.00" fill="none" stroke="#123258" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 10.65 7.64 L 16.00 18.60 L 26.11 11.78" fill="none" stroke="#1c7f9c" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 15.02 10.92 L 16.00 18.60 L 23.33 16.11" fill="none" stroke="#22b8d4" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="16.00" cy="18.60" r="1.7" fill="#4fe3f2"/>
+</svg>

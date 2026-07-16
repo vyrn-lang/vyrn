@@ -1,13 +1,14 @@
 {
-  "name": "vela",
-  "displayName": "Vela",
-  "description": "Language support for Vela: syntax highlighting + diagnostics via the vela-lsp server.",
+  "name": "vyrn",
+  "displayName": "Vyrn",
+  "description": "Language support for Vyrn: syntax highlighting + diagnostics via the vyrn-lsp server.",
   "version": "0.1.0",
-  "publisher": "vela-lang",
+  "publisher": "vyrn-lang",
   "license": "MIT",
+  "icon": "icons/vyrn.png",
   "engines": { "vscode": "^1.70.0" },
   "categories": ["Programming Languages"],
-  "activationEvents": ["onLanguage:vela"],
+  "activationEvents": ["onLanguage:vyrn"],
   "main": "./extension.js",
   "scripts": {
     "package": "node scripts/make-vsix.mjs"
@@ -15,55 +16,55 @@
   "contributes": {
     "languages": [
       {
-        "id": "vela",
-        "aliases": ["Vela", "vela"],
-        "extensions": [".vela"],
-        "icon": { "light": "./icons/vela.svg", "dark": "./icons/vela.svg" },
+        "id": "vyrn",
+        "aliases": ["Vyrn", "vyrn"],
+        "extensions": [".vyrn"],
+        "icon": { "light": "./icons/vyrn.svg", "dark": "./icons/vyrn.svg" },
         "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
       {
-        "language": "vela",
-        "scopeName": "source.vela",
-        "path": "./vela.tmLanguage.json"
+        "language": "vyrn",
+        "scopeName": "source.vyrn",
+        "path": "./vyrn.tmLanguage.json"
       }
     ],
     "snippets": [
       {
-        "language": "vela",
-        "path": "./snippets/vela.json"
+        "language": "vyrn",
+        "path": "./snippets/vyrn.json"
       }
     ],
     "commands": [
       {
-        "command": "vela.run",
-        "title": "Vela: Run File",
-        "category": "Vela"
+        "command": "vyrn.run",
+        "title": "Vyrn: Run File",
+        "category": "Vyrn"
       },
       {
-        "command": "vela.test",
-        "title": "Vela: Run Test",
-        "category": "Vela"
+        "command": "vyrn.test",
+        "title": "Vyrn: Run Test",
+        "category": "Vyrn"
       },
       {
-        "command": "vela.testAll",
-        "title": "Vela: Run All Tests",
-        "category": "Vela"
+        "command": "vyrn.testAll",
+        "title": "Vyrn: Run All Tests",
+        "category": "Vyrn"
       }
     ],
     "configuration": {
-      "title": "Vela",
+      "title": "Vyrn",
       "properties": {
-        "vela.serverPath": {
+        "vyrn.serverPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the vela-lsp server binary. Defaults to ${workspaceFolder}/compiler/vela-lsp/target/debug/vela-lsp (or .exe). Leave empty for the dev default."
+          "description": "Path to the vyrn-lsp server binary. Defaults to ${workspaceFolder}/compiler/vyrn-lsp/target/debug/vyrn-lsp (or .exe). Leave empty for the dev default."
         },
-        "vela.velacPath": {
+        "vyrn.path": {
           "type": "string",
           "default": "",
-          "description": "Path to the velac compiler binary used by the ▶ Run CodeLens. When empty, resolves ${workspaceFolder}/compiler/target/release/velac(.exe), then the debug build, then falls back to `cargo run -p vela-cli`."
+          "description": "Path to the vyrn compiler binary used by the ▶ Run CodeLens. When empty, resolves ${workspaceFolder}/compiler/target/release/vyrn(.exe), then the debug build, then falls back to `cargo run -p vyrn-cli`."
         }
       }
     }

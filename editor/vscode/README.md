@@ -1,4 +1,4 @@
-# Vela — VS Code support
+# Vyrn — VS Code support
 
 A minimal VS Code extension that adds **syntax highlighting** (including
 **regex highlighting** inside `=~` / `where` predicates and distinct colors for
@@ -7,38 +7,38 @@ A minimal VS Code extension that adds **syntax highlighting** (including
 (including `test` blocks), **document formatting** (RFC-0017 — format-on-save
 works with zero extra config, since the server advertises
 `documentFormattingProvider`), **▶ Run / ▶ Run test CodeLenses**, and
-**snippets** for the Vela language (`.vela` files).
+**snippets** for the Vyrn language (`.vyrn` files).
 
 It is deliberately tiny and plain-JavaScript (no TypeScript compile step):
 
-- `extension.js` — spawns the `vela-lsp` server and shuttles JSON-RPC, and
-  registers the ▶ Run / ▶ Run test CodeLenses + the `vela.run` / `vela.test` /
-  `vela.testAll` commands (terminal launchers; no server needed). The server
+- `extension.js` — spawns the `vyrn-lsp` server and shuttles JSON-RPC, and
+  registers the ▶ Run / ▶ Run test CodeLenses + the `vyrn.run` / `vyrn.test` /
+  `vyrn.testAll` commands (terminal launchers; no server needed). The server
   does the language-analysis work.
-- `vela.tmLanguage.json` — a TextMate grammar (colors) derived from the real
+- `vyrn.tmLanguage.json` — a TextMate grammar (colors) derived from the real
   lexer token set: keywords, PascalCase types/variants, function calls,
   contextual capability modifiers (`consume`/`share`/`modify`/`read`), tagged
   templates, and structural regex highlighting after `=~`. Works even without
   the server.
-- `snippets/vela.json` — snippets for `fn`, `main`, record/enum `type`,
+- `snippets/vyrn.json` — snippets for `fn`, `main`, record/enum `type`,
   `protocol`, `impl`, `match`, `import`, the `logging` block, and `test`.
 - `language-configuration.json` — `//` comment toggle + bracket matching.
 
 ## Run a file
 
-A **▶ Run** CodeLens appears above every `fn main` (Vela's only entry point).
-Clicking it runs the file in a reused integrated terminal named `vela`. The
-compiler is resolved as: the `vela.velacPath` setting, else
-`${workspaceFolder}/compiler/target/release/velac(.exe)`, else the `debug`
-build, else `cargo run -p vela-cli -- run <file>`.
+A **▶ Run** CodeLens appears above every `fn main` (Vyrn's only entry point).
+Clicking it runs the file in a reused integrated terminal named `vyrn`. The
+compiler is resolved as: the `vyrn.path` setting, else
+`${workspaceFolder}/compiler/target/release/vyrn(.exe)`, else the `debug`
+build, else `cargo run -p vyrn-cli -- run <file>`.
 
 For tests (RFC-0015), a **▶ Run test** CodeLens sits above every
-`test "name" { .. }` block — it runs `velac test <file> --name "name"` — and a
-**▶ Run all tests** CodeLens sits above the first test block (`velac test
+`test "name" { .. }` block — it runs `vyrn test <file> --name "name"` — and a
+**▶ Run all tests** CodeLens sits above the first test block (`vyrn test
 <file>`). Both use the same terminal and compiler-resolution as ▶ Run.
 
-The LSP server (`compiler/vela-lsp`) is a thin adapter over the compiler's core
-diagnostics + symbol-query API (`vela_frontend::analyze`), the same one `velac
+The LSP server (`compiler/vyrn-lsp`) is a thin adapter over the compiler's core
+diagnostics + symbol-query API (`vyrn_frontend::analyze`), the same one `vyrn
 check` uses — so the editor and the CLI report identical errors, and a document
 is parsed once per change (hover/def/completion read the cached result, never
 re-parsing).
@@ -50,14 +50,14 @@ re-parsing).
    separate manual step now). Re-run this whenever you change server source:
 
    ```
-   cargo build --manifest-path compiler/vela-lsp/Cargo.toml
+   cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml
    ```
    (Equivalently: run the `build-lsp` VS Code task from the Command Palette.)
 
 2. Open this repo (`N:\lang`) in VS Code and press **F5**. An "Extension
-   Development Host" window opens with the Vela extension loaded.
+   Development Host" window opens with the Vyrn extension loaded.
 
-3. Open any file under `examples/` (e.g. `examples/enum.vela`):
+3. Open any file under `examples/` (e.g. `examples/enum.vyrn`):
    - Colors render from the TextMate grammar.
    - Inject a type error and save — red squiggles appear at the **exact token**
      (lexer/parser) or **whole line** (checker/movecheck), one per error even
@@ -70,24 +70,24 @@ re-parsing).
      types, and variants.
 
 The server path defaults to
-`${workspaceFolder}/compiler/vela-lsp/target/debug/vela-lsp(.exe)`. Override
-with the `vela.serverPath` setting for a release/bundled build.
+`${workspaceFolder}/compiler/vyrn-lsp/target/debug/vyrn-lsp(.exe)`. Override
+with the `vyrn.serverPath` setting for a release/bundled build.
 
 ## Package a .vsix
 
 `npm run package` (from `editor/vscode`) builds the server in **release** mode,
 copies the binary into `./server/`, and produces a platform-tagged
-`vela-<target>-<version>.vsix` (e.g. `vela-win32-x64-0.1.0.vsix`) that bundles
+`vyrn-<target>-<version>.vsix` (e.g. `vyrn-win32-x64-0.1.0.vsix`) that bundles
 the server — so the installed extension works with no Rust toolchain. `@vscode/vsce` is the only dev dependency (`npm install` once first). Install the
 result with:
 
 ```
-code --install-extension vela-win32-x64-0.1.0.vsix
+code --install-extension vyrn-win32-x64-0.1.0.vsix
 ```
 
-`extension.js` resolves the server as: the `vela.serverPath` setting, else the
-bundled `./server/vela-lsp(.exe)`, else the dev build at
-`<repo>/compiler/vela-lsp/target/debug/vela-lsp(.exe)`. A bundled binary makes
+`extension.js` resolves the server as: the `vyrn.serverPath` setting, else the
+bundled `./server/vyrn-lsp(.exe)`, else the dev build at
+`<repo>/compiler/vyrn-lsp/target/debug/vyrn-lsp(.exe)`. A bundled binary makes
 the `.vsix` host-specific (the `--target` flag tags it accordingly); rebuild on
 each target platform you want to ship.
 
@@ -97,10 +97,10 @@ each target platform you want to ship.
 editor/vscode/
   package.json              extension manifest + grammar/language/snippet contributions
   extension.js              the LSP client + ▶ Run / ▶ Run test CodeLenses/commands (plain JS)
-  vela.tmLanguage.json      TextMate grammar
-  snippets/vela.json        snippets (fn, main, type, protocol, impl, match, import, logging, test)
+  vyrn.tmLanguage.json      TextMate grammar
+  snippets/vyrn.json        snippets (fn, main, type, protocol, impl, match, import, logging, test)
   language-configuration.json
-  server/vela-lsp.exe       bundled language server (deployed release build)
+  server/vyrn-lsp.exe       bundled language server (deployed release build)
   node_modules/             vscode-languageclient (gitignored)
 ```
 

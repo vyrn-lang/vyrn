@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
-  "name": "Vela",
-  "scopeName": "source.vela",
+  "name": "Vyrn",
+  "scopeName": "source.vyrn",
   "patterns": [
     { "include": "#comments" },
     { "include": "#regex-string" },
@@ -19,60 +19,60 @@
   ],
   "repository": {
     "comments": {
-      "name": "comment.line.double-slash.vela",
+      "name": "comment.line.double-slash.vyrn",
       "match": "//.*$"
     },
     "regex-string": {
-      "comment": "A string literal immediately after `=~` (a String refinement or `where` predicate, e.g. `value =~ \"[a-z]+\"`) is a REGEX, not plain text — scope it string.regexp and highlight its structure so escapes/classes/quantifiers/groups read distinctly. Placed BEFORE #strings and #operators in the patterns list so it wins the `=~ \"` sequence: at the `=` both this and #operators/#strings could start, and rule order decides. The supported regex grammar (see compiler/vela-frontend/src/regex.rs) is alternation `|`, grouping `()`, classes `[…]`, escapes `\\d \\w \\s \\D \\W \\S \\<c>`, `.`, and quantifiers `* + ? {m} {m,} {m,n}`.",
-      "name": "string.regexp.vela",
+      "comment": "A string literal immediately after `=~` (a String refinement or `where` predicate, e.g. `value =~ \"[a-z]+\"`) is a REGEX, not plain text — scope it string.regexp and highlight its structure so escapes/classes/quantifiers/groups read distinctly. Placed BEFORE #strings and #operators in the patterns list so it wins the `=~ \"` sequence: at the `=` both this and #operators/#strings could start, and rule order decides. The supported regex grammar (see compiler/vyrn-frontend/src/regex.rs) is alternation `|`, grouping `()`, classes `[…]`, escapes `\\d \\w \\s \\D \\W \\S \\<c>`, `.`, and quantifiers `* + ? {m} {m,} {m,n}`.",
+      "name": "string.regexp.vyrn",
       "begin": "(=~)\\s*(\")",
       "beginCaptures": {
-        "1": { "name": "keyword.operator.vela" },
-        "2": { "name": "punctuation.definition.string.begin.vela" }
+        "1": { "name": "keyword.operator.vyrn" },
+        "2": { "name": "punctuation.definition.string.begin.vyrn" }
       },
       "end": "\"",
-      "endCaptures": { "0": { "name": "punctuation.definition.string.end.vela" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.string.end.vyrn" } },
       "patterns": [
         {
           "comment": "Escapes and shorthand classes: \\d \\w \\s (and negated) plus any escaped metacharacter (\\. \\[ \\\\ …). Listed first so `\\[` does not open a character class and `\\.` is not read as the dot atom.",
-          "name": "constant.character.escape.vela",
+          "name": "constant.character.escape.vyrn",
           "match": "\\\\(?:d|w|s|D|W|S|.)"
         },
         {
           "comment": "A character class `[…]` or negated `[^…]`.",
-          "name": "constant.other.character-class.vela",
+          "name": "constant.other.character-class.vyrn",
           "match": "\\[\\^?[^\\]]*\\]"
         },
         {
           "comment": "Quantifiers: * + ? and counted {m} {m,} {m,n}.",
-          "name": "keyword.operator.quantifier.regexp.vela",
+          "name": "keyword.operator.quantifier.regexp.vyrn",
           "match": "[*+?]|\\{\\d+(?:,\\d*)?\\}"
         },
         {
           "comment": "Alternation and grouping.",
-          "name": "keyword.operator.or.regexp.vela",
+          "name": "keyword.operator.or.regexp.vyrn",
           "match": "[|()]"
         }
       ]
     },
     "template-tag": {
       "comment": "The tag of a tagged template (`sql\"…\"`, RFC-0007 Phase 2): a lowerCamelCase identifier directly against a `\"`. Scoped entity.name.function so the tag reads as the call it is. Placed before #strings; the string itself is highlighted by #strings on the next position.",
-      "name": "entity.name.function.vela",
+      "name": "entity.name.function.vyrn",
       "match": "\\b[a-z_][A-Za-z0-9_]*(?=\")"
     },
     "capabilities": {
       "comment": "Capability modifiers on a parameter's type: `fn f(t: consume Token)`, `fn f(c: modify Counter)`, `fn f(cfg: share Config)`, `read`. These are CONTEXTUAL, not reserved — the lexer emits them as plain identifiers and the parser only treats them as capabilities in `: <cap> <Type>` position (parse_capability). So match them contextually — between the `:` and a PascalCase type — rather than as keywords, which keeps `let share = 1` a normal binding. The `:` is captured (and re-scoped as separator) instead of a variable-length lookbehind, which oniguruma does not reliably support. Scoped storage.modifier so themes render it distinctly from both keywords and variables.",
       "match": "(:)(\\s*)(consume|share|modify|read)(?=\\s+[A-Z])",
       "captures": {
-        "1": { "name": "punctuation.separator.vela" },
-        "3": { "name": "storage.modifier.vela" }
+        "1": { "name": "punctuation.separator.vyrn" },
+        "3": { "name": "storage.modifier.vyrn" }
       }
     },
     "strings": {
       "patterns": [
         {
           "comment": "Interpolated string \"a\\{expr}b\" (RFC-0007). Holes use \\{ ... } so plain { } stay literal.",
-          "name": "string.quoted.double.vela",
+          "name": "string.quoted.double.vyrn",
           "begin": "\"",
           "end": "\"",
           "patterns": [
@@ -83,17 +83,17 @@
       ]
     },
     "string-escapes": {
-      "comment": "String escapes. \\{ is NOT here: it opens an interpolation hole (below), and { is already a literal char in Vela strings, so there is no `\\{` escape.",
-      "name": "constant.character.escape.vela",
+      "comment": "String escapes. \\{ is NOT here: it opens an interpolation hole (below), and { is already a literal char in Vyrn strings, so there is no `\\{` escape.",
+      "name": "constant.character.escape.vyrn",
       "match": "\\\\(?:n|t|\\\\|\")"
     },
     "interpolation": {
       "comment": "A \\{ ... } interpolation hole. The closing } is consumed by `end` and colored via endCaptures. Inner patterns deliberately OMIT } — an included } here would match before `end` and leave the hole unterminated. Nested braces (e.g. a block expr) are a known limitation: the hole closes at the first } not inside a nested string. NOTE: the delimiter scopes intentionally reuse the `punctuation.definition.template-expression.*` family rather than a generic `punctuation.definition.interpolation` — Dark+ (and most themes) theme the former but not the latter, so this is what makes \\{ and } actually render in a distinct color instead of falling back to the surrounding string color.",
-      "name": "meta.interpolation.vela",
+      "name": "meta.interpolation.vyrn",
       "begin": "\\\\\\{",
-      "beginCaptures": { "0": { "name": "punctuation.definition.template-expression.begin.vela" } },
+      "beginCaptures": { "0": { "name": "punctuation.definition.template-expression.begin.vyrn" } },
       "end": "\\}",
-      "endCaptures": { "0": { "name": "punctuation.definition.template-expression.end.vela" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.template-expression.end.vyrn" } },
       "patterns": [
         { "include": "#strings" },
         { "include": "#keywords" },
@@ -107,52 +107,52 @@
     },
     "test-keyword": {
       "comment": "`test` (RFC-0015) is a CONTEXTUAL starter, not a reserved word: the parser treats it as a test declaration only when a string literal follows (`test \"name\" { .. }`), so `let test = 1` stays an ordinary binding. Match it as a keyword only directly before a `\"`, mirroring how the parser recognizes it. Placed before #keywords/#function-calls/#identifiers so it wins that position.",
-      "name": "keyword.control.vela",
+      "name": "keyword.control.vyrn",
       "match": "\\btest\\b(?=\\s+\")"
     },
     "keywords": {
-      "name": "keyword.control.vela",
+      "name": "keyword.control.vyrn",
       "match": "\\b(fn|let|mut|if|else|while|for|in|drop|protocol|impl|self|return|true|false|type|where|match|region|spawn|import|export|from|logging)\\b"
     },
     "function-calls": {
       "comment": "A lowerCamelCase identifier directly before `(` is a function/method call (or the name in `fn name(...)`) — entity.name.function → yellow in Dark+, distinct from plain variables. PascalCase constructors (Circle(1), Some(x)) are NOT matched here: #types is included earlier and wins, keeping variants teal. Keywords are also included earlier, so `if (...)` stays a keyword.",
-      "name": "entity.name.function.vela",
+      "name": "entity.name.function.vyrn",
       "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\s*\\()"
     },
     "types": {
-      "comment": "Type and enum-variant names. Vela's style is PascalCase for types/variants (Shape, Circle, Option, Int64, Some, Ok) and lowerCamelCase for variables/functions, so a PascalCase identifier is reliably a type or variant. This subsumes the built-ins (all PascalCase) and colors user-defined types/variants the same as built-ins, instead of maintaining an explicit list. Scoped as support.type → teal in Dark+.",
-      "name": "support.type.vela",
+      "comment": "Type and enum-variant names. Vyrn's style is PascalCase for types/variants (Shape, Circle, Option, Int64, Some, Ok) and lowerCamelCase for variables/functions, so a PascalCase identifier is reliably a type or variant. This subsumes the built-ins (all PascalCase) and colors user-defined types/variants the same as built-ins, instead of maintaining an explicit list. Scoped as support.type → teal in Dark+.",
+      "name": "support.type.vyrn",
       "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
     },
     "numbers": {
-      "name": "constant.numeric.integer.vela",
+      "name": "constant.numeric.integer.vyrn",
       "match": "\\b\\d+\\b"
     },
     "operators": {
       "comment": "Multi-char operators listed first so >= is not split into > then =. Order in the alternation matters: oniguruma picks the first alternative that matches at the position.",
-      "name": "keyword.operator.vela",
+      "name": "keyword.operator.vyrn",
       "match": "->|=>|==|!=|<=|>=|[+\\-*/%=<>!?|&]"
     },
     "punctuation": {
       "comment": "Brackets and delimiters in normal (top-level) code. Includes } (block close).",
       "patterns": [
-        { "name": "punctuation.section.parens.vela", "match": "[()]" },
-        { "name": "punctuation.section.brackets.vela", "match": "[\\[\\]]" },
-        { "name": "punctuation.section.braces.vela", "match": "[{}]" },
-        { "name": "punctuation.separator.vela", "match": "[,;:.]" }
+        { "name": "punctuation.section.parens.vyrn", "match": "[()]" },
+        { "name": "punctuation.section.brackets.vyrn", "match": "[\\[\\]]" },
+        { "name": "punctuation.section.braces.vyrn", "match": "[{}]" },
+        { "name": "punctuation.separator.vyrn", "match": "[,;:.]" }
       ]
     },
     "hole-punctuation": {
       "comment": "Same as #punctuation but WITHOUT } — the interpolation hole's `end` owns the closing brace, and an included } would shadow it and never close the hole.",
       "patterns": [
-        { "name": "punctuation.section.parens.vela", "match": "[()]" },
-        { "name": "punctuation.section.brackets.vela", "match": "[\\[\\]]" },
-        { "name": "punctuation.section.braces.vela", "match": "\\{" },
-        { "name": "punctuation.separator.vela", "match": "[,;:.]" }
+        { "name": "punctuation.section.parens.vyrn", "match": "[()]" },
+        { "name": "punctuation.section.brackets.vyrn", "match": "[\\[\\]]" },
+        { "name": "punctuation.section.braces.vyrn", "match": "\\{" },
+        { "name": "punctuation.separator.vyrn", "match": "[,;:.]" }
       ]
     },
     "identifiers": {
-      "name": "variable.other.vela",
+      "name": "variable.other.vyrn",
       "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
     }
   }

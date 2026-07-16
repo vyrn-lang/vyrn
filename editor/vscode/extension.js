@@ -1,6 +1,6 @@
 // @ts-check
 //
-// Vela VS Code extension — a thin client for the `vela-lsp` language server.
+// Vyrn VS Code extension — a thin client for the `vyrn-lsp` language server.
 //
 // Deliberately plain JavaScript (no TypeScript compile step) to keep the
 // maintenance surface tiny: edit extension.js, reload the window. The only
@@ -21,13 +21,13 @@ function activate(context) {
   // so it is registered even if the server binary is missing (below).
   registerRun(context, vsc);
 
-  const cfg = vsc.workspace.getConfiguration("vela");
+  const cfg = vsc.workspace.getConfiguration("vyrn");
   let serverPath = cfg.get("serverPath", "");
 
   if (!serverPath) {
-    const exe = process.platform === "win32" ? "vela-lsp.exe" : "vela-lsp";
+    const exe = process.platform === "win32" ? "vyrn-lsp.exe" : "vyrn-lsp";
     // Resolve relative to the EXTENSION's own location, not the workspace
-    // folder — the workspace may be empty (e.g. a single .vela file opened
+    // folder — the workspace may be empty (e.g. a single .vyrn file opened
     // directly), in which case `workspaceFolders[0]` is undefined and a
     // relative path would fail to spawn (ENOENT).
     //
@@ -37,13 +37,13 @@ function activate(context) {
     const bundled = path.join(context.extensionPath, "server", exe);
     // 2. Dev fallback: the extension lives at <repo>/editor/vscode, so the
     //    freshly-built dev server is two levels up, then into
-    //    compiler/vela-lsp/target/debug.
+    //    compiler/vyrn-lsp/target/debug.
     const dev = path.join(
       context.extensionPath,
       "..",
       "..",
       "compiler",
-      "vela-lsp",
+      "vyrn-lsp",
       "target",
       "debug",
       exe
@@ -55,9 +55,9 @@ function activate(context) {
   // build it and bail out cleanly instead of taking down the host.
   if (!fs.existsSync(serverPath)) {
     vsc.window.showWarningMessage(
-      `Vela: language server not found at "${serverPath}". Build it with: ` +
-        `cargo build --manifest-path compiler/vela-lsp/Cargo.toml ` +
-        `(or set the "vela.serverPath" setting).`
+      `Vyrn: language server not found at "${serverPath}". Build it with: ` +
+        `cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml ` +
+        `(or set the "vyrn.serverPath" setting).`
     );
     return;
   }
@@ -68,12 +68,12 @@ function activate(context) {
   };
 
   const clientOptions = {
-    documentSelector: [{ scheme: "file", language: "vela" }],
+    documentSelector: [{ scheme: "file", language: "vyrn" }],
   };
 
   const client = new LanguageClient(
-    "vela-lsp",
-    "Vela Language Server",
+    "vyrn-lsp",
+    "Vyrn Language Server",
     serverOptions,
     clientOptions
   );
@@ -85,14 +85,14 @@ function activate(context) {
   context.subscriptions.push(started);
   started.catch((err) => {
     vsc.window.showErrorMessage(
-      `Vela: failed to start language server "${serverPath}": ${err.message}`
+      `Vyrn: failed to start language server "${serverPath}": ${err.message}`
     );
   });
 }
 
 /**
- * Register the "▶ Run" CodeLens over `fn main` and the `vela.run` command that
- * it fires. Vela's only entry point is `fn main`, so that is the one place a
+ * Register the "▶ Run" CodeLens over `fn main` and the `vyrn.run` command that
+ * it fires. Vyrn's only entry point is `fn main`, so that is the one place a
  * "run this program" affordance belongs.
  *
  * @param {import("vscode").ExtensionContext} context
@@ -115,7 +115,7 @@ function registerRun(context, vsc) {
         lenses.push(
           new vsc.CodeLens(range, {
             title: "▶ Run",
-            command: "vela.run",
+            command: "vyrn.run",
             arguments: [document.uri],
           })
         );
@@ -125,7 +125,7 @@ function registerRun(context, vsc) {
       }
 
       // `test "name"` blocks. The name is captured so the lens can filter to it
-      // with `velac test --name "<name>"`. Mirrors the parser's contextual
+      // with `vyrn test --name "<name>"`. Mirrors the parser's contextual
       // recognition: `test` directly before a string literal.
       const testRe = /^[ \t]*test\s+"((?:[^"\\]|\\.)*)"/gm;
       let first = true;
@@ -138,7 +138,7 @@ function registerRun(context, vsc) {
           lenses.push(
             new vsc.CodeLens(range, {
               title: "▶ Run all tests",
-              command: "vela.testAll",
+              command: "vyrn.testAll",
               arguments: [document.uri],
             })
           );
@@ -147,7 +147,7 @@ function registerRun(context, vsc) {
         lenses.push(
           new vsc.CodeLens(range, {
             title: "▶ Run test",
-            command: "vela.test",
+            command: "vyrn.test",
             arguments: [document.uri, name],
           })
         );
@@ -158,18 +158,18 @@ function registerRun(context, vsc) {
   };
 
   context.subscriptions.push(
-    vsc.languages.registerCodeLensProvider({ scheme: "file", language: "vela" }, provider)
+    vsc.languages.registerCodeLensProvider({ scheme: "file", language: "vyrn" }, provider)
   );
 
   context.subscriptions.push(
-    vsc.commands.registerCommand("vela.run", (uri) => runVelac(vsc, uri, (file) => ["run", file])),
-    vsc.commands.registerCommand("vela.testAll", (uri) =>
-      runVelac(vsc, uri, (file) => ["test", file])
+    vsc.commands.registerCommand("vyrn.run", (uri) => runVyrn(vsc, uri, (file) => ["run", file])),
+    vsc.commands.registerCommand("vyrn.testAll", (uri) =>
+      runVyrn(vsc, uri, (file) => ["test", file])
     ),
     // The name is the JSON-string body as it appears in source (with escapes);
-    // unescape it so `velac test --name` matches the runtime test name.
-    vsc.commands.registerCommand("vela.test", (uri, name) =>
-      runVelac(vsc, uri, (file) => ["test", file, "--name", unescapeTestName(name)])
+    // unescape it so `vyrn test --name` matches the runtime test name.
+    vsc.commands.registerCommand("vyrn.test", (uri, name) =>
+      runVyrn(vsc, uri, (file) => ["test", file, "--name", unescapeTestName(name)])
     )
   );
 }
@@ -186,7 +186,7 @@ function unescapeTestName(s) {
 }
 
 /**
- * The Vela repo root that owns `startDir`: the nearest ancestor containing
+ * The Vyrn repo root that owns `startDir`: the nearest ancestor containing
  * `compiler/Cargo.toml`. Walking up from the FILE (not the workspace folder)
  * is what makes the run command work when a subdirectory — `examples/`, a
  * project scaffold — is opened as the workspace: the workspace root then has
@@ -207,38 +207,38 @@ function findRepoRoot(startDir) {
 }
 
 /**
- * Run velac against a `.vela` file in the integrated terminal. `buildArgs(file)`
- * returns the full velac argument vector (e.g. `["run", file]` or
+ * Run vyrn against a `.vyrn` file in the integrated terminal. `buildArgs(file)`
+ * returns the full vyrn argument vector (e.g. `["run", file]` or
  * `["test", file, "--name", "..."]`). Resolution order for the compiler (first
  * hit wins):
- *   1. the `vela.velacPath` setting, if set;
- *   2. `<repo>/compiler/target/release/velac.exe`, if it exists;
- *   3. `<repo>/compiler/target/debug/velac.exe`, if it exists;
- *   4. `cargo run -q --manifest-path <repo>/compiler/Cargo.toml -p vela-cli -- <args>`;
- *   5. no repo found at all: bare `velac <args>` (PATH install).
+ *   1. the `vyrn.path` setting, if set;
+ *   2. `<repo>/compiler/target/release/vyrn.exe`, if it exists;
+ *   3. `<repo>/compiler/target/debug/vyrn.exe`, if it exists;
+ *   4. `cargo run -q --manifest-path <repo>/compiler/Cargo.toml -p vyrn-cli -- <args>`;
+ *   5. no repo found at all: bare `vyrn <args>` (PATH install).
  * `<repo>` is found by walking up from the file (see [findRepoRoot]).
  *
  * @param {typeof import("vscode")} vsc
  * @param {import("vscode").Uri=} uri  the file (defaults to the active editor)
- * @param {(file: string) => string[]} buildArgs  velac args for the resolved file
+ * @param {(file: string) => string[]} buildArgs  vyrn args for the resolved file
  */
-function runVelac(vsc, uri, buildArgs) {
+function runVyrn(vsc, uri, buildArgs) {
   const target = uri || (vsc.window.activeTextEditor && vsc.window.activeTextEditor.document.uri);
   if (!target || target.scheme !== "file") {
-    vsc.window.showWarningMessage("Vela: no file to run.");
+    vsc.window.showWarningMessage("Vyrn: no file to run.");
     return;
   }
   const file = target.fsPath;
   const args = buildArgs(file);
 
-  const exe = process.platform === "win32" ? "velac.exe" : "velac";
-  const cfg = vsc.workspace.getConfiguration("vela");
-  const velacPath = cfg.get("velacPath", "");
+  const exe = process.platform === "win32" ? "vyrn.exe" : "vyrn";
+  const cfg = vsc.workspace.getConfiguration("vyrn");
+  const vyrnPath = cfg.get("path", "");
   const repo = findRepoRoot(path.dirname(file));
 
   let command;
-  if (velacPath) {
-    command = invoke(velacPath, args);
+  if (vyrnPath) {
+    command = invoke(vyrnPath, args);
   } else if (repo) {
     const release = path.join(repo, "compiler", "target", "release", exe);
     const debug = path.join(repo, "compiler", "target", "debug", exe);
@@ -250,23 +250,23 @@ function runVelac(vsc, uri, buildArgs) {
       const manifest = path.join(repo, "compiler", "Cargo.toml");
       // `cargo` is a bare program name on PATH, so it runs in any shell without
       // a call operator; only its arguments need quoting.
-      command = `cargo run -q --manifest-path ${quote(manifest)} -p vela-cli -- ${args
+      command = `cargo run -q --manifest-path ${quote(manifest)} -p vyrn-cli -- ${args
         .map(quote)
         .join(" ")}`;
     }
   } else {
-    // Not inside a Vela repo: assume an installed `velac` on PATH (and point
+    // Not inside a Vyrn repo: assume an installed `vyrn` on PATH (and point
     // at the setting if that guess is wrong).
-    command = `velac ${args.map(quote).join(" ")}`;
+    command = `vyrn ${args.map(quote).join(" ")}`;
     vsc.window.setStatusBarMessage(
-      'Vela: no compiler/ found above this file — using `velac` from PATH ' +
-        '(set "vela.velacPath" if that is not what you want)',
+      'Vyrn: no compiler/ found above this file — using `vyrn` from PATH ' +
+        '(set "vyrn.path" if that is not what you want)',
       8000
     );
   }
 
   // Reuse a single named terminal rather than spawning one per click.
-  const name = "vela";
+  const name = "vyrn";
   let terminal = vsc.window.terminals.find((t) => t.name === name);
   if (!terminal) {
     terminal = vsc.window.createTerminal(name);

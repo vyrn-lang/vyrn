@@ -83,6 +83,6 @@
       "    ${0:assert(true)}",
       "}"
     ],
-    "description": "A test block (RFC-0015): assert / assertEq, run with `velac test`"
+    "description": "A test block (RFC-0015): assert / assertEq, run with `vyrn test`"
   }
 }
