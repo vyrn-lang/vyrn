@@ -1,0 +1,71 @@
+/// Typed translations (RFC-0020) as a library on generator imports (RFC-0021).
+///
+/// `i18n("./locales")` runs the std/i18n generator at load time: it reads
+/// `locales/en.json` + `locales/uk.json`, checks that both locales carry the
+/// SAME keys and the SAME per-key arguments (drift = a load error), and
+/// synthesizes a module of typed accessors. Everything below is then ordinary
+/// Vyrn — this file is a normal interp == native == wasm parity citizen.
+///
+///   - `t("home.title")` — the key is checked at compile time (TransKey is a
+///     finite string type; a typo is a compile error, and the LSP completes it).
+///   - `tCartItems(2)` / `tGreeting("Ada")` — typed args derived from the ICU
+///     message; the Ukrainian plural picks one/few/many by the CLDR rule.
+///   - `t("nav.\{sec}.label")` — a key built by interpolation. Because `sec` has
+///     a finite type, the whole interpolation is proven ⊆ TransKey (RFC-0020 M1)
+///     with no runtime key validation.
+///
+/// Inspect the synthesized module with:  vyrn emit-gen examples/i18ndemo.vyrn
+import { i18n } from "std/i18n"
+import { t, setLocale, Locale, TransKey, tCartItems, tGreeting, tStatus } from i18n("./locales")
+
+/// The nav sections that exist — a finite language, so `"nav.\{s}.label"` is
+/// provably a TransKey.
+type NavSection = String where value =~ "home|settings"
+
+fn main() -> Int64 {
+    // Source locale (en) is the default.
+    print(t("home.title")) // Welcome
+    print(tGreeting("Ada")) // Hello, Ada!
+    print(tCartItems(2)) // 2 items
+    print(tStatus("active")) // Active
+
+    let sec: NavSection = "settings"
+    print(t("nav.\{sec}.label")) // Settings — interpolation proven ⊆ TransKey
+
+    // Switch to Ukrainian: the plural now exercises one / few / many.
+    setLocale(Uk)
+    print(t("home.title")) // Ласкаво просимо
+    print(tCartItems(1)) // 1 товар    (one)
+    print(tCartItems(2)) // 2 товари   (few)
+    print(tCartItems(5)) // 5 товарів  (many)
+    print(tStatus("paused")) // Призупинено
+    print(t("nav.\{sec}.label")) // Налаштування
+
+    return 0
+}
+
+test "ukrainian plural picks one / few / many by the CLDR rule" {
+    setLocale(Uk)
+    assertEq(tCartItems(1), "1 товар") // one
+    assertEq(tCartItems(2), "2 товари") // few
+    assertEq(tCartItems(5), "5 товарів") // many
+    assertEq(tCartItems(21), "21 товар") // one  (21 % 10 == 1, 21 % 100 != 11)
+    assertEq(tCartItems(11), "11 товарів") // many (11 % 100 == 11)
+    assertEq(tCartItems(22), "22 товари") // few
+}
+
+test "english plural and constant keys" {
+    setLocale(En)
+    assertEq(tCartItems(1), "1 item")
+    assertEq(tCartItems(3), "3 items")
+    assertEq(t("home.subtitle"), "Your dashboard")
+    assertEq(tGreeting("Ada"), "Hello, Ada!")
+}
+
+test "interpolated key resolves per locale" {
+    setLocale(En)
+    let s: NavSection = "home"
+    assertEq(t("nav.\{s}.label"), "Home")
+    setLocale(Uk)
+    assertEq(t("nav.\{s}.label"), "Головна")
+}
