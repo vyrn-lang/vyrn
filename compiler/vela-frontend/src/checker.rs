@@ -62,6 +62,7 @@ pub fn check_accum_with_let_types(
         "hexEncode", "hexDecode", "base64Encode", "base64Decode", "urlEncode", "urlDecode",
         "args", "readLine", "readFile", "writeFile", "readFileBytes", "stringFromBytes",
         "trace", "debug", "info", "warn", "error", "value", "list", "schemaOf", "jsonSchema",
+        "toJson", "fromJson",
         "toString", "pop", "swapRemove", "assert", "assertEq",
         "Int", "Int64", "Int32", "Int16", "Int8", "Float", "Float64", "Float32",
         "UInt8", "UInt16", "UInt32", "UInt64",
@@ -2706,6 +2707,62 @@ impl<'a> Checker<'a> {
                 }
                 _ => return Err(format!("line {line}: `jsonSchema` needs a type name")),
             }
+        }
+        // built-in: toJson(x) -> String (RFC-0018) — encode any *codable* value
+        // to canonical JSON. Pure (not constant: kept out of consteval), never
+        // traps. The argument's type must be encodable (scalars, validated
+        // scalars, records, Option, Array/ArrayN, payload-less enums).
+        if name == "toJson" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `toJson` takes 1 argument (a value), got {}",
+                    args.len()
+                ));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            if matches!(at, Type::Err) {
+                return Ok(Type::Str);
+            }
+            if let Err(off) = crate::codec::encodable(&at, self.types) {
+                return Err(format!(
+                    "line {line}: `toJson` cannot encode `{off}` (not a codable type)"
+                ));
+            }
+            return Ok(Type::Str);
+        }
+        // built-in: fromJson(TypeName, s) -> Validation<T> (RFC-0018) —
+        // type-directed decode (the `schemaOf`/`jsonSchema` precedent: the first
+        // argument is a *type name*). Never traps; every problem is an `Issue`
+        // accumulated into the returned `Validation<T>`.
+        if name == "fromJson" {
+            if args.len() != 2 {
+                return Err(format!(
+                    "line {line}: `fromJson` takes 2 arguments (a type name and a String), got {}",
+                    args.len()
+                ));
+            }
+            let tn = match &args[0] {
+                Expr::Var { name: tn, .. } if self.types.contains_key(tn) => tn.clone(),
+                Expr::Var { name: tn, .. } => {
+                    return Err(format!(
+                        "line {line}: `fromJson` needs a declared type name; `{tn}` is not a type"
+                    ))
+                }
+                _ => return Err(format!("line {line}: `fromJson` needs a type name")),
+            };
+            let target = Type::Named(tn.clone());
+            if let Err(off) = crate::codec::decodable(&target, self.types) {
+                return Err(format!(
+                    "line {line}: `fromJson` cannot decode into `{off}` (not a codable type)"
+                ));
+            }
+            let sty = self.base(&self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?);
+            if !matches!(sty, Type::Str | Type::Err) {
+                return Err(format!(
+                    "line {line}: `fromJson`'s second argument must be a String, found {sty}"
+                ));
+            }
+            return Ok(Type::App("Validation".to_string(), vec![target]));
         }
         // built-in: value(x) -> Value — box a scalar into the interpolation value
         // type (RFC-0007). What a tagged template's holes desugar to.

@@ -112,6 +112,36 @@ fn wrap_intn(v: i64, bits: u8, signed: bool) -> i64 {
     }
 }
 
+/// Decode a JSON number into a sized-integer target (RFC-0018): the token must
+/// be integer syntax AND fit the target's width/signedness exactly (never
+/// through `f64`). Returns the `i64` bit pattern (as stored in `Val::IntN`), or
+/// `None` for a non-integral or out-of-range value.
+fn intn_from_num(n: &crate::codec::Num, bits: u8, signed: bool) -> Option<i64> {
+    if !n.is_int {
+        return None;
+    }
+    if signed {
+        let v = n.text.parse::<i64>().ok()?;
+        let (min, max) = if bits >= 64 {
+            (i64::MIN, i64::MAX)
+        } else {
+            let m = 1i64 << (bits - 1);
+            (-m, m - 1)
+        };
+        if v < min || v > max {
+            return None;
+        }
+        Some(wrap_intn(v, bits, signed))
+    } else {
+        let v = n.text.parse::<u64>().ok()?;
+        let max = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        if v > max {
+            return None;
+        }
+        Some(wrap_intn(v as i64, bits, signed))
+    }
+}
+
 /// Convert a numeric value to `target` (Int / sized IntN / Float / Float32),
 /// matching the native casts (sext/trunc via `wrap_intn`, si/uitofp, fpto si/ui,
 /// fp trunc/ext). Float→int truncates toward zero; out-of-range float→int is
@@ -562,6 +592,10 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         program.functions.iter().map(|f| (f.name.as_str(), f)).collect();
     let types: HashMap<&str, &TypeDecl> =
         program.type_decls.iter().map(|t| (t.name.as_str(), t)).collect();
+    // Owned copy for `crate::types::resolve` / `crate::codec` (JSON codec,
+    // RFC-0018), which need `&HashMap<String, TypeDecl>`.
+    let type_map: HashMap<String, TypeDecl> =
+        program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
     // Enum variant names, so constructor uses (Var/Call) can be recognized.
     let mut variants: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for t in &program.type_decls {
@@ -583,6 +617,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
     let interp = Interp {
         funcs,
         types,
+        type_map,
         variants,
         droppable,
         cells: RefCell::new(Vec::new()),
@@ -614,6 +649,8 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
 struct Interp<'a> {
     funcs: HashMap<&'a str, &'a Function>,
     types: HashMap<&'a str, &'a TypeDecl>,
+    /// Owned type map for `resolve`/codec (RFC-0018 JSON codec).
+    type_map: HashMap<String, TypeDecl>,
     variants: std::collections::HashSet<&'a str>,
     /// Droppable `let` bindings (by `Stmt` node address) and their reclamation
     /// kind — the ownership analysis shared with the native backend.
@@ -795,7 +832,18 @@ impl<'a> Interp<'a> {
                 if let Some(t) = ty {
                     v = self.coerce(v, t)?;
                 }
-                scope.last_mut().unwrap().insert(name.clone(), Slot { v, ty: ty.clone() });
+                // Remember the binding's type so a later `toJson(x)` can encode
+                // record fields in declaration order (RFC-0018). An explicit
+                // annotation wins; otherwise infer the initializer's type. This
+                // fills a previously-`None` slot only — it never overrides an
+                // annotation, so reassignment coercion is unaffected for the
+                // annotated case, and the inferred type is idempotent-safe
+                // (records were already validated at construction).
+                let slot_ty = match ty {
+                    Some(t) => Some(t.clone()),
+                    None => self.type_of(value, scope),
+                };
+                scope.last_mut().unwrap().insert(name.clone(), Slot { v, ty: slot_ty });
                 Ok(Flow::Normal)
             }
             Stmt::Assign { name, value, .. } => {
@@ -1086,6 +1134,39 @@ impl<'a> Interp<'a> {
                         }
                     }
                     return Err("`jsonSchema` needs a declared type name".into());
+                }
+                // `toJson(x)` (RFC-0018) — encode a codable value to canonical
+                // JSON. The argument's static type drives record field order and
+                // the None-field omission, so infer it alongside the value.
+                if name == "toJson" {
+                    let v = self.expr(&args[0], scope)?;
+                    let ty = self
+                        .type_of(&args[0], scope)
+                        .ok_or("`toJson` could not determine the argument's type")?;
+                    let mut out = String::new();
+                    self.encode_val(&v, &ty, &mut out)?;
+                    return Ok(Val::Str(out));
+                }
+                // `fromJson(TypeName, s)` (RFC-0018) — type-directed decode into
+                // `Validation<T>`. Never traps; every problem is an accumulated
+                // `Issue`. The first argument is a type name (not a value).
+                if name == "fromJson" {
+                    let tn = match args.first() {
+                        Some(Expr::Var { name: tn, .. }) if self.types.contains_key(tn.as_str()) => {
+                            tn.clone()
+                        }
+                        _ => return Err("`fromJson` needs a declared type name".into()),
+                    };
+                    let s = match self.expr(&args[1], scope)? {
+                        Val::Str(s) => s,
+                        other => {
+                            return Err(format!(
+                                "`fromJson`'s second argument must be a String, found {other:?}"
+                            )
+                            .into())
+                        }
+                    };
+                    return Ok(self.decode_top(&tn, &s));
                 }
                 // `a.pop()` (RFC-0011) — remove and return the last element as
                 // `Option<T>` (`None` on empty), mutating the receiver in place.
@@ -1982,6 +2063,361 @@ impl<'a> Interp<'a> {
             }
             (_, v) => Ok(v),
         }
+    }
+
+    // ---- JSON codec (RFC-0018) ------------------------------------------
+    // The reference implementation of `toJson`/`fromJson`. The native backend
+    // (per-type generated IR + C runtime) must produce byte-identical output,
+    // including every `Issue`'s key/path/message; the wording lives in
+    // `crate::codec` so both sides read from one source.
+
+    /// Best-effort static type of an expression, used by `toJson` to encode
+    /// record fields in **declaration order** (a `Val::Record` is an unordered
+    /// map). Covers the forms a codable value flows through: bindings/params,
+    /// record literals, field access, `Some(..)`, indexing, numeric
+    /// conversions, and user-function results.
+    fn type_of(&self, e: &Expr, scope: &[HashMap<String, Slot>]) -> Option<Type> {
+        match e {
+            Expr::Var { name, .. } => {
+                for frame in scope.iter().rev() {
+                    if let Some(s) = frame.get(name) {
+                        return s.ty.clone();
+                    }
+                }
+                self.globals.borrow().get(name).and_then(|s| s.ty.clone())
+            }
+            Expr::StructLit { name, fields, .. } => {
+                if !name.is_empty() {
+                    return Some(Type::Named(name.clone()));
+                }
+                let mut fs = Vec::new();
+                for (k, ve) in fields {
+                    fs.push(Field { name: k.clone(), ty: self.type_of(ve, scope)? });
+                }
+                Some(Type::Record(fs))
+            }
+            Expr::Field { expr, field, .. } => {
+                let pt = self.type_of(expr, scope)?;
+                let fields = crate::types::record_fields(&pt, &self.type_map)?;
+                fields.into_iter().find(|f| &f.name == field).map(|f| f.ty)
+            }
+            Expr::Call { name, args, .. } => {
+                if name == "Some" {
+                    return Some(Type::Option(Box::new(self.type_of(args.first()?, scope)?)));
+                }
+                if name == "at" && args.len() == 2 {
+                    let at = self.type_of(&args[0], scope)?;
+                    return match crate::types::resolve(&at, &self.type_map) {
+                        Type::Array(i) | Type::ArrayN(i, _) => Some(*i),
+                        _ => None,
+                    };
+                }
+                if let Some(t) = crate::types::numeric_conv_target(name) {
+                    return Some(t);
+                }
+                self.funcs.get(name.as_str()).map(|f| f.ret.clone())
+            }
+            Expr::TryConstruct { name, .. } => {
+                Some(Type::Option(Box::new(Type::Named(name.clone()))))
+            }
+            _ => None,
+        }
+    }
+
+    /// Encode a value to canonical JSON (RFC-0018), driven by its static type:
+    /// record fields in declaration order, `None` fields omitted, a bare `None`
+    /// as `null`, numbers via the canonical `scalar_to_string` rendering, and
+    /// the minimal escaping table.
+    fn encode_val(&self, v: &Val, ty: &Type, out: &mut String) -> Result<(), Ctrl> {
+        match crate::types::resolve(ty, &self.type_map) {
+            Type::Record(fields) => {
+                out.push('{');
+                let mut first = true;
+                if let Val::Record(map) = v {
+                    for f in &fields {
+                        let fv = match map.get(&f.name) {
+                            Some(x) => x,
+                            None => continue,
+                        };
+                        // A `None` record field is omitted entirely.
+                        if matches!(fv, Val::Option(None)) {
+                            continue;
+                        }
+                        if !first {
+                            out.push(',');
+                        }
+                        first = false;
+                        out.push('"');
+                        crate::codec::escape_into(&f.name, out);
+                        out.push_str("\":");
+                        self.encode_val(fv, &f.ty, out)?;
+                    }
+                }
+                out.push('}');
+            }
+            Type::Array(inner) | Type::ArrayN(inner, _) => {
+                out.push('[');
+                if let Val::Array(items) = v {
+                    for (i, it) in items.iter().enumerate() {
+                        if i > 0 {
+                            out.push(',');
+                        }
+                        self.encode_val(it, &inner, out)?;
+                    }
+                }
+                out.push(']');
+            }
+            Type::Option(inner) => match v {
+                Val::Option(Some(x)) => self.encode_val(x, &inner, out)?,
+                Val::Option(None) => out.push_str("null"),
+                other => self.encode_val(other, &inner, out)?,
+            },
+            Type::Str => {
+                out.push('"');
+                if let Val::Str(s) = v {
+                    crate::codec::escape_into(s, out);
+                }
+                out.push('"');
+            }
+            Type::Enum(_) => {
+                out.push('"');
+                if let Val::Enum(name, _) = v {
+                    crate::codec::escape_into(name, out);
+                }
+                out.push('"');
+            }
+            Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool => {
+                out.push_str(&scalar_to_string(v));
+            }
+            other => {
+                return Err(format!("toJson: cannot encode type {other}").into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Decode `s` into `Validation<tn>` (RFC-0018). Never traps; a parse error
+    /// or any accumulated `Issue` yields `Invalid([Issue])`.
+    fn decode_top(&self, tn: &str, s: &str) -> Val {
+        let json = match crate::codec::parse(s) {
+            Ok(j) => j,
+            Err(e) => {
+                let issue = self.issue_val("json.parse", "", &e.0);
+                return Val::Enum("Invalid".to_string(), vec![Val::Array(vec![issue])]);
+            }
+        };
+        let mut issues = Vec::new();
+        let target = Type::Named(tn.to_string());
+        let v = self.decode_val(&json, &target, "", &mut issues);
+        if issues.is_empty() {
+            Val::Enum("Valid".to_string(), vec![v.unwrap_or(Val::Unit)])
+        } else {
+            Val::Enum("Invalid".to_string(), vec![Val::Array(issues)])
+        }
+    }
+
+    /// Walk a parsed JSON node against a target type, building the value and
+    /// accumulating `Issue`s. Returns `None` when this node produced no value
+    /// (a structural failure) — the caller keeps going so every problem is
+    /// reported at once.
+    fn decode_val(
+        &self,
+        json: &crate::codec::JsonV,
+        ty: &Type,
+        path: &str,
+        issues: &mut Vec<Val>,
+    ) -> Option<Val> {
+        use crate::codec::JsonV;
+        // A named type decodes against its base, then runs its `where` clause
+        // (accumulating a `validate` Issue instead of trapping).
+        if let Type::Named(n) = ty {
+            let decl = self.type_map.get(n)?.clone();
+            let base_val = self.decode_val(json, &decl.base, path, issues)?;
+            if decl.predicate.is_some() {
+                let holds = self.run_predicate(&decl, &base_val).unwrap_or(false);
+                if !holds {
+                    issues.push(self.issue_val(
+                        "validate",
+                        path,
+                        &crate::codec::validate_message(&decl),
+                    ));
+                }
+            }
+            return Some(base_val);
+        }
+        match ty {
+            Type::Record(fields) => {
+                let obj_fields = match json {
+                    JsonV::Obj(fs) => fs,
+                    _ => {
+                        issues.push(self.type_issue(path, "object", json));
+                        return None;
+                    }
+                };
+                let get = |k: &str| obj_fields.iter().find(|(fk, _)| fk == k).map(|(_, v)| v);
+                let mut map = HashMap::new();
+                for f in fields {
+                    let child = crate::codec::field_path(path, &f.name);
+                    let ft = crate::types::resolve(&f.ty, &self.type_map);
+                    if let Type::Option(inner) = ft {
+                        // Absent OR null -> None; otherwise Some(decode).
+                        let val = match get(&f.name) {
+                            None | Some(JsonV::Null) => Val::Option(None),
+                            Some(j) => match self.decode_val(j, &inner, &child, issues) {
+                                Some(x) => Val::Option(Some(Box::new(x))),
+                                None => Val::Option(None),
+                            },
+                        };
+                        map.insert(f.name.clone(), val);
+                    } else {
+                        match get(&f.name) {
+                            None => {
+                                issues.push(self.issue_val(
+                                    "json.missing",
+                                    &child,
+                                    &crate::codec::missing_message(&f.name),
+                                ));
+                            }
+                            Some(j) => {
+                                if let Some(fv) = self.decode_val(j, &f.ty, &child, issues) {
+                                    map.insert(f.name.clone(), fv);
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(Val::Record(map))
+            }
+            Type::Array(inner) => {
+                let items = match json {
+                    JsonV::Arr(items) => items,
+                    _ => {
+                        issues.push(self.type_issue(path, "array", json));
+                        return None;
+                    }
+                };
+                let mut out = Vec::new();
+                for (i, it) in items.iter().enumerate() {
+                    let child = crate::codec::index_path(path, i);
+                    if let Some(ev) = self.decode_val(it, inner, &child, issues) {
+                        out.push(ev);
+                    }
+                }
+                Some(Val::Array(out))
+            }
+            Type::Int => match json {
+                JsonV::Num(n) => match n.as_i64() {
+                    Some(i) => Some(Val::Int(i)),
+                    None => {
+                        issues.push(self.type_issue(path, "integer", json));
+                        None
+                    }
+                },
+                _ => {
+                    issues.push(self.type_issue(path, "integer", json));
+                    None
+                }
+            },
+            Type::IntN { bits, signed } => {
+                let ok = match json {
+                    JsonV::Num(n) => intn_from_num(n, *bits, *signed),
+                    _ => None,
+                };
+                match ok {
+                    Some(v) => Some(Val::IntN { v, bits: *bits, signed: *signed }),
+                    None => {
+                        issues.push(self.type_issue(path, "integer", json));
+                        None
+                    }
+                }
+            }
+            Type::Float => match json {
+                JsonV::Num(n) => Some(Val::Float(n.as_f64())),
+                _ => {
+                    issues.push(self.type_issue(path, "number", json));
+                    None
+                }
+            },
+            Type::Float32 => match json {
+                JsonV::Num(n) => Some(Val::Float32(n.as_f64() as f32)),
+                _ => {
+                    issues.push(self.type_issue(path, "number", json));
+                    None
+                }
+            },
+            Type::Bool => match json {
+                JsonV::Bool(b) => Some(Val::Bool(*b)),
+                _ => {
+                    issues.push(self.type_issue(path, "boolean", json));
+                    None
+                }
+            },
+            Type::Str => match json {
+                JsonV::Str(s) => Some(Val::Str(s.clone())),
+                _ => {
+                    issues.push(self.type_issue(path, "string", json));
+                    None
+                }
+            },
+            Type::Enum(vs) => {
+                let expected = crate::codec::enum_expected(vs);
+                match json {
+                    JsonV::Str(s) if vs.iter().any(|v| &v.name == s) => {
+                        Some(Val::Enum(s.clone(), Vec::new()))
+                    }
+                    _ => {
+                        issues.push(self.issue_val(
+                            "json.type",
+                            path,
+                            &crate::codec::type_message(&expected, json.kind()),
+                        ));
+                        None
+                    }
+                }
+            }
+            Type::Option(inner) => match json {
+                JsonV::Null => Some(Val::Option(None)),
+                _ => self
+                    .decode_val(json, inner, path, issues)
+                    .map(|x| Val::Option(Some(Box::new(x)))),
+            },
+            _ => None,
+        }
+    }
+
+    /// Run a refined type's predicate as a boolean (no trap), for decode's
+    /// accumulating `validate` check. Mirrors `coerce`'s predicate evaluation:
+    /// a record base binds field names; a scalar base binds `value`.
+    fn run_predicate(&self, decl: &TypeDecl, v: &Val) -> Result<bool, Ctrl> {
+        let Some(pred) = &decl.predicate else { return Ok(true) };
+        if matches!(decl.base, Type::Record(_)) {
+            if let Val::Record(map) = v {
+                let mut env = vec![map
+                    .iter()
+                    .map(|(k, val)| (k.clone(), Slot::untyped(val.clone())))
+                    .collect::<HashMap<_, _>>()];
+                return match self.expr(pred, &mut env)? {
+                    Val::Bool(b) => Ok(b),
+                    _ => Ok(false),
+                };
+            }
+            return Ok(true);
+        }
+        self.validates(decl, v)
+    }
+
+    /// Build an `Issue { key, path, message }` record value.
+    fn issue_val(&self, key: &str, path: &str, message: &str) -> Val {
+        let mut m = HashMap::new();
+        m.insert("key".to_string(), Val::Str(key.to_string()));
+        m.insert("path".to_string(), Val::Str(path.to_string()));
+        m.insert("message".to_string(), Val::Str(message.to_string()));
+        Val::Record(m)
+    }
+
+    /// A `json.type` Issue: `expected <what>, found <kind>`.
+    fn type_issue(&self, path: &str, expected: &str, json: &crate::codec::JsonV) -> Val {
+        self.issue_val("json.type", path, &crate::codec::type_message(expected, json.kind()))
     }
 
     fn as_ref(&self, v: &Val) -> Result<(usize, u64), Ctrl> {
@@ -3564,5 +4000,146 @@ mod tests {
                        a[5].x = 9 \
                        return 0 }";
         assert_eq!(run(src).unwrap_err(), "array index 5 out of bounds");
+    }
+
+    // ---- JSON codec (RFC-0018) ------------------------------------------
+    // `run` returns an `Int64`, and match arms are single expressions, so these
+    // programs fold each assertion into an integer via a tiny `eq` helper.
+    const EQ: &str = "fn eq(a: String, b: String) -> Int64 { if a == b { return 1; } return 0; } ";
+
+    #[test]
+    fn tojson_canonical_record_order_and_escaping() {
+        // Declaration order, no whitespace, minimal escaping.
+        let src = "type P = { name: String, age: Int64, ok: Bool } \
+                   fn main() -> Int64 { \
+                       let p = P { name: \"a\\\"b\", age: 30, ok: true } \
+                       if toJson(p) == \"{\\\"name\\\":\\\"a\\\\\\\"b\\\",\\\"age\\\":30,\\\"ok\\\":true}\" { return 1; } \
+                       return 0; }";
+        assert_eq!(run(src).unwrap(), 1);
+    }
+
+    #[test]
+    fn tojson_omits_none_field_and_bare_option_is_null() {
+        let src = "type P = { name: String, nick: Option<String> } \
+                   fn main() -> Int64 { \
+                       let p = P { name: \"x\", nick: None } \
+                       if toJson(p) == \"{\\\"name\\\":\\\"x\\\"}\" { return 1; } \
+                       return 0; }";
+        assert_eq!(run(src).unwrap(), 1);
+    }
+
+    #[test]
+    fn roundtrip_valid_record() {
+        let src = "type Age = Int64 where value >= 0 && value <= 130 \
+                   type User = { name: String, age: Age, nick: Option<String> } \
+                   fn main() -> Int64 { \
+                       let u = User { name: \"Ada\", age: 36, nick: Some(\"A\") } \
+                       let s = toJson(u) \
+                       return match fromJson(User, s) { \
+                           Valid(u2) => u2.age + u2.name.length, \
+                           Invalid(iss) => 0 - iss.length, \
+                       }; }";
+        // age 36 + name length 3 = 39.
+        assert_eq!(run(src).unwrap(), 39);
+    }
+
+    #[test]
+    fn exact_large_integer_roundtrips() {
+        // Beyond f64's 53-bit exact range — must survive as an exact i64.
+        let src = "type W = { n: Int64 } \
+                   fn main() -> Int64 { \
+                       return match fromJson(W, \"{\\\"n\\\":9007199254740993}\") { \
+                           Valid(w) => w.n - 9007199254740992, \
+                           Invalid(iss) => 0 - iss.length, \
+                       }; }";
+        assert_eq!(run(src).unwrap(), 1);
+    }
+
+    #[test]
+    fn decode_unknown_fields_ignored_and_null_option_is_none() {
+        let src = "type U = { name: String, nick: Option<String> } \
+                   fn main() -> Int64 { \
+                       return match fromJson(U, \"{\\\"name\\\":\\\"x\\\",\\\"nick\\\":null,\\\"extra\\\":7}\") { \
+                           Valid(u) => match u.nick { Some(s) => 2, None => 1, }, \
+                           Invalid(iss) => 0 - iss.length, \
+                       }; }";
+        assert_eq!(run(src).unwrap(), 1);
+    }
+
+    #[test]
+    fn decode_missing_field_issue_bytes() {
+        let src = "type U = { name: String, age: Int64 } \
+                   fn main() -> Int64 { \
+                       return match fromJson(U, \"{\\\"name\\\":\\\"x\\\"}\") { \
+                           Valid(u) => 0, \
+                           Invalid(iss) => eq(iss[0].key, \"json.missing\") + eq(iss[0].path, \"age\") \
+                               + eq(iss[0].message, \"missing required field `age`\"), \
+                       }; }";
+        assert_eq!(run(&format!("{EQ}{src}")).unwrap(), 3);
+    }
+
+    #[test]
+    fn decode_type_mismatch_issue_bytes() {
+        let src = "type U = { age: Int64 } \
+                   fn main() -> Int64 { \
+                       return match fromJson(U, \"{\\\"age\\\":\\\"nope\\\"}\") { \
+                           Valid(u) => 0, \
+                           Invalid(iss) => eq(iss[0].key, \"json.type\") + eq(iss[0].path, \"age\") \
+                               + eq(iss[0].message, \"expected integer, found string\"), \
+                       }; }";
+        assert_eq!(run(&format!("{EQ}{src}")).unwrap(), 3);
+    }
+
+    #[test]
+    fn decode_validation_issue_accumulates_all() {
+        // Two failing `where` clauses -> two `validate` issues, both reported.
+        let src = "type Age = Int64 where value >= 0 && value <= 130 \
+                   type Name = String where value.length >= 1 \
+                   type U = { name: Name, age: Age } \
+                   fn main() -> Int64 { \
+                       return match fromJson(U, \"{\\\"name\\\":\\\"\\\",\\\"age\\\":999}\") { \
+                           Valid(u) => 0, \
+                           Invalid(iss) => iss.length, \
+                       }; }";
+        assert_eq!(run(src).unwrap(), 2);
+    }
+
+    #[test]
+    fn decode_validation_issue_bytes() {
+        let src = "type Age = Int64 where value >= 0 && value <= 130 \
+                   type U = { age: Age } \
+                   fn main() -> Int64 { \
+                       return match fromJson(U, \"{\\\"age\\\":999}\") { \
+                           Valid(u) => 0, \
+                           Invalid(iss) => eq(iss[0].key, \"validate\") + eq(iss[0].path, \"age\") \
+                               + eq(iss[0].message, \"validation failed for `Age`\"), \
+                       }; }";
+        assert_eq!(run(&format!("{EQ}{src}")).unwrap(), 3);
+    }
+
+    #[test]
+    fn decode_parse_error_is_single_issue() {
+        let src = "type U = { a: Int64 } \
+                   fn main() -> Int64 { \
+                       return match fromJson(U, \"{ bad\") { \
+                           Valid(u) => 0, \
+                           Invalid(iss) => iss.length + eq(iss[0].key, \"json.parse\") + eq(iss[0].path, \"\"), \
+                       }; }";
+        // one parse issue + key match + path match = 3.
+        assert_eq!(run(&format!("{EQ}{src}")).unwrap(), 3);
+    }
+
+    #[test]
+    fn decode_enum_payloadless_roundtrip() {
+        let src = "type Color = | Red | Green | Blue \
+                   type P = { c: Color } \
+                   fn main() -> Int64 { \
+                       let p = P { c: Green } \
+                       let s = toJson(p) \
+                       if s == \"{\\\"c\\\":\\\"Green\\\"}\" { \
+                           return match fromJson(P, s) { Valid(q) => 1, Invalid(iss) => 0, }; \
+                       } \
+                       return 5; }";
+        assert_eq!(run(src).unwrap(), 1);
     }
 }

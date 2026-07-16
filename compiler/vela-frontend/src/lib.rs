@@ -12,6 +12,7 @@
 
 pub mod ast;
 pub mod checker;
+pub mod codec;
 pub mod consteval;
 pub mod diagnostics;
 pub mod fmt;
