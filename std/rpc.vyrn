@@ -1,0 +1,355 @@
+/// std/rpc — Typed RPC as a library (RFC-0019), built entirely on RFC-0021
+/// generator imports. Three `gen fn`s over an ordinary contract module:
+/// `rpcServer`, `rpcClient`, and `rpcInProcess`. The compiler knows nothing
+/// about RPC — everything below is generated Vyrn source over `moduleInterface`
+/// reflection, `toJson`/`fromJson` (RFC-0018), `jsonSchema` (RFC-0003), `extern`
+/// (RFC-0012), and the `handle` convention (RFC-0016). No keyword, no builtin,
+/// no compilation roles.
+///
+/// A procedure is any EXPORTED function of the contract module with 0 or 1
+/// codable parameters and a codable (or `Unit`) return. Non-conforming exports
+/// fail generation with a load diagnostic pointing at the generator call.
+///
+/// Inspect any generated module with:  vyrn emit-gen <file>
+
+// ---- shared pure helpers ---------------------------------------------------
+// (Everything here is comptime-pure — plain string building — so it is legal in
+// a `gen fn` and its transitive callees.)
+
+/// Uppercase the first byte of `s` (ASCII), leaving the rest untouched — the
+/// procedure `getUser` derives `onGetUser` / `vyrnRpcDoneGetUser` this way.
+fn capFirst(s: String) -> String {
+    let raw = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    for b in raw {
+        if i == 0 && b >= 97 && b <= 122 {
+            out.push(b - 32)
+        } else {
+            out.push(b)
+        }
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(t) => t,
+        Err(e) => s,
+    }
+}
+
+/// Join `parts` with `sep` between them.
+fn joinList(parts: Array<String>, sep: String) -> String {
+    let mut out = ""
+    let mut i = 0
+    for p in parts {
+        if i > 0 {
+            out = out + sep
+        }
+        out = out + p
+        i = i + 1
+    }
+    return out
+}
+
+/// Whether `spelling` names one of the contract's exported types (so `fromJson`
+/// / `jsonSchema` can be handed it as a declared type name).
+fn isNamedType(spelling: String, iface: ModuleInterface) -> Bool {
+    for t in iface.types {
+        if t.name == spelling {
+            return true
+        }
+    }
+    return false
+}
+
+/// A one-line synthesized module that fails to load, spelling a contract
+/// violation in an identifier. Vyrn has no message-carrying trap primitive, so
+/// the offense rides a bare top-level identifier: parsing fails immediately with
+/// a single diagnostic attributed to the generator call site (its banner) that
+/// names the offender — unmasked by any later import/link error. `detail` must
+/// be a valid identifier.
+fn contractError(detail: String) -> String {
+    return "RPC_CONTRACT_ERROR__" + detail + "\n"
+}
+
+/// Reject any contract the RPC layer cannot model: an exported procedure with
+/// more than one parameter, or a single parameter that is not an exported named
+/// (codable) type. Returns "" when the contract is clean.
+fn validateContract(iface: ModuleInterface) -> String {
+    for f in iface.functions {
+        if f.params.length > 1 {
+            return contractError(f.name + "_must_take_at_most_one_parameter")
+        }
+        if f.params.length == 1 {
+            if isNamedType(f.params[0].spelling, iface) == false {
+                return contractError(f.name + "_parameter_must_be_an_exported_named_codable_type")
+            }
+        }
+    }
+    return ""
+}
+
+/// The comma-joined list of every exported function AND type name in `iface` —
+/// the import surface a server / in-process module pulls from the contract.
+fn contractImports(iface: ModuleInterface) -> String {
+    let mut names: Array<String> = []
+    for f in iface.functions {
+        names.push(f.name)
+    }
+    for t in iface.types {
+        names.push(t.name)
+    }
+    return joinList(names, ", ")
+}
+
+// ---- rpcServer -------------------------------------------------------------
+
+/// One per-procedure handler function: decode the body with `fromJson`, call the
+/// real (imported) procedure, encode the result. A decode failure becomes 422
+/// with the server's own accumulated issues; a `Unit` return becomes 204.
+fn serverHandlerFn(f: FnInfo) -> String {
+    let cap = capFirst(f.name)
+    let handler = "rpcHandle" + cap
+    let retUnit = f.ret == ""
+    let mut out = "fn " + handler + "(body: String) -> Response {\n"
+    if f.params.length == 1 {
+        let reqType = f.params[0].spelling
+        out = out + "    return match fromJson(" + reqType + ", body) {\n"
+        if retUnit {
+            let runName = "rpcRun" + cap
+            out = out + "        Valid(input) => " + runName + "(input),\n"
+            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }) },\n"
+            out = out + "    }\n}\n"
+            out = out + "fn " + runName + "(input: " + reqType + ") -> Response {\n"
+            out = out + "    " + f.name + "(input)\n"
+            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\" }\n}\n"
+        } else {
+            out = out + "        Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "(input)) },\n"
+            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }) },\n"
+            out = out + "    }\n}\n"
+        }
+    } else {
+        if retUnit {
+            out = out + "    " + f.name + "()\n"
+            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\" }\n}\n"
+        } else {
+            out = out + "    return Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "()) }\n}\n"
+        }
+    }
+    return out
+}
+
+/// The `GET /rpc/$schema` registry builder: a JSON document listing every
+/// procedure with its request/response JSON Schema (or `null` when there is no
+/// named type / it returns `Unit`), assembled from `jsonSchema()` calls emitted
+/// into the generated code.
+fn serverSchemaFn(iface: ModuleInterface) -> String {
+    let mut out = "fn rpcSchema() -> String {\n"
+    out = out + "    let mut acc = \"{\\\"procedures\\\":[\"\n"
+    let mut i = 0
+    for f in iface.functions {
+        let mut lead = ""
+        if i > 0 {
+            lead = ","
+        }
+        out = out + "    acc = acc + \"" + lead + "{\\\"name\\\":\\\"" + f.name + "\\\",\\\"request\\\":\"\n"
+        if f.params.length == 1 && isNamedType(f.params[0].spelling, iface) {
+            out = out + "    acc = acc + jsonSchema(" + f.params[0].spelling + ")\n"
+        } else {
+            out = out + "    acc = acc + \"null\"\n"
+        }
+        out = out + "    acc = acc + \",\\\"response\\\":\"\n"
+        if isNamedType(f.ret, iface) {
+            out = out + "    acc = acc + jsonSchema(" + f.ret + ")\n"
+        } else {
+            out = out + "    acc = acc + \"null\"\n"
+        }
+        out = out + "    acc = acc + \"}\"\n"
+        i = i + 1
+    }
+    out = out + "    acc = acc + \"]}\"\n"
+    out = out + "    return acc\n}\n"
+    return out
+}
+
+/// The exported router: `POST /rpc/<name>` decode-call-encode, `GET
+/// /rpc/$schema` registry, 405 on the wrong method, 404 on an unknown procedure,
+/// and `None` (not our path) for everything else.
+fn serverRouterFn(iface: ModuleInterface) -> String {
+    let mut out = "export fn rpcHandle(req: Request) -> Option<Response> {\n"
+    out = out + "    if req.path == \"/rpc/$schema\" {\n"
+    out = out + "        if req.method == \"GET\" {\n"
+    out = out + "            return Some(Response { status: 200, contentType: \"application/json\", body: rpcSchema() })\n"
+    out = out + "        }\n"
+    out = out + "        return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\" })\n"
+    out = out + "    }\n"
+    for f in iface.functions {
+        let cap = capFirst(f.name)
+        out = out + "    if req.path == \"/rpc/" + f.name + "\" {\n"
+        out = out + "        if req.method != \"POST\" {\n"
+        out = out + "            return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\" })\n"
+        out = out + "        }\n"
+        out = out + "        return Some(rpcHandle" + cap + "(req.body))\n"
+        out = out + "    }\n"
+    }
+    out = out + "    if req.path.startsWith(\"/rpc/\") {\n"
+    out = out + "        return Some(Response { status: 404, contentType: \"text/plain\", body: \"no such procedure\" })\n"
+    out = out + "    }\n"
+    out = out + "    return None\n}\n"
+    return out
+}
+
+/// `rpcServer(contract)` — emit a module that imports the contract's procedures
+/// and exposes `rpcHandle(req: Request) -> Option<Response>` plugging into the
+/// RFC-0016 `handle` convention. The mount surface is exactly the module you
+/// point it at: explicit, no transitive surprises.
+export gen fn rpcServer(contract: String) -> String {
+    let iface = moduleInterface(contract)
+    let err = validateContract(iface)
+    if err != "" {
+        return err
+    }
+    let mut out = "/// Generated by std/rpc `rpcServer` (RFC-0019) — do not edit.\n"
+    out = out + "import { " + contractImports(iface) + " } from \"" + contract + "\"\n"
+    out = out + "type RpcIssues = { issues: Array<Issue> }\n"
+    for f in iface.functions {
+        out = out + serverHandlerFn(f)
+    }
+    out = out + serverSchemaFn(iface)
+    out = out + serverRouterFn(iface)
+    return out
+}
+
+// ---- rpcClient -------------------------------------------------------------
+
+/// The per-procedure result unifier (locked, RFC-0019): 200 ⇒ decode the body;
+/// 2xx-with-no-body (204) on a `Unit` procedure ⇒ `Valid(true)`; 422 ⇒ the
+/// server's own issues; a transport / other status ⇒ a single `rpc.transport`
+/// `Issue` (status 0 = unreachable).
+fn clientUnifyFn(f: FnInfo) -> String {
+    let cap = capFirst(f.name)
+    let unify = "rpcUnify" + cap
+    let retUnit = f.ret == ""
+    let mut out = ""
+    if retUnit {
+        out = out + "fn " + unify + "(status: Int64, body: String) -> Validation<Bool> {\n"
+        out = out + "    if status == 200 { return Valid(true) }\n"
+        out = out + "    if status == 204 { return Valid(true) }\n"
+    } else {
+        out = out + "fn " + unify + "(status: Int64, body: String) -> Validation<" + f.ret + "> {\n"
+        out = out + "    if status == 200 { return fromJson(" + f.ret + ", body) }\n"
+    }
+    out = out + "    if status == 422 {\n"
+    out = out + "        return match fromJson(RpcIssues, body) {\n"
+    out = out + "            Valid(bag) => Invalid(bag.issues),\n"
+    out = out + "            Invalid(issues) => Invalid(issues),\n"
+    out = out + "        }\n"
+    out = out + "    }\n"
+    out = out + "    if status == 0 {\n"
+    out = out + "        return Invalid([Issue { key: \"rpc.transport\", path: \"\", message: \"procedure `" + f.name + "` is unreachable\" }])\n"
+    out = out + "    }\n"
+    out = out + "    return Invalid([Issue { key: \"rpc.transport\", path: \"\", message: \"procedure `" + f.name + "` failed with status \" + status.toString() }])\n}\n"
+    return out
+}
+
+/// One procedure's client surface: the same-named stub that fires the single
+/// shared transport extern, plus the per-procedure completion dispatcher (an
+/// `export extern fn` the host calls) that unifies the reply and hands it to the
+/// user's plain `onGetUser` handler.
+fn clientProcFns(f: FnInfo) -> String {
+    let cap = capFirst(f.name)
+    let mut out = clientUnifyFn(f)
+    // The stub.
+    if f.params.length == 1 {
+        out = out + "export fn " + f.name + "(req: " + f.params[0].spelling + ") {\n"
+        out = out + "    vyrnRpcCall(\"" + f.name + "\", toJson(req))\n}\n"
+    } else {
+        out = out + "export fn " + f.name + "() {\n"
+        out = out + "    vyrnRpcCall(\"" + f.name + "\", \"\")\n}\n"
+    }
+    // The completion dispatcher → the user's `on<Proc>` handler.
+    out = out + "export extern fn vyrnRpcDone" + cap + "(id: Int64, status: Int64, body: String) {\n"
+    out = out + "    on" + cap + "(id, rpcUnify" + cap + "(status, body))\n}\n"
+    return out
+}
+
+/// `rpcClient(contract)` — emit the client surface: the contract's TYPE
+/// declarations verbatim (the client build never links server bodies, so there
+/// is nothing to strip), one same-named stub per procedure over a single shared
+/// `vyrnRpcCall` extern, and one `export extern fn` completion dispatcher per
+/// procedure. The user writes only `fn onGetUser(id: Int64, res: Validation<T>)`.
+export gen fn rpcClient(contract: String) -> String {
+    let iface = moduleInterface(contract)
+    let err = validateContract(iface)
+    if err != "" {
+        return err
+    }
+    let mut out = "/// Generated by std/rpc `rpcClient` (RFC-0019) — do not edit.\n"
+    // The contract's types, verbatim (re-emitted, not imported).
+    for t in iface.types {
+        out = out + t.source + "\n"
+    }
+    out = out + "type RpcIssues = { issues: Array<Issue> }\n"
+    // The single shared transport, declared once.
+    out = out + "extern fn vyrnRpcCall(name: String, body: String) -> Int64\n"
+    for f in iface.functions {
+        out = out + clientProcFns(f)
+    }
+    return out
+}
+
+// ---- rpcInProcess ----------------------------------------------------------
+
+/// One in-process dispatcher: call the real (imported) procedure directly and
+/// invoke the user's `on<Proc>` handler synchronously with `Valid(..)` before
+/// returning. Validated types cannot be constructed invalid in-process, so the
+/// deterministic flavor only ever produces `Valid` — the `Invalid` paths are a
+/// wire concern (`fromJson` of an untrusted payload). Request ids are always 0:
+/// in-process dispatch allocates none (wire ids come from the JS runtime).
+fn inProcStub(f: FnInfo) -> String {
+    let cap = capFirst(f.name)
+    let stub = "call" + cap
+    let retUnit = f.ret == ""
+    let mut out = ""
+    if f.params.length == 1 {
+        out = out + "export fn " + stub + "(req: " + f.params[0].spelling + ") {\n"
+        if retUnit {
+            out = out + "    " + f.name + "(req)\n"
+            out = out + "    on" + cap + "(0, Valid(true))\n}\n"
+        } else {
+            out = out + "    on" + cap + "(0, Valid(" + f.name + "(req)))\n}\n"
+        }
+    } else {
+        out = out + "export fn " + stub + "() {\n"
+        if retUnit {
+            out = out + "    " + f.name + "()\n"
+            out = out + "    on" + cap + "(0, Valid(true))\n}\n"
+        } else {
+            out = out + "    on" + cap + "(0, Valid(" + f.name + "()))\n}\n"
+        }
+    }
+    return out
+}
+
+/// `rpcInProcess(contract)` — the deterministic test / SSR flavor. Emits a
+/// module that imports the real procedures + their types from the contract and
+/// exposes a `call<Proc>` dispatcher per procedure that runs the real logic and
+/// fires `on<Proc>(0, Valid(..))` synchronously.
+///
+/// v1 deviation: the dispatchers are named `call<Proc>` rather than sharing the
+/// wire client's `<proc>` name, and the contract TYPES are imported directly
+/// from the contract. Vyrn links every module into one flat namespace, so a stub
+/// cannot share a name with the real function it calls; a faithful same-named
+/// in-process flavor would need import aliasing (a general future primitive).
+export gen fn rpcInProcess(contract: String) -> String {
+    let iface = moduleInterface(contract)
+    let err = validateContract(iface)
+    if err != "" {
+        return err
+    }
+    let mut out = "/// Generated by std/rpc `rpcInProcess` (RFC-0019) — do not edit.\n"
+    out = out + "import { " + contractImports(iface) + " } from \"" + contract + "\"\n"
+    for f in iface.functions {
+        out = out + inProcStub(f)
+    }
+    return out
+}
