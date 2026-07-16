@@ -652,8 +652,9 @@ fn run_generator(
             }
         }
     }
-    let sources_hash =
-        generator_sources_hash(&gen_source, &gen_mod_key, opts, resolver, name, &arg_repr)?;
+    let sources_hash = generator_sources_hash(
+        &gen_source, &gen_mod_key, opts, resolver, name, &arg_repr, &allowed,
+    )?;
     let no_cache = std::env::var("VYRN_NO_GEN_CACHE").is_ok();
 
     // 5a. Cache hit: every recorded input still hashes as it did ⇒ reuse output.
@@ -696,9 +697,14 @@ fn run_generator(
     Ok((gen_key, Some(out.source)))
 }
 
-/// `sha256(sorted generator module sources ++ args)` — the stable part of the
-/// cache key (the generator's code + its call). The variable part (which input
-/// files it reads) is verified separately at hit time.
+/// `sha256(sorted generator module sources ++ name ++ args ++ resolved inputs)`
+/// — the stable part of the cache key (the generator's code + its call + WHERE
+/// its call resolves to). The exact bytes each input currently holds are verified
+/// separately at hit time; folding the RESOLVED input roots in here keys the
+/// entry on the importer's location too, so two modules in different directories
+/// calling the same generator with the same RELATIVE arg string (e.g. both
+/// `rpcClient("./api")`) never collide onto one entry — a relative specifier
+/// means different files in different importers.
 fn generator_sources_hash(
     gen_source: &str,
     gen_mod_key: &str,
@@ -706,6 +712,7 @@ fn generator_sources_hash(
     resolver: &dyn ModuleResolver,
     name: &str,
     arg_repr: &str,
+    resolved_inputs: &[String],
 ) -> Result<String, Vec<Diagnostic>> {
     let graph = module_graph(gen_source, gen_mod_key, opts, resolver)?;
     let mut keys: Vec<String> = graph.into_iter().map(|(k, _)| k).collect();
@@ -725,6 +732,16 @@ fn generator_sources_hash(
     blob.extend_from_slice(name.as_bytes());
     blob.push(0);
     blob.extend_from_slice(arg_repr.as_bytes());
+    blob.push(0);
+    // The resolved input roots (the arg paths rebased onto the importer's
+    // directory). Sorted + deduped so the key is stable regardless of arg order.
+    let mut inputs: Vec<&String> = resolved_inputs.iter().collect();
+    inputs.sort();
+    inputs.dedup();
+    for p in inputs {
+        blob.extend_from_slice(p.as_bytes());
+        blob.push(0);
+    }
     Ok(crate::hash::sha256_hex(&blob))
 }
 
@@ -3282,5 +3299,62 @@ mod gen_tests {
                     fn main() -> Int64 { return 0 }";
         let e = gen_err(root, &[("gen.vyrn", gen)]);
         assert!(e.contains("not comptime-pure"), "{e}");
+    }
+
+    #[test]
+    fn same_relative_arg_in_different_dirs_does_not_collide_in_the_cache() {
+        // dogfood BUG 1: two modules in DIFFERENT directories both call the same
+        // generator with the SAME relative arg (`consts("./data")`), but each
+        // `./data` resolves to a different file. The content-addressed cache must
+        // NOT serve the first importer's output to the second — the key now folds
+        // in the RESOLVED inputs, so the two never share an entry.
+        let gen = "export gen fn consts(dir: String) -> String { \
+                       return match readFile(dir + \"/n.txt\") { \
+                           Ok(s) => \"export fn val() -> Int64 { return \" + s + \" }\", \
+                           Err(e) => e } }";
+        let a = "import { consts } from \"../gen\" \
+                 import * as g from consts(\"./data\") \
+                 export fn na() -> Int64 { return g.val() }";
+        let b = "import { consts } from \"../gen\" \
+                 import * as g from consts(\"./data\") \
+                 export fn nb() -> Int64 { return g.val() }";
+        let root = "import { na } from \"./a/client\" \
+                    import { nb } from \"./b/client\" \
+                    fn main() -> Int64 { return na() * 10 + nb() }";
+        let r = CachingResolver::new(&[
+            ("gen.vyrn", gen),
+            ("a/client.vyrn", a),
+            ("a/data/n.txt", "1"),
+            ("b/client.vyrn", b),
+            ("b/data/n.txt", "2"),
+        ]);
+        // Warm cache from `a`'s generation must not leak into `b`'s: 1*10 + 2 = 12
+        // (a pre-fix collision served `b` the value `1`, giving 11).
+        assert_eq!(run_with(root, &r).unwrap(), 12);
+    }
+
+    #[test]
+    fn identical_importer_and_arg_still_hits_the_cache() {
+        // The other half of BUG 1's fix: same importer + same arg must STILL be a
+        // cache hit on re-load (no needless re-run). Two loads of the same root;
+        // the generation runs once, then the warm cache short-circuits it.
+        let gen = "export gen fn consts(dir: String) -> String { \
+                       return match readFile(dir + \"/n.txt\") { \
+                           Ok(s) => \"export fn val() -> Int64 { return \" + s + \" }\", \
+                           Err(e) => e } }";
+        let client = "import { consts } from \"../gen\" \
+                      import { val } from consts(\"./data\") \
+                      export fn na() -> Int64 { return val() }";
+        let root = "import { na } from \"./a/client\" fn main() -> Int64 { return na() }";
+        let r = CachingResolver::new(&[
+            ("gen.vyrn", gen),
+            ("a/client.vyrn", client),
+            ("a/data/n.txt", "7"),
+        ]);
+        let before = gen_run_count();
+        assert_eq!(run_with(root, &r).unwrap(), 7);
+        assert_eq!(gen_run_count(), before + 1, "cold: one run");
+        assert_eq!(run_with(root, &r).unwrap(), 7);
+        assert_eq!(gen_run_count(), before + 1, "warm: cache hit, no re-run");
     }
 }
