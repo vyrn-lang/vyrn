@@ -1,0 +1,47 @@
+/// The home page (`GET /`), server-rendered by the std/ui pages router (RFC-0026
+/// M3). It is the shell for the UNCHANGED interactive RPC demo: it references the
+/// static stylesheet and the `/app.js` boot module (both served by `vyrn dev`
+/// from `public/`), mounts the client wasm into `#app`, and keeps the two raw-wire
+/// demonstrations (a server-side 422 and the `$schema` registry). The former
+/// `public/index.html` is gone — `/` now falls through `handle` to `route`.
+import { el, text, Html, Attr } from "std/html"
+
+export fn page() -> Html {
+    return el("div", [Id("root")], [
+            el("link", [A("rel", "stylesheet"), A("href", "/style.css")], []),
+            el("h1", [], [text("vyrn fullstack — typed RPC, pages by std/ui")]),
+            el("nav", [], [
+                    el("a", [A("href", "/")], [text("home")]),
+                    el("a", [A("href", "/users/7")], [text("/users/7")]),
+                    el("a", [A("href", "/users/42")], [text("/users/42")]),
+                ]),
+            el("p", [Cls("sub")], [
+                    text("One contract ("),
+                    el("code", [], [text("api.vyrn")]),
+                    text("), unchanged server + RPC. The HTML surface is now a "),
+                    el("code", [], [text("pages/")]),
+                    text(" directory compiled to "),
+                    el("code", [], [text("route(req)")]),
+                    text("; the client below still renders via "),
+                    el("code", [], [text("view()")]),
+                    text(" + vyrn-dom.js."),
+                ]),
+            el("p", [Id("status")], [text("loading client.wasm…")]),
+            el("div", [Id("app")], []),
+            el("section", [Cls("shell")], [
+                    el("h2", [], [text("Validated submit — server-side 422")]),
+                    el("button", [Id("badBtn")], [text("create user with age 200 (raw wire)")]),
+                    el("p", [Cls("sub")], [
+                            text("Age 200 fails "),
+                            el("code", [], [text("Age = Int64 where value <= 130")]),
+                            text(" during fromJson on the server; the issues appear in the panel above."),
+                        ]),
+                ]),
+            el("section", [Cls("shell")], [
+                    el("h2", [], [text("Procedure registry")]),
+                    el("button", [Id("schemaBtn")], [text("GET /rpc/$schema")]),
+                    el("div", [Cls("out"), Id("schemaOut")], []),
+                ]),
+            el("script", [A("type", "module"), A("src", "/app.js")], []),
+        ])
+}

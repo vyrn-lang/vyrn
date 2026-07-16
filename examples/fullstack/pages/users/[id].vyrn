@@ -1,0 +1,43 @@
+/// A dynamic, server-rendered page WITH a loader (`GET /users/:id`, RFC-0026 M3).
+///
+/// The `[id]` segment is parsed as `Int64` by the synthesized router (a
+/// non-integer like `/users/abc` 404s before this code runs). `load` "fetches"
+/// the user through the SAME `getUser` procedure the RPC contract exposes and
+/// returns a `Validation<Data>`; on `Invalid` the router renders a 422 error page
+/// listing the issues. Here id 42 is treated as "not found" to exercise that path
+/// (id 0 is the RPC contract's own refusal case), while every other id renders.
+import { el, text, Html, Attr } from "std/html"
+import { getUser, GetUserReq } from "../../api"
+
+export type Params = { id: Int64 }
+export type Data = { name: String, age: Int64 }
+
+export fn load(p: Params) -> Validation<Data> {
+    if p.id == 42 {
+        return Invalid([Issue { key: "user.notFound", path: "id", message: "no user with id \{p.id}" }])
+    }
+    let u = getUser(GetUserReq { id: p.id })
+    return Valid(Data { name: u.name, age: u.age })
+}
+
+export fn page(p: Params, d: Data) -> Html {
+    return el("div", [Id("root")], [
+            el("link", [A("rel", "stylesheet"), A("href", "/style.css")], []),
+            el("nav", [], [el("a", [A("href", "/")], [text("← home")])]),
+            el("h1", [], [text("User \{p.id}")]),
+            el("p", [Cls("out")], [text("\{d.name} · age \{d.age}")]),
+            el("p", [Cls("sub")], [
+                    text("Server-rendered by "),
+                    el("code", [], [text("pages/users/[id].vyrn")]),
+                    text(" through its "),
+                    el("code", [], [text("load")]),
+                    text(" + "),
+                    el("code", [], [text("page")]),
+                    text(" — try "),
+                    el("code", [], [text("/users/42")]),
+                    text(" (error page) or "),
+                    el("code", [], [text("/users/abc")]),
+                    text(" (404)."),
+                ]),
+        ])
+}
