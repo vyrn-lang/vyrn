@@ -1,0 +1,196 @@
+/// web/vyrn-dom.js — the client runtime for the Vyrn UI layer (RFC-0026 M2).
+///
+/// The Elm Architecture, host-side: `view()` is a pure function of module state
+/// returning an `Html` tree; the app exports `vyrnView()` (= `toJson(view())`)
+/// and `vyrnSubs()` (= `toJson(subs())`), plus one `export extern fn` per
+/// event handler. The browser runtime builds the DOM, delegates events by name,
+/// diffs after every handler (keyed where `Key` attrs are present), and
+/// reconciles subscriptions by value. See `web/domdemo.html` for the page.
+///
+/// This module is ALSO an ordinary interp == native == wasm parity citizen:
+/// `main` drives the same handlers deterministically and prints the rendered
+/// HTML, so the pure view logic is checked three ways. The browser just calls
+/// the exported handlers on its own schedule instead.
+import { el, text, cls, attr, on, keyed, empty, toHtmlString, Html, Attr, Sub } from "std/html"
+
+// ---- module state (root-only, RFC-0013) -----------------------------------
+let mut count: Int64 = 0
+let mut ticks: Int64 = 0
+let mut typed: String = ""
+let mut timerOn: Bool = true
+let mut order: Array<Int64> = [1, 2, 3, 4]
+
+/// A stable label per item id — the keyed list reorders ids, not labels.
+fn labelFor(id: Int64) -> String {
+    if id == 1 {
+        return "Widget"
+    }
+    if id == 2 {
+        return "Gadget"
+    }
+    if id == 3 {
+        return "Sprocket"
+    }
+    if id == 4 {
+        return "Cog"
+    }
+    return "Item"
+}
+
+// ---- the view (pure) -------------------------------------------------------
+
+fn counterView() -> Html {
+    return el("section", [Id("counter")], [
+            el("h2", [], [text("Counter")]),
+            el("p", [Id("count")], [text("count = \{count}")]),
+            el("button", [Id("inc"), on("click", "increment", "")], [text("+1")]),
+            el("button", [Id("dec"), on("click", "decrement", "")], [text("-1")]),
+            el("button", [Id("reset"), on("click", "resetCount", "")], [text("reset")]),
+        ])
+}
+
+fn inputView() -> Html {
+    return el("section", [Id("inputbox")], [
+            el("h2", [], [text("Text input")]),
+            el("input", [Id("field"), attr("placeholder", "type here…"), on("input", "onType", "")], []),
+            el("p", [Id("echo")], [text("you typed: \{typed}")]),
+        ])
+}
+
+fn itemRow(id: Int64) -> Html {
+    return keyed("\{id}", el("li", [cls("row")], [
+                el("span", [cls("tag")], [text("#\{id} \{labelFor(id)}")]),
+                // An UNCONTROLLED input: whatever you type stays in the DOM node, so a
+                // keyed reorder that reuses the node carries your text with its row.
+                el("input", [attr("placeholder", "note…")], []),
+            ]))
+}
+
+fn rowsView() -> Array<Html> {
+    let mut rows: Array<Html> = []
+    for id in order {
+        rows.push(itemRow(id))
+    }
+    return rows
+}
+
+fn listView() -> Html {
+    return el("section", [Id("list")], [
+            el("h2", [], [text("Keyed list")]),
+            el("button", [Id("rotate"), on("click", "rotate", "")], [text("rotate (first → last)")]),
+            el("ul", [Id("rows")], rowsView()),
+        ])
+}
+
+fn toggleLabel() -> String {
+    if timerOn {
+        return "stop timer"
+    }
+    return "start timer"
+}
+
+fn subsView() -> Html {
+    return el("section", [Id("subs")], [
+            el("h2", [], [text("Subscription — Every 1s")]),
+            el("p", [Id("ticks")], [text("ticks = \{ticks}")]),
+            el("button", [Id("toggle"), on("click", "toggleTimer", "")], [text(toggleLabel())]),
+        ])
+}
+
+fn view() -> Html {
+    return el("main", [], [
+            el("h1", [], [text("vyrn-dom demo")]),
+            counterView(),
+            el("hr", [], []),
+            inputView(),
+            el("hr", [], []),
+            listView(),
+            el("hr", [], []),
+            subsView(),
+        ])
+}
+
+/// The declared subscriptions — effects as data. When `timerOn` is false the
+/// list is empty and the host unwires the interval (nothing to leak).
+fn subs() -> Array<Sub> {
+    if timerOn {
+        return [Every(1000, "onTick")]
+    }
+    let none: Array<Sub> = []
+    return none
+}
+
+// ---- handlers (exported; the browser and `main` both call these) -----------
+
+export extern fn increment(arg: String) {
+    count = count + 1
+}
+
+export extern fn decrement(arg: String) {
+    count = count - 1
+}
+
+export extern fn resetCount(arg: String) {
+    count = 0
+}
+
+export extern fn onType(arg: String) {
+    typed = arg
+}
+
+export extern fn onTick(arg: String) {
+    ticks = ticks + 1
+}
+
+export extern fn toggleTimer(arg: String) {
+    timerOn = !timerOn
+}
+
+/// Move the first id to the end — a reorder the keyed differ must handle by
+/// MOVING DOM nodes, not rebuilding them.
+export extern fn rotate(arg: String) {
+    let mut next: Array<Int64> = []
+    let mut i = 1
+    while i < order.length {
+        next.push(order[i])
+        i = i + 1
+    }
+    if order.length > 0 {
+        next.push(order[0])
+    }
+    order = next
+}
+
+// ---- the host bridge -------------------------------------------------------
+
+export extern fn vyrnView() -> String {
+    return toJson(view())
+}
+
+export extern fn vyrnSubs() -> String {
+    return toJson(subs())
+}
+
+fn main() -> Int64 {
+    // Drive the handlers deterministically, exactly as the browser would, so
+    // this stays a three-way parity citizen.
+    print(vyrnView())
+    increment("")
+    increment("")
+    onType("hello")
+    rotate("")
+    print("--- after +2, type, rotate ---")
+    print(toHtmlString(view()))
+    print("subs on: \{vyrnSubs()}")
+    toggleTimer("")
+    print("subs off: \{vyrnSubs()}")
+    // Restore initial state so a host that instantiates this module (the
+    // browser, after `_start` runs `main` once) boots from a pristine view —
+    // `main` is only a deterministic smoke drive for the parity harness.
+    count = 0
+    typed = ""
+    ticks = 0
+    timerOn = true
+    order = [1, 2, 3, 4]
+    return 0
+}
