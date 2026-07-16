@@ -24,14 +24,14 @@ to do it safely*.
 
 ## Explicitly *not* competing with
 
-| Language | Owns the niche of | Why Vela doesn't chase it |
+| Language | Owns the niche of | Why Vyrn doesn't chase it |
 |----------|-------------------|---------------------------|
-| C        | maximal low-level control | Vela is memory-safe by default |
-| Rust     | maximal control + zero-overhead safety | Vela trades some control for predictability |
-| Go       | simplicity via a GC | Vela has no tracing GC |
-| TypeScript | running on JS everywhere | Vela is native, ahead-of-time |
+| C        | maximal low-level control | Vyrn is memory-safe by default |
+| Rust     | maximal control + zero-overhead safety | Vyrn trades some control for predictability |
+| Go       | simplicity via a GC | Vyrn has no tracing GC |
+| TypeScript | running on JS everywhere | Vyrn is native, ahead-of-time |
 
-Vela occupies its own niche: **"systems TypeScript."**
+Vyrn occupies its own niche: **"systems TypeScript."**
 
 ---
 
@@ -95,7 +95,7 @@ heavily from prior art. It is the *combination*:
 3. A programming model built around **intent** instead of **implementation**.
 
 Rust is known for ownership. Haskell for type theory. Lean for dependent types.
-Vela's opportunity: **the best *practical* type system** — type-level power that
+Vyrn's opportunity: **the best *practical* type system** — type-level power that
 feels like ordinary programming, not type theory.
 
 ---
@@ -130,5 +130,5 @@ its own RFC → RFC-0003.
 - **Q1.** How much should the compiler infer before it feels "magical" and
   unpredictable? (Tension between Principle 2 and Principle 7.) *Resolve with a
   prototype, not by argument.*
-- **Q2.** Final codename. "Vela" is provisional.
+- **Q2.** Final codename. "Vyrn" is provisional.
 - **Q3.** Does const-generic dependent typing (RFC-0003) ship in v1 or v1.x?

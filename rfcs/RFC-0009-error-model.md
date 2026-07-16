@@ -6,7 +6,7 @@
 > **Implementation status.** The built-in `Issue` record and generic
 > `Validation<T>` enum are injected into every program and lower through the
 > existing generic-enum/record/array machinery. Verified interpreter == native
-> (`examples/validation.vela`).
+> (`examples/validation.vyrn`).
 
 ---
 
@@ -20,7 +20,7 @@ error type with *structured, keyed* errors.
 
 ## The types (built in)
 
-```vela
+```vyrn
 type Issue = { key: String, path: String, message: String }
 type Validation<T> = | Valid(T) | Invalid(Array<Issue>)
 ```
@@ -32,7 +32,7 @@ type Validation<T> = | Valid(T) | Invalid(Array<Issue>)
 A validator accumulates all failing checks into an issue array and returns
 `Invalid(issues)`, or `Valid(value)` when clean:
 
-```vela
+```vyrn
 fn validatePerson(name: String, age: Int) -> Validation<Person> {
     let mut issues: Array<Issue> = []
     if len(name) == 0 { issues.push(Issue { key: "name.required", path: "name", message: ".." }) }
@@ -50,7 +50,7 @@ UI can show all field errors together and localize each via its `key`.
 
 The classic applicative — `Validation<A> & Validation<B> -> Validation<(A, B)>`,
 accumulating errors while combining values — needs **tuples** and **closures**
-(to name the combined value / the final constructor). Vela has neither yet, so the
+(to name the combined value / the final constructor). Vyrn has neither yet, so the
 combined-value form is not expressible. The **accumulate-into-an-array** pattern
 above reaches the same practical goal (report all errors, keyed, renderable) with
 today's features, and reads clearly. A combinator layer (`require`, `all`,

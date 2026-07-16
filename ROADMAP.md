@@ -1,4 +1,4 @@
-# Vela — status & roadmap
+# Vyrn — status & roadmap
 
 The forward-looking companion to the [RFCs](rfcs/). What ships today, what's next,
 and the one decision the rest of the language waits on.
@@ -9,22 +9,22 @@ exit codes against the tree-walking interpreter (the reference semantics),
 across **46 examples** and **606 tests** (0 warnings) — including every runtime
 trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere)
 and the canonical I/O error strings (RFC-0014). The whole corpus is kept
-canonical by `velac fmt` (RFC-0017) and re-verified by the parity harness.
+canonical by `vyrn fmt` (RFC-0017) and re-verified by the parity harness.
 The permanent corpus harness is
-`cargo test -p vela-cli --test parity -- --ignored` (needs clang; the wasm
+`cargo test -p vyrn-cli --test parity -- --ignored` (needs clang; the wasm
 column runs when `tools/` holds a wasi-sysroot + wasmtime, or via
-`$WASI_SYSROOT`/`$VELA_WASMTIME`; the known-divergent list is empty and must
+`$WASI_SYSROOT`/`$VYRN_WASMTIME`; the known-divergent list is empty and must
 stay that way).
 
-**WebAssembly**: `velac build prog.vela --target wasm` compiles the same
+**WebAssembly**: `vyrn build prog.vyrn --target wasm` compiles the same
 LLVM IR against wasi-libc (`--target=wasm32-wasip1`). The runtime is
 libc-portable: stream handles and all size_t-sensitive calls (`strlen`,
 `malloc`, `realloc`, `strncmp`, `snprintf`) route through a tiny embedded C
 shim with 64-bit-clean prototypes, and the C `main` lives in the shim (the IR
-exports `vela_entry`), so MSVC, glibc, and wasi-libc all link the same module.
+exports `vyrn_entry`), so MSVC, glibc, and wasi-libc all link the same module.
 Exit codes are portable in 0..126 (WASI's constraint). **The browser demo
 ships** (`web/`): a hand-rolled WASI preview1 shim (`wasi-min.js`, zero
-dependencies) runs any `velac`-built module in a page — a compute-only velac
+dependencies) runs any `vyrn`-built module in a page — a compute-only vyrn
 module imports five preview1 functions (`fd_write`, `fd_fdstat_get`,
 `fd_close`, `fd_seek`, `proc_exit`); a module using input (RFC-0014) pulls in
 seven more (`args_get`, `args_sizes_get`, `fd_read`, `fd_fdstat_set_flags`,
@@ -36,64 +36,64 @@ trap parity holds end-to-end (division by zero prints the canonical
 `error: division by zero` + exit 1 in the browser, byte-identical to interp
 and native). `web/build.ps1` builds the example modules; any static server
 serves it. **JS interop stage 1 ships (RFC-0012 M1)**: `extern fn
-jsLog(msg: String)` declares a host import from the wasm `vela` namespace —
+jsLog(msg: String)` declares a host import from the wasm `vyrn` namespace —
 scalars cross by value (`Int64` is a `BigInt` in JS), a `String` crosses as
 a `(ptr, len)` pair that `wasi-min.js` decodes, and the page supplies the
-functions via `runVela(bytes, { extern: { … } })` (a missing one is a clear
+functions via `runVyrn(bytes, { extern: { … } })` (a missing one is a clear
 instantiate error naming provided vs wanted). On the interpreter and the
 native binary an extern *call* traps with canonical wording (``error:
 extern `name` is not available on this target``, byte-identical between
 the two — asserted by the parity harness's `WASM_ONLY` list; declaring is
 fine everywhere, and `KNOWN_DIVERGENT` stays empty). Extern calls are
 never spawn-safe (a host effect), and the signature domain is checked
-(scalars + String only). See `examples/externdemo.vela` +
+(scalars + String only). See `examples/externdemo.vyrn` +
 `web/externdemo.html`. **JS interop stage 2 ships too (RFC-0012 M2)**:
-`export extern fn velaAdd(a: Int64, b: Int64) -> Int64 { … }` is a normal,
-body-checked Vela function that is *additionally* exported to JS — after
+`export extern fn vyrnAdd(a: Int64, b: Int64) -> Int64 { … }` is a normal,
+body-checked Vyrn function that is *additionally* exported to JS — after
 `_start` runs `main`, the host calls it on the live instance
-(`runVela(...).exports`). The export is an inline `wasm-export-name`
-attribute on the `define` (auto-rooted; the module's `__vela_malloc` is
+(`runVyrn(...).exports`). The export is an inline `wasm-export-name`
+attribute on the `define` (auto-rooted; the module's `__vyrn_malloc` is
 force-exported when a String parameter is present so the shim can allocate
 argument buffers). A `String` crosses *into* an exported call as a single
 `ptr` (the JS caller allocates + NUL-terminates — the asymmetry vs. an
 import's `(ptr, len)`), and a returned `String` is NUL-decoded from linear
 memory: `greet(String) -> String` round-trips a string both ways.
 Because they never trap (only body-less imports do),
-`examples/externdemo2.vela` stays fully three-way parity-capable
+`examples/externdemo2.vyrn` stays fully three-way parity-capable
 (interp == native == wasm); the browser round trip is in the M2 section of
 `web/externdemo.html`. **The event-loop story ships too (RFC-0013)**:
 `export extern` gave a live module callable after `main` returns; **module
 state** — a top-level `let [mut] name = init` in the root module — gives it
 state that *survives between entries*, so a handler called at t=1s finds the
 counter `main` set up at t=0. A wasm module can't block the page or suspend,
-so a Vela "event loop" is an inversion: **the host owns the loop** (a browser
-`setInterval`, later a server runtime) and calls exported handlers; Vela owns
+so a Vyrn "event loop" is an inversion: **the host owns the loop** (a browser
+`setInterval`, later a server runtime) and calls exported handlers; Vyrn owns
 the state and the logic — the same shape wasm components and every embedded
 runtime use, with no new control flow. Globals initialize once, in declaration
 order, before `main` (native/wasm run them in a synthesized
-`@__vela_globals_init` called from `vela_entry`; the interpreter seeds a
+`@__vyrn_globals_init` called from `vyrn_entry`; the interpreter seeds a
 persistent frame). They validate on every store like any value boundary, are
 never dropped (module lifetime, safe-leak), can't be `consume`d or `drop`ped,
 and any function that touches one is not spawn-safe (module state is shared by
-definition) — transitively. `examples/eventloop.vela` drives the handlers in a
+definition) — transitively. `examples/eventloop.vyrn` drives the handlers in a
 deterministic in-`main` loop so it is a normal three-way parity citizen; the
 live version is `web/eventloop.html`, where a timer renders the count and a
 button calls `reset()`. Next on the browser path: the long-range goal is
 same-language server (native SSR) + client (wasm), with validated types as the
 wire contract.
 
-**The server half's v1 ships (RFC-0016).** `velac serve prog.vela [--port N]`
+**The server half's v1 ships (RFC-0016).** `vyrn serve prog.vyrn [--port N]`
 is a hand-rolled HTTP/1.1 host on `std::net` (no crates, the no-crates ethos)
 running an ordinary `fn handle(req: Request) -> Response` under the interpreter
-— the *same program shape as the browser*: the host owns the accept loop, Vela
+— the *same program shape as the browser*: the host owns the accept loop, Vyrn
 owns the module state (`hits` persists across requests) and the logic.
 `Request`/`Response` are parser-injected records (like `Schema`/`Issue`), so
 `handle` is a plain, testable, checkable function — `main` and `test` blocks
-call it directly, and `examples/server.vela` is a normal three-way parity
+call it directly, and `examples/server.vyrn` is a normal three-way parity
 citizen (interp == native == wasm). Sequential accept loop, one request at a
 time, so module state is race-free by construction; a `handle` trap is caught,
 logged with the canonical wording, and answered 500 (the server survives).
-This RFC also **settled the async question: Vela adds no `async`/`await`** (for
+This RFC also **settled the async question: Vyrn adds no `async`/`await`** (for
 now, deliberately) — function suspension is the highest-risk feature the
 three-backend invariant could face (wasm can't switch stacks), the host-owns-
 the-loop model already covers the real use cases, and determinism is the
@@ -117,19 +117,19 @@ both backends instead of corrupting memory past the fixed `[64 x ptr]`
 global — and the checker's return-path analysis learned that a `region`
 body that always returns satisfies the enclosing function (it runs exactly
 once, unlike a loop). Allocation failure traps (`error: out of memory`)
-instead of dereferencing null — the C shim's `__vela_malloc`/`__vela_realloc`
+instead of dereferencing null — the C shim's `__vyrn_malloc`/`__vyrn_realloc`
 check once at the choke point, including the ILP32 guard against a 64-bit
 size silently truncating in the `(size_t)` cast on wasm32. `schemaOf(T)`
 was enriched: `Schema` now carries `name`, the full base spelling (sized
 ints included), the `///` `doc`, `multipleOf`, `minLength`/`maxLength`,
 and the regex `pattern` — enough to assemble real OpenAPI fragments in
-ordinary Vela code (see `examples/reflection.vela`). Along the way, a
+ordinary Vyrn code (see `examples/reflection.vyrn`). Along the way, a
 `///` block separated from a declaration by a blank line (a file header)
 no longer glues onto that declaration's doc.
 
 **Modules (RFC-0010)**: `import { names } from "./path"` / `export fn|type|protocol`
-— TS-style, resolved relative to the importing file (`.vela` appended), with
-`std/...` reserved for the standard library (itself written in Vela: `std/math`,
+— TS-style, resolved relative to the importing file (`.vyrn` appended), with
+`std/...` reserved for the standard library (itself written in Vyrn: `std/math`,
 `std/strings` — parity for free). A loader/linker stage parses each file once,
 enforces exports/visibility (a module only sees foreign names it imported;
 importing an enum brings its variants, a protocol its methods), rejects cycles
@@ -141,7 +141,7 @@ CLI, in-memory maps in tests). **JSON Schema type imports** (M2):
 from a schema document — the exact inverse of `jsonSchema(T)` (bounds/lengths/
 patterns become `where` clauses, `required` steers `Option<T>`, `$defs`,
 `#/$defs/..` and root `#` refs resolve, `enum`-of-strings becomes a
-payload-less Vela enum, constrained fields become synthetic `User.age`
+payload-less Vyrn enum, constrained fields become synthetic `User.age`
 types), byte-exact round-trip with the emitter, and any inexpressible keyword
 is a hard error. The emitter side is correspondingly rich: named nested types
 render as `$ref`s into a `$defs` section (recursion is a real `$ref` — `"#"`
@@ -157,38 +157,38 @@ absent-or-`null` for an `Option`, parses integers **exactly** (never through
 path). Encode renders through the canonical scalar path and decode runs the
 same predicate lowering as every other boundary, so the encoded bytes AND
 every Issue's key/path/message are byte-identical across all three backends
-(`examples/jsoncodec.vela`). **Project manifest** (M3): an optional `vela.json`
-(`name`/`main`/`dependencies`) found by walking up from the cwd — `velac run/
+(`examples/jsoncodec.vyrn`). **Project manifest** (M3): an optional `vyrn.json`
+(`name`/`main`/`dependencies`) found by walking up from the cwd — `vyrn run/
 check/build` need no file argument in a project, bare import specifiers
 (`import { x } from "money"`) resolve through the `dependencies` map (an
-import map; targets are relative-to-manifest or `std/` for now), and `velac
-new <name>` scaffolds a runnable project, `velac deps` prints the resolved
-module graph. Bare `velac run file.vela` stays manifest-free forever.
+import map; targets are relative-to-manifest or `std/` for now), and `vyrn
+new <name>` scaffolds a runnable project, `vyrn deps` prints the resolved
+module graph. Bare `vyrn run file.vyrn` stays manifest-free forever.
 **Reproducible remote imports** (M4): `github:owner/repo@ref/path`,
 `gist:user/id[@rev]/file`, and `https://...` specifiers (inline or as manifest
-targets). The first resolve pins each dep in `vela.lock`
+targets). The first resolve pins each dep in `vyrn.lock`
 (`specifier ⇥ immutable-url ⇥ sha256`, floating refs frozen to a commit via
 `git ls-remote`); content lives in the content-addressed
-`~/.vela/cache/sha256/` and is hash-verified on EVERY load (tampering fails
-loudly). `--offline`/`VELA_OFFLINE=1` builds never touch the network;
-`velac add <spec> [--name alias]` fetches+pins+records, `velac update [alias]`
-is the only way a pin changes, and `velac vendor [--check]` copies the lock's
-blobs into `./vela_vendor/` — a committed checkout builds forever even if the
+`~/.vyrn/cache/sha256/` and is hash-verified on EVERY load (tampering fails
+loudly). `--offline`/`VYRN_OFFLINE=1` builds never touch the network;
+`vyrn add <spec> [--name alias]` fetches+pins+records, `vyrn update [alias]`
+is the only way a pin changes, and `vyrn vendor [--check]` copies the lock's
+blobs into `./vyrn_vendor/` — a committed checkout builds forever even if the
 upstream is deleted (any copy of a file with the locked hash restores it).
 Remote modules are sandboxed: relative imports stay inside their pinned base,
 no local paths, no bare specifiers. Zero new crates (hand-rolled SHA-256 with
-NIST vectors; `curl`/`git ls-remote` subprocesses, all in vela-cli).
+NIST vectors; `curl`/`git ls-remote` subprocesses, all in vyrn-cli).
 
-**Input I/O (RFC-0014)**: a Vela program can finally *read* — the "computes
+**Input I/O (RFC-0014)**: a Vyrn program can finally *read* — the "computes
 from constants only" gap is closed. `args() -> Array<String>` (argv[1..];
-`velac run prog.vela x y` forwards trailing arguments), `readLine() ->
+`vyrn run prog.vyrn x y` forwards trailing arguments), `readLine() ->
 Option<String>` (one stdin line, `\r\n`/`\n` stripped, `None` at EOF, repeated
 calls stream), `readFile(p) -> Result<String, String>`, `writeFile(p, c) ->
 Result<Bool, String>` — plus the byte layer: `readFileBytes(p) ->
 Result<Array<UInt8>, String>`, `bytes(s) -> Array<UInt8>` (now a true
 i8-stride byte array), and `stringFromBytes(b)` with the pinned round-trip law
 `stringFromBytes(bytes(s)) == Ok(s)`. All are effects (spawn-forbidden, never
-constant). **Error payloads are canonical Vela wording, never OS text** —
+constant). **Error payloads are canonical Vyrn wording, never OS text** —
 ``Err("cannot read `p`")``, ``Err("`p` is not valid UTF-8")``, ``Err("`p`
 contains a NUL byte")`` (NUL is valid UTF-8 but cannot live in a
 NUL-terminated String, so it is rejected explicitly), ``Err("cannot write
@@ -196,10 +196,10 @@ NUL-terminated String, so it is rejected explicitly), ``Err("cannot write
 place (the codegen's `@.io.*` globals; the interpreter matches it). The parity
 harness gained the I/O conventions: an `examples/<name>.stdin` fixture pipes
 into all three backends, every run's cwd is `examples/`, and wasmtime gets
-`--dir .` — `examples/input.vela`, `examples/files.vela`, and
-`examples/args.vela` are ordinary three-way parity citizens.
+`--dir .` — `examples/input.vyrn`, `examples/files.vyrn`, and
+`examples/args.vyrn` are ordinary three-way parity citizens.
 
-**Testing (RFC-0015)**: a Vela user finally has somewhere to put a test.
+**Testing (RFC-0015)**: a Vyrn user finally has somewhere to put a test.
 `test "name" { .. }` is a top-level declaration — a named block checked exactly
 like a `Unit`-returning function body (locals, `print`, spawn rules, ownership,
 move-checking all apply, under a synthetic unspellable `test@<index>` name), so
@@ -207,16 +207,16 @@ every existing analysis catches bugs inside a test unchanged. Two builtins are
 legal **only** inside a test: `assert(cond: Bool)` traps the test with
 `assertion failed at line N`; `assertEq(a, b)` (same equatable type both sides)
 traps with `assertion failed at line N: <a> != <b>` using the canonical
-`toString` rendering. `velac test [file] [--name <substring>]` runs the root
+`toString` rendering. `vyrn test [file] [--name <substring>]` runs the root
 file's tests in declaration order under the interpreter, printing `test "name"
 ... ok` / `... FAILED: <message>` and a `N passed, M failed` summary (exit 1 if
 any failed; a file with no tests prints `no tests`). Tests are **stripped** from
 `run`/`build`/`emit-ir` — a shipped binary contains no tests, and the string
 pool / regex collection never see them (they live in their own `Program.tests`
 field, not `functions`) — so a file with BOTH tests and a `main`
-(`examples/testing.vela`) stays a byte-identical three-way parity citizen. A
+(`examples/testing.vyrn`) stays a byte-identical three-way parity citizen. A
 file with tests (or exports) needs no `main` (the library-module rule). An
-imported module's tests type-check but do not run under `velac test <root>`.
+imported module's tests type-check but do not run under `vyrn test <root>`.
 
 ---
 
@@ -297,7 +297,7 @@ imported module's tests type-check but do not run under `velac test <root>`.
 
 #### ECS notes — what a Structure-of-Arrays ECS can do today
 
-`examples/ecs.vela` is a working SoA entity-component-system toy (parallel
+`examples/ecs.vyrn` is a working SoA entity-component-system toy (parallel
 `Array<Int64>` component stores, a movement system, spawn/despawn churn, a
 deterministic checksum) verified interp == native == wasm. Writing it mapped out
 exactly where the language helps and where it doesn't:
@@ -375,20 +375,20 @@ none blocks the core loop.
   traps cleanly instead of dangling.
 
 ### Backend
-- Text LLVM-IR backend; `velac build prog.vela` emits IR and links a native exe
+- Text LLVM-IR backend; `vyrn build prog.vyrn` emits IR and links a native exe
   with `clang`. (The Inkwell in-memory backend also works now — builds against an
   LLVM 22 dev SDK and links a `fib` exe whose exit code matches the interpreter —
   but stays excluded from the default workspace and covers only the v0.1 subset;
   the text-IR path remains the full reference backend.)
 
 ### Tooling
-- **Structured diagnostics as a core API** — `vela_frontend::diagnostics(source)`
+- **Structured diagnostics as a core API** — `vyrn_frontend::diagnostics(source)`
   returns every problem as a `Diagnostic { line, col, end_col, severity, stage,
-  message }` with a precise position. Both `velac check` (prints
+  message }` with a precise position. Both `vyrn check` (prints
   `file:line:col: message`) and the LSP consume the same API; no duplication.
   Accumulation is bounded: lexer/parser stop at the first error, but once a file
   parses, every type/ownership error across all functions and types is reported.
-- **Symbol query as a core API** — `vela_frontend::analyze(source)` runs the
+- **Symbol query as a core API** — `vyrn_frontend::analyze(source)` runs the
   pipeline (lex→parse→check→movecheck) once and returns an `Analysis {
   diagnostics, symbols, tokens }`: the diagnostics, a `Symbol` per top-level
   function/type/variant/method with a precise name column (reused from the
@@ -396,8 +396,8 @@ none blocks the core loop.
   `resolve(analysis, line, col)` maps a cursor to its declaration; `
   completions(analysis)` lists top-level symbols. Non-invasive: no AST/parser
   span threading. `diagnostics()` delegates to `analyze()`, so one pipeline.
-- **`velac fmt` — the canonical formatter** (RFC-0017). One style, no options.
-  `vela_frontend::fmt(source) -> Result<String, Diagnostic>` prints a
+- **`vyrn fmt` — the canonical formatter** (RFC-0017). One style, no options.
+  `vyrn_frontend::fmt(source) -> Result<String, Diagnostic>` prints a
   comment-preserving token stream (`lexer::lex_with_trivia`): 4-space brace-depth
   indent, the normative spacing table, semicolons dropped, 2+ blank lines
   collapsed to one, one trailing newline. It **never joins or splits lines** (no
@@ -405,24 +405,24 @@ none blocks the core loop.
   whitespace between raw token texts, so the **safety invariant** is cheap:
   `lex(fmt(src))` equals `lex(src)` modulo removed `Semi`, checked in `fmt`
   itself (a mismatch returns an error and leaves the file untouched) and over the
-  whole corpus. `velac fmt [files…] [--check]` formats in place (or bare
-  `velac fmt` = project main + local imports via the module graph); `--check` is
+  whole corpus. `vyrn fmt [files…] [--check]` formats in place (or bare
+  `vyrn fmt` = project main + local imports via the module graph); `--check` is
   the CI gate (lists drift, exits 1, writes nothing). Requires only *lexable*
   input, so a half-typed buffer with a parse error still formats — which is what
   makes format-on-save safe.
-- **`vela-lsp`** — a synchronous `lsp-server` LSP server (no async runtime) and a
+- **`vyrn-lsp`** — a synchronous `lsp-server` LSP server (no async runtime) and a
   pure adapter: it calls `analyze_linked` once on open/change, caches the
   `Analysis`, and serves `textDocument/publishDiagnostics`, `/hover`,
   `/definition`, `/completion`, and `/formatting` (whole-document, running the
   same `fmt`) from it (a request never re-parses). Excluded
   from the default workspace (pulls `lsp-server`/`lsp-types`); built with
-  `cargo build --manifest-path compiler/vela-lsp/Cargo.toml`. The only compiler
-  calls are `vela_frontend::analyze_linked` + the query layer, so the editor and
+  `cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml`. The only compiler
+  calls are `vyrn_frontend::analyze_linked` + the query layer, so the editor and
   CLI report identical errors. **Multi-file aware** (RFC-0010): the server
   resolves a document's `import`s through the module loader — local files from
-  disk, `std/` via the same discovery as `velac`, manifest aliases from
-  `vela.json`, and *pinned* remote modules read-only from `vela_vendor/` or the
-  user cache (the editor never fetches; unpinned remotes get a "run `velac
+  disk, `std/` via the same discovery as `vyrn`, manifest aliases from
+  `vyrn.json`, and *pinned* remote modules read-only from `vyrn_vendor/` or the
+  user cache (the editor never fetches; unpinned remotes get a "run `vyrn
   check` once" diagnostic). Errors inside an imported file surface in the open
   document as `in <file>: …` at the top. Hover/go-to-definition/completion cover
   top-level functions, types, and variants of the open document, plus local
@@ -436,13 +436,13 @@ none blocks the core loop.
   (`github:...`) get hover but no jump (no local file). Imported names appear
   in completions.
 - **VS Code extension** (`editor/vscode/`) — plain-JavaScript (no compile step)
-  extension that spawns `vela-lsp` and ships a TextMate grammar for colors. `F5`
+  extension that spawns `vyrn-lsp` and ships a TextMate grammar for colors. `F5`
   from the repo root runs it against `examples/`: colored, squiggled, with hover
   / F12 go-to-definition / completion. A **"▶ Run" CodeLens** sits over `fn main`
-  (runs `velac run`); for tests (RFC-0015) a **"▶ Run test"** CodeLens sits over
-  each `test "name"` block (`velac test --name "name"`) and a **"▶ Run all
-  tests"** over the first — all reusing the shared `vela` terminal and the
-  repo-root velac discovery. `test` is a contextual keyword in the grammar (only
+  (runs `vyrn run`); for tests (RFC-0015) a **"▶ Run test"** CodeLens sits over
+  each `test "name"` block (`vyrn test --name "name"`) and a **"▶ Run all
+  tests"** over the first — all reusing the shared `vyrn` terminal and the
+  repo-root vyrn discovery. `test` is a contextual keyword in the grammar (only
   before a string), there is a `test` snippet, and test blocks appear in the
   outline / document-symbol list.
 

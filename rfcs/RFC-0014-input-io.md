@@ -2,11 +2,11 @@
 
 - **Status:** Implemented (M1 + M2) — three-way parity verified (interp ==
   native == wasm, byte-identical including the canonical error strings);
-  `examples/input.vela`, `examples/files.vela`, `examples/args.vela`
+  `examples/input.vyrn`, `examples/files.vyrn`, `examples/args.vyrn`
 - **Depends on:** RFC-0005 (`Option`/`Result`), RFC-0012 (the browser has its
   own input story — `extern`; this RFC is about native/WASI input)
 
-> **Motivation.** A Vela program can compute, validate, and print — but it
+> **Motivation.** A Vyrn program can compute, validate, and print — but it
 > cannot *read*: no CLI args, no stdin, no files. Every program computes from
 > constants. This is the single biggest "real language" gap, and the
 > prerequisite for the server half of the long-range goal (same-language
@@ -17,7 +17,7 @@
 
 ## Surface (M1 — text)
 
-```vela
+```vyrn
 fn main() -> Int64 {
     let who = args()                          // Array<String>: argv[1..]
     let line = readLine()                     // Option<String>: one stdin line, None at EOF
@@ -44,7 +44,7 @@ They are not constant (`where`/consteval never see them).
 ## The parity rule for errors (critical)
 
 OS error text differs between backends (Rust `io::Error` vs libc `strerror`),
-so **error payloads are canonical Vela wording, never OS text**:
+so **error payloads are canonical Vyrn wording, never OS text**:
 
 - `readFile` → `Err("cannot read `<path>`")` — any reason (missing,
   permission, directory).
@@ -54,7 +54,7 @@ so **error payloads are canonical Vela wording, never OS text**:
 - `writeFile` → `Err("cannot write `<path>`")`.
 
 **The NUL rule (implementation decision).** A NUL byte *is* valid UTF-8, but
-cannot live in a NUL-terminated Vela String — silently truncating on native
+cannot live in a NUL-terminated Vyrn String — silently truncating on native
 would diverge from the interpreter. So NUL is rejected explicitly, checked
 *before* UTF-8 validation, with its own canonical wording:
 
@@ -80,7 +80,7 @@ kind):
   three backends (interp, native, wasmtime run).
 - **Files:** examples use paths relative to the repo's `examples/` directory;
   the harness sets the working directory to `examples/` for all three runs
-  and passes `--dir .` to wasmtime (WASI preopens). `velac run`/native run
+  and passes `--dir .` to wasmtime (WASI preopens). `vyrn run`/native run
   inherit the cwd naturally.
 - Written outputs go to a temp name and are cleaned up by the example itself
   or ignored via .gitignore — an example must remain re-runnable.
@@ -96,9 +96,9 @@ an empty world. Real browser input remains the `extern` story (RFC-0012).
 - **Interpreter:** Rust `std::env::args` / `Stdin::lock` lines / `fs` — with
   the canonical error mapping above.
 - **Native + wasm (one IR):** C shim helpers with 64-bit-clean prototypes
-  (the established pattern): `__vela_args_count/__vela_args_get`,
-  `__vela_read_line` (returns malloc'd ptr or null at EOF, strips `\r?\n`),
-  `__vela_read_file` / `__vela_write_file` (out-params for ptr+len; status
+  (the established pattern): `__vyrn_args_count/__vyrn_args_get`,
+  `__vyrn_read_line` (returns malloc'd ptr or null at EOF, strips `\r?\n`),
+  `__vyrn_read_file` / `__vyrn_write_file` (out-params for ptr+len; status
   codes 0/1/2 for ok/io-error/not-utf8 — the IR builds the canonical `Err`
   strings so wording lives in ONE place, the codegen). The shim's C `main`
   becomes `main(int argc, char** argv)` and stashes argv for `args()`.
@@ -125,7 +125,7 @@ an empty world. Real browser input remains the `extern` story (RFC-0012).
 itself, which previously produced an i64-stride `Array<Int64>` — it now
 returns a true i8-stride `Array<UInt8>` in all three backends. M2 shipped
 with M1; the round-trip law is pinned in the interpreter tests, and
-`examples/files.vela` exercises the byte surface under three-way parity.
+`examples/files.vyrn` exercises the byte surface under three-way parity.
 
 ## Out of scope
 

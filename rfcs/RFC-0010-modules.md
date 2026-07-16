@@ -8,7 +8,7 @@
 > **Motivation.** Every program past one file needs a way to split into modules,
 > and every ecosystem needs a way to depend on someone else's code *without*
 > the left-pad problem — a dependency that can vanish or change under you. This
-> RFC defines Vela's module system end to end: a TS-style `import`/`export`
+> RFC defines Vyrn's module system end to end: a TS-style `import`/`export`
 > surface, a loader/linker that flattens many files into the single `Program`
 > the rest of the compiler already understands, an optional project manifest,
 > and content-addressed, lock-pinned remote imports that build forever offline.
@@ -19,12 +19,12 @@
 
 ## The surface
 
-```vela
-// math.vela
+```vyrn
+// math.vyrn
 export fn square(n: Int64) -> Int64 { return n * n }
 export type Point = { x: Int64, y: Int64 }
 
-// main.vela
+// main.vyrn
 import { square, Point } from "./math"
 fn main() -> Int64 { return square(3) }
 ```
@@ -37,8 +37,8 @@ fn main() -> Int64 { return square(3) }
   importing module's scope. Importing a name is all-or-nothing per name; there
   is no `import *` and no rename-on-import in v1.
 - **Specifier resolution** is TS-style, relative to the importing file with
-  `.vela` appended (`"./math"` → `math.vela` beside the importer). `"std/..."`
-  is reserved for the standard library — itself written in Vela (`std/math`,
+  `.vyrn` appended (`"./math"` → `math.vyrn` beside the importer). `"std/..."`
+  is reserved for the standard library — itself written in Vyrn (`std/math`,
   `std/strings`), so it earns three-way parity for free. Bare specifiers
   (`"money"`) resolve only through a manifest's import map (M3), and remote
   specifiers (`github:`/`gist:`/`https:`) resolve through the lock + cache (M4).
@@ -62,7 +62,7 @@ A **loader/linker** stage sits between the parser and the checker:
      `logging { .. }` config block (RFC-0008), and `main` live in the **root
      module only**; the loader rejects them in imported modules. An imported
      module's `test` blocks (RFC-0015) still type-check but do not run unless
-     that module is itself the argument to `velac test`.
+     that module is itself the argument to `vyrn test`.
 4. **Link** every module into ONE `ast::Program`: functions, types, protocols,
    and impls are concatenated (each decl tagged with its source `module` for
    diagnostics), imports discharged. Downstream — checker, interpreter, native
@@ -75,7 +75,7 @@ is why linking can merge impl blocks without per-module scoping.
 
 ## JSON-Schema type imports (M2)
 
-```vela
+```vyrn
 import type { User } from "./api.schema.json"
 ```
 
@@ -86,11 +86,11 @@ from a JSON Schema document — the exact inverse of the `jsonSchema(T)` emitter
   `pattern` become `where` clauses;
 - `required` vs optional steers `Option<T>`;
 - `$defs`, `#/$defs/..` and root `#` `$ref`s resolve (recursion included);
-- an `enum` of strings becomes a payload-less Vela enum;
+- an `enum` of strings becomes a payload-less Vyrn enum;
 - a constrained field becomes a synthetic `User.age`-style refinement type,
   exactly as inline field `where` desugars.
 
-The round-trip with the emitter is **byte-exact**, and any schema keyword Vela
+The round-trip with the emitter is **byte-exact**, and any schema keyword Vyrn
 cannot express is a hard error rather than a silent drop. The emitter side is
 correspondingly faithful: named nested types render as `$ref`s into a `$defs`
 section (recursion is a real `$ref`, `"#"` for the root — not a lossy comment),
@@ -99,17 +99,17 @@ payload-less enums emit `enum` arrays.
 
 ## Project manifest & import maps (M3)
 
-An optional **`vela.json`** (`name` / `main` / `dependencies`), found by walking
+An optional **`vyrn.json`** (`name` / `main` / `dependencies`), found by walking
 up from the cwd, makes a directory a project:
 
-- `velac run` / `check` / `build` need **no file argument** inside a project
+- `vyrn run` / `check` / `build` need **no file argument** inside a project
   (they use `main`).
 - **Bare import specifiers** (`import { x } from "money"`) resolve through the
   `dependencies` map — an import map whose targets are relative-to-manifest
   paths or `std/` for now (and remote specifiers under M4).
-- `velac new <name>` scaffolds a runnable project; `velac deps` prints the
+- `vyrn new <name>` scaffolds a runnable project; `vyrn deps` prints the
   resolved module graph.
-- Bare `velac run file.vela` stays **manifest-free forever** — a single file is
+- Bare `vyrn run file.vyrn` stays **manifest-free forever** — a single file is
   always runnable without ceremony.
 
 ## Reproducible remote imports (M4)
@@ -118,23 +118,23 @@ Remote specifiers — `github:owner/repo@ref/path`, `gist:user/id[@rev]/file`, a
 `https://...` — are usable inline or as manifest `dependencies` targets, and are
 **reproducible by construction**:
 
-- **Pinning.** The first resolve writes `vela.lock`: `specifier ⇥ immutable-url
+- **Pinning.** The first resolve writes `vyrn.lock`: `specifier ⇥ immutable-url
   ⇥ sha256`. A floating ref (a branch/tag) is frozen to a specific commit via
   `git ls-remote` at pin time, so a pin never drifts.
 - **Content-addressed cache.** Fetched content lives in
-  `~/.vela/cache/sha256/<hash>` and is **hash-verified on every load** —
+  `~/.vyrn/cache/sha256/<hash>` and is **hash-verified on every load** —
   tampering or corruption fails loudly, and two specifiers resolving to the same
   bytes share one cache entry.
-- **`velac add <spec> [--name alias]`** fetches, pins, and records a dependency;
-  **`velac update [alias]`** is the *only* command that changes a pin;
-  **`velac vendor [--check]`** copies the lock's blobs into `./vela_vendor/`, so
+- **`vyrn add <spec> [--name alias]`** fetches, pins, and records a dependency;
+  **`vyrn update [alias]`** is the *only* command that changes a pin;
+  **`vyrn vendor [--check]`** copies the lock's blobs into `./vyrn_vendor/`, so
   a committed checkout builds forever even if upstream is deleted (any copy of a
   file with the locked hash restores it).
-- **Offline & sandboxed.** `--offline` / `VELA_OFFLINE=1` builds never touch the
+- **Offline & sandboxed.** `--offline` / `VYRN_OFFLINE=1` builds never touch the
   network. Remote modules are sandboxed: relative imports stay inside the pinned
   base — no local-filesystem paths, no bare specifiers escaping the module.
 - **Zero new crates.** SHA-256 is hand-rolled (checked against the NIST vectors);
-  fetching shells out to `curl` / `git ls-remote`. All of it lives in `vela-cli`.
+  fetching shells out to `curl` / `git ls-remote`. All of it lives in `vyrn-cli`.
 
 ## Editor support
 
@@ -152,7 +152,7 @@ vendor directory or the cache.
 There is nothing module-specific in the backends: linking produces one
 `Program`, so a multi-file program is checked, interpreted, and compiled
 (native + wasm) exactly like a single-file one, and stays a first-class citizen
-of the three-way parity corpus. `std/` being written in Vela is the proof: the
+of the three-way parity corpus. `std/` being written in Vyrn is the proof: the
 standard library is just more modules, verified byte-identical across all three
 backends like any example.
 

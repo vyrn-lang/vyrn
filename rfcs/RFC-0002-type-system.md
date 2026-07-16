@@ -6,7 +6,7 @@
 
 > **Implementation status (v0.1).** Structural record types (§1) are implemented
 > across the parser, checker, interpreter, **and the native (text-IR) backend**:
-> ```vela
+> ```vyrn
 > type Named = { name: Int };
 > type User  = { name: Int, age: Int };
 > fn greet(w: Named) -> Int { return w.name; }   // accepts anything Named-shaped
@@ -25,10 +25,10 @@
 >   annotated `let`/assign, nested field) a value is rebuilt in the target's
 >   layout by copying the required fields by name. Records with validated-type
 >   fields and record-returning functions work too. Verified against the
->   interpreter. See `examples/record.vela`.
+>   interpreter. See `examples/record.vyrn`.
 >
 > **Compile-time transformers (§7)** are implemented for records:
-> ```vela
+> ```vyrn
 > type User    = { id: Int, name: Int, password: Int };
 > type Public  = Omit<User, password>;   // { id, name }
 > type Id      = Pick<User, id>;         // { id }
@@ -36,14 +36,14 @@
 > ```
 > `Omit`/`Pick`/`Merge` are pure type-level functions that evaluate to a concrete
 > record and are **fully erased before codegen** — the shared resolver in
-> `vela-frontend::types` reduces them, so the checker and both backends treat the
+> `vyrn-frontend::types` reduces them, so the checker and both backends treat the
 > result as an ordinary record (width subtyping, struct literals, native lowering
 > all work over derived shapes). Unknown transformer keys are a compile error.
-> See `examples/utility.vela`.
+> See `examples/utility.vyrn`.
 >
 > **User-defined enums / sum types (§4)** are implemented end to end, including
 > native code:
-> ```vela
+> ```vyrn
 > type Shape = | Circle(Int) | Square(Int) | Unit;
 > fn area(s: Shape) -> Int {
 >     return match s { Circle(r) => 3*r*r, Square(w) => w*w, Unit => 0 };
@@ -54,11 +54,11 @@
 > variant names (`Circle(2)`, `Unit`); variant names are global and must be
 > unique. Native lowering: a `{ i64 tag, i64 payload }` aggregate; `match` is an
 > LLVM `switch` on the tag + `phi`. `Option`/`Result` remain distinct built-ins.
-> See `examples/enum.vela`.
+> See `examples/enum.vyrn`.
 >
 > **Generics (§6)** — functions *and* types — are implemented end to end,
 > including native code:
-> ```vela
+> ```vyrn
 > fn id<T>(x: T) -> T { return x; }
 > type Box<T> = { value: T };
 > fn unbox<T>(b: Box<T>) -> T { return b.value; }
@@ -67,7 +67,7 @@
 > - A type parameter is opaque while the body is checked (no arithmetic/field
 >   access on `T`) and inferred at the call/construction site.
 > - **Generic functions** monomorphize to one specialized machine function per
->   concrete type (`vela_id__Int(i64)`, `vela_id__Str(ptr)`); generic‑calls‑generic
+>   concrete type (`vyrn_id__Int(i64)`, `vyrn_id__Str(ptr)`); generic‑calls‑generic
 >   works via substitution in the worklist; only reachable instantiations are
 >   emitted.
 > - **Generic types** need no separate functions: after substituting arguments
@@ -93,7 +93,7 @@
 
 ## Summary
 
-Vela's type system is **structural by default**, with **nominal opt-in**,
+Vyrn's type system is **structural by default**, with **nominal opt-in**,
 **no unchecked casts**, first-class **compile-time type transformations**, unions
 and pattern matching, and practical generics. The guiding constraint from
 RFC-0001: types communicate *what operations are available and what a valid value
@@ -105,7 +105,7 @@ looks like*, not merely the shape of memory.
 
 Compatibility is based on structure, not declared name.
 
-```vela
+```vyrn
 type User = {
     name: String,
 }
@@ -118,14 +118,14 @@ type Employee = User & {
 An `Employee` is usable anywhere a `User` is expected — **no cast**, because
 `Employee` contains everything `User` requires (width subtyping).
 
-```vela
+```vyrn
 let e: Employee = Employee { name: "Ada", salary: 100 }
 let u: User = e          // OK: Employee ⊇ User
 ```
 
 The reverse is a **compile error**, not a cast:
 
-```vela
+```vyrn
 let u: User = ...
 let e: Employee = u      // ERROR: User is missing `salary`
 ```
@@ -144,7 +144,7 @@ When identity matters (units, IDs, domain distinctions that share a shape),
 declare a nominal type. Two nominal types with identical structure are **not**
 interchangeable.
 
-```vela
+```vyrn
 nominal type UserId = String
 nominal type SessionId = String
 // UserId and SessionId never mix, despite both being String-shaped.
@@ -173,7 +173,7 @@ There is no `as`. Every conversion is one of:
 - **Compiler-proven** — the compiler shows equivalence, zero-cost.
 - **Runtime-checked narrowing** — returns `Option<T>` / `Result<T, E>`.
 
-```vela
+```vyrn
 // narrowing a wider/unknown value: checked, never blind
 match value {
     Employee(emp) => ...,   // runtime verified to have `salary`
@@ -183,7 +183,7 @@ match value {
 
 or:
 
-```vela
+```vyrn
 let maybe: Option<Employee> = value as? Employee   // syntax TBD; result is Option
 ```
 
@@ -194,7 +194,7 @@ let maybe: Option<Employee> = value as? Employee   // syntax TBD; result is Opti
 Tagged unions are a core type. Pattern matching is exhaustive; the compiler
 errors on missing arms.
 
-```vela
+```vyrn
 type Shape =
     | Circle { r: Float }
     | Rect { w: Float, h: Float }
@@ -215,7 +215,7 @@ handles them with no special cases.
 Behavior is shared through **protocols**, satisfied structurally. There is no
 class inheritance (RFC-0001 non-goal).
 
-```vela
+```vyrn
 protocol Drawable {
     fn draw(self: read Self, canvas: modify Canvas)
 }
@@ -226,7 +226,7 @@ protocol Drawable {
 
 Intersection composes protocols cleanly, replacing deep hierarchies:
 
-```vela
+```vyrn
 fn render(x: Drawable & Serializable) { ... }
 ```
 
@@ -234,7 +234,7 @@ fn render(x: Drawable & Serializable) { ... }
 
 Practical, constraint-based generics. Constraints are protocols.
 
-```vela
+```vyrn
 fn max<T: Ord>(a: T, b: T) -> T {
     if a > b { a } else { b }
 }
@@ -249,7 +249,7 @@ RFC-0003.
 First-class, and — unlike TypeScript, where they are library-level — part of the
 language. They are pure functions from types to types, erased before codegen.
 
-```vela
+```vyrn
 type PublicUser = Omit<User, "password">
 type Editable   = Partial<User>
 type Frozen     = Readonly<User>
@@ -258,7 +258,7 @@ type WithoutMeta<T> = Omit<T, "createdAt" | "updatedAt">
 
 Mapped/derived forms:
 
-```vela
+```vyrn
 type Api<T> = Async<Readonly<Omit<T, "password">>>
 
 type OnlyStrings<T> = Filter<T, IsString>

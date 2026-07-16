@@ -1,11 +1,11 @@
-# RFC-0015 — Testing: `test` Blocks, `assert`, `velac test`
+# RFC-0015 — Testing: `test` Blocks, `assert`, `vyrn test`
 
 - **Status:** Implemented
 - **Depends on:** RFC-0006 (diagnostics), RFC-0010 (modules — test files may
   import), the editor CodeLens (run affordance precedent)
 
-> **Motivation.** Vela has no test construct: the compiler's own 500+ Rust
-> tests guard the language, but a Vela *user* has nowhere to put one. The
+> **Motivation.** Vyrn has no test construct: the compiler's own 500+ Rust
+> tests guard the language, but a Vyrn *user* has nowhere to put one. The
 > editor's Run CodeLens stops at `fn main`. A test story this small — one
 > declaration form, one builtin, one command — buys the whole ecosystem
 > habit early.
@@ -14,7 +14,7 @@
 
 ## Surface
 
-```vela
+```vyrn
 import { clamp } from "std/math"
 
 test "clamp holds the bounds" {
@@ -32,7 +32,7 @@ test "empty pops to None" {
 - **`test "name" { body }`** — a top-level declaration: a string name (must
   be unique per file) and a block body (checked exactly like a Unit function
   body: locals, effects like `print` allowed, spawn rules apply). Root and
-  imported modules may declare tests; `velac test <file>` runs the **root
+  imported modules may declare tests; `vyrn test <file>` runs the **root
   file's** tests only (a library's tests run when *it* is the argument).
 - **`assert(cond: Bool)`** — traps the current test with
   `assertion failed at line N` when false. Usable **only inside a `test`
@@ -42,7 +42,7 @@ test "empty pops to None" {
   `assertion failed at line N: <a> != <b>` using the canonical `toString`
   rendering (parity-identical by construction).
 
-## `velac test [file]`
+## `vyrn test [file]`
 
 - Runs every test block of the root file **in declaration order** under the
   interpreter (the reference semantics — fast, no clang needed):
@@ -57,17 +57,17 @@ test "empty pops to None" {
 - A failing assert (or any runtime trap inside the body) marks that test
   FAILED with the trap message, **continues to the next test**, and the
   process exits 1 if any failed. Test stdout (`print`) passes through.
-- `velac test <file> --name "<substring>"` filters by name.
-- Manifest-aware like the other commands (`velac test` with no file uses
-  `vela.json`'s `main`).
+- `vyrn test <file> --name "<substring>"` filters by name.
+- Manifest-aware like the other commands (`vyrn test` with no file uses
+  `vyrn.json`'s `main`).
 
 Native/wasm test execution is deferred: program *semantics* are already
-three-way parity-gated; `velac test` is a dev loop tool. (The declaration
+three-way parity-gated; `vyrn test` is a dev loop tool. (The declaration
 must still PARSE and CHECK identically everywhere — see below.)
 
 ## Compilation model
 
-- `velac run` / `build` / `emit-ir` **ignore** test blocks entirely (checked,
+- `vyrn run` / `build` / `emit-ir` **ignore** test blocks entirely (checked,
   then stripped before interp/codegen — a shipped binary contains no tests;
   the string pool and regex collection must not collect from them either).
 - A file consisting only of tests (+ imports) needs no `main` (extends the
@@ -81,22 +81,22 @@ must still PARSE and CHECK identically everywhere — see below.)
 - Grammar: `test` as a contextual starter (identifier elsewhere — same
   treatment as `extern`); the name string is a plain string scope.
 - CodeLens: "▶ Run test" above each `test` block →
-  `velac test <file> --name "<name>"`; "▶ Run all tests" above the first.
+  `vyrn test <file> --name "<name>"`; "▶ Run all tests" above the first.
 - LSP: test blocks in the symbol index / outline (kind Method → "test" detail
   `test "name"`), so the outline shows the test list.
 - Snippet: `test`.
 
 ## Parity note
 
-`examples/` gains a `testing.vela`… **no** — examples are runnable programs;
-tests live next to code in real projects. Instead: `velac new` scaffolds a
-`src/main.test.vela`? Also no — v1 keeps zero conventions: tests can live in
-ANY .vela file. The parity corpus is unaffected (test blocks are stripped
+`examples/` gains a `testing.vyrn`… **no** — examples are runnable programs;
+tests live next to code in real projects. Instead: `vyrn new` scaffolds a
+`src/main.test.vyrn`? Also no — v1 keeps zero conventions: tests can live in
+ANY .vyrn file. The parity corpus is unaffected (test blocks are stripped
 from run/build; an example may contain a test block and stay byte-identical
 across backends precisely because of that). One example
-(`examples/testing.vela`) demonstrates the form: it has BOTH tests and a
+(`examples/testing.vyrn`) demonstrates the form: it has BOTH tests and a
 `main` (so it stays a normal parity citizen), with a doc comment showing the
-`velac test` output.
+`vyrn test` output.
 
 ## Out of scope
 

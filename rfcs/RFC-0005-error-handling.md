@@ -6,7 +6,7 @@
 > **Implementation status (v0.1).** `Option<T>`, `Result<T, E>`, exhaustive
 > `match`, and the `?` operator are implemented end to end — parser, checker,
 > interpreter, and both codegen backends:
-> ```vela
+> ```vyrn
 > fn parse_age(n: Int) -> Result<Age, Int> {
 >     if n >= 18 { return Ok(Age(n)); }
 >     return Err(n);
@@ -28,7 +28,7 @@
 >   (tag + i64 payload); constructors use `insertvalue`, `match` is a tag test +
 >   `phi`. The native backend supports **Int payloads** and rejects Bool payloads
 >   at the constructor; the interpreter supports any scalar payload.
->   See `examples/option.vela` and `examples/result.vela`.
+>   See `examples/option.vyrn` and `examples/result.vyrn`.
 >
 > **Not yet implemented:** wiring validated construction (RFC-0003) to *return*
 > `Result` directly (today it aborts, but the fallible pattern composes cleanly —
@@ -49,7 +49,7 @@ special typing machinery.
 
 `null` does not exist. Absence is explicit:
 
-```vela
+```vyrn
 type Option<T> =
     | Some { value: T }
     | None
@@ -60,7 +60,7 @@ there is no nullable reference to forget to check.
 
 ## 2. Errors as values: `Result`
 
-```vela
+```vyrn
 type Result<T, E> =
     | Ok  { value: T }
     | Err { error: E }
@@ -74,7 +74,7 @@ visible — the RFC-0001 predictability principle applied to control flow.
 `?` unwraps `Ok`/`Some` or short-circuits the enclosing function with the
 `Err`/`None`.
 
-```vela
+```vyrn
 fn load_user(path: String) -> Result<User, IoError> {
     let raw = read_file(path)?          // returns Err early on failure
     let email = Email(raw.email)?       // RFC-0003: validated construction
@@ -90,7 +90,7 @@ TBD in Q1).
 No special-casing — `Result`/`Option` are unions, so `match` handles them and the
 compiler enforces exhaustiveness (RFC-0002):
 
-```vela
+```vyrn
 match load_user(p) {
     Ok(user)  => greet(user),
     Err(e)    => log(e),

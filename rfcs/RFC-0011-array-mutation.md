@@ -4,7 +4,7 @@
 - **Depends on:** RFC-0002 (arrays, records), RFC-0003 (validated types),
   RFC-0004 (ownership — arrays are owned heap values)
 
-> **Motivation.** The ECS feasibility study (`examples/ecs.vela`, ROADMAP "ECS
+> **Motivation.** The ECS feasibility study (`examples/ecs.vyrn`, ROADMAP "ECS
 > notes") found that `Array<T>` storage is already right — one contiguous
 > `{ ptr, len, cap }` heap buffer, `a[i]` is a stride-indexed load — but the
 > mutation surface is write-append-only: `[]` / `push` / `a[i]` read /
@@ -17,7 +17,7 @@
 
 ## The surface
 
-```vela
+```vyrn
 let mut xs: Array<Int64> = [10, 20, 30]
 
 xs[1] = 25                 // 1. element store (in place)
@@ -77,7 +77,7 @@ builtins (RFC precedent: the 2026-07-16 surface migration).
   existing array helpers.
 
 **Parity gate:** all three operations land with paired interp/codegen tests
-plus example coverage; `ecs.vela` is rewritten from rebuild-compaction to
+plus example coverage; `ecs.vyrn` is rewritten from rebuild-compaction to
 `swapRemove` despawn and stays in the three-way parity corpus.
 
 ## Addendum (implemented) — `a[i].field = v` write-through
@@ -85,7 +85,7 @@ plus example coverage; `ecs.vela` is rewritten from rebuild-compaction to
 Writing a record field back *through* an array element is sugar for the
 copy-modify-store idiom, so it is exactly and only that:
 
-```vela
+```vyrn
 let mut ps: Array<Point> = [Point { x: 1, y: 2 }]
 ps[0].x = 9        // sugar for:
                    //   let mut ps[] = ps[0]   (load element 0 — bounds-checked)
@@ -114,7 +114,7 @@ ps[0].x = 9        // sugar for:
   write-through); deeper paths, and a non-variable array receiver
   (`f()[i].x = v`), are rejected in the parser.
 
-Covered by `examples/arrays.vela` (a `Point` component array with field
+Covered by `examples/arrays.vyrn` (a `Point` component array with field
 write-through) and in the three-way parity corpus.
 
 ## Out of scope (future)

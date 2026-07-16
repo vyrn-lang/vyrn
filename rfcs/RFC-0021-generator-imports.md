@@ -11,7 +11,7 @@
 > **Motivation.** The compiler was starting to accrete file-format knowledge:
 > JSON Schema (`import type`), then a proposed translations flavor. Each is a
 > crutch for the same missing general mechanism: **user code that runs at
-> compile time and synthesizes a module**. Vela can offer this with unusually
+> compile time and synthesizes a module**. Vyrn can offer this with unusually
 > strong guarantees, because the compiler already contains a deterministic
 > interpreter, a capability-mediated module resolver, and a content-addressed
 > lock/cache — the three things that make compile-time codegen safe,
@@ -21,16 +21,16 @@
 
 ## Surface
 
-```vela
-// gen/i18n.vela — an ordinary Vela module (local, std/, or github:@pinned)
+```vyrn
+// gen/i18n.vyrn — an ordinary Vyrn module (local, std/, or github:@pinned)
 export gen fn i18n(dir: String) -> String {
     // read <dir>/<locale>.json via readFile/listDir (scoped — see sandbox),
     // parse, check cross-locale drift (fail with a clear trap message),
-    // and RETURN VELA SOURCE TEXT for the module to synthesize.
+    // and RETURN VYRN SOURCE TEXT for the module to synthesize.
 }
 ```
 
-```vela
+```vyrn
 // app code
 import { i18n } from "./gen/i18n"
 import { t, TransKey, setLocale } from i18n("./locales")
@@ -39,11 +39,11 @@ import { t, TransKey, setLocale } from i18n("./locales")
 - **`gen fn`** — a contextual modifier (the `extern`/`rpc` precedent). An
   ordinary function otherwise: callable at runtime too (useful for testing),
   formatted by `fmt`, covered by `test` blocks, distributed like any module
-  (incl. `github:` + `vela.lock` — generators are left-pad-proof).
+  (incl. `github:` + `vyrn.lock` — generators are left-pad-proof).
 - **An import target may be a `gen fn` call** whose arguments are
   compile-time constants (consteval-provable; paths resolve relative to the
   importing file). The loader runs the call in the compiler's interpreter;
-  the returned `String` is Vela source, lexed/parsed/linked as a synthesized
+  the returned `String` is Vyrn source, lexed/parsed/linked as a synthesized
   module through the ordinary pipeline. Checker, backends, parity, and the
   LSP stay module-unaware, as always.
 - A generator that **traps** (drift check failed, malformed input) turns
@@ -55,7 +55,7 @@ A `gen fn` (and everything it transitively calls) is checked by a
 **comptime-purity analysis** — the spawn-isolation machinery's sibling:
 
 - **Forbidden:** `extern`, `spawn`, module state, `writeFile`, `readLine`,
-  `args`, logging sinks. (No clock or randomness exists in Vela — good.)
+  `args`, logging sinks. (No clock or randomness exists in Vyrn — good.)
 - **Permitted, mediated:** `readFile` and a new `listDir(path) ->
   Array<String>` builtin — at generation time these route through the
   loader's `ModuleResolver`, restricted to paths under the generator call's
@@ -86,7 +86,7 @@ deterministic, and pinned.
 
 Deterministic + declared inputs ⇒ content-addressed output:
 `sha256(linked generator sources ++ args ++ every input file read)` keys a
-cache of generated source (`~/.vela/cache/gen/<hex>` — the M4
+cache of generated source (`~/.vyrn/cache/gen/<hex>` — the M4
 infrastructure). Cold generation runs once; rebuilds and per-keystroke LSP
 re-analysis hit the cache. The resolver records which files were read — the
 synthesized module's true dependency set, available to any future watcher.
@@ -94,7 +94,7 @@ synthesized module's true dependency set, available to any future watcher.
 ## Diagnostics & debugging
 
 - Errors *inside generated source* report against the generated text with a
-  banner naming the generator call site; **`velac emit-gen <file>`** dumps
+  banner naming the generator call site; **`vyrn emit-gen <file>`** dumps
   every synthesized module for inspection.
 - Output must parse and link like any module; name collisions with user
   code are ordinary load errors.
@@ -117,7 +117,7 @@ a possible v2 if hygiene ever earns its complexity.
   point: with this one reflection primitive, the whole layer is generated
   source.
 - **i18n (RFC-0020 M2)** — the first file-reading generator: ICU-subset
-  parsing, key flattening, drift checking, CLDR plural tables, all in Vela.
+  parsing, key flattening, drift checking, CLDR plural tables, all in Vyrn.
 - **Future, all libraries, zero compiler patches:** `.proto` emit/import,
   GraphQL SDL, OpenAPI clients, SQL schema types, CSV-to-types, route
   tables, mocks/docs from `moduleInterface`. `import type` (schema) is

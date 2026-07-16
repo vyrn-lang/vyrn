@@ -15,7 +15,7 @@
 > program output and diagnostics are separable — the "where does it print" concern.
 > Interpreter == native verified (stdout + stderr identical modulo the documented
 > CRLF/LF artifact). Logging is barred from spawned tasks (it is observable I/O), and
-> the log methods are read-only for ownership analysis. See `examples/logging.vela`.
+> the log methods are read-only for ownership analysis. See `examples/logging.vyrn`.
 >
 > **Phase 2 (threshold + config).** A `logging { level: <name> }` top-level block
 > sets the threshold; the default is `Info` (so `trace`/`debug` are off unless
@@ -24,16 +24,16 @@
 > interpreter, which evaluates args before the level check), so message side effects
 > are consistent. `Program` gained a `log_level` ordinal; a shared
 > `log_level_ordinal(name)` keeps the interpreter and codegen in lockstep. See
-> `examples/logging.vela` (threshold `debug` — `trace` is dropped).
+> `examples/logging.vyrn` (threshold `debug` — `trace` is dropped).
 >
 > **Sinks (implemented, single sink).** `logging { level: .., sink: .. }` selects
 > the destination: `stderr` (default), `stdout`, or `file("path")`. The sink is
 > compile-time-known, so the log call targets the right stream directly — MSVC's
-> `__acrt_iob_func(1)`/`(2)` for stdout/stderr, and for a file a `@__vela_log_file`
+> `__acrt_iob_func(1)`/`(2)` for stdout/stderr, and for a file a `@__vyrn_log_file`
 > global opened once with `fopen`(mode `w`, truncating) in `@main` before
-> `vela_main` and `fclose`d after. The interpreter mirrors this with
+> `vyrn_main` and `fclose`d after. The interpreter mirrors this with
 > `println!`/`eprintln!`/a `std::fs::File`. Verified interpreter == native on the
-> **file contents** too. See `examples/logging.vela`.
+> **file contents** too. See `examples/logging.vyrn`.
 >
 > **Not yet:** **per-logger** level overrides (`loggers: { "db": Debug }` — hard
 > under compile-time filtering since a logger's name is a runtime value), **multi**
@@ -50,7 +50,7 @@ Two layers, exactly the SLF4J/Logback split:
 - **Facade** — what call sites use. A **named logger** with the five standard
   levels. It knows nothing about where logs go.
 
-  ```vela
+  ```vyrn
   let log = logger("dynarray");
   log.info("collected \{n} squares, sum = \{total}");   // RFC-0007 template
   log.warn("nothing to sum");
@@ -60,7 +60,7 @@ Two layers, exactly the SLF4J/Logback split:
 - **Backend** — declarative config, set once. Chooses the threshold, per-logger
   overrides, and where output goes.
 
-  ```vela
+  ```vyrn
   logging {
       level:   Warn,                        // root threshold
       loggers: { "dynarray": Debug },       // per-name overrides (Logback <logger>)
@@ -112,7 +112,7 @@ A single `logging { ... }` config block, evaluated once at startup (Logback's
 
 **Sinks** (appenders): `stdout()`, `stderr()`, `file(path)`. Multiple sinks fan
 out. `stdout`/`stderr` are trivial (`fprintf` to the stream); `file` requires
-**real file I/O** — `open`/`write`/`close` — which Vela does not have today and
+**real file I/O** — `open`/`write`/`close` — which Vyrn does not have today and
 which must be added to **both** the interpreter and the native backend in
 lockstep so the invariant holds. That is the single biggest cost in this RFC and
 the reason `file` is a later phase.
@@ -175,7 +175,7 @@ Each phase is independently shippable and keeps interpreter == native.
   SLF4J evaluates them; a macro-style template could skip them. Must be pinned for
   interpreter == native.
 - **Q5 — file I/O surface.** `file(path)` is the first real filesystem access in
-  Vela. Does it get a general file API (RFC-00xx), or a logging-only sink with no
+  Vyrn. Does it get a general file API (RFC-00xx), or a logging-only sink with no
   user-facing file handle? *(Leaning: logging-only sink first; a general I/O RFC
   later.)*
 - **Q6 — errors from sinks.** A failing `file()` write (disk full, bad path) — does

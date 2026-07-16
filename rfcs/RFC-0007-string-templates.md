@@ -14,13 +14,13 @@
 > a string with holes into `Tok::TemplateStr { parts, exprs }` (raw hole sources),
 > which the parser re-lexes/parses and folds. A string with no `\{` still lexes to
 > a plain `Tok::Str`, so every prior program is unchanged. See
-> `examples/interpolation.vela`.
+> `examples/interpolation.vyrn`.
 >
 > **Tagged templates (implemented).** `sql"a\{x}b"` desugars to
 > `sql(list(["a","b"]), list([value(x)]))` — the tag is any in-scope function of
 > type `(Array<String>, Array<Value>) -> T`. The literal `parts` and the boxed
 > `values` reach it as separate arrays, so a value can only ever become a parameter,
-> never query structure (the safety property — see `examples/tagged.vela`, a `sql`
+> never query structure (the safety property — see `examples/tagged.vyrn`, a `sql`
 > tag that renders `$N` placeholders and keeps a `'; DROP TABLE …` value out of the
 > text). `Value` is the built-in closed enum `IntVal(Int) | StrVal(String) | BoolVal(Bool)`
 > (injected at parse time, matchable by the tag); the `value(x)` builtin boxes a
@@ -40,7 +40,7 @@ A string literal may **interpolate** an expression with the `\{ expr }` escape,
 and may carry a **tag** prefix that decides how the literal parts and the
 interpolated values are assembled:
 
-```vela
+```vyrn
 let msg = "collected \{n} squares, sum = \{total}";   // default tag -> String
 let q   = sql"SELECT * FROM users WHERE id = \{id}";   // sql tag -> Query (parameterized)
 let doc = latex"\caption{\{title}}";                   // latex tag -> escaped String
@@ -52,7 +52,7 @@ values* (runtime, untrusted and typed), so `sql` can only ever bind a value as a
 parameter — never splice it into the query structure. This is the JavaScript
 tagged-template / Python t-string (PEP 750) / Scala string-interpolator pattern,
 chosen here because "unsafe unless you're careful" is exactly the failure mode
-Vela rejects everywhere else.
+Vyrn rejects everywhere else.
 
 ## Why `\{ }` and not `{ }` / `${ }`
 
@@ -63,7 +63,7 @@ SQL, JSON, regex, C-like code — are made of braces, so a `{}`-based marker wou
 force doubling/escaping the common case. Here the escape is on the *interpolation*
 (the rare thing), and braces cost nothing:
 
-```vela
+```vyrn
 let doc  = latex"\section{\{name}}";        //  \section{…}  braces are literal
 let json = "{ \"n\": \{n} }";               //  JSON object braces are literal
 ```
@@ -109,14 +109,14 @@ needs a common value type. Two stages:
 
 ### v1 — a closed, built-in set (implementable on today's type system)
 
-```vela
+```vyrn
 type Value = | IntVal(Int) | StrVal(String) | BoolVal(Bool)
 ```
 
 The compiler boxes each `\{ e }` into the variant matching `e`'s static type. A
 tag is then an ordinary function:
 
-```vela
+```vyrn
 fn latex(parts: Array<String>, values: Array<Value>) -> String { … }
 ```
 
@@ -128,7 +128,7 @@ built-in scalars are interpolable.
 
 Any type implementing a `Display` / `ToParam` protocol becomes interpolable, and
 `Value` is replaced by a protocol bound. This **depends on user-defined
-protocols/methods**, which Vela does not have yet (the outstanding roadmap item),
+protocols/methods**, which Vyrn does not have yet (the outstanding roadmap item),
 so it is explicitly deferred. v1 is forward-compatible: the same `parts/values`
 shape, with a wider element type.
 
@@ -147,7 +147,7 @@ library code, which is what makes the feature open-ended.
 
 ### Worked example — SQL safety by construction
 
-```vela
+```vyrn
 let userName = "'; DROP TABLE users; --";
 let q = sql"SELECT * FROM users WHERE name = \{userName}";
 //  q.text   == "SELECT * FROM users WHERE name = $1"
@@ -161,7 +161,7 @@ of the desugaring, not of the programmer remembering to escape.
 
 ### Worked example — LaTeX / escaping tags
 
-```vela
+```vyrn
 let title = "Cost: 50% of R&D_budget";
 let doc = latex"\caption{\{title}}";
 //  escapes % _ & # { } in the *value* -> "\caption{Cost: 50\% of R\&D\_budget}"
@@ -172,7 +172,7 @@ let doc = latex"\caption{\{title}}";
 
 Logging **consumes** templates rather than inventing placeholders:
 
-```vela
+```vyrn
 log.info("collected \{n} squares, sum = \{total}");
 ```
 

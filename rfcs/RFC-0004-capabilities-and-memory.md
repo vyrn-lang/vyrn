@@ -9,8 +9,8 @@
 
 > **Implementation status (v0.1).** The capability *surface* is in: a parameter
 > may carry a capability keyword — `fn redeem(t: consume Token)` — and `consume`
-> is enforced by a move-checking pass (`vela-frontend::movecheck`):
-> ```vela
+> is enforced by a move-checking pass (`vyrn-frontend::movecheck`):
+> ```vyrn
 > let b = Token { id: 5 };
 > let y = redeem(b);   // b consumed
 > redeem(b);           // ERROR: `b` was already consumed by `redeem(..)` on line N
@@ -25,13 +25,13 @@
 >
 > **The heap now exists (first step of §4).** Dynamic strings are implemented —
 > `concat` allocates a fresh buffer, `len` measures one — so the language has real
-> heap allocation for the first time. See `examples/dynstring.vela`.
+> heap allocation for the first time. See `examples/dynstring.vyrn`.
 >
 > **First reclamation strategy: `region { .. }` arenas (§4, §Q3).** The heap no
 > longer only leaks. A `region` block gives its allocations a deterministic
 > lifetime — everything allocated while the region is on the stack is freed the
 > moment the block exits, with no GC and no per-object bookkeeping:
-> ```vela
+> ```vyrn
 > region {
 >     let s = concat(a, b);   // allocated in the arena
 >     total = len(s);         // a non-heap result to carry out
@@ -43,7 +43,7 @@
 >   ownership transfer, which is still future work.
 > - **Measured.** A 40-million-iteration allocation loop consumes ~1.2 GB when it
 >   leaks and stays flat at ~3.5 MB inside a region — the arena genuinely reclaims.
->   See `examples/region.vela`.
+>   See `examples/region.vyrn`.
 >
 > **Second reclamation strategy: ownership auto-drop (§4, Path A's ownership
 > half).** Reclamation no longer needs an explicit region for the common case. An
@@ -51,7 +51,7 @@
 > block — it is only ever *read* (`len`/`print`/`concat` copy but never retain a
 > string), never returned, aliased, or stored outward — and the backend frees it
 > deterministically when the block exits:
-> ```vela
+> ```vyrn
 > fn greeting_len(a: String, b: String) -> Int {
 >     let g = concat(a, b);   // a heap temporary…
 >     return len(g);          // …freed automatically right here
@@ -67,14 +67,14 @@
 > - **Measured.** The same 40-million-allocation loop that leaked 1.2 GB now stays
 >   flat at ~3 MB with no region at all — including a variant that threads
 >   temporaries through nested `concat`s and early returns, which exits cleanly
->   (a double-free would abort). See `examples/ownership.vela`.
+>   (a double-free would abort). See `examples/ownership.vyrn`.
 >
 > **Ownership *transfer* across calls (§3, "inference first").** Ownership is not
 > confined to one function. A function whose every heap return yields a *fresh,
 > unaliased* value (a `concat`, or a local owner moved out) is inferred to
 > **return owned**, and at each call site the receiving binding becomes the owner
 > and is freed in turn:
-> ```vela
+> ```vyrn
 > fn full_name(first: String, last: String) -> String {
 >     let sp = concat(first, " ");   // inner temp, freed inside full_name
 >     return concat(sp, last);       // fresh value, ownership moves to the caller
@@ -87,7 +87,7 @@
 > own argument — is **not** owned, so its result is never auto-freed and the value
 > it aliases is left to leak rather than be freed twice. Verified: a 20-million-
 > call factory loop stays flat at ~3.5 MB, while the aliasing case leaks but exits
-> cleanly (no double-free, no dangling read). See `examples/transfer.vela`.
+> cleanly (no double-free, no dangling read). See `examples/transfer.vyrn`.
 >
 > Together these cover Path A of §4 for `String` values: regions for grouped
 > lifetimes, ownership auto-drop for local temporaries, and ownership transfer for
@@ -99,7 +99,7 @@
 > what the second lowering is for. A `Ref` is a *freely-copyable* handle to a
 > mutable heap `Int` cell — you can alias it, pass it, and store it without
 > ownership tracking:
-> ```vela
+> ```vyrn
 > let counter = cell(0);
 > let alias = counter;      // a second reference to the same cell — allowed
 > set(alias, 40);
@@ -107,11 +107,11 @@
 > ```
 > Each reference carries the *generation* captured when it was made; the cell
 > carries a counter that `release` bumps. Every `get`/`set` validates the two, so
-> a reference used after release fails a cheap check (`Vela: reference used after
+> a reference used after release fails a cheap check (`Vyrn: reference used after
 > release`, exit 1) instead of dangling — even after the slot has been reused by a
 > later `cell(..)`, because reuse bumps the generation and old references no longer
 > match. This is the Vale-style mechanism from §4, working end to end in both the
-> interpreter and native code. See `examples/genref.vela`.
+> interpreter and native code. See `examples/genref.vyrn`.
 >
 > **`release` is inferred — the two paths share one analysis.** Manual `release`
 > exists but is rarely needed: the *same* ownership analysis that auto-frees a
@@ -121,8 +121,8 @@
 > a buffer, `release` a cell, or `afree` a growable array). The array case even
 > tracks the in-place `a = push(a, x)` self-update so a `mut` array is reclaimed
 > without a manual call. A resource that is aliased or handed off is left to the
-> programmer (as in `examples/genref.vela`); an ordinary local one needs no manual
-> free at all (`examples/autorelease.vela`).
+> programmer (as in `examples/genref.vyrn`); an ordinary local one needs no manual
+> free at all (`examples/autorelease.vyrn`).
 >
 > This makes Path B's advantage concrete: reclamation can be *aggressive* because
 > a missed alias fails a cheap generation check (a clean trap) rather than
@@ -135,7 +135,7 @@
 > make a `Ref<String>`, a `Ref` to a record, or a `Ref<Ref<Int>>`. Crucially, this
 > makes recursion well-formed: a record may hold a `Ref` to *its own type* and stay
 > finite, exactly as a pointer would — `type Node = { value: Int, next: Ref<Node> }`
-> type-checks and lowers. See `examples/reftypes.vela`.
+> type-checks and lowers. See `examples/reftypes.vyrn`.
 >
 > **Recursive data structures work — and reclaim.** An `Option` (or enum) payload
 > can now hold a `Ref` — boxed into the aggregate's word — so `Option<Ref<Node>>`
@@ -145,7 +145,7 @@
 > recursive walk that reads a node's edges, `release`s it, then recurses frees the
 > whole structure. A stress loop that builds and frees 100,000 nodes through a
 > 65536-cell slab runs to completion, so the slots are genuinely reused. See
-> `examples/linkedlist.vela`, `examples/tree.vela`, `examples/freelist.vela`.
+> `examples/linkedlist.vyrn`, `examples/tree.vyrn`, `examples/freelist.vyrn`.
 >
 > The `Option` (and `Result`) payload is two words wide, so a `Ref` — which is two
 > words — is stored *inline* with no heap box; a whole recursive structure now
@@ -171,7 +171,7 @@
 
 ## Summary
 
-Vela replaces Rust's *ownership vocabulary* with a *capability vocabulary*. The
+Vyrn replaces Rust's *ownership vocabulary* with a *capability vocabulary*. The
 programmer thinks **read / modify / consume / share**. The compiler lowers those
 intents onto a concrete memory strategy (ownership inference + regions +
 generational references, hybrid) that is **largely invisible** in everyday code.
@@ -206,7 +206,7 @@ The four capabilities:
 
 Function parameters state the capability they need:
 
-```vela
+```vyrn
 fn print(user: read User)      // observes
 fn rename(user: modify User)   // mutates in place
 fn archive(user: consume User) // takes it; caller can't use it after
@@ -214,7 +214,7 @@ fn archive(user: consume User) // takes it; caller can't use it after
 
 At the call site the *intent* is legible before you read the body:
 
-```vela
+```vyrn
 print(user)     // I know this only looks
 rename(user)    // I know this may change user
 archive(user)   // I know user is gone after this line
@@ -246,20 +246,20 @@ value is used, and infers when a value is last used (so a `consume` is free).
 Annotations on parameters are required (they are the API contract); annotations
 inside bodies should almost never be.
 
-```vela
+```vyrn
 let s = make_string()
 let t = s              // compiler proves s is dead here ⇒ this is a move, no error
 ```
 
 Field-granular borrows are inferred too:
 
-```vela
+```vyrn
 foo(user.name)         // compiler lends just `name`, not the whole `user`
 ```
 
 ## 4. Memory model — candidates (OPEN)
 
-The design conversation surveyed the research. Vela's plan is a **hybrid** where
+The design conversation surveyed the research. Vyrn's plan is a **hybrid** where
 the compiler picks a strategy per value, and the programmer rarely chooses:
 
 ```
@@ -329,7 +329,7 @@ surface ceremony (`cell`/`get`/`set`) but expresses aliasing directly.
 
 **Error predictability.** Path A's failure mode is a *silent leak* (safe, but
 invisible) when ownership can't be proven. Path B's is a *loud, clean trap*
-(`Vela: reference used after release`) — a diagnosable runtime error, never a
+(`Vyrn: reference used after release`) — a diagnosable runtime error, never a
 dangling read.
 
 ### 5.2 Decision — a hybrid, defaulting to ownership (answering Q1)
@@ -407,7 +407,7 @@ to be **structured and deterministic in its observable result**. It is:
 What remains is therefore only **parallel execution** — a portable threading layer
 plus task marshalling. That is runtime engineering, not language design: the
 concurrency model, its type (`Task<T>`), and its safety guarantee are all in v0.1
-and verified. See `examples/concurrency.vela`.
+and verified. See `examples/concurrency.vyrn`.
 
 (The one thing still to gain teeth is `share`-by-reference: today a `share`
 parameter is passed by value, so it coincides observably with `read`; passing large

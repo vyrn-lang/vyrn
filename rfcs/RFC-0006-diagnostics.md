@@ -10,7 +10,7 @@
 Diagnostics are a **first-class language feature**, not an afterthought. The
 compiler is a *teacher, not a gatekeeper*. Because the compiler already tracks
 capabilities (RFC-0004) internally, it can present conflicts in terms of the
-programmer's intent — this is the candidate *signature experience* of Vela.
+programmer's intent — this is the candidate *signature experience* of Vyrn.
 
 > **First instance (v0.1).** The `consume` move-checker (RFC-0004) already
 > follows this format — it names the intent, locates the consumer, and explains
@@ -39,7 +39,7 @@ error[E0502]: cannot borrow `user` as mutable because it is also
               borrowed as immutable
 ```
 
-### After (Vela, intent-first)
+### After (Vyrn, intent-first)
 ```
 error: rename(user) needs to MODIFY `user`
 

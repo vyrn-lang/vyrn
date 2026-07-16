@@ -4,9 +4,9 @@
 - **Depends on:** RFC-0012 (`export extern fn` — re-entrant host calls),
   RFC-0004 (ownership), RFC-0003 (validated types)
 
-> **Motivation.** RFC-0012 M2 made a live Vela module callable from JS after
+> **Motivation.** RFC-0012 M2 made a live Vyrn module callable from JS after
 > `main` returns — the mechanical half of an event loop. The missing half is
-> **state that survives between entries**: Vela has no module-level bindings,
+> **state that survives between entries**: Vyrn has no module-level bindings,
 > so `onTick()` called at t=1s has nowhere to find the counter `main` set up
 > at t=0. This RFC adds module state, and with it the event-loop *pattern* is
 > complete — deliberately without adding async, coroutines, or a blocking
@@ -17,15 +17,15 @@
 ## The decided shape: the host owns the loop
 
 A wasm module cannot block the page and cannot suspend mid-function (stack
-switching is not shippable), so a Vela "event loop" is an **inversion**: the
+switching is not shippable), so a Vyrn "event loop" is an **inversion**: the
 host (a browser page, later a server runtime) owns the loop and calls exported
-handlers; Vela owns the state and the logic. This is not a stopgap — it is the
+handlers; Vyrn owns the state and the logic. This is not a stopgap — it is the
 same shape wasm components and every embedded runtime use, and it needs no
 new control flow in the language. What it needs is state:
 
-```vela
+```vyrn
 let mut hits = 0
-let banner = "vela counter"
+let banner = "vyrn counter"
 
 fn main() -> Int64 {
     return 0                       // set-up only; the host drives from here
@@ -42,7 +42,7 @@ export extern fn reset() {
 ```
 
 ```js
-const { exports } = await runVela(bytes);
+const { exports } = await runVyrn(bytes);
 setInterval(() => render(exports.onTick()), 1000);   // the host's loop
 button.onclick = () => exports.reset();
 ```
@@ -102,8 +102,8 @@ button.onclick = () => exports.reset();
   every function-call scope stack bottoms out on; initialized before
   `call("main")`.
 - **Codegen (native + wasm, one IR)**: one LLVM global per binding
-  (`zeroinitializer`), a synthesized `@__vela_globals_init()` running the
-  initializer stores in declaration order, called from `vela_entry` before
+  (`zeroinitializer`), a synthesized `@__vyrn_globals_init()` running the
+  initializer stores in declaration order, called from `vyrn_entry` before
   `main`. Reads/writes are loads/stores through the global. Validated stores
   reuse `emit_validation`.
 - **LSP**: globals in the symbol index (hover `let mut hits: Int64`,
@@ -111,7 +111,7 @@ button.onclick = () => exports.reset();
 
 ## Deliverables
 
-- `examples/eventloop.vela` — module state + exported handlers, with a `main`
+- `examples/eventloop.vyrn` — module state + exported handlers, with a `main`
   that exercises the handlers in a deterministic loop (so the example is a
   normal three-way parity citizen), plus a `web/` counter page where a timer
   and a button drive the live module (browser-verified).

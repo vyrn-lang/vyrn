@@ -7,7 +7,7 @@
 > **Implementation notes.** Shipped across all three backends, byte-identical
 > — including every encoded string AND every `Issue`'s key/path/message.
 >
-> - The backend-neutral heart lives in `vela_frontend::codec`: the codability
+> - The backend-neutral heart lives in `vyrn_frontend::codec`: the codability
 >   predicates, the exact-integer parser, and the locked Issue wording, so the
 >   interpreter and the code generator read message bytes from one source.
 > - **Number representation (the one real design choice):** the schema parser
@@ -26,9 +26,9 @@
 > - Decode's `where` check derives from the **same** predicate lowering as the
 >   trap path (`emit_predicate_cond`), and only runs on a cleanly-decoded value
 >   — so the two paths never drift.
-> - `examples/jsoncodec.vela` is the three-way parity showcase.
+> - `examples/jsoncodec.vyrn` is the three-way parity showcase.
 
-> **Motivation.** Vela can describe its types on the wire (jsonSchema, both
+> **Motivation.** Vyrn can describe its types on the wire (jsonSchema, both
 > directions) but cannot move *values* across it: there is no way to encode a
 > record to JSON or decode JSON into one. This codec is the foundation of the
 > RPC layer (RFC-0019) — and the place where validated types earn their keep:
@@ -39,7 +39,7 @@
 
 ## Surface
 
-```vela
+```vyrn
 type User = { name: Username, age: Age, nick: Option<String> }
 
 let s = toJson(u)                          // String (canonical, deterministic)
@@ -52,7 +52,7 @@ match v {
 
 - **`toJson(x) -> String`** — any *codable* value (below). Deterministic
   canonical output: record fields in declaration order, no whitespace,
-  numbers rendered exactly as Vela's canonical `toString`, minimal JSON
+  numbers rendered exactly as Vyrn's canonical `toString`, minimal JSON
   string escaping (`\" \\ \n \t \r`, `\u00XX` for other control bytes).
   `None` record fields are **omitted**; a bare `Option` encodes as `null`.
 - **`fromJson(TypeName, s) -> Validation<T>`** — type-directed (the
