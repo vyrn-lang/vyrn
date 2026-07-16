@@ -1,0 +1,30 @@
+// Worker threads (RFC-0025) — the same fork-join surface as concurrency.vyrn,
+// now running on real OS threads in the native binary. Each spawned task is
+// isolated (checker-proven: no I/O, no module state, no shared cells), so ANY
+// schedule produces byte-identical output — this file is an ordinary three-way
+// parity citizen (interp == native == wasm), and VYRN_SEQUENTIAL_SPAWN=1
+// forces the eager path natively with the same bytes.
+
+fn fib(n: Int64) -> Int64 {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn main() -> Int64 {
+    // Four tasks racing on the wall clock, joined in a fixed order — the
+    // deliberately thread-racy-looking-but-isolated shape.
+    let a = spawn fib(24)
+    let b = spawn fib(25)
+    let c = spawn fib(26)
+    let d = spawn fib(27)
+
+    print("joined in order:")
+    print(a.join())
+    print(b.join())
+    print(c.join())
+    print(d.join())
+
+    // join is idempotent — a second join re-reads the settled result.
+    if a.join() + b.join() == c.join() { return 0 }
+    return 1
+}

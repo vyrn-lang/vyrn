@@ -257,6 +257,76 @@ fn wasm_only_examples_trap_identically() {
     }
 }
 
+/// Worker threads (RFC-0025): with `spawn` on real OS threads natively,
+/// (a) the threaded run, the `VYRN_SEQUENTIAL_SPAWN=1` eager run, and the
+/// interpreter all produce byte-identical output on the spawn-heavy example,
+/// and (b) a trap INSIDE a task keeps the locked protocol — the canonical
+/// wording printed exactly once on stderr, exit 1 — in all three modes.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn threaded_spawn_matches_sequential_and_interp() {
+    let dir = examples_dir();
+    let out_dir = std::env::temp_dir().join("vyrn-parity");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let path = dir.join("parallel.vyrn");
+
+    let interp = vyrn().arg("run").arg(&path).output().expect("run interp");
+    let exe = out_dir.join("parallel-seq-check.exe");
+    let build = vyrn().arg("build").arg(&path).arg("-o").arg(&exe).output().expect("build");
+    assert!(build.status.success(), "native build failed:\n{}", norm(&build.stderr));
+
+    let threaded = Command::new(&exe).output().expect("run threaded");
+    let sequential = Command::new(&exe)
+        .env("VYRN_SEQUENTIAL_SPAWN", "1")
+        .output()
+        .expect("run sequential");
+
+    for (label, run) in [("threaded", &threaded), ("VYRN_SEQUENTIAL_SPAWN=1", &sequential)] {
+        assert_eq!(norm(&run.stdout), norm(&interp.stdout), "{label}: stdout != interp");
+        assert_eq!(norm(&run.stderr), norm(&interp.stderr), "{label}: stderr != interp");
+        assert_eq!(run.status.code(), interp.status.code(), "{label}: exit code != interp");
+    }
+}
+
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn task_trap_prints_once_and_exits_1_threaded() {
+    let out_dir = std::env::temp_dir().join("vyrn-parity");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    // A long task in flight while a second task traps: the trapping task
+    // performs the standard trap protocol itself (stderr + exit(1)) from its
+    // own thread — the locked RFC-0025 semantics.
+    let src = "fn boom(n: Int64) -> Int64 {\n    let z = n - n\n    return n / z\n}\n\n\
+               fn fib(n: Int64) -> Int64 {\n    if n < 2 { return n }\n    \
+               return fib(n - 1) + fib(n - 2)\n}\n\n\
+               fn main() -> Int64 {\n    let w = spawn fib(30)\n    \
+               let t = spawn boom(3)\n    return t.join()\n}\n";
+    let file = out_dir.join("taskboom.vyrn");
+    std::fs::write(&file, src).unwrap();
+    let exe = out_dir.join("taskboom.exe");
+    let build = vyrn().arg("build").arg(&file).arg("-o").arg(&exe).output().expect("build");
+    assert!(build.status.success(), "native build failed:\n{}", norm(&build.stderr));
+
+    let interp = vyrn().arg("run").arg(&file).output().expect("run interp");
+    let threaded = Command::new(&exe).output().expect("run threaded");
+    let sequential = Command::new(&exe)
+        .env("VYRN_SEQUENTIAL_SPAWN", "1")
+        .output()
+        .expect("run sequential");
+
+    for (label, run) in
+        [("interp", &interp), ("threaded", &threaded), ("VYRN_SEQUENTIAL_SPAWN=1", &sequential)]
+    {
+        assert_eq!(run.status.code(), Some(1), "{label}: task trap must exit 1");
+        assert_eq!(norm(&run.stdout), "", "{label}: no stdout");
+        assert_eq!(
+            norm(&run.stderr),
+            "error: division by zero\n",
+            "{label}: canonical wording, printed exactly once"
+        );
+    }
+}
+
 #[test]
 fn expected_check_failures_do_fail() {
     let dir = examples_dir();

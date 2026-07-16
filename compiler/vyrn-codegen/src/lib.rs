@@ -23,9 +23,16 @@ use vyrn_frontend::ast::*;
 use vyrn_frontend::own::DropKind;
 
 /// LLVM IR for the region/arena runtime (see the preamble comment in `emit`).
+///
+/// The arena stack is `thread_local` (RFC-0025): `region { .. }` is memory
+/// management, not an effect, so an isolated task may use it — and with tasks
+/// on real OS threads a shared stack would race. Per-thread stacks keep every
+/// region block self-contained on its own thread. On single-threaded targets
+/// (wasm32-wasip1) LLVM lowers TLS to ordinary globals, so the shared IR is
+/// unchanged in behavior there.
 const REGION_RUNTIME: &str = "\
-@__vyrn_region_sp = global i64 0
-@__vyrn_region_heads = global [64 x ptr] zeroinitializer
+@__vyrn_region_sp = thread_local global i64 0
+@__vyrn_region_heads = thread_local global [64 x ptr] zeroinitializer
 @.trap.regiondepth = private unnamed_addr constant [34 x i8] c\"error: region nesting exceeds 64\\0A\\00\"
 
 define void @__vyrn_region_enter() {
@@ -1046,6 +1053,16 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare void @free(ptr)\n");
     out.push_str("declare ptr @strcpy(ptr, ptr)\n");
     out.push_str("declare ptr @strcat(ptr, ptr)\n");
+    // Worker threads (RFC-0025): `spawn f(args)` packs its evaluated arguments
+    // into a heap frame and hands the shim a per-spawn-site thunk SYMBOL plus
+    // that frame; the shim runs the thunk on a real OS thread natively (Win32 /
+    // pthreads), inline on wasm (no threads) and under VYRN_SEQUENTIAL_SPAWN=1
+    // — one shared IR, byte-identical output on every schedule because tasks
+    // are checker-proven isolated. `join` blocks and returns the frame; the
+    // result sits in its leading slot. The thunk symbol is a C-boundary detail,
+    // not a Vyrn-level function value: every `call` still names a symbol.
+    out.push_str("declare ptr @__vyrn_spawn(ptr, ptr)\n");
+    out.push_str("declare ptr @__vyrn_join(ptr)\n");
     out.push_str("declare i32 @__vyrn_snprintf(ptr, i64, ptr, ...)\n");
     // Logging (RFC-0008) and traps: fprintf/fputs to stderr. `stderr` is a C
     // macro with no portable symbol, so the stream handles come from a tiny C
@@ -1471,6 +1488,12 @@ pub fn emit(program: &Program) -> Result<String, String> {
         globals_init_ir.push_str("}\n\n");
         out.push_str(&decls);
         out.push('\n');
+        // An initializer may instantiate a generic or spawn a task (RFC-0025:
+        // a spawn emits a per-callee thunk into `lambda_defs`) — drain both so
+        // the referenced symbols get defined like any function body's.
+        let insts = std::mem::take(&mut gi.instantiations);
+        enqueue(&emitted, &mut queue, insts);
+        drain_ho(&mut gi, &mut out, &mut ho_queue, &mut lambda_emitted);
     }
 
     // 1. Non-generic functions (main + others), collecting instantiations.
@@ -1949,9 +1972,10 @@ impl<'a> Gen<'a> {
             Type::Array(_) => "{ ptr, i64, i64 }".into(),
             // A fixed-size array lowers to the LLVM value aggregate [N x T].
             Type::ArrayN(inner, n) => format!("[{n} x {}]", self.llt(&inner)),
-            // A task's result handle is just its result value (deterministic
-            // fork-join needs no boxing).
-            Type::Task(inner) => self.llt(&inner),
+            // A task handle (RFC-0025) is an opaque `ptr` to the shim's task
+            // record (thread handle + heap frame); `t.join()` blocks on it and
+            // loads the result from the frame's leading slot.
+            Type::Task(_) => "ptr".into(),
             // A logger handle is a `ptr` to its name string.
             Type::Logger => "ptr".into(),
             Type::Record(fields) => {
@@ -2845,12 +2869,11 @@ impl<'a> Gen<'a> {
                 Ok((t, fty))
             }
             Expr::TryConstruct { name, args, .. } => self.gen_try_construct(name, &args[0]),
-            // A spawned task: run the (pure) callee. Execution is eager and
-            // deterministic; the type is `Task<ret>` so a `join` is required.
-            Expr::Spawn { name, args, .. } => {
-                let (v, ret) = self.gen_call(name, args)?;
-                Ok((v, Type::Task(Box::new(ret))))
-            }
+            // A spawned task (RFC-0025): evaluate the arguments HERE (spawn-site
+            // evaluation order is observable and matches the eager interpreter),
+            // pack them into a heap frame, and hand the shim a per-spawn-site
+            // thunk that runs the isolated callee — on a real thread natively.
+            Expr::Spawn { name, args, .. } => self.gen_spawn(name, args),
             Expr::ArrayLit { elems, .. } => {
                 // An empty `[]` is a growable empty array — the same `{ptr,len,cap}`
                 // triple `array()` produces (the element type is placeholder; the
@@ -5119,14 +5142,27 @@ impl<'a> Gen<'a> {
                 other => return Err(format!("`@list` needs an Array, found {other:?}")),
             }
         }
-        // @join (`t.join()`): with eager tasks the result is already computed.
+        // @join (`t.join()`), RFC-0025: block until the task completes, then
+        // load its result from the frame's leading slot. Idempotent — a task
+        // may be joined more than once (the shim only waits the first time and
+        // the frame is never freed), exactly like the eager value semantics.
         if name == "@join" {
             let (v, ty) = self.gen_expr(&args[0])?;
             let inner = match self.resolve(&ty) {
                 Type::Task(inner) => *inner,
-                other => other,
+                // Defensive: a non-Task operand is already the value (the
+                // checker never lets this through; keep the old identity).
+                other => return Ok((v, other)),
             };
-            return Ok((v, inner));
+            let frame = self.fresh_tmp();
+            self.emit(format!("{frame} = call ptr @__vyrn_join(ptr {v})"));
+            let retll = self.llt(&inner);
+            if retll == "void" {
+                return Ok((String::new(), Type::Unit));
+            }
+            let t = self.fresh_tmp();
+            self.emit(format!("{t} = load {retll}, ptr {frame}"));
+            return Ok((t, inner));
         }
 
         // `Some(x)` — the payload may be any type (boxed if wider than a word),
@@ -5314,6 +5350,135 @@ impl<'a> Gen<'a> {
             self.emit(format!("{t} = call {retll} @{sym}({})", arg_ops.join(", ")));
             Ok((t, ret))
         }
+    }
+
+    /// Lower `spawn f(args)` (RFC-0025) to real-thread machinery in the shim.
+    ///
+    /// The spawn site knows the concrete callee (spawn is monomorphic — `f` is
+    /// named statically), so: evaluate + coerce every argument NOW (the eager
+    /// interpreter's evaluation order), pack them into a malloc'd frame whose
+    /// leading slot is the result, synthesize a per-callee thunk
+    /// `void @__vyrn_task_<sym>(ptr %frame)` that loads the arguments back and
+    /// calls the callee DIRECTLY, and emit
+    /// `call ptr @__vyrn_spawn(ptr @thunk, ptr %frame)`.
+    ///
+    /// The thunk symbol handed to the shim is a function pointer at the C
+    /// boundary ONLY — no Vyrn-level function value exists, every emitted
+    /// `call` still names an `@symbol` (the RFC-0023 invariant), and the wasm
+    /// module gains no indirect-call table entry from Vyrn code (the shim's
+    /// inline `thunk(frame)` is C, compiled per target). The thunk is keyed by
+    /// the callee's mangled symbol: its content is a pure function of that
+    /// symbol, so spawn sites of the same callee share one thunk (deduped by
+    /// the `lambda_defs` driver).
+    fn gen_spawn(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
+        let (sym, arg_vals, ret_ty) = self.prep_spawn_target(name, args)?;
+        let retll = self.llt(&ret_ty);
+        // Frame layout: { result, args... } — result first so `join` loads it
+        // straight off the frame pointer. A Unit task has no result slot.
+        let mut fields: Vec<String> = Vec::new();
+        if retll != "void" {
+            fields.push(retll.clone());
+        }
+        for (ll, _) in &arg_vals {
+            fields.push(ll.clone());
+        }
+        let frame_ty = format!("{{ {} }}", fields.join(", "));
+        let frame = self.fresh_tmp();
+        self.emit(format!(
+            "{frame} = call ptr @__vyrn_malloc(i64 ptrtoint (ptr getelementptr \
+             ({frame_ty}, ptr null, i32 1) to i64))"
+        ));
+        let base = usize::from(retll != "void");
+        for (i, (ll, v)) in arg_vals.iter().enumerate() {
+            let p = self.fresh_tmp();
+            self.emit(format!(
+                "{p} = getelementptr {frame_ty}, ptr {frame}, i32 0, i32 {}",
+                base + i
+            ));
+            self.emit(format!("store {ll} {v}, ptr {p}"));
+        }
+
+        let tsym = format!("__vyrn_task_{sym}");
+        let mut def = String::new();
+        def.push_str(&format!("define void @{tsym}(ptr %frame) {{\nentry:\n"));
+        let mut ops: Vec<String> = Vec::new();
+        for (i, (ll, _)) in arg_vals.iter().enumerate() {
+            def.push_str(&format!(
+                "  %p{i} = getelementptr {frame_ty}, ptr %frame, i32 0, i32 {}\n",
+                base + i
+            ));
+            def.push_str(&format!("  %a{i} = load {ll}, ptr %p{i}\n"));
+            ops.push(format!("{ll} %a{i}"));
+        }
+        if retll == "void" {
+            def.push_str(&format!("  call void @{sym}({})\n", ops.join(", ")));
+        } else {
+            def.push_str(&format!("  %r = call {retll} @{sym}({})\n", ops.join(", ")));
+            def.push_str(&format!("  store {retll} %r, ptr %frame\n"));
+        }
+        def.push_str("  ret void\n}\n\n");
+        self.lambda_defs.push((tsym.clone(), def));
+
+        let t = self.fresh_tmp();
+        self.emit(format!("{t} = call ptr @__vyrn_spawn(ptr @{tsym}, ptr {frame})"));
+        Ok((t, Type::Task(Box::new(ret_ty))))
+    }
+
+    /// Resolve a spawn callee exactly as `gen_call` would: evaluate and coerce
+    /// each argument to its (substituted) parameter type, solve + register a
+    /// generic instantiation when the callee is generic, and return the callee
+    /// symbol, the `(llvm type, value)` argument pairs, and the concrete return
+    /// type. `modify` parameters and externs cannot appear — the checker only
+    /// admits isolated (spawn-safe) callees.
+    fn prep_spawn_target(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+    ) -> Result<(String, Vec<(String, String)>, Type), String> {
+        let callee = self.funcs.get(name).copied();
+        if let Some(callee) = callee.filter(|c| !c.type_params.is_empty()) {
+            // Generic callee — mirror gen_call's instantiation solving.
+            let mut arg_tys = Vec::new();
+            let mut arg_vals = Vec::new();
+            for a in args {
+                let (v, vty) = self.gen_expr(a)?;
+                arg_tys.push(vyrn_frontend::types::substitute(&vty, self.subst));
+                arg_vals.push(v);
+            }
+            let mut call_subst: HashMap<String, Type> = HashMap::new();
+            for (p, aty) in callee.params.iter().zip(&arg_tys) {
+                solve_param(&p.ty, aty, &mut call_subst);
+            }
+            let type_args: Vec<Type> = callee
+                .type_params
+                .iter()
+                .map(|tp| call_subst.get(tp).cloned().unwrap_or(Type::Unit))
+                .collect();
+            let sym = mangle_name(name, &type_args);
+            let mut pairs = Vec::new();
+            for ((p, v), aty) in callee.params.iter().zip(arg_vals).zip(&arg_tys) {
+                let pty = vyrn_frontend::types::substitute(&p.ty, &call_subst);
+                let (v, cty) = self.coerce(v, aty, &pty)?;
+                pairs.push((self.llt(&cty), v));
+            }
+            self.instantiations.push((name.to_string(), type_args));
+            let ret_ty = vyrn_frontend::types::substitute(&callee.ret, &call_subst);
+            return Ok((sym, pairs, ret_ty));
+        }
+        // Ordinary callee.
+        let params = self.param_types.get(name).cloned().unwrap_or_default();
+        let mut pairs = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let (v, vty) = self.gen_expr(a)?;
+            let (v, pty) = match params.get(i) {
+                Some(p) => self.coerce_flow(v, a, &vty, p)?,
+                None => (v, vty),
+            };
+            pairs.push((self.llt(&pty), v));
+        }
+        let sym = format!("vyrn_{name}");
+        let ret = self.ret_types.get(name).cloned().unwrap_or(Type::Int);
+        Ok((sym, pairs, ret))
     }
 
     /// Emit a real call to an `extern` import (RFC-0012). Each argument is
@@ -7270,6 +7435,64 @@ mod tests {
             ir.contains("@__vyrn_lambda_main_1_Int64Int64RInt64(i64 %arg0, i64 %arg1)"),
             "captured lambda should take (capture, param):\n{ir}"
         );
+    }
+
+    // ---- worker threads (RFC-0025) ---------------------------------------
+
+    const SPAWNY: &str = "fn fib(n: Int64) -> Int64 { \
+                              if n < 2 { return n } \
+                              return fib(n - 1) + fib(n - 2) } \
+                          fn main() -> Int64 { \
+                              let a = spawn fib(10) \
+                              let b = spawn fib(11) \
+                              return a.join() + b.join() - fib(12) }";
+
+    #[test]
+    fn spawn_lowers_to_shim_threads_with_a_per_callee_thunk() {
+        let ir = emit(&check(SPAWNY).unwrap()).unwrap();
+        // The spawn site: a heap frame plus the thunk SYMBOL into the shim.
+        assert!(
+            ir.contains("call ptr @__vyrn_spawn(ptr @__vyrn_task_vyrn_fib, ptr"),
+            "spawn call missing:\n{ir}"
+        );
+        // ONE thunk per callee — both spawn sites share it (deduped) — and it
+        // calls the task function directly, then stores into the result slot.
+        assert_eq!(
+            ir.matches("define void @__vyrn_task_vyrn_fib(ptr %frame)").count(),
+            1,
+            "expected exactly one shared thunk:\n{ir}"
+        );
+        assert!(ir.contains("%r = call i64 @vyrn_fib(i64 %a0)"), "{ir}");
+        assert!(ir.contains("store i64 %r, ptr %frame"), "{ir}");
+        // join blocks through the shim and loads the result from the frame.
+        assert!(ir.contains("call ptr @__vyrn_join(ptr"), "join missing:\n{ir}");
+    }
+
+    #[test]
+    fn region_arena_is_thread_local() {
+        // Isolated tasks may use `region { .. }`; with tasks on real threads
+        // the arena stack must be per-thread (single-threaded targets lower
+        // TLS to plain globals, so the shared IR is unaffected there).
+        let ir = emit(&check(SPAWNY).unwrap()).unwrap();
+        assert!(ir.contains("@__vyrn_region_sp = thread_local global i64 0"), "{ir}");
+        assert!(
+            ir.contains("@__vyrn_region_heads = thread_local global [64 x ptr] zeroinitializer"),
+            "{ir}"
+        );
+    }
+
+    #[test]
+    fn spawn_ir_has_no_indirect_calls() {
+        // The RFC-0023 invariant survives RFC-0025: the thunk symbol passed to
+        // `__vyrn_spawn` sits in ARGUMENT position (a C-boundary detail, not a
+        // Vyrn-level function value); every emitted `call` still names @symbol.
+        let ir = emit(&check(SPAWNY).unwrap()).unwrap();
+        for line in ir.lines() {
+            let t = line.trim_start();
+            if t.contains(" = call ") || t.starts_with("call ") {
+                assert!(t.contains("@"), "indirect (function-pointer) call emitted:\n  {line}");
+            }
+        }
     }
 
     // ---- input I/O (RFC-0014) -------------------------------------------

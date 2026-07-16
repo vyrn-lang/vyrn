@@ -1368,14 +1368,170 @@ const char* __vyrn_issue_key(VIssues* s, long long i) { return s->items[i].key; 
 const char* __vyrn_issue_path(VIssues* s, long long i) { return s->items[i].path; }
 const char* __vyrn_issue_msg(VIssues* s, long long i) { return s->items[i].message; }
 
+/* ---- worker threads (RFC-0025) ------------------------------------------ */
+/* `spawn f(args)` lowers to __vyrn_spawn(thunk, frame): the IR packs the
+   already-evaluated arguments (behind a leading result slot) into a heap frame
+   and passes a per-callee thunk that loads them, calls the isolated task
+   function, and stores the result back into the frame. The task is isolated
+   (checker-enforced, transitively: no I/O, no module state, no shared cells,
+   no `drop`), so ANY schedule produces byte-identical program output — the
+   threads below are pure wall-clock optimization. `t.join()` lowers to
+   __vyrn_join: block until completion, return the frame (the IR loads the
+   result from its leading slot).
+
+   One shared IR, three behaviors, all byte-identical:
+     - native: a real OS thread per task (Win32 / pthreads);
+     - VYRN_SEQUENTIAL_SPAWN=1 (native): the thunk runs inline at the spawn
+       point — the old eager path, a debugging escape hatch;
+     - wasm (__wasi__): no threads exist; the thunk always runs inline.
+
+   Locked trap protocol: a trapping task performs the standard trap protocol
+   itself (one fputs of the canonical `error: ...` line to stderr, then
+   exit(1)) from whichever thread it runs on — same wording, same exit code,
+   printed once; exit() flushes stdout so no output is lost. Tasks that were
+   never joined are joined at process exit (below, in spawn order): the eager
+   semantics ran every task, so a trap in a leaked task must not be lost.
+
+   Ownership: task records and frames are never freed — a task may be joined
+   more than once (join is idempotent), and the count is bounded by the number
+   of spawns (the "unproven ownership leaks, which is always safe" rule). */
+#if defined(__wasi__)
+typedef struct VTask { void* frame; } VTask;
+void* __vyrn_spawn(void (*thunk)(void*), void* frame) {
+    VTask* t = (VTask*)__vyrn_malloc(sizeof(VTask));
+    t->frame = frame;
+    thunk(frame); /* eager: single-threaded target */
+    return t;
+}
+void* __vyrn_join(void* task) { return ((VTask*)task)->frame; }
+static void __vyrn_join_all(void) {}
+#else
+#ifdef _WIN32
+#include <windows.h>
+typedef struct VTask {
+    void (*thunk)(void*);
+    void* frame;
+    HANDLE done; /* manual-reset event, signaled when the task completed */
+    struct VTask* next;
+} VTask;
+static DWORD WINAPI __vyrn_task_main(LPVOID p) {
+    VTask* t = (VTask*)p;
+    t->thunk(t->frame);
+    SetEvent(t->done);
+    return 0;
+}
+static SRWLOCK __vyrn_task_lock = SRWLOCK_INIT;
+static void __vyrn_tasks_acquire(void) { AcquireSRWLockExclusive(&__vyrn_task_lock); }
+static void __vyrn_tasks_release(void) { ReleaseSRWLockExclusive(&__vyrn_task_lock); }
+static void __vyrn_task_wait(VTask* t) { WaitForSingleObject(t->done, INFINITE); }
+#else
+#include <pthread.h>
+typedef struct VTask {
+    void (*thunk)(void*);
+    void* frame;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int done;
+    struct VTask* next;
+} VTask;
+static void* __vyrn_task_main(void* p) {
+    VTask* t = (VTask*)p;
+    t->thunk(t->frame);
+    pthread_mutex_lock(&t->mu);
+    t->done = 1;
+    pthread_cond_broadcast(&t->cv);
+    pthread_mutex_unlock(&t->mu);
+    return 0;
+}
+static pthread_mutex_t __vyrn_task_lock = PTHREAD_MUTEX_INITIALIZER;
+static void __vyrn_tasks_acquire(void) { pthread_mutex_lock(&__vyrn_task_lock); }
+static void __vyrn_tasks_release(void) { pthread_mutex_unlock(&__vyrn_task_lock); }
+static void __vyrn_task_wait(VTask* t) {
+    pthread_mutex_lock(&t->mu);
+    while (!t->done) pthread_cond_wait(&t->cv, &t->mu);
+    pthread_mutex_unlock(&t->mu);
+}
+#endif
+/* Registry of every spawned task, appended in spawn order (a task may itself
+   spawn — the list is append-only under the lock, so the exit-time walk below
+   observes children its waits allowed to be registered). */
+static VTask* __vyrn_task_head = 0;
+static VTask* __vyrn_task_tail = 0;
+
+void* __vyrn_spawn(void (*thunk)(void*), void* frame) {
+    int started = 0;
+    VTask* t = (VTask*)__vyrn_malloc(sizeof(VTask));
+    t->thunk = thunk;
+    t->frame = frame;
+    t->next = 0;
+#ifdef _WIN32
+    t->done = CreateEvent(0, TRUE, FALSE, 0);
+#else
+    pthread_mutex_init(&t->mu, 0);
+    pthread_cond_init(&t->cv, 0);
+    t->done = 0;
+#endif
+    {
+        const char* seq = getenv("VYRN_SEQUENTIAL_SPAWN");
+        if (!(seq && seq[0] == '1' && seq[1] == 0)) {
+#ifdef _WIN32
+            HANDLE th = CreateThread(0, 0, __vyrn_task_main, t, 0, 0);
+            if (th != 0) { CloseHandle(th); started = 1; } /* completion is t->done */
+#else
+            pthread_t th;
+            pthread_attr_t at;
+            pthread_attr_init(&at);
+            pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+            started = (pthread_create(&th, &at, __vyrn_task_main, t) == 0);
+            pthread_attr_destroy(&at);
+#endif
+        }
+    }
+    if (!started) {
+        /* sequential mode, or thread creation failed: the eager path (run at
+           the spawn point, on this thread) — the same bytes, by isolation. */
+        __vyrn_task_main(t);
+    }
+    __vyrn_tasks_acquire();
+    if (__vyrn_task_tail) __vyrn_task_tail->next = t; else __vyrn_task_head = t;
+    __vyrn_task_tail = t;
+    __vyrn_tasks_release();
+    return t;
+}
+
+void* __vyrn_join(void* task) {
+    VTask* t = (VTask*)task;
+    __vyrn_task_wait(t); /* idempotent; safe from any number of joiners */
+    return t->frame;
+}
+
+/* Join every task that is still outstanding when the program returns from
+   `main` — under eager semantics every spawned task ran, so a leaked task's
+   work (and, if it traps, its canonical trap + exit(1)) must still happen. */
+static void __vyrn_join_all(void) {
+    __vyrn_tasks_acquire();
+    VTask* t = __vyrn_task_head;
+    __vyrn_tasks_release();
+    while (t) {
+        __vyrn_task_wait(t);
+        __vyrn_tasks_acquire();
+        t = t->next;
+        __vyrn_tasks_release();
+    }
+}
+#endif
+
 /* The real C entry point: every target's crt (MSVC, glibc, wasi-libc) knows
    how to call a plain C main; the IR only exports vyrn_entry. argv is stashed
-   for `args()` (RFC-0014). */
+   for `args()` (RFC-0014). Outstanding tasks are joined before the exit code
+   is returned (RFC-0025). */
 extern int vyrn_entry(void);
 int main(int argc, char** argv) {
     __vyrn_argc = argc;
     __vyrn_argv = argv;
-    return vyrn_entry();
+    int code = vyrn_entry();
+    __vyrn_join_all();
+    return code;
 }
 "#;
 
@@ -2084,6 +2240,11 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         .arg(&out_path)
         // our IR carries no target triple; clang supplies the target's — don't warn.
         .arg("-Wno-override-module");
+    if !wasm && !cfg!(windows) {
+        // Worker threads (RFC-0025): pthreads. Win32 threads need no flag and
+        // wasm builds get the shim's inline (sequential) path instead.
+        cmd.arg("-pthread");
+    }
     if wasm {
         // wasm32-wasi: the same IR, compiled against wasi-libc. The sysroot
         // comes from $WASI_SYSROOT (a wasi-sdk checkout's `share/wasi-sysroot`).
