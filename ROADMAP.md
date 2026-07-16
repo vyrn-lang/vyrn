@@ -6,7 +6,7 @@ and the one decision the rest of the language waits on.
 **Every feature below is verified three ways**: the clang-compiled native
 binary AND the `wasm32-wasi` module produce byte-identical stdout, stderr, and
 exit codes against the tree-walking interpreter (the reference semantics),
-across **45 examples** and **595 tests** (0 warnings) — including every runtime
+across **46 examples** and **606 tests** (0 warnings) — including every runtime
 trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere)
 and the canonical I/O error strings (RFC-0014). The whole corpus is kept
 canonical by `velac fmt` (RFC-0017) and re-verified by the parity harness.
@@ -146,7 +146,18 @@ types), byte-exact round-trip with the emitter, and any inexpressible keyword
 is a hard error. The emitter side is correspondingly rich: named nested types
 render as `$ref`s into a `$defs` section (recursion is a real `$ref` — `"#"`
 for the root — not a lossy comment), sized ints carry their width bounds as
-part of the wire contract, and payload-less enums emit `enum` arrays. **Project manifest** (M3): an optional `vela.json`
+part of the wire contract, and payload-less enums emit `enum` arrays. **The
+JSON codec** (RFC-0018) moves *values* across that same wire: `toJson(x) ->
+String` (canonical — declaration-order fields, `None` omitted, bare `Option`
+→ `null`, numbers through the same `toString` rendering) and `fromJson(T, s)
+-> Validation<T>`, which never traps — it ignores unknown fields, takes
+absent-or-`null` for an `Option`, parses integers **exactly** (never through
+`f64`), and runs every `where` clause, accumulating one `Issue` per failure
+(`json.parse`/`json.type`/`json.missing`/`validate`, each with a dotted/indexed
+path). Encode renders through the canonical scalar path and decode runs the
+same predicate lowering as every other boundary, so the encoded bytes AND
+every Issue's key/path/message are byte-identical across all three backends
+(`examples/jsoncodec.vela`). **Project manifest** (M3): an optional `vela.json`
 (`name`/`main`/`dependencies`) found by walking up from the cwd — `velac run/
 check/build` need no file argument in a project, bare import specifiers
 (`import { x } from "money"`) resolve through the `dependencies` map (an

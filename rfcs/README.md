@@ -29,6 +29,8 @@ prototype to answer.
 | [0015](RFC-0015-testing.md) | Testing | `test` blocks, `assert`/`assertEq`, `velac test` |
 | [0016](RFC-0016-server.md) | The Server | `velac serve`, `Request`/`Response`, the async decision |
 | [0017](RFC-0017-formatter.md) | Canonical Formatter | `velac fmt`: one style, no options |
+| [0018](RFC-0018-json-codec.md) | The JSON Codec | `toJson`/`fromJson`: canonical encode, decode into `Validation<T>` with accumulated `Issue`s |
+| [0019](RFC-0019-rpc.md) | Typed RPC | Draft: the codec as an RPC layer, end-to-end typed calls |
 
 ## Status legend
 
@@ -44,7 +46,9 @@ design conversation; most of the surface they describe — and RFCs 0010–0016 
 is now **Implemented** in `compiler/` and covered by the three-way parity
 corpus (each RFC header carries its own status). RFC-0004's memory model is the
 part still expected to move; RFC-0017 (the formatter, `velac fmt` + LSP
-`textDocument/formatting`) is now **Implemented** too.
+`textDocument/formatting`) and RFC-0018 (the JSON codec, `toJson`/`fromJson`)
+are now **Implemented** too. RFC-0019 (typed RPC over the codec) is the open
+draft.
 
 ## Process
 

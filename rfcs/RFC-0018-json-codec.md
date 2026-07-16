@@ -1,8 +1,32 @@
 # RFC-0018 — The JSON Codec: `toJson` / `fromJson`
 
-- **Status:** Draft — approved for implementation
+- **Status:** Implemented
 - **Depends on:** RFC-0009 (`Validation<T>`/`Issue`), RFC-0003 (validated
   types), the jsonSchema emitter/importer (the schema side of this coin)
+
+> **Implementation notes.** Shipped across all three backends, byte-identical
+> — including every encoded string AND every `Issue`'s key/path/message.
+>
+> - The backend-neutral heart lives in `vela_frontend::codec`: the codability
+>   predicates, the exact-integer parser, and the locked Issue wording, so the
+>   interpreter and the code generator read message bytes from one source.
+> - **Number representation (the one real design choice):** the schema parser
+>   in `schema.rs` stores every number as `f64`, which cannot decode an
+>   `Int64` exactly. The codec therefore uses a *sibling* parser whose number
+>   token keeps its verbatim source text plus an `is_int` flag; an integer
+>   target is decoded by parsing that text directly (`i64`/`u64` with a range
+>   check), never through a double. `9007199254740993` round-trips.
+> - Interp: a direct Rust walk of the value. Native/wasm: a JSON DOM + parser
+>   + canonical encoder live in the C runtime shim (the parity-critical string
+>   work — number formatting through the same `snprintf` that backs
+>   `toString`, minimal escaping, parser error wording); the per-record-type
+>   encode/decode logic is generated as LLVM IR (the `emit_validation`
+>   precedent), with enums/options/arrays/validated scalars inlined and nested
+>   records resolved to a call (recursion-safe).
+> - Decode's `where` check derives from the **same** predicate lowering as the
+>   trap path (`emit_predicate_cond`), and only runs on a cleanly-decoded value
+>   — so the two paths never drift.
+> - `examples/jsoncodec.vela` is the three-way parity showcase.
 
 > **Motivation.** Vela can describe its types on the wire (jsonSchema, both
 > directions) but cannot move *values* across it: there is no way to encode a
