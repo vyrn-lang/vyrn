@@ -1792,6 +1792,45 @@ impl<'a> Gen<'a> {
     /// Coerce a value of type `from` to type `to`, emitting a field-by-field
     /// rebuild for structural record width subtyping (RFC-0002). For everything
     /// else the bit pattern is unchanged and only the reported type differs.
+    /// RFC-0020 M1: coerce `op` (produced by `expr`) into `to`, but SKIP the
+    /// runtime validation when the checker's containment proof holds — a string
+    /// interpolation whose language ⊆ `to`, or a finite string variable
+    /// contained in `to`. The value representation of a validated `String` is
+    /// identical to `String`, so a proven flow simply coerces to the base and
+    /// retags. Both backends run [`vyrn_frontend::finite::string_flow_proven`]
+    /// independently on the same AST, so they skip identically (the consteval
+    /// precedent). Any non-string / non-proven flow is the ordinary [`coerce`].
+    fn coerce_flow(
+        &mut self,
+        op: String,
+        expr: &Expr,
+        from: &Type,
+        to: &Type,
+    ) -> Result<(String, Type), String> {
+        if self.string_flow_proven(expr, to) {
+            if let Type::Named(n) = to {
+                if let Some(decl) = self.types.get(n).cloned() {
+                    if decl.predicate.is_some() {
+                        let (v, _) = self.coerce(op, from, &decl.base)?;
+                        return Ok((v, to.clone()));
+                    }
+                }
+            }
+        }
+        self.coerce(op, from, to)
+    }
+
+    /// Whether a flow of `expr` into `to` is statically proven contained (so its
+    /// runtime validation may be skipped). Resolves interpolation holes / a
+    /// finite-string receiver through the local scope's declared types.
+    fn string_flow_proven(&self, expr: &Expr, to: &Type) -> bool {
+        let resolve = |e: &Expr| match e {
+            Expr::Var { name, .. } => self.lookup(name).map(|(_, t)| t),
+            _ => None,
+        };
+        vyrn_frontend::finite::string_flow_proven(expr, to, self.types, &resolve)
+    }
+
     fn coerce(&mut self, op: String, from: &Type, to: &Type) -> Result<(String, Type), String> {
         // AUTOMATIC VALIDATION: a value flowing into a predicated named type
         // coerces to its base, then runs the `where` predicate inline and traps
@@ -2214,7 +2253,7 @@ impl<'a> Gen<'a> {
                 let (v, vty) = self.gen_expr(value)?;
                 // Coerce to the annotation if present (record width subtyping).
                 let (v, bty) = match decl_ty {
-                    Some(t) => self.coerce(v, &vty, t)?,
+                    Some(t) => self.coerce_flow(v, value, &vty, t)?,
                     None => (v, vty),
                 };
                 let ll = self.llt(&bty);
@@ -2316,7 +2355,7 @@ impl<'a> Gen<'a> {
                     Some(e) => {
                         let (v, vty) = self.gen_expr(e)?;
                         let ret = self.fn_ret.clone();
-                        let (v, _) = self.coerce(v, &vty, &ret)?;
+                        let (v, _) = self.coerce_flow(v, e, &vty, &ret)?;
                         let ll = self.llt(&ret);
                         // Free in-scope owned temporaries before leaving (the
                         // return value never aliases one — droppable bindings by
@@ -2726,7 +2765,12 @@ impl<'a> Gen<'a> {
         for (i, decl_f) in rfields.iter().enumerate() {
             let (v, vty) = vals[i].clone();
             let field_ty = vyrn_frontend::types::substitute(&decl_f.ty, &solved);
-            let (v, _) = self.coerce(v, &vty, &field_ty)?;
+            // The field's source expression (for the RFC-0020 containment skip).
+            let field_expr = fields.iter().find(|(fname, _)| fname == &decl_f.name).map(|(_, e)| e);
+            let (v, _) = match field_expr {
+                Some(e) => self.coerce_flow(v, e, &vty, &field_ty)?,
+                None => self.coerce(v, &vty, &field_ty)?,
+            };
             let field_ll = self.llt(&field_ty);
             let ins = self.fresh_tmp();
             self.emit(format!("{ins} = insertvalue {ll} {cur}, {field_ll} {v}, {i}"));
@@ -4533,7 +4577,7 @@ impl<'a> Gen<'a> {
             }
             let (v, vty) = self.gen_expr(a)?;
             let (v, pty) = match params.get(i) {
-                Some(p) => self.coerce(v, &vty, p)?,
+                Some(p) => self.coerce_flow(v, a, &vty, p)?,
                 None => (v, vty),
             };
             arg_ops.push(format!("{} {v}", self.llt(&pty)));
@@ -6933,5 +6977,52 @@ mod tests {
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("@.trap.verr.Age"), "per-type validation trap: {ir}");
         assert!(ir.contains("store i64 %") && ir.contains("@g.a"), "store through global: {ir}");
+    }
+
+    // ---- RFC-0020 M1: interpolation containment erases the runtime check ----
+
+    #[test]
+    fn proven_interpolation_emits_no_validation() {
+        // `"nav.\{s}.label"` with s: Section is provably a TransKey, so the
+        // containment proof erases the runtime validation entirely — no per-type
+        // trap for TransKey is emitted at the `t(..)` argument boundary.
+        let src = "type TransKey = String where value =~ \"nav\\\\.(home|about|settings)\\\\.label\" \
+                   type Section = String where value =~ \"home|about|settings\" \
+                   fn t(key: TransKey) -> Int64 { return 0 } \
+                   fn main() -> Int64 { let s: Section = \"home\" return t(\"nav.\\{s}.label\") }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        // The per-type message global is always defined; a *check* is an `fputs`
+        // of it in a trap block. A proven flow emits none.
+        assert!(
+            !ir.contains("@.trap.verr.TransKey, ptr"),
+            "proven interpolation must emit NO TransKey validation: {ir}"
+        );
+    }
+
+    #[test]
+    fn nonfinite_hole_interpolation_still_validates_at_runtime() {
+        // A plain-String hole is not finite, so containment does not apply and
+        // the ordinary runtime validation for TransKey IS emitted.
+        let src = "type TransKey = String where value =~ \"nav\\\\.(home|about|settings)\\\\.label\" \
+                   fn t(key: TransKey) -> Int64 { return 0 } \
+                   fn build(x: String) -> Int64 { return t(\"nav.\\{x}.label\") } \
+                   fn main() -> Int64 { return build(\"home\") }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(
+            ir.contains("@.trap.verr.TransKey, ptr"),
+            "a non-finite hole must keep the runtime validation: {ir}"
+        );
+    }
+
+    #[test]
+    fn finite_var_contained_emits_no_validation() {
+        // A Narrow value flowing into a Wide param where L(Narrow) ⊆ L(Wide) is
+        // proven — no runtime check emitted.
+        let src = "type Wide = String where value =~ \"a|b|c\" \
+                   type Narrow = String where value =~ \"a|b\" \
+                   fn want(x: Wide) -> Int64 { return 0 } \
+                   fn main() -> Int64 { let n: Narrow = \"a\" return want(n) }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(!ir.contains("@.trap.verr.Wide, ptr"), "contained finite var needs no check: {ir}");
     }
 }

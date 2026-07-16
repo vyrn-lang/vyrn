@@ -662,6 +662,43 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
+    /// RFC-0020 M1: prove a string **interpolation** (or a finite-string
+    /// variable) flowing into a validated string type is contained in that
+    /// type's language. Runs alongside [`Self::prove_coercion`] at every value
+    /// boundary. An interpolation that can produce a value outside `to`'s
+    /// language is a hard compile error carrying the shortest witness; a proven
+    /// flow silently lets the backends skip the runtime check; anything else
+    /// (a non-finite hole, a non-regex target) leaves runtime validation in
+    /// place. `scope`/`fn_ret` are used to infer hole types.
+    fn prove_string_interpolation(
+        &self,
+        expr: &Expr,
+        to: &Type,
+        scope: &Vec<HashMap<String, Binding>>,
+        fn_ret: Option<&Type>,
+        line: usize,
+    ) -> Result<(), String> {
+        let resolve = |e: &Expr| self.expr(e, scope, None, fn_ret).ok();
+        match crate::finite::prove_string_flow(expr, to, self.types, &resolve) {
+            crate::finite::Proof::Witness(witness) => {
+                // `to` is a named predicated type here (Proof::Witness only
+                // arises when the target resolved to one).
+                let decl = match to {
+                    Type::Named(n) => self.types.get(n).unwrap(),
+                    _ => unreachable!("witness implies a named target"),
+                };
+                let pred = decl.predicate.as_ref().unwrap();
+                Err(format!(
+                    "line {line}: \"{witness}\" (a possible value of this interpolation) \
+                     does not satisfy `{}` (predicate `where {}` is false)",
+                    decl.name,
+                    pred_summary(pred),
+                ))
+            }
+            crate::finite::Proof::Proven | crate::finite::Proof::NotApplicable => Ok(()),
+        }
+    }
+
     fn ensure_type_exists(&self, ty: &Type, line: usize) -> Result<(), String> {
         match ty {
             Type::Named(n) => match self.types.get(n) {
@@ -1093,6 +1130,7 @@ impl<'a> Checker<'a> {
                         ));
                     }
                     self.prove_coercion(value, declared, *line)?;
+                    self.prove_string_interpolation(value, declared, scope, Some(ret), *line)?;
                 }
                 if self.base(&vty) == Type::Unit {
                     return Err(format!("line {line}: cannot bind `{name}` to a Unit value"));
@@ -1125,6 +1163,7 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 self.prove_coercion(value, &b.ty, *line)?;
+                self.prove_string_interpolation(value, &b.ty, scope, Some(ret), *line)?;
                 self.region_store_guard(name, &b.ty, scope, *line)?;
                 Ok(false)
             }
@@ -1216,6 +1255,7 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 self.prove_coercion(value, &elem, *line)?;
+                self.prove_string_interpolation(value, &elem, scope, Some(ret), *line)?;
                 self.region_store_guard(name, &elem, scope, *line)?;
                 Ok(false)
             }
@@ -1227,6 +1267,12 @@ impl<'a> Checker<'a> {
                 if self.coercible(&vty, ret) {
                     if let Some(e) = value {
                         if let Err(msg) = self.prove_coercion(e, ret, *line) {
+                            self.errors.borrow_mut().push(msg);
+                            return Ok(true);
+                        }
+                        if let Err(msg) =
+                            self.prove_string_interpolation(e, ret, scope, Some(ret), *line)
+                        {
                             self.errors.borrow_mut().push(msg);
                             return Ok(true);
                         }
@@ -1663,6 +1709,7 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 self.prove_coercion(&elems[0], &elem_ty, *line)?;
+                self.prove_string_interpolation(&elems[0], &elem_ty, scope, fn_ret, *line)?;
                 for e in &elems[1..] {
                     let t = self.expr(e, scope, Some(&elem_ty), fn_ret)?;
                     if !self.coercible(&t, &elem_ty) {
@@ -1671,6 +1718,7 @@ impl<'a> Checker<'a> {
                         ));
                     }
                     self.prove_coercion(e, &elem_ty, *line)?;
+                    self.prove_string_interpolation(e, &elem_ty, scope, fn_ret, *line)?;
                 }
                 if growable {
                     Ok(Type::Array(Box::new(elem_ty)))
@@ -1713,6 +1761,7 @@ impl<'a> Checker<'a> {
             let vty = self.expr(value, scope, Some(&field.ty), fn_ret)?;
             self.unify(&field.ty, &vty, &mut subst, line)?;
             self.prove_coercion(value, &field.ty, line)?;
+            self.prove_string_interpolation(value, &field.ty, scope, fn_ret, line)?;
         }
         // Every declared field must be provided.
         for f in &rfields {
@@ -3086,6 +3135,7 @@ impl<'a> Checker<'a> {
                 ));
             }
             self.prove_coercion(arg, pty, line)?;
+            self.prove_string_interpolation(arg, pty, scope, fn_ret, line)?;
             // A `modify` parameter receives the caller's binding by reference —
             // full discipline checked in the shared helper.
             if caps.and_then(|c| c.get(i)) == Some(&Capability::Modify) {
@@ -5504,5 +5554,96 @@ mod tests {
              fn main() -> Int64 { let mut a: Array<P> = [P { x: 1, y: 2 }]  a[0].x = 9  return 0 }",
         )
         .is_ok());
+    }
+
+    // ---- RFC-0020 M1: finite string types & interpolation containment -------
+
+    /// A common prelude: a finite key type, a finite section type, and a `t`
+    /// consumer.
+    const KEYS: &str = "type TransKey = String where value =~ \"(home\\\\.(title|subtitle)|nav\\\\.(home|about|settings)\\\\.label)\"\n\
+         type Section = String where value =~ \"home|about|settings\"\n\
+         fn t(key: TransKey) -> Int64 { return 0 }\n";
+
+    #[test]
+    fn proven_interpolation_into_finite_type_is_accepted() {
+        // Every value of `"nav.\{s}.label"` (s: Section) is a TransKey.
+        let src = format!(
+            "{KEYS}fn main() -> Int64 {{ let s: Section = \"home\"  return t(\"nav.\\{{s}}.label\") }}"
+        );
+        assert!(check_src(&src).is_ok(), "{:?}", check_src(&src));
+    }
+
+    #[test]
+    fn interpolation_witness_is_a_compile_error() {
+        // A Section that includes `profile` produces `nav.profile.label`, which
+        // TransKey does not contain — the witness must name it exactly.
+        let src = "type TransKey = String where value =~ \"nav\\\\.(home|about)\\\\.label\"\n\
+             type Section = String where value =~ \"home|about|profile\"\n\
+             fn t(key: TransKey) -> Int64 { return 0 }\n\
+             fn main() -> Int64 { let s: Section = \"home\"  return t(\"nav.\\{s}.label\") }";
+        let e = check_src(src).unwrap_err();
+        assert!(
+            e.contains(
+                "\"nav.profile.label\" (a possible value of this interpolation) does not satisfy `TransKey`"
+            ),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn interpolation_with_nonfinite_hole_is_left_to_runtime() {
+        // A plain-String hole is not finite → no containment, no error (the
+        // boundary keeps its ordinary runtime validation).
+        let src = format!(
+            "{KEYS}fn build(x: String) -> Int64 {{ return t(\"nav.\\{{x}}.label\") }}\n\
+             fn main() -> Int64 {{ return build(\"home\") }}"
+        );
+        assert!(check_src(&src).is_ok(), "{:?}", check_src(&src));
+    }
+
+    #[test]
+    fn finite_var_contained_is_accepted_and_uncontained_is_left_to_runtime() {
+        // Section ⊆ TransKey? No — but a Section variable might still hold a
+        // conforming value, so flowing it into TransKey is NOT an error (runtime
+        // check stays). This must type-check.
+        let runtime = format!(
+            "{KEYS}fn main() -> Int64 {{ let s: Section = \"home\"  return t(s) }}"
+        );
+        assert!(check_src(&runtime).is_ok(), "{:?}", check_src(&runtime));
+
+        // A finite type that IS contained in the target flows with no error.
+        let proven = "type Wide = String where value =~ \"a|b|c\"\n\
+             type Narrow = String where value =~ \"a|b\"\n\
+             fn want(x: Wide) -> Int64 { return 0 }\n\
+             fn main() -> Int64 { let n: Narrow = \"a\"  return want(n) }";
+        assert!(check_src(proven).is_ok(), "{:?}", check_src(proven));
+    }
+
+    #[test]
+    fn mixed_predicate_target_falls_back_to_runtime() {
+        // The target mixes a length clause with a regex clause → not a pure
+        // regex language → containment does not apply, no error even though the
+        // interpolation could exceed the length at runtime.
+        let src = "type Key = String where value =~ \"[a-z]+\" && value.length < 3\n\
+             type Section = String where value =~ \"home|about\"\n\
+             fn t(k: Key) -> Int64 { return 0 }\n\
+             fn main() -> Int64 { let s: Section = \"home\"  return t(\"\\{s}\") }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn proven_interpolation_at_return_and_let_boundaries() {
+        // Return boundary.
+        let ret = "type Section = String where value =~ \"home|about\"\n\
+             type Key = String where value =~ \"nav\\\\.(home|about)\\\\.label\"\n\
+             fn build(s: Section) -> Key { return \"nav.\\{s}.label\" }\n\
+             fn main() -> Int64 { let s: Section = \"home\"  build(s)  return 0 }";
+        assert!(check_src(ret).is_ok(), "{:?}", check_src(ret));
+
+        // Let-annotation boundary.
+        let letb = "type Section = String where value =~ \"home|about\"\n\
+             type Key = String where value =~ \"nav\\\\.(home|about)\\\\.label\"\n\
+             fn main() -> Int64 { let s: Section = \"home\"  let k: Key = \"nav.\\{s}.label\"  return 0 }";
+        assert!(check_src(letb).is_ok(), "{:?}", check_src(letb));
     }
 }

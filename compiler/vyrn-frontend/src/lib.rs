@@ -15,6 +15,7 @@ pub mod checker;
 pub mod codec;
 pub mod consteval;
 pub mod diagnostics;
+pub mod finite;
 pub mod fmt;
 pub mod hash;
 pub mod interp;

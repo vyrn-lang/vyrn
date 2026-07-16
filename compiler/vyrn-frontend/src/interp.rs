@@ -3575,6 +3575,29 @@ mod tests {
     }
 
     #[test]
+    fn proven_interpolation_runs_correctly() {
+        // RFC-0020 M1: a statically-proven interpolation flows into TransKey and
+        // runs identically (the interp validation is a no-op on a proven value).
+        let src = "type TransKey = String where value =~ \"nav\\\\.(home|about)\\\\.label\"\n\
+                   type Section = String where value =~ \"home|about\"\n\
+                   fn t(key: TransKey) -> Int64 { return key.length }\n\
+                   fn main() -> Int64 { let s: Section = \"home\"  return t(\"nav.\\{s}.label\") }";
+        // "nav.home.label" is 14 bytes.
+        assert_eq!(run(src).unwrap(), 14);
+    }
+
+    #[test]
+    fn nonfinite_hole_interpolation_traps_at_runtime() {
+        // A plain-String hole is not finite, so no static proof — an invalid
+        // value produced at runtime traps through the canonical message (the
+        // interp counterpart of the codegen runtime-validation test).
+        let src = "type TransKey = String where value =~ \"nav\\\\.(home|about)\\\\.label\"\n\
+                   fn build(x: String) -> Int64 { let k: TransKey = \"nav.\\{x}.label\"  return 0 }\n\
+                   fn main() -> Int64 { return build(\"BAD\") }";
+        assert!(run(src).unwrap_err().contains("validation failed for `TransKey`"));
+    }
+
+    #[test]
     fn cross_field_record_valid_and_invalid() {
         let ok = "type R = { a: Int64, b: Int64 } where a < b; \
                   fn mk(x: Int64, y: Int64) -> R { return R { a: x, b: y }; } \
