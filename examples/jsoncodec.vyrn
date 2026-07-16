@@ -6,7 +6,7 @@
 ///   fromJson(TypeName, s) -> Validation<T>    never traps; every problem at once
 ///
 /// Encoding is canonical: record fields in declaration order, no whitespace,
-/// numbers rendered exactly as Vela's `toString`, `None` fields omitted, a bare
+/// numbers rendered exactly as Vyrn's `toString`, `None` fields omitted, a bare
 /// `Option` as `null`. Decoding ignores unknown fields, accepts absent-or-null
 /// for an `Option`, parses integers exactly, and accumulates one `Issue` per
 /// failure — each with a `key`, a dotted/indexed `path`, and a `message`.

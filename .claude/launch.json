@@ -2,7 +2,7 @@
     "version": "0.0.1",
     "configurations": [
         {
-            "name": "vela-web-demo",
+            "name": "vyrn-web-demo",
             "runtimeExecutable": "python",
             "runtimeArgs": ["-m", "http.server", "8734", "--directory", "web"],
             "port": 8734

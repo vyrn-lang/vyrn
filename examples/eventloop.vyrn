@@ -2,18 +2,18 @@
 ///
 /// Module state (a top-level `let`) survives between calls, so an exported
 /// handler the host invokes — a browser timer, later a server runtime — can
-/// accumulate results across entries. The host owns the loop; Vela owns the
+/// accumulate results across entries. The host owns the loop; Vyrn owns the
 /// state and the logic. `main` sets things up and returns; a real host then
 /// drives the exported handlers on its own schedule (see `web/eventloop.html`).
 ///
 /// Here `main` also drives the handlers in a deterministic loop, so this example
 /// is a normal three-way parity citizen (interp == native == wasm) — the
-/// exported functions are ordinary Vela functions with no host imports.
+/// exported functions are ordinary Vyrn functions with no host imports.
 
 // Module state: shared by every function, initialized once before `main`.
 let mut hits: Int64 = 0
 let mut total: Int64 = 0
-let banner = "vela counter"
+let banner = "vyrn counter"
 
 fn main() -> Int64 {
     print(banner)

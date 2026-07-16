@@ -1,5 +1,5 @@
 // A tiny Entity-Component-System (ECS), Structure-of-Arrays style — a feasibility
-// probe for "can Vela do an efficient ECS today?". Verdict: the DATA LAYOUT was
+// probe for "can Vyrn do an efficient ECS today?". Verdict: the DATA LAYOUT was
 // already right, and RFC-0011 closed the MUTATION gap this file first exposed.
 //
 // What an ECS wants: components stored contiguously so a system can stream over

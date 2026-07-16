@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Run Vela extension (Extension Development Host)",
+      "name": "Run Vyrn extension (Extension Development Host)",
       "type": "extensionHost",
       "request": "launch",
       "args": [

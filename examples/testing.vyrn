@@ -1,11 +1,11 @@
-// Testing (RFC-0015) — `test` blocks, `assert`, `assertEq`, and `velac test`.
+// Testing (RFC-0015) — `test` blocks, `assert`, `assertEq`, and `vyrn test`.
 //
 // A file may hold BOTH a `main` (an ordinary runnable program) AND `test`
-// blocks. `velac run` / `build` ignore the tests entirely — they are checked,
+// blocks. `vyrn run` / `build` ignore the tests entirely — they are checked,
 // then stripped — so this stays a normal three-way parity citizen. To run the
-// tests instead of `main`, use `velac test`:
+// tests instead of `main`, use `vyrn test`:
 //
-//   $ velac test examples/testing.vela
+//   $ vyrn test examples/testing.vyrn
 //   test "clamp holds the bounds" ... ok
 //   test "clamp reports its edges" ... ok
 //   test "empty pops to None" ... ok

@@ -1,9 +1,9 @@
 /// JSON Schema type imports (RFC-0010 M2): `import type { .. }` from a
-/// `.json` file synthesizes validated Vela types from a JSON Schema document —
+/// `.json` file synthesizes validated Vyrn types from a JSON Schema document —
 /// the exact inverse of `jsonSchema(T)`. Constraints become `where` clauses
 /// (auto-validated at every boundary, like any validated type), `required`
 /// steers `Option<T>`, and `$defs` entries are importable too. A schema using
-/// a keyword Vela can't express is a compile-time error, never a silently
+/// a keyword Vyrn can't express is a compile-time error, never a silently
 /// weaker type.
 
 import type { User, Port } from "./user.schema.json"

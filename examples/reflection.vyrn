@@ -2,11 +2,11 @@
 /// validated type's declaration *at compile time* and yields a `Schema`:
 /// its name, base spelling, `///` doc, and everything the `where` predicate
 /// implies (numeric bounds, `multipleOf`, string length bounds, the regex
-/// pattern). It is NOT runtime reflection (Vela erases types); the compiler
+/// pattern). It is NOT runtime reflection (Vyrn erases types); the compiler
 /// computes it from the declaration, so the interpreter and native backend
 /// produce identical results. Turn it into OpenAPI, JSON Schema, etc.
 /// (For a ready-made JSON Schema document, use `jsonSchema(TypeName)` directly —
-/// see jsonschema.vela.)
+/// see jsonschema.vyrn.)
 
 /// Age of an adult account holder.
 type Age = Int64 where value >= 18

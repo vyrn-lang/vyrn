@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Vela × JS interop (extern)</title>
+<title>Vyrn × JS interop (extern)</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -38,11 +38,11 @@
 </style>
 </head>
 <body>
-<h1>Vela × JS interop</h1>
+<h1>Vyrn × JS interop</h1>
 <p class="sub">
-  <code>examples/externdemo.vela</code> declares three <code>extern fn</code>
+  <code>examples/externdemo.vyrn</code> declares three <code>extern fn</code>
   imports (RFC-0012) and calls them. The host page below supplies them in the
-  <code>vela</code> import namespace: <code>jsLog</code> (a <code>String</code>
+  <code>vyrn</code> import namespace: <code>jsLog</code> (a <code>String</code>
   decoded from linear memory), <code>jsNow</code> (returns a
   <code>Float64</code>), and <code>jsAdd</code> (two <code>Int64</code>s round-
   tripped through JS). The same module traps under the interpreter and the
@@ -54,7 +54,7 @@
   <span id="status"></span>
 </div>
 
-<div class="label">jsLog (Vela → JS, string glue)</div>
+<div class="label">jsLog (Vyrn → JS, string glue)</div>
 <pre id="jslog"></pre>
 <div class="label">the externs, as this page implements them</div>
 <pre id="which"></pre>
@@ -65,15 +65,15 @@
 
 <hr style="margin: 2.5rem 0; border: none; border-top: 1px solid var(--card);">
 
-<h1>Vela → JS exports (M2)</h1>
+<h1>Vyrn → JS exports (M2)</h1>
 <p class="sub">
-  <code>examples/externdemo2.vela</code> declares two <code>export extern fn</code>s
-  — a Vela function is a normal, fully-checked function that is <em>additionally</em>
+  <code>examples/externdemo2.vyrn</code> declares two <code>export extern fn</code>s
+  — a Vyrn function is a normal, fully-checked function that is <em>additionally</em>
   exported to JS on the wasm target. After <code>_start</code> runs
   <code>main</code> once, this page calls them on the live module instance:
-  <code>velaAdd(Int64, Int64) -> Int64</code> (BigInts round-trip) and
-  <code>greet(String) -> String</code> (a string crosses <em>into</em> Vela — the
-  page allocates the buffer via the module's <code>__vela_malloc</code>, copies
+  <code>vyrnAdd(Int64, Int64) -> Int64</code> (BigInts round-trip) and
+  <code>greet(String) -> String</code> (a string crosses <em>into</em> Vyrn — the
+  page allocates the buffer via the module's <code>__vyrn_malloc</code>, copies
   UTF-8 + a NUL — and a built string comes back, NUL-decoded from linear memory).
 </p>
 
@@ -85,7 +85,7 @@
 <pre id="stdout2"></pre>
 
 <div class="row" id="callrow" style="display:none">
-  <label>velaAdd(<input id="addA" type="number" value="40" style="width:4rem">,
+  <label>vyrnAdd(<input id="addA" type="number" value="40" style="width:4rem">,
   <input id="addB" type="number" value="2" style="width:4rem">)</label>
   <button id="callAdd">call</button>
   <span id="addOut" class="ok"></span>
@@ -97,7 +97,7 @@
 </div>
 
 <script type="module">
-import { runVela } from "./wasi-min.js";
+import { runVyrn } from "./wasi-min.js";
 
 const status = document.getElementById("status");
 const jslog = document.getElementById("jslog");
@@ -112,7 +112,7 @@ const extern = {
   // String param: wasi-min.js decodes (ptr, len) from memory before we see it.
   jsLog: (msg) => { jslog.textContent += msg + "\n"; },
   // Float64 return: a fixed value keeps the demo deterministic (a real clock
-  // would be Date.now() / 1000). The value flows back into Vela and is logged.
+  // would be Date.now() / 1000). The value flows back into Vyrn and is logged.
   jsNow: () => 1721000000.5,
   // Int64 params arrive as BigInt; returning a BigInt keeps it an i64.
   jsAdd: (a, b) => { const r = a + b; addCalls.push(`${a} + ${b} = ${r}`); return r; },
@@ -134,7 +134,7 @@ document.getElementById("run").addEventListener("click", async () => {
       return;
     }
     const bytes = await resp.arrayBuffer();
-    const r = await runVela(bytes, {
+    const r = await runVyrn(bytes, {
       extern,
       onStdout: (s) => (out.textContent += s),
       onStderr: (s) => (err.textContent += s),
@@ -152,7 +152,7 @@ document.getElementById("run").addEventListener("click", async () => {
 // --- M2: exports. Run the module once (main), then call its exports live. -----
 const status2 = document.getElementById("status2");
 const out2 = document.getElementById("stdout2");
-let velaExports = null;
+let vyrnExports = null;
 
 document.getElementById("load2").addEventListener("click", async () => {
   out2.textContent = "";
@@ -165,13 +165,13 @@ document.getElementById("load2").addEventListener("click", async () => {
     }
     const bytes = await resp.arrayBuffer();
     // `greet` returns a String — an i32 result is ambiguous in wasm, so name it.
-    const r = await runVela(bytes, {
+    const r = await runVyrn(bytes, {
       exportReturns: { greet: "string" },
       onStdout: (s) => (out2.textContent += s),
     });
-    velaExports = r.exports;
+    vyrnExports = r.exports;
     status2.innerHTML =
-      `<span class="ok">exit ${r.exitCode}</span> · exports: ${Object.keys(velaExports).join(", ")}`;
+      `<span class="ok">exit ${r.exitCode}</span> · exports: ${Object.keys(vyrnExports).join(", ")}`;
     document.getElementById("callrow").style.display = "flex";
     document.getElementById("greetrow").style.display = "flex";
   } catch (e) {
@@ -181,19 +181,19 @@ document.getElementById("load2").addEventListener("click", async () => {
 });
 
 document.getElementById("callAdd").addEventListener("click", () => {
-  if (!velaExports) return;
+  if (!vyrnExports) return;
   const a = Number(document.getElementById("addA").value);
   const b = Number(document.getElementById("addB").value);
   // Int64 args cross as BigInt; the result is a BigInt too.
-  const r = velaExports.velaAdd(a, b);
+  const r = vyrnExports.vyrnAdd(a, b);
   document.getElementById("addOut").textContent = `= ${r}  (BigInt: ${typeof r === "bigint"})`;
 });
 
 document.getElementById("callGreet").addEventListener("click", () => {
-  if (!velaExports) return;
+  if (!vyrnExports) return;
   const name = document.getElementById("greetName").value;
-  // A JS string in, a decoded Vela-built string back.
-  const r = velaExports.greet(name);
+  // A JS string in, a decoded Vyrn-built string back.
+  const r = vyrnExports.greet(name);
   document.getElementById("greetOut").textContent = JSON.stringify(r);
 });
 </script>

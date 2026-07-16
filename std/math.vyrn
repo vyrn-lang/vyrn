@@ -1,4 +1,4 @@
-/// std/math — numeric helpers, written in Vela itself. Being ordinary Vela,
+/// std/math — numeric helpers, written in Vyrn itself. Being ordinary Vyrn,
 /// everything here gets interpreter == native == wasm parity for free.
 
 export fn min(a: Int64, b: Int64) -> Int64 {

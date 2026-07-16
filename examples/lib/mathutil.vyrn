@@ -1,4 +1,4 @@
-/// A local library module for examples/modules.vela. Only `export`ed names are
+/// A local library module for examples/modules.vyrn. Only `export`ed names are
 /// importable; `double` is private to this file.
 
 export type Percent = Int64 where value >= 0 && value <= 100

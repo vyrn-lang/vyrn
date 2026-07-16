@@ -4,7 +4,7 @@
     {
       "label": "build-lsp",
       "type": "shell",
-      "command": "cargo build --manifest-path ${workspaceFolder}/compiler/vela-lsp/Cargo.toml",
+      "command": "cargo build --manifest-path ${workspaceFolder}/compiler/vyrn-lsp/Cargo.toml",
       "problemMatcher": "$rustc",
       "group": "build"
     }

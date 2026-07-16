@@ -1,6 +1,6 @@
 # Build the demo's example modules to wasm32-wasip1.
 # Needs the WASI sysroot (auto-detected from ..\tools\wasi-sysroot-*, or set
-# $env:WASI_SYSROOT) and clang on PATH — same requirements as `velac build
+# $env:WASI_SYSROOT) and clang on PATH — same requirements as `vyrn build
 # --target wasm` anywhere else.
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
@@ -12,10 +12,10 @@ if (-not $env:WASI_SYSROOT) {
 }
 
 foreach ($name in "fib", "enum", "reflection", "jsonschema", "externdemo", "externdemo2", "eventloop", "files", "input", "args") {
-    cargo run -q --manifest-path "$root\compiler\Cargo.toml" -p vela-cli -- `
-        build "$root\examples\$name.vela" --target wasm -o "$PSScriptRoot\$name.wasm"
+    cargo run -q --manifest-path "$root\compiler\Cargo.toml" -p vyrn-cli -- `
+        build "$root\examples\$name.vyrn" --target wasm -o "$PSScriptRoot\$name.wasm"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # velac leaves its intermediates next to the output; the page needs only
+    # vyrn leaves its intermediates next to the output; the page needs only
     # the .wasm.
     Remove-Item "$PSScriptRoot\$name.ll", "$PSScriptRoot\$name.shim.c" -ErrorAction SilentlyContinue
 }

@@ -33,10 +33,10 @@ fn main() -> Int64 {
     // ---- ownership transfer: the caller owns (and frees) the result ---------
     i = 0
     while i < 1000000 {
-        let name = fullName("Ada", "Lovelace") // owned result — freed each turn
+        let name = fullName("Ada", "Lovelace") // owned result — freed each turn
         n = name.length
         i = i + 1
     }
-    print(n) // 12  ("Ada Lovelace")
+    print(n) // 12  ("Ada Lovelace")
     return n
 }

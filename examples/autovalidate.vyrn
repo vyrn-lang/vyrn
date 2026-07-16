@@ -2,7 +2,7 @@
 /// `where`-validated type is checked BY THE BOUNDARY ITSELF — no explicit
 /// `Age(n)` constructor call needed. Provably-bad constants are compile
 /// errors; provably-good ones cost nothing; dynamic values trap at runtime
-/// (see validate_fail.vela for the trapping flavor).
+/// (see validate_fail.vyrn for the trapping flavor).
 ///
 /// Boundaries that validate automatically: `let` annotations, assignments,
 /// call arguments, returns, record fields, and array elements.

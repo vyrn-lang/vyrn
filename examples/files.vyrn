@@ -1,7 +1,7 @@
 /// Files — RFC-0014. `readFile`/`writeFile` move whole UTF-8 Strings;
 /// `readFileBytes`/`bytes`/`stringFromBytes` (M2) handle raw bytes.
 ///
-/// Error payloads are CANONICAL Vela wording, never OS text — so all three
+/// Error payloads are CANONICAL Vyrn wording, never OS text — so all three
 /// backends (interpreter, native, wasm) produce byte-identical `Err`s:
 ///
 ///   readFile  -> Err("cannot read `<path>`")        any I/O reason
@@ -29,7 +29,7 @@ fn main() -> Int64 {
     print(showRead(readFile("data/no_such_file.txt")))
 
     // writeFile -> readFile round-trip (create/truncate + write).
-    let report = "three lines\nwritten by\nfiles.vela"
+    let report = "three lines\nwritten by\nfiles.vyrn"
     let wrote = match writeFile("data/report.tmp.txt", report) {
         Ok(b) => "wrote: \{b}",
         Err(e) => "error: \{e}",

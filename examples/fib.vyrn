@@ -1,5 +1,5 @@
 // Recursive Fibonacci — exercises functions, recursion, if, and comparison.
-// `velac run examples/fib.vela` prints 55 and exits with code 55.
+// `vyrn run examples/fib.vyrn` prints 55 and exits with code 55.
 
 fn fib(n: Int64) -> Int64 {
     if n < 2 {

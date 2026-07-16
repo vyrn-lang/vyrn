@@ -1,7 +1,7 @@
-# Rust build output (workspace and the excluded vela-codegen-llvm crate)
+# Rust build output (workspace and the excluded vyrn-codegen-llvm crate)
 target/
 
-# Compiled Vela artifacts (regenerable via `velac build`)
+# Compiled Vyrn artifacts (regenerable via `vyrn build`)
 *.exe
 *.ll
 *.obj
@@ -14,7 +14,7 @@ web/*.shim.c
 
 # Editor / tooling
 editor/**/node_modules/
-# Bundled LSP server binary (copied from vela-lsp/target by npm run package)
+# Bundled LSP server binary (copied from vyrn-lsp/target by npm run package)
 editor/vscode/server/
 *.vsix
 

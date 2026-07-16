@@ -1,21 +1,21 @@
 // Demonstrates COMPILE-TIME validation failure — the other half of validation.
 //
-// validate_fail.vela shows a RUNTIME failure: a value arriving through a
+// validate_fail.vyrn shows a RUNTIME failure: a value arriving through a
 // parameter can't be folded, so its check happens when the program runs. But
 // when the offending value is a compile-time CONSTANT, the compiler evaluates
 // the `where` predicate right then and rejects the program before it ever runs
 // (RFC-0003: what the compiler can prove costs nothing and fails early).
 //
-// This file is an INTENTIONAL compile error — it is meant to FAIL `velac check`.
+// This file is an INTENTIONAL compile error — it is meant to FAIL `vyrn check`.
 // Because it never builds, the parity harness lists it under
 // EXPECTED_CHECK_FAILURE rather than running it. Observe the diagnostics with:
 //
-//   velac check examples/validate_compile.vela
+//   vyrn check examples/validate_compile.vyrn
 //
 // Each construction below is provably out of range, so each is a compile error
 // naming the type and its predicate — e.g.
 //   `5 does not satisfy `Age` (predicate `where value >= 18` is false)`
-// Compare validate.vela, where `Age(25)` is proven VALID at compile time (and
+// Compare validate.vyrn, where `Age(25)` is proven VALID at compile time (and
 // so costs nothing at runtime).
 
 type Age = Int64 where value >= 18

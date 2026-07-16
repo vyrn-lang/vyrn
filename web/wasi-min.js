@@ -1,8 +1,8 @@
-// Minimal WASI preview1 shim — just enough to run `velac build --target wasm`
+// Minimal WASI preview1 shim — just enough to run `vyrn build --target wasm`
 // output in a browser. Hand-rolled, zero dependencies, matching the project's
 // no-crates ethos.
 //
-// A compute-only velac module imports five preview1 functions (wasi-libc's
+// A compute-only vyrn module imports five preview1 functions (wasi-libc's
 // stdio path): fd_write, fd_close, fd_seek, fd_fdstat_get, proc_exit. A module
 // using input (RFC-0014: args/readLine/readFile/writeFile) additionally pulls
 // in args_get, args_sizes_get, fd_read, fd_fdstat_set_flags, fd_prestat_get,
@@ -15,7 +15,7 @@
 // ever grows, the instantiate error names the missing function.
 //
 // Usage:
-//   const { exitCode, stdout, stderr, exports } = await runVela(bytes, {
+//   const { exitCode, stdout, stderr, exports } = await runVyrn(bytes, {
 //     onStdout: line => ..., onStderr: line => ...,   // optional, per-chunk
 //     extern: {                                        // optional (RFC-0012 M1)
 //       jsLog: (msg) => console.log(msg),              //   String param decoded
@@ -35,7 +35,7 @@ const ERRNO_BADF = 8;
 const ERRNO_NOENT = 44; // no filesystem in a page: every path_open fails
 const ERRNO_SPIPE = 29; // stdout/stderr are not seekable
 
-// --- minimal wasm reader: recover the signatures of the module's `vela.*`
+// --- minimal wasm reader: recover the signatures of the module's `vyrn.*`
 // imports (so the extern-import glue can decode/encode arguments, RFC-0012 M1)
 // AND of its exported functions (so the export glue can wrap them, M2). The JS
 // WebAssembly API exposes names but not types, so we read the type, import,
@@ -130,13 +130,13 @@ function readModule(bytes) {
 }
 
 /** Thrown by proc_exit to unwind out of _start; carries the exit code. */
-class VelaExit {
+class VyrnExit {
   constructor(code) {
     this.code = code;
   }
 }
 
-export async function runVela(wasmBytes, hooks = {}) {
+export async function runVyrn(wasmBytes, hooks = {}) {
   let memory; // set after instantiate
   const dec = new TextDecoder();
   let stdout = "";
@@ -187,7 +187,7 @@ export async function runVela(wasmBytes, hooks = {}) {
     fd_close: () => ERRNO_SUCCESS,
     fd_seek: () => ERRNO_SPIPE,
     proc_exit: (code) => {
-      throw new VelaExit(code);
+      throw new VyrnExit(code);
     },
 
     // ---- input I/O (RFC-0014): graceful degradation, not file access -------
@@ -214,35 +214,35 @@ export async function runVela(wasmBytes, hooks = {}) {
     path_open: () => ERRNO_NOENT,
   };
 
-  // Build the `vela` import namespace (RFC-0012) from the host's extern hooks.
-  // For each `vela.*` the module imports, wrap the user function so it sees
+  // Build the `vyrn` import namespace (RFC-0012) from the host's extern hooks.
+  // For each `vyrn.*` the module imports, wrap the user function so it sees
   // decoded values: a `String` param arrives as an (i32 ptr, i64 len) pair and
   // is decoded to a JS string; an `i64` param arrives as a `BigInt`; `i32`/
   // float params arrive as numbers. Return values are converted back to the
   // wasm result type (BigInt for i64, 0/1 for a Bool i32, numbers for floats).
   //
-  // String detection is by ABI shape: the only Vela type that lowers to two
+  // String detection is by ABI shape: the only Vyrn type that lowers to two
   // wasm words is `String` = (i32, i64), so an i32 immediately followed by an
   // i64 is decoded as one string argument. (A hypothetical `(Int32, Int64)`
   // adjacent pair would collide — none of the v1 externs use that; documented
   // in web/README.md.)
   const externHooks = hooks.extern || {};
   const mod = readModule(wasmBytes);
-  const wanted = mod.imports.filter((im) => im.module === "vela");
-  const vela = {};
+  const wanted = mod.imports.filter((im) => im.module === "vyrn");
+  const vyrn = {};
   for (const im of wanted) {
     const fn = externHooks[im.field];
     if (typeof fn !== "function") {
       const provided = Object.keys(externHooks);
       throw new Error(
-        `module imports extern \`vela.${im.field}\`, but no such function was ` +
-          `provided. Pass it via runVela(bytes, { extern: { ${im.field}: … } }). ` +
+        `module imports extern \`vyrn.${im.field}\`, but no such function was ` +
+          `provided. Pass it via runVyrn(bytes, { extern: { ${im.field}: … } }). ` +
           `Provided: [${provided.join(", ")}]; wanted: [${wanted.map((w) => w.field).join(", ")}]`
       );
     }
     const params = im.type.params;
     const result = im.type.results[0]; // v1 externs return at most one value
-    vela[im.field] = (...raw) => {
+    vyrn[im.field] = (...raw) => {
       const dec = new TextDecoder();
       const args = [];
       for (let k = 0; k < params.length; k++) {
@@ -269,27 +269,27 @@ export async function runVela(wasmBytes, hooks = {}) {
 
   const { instance } = await WebAssembly.instantiate(wasmBytes, {
     wasi_snapshot_preview1: wasi,
-    vela,
+    vyrn,
   });
   memory = instance.exports.memory;
 
   // --- string helpers over linear memory (RFC-0012 M2 export ABI) ------------
-  // A String crosses into an exported Vela function as a single pointer: the JS
-  // side allocates `len + 1` bytes via the module's own `__vela_malloc`, copies
-  // UTF-8, and writes a NUL terminator (a Vela String is a NUL-terminated ptr).
+  // A String crosses into an exported Vyrn function as a single pointer: the JS
+  // side allocates `len + 1` bytes via the module's own `__vyrn_malloc`, copies
+  // UTF-8, and writes a NUL terminator (a Vyrn String is a NUL-terminated ptr).
   // This is the asymmetry vs. an IMPORT (M1), where a String is a (ptr, len)
   // pair — an import can't allocate inside the module, but an exported call can.
   const enc = new TextEncoder();
   const encodeString = (s) => {
     const bytes = enc.encode(s);
-    if (typeof instance.exports.__vela_malloc !== "function") {
+    if (typeof instance.exports.__vyrn_malloc !== "function") {
       throw new Error(
-        "a String argument needs the module's allocator, but `__vela_malloc` is " +
-          "not exported. Rebuild: velac exports it whenever an `export extern fn` " +
+        "a String argument needs the module's allocator, but `__vyrn_malloc` is " +
+          "not exported. Rebuild: vyrn exports it whenever an `export extern fn` " +
           "takes a String parameter."
       );
     }
-    const ptr = Number(instance.exports.__vela_malloc(BigInt(bytes.length + 1)));
+    const ptr = Number(instance.exports.__vyrn_malloc(BigInt(bytes.length + 1)));
     const view = new Uint8Array(memory.buffer);
     view.set(bytes, ptr);
     view[ptr + bytes.length] = 0; // NUL
@@ -314,7 +314,7 @@ export async function runVela(wasmBytes, hooks = {}) {
   // name it `"string"` (NUL-decoded) or `"bool"`, else an i32 result is a
   // number. `i64` results are BigInt, floats are numbers. See web/README.md.
   const returnHints = hooks.exportReturns || {};
-  const RESERVED = new Set(["memory", "_start", "__vela_malloc"]);
+  const RESERVED = new Set(["memory", "_start", "__vyrn_malloc"]);
   const wrappedExports = {};
   for (const ex of mod.exports) {
     if (ex.kind !== 0 || !ex.type) continue; // functions only
@@ -355,7 +355,7 @@ export async function runVela(wasmBytes, hooks = {}) {
   try {
     instance.exports._start();
   } catch (e) {
-    if (e instanceof VelaExit) {
+    if (e instanceof VyrnExit) {
       exitCode = e.code;
     } else {
       throw e; // a genuine trap (unreachable, OOB) — surface it

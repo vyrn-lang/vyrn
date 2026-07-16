@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Vela in the browser</title>
+<title>Vyrn in the browser</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -38,9 +38,9 @@
 </style>
 </head>
 <body>
-<h1>Vela in the browser</h1>
+<h1>Vyrn in the browser</h1>
 <p class="sub">
-  The same <code>velac build --target wasm</code> module that runs under
+  The same <code>vyrn build --target wasm</code> module that runs under
   wasmtime, executed here by a small hand-rolled WASI shim
   (<code>wasi-min.js</code>). No frameworks, no toolchain in the page.
 </p>
@@ -51,7 +51,7 @@
   <span id="status"></span>
 </div>
 <div class="row">
-  <label>…or drop in any velac-built module: <input type="file" id="file" accept=".wasm"></label>
+  <label>…or drop in any vyrn-built module: <input type="file" id="file" accept=".wasm"></label>
 </div>
 
 <div class="label">stdout</div>
@@ -60,7 +60,7 @@
 <pre id="stderr"></pre>
 
 <script type="module">
-import { runVela } from "./wasi-min.js";
+import { runVyrn } from "./wasi-min.js";
 
 const pick = document.getElementById("pick");
 const status = document.getElementById("status");
@@ -74,7 +74,7 @@ const err = document.getElementById("stderr");
 for (const name of ["fib", "enum", "reflection", "jsonschema", "files", "input", "args"]) {
   const o = document.createElement("option");
   o.value = `${name}.wasm`;
-  o.textContent = `examples/${name}.vela`;
+  o.textContent = `examples/${name}.vyrn`;
   pick.appendChild(o);
 }
 
@@ -84,7 +84,7 @@ async function run(bytes) {
   status.textContent = "running…";
   try {
     const t0 = performance.now();
-    const r = await runVela(bytes, {
+    const r = await runVyrn(bytes, {
       onStdout: (s) => (out.textContent += s),
       onStderr: (s) => (err.textContent += s),
     });

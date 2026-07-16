@@ -3,7 +3,7 @@
 // The generational-reference slab holds 65536 cells. This builds a 5-node list,
 // sums it, and frees it — 20,000 times over. That is 100,000 cell allocations,
 // well past the slab's 65536; they only fit because `freeList` drops every
-// node and its slot is reused. Without the frees this would trip "Vela: out of
+// node and its slot is reused. Without the frees this would trip "Vyrn: out of
 // reference cells" after the 65536th allocation. It runs to completion, so
 // reclamation holds. (The native binary handles far more — see the docs.)
 

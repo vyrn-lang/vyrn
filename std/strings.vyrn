@@ -1,4 +1,4 @@
-/// std/strings — string helpers, written in Vela itself.
+/// std/strings — string helpers, written in Vyrn itself.
 
 /// `s` repeated `n` times ("" for n <= 0).
 export fn repeat(s: String, n: Int64) -> String {

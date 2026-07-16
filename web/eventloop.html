@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Vela × the host-driven event loop</title>
+<title>Vyrn × the host-driven event loop</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -44,15 +44,15 @@
 </style>
 </head>
 <body>
-<h1>Vela × the host-driven event loop</h1>
+<h1>Vyrn × the host-driven event loop</h1>
 <p class="sub">
-  <code>examples/eventloop.vela</code> keeps a counter in <strong>module
+  <code>examples/eventloop.vyrn</code> keeps a counter in <strong>module
   state</strong> (RFC-0013): a top-level <code>let mut hits = 0</code> that
   survives between calls. A wasm module can't block the page or suspend, so the
-  <em>host owns the loop</em> — Vela owns the state and the logic. After
+  <em>host owns the loop</em> — Vyrn owns the state and the logic. After
   <code>_start</code> runs <code>main</code> once, the timer below calls the
   exported <code>onTick()</code> handler on each fire and the button calls
-  <code>reset()</code>. The count you see is live Vela module state.
+  <code>reset()</code>. The count you see is live Vyrn module state.
   <a href="./index.html">← plain demo</a> · <a href="./externdemo.html">extern / exports demo →</a>
 </p>
 
@@ -77,7 +77,7 @@
 <pre id="stdout"></pre>
 
 <script type="module">
-import { runVela } from "./wasi-min.js";
+import { runVyrn } from "./wasi-min.js";
 
 const status = document.getElementById("status");
 const out = document.getElementById("stdout");
@@ -89,23 +89,23 @@ const stopBtn = document.getElementById("stop");
 const resetBtn = document.getElementById("reset");
 
 const TICK_MS = 800;
-let velaExports = null;
+let vyrnExports = null;
 let timer = null;
 let ticks = 0;
 
 function setRunning(on) {
-  startBtn.disabled = on || !velaExports;
+  startBtn.disabled = on || !vyrnExports;
   stopBtn.disabled = !on;
-  resetBtn.disabled = !velaExports;
+  resetBtn.disabled = !vyrnExports;
 }
 
 function startLoop() {
-  if (timer || !velaExports) return;
+  if (timer || !vyrnExports) return;
   timer = setInterval(() => {
     // The host's loop: call the exported handler, render its result. onTick()
     // reads AND writes the module-state counter, so it advances every fire —
     // proof that state survives between entries.
-    const n = Number(velaExports.onTick());
+    const n = Number(vyrnExports.onTick());
     ticks += 1;
     countEl.textContent = n;
     ticklog.textContent += `tick ${ticks}: onTick() -> ${n}\n`;
@@ -131,11 +131,11 @@ loadBtn.addEventListener("click", async () => {
     const bytes = await resp.arrayBuffer();
     // _start runs main once (which also inits module state before main). The
     // exported handlers are then callable on the live instance.
-    const r = await runVela(bytes, { onStdout: (s) => (out.textContent += s) });
-    velaExports = r.exports;
+    const r = await runVyrn(bytes, { onStdout: (s) => (out.textContent += s) });
+    vyrnExports = r.exports;
     countEl.textContent = "0";
     status.innerHTML =
-      `<span class="ok">exit ${r.exitCode}</span> · exports: ${Object.keys(velaExports).join(", ")}`;
+      `<span class="ok">exit ${r.exitCode}</span> · exports: ${Object.keys(vyrnExports).join(", ")}`;
     setRunning(false);
     startLoop(); // begin the host loop immediately, like a page would
   } catch (e) {
@@ -148,8 +148,8 @@ startBtn.addEventListener("click", startLoop);
 stopBtn.addEventListener("click", stopLoop);
 
 resetBtn.addEventListener("click", () => {
-  if (!velaExports) return;
-  velaExports.reset();          // sets the module-state counter back to 0
+  if (!vyrnExports) return;
+  vyrnExports.reset();          // sets the module-state counter back to 0
   countEl.textContent = "0";
   ticklog.textContent += `reset() -> counter back to 0\n`;
 });

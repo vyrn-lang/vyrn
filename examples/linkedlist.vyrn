@@ -1,4 +1,4 @@
-// A singly-linked list — the first recursive heap data structure in Vela
+// A singly-linked list — the first recursive heap data structure in Vyrn
 // (RFC-0004 §4) — now with deterministic reclamation. Three features combine:
 //
 //   * `Ref<T>` gives a fixed-size handle, so `Node` can refer to its own type
@@ -6,7 +6,7 @@
 //   * an `Option` payload can hold a `Ref` (boxed into the tag+word aggregate),
 //     so `None` cleanly terminates the list, and
 //   * `drop` frees a node's cell, so walking the list bottom-up reclaims the
-//     whole structure — proven by the stress loop in `examples/freelist.vela`,
+//     whole structure — proven by the stress loop in `examples/freelist.vyrn`,
 //     which builds and frees 100,000 nodes through a 65536-cell slab.
 
 type Node = { value: Int64, next: Option<Ref<Node>> }

@@ -40,8 +40,8 @@ fn main() -> Int64 {
     print(register("bob")) // bob — validated at runtime
 
     // Regex-refined strings run the same matcher.
-    let e = Email("dev@vela.io")
-    print(e) // dev@vela.io
+    let e = Email("dev@vyrn.io")
+    print(e) // dev@vyrn.io
     let w = EveryOther("banana") // 6 chars, a-z, every 2nd char 'a'
     print(w) // banana
 

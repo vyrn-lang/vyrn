@@ -2,7 +2,7 @@
 // An invalid value of a validated type simply cannot exist.
 //
 // Three ways in:
-//   - automatically, at any value boundary (see autovalidate.vela);
+//   - automatically, at any value boundary (see autovalidate.vyrn);
 //   - explicitly, `Age(n)` — asserts validity, traps on failure;
 //   - fallibly, `Age?(n) -> Option<Age>` — `None` when the refinement fails,
 //     so untrusted input is handled without aborting.

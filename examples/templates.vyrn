@@ -1,5 +1,5 @@
 /// String templates — RFC-0007: interpolation, multi-line strings, and the
-/// first-class `Template` record. (See tagged.vela for tagged templates.)
+/// first-class `Template` record. (See tagged.vyrn for tagged templates.)
 ///
 /// A `\{ expr }` hole inside a normal `"..."` string interpolates the
 /// expression, rendered exactly as `print` renders it (Int64, sized ints,
@@ -37,12 +37,12 @@ fn render(t: Template) -> String {
 }
 
 fn main() -> Int64 {
-    let name = "Vela"
+    let name = "Vyrn"
     let n = 3
     let done = n > 2
 
     // ---- interpolation ---------------------------------------------------
-    print(greet(name, n)) // hi Vela, you have 3 messages
+    print(greet(name, n)) // hi Vyrn, you have 3 messages
     print("n=\{n}, doubled=\{n + n}") // n=3, doubled=6
     print("done? \{done}") // done? true
     print("literal braces { } stay put") // literal braces { } stay put
@@ -61,6 +61,6 @@ messages: \{n}"
     let t = template"x = \{n}, name = \{name}"
     print(t.parts.length) // 3
     print(t.values.length) // 2
-    print(render(t)) // x = 3, name = Vela
+    print(render(t)) // x = 3, name = Vyrn
     return 0
 }

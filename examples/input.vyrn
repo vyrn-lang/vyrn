@@ -7,7 +7,7 @@
 /// (interpreter, native, wasm) and requires byte-identical output. Run it
 /// yourself with:
 ///
-///   velac run examples/input.vela < examples/input.stdin
+///   vyrn run examples/input.vyrn < examples/input.stdin
 
 /// One line, or the sentinel when stdin is exhausted. (`match` is an
 /// expression; a helper keeps the loop body flat.)

@@ -1,7 +1,7 @@
 /// JS interop (RFC-0012, milestone 1) — `extern fn` imports.
 ///
 /// An `extern fn` is a body-less declaration whose implementation the wasm host
-/// supplies from the fixed `vela` import namespace (see `web/`). Calling one on
+/// supplies from the fixed `vyrn` import namespace (see `web/`). Calling one on
 /// the wasm target crosses into JavaScript for real; calling it on native or
 /// under the interpreter traps with `extern \`name\` is not available on this
 /// target`, since a single binary has no host to provide it. Declaring an
@@ -33,11 +33,11 @@ fn main() -> Int64 {
 
     // Timestamp from a JS clock, then log a line across the boundary.
     let t = jsNow()
-    jsLog("vela: sum(1..\{n}) = \{local} at t=\{t}")
+    jsLog("vyrn: sum(1..\{n}) = \{local} at t=\{t}")
 
     // Round-trip two integers out to JS and back.
     let viaJs = jsAdd(local, n)
-    jsLog("vela: jsAdd(\{local}, \{n}) = \{viaJs}")
+    jsLog("vyrn: jsAdd(\{local}, \{n}) = \{viaJs}")
 
     return 0
 }

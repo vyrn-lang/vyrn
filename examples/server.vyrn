@@ -1,8 +1,8 @@
 /// RFC-0016 — The Server. A served module: module state (a hit counter), an
 /// optional `main` setup hook, and `fn handle(req: Request) -> Response`.
 ///
-/// `velac serve examples/server.vela --port 8080` runs `handle` over real HTTP
-/// (the host owns the accept loop; Vela owns the state and logic). Here `main`
+/// `vyrn serve examples/server.vyrn --port 8080` runs `handle` over real HTTP
+/// (the host owns the accept loop; Vyrn owns the state and logic). Here `main`
 /// also drives `handle` directly with constructed `Request`s and prints the
 /// responses, so the file is a normal three-way parity citizen (interp ==
 /// native == wasm) — the serve host is CLI runtime, not language semantics.

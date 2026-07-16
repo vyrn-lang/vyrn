@@ -6,10 +6,10 @@
 // Every access is generation-checked: a reference used after the cell is
 // dropped fails a cheap check instead of dangling — a stale alias is caught,
 // never a use-after-free. A record may even hold a `Ref` to *its own type*
-// without becoming infinite (see linkedlist.vela / tree.vela).
+// without becoming infinite (see linkedlist.vyrn / tree.vyrn).
 //
 // An *aliased* cell needs an explicit `drop`; a cell that is never aliased is
-// auto-released by the ownership analysis (see autorelease.vela).
+// auto-released by the ownership analysis (see autorelease.vyrn).
 
 fn bump(r: Ref<Int64>) -> Int64 {
     set(r, get(r) + 1) // mutate through a reference passed by value

@@ -1,4 +1,4 @@
-// An integer-keyed map built entirely in Vela from an `Array` of key/value
+// An integer-keyed map built entirely in Vyrn from an `Array` of key/value
 // records — no new builtin. Lookup is a recursive linear scan returning an
 // `Option`. This is a small capstone: arrays, records, `Option`, recursion, and
 // reclamation all compose into a real abstract data type.

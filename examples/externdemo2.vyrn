@@ -1,6 +1,6 @@
 /// JS interop (RFC-0012, milestone 2) — `export extern fn` exports.
 ///
-/// An `export extern fn` is a NORMAL Vela function (body fully checked, runnable
+/// An `export extern fn` is a NORMAL Vyrn function (body fully checked, runnable
 /// under the interpreter and the native binary, spawn-analyzed by its body) that
 /// is ADDITIONALLY exported to JS on the wasm target. `_start` still runs `main`
 /// once; afterwards the host page can call the exported functions on the live
@@ -8,25 +8,25 @@
 ///
 /// Because these are ordinary functions (no body-less imports), calling them
 /// never traps: this program is fully three-way parity-capable (interp == native
-/// == wasm), unlike `externdemo.vela` which imports host functions.
+/// == wasm), unlike `externdemo.vyrn` which imports host functions.
 
-// Exported to JS. Also a perfectly ordinary Vela function, called from `main`.
-export extern fn velaAdd(a: Int64, b: Int64) -> Int64 {
+// Exported to JS. Also a perfectly ordinary Vyrn function, called from `main`.
+export extern fn vyrnAdd(a: Int64, b: Int64) -> Int64 {
     return a + b
 }
 
 // A String crosses in BOTH directions here. On wasm the JS caller allocates the
-// argument buffer via the module's `__vela_malloc`, copies UTF-8 + a NUL, and
+// argument buffer via the module's `__vyrn_malloc`, copies UTF-8 + a NUL, and
 // passes the pointer; the returned String is a pointer the shim decodes by
-// scanning for the NUL. From Vela it is just string building.
+// scanning for the NUL. From Vyrn it is just string building.
 export extern fn greet(name: String) -> String {
-    return "Hello, \{name}! Welcome to Vela."
+    return "Hello, \{name}! Welcome to Vyrn."
 }
 
 fn main() -> Int64 {
-    // The exported functions are ordinary Vela functions too — use them directly.
-    let sum = velaAdd(40, 2)
-    print("velaAdd(40, 2) = \{sum}")
+    // The exported functions are ordinary Vyrn functions too — use them directly.
+    let sum = vyrnAdd(40, 2)
+    print("vyrnAdd(40, 2) = \{sum}")
     print(greet("world"))
     return 0
 }

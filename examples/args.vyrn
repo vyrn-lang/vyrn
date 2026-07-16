@@ -5,8 +5,8 @@
 /// The parity harness runs every example with zero arguments, so this example
 /// is deterministic there; run it with real arguments yourself:
 ///
-///   velac run examples/args.vela greet world
-///   velac build examples/args.vela -o args.exe && ./args.exe greet world
+///   vyrn run examples/args.vyrn greet world
+///   vyrn build examples/args.vyrn -o args.exe && ./args.exe greet world
 
 fn main() -> Int64 {
     let a = args()
@@ -17,7 +17,7 @@ fn main() -> Int64 {
         i = i + 1
     }
     if a.length == 0 {
-        print("(try: velac run examples/args.vela hello world)")
+        print("(try: vyrn run examples/args.vyrn hello world)")
     }
     return 0
 }

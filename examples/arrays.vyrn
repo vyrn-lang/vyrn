@@ -1,6 +1,6 @@
 // Arrays — growable `Array<T>` and fixed-size `Array<T, N>` (RFC-0002).
 //
-// The growable array is Vela's `Vec`: a { data, len, cap } triple over a heap
+// The growable array is Vyrn's `Vec`: a { data, len, cap } triple over a heap
 // buffer that doubles when it fills. The surface is subject-first: build an
 // empty one with `[]`, grow it with `arr.push(x)`, read `arr.length`, index
 // with `arr[i]` (bounds-checked), and MUTATE in place (RFC-0011): store an

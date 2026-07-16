@@ -1,7 +1,7 @@
 /// Compile-time JSON Schema — `jsonSchema(TypeName)` renders a declared type as a
 /// JSON Schema (draft 2020-12) document, computed from the type's `where` predicate
-/// and structure *at compile time*. Like `schemaOf` (see reflection.vela) it is not
-/// runtime reflection — Vela erases types — so the interpreter and native backend
+/// and structure *at compile time*. Like `schemaOf` (see reflection.vyrn) it is not
+/// runtime reflection — Vyrn erases types — so the interpreter and native backend
 /// emit byte-identical strings. Serve it, write it to disk, or diff it in CI.
 ///
 /// Scalar bases map to the standard type names; the `where` predicate contributes

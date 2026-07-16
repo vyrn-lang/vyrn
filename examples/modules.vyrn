@@ -1,7 +1,7 @@
 /// Modules (RFC-0010): `import { names } from "path"` brings another file's
 /// `export`ed functions and types into scope. Paths are relative to the
-/// importing file (`.vela` appended), and `std/...` is the standard library —
-/// itself written in Vela. Everything links into one program, so validated
+/// importing file (`.vyrn` appended), and `std/...` is the standard library —
+/// itself written in Vyrn. Everything links into one program, so validated
 /// types, monomorphization, and interp == native == wasm parity all apply
 /// across module boundaries.
 
@@ -14,7 +14,7 @@ fn main() -> Int64 {
     let half: Percent = 50
     print(scale(300, half)) // 150
 
-    print(clamp(999, 0, 100)) // 100 — std, written in Vela
+    print(clamp(999, 0, 100)) // 100 — std, written in Vyrn
 
     print(repeat("ab", 3)) // ababab
     let parts: Array<String> = ["x", "y", "z"]

@@ -3,18 +3,18 @@
 // `checked(5)` passes 5 to `Age`, whose predicate requires value >= 18. Because
 // 5 arrives through a function parameter the compiler can't fold it, so the
 // check happens at runtime — and fails, aborting the program with a nonzero
-// exit code. (Compare validate.vela, where every construction succeeds.)
+// exit code. (Compare validate.vyrn, where every construction succeeds.)
 //
 // This is only HALF the story. When the offending value is a compile-time
 // CONSTANT, the same predicate is evaluated during checking and the program is
-// rejected before it ever runs — see validate_compile.vela for that half. Here
+// rejected before it ever runs — see validate_compile.vyrn for that half. Here
 // the value hides behind a parameter, so only the runtime net catches it.
 //
 // Both backends behave identically: `error: validation failed for `Age`` on
 // stderr, exit code 1.
 //
-//   velac run   examples/validate_fail.vela   -> error, exit 1
-//   velac build examples/validate_fail.vela   -> same error, same exit code
+//   vyrn run   examples/validate_fail.vyrn   -> error, exit 1
+//   vyrn build examples/validate_fail.vyrn   -> same error, same exit code
 
 type Age = Int64 where value >= 18
 

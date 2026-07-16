@@ -1,4 +1,4 @@
-/// Encodings — Vela strings are UTF-8, plus the data encodings (hex, base64,
+/// Encodings — Vyrn strings are UTF-8, plus the data encodings (hex, base64,
 /// URL) over their bytes.
 ///
 /// Text level:
@@ -39,7 +39,7 @@ fn main() -> Int64 {
     print(show(hexDecode("4869"))) // Hi
 
     // ---- base64 (standard alphabet, `=` padding) ----------------------------
-    print(base64Encode("Hello, Vela!")) // SGVsbG8sIFZlbGEh
+    print(base64Encode("Hello, Vyrn!")) // SGVsbG8sIFZlbGEh
     print(show(base64Decode("SGVsbG8="))) // Hello
 
     // ---- URL / percent encoding (unreserved set is A-Za-z0-9-_.~) -----------
