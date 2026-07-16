@@ -97,8 +97,22 @@ pub fn load(
     opts: &loader::LoadOptions,
     resolver: &dyn loader::ModuleResolver,
 ) -> Result<ast::Program, Vec<diagnostics::Diagnostic>> {
+    load_with_role(root_source, root_path, opts, resolver, ast::CompileRole::Server)
+}
+
+/// Like [`load`], but type-checks for an explicit compile role (RFC-0019). The
+/// client role (`velac build --client`) rejects a *direct* call to a procedure —
+/// it must go through `rpc()`; the bodies still type-check so the shared contract
+/// module cannot rot silently.
+pub fn load_with_role(
+    root_source: &str,
+    root_path: &str,
+    opts: &loader::LoadOptions,
+    resolver: &dyn loader::ModuleResolver,
+    role: ast::CompileRole,
+) -> Result<ast::Program, Vec<diagnostics::Diagnostic>> {
     let program = loader::load(root_source, root_path, opts, resolver)?;
-    let mut diags = checker::check_accum(&program);
+    let mut diags = checker::check_accum_with_role(&program, role);
     if diags.is_empty() {
         diags.extend(movecheck::check_accum(&program));
     }

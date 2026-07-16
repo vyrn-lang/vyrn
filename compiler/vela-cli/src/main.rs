@@ -65,6 +65,12 @@ fn main() -> ExitCode {
     if cmd == "fmt" {
         return fmt_cmd(&args[2..]);
     }
+    // `build` does its own root + role resolution (RFC-0019 `--server`/`--client`
+    // select the manifest's fullstack roots), so it is handled before the generic
+    // "file or manifest main" resolution the other commands share.
+    if cmd == "build" {
+        return build(&args[2..]);
+    }
 
     // The remaining commands take an optional file; without one, the manifest
     // supplies `main`.
@@ -80,9 +86,6 @@ fn main() -> ExitCode {
         },
     };
 
-    if cmd == "build" {
-        return build(&path, rest);
-    }
     if cmd == "test" {
         return test_cmd(&path, rest);
     }
@@ -190,6 +193,10 @@ struct Manifest {
     /// Directory the manifest lives in (slash-separated).
     dir: String,
     main: Option<String>,
+    /// The fullstack roots (RFC-0019): `"server"` (native server-role binary)
+    /// and `"client"` (browser wasm, client role). Optional.
+    server: Option<String>,
+    client: Option<String>,
     dependencies: Vec<(String, String)>,
 }
 
@@ -212,6 +219,12 @@ fn find_manifest(start: &Path) -> Option<Manifest> {
                 Some(Json::Str(s)) => Some(s.clone()),
                 _ => None,
             };
+            let str_key = |k: &str| match doc.get(k) {
+                Some(Json::Str(s)) => Some(s.clone()),
+                _ => None,
+            };
+            let server = str_key("server");
+            let client = str_key("client");
             let dependencies = match doc.get("dependencies") {
                 Some(Json::Obj(entries)) => entries
                     .iter()
@@ -225,6 +238,8 @@ fn find_manifest(start: &Path) -> Option<Manifest> {
             return Some(Manifest {
                 dir: dir.to_string_lossy().replace('\\', "/"),
                 main,
+                server,
+                client,
                 dependencies,
             });
         }
@@ -238,6 +253,19 @@ fn manifest_main() -> Option<String> {
     let m = find_manifest(&cwd)?;
     let main = m.main?;
     Some(format!("{}/{main}", m.dir))
+}
+
+/// The manifest's fullstack `server`/`client` root (RFC-0019), resolved relative
+/// to the manifest's directory.
+fn manifest_role_root(key: &str) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let m = find_manifest(&cwd)?;
+    let root = match key {
+        "server" => m.server,
+        "client" => m.client,
+        _ => None,
+    }?;
+    Some(format!("{}/{root}", m.dir))
 }
 
 /// LoadOptions for a root file: std root + the nearest manifest's aliases.
@@ -500,12 +528,22 @@ fn save_lock(resolver: &remote::RemoteResolver) -> Result<(), ExitCode> {
 /// Load + check a root file through the module loader, printing diagnostics
 /// (with their originating file) on failure.
 fn load_program(path: &str, source: &str) -> Result<vela_frontend::ast::Program, ExitCode> {
+    load_program_role(path, source, vela_frontend::ast::CompileRole::Server)
+}
+
+/// Load + type-check a program for an explicit compile role (RFC-0019). Server
+/// role is the default everywhere except `velac build --client`.
+fn load_program_role(
+    path: &str,
+    source: &str,
+    role: vela_frontend::ast::CompileRole,
+) -> Result<vela_frontend::ast::Program, ExitCode> {
     // Strip Windows' verbatim prefix (`\\?\C:\..`) — it survives neither the
     // slash normalization nor readable diagnostics.
     let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
-    let result = vela_frontend::load(source, &root_key, &opts, &resolver);
+    let result = vela_frontend::load_with_role(source, &root_key, &opts, &resolver, role);
     // Pins are kept even when a later stage fails — fetched is pinned.
     save_lock(&resolver)?;
     match result {
@@ -1782,10 +1820,16 @@ fn write_response(stream: &mut std::net::TcpStream, status: i64, content_type: &
     let _ = stream.flush();
 }
 
-fn build(path: &str, rest: &[String]) -> ExitCode {
-    // parse optional `-o <out>` / `--target wasm`
+fn build(rest: &[String]) -> ExitCode {
+    // parse optional `-o <out>` / `--target wasm` / `--server` / `--client`, plus
+    // an optional positional file. `--server`/`--client` (RFC-0019) select a
+    // compile ROLE and, without an explicit file, the manifest's fullstack root.
+    use vela_frontend::ast::CompileRole;
     let mut out: Option<String> = None;
     let mut wasm = false;
+    let mut server_flag = false;
+    let mut client_flag = false;
+    let mut file: Option<String> = None;
     let mut i = 0;
     while i < rest.len() {
         if rest[i] == "-o" && i + 1 < rest.len() {
@@ -1800,11 +1844,59 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
                 }
             }
             i += 2;
+        } else if rest[i] == "--server" {
+            server_flag = true;
+            i += 1;
+        } else if rest[i] == "--client" {
+            client_flag = true;
+            i += 1;
+        } else if !rest[i].starts_with('-') && file.is_none() {
+            file = Some(rest[i].clone());
+            i += 1;
         } else {
             eprintln!("build: unexpected argument `{}`", rest[i]);
             return ExitCode::from(2);
         }
     }
+    if server_flag && client_flag {
+        eprintln!("build: `--server` and `--client` are mutually exclusive");
+        return ExitCode::from(2);
+    }
+    // The client role is a browser build: it implies `--target wasm`.
+    let role = if client_flag { CompileRole::Client } else { CompileRole::Server };
+    if client_flag {
+        wasm = true;
+    }
+
+    // Resolve the root: an explicit file wins; otherwise `--client`/`--server`
+    // take the manifest's `client`/`server` key, and a plain `build` its `main`.
+    let path = match file {
+        Some(f) => f,
+        None => {
+            let picked = if client_flag {
+                manifest_role_root("client")
+            } else if server_flag {
+                manifest_role_root("server")
+            } else {
+                manifest_main()
+            };
+            match picked {
+                Some(p) => p,
+                None => {
+                    let what = if client_flag {
+                        "a `client` root"
+                    } else if server_flag {
+                        "a `server` root"
+                    } else {
+                        "a `main`"
+                    };
+                    eprintln!("error: no input file, and no vela.json with {what} found");
+                    return ExitCode::from(2);
+                }
+            }
+        }
+    };
+    let path = path.as_str();
 
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -1814,11 +1906,11 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         }
     };
 
-    let program = match load_program(path, &source) {
+    let program = match load_program_role(path, &source, role) {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let ir = match vela_codegen::emit(&program) {
+    let ir = match vela_codegen::emit_with_role(&program, role) {
         Ok(ir) => ir,
         Err(e) => {
             eprintln!("error: {e}");

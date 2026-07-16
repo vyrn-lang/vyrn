@@ -1622,6 +1622,14 @@ pub fn emit_with_role(program: &Program, role: CompileRole) -> Result<String, St
     // functions (textual order is immaterial to LLVM).
     out.push_str(&globals_init_ir);
 
+    // A file with no `main` (a library module — RFC-0010 — or a client-role
+    // build whose entry is the exported handlers, RFC-0019) still links a trivial
+    // `@vela_main` so the C entry below resolves. It returns 0; the real surface
+    // is the exported functions the host calls.
+    if !program.functions.iter().any(|f| f.name == "main") {
+        out.push_str("define i64 @vela_main() {\nentry:\n  ret i64 0\n}\n");
+    }
+
     // C entry point: call Vela's main and reduce its i64 to a process exit code.
     // Mask to the low 8 bits so the result matches the interpreter (which does
     // `code & 0xff`) and the POSIX 0–255 exit-status convention — otherwise a
