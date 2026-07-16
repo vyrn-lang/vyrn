@@ -1,0 +1,68 @@
+/// Finite string types & interpolation containment (RFC-0020 M1).
+///
+/// A validated `String` whose regex denotes a FINITE language is a *finite
+/// string type*. Two powers follow, both checked at compile time by walking
+/// automata (a DFA product) — never by enumerating a union, so this scales to
+/// thousands of keys where TypeScript's template-literal types choke:
+///
+///   1. A string interpolation `"nav.\{s}.label"` whose every hole is a finite
+///      string type is itself typed as a finite language.
+///   2. Coercing that interpolation into a validated string type checks
+///      `L ⊆ T` by DFA containment. If PROVEN, no runtime validation is emitted
+///      (`navLabel` below is checked once, costs nothing at runtime). If it
+///      could produce a value outside `T`, the compiler rejects it with the
+///      exact offending key.
+///
+/// (The negative case — an interpolation whose witness escapes the target — is
+/// a compile error, so it lives in the checker tests, not this runnable file.)
+
+/// Every dotted translation key the app knows — a finite language.
+type TransKey = String where value =~ "(home\\.(title|subtitle)|nav\\.(home|about|settings)\\.label)"
+
+/// The nav sections — also finite. `"nav.\{Section}.label"` is therefore a
+/// finite language, and provably a subset of `TransKey`.
+type Section = String where value =~ "home|about|settings"
+
+/// A translation lookup keyed by a compile-time-checked key. A bad key is a
+/// compile error at every call site; there is no runtime key validation to pay.
+fn t(key: TransKey) -> String {
+    return key
+}
+
+/// Build a nav-label key from a section. The interpolation is PROVEN contained
+/// in `TransKey`, so the return boundary emits no validation — the containment
+/// was settled by the checker.
+fn navLabel(s: Section) -> TransKey {
+    return "nav.\{s}.label"
+}
+
+fn main() -> Int64 {
+    let home: Section = "home"
+    let about: Section = "about"
+
+    print(t("home.title")) // a constant finite key: home.title
+    print(t(navLabel(home))) // proven interpolation via navLabel: nav.home.label
+    print(t("nav.\{about}.label")) // proven inline, straight into the argument: nav.about.label
+
+    return 0
+}
+
+test "proven interpolation produces valid keys" {
+    let s: Section = "settings"
+    // navLabel's body is proven at compile time; here we confirm the value.
+    let k: String = navLabel(s)
+    assertEq(k, "nav.settings.label")
+}
+
+test "every section yields a TransKey" {
+    let secs: Array<Section, 3> = ["home", "about", "settings"]
+    let mut i = 0
+    for sec in secs {
+        // Each `navLabel(sec)` is statically a TransKey — this loop only
+        // confirms the runtime strings.
+        let key: String = navLabel(sec)
+        assert(key =~ "nav\\.(home|about|settings)\\.label")
+        i = i + 1
+    }
+    assertEq(i, 3)
+}
