@@ -3097,6 +3097,36 @@ mod tests {
         assert_eq!(run("fn main() -> Int64 { return 2 + 3 * 4; }").unwrap(), 14);
     }
 
+    // ---- payload enums / Result round-trip (RFC-0024) -------------------
+
+    /// `fromJson(T, toJson(x)) == Valid(x)` over the new domain: a payload enum
+    /// (single/tuple/nullary) and a `Result`, both nested through a record, an
+    /// array, and an `Option`. Returns 0 only when every arm round-trips.
+    #[test]
+    fn payload_codec_round_trip_law() {
+        let src = "type Shape = | Circle(Int64) | Rect(Int64, Int64) | Nothing \
+                   type Box = { s: Shape, r: Result<Int64, String>, \
+                                tags: Array<Shape>, opt: Option<Shape> } \
+                   fn cmp(enc: String, b: Box) -> Int64 { \
+                       if toJson(b) == enc { return 0 } \
+                       return 1 \
+                   } \
+                   fn same(a: Box) -> Int64 { \
+                       let enc = toJson(a) \
+                       return match fromJson(Box, enc) { \
+                           Valid(b) => cmp(enc, b), \
+                           Invalid(is) => 2, \
+                       } \
+                   } \
+                   fn main() -> Int64 { \
+                       let ok = Box { s: Rect(3, 4), r: Ok(9), \
+                                      tags: [Circle(1), Nothing], opt: Some(Rect(2, 2)) } \
+                       let err = Box { s: Nothing, r: Err(\"boom\"), tags: [], opt: None } \
+                       return same(ok) + same(err) \
+                   }";
+        assert_eq!(run(src).unwrap(), 0);
+    }
+
     // ---- testing (RFC-0015) ---------------------------------------------
 
     #[test]

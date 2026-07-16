@@ -7198,6 +7198,35 @@ mod tests {
         assert!(ir.contains("add i64"));
     }
 
+    // ---- payload enums on the wire (RFC-0024) ---------------------------
+
+    #[test]
+    fn payload_enum_gets_per_type_codec_functions() {
+        let src = "type Shape = | Circle(Int64) | Rect(Int64, Int64) | Nothing \
+                   fn f(s: Shape) -> String { return toJson(s) } \
+                   fn g(s: String) -> Validation<Shape> { return fromJson(Shape, s) } \
+                   fn main() -> Int64 { return 0 }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        // A payload enum earns standalone encode/decode functions (recursion-safe)
+        // and the call sites route to them.
+        assert!(ir.contains("define ptr @__vyrn_enc_Shape("), "enc fn:\n{ir}");
+        assert!(ir.contains("@__vyrn_dec_Shape("), "dec fn:\n{ir}");
+        // The tuple payload reads a JSON array element.
+        assert!(ir.contains("@__vyrn_vj_at_or_null"), "tuple element access:\n{ir}");
+    }
+
+    #[test]
+    fn pure_nullary_enum_keeps_inline_string_encoding() {
+        // Regression pin: a payload-LESS enum must NOT get a codec function — it
+        // reads its variant name from the O(1) table (byte-identical to RFC-0018).
+        let src = "type Role = | Guest | Admin \
+                   fn f(r: Role) -> String { return toJson(r) } \
+                   fn main() -> Int64 { return 0 }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(!ir.contains("@__vyrn_enc_Role("), "no codec fn for a nullary enum:\n{ir}");
+        assert!(ir.contains("@.enumnames.Role"), "name table present:\n{ir}");
+    }
+
     // ---- function values (RFC-0023) -------------------------------------
 
     const HO: &str = "fn twice(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {\n\
