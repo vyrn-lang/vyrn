@@ -1,0 +1,128 @@
+/// `Map<String, V>` — the dictionary type (RFC-0028). A growable, always
+/// insertion-ordered map: `m[k]` looks up honestly (`Option<V>`), `m[k] = v`
+/// inserts or updates in place, and `has` / `remove` / `length` / `keys()`
+/// round out the surface. On the wire a `Map` IS a JSON object; its schema is
+/// `{"type":"object","additionalProperties":<V>}`. Every byte here is identical
+/// under the interpreter, the native binary, and wasm.
+///
+///   m[k]         -> Option<V>          honest lookup (no trap, no `undefined`)
+///   m[k] = v                           insert (new key) or update (keeps slot)
+///   m.has(k)     -> Bool
+///   m.remove(k)  -> Bool               was it present? (order-preserving)
+///   m.length     -> Int64
+///   m.keys()     -> Array<String>      a snapshot, in insertion order
+
+/// A validated value type: the `where` clause runs on every insert, exactly
+/// like a validated array element store.
+type Count = Int64 where value >= 0
+
+/// `fromJson` / `jsonSchema` are type-directed by a type *name*, so a codable
+/// map is given one. (An anonymous `Map<String, Int64>` cannot be spelled in a
+/// value position — `<` is the comparison operator there.)
+type IntMap = Map<String, Int64>
+
+/// A payload enum carrying a Map — a "fat" payload the RFC-0026 boxing handles.
+type Event = | Batch(Map<String, Int64>) | Empty
+
+fn look(m: Map<String, Int64>, k: String) -> Int64 {
+    return match m[k] {
+        Some(v) => v,
+        None => 0 - 1,
+    }
+}
+
+/// Iterate a snapshot of keys and sum the values (insertion order).
+fn total(m: Map<String, Int64>) -> Int64 {
+    let mut sum = 0
+    for k in m.keys() {
+        sum = sum + look(m, k)
+    }
+    return sum
+}
+
+fn report(issues: Array<Issue>) -> Int64 {
+    for issue in issues {
+        print("\{issue.key} | \{issue.path} | \{issue.message}")
+    }
+    return issues.length
+}
+
+fn main() -> Int64 {
+    // --- Insert, update-in-place, honest lookup -------------------------
+    let mut scores: Map<String, Int64> = [:]
+    scores["alice"] = 10
+    scores["bob"] = 20
+    scores["alice"] = 11 // update: keeps alice's slot (position 0), value now 11
+    print("alice=\{look(scores, "alice")} bob=\{look(scores, "bob")}")
+    print("missing=\{look(scores, "nobody")}") // -1 (None)
+    print("has bob: \{scores.has("bob")} has cid: \{scores.has("cid")}")
+    print("length=\{scores.length}")
+
+    // Insertion order is stable across an update (alice, then bob).
+    for k in scores.keys() {
+        print("\{k} -> \{look(scores, k)}")
+    }
+
+    // --- Ordering: update keeps the slot, remove+reinsert moves to end --
+    let removed = scores.remove("alice")
+    scores["alice"] = 99 // reinserted -> now LAST (after bob)
+    print("removed alice? \{removed}")
+    for k in scores.keys() {
+        print("order \{k}")
+    }
+
+    // --- keys() is a snapshot: safe to mutate the map while iterating ---
+    let snap = scores.keys()
+    let cleared = scores.remove("bob") // mutate the map...
+    print("snapshot still has \{snap.length} keys after remove")
+
+    // --- A non-empty map literal desugars to insertions (written order) -
+    let prices: Map<String, Int64> = ["usd": 1, "eur": 2, "usd": 3]
+    // Duplicate "usd" updates in place: length 2, "usd" stays first with value 3.
+    print("prices length=\{prices.length} usd=\{look(prices, "usd")}")
+
+    // --- Codec: a Map encodes as a JSON object, round-trips exactly -----
+    let mut inv: Map<String, Int64> = [:]
+    inv["apple"] = 3
+    inv["pear"] = 5
+    let wire = toJson(inv)
+    print(wire) // {"apple":3,"pear":5}
+    let back = match fromJson(IntMap, wire) {
+        Valid(m) => total(m),
+        Invalid(issues) => report(issues),
+    }
+    print("decoded total=\{back}") // 8
+
+    // Duplicate keys in JSON input: first wins (mirrors the record decoder).
+    let dup = match fromJson(IntMap, "{\"a\":1,\"b\":2,\"a\":9}") {
+        Valid(m) => look(m, "a"), // 1, not 9
+        Invalid(issues) => 0 - report(issues),
+    }
+    print("dup-key a=\{dup}")
+
+    // A bad value surfaces a `json.type` Issue at `field.<key>`.
+    let bad = match fromJson(IntMap, "{\"ok\":1,\"oops\":\"x\"}") {
+        Valid(m) => 0,
+        Invalid(issues) => report(issues), // json.type | oops | expected integer, found string
+    }
+
+    // --- Schema: additionalProperties carries V's schema ---------------
+    print(jsonSchema(IntMap))
+
+    // --- A Map inside an enum payload, encoded ------------------------
+    let mut mm: Map<String, Int64> = [:]
+    mm["x"] = 1
+    mm["y"] = 2
+    let ev = Batch(mm)
+    print(toJson(ev)) // {"Batch":{"x":1,"y":2}}
+
+    // --- A validated value type re-validates on insert (passes here) ---
+    let mut counts: Map<String, Count> = [:]
+    counts["hits"] = 7 // runs `Count`'s `where` clause; 7 >= 0, so it holds
+    print(toJson(counts)) // {"hits":7}
+
+    // Reclaim the maps explicitly (most reclamation is inferred).
+    drop scores
+    drop snap
+    return 0
+}

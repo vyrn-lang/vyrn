@@ -1,6 +1,6 @@
 # RFC-0028 — `Map<String, V>`: The Dictionary Type
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented
 - **Depends on:** RFC-0011 (array mutation — the subject-first collection
   API this mirrors), RFC-0018/0024 (codec — a Map IS a JSON object),
   RFC-0003 (jsonSchema — `additionalProperties` emit + import round-trip),
@@ -109,3 +109,71 @@ Non-String keys (hash/eq protocols), map iteration with destructuring
 (`for (k, v) in m` — needs tuples; `keys()` carries v1), map equality,
 comprehensions, `values()`/`entries()` (add by demand), mixed
 record+index-signature types, weak maps.
+
+---
+
+## As-landed notes
+
+Shipped across parser/checker/interp/native/wasm (one shared IR)/codec/schema/
+fmt/LSP with zero new dependencies. Full suite green (786 workspace + 8 LSP
+tests), 0 warnings; the three-way parity corpus is byte-identical including
+`examples/mapdemo.vyrn` (interp == native == wasm, every operation, ordering,
+codec, schema, enum-payload Map, validated-V trap).
+
+- **Type surface.** `Type::Map(Box<Type>, Box<Type>)` carries the *key and
+  value* spellings so the checker can enforce the String-key rule and still
+  future-proof the type. `ensure_type_exists` resolves the key and rejects any
+  non-`String` spelling with a named diagnostic (a validated string type
+  resolves to `String` and is allowed). A bare `Map<String, V>` may be named by
+  a transparent `type` alias (like the `Result`/`Option` aliases) so
+  `fromJson`/`jsonSchema` can target it — `assignable`/`unify` resolve such
+  aliases structurally.
+- **Surface reuse.** `m[k]` desugars to the existing `at(m, k)` and dispatches
+  on the receiver type to yield `Option<V>`; `m[k] = v` reuses `IndexSet`;
+  `has`/`remove`/`keys` are method-only `@`-names (like `@pop`); `.length` is a
+  field like an array's. `[:]` / `["k": v]` are a new `Expr::MapLit`; the parser
+  disambiguates on the first `:`.
+- **Runtime representation.** Interp: `Val::Map(Vec<(String, Val)>)` — a Vec of
+  pairs, so iteration/encode order is deterministic. Compiled (native + wasm,
+  one IR): `{ ptr keys, ptr values, i64 len, i64 cap }` — two parallel growable
+  buffers sharing one length/capacity; keys are `char*`, values are
+  `llt(V)`-stride. Lookup is a linear `strcmp` scan (O(n) v1, per the RFC). Four
+  small C-shim helpers (`__vyrn_map_find`/`_reserve`/`_remove_at`/`_keys_copy`)
+  handle key comparison and buffer growth by element size; everything else is
+  inline IR next to the array helpers. **Ordering** is guaranteed by the Vec /
+  parallel-array layout plus insert-or-update-in-place (a hit overwrites the
+  value slot; a miss appends) and an order-preserving shift on `remove` — a
+  remove-then-insert therefore moves the key to the end, exactly as specified.
+- **Ownership.** `Map` is a heap value (`DropKind::FreeMap`): auto-dropped like
+  an array (a `mut` map keeps its identity and its buffers). `drop m` frees both
+  backing buffers; elements are a **safe leak**, mirroring `Array`'s
+  `AfreeArr` exactly (the RFC's "recursively" reads as "follow Array's rules",
+  which is what parity actually pins). `keys()` copies the key pointers into a
+  fresh `Array<String>` snapshot.
+- **Boundary validation.** A validated `V` re-validates on every `m[k] = v`
+  (the `emit_map_set` / interp-coerce path runs the `where` clause and traps
+  with the canonical `validation failed for \`T\`` wording, byte-identical
+  across backends), exactly like an array element store.
+- **Codec.** Encodes as a JSON **object** (keys JSON-escaped, insertion order,
+  values via V's codec). Decodes any JSON object: document order = insertion
+  order, each value validated at path `field.<key>`, reusing the locked
+  `json.type`/`validate` Issue vocabulary. **Duplicate keys: first wins** —
+  this mirrors the record decoder's *actual* policy: `JsonV::get` /
+  `__vyrn_vj_get` both return the **first** matching member (the RFC's
+  "last wins" aside was superseded by "mirror whatever the record decoder does";
+  the code is first-wins, so the map is too). Verified byte-exact including
+  re-emit: `{"a":1,"b":2,"a":9}` → `{"a":1,"b":2}` on all three backends.
+- **Schema.** Emits `{"type":"object","additionalProperties":<V schema>}`; the
+  importer round-trips exactly that shape back to `Map<String, V>` (constrained
+  values become a synthetic `<name>.value` validated type, mirroring array
+  `items`). Emit → import → re-emit is byte-exact.
+- **Surprises Array's architecture did not cover.** (1) Codegen `coerce` has no
+  growable-`Array<From>`→`Array<To>` element revalidation, so `MapLit` infers
+  `V` from the first value and validation rides the `m[k] = v` insert path
+  instead; a validated-`V` map is filled by inserts, not literals, in practice.
+  (2) A bare `Map`/`Array` had no way to be a `type` alias — added the
+  transparent-alias allowance (and the matching `assignable`/`unify` resolution)
+  so `fromJson`/`jsonSchema` can name one. (3) The `>`/`=` lexer greedily forms
+  `>=`, so `Map<String, Int64>= x` (no space) mis-lexes — this is the
+  pre-existing generic-`>=` quirk shared with `Array<T>= x`, not new; write the
+  space.
