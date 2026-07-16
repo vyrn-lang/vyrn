@@ -33,6 +33,20 @@ fn offline(args: &[String]) -> bool {
 }
 
 fn main() -> ExitCode {
+    // The loader runs generators (RFC-0021) by invoking the tree-walking
+    // interpreter recursively, nested deep inside the load/parse/check call
+    // chain. On Windows the default ~1 MB main-thread stack overflows on a
+    // realistic generator (e.g. std/i18n compiling ICU messages). Run the whole
+    // CLI on a worker thread with a generous stack so generation has headroom.
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(real_main)
+        .expect("failed to spawn the vyrn worker thread")
+        .join()
+        .unwrap_or(ExitCode::FAILURE)
+}
+
+fn real_main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().collect();
     let is_offline = offline(&args);
     if is_offline {
