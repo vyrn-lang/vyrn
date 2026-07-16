@@ -457,6 +457,477 @@ impl Dfa {
         }
         self.accepting[st]
     }
+
+    /// The set of states reachable from `start` over any byte transition.
+    fn reachable_from_start(&self) -> Vec<bool> {
+        let n = self.num_states();
+        let mut seen = vec![false; n];
+        let mut stack = vec![self.start as usize];
+        seen[self.start as usize] = true;
+        while let Some(s) = stack.pop() {
+            for b in 0..256usize {
+                let t = self.table[s * 256 + b] as usize;
+                if !seen[t] {
+                    seen[t] = true;
+                    stack.push(t);
+                }
+            }
+        }
+        seen
+    }
+
+    /// The set of states that can reach an accepting state (reverse reachability
+    /// from every accepting state over the transition graph).
+    fn can_reach_accept(&self) -> Vec<bool> {
+        let n = self.num_states();
+        // Reverse adjacency: rev[t] holds every predecessor state `s` with an
+        // edge `s -b-> t`.
+        let mut rev: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for s in 0..n {
+            for b in 0..256usize {
+                let t = self.table[s * 256 + b] as usize;
+                rev[t].push(s);
+            }
+        }
+        let mut seen = vec![false; n];
+        let mut stack = Vec::new();
+        for (s, &acc) in self.accepting.iter().enumerate() {
+            if acc {
+                seen[s] = true;
+                stack.push(s);
+            }
+        }
+        while let Some(t) = stack.pop() {
+            for &s in &rev[t] {
+                if !seen[s] {
+                    seen[s] = true;
+                    stack.push(s);
+                }
+            }
+        }
+        seen
+    }
+
+    /// Whether the language is **finite**: no cycle lies on any accepting path.
+    /// A DFA denotes a finite language iff, among the states that are both
+    /// reachable from the start AND able to reach an accepting state ("live"
+    /// states), there is no cycle. The empty language (nothing accepting is
+    /// reachable) is finite vacuously. Decidable in one DFS over the live
+    /// subgraph. This is the defining test of a *finite string type* (RFC-0020).
+    pub fn is_finite(&self) -> bool {
+        let n = self.num_states();
+        let reach = self.reachable_from_start();
+        let acc = self.can_reach_accept();
+        let live: Vec<bool> = (0..n).map(|i| reach[i] && acc[i]).collect();
+        // Cycle detection (three-colour DFS) over the subgraph induced by live
+        // states, following distinct successor states (a self-loop counts).
+        #[derive(Clone, Copy, PartialEq)]
+        enum Colour {
+            White,
+            Grey,
+            Black,
+        }
+        let mut colour = vec![Colour::White; n];
+        // Iterative DFS with an explicit stack of (state, next-successor-index)
+        // over the deduplicated live successors of each state.
+        let succ = |s: usize| -> Vec<usize> {
+            let mut out: Vec<usize> = Vec::new();
+            for b in 0..256usize {
+                let t = self.table[s * 256 + b] as usize;
+                if live[t] && !out.contains(&t) {
+                    out.push(t);
+                }
+            }
+            out
+        };
+        for start in 0..n {
+            if !live[start] || colour[start] != Colour::White {
+                continue;
+            }
+            let mut stack: Vec<(usize, Vec<usize>, usize)> = vec![(start, succ(start), 0)];
+            colour[start] = Colour::Grey;
+            while let Some((s, succs, i)) = stack.last_mut() {
+                if *i < succs.len() {
+                    let t = succs[*i];
+                    *i += 1;
+                    match colour[t] {
+                        Colour::Grey => return false, // back-edge → cycle → infinite
+                        Colour::White => {
+                            colour[t] = Colour::Grey;
+                            let ts = succ(t);
+                            stack.push((t, ts, 0));
+                        }
+                        Colour::Black => {}
+                    }
+                } else {
+                    colour[*s] = Colour::Black;
+                    stack.pop();
+                }
+            }
+        }
+        true
+    }
+
+    /// Enumerate every string in the language in lexicographic (byte) order, up
+    /// to `cap` strings. Returns `None` if the language has more than `cap`
+    /// members (or is infinite). Deterministic. Non-UTF-8 members (impossible for
+    /// the ASCII refinement patterns in practice) are rendered with `\xNN`
+    /// escapes; see [`escape_bytes`].
+    pub fn enumerate(&self, cap: usize) -> Option<Vec<String>> {
+        if !self.is_finite() {
+            return None;
+        }
+        let acc = self.can_reach_accept();
+        // BFS by length keeps the queue bounded (a finite language over a DFA has
+        // no live-state repeat on any accepting path, so lengths are bounded by
+        // the live-state count). Collect raw bytes, then sort for a stable
+        // lexicographic result.
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        let mut frontier: Vec<(usize, Vec<u8>)> = vec![(self.start as usize, Vec::new())];
+        let max_len = self.num_states() + 1; // safety bound; never hit when finite
+        let mut depth = 0;
+        while !frontier.is_empty() && depth <= max_len {
+            let mut next: Vec<(usize, Vec<u8>)> = Vec::new();
+            for (st, s) in &frontier {
+                if self.accepting[*st] {
+                    out.push(s.clone());
+                    if out.len() > cap {
+                        return None;
+                    }
+                }
+                for b in 0..256usize {
+                    let t = self.table[*st * 256 + b] as usize;
+                    // Only descend into states that can still reach an accept —
+                    // prunes the dead state and dead branches.
+                    if acc[t] {
+                        let mut ns = s.clone();
+                        ns.push(b as u8);
+                        next.push((t, ns));
+                    }
+                }
+            }
+            frontier = next;
+            depth += 1;
+        }
+        out.sort();
+        Some(out.into_iter().map(|b| escape_bytes(&b)).collect())
+    }
+
+    /// The complement DFA: same transitions, accepting bits flipped. Correct
+    /// because the DFA is **total** (the subset construction always interns the
+    /// empty set as a dead sink with all-self transitions), so every byte string
+    /// lands in exactly one state and flipping acceptance yields the complement
+    /// language over all byte strings.
+    pub fn complement(&self) -> Dfa {
+        Dfa {
+            start: self.start,
+            accepting: self.accepting.iter().map(|a| !a).collect(),
+            table: self.table.clone(),
+        }
+    }
+}
+
+/// Render bytes for a diagnostic: the UTF-8 string if valid, otherwise each
+/// offending byte as `\xNN` (with valid runs kept verbatim). Refinement
+/// languages are ASCII in practice, so the escape path is defensive.
+pub fn escape_bytes(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            let mut out = String::new();
+            for &b in bytes {
+                if b.is_ascii_graphic() || b == b' ' {
+                    out.push(b as char);
+                } else {
+                    out.push_str(&format!("\\x{b:02x}"));
+                }
+            }
+            out
+        }
+    }
+}
+
+/// The intersection DFA (product automaton, accepting iff both accept). Used to
+/// realise a `where value =~ "a" && value =~ "b"` conjunction as a single DFA.
+pub fn intersect(a: &Dfa, b: &Dfa) -> Dfa {
+    product(a, b, |x, y| x && y)
+}
+
+/// `sub ⊆ sup`? Returns `Ok(())` when every string `sub` accepts, `sup` also
+/// accepts; otherwise `Err(witness)` where `witness` is a **shortest** string in
+/// `sub \ sup` (BFS over the product of `sub` and the complement of `sup`, so
+/// the counterexample the containment fails on is produced for free). This is
+/// the automaton-theoretic core of RFC-0020's interpolation containment.
+pub fn contains(sup: &Dfa, sub: &Dfa) -> Result<(), String> {
+    // sub ⊆ sup  ⇔  sub ∩ ¬sup = ∅. BFS the product; a reachable state that is
+    // accepting in `sub` and non-accepting in `sup` is a witness.
+    use std::collections::VecDeque;
+    let ns = sup.num_states();
+    let start = (sub.start as usize, sup.start as usize);
+    let idx = |a: usize, c: usize| a * ns + c;
+    let total = sub.num_states() * ns;
+    let mut seen = vec![false; total];
+    let mut prev: Vec<Option<(usize, u8)>> = vec![None; total];
+    let mut queue = VecDeque::new();
+    seen[idx(start.0, start.1)] = true;
+    queue.push_back(start);
+    let mut witness_state: Option<(usize, usize)> = None;
+    'bfs: while let Some((a, c)) = queue.pop_front() {
+        if sub.accepting[a] && !sup.accepting[c] {
+            witness_state = Some((a, c));
+            break 'bfs;
+        }
+        for b in 0..256usize {
+            let na = sub.table[a * 256 + b] as usize;
+            let nc = sup.table[c * 256 + b] as usize;
+            let id = idx(na, nc);
+            if !seen[id] {
+                seen[id] = true;
+                prev[id] = Some((idx(a, c), b as u8));
+                queue.push_back((na, nc));
+            }
+        }
+    }
+    match witness_state {
+        None => Ok(()),
+        Some((a, c)) => {
+            // Reconstruct the shortest path bytes by walking `prev` back to start.
+            let mut bytes: Vec<u8> = Vec::new();
+            let mut cur = idx(a, c);
+            let start_id = idx(start.0, start.1);
+            while cur != start_id {
+                let (p, b) = prev[cur].expect("product BFS parent");
+                bytes.push(b);
+                cur = p;
+            }
+            bytes.reverse();
+            Err(escape_bytes(&bytes))
+        }
+    }
+}
+
+/// Product automaton over two DFAs, `accept` combining the two acceptance bits.
+/// Only reachable product states are materialised (keeps the table small).
+fn product(a: &Dfa, b: &Dfa, accept: impl Fn(bool, bool) -> bool) -> Dfa {
+    use std::collections::HashMap;
+    let mut index: HashMap<(usize, usize), u32> = HashMap::new();
+    let mut work: Vec<(usize, usize)> = Vec::new();
+    let start_pair = (a.start as usize, b.start as usize);
+    index.insert(start_pair, 0);
+    work.push(start_pair);
+    let mut table: Vec<u32> = Vec::new();
+    let mut accepting: Vec<bool> = Vec::new();
+    let mut processed = 0usize;
+    while processed < work.len() {
+        let (sa, sb) = work[processed];
+        if table.len() < (processed + 1) * 256 {
+            table.resize((processed + 1) * 256, 0);
+        }
+        accepting.resize(processed + 1, false);
+        accepting[processed] = accept(a.accepting[sa], b.accepting[sb]);
+        for byte in 0..256usize {
+            let na = a.table[sa * 256 + byte] as usize;
+            let nb = b.table[sb * 256 + byte] as usize;
+            let next = *index.entry((na, nb)).or_insert_with(|| {
+                let id = work.len() as u32;
+                work.push((na, nb));
+                id
+            });
+            table[processed * 256 + byte] = next;
+        }
+        processed += 1;
+    }
+    table.resize(work.len() * 256, 0);
+    accepting.resize(work.len(), false);
+    for (i, &(sa, sb)) in work.iter().enumerate() {
+        accepting[i] = accept(a.accepting[sa], b.accepting[sb]);
+    }
+    Dfa { start: 0, accepting, table }
+}
+
+// ---- concatenation of literals and hole DFAs (RFC-0020) ---------------------
+
+/// One piece of an interpolation's concatenation language: a literal byte run
+/// (a string constant) or the language of a hole (a finite string type's DFA).
+pub enum ConcatPiece<'a> {
+    Lit(&'a [u8]),
+    Dfa(&'a Dfa),
+}
+
+/// A general ε-NFA (multiple labelled edges per state) used to assemble a
+/// concatenation of literal runs and hole DFAs, then subset-construct to a DFA.
+/// The `Re`-based [`Nfa`] cannot express an arbitrary hole DFA, so this is its
+/// sibling for the containment feature.
+struct GenNfa {
+    states: Vec<GenState>,
+}
+
+struct GenState {
+    eps: Vec<usize>,
+    edges: Vec<(ByteClass, usize)>,
+}
+
+impl GenNfa {
+    fn new() -> GenNfa {
+        GenNfa { states: Vec::new() }
+    }
+    fn add(&mut self) -> usize {
+        self.states.push(GenState { eps: Vec::new(), edges: Vec::new() });
+        self.states.len() - 1
+    }
+
+    /// A fragment matching exactly the literal bytes `s`, returning `(in, out)`.
+    fn literal(&mut self, s: &[u8]) -> (usize, usize) {
+        let start = self.add();
+        let mut cur = start;
+        for &b in s {
+            let nxt = self.add();
+            let mut cl = ByteClass::empty();
+            cl.set(b);
+            self.states[cur].edges.push((cl, nxt));
+            cur = nxt;
+        }
+        (start, cur)
+    }
+
+    /// A fragment matching the DFA `dfa`'s language, returning `(in, out)`. Each
+    /// DFA state becomes an NFA state; a fresh `in` ε-jumps to the copied start,
+    /// and every copied accepting state ε-jumps to a fresh single `out`. The dead
+    /// sink (a non-accepting state whose every transition is a self-loop) is
+    /// dropped so it never pollutes the assembled automaton.
+    fn from_dfa(&mut self, dfa: &Dfa) -> (usize, usize) {
+        let dead = dfa.dead_state();
+        let n = dfa.num_states();
+        // Map each kept DFA state to a fresh NFA state id.
+        let mut map = vec![usize::MAX; n];
+        for (s, m) in map.iter_mut().enumerate() {
+            if Some(s) != dead {
+                *m = self.add();
+            }
+        }
+        let entry = self.add();
+        let exit = self.add();
+        self.states[entry].eps.push(map[dfa.start as usize]);
+        for s in 0..n {
+            if Some(s) == dead {
+                continue;
+            }
+            // Group the 256 transitions by target into one ByteClass per target.
+            let mut by_target: std::collections::HashMap<usize, ByteClass> =
+                std::collections::HashMap::new();
+            for b in 0..256usize {
+                let t = dfa.table[s * 256 + b] as usize;
+                if Some(t) == dead {
+                    continue;
+                }
+                by_target.entry(t).or_insert_with(ByteClass::empty).set(b as u8);
+            }
+            for (t, cl) in by_target {
+                self.states[map[s]].edges.push((cl, map[t]));
+            }
+            if dfa.accepting[s] {
+                self.states[map[s]].eps.push(exit);
+            }
+        }
+        (entry, exit)
+    }
+
+    fn eps_closure(&self, seed: &[usize]) -> Vec<usize> {
+        let mut seen = vec![false; self.states.len()];
+        let mut stack: Vec<usize> = seed.to_vec();
+        let mut out = Vec::new();
+        while let Some(s) = stack.pop() {
+            if seen[s] {
+                continue;
+            }
+            seen[s] = true;
+            out.push(s);
+            for &n in &self.states[s].eps {
+                if !seen[n] {
+                    stack.push(n);
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// Subset-construct the DFA for the language of this NFA, given its start and
+    /// single accepting state.
+    fn to_dfa(&self, start: usize, accept: usize) -> Dfa {
+        use std::collections::HashMap;
+        let mut index: HashMap<Vec<usize>, u32> = HashMap::new();
+        let mut sets: Vec<Vec<usize>> = Vec::new();
+        let mut table: Vec<u32> = Vec::new();
+        let mut accepting: Vec<bool> = Vec::new();
+        let start_set = self.eps_closure(&[start]);
+        index.insert(start_set.clone(), 0);
+        sets.push(start_set);
+        let mut processed = 0usize;
+        while processed < sets.len() {
+            let cur = sets[processed].clone();
+            if table.len() < (processed + 1) * 256 {
+                table.resize((processed + 1) * 256, 0);
+            }
+            accepting.resize(processed + 1, false);
+            accepting[processed] = cur.contains(&accept);
+            for byte in 0..256usize {
+                let mut moved: Vec<usize> = Vec::new();
+                for &s in &cur {
+                    for (cl, to) in &self.states[s].edges {
+                        if cl.contains(byte as u8) {
+                            moved.push(*to);
+                        }
+                    }
+                }
+                let closure = self.eps_closure(&moved);
+                let next = *index.entry(closure.clone()).or_insert_with(|| {
+                    let id = sets.len() as u32;
+                    sets.push(closure);
+                    id
+                });
+                table[processed * 256 + byte] = next;
+            }
+            processed += 1;
+        }
+        table.resize(sets.len() * 256, 0);
+        accepting.resize(sets.len(), false);
+        for (i, set) in sets.iter().enumerate() {
+            accepting[i] = set.contains(&accept);
+        }
+        Dfa { start: 0, accepting, table }
+    }
+}
+
+/// Build the DFA for the language `piece0 · piece1 · …` — the concatenation of
+/// literal runs and hole DFAs. This is exactly the language of a string
+/// interpolation `"lit0\{h1}lit1…"` when each hole `hi` ranges over a finite
+/// string type (RFC-0020). An empty piece list denotes `{""}`.
+pub fn concat_language(pieces: &[ConcatPiece]) -> Dfa {
+    let mut nfa = GenNfa::new();
+    // Seed with an ε-only fragment so an empty piece list yields `{""}`.
+    let start = nfa.add();
+    let mut tail = start;
+    for piece in pieces {
+        let (fin, fout) = match piece {
+            ConcatPiece::Lit(s) => nfa.literal(s),
+            ConcatPiece::Dfa(d) => nfa.from_dfa(d),
+        };
+        nfa.states[tail].eps.push(fin);
+        tail = fout;
+    }
+    nfa.to_dfa(start, tail)
+}
+
+impl Dfa {
+    /// The dead sink state, if any: a non-accepting state whose every transition
+    /// is a self-loop (the empty-set state the subset construction interns). Used
+    /// when copying a DFA into an NFA fragment, to drop the sink cleanly.
+    fn dead_state(&self) -> Option<usize> {
+        (0..self.num_states()).find(|&s| {
+            !self.accepting[s] && (0..256usize).all(|b| self.table[s * 256 + b] as usize == s)
+        })
+    }
 }
 
 /// Compile a pattern to a DFA, or return a human-readable error for unsupported
@@ -665,5 +1136,161 @@ mod tests {
         assert!(!m("a.b", "a\rb"));
         // An explicit negated class stays byte-wise and CAN match `\n`.
         assert!(m("a[^x]b", "a\nb"));
+    }
+
+    // ---- finiteness / enumeration / containment (RFC-0020) ------------------
+
+    fn dfa(pat: &str) -> Dfa {
+        compile(pat).unwrap()
+    }
+
+    #[test]
+    fn finiteness_of_languages() {
+        // Finite: literals, alternations of finite branches, counted {m,n}.
+        assert!(dfa("abc").is_finite());
+        assert!(dfa("cat|dog|maybe").is_finite());
+        assert!(dfa("a{2,4}").is_finite());
+        assert!(dfa("(home\\.(title|subtitle)|nav\\.(home|about)\\.label)").is_finite());
+        assert!(dfa("nav\\.(home|about|settings)\\.label").is_finite());
+        // The empty language is finite vacuously (nothing accepts).
+        // `[^\\x00-\\xff]` — a class matching no byte — never accepts.
+        // Infinite: any unbounded repetition on an accepting path.
+        assert!(!dfa("a+").is_finite());
+        assert!(!dfa("a*").is_finite());
+        assert!(!dfa("a{2,}").is_finite());
+        assert!(!dfa("[a-z]+").is_finite());
+        assert!(!dfa("x(ab)*y").is_finite());
+        // A star whose body cannot lead to an accept does NOT make it infinite.
+        assert!(dfa("ab").is_finite());
+    }
+
+    #[test]
+    fn enumeration_is_exact_and_ordered() {
+        assert_eq!(
+            dfa("cat|dog|bird").enumerate(10),
+            Some(vec!["bird".to_string(), "cat".to_string(), "dog".to_string()])
+        );
+        // Lexicographic (byte) order, deterministic.
+        assert_eq!(
+            dfa("nav\\.(home|about)\\.label").enumerate(10),
+            Some(vec!["nav.about.label".to_string(), "nav.home.label".to_string()])
+        );
+        // A single literal is a one-element language (`.` escaped to a literal).
+        assert_eq!(dfa("home\\.title").enumerate(10).map(|v| v.len()), Some(1));
+        // {m,n} enumerates every count.
+        assert_eq!(
+            dfa("a{1,3}").enumerate(10),
+            Some(vec!["a".to_string(), "aa".to_string(), "aaa".to_string()])
+        );
+    }
+
+    #[test]
+    fn enumeration_respects_cap_and_infinity() {
+        // Over the cap → None.
+        assert_eq!(dfa("cat|dog|bird").enumerate(2), None);
+        // Infinite language → None regardless of cap.
+        assert_eq!(dfa("[a-z]+").enumerate(1000), None);
+        // Exactly at the cap → Some.
+        assert!(dfa("cat|dog|bird").enumerate(3).is_some());
+    }
+
+    #[test]
+    fn containment_holds_and_fails_with_shortest_witness() {
+        // sub ⊆ sup.
+        let keys = dfa("nav\\.(home|about|settings)\\.label");
+        let sub = dfa("nav\\.(home|about)\\.label");
+        assert_eq!(contains(&keys, &sub), Ok(()));
+        // Self-containment.
+        assert_eq!(contains(&keys, &keys), Ok(()));
+        // Not contained: `settings` is in sub but a narrower sup forbids it.
+        let narrow = dfa("nav\\.(home|about)\\.label");
+        let wide = dfa("nav\\.(home|about|settings)\\.label");
+        match contains(&narrow, &wide) {
+            Err(w) => assert_eq!(w, "nav.settings.label"),
+            Ok(()) => panic!("expected a witness"),
+        }
+    }
+
+    #[test]
+    fn containment_witness_is_shortest() {
+        // sup accepts only strings of length ≥ 3 starting `a`; sub accepts `a`.
+        let sup = dfa("a.+");
+        let sub = dfa("a|abcd");
+        match contains(&sup, &sub) {
+            Err(w) => assert_eq!(w, "a"), // the shortest member of sub \ sup
+            Ok(()) => panic!("expected a witness"),
+        }
+    }
+
+    #[test]
+    fn empty_language_is_contained_in_everything() {
+        // `sub` accepting nothing is a subset of any `sup`. Use an intersection
+        // of disjoint literals as a guaranteed-empty language.
+        let a = dfa("abc");
+        let b = dfa("xyz");
+        let empty = intersect(&a, &b);
+        assert_eq!(empty.enumerate(10), Some(vec![]));
+        assert_eq!(contains(&dfa("abc"), &empty), Ok(()));
+    }
+
+    #[test]
+    fn intersection_is_the_conjunction_language() {
+        // `[a-z]{3}` ∩ `.a.` = strings of 3 lowercase letters whose middle is `a`.
+        let inter = intersect(&dfa("[a-z]{3}"), &dfa(".a."));
+        assert!(inter.matches("cat"));
+        assert!(inter.matches("bat"));
+        assert!(!inter.matches("cot"));
+        assert!(!inter.matches("ca")); // wrong length
+    }
+
+    #[test]
+    fn concat_of_literals_and_holes() {
+        // "nav." · {home,about} · ".label"
+        let section = dfa("home|about");
+        let l = concat_language(&[
+            ConcatPiece::Lit(b"nav."),
+            ConcatPiece::Dfa(&section),
+            ConcatPiece::Lit(b".label"),
+        ]);
+        assert!(l.matches("nav.home.label"));
+        assert!(l.matches("nav.about.label"));
+        assert!(!l.matches("nav.settings.label"));
+        assert!(!l.matches("nav.home.label.x"));
+        assert_eq!(
+            l.enumerate(10),
+            Some(vec!["nav.about.label".to_string(), "nav.home.label".to_string()])
+        );
+        // Empty piece list denotes {""}.
+        assert_eq!(concat_language(&[]).enumerate(10), Some(vec!["".to_string()]));
+        // A hole whose language includes the empty string concatenates correctly.
+        let opt = dfa("x?");
+        let l2 = concat_language(&[ConcatPiece::Lit(b"a"), ConcatPiece::Dfa(&opt), ConcatPiece::Lit(b"b")]);
+        assert!(l2.matches("ab"));
+        assert!(l2.matches("axb"));
+        assert!(!l2.matches("axxb"));
+    }
+
+    #[test]
+    fn concat_containment_end_to_end() {
+        // The flagship: L = "nav." · Section · ".label" ⊆ TransKey.
+        let trans_key = dfa("(home\\.(title|subtitle)|nav\\.(home|about|settings)\\.label)");
+        let section = dfa("home|about|settings");
+        let l = concat_language(&[
+            ConcatPiece::Lit(b"nav."),
+            ConcatPiece::Dfa(&section),
+            ConcatPiece::Lit(b".label"),
+        ]);
+        assert_eq!(contains(&trans_key, &l), Ok(()));
+        // Widen the section to include a key TransKey does not have → witness.
+        let bad_section = dfa("home|about|profile");
+        let bad = concat_language(&[
+            ConcatPiece::Lit(b"nav."),
+            ConcatPiece::Dfa(&bad_section),
+            ConcatPiece::Lit(b".label"),
+        ]);
+        match contains(&trans_key, &bad) {
+            Err(w) => assert_eq!(w, "nav.profile.label"),
+            Ok(()) => panic!("expected a witness"),
+        }
     }
 }
