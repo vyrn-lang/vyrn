@@ -379,19 +379,40 @@ fn load_modules(
             }
         }
 
-        // Resolve and load imports depth-first.
-        let mut import_targets = Vec::new();
-        for imp in &program.imports {
-            let target = resolve_spec(&imp.path, key, opts).map_err(|e| {
-                let mut d = Diagnostic::error(imp.line, 0, "load", e);
-                if !is_root {
-                    d.file = Some(key.to_string());
-                }
-                vec![d]
-            })?;
-            visit(&target, None, opts, resolver, modules, states, stack, root_key)?;
-            import_targets.push(target);
+        // Resolve and load imports depth-first. `ImportSource::Path` resolves +
+        // visits the target module here; `ImportSource::Generator` is handled in a
+        // second pass (below), once every path-imported module — including the one
+        // defining the generator — is loaded and available to run.
+        let mut import_targets: Vec<Option<String>> = vec![None; program.imports.len()];
+        for (i, imp) in program.imports.iter().enumerate() {
+            if let ImportSource::Path(path) = &imp.source {
+                let target = resolve_spec(path, key, opts).map_err(|e| {
+                    let mut d = Diagnostic::error(imp.line, 0, "load", e);
+                    if !is_root {
+                        d.file = Some(key.to_string());
+                    }
+                    vec![d]
+                })?;
+                visit(&target, None, opts, resolver, modules, states, stack, root_key)?;
+                import_targets[i] = Some(target);
+            }
         }
+        // Generator-call imports (RFC-0021): run each generator now that its
+        // module is loaded, synthesize the module source, and visit it. Identical
+        // calls dedup on `gen_key` (already-loaded ⇒ no source, no re-run).
+        for (i, imp) in program.imports.iter().enumerate() {
+            if let ImportSource::Generator { name, args, line } = &imp.source {
+                let (gen_key, gen_source) = run_generator(
+                    key, is_root, name, args, *line, opts, resolver, modules, states, root_key,
+                )?;
+                if let Some(src) = gen_source {
+                    visit(&gen_key, Some(&src), opts, resolver, modules, states, stack, root_key)?;
+                }
+                import_targets[i] = Some(gen_key);
+            }
+        }
+        let import_targets: Vec<String> =
+            import_targets.into_iter().map(|t| t.expect("every import resolved")).collect();
 
         stack.pop();
         states.insert(key.to_string(), true);
@@ -411,6 +432,36 @@ fn load_modules(
     )?;
 
     Ok((modules, root_key))
+}
+
+/// Run a generator-call import target (RFC-0021) and return
+/// `(synthesized module key, Some(source) | None-if-already-loaded)`.
+///
+/// (Stub — the generation engine is wired in a following change. For now a
+/// generator-call import is a clean load error.)
+#[allow(clippy::too_many_arguments)]
+fn run_generator(
+    importer: &str,
+    importer_is_root: bool,
+    name: &str,
+    _args: &[Expr],
+    line: usize,
+    _opts: &LoadOptions,
+    _resolver: &dyn ModuleResolver,
+    _modules: &[Module],
+    _states: &HashMap<String, bool>,
+    _root_key: &str,
+) -> Result<(String, Option<String>), Vec<Diagnostic>> {
+    let mut d = Diagnostic::error(
+        line,
+        0,
+        "load",
+        format!("generator import target `{name}(..)` is not yet supported"),
+    );
+    if !importer_is_root {
+        d.file = Some(importer.to_string());
+    }
+    Err(vec![d])
 }
 
 /// Whether a type decl is one of the parser-injected builtins (`Value`,

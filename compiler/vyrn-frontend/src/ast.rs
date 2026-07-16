@@ -116,10 +116,24 @@ pub struct ImportDecl {
     /// The names brought into scope. `import type { .. }` (JSON Schema
     /// imports) also lands here; the loader dispatches on the path's extension.
     pub names: Vec<String>,
-    /// The specifier as written: relative (`./lib`), `std/name`, or (later
-    /// milestones) a manifest alias / remote specifier.
-    pub path: String,
+    /// Where the names come from: an ordinary module specifier, or a compile-time
+    /// generator call (RFC-0021).
+    pub source: ImportSource,
     pub line: usize,
+}
+
+/// The right-hand side of an `import { .. } from <source>` (RFC-0010 / RFC-0021).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportSource {
+    /// `from "path"` — a module specifier as written: relative (`./lib`),
+    /// `std/name`, a manifest alias, or a remote specifier.
+    Path(String),
+    /// `from gen(args...)` — a generator-call import target (RFC-0021). `name`
+    /// is the `gen fn` to invoke (an imported or locally-declared generator);
+    /// `args` are its arguments, which must be consteval-provable constants. The
+    /// loader runs the call in the compiler's interpreter and links the returned
+    /// `String` as a synthesized module.
+    Generator { name: String, args: Vec<Expr>, line: usize },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -230,6 +244,16 @@ pub struct Function {
     /// `is_export_extern` are mutually exclusive (import vs. exported impl); the
     /// checker additionally enforces the extern ABI type domain on its signature.
     pub is_export_extern: bool,
+    /// `gen fn ..` — a compile-time module generator (RFC-0021). A contextual
+    /// modifier (the `extern`/`test` precedent): an ordinary function in every
+    /// respect (has a body, callable at runtime, testable, formatted, exportable)
+    /// EXCEPT that it may be used as an `import { .. } from gen(args)` target, in
+    /// which case the loader runs it in the compiler's interpreter to synthesize a
+    /// module. Because it can run at generation time, the checker holds every `gen
+    /// fn` (and its transitive callees) to the **comptime-purity** discipline —
+    /// the spawn-isolation sibling: no `extern`, `spawn`, module state,
+    /// `writeFile`, `readLine`, `args`, or logging sinks.
+    pub is_gen: bool,
 }
 
 /// A capability declares what a function does with a parameter (RFC-0004):

@@ -373,6 +373,12 @@ pub fn check_accum_with_let_types(
     //    are rejected here (a better message than a parse error).
     check_tests(&checker, program, &mut out);
 
+    // 7. Comptime-purity (RFC-0021): every `gen fn` and its transitive callees
+    //    must be pure enough to run in the compiler's interpreter at generation
+    //    time. Reported after the ordinary body checks so a broken generator's
+    //    type errors surface first.
+    check_comptime_purity(program, &mut out);
+
     let let_types = checker.let_types.borrow().clone();
     (out, let_types)
 }
@@ -417,6 +423,7 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             line: t.line,
             is_extern: false,
             is_export_extern: false,
+            is_gen: false,
         };
         if let Err(s) = checker.function(&synthetic) {
             let mut d = Diagnostic::from_rendered(s, "check");
@@ -3395,6 +3402,167 @@ fn contains_drop(b: &Block) -> bool {
     })
 }
 
+/// Whether an expression tree uses `spawn` anywhere.
+fn expr_contains_spawn(e: &Expr) -> bool {
+    match e {
+        Expr::Spawn { .. } => true,
+        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
+            expr_contains_spawn(expr)
+        }
+        Expr::Binary { lhs, rhs, .. } => expr_contains_spawn(lhs) || expr_contains_spawn(rhs),
+        Expr::Call { args, .. } | Expr::TryConstruct { args, .. } | Expr::ArrayLit { elems: args, .. } => {
+            args.iter().any(expr_contains_spawn)
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            expr_contains_spawn(scrutinee) || arms.iter().any(|a| expr_contains_spawn(&a.body))
+        }
+        Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_contains_spawn(v)),
+        _ => false,
+    }
+}
+
+/// Whether a block uses `spawn` anywhere (including nested blocks) — used by the
+/// comptime-purity analysis (RFC-0021): a generator may not spawn.
+fn contains_spawn(b: &Block) -> bool {
+    fn stmt(s: &Stmt) -> bool {
+        match s {
+            Stmt::Let { value, .. }
+            | Stmt::Assign { value, .. }
+            | Stmt::SetField { value, .. }
+            | Stmt::Expr(value) => expr_contains_spawn(value),
+            Stmt::Return { value, .. } => value.as_ref().is_some_and(expr_contains_spawn),
+            Stmt::IndexSet { index, value, .. } => {
+                expr_contains_spawn(index) || expr_contains_spawn(value)
+            }
+            Stmt::If { cond, then_block, else_block, .. } => {
+                expr_contains_spawn(cond)
+                    || contains_spawn(then_block)
+                    || else_block.as_ref().is_some_and(contains_spawn)
+            }
+            Stmt::While { cond, body, .. } => expr_contains_spawn(cond) || contains_spawn(body),
+            Stmt::ForIn { iter, body, .. } => expr_contains_spawn(iter) || contains_spawn(body),
+            Stmt::Region { body, .. } => contains_spawn(body),
+            Stmt::Drop { .. } => false,
+        }
+    }
+    b.stmts.iter().any(stmt)
+}
+
+/// Builtins a `gen fn` (RFC-0021) may not use at generation time: they observe
+/// or mutate the outside world in a way the deterministic, cache-keyed sandbox
+/// cannot mediate. `readFile`/`listDir`/`moduleInterface` are deliberately
+/// ABSENT — they route through the loader's resolver at generation time and are
+/// recorded as cache inputs. Logging sinks (`trace`..`error`) are here too.
+const COMPTIME_FORBIDDEN: &[&str] = &[
+    "writeFile", "readLine", "args", "readFileBytes", "trace", "debug", "info", "warn", "error",
+];
+
+/// Comptime-purity analysis (RFC-0021), the spawn-isolation sibling. Every
+/// `gen fn` — and everything it transitively calls — must be pure enough to run
+/// deterministically in the compiler's interpreter at generation time: no
+/// `extern`, `spawn`, module state, or the [`COMPTIME_FORBIDDEN`] effect
+/// builtins. Because a `gen fn` may be *used* as an import target anywhere it is
+/// visible, the restriction is enforced on EVERY `gen fn` unconditionally (v1:
+/// simpler and sound than a whole-program "reached as a generation target"
+/// analysis; a `gen fn` called only at runtime pays the same discipline, which
+/// keeps the rule one sentence long). Diagnostics name the offending effect and
+/// the call chain that reaches it.
+fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
+    let gen_fns: Vec<&Function> = program.functions.iter().filter(|f| f.is_gen).collect();
+    if gen_fns.is_empty() {
+        return;
+    }
+    let fn_map: HashMap<&str, &Function> =
+        program.functions.iter().map(|f| (f.name.as_str(), f)).collect();
+    let extern_fns: std::collections::HashSet<&str> =
+        program.functions.iter().filter(|f| f.is_extern).map(|f| f.name.as_str()).collect();
+    let global_names: std::collections::HashSet<String> =
+        program.globals.iter().map(|g| g.name.clone()).collect();
+    // Surface method name -> impl mangled names, so a protocol-method call edge
+    // is followed into the impl body (an impure impl reached through a method).
+    let mut method_impls: HashMap<String, Vec<String>> = HashMap::new();
+    for imp in &program.impls {
+        if let Some(key) = crate::types::type_key(&imp.ty) {
+            for m in &imp.methods {
+                method_impls
+                    .entry(m.name.clone())
+                    .or_default()
+                    .push(crate::types::impl_method_name(&imp.protocol, &key, &m.name));
+            }
+        }
+    }
+    let expand = |calls: std::collections::HashSet<String>| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for c in calls {
+            if let Some(impls) = method_impls.get(&c) {
+                out.extend(impls.iter().cloned());
+            }
+            out.push(c);
+        }
+        out
+    };
+    // A function's own (non-transitive) purity violation, if any.
+    let direct = |f: &Function| -> Option<String> {
+        if contains_spawn(&f.body) {
+            return Some("uses `spawn`".to_string());
+        }
+        if touches_globals(f, &global_names) {
+            return Some("reads or writes module state".to_string());
+        }
+        for c in expand(fn_calls(&f.body)) {
+            if COMPTIME_FORBIDDEN.contains(&c.as_str()) {
+                return Some(format!("calls `{c}`"));
+            }
+            if extern_fns.contains(c.as_str()) {
+                return Some(format!("calls the extern `{c}`"));
+            }
+        }
+        None
+    };
+    const HINT: &str = "generators run at compile time — they may not use `extern`, `spawn`, \
+                        module state, `writeFile`, `readLine`, `args`, `readFileBytes`, or logging \
+                        sinks";
+    for g in gen_fns {
+        // BFS the call graph from this generator to the nearest direct violation.
+        let mut queue: std::collections::VecDeque<Vec<&str>> =
+            std::collections::VecDeque::from([vec![g.name.as_str()]]);
+        let mut seen: std::collections::HashSet<&str> =
+            std::collections::HashSet::from([g.name.as_str()]);
+        while let Some(path) = queue.pop_front() {
+            let cur = *path.last().unwrap();
+            let Some(f) = fn_map.get(cur) else { continue };
+            if let Some(reason) = direct(f) {
+                let msg = if path.len() == 1 {
+                    format!(
+                        "line {}: `gen fn {}` is not comptime-pure: it {reason} ({HINT})",
+                        g.line, g.name
+                    )
+                } else {
+                    let chain = path.join(" -> ");
+                    format!(
+                        "line {}: `gen fn {}` is not comptime-pure: it reaches `{cur}` (via \
+                         {chain}), which {reason} ({HINT})",
+                        g.line, g.name
+                    )
+                };
+                let mut d = Diagnostic::from_rendered(msg, "check");
+                d.file = g.module.clone();
+                out.push(d);
+                break;
+            }
+            for callee in expand(fn_calls(&f.body)) {
+                if let Some(next) = fn_map.get(callee.as_str()) {
+                    if seen.insert(next.name.as_str()) {
+                        let mut np: Vec<&str> = path.clone();
+                        np.push(next.name.as_str());
+                        queue.push_back(np);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Whether a function reads or writes any module-state binding (RFC-0013), so it
 /// cannot be spawned. A local (param / `let` / `for`-var) with the same name
 /// shadows the global and does not count. Slightly conservative: a name both
@@ -3687,6 +3855,74 @@ mod tests {
     fn rejects_type_mismatch() {
         let e = check_src("fn main() -> Int64 { return true; }").unwrap_err();
         assert!(e.contains("return type mismatch"), "{e}");
+    }
+
+    // ---- comptime purity (RFC-0021) -------------------------------------
+
+    #[test]
+    fn pure_gen_fn_is_accepted() {
+        // readFile is mediated (permitted); the rest is ordinary pure code.
+        let src = "gen fn g(dir: String) -> String { \
+                       let r = readFile(dir) \
+                       return \"fn x() -> Int64 { return 0 }\" } \
+                   fn main() -> Int64 { return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn gen_fn_using_writefile_is_rejected() {
+        let e = check_src(
+            "gen fn g() -> String { let w = writeFile(\"x\", \"y\") return \"\" } \
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("not comptime-pure"), "{e}");
+        assert!(e.contains("`writeFile`"), "{e}");
+    }
+
+    #[test]
+    fn gen_fn_using_spawn_is_rejected() {
+        let e = check_src(
+            "fn sq(x: Int64) -> Int64 { return x * x } \
+             gen fn g() -> String { let t = spawn sq(2) return \"\" } \
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("not comptime-pure") && e.contains("spawn"), "{e}");
+    }
+
+    #[test]
+    fn gen_fn_calling_extern_is_rejected() {
+        let e = check_src(
+            "extern fn host() -> Int64 \
+             gen fn g() -> String { let n = host() return \"\" } \
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("not comptime-pure") && e.contains("extern"), "{e}");
+    }
+
+    #[test]
+    fn gen_fn_touching_module_state_is_rejected() {
+        let e = check_src(
+            "let mut counter = 0 \
+             gen fn g() -> String { return counter.toString() } \
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("not comptime-pure") && e.contains("module state"), "{e}");
+    }
+
+    #[test]
+    fn gen_fn_transitive_impurity_names_the_chain() {
+        let e = check_src(
+            "fn helper() -> String { let w = writeFile(\"a\", \"b\") return \"\" } \
+             gen fn g() -> String { return helper() } \
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(e.contains("not comptime-pure"), "{e}");
+        assert!(e.contains("helper") && e.contains("`writeFile`"), "{e}");
     }
 
     #[test]

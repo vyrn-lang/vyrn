@@ -367,10 +367,18 @@ impl Parser {
                 // contextual starter, recognized only when `fn` follows it.
                 let is_export_extern = matches!(self.peek(), Tok::Ident(n) if n == "extern")
                     && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
-                if !matches!(self.peek(), Tok::Fn | Tok::Type | Tok::Protocol) && !is_export_extern {
+                // `export gen fn ..` (RFC-0021) — `gen` is a contextual starter too,
+                // recognized only when `fn` follows it.
+                let is_export_gen = matches!(self.peek(), Tok::Ident(n) if n == "gen")
+                    && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
+                if !matches!(self.peek(), Tok::Fn | Tok::Type | Tok::Protocol)
+                    && !is_export_extern
+                    && !is_export_gen
+                {
                     errors.push(Diagnostic::error(
                         self.line(), self.col(), "parse",
-                        "`export` must be followed by `fn`, `type`, `protocol`, or `extern fn`"
+                        "`export` must be followed by `fn`, `type`, `protocol`, `extern fn`, or \
+                         `gen fn`"
                             .to_string(),
                     ));
                     self.sync_to_decl();
@@ -393,10 +401,22 @@ impl Parser {
                     }
                     Err(d) => { errors.push(d); self.sync_to_decl(); }
                 },
-                Tok::Fn => match self.function() {
+                Tok::Fn => match self.function(false) {
                     Ok(mut f) => { f.doc = doc; f.exported = exported; functions.push(f); }
                     Err(d) => { errors.push(d); self.sync_to_decl(); }
                 },
+                // `gen fn ..` — a compile-time module generator (RFC-0021). `gen`
+                // is a contextual starter (a plain identifier elsewhere); recognize
+                // it only when `fn` follows, so a variable named `gen` is unharmed.
+                Tok::Ident(name)
+                    if name == "gen" && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
+                {
+                    self.advance(); // `gen` (a contextual Ident)
+                    match self.function(true) {
+                        Ok(mut f) => { f.doc = doc; f.exported = exported; functions.push(f); }
+                        Err(d) => { errors.push(d); self.sync_to_decl(); }
+                    }
+                }
                 Tok::Protocol => match self.protocol_decl() {
                     Ok(mut p) => { p.doc = doc; p.exported = exported; protocols.push(p); }
                     Err(d) => { errors.push(d); self.sync_to_decl(); }
@@ -506,9 +526,10 @@ impl Parser {
                 }
                 Tok::Ident(name) if depth == 0 && name == "logging" => return,
                 // `extern fn ..` is a top-level starter (RFC-0012) — resume there.
+                // `gen fn ..` likewise (RFC-0021).
                 Tok::Ident(name)
                     if depth == 0
-                        && name == "extern"
+                        && (name == "extern" || name == "gen")
                         && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
                 {
                     return
@@ -629,6 +650,7 @@ impl Parser {
             line,
             is_extern: false,
             is_export_extern: false,
+            is_gen: false,
         })
     }
 
@@ -753,19 +775,43 @@ impl Parser {
                 ))
             }
         }
-        let path = match self.advance() {
-            Tok::Str(p) => p,
+        // `from` may be followed by a module path string, or a generator call
+        // `gen(args...)` — an import target synthesized at compile time (RFC-0021).
+        let source = match self.peek().clone() {
+            Tok::Str(p) => {
+                self.advance();
+                ImportSource::Path(p)
+            }
+            Tok::Ident(gen_name) if matches!(self.tokens[self.pos + 1].tok, Tok::LParen) => {
+                let call_line = self.line();
+                self.advance(); // the generator name
+                self.eat(&Tok::LParen)?;
+                let mut args = Vec::new();
+                while *self.peek() != Tok::RParen {
+                    args.push(self.expr()?);
+                    if *self.peek() == Tok::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.eat(&Tok::RParen)?;
+                ImportSource::Generator { name: gen_name, args, line: call_line }
+            }
             other => {
                 return Err(Diagnostic::error(
                     line,
                     self.col(),
                     "parse",
-                    format!("expected a module path string after `from`, found {other:?}"),
+                    format!(
+                        "expected a module path string or a generator call after `from`, \
+                         found {other:?}"
+                    ),
                 ))
             }
         };
         self.eat_semi();
-        Ok(ImportDecl { names, path, line })
+        Ok(ImportDecl { names, source, line })
     }
 
     fn type_decl(&mut self) -> Result<Vec<TypeDecl>, Diagnostic> {
@@ -960,7 +1006,10 @@ impl Parser {
         Ok(Type::Record(result?))
     }
 
-    fn function(&mut self) -> Result<Function, Diagnostic> {
+    /// `[gen] fn name<...>(params) -> Ret { body }`. `is_gen` is set by the
+    /// caller when a contextual `gen` modifier preceded `fn` (RFC-0021); the
+    /// function parses identically otherwise.
+    fn function(&mut self, is_gen: bool) -> Result<Function, Diagnostic> {
         let line = self.line();
         self.eat(&Tok::Fn)?;
         let name = self.expect_ident()?;
@@ -1024,7 +1073,7 @@ impl Parser {
 
         let body = self.block()?;
         self.type_params.clear();
-        Ok(Function { name, exported: false, module: None, doc: None, type_params, type_bounds, params, ret, body, line, is_extern: false, is_export_extern: false })
+        Ok(Function { name, exported: false, module: None, doc: None, type_params, type_bounds, params, ret, body, line, is_extern: false, is_export_extern: false, is_gen })
     }
 
     /// `test "name" { body }` — a test declaration (RFC-0015). `test` is a
@@ -1124,6 +1173,7 @@ impl Parser {
                 line,
                 is_extern: false,
                 is_export_extern: true,
+                is_gen: false,
             });
         }
         if has_body {
@@ -1148,6 +1198,7 @@ impl Parser {
             line,
             is_extern: true,
             is_export_extern: false,
+            is_gen: false,
         })
     }
 
@@ -2145,6 +2196,63 @@ mod tests {
         assert!(matches!(f.body.stmts[0], Stmt::Let { .. }));
         assert!(matches!(f.body.stmts[2], Stmt::Assign { .. }));
         assert!(matches!(f.body.stmts[3], Stmt::Return { value: Some(_), .. }));
+    }
+
+    #[test]
+    fn gen_fn_parses_as_a_generator_marked_function() {
+        // RFC-0021: `gen fn` is an ordinary function with `is_gen` set.
+        let p = parse_src(
+            "gen fn make(dir: String) -> String { return \"fn x() -> Int64 { return 0 }\" } \
+             fn main() -> Int64 { return 0 }",
+        );
+        let g = p.functions.iter().find(|f| f.name == "make").unwrap();
+        assert!(g.is_gen);
+        assert!(!g.is_extern);
+        let m = p.functions.iter().find(|f| f.name == "main").unwrap();
+        assert!(!m.is_gen);
+    }
+
+    #[test]
+    fn export_gen_fn_parses() {
+        let p = parse_src(
+            "export gen fn g() -> String { return \"\" } fn main() -> Int64 { return 0 }",
+        );
+        let g = p.functions.iter().find(|f| f.name == "g").unwrap();
+        assert!(g.is_gen && g.exported);
+    }
+
+    #[test]
+    fn gen_is_still_an_identifier_elsewhere() {
+        // `gen` as a variable name is unharmed (contextual: only `gen fn` is special).
+        let p = parse_src("fn main() -> Int64 { let gen = 3 return gen }");
+        let f = &p.functions[0];
+        assert!(matches!(&f.body.stmts[0], Stmt::Let { name, .. } if name == "gen"));
+    }
+
+    #[test]
+    fn import_from_generator_call_parses() {
+        // RFC-0021: `import { .. } from ident(args)`.
+        let p = parse_src(
+            "import { t, TransKey } from i18n(\"./locales\", 3) \
+             fn main() -> Int64 { return 0 }",
+        );
+        let imp = &p.imports[0];
+        assert_eq!(imp.names, vec!["t".to_string(), "TransKey".to_string()]);
+        match &imp.source {
+            ImportSource::Generator { name, args, .. } => {
+                assert_eq!(name, "i18n");
+                assert_eq!(args.len(), 2);
+                assert!(matches!(&args[0], Expr::Str(s) if s == "./locales"));
+                assert!(matches!(&args[1], Expr::Int(3)));
+            }
+            other => panic!("expected a generator source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_from_path_string_still_parses() {
+        let p = parse_src("import { x } from \"./lib\" fn main() -> Int64 { return 0 }");
+        assert!(matches!(&p.imports[0].source, ImportSource::Path(p) if p == "./lib"));
     }
 
     #[test]

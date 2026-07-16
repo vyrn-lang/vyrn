@@ -361,6 +361,20 @@ mod tests {
     }
 
     #[test]
+    fn formats_gen_fn_and_generator_imports() {
+        // RFC-0021: `gen fn` and `import { .. } from gen(args)` are token-based
+        // constructs the formatter renders canonically.
+        assert_eq!(
+            f("gen  fn   make(dir:String)->String{return \"x\"}\n"),
+            "gen fn make(dir: String) -> String { return \"x\" }\n"
+        );
+        assert_eq!(
+            f("import { t } from i18n(\"./x\")\n"),
+            "import { t } from i18n(\"./x\")\n"
+        );
+    }
+
+    #[test]
     fn indents_by_brace_depth() {
         let src = "fn main() -> Int64 {\nlet x = 1\nreturn x\n}\n";
         assert_eq!(f(src), "fn main() -> Int64 {\n    let x = 1\n    return x\n}\n");
