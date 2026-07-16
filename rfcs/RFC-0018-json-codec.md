@@ -64,10 +64,14 @@ Scalars (`Int64`, sized ints, `Float64`, `Float32`, `Bool`, `String`),
 validated scalars, records (nested, incl. inline-refined fields),
 `Option<T>`, `Array<T>`, payload-less enums (↔ JSON strings, matching the
 jsonSchema `enum` emission). **Not codable** (checker error naming the
-offender): payload enums (incl. `Result`), `Ref`, `Task`, `Template`,
-`ArrayN` as a decode target (encode is fine — it is just an array).
-Payload-enum encoding is the named v2 (a tagging decision that must land
-together with its jsonSchema story).
+offender): `Ref`, `Task`, `Template`, `Validation<T>`, `ArrayN` as a decode
+target (encode is fine — it is just an array).
+
+> **v2 landed (RFC-0024).** Payload enums and `Result<T, E>` are now codable —
+> externally tagged and arity-shaped (`"Unit"` / `{"Circle":5}` /
+> `{"Rect":[2,3]}` / `{"Ok":x}` / `{"Err":e}`), with a matching `oneOf`
+> jsonSchema that round-trips byte-exact. See
+> [RFC-0024](RFC-0024-enums-on-the-wire.md).
 
 ## Decode semantics (locked)
 
@@ -115,6 +119,7 @@ NOT granted though — keep them out of consteval; runtime only).
 
 ## Out of scope
 
-Payload enums / `Result` on the wire (v2, with tagging + schema),
-streaming/incremental parsing, non-JSON codecs (the seam is RFC-0019's),
-custom serialization hooks, pretty-printing.
+Payload enums / `Result` on the wire (shipped as v2 —
+[RFC-0024](RFC-0024-enums-on-the-wire.md)), streaming/incremental parsing,
+non-JSON codecs (the seam is RFC-0019's), custom serialization hooks,
+pretty-printing.

@@ -39,6 +39,17 @@ exported signature at generation time — a non-codable export is a
 generation error naming the offender (keep helpers unexported or in
 another module).
 
+> **`Result`-returning procedures (RFC-0024).** Since payload enums and
+> `Result<T, E>` are now codable, a procedure may return one. An `Err` is an
+> **application-level outcome**, not a request failure: the wire carries a
+> **200** with `{"Err":..}` (byte-identical `{"Ok":..}` for success). `422`
+> stays reserved for request *validation* (`fromJson` of the body), so the
+> status alone distinguishes "your request was malformed" from "the request was
+> fine, the app said no". Name the return so `fromJson`/`jsonSchema` can take it
+> by name — `export type DeleteResult = Result<Bool, String>`; see
+> `examples/fullstack`'s `deleteUser`. (Before RFC-0024 the offender-naming above
+> was routinely `Result`, and contracts modeled errors as records+`Option`.)
+
 ## The library: three generators over one contract
 
 The three generators are **ordinary `gen fn`s in an ordinary module** —

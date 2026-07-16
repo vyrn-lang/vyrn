@@ -157,7 +157,16 @@ absent-or-`null` for an `Option`, parses integers **exactly** (never through
 path). Encode renders through the canonical scalar path and decode runs the
 same predicate lowering as every other boundary, so the encoded bytes AND
 every Issue's key/path/message are byte-identical across all three backends
-(`examples/jsoncodec.vyrn`). **Project manifest** (M3): an optional `vyrn.json`
+(`examples/jsoncodec.vyrn`). The codable domain is scalars/validated scalars,
+records, `Option`, `Array`, and — since **codec v2 (RFC-0024)** — **payload
+enums and `Result<T, E>`**, externally tagged and arity-shaped (`"Unit"` /
+`{"Circle":5}` / `{"Rect":[2,3]}` / `{"Ok":x}` / `{"Err":e}`); a named payload
+enum earns a per-type IR encode/decode function (recursion-safe), a payload
+enum's jsonSchema is a `oneOf` that round-trips byte-exact (tuples via
+`prefixItems`+`items:false`), and a `Result`-returning RPC procedure is a **200**
+carrying `{"Err":..}` — `422` stays request-validation only
+(`examples/enumcodec.vyrn`). `Validation<T>` stays off the wire.
+**Project manifest** (M3): an optional `vyrn.json`
 (`name`/`main`/`dependencies`) found by walking up from the cwd — `vyrn run/
 check/build` need no file argument in a project, bare import specifiers
 (`import { x } from "money"`) resolve through the `dependencies` map (an
