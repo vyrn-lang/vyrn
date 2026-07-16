@@ -199,6 +199,49 @@ goes to `handle`. See [examples/fullstack/](../examples/fullstack/): `vyrn dev`,
 then the page does a typed round trip, a validated submit that renders the
 server's own 422 issues, and a query-cache dedupe + invalidate demo.
 
+## The UI layer — `view()` + `vyrn-dom.js` (RFC-0026)
+
+[`std/html`](../std/html.vyrn) is a pure library: an `Html` payload enum
+(`Empty` / `Text` / `Raw` / `El`) with `Attr` (`Cls` / `Id` / `A` / `On` /
+`Key`), trivial constructors, and a total `toHtmlString` SSR renderer (the
+locked escaping rules, the void-element set, `On` → `data-on-<event>` /
+`data-arg-<event>`). A component is a pure `fn view() -> Html` of module state —
+so SSR (`toHtmlString(view())`) and the client (`toJson(view())`) share it, and
+views are three-way parity citizens (see [examples/htmltree.vyrn](../examples/htmltree.vyrn)).
+
+**[vyrn-dom.js](vyrn-dom.js) — the client runtime.** Zero deps, beside
+`wasi-min.js`, talking to ordinary wasm exports (nothing privileged). The Elm
+Architecture, host-side:
+
+- **boot:** `mount(bytes, el, opts)` instantiates, calls the exported
+  `vyrnView()` (= `toJson(view())`), parses the JSON `Html` tree, builds the DOM.
+- **update:** after any handler returns it calls `vyrnView()` again and diffs
+  new vs. retained — **keyed** where `Key` attrs are present (a reused node is
+  *moved*, so input value / caret / focus survive a reorder), positional
+  otherwise — patching minimally.
+- **events:** one delegated listener per event type on the mount root; on an
+  event it walks to the nearest `data-on-<type>` and invokes the exported handler
+  by name. Locked ABI: every handler is `export extern fn name(arg: String)` —
+  `click`/`keydown` send the `data-arg` payload, `input`/`change` the control
+  value, `submit` the payload (+ `preventDefault`).
+- **subscriptions:** the app may export `vyrnSubs()` (= `toJson(subs())`) of
+  `Sub = Every(ms, handler) | Keydown(key, handler)`; the host reconciles the
+  list by value after each render — appeared wire, disappeared unwire.
+- **effects:** a `data-effect="name"` node invokes a host-registered effect
+  (`app.effect(name, fn)` / `opts.effects`) on appear, with an optional cleanup
+  returned for disappear.
+
+```js
+import { mount } from "./vyrn-dom.js";
+const app = await mount(bytes, document.getElementById("app"), {});
+// app.exports / app.rerender() / app.effect(name, fn) / app.destroy()
+```
+
+[examples/domdemo.vyrn](../examples/domdemo.vyrn) + [domdemo.html](domdemo.html)
+exercise a counter, a keyed-list reorder, a text input, and an `Every`
+subscription; the [fullstack](../examples/fullstack/) client is a `view()` over
+its RPC state — `vyrn-dom.js` for the DOM, `vyrn-rpc.js` for the transport.
+
 ## What this is (and isn't) yet
 
 This is the browser direction through stage 2 (WASI shim demo), RFC-0012 M1+M2
