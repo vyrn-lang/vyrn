@@ -31,7 +31,7 @@ prototype to answer.
 | [0017](RFC-0017-formatter.md) | Canonical Formatter | `vyrn fmt`: one style, no options |
 | [0018](RFC-0018-json-codec.md) | The JSON Codec | `toJson`/`fromJson`: canonical encode, decode into `Validation<T>` with accumulated `Issue`s |
 | [0019](RFC-0019-rpc.md) | Typed RPC | **Implemented**: the codec as an RPC layer, end-to-end typed calls — a library (`std/rpc`) over RFC-0021's `moduleInterface`, with `vyrn dev` + browser runtimes |
-| [0020](RFC-0020-i18n.md) | i18n | **M1 implemented**: finite string types & interpolation containment — DFA finiteness/enumeration/containment, a proven `"nav.\{s}.label" ⊆ TransKey` skips its runtime check, plus string-literal completion. M2 pending: locale message catalogs (a generator on RFC-0021) |
+| [0020](RFC-0020-i18n.md) | i18n | **Implemented (M1 + M2)**: M1 finite string types & interpolation containment (a proven `"nav.\{s}.label" ⊆ TransKey` skips its runtime check + literal completion); M2 the `std/i18n` generator on RFC-0021 — a Vyrn-authored JSON + ICU reader that flattens locales, checks cross-locale drift, and compiles each message (interpolation / plural via CLDR rules / select) into ordinary Vyrn, emitting `TransKey`, a `Locale` enum + module state, and per-key typed functions with `///` docs |
 | [0021](RFC-0021-generator-imports.md) | Generator Imports | **Implemented**: `gen fn` + `import { .. } from gen(args)` — comptime-pure module synthesis, mediated `readFile`/`listDir`/`moduleInterface`, content-addressed cache |
 
 ## Status legend
@@ -51,10 +51,11 @@ part still expected to move; RFC-0017 (the formatter, `vyrn fmt` + LSP
 `textDocument/formatting`) and RFC-0018 (the JSON codec, `toJson`/`fromJson`)
 are now **Implemented** too. RFC-0021 (generator imports — user code that runs
 at compile time and synthesizes a module) is **Implemented** and is the
-mechanism RFC-0019 (typed RPC) and RFC-0020 (i18n) are now designed as libraries
+mechanism RFC-0019 (typed RPC) and RFC-0020 (i18n) are now built as libraries
 over: with the `moduleInterface` reflection primitive and mediated file reading,
-both shed their compiler-flavored special cases. Those two remain the open
-drafts, now with a foundation to build on.
+both shed their compiler-flavored special cases. Both are now **Implemented** —
+`std/rpc` and `std/i18n` are ordinary Vyrn `gen fn`s the compiler knows nothing
+about.
 
 ## Process
 

@@ -301,6 +301,27 @@ wasm` is untouched. This is M1 and independent of i18n; **M2 (the locale
 message-catalog generator) is now a library on RFC-0021** built over these
 finite key types.
 
+**Typed i18n is now that library (RFC-0020 M2).** `std/i18n` is a single Vyrn
+`gen fn` — no i18n, ICU, or CLDR knowledge in the compiler. It reads a directory
+of `<locale>.json` files (a recursive JSON reader written in Vyrn, since
+`fromJson` is type-directed and can't take arbitrary nested data), flattens the
+key trees, and emits `TransKey` (the finite type of every dotted key, so M1's
+completion and containment come for free), a `Locale` enum with `setLocale`/
+`locale()` backed by generator-owned module state, and one typed function per
+key. The comparison the RFC set out to beat is the production Nuxt i18n module:
+there, keeping locales in sync needs a baseline file and a check *script* —
+here **drift-checking is just what `import` means**, because the generator
+requires every locale to carry the same key set and the same per-key argument
+signatures or it fails the load with a per-locale diagnostic. Each ICU message
+compiles to an ordinary Vyrn function body — interpolation, a `select` equality
+chain, or a `plural` `if`-chain over a compiled-in **CLDR cardinal table**
+(en/de/es/it, fr/pt, Slavic uk/ru/pl, CJK ja/zh/ko) — so all three backends
+inherit the behavior and parity is not re-proven. Each function's `///` doc is
+the source-locale message, so **hover shows the translation with zero LSP work**,
+and the `TransKey` DFA keeps `t("` completion at the same per-keystroke speed
+whether the catalog has ten keys or ten thousand. See `examples/i18ndemo.vyrn`
+(a normal three-way parity citizen, Ukrainian one/few/many included).
+
 ---
 
 ## Shipped

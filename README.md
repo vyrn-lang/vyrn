@@ -72,7 +72,12 @@ tests). Highlights:
   containment (a product-automaton walk, not the union cross-product TypeScript
   expands): proven ⇒ the runtime check is erased; not contained ⇒ a compile error
   naming the offending key. The editor completes `t("` with every key. See
-  [`examples/finitekeys.vyrn`](examples/finitekeys.vyrn).
+  [`examples/finitekeys.vyrn`](examples/finitekeys.vyrn). **M2 builds on this as
+  a library**: [`std/i18n`](std/i18n.vyrn) is a `gen fn` that reads a directory of
+  locale JSON, cross-checks drift, and compiles each ICU message (interpolation /
+  CLDR plural / select) into ordinary Vyrn — emitting `TransKey`, a `Locale` enum
+  with `setLocale`, and per-key typed functions whose `///` doc is the translation.
+  See [`examples/i18ndemo.vyrn`](examples/i18ndemo.vyrn).
 - **`Option<T>`, `Result<T, E>`, `match`, and `?` (RFC-0005) implemented** end to
   end — no null; absence/failure are explicit values, read via exhaustive
   `match`, and `?` propagates `None`/`Err` out of a function. `Option` **and**
