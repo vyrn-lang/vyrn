@@ -6,7 +6,7 @@ and the one decision the rest of the language waits on.
 **Every feature below is verified three ways**: the clang-compiled native
 binary AND the `wasm32-wasi` module produce byte-identical stdout, stderr, and
 exit codes against the tree-walking interpreter (the reference semantics),
-across **46 examples** and **606 tests** (0 warnings) — including every runtime
+across **52 examples** and **694 tests** (0 warnings) — including every runtime
 trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere)
 and the canonical I/O error strings (RFC-0014). The whole corpus is kept
 canonical by `vyrn fmt` (RFC-0017) and re-verified by the parity harness.
@@ -321,6 +321,22 @@ the source-locale message, so **hover shows the translation with zero LSP work**
 and the `TransKey` DFA keeps `t("` completion at the same per-keystroke speed
 whether the catalog has ten keys or ten thousand. See `examples/i18ndemo.vyrn`
 (a normal three-way parity citizen, Ukrainian one/few/many included).
+
+**Four ergonomic gaps closed (RFC-0022).** Each was demanded by the library code
+above, not speculation. `else if` chains directly (parser sugar for the nested
+form; the i18n parsers' staircases and its generator output both migrated).
+String **ordering** (`< <= > >=`) compares byte-wise lexicographically — byte
+order, never locale collation — so std/i18n's hand-rolled `strGreater` became the
+operator; it reuses `strcmp` in codegen for free parity. **`s[i]` is now a
+`UInt8`** (was `Int64`), aligned with `bytes(s): Array<UInt8>` so byte-level code
+mixes the two (explicit `Int64(s[i])` where arithmetic needs the wider type).
+And **import aliasing** (`import { getUser as fetchUser }`): a loader pass folds
+aliases into the one flat namespace before the alias-unaware register/merge, keys
+collision and visibility on the alias, and — for the RPC stub that co-names the
+real function — renames the foreign decl to a fresh symbol so the local stub
+keeps the name. That erased RFC-0019's `call<Proc>` deviation: `rpcInProcess` now
+emits same-named `<proc>` dispatchers via `getUser as getUser__real`. The LSP is
+alias-aware (hover shows `— alias of getUser`, go-to-def jumps to the source).
 
 ---
 

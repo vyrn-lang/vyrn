@@ -169,12 +169,13 @@ keyword, builtin), permanently.
   come from the JS runtime (a per-transport counter). Validated types also cannot
   be constructed invalid in-process, so the in-process flavor only ever produces
   `Valid` — the `Invalid` paths are a wire concern.
-- **In-process naming deviation (honest).** Vyrn links every module into one flat
-  namespace, so a stub cannot share a name with the real function it calls. The
-  in-process dispatchers are therefore named `call<Proc>` (not the wire client's
-  `<proc>`), and the contract TYPES are imported from the contract directly. A
-  faithful same-named in-process flavor would need a general import-aliasing
-  primitive; deferred.
+- **In-process naming (resolved by RFC-0022).** The in-process dispatchers now
+  share the wire client's `<proc>` name: import aliasing lets the generated
+  module import each real procedure as `getUser as getUser__real` and give the
+  same-named stub the real name, forwarding to the alias. (Historically the
+  dispatchers were named `call<Proc>`, because Vyrn links every module into one
+  flat namespace and a stub could not share a name with the real function it
+  calls; import aliasing — a general primitive — erased that deviation.)
 - **`vyrn dev` static precedence (locked).** A GET whose path names an existing
   static asset (the built `/client.wasm`, the runtimes under `/vyrn-runtime/*`,
   or a file under the public dir with `/` → `index.html`) is served from disk;

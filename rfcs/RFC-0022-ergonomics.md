@@ -1,10 +1,37 @@
 # RFC-0022 — Ergonomics Batch: `else if`, String Ordering, Byte Indexing, Import Aliasing
 
-- **Status:** Draft — approved for implementation
+- **Status:** Implemented
 - **Depends on:** nothing new — four small, evidence-backed gaps
 - **Evidence:** every item was demanded by real code written this cycle —
   the std/i18n JSON+ICU parsers (RFC-0020 M2) and the std/rpc generators
   (RFC-0019). No speculative surface.
+
+## Implementation notes
+
+1. **`else if`** — parser only: after `else`, an `if` is parsed recursively as
+   the sole statement of a synthesized else-block (zero new AST; the chained
+   `if` keeps its own line for diagnostics). The token formatter already prints
+   `} else if cond {` canonically (it never joins lines). The std/i18n parsers'
+   17 pure `else { if }` staircases and its plural/select generator were
+   migrated to `else if`.
+2. **String ordering** — `< <= > >=` on `(String, String) -> Bool`, byte-wise
+   lexicographic (byte order, **not** locale collation). Interp uses `str` byte
+   `Ord`; codegen reuses `strcmp` and tests its sign against 0 with a signed
+   `icmp`. std/i18n's hand-rolled `strGreater` was deleted for the operator.
+3. **`s[i]` → `UInt8`** — the string-index result type changed from `Int64` to
+   `UInt8`, matching `bytes(s): Array<UInt8>`. Mixed arithmetic needs an
+   explicit `Int64(s[i])`. OOB trap wording unchanged. (The corpus already did
+   byte work via `bytes(s)`, so churn was limited to a handful of tests.)
+4. **Import aliasing** — `import { X as Y }`; `as` is contextual. The loader's
+   `resolve_aliases` pass folds aliases into the one flat namespace before the
+   register/visibility/merge stages, which stay alias-unaware: it rewrites
+   references to the resolved decl, keys collision/visibility on the alias, and
+   hides the original unless also defined/imported. **Co-naming** (a module
+   importing `X as Y` while defining its own `X` — the RPC stub) is resolved by
+   renaming the foreign decl to a fresh unique symbol program-wide, freeing the
+   name for the local stub. LSP hover shows `— alias of <original>` and
+   go-to-def jumps to the source. `std/rpc`'s `rpcInProcess` now emits same-named
+   `<proc>` stubs via `getUser as getUser__real`, removing the RFC-0019 deviation.
 
 ---
 

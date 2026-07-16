@@ -33,6 +33,7 @@ prototype to answer.
 | [0019](RFC-0019-rpc.md) | Typed RPC | **Implemented**: the codec as an RPC layer, end-to-end typed calls — a library (`std/rpc`) over RFC-0021's `moduleInterface`, with `vyrn dev` + browser runtimes |
 | [0020](RFC-0020-i18n.md) | i18n | **Implemented (M1 + M2)**: M1 finite string types & interpolation containment (a proven `"nav.\{s}.label" ⊆ TransKey` skips its runtime check + literal completion); M2 the `std/i18n` generator on RFC-0021 — a Vyrn-authored JSON + ICU reader that flattens locales, checks cross-locale drift, and compiles each message (interpolation / plural via CLDR rules / select) into ordinary Vyrn, emitting `TransKey`, a `Locale` enum + module state, and per-key typed functions with `///` docs |
 | [0021](RFC-0021-generator-imports.md) | Generator Imports | **Implemented**: `gen fn` + `import { .. } from gen(args)` — comptime-pure module synthesis, mediated `readFile`/`listDir`/`moduleInterface`, content-addressed cache |
+| [0022](RFC-0022-ergonomics.md) | Ergonomics Batch | **Implemented**: `else if` chaining; string ordering (`< <= > >=`, byte-wise); `s[i] : UInt8` (aligned with `bytes(s)`); import aliasing (`import { X as Y }`, alias-aware LSP) — the last erases RFC-0019's `call<Proc>` deviation |
 
 ## Status legend
 
