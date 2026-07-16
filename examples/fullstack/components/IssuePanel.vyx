@@ -1,0 +1,16 @@
+<script>
+props { issueLine: String }
+
+fn issueClass(line: String) -> String {
+    if line.length > 0 {
+        return "out issues has-issues"
+    }
+    return "out issues"
+}
+</script>
+
+<template>
+<p id="issueOut" class={issueClass(issueLine)}>
+    {#if issueLine.length > 0}{issueLine}{:else}<span class="ok">no issues</span>{/if}
+</p>
+</template>

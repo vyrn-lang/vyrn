@@ -1,0 +1,15 @@
+<script>
+props { userLine: String, issueLine: String, idText: String }
+</script>
+
+<template>
+<main>
+    <h1>vyrn fullstack — typed RPC through .vyx components</h1>
+    <Section title="Typed round trip" kind="roundtrip">
+        <Roundtrip idText={idText} userLine={userLine}/>
+    </Section>
+    <Section title="Issues (server-side, off the wire)" kind="issues">
+        <IssuePanel issueLine={issueLine}/>
+    </Section>
+</main>
+</template>

@@ -1,0 +1,15 @@
+<script>
+props { idText: String, userLine: String }
+</script>
+
+<template>
+<div id="roundtrip">
+    <label>
+        id
+        <input id="uid" type="number" value={idText} @input="setId"/>
+    </label>
+    <button id="fetchBtn" @click="loadUser">getUser (typed stub)</button>
+    <button id="delBtn" @click="removeUser">deleteUser (Result)</button>
+    <p id="userOut" class="out">{userLine}</p>
+</div>
+</template>

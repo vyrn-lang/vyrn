@@ -14,7 +14,9 @@
 /// completion). Server behavior and the wire protocol are identical.
 import { getUser, createUser, deleteUser, GetUserReq, CreateUserReq, User, DeleteReq, DeleteResult } from rpcClient("./api")
 import { rpcClient } from "std/rpc"
-import { el, text, cls, attr, on, empty, toHtmlString, Html, Attr } from "std/html"
+import { toHtmlString, Html } from "std/html"
+import { components } from "std/vyx"
+import { app } from components("./components")
 
 /// A named `Int64` alias so `fromJson` can parse the id-input string (a handler
 /// arg arrives as `String`; `fromJson` needs a declared type name). A
@@ -92,34 +94,14 @@ fn onDeleteUser(id: Int64, res: Validation<DeleteResult>) {
     }
 }
 
-// ---- the view (pure) -------------------------------------------------------
+// ---- the view (pure, compiled from .vyx components) ------------------------
 
+/// The whole page view is now the `App` component in `components/App.vyx`
+/// (RFC-0026 M4), a pure function of module state passed as props. The template
+/// compiler lowers it to the same `std/html` hyperscript the hand-written
+/// `view()` used to build; `vyrn emit-gen client.vyrn` shows the render function.
 fn view() -> Html {
-    return el("main", [], [
-            el("h1", [], [text("vyrn fullstack — typed RPC through view()")]),
-            el("section", [Id("roundtrip")], [
-                    el("h2", [], [text("Typed round trip")]),
-                    el("label", [], [
-                            text("id "),
-                            el("input", [Id("uid"), attr("type", "number"), attr("value", idText), on("input", "setId", "")], []),
-                        ]),
-                    el("button", [Id("fetchBtn"), on("click", "loadUser", "")], [text("getUser (typed stub)")]),
-                    el("button", [Id("delBtn"), on("click", "removeUser", "")], [text("deleteUser (Result)")]),
-                    el("p", [Id("userOut"), cls("out")], [text(userLine)]),
-                ]),
-            el("section", [Id("issues")], [
-                    el("h2", [], [text("Issues (server-side, off the wire)")]),
-                    el("p", [Id("issueOut"), cls("out issues")], [issueNode()]),
-                ]),
-        ])
-}
-
-/// The issue line, or an empty node when there is nothing to show.
-fn issueNode() -> Html {
-    if issueLine.length == 0 {
-        return empty()
-    }
-    return text(issueLine)
+    return app(userLine, issueLine, idText)
 }
 
 // ---- the page's entry points (exported to JS) ------------------------------
