@@ -6,7 +6,7 @@ and the one decision the rest of the language waits on.
 **Every feature below is verified three ways**: the clang-compiled native
 binary AND the `wasm32-wasi` module produce byte-identical stdout, stderr, and
 exit codes against the tree-walking interpreter (the reference semantics),
-across **52 examples** and **694 tests** (0 warnings) — including every runtime
+across **53 examples** and **743 tests** (0 warnings) — including every runtime
 trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere)
 and the canonical I/O error strings (RFC-0014). The whole corpus is kept
 canonical by `vyrn fmt` (RFC-0017) and re-verified by the parity harness.
@@ -97,9 +97,20 @@ This RFC also **settled the async question: Vyrn adds no `async`/`await`** (for
 now, deliberately) — function suspension is the highest-risk feature the
 three-backend invariant could face (wasm can't switch stacks), the host-owns-
 the-loop model already covers the real use cases, and determinism is the
-product. When concurrency comes to the server it will be worker threads calling
-`handle` in parallel, gated on the isolation analysis — same output, no new
-language surface.
+product. The promise that decision made — "when concurrency comes to the server
+it will be worker threads calling `handle` in parallel, gated on the isolation
+analysis, same output, no new language surface" — **is now kept (RFC-0025)**:
+`vyrn serve --workers N` (and `vyrn dev --workers N`) runs `handle` on N worker
+threads, each owning a fully independent interpreter. The gate is exactly
+module state: if `handle` transitively reads or writes a module-state binding,
+startup refuses with the offending call path (``error: `--workers` needs a
+module-state-free `handle`: `handle` -> `bump` reads or writes module state
+`hits` ...``) — the existing isolation analysis answering a narrower question
+(`print`/logging/file I/O do NOT gate workers; each log line stays atomic,
+though lines may interleave across workers). `main` and module-state init run
+once, on a setup interpreter, before any worker; each worker then initializes
+its own (unobservable, by the gate) global frame. `--workers` absent remains
+today's sequential loop byte-for-byte.
 
 A 2026-07-15 hardening pass fixed ~40 reviewed defects: native
 use-after-free/heap-corruption bugs (cell `set`, region escapes, `list` in
@@ -502,13 +513,24 @@ none blocks the core loop.
 - `modify` capability — a parameter changed in place, visible to the caller
   (by-reference / call-by-value-result; the argument must be a `mut` variable).
 
-### Concurrency (RFC-0004 §Q4)
+### Concurrency (RFC-0004 §Q4, parallel since RFC-0025)
 - **Structured fork-join** — `spawn f(args) -> Task<T>` / `t.join()`. The compiler
   *proves* a spawned function is isolated (no I/O, no shared mutable state,
   transitively), so tasks are data-race-free and the result is schedule-independent
   — which is what keeps interpreter == native. `share` is the concurrent-read
-  capability. (Execution is eager/sequential today; a parallel scheduler is a
-  drop-in backend optimisation the model already guarantees is safe.)
+  capability.
+- **Real threads natively (RFC-0025).** The native binary runs each task on an
+  OS thread (Win32/pthreads, entirely inside the C shim: the IR packs arguments
+  into a heap frame and passes a per-callee thunk symbol to `__vyrn_spawn`;
+  `join` blocks and reads the frame — no Vyrn-level function pointer exists,
+  preserving RFC-0023's invariant). The interpreter and wasm stay eager/
+  sequential — byte-identical by isolation, so the parity corpus runs with zero
+  exclusions (`examples/parallel.vyrn` is an ordinary citizen). A trapping task
+  performs the canonical trap protocol from its own thread (same wording, exit
+  1, printed once); unjoined tasks are joined at process exit. Wall-clock: 8 ×
+  `fib(36)` ≈ 4.6× faster than `VYRN_SEQUENTIAL_SPAWN=1` (the documented
+  sequential escape hatch) on a 12-core machine, identical output. The region
+  arena stack became `thread_local` so tasks may use `region { .. }`.
 - **The heap** — dynamic strings (`a + b` concatenation, `s.length`), malloc-backed.
 - **Deterministic reclamation, Path A (no GC):**
   - `region { .. }` arenas free a whole *group* of allocations at block exit.
@@ -642,9 +664,9 @@ inference, and concurrency.
 Each needs dynamic allocation or references; the heap unblocks them, but most wait
 on the reclamation decision above.
 
-- **Parallel execution of tasks** — the concurrency *model* and its safety ship
-  today (eager/sequential scheduler); running tasks on real threads is a portable
-  threading runtime — runtime work, not language design, and it changes no answers.
+- ~~**Parallel execution of tasks**~~ — **shipped (RFC-0025)**: tasks run on
+  real OS threads natively, and it changed no answers (the whole corpus is
+  byte-identical with threads underneath).
 - **`share`-by-reference** — pass large shared data without copying (an
   optimisation; observably identical to today's by-value `share`).
 - **More conversions** — `parse` for other types; formatting helpers.

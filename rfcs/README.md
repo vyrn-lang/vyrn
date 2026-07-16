@@ -36,6 +36,7 @@ prototype to answer.
 | [0021](RFC-0021-generator-imports.md) | Generator Imports | **Implemented**: `gen fn` + `import { .. } from gen(args)` — comptime-pure module synthesis, mediated `readFile`/`listDir`/`moduleInterface`, content-addressed cache |
 | [0022](RFC-0022-ergonomics.md) | Ergonomics Batch | **Implemented**: `else if` chaining; string ordering (`< <= > >=`, byte-wise); `s[i] : UInt8` (aligned with `bytes(s)`); import aliasing (`import { X as Y }`, alias-aware LSP) — the last erases RFC-0019's `call<Proc>` deviation |
 | [0023](RFC-0023-function-values.md) | Function Values | **Implemented**: `fn`-typed parameters + lambda literals (`\|x\| expr`), parameter-only and call-argument-only, read-only captures, per-lambda monomorphization — zero runtime function pointers in any backend; ships generic `std/arrays` (`map`/`filter`/`fold`/`any`/`all`) |
+| [0025](RFC-0025-worker-threads.md) | Worker Threads | **Implemented**: `spawn` on real OS threads natively (shim-resident: Win32/pthreads, wasm stays inline, `VYRN_SEQUENTIAL_SPAWN=1` escape hatch) — byte-identical by isolation, zero parity exclusions; `vyrn serve/dev --workers N` runs `handle` on per-worker interpreters behind the module-state gate (refusal names the call path) |
 
 ## Status legend
 
@@ -58,7 +59,10 @@ mechanism RFC-0019 (typed RPC) and RFC-0020 (i18n) are now built as libraries
 over: with the `moduleInterface` reflection primitive and mediated file reading,
 both shed their compiler-flavored special cases. Both are now **Implemented** —
 `std/rpc` and `std/i18n` are ordinary Vyrn `gen fn`s the compiler knows nothing
-about.
+about. RFC-0025 (worker threads) is **Implemented** too — the promise RFC-0016's
+async decision made ("worker threads calling `handle` in parallel, gated on the
+isolation analysis") is kept, with `spawn` on real OS threads under the same
+byte-identical corpus.
 
 ## Process
 
