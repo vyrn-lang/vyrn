@@ -1,0 +1,51 @@
+/// Function values (RFC-0023): a `fn`-typed parameter takes a lambda literal
+/// (`|x| expr`) or a named function, and every use is monomorphized away at
+/// compile time — no function value survives to runtime in any backend. Lambdas
+/// capture outer locals by READ; they are legal only as call arguments.
+
+import { map, filter, fold, any } from "std/arrays"
+
+fn double(n: Int64) -> Int64 {
+    return n * 2
+}
+
+fn sum(xs: Array<Int64>) -> Int64 {
+    return fold(xs, 0, |acc, x| acc + x)
+}
+
+/// A function whose `fn`-typed parameter is forwarded (pass-through) to another
+/// higher-order function — the monomorphization threads through transitively.
+fn mapThenSum(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Int64 {
+    return sum(map(xs, f))
+}
+
+fn main() -> Int64 {
+    let nums: Array<Int64> = [1, 2, 3, 4, 5]
+
+    // A lambda literal passed to a generic higher-order function.
+    let doubled = map(nums, |x| x * 2)
+    print(sum(doubled)) // 30
+
+    // A named function used as a function value — same monomorphization path.
+    let doubled2 = map(nums, double)
+    print(sum(doubled2)) // 30
+
+    // A capture: `bump` is read from the enclosing scope (by value).
+    let bump = 100
+    let bumped = map(nums, |x| x + bump)
+    print(sum(bumped)) // 515
+
+    // filter + fold composed.
+    let evens = filter(nums, |x| x % 2 == 0)
+    print(sum(evens)) // 6
+
+    // any / all predicates.
+    if any(nums, |x| x > 4) {
+        print(1) // 1
+    }
+
+    // Pass-through: `mapThenSum` forwards its `fn` parameter to `map`.
+    print(mapThenSum(nums, |x| x * 10)) // 150
+
+    return 0
+}

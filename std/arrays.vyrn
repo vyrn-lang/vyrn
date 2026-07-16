@@ -1,0 +1,53 @@
+/// std/arrays — higher-order array helpers (RFC-0023), written in Vyrn itself.
+/// Being ordinary Vyrn, every function here gets interpreter == native == wasm
+/// parity for free, and each `fn`-typed parameter is monomorphized away at every
+/// call site (no function value survives to runtime).
+
+/// Apply `f` to every element, collecting the results into a new array.
+export fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> {
+    let mut out: Array<U> = []
+    for x in xs {
+        out.push(f(x))
+    }
+    return out
+}
+
+/// Keep only the elements for which `pred` returns `true`.
+export fn filter<T>(xs: Array<T>, pred: fn(T) -> Bool) -> Array<T> {
+    let mut out: Array<T> = []
+    for x in xs {
+        if pred(x) {
+            out.push(x)
+        }
+    }
+    return out
+}
+
+/// Left fold: thread `acc` through `f` for every element, starting from `init`.
+export fn fold<T, A>(xs: Array<T>, init: A, f: fn(A, T) -> A) -> A {
+    let mut acc = init
+    for x in xs {
+        acc = f(acc, x)
+    }
+    return acc
+}
+
+/// `true` if `pred` holds for at least one element.
+export fn any<T>(xs: Array<T>, pred: fn(T) -> Bool) -> Bool {
+    for x in xs {
+        if pred(x) {
+            return true
+        }
+    }
+    return false
+}
+
+/// `true` if `pred` holds for every element (vacuously true when empty).
+export fn all<T>(xs: Array<T>, pred: fn(T) -> Bool) -> Bool {
+    for x in xs {
+        if !pred(x) {
+            return false
+        }
+    }
+    return true
+}
