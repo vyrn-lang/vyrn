@@ -1580,6 +1580,32 @@ impl Parser {
         Ok(GlobalDecl { name, mutable, ty, init, doc: None, module: None, line })
     }
 
+    /// Parse an `if` statement whose `if` token is current (`line` is its
+    /// position). After the then-block an `else` may be followed either by a
+    /// block (`else { .. }`) or — directly — by another `if`, giving an
+    /// `else if` chain (RFC-0022). The chained `if` is parsed recursively and
+    /// wrapped as the sole statement of a synthesized else-block, so it is the
+    /// ordinary nested form to every backend and carries its own honest line
+    /// number (diagnostics point at the real `else if`, not the outer `if`).
+    fn if_stmt(&mut self, line: usize) -> Result<Stmt, Diagnostic> {
+        self.advance(); // `if`
+        let cond = self.cond_expr()?;
+        let then_block = self.block()?;
+        let else_block = if *self.peek() == Tok::Else {
+            self.advance();
+            if *self.peek() == Tok::If {
+                let else_line = self.line();
+                let nested = self.if_stmt(else_line)?;
+                Some(Block { stmts: vec![nested] })
+            } else {
+                Some(self.block()?)
+            }
+        } else {
+            None
+        };
+        Ok(Stmt::If { cond, then_block, else_block, line })
+    }
+
     fn stmt(&mut self) -> Result<Stmt, Diagnostic> {
         let line = self.line();
         match self.peek() {
@@ -1615,18 +1641,7 @@ impl Parser {
                 self.eat_semi();
                 Ok(Stmt::Return { value, line })
             }
-            Tok::If => {
-                self.advance();
-                let cond = self.cond_expr()?;
-                let then_block = self.block()?;
-                let else_block = if *self.peek() == Tok::Else {
-                    self.advance();
-                    Some(self.block()?)
-                } else {
-                    None
-                };
-                Ok(Stmt::If { cond, then_block, else_block, line })
-            }
+            Tok::If => self.if_stmt(line),
             Tok::While => {
                 self.advance();
                 let cond = self.cond_expr()?;
@@ -2271,6 +2286,49 @@ mod tests {
         assert!(matches!(f.body.stmts[0], Stmt::Let { .. }));
         assert!(matches!(f.body.stmts[2], Stmt::Assign { .. }));
         assert!(matches!(f.body.stmts[3], Stmt::Return { value: Some(_), .. }));
+    }
+
+    #[test]
+    fn else_if_desugars_to_nested_if_with_honest_lines() {
+        // `else if` (RFC-0022) parses to the ordinary nested form: the else-block
+        // is a single-statement block whose one statement is the chained `if`,
+        // carrying its own line number.
+        let src = "fn f() -> Int64 {\n\
+                   if a == 1 {\n\
+                   return 1\n\
+                   } else if a == 2 {\n\
+                   return 2\n\
+                   } else {\n\
+                   return 3\n\
+                   }\n\
+                   }";
+        let p = parse_src(src);
+        let f = &p.functions[0];
+        let Stmt::If { else_block: Some(eb), .. } = &f.body.stmts[0] else {
+            panic!("expected an if with an else");
+        };
+        // The else-block holds exactly the chained `if`, at its real source line 4.
+        assert_eq!(eb.stmts.len(), 1);
+        let Stmt::If { line, else_block: Some(inner), .. } = &eb.stmts[0] else {
+            panic!("else-block's sole statement is the chained if");
+        };
+        assert_eq!(*line, 4, "chained if keeps its own line for diagnostics");
+        // The innermost else is a plain block (the final `else`).
+        assert_eq!(inner.stmts.len(), 1);
+        assert!(matches!(inner.stmts[0], Stmt::Return { .. }));
+    }
+
+    #[test]
+    fn else_if_equals_the_nested_form() {
+        // The sugar is exact: `else if` and the hand-written nested `else { if }`
+        // produce identical ASTs.
+        let sugar = parse_src(
+            "fn f() -> Int64 { if a { return 1 } else if b { return 2 } else { return 3 } }",
+        );
+        let nested = parse_src(
+            "fn f() -> Int64 { if a { return 1 } else { if b { return 2 } else { return 3 } } }",
+        );
+        assert_eq!(sugar.functions[0].body, nested.functions[0].body);
     }
 
     #[test]
