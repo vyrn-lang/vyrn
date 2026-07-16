@@ -1,0 +1,30 @@
+/// Geometry primitives, imported under a namespace by `namespace.vyrn`
+/// (RFC-0027). None of these exports enter the importer's flat namespace — they
+/// are reached only as `shapes.member`.
+
+export type Point = { x: Int64, y: Int64 }
+
+export type Color =
+    | Red
+    | Green
+    | Blue
+
+export fn origin() -> Point {
+    return Point { x: 0, y: 0 }
+}
+
+export fn shift(p: Point, dx: Int64, dy: Int64) -> Point {
+    return Point { x: p.x + dx, y: p.y + dy }
+}
+
+export fn colorRank(c: Color) -> Int64 {
+    return match c {
+        Red => 1,
+        Green => 2,
+        Blue => 3,
+    }
+}
+
+export fn describe() -> String {
+    return "shapes"
+}

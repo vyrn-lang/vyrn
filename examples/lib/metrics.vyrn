@@ -1,0 +1,11 @@
+/// A second module that deliberately reuses export names (`origin`, `describe`).
+/// Under a namespace these coexist with `shapes`' same-named exports — a clash
+/// the flat namespace could never allow (RFC-0027).
+
+export fn origin() -> Int64 {
+    return 100
+}
+
+export fn describe() -> String {
+    return "metrics"
+}

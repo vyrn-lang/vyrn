@@ -1,0 +1,58 @@
+/// Namespaced imports (RFC-0027): `import * as ns from <source>` binds ONE name
+/// and keeps the module's exports OUT of the flat namespace. `ns.member` then
+/// works wherever the underlying export does — calls, record construction, type
+/// positions, generic arguments, enum-variant construction and match patterns,
+/// and type-name arguments. The loader folds every qualified use to the foreign
+/// decl's program-wide symbol, so the checker/backends stay namespace-unaware and
+/// interp == native == wasm parity is inherited.
+///
+/// Two modules here (`shapes`, `metrics`) both export `origin` and `describe`;
+/// under distinct namespaces they coexist. A namespaced generator import
+/// (`pal`, RFC-0021) shows namespaces cover synthesized modules too.
+
+import { palette } from "./lib/gen_palette"
+
+import * as shapes from "./lib/shapes"
+import * as metrics from "./lib/metrics"
+import * as pal from palette("./data")
+
+fn colorName(c: shapes.Color) -> String {
+    return match c {
+        shapes.Color.Red => "red",
+        shapes.Color.Green => "green",
+        shapes.Color.Blue => "blue",
+    }
+}
+
+fn main() -> Int64 {
+    // Call + record construction + type position.
+    let p: shapes.Point = shapes.shift(shapes.origin(), 3, 4)
+    print(p.x + p.y) // 7
+
+    // Generic type argument + enum-variant construction and patterns.
+    let colors: Array<shapes.Color> = [shapes.Color.Green, shapes.Color.Blue]
+    let mut total = 0
+    for c in colors {
+        total = total + shapes.colorRank(c)
+    }
+    print(total) // 5
+    print(colorName(shapes.Color.Red)) // red
+
+    // Two namespaced modules with the same export names, side by side.
+    print(shapes.describe()) // shapes
+    print(metrics.describe()) // metrics
+    print(shapes.origin().x + metrics.origin()) // 100
+
+    // Type-name argument through a namespace.
+    let parsed = fromJson(shapes.Point, "{\"x\":10,\"y\":20}")
+    print(match parsed {
+            Valid(pt) => pt.x + pt.y,
+            Invalid(iss) => 0 - 1,
+        }) // 30
+
+    // A namespaced generator import (RFC-0021).
+    print(pal.colorCount()) // 3
+    print(pal.firstTheme()) // dark.txt
+
+    return 0
+}
