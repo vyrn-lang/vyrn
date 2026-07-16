@@ -184,7 +184,9 @@ with full type safety, get accumulated validation on bad input for free. `rpc
 fn getUser(req: GetUserReq) -> User { .. }` is a contextual modifier (the
 `extern` precedent) — an ordinary function that is ALSO wire-callable: 0-or-1
 parameter, its parameter/return types must be codable (RFC-0018; the checker
-names any offender). The `rpc(getUser, req) -> Int64` builtin names the
+names any offender). A procedure IMPLIES `export` (the client imports its name),
+so `export rpc fn` is a redundant-export error. The `rpc(getUser, req) -> Int64`
+builtin names the
 procedure as an *identifier* (the `schemaOf`/`fromJson` precedent) and checks
 the request against its parameter; the response is delivered to a convention
 handler `export extern fn onRpc(id, status, body)` (a missing one is a compile
@@ -197,7 +199,11 @@ with zero mocks, and it is a normal three-way parity citizen —
 (415 unless `application/json`; a decode failure ⇒ 422 with the exact
 `{"issues":[..]}` bytes; unknown ⇒ 404; a `Unit` return ⇒ 204; a trap ⇒ logged
 500) plus `GET /rpc/$schema`, a protocol-neutral registry feeding the
-`jsonSchema` emitter; and **browser** — the client-role build. The
+`jsonSchema` emitter. The wire surface is **root-scoped** (a security rule):
+only procedures visible in the server ROOT module — declared there or imported
+BY NAME into it — are mounted, so a transitively-imported dependency cannot add
+endpoints (its procedures are a 404, though still callable in-process from any
+module). And **browser** — the client-role build. The
 **role-based fullstack build** shares ONE contract module: `vela.json` gains
 `server`/`client` roots, `velac build --server` is the native server binary and
 `velac build --client` the browser wasm (client ROLE + wasm). Both roles

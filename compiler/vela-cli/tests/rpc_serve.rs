@@ -21,11 +21,11 @@ type UserId = Int64 where value >= 1
 type GetUserReq = { id: UserId }
 type User = { name: String, active: Bool }
 
-export rpc fn getUser(req: GetUserReq) -> User {
+rpc fn getUser(req: GetUserReq) -> User {
     return User { name: "user#\{req.id}", active: true }
 }
 
-export rpc fn ping() -> Unit {
+rpc fn ping() -> Unit {
     return
 }
 "#;
@@ -210,6 +210,97 @@ fn get_on_procedure_returns_405() {
         "GET /rpc/getUser HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     );
     assert_eq!(status, "HTTP/1.1 405 Method Not Allowed");
+}
+
+/// A `Drop`-cleaned temp directory holding a multi-file project.
+struct TempDir {
+    path: std::path::PathBuf,
+}
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Spawn a server whose ROOT imports only a TYPE from a dependency module — the
+/// dependency ALSO declares a procedure (`secret`), which is thus in the linked
+/// program but NOT visible in the root. Returns the server plus the temp dir
+/// (kept alive for the child's lifetime).
+fn start_multi_server() -> (Serve, TempDir) {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    );
+    let dir = std::env::temp_dir().join(format!("vela-rpc-multi-{unique}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    // The dependency: exports a type AND declares a procedure (auto-exported).
+    std::fs::write(
+        dir.join("dep.vela"),
+        "export type Widget = { id: Int64 }\n\
+         rpc fn secret(w: Widget) -> Widget { return w }\n",
+    )
+    .unwrap();
+    // The server root: imports only the TYPE `Widget`, declares its own `getUser`.
+    // It never names `secret`, so `secret` must not be a wire endpoint.
+    let root = dir.join("server.vela");
+    std::fs::write(
+        &root,
+        "import { Widget } from \"./dep\"\n\
+         rpc fn getUser(w: Widget) -> Widget { return w }\n",
+    )
+    .unwrap();
+
+    let port = free_port();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_velac"))
+        .arg("serve")
+        .arg(&root)
+        .arg("--port")
+        .arg(port.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn velac serve");
+    let _ = drain(child.stdout.take().unwrap());
+    let stderr = drain(child.stderr.take().unwrap());
+    // No temp file to track here (the dir guard owns cleanup); reuse a dummy.
+    let server = Serve {
+        child,
+        port,
+        stderr,
+        _file: TempFile { path: root.clone() },
+    };
+    wait_for(&server.stderr, "serving", Duration::from_secs(10));
+    (server, TempDir { path: dir })
+}
+
+#[test]
+fn root_declared_procedure_is_mounted() {
+    let (s, _dir) = start_multi_server();
+    let (status, _) = post(s.port, "getUser", "application/json", "{\"id\":3}");
+    assert_eq!(status, "HTTP/1.1 200 OK", "root-declared procedure is mounted");
+}
+
+#[test]
+fn transitively_imported_procedure_is_not_mounted() {
+    let (s, _dir) = start_multi_server();
+    // `secret` lives in a dependency the root imports a TYPE from — it is in the
+    // linked program but NOT visible in the root, so it is NOT an endpoint (404,
+    // indistinguishable from a nonexistent name — a dependency can't add routes).
+    let (status, _) = post(s.port, "secret", "application/json", "{\"id\":3}");
+    assert_eq!(status, "HTTP/1.1 404 Not Found");
+}
+
+#[test]
+fn schema_lists_only_root_visible_procedures() {
+    let (s, _dir) = start_multi_server();
+    let (status, body) = request(
+        s.port,
+        "GET /rpc/$schema HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(body.contains("\"name\":\"getUser\""), "lists getUser: {body}");
+    assert!(!body.contains("secret"), "must NOT list the dependency's procedure: {body}");
 }
 
 #[test]

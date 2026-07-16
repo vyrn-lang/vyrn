@@ -14,8 +14,10 @@ type UserId = Int64 where value >= 1
 type GetUserReq = { id: UserId }
 type User = { name: String, active: Bool }
 
-/// The procedure: signature is the contract, body is ordinary server logic.
-export rpc fn getUser(req: GetUserReq) -> User {
+/// The procedure: signature is the contract, body is ordinary server logic. A
+/// `rpc fn` is inherently public (a client imports its name), so it is always
+/// exported — writing `export rpc fn` would be a redundant-export error.
+rpc fn getUser(req: GetUserReq) -> User {
     return User { name: "user#\{req.id}", active: req.id < 100 }
 }
 

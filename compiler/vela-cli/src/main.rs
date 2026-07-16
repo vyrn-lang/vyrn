@@ -1476,10 +1476,18 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Root-scoped mount surface (RFC-0019 security rule): mount ONLY the
+    // procedures visible in the SERVER ROOT module — declared in the root file or
+    // imported BY NAME into it. A transitively-imported third-party module cannot
+    // add endpoints; the root's import list IS the route table. (In-process
+    // `rpc()` from any module still calls any procedure — only the WIRE surface is
+    // root-scoped.)
+    let mounted = std::sync::Arc::new(root_mounted_procs(&source, &program));
+
     // The `GET /rpc/$schema` registry (RFC-0019): a protocol-neutral list of the
-    // procedures with each one's request/response JSON Schema (or `null`).
+    // MOUNTED procedures with each one's request/response JSON Schema (or `null`).
     // Computed once from the type declarations (the `jsonSchema` emitter).
-    let rpc_schema = std::sync::Arc::new(rpc_schema_json(&program));
+    let rpc_schema = std::sync::Arc::new(rpc_schema_json(&program, &mounted));
 
     // Bind before running `main`, so a port clash fails fast and cleanly. A
     // `--port 0` lets the OS pick a free port; report the one it chose.
@@ -1503,7 +1511,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
         eprintln!("serving {file_label} on http://localhost:{actual_port}");
         for stream in listener.incoming() {
             match stream {
-                Ok(mut s) => serve_one(&mut s, host, &rpc_schema),
+                Ok(mut s) => serve_one(&mut s, host, &rpc_schema, &mounted),
                 Err(_) => continue,
             }
         }
@@ -1535,6 +1543,7 @@ fn serve_one(
     stream: &mut std::net::TcpStream,
     host: &mut dyn vela_frontend::interp::ServeHost,
     rpc_schema: &str,
+    mounted: &std::collections::HashSet<String>,
 ) {
     match parse_request(stream) {
         Ok(req) => {
@@ -1554,7 +1563,7 @@ fn serve_one(
                 return;
             }
             if let Some(name) = route.strip_prefix("/rpc/") {
-                serve_rpc(stream, host, &method, &path, name, &req.content_type, &req.body);
+                serve_rpc(stream, host, mounted, &method, &path, name, &req.content_type, &req.body);
                 return;
             }
             // Otherwise fall to the RFC-0016 `handle` (if the file defines one).
@@ -1595,6 +1604,7 @@ fn serve_one(
 fn serve_rpc(
     stream: &mut std::net::TcpStream,
     host: &mut dyn vela_frontend::interp::ServeHost,
+    mounted: &std::collections::HashSet<String>,
     method: &str,
     path: &str,
     name: &str,
@@ -1605,6 +1615,15 @@ fn serve_rpc(
     if method != "POST" {
         eprintln!("{method} {path} -> 405");
         write_response(stream, 405, "text/plain", b"method not allowed");
+        return;
+    }
+    // Root-scoped mount surface (RFC-0019): a procedure that is not visible in
+    // the server root — e.g. one reachable only through a transitively-imported
+    // module — is NOT an endpoint. It is a 404, indistinguishable from a name
+    // that does not exist, so a dependency cannot probe for hidden procedures.
+    if !mounted.contains(name) {
+        eprintln!("{method} {path} -> 404");
+        write_response(stream, 404, "text/plain", b"not found");
         return;
     }
     if content_type != "application/json" {
@@ -1637,17 +1656,57 @@ fn serve_rpc(
     }
 }
 
+/// The root-scoped RPC mount surface (RFC-0019 security rule): the set of
+/// procedure names `velac serve` exposes over HTTP. A procedure is mounted iff
+/// it is visible in the SERVER ROOT module — declared in the root file, or
+/// imported BY NAME into it. A procedure reachable only through a
+/// transitively-imported module is intentionally NOT mounted (a dependency
+/// cannot add endpoints). The root's own AST (re-parsed from `source`, since the
+/// linker clears the merged `imports`) is the route table; `program` is the
+/// linked whole, used only to confirm an imported name is actually a procedure.
+fn root_mounted_procs(
+    source: &str,
+    program: &vela_frontend::ast::Program,
+) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    let root = vela_frontend::parser::parse_accum(
+        vela_frontend::lexer::lex(source).unwrap_or_default(),
+    )
+    .0;
+    let linked_rpc: HashSet<&str> =
+        program.functions.iter().filter(|f| f.is_rpc).map(|f| f.name.as_str()).collect();
+    let mut mounted: HashSet<String> = HashSet::new();
+    // Procedures declared in the root file.
+    for f in root.functions.iter().filter(|f| f.is_rpc) {
+        mounted.insert(f.name.clone());
+    }
+    // Procedures imported BY NAME into the root (that really are procedures).
+    for imp in &root.imports {
+        for n in &imp.names {
+            if linked_rpc.contains(n.as_str()) {
+                mounted.insert(n.clone());
+            }
+        }
+    }
+    mounted
+}
+
 /// Build the `GET /rpc/$schema` registry body (RFC-0019):
 /// `{"procedures":[{"name","request":<jsonSchema|null>,"response":<jsonSchema|null>}]}`.
 /// Procedures appear in declaration order; the request/response schemas come from
 /// the same emitter as the `jsonSchema` builtin (`null` for a parameterless
 /// request or a `Unit` return).
-fn rpc_schema_json(program: &vela_frontend::ast::Program) -> String {
+fn rpc_schema_json(
+    program: &vela_frontend::ast::Program,
+    mounted: &std::collections::HashSet<String>,
+) -> String {
     use vela_frontend::ast::Type;
     let types: std::collections::HashMap<String, vela_frontend::ast::TypeDecl> =
         program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
     let mut procs = Vec::new();
-    for f in program.functions.iter().filter(|f| f.is_rpc) {
+    // Only the MOUNTED (root-visible) procedures are listed — the registry
+    // reflects exactly the wire surface, never a dependency's internal procedures.
+    for f in program.functions.iter().filter(|f| f.is_rpc && mounted.contains(&f.name)) {
         let request = match f.params.first() {
             Some(p) => vela_frontend::types::rpc_payload_schema(&p.ty, &types)
                 .unwrap_or_else(|| "null".to_string()),

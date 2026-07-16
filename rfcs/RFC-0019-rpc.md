@@ -22,7 +22,7 @@
 export type GetUserReq = { id: Int64 }
 export type User = { name: Username, age: Age }
 
-export rpc fn getUser(req: GetUserReq) -> User {
+rpc fn getUser(req: GetUserReq) -> User {
     ...                                    // ordinary body; may import server logic
 }
 ```
@@ -32,6 +32,11 @@ export rpc fn getUser(req: GetUserReq) -> User {
 - Zero or one parameter; parameter and return types must be **codable**
   (RFC-0018; checker enforces, naming the offender). Return may be `Unit`.
 - Procedure names are the wire names; they share the top-level namespace.
+- **`rpc` implies `export`.** A procedure is inherently public — the client
+  must import its name for the typed `rpc()` call — so it is always
+  module-importable. Writing `export rpc fn` is a redundant-export error
+  (`redundant `export`: `rpc fn` procedures are always exported`) — one way to
+  spell it, the canonical-style ethos.
 
 ## Transports (v1) and the seams (locked now, cheap forever)
 
@@ -42,10 +47,22 @@ bytes)`. Three transports ship; everything else is an adapter later:
    test story's: zero serialization, always available on server-role builds.
 2. **HTTP** — `velac serve` mounts `POST /rpc/<name>`: decode via
    `fromJson` → `Invalid` ⇒ **422** with `{"issues":[...]}` (the `Issue`
-   array, toJson'd) → call → `toJson` ⇒ 200 `application/json`. Unknown
-   procedure ⇒ 404. `Content-Type` other than `application/json` ⇒ 415 —
-   **the codec seam**: negotiated by content type, JSON is simply the only
-   v1 codec. A trap in a procedure ⇒ logged 500 (server survives, RFC-0016).
+   array, toJson'd) → call → `toJson` ⇒ 200 `application/json`. A `Unit`
+   return ⇒ **204** (no body). Unknown procedure ⇒ 404. `Content-Type` other
+   than `application/json` ⇒ 415 — **the codec seam**: negotiated by content
+   type, JSON is simply the only v1 codec. A trap in a procedure ⇒ logged 500
+   (server survives, RFC-0016).
+
+   **The mount surface is root-visible procedures only** (a security rule).
+   `velac serve` (and later `dev`) mounts exactly the procedures visible in
+   the SERVER ROOT module — declared in the root file, or imported BY NAME
+   into it. The root's import list IS the route table: explicit and greppable.
+   A procedure reachable only through a transitively-imported third-party
+   module is NOT an endpoint (a 404, indistinguishable from a name that does
+   not exist, so a dependency cannot add routes or be probed for hidden ones).
+   `GET /rpc/$schema` lists exactly this mounted surface. In-process `rpc()`
+   dispatch still works for ANY procedure in the linked program (it is just a
+   call) — only the WIRE surface is root-scoped.
 3. **Browser** — the `rpc()` builtin below, via `web/vela-rpc.js` (fetch).
 
 **Contract endpoint:** `GET /rpc/$schema` returns
