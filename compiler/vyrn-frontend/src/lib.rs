@@ -16,6 +16,7 @@ pub mod codec;
 pub mod consteval;
 pub mod diagnostics;
 pub mod fmt;
+pub mod hash;
 pub mod interp;
 pub mod lexer;
 pub mod loader;
@@ -24,6 +25,7 @@ pub mod own;
 pub mod parser;
 pub mod regex;
 pub mod schema;
+pub mod schema_reflect;
 pub mod symbols;
 pub mod types;
 

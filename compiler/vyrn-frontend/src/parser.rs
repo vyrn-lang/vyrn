@@ -133,6 +133,81 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         predicate: None,
         line: 0,
     });
+    // Module reflection (RFC-0021): `moduleInterface(path)` returns the shape of
+    // a module's EXPORTED surface — `schemaOf` generalized from one type to a
+    // whole module. Injected like `Schema`/`Issue` so a generator can name them
+    // without an import, and filtered out of the LSP by their line-0 origin. The
+    // records reference each other and `Schema` by name (resolution is
+    // order-independent). A generator consumes these to emit stubs/docs/mocks.
+    //   ParamInfo { name, spelling, schema }
+    //   FnInfo     { name, params: Array<ParamInfo>, ret, retSchema }
+    //   TypeInfo   { name, source, schema }
+    //   ModuleInterface { functions: Array<FnInfo>, types: Array<TypeInfo> }
+    program.type_decls.push(TypeDecl {
+        name: "ParamInfo".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        base: Type::Record(vec![
+            Field { name: "name".to_string(), ty: Type::Str },
+            Field { name: "spelling".to_string(), ty: Type::Str },
+            Field { name: "schema".to_string(), ty: Type::Named("Schema".to_string()) },
+        ]),
+        predicate: None,
+        line: 0,
+    });
+    program.type_decls.push(TypeDecl {
+        name: "FnInfo".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        base: Type::Record(vec![
+            Field { name: "name".to_string(), ty: Type::Str },
+            Field {
+                name: "params".to_string(),
+                ty: Type::Array(Box::new(Type::Named("ParamInfo".to_string()))),
+            },
+            Field { name: "ret".to_string(), ty: Type::Str },
+            Field { name: "retSchema".to_string(), ty: Type::Named("Schema".to_string()) },
+        ]),
+        predicate: None,
+        line: 0,
+    });
+    program.type_decls.push(TypeDecl {
+        name: "TypeInfo".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        base: Type::Record(vec![
+            Field { name: "name".to_string(), ty: Type::Str },
+            Field { name: "source".to_string(), ty: Type::Str },
+            Field { name: "schema".to_string(), ty: Type::Named("Schema".to_string()) },
+        ]),
+        predicate: None,
+        line: 0,
+    });
+    program.type_decls.push(TypeDecl {
+        name: "ModuleInterface".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        base: Type::Record(vec![
+            Field {
+                name: "functions".to_string(),
+                ty: Type::Array(Box::new(Type::Named("FnInfo".to_string()))),
+            },
+            Field {
+                name: "types".to_string(),
+                ty: Type::Array(Box::new(Type::Named("TypeInfo".to_string()))),
+            },
+        ]),
+        predicate: None,
+        line: 0,
+    });
     // The server surface (RFC-0016): the `Request` handed to `handle` and the
     // `Response` it returns. Ordinary records (no `where`), injected like
     // `Schema`/`Issue` so every program can name them without a `use` and

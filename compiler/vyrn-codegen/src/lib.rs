@@ -3500,6 +3500,25 @@ impl<'a> Gen<'a> {
             ));
             return Ok((r, Type::Option(Box::new(Type::Str))));
         }
+        // `listDir`/`moduleInterface` (RFC-0021) are interpreter/generation-time
+        // builtins. `moduleInterface` is compile-time reflection (it never has a
+        // runtime value); `listDir`'s primary role is generation-time directory
+        // enumeration (mediated through the loader's resolver). Neither has a
+        // native/wasm lowering in v1 — a program that reaches one at runtime gets
+        // a clear compile error rather than a link failure.
+        if name == "listDir" {
+            return Err(format!(
+                "`listDir` runs in the interpreter / at generation time (RFC-0021); it has no \
+                 native or wasm lowering in v1 — use it in a `gen fn` or under `vyrn run`"
+            ));
+        }
+        if name == "moduleInterface" {
+            return Err(
+                "`moduleInterface` is compile-time reflection (RFC-0021) — it is only available \
+                 during generation, never at runtime"
+                    .to_string(),
+            );
+        }
         if name == "readFile" {
             // status = __vyrn_read_file(path, &buf, &len): 0 ok / 1 io / 3 NUL,
             // then the shared UTF-8 DFA decides status 2. The Err payload is

@@ -151,6 +151,41 @@ pub fn cache_dir() -> PathBuf {
     Path::new(&home).join(".vyrn/cache/sha256")
 }
 
+/// The generator cache directory (RFC-0021): `~/.vyrn/cache/gen`, overridable
+/// with `VYRN_GEN_CACHE_DIR` (used by tests + air-gapped setups). Shared by the
+/// CLI and the LSP so a build's generation is reused per keystroke.
+pub fn gen_cache_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("VYRN_GEN_CACHE_DIR") {
+        return PathBuf::from(d);
+    }
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    Path::new(&home).join(".vyrn/cache/gen")
+}
+
+/// Read a cached generator output by content-address key (a hex sha256).
+pub fn gen_cache_get(key: &str) -> Option<String> {
+    std::fs::read_to_string(gen_cache_dir().join(key)).ok()
+}
+
+/// Store a generator output; failures are swallowed (the cache is optional).
+pub fn gen_cache_put(key: &str, value: &str) {
+    let dir = gen_cache_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join(key), value);
+}
+
+/// List the entry names directly under `dir` (generation-time `listDir`,
+/// RFC-0021), sorted for determinism.
+pub fn list_dir(dir: &str) -> Result<Vec<String>, String> {
+    let entries = std::fs::read_dir(dir).map_err(|_| format!("cannot list `{dir}`"))?;
+    let mut names: Vec<String> =
+        entries.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    Ok(names)
+}
+
 pub fn vendor_dir(project_dir: &str) -> PathBuf {
     Path::new(project_dir).join("vyrn_vendor/sha256")
 }
@@ -318,6 +353,17 @@ impl vyrn_frontend::loader::ModuleResolver for RemoteResolver {
         } else {
             std::fs::read_to_string(resolved).map_err(|e| e.to_string())
         }
+    }
+    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
+        // Generation-time `listDir` reads local directories only (inputs are
+        // local or lock-pinned; a remote key has no directory to enumerate).
+        list_dir(resolved)
+    }
+    fn gen_cache_get(&self, key: &str) -> Option<String> {
+        gen_cache_get(key)
+    }
+    fn gen_cache_put(&self, key: &str, value: &str) {
+        gen_cache_put(key, value)
     }
 }
 

@@ -36,6 +36,50 @@ use crate::{lexer, parser};
 /// filesystem resolver, in-memory maps in tests, cache/network in M4.
 pub trait ModuleResolver {
     fn read(&self, resolved: &str) -> Result<String, String>;
+    /// List the entry names directly under the directory `resolved` (no `.`/`..`;
+    /// bare names, not paths). Default: unsupported. Filesystem-backed resolvers
+    /// override it; the in-memory [`MapResolver`] scans its keys. Used by
+    /// generation-time `listDir` (RFC-0021); ordinary module loading never calls
+    /// it.
+    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
+        Err(format!("cannot list `{resolved}`"))
+    }
+    /// Fetch a cached generator output by content-address key (RFC-0021). The
+    /// frontend stays filesystem-free: the CLI/LSP back this with
+    /// `~/.vyrn/cache/gen`; tests use an in-memory map. Default: no cache (a
+    /// permanent miss), so generation always re-runs.
+    fn gen_cache_get(&self, _key: &str) -> Option<String> {
+        None
+    }
+    /// Store a generator output under its content-address key (RFC-0021). Default:
+    /// a no-op (no cache). Failures are swallowed — the cache is an optimization,
+    /// never a correctness dependency.
+    fn gen_cache_put(&self, _key: &str, _value: &str) {}
+}
+
+thread_local! {
+    /// Count of generator bodies actually *run* (cache misses) on this thread.
+    /// Thread-local so the parallel test runner sees each test's own count (a
+    /// generation runs inline on the calling thread). Test-observable evidence
+    /// that the cache short-circuits re-runs (RFC-0021).
+    static GEN_RUNS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn bump_gen_runs() {
+    GEN_RUNS.with(|c| c.set(c.get() + 1));
+}
+
+/// The number of generator runs so far on this thread (cache misses).
+pub fn gen_run_count() -> u64 {
+    GEN_RUNS.with(|c| c.get())
+}
+
+thread_local! {
+    /// Test-only guardrail overrides (thread-local ⇒ no parallel-test
+    /// interference). `None` ⇒ the production defaults.
+    static GEN_FUEL_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static GEN_MAX_OUTPUT_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// A resolver over an in-memory map — used by tests and always available.
@@ -45,11 +89,31 @@ impl ModuleResolver for MapResolver {
     fn read(&self, resolved: &str) -> Result<String, String> {
         self.0.get(resolved).cloned().ok_or_else(|| format!("module not found: {resolved}"))
     }
+    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
+        // Every key directly under `resolved/` contributes its next path segment.
+        let prefix = format!("{}/", resolved.trim_end_matches('/'));
+        let mut names: std::collections::BTreeSet<String> = Default::default();
+        let mut any_under = false;
+        for key in self.0.keys() {
+            if let Some(rest) = key.strip_prefix(&prefix) {
+                any_under = true;
+                if let Some(seg) = rest.split('/').next() {
+                    if !seg.is_empty() {
+                        names.insert(seg.to_string());
+                    }
+                }
+            }
+        }
+        if !any_under {
+            return Err(format!("cannot list `{resolved}`"));
+        }
+        Ok(names.into_iter().collect())
+    }
 }
 
 /// Lexically normalize a slash-separated path: resolve `.` and `..`, collapse
 /// duplicate separators. Purely textual (works for in-memory resolvers too).
-fn normalize(path: &str) -> String {
+pub(crate) fn normalize(path: &str) -> String {
     let slashed = path.replace('\\', "/");
     let mut out: Vec<&str> = Vec::new();
     for seg in slashed.split('/') {
@@ -212,6 +276,23 @@ struct Module {
     program: Program,
     /// The resolved key each import points at, in `program.imports` order.
     import_targets: Vec<String>,
+    /// The synthesized source text, for a module produced by a generator
+    /// (RFC-0021); `None` for a module read from disk. Powers `vyrn emit-gen`.
+    gen_source: Option<String>,
+}
+
+/// The synthesized source of every generator-produced module reachable from the
+/// root (RFC-0021), as `(banner, source)` pairs in load order — the data behind
+/// `vyrn emit-gen`. Runs the whole load (generators fire, cache included) but
+/// discards the link.
+pub fn generated_modules(
+    root_source: &str,
+    root_path: &str,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+) -> Result<Vec<(String, String)>, Vec<Diagnostic>> {
+    let (modules, _) = load_modules(root_source, root_path, opts, resolver)?;
+    Ok(modules.into_iter().filter_map(|m| m.gen_source.map(|s| (m.key, s))).collect())
 }
 
 /// Load `root_source` (already read; its path is `root_path`) and every module
@@ -306,6 +387,7 @@ fn load_modules(
                     log_sink: LogSink::Stderr,
                 },
                 import_targets: Vec::new(),
+                gen_source: None,
             });
             stack.pop();
             states.insert(key.to_string(), true);
@@ -416,7 +498,10 @@ fn load_modules(
 
         stack.pop();
         states.insert(key.to_string(), true);
-        modules.push(Module { key: key.to_string(), program, import_targets });
+        // A module synthesized by a generator (RFC-0021) keeps its source text
+        // (its key is the generator banner) so `vyrn emit-gen` can print it.
+        let gen_source = key.starts_with("generated by ").then(|| text.clone());
+        modules.push(Module { key: key.to_string(), program, import_targets, gen_source });
         Ok(())
     }
 
@@ -434,34 +519,225 @@ fn load_modules(
     Ok((modules, root_key))
 }
 
+/// Guardrails (RFC-0021): a generator's step budget and output-size cap.
+const GEN_FUEL: u64 = 20_000_000;
+const GEN_MAX_OUTPUT: usize = 4 * 1024 * 1024;
+
 /// Run a generator-call import target (RFC-0021) and return
-/// `(synthesized module key, Some(source) | None-if-already-loaded)`.
+/// `(synthesized module key, Some(source) | None-if-already-synthesized)`.
 ///
-/// (Stub — the generation engine is wired in a following change. For now a
-/// generator-call import is a clean load error.)
+/// Flow: prove the arguments are compile-time constants → compute the
+/// synthesized module key (which dedups identical calls and separates distinct
+/// arguments) → find the exported `gen fn` in an already-loaded module → load +
+/// check it as a runnable program → consult the content-addressed cache (a hit
+/// skips interpretation) → on a miss, run the generator in the mediated sandbox,
+/// then cache the result keyed by `sha256(generator sources ++ args ++ inputs)`.
 #[allow(clippy::too_many_arguments)]
 fn run_generator(
     importer: &str,
     importer_is_root: bool,
     name: &str,
-    _args: &[Expr],
+    args: &[Expr],
     line: usize,
-    _opts: &LoadOptions,
-    _resolver: &dyn ModuleResolver,
-    _modules: &[Module],
-    _states: &HashMap<String, bool>,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    modules: &[Module],
+    states: &HashMap<String, bool>,
     _root_key: &str,
 ) -> Result<(String, Option<String>), Vec<Diagnostic>> {
-    let mut d = Diagnostic::error(
-        line,
-        0,
-        "load",
-        format!("generator import target `{name}(..)` is not yet supported"),
-    );
-    if !importer_is_root {
-        d.file = Some(importer.to_string());
+    let err = |msg: String| -> Vec<Diagnostic> {
+        let mut d = Diagnostic::error(line, 0, "load", msg);
+        if !importer_is_root {
+            d.file = Some(importer.to_string());
+        }
+        vec![d]
+    };
+
+    // 1. Arguments must be compile-time constants (RFC-0021).
+    let empty = HashMap::new();
+    let mut consts = Vec::with_capacity(args.len());
+    for a in args {
+        match crate::consteval::eval(a, &empty) {
+            Some(c) => consts.push(c),
+            None => {
+                return Err(err(format!(
+                    "generator import `{name}(..)` needs compile-time-constant arguments (v1: \
+                     string / integer / boolean literals)"
+                )))
+            }
+        }
     }
-    Err(vec![d])
+    let arg_repr = consts.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ");
+
+    // 2. The synthesized module's key IS its diagnostic banner. It omits the
+    //    line, so two identical calls dedup; different arguments ⇒ different key.
+    let gen_key = format!("generated by {name}({arg_repr}) at {importer}");
+    if states.contains_key(&gen_key) {
+        return Ok((gen_key, None));
+    }
+
+    // 3. The generator must be an exported `gen fn` in a module this file loaded.
+    let gen_mod_key = modules
+        .iter()
+        .find(|m| m.program.functions.iter().any(|f| f.name == name && f.is_gen && f.exported))
+        .map(|m| m.key.clone())
+        .ok_or_else(|| {
+            err(format!(
+                "`{name}` is not an imported `gen fn` — a generator import target must be an \
+                 exported `gen fn` in a module this file imports"
+            ))
+        })?;
+    let gen_fn = modules
+        .iter()
+        .flat_map(|m| &m.program.functions)
+        .find(|f| f.name == name && f.is_gen)
+        .expect("generator found above");
+    if gen_fn.params.len() != consts.len() {
+        return Err(err(format!(
+            "generator `{name}` takes {} argument(s), got {}",
+            gen_fn.params.len(),
+            consts.len()
+        )));
+    }
+
+    // 4. Load + check the generator module as a runnable program (its own
+    //    comptime-purity is enforced by the check).
+    let gen_source = resolver
+        .read(&gen_mod_key)
+        .map_err(|e| err(format!("cannot re-read generator module `{gen_mod_key}`: {e}")))?;
+    let gen_program = load(&gen_source, &gen_mod_key, opts, resolver)?;
+    let mut gdiags = crate::checker::check_accum(&gen_program);
+    if gdiags.is_empty() {
+        gdiags.extend(crate::movecheck::check_accum(&gen_program));
+    }
+    if !gdiags.is_empty() {
+        return Err(gdiags);
+    }
+
+    // 5. Content-addressed cache key: generator sources ++ args ++ inputs read.
+    let importer_dir = dir_of(importer).to_string();
+    let join_dir = |s: &str| -> String {
+        normalize(&if importer_dir.is_empty() { s.to_string() } else { format!("{importer_dir}/{s}") })
+    };
+    // Each constant string path argument becomes an allowed input root. A path
+    // that names a module (no extension) also admits its `.vyrn` file, so
+    // `moduleInterface("./contract")` may read `contract.vyrn`.
+    let mut allowed: Vec<String> = Vec::new();
+    for c in &consts {
+        if let crate::consteval::ConstVal::Str(s) = c {
+            allowed.push(join_dir(s));
+            if !s.ends_with(".vyrn") && !s.ends_with(".json") {
+                allowed.push(join_dir(&format!("{s}.vyrn")));
+            }
+        }
+    }
+    let sources_hash = generator_sources_hash(&gen_source, &gen_mod_key, opts, resolver, &arg_repr)?;
+    let no_cache = std::env::var("VYRN_NO_GEN_CACHE").is_ok();
+
+    // 5a. Cache hit: every recorded input still hashes as it did ⇒ reuse output.
+    if !no_cache {
+        if let Some(cached) = resolver.gen_cache_get(&sources_hash) {
+            if let Some((inputs, output)) = parse_cache_entry(&cached) {
+                if inputs.iter().all(|(path, hash)| current_input_hash(resolver, path) == Some(hash.clone())) {
+                    return Ok((gen_key, Some(output)));
+                }
+            }
+        }
+    }
+
+    // 5b. Cache miss: run the generator in the mediated sandbox.
+    let out = crate::interp::generate(
+        &gen_program,
+        name,
+        &consts,
+        crate::interp::GenInputs {
+            resolver,
+            importer_dir,
+            allowed,
+            fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
+            max_output: GEN_MAX_OUTPUT_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_MAX_OUTPUT),
+        },
+    )
+    .map_err(|trap| err(format!("generator `{name}({arg_repr})` failed: {trap}")))?;
+    bump_gen_runs();
+
+    // 6. Cache the output keyed by its recorded inputs, for the next load / the
+    //    LSP's per-keystroke re-analysis.
+    if !no_cache {
+        let inputs: Vec<(String, String)> = out
+            .reads
+            .iter()
+            .map(|(p, bytes)| (p.clone(), crate::hash::sha256_hex(bytes)))
+            .collect();
+        resolver.gen_cache_put(&sources_hash, &render_cache_entry(&inputs, &out.source));
+    }
+    Ok((gen_key, Some(out.source)))
+}
+
+/// `sha256(sorted generator module sources ++ args)` — the stable part of the
+/// cache key (the generator's code + its call). The variable part (which input
+/// files it reads) is verified separately at hit time.
+fn generator_sources_hash(
+    gen_source: &str,
+    gen_mod_key: &str,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    arg_repr: &str,
+) -> Result<String, Vec<Diagnostic>> {
+    let graph = module_graph(gen_source, gen_mod_key, opts, resolver)?;
+    let mut keys: Vec<String> = graph.into_iter().map(|(k, _)| k).collect();
+    keys.sort();
+    let mut blob: Vec<u8> = Vec::new();
+    for k in &keys {
+        let src = resolver.read(k).map_err(|e| {
+            vec![Diagnostic::error(0, 0, "load", format!("cannot read `{k}`: {e}"))]
+        })?;
+        blob.extend_from_slice(k.as_bytes());
+        blob.push(0);
+        blob.extend_from_slice(src.as_bytes());
+        blob.push(0);
+    }
+    blob.extend_from_slice(arg_repr.as_bytes());
+    Ok(crate::hash::sha256_hex(&blob))
+}
+
+/// The current hash of a recorded generation input — a file (`resolver.read`) or
+/// a directory listing (a `dir/` marker, `resolver.list`). `None` if it can no
+/// longer be read (a miss: the input vanished).
+fn current_input_hash(resolver: &dyn ModuleResolver, path: &str) -> Option<String> {
+    if let Some(dir) = path.strip_suffix('/') {
+        let mut names = resolver.list(dir).ok()?;
+        names.sort();
+        Some(crate::hash::sha256_hex(names.join("\n").as_bytes()))
+    } else {
+        Some(crate::hash::sha256_hex(resolver.read(path).ok()?.as_bytes()))
+    }
+}
+
+/// Serialize a cache entry: an input-hash header (`N` then `path⇥hash` lines)
+/// followed verbatim by the generated source.
+fn render_cache_entry(inputs: &[(String, String)], output: &str) -> String {
+    let mut s = format!("{}\n", inputs.len());
+    for (p, h) in inputs {
+        s.push_str(&format!("{p}\t{h}\n"));
+    }
+    s.push_str(output);
+    s
+}
+
+/// Inverse of [`render_cache_entry`].
+fn parse_cache_entry(text: &str) -> Option<(Vec<(String, String)>, String)> {
+    let first_nl = text.find('\n')?;
+    let n: usize = text[..first_nl].trim().parse().ok()?;
+    let mut idx = first_nl + 1;
+    let mut inputs = Vec::with_capacity(n);
+    for _ in 0..n {
+        let nl = text[idx..].find('\n')? + idx;
+        let (p, h) = text[idx..nl].split_once('\t')?;
+        inputs.push((p.to_string(), h.to_string()));
+        idx = nl + 1;
+    }
+    Some((inputs, text[idx..].to_string()))
 }
 
 /// Whether a type decl is one of the parser-injected builtins (`Value`,
@@ -1090,5 +1366,275 @@ mod remote_tests {
         let root = "import { x } from \"http://x.dev/y\" fn main() -> Int64 { return 0 }";
         let e = load_err_at(root, &[]);
         assert!(e.contains("insecure `http:`"), "{e}");
+    }
+}
+
+#[cfg(test)]
+mod gen_tests {
+    use super::tests::opts;
+    use super::*;
+    use std::cell::RefCell;
+
+    /// A resolver over an in-memory map that ALSO persists the generator cache in
+    /// memory — so a second load in the same test observes cache hits.
+    struct CachingResolver {
+        files: HashMap<String, String>,
+        cache: RefCell<HashMap<String, String>>,
+    }
+    impl CachingResolver {
+        fn new(entries: &[(&str, &str)]) -> CachingResolver {
+            CachingResolver {
+                files: entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                cache: RefCell::new(HashMap::new()),
+            }
+        }
+    }
+    impl ModuleResolver for CachingResolver {
+        fn read(&self, resolved: &str) -> Result<String, String> {
+            self.files.get(resolved).cloned().ok_or_else(|| format!("not found: {resolved}"))
+        }
+        fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
+            let prefix = format!("{}/", resolved.trim_end_matches('/'));
+            let mut names: std::collections::BTreeSet<String> = Default::default();
+            let mut any = false;
+            for k in self.files.keys() {
+                if let Some(rest) = k.strip_prefix(&prefix) {
+                    any = true;
+                    if let Some(seg) = rest.split('/').next() {
+                        if !seg.is_empty() {
+                            names.insert(seg.to_string());
+                        }
+                    }
+                }
+            }
+            if any {
+                Ok(names.into_iter().collect())
+            } else {
+                Err(format!("cannot list `{resolved}`"))
+            }
+        }
+        fn gen_cache_get(&self, key: &str) -> Option<String> {
+            self.cache.borrow().get(key).cloned()
+        }
+        fn gen_cache_put(&self, key: &str, value: &str) {
+            self.cache.borrow_mut().insert(key.to_string(), value.to_string());
+        }
+    }
+
+    fn run_with(root: &str, r: &dyn ModuleResolver) -> Result<i64, String> {
+        let program = load(root, "main.vyrn", &opts(), r)
+            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
+        let diags = crate::checker::check_accum(&program);
+        if let Some(d) = diags.first() {
+            return Err(d.render());
+        }
+        crate::interp::run(&program)
+    }
+
+    fn map(entries: &[(&str, &str)]) -> MapResolver {
+        MapResolver(entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+    }
+    fn run(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
+        run_with(root, &map(files))
+    }
+    fn gen_err(root: &str, files: &[(&str, &str)]) -> String {
+        match load(root, "main.vyrn", &opts(), &map(files)) {
+            Ok(p) => match crate::checker::check_accum(&p).first() {
+                Some(d) => d.message.clone(),
+                None => panic!("expected an error, load+check succeeded"),
+            },
+            Err(ds) => ds.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("\n"),
+        }
+    }
+
+    #[test]
+    fn generator_output_links_and_runs() {
+        let gen = "export gen fn mk(dir: String) -> String { \
+                       return \"export fn magic() -> Int64 { return 42 }\" }";
+        let root = "import { mk } from \"./gen\" \
+                    import { magic } from mk(\"./data\") \
+                    fn main() -> Int64 { return magic() }";
+        assert_eq!(run(root, &[("gen.vyrn", gen)]).unwrap(), 42);
+    }
+
+    #[test]
+    fn generator_reads_a_scoped_file() {
+        // The generator reads a data file (mediated) and emits it as a constant.
+        let gen = "export gen fn consts(dir: String) -> String { \
+                       return match readFile(\"./data/n.txt\") { \
+                           Ok(s) => \"export fn n() -> String { return \\\"\" + s + \"\\\" }\", \
+                           Err(e) => e } }";
+        let root = "import { consts } from \"./gen\" \
+                    import { n } from consts(\"./data\") \
+                    fn main() -> Int64 { print(n()) return 0 }";
+        let files = &[("gen.vyrn", gen), ("data/n.txt", "hello")];
+        // Links + runs (the emitted `n` returns the file content).
+        assert_eq!(run(root, files).unwrap(), 0);
+    }
+
+    #[test]
+    fn generator_readfile_escape_is_rejected() {
+        let gen = "export gen fn g(dir: String) -> String { \
+                       return match readFile(\"./secret.txt\") { Ok(s) => s, Err(e) => e } }";
+        let root = "import { g } from \"./gen\" \
+                    import { x } from g(\"./data\") \
+                    fn main() -> Int64 { return 0 }";
+        let e = gen_err(root, &[("gen.vyrn", gen), ("secret.txt", "top secret")]);
+        assert!(e.contains("escapes its declared inputs"), "{e}");
+    }
+
+    #[test]
+    fn generator_listdir_is_scoped_and_works() {
+        // Emit a function returning the number of files under the data dir.
+        let gen = "export gen fn count(dir: String) -> String { \
+                       return match listDir(dir) { \
+                           Ok(names) => \"export fn n() -> Int64 { return \" + names.length.toString() + \" }\", \
+                           Err(e) => e } }";
+        let root = "import { count } from \"./gen\" \
+                    import { n } from count(\"./data\") \
+                    fn main() -> Int64 { return n() }";
+        let files = &[
+            ("gen.vyrn", gen),
+            ("data/a.txt", "1"),
+            ("data/b.txt", "2"),
+            ("data/c.txt", "3"),
+        ];
+        assert_eq!(run(root, files).unwrap(), 3);
+    }
+
+    #[test]
+    fn distinct_args_make_distinct_modules_same_args_dedup() {
+        // Two calls with different args ⇒ two modules with different names.
+        let gen = "export gen fn mk(tag: String) -> String { \
+                       return \"export fn tag\" + tag + \"() -> Int64 { return \" + tag + \" }\" }";
+        let root = "import { mk } from \"./gen\" \
+                    import { tag1 } from mk(\"1\") \
+                    import { tag2 } from mk(\"2\") \
+                    fn main() -> Int64 { return tag1() + tag2() }";
+        assert_eq!(run(root, &[("gen.vyrn", gen)]).unwrap(), 3);
+    }
+
+    #[test]
+    fn generator_trap_becomes_a_load_diagnostic() {
+        let gen = "export gen fn bad(x: Int64) -> String { \
+                       let q = 1 / x \
+                       return \"\" }";
+        let root = "import { bad } from \"./gen\" \
+                    import { z } from bad(0) \
+                    fn main() -> Int64 { return 0 }";
+        let e = gen_err(root, &[("gen.vyrn", gen)]);
+        assert!(e.contains("generator `bad") && e.contains("failed"), "{e}");
+    }
+
+    #[test]
+    fn generated_name_collision_is_a_load_error() {
+        let gen = "export gen fn mk(d: String) -> String { \
+                       return \"export fn dup() -> Int64 { return 1 }\" }";
+        // The root already defines `dup`, so the generated `dup` collides.
+        let root = "import { mk } from \"./gen\" \
+                    import { dup } from mk(\"./x\") \
+                    fn dup() -> Int64 { return 2 } \
+                    fn main() -> Int64 { return dup() }";
+        let e = gen_err(root, &[("gen.vyrn", gen)]);
+        assert!(e.contains("defined in both") || e.contains("unique"), "{e}");
+    }
+
+    #[test]
+    fn non_constant_generator_argument_is_rejected() {
+        let gen = "export gen fn mk(d: String) -> String { return \"\" }";
+        let root = "import { mk } from \"./gen\" \
+                    import { x } from mk(readLine()) \
+                    fn main() -> Int64 { return 0 }";
+        let e = gen_err(root, &[("gen.vyrn", gen)]);
+        assert!(e.contains("compile-time-constant"), "{e}");
+    }
+
+    #[test]
+    fn missing_generator_is_a_clear_error() {
+        let root = "import { x } from nope(\"./d\") fn main() -> Int64 { return 0 }";
+        let e = gen_err(root, &[]);
+        assert!(e.contains("not an imported `gen fn`"), "{e}");
+    }
+
+    #[test]
+    fn module_interface_reflects_exported_surface() {
+        // The generator emits a doc string listing the contract's exported fns.
+        let contract = "export type Id = Int64 where value >= 1 \
+                        export fn ping(id: Id) -> String { return \"pong\" }";
+        let gen = "export gen fn doc(path: String) -> String { \
+                       let iface = moduleInterface(path) \
+                       let mut body = \"export fn names() -> String { return \\\"\" \
+                       for f in iface.functions { body = body + f.name + \";\" } \
+                       body = body + \"\\\" }\" \
+                       return body }";
+        let root = "import { doc } from \"./gen\" \
+                    import { names } from doc(\"./contract\") \
+                    fn main() -> Int64 { print(names()) return 0 }";
+        let files = &[("gen.vyrn", gen), ("contract.vyrn", contract)];
+        // Runs; `names()` returns "ping;" (the one exported fn).
+        assert_eq!(run(root, files).unwrap(), 0);
+    }
+
+    #[test]
+    fn cache_hit_skips_the_second_run_and_input_change_invalidates() {
+        let gen = "export gen fn consts(dir: String) -> String { \
+                       return match readFile(\"./data/n.txt\") { \
+                           Ok(s) => \"export fn n() -> String { return \\\"\" + s + \"\\\" }\", \
+                           Err(e) => e } }";
+        let root = "import { consts } from \"./gen\" \
+                    import { n } from consts(\"./data\") \
+                    fn main() -> Int64 { return 0 }";
+        let mut r = CachingResolver::new(&[("gen.vyrn", gen), ("data/n.txt", "one")]);
+
+        let before = gen_run_count();
+        run_with(root, &r).unwrap();
+        assert_eq!(gen_run_count(), before + 1, "cold: one run");
+        run_with(root, &r).unwrap();
+        assert_eq!(gen_run_count(), before + 1, "warm: cache hit, no re-run");
+
+        // Change the input file — the recorded input hash no longer matches.
+        r.files.insert("data/n.txt".to_string(), "two".to_string());
+        run_with(root, &r).unwrap();
+        assert_eq!(gen_run_count(), before + 2, "input changed: re-run");
+    }
+
+    #[test]
+    fn generator_over_step_budget_fails_loudly() {
+        super::GEN_FUEL_OVERRIDE.with(|c| c.set(Some(500)));
+        let gen = "export gen fn spin(n: Int64) -> String { \
+                       let mut i = 0 \
+                       while i < 1000000000 { i = i + 1 } \
+                       return \"\" }";
+        let root = "import { spin } from \"./gen\" \
+                    import { z } from spin(1) \
+                    fn main() -> Int64 { return 0 }";
+        let e = gen_err(root, &[("gen.vyrn", gen)]);
+        super::GEN_FUEL_OVERRIDE.with(|c| c.set(None));
+        assert!(e.contains("exceeded its step budget"), "{e}");
+    }
+
+    #[test]
+    fn generator_over_output_cap_fails_loudly() {
+        super::GEN_MAX_OUTPUT_OVERRIDE.with(|c| c.set(Some(5)));
+        let gen = "export gen fn big(d: String) -> String { \
+                       return \"this is far more than five bytes\" }";
+        let root = "import { big } from \"./gen\" \
+                    import { z } from big(\"./d\") \
+                    fn main() -> Int64 { return 0 }";
+        let e = gen_err(root, &[("gen.vyrn", gen)]);
+        super::GEN_MAX_OUTPUT_OVERRIDE.with(|c| c.set(None));
+        assert!(e.contains("over the") && e.contains("cap"), "{e}");
+    }
+
+    #[test]
+    fn generator_purity_violation_is_reported() {
+        // A `gen fn` that writes a file fails the comptime-purity check.
+        let gen = "export gen fn bad(d: String) -> String { \
+                       let w = writeFile(\"x\", \"y\") return \"\" }";
+        let root = "import { bad } from \"./gen\" \
+                    import { z } from bad(\"./d\") \
+                    fn main() -> Int64 { return 0 }";
+        let e = gen_err(root, &[("gen.vyrn", gen)]);
+        assert!(e.contains("not comptime-pure"), "{e}");
     }
 }

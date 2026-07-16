@@ -4,6 +4,7 @@
 //!   vyrn run     [file.vyrn]            Type-check and interpret; process exits with main's value.
 //!   vyrn check   [file.vyrn]            Type-check only; print "ok" or every diagnostic.
 //!   vyrn emit-ir [file.vyrn]            Print textual LLVM IR to stdout.
+//!   vyrn emit-gen [file.vyrn]           Print every synthesized generator module (RFC-0021).
 //!   vyrn build   [file.vyrn] [-o out] [--target wasm]
 //!                                        Compile to a native executable (or wasm) via clang.
 //!   vyrn test    [file.vyrn] [--name <substring>]
@@ -21,7 +22,7 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|build|test|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn serve [file.vyrn] [--port N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn serve [file.vyrn] [--port N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
@@ -146,9 +147,44 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "emit-gen" => emit_gen(path, &source),
         other => {
-            eprintln!("unknown command `{other}` (expected run, check, emit-ir, build, test, or serve)");
+            eprintln!("unknown command `{other}` (expected run, check, emit-ir, emit-gen, build, test, or serve)");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// `vyrn emit-gen [file]` (RFC-0021) — run every generator import the file
+/// reaches and print the synthesized module source, each under a banner naming
+/// its generator call site. Nothing is printed for a file with no generators.
+fn emit_gen(path: &str, source: &str) -> ExitCode {
+    let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let opts = load_options(&root_key);
+    let resolver = make_resolver(&root_key);
+    let result = vyrn_frontend::loader::generated_modules(source, &root_key, &opts, &resolver);
+    let _ = save_lock(&resolver);
+    match result {
+        Ok(mods) => {
+            if mods.is_empty() {
+                eprintln!("(no generator imports in {root_key})");
+            }
+            for (banner, src) in mods {
+                println!("// ==== {banner} ====");
+                print!("{src}");
+                if !src.ends_with('\n') {
+                    println!();
+                }
+                println!();
+            }
+            ExitCode::SUCCESS
+        }
+        Err(diags) => {
+            for d in &diags {
+                let file = d.file.as_deref().unwrap_or(&root_key);
+                eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
+            }
+            ExitCode::FAILURE
         }
     }
 }
@@ -160,6 +196,15 @@ struct FsResolver;
 impl vyrn_frontend::loader::ModuleResolver for FsResolver {
     fn read(&self, resolved: &str) -> Result<String, String> {
         std::fs::read_to_string(resolved).map_err(|e| e.to_string())
+    }
+    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
+        remote::list_dir(resolved)
+    }
+    fn gen_cache_get(&self, key: &str) -> Option<String> {
+        remote::gen_cache_get(key)
+    }
+    fn gen_cache_put(&self, key: &str, value: &str) {
+        remote::gen_cache_put(key, value)
     }
 }
 

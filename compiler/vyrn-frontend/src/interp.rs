@@ -573,6 +573,88 @@ where
     run_loop(&mut handler)
 }
 
+/// The result of running a generator (RFC-0021): the synthesized module source
+/// plus the input files the generator read (path + bytes), which the loader
+/// folds into the content-addressed cache key.
+pub struct GenOutput {
+    pub source: String,
+    pub reads: Vec<(String, Vec<u8>)>,
+}
+
+/// Everything a generation run needs from the loader (RFC-0021). Bundled so the
+/// [`generate`] signature stays legible.
+pub struct GenInputs<'a> {
+    pub resolver: &'a dyn crate::loader::ModuleResolver,
+    /// The importing module's directory — the base for relative-path resolution.
+    pub importer_dir: String,
+    /// Resolved path prefixes the generator may read under (its constant path
+    /// args). Empty ⇒ no filesystem access is permitted.
+    pub allowed: Vec<String>,
+    /// Step budget and output-size cap (guardrails).
+    pub fuel: u64,
+    pub max_output: usize,
+}
+
+/// Run `fn_name` in `program` as a **generation target** (RFC-0021): under the
+/// capability-mediated sandbox in `inputs`, with `args` (compile-time constants)
+/// as its arguments. Returns the returned `String` (the synthesized module
+/// source) plus the recorded input reads, or a trap message.
+///
+/// Runs on the big-stack interpreter thread like [`run`]. The generator is
+/// ordinary Vyrn code — the ONLY differences from a normal call are the mediated
+/// `readFile`/`listDir`/`moduleInterface` and the step/size guardrails.
+pub fn generate(
+    program: &Program,
+    fn_name: &str,
+    args: &[crate::consteval::ConstVal],
+    inputs: GenInputs<'_>,
+) -> Result<GenOutput, String> {
+    // Runs on the caller's stack (the resolver holds a `RefCell` and is not
+    // `Sync`, so it can't cross to a scoped thread). Deep recursion is bounded
+    // by the step budget in `inputs.fuel`, so a runaway generator fails with the
+    // budget trap long before it could exhaust the stack.
+    use crate::consteval::ConstVal;
+    let mut interp = new_interp(program, &[])?;
+    interp.gen = Some(GenCtx {
+        resolver: inputs.resolver,
+        importer_dir: inputs.importer_dir,
+        allowed: inputs.allowed,
+        reads: RefCell::new(Vec::new()),
+        fuel: std::cell::Cell::new(inputs.fuel),
+    });
+    if let Err(Ctrl::Err(s)) = interp.init_globals(program) {
+        return Err(s);
+    }
+    let vals: Vec<Val> = args
+        .iter()
+        .map(|c| match c {
+            ConstVal::Int(n) => Val::Int(*n),
+            ConstVal::Bool(b) => Val::Bool(*b),
+            ConstVal::Float(f) => Val::Float(*f),
+            ConstVal::Str(s) => Val::Str(s.clone()),
+        })
+        .collect();
+    let source = match interp.call(fn_name, &vals) {
+        Ok(Val::Str(s)) => s,
+        Ok(other) => {
+            return Err(format!(
+                "generator `{fn_name}` returned {other:?}, expected a String of module source"
+            ))
+        }
+        Err(Ctrl::Err(s)) => return Err(s),
+        Err(Ctrl::Return(_)) => return Err("internal: `?` propagated past a generator".into()),
+    };
+    if source.len() > inputs.max_output {
+        return Err(format!(
+            "generator `{fn_name}` produced {} bytes of source, over the {}-byte cap",
+            source.len(),
+            inputs.max_output
+        ));
+    }
+    let reads = interp.gen.as_ref().unwrap().reads.borrow().clone();
+    Ok(GenOutput { source, reads })
+}
+
 /// Build a fresh interpreter over `program` (shared setup for `run` and
 /// `run_tests`): the ownership plan, function/type/variant indexes, and the log
 /// sink. Does NOT initialize module state — call [`Interp::init_globals`].
@@ -642,6 +724,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         region_depth: std::cell::Cell::new(0),
         globals: RefCell::new(HashMap::new()),
         args: prog_args.to_vec(),
+        gen: None,
     };
     Ok(interp)
 }
@@ -680,6 +763,31 @@ struct Interp<'a> {
     globals: RefCell<HashMap<String, Slot>>,
     /// The program's command-line arguments (RFC-0014 `args()`), argv[1..].
     args: Vec<String>,
+    /// Set only while running a `gen fn` as a generation target (RFC-0021). When
+    /// present: `readFile`/`listDir`/`moduleInterface` route through the loader's
+    /// resolver (path-scoped + recorded as cache inputs), and every statement
+    /// spends a unit of the step budget. Absent for ordinary `run`/`test`/`serve`.
+    gen: Option<GenCtx<'a>>,
+}
+
+/// The generation sandbox (RFC-0021): the capability-mediated I/O + guardrails a
+/// `gen fn` runs under when invoked as an import target. Owned by the [`Interp`]
+/// for the duration of one generation.
+pub(crate) struct GenCtx<'a> {
+    /// The loader's resolver — the single mediated I/O channel.
+    resolver: &'a dyn crate::loader::ModuleResolver,
+    /// The importing module's directory — the base for resolving the generator's
+    /// relative path arguments (`readFile`/`listDir`/`moduleInterface`).
+    importer_dir: String,
+    /// Resolved path prefixes the generator may read under — its constant path
+    /// arguments. A mediated read outside all of them is a trap.
+    allowed: Vec<String>,
+    /// Every input read, in order: `(resolved path, bytes)`. Folded into the
+    /// content-addressed cache key so a changed input invalidates the cache.
+    reads: RefCell<Vec<(String, Vec<u8>)>>,
+    /// Remaining step budget; each statement spends one. Zero ⇒ the generator is
+    /// killed with the canonical "exceeded its step budget" trap.
+    fuel: std::cell::Cell<u64>,
 }
 
 /// A scope binding: the current value plus the declared type, when one exists
@@ -714,6 +822,111 @@ impl<'a> Interp<'a> {
             self.globals.borrow_mut().insert(g.name.clone(), Slot { v, ty: g.ty.clone() });
         }
         Ok(())
+    }
+
+    // ---- generation sandbox (RFC-0021) ----------------------------------
+
+    /// Resolve a mediated path argument against the importer's directory, then
+    /// enforce that it stays under one of the generator's declared input roots
+    /// (its constant path args). Returns the resolved key or a scoping trap.
+    fn gen_scoped_path(&self, arg: &str) -> Result<String, Ctrl> {
+        let g = self.gen.as_ref().expect("gen context");
+        let joined = if g.importer_dir.is_empty() {
+            arg.to_string()
+        } else {
+            format!("{}/{arg}", g.importer_dir)
+        };
+        let resolved = crate::loader::normalize(&joined);
+        let ok = g.allowed.iter().any(|root| {
+            resolved == *root || resolved.starts_with(&format!("{root}/"))
+        });
+        if !ok {
+            return Err(Ctrl::Err(format!(
+                "generator read `{arg}` escapes its declared inputs ({}) — a generator may only \
+                 read under its constant path arguments",
+                g.allowed.join(", ")
+            )));
+        }
+        Ok(resolved)
+    }
+
+    /// Mediated `readFile` (RFC-0021): read through the resolver, record the
+    /// bytes for the cache key, return a Vyrn `Result<String, String>`.
+    fn gen_read_file(&self, path: &str) -> Result<Val, Ctrl> {
+        let resolved = self.gen_scoped_path(path)?;
+        let g = self.gen.as_ref().unwrap();
+        match g.resolver.read(&resolved) {
+            Ok(content) => {
+                g.reads.borrow_mut().push((resolved, content.clone().into_bytes()));
+                if content.as_bytes().contains(&0) {
+                    return Ok(Val::Result(
+                        false,
+                        Box::new(Val::Str(format!("`{path}` contains a NUL byte"))),
+                    ));
+                }
+                Ok(Val::Result(true, Box::new(Val::Str(content))))
+            }
+            Err(_) => Ok(Val::Result(
+                false,
+                Box::new(Val::Str(format!("cannot read `{path}`"))),
+            )),
+        }
+    }
+
+    /// Mediated `listDir` (RFC-0021): list through the resolver, record the
+    /// (sorted) listing for the cache key.
+    fn gen_list_dir(&self, path: &str) -> Result<Val, Ctrl> {
+        let resolved = self.gen_scoped_path(path)?;
+        let g = self.gen.as_ref().unwrap();
+        match g.resolver.list(&resolved) {
+            Ok(mut names) => {
+                names.sort();
+                // Record the listing as a synthetic input so a directory whose
+                // contents change invalidates the cache.
+                g.reads
+                    .borrow_mut()
+                    .push((format!("{resolved}/"), names.join("\n").into_bytes()));
+                Ok(Val::Result(
+                    true,
+                    Box::new(Val::Array(names.into_iter().map(Val::Str).collect())),
+                ))
+            }
+            Err(_) => Ok(Val::Result(
+                false,
+                Box::new(Val::Str(format!("cannot list `{path}`"))),
+            )),
+        }
+    }
+
+    /// `moduleInterface(path)` (RFC-0021): parse the referenced module through
+    /// the resolver (recording its bytes) and build the `ModuleInterface` record
+    /// literal for its EXPORTED surface. Generation-only — a runtime call traps.
+    fn gen_module_interface(&self, path: &str) -> Result<Expr, Ctrl> {
+        if self.gen.is_none() {
+            return Err(Ctrl::Err(
+                "`moduleInterface` is only available during generation".to_string(),
+            ));
+        }
+        // Resolve like a module specifier (`.vyrn` appended), scoped like readFile.
+        let spec = if path.ends_with(".vyrn") || path.ends_with(".json") {
+            path.to_string()
+        } else {
+            format!("{path}.vyrn")
+        };
+        let resolved = self.gen_scoped_path(&spec)?;
+        let g = self.gen.as_ref().unwrap();
+        let source = g
+            .resolver
+            .read(&resolved)
+            .map_err(|e| Ctrl::Err(format!("moduleInterface cannot read `{path}`: {e}")))?;
+        g.reads.borrow_mut().push((resolved.clone(), source.clone().into_bytes()));
+        let tokens = crate::lexer::lex(&source)
+            .map_err(|d| Ctrl::Err(format!("moduleInterface `{path}`: {}", d.message)))?;
+        let (program, errors) = crate::parser::parse_accum(tokens);
+        if let Some(d) = errors.first() {
+            return Err(Ctrl::Err(format!("moduleInterface `{path}`: {}", d.message)));
+        }
+        Ok(crate::schema_reflect::module_interface_lit(&program))
     }
 
     fn call(&self, name: &str, args: &[Val]) -> Result<Val, Ctrl> {
@@ -823,6 +1036,15 @@ impl<'a> Interp<'a> {
     }
 
     fn stmt(&self, stmt: &Stmt, scope: &mut Vec<HashMap<String, Slot>>) -> Result<Flow, Ctrl> {
+        // Generation step budget (RFC-0021): a runaway generator fails loudly
+        // instead of hanging the build. Only active inside a generation run.
+        if let Some(g) = &self.gen {
+            let fuel = g.fuel.get();
+            if fuel == 0 {
+                return Err(Ctrl::Err("generator exceeded its step budget".into()));
+            }
+            g.fuel.set(fuel - 1);
+        }
         match stmt {
             Stmt::Let { name, value, ty, .. } => {
                 let mut v = self.expr(value, scope)?;
@@ -1355,6 +1577,11 @@ impl<'a> Interp<'a> {
                             Val::Str(s) => s.clone(),
                             other => return Err(format!("readFile of non-String {other:?}").into()),
                         };
+                        // In a generation run (RFC-0021), route through the
+                        // resolver, path-scoped + recorded for the cache key.
+                        if self.gen.is_some() {
+                            return self.gen_read_file(&path);
+                        }
                         match std::fs::read(&path) {
                             Ok(bytes) => {
                                 // NUL first: a NUL byte IS valid UTF-8, but cannot
@@ -1382,6 +1609,50 @@ impl<'a> Interp<'a> {
                                 Box::new(Val::Str(format!("cannot read `{path}`"))),
                             )),
                         }
+                    }
+                    // `listDir(path) -> Result<Array<String>, String>` (RFC-0021).
+                    // Entry names are sorted for cross-platform determinism.
+                    "listDir" => {
+                        let path = match &vals[0] {
+                            Val::Str(s) => s.clone(),
+                            other => return Err(format!("listDir of non-String {other:?}").into()),
+                        };
+                        if self.gen.is_some() {
+                            return self.gen_list_dir(&path);
+                        }
+                        match std::fs::read_dir(&path) {
+                            Ok(entries) => {
+                                let mut names: Vec<String> = entries
+                                    .filter_map(|e| e.ok())
+                                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                                    .collect();
+                                names.sort();
+                                Ok(Val::Result(
+                                    true,
+                                    Box::new(Val::Array(
+                                        names.into_iter().map(Val::Str).collect(),
+                                    )),
+                                ))
+                            }
+                            Err(_) => Ok(Val::Result(
+                                false,
+                                Box::new(Val::Str(format!("cannot list `{path}`"))),
+                            )),
+                        }
+                    }
+                    // `moduleInterface(path) -> ModuleInterface` (RFC-0021) — the
+                    // reflection primitive. Generation-only: at runtime it traps.
+                    "moduleInterface" => {
+                        let path = match &vals[0] {
+                            Val::Str(s) => s.clone(),
+                            other => {
+                                return Err(
+                                    format!("moduleInterface of non-String {other:?}").into()
+                                )
+                            }
+                        };
+                        let lit = self.gen_module_interface(&path)?;
+                        return self.expr(&lit, scope);
                     }
                     "writeFile" => {
                         let path = match &vals[0] {

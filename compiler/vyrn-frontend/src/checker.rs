@@ -61,6 +61,7 @@ pub fn check_accum_with_let_types(
         "contains", "startsWith", "endsWith", "bytes", "chars",
         "hexEncode", "hexDecode", "base64Encode", "base64Decode", "urlEncode", "urlDecode",
         "args", "readLine", "readFile", "writeFile", "readFileBytes", "stringFromBytes",
+        "listDir", "moduleInterface",
         "trace", "debug", "info", "warn", "error", "value", "list", "schemaOf", "jsonSchema",
         "toJson", "fromJson",
         "toString", "pop", "swapRemove", "assert", "assertEq",
@@ -2246,6 +2247,49 @@ impl<'a> Checker<'a> {
             }
             return Ok(Type::Result(Box::new(Type::Str), Box::new(Type::Str)));
         }
+        // `listDir(path) -> Result<Array<String>, String>` (RFC-0021 family): the
+        // entry names directly under `path` (no `.`/`..`, unsorted-by-OS order the
+        // interpreter sorts for determinism). At generation time it is mediated
+        // through the loader's resolver and scoped to the generator's path args;
+        // at runtime it lists the real filesystem. Canonical error `cannot list
+        // \`p\``.
+        if name == "listDir" {
+            if args.len() != 1 {
+                return Err(format!("line {line}: `listDir` takes 1 argument, got {}", args.len()));
+            }
+            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
+            if matches!(t, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if t != Type::Str {
+                return Err(format!("line {line}: `listDir` needs a String path, found {t}"));
+            }
+            return Ok(Type::Result(
+                Box::new(Type::Array(Box::new(Type::Str))),
+                Box::new(Type::Str),
+            ));
+        }
+        // `moduleInterface(path) -> ModuleInterface` (RFC-0021): generation-time
+        // reflection over a module's exported surface. A runtime call traps; the
+        // type is available everywhere so a `gen fn` type-checks against it.
+        if name == "moduleInterface" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `moduleInterface` takes 1 argument, got {}",
+                    args.len()
+                ));
+            }
+            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
+            if matches!(t, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if t != Type::Str {
+                return Err(format!(
+                    "line {line}: `moduleInterface` needs a String path, found {t}"
+                ));
+            }
+            return Ok(Type::Named("ModuleInterface".to_string()));
+        }
         if name == "writeFile" {
             if args.len() != 2 {
                 return Err(format!(
@@ -3369,8 +3413,9 @@ fn render_int_literal(n: i64) -> String {
 const SPAWN_FORBIDDEN: &[&str] = &[
     "print", "cell", "set", "release", "afree", "trace", "debug", "info", "warn", "error",
     // Input I/O effects (RFC-0014): observe/mutate the outside world (stdin
-    // cursor, the filesystem), so they must not cross a task boundary.
-    "args", "readLine", "readFile", "writeFile", "readFileBytes", "stringFromBytes",
+    // cursor, the filesystem), so they must not cross a task boundary. `listDir`
+    // reads the filesystem too (RFC-0021).
+    "args", "readLine", "readFile", "writeFile", "readFileBytes", "stringFromBytes", "listDir",
 ];
 
 /// Whether a type may appear in an `extern` signature (RFC-0012 ABI). The scalar
