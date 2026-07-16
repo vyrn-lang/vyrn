@@ -1,0 +1,105 @@
+/// Payload enums on the wire — RFC-0024 (the JSON codec v2). Building on
+/// RFC-0018, a sum type with payloads now crosses the wire, externally tagged
+/// and arity-shaped:
+///
+///   Unit          (nullary)     -> "Unit"          a bare string (unchanged)
+///   Circle(5)     (one payload) -> {"Circle":5}    unwrapped
+///   Rect(2, 3)    (two+)        -> {"Rect":[2,3]}  an array
+///   Ok(x) / Err(e) (Result)     -> {"Ok":x} / {"Err":e}
+///
+/// Decoding is strict — exactly one wire form per value: a payload variant as a
+/// bare string, a nullary variant as an object, an unknown key, or a multi-key
+/// object all fail with the locked `expected one of ...` Issue. Every payload
+/// runs its `where` clause on decode and accumulates, as everywhere. The bytes
+/// printed here are identical under the interpreter, the native binary, and wasm.
+
+/// A validated radius: its `where` runs on construction AND on decode.
+type Radius = Int64 where value >= 1
+
+/// A mixed sum type: a single payload, a tuple payload, and a nullary variant.
+type Shape =
+    | Circle(Radius)
+    | Rect(Int64, Int64)
+    | Nothing
+
+/// A named `Result` alias — nameable so `fromJson`/`jsonSchema` can take it.
+type Lookup = Result<Shape, String>
+
+/// Enums nest anywhere a codable type may: in records, arrays, and `Option`.
+type Scene = { hero: Shape, props: Array<Shape>, hint: Option<Shape> }
+
+fn report(issues: Array<Issue>) -> Int64 {
+    let mut i = 0
+    for issue in issues {
+        print("\{issues[i].key} | \{issues[i].path} | \{issues[i].message}")
+        i = i + 1
+    }
+    return issues.length
+}
+
+fn roundShape(s: Shape) -> Int64 {
+    print(toJson(s))
+    return 0
+}
+
+fn decodeShape(s: String) -> Int64 {
+    return match fromJson(Shape, s) {
+        Valid(sh) => roundShape(sh),
+        Invalid(issues) => report(issues),
+    }
+}
+
+fn decodeLookup(s: String) -> Int64 {
+    return match fromJson(Lookup, s) {
+        Valid(_) => 0,
+        Invalid(issues) => report(issues),
+    }
+}
+
+fn main() -> Int64 {
+    // --- encode: nullary bare string, single unwrapped, tuple as array ---
+    roundShape(Circle(5))
+    roundShape(Rect(2, 3))
+    roundShape(Nothing)
+
+    // Result on the wire, both arms.
+    let ok: Lookup = Ok(Rect(4, 6))
+    print(toJson(ok))
+    let bad: Lookup = Err("not found")
+    print(toJson(bad))
+
+    // Enums inside a record, an array, and an Option.
+    let scene = Scene { hero: Circle(9), props: [Rect(1, 1), Nothing], hint: Some(Rect(7, 8)) }
+    print(toJson(scene))
+    let bare = Scene { hero: Nothing, props: [], hint: None }
+    print(toJson(bare))
+
+    // --- decode: the good wire forms round-trip ---
+    print("--- decode ok ---")
+    decodeShape("{\"Circle\":5}")
+    decodeShape("{\"Rect\":[2,3]}")
+    decodeShape("\"Nothing\"")
+    decodeLookup("{\"Ok\":{\"Circle\":3}}")
+    decodeLookup("{\"Err\":\"missing\"}")
+
+    // --- decode: every rejection, one Issue at a time ---
+    print("--- decode errors ---")
+    // An unknown variant name.
+    decodeShape("\"Sphere\"")
+    // A nullary variant spelled as an object — not its wire form.
+    decodeShape("{\"Nothing\":null}")
+    // A payload variant spelled as a bare string.
+    decodeShape("\"Circle\"")
+    // More than one key.
+    decodeShape("{\"Circle\":5,\"Rect\":[1,2]}")
+    // A payload of the wrong JSON type.
+    decodeShape("{\"Circle\":\"big\"}")
+    // A tuple payload that is not an array.
+    decodeShape("{\"Rect\":5}")
+    // A validated payload that fails its `where` (Radius >= 1) on decode.
+    decodeShape("{\"Circle\":0}")
+    // A Result whose shape is neither Ok nor Err.
+    decodeLookup("\"Ok\"")
+
+    return 0
+}
