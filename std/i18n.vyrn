@@ -19,6 +19,9 @@
 ///     `tCartItems(count: Int64) -> String`, … with args derived from the ICU
 ///     message and a `///` doc = the source-locale message (so hover shows it)
 ///   - `t(key: TransKey) -> String` for argument-less messages
+///   - `transKey(s: String) -> Option<TransKey>` — a runtime membership test over
+///     the finite key set, for a key that arrives as a plain `String` (config, a
+///     URL, user input): `Some(k)` then flows into `t(k)`, an unknown key is `None`
 ///
 /// Inspect the synthesized module with:  vyrn emit-gen <file>
 ///
@@ -1194,6 +1197,25 @@ fn buildModule(tags: Array<String>, datas: Array<LocaleData>) -> String {
 
     // ---- t(): argument-less lookup ----------------------------------------
     out = out + buildT(tags, datas)
+
+    // ---- transKey(): runtime membership over the finite key set -----------
+    out = out + buildTransKey(base)
+    return out
+}
+
+/// `transKey(s)` — a runtime membership test over the finite key set, so a key
+/// arriving as a plain `String` (config, a URL, user input) can be checked before
+/// use. `Some(k)` yields a validated `TransKey` ready to feed to `t(k)`; an
+/// unknown key yields `None`. The domain is finite, so this is a plain if-chain
+/// over the known keys — the runtime complement of the compile-time key checking.
+fn buildTransKey(base: LocaleData) -> String {
+    let mut out = "export fn transKey(s: String) -> Option<TransKey> {\n"
+    let mut k = 0
+    while k < base.keys.length {
+        out = out + "    if s == " + strLit(base.keys[k]) + " {\n        return Some(s)\n    }\n"
+        k = k + 1
+    }
+    out = out + "    return None\n}\n"
     return out
 }
 

@@ -155,5 +155,5 @@ fn demo_tests_run_green() {
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "demo tests failed:\n{combined}");
-    assert!(combined.contains("3 passed, 0 failed"), "expected 3 green tests:\n{combined}");
+    assert!(combined.contains("4 passed, 0 failed"), "expected 4 green tests:\n{combined}");
 }
