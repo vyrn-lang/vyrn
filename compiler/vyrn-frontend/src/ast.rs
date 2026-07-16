@@ -376,6 +376,12 @@ pub enum Type {
     /// the five level methods (`trace`/`debug`/`info`/`warn`/`error`) are called
     /// on it. Lowers to a `ptr` (its name string).
     Logger,
+    /// A function value type (RFC-0023): `fn(T, U) -> R`. Legal ONLY as a
+    /// top-level function-parameter type ("function types are parameter-only in
+    /// v1" — enforced by the checker). Never storable, returnable, or escapable:
+    /// every use is monomorphized away, so no function value exists at runtime in
+    /// any backend and this type has no runtime lowering (`llt` never sees it).
+    Fn(Vec<Type>, Box<Type>),
     /// A compile-time "type-check failed here" sentinel used for inside-body
     /// error recovery (RFC-0006 accumulation). When a `let` initializer or a
     /// sub-expression fails to type-check, the binding / hole is filled with
@@ -434,6 +440,14 @@ impl std::fmt::Display for Type {
             Type::ArrayN(t, n) => write!(f, "Array<{t}, {n}>"),
             Type::Task(t) => write!(f, "Task<{t}>"),
             Type::Logger => write!(f, "Logger"),
+            Type::Fn(params, ret) => {
+                let ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+                write!(f, "fn({})", ps.join(", "))?;
+                if **ret != Type::Unit {
+                    write!(f, " -> {ret}")?;
+                }
+                Ok(())
+            }
             Type::Err => write!(f, "<type error>"),
         }
     }
@@ -609,6 +623,21 @@ pub enum Expr {
     /// `Task<T>` (RFC-0004 §Q4). The callee must be isolated (no I/O, no shared
     /// mutable state); the result is deterministic regardless of scheduling.
     Spawn { name: String, args: Vec<Expr>, line: usize },
+    /// A lambda literal (RFC-0023): `|x| expr` or `|x, y| { block }`. The
+    /// parameters are untyped in the literal — their types flow from the expected
+    /// `fn(..) -> R` type of the parameter position it is passed to. Legal ONLY as
+    /// a call argument in a function-typed parameter position (enforced by the
+    /// checker). Captures outer locals by read; monomorphized away in codegen.
+    Lambda { params: Vec<String>, body: LambdaBody, line: usize },
+}
+
+/// A lambda's body (RFC-0023): a single expression (`|x| x * 2`) or a
+/// brace-delimited block that uses `return` like an ordinary function body
+/// (`|x| { ... return e }`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum LambdaBody {
+    Expr(Box<Expr>),
+    Block(Block),
 }
 
 /// One arm of a `match`.
@@ -648,7 +677,8 @@ impl Expr {
             | Expr::Field { line, .. }
             | Expr::TryConstruct { line, .. }
             | Expr::ArrayLit { line, .. }
-            | Expr::Spawn { line, .. } => *line,
+            | Expr::Spawn { line, .. }
+            | Expr::Lambda { line, .. } => *line,
         }
     }
 }

@@ -472,6 +472,20 @@ impl Analysis<'_> {
                     self.visit(e);
                 }
             }
+            // A lambda body (RFC-0023): a captured heap binding is passed by value
+            // into the monomorphized lambda function, which never frees it (the
+            // enclosing scope keeps ownership). Walking the body conservatively
+            // treats a captured candidate as escaped, so it is not auto-freed at
+            // the capture site — sound (never a double-free; at worst a leak, which
+            // does not affect observable behavior or parity).
+            Expr::Lambda { body, .. } => match body {
+                LambdaBody::Expr(e2) => self.visit(e2),
+                LambdaBody::Block(b) => {
+                    for s in &b.stmts {
+                        self.stmt(s);
+                    }
+                }
+            },
         }
     }
 

@@ -1005,6 +1005,27 @@ fn extern_decl_params(f: &Function) -> String {
     parts.join(", ")
 }
 
+/// Drain a just-emitted `Gen`'s higher-order outputs (RFC-0023): append each
+/// lifted lambda definition once (deduped by symbol) and queue each newly
+/// discovered specialization for emission.
+fn drain_ho(
+    gen: &mut Gen,
+    out: &mut String,
+    ho_queue: &mut Vec<HoInst>,
+    lambda_emitted: &mut std::collections::HashSet<String>,
+) {
+    for (sym, def) in std::mem::take(&mut gen.lambda_defs) {
+        if lambda_emitted.insert(sym) {
+            out.push_str(&def);
+        }
+    }
+    for inst in std::mem::take(&mut gen.ho_instances) {
+        if !ho_queue.iter().any(|q| q.sym == inst.sym) {
+            ho_queue.push(inst);
+        }
+    }
+}
+
 /// Emit a complete LLVM IR module for `program`.
 pub fn emit(program: &Program) -> Result<String, String> {
     let mut out = String::new();
@@ -1371,6 +1392,9 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // functions are emitted once per distinct instantiation reachable from them.
     let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut queue: Vec<(String, Vec<Type>)> = Vec::new();
+    // Higher-order specialization worklist and lifted-lambda dedup set (RFC-0023).
+    let mut ho_queue: Vec<HoInst> = Vec::new();
+    let mut lambda_emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let enqueue = |emitted: &std::collections::HashSet<String>,
                    queue: &mut Vec<(String, Vec<Type>)>,
@@ -1463,6 +1487,12 @@ pub fn emit(program: &Program) -> Result<String, String> {
         if f.is_gen {
             continue;
         }
+        // A function that takes `fn`-typed parameters (RFC-0023) has no first-order
+        // definition — it exists only as monomorphized specializations, emitted on
+        // demand from the higher-order worklist. Skip its (unspecializable) shell.
+        if f.params.iter().any(|p| matches!(p.ty, Type::Fn(..))) {
+            continue;
+        }
         let sym = if f.name == "main" { "vyrn_main".to_string() } else { format!("vyrn_{}", f.name) };
         let mut gen = Gen::new(
             &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
@@ -1476,29 +1506,56 @@ pub fn emit(program: &Program) -> Result<String, String> {
         out.push('\n');
         let insts = std::mem::take(&mut gen.instantiations);
         enqueue(&emitted, &mut queue, insts);
+        drain_ho(&mut gen, &mut out, &mut ho_queue, &mut lambda_emitted);
     }
 
-    // 2. Generic instantiations, transitively.
-    while let Some((name, type_args)) = queue.pop() {
-        let sym = mangle_name(&name, &type_args);
-        if !emitted.insert(sym.clone()) {
+    // 2. Generic instantiations and higher-order specializations, transitively.
+    // Both worklists feed each other (a generic body may take `fn` params; a
+    // specialized instance may call generics), so drain them together.
+    loop {
+        if let Some((name, type_args)) = queue.pop() {
+            let sym = mangle_name(&name, &type_args);
+            if !emitted.insert(sym.clone()) {
+                continue;
+            }
+            let f = funcs[&name];
+            let subst: HashMap<String, Type> =
+                f.type_params.iter().cloned().zip(type_args.iter().cloned()).collect();
+            let mut gen = Gen::new(
+                &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &subst,
+                &funcs, droppable_map, &regex_globals,
+            );
+            gen.log_level = program.log_level;
+            gen.log_sink = program.log_sink.clone();
+            gen.protocol_methods = protocol_methods.clone();
+            gen.globals = globals_map.clone();
+            gen.function(f, &sym, &mut out)?;
+            out.push('\n');
+            let insts = std::mem::take(&mut gen.instantiations);
+            enqueue(&emitted, &mut queue, insts);
+            drain_ho(&mut gen, &mut out, &mut ho_queue, &mut lambda_emitted);
             continue;
         }
-        let f = funcs[&name];
-        let subst: HashMap<String, Type> =
-            f.type_params.iter().cloned().zip(type_args.iter().cloned()).collect();
-        let mut gen = Gen::new(
-            &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &subst, &funcs,
-            droppable_map, &regex_globals,
-        );
-        gen.log_level = program.log_level;
-        gen.log_sink = program.log_sink.clone();
-        gen.protocol_methods = protocol_methods.clone();
-        gen.globals = globals_map.clone();
-        gen.function(f, &sym, &mut out)?;
-        out.push('\n');
-        let insts = std::mem::take(&mut gen.instantiations);
-        enqueue(&emitted, &mut queue, insts);
+        if let Some(inst) = ho_queue.pop() {
+            if !emitted.insert(inst.sym.clone()) {
+                continue;
+            }
+            let mut gen = Gen::new(
+                &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &inst.subst,
+                &funcs, droppable_map, &regex_globals,
+            );
+            gen.log_level = program.log_level;
+            gen.log_sink = program.log_sink.clone();
+            gen.protocol_methods = protocol_methods.clone();
+            gen.globals = globals_map.clone();
+            gen.ho_function(&inst, &mut out)?;
+            out.push('\n');
+            let insts = std::mem::take(&mut gen.instantiations);
+            enqueue(&emitted, &mut queue, insts);
+            drain_ho(&mut gen, &mut out, &mut ho_queue, &mut lambda_emitted);
+            continue;
+        }
+        break;
     }
 
     // JSON codec (RFC-0018): a per-record-type encoder/decoder, synthesized
@@ -1675,6 +1732,60 @@ struct Gen<'a> {
     /// variable read/write that misses the local scope falls back to these,
     /// loading/storing through the global just like an alloca slot.
     globals: HashMap<String, (String, Type)>,
+    /// Higher-order monomorphization (RFC-0023). While emitting a specialized
+    /// instance of a function that takes `fn`-typed parameters, this maps each
+    /// such parameter name to how to call it: the target symbol, the capture
+    /// values (this instance's own leading extra parameters), and the target's
+    /// signature. A call to the parameter becomes a direct call to the target
+    /// with the captures prepended — no function pointer anywhere.
+    fn_bindings: HashMap<String, FnBinding>,
+    /// Higher-order instances discovered while emitting this function, to be
+    /// emitted by the driver (like `instantiations`).
+    ho_instances: Vec<HoInst>,
+    /// Lifted lambda function definitions discovered while emitting this function,
+    /// as (symbol, full IR text). The driver appends each once (deduped by symbol).
+    lambda_defs: Vec<(String, String)>,
+    /// The original name of the function whose body is being emitted, for
+    /// deterministic lifted-lambda symbols (RFC-0023).
+    cur_fn_name: String,
+    /// Source-order ordinal of the next lambda lifted while emitting this function.
+    lambda_counter: usize,
+}
+
+/// How to invoke a `fn`-typed parameter inside a specialized instance (RFC-0023).
+#[derive(Clone)]
+struct FnBinding {
+    target_sym: String,
+    /// (capture-type, ssa-value) for each capture, prepended to every call. The
+    /// ssa values are the specialized instance's own leading extra parameters.
+    captures: Vec<(Type, String)>,
+    param_tys: Vec<Type>,
+    ret: Type,
+}
+
+/// A higher-order specialization of a function taking `fn`-typed parameters
+/// (RFC-0023): the original function, the generic substitution, and the resolved
+/// binding for each `fn`-typed parameter. Keyed (via `sym`) so identical
+/// specializations are emitted once.
+#[derive(Clone)]
+struct HoInst {
+    sym: String,
+    name: String,
+    subst: HashMap<String, Type>,
+    bindings: Vec<HoParamBinding>,
+}
+
+/// The resolved binding for one `fn`-typed parameter of a higher-order instance.
+#[derive(Clone)]
+struct HoParamBinding {
+    param_name: String,
+    target_sym: String,
+    /// The capture parameter types (concrete) this instance receives as extra
+    /// leading arguments for this parameter.
+    capture_tys: Vec<Type>,
+    /// The target function's parameter and return types (concrete).
+    param_tys: Vec<Type>,
+    ret: Type,
 }
 
 impl<'a> Gen<'a> {
@@ -1718,6 +1829,11 @@ impl<'a> Gen<'a> {
             protocol_methods: HashMap::new(),
             regex_globals,
             globals: HashMap::new(),
+            fn_bindings: HashMap::new(),
+            ho_instances: Vec::new(),
+            lambda_defs: Vec::new(),
+            cur_fn_name: String::new(),
+            lambda_counter: 0,
         }
     }
 
@@ -1782,6 +1898,10 @@ impl<'a> Gen<'a> {
             // Unreachable after `resolve` (Named/App/transformers/params reduced away).
             Type::Named(_) | Type::App(..) | Type::Omit(..) | Type::Pick(..) | Type::Merge(..)
             | Type::Partial(..) | Type::Param(_) => "void".into(),
+            // A function-value type (RFC-0023) is monomorphized away — no function
+            // value is ever a runtime value, so this has no lowering. It is only
+            // ever a parameter marker; `llt` is never asked for a real one.
+            Type::Fn(..) => "void".into(),
             // `Err` is the checker's recovery sentinel; a program with any `Err`
             // already has diagnostics and never reaches codegen. Lower to void
             // as a defensive fallback (never observed in practice).
@@ -2086,6 +2206,8 @@ impl<'a> Gen<'a> {
 
     fn function(&mut self, f: &Function, sym: &str, out: &mut String) -> Result<(), String> {
         self.fn_ret = f.ret.clone();
+        self.cur_fn_name = f.name.clone();
+        self.lambda_counter = 0;
         self.droppable = self.droppable_map.get(&f.name).cloned().unwrap_or_default();
         self.modify_copyout.clear();
         let ret = self.llt(&f.ret);
@@ -2684,6 +2806,12 @@ impl<'a> Gen<'a> {
                     cur = next;
                 }
                 Ok((cur, Type::ArrayN(Box::new(ety), elems.len())))
+            }
+            // A lambda literal is never lowered as a value (RFC-0023): it is
+            // monomorphized away at the call site that receives it, so a bare one
+            // here would be a checker bug.
+            Expr::Lambda { .. } => {
+                Err("internal: a lambda literal has no value representation".into())
             }
         }
     }
@@ -3324,7 +3452,517 @@ impl<'a> Gen<'a> {
         self.emit_term("unreachable".into());
     }
 
+    // ---- higher-order monomorphization (RFC-0023) -----------------------
+
+    /// Emit a call to a function `callee` that takes one or more `fn`-typed
+    /// parameters. Each function-value argument is resolved to a target symbol
+    /// (a lifted lambda, a named function, or a forwarded parameter) with its
+    /// captures materialized HERE (the outer call site — the capture-timing lock);
+    /// the callee is specialized per those targets and called directly.
+    fn gen_ho_call(
+        &mut self,
+        callee: &'a Function,
+        args: &[Expr],
+    ) -> Result<(String, Type), String> {
+        let name = callee.name.clone();
+        let generic = !callee.type_params.is_empty();
+        // The specialization's generic substitution, solved from the ordinary
+        // (non-`fn`) arguments first so a `map<T, U>` lambda sees a concrete `T`.
+        let mut call_subst: HashMap<String, Type> = HashMap::new();
+        // Ordinary argument operands, in parameter order.
+        let mut nonfn_ops: Vec<String> = Vec::new();
+        for (i, p) in callee.params.iter().enumerate() {
+            if matches!(p.ty, Type::Fn(..)) {
+                continue;
+            }
+            let (v, vty) = self.gen_expr(&args[i])?;
+            let aty = vyrn_frontend::types::substitute(&vty, self.subst);
+            if generic {
+                solve_param(&p.ty, &aty, &mut call_subst);
+            }
+            let pty = vyrn_frontend::types::substitute(&p.ty, &call_subst);
+            let (v, cty) = self.coerce(v, &aty, &pty)?;
+            nonfn_ops.push(format!("{} {v}", self.llt(&cty)));
+        }
+        // Resolve each `fn`-typed argument: lift/forward the target and evaluate
+        // its captures now.
+        let mut bindings: Vec<HoParamBinding> = Vec::new();
+        let mut capture_ops: Vec<String> = Vec::new();
+        for (i, p) in callee.params.iter().enumerate() {
+            let Type::Fn(dptys, dret) = &p.ty else { continue };
+            // The parameter's `fn` type with type parameters filled in from pass 1.
+            let ptys: Vec<Type> = dptys
+                .iter()
+                .map(|t| vyrn_frontend::types::substitute(t, &call_subst))
+                .collect();
+            let dret_sub = vyrn_frontend::types::substitute(dret, &call_subst);
+            let (target_sym, capture_tys, target_ret) =
+                self.resolve_fn_arg(&args[i], &ptys, &dret_sub, &mut capture_ops)?;
+            // Solve the outbound generic parameter (`U`) from the target's return.
+            if generic {
+                solve_param(dret, &target_ret, &mut call_subst);
+            }
+            bindings.push(HoParamBinding {
+                param_name: p.name.clone(),
+                target_sym,
+                capture_tys,
+                param_tys: ptys,
+                ret: target_ret,
+            });
+        }
+        // The specialized instance's symbol keys on (callee, type args, targets).
+        let type_args: Vec<Type> = callee
+            .type_params
+            .iter()
+            .map(|tp| call_subst.get(tp).cloned().unwrap_or(Type::Unit))
+            .collect();
+        let mut sym = format!("vyrn_{name}__ho");
+        for ta in &type_args {
+            sym.push('_');
+            sym.push_str(&mangle_ty(ta));
+        }
+        for b in &bindings {
+            sym.push('_');
+            sym.push_str(&sanitize(&b.target_sym));
+        }
+        self.ho_instances.push(HoInst {
+            sym: sym.clone(),
+            name: name.clone(),
+            subst: call_subst.clone(),
+            bindings,
+        });
+        // Emit the direct call: ordinary operands, then every capture operand.
+        let mut arg_ops = nonfn_ops;
+        arg_ops.extend(capture_ops);
+        let ret_ty = vyrn_frontend::types::substitute(&callee.ret, &call_subst);
+        let retll = self.llt(&ret_ty);
+        if retll == "void" {
+            self.emit(format!("call void @{sym}({})", arg_ops.join(", ")));
+            Ok((String::new(), Type::Unit))
+        } else {
+            let t = self.fresh_tmp();
+            self.emit(format!("{t} = call {retll} @{sym}({})", arg_ops.join(", ")));
+            Ok((t, ret_ty))
+        }
+    }
+
+    /// Resolve one `fn`-typed argument to a call target (RFC-0023), emitting any
+    /// capture loads into `capture_ops`. Returns (target symbol, capture types,
+    /// the target's concrete return type).
+    fn resolve_fn_arg(
+        &mut self,
+        arg: &Expr,
+        ptys: &[Type],
+        expected_ret: &Type,
+        capture_ops: &mut Vec<String>,
+    ) -> Result<(String, Vec<Type>, Type), String> {
+        match arg {
+            Expr::Lambda { params, body, .. } => {
+                // Free (captured) locals, in first-seen order.
+                let locals: std::collections::HashSet<String> = params.iter().cloned().collect();
+                let cap_names = self.lambda_captures(body, locals);
+                let mut cap_tys = Vec::new();
+                for cn in &cap_names {
+                    let (slot, ty) = self
+                        .lookup(cn)
+                        .ok_or_else(|| format!("captured `{cn}` not in scope"))?;
+                    let cty = vyrn_frontend::types::substitute(&ty, self.subst);
+                    let ll = self.llt(&cty);
+                    let v = self.fresh_tmp();
+                    self.emit(format!("{v} = load {ll}, ptr {slot}"));
+                    capture_ops.push(format!("{ll} {v}"));
+                    cap_tys.push(cty);
+                }
+                // The expected return: concrete for a monomorphic `fn` type, or a
+                // type parameter to be inferred from the body.
+                let want_ret = if matches!(expected_ret, Type::Param(_)) {
+                    None
+                } else {
+                    Some(expected_ret.clone())
+                };
+                let (sym, ret) =
+                    self.emit_lifted_lambda(params, body, &cap_names, &cap_tys, ptys, want_ret)?;
+                Ok((sym, cap_tys, ret))
+            }
+            Expr::Var { name: vn, .. } => {
+                // A pass-through `fn`-typed parameter: forward its target and its
+                // captures (this instance's own capture parameters).
+                if let Some(b) = self.fn_bindings.get(vn).cloned() {
+                    for (ty, v) in &b.captures {
+                        capture_ops.push(format!("{} {v}", self.llt(ty)));
+                    }
+                    let cap_tys = b.captures.iter().map(|(ty, _)| ty.clone()).collect();
+                    return Ok((b.target_sym.clone(), cap_tys, b.ret.clone()));
+                }
+                // A named top-level function: call it directly, no captures.
+                let ret = self.ret_types.get(vn).cloned().unwrap_or(Type::Unit);
+                Ok((format!("vyrn_{vn}"), Vec::new(), ret))
+            }
+            _ => Err("internal: unexpected `fn`-typed argument".into()),
+        }
+    }
+
+    /// The captured (free) local variables of a lambda body (RFC-0023), in
+    /// first-seen order: names read in the body that are neither the lambda's own
+    /// parameters/locals nor module state nor functions — i.e. bindings that live
+    /// in the enclosing local scope.
+    fn lambda_captures(
+        &self,
+        body: &LambdaBody,
+        locals: std::collections::HashSet<String>,
+    ) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut locals = locals;
+        match body {
+            LambdaBody::Expr(e) => self.captures_of_expr(e, &mut locals, &mut out, &mut seen),
+            LambdaBody::Block(b) => self.captures_of_block(b, &mut locals, &mut out, &mut seen),
+        }
+        out
+    }
+
+    fn captures_of_block(
+        &self,
+        b: &Block,
+        locals: &mut std::collections::HashSet<String>,
+        out: &mut Vec<String>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        for s in &b.stmts {
+            match s {
+                Stmt::Let { name, value, .. } => {
+                    self.captures_of_expr(value, locals, out, seen);
+                    locals.insert(name.clone());
+                }
+                Stmt::Assign { value, .. }
+                | Stmt::SetField { value, .. }
+                | Stmt::Expr(value)
+                | Stmt::Return { value: Some(value), .. } => {
+                    self.captures_of_expr(value, locals, out, seen)
+                }
+                Stmt::IndexSet { index, value, .. } => {
+                    self.captures_of_expr(index, locals, out, seen);
+                    self.captures_of_expr(value, locals, out, seen);
+                }
+                Stmt::If { cond, then_block, else_block, .. } => {
+                    self.captures_of_expr(cond, locals, out, seen);
+                    self.captures_of_block(then_block, &mut locals.clone(), out, seen);
+                    if let Some(eb) = else_block {
+                        self.captures_of_block(eb, &mut locals.clone(), out, seen);
+                    }
+                }
+                Stmt::While { cond, body, .. } => {
+                    self.captures_of_expr(cond, locals, out, seen);
+                    self.captures_of_block(body, &mut locals.clone(), out, seen);
+                }
+                Stmt::ForIn { var, iter, body, .. } => {
+                    self.captures_of_expr(iter, locals, out, seen);
+                    let mut inner = locals.clone();
+                    inner.insert(var.clone());
+                    self.captures_of_block(body, &mut inner, out, seen);
+                }
+                Stmt::Region { body, .. } => {
+                    self.captures_of_block(body, &mut locals.clone(), out, seen)
+                }
+                Stmt::Return { value: None, .. } | Stmt::Drop { .. } => {}
+            }
+        }
+    }
+
+    fn captures_of_expr(
+        &self,
+        e: &Expr,
+        locals: &mut std::collections::HashSet<String>,
+        out: &mut Vec<String>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        match e {
+            Expr::Var { name, .. } => {
+                if locals.contains(name) || seen.contains(name) {
+                    return;
+                }
+                // Only an enclosing LOCAL slot is a capture — module state and
+                // functions/variants are reached directly by the lifted function.
+                let is_local = self.scope.iter().any(|f| f.iter().any(|(n, _, _)| n == name));
+                if is_local {
+                    seen.insert(name.clone());
+                    out.push(name.clone());
+                }
+            }
+            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+                self.captures_of_expr(expr, locals, out, seen)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.captures_of_expr(lhs, locals, out, seen);
+                self.captures_of_expr(rhs, locals, out, seen);
+            }
+            Expr::Call { args, .. }
+            | Expr::Spawn { args, .. }
+            | Expr::TryConstruct { args, .. }
+            | Expr::ArrayLit { elems: args, .. } => {
+                for a in args {
+                    self.captures_of_expr(a, locals, out, seen);
+                }
+            }
+            Expr::Match { scrutinee, arms, .. } => {
+                self.captures_of_expr(scrutinee, locals, out, seen);
+                for arm in arms {
+                    let mut inner = locals.clone();
+                    for b in vyrn_frontend::pattern_bindings(&arm.pattern) {
+                        inner.insert(b.to_string());
+                    }
+                    self.captures_of_expr(&arm.body, &mut inner, out, seen);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for (_, v) in fields {
+                    self.captures_of_expr(v, locals, out, seen);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Emit a monomorphized top-level function for a lambda literal (RFC-0023):
+    /// `@__vyrn_lambda_...(<captures>, <params>) -> <ret>`. Returns (symbol,
+    /// concrete return type). The definition is buffered in `lambda_defs` for the
+    /// driver to append once (deduped by symbol).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_lifted_lambda(
+        &mut self,
+        params: &[String],
+        body: &LambdaBody,
+        cap_names: &[String],
+        cap_tys: &[Type],
+        param_tys: &[Type],
+        want_ret: Option<Type>,
+    ) -> Result<(String, Type), String> {
+        // A deterministic, dedup-friendly symbol: enclosing function + ordinal +
+        // the concrete capture/param/return shape (so two instantiations of a
+        // generic function lift distinct, correctly-typed copies).
+        let ordinal = self.lambda_counter;
+        self.lambda_counter += 1;
+        let mut shape = String::new();
+        for t in cap_tys.iter().chain(param_tys.iter()) {
+            shape.push_str(&mangle_ty(t));
+        }
+        if let Some(r) = &want_ret {
+            shape.push('R');
+            shape.push_str(&mangle_ty(r));
+        }
+        let sym = format!("__vyrn_lambda_{}_{ordinal}_{shape}", sanitize(&self.cur_fn_name));
+
+        // Save the current emission state; emit the lambda into fresh buffers.
+        let saved_allocas = std::mem::take(&mut self.allocas);
+        let saved_body = std::mem::take(&mut self.body);
+        let saved_scope = std::mem::replace(&mut self.scope, vec![Vec::new()]);
+        let saved_block = std::mem::replace(&mut self.cur_block, "entry".to_string());
+        let saved_term = std::mem::replace(&mut self.terminated, false);
+        let saved_ret = self.fn_ret.clone();
+        let saved_tmp = self.tmp;
+        let saved_label = self.label;
+        let saved_drop = std::mem::take(&mut self.drop_stack);
+        let saved_droppable = std::mem::take(&mut self.droppable);
+        let saved_modify = std::mem::take(&mut self.modify_copyout);
+        let saved_bindings = std::mem::take(&mut self.fn_bindings);
+        self.tmp = 0;
+        self.label = 0;
+
+        // Signature: captures first, then the lambda parameters. Each is stored
+        // into a fresh alloca slot so the body reads them like ordinary locals.
+        let mut sig: Vec<String> = Vec::new();
+        let mut argn = 0usize;
+        for (cn, cty) in cap_names.iter().zip(cap_tys) {
+            let ll = self.llt(cty);
+            sig.push(format!("{ll} %arg{argn}"));
+            let slot = self.declare(cn, cty);
+            self.emit(format!("store {ll} %arg{argn}, ptr {slot}"));
+            argn += 1;
+        }
+        for (pn, pty) in params.iter().zip(param_tys) {
+            let ll = self.llt(pty);
+            sig.push(format!("{ll} %arg{argn}"));
+            let slot = self.declare(pn, pty);
+            self.emit(format!("store {ll} %arg{argn}, ptr {slot}"));
+            argn += 1;
+        }
+
+        // Body: an expression yields the return value; a block returns via `return`.
+        let ret_ty = match body {
+            LambdaBody::Expr(e) => {
+                let (v, vty) = self.gen_expr(e)?;
+                let ret = want_ret.clone().unwrap_or(vty.clone());
+                self.fn_ret = ret.clone();
+                if self.llt(&ret) == "void" {
+                    self.emit_term("ret void".into());
+                } else {
+                    let (v, cty) = self.coerce(v, &vty, &ret)?;
+                    self.emit_term(format!("ret {} {v}", self.llt(&cty)));
+                }
+                ret
+            }
+            LambdaBody::Block(b) => {
+                let ret = want_ret.clone().unwrap_or(Type::Unit);
+                self.fn_ret = ret.clone();
+                self.gen_block(b)?;
+                if !self.terminated {
+                    if self.llt(&ret) == "void" {
+                        self.emit_term("ret void".into());
+                    } else {
+                        self.emit_term("unreachable".into());
+                    }
+                }
+                ret
+            }
+        };
+
+        // Assemble the definition.
+        let retll = self.llt(&ret_ty);
+        let mut def = String::new();
+        def.push_str(&format!("define {retll} @{sym}({}) {{\n", sig.join(", ")));
+        def.push_str("entry:\n");
+        for a in &self.allocas {
+            def.push_str(a);
+            def.push('\n');
+        }
+        for b in &self.body {
+            def.push_str(b);
+            def.push('\n');
+        }
+        def.push_str("}\n\n");
+
+        // Restore the outer emission state.
+        self.allocas = saved_allocas;
+        self.body = saved_body;
+        self.scope = saved_scope;
+        self.cur_block = saved_block;
+        self.terminated = saved_term;
+        self.fn_ret = saved_ret;
+        self.tmp = saved_tmp;
+        self.label = saved_label;
+        self.drop_stack = saved_drop;
+        self.droppable = saved_droppable;
+        self.modify_copyout = saved_modify;
+        self.fn_bindings = saved_bindings;
+
+        self.lambda_defs.push((sym.clone(), def));
+        Ok((sym, ret_ty))
+    }
+
+    /// Emit a specialized instance of a higher-order function (RFC-0023): its
+    /// ordinary parameters, then the capture parameters for each `fn`-typed
+    /// parameter, with `fn_bindings` wired so calls to those parameters become
+    /// direct calls to their targets.
+    fn ho_function(&mut self, inst: &HoInst, out: &mut String) -> Result<(), String> {
+        let callee: &Function = self.funcs[inst.name.as_str()];
+        self.cur_fn_name = inst.name.clone();
+        self.lambda_counter = 0;
+        self.droppable = self.droppable_map.get(&inst.name).cloned().unwrap_or_default();
+        self.fn_ret = vyrn_frontend::types::substitute(&callee.ret, &self.subst_clone());
+        self.fn_bindings.clear();
+
+        let mut sig: Vec<String> = Vec::new();
+        let mut argn = 0usize;
+        // Ordinary parameters.
+        for p in callee.params.iter() {
+            if matches!(p.ty, Type::Fn(..)) {
+                continue;
+            }
+            let ll = self.llt(&p.ty);
+            sig.push(format!("{ll} %arg{argn}"));
+            let slot = self.declare(&p.name, &p.ty);
+            self.emit(format!("store {ll} %arg{argn}, ptr {slot}"));
+            argn += 1;
+        }
+        // Capture parameters + `fn` bindings, in `fn`-parameter order.
+        for b in &inst.bindings {
+            let mut caps: Vec<(Type, String)> = Vec::new();
+            for cty in &b.capture_tys {
+                let ll = self.llt(cty);
+                sig.push(format!("{ll} %arg{argn}"));
+                caps.push((cty.clone(), format!("%arg{argn}")));
+                argn += 1;
+            }
+            self.fn_bindings.insert(
+                b.param_name.clone(),
+                FnBinding {
+                    target_sym: b.target_sym.clone(),
+                    captures: caps,
+                    param_tys: b.param_tys.clone(),
+                    ret: b.ret.clone(),
+                },
+            );
+        }
+
+        self.gen_block(&callee.body)?;
+        if !self.terminated {
+            if self.llt(&self.fn_ret.clone()) == "void" {
+                self.emit_term("ret void".into());
+            } else {
+                self.emit_term("unreachable".into());
+            }
+        }
+
+        let retll = self.llt(&self.fn_ret.clone());
+        writeln!(out, "define {retll} @{}({}) {{", inst.sym, sig.join(", ")).unwrap();
+        out.push_str("entry:\n");
+        for a in &self.allocas {
+            out.push_str(a);
+            out.push('\n');
+        }
+        for b in &self.body {
+            out.push_str(b);
+            out.push('\n');
+        }
+        out.push_str("}\n");
+        Ok(())
+    }
+
+    /// Clone the current generic substitution (used where an owned copy is needed).
+    fn subst_clone(&self) -> HashMap<String, Type> {
+        self.subst.clone()
+    }
+
     fn gen_call(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
+        // Calling a `fn`-typed parameter inside a specialized instance (RFC-0023):
+        // a direct call to the monomorphized target with the captured values (this
+        // instance's own extra parameters) prepended. No function pointer exists.
+        if let Some(b) = self.fn_bindings.get(name).cloned() {
+            let mut arg_ops: Vec<String> = b
+                .captures
+                .iter()
+                .map(|(ty, v)| format!("{} {v}", self.llt(ty)))
+                .collect();
+            for (i, a) in args.iter().enumerate() {
+                let (v, vty) = self.gen_expr(a)?;
+                let (v, cty) = match b.param_tys.get(i) {
+                    Some(p) => self.coerce(v, &vty, p)?,
+                    None => (v, vty),
+                };
+                arg_ops.push(format!("{} {v}", self.llt(&cty)));
+            }
+            let retll = self.llt(&b.ret);
+            return if retll == "void" {
+                self.emit(format!("call void @{}({})", b.target_sym, arg_ops.join(", ")));
+                Ok((String::new(), Type::Unit))
+            } else {
+                let t = self.fresh_tmp();
+                self.emit(format!(
+                    "{t} = call {retll} @{}({})",
+                    b.target_sym,
+                    arg_ops.join(", ")
+                ));
+                Ok((t, b.ret.clone()))
+            };
+        }
+        // A call to a function that takes `fn`-typed parameters (RFC-0023): resolve
+        // each function-value argument, specialize the callee per those targets, and
+        // emit a direct call to the specialized instance with captures appended.
+        if let Some(callee) = self.funcs.get(name).copied() {
+            if !callee.is_extern && callee.params.iter().any(|p| matches!(p.ty, Type::Fn(..))) {
+                return self.gen_ho_call(callee, args);
+            }
+        }
         // `schemaOf(TypeName)` reflects a type at compile time — build its Schema
         // literal from the type declaration and lower that (identical to interp).
         if name == "schemaOf" {
@@ -5835,6 +6473,11 @@ fn collect_regex_expr(e: &Expr, out: &mut Vec<String>) {
                 collect_regex_expr(e, out);
             }
         }
+        // A `=~` pattern inside a lambda body (RFC-0023) must be pooled too.
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(e2) => collect_regex_expr(e2, out),
+            LambdaBody::Block(b) => collect_regex_block(b, out),
+        },
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Var { .. } => {}
     }
 }
@@ -5952,6 +6595,12 @@ fn collect_strings_expr(e: &Expr, out: &mut Vec<String>, types: &HashMap<String,
                 collect_strings_expr(e, out, types);
             }
         }
+        // String literals inside a lambda body (RFC-0023) join the module's
+        // string pool so the monomorphized lambda function can reference them.
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(e2) => collect_strings_expr(e2, out, types),
+            LambdaBody::Block(b) => collect_strings_block(b, out, types),
+        },
     }
 }
 
@@ -5973,6 +6622,11 @@ fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
                 solve_param(p, a, subst);
             }
         }
+        // Generic collection/reference element inference (RFC-0023): bind the
+        // element type parameter from the concrete argument.
+        (Type::Array(p), Type::Array(a)) => solve_param(p, a, subst),
+        (Type::ArrayN(p, _), Type::ArrayN(a, _)) => solve_param(p, a, subst),
+        (Type::Ref(p), Type::Ref(a)) => solve_param(p, a, subst),
         _ => {}
     }
 }
@@ -6007,6 +6661,14 @@ fn mangle_ty(t: &Type) -> String {
         Type::ArrayN(inner, n) => format!("Arr{n}{}", mangle_ty(inner)),
         Type::Task(inner) => format!("Task{}", mangle_ty(inner)),
         Type::Logger => "Logger".into(),
+        // A function-value type (RFC-0023) mangles by shape — used only when a
+        // generic instance's own type argument mentions one (rare); the
+        // higher-order specialization keys are formed separately.
+        Type::Fn(ps, r) => format!(
+            "Fn{}R{}",
+            ps.iter().map(mangle_ty).collect::<String>(),
+            mangle_ty(r)
+        ),
         // Checker recovery sentinel; never reaches codegen in a valid program.
         Type::Err => "Err".into(),
     }

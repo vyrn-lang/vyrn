@@ -323,6 +323,26 @@ impl MoveCheck<'_> {
                 }
                 Ok(())
             }
+            // A lambda body (RFC-0023): its untyped params are fresh locals; walk
+            // the body so a `consume`-misuse inside it is still caught. Captured
+            // bindings are read-only (the checker forbids consuming/dropping them),
+            // so a reference to one that was already consumed surfaces the standard
+            // use-after-consume error here too.
+            Expr::Lambda { params, body, .. } => {
+                scope.push(HashSet::new());
+                for p in params {
+                    scope.last_mut().unwrap().insert(p.clone());
+                }
+                let r = match body {
+                    LambdaBody::Expr(inner) => self.expr(inner, consumed, scope),
+                    LambdaBody::Block(b) => {
+                        self.block(b, consumed, scope);
+                        Ok(())
+                    }
+                };
+                scope.pop();
+                r
+            }
             // `spawn f(args)` moves arguments exactly like a direct call: a
             // `consume` parameter takes ownership across the task boundary.
             Expr::Spawn { name, args, line } => {
@@ -373,7 +393,7 @@ impl MoveCheck<'_> {
 }
 
 /// The payload names a `match` pattern binds.
-fn pattern_bindings(p: &Pattern) -> Vec<&str> {
+pub fn pattern_bindings(p: &Pattern) -> Vec<&str> {
     match p {
         Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => vec![b],
         Pattern::Variant(_, binds) => binds.iter().map(|s| s.as_str()).collect(),

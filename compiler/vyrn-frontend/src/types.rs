@@ -691,6 +691,12 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
         Type::Array(inner) => Type::Array(Box::new(substitute(inner, subst))),
         Type::ArrayN(inner, n) => Type::ArrayN(Box::new(substitute(inner, subst)), *n),
         Type::Task(inner) => Type::Task(Box::new(substitute(inner, subst))),
+        // A function-value type (RFC-0023): substitute into its parameter and
+        // return types so a generic `fn(T) -> U` monomorphizes with the rest.
+        Type::Fn(params, ret) => Type::Fn(
+            params.iter().map(|p| substitute(p, subst)).collect(),
+            Box::new(substitute(ret, subst)),
+        ),
         other => other.clone(),
     }
 }

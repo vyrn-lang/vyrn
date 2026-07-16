@@ -44,6 +44,10 @@ pub use symbols::{
 // and `vyrn_frontend::fmt::` names the module.
 pub use fmt::fmt;
 
+// The names a `match` pattern binds (RFC-0023 uses this in codegen's lambda
+// capture analysis, so it is re-exported at the crate root).
+pub use movecheck::pattern_bindings;
+
 /// Parse, type-check, and move-check `source`, returning the checked
 /// [`ast::Program`].
 ///

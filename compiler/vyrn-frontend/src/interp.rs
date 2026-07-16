@@ -42,6 +42,35 @@ pub enum Val {
     Ref { slot: usize, gen: u64 },
     /// A growable array (`Vec`). Used linearly; `push` returns a new value.
     Array(Vec<Val>),
+    /// A function value (RFC-0023) — an internal, non-observable value produced
+    /// when a lambda literal or a named function is passed to a `fn`-typed
+    /// parameter. The checker guarantees it is never stored, returned, printed, or
+    /// compared, so it never escapes into user-visible output; it exists only so
+    /// the callee can invoke its `fn`-typed parameter. Native/wasm monomorphize it
+    /// away entirely — this variant is the interpreter's dynamic stand-in, kept
+    /// semantically identical by materializing captures at the outer call site.
+    Fn(Box<FnVal>),
+}
+
+/// The two shapes a [`Val::Fn`] can take (RFC-0023).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FnVal {
+    /// A named top-level function passed by name (`twice(xs, double)`).
+    Named(String),
+    /// A lambda literal with its captured environment snapshot. Captures are read
+    /// values fixed at the moment the lambda expression is evaluated (the outer
+    /// call site) — a binding reassigned afterward is not visible, matching the
+    /// monomorphized backends (which pass captures at the same point).
+    Lambda {
+        params: Vec<String>,
+        body: LambdaBody,
+        captures: Vec<(String, Val)>,
+        /// The lambda's parameter types and return type, taken from the `fn(..)`
+        /// signature of the parameter it was passed to (so arguments coerce and
+        /// the result validates exactly as a named callee would).
+        param_tys: Vec<Type>,
+        ret: Type,
+    },
 }
 
 /// One slot in the interpreter's cell slab: a generation and the boxed value.
@@ -933,6 +962,121 @@ impl<'a> Interp<'a> {
         Ok(self.call_capturing(name, args)?.0)
     }
 
+    /// Materialize a lambda literal into a closure value (RFC-0023). Captures are
+    /// the CURRENT values of every visible local binding — a by-value snapshot,
+    /// which is semantically exact because captures are read-only. Fixing them
+    /// here (at the outer call site, where the argument is evaluated) is the
+    /// capture-timing lock: a binding reassigned between now and the lambda's
+    /// invocation is not observed, identically in every backend. Module state is
+    /// NOT snapshotted — a global read inside the body resolves live, as in any
+    /// function.
+    fn make_closure(
+        &self,
+        params: &[String],
+        body: &LambdaBody,
+        scope: &[HashMap<String, Slot>],
+        param_tys: Vec<Type>,
+        ret: Type,
+    ) -> Val {
+        // Flatten outer→inner so an inner binding shadows an outer one, matching
+        // lexical resolution at the definition site.
+        let mut env: HashMap<String, Val> = HashMap::new();
+        for frame in scope.iter() {
+            for (k, slot) in frame {
+                env.insert(k.clone(), slot.v.clone());
+            }
+        }
+        let captures: Vec<(String, Val)> = env.into_iter().collect();
+        Val::Fn(Box::new(FnVal::Lambda {
+            params: params.to_vec(),
+            body: body.clone(),
+            captures,
+            param_tys,
+            ret,
+        }))
+    }
+
+    /// Look up `name` in the local scope and return a clone if it is a function
+    /// value (RFC-0023) — used to dispatch a call to a `fn`-typed parameter.
+    fn lookup_fnval(&self, scope: &[HashMap<String, Slot>], name: &str) -> Option<FnVal> {
+        for frame in scope.iter().rev() {
+            if let Some(slot) = frame.get(name) {
+                return match &slot.v {
+                    Val::Fn(fv) => Some((**fv).clone()),
+                    _ => None,
+                };
+            }
+        }
+        None
+    }
+
+    /// Evaluate a `fn`-typed argument (RFC-0023) into a function value, given the
+    /// parameter's expected `fn(param_tys) -> ret` type. A lambda literal captures
+    /// its environment here; a bare name is a pass-through of an existing function
+    /// value or a reference to a named top-level function.
+    fn eval_fn_arg(
+        &self,
+        arg: &Expr,
+        scope: &mut Vec<HashMap<String, Slot>>,
+        fnty: &Type,
+    ) -> Result<Val, Ctrl> {
+        let (ptys, ret) = match fnty {
+            Type::Fn(ps, r) => (ps.clone(), (**r).clone()),
+            _ => (Vec::new(), Type::Unit),
+        };
+        match arg {
+            Expr::Lambda { params, body, .. } => {
+                Ok(self.make_closure(params, body, scope, ptys, ret))
+            }
+            Expr::Var { name, .. } => {
+                if let Some(fv) = self.lookup_fnval(scope, name) {
+                    return Ok(Val::Fn(Box::new(fv)));
+                }
+                if self.funcs.contains_key(name.as_str()) {
+                    return Ok(Val::Fn(Box::new(FnVal::Named(name.clone()))));
+                }
+                Err(format!("`{name}` is not a function value").into())
+            }
+            other => self.expr(other, scope),
+        }
+    }
+
+    /// Invoke a function value (RFC-0023): a named function is called directly; a
+    /// lambda binds its captured snapshot plus its arguments and runs its body.
+    fn call_fnval(&self, fv: &FnVal, args: &[Val]) -> Result<Val, Ctrl> {
+        match fv {
+            FnVal::Named(name) => self.call(name, args),
+            FnVal::Lambda { params, body, captures, param_tys, ret } => {
+                let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+                // The captured environment is the outer (read-only) frame.
+                for (k, v) in captures {
+                    scope[0].insert(k.clone(), Slot::untyped(v.clone()));
+                }
+                // Then the lambda's own parameters shadow captures, coerced to the
+                // signature's parameter types (sized-int wrapping / validation).
+                scope.push(HashMap::new());
+                for (i, p) in params.iter().enumerate() {
+                    let v = args.get(i).cloned().unwrap_or(Val::Unit);
+                    let v = match param_tys.get(i) {
+                        Some(t) => self.coerce(v, t)?,
+                        None => v,
+                    };
+                    scope.last_mut().unwrap().insert(p.clone(), Slot { v, ty: param_tys.get(i).cloned() });
+                }
+                let out = match body {
+                    LambdaBody::Expr(e) => self.expr(e, &mut scope)?,
+                    LambdaBody::Block(b) => match self.block(b, &mut scope) {
+                        Ok(Flow::Return(v)) => v,
+                        Ok(Flow::Normal) => Val::Unit,
+                        Err(Ctrl::Return(v)) => v,
+                        Err(e) => return Err(e),
+                    },
+                };
+                self.coerce(out, ret)
+            }
+        }
+    }
+
     /// Like [`call`], but also returns the final values of the parameters (so the
     /// caller can copy `modify` parameters back — call-by-value-result).
     fn call_capturing(&self, name: &str, args: &[Val]) -> Result<(Val, Vec<Val>), Ctrl> {
@@ -1241,6 +1385,13 @@ impl<'a> Interp<'a> {
             Expr::Float(x) => Ok(Val::Float(*x)),
             Expr::Bool(b) => Ok(Val::Bool(*b)),
             Expr::Str(s) => Ok(Val::Str(s.clone())),
+            // A lambda literal (RFC-0023). Reached only as a `fn`-typed call
+            // argument (the checker forbids it elsewhere); its parameter/return
+            // types are supplied by the call handler, so here we snapshot captures
+            // with the types left blank — a bare evaluation never actually runs.
+            Expr::Lambda { params, body, .. } => {
+                Ok(self.make_closure(params, body, scope, Vec::new(), Type::Unit))
+            }
             Expr::Var { name, .. } => {
                 // `None` is the empty-Option constructor, not a variable.
                 if name == "None" {
@@ -1294,6 +1445,18 @@ impl<'a> Interp<'a> {
                 self.binop(*op, l, r)
             }
             Expr::Call { name, args, line } => {
+                // Calling a `fn`-typed parameter (RFC-0023): `f(x)` where `f` is a
+                // local bound to a function value. Resolved before the builtins so
+                // a parameter always shadows a same-named builtin, and evaluated by
+                // invoking the closure directly (a monomorphized direct call in the
+                // native/wasm backends).
+                if let Some(fv) = self.lookup_fnval(scope, name) {
+                    let mut vals = Vec::with_capacity(args.len());
+                    for a in args {
+                        vals.push(self.expr(a, scope)?);
+                    }
+                    return self.call_fnval(&fv, &vals);
+                }
                 // Test builtins (RFC-0015): `assert` / `assertEq`. A failing
                 // assertion traps the current test with a canonical message; the
                 // `vyrn test` runner catches it and marks the test FAILED.
@@ -1443,9 +1606,22 @@ impl<'a> Interp<'a> {
                     }
                     return Err("`swapRemove` needs a mutable array binding".into());
                 }
+                // A callee with `fn`-typed parameters (RFC-0023): materialize each
+                // such argument into a function value (a lambda snapshots its
+                // captures HERE, at the outer call; a bare name becomes a named or
+                // pass-through function value). Every other argument evaluates
+                // normally. The callee's declared parameter types drive which is
+                // which.
+                let fn_param_tys: Option<Vec<Type>> = self
+                    .funcs
+                    .get(name.as_str())
+                    .map(|f| f.params.iter().map(|p| p.ty.clone()).collect());
                 let mut vals = Vec::with_capacity(args.len());
-                for a in args {
-                    vals.push(self.expr(a, scope)?);
+                for (i, a) in args.iter().enumerate() {
+                    match fn_param_tys.as_ref().and_then(|ts| ts.get(i)) {
+                        Some(fnty @ Type::Fn(..)) => vals.push(self.eval_fn_arg(a, scope, fnty)?),
+                        _ => vals.push(self.expr(a, scope)?),
+                    }
                 }
                 // Numeric conversion `Int32(x)`, `Float64(x)`, ...
                 if let Some(target) = crate::types::numeric_conv_target(name) {

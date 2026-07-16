@@ -335,7 +335,24 @@ pub fn check_accum_with_let_types(
     for f in &program.functions {
         let r = (|| -> Result<(), String> {
             for p in &f.params {
-                checker.ensure_type_exists(&p.ty, f.line)?;
+                // A `fn`-typed parameter is legal only on an ordinary function
+                // (RFC-0023): never on an `extern` import/export, whose ABI domain
+                // is checked separately and cannot carry a monomorphized function.
+                if matches!(p.ty, Type::Fn(..)) && (f.is_extern || f.is_export_extern) {
+                    return Err(format!(
+                        "line {}: an `extern` function may not take a `fn`-typed \
+                         parameter (RFC-0023)",
+                        f.line
+                    ));
+                }
+                if matches!(p.ty, Type::Fn(..)) && f.is_gen {
+                    return Err(format!(
+                        "line {}: a `gen fn` may not take a `fn`-typed parameter in v1 \
+                         (RFC-0023)",
+                        f.line
+                    ));
+                }
+                checker.ensure_param_type(&p.ty, f.line)?;
             }
             checker.ensure_type_exists(&f.ret, f.line)?;
             // An `extern` import (RFC-0012 M1) has no body to check; instead
@@ -774,9 +791,51 @@ impl<'a> Checker<'a> {
             // A generic parameter is always valid in the context the parser
             // produced it (it only tags names declared in `<...>`).
             Type::Param(_) => {}
+            // A function-value type (RFC-0023) is legal ONLY as a top-level
+            // function-parameter type — never in a record, array, Option/Result,
+            // generic argument, return, `let`, or module-state position. Those
+            // positions all route through `ensure_type_exists`, so rejecting it
+            // here names the restriction everywhere except the one allowed spot
+            // (which is validated by `ensure_param_type`).
+            Type::Fn(..) => {
+                return Err(format!(
+                    "line {line}: function types are parameter-only in v1 — \
+                     `fn(..) -> ..` may appear only as a function parameter's type, \
+                     not here (RFC-0023)"
+                ))
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Validate a function parameter's type (RFC-0023). A top-level `fn(..) -> R`
+    /// is the one legal function-type position; its own parameter and return types
+    /// must not themselves be function types (no higher-order-of-higher-order in
+    /// v1). Every other parameter type is validated normally.
+    fn ensure_param_type(&self, ty: &Type, line: usize) -> Result<(), String> {
+        match ty {
+            Type::Fn(ptys, ret) => {
+                for p in ptys {
+                    if matches!(p, Type::Fn(..)) {
+                        return Err(format!(
+                            "line {line}: a `fn`-typed parameter may not itself take a \
+                             function value in v1 (RFC-0023)"
+                        ));
+                    }
+                    self.ensure_type_exists(p, line)?;
+                }
+                if matches!(**ret, Type::Fn(..)) {
+                    return Err(format!(
+                        "line {line}: a `fn`-typed parameter may not return a function \
+                         value in v1 (RFC-0023)"
+                    ));
+                }
+                self.ensure_type_exists(ret, line)?;
+                Ok(())
+            }
+            _ => self.ensure_type_exists(ty, line),
+        }
     }
 
     fn check_type_decl(&self, t: &TypeDecl) -> Result<(), String> {
@@ -1726,6 +1785,15 @@ impl<'a> Checker<'a> {
                     Ok(Type::ArrayN(Box::new(elem_ty), elems.len()))
                 }
             }
+            // A lambda literal reaching the general expression checker is in an
+            // illegal position (RFC-0023): a valid one is intercepted inside
+            // `call` where its `fn`-typed parameter supplies its types. Everywhere
+            // else — `let` initializers, returns, operands, non-`fn` arguments — it
+            // is rejected here.
+            Expr::Lambda { line, .. } => Err(format!(
+                "line {line}: a lambda `|..|` is only allowed as an argument in a \
+                 function-typed parameter position (RFC-0023)"
+            )),
         }
     }
 
@@ -2116,6 +2184,32 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
+        // Calling a `fn`-typed parameter (RFC-0023): `f(x)` where `f` is a local
+        // bound to a function value. Checked against the parameter's `fn(..) -> R`
+        // signature before the builtins, so a parameter always shadows a same-named
+        // builtin. The parameter itself is not a storable value — only a call
+        // target (or a pass-through argument, handled where a `fn`-typed argument
+        // is expected).
+        if let Some(Binding { ty: Type::Fn(ptys, ret), .. }) = self.lookup(scope, name) {
+            if ptys.len() != args.len() {
+                return Err(format!(
+                    "line {line}: `{name}` is a function value taking {} argument(s), got {}",
+                    ptys.len(),
+                    args.len()
+                ));
+            }
+            for (i, (arg, pty)) in args.iter().zip(&ptys).enumerate() {
+                let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
+                if !self.coercible(&aty, pty) {
+                    return Err(format!(
+                        "line {line}: `{name}` argument {} expects {pty}, found {aty}",
+                        i + 1
+                    ));
+                }
+                self.prove_coercion(arg, pty, line)?;
+            }
+            return Ok((*ret).clone());
+        }
         // Removed free-function builtins → their method/operator replacements.
         // These fire only for the *bare* user-written spelling; the desugaring
         // and method forms use the unspellable `@`-prefixed internal names
@@ -3077,11 +3171,31 @@ impl<'a> Checker<'a> {
         // Generic call: infer the type parameters from the argument types.
         if let Some(type_params) = self.generics.get(name) {
             let mut subst: HashMap<String, Type> = HashMap::new();
-            let mut atys: Vec<Type> = Vec::with_capacity(args.len());
-            for (arg, pty) in args.iter().zip(params) {
+            let mut atys: Vec<Type> = vec![Type::Err; args.len()];
+            // Pass 1: the ordinary (non-`fn`) arguments bind the type parameters
+            // that flow IN (e.g. `T` from `xs: Array<T>`). This must run before the
+            // `fn`-typed arguments so a `map<T, U>(xs: Array<T>, f: fn(T) -> U)`
+            // lambda sees a CONCRETE `T` for its parameter, and its body's type
+            // then infers `U` (RFC-0023 — this ordering is what makes generic
+            // higher-order functions monomorphize).
+            for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
+                if matches!(pty, Type::Fn(..)) {
+                    continue;
+                }
                 let aty = self.expr(arg, scope, None, fn_ret)?;
                 self.unify(pty, &aty, &mut subst, line)?;
-                atys.push(aty);
+                atys[i] = aty;
+            }
+            // Pass 2: each `fn`-typed argument (a lambda, named function, or
+            // pass-through parameter). The parameter's `fn(..)` type is substituted
+            // with what pass 1 learned, so its own parameter types are concrete; the
+            // function value's inferred return type binds the remaining parameter
+            // (`U`).
+            for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
+                if let Type::Fn(..) = pty {
+                    let expected_fn = crate::types::substitute(pty, &subst);
+                    self.check_fn_arg(name, i, arg, &expected_fn, scope, fn_ret, &mut subst, line)?;
+                }
             }
             // Capability discipline applies to generic calls exactly as to
             // concrete ones (this path used to return early and skip it,
@@ -3133,6 +3247,14 @@ impl<'a> Checker<'a> {
 
         let caps = self.caps.get(name);
         for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
+            // A `fn`-typed parameter (RFC-0023) takes a lambda, a named function,
+            // or a pass-through `fn`-typed parameter — never an ordinary value —
+            // and is checked/monomorphized by the shared helper.
+            if let Type::Fn(..) = pty {
+                let mut ignored: HashMap<String, Type> = HashMap::new();
+                self.check_fn_arg(name, i, arg, pty, scope, fn_ret, &mut ignored, line)?;
+                continue;
+            }
             let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
             if !self.coercible(&aty, pty) {
                 return Err(format!(
@@ -3149,6 +3271,349 @@ impl<'a> Checker<'a> {
             }
         }
         Ok(ret.clone())
+    }
+
+    /// Check a `fn`-typed argument (RFC-0023): a lambda literal, a named
+    /// top-level function, or a pass-through `fn`-typed parameter. `expected_fn`
+    /// is the parameter's `fn(P..) -> R` type with its parameter types already
+    /// substituted concrete; the function value's inferred return type is unified
+    /// into `subst` against `R` (which drives generic higher-order inference).
+    #[allow(clippy::too_many_arguments)]
+    fn check_fn_arg(
+        &self,
+        callee: &str,
+        i: usize,
+        arg: &Expr,
+        expected_fn: &Type,
+        scope: &Vec<HashMap<String, Binding>>,
+        fn_ret: Option<&Type>,
+        subst: &mut HashMap<String, Type>,
+        line: usize,
+    ) -> Result<(), String> {
+        let (ptys, ret) = match expected_fn {
+            Type::Fn(ps, r) => (ps.clone(), (**r).clone()),
+            _ => return Ok(()),
+        };
+        match arg {
+            Expr::Lambda { params, body, line: lline } => {
+                if params.len() != ptys.len() {
+                    return Err(format!(
+                        "line {lline}: this lambda takes {} parameter(s), but `{callee}` \
+                         argument {} expects {}",
+                        params.len(),
+                        i + 1,
+                        ptys.len()
+                    ));
+                }
+                // Bind the lambda's parameters (typed from the `fn` signature) in a
+                // fresh frame over the enclosing scope — captures resolve through
+                // the outer frames by read.
+                let mut inner = scope.clone();
+                inner.push(HashMap::new());
+                for (pn, pty) in params.iter().zip(&ptys) {
+                    inner
+                        .last_mut()
+                        .unwrap()
+                        .insert(pn.clone(), Binding { ty: pty.clone(), mutable: false });
+                }
+                // Enforce the capture rules: a lambda may not assign to, `drop`, or
+                // `consume` a captured (outer) binding — it captures by read.
+                let mut locals: HashSet<String> = params.iter().cloned().collect();
+                self.check_lambda_body_captures(body, scope, &mut locals, *lline)?;
+                // Type-check the body and infer its result type.
+                let ret_known = !matches!(ret, Type::Param(_));
+                let body_ty = match body {
+                    LambdaBody::Expr(e) => {
+                        let exp = if ret_known { Some(&ret) } else { None };
+                        let t = self.expr(e, &inner, exp, fn_ret)?;
+                        if ret == Type::Unit {
+                            // Unit-returning lambda: the body value is discarded.
+                            Type::Unit
+                        } else {
+                            t
+                        }
+                    }
+                    LambdaBody::Block(b) => {
+                        if !ret_known {
+                            return Err(format!(
+                                "line {lline}: cannot infer the return type of a \
+                                 block-bodied lambda passed to a generic `fn` parameter; \
+                                 use an expression body `|..| expr`"
+                            ));
+                        }
+                        let returns = self.block(b, &ret, &mut inner);
+                        if ret != Type::Unit && !returns {
+                            return Err(format!(
+                                "line {lline}: this lambda must return {ret} on all paths"
+                            ));
+                        }
+                        ret.clone()
+                    }
+                };
+                if ret == Type::Unit {
+                    return Ok(());
+                }
+                if ret_known {
+                    if !self.coercible(&body_ty, &ret) {
+                        return Err(format!(
+                            "line {lline}: this lambda returns {body_ty}, but `{callee}` \
+                             expects it to return {ret}"
+                        ));
+                    }
+                    if let LambdaBody::Expr(e) = body {
+                        self.prove_coercion(e, &ret, *lline)?;
+                    }
+                } else {
+                    // Infer the generic return parameter (`U`) from the body type.
+                    self.unify(&ret, &body_ty, subst, *lline)?;
+                }
+                Ok(())
+            }
+            // A bare name: either a pass-through `fn`-typed parameter, or a named
+            // top-level function used as a function value.
+            Expr::Var { name: vn, .. } => {
+                if let Some(Binding { ty: Type::Fn(vptys, vret), .. }) = self.lookup(scope, vn) {
+                    if vptys.len() != ptys.len() {
+                        return Err(format!(
+                            "line {line}: `{vn}` is a {}-argument function value, but \
+                             `{callee}` argument {} expects {}",
+                            vptys.len(),
+                            i + 1,
+                            ptys.len()
+                        ));
+                    }
+                    for (a, b) in vptys.iter().zip(&ptys) {
+                        if !self.assignable(a, b) && !self.assignable(b, a) {
+                            return Err(format!(
+                                "line {line}: `{vn}` has parameter type {a}, but `{callee}` \
+                                 expects {b}"
+                            ));
+                        }
+                    }
+                    self.unify(&ret, &vret, subst, line)?;
+                    return Ok(());
+                }
+                let sig = self.sigs.get(vn).ok_or_else(|| {
+                    format!(
+                        "line {line}: `{callee}` argument {} expects a function; `{vn}` is \
+                         neither a lambda nor a known function",
+                        i + 1
+                    )
+                })?;
+                // A generic function cannot be passed as a monomorphic function
+                // value in v1 (its type parameters have nothing to solve against).
+                if self.generics.contains_key(vn.as_str()) {
+                    return Err(format!(
+                        "line {line}: `{vn}` is generic and cannot be passed as a function \
+                         value in v1 (RFC-0023)"
+                    ));
+                }
+                if sig.0.len() != ptys.len() {
+                    return Err(format!(
+                        "line {line}: `{vn}` takes {} argument(s), but `{callee}` argument \
+                         {} expects a {}-argument function",
+                        sig.0.len(),
+                        i + 1,
+                        ptys.len()
+                    ));
+                }
+                for (a, b) in sig.0.iter().zip(&ptys) {
+                    if !self.assignable(b, a) {
+                        return Err(format!(
+                            "line {line}: `{vn}` expects a {a} argument, but `{callee}` will \
+                             pass it {b}"
+                        ));
+                    }
+                }
+                self.unify(&ret, &sig.1, subst, line)?;
+                Ok(())
+            }
+            other => Err(format!(
+                "line {}: `{callee}` argument {} must be a lambda `|..| ..` or a function \
+                 name (RFC-0023)",
+                other.line(),
+                i + 1
+            )),
+        }
+    }
+
+    /// Enforce a lambda's capture discipline (RFC-0023): inside the body, a
+    /// captured (outer) binding may be READ but never assigned, `drop`ped, or
+    /// passed to a `consume` parameter. Names introduced inside the lambda
+    /// (parameters, `let`s, `for`-vars) are tracked in `locals` and are exempt.
+    fn check_lambda_body_captures(
+        &self,
+        body: &LambdaBody,
+        outer: &Vec<HashMap<String, Binding>>,
+        locals: &mut HashSet<String>,
+        line: usize,
+    ) -> Result<(), String> {
+        match body {
+            LambdaBody::Expr(e) => self.captures_expr(e, outer, locals),
+            LambdaBody::Block(b) => self.captures_block(b, outer, &mut locals.clone()),
+        }
+        .map_err(|m| format!("line {line}: {m}"))
+    }
+
+    fn captures_block(
+        &self,
+        b: &Block,
+        outer: &Vec<HashMap<String, Binding>>,
+        locals: &mut HashSet<String>,
+    ) -> Result<(), String> {
+        for s in &b.stmts {
+            self.captures_stmt(s, outer, locals)?;
+        }
+        Ok(())
+    }
+
+    fn captures_stmt(
+        &self,
+        s: &Stmt,
+        outer: &Vec<HashMap<String, Binding>>,
+        locals: &mut HashSet<String>,
+    ) -> Result<(), String> {
+        // A captured binding is one visible in the enclosing scope and NOT shadowed
+        // by a name introduced inside the lambda.
+        let is_capture = |n: &str, locals: &HashSet<String>| {
+            !locals.contains(n) && self.lookup(outer, n).is_some()
+        };
+        match s {
+            Stmt::Let { name, value, .. } => {
+                self.captures_expr(value, outer, locals)?;
+                locals.insert(name.clone());
+                Ok(())
+            }
+            Stmt::Assign { name, value, line } => {
+                if is_capture(name, locals) {
+                    return Err(format!(
+                        "a lambda captures by read; it cannot assign to the captured \
+                         binding `{name}` (line {line})"
+                    ));
+                }
+                self.captures_expr(value, outer, locals)
+            }
+            Stmt::SetField { name, value, line, .. } => {
+                if is_capture(name, locals) {
+                    return Err(format!(
+                        "a lambda captures by read; it cannot mutate a field of the \
+                         captured binding `{name}` (line {line})"
+                    ));
+                }
+                self.captures_expr(value, outer, locals)
+            }
+            Stmt::IndexSet { name, index, value, line } => {
+                if is_capture(name, locals) {
+                    return Err(format!(
+                        "a lambda captures by read; it cannot store into the captured \
+                         binding `{name}` (line {line})"
+                    ));
+                }
+                self.captures_expr(index, outer, locals)?;
+                self.captures_expr(value, outer, locals)
+            }
+            Stmt::Drop { name, line } => {
+                if is_capture(name, locals) {
+                    return Err(format!(
+                        "a lambda cannot `drop` the captured binding `{name}` (line {line})"
+                    ));
+                }
+                Ok(())
+            }
+            Stmt::Return { value: Some(e), .. } => self.captures_expr(e, outer, locals),
+            Stmt::Return { value: None, .. } => Ok(()),
+            Stmt::Expr(e) => self.captures_expr(e, outer, locals),
+            Stmt::If { cond, then_block, else_block, .. } => {
+                self.captures_expr(cond, outer, locals)?;
+                self.captures_block(then_block, outer, &mut locals.clone())?;
+                if let Some(eb) = else_block {
+                    self.captures_block(eb, outer, &mut locals.clone())?;
+                }
+                Ok(())
+            }
+            Stmt::While { cond, body, .. } => {
+                self.captures_expr(cond, outer, locals)?;
+                self.captures_block(body, outer, &mut locals.clone())
+            }
+            Stmt::ForIn { var, iter, body, .. } => {
+                self.captures_expr(iter, outer, locals)?;
+                let mut inner = locals.clone();
+                inner.insert(var.clone());
+                self.captures_block(body, outer, &mut inner)
+            }
+            Stmt::Region { body, .. } => self.captures_block(body, outer, &mut locals.clone()),
+        }
+    }
+
+    fn captures_expr(
+        &self,
+        e: &Expr,
+        outer: &Vec<HashMap<String, Binding>>,
+        locals: &HashSet<String>,
+    ) -> Result<(), String> {
+        let is_capture =
+            |n: &str| !locals.contains(n) && self.lookup(outer, n).is_some();
+        match e {
+            Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
+                // Passing a captured binding to a `consume` parameter would move it
+                // out of the enclosing scope from inside the lambda — forbidden.
+                let caps = self.caps.get(name);
+                for (k, a) in args.iter().enumerate() {
+                    if caps.and_then(|c| c.get(k)) == Some(&Capability::Consume) {
+                        if let Expr::Var { name: vn, .. } = a {
+                            if is_capture(vn) {
+                                return Err(format!(
+                                    "a lambda cannot consume the captured binding `{vn}` \
+                                     (line {line})"
+                                ));
+                            }
+                        }
+                    }
+                    self.captures_expr(a, outer, locals)?;
+                }
+                Ok(())
+            }
+            Expr::TryConstruct { args, .. } | Expr::ArrayLit { elems: args, .. } => {
+                for a in args {
+                    self.captures_expr(a, outer, locals)?;
+                }
+                Ok(())
+            }
+            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+                self.captures_expr(expr, outer, locals)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.captures_expr(lhs, outer, locals)?;
+                self.captures_expr(rhs, outer, locals)
+            }
+            Expr::Match { scrutinee, arms, .. } => {
+                self.captures_expr(scrutinee, outer, locals)?;
+                for arm in arms {
+                    let mut inner = locals.clone();
+                    for b in crate::movecheck::pattern_bindings(&arm.pattern) {
+                        inner.insert(b.to_string());
+                    }
+                    self.captures_expr(&arm.body, outer, &inner)?;
+                }
+                Ok(())
+            }
+            Expr::StructLit { fields, .. } => {
+                for (_, v) in fields {
+                    self.captures_expr(v, outer, locals)?;
+                }
+                Ok(())
+            }
+            // A nested lambda literal is NOT permitted inside a lambda body in v1
+            // (RFC-0023 nesting lock): it would compound monomorphization. A lambda
+            // body MAY call functions that themselves take `fn` parameters — that is
+            // an ordinary call, handled above.
+            Expr::Lambda { line, .. } => Err(format!(
+                "a lambda body may not contain another lambda literal in v1 \
+                 (line {line})"
+            )),
+            // Scalar leaves and plain variable reads (captures by read) are fine.
+            _ => Ok(()),
+        }
     }
 
     /// The call-site discipline for a `modify` parameter, shared by concrete
@@ -3246,6 +3711,20 @@ impl<'a> Checker<'a> {
                     }
                     Ok(())
                 }
+                _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+            },
+            // A generic `Array<T>` / `Array<T, N>` binds `T` from the element type
+            // (RFC-0023 relies on this so `map<T, U>(xs: Array<T>, ..)` infers `T`).
+            Type::Array(inner) => match aty {
+                Type::Array(a) => self.unify(inner, a, subst, line),
+                _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+            },
+            Type::ArrayN(inner, n) => match aty {
+                Type::ArrayN(a, m) if m == n => self.unify(inner, a, subst, line),
+                _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+            },
+            Type::Ref(inner) => match aty {
+                Type::Ref(a) => self.unify(inner, a, subst, line),
                 _ => Err(format!("line {line}: expected {pty}, found {aty}")),
             },
             _ => {
@@ -3410,6 +3889,7 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
         Expr::TryConstruct { name, .. } => format!("{name}?(..)"),
         Expr::ArrayLit { .. } => "[..]".to_string(),
         Expr::Spawn { name, .. } => format!("spawn {name}(..)"),
+        Expr::Lambda { params, .. } => format!("|{}| ..", params.join(", ")),
     }
 }
 
@@ -3767,6 +4247,13 @@ fn global_ref_expr(
             fields.iter().any(|(_, v)| global_ref_expr(v, globals, local))
         }
         Expr::ArrayLit { elems, .. } => elems.iter().any(|v| global_ref_expr(v, globals, local)),
+        // A lambda body (RFC-0023) that reads module state makes the enclosing
+        // call chain non-spawn-safe — the effect is attributed to the
+        // instantiation site (this function).
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(e2) => global_ref_expr(e2, globals, local),
+            LambdaBody::Block(b) => global_ref_block(b, globals, local),
+        },
     }
 }
 
@@ -3847,6 +4334,15 @@ fn init_restrictions(
             }
             Ok(())
         }
+        // A lambda literal can never appear in a valid initializer (the checker's
+        // position rule rejects it outside a call argument, and initializers make
+        // no calls); recurse for completeness so the deeper diagnostic still fires.
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(e2) => {
+                init_restrictions(e2, forbidden, all_globals, ready, own_name, line)
+            }
+            LambdaBody::Block(_) => Ok(()),
+        },
     }
 }
 
@@ -3933,6 +4429,14 @@ fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
                 calls_expr(v, out);
             }
         }
+        // Calls inside a lambda body (RFC-0023) are attributed to the enclosing
+        // function — that is the monomorphization site, so a lambda that performs
+        // I/O (or, via `global_ref_expr`, reads module state) makes the enclosing
+        // function non-spawn-safe.
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(e2) => calls_expr(e2, out),
+            LambdaBody::Block(b) => calls_block(b, out),
+        },
     }
 }
 

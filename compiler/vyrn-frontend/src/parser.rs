@@ -1304,6 +1304,31 @@ impl Parser {
         if *self.peek() == Tok::LBrace {
             return self.record_type();
         }
+        // A function-value type (RFC-0023): `fn(T, U) -> R`, or `fn(T)` /
+        // `fn()` for a Unit return. Parsed anywhere a type is; the checker
+        // restricts it to a top-level parameter position ("function types are
+        // parameter-only in v1").
+        if *self.peek() == Tok::Fn {
+            self.advance();
+            self.eat(&Tok::LParen)?;
+            let mut params = Vec::new();
+            while *self.peek() != Tok::RParen {
+                params.push(self.type_()?);
+                if *self.peek() == Tok::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.eat(&Tok::RParen)?;
+            let ret = if *self.peek() == Tok::Arrow {
+                self.advance();
+                self.type_()?
+            } else {
+                Type::Unit
+            };
+            return Ok(Type::Fn(params, Box::new(ret)));
+        }
         let name = self.expect_ident()?;
         Ok(match name.as_str() {
             // Every numeric type carries its size in its name. `Int64` is the
@@ -1954,9 +1979,51 @@ impl Parser {
         Ok(e)
     }
 
+    /// Parse a lambda literal (RFC-0023): `|x| expr`, `|x, y| { block }`, or the
+    /// zero-parameter form `|| expr` (whose empty pipe pair is the single `||`
+    /// token). The parameters are untyped names; their types flow from the
+    /// expected `fn(..)` type at the checker. A block body uses `return` like a
+    /// function; an expression body is the returned value directly.
+    fn lambda(&mut self, line: usize) -> Result<Expr, Diagnostic> {
+        let mut params = Vec::new();
+        if *self.peek() == Tok::OrOr {
+            // `||` — an empty parameter list.
+            self.advance();
+        } else {
+            self.eat(&Tok::Pipe)?;
+            while *self.peek() != Tok::Pipe {
+                params.push(self.expect_ident()?);
+                if *self.peek() == Tok::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.eat(&Tok::Pipe)?;
+        }
+        let body = if *self.peek() == Tok::LBrace {
+            LambdaBody::Block(self.block()?)
+        } else {
+            // A struct literal is legal again inside a lambda's expression body
+            // (the `no_struct` guard is for `if`/`while`/`match` heads only).
+            let saved = self.no_struct;
+            self.no_struct = false;
+            let e = self.expr();
+            self.no_struct = saved;
+            LambdaBody::Expr(Box::new(e?))
+        };
+        Ok(Expr::Lambda { params, body, line })
+    }
+
     fn primary(&mut self) -> Result<Expr, Diagnostic> {
         let line = self.line();
         let col = self.col();
+        // A lambda literal (RFC-0023). A bare `|` in expression position opens
+        // one (there is no bitwise-or operator, so `|` never starts an ordinary
+        // expression); an `||` token is the zero-parameter form `|| expr`.
+        if matches!(self.peek(), Tok::Pipe | Tok::OrOr) {
+            return self.lambda(line);
+        }
         match self.advance() {
             Tok::Int(v) => Ok(Expr::Int(v)),
             Tok::Float(v) => Ok(Expr::Float(v)),

@@ -1315,6 +1315,12 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
                     expr(e2, *line, out);
                 }
             }
+            // A lambda body (RFC-0023) references names too — walk it so a call
+            // or constructor used only inside a lambda is still visibility-checked.
+            Expr::Lambda { body, line, .. } => match body {
+                LambdaBody::Expr(e2) => expr(e2, *line, out),
+                LambdaBody::Block(b2) => block(b2, out),
+            },
             Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
         }
     }
@@ -1446,6 +1452,12 @@ fn rewrite_expr(e: &mut Expr, map: &HashMap<String, String>) {
                 rewrite_expr(e2, map);
             }
         }
+        // A lambda body (RFC-0023): rewrite referenced names inside it (its own
+        // untyped params are locals, never in `map`, so blanket rewriting is safe).
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(e2) => rewrite_expr(e2, map),
+            LambdaBody::Block(b2) => rewrite_block(b2, map),
+        },
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
     }
 }

@@ -61,6 +61,12 @@ struct Roles {
     generic_angle: bool,
     /// A `-` used as a unary prefix (`-x`) rather than a binary subtraction.
     unary_minus: bool,
+    /// A `|` that opens a lambda parameter list (RFC-0023): tight *after* it
+    /// (`|x`), so no space precedes the first parameter.
+    lambda_open: bool,
+    /// A `|` that closes a lambda parameter list (RFC-0023): tight *before* it
+    /// (`x|`), with the normal one space *after* it before the body.
+    lambda_close: bool,
 }
 
 /// A token can be the *end* of an operand — i.e. a binary operator that follows
@@ -104,6 +110,7 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
             _ => unreachable!("toks holds only Tok items"),
         }
     };
+    let mut in_lambda_params = false;
     for k in 0..toks.len() {
         let idx = toks[k];
         let prev = if k > 0 { Some(kind(toks[k - 1])) } else { None };
@@ -137,6 +144,19 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
                     roles[idx].unary_minus = true;
                 }
             }
+            // A `|` opening or closing a lambda parameter list (RFC-0023). A lambda
+            // is only ever a call argument, so its opening `|` follows `(` or `,`;
+            // the next `|` closes the list. Enum-variant `|` (after `=` or on its
+            // own line) never follows `(`/`,`, so it stays unmarked.
+            Tok::Pipe => {
+                if in_lambda_params {
+                    roles[idx].lambda_close = true;
+                    in_lambda_params = false;
+                } else if matches!(prev, Some(Tok::LParen) | Some(Tok::Comma)) {
+                    roles[idx].lambda_open = true;
+                    in_lambda_params = true;
+                }
+            }
             _ => {}
         }
     }
@@ -146,14 +166,23 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
 /// Whether a single space belongs between adjacent same-line tokens `prev`→`next`
 /// (the RFC's spacing table). `*_generic` mark `<`/`>` as generic brackets;
 /// `prev_unary_minus` marks a `-` as a unary prefix.
+#[allow(clippy::too_many_arguments)]
 fn wants_space(
     prev: &Tok,
     next: &Tok,
     prev_generic: bool,
     next_generic: bool,
     prev_unary_minus: bool,
+    prev_lambda_open: bool,
+    next_lambda_close: bool,
 ) -> bool {
     use Tok::*;
+    // A lambda parameter list is tight inside (RFC-0023): no space after the
+    // opening `|` and no space before the closing `|` (`|x|`, `|x, y|`). The one
+    // space AFTER the closing `|` (before the body) follows the normal rules.
+    if prev_lambda_open || next_lambda_close {
+        return false;
+    }
     // No space just inside `(`/`[`.
     if matches!(prev, LParen | LBracket) {
         return false;
@@ -179,9 +208,10 @@ fn wants_space(
         return false;
     }
     // Call / index: `foo(`, `arr[`, `f()[`, `x?(` attach with no space. A generic
-    // close `>` also attaches (`fn id<T>(x)`, `foo<Int64>()`).
+    // close `>` also attaches (`fn id<T>(x)`, `foo<Int64>()`). A function-value
+    // type's `fn(` (RFC-0023) attaches too.
     if matches!(next, LParen | LBracket)
-        && (matches!(prev, Ident(_) | RParen | RBracket | Question)
+        && (matches!(prev, Ident(_) | RParen | RBracket | Question | Fn)
             || (matches!(prev, Gt) && prev_generic))
     {
         return false;
@@ -295,6 +325,8 @@ fn print(items: &[Triv]) -> String {
                                         roles[p].generic_angle,
                                         roles[idx].generic_angle,
                                         roles[p].unary_minus,
+                                        roles[p].lambda_open,
+                                        roles[idx].lambda_close,
                                     )
                                 }
                             }
