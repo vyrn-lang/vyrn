@@ -1,0 +1,107 @@
+/// Enum variants that carry an `Array` payload — RFC-0026. A fat array value
+/// (`{ptr,len,cap}`, three words) is wider than the word-sized payload slot an
+/// enum aggregate carries, so it is boxed on the heap on construction and loaded
+/// back on `match`. The subtle part: an array *literal* `[..]` is a fixed
+/// `[N x T]` value, but a declared `Array<T>` payload is the growable triple —
+/// construction must reshape the literal before boxing, or extraction reads the
+/// raw elements as a `{ptr,len,cap}` header and the length is garbage. This
+/// example exercises every shape (single, tuple, element types with their own
+/// heap representation, `Result`, and the JSON codec) so the bytes stay
+/// identical under the interpreter, the native binary, and wasm.
+
+/// A record element type — its own fields live behind the array payload.
+type Point = { x: Int64, y: Int64 }
+
+/// A sum type whose variants carry arrays of every representation: scalars,
+/// heap strings, records, plus a tuple payload mixing a scalar and an array.
+type Bag =
+    | Empty
+    | Ints(Array<Int64>)
+    | Words(Array<String>)
+    | Points(Array<Point>)
+    | Tagged(Int64, Array<Int64>)
+
+/// Sum an extracted `Array<Int64>` by iteration — proves the elements, length,
+/// and indexing all survive extraction from the payload slot.
+fn total(xs: Array<Int64>) -> Int64 {
+    let mut sum = 0
+    for x in xs {
+        sum = sum + x
+    }
+    return sum
+}
+
+/// Describe a `Bag` by matching, extracting the array payload, and reading its
+/// length, elements, and (for records) nested fields.
+fn describe(b: Bag) -> Int64 {
+    match b {
+        Empty => print("Empty"),
+        Ints(xs) => print("Ints len \{xs.length} sum \{total(xs)} first \{xs[0]}"),
+        Words(ws) => print("Words len \{ws.length} first \{ws[0]} last \{ws[ws.length - 1]}"),
+        Points(ps) => print("Points len \{ps.length} p0 (\{ps[0].x},\{ps[0].y}) p1.y \{ps[1].y}"),
+        Tagged(n, xs) => print("Tagged \{n} len \{xs.length} sum \{total(xs)}"),
+    }
+    return 0
+}
+
+/// A loader that returns an `Array<Int64>` payload through `Result` — the same
+/// `Ok([..])` shape a `Validation` `Invalid(Array<Issue>)` arm relies on.
+fn load(ok: Bool) -> Result<Array<Int64>, String> {
+    if ok {
+        return Ok([100, 200, 300])
+    }
+    return Err("no data")
+}
+
+fn showLoad(ok: Bool) -> Int64 {
+    match load(ok) {
+        Ok(xs) => print("Ok len \{xs.length} sum \{total(xs)}"),
+        Err(e) => print("Err \{e}"),
+    }
+    return 0
+}
+
+/// An `Option<Array<String>>` payload — `Some([..])` boxes the growable array
+/// too, so extraction must reshape it exactly as `Result` and enums do.
+fn pick(some: Bool) -> Option<Array<String>> {
+    if some {
+        return Some(["a", "b", "c"])
+    }
+    return None
+}
+
+fn showOpt(some: Bool) -> Int64 {
+    match pick(some) {
+        Some(ws) => print("Some len \{ws.length} mid \{ws[1]}"),
+        None => print("None"),
+    }
+    return 0
+}
+
+fn main() -> Int64 {
+    // Direct construction + extraction of each array-payload shape.
+    describe(Empty)
+    describe(Ints([1, 2, 3, 4]))
+    describe(Words(["red", "green", "blue"]))
+    describe(Points([Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]))
+    describe(Tagged(9, [10, 20, 30]))
+
+    // Through a variable, so the array crosses an assignment before the match.
+    let b = Ints([5, 6, 7])
+    describe(b)
+
+    // Result and Option array payloads.
+    showLoad(true)
+    showLoad(false)
+    showOpt(true)
+    showOpt(false)
+
+    // Codec round-trip: encode an array-payload enum, decode it back, and match.
+    let enc = toJson(Words(["x", "y"]))
+    print(enc)
+    match fromJson(Bag, "{\"Ints\":[8,9]}") {
+        Valid(v) => describe(v),
+        Invalid(_) => 0,
+    }
+    return 0
+}
