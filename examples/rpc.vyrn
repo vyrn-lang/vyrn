@@ -12,8 +12,8 @@
 ///
 /// Inspect the synthesized dispatch module with:  vyrn emit-gen examples/rpc.vyrn
 import { rpcInProcess } from "std/rpc"
-import { getUser, createUser } from rpcInProcess("./fullstack/api")
-import { GetUserReq, CreateUserReq, User } from "./fullstack/api"
+import { getUser, createUser, deleteUser } from rpcInProcess("./fullstack/api")
+import { GetUserReq, CreateUserReq, User, DeleteReq, DeleteResult } from "./fullstack/api"
 
 // Module state: the last dispatch result, filled by the handlers below.
 let mut line: String = "(none)"
@@ -34,10 +34,27 @@ fn onCreateUser(id: Int64, res: Validation<User>) {
     }
 }
 
+/// The completion handler for `deleteUser` — a `Result` procedure (RFC-0024). An
+/// application-level `Err` is a `Valid(Err(..))` here, distinct from the wire's
+/// decode failures (`Invalid`).
+fn onDeleteUser(id: Int64, res: Validation<DeleteResult>) {
+    line = match res {
+        Valid(r) => match r {
+            Ok(done) => "deleteUser -> ok",
+            Err(why) => "deleteUser -> refused: \{why}",
+        },
+        Invalid(issues) => "deleteUser failed",
+    }
+}
+
 fn main() -> Int64 {
     getUser(GetUserReq { id: 7 })
     print(line)
     createUser(CreateUserReq { name: "Ada", age: 36 })
+    print(line)
+    deleteUser(DeleteReq { id: 5 })
+    print(line)
+    deleteUser(DeleteReq { id: 0 })
     print(line)
     return 0
 }
@@ -50,4 +67,11 @@ test "in-process getUser runs the real contract procedure" {
 test "in-process createUser echoes its validated fields" {
     createUser(CreateUserReq { name: "Grace", age: 45 })
     assertEq(line, "createUser -> id 1000 Grace")
+}
+
+test "in-process deleteUser carries a Result outcome (RFC-0024)" {
+    deleteUser(DeleteReq { id: 5 })
+    assertEq(line, "deleteUser -> ok")
+    deleteUser(DeleteReq { id: 0 })
+    assertEq(line, "deleteUser -> refused: cannot delete the root user")
 }

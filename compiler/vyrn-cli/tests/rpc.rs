@@ -145,6 +145,55 @@ fn rpc_invalid_payload_is_422_with_exact_issue_bytes() {
 }
 
 #[test]
+fn rpc_result_ok_is_200_with_tagged_ok() {
+    // A `Result`-returning procedure (RFC-0024): an application-level success is
+    // a 200 carrying the externally-tagged `{"Ok":true}` — never a 422.
+    let s = start_server();
+    let (status, body) = post(s.port, "/rpc/deleteUser", "{\"id\":5}");
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(body, "{\"Ok\":true}");
+}
+
+#[test]
+fn rpc_result_err_is_200_with_tagged_err() {
+    // An application-level refusal is ALSO a 200, carrying `{"Err":".."}` — the
+    // status distinguishes transport/validation from application outcome.
+    let s = start_server();
+    let (status, body) = post(s.port, "/rpc/deleteUser", "{\"id\":0}");
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(body, "{\"Err\":\"cannot delete the root user\"}");
+}
+
+#[test]
+fn rpc_result_invalid_request_is_still_422() {
+    // A malformed REQUEST (id is not an integer) is a decode failure: 422 with
+    // the server's issues — 422 stays reserved for request validation.
+    let s = start_server();
+    let (status, body) = post(s.port, "/rpc/deleteUser", "{\"id\":\"nope\"}");
+    assert_eq!(status, "HTTP/1.1 422 Unprocessable Entity");
+    assert_eq!(
+        body,
+        "{\"issues\":[{\"key\":\"json.type\",\"path\":\"id\",\"message\":\"expected integer, found string\"}]}"
+    );
+}
+
+#[test]
+fn rpc_schema_registry_reflects_result_oneof() {
+    let s = start_server();
+    let (_status, body) = get(s.port, "/rpc/$schema");
+    // deleteUser's response schema is the RFC-0024 Ok/Err oneOf.
+    assert!(body.contains("\"name\":\"deleteUser\""), "deleteUser in registry:\n{body}");
+    assert!(
+        body.contains("\"properties\":{\"Ok\":{\"type\":\"boolean\"}}"),
+        "Ok arm reflected:\n{body}"
+    );
+    assert!(
+        body.contains("\"properties\":{\"Err\":{\"type\":\"string\"}}"),
+        "Err arm reflected:\n{body}"
+    );
+}
+
+#[test]
 fn rpc_wrong_method_is_405() {
     let s = start_server();
     let (status, _) = get(s.port, "/rpc/getUser");
@@ -212,5 +261,5 @@ fn in_process_flavor_runs_green_under_vyrn_test() {
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "in-process tests failed:\n{combined}");
-    assert!(combined.contains("2 passed, 0 failed"), "expected 2 green tests:\n{combined}");
+    assert!(combined.contains("3 passed, 0 failed"), "expected 3 green tests:\n{combined}");
 }

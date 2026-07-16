@@ -18,6 +18,11 @@ export type GetUserReq = { id: Int64 }
 export type CreateUserReq = { name: Username, age: Age }
 export type User = { id: Int64, name: Username, age: Age }
 
+export type DeleteReq = { id: Int64 }
+/// A named `Result` alias (RFC-0024): nameable, so `fromJson`/`jsonSchema` can
+/// take it and the wire form is `{"Ok":true}` / `{"Err":"..."}`.
+export type DeleteResult = Result<Bool, String>
+
 /// Look up a user by id. No database here (an imported module is stateless), so
 /// the result is derived deterministically from the id — enough to show a real,
 /// typed round trip.
@@ -29,4 +34,15 @@ export fn getUser(req: GetUserReq) -> User {
 /// (decode enforced `Username`/`Age`), so this just echoes it back with an id.
 export fn createUser(req: CreateUserReq) -> User {
     return User { id: 1000, name: req.name, age: req.age }
+}
+
+/// "Delete" a user, returning a `Result` (RFC-0024) — an application-level
+/// outcome, NOT request validation. A missing/invalid request body is still a
+/// 422; a well-formed request that the app refuses is a **200** carrying
+/// `{"Err":"..."}`. Deleting the root user (id 0) is refused.
+export fn deleteUser(req: DeleteReq) -> DeleteResult {
+    if req.id == 0 {
+        return Err("cannot delete the root user")
+    }
+    return Ok(true)
 }

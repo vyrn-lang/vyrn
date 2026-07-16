@@ -6,7 +6,7 @@
 /// `vyrn dev` builds this to wasm; `web/vyrn-rpc.js` provides the transport and
 /// `web/vyrn-query.js` the cache. The page never sees a Request/Response — it
 /// calls typed stubs and reads results the handlers stash in module state.
-import { getUser, createUser, GetUserReq, CreateUserReq, User } from rpcClient("./api")
+import { getUser, createUser, deleteUser, GetUserReq, CreateUserReq, User, DeleteReq, DeleteResult } from rpcClient("./api")
 import { rpcClient } from "std/rpc"
 
 // Module state (root-only): the last result / issues, read by the page.
@@ -57,11 +57,30 @@ fn onCreateUser(id: Int64, res: Validation<User>) {
     }
 }
 
+/// The completion handler for `deleteUser` — a `Result` procedure (RFC-0024). A
+/// well-formed request the app refuses arrives as `Valid(Err(..))` (a 200 on the
+/// wire), distinct from a decode failure (`Invalid`, a 422).
+fn onDeleteUser(id: Int64, res: Validation<DeleteResult>) {
+    match res {
+        Valid(r) => match r {
+            Ok(done) => setUser("deleted"),
+            Err(why) => setUser("refused: \{why}"),
+        },
+        Invalid(issues) => setIssues(renderIssues(issues)),
+    }
+}
+
 // ---- the page's entry points (exported to JS) ------------------------------
 
 /// Fire a typed `getUser` round trip; the reply flows to `onGetUser`.
 export extern fn loadUser(id: Int64) {
     getUser(GetUserReq { id: id })
+}
+
+/// Fire a typed `deleteUser` round trip; the `Result` reply flows to
+/// `onDeleteUser`.
+export extern fn removeUser(id: Int64) {
+    deleteUser(DeleteReq { id: id })
 }
 
 /// The last result line and the last issue line, for the page to render.

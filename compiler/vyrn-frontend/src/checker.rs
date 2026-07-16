@@ -1962,7 +1962,21 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
-        let sty = self.expr(scrutinee, scope, None, fn_ret)?;
+        let raw_sty = self.expr(scrutinee, scope, None, fn_ret)?;
+        // Resolve a transparent alias so `match` over `type X = Result<..>` (or an
+        // `Option`/enum alias) dispatches on the underlying shape (RFC-0024).
+        let sty = match &raw_sty {
+            Type::Named(n) => match self.types.get(n) {
+                Some(d)
+                    if d.predicate.is_none()
+                        && matches!(d.base, Type::Result(..) | Type::Option(..)) =>
+                {
+                    crate::types::resolve(&raw_sty, self.types)
+                }
+                _ => raw_sty.clone(),
+            },
+            _ => raw_sty.clone(),
+        };
         // A user enum dispatches to its own (N-variant) checker.
         if let Type::Enum(evs) = self.base(&sty) {
             return self.check_match_enum(&sty, &evs, arms, line, scope, expected, fn_ret);
