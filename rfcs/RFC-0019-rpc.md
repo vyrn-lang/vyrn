@@ -1,148 +1,124 @@
-# RFC-0019 — Typed Procedures: RPC, the Fullstack Build, and Transports
+# RFC-0019 — Typed RPC as a Library (on Generator Imports)
 
-- **Status:** Draft — approved for implementation
-- **Depends on:** RFC-0018 (JSON codec), RFC-0016 (`velac serve`), RFC-0012/13
-  (extern + host-owns-the-loop), RFC-0010 (modules/manifest)
+- **Status:** Draft, redesigned — approved. Supersedes the withdrawn
+  `rpc fn` keyword design (implemented, then **reverted** in 7032894 — a
+  language-level crutch; see the revision note).
+- **Depends on:** RFC-0018 (JSON codec), RFC-0021 (generator imports **+
+  `moduleInterface` reflection** — added there for this), RFC-0016 (`serve`
+  and its `handle` convention), RFC-0012/13 (extern + host-owns-the-loop)
 
-> **Motivation.** The long-range pitch — same language on server and client,
-> validated types as the wire contract — becomes a *product* here: define a
-> procedure once, call it from the browser with full type safety, get
-> accumulated validation errors on bad input for free. What oRPC/tRPC do with
-> type inference across a codebase boundary, Vela does by **sharing the
-> module**: the contract is code, not a schema file.
+> **Revision note.** The first design added `rpc fn`, an `rpc()` builtin,
+> and client/server compilation roles. User review held that this bakes a
+> domain into the language — the i18n mistake one layer deeper. It was
+> right: the *only* thing the compiler must provide that a library cannot
+> is **reading a module's typed interface**, and that is reflection (the
+> `schemaOf` family generalized), not RPC knowledge. With that one general
+> primitive, everything below is generated Vela source. No keyword. No
+> builtin. No compilation roles. The language knows nothing about RPC.
 
 ---
 
-## Procedures
+## The contract is an ordinary module
 
 ```vela
-// api.vela — imported by BOTH builds
+// api.vela — ordinary Vela, zero annotations
 export type GetUserReq = { id: Int64 }
-export type User = { name: Username, age: Age }
+export type User = { name: String, age: Age }
 
-export rpc fn getUser(req: GetUserReq) -> User {
-    ...                                    // ordinary body; may import server logic
+export fn getUser(req: GetUserReq) -> User {
+    return dbFind(req.id)
 }
 ```
 
-- **`rpc fn`** — a contextual modifier (the `extern` precedent). Body
-  required. Otherwise an ordinary function: callable, testable, analyzable.
-- Zero or one parameter; parameter and return types must be **codable**
-  (RFC-0018; checker enforces, naming the offender). Return may be `Unit`.
-- Procedure names are the wire names; they share the top-level namespace.
+Procedures are simply **the exported functions of the module you point a
+generator at**. The generator enforces RFC-0018 codability of every
+exported signature at generation time — a non-codable export is a
+generation error naming the offender (keep helpers unexported or in
+another module).
 
-## Transports (v1) and the seams (locked now, cheap forever)
-
-The contract layer is `(procedure name, request bytes) → (status, response
-bytes)`. Three transports ship; everything else is an adapter later:
-
-1. **In-process** — calling the function. This is SSR's transport and the
-   test story's: zero serialization, always available on server-role builds.
-2. **HTTP** — `velac serve` mounts `POST /rpc/<name>`: decode via
-   `fromJson` → `Invalid` ⇒ **422** with `{"issues":[...]}` (the `Issue`
-   array, toJson'd) → call → `toJson` ⇒ 200 `application/json`. Unknown
-   procedure ⇒ 404. `Content-Type` other than `application/json` ⇒ 415 —
-   **the codec seam**: negotiated by content type, JSON is simply the only
-   v1 codec. A trap in a procedure ⇒ logged 500 (server survives, RFC-0016).
-3. **Browser** — the `rpc()` builtin below, via `web/vela-rpc.js` (fetch).
-
-**Contract endpoint:** `GET /rpc/$schema` returns
-`{"procedures":[{"name","request":<jsonSchema>,"response":<jsonSchema>}]}` —
-a protocol-neutral registry that any emitter (OpenAPI, `.proto`, SDL) can
-feed on later.
-
-## The client call: `rpc()` + the `onRpc` convention
+## The library: three generators over one contract
 
 ```vela
-// client.vela
-import { getUser, GetUserReq, User } from "./api"
+// server.vela
+import { rpcHandle } from rpcServer("./api")
+import { getUser } from "./api"           // direct calls stay fine on the server
 
-fn refresh(id: Int64) {
-    let reqId = rpc(getUser, GetUserReq { id: id })   // typed: req checked against getUser
-}
-
-export extern fn onRpc(id: Int64, status: Int64, body: String) {
-    if status == 200 {
-        match fromJson(User, body) { Valid(u) => ..., Invalid(is) => ... }
+fn handle(req: Request) -> Response {
+    return match rpcHandle(req) {          // POST /rpc/<name> + GET /rpc/$schema
+        Some(r) => r,
+        None => pages(req),                // your own routes/fallback
     }
 }
 ```
 
-- **`rpc(procedure, req) -> Int64`** — the procedure is named as an
-  *identifier* (no function values needed); the checker verifies it is an
-  `rpc fn` and that `req` matches its parameter. Returns a request id.
-- **Server role / interp / native:** `rpc()` dispatches **in-process,
-  synchronously** — encode, call, decode, invoke `onRpc` before returning.
-  Deterministic; client logic is testable against real procedures with zero
-  mocks; parity holds three-way.
-- **Client role (browser wasm):** routed through `vela-rpc.js` — a real
-  fetch; `onRpc` fires on completion (host owns the loop). CPS-by-convention
-  is the accepted v1 cost of the async decision (RFC-0016).
+```vela
+// client.vela
+import { getUser, GetUserReq, User } from rpcClient("./api")
 
-## The fullstack build
+fn load(id: Int64) {
+    getUser(GetUserReq { id: id })         // the STUB — fires the wire call
+}
 
-```
-vela.json   { "name": "app", "server": "server.vela", "client": "client.vela" }
-velac build --server   -> native server binary
-velac build --client   -> browser wasm (client ROLE)
-velac dev              -> everything on :8080
+fn onGetUser(id: Int64, res: Validation<User>) {
+    match res { Valid(u) => ..., Invalid(issues) => ... }
+}
 ```
 
-- **Role-based lowering, one shared contract module.** Both roles type-check
-  `rpc fn` bodies (identical diagnostics — the contract cannot rot silently).
-  Server role lowers them fully. **Client role** lowers each `rpc fn` as a
-  remote stub: a *direct* call is a checker error ("call `getUser` through
-  `rpc()` on the client"); only signatures ship. Dead server code in the
-  client artifact is pruned by wasm-ld's linker GC (documented caveat:
-  secrets belong in files/env — which do not exist client-side — not in
-  literals; v1 relies on GC, not a guarantee).
-- `run`/`test`/parity always use **server role** — bodies present, `rpc()`
-  in-process, fully deterministic.
-- **`velac dev`**: builds the client wasm, then serves — `/rpc/*`
-  (procedures), `public/` + the client module (static), everything else →
-  `handle()` if defined. Interp server; rebuild-on-change is v2.
+```vela
+// client tests / SSR: swap ONE import — same names, in-process dispatch
+import { getUser, GetUserReq, User } from rpcInProcess("./api")
+```
 
-## The query layer (the "colada")
+- **`rpcServer(path)`** emits `rpcHandle(req: Request) -> Option<Response>`:
+  matches `POST /rpc/<name>`; decodes via `fromJson` (`Invalid` ⇒ 422 with
+  `{"issues":[...]}`); calls the real function (imported normally — this
+  is the server, bodies exist); encodes ⇒ 200. `GET /rpc/$schema` ⇒ the
+  procedure registry, built with `jsonSchema()` calls *in generated code*.
+  Plugs into the existing `handle` convention — `serve` is untouched. The
+  mount surface is exactly the module you pointed the generator at:
+  explicit, no transitive surprises.
+- **`rpcClient(path)`** emits: verbatim re-declarations of the contract's
+  *types* (via `moduleInterface` source text — the client build never
+  links server bodies, so there is nothing to strip: no roles, no
+  linker-GC-secrets caveat); one **stub per procedure** (same
+  name/parameter, returns `Unit` — fires the transport) over a tiny
+  extern; and one **per-procedure dispatcher** (`export extern fn`) that
+  decodes the completion with the right type and calls your plain
+  `fn onGetUser(id: Int64, res: Validation<User>)`. A missing handler is
+  an ordinary "unknown function" error inside the generated module,
+  banner pointing at the generator call — `velac emit-gen` shows the
+  exact expected signature. Result unification (locked): 200 ⇒ `Valid` /
+  decode-failure `Invalid`; 422 ⇒ `Invalid` carrying the **server's own
+  issues**; transport/HTTP failure ⇒
+  `Invalid([Issue{key: "rpc.transport", path: "", message: <locked
+  canonical wording>}])`. One handler shape covers everything.
+- **`rpcInProcess(path)`** emits same-named stubs that call the real
+  functions directly and invoke `onGetUser` synchronously before
+  returning — the deterministic test/SSR flavor. Choosing it is one
+  visible import line, not a compiler mode.
 
-`web/vela-query.js` — a zero-dependency host runtime (sibling of
-`wasi-min.js`/`vela-rpc.js`) owning cache **policy**: keys =
-`(procedure, requestJson)`, in-flight dedupe, `staleTime`, refetch,
-`invalidate(key)`. Vela owns the **truth**: decoded, validated results land
-in module state through exported handlers. The split is deliberate (host
-owns timing, Vela owns state — RFC-0013), and honest: a fully Vela-native
-cache wants **function values/closures and library-owned state
-(`export let`)** — this direction is precisely what should motivate those
-RFCs, and real usage of v1 is the evidence-gathering.
+`web/vela-rpc.js` routes fetch completions by procedure name (it made the
+request, so it knows the owner — **no shared client state needed
+anywhere**); `web/vela-query.js` owns cache policy (dedupe, staleTime,
+invalidate) as before.
 
-## Protocol roadmap (space reserved, nothing built)
+## The fullstack build (what remains of it)
 
-- **gRPC via the Connect protocol** — unary gRPC semantics over plain
-  HTTP/1.1 POST (JSON or protobuf bodies): ecosystem interop without
-  hand-rolling HTTP/2. Protobuf requires **stable field numbers** — records
-  crossing a protobuf boundary will need an explicit numbering annotation
-  (design reserved, decided when built). `.proto` emit/import follows the
-  jsonSchema round-trip precedent.
-- **GraphQL — the boundary stated:** SDL emission from Vela types is cheap
-  (the reflection exists); a shallow adapter exposing procedures as
-  `Query`/`Mutation` fields is plausible; nested field resolvers need
-  function values and an executor — out, deliberately, and somewhat contrary
-  to Vela's closed-contract bet.
-- **JSON-RPC 2.0** — a trivial envelope adapter (which also makes a Vela
-  server MCP-servable). **SSE** for server-streaming before WebSockets;
-  both gated on the streaming/async revisit triggers. **Queues/postMessage**
-  — the contract layer already fits.
+**No compilation roles.** `vela.json`'s `server`/`client` keys survive
+purely as `velac dev` convenience (which root to serve, which to build to
+wasm) — zero semantics. `velac build client.vela --target wasm` is a plain
+wasm build; client and server differ only in *what they import*.
 
-## Deliverables & demo
+## What the language provides (all of it general)
 
-`examples/fullstack/` — `vela.json` (server/client roots), `api.vela`
-(types + procedures with validated fields), `server.vela`, `client.vela`,
-`public/index.html`. `velac dev` runs it; browser-verified: a typed round
-trip, a 422 whose `Issue`s render in the page, and the query cache
-deduping/invalidating visibly. Integration tests drive `/rpc/*` (200, 422
-with exact Issue JSON, 404, 415) and the client role's checker errors;
-`velac test` covers procedures in-process.
+`toJson`/`fromJson` (RFC-0018) · generator imports + `moduleInterface`
+(RFC-0021) · `extern` (RFC-0012) · the `handle` convention (RFC-0016).
+The protocol roadmap — Connect/gRPC, `.proto`/SDL emitters, JSON-RPC/MCP,
+SSE — is now *more generators and more host adapters*; none of it will
+ever touch the compiler.
 
 ## Out of scope
 
-Streaming procedures, non-JSON codecs (seam only), auth/middleware, HMR,
-per-procedure config, GraphQL execution, HTTP/2.
+Streaming, auth/middleware (a generator-parameter story later), HMR,
+GraphQL execution, HTTP/2 — plus everything the revision deleted (roles,
+keyword, builtin), permanently.

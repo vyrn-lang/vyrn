@@ -61,6 +61,19 @@ A `gen fn` (and everything it transitively calls) is checked by a
   loader's `ModuleResolver`, restricted to paths under the generator call's
   constant path arguments. The resolver is exactly how the LSP stays
   read-only and how a future remote-input story stays lockable.
+- **Permitted, mediated — `moduleInterface(path: String) ->
+  ModuleInterface`** (generation-time only; the primitive that makes RPC a
+  library). The compiler parses the referenced module with its own
+  frontend and hands back structured reflection: for every **export**, its
+  kind and name; for functions, parameter/return types as `Schema` values
+  (the RFC-0009-enriched reflection record) plus the raw type *spellings*;
+  for type declarations, the **canonical source text** of the declaration
+  (lossless — a generator re-emits contract types verbatim instead of
+  reconstructing them from schemas). Same sandbox scoping as `readFile`;
+  same cache-key participation (the module's bytes are recorded inputs).
+  This is `schemaOf` generalized from one type to a module — compiler
+  knowledge of *its own language*, which is reflection, not a domain
+  crutch.
 - Runtime execution of the same fn (outside an import) uses ordinary I/O
   rules; the restriction is a property of the *generation context*.
 
@@ -98,11 +111,17 @@ a possible v2 if hygiene ever earns its complexity.
 
 ## What becomes a library
 
-- **i18n (RFC-0020 M2)** — the first real generator: ICU-subset parsing,
-  key flattening, drift checking, CLDR plural tables, all in Vela.
+- **Typed RPC (RFC-0019, redesigned)** — the flagship consumer of
+  `moduleInterface`: `rpcServer`/`rpcClient`/`rpcInProcess` generators over
+  an ordinary contract module. The withdrawn `rpc fn` keyword proved the
+  point: with this one reflection primitive, the whole layer is generated
+  source.
+- **i18n (RFC-0020 M2)** — the first file-reading generator: ICU-subset
+  parsing, key flattening, drift checking, CLDR plural tables, all in Vela.
 - **Future, all libraries, zero compiler patches:** `.proto` emit/import,
   GraphQL SDL, OpenAPI clients, SQL schema types, CSV-to-types, route
-  tables. `import type` (schema) is grandfathered but reimplementable here.
+  tables, mocks/docs from `moduleInterface`. `import type` (schema) is
+  grandfathered but reimplementable here.
 
 ## Out of scope
 
