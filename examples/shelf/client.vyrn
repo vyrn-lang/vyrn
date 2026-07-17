@@ -33,7 +33,6 @@ type IntArg = Int64
 let mut mode: String = "list"
 let mut detailId: Int64 = 0
 let mut books: Array<api.Book> = []
-let mut tagMap: Map<String, Int64> = [:]
 let mut filter: String = ""
 let mut confirmId: Int64 = -1
 let mut draftTitle: String = ""
@@ -131,13 +130,35 @@ fn bookViews() -> Array<BookView> {
     return out
 }
 
+/// The tag histogram over the fetched `books`, in first-seen fold order
+/// (identical to the server's `tagCounts`). Deriving it CLIENT-SIDE from the same
+/// `books` the list renders — rather than a second, racing `tagCounts` RPC —
+/// keeps the panel consistent with the list in ONE render: a delete updates the
+/// book list and its tag counts atomically, with no stale window and no reload
+/// (the old two-RPC refetch let the list re-render one completion before the tag
+/// map did). The server `tagCounts` proc + its Map round-trip stay tested.
+fn histogram(bs: Array<api.Book>) -> Map<String, Int64> {
+    let mut m: Map<String, Int64> = [:]
+    for b in bs {
+        for tag in b.tags {
+            let cur = match m[tag] {
+                Some(c) => c,
+                None => 0,
+            }
+            m[tag] = cur + 1
+        }
+    }
+    return m
+}
+
 /// The tag histogram as `TagCount`s, with a DYNAMIC-KEY i18n label lookup
 /// (`transKey("tag." + name)`) so known tags are localized and unknown ones fall
-/// back to the raw name. Iterates the wire `Map` via `keys()`.
+/// back to the raw name. Iterates the `books`-derived histogram via `keys()`.
 fn tagViews() -> Array<TagCount> {
+    let counts = histogram(books)
     let mut out: Array<TagCount> = []
-    for name in tagMap.keys() {
-        let count = match tagMap[name] {
+    for name in counts.keys() {
+        let count = match counts[name] {
             Some(c) => c,
             None => 0,
         }
@@ -145,10 +166,7 @@ fn tagViews() -> Array<TagCount> {
             Some(k) => t(k),
             None => name,
         }
-        let mut cls = "tag"
-        if filter == name {
-            cls = "tag active"
-        }
+        let cls = if filter == name { "tag active" } else { "tag" }
         out.push(TagCount { name: name, label: label, count: count, cls: cls })
     }
     return out
@@ -197,14 +215,13 @@ fn setBooks(l: api.BookList) {
     books = l.books
 }
 
+/// Completion handler for the contract's `tagCounts` procedure. The reactive tag
+/// panel now derives its histogram from `books` (see `histogram`/`tagViews`), so
+/// the client no longer depends on this server round-trip — but the generated
+/// dispatcher `vyrnRpcDoneTagCounts` still calls `onTagCounts`, so it must exist.
+/// It intentionally does nothing (the server proc + its Map round-trip remain
+/// exercised by the contract's own tests).
 fn onTagCounts(id: Int64, res: Validation<api.TagCounts>) {
-    match res {
-        Valid(m) => setTags(m),
-        Invalid(iss) => setIssues(renderIssues(iss)),
-    }
-}
-fn setTags(m: api.TagCounts) {
-    tagMap = m
 }
 
 fn onGetBook(id: Int64, res: Validation<api.BookResult>) {
@@ -285,10 +302,12 @@ fn setIssues(s: String) {
     issues = s
 }
 
-/// Re-read the shelf and the tag histogram (each completion re-renders).
+/// Re-read the shelf. The tag histogram is derived client-side from the returned
+/// books (see `histogram`/`tagViews`), so one `listBooks` completion updates the
+/// list AND its tag counts in a single render — no second, racing `tagCounts`
+/// RPC, hence no post-delete stale window.
 fn refetch() {
     api.listBooks()
-    api.tagCounts()
 }
 
 // ---- event handlers (exported to JS, one String arg — the locked ABI) -------
