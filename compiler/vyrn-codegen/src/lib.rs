@@ -1034,94 +1034,7 @@ fn drain_ho(
 }
 
 /// Emit a complete LLVM IR module for `program`.
-/// The RFC-0037 stage gate: stored function values are checked and executable
-/// under the interpreter, but their defunctionalized lowering has not landed in
-/// this backend yet. Fail loudly rather than miscompile.
-fn rfc0037_gate(what: &str) -> String {
-    format!(
-        "{what}: stored function values (RFC-0037) are not yet supported by the \
-         native/wasm backends — run with `vyrn run` (interpreter) while the \
-         defunctionalized lowering lands"
-    )
-}
-
-/// Whether a declared type transitively mentions a function type (RFC-0037
-/// stage gate). Named references don't recurse — the alias's own declaration
-/// is scanned directly, so any fn-typed storage roots at a flagged site.
-fn mentions_fn_type(ty: &Type) -> bool {
-    match ty {
-        Type::Fn(..) => true,
-        Type::Option(i)
-        | Type::Array(i)
-        | Type::ArrayN(i, _)
-        | Type::Ref(i)
-        | Type::Task(i)
-        | Type::Partial(i)
-        | Type::Omit(i, _)
-        | Type::Pick(i, _) => mentions_fn_type(i),
-        Type::Result(a, b) | Type::Map(a, b) | Type::Merge(a, b) => {
-            mentions_fn_type(a) || mentions_fn_type(b)
-        }
-        Type::Record(fs) => fs.iter().any(|f| mentions_fn_type(&f.ty)),
-        Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(mentions_fn_type)),
-        Type::App(_, args) => args.iter().any(mentions_fn_type),
-        _ => false,
-    }
-}
-
-/// Scan for RFC-0037 storage-of-function-values the checker now accepts but
-/// this backend cannot lower yet: fn types in type declarations, module state,
-/// function returns, and `let` annotations. (Bare named-function values and
-/// lambda literals in storage positions are caught at their emission sites.)
-fn rfc0037_stage_scan(program: &Program) -> Result<(), String> {
-    for t in &program.type_decls {
-        if mentions_fn_type(&t.base) {
-            return Err(rfc0037_gate(&format!("type `{}`", t.name)));
-        }
-    }
-    for g in &program.globals {
-        if g.ty.as_ref().is_some_and(mentions_fn_type) {
-            return Err(rfc0037_gate(&format!("module state `{}`", g.name)));
-        }
-    }
-    fn scan_block(b: &Block, fname: &str) -> Result<(), String> {
-        for s in &b.stmts {
-            match s {
-                Stmt::Let { name, ty, .. } => {
-                    if ty.as_ref().is_some_and(mentions_fn_type) {
-                        return Err(rfc0037_gate(&format!("`let {name}` in `{fname}`")));
-                    }
-                }
-                Stmt::If { then_block, else_block, .. } => {
-                    scan_block(then_block, fname)?;
-                    if let Some(eb) = else_block {
-                        scan_block(eb, fname)?;
-                    }
-                }
-                Stmt::While { body, .. }
-                | Stmt::ForIn { body, .. }
-                | Stmt::Region { body, .. } => scan_block(body, fname)?,
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-    for f in &program.functions {
-        // v1 `fn`-typed PARAMETERS stay on the monomorphization path — only a
-        // fn-typed RETURN is a storage position this backend cannot lower yet.
-        if mentions_fn_type(&f.ret) {
-            return Err(rfc0037_gate(&format!("the return type of `{}`", f.name)));
-        }
-        scan_block(&f.body, &f.name)?;
-    }
-    for t in &program.tests {
-        scan_block(&t.body, &t.name)?;
-    }
-    Ok(())
-}
-
 pub fn emit(program: &Program) -> Result<String, String> {
-    rfc0037_stage_scan(program)?;
     let mut out = String::new();
     // module preamble: printf/abort + format strings (opaque-pointer style)
     out.push_str("; Vyrn v0.1 — generated LLVM IR (target: LLVM 15+)\n");
@@ -1508,6 +1421,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // Higher-order specialization worklist and lifted-lambda dedup set (RFC-0023).
     let mut ho_queue: Vec<HoInst> = Vec::new();
     let mut lambda_emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // RFC-0037 defunctionalization state, threaded through every `Gen` so
+    // variant tags are module-global and dispatchers see every source.
+    let mut fnval_registry: Vec<FnValVariant> = Vec::new();
+    let mut fnval_dispatch: Vec<Type> = Vec::new();
 
     let enqueue = |emitted: &std::collections::HashSet<String>,
                    queue: &mut Vec<(String, Vec<Type>)>,
@@ -1547,9 +1464,20 @@ pub fn emit(program: &Program) -> Result<String, String> {
         gi.log_level = program.log_level;
         gi.log_sink = program.log_sink.clone();
         gi.protocol_methods = protocol_methods.clone();
+        gi.fnval_variants = std::mem::take(&mut fnval_registry);
+        gi.fnval_dispatch = std::mem::take(&mut fnval_dispatch);
         let mut decls = String::new();
         for g in &program.globals {
-            let (v, vty) = gi.gen_expr(&g.init)?;
+            // RFC-0037: the declared type is a lambda initializer's signature.
+            let pushed = g.ty.is_some();
+            if let Some(t) = &g.ty {
+                gi.expect.push(t.clone());
+            }
+            let r = gi.gen_expr(&g.init);
+            if pushed {
+                gi.expect.pop();
+            }
+            let (v, vty) = r?;
             let ty = match &g.ty {
                 Some(t) => t.clone(),
                 None => vty.clone(),
@@ -1586,6 +1514,8 @@ pub fn emit(program: &Program) -> Result<String, String> {
         let insts = std::mem::take(&mut gi.instantiations);
         enqueue(&emitted, &mut queue, insts);
         drain_ho(&mut gi, &mut out, &mut ho_queue, &mut lambda_emitted);
+        fnval_registry = std::mem::take(&mut gi.fnval_variants);
+        fnval_dispatch = std::mem::take(&mut gi.fnval_dispatch);
     }
 
     // 1. Non-generic functions (main + others), collecting instantiations.
@@ -1621,11 +1551,15 @@ pub fn emit(program: &Program) -> Result<String, String> {
         gen.log_sink = program.log_sink.clone();
         gen.protocol_methods = protocol_methods.clone();
         gen.globals = globals_map.clone();
+        gen.fnval_variants = std::mem::take(&mut fnval_registry);
+        gen.fnval_dispatch = std::mem::take(&mut fnval_dispatch);
         gen.function(f, &sym, &mut out)?;
         out.push('\n');
         let insts = std::mem::take(&mut gen.instantiations);
         enqueue(&emitted, &mut queue, insts);
         drain_ho(&mut gen, &mut out, &mut ho_queue, &mut lambda_emitted);
+        fnval_registry = std::mem::take(&mut gen.fnval_variants);
+        fnval_dispatch = std::mem::take(&mut gen.fnval_dispatch);
     }
 
     // 2. Generic instantiations and higher-order specializations, transitively.
@@ -1648,11 +1582,15 @@ pub fn emit(program: &Program) -> Result<String, String> {
             gen.log_sink = program.log_sink.clone();
             gen.protocol_methods = protocol_methods.clone();
             gen.globals = globals_map.clone();
+            gen.fnval_variants = std::mem::take(&mut fnval_registry);
+            gen.fnval_dispatch = std::mem::take(&mut fnval_dispatch);
             gen.function(f, &sym, &mut out)?;
             out.push('\n');
             let insts = std::mem::take(&mut gen.instantiations);
             enqueue(&emitted, &mut queue, insts);
             drain_ho(&mut gen, &mut out, &mut ho_queue, &mut lambda_emitted);
+            fnval_registry = std::mem::take(&mut gen.fnval_variants);
+            fnval_dispatch = std::mem::take(&mut gen.fnval_dispatch);
             continue;
         }
         if let Some(inst) = ho_queue.pop() {
@@ -1667,14 +1605,40 @@ pub fn emit(program: &Program) -> Result<String, String> {
             gen.log_sink = program.log_sink.clone();
             gen.protocol_methods = protocol_methods.clone();
             gen.globals = globals_map.clone();
+            gen.fnval_variants = std::mem::take(&mut fnval_registry);
+            gen.fnval_dispatch = std::mem::take(&mut fnval_dispatch);
             gen.ho_function(&inst, &mut out)?;
             out.push('\n');
             let insts = std::mem::take(&mut gen.instantiations);
             enqueue(&emitted, &mut queue, insts);
             drain_ho(&mut gen, &mut out, &mut ho_queue, &mut lambda_emitted);
+            fnval_registry = std::mem::take(&mut gen.fnval_variants);
+            fnval_dispatch = std::mem::take(&mut gen.fnval_dispatch);
             continue;
         }
         break;
+    }
+
+    // RFC-0037: the synthesized per-signature dispatchers, emitted after every
+    // function so the variant set (one per source that flowed into storage
+    // anywhere in the module) is complete. Every call inside them is direct;
+    // the defensive default arm needs its message global exactly once.
+    if !fnval_dispatch.is_empty() {
+        let (escaped, len) = llvm_str("error: internal: invalid function value\n");
+        out.push_str(&format!(
+            "@.fnval.bad = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n\n"
+        ));
+        let mut dgen = Gen::new(
+            &ret_types, &param_types, &param_caps, &types, &variants, &str_globals, &empty_subst,
+            &funcs, droppable_map, &regex_globals,
+        );
+        dgen.protocol_methods = protocol_methods.clone();
+        dgen.globals = globals_map.clone();
+        dgen.fnval_variants = fnval_registry.clone();
+        let sigs = fnval_dispatch.clone();
+        for sig in &sigs {
+            dgen.emit_fnval_dispatcher(sig, &mut out)?;
+        }
     }
 
     // JSON codec (RFC-0018): a per-record-type encoder/decoder, synthesized
@@ -1934,6 +1898,42 @@ struct Gen<'a> {
     cur_fn_name: String,
     /// Source-order ordinal of the next lambda lifted while emitting this function.
     lambda_counter: usize,
+    /// RFC-0037 expected-type stack: storage boundaries (let/assign/field/
+    /// element stores, returns, constructor payloads, stored-call arguments)
+    /// push the declared type they are about to coerce into, so a lambda
+    /// literal or bare function name evaluated INSIDE the initializer knows
+    /// which `fn(P..) -> R` it is becoming. `IfExpr`/`match` arms deliberately
+    /// push nothing — the enclosing target stays on top, so a conditional
+    /// lambda adopts it naturally.
+    expect: Vec<Type>,
+    /// RFC-0037 defunctionalization registry, threaded through every `Gen`
+    /// by the driver (tags are module-global): one entry per (signature,
+    /// source) that flows into a stored function value, in first-construction
+    /// order. The entry's index IS the variant tag.
+    fnval_variants: Vec<FnValVariant>,
+    /// Signatures called through a stored value anywhere in the module — each
+    /// gets one synthesized dispatcher `@__vyrn_fndispatch_<sig>` at the end.
+    fnval_dispatch: Vec<Type>,
+}
+
+/// One variant of a synthesized stored-function enum (RFC-0037): a source
+/// (named function or lifted lambda) registered under a structural signature.
+/// The runtime value is `{ i64 tag, i64 payload }`; `payload` is 0 for an
+/// empty capture set, else a pointer to a malloc'd capture block.
+#[derive(Clone)]
+struct FnValVariant {
+    /// The normalized `fn(P..) -> R` signature this source flows into.
+    sig: Type,
+    /// The direct-call target: `vyrn_<name>` or a lifted lambda symbol.
+    target_sym: String,
+    /// The capture block's field types, in capture order (empty for a named
+    /// function). The block is `{ llt(c0), llt(c1), ... }` on the heap.
+    cap_tys: Vec<Type>,
+    /// The target's OWN parameter/return types (a named function's declared
+    /// signature may differ representationally from the slot's — record width
+    /// subtyping, validated scalars — so dispatcher arms coerce through them).
+    tgt_params: Vec<Type>,
+    tgt_ret: Type,
 }
 
 /// How to invoke a `fn`-typed parameter inside a specialized instance (RFC-0023).
@@ -2018,6 +2018,9 @@ impl<'a> Gen<'a> {
             lambda_defs: Vec::new(),
             cur_fn_name: String::new(),
             lambda_counter: 0,
+            expect: Vec::new(),
+            fnval_variants: Vec::new(),
+            fnval_dispatch: Vec::new(),
         }
     }
 
@@ -2087,10 +2090,12 @@ impl<'a> Gen<'a> {
             // Unreachable after `resolve` (Named/App/transformers/params reduced away).
             Type::Named(_) | Type::App(..) | Type::Omit(..) | Type::Pick(..) | Type::Merge(..)
             | Type::Partial(..) | Type::Param(_) => "void".into(),
-            // A function-value type (RFC-0023) is monomorphized away — no function
-            // value is ever a runtime value, so this has no lowering. It is only
-            // ever a parameter marker; `llt` is never asked for a real one.
-            Type::Fn(..) => "void".into(),
+            // A stored function value (RFC-0037) is a synthesized closed enum:
+            // `{ i64 tag, i64 payload }` — tag selects the source (one variant
+            // per named function / lifted lambda), payload is 0 or a pointer to
+            // the malloc'd capture block. v1 `fn`-typed PARAMETERS never reach
+            // `llt` (they monomorphize away before lowering).
+            Type::Fn(..) => "{ i64, i64 }".into(),
             // `Err` is the checker's recovery sentinel; a program with any `Err`
             // already has diagnostics and never reaches codegen. Lower to void
             // as a defensive fallback (never observed in practice).
@@ -2156,6 +2161,14 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
+        }
+        // A function value flowing between fn-typed spellings (RFC-0037): the
+        // structural form and any named alias share the `{ i64, i64 }` enum
+        // representation, so this is a re-tag only. (Sources — lambda literals
+        // and bare function names — were constructed AS the slot's signature by
+        // the expected-type stack, so no reshaping can be needed here.)
+        if matches!(self.resolve(to), Type::Fn(..)) && matches!(self.resolve(from), Type::Fn(..)) {
+            return Ok((op, to.clone()));
         }
         // An Option/Result whose payload representation changed: an array
         // literal is boxed by `Some`/`Ok`/`Err` as a fixed `[N x T]` value, but
@@ -2609,7 +2622,17 @@ impl<'a> Gen<'a> {
                 // Node-address identity — must match `vyrn_frontend::own`, which
                 // ran on this same borrowed AST.
                 let key = stmt as *const Stmt as usize;
-                let (v, vty) = self.gen_expr(value)?;
+                // RFC-0037: the annotation is the expected type for any lambda
+                // literal / bare function name inside the initializer.
+                let pushed = decl_ty.is_some();
+                if let Some(t) = decl_ty {
+                    self.expect.push(t.clone());
+                }
+                let r = self.gen_expr(value);
+                if pushed {
+                    self.expect.pop();
+                }
+                let (v, vty) = r?;
                 // Coerce to the annotation if present (record width subtyping).
                 let (v, bty) = match decl_ty {
                     Some(t) => self.coerce_flow(v, value, &vty, t)?,
@@ -2626,8 +2649,11 @@ impl<'a> Gen<'a> {
                 Ok(())
             }
             Stmt::Assign { name, value, .. } => {
-                let (v, vty) = self.gen_expr(value)?;
                 let (slot, tty) = self.lookup(name).ok_or_else(|| format!("unbound `{name}`"))?;
+                self.expect.push(tty.clone());
+                let r = self.gen_expr(value);
+                self.expect.pop();
+                let (v, vty) = r?;
                 let (v, _) = self.coerce(v, &vty, &tty)?;
                 let ll = self.llt(&tty);
                 self.emit(format!("store {ll} {v}, ptr {slot}"));
@@ -2644,7 +2670,10 @@ impl<'a> Gen<'a> {
                     .find(|(_, f)| &f.name == field)
                     .map(|(i, f)| (i, f.ty.clone()))
                     .ok_or_else(|| format!("no field `{field}`"))?;
-                let (v, vty) = self.gen_expr(value)?;
+                self.expect.push(fty.clone());
+                let r = self.gen_expr(value);
+                self.expect.pop();
+                let (v, vty) = r?;
                 let (v, _) = self.coerce(v, &vty, &fty)?;
                 // Rebuild the record value with the new field, then store it back.
                 let rec_ll = self.llt(&tty);
@@ -2677,7 +2706,10 @@ impl<'a> Gen<'a> {
                         self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {hdr}, 0"));
                         self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {hdr}, 1"));
                         let (iv, _) = self.gen_expr(index)?;
-                        let (v, vty) = self.gen_expr(value)?;
+                        self.expect.push(elem.clone());
+                        let r = self.gen_expr(value);
+                        self.expect.pop();
+                        let (v, vty) = r?;
                         let (v, _) = self.coerce(v, &vty, &elem)?;
                         let oob = self.fresh_tmp();
                         self.emit(format!("{oob} = icmp uge i64 {iv}, {len}"));
@@ -2694,7 +2726,10 @@ impl<'a> Gen<'a> {
                         let ell = self.llt(&elem);
                         let aggty = format!("[{n} x {ell}]");
                         let (iv, _) = self.gen_expr(index)?;
-                        let (v, vty) = self.gen_expr(value)?;
+                        self.expect.push(elem.clone());
+                        let r = self.gen_expr(value);
+                        self.expect.pop();
+                        let (v, vty) = r?;
                         let (v, _) = self.coerce(v, &vty, &elem)?;
                         let oob = self.fresh_tmp();
                         self.emit(format!("{oob} = icmp uge i64 {iv}, {n}"));
@@ -2710,7 +2745,10 @@ impl<'a> Gen<'a> {
                     Type::Map(_, val) => {
                         let val = *val;
                         let (kv, _) = self.gen_expr(index)?;
-                        let (v, vty) = self.gen_expr(value)?;
+                        self.expect.push(val.clone());
+                        let r = self.gen_expr(value);
+                        self.expect.pop();
+                        let (v, vty) = r?;
                         let (v, _) = self.coerce(v, &vty, &val)?;
                         self.emit_map_set(&slot, &kv, &v, &val);
                         Ok(())
@@ -2721,7 +2759,11 @@ impl<'a> Gen<'a> {
             Stmt::Return { value, .. } => {
                 match value {
                     Some(e) => {
-                        let (v, vty) = self.gen_expr(e)?;
+                        let ret_expect = self.fn_ret.clone();
+                        self.expect.push(ret_expect);
+                        let r = self.gen_expr(e);
+                        self.expect.pop();
+                        let (v, vty) = r?;
                         let ret = self.fn_ret.clone();
                         let (v, _) = self.coerce_flow(v, e, &vty, &ret)?;
                         let ll = self.llt(&ret);
@@ -2961,9 +3003,10 @@ impl<'a> Gen<'a> {
                     return Ok((cur, Type::Named(enum_name)));
                 }
                 let Some((slot, ty)) = self.lookup(name) else {
-                    // A bare function name in a value position (RFC-0037).
+                    // A bare function name in a value position (RFC-0037): an
+                    // empty-payload defunctionalization variant.
                     if self.funcs.contains_key(name.as_str()) {
-                        return Err(rfc0037_gate(&format!("`{name}` used as a function value")));
+                        return self.construct_fnval_named(name);
                     }
                     return Err(format!("unbound `{name}`"));
                 };
@@ -3055,20 +3098,39 @@ impl<'a> Gen<'a> {
                         Type::Array(Box::new(Type::Int)),
                     ));
                 }
-                // Build the [N x T] value aggregate by inserting each element.
-                let (v0, ety) = self.gen_expr(&elems[0])?;
-                let ell = self.llt(&ety);
-                let aty = format!("[{} x {ell}]", elems.len());
-                let mut cur = self.fresh_tmp();
-                self.emit(format!("{cur} = insertvalue {aty} undef, {ell} {v0}, 0"));
-                for (i, e) in elems.iter().enumerate().skip(1) {
-                    let (v, vt) = self.gen_expr(e)?;
-                    let (v, _) = self.coerce(v, &vt, &ety)?;
-                    let next = self.fresh_tmp();
-                    self.emit(format!("{next} = insertvalue {aty} {cur}, {ell} {v}, {i}"));
-                    cur = next;
+                // RFC-0037: the enclosing storage boundary's Array type (if
+                // any) supplies each element's expected type, so a lambda
+                // literal element knows its signature.
+                let elem_expect: Option<Type> = self.expect.last().and_then(|t| {
+                    match self.resolve(t) {
+                        Type::Array(i) | Type::ArrayN(i, _) => Some(*i),
+                        _ => None,
+                    }
+                });
+                let pushed = elem_expect.is_some();
+                if let Some(t) = &elem_expect {
+                    self.expect.push(t.clone());
                 }
-                Ok((cur, Type::ArrayN(Box::new(ety), elems.len())))
+                let build = (|| -> Result<(String, Type), String> {
+                    // Build the [N x T] value aggregate by inserting each element.
+                    let (v0, ety) = self.gen_expr(&elems[0])?;
+                    let ell = self.llt(&ety);
+                    let aty = format!("[{} x {ell}]", elems.len());
+                    let mut cur = self.fresh_tmp();
+                    self.emit(format!("{cur} = insertvalue {aty} undef, {ell} {v0}, 0"));
+                    for (i, e) in elems.iter().enumerate().skip(1) {
+                        let (v, vt) = self.gen_expr(e)?;
+                        let (v, _) = self.coerce(v, &vt, &ety)?;
+                        let next = self.fresh_tmp();
+                        self.emit(format!("{next} = insertvalue {aty} {cur}, {ell} {v}, {i}"));
+                        cur = next;
+                    }
+                    Ok((cur, Type::ArrayN(Box::new(ety), elems.len())))
+                })();
+                if pushed {
+                    self.expect.pop();
+                }
+                build
             }
             // A map literal (RFC-0028): `[:]` is the empty `{ptr,ptr,len,cap}`
             // (buffers null, value type from context — the representation is
@@ -3088,27 +3150,45 @@ impl<'a> Gen<'a> {
                 self.emit(format!(
                     "store {{ ptr, ptr, i64, i64 }} {{ ptr null, ptr null, i64 0, i64 0 }}, ptr {slot}"
                 ));
-                let (kv0, _) = self.gen_expr(&entries[0].0)?;
-                let (v0, vty0) = self.gen_expr(&entries[0].1)?;
-                let val = vty0;
-                self.emit_map_set(&slot, &kv0, &v0, &val);
-                for (ke, ve) in entries.iter().skip(1) {
-                    let (kv, _) = self.gen_expr(ke)?;
-                    let (v, vt) = self.gen_expr(ve)?;
-                    let (v, _) = self.coerce(v, &vt, &val)?;
-                    self.emit_map_set(&slot, &kv, &v, &val);
+                // RFC-0037: derive each value's expected type from the enclosing
+                // storage boundary's Map type, if any.
+                let val_expect: Option<Type> = self.expect.last().and_then(|t| {
+                    match self.resolve(t) {
+                        Type::Map(_, v) => Some(*v),
+                        _ => None,
+                    }
+                });
+                let pushed = val_expect.is_some();
+                if let Some(t) = &val_expect {
+                    self.expect.push(t.clone());
                 }
+                let build = (|| -> Result<Type, String> {
+                    let (kv0, _) = self.gen_expr(&entries[0].0)?;
+                    let (v0, vty0) = self.gen_expr(&entries[0].1)?;
+                    let val = vty0;
+                    self.emit_map_set(&slot, &kv0, &v0, &val);
+                    for (ke, ve) in entries.iter().skip(1) {
+                        let (kv, _) = self.gen_expr(ke)?;
+                        let (v, vt) = self.gen_expr(ve)?;
+                        let (v, _) = self.coerce(v, &vt, &val)?;
+                        self.emit_map_set(&slot, &kv, &v, &val);
+                    }
+                    Ok(val)
+                })();
+                if pushed {
+                    self.expect.pop();
+                }
+                let val = build?;
                 let agg = self.fresh_tmp();
                 self.emit(format!("{agg} = load {{ ptr, ptr, i64, i64 }}, ptr {slot}"));
                 Ok((agg, Type::Map(Box::new(Type::Str), Box::new(val))))
             }
             // A lambda literal in a v1 argument position is monomorphized away
             // at the call site that receives it (RFC-0023); one reaching the
-            // general expression path is an RFC-0037 storage source this
-            // backend cannot lower yet.
-            Expr::Lambda { .. } => {
-                Err(rfc0037_gate("a lambda literal in a storage position"))
-            }
+            // general expression path is an RFC-0037 storage source — lift it
+            // and construct its defunctionalized enum value, typed by the
+            // innermost storage boundary's expected fn type.
+            Expr::Lambda { .. } => self.construct_fnval_lambda(expr),
         }
     }
 
@@ -3167,7 +3247,12 @@ impl<'a> Gen<'a> {
                 .iter()
                 .find(|(fname, _)| fname == &decl_f.name)
                 .ok_or_else(|| format!("missing field `{}`", decl_f.name))?;
-            let (v, vty) = self.gen_expr(value_expr)?;
+            // RFC-0037: the declared field type (already substituted where the
+            // enclosing solve got there) is a lambda field's expected type.
+            self.expect.push(vyrn_frontend::types::substitute(&decl_f.ty, &solved));
+            let r = self.gen_expr(value_expr);
+            self.expect.pop();
+            let (v, vty) = r?;
             solve_param(&decl_f.ty, &vty, &mut solved);
             vals.push((v, vty));
         }
@@ -3455,7 +3540,9 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{w} = ptrtoint ptr {v} to i64"));
                 (w, "0".into())
             }
-            Type::Ref(_) => {
+            // A `Ref` and a stored function value (RFC-0037) are both two-word
+            // `{ i64, i64 }` aggregates — they fit inline with no heap box.
+            Type::Ref(_) | Type::Fn(..) => {
                 let w0 = self.fresh_tmp();
                 let w1 = self.fresh_tmp();
                 self.emit(format!("{w0} = extractvalue {{ i64, i64 }} {v}, 0"));
@@ -3480,7 +3567,7 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{v} = inttoptr i64 {w0} to ptr"));
                 v
             }
-            Type::Ref(_) => {
+            Type::Ref(_) | Type::Fn(..) => {
                 let a = self.fresh_tmp();
                 let b = self.fresh_tmp();
                 self.emit(format!("{a} = insertvalue {{ i64, i64 }} undef, i64 {w0}, 0"));
@@ -4070,6 +4157,23 @@ impl<'a> Gen<'a> {
                     let cap_tys = b.captures.iter().map(|(ty, _)| ty.clone()).collect();
                     return Ok((b.target_sym.clone(), cap_tys, b.ret.clone()));
                 }
+                // A STORED function value (RFC-0037) flowing into a v1 `fn`-typed
+                // parameter: the specialized instance receives the `{ i64, i64 }`
+                // enum as its capture parameter, and calls to the parameter
+                // become direct calls to the signature's dispatcher with the
+                // enum prepended — v1's zero-cost path for direct lambda/named
+                // arguments is untouched (those never reach this arm).
+                if let Some((slot, ty)) = self.lookup(vn) {
+                    if let sig @ Type::Fn(..) = self.normalize_sig(&ty) {
+                        let Type::Fn(_, ref sret) = sig else { unreachable!() };
+                        let v = self.fresh_tmp();
+                        self.emit(format!("{v} = load {{ i64, i64 }}, ptr {slot}"));
+                        capture_ops.push(format!("{{ i64, i64 }} {v}"));
+                        let sym = self.fnval_dispatcher_sym(&sig);
+                        let ret = (**sret).clone();
+                        return Ok((sym, vec![sig.clone()], ret));
+                    }
+                }
                 // A named top-level function: call it directly, no captures.
                 let ret = self.ret_types.get(vn).cloned().unwrap_or(Type::Unit);
                 Ok((format!("vyrn_{vn}"), Vec::new(), ret))
@@ -4332,6 +4436,336 @@ impl<'a> Gen<'a> {
         Ok((sym, ret_ty))
     }
 
+    // ---- stored function values by defunctionalization (RFC-0037) --------
+
+    /// Deep-normalize a stored-fn signature so structurally identical
+    /// spellings (aliases, validated scalars, transformer sugar) register and
+    /// dispatch as ONE synthesized enum. `Ref`/`Task` interiors are left as
+    /// resolved (they cannot hold fn values, and recursing would cycle).
+    fn normalize_sig(&self, t: &Type) -> Type {
+        match self.resolve(t) {
+            Type::Fn(ps, r) => Type::Fn(
+                ps.iter().map(|p| self.normalize_sig(p)).collect(),
+                Box::new(self.normalize_sig(&r)),
+            ),
+            Type::Array(i) => Type::Array(Box::new(self.normalize_sig(&i))),
+            Type::ArrayN(i, n) => Type::ArrayN(Box::new(self.normalize_sig(&i)), n),
+            Type::Option(i) => Type::Option(Box::new(self.normalize_sig(&i))),
+            Type::Result(a, b) => Type::Result(
+                Box::new(self.normalize_sig(&a)),
+                Box::new(self.normalize_sig(&b)),
+            ),
+            Type::Map(k, v) => Type::Map(
+                Box::new(self.normalize_sig(&k)),
+                Box::new(self.normalize_sig(&v)),
+            ),
+            Type::Record(fs) => Type::Record(
+                fs.iter()
+                    .map(|f| Field { name: f.name.clone(), ty: self.normalize_sig(&f.ty) })
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    /// The expected fn type currently in scope for a lambda literal / bare
+    /// function name: the innermost storage boundary's declared type, resolved.
+    fn expected_fn_sig(&self) -> Option<Type> {
+        let top = self.expect.last()?;
+        match self.resolve(top) {
+            t @ Type::Fn(..) => Some(self.normalize_sig(&t)),
+            _ => None,
+        }
+    }
+
+    /// Register a defunctionalization variant (deduped on signature + target)
+    /// and return its module-global tag.
+    fn register_fnval(
+        &mut self,
+        sig: &Type,
+        target_sym: String,
+        cap_tys: Vec<Type>,
+        tgt_params: Vec<Type>,
+        tgt_ret: Type,
+    ) -> i64 {
+        if let Some(i) = self
+            .fnval_variants
+            .iter()
+            .position(|v| v.sig == *sig && v.target_sym == target_sym)
+        {
+            return i as i64;
+        }
+        self.fnval_variants.push(FnValVariant {
+            sig: sig.clone(),
+            target_sym,
+            cap_tys,
+            tgt_params,
+            tgt_ret,
+        });
+        (self.fnval_variants.len() - 1) as i64
+    }
+
+    /// Build the `{ i64 tag, i64 payload }` aggregate for a variant.
+    fn fnval_aggregate(&mut self, tag: i64, payload: &str) -> String {
+        let a = self.fresh_tmp();
+        let b = self.fresh_tmp();
+        self.emit(format!("{a} = insertvalue {{ i64, i64 }} undef, i64 {tag}, 0"));
+        self.emit(format!("{b} = insertvalue {{ i64, i64 }} {a}, i64 {payload}, 1"));
+        b
+    }
+
+    /// Construct a stored function value from a lambda literal (RFC-0037): the
+    /// captures are loaded HERE (the literal's evaluation site — RFC-0023's
+    /// capture-timing lock, verbatim), packed by value into a malloc'd capture
+    /// block, and the body is lifted through the SAME `emit_lifted_lambda` the
+    /// v1 argument path uses, typed exactly by the slot's signature.
+    fn construct_fnval_lambda(&mut self, expr: &Expr) -> Result<(String, Type), String> {
+        let sig = self.expected_fn_sig().ok_or_else(|| {
+            "internal: a lambda literal reached codegen without an expected \
+             function type (RFC-0037)"
+                .to_string()
+        })?;
+        let Expr::Lambda { params, body, .. } = expr else { unreachable!() };
+        let Type::Fn(ptys, ret) = &sig else { unreachable!() };
+        // Free (captured) locals, in first-seen order (v1's collector).
+        let locals: std::collections::HashSet<String> = params.iter().cloned().collect();
+        let cap_names = self.lambda_captures(body, locals);
+        let mut cap_tys = Vec::new();
+        let mut cap_vals = Vec::new();
+        for cn in &cap_names {
+            let (slot, ty) = self
+                .lookup(cn)
+                .ok_or_else(|| format!("captured `{cn}` not in scope"))?;
+            let cty = vyrn_frontend::types::substitute(&ty, self.subst);
+            let ll = self.llt(&cty);
+            let v = self.fresh_tmp();
+            self.emit(format!("{v} = load {ll}, ptr {slot}"));
+            cap_vals.push(v);
+            cap_tys.push(cty);
+        }
+        // The expected-type stack must not leak into the lifted body (its own
+        // storage boundaries push their own types).
+        let saved_expect = std::mem::take(&mut self.expect);
+        let (sym, _) = self.emit_lifted_lambda(
+            params,
+            body,
+            &cap_names,
+            &cap_tys,
+            ptys,
+            Some((**ret).clone()),
+        )?;
+        self.expect = saved_expect;
+        // Pack the captures into a `{ llt(c0), ... }` block on the heap; an
+        // empty capture set is payload 0. The block is never freed — the same
+        // safe leak every boxed enum payload already is (own.rs precedent).
+        let payload = if cap_tys.is_empty() {
+            "0".to_string()
+        } else {
+            let block_ll = format!(
+                "{{ {} }}",
+                cap_tys.iter().map(|t| self.llt(t)).collect::<Vec<_>>().join(", ")
+            );
+            let mut cur = "undef".to_string();
+            for (i, (v, t)) in cap_vals.iter().zip(&cap_tys).enumerate() {
+                let ins = self.fresh_tmp();
+                let ll = self.llt(t);
+                self.emit(format!("{ins} = insertvalue {block_ll} {cur}, {ll} {v}, {i}"));
+                cur = ins;
+            }
+            let size = self.fresh_tmp();
+            let p = self.fresh_tmp();
+            self.emit(format!(
+                "{size} = ptrtoint ptr getelementptr ({block_ll}, ptr null, i64 1) to i64"
+            ));
+            self.emit(format!("{p} = call ptr @__vyrn_malloc(i64 {size})"));
+            self.emit(format!("store {block_ll} {cur}, ptr {p}"));
+            let iv = self.fresh_tmp();
+            self.emit(format!("{iv} = ptrtoint ptr {p} to i64"));
+            iv
+        };
+        let tag = self.register_fnval(&sig, sym, cap_tys, ptys.clone(), (**ret).clone());
+        Ok((self.fnval_aggregate(tag, &payload), sig))
+    }
+
+    /// Construct a stored function value from a bare function name (RFC-0037):
+    /// an empty-payload variant calling the function directly. The signature is
+    /// the slot's when one is expected, else the function's own.
+    fn construct_fnval_named(&mut self, name: &str) -> Result<(String, Type), String> {
+        let f = self.funcs.get(name).copied().ok_or_else(|| format!("unbound `{name}`"))?;
+        let tgt_params: Vec<Type> =
+            f.params.iter().map(|p| self.normalize_sig(&p.ty)).collect();
+        let tgt_ret = self.normalize_sig(&f.ret);
+        let sig = self.expected_fn_sig().unwrap_or_else(|| {
+            Type::Fn(tgt_params.clone(), Box::new(tgt_ret.clone()))
+        });
+        let tag = self.register_fnval(
+            &sig,
+            format!("vyrn_{name}"),
+            Vec::new(),
+            tgt_params,
+            tgt_ret,
+        );
+        Ok((self.fnval_aggregate(tag, "0"), sig))
+    }
+
+    /// Record that signature `sig` is called through a stored value somewhere,
+    /// and return its dispatcher's symbol.
+    fn fnval_dispatcher_sym(&mut self, sig: &Type) -> String {
+        if !self.fnval_dispatch.iter().any(|s| s == sig) {
+            self.fnval_dispatch.push(sig.clone());
+        }
+        mangle_dispatch_sym(sig)
+    }
+
+    /// Emit a call through a stored function value: args coerce into the
+    /// signature's parameter types, then ONE direct call to the signature's
+    /// dispatcher — which itself makes only direct calls (the RFC-0023 IR
+    /// invariant holds verbatim; no function pointer exists anywhere).
+    fn gen_fnval_call(
+        &mut self,
+        fnval: String,
+        sig: &Type,
+        args: &[Expr],
+    ) -> Result<(String, Type), String> {
+        let sig = self.normalize_sig(sig);
+        let Type::Fn(ptys, ret) = &sig else {
+            return Err("internal: fn-value call on a non-fn type".into());
+        };
+        let mut arg_ops = vec![format!("{{ i64, i64 }} {fnval}")];
+        for (a, pty) in args.iter().zip(ptys) {
+            self.expect.push(pty.clone());
+            let r = self.gen_expr(a);
+            self.expect.pop();
+            let (v, vty) = r?;
+            let (v, cty) = self.coerce(v, &vty, pty)?;
+            arg_ops.push(format!("{} {v}", self.llt(&cty)));
+        }
+        let sym = self.fnval_dispatcher_sym(&sig);
+        let retll = self.llt(ret);
+        if retll == "void" {
+            self.emit(format!("call void @{sym}({})", arg_ops.join(", ")));
+            Ok((String::new(), Type::Unit))
+        } else {
+            let t = self.fresh_tmp();
+            self.emit(format!("{t} = call {retll} @{sym}({})", arg_ops.join(", ")));
+            Ok((t, (**ret).clone()))
+        }
+    }
+
+    /// Emit one signature's dispatcher (RFC-0037): switch on the tag, unpack
+    /// the variant's capture block, and DIRECT-call the target. Every call
+    /// names an `@symbol`; the default arm is unreachable by construction
+    /// (tags only come from registered constructions) and traps defensively.
+    fn emit_fnval_dispatcher(&mut self, sig: &Type, out: &mut String) -> Result<(), String> {
+        let Type::Fn(ptys, ret) = sig else {
+            return Err("internal: dispatcher for a non-fn type".into());
+        };
+        let sym = mangle_dispatch_sym(sig);
+        let retll = self.llt(ret);
+        self.allocas.clear();
+        self.body.clear();
+        self.tmp = 0;
+        self.label = 0;
+        self.terminated = false;
+        self.cur_block = "entry".into();
+        self.fn_ret = (**ret).clone();
+
+        let mut sig_ll: Vec<String> = vec!["{ i64, i64 } %fv".into()];
+        for (i, p) in ptys.iter().enumerate() {
+            sig_ll.push(format!("{} %a{i}", self.llt(p)));
+        }
+        let tag = self.fresh_tmp();
+        let pl = self.fresh_tmp();
+        self.emit(format!("{tag} = extractvalue {{ i64, i64 }} %fv, 0"));
+        self.emit(format!("{pl} = extractvalue {{ i64, i64 }} %fv, 1"));
+        let variants: Vec<(usize, FnValVariant)> = self
+            .fnval_variants
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.sig == *sig)
+            .map(|(i, v)| (i, v.clone()))
+            .collect();
+        let bad = "fnval.bad".to_string();
+        let arms: Vec<String> = variants
+            .iter()
+            .map(|(i, _)| format!("i64 {i}, label %fnval.v{i}"))
+            .collect();
+        self.emit_term(format!("switch i64 {tag}, label %{bad} [ {} ]", arms.join(" ")));
+        for (i, v) in &variants {
+            self.emit_label(&format!("fnval.v{i}"));
+            let mut ops: Vec<String> = Vec::new();
+            // Unpack captures (a lifted lambda's leading parameters).
+            if !v.cap_tys.is_empty() {
+                let block_ll = format!(
+                    "{{ {} }}",
+                    v.cap_tys.iter().map(|t| self.llt(t)).collect::<Vec<_>>().join(", ")
+                );
+                let p = self.fresh_tmp();
+                self.emit(format!("{p} = inttoptr i64 {pl} to ptr"));
+                let blk = self.fresh_tmp();
+                self.emit(format!("{blk} = load {block_ll}, ptr {p}"));
+                for (ci, ct) in v.cap_tys.iter().enumerate() {
+                    let cv = self.fresh_tmp();
+                    self.emit(format!("{cv} = extractvalue {block_ll} {blk}, {ci}"));
+                    ops.push(format!("{} {cv}", self.llt(ct)));
+                }
+            }
+            // Ordinary arguments, coerced into the TARGET's own parameter types
+            // (a named source's declared types may differ — validated scalars
+            // re-validate, records re-layout — mirroring the interpreter's call
+            // boundary coercion).
+            for (ai, pty) in ptys.iter().enumerate() {
+                let tp = v.tgt_params.get(ai).unwrap_or(pty).clone();
+                let (cv, cty) = self.coerce(format!("%a{ai}"), pty, &tp)?;
+                ops.push(format!("{} {cv}", self.llt(&cty)));
+            }
+            let tgt_retll = self.llt(&v.tgt_ret);
+            if retll == "void" {
+                if tgt_retll == "void" {
+                    self.emit(format!("call void @{}({})", v.target_sym, ops.join(", ")));
+                } else {
+                    // A Unit-signature slot may store a value-returning named
+                    // function (the result is discarded, like a Unit lambda).
+                    let t = self.fresh_tmp();
+                    self.emit(format!(
+                        "{t} = call {tgt_retll} @{}({})",
+                        v.target_sym,
+                        ops.join(", ")
+                    ));
+                }
+                self.emit_term("ret void".into());
+            } else {
+                let t = self.fresh_tmp();
+                self.emit(format!(
+                    "{t} = call {tgt_retll} @{}({})",
+                    v.target_sym,
+                    ops.join(", ")
+                ));
+                let (rv, rty) = self.coerce(t, &v.tgt_ret, ret)?;
+                self.emit_term(format!("ret {} {rv}", self.llt(&rty)));
+            }
+        }
+        self.emit_label(&bad);
+        let e = self.fresh_tmp();
+        self.emit(format!("{e} = call ptr @__vyrn_stderr()"));
+        self.emit(format!("call i32 @fputs(ptr @.fnval.bad, ptr {e})"));
+        self.emit("call void @exit(i32 1)".into());
+        self.emit_term("unreachable".into());
+
+        writeln!(out, "define {retll} @{sym}({}) {{", sig_ll.join(", ")).unwrap();
+        out.push_str("entry:\n");
+        for a in &self.allocas {
+            out.push_str(a);
+            out.push('\n');
+        }
+        for b in &self.body {
+            out.push_str(b);
+            out.push('\n');
+        }
+        out.push_str("}\n\n");
+        Ok(())
+    }
+
     /// Emit a specialized instance of a higher-order function (RFC-0023): its
     /// ordinary parameters, then the capture parameters for each `fn`-typed
     /// parameter, with `fn_bindings` wired so calls to those parameters become
@@ -4438,10 +4872,15 @@ impl<'a> Gen<'a> {
                 Ok((t, b.ret.clone()))
             };
         }
-        // A call through a stored fn-typed binding (RFC-0037) — not yet lowered.
-        if let Some((_, ty)) = self.lookup(name) {
-            if matches!(self.resolve(&ty), Type::Fn(..)) {
-                return Err(rfc0037_gate(&format!("a call through the stored value `{name}`")));
+        // A call through a stored fn-typed binding (RFC-0037): load the enum
+        // value and dispatch through the signature's synthesized dispatcher —
+        // one direct call; the switch + direct calls live inside it.
+        if let Some((slot, ty)) = self.lookup(name) {
+            let rty = self.resolve(&ty);
+            if matches!(rty, Type::Fn(..)) {
+                let v = self.fresh_tmp();
+                self.emit(format!("{v} = load {{ i64, i64 }}, ptr {slot}"));
+                return self.gen_fnval_call(v, &rty, args);
             }
         }
         // A call to a function that takes `fn`-typed parameters (RFC-0023): resolve
@@ -5255,7 +5694,11 @@ impl<'a> Gen<'a> {
                 _ => return Err("push on a non-Array value".into()),
             };
             let ell = self.llt(&elem);
-            let (v, vty) = self.gen_expr(&args[1])?;
+            // RFC-0037: the element type is a pushed lambda's expected type.
+            self.expect.push(elem.clone());
+            let r = self.gen_expr(&args[1]);
+            self.expect.pop();
+            let (v, vty) = r?;
             let (v, _) = self.coerce(v, &vty, &elem)?;
             let data = self.fresh_tmp();
             let len = self.fresh_tmp();
@@ -5687,7 +6130,23 @@ impl<'a> Gen<'a> {
         // `Some(x)` — the payload may be any type (boxed if wider than a word),
         // so the Option is `Option<typeof x>`.
         if name == "Some" {
-            let (v, ty) = self.gen_expr(&args[0])?;
+            // RFC-0037: an enclosing `Option<T>` expectation types the payload
+            // (a lambda literal payload needs its fn signature).
+            let payload_expect: Option<Type> = self.expect.last().and_then(|t| {
+                match self.resolve(t) {
+                    Type::Option(i) => Some(*i),
+                    _ => None,
+                }
+            });
+            let pushed = payload_expect.is_some();
+            if let Some(t) = &payload_expect {
+                self.expect.push(t.clone());
+            }
+            let r = self.gen_expr(&args[0]);
+            if pushed {
+                self.expect.pop();
+            }
+            let (v, ty) = r?;
             let (w0, w1) = self.encode_payload(&v, &ty);
             let a = self.fresh_tmp();
             let b = self.fresh_tmp();
@@ -5705,7 +6164,24 @@ impl<'a> Gen<'a> {
             "Err" => Some(0),
             _ => None,
         } {
-            let (v, ty) = self.gen_expr(&args[0])?;
+            // RFC-0037: an enclosing `Result<T, E>` expectation types the arm.
+            let payload_expect: Option<Type> = self.expect.last().and_then(|t| {
+                match self.resolve(t) {
+                    Type::Result(ok, err) => {
+                        Some(if name == "Ok" { *ok } else { *err })
+                    }
+                    _ => None,
+                }
+            });
+            let pushed = payload_expect.is_some();
+            if let Some(t) = &payload_expect {
+                self.expect.push(t.clone());
+            }
+            let r = self.gen_expr(&args[0]);
+            if pushed {
+                self.expect.pop();
+            }
+            let (v, ty) = r?;
             let (w0, w1) = self.encode_payload(&v, &ty);
             let a = self.fresh_tmp();
             let b = self.fresh_tmp();
@@ -5748,7 +6224,18 @@ impl<'a> Gen<'a> {
             // than a word.
             let mut payloads = Vec::new();
             for (i, a) in args.iter().enumerate() {
-                let (v, ty) = self.gen_expr(a)?;
+                // RFC-0037: the declared payload type is the expected type for
+                // a lambda-literal payload.
+                let pushed = matches!(decl_payload.get(i),
+                    Some(dt) if !matches!(self.resolve(dt), Type::Param(_)));
+                if pushed {
+                    self.expect.push(decl_payload[i].clone());
+                }
+                let r = self.gen_expr(a);
+                if pushed {
+                    self.expect.pop();
+                }
+                let (v, ty) = r?;
                 let (v, ty) = match decl_payload.get(i) {
                     Some(dt) if !matches!(self.resolve(dt), Type::Param(_)) => {
                         self.coerce(v, &ty, dt)?
@@ -5877,7 +6364,17 @@ impl<'a> Gen<'a> {
                 }
                 return Err(format!("`modify` argument to `{name}` must be a variable"));
             }
-            let (v, vty) = self.gen_expr(a)?;
+            // RFC-0037: the declared parameter type is the expected type for a
+            // lambda-carrying argument (e.g. `takes(Some(|x| x))`).
+            let pushed = params.get(i).is_some();
+            if let Some(p) = params.get(i) {
+                self.expect.push(p.clone());
+            }
+            let r = self.gen_expr(a);
+            if pushed {
+                self.expect.pop();
+            }
+            let (v, vty) = r?;
             let (v, pty) = match params.get(i) {
                 Some(p) => self.coerce_flow(v, a, &vty, p)?,
                 None => (v, vty),
@@ -7926,6 +8423,15 @@ fn mangle_name(name: &str, type_args: &[Type]) -> String {
     format!("vyrn_{name}__{}", parts.join("_"))
 }
 
+/// The dispatcher symbol for a stored-fn signature (RFC-0037). The readable
+/// mangle alone is not injective (records mangle as `Rec`), so a SHA-256
+/// prefix of the structural form disambiguates — deterministic across builds
+/// and platforms (the frontend's own hash, no hasher state).
+fn mangle_dispatch_sym(sig: &Type) -> String {
+    let h = vyrn_frontend::hash::sha256_hex(format!("{sig:?}").as_bytes());
+    format!("__vyrn_fndispatch_{}_{}", sanitize(&mangle_ty(sig)), &h[..12])
+}
+
 fn mangle_ty(t: &Type) -> String {
     match t {
         Type::Int => "Int64".into(),
@@ -8161,37 +8667,158 @@ mod tests {
         );
     }
 
-    // ---- stored function values: stage gate (RFC-0037) --------------------
+    // ---- stored function values (RFC-0037) --------------------------------
+
+    /// A storage-heavy module: stored lambdas (with and without captures) in
+    /// lets/arrays/records/Option/module state, a named source, composition,
+    /// a stored value passed into a v1 `fn`-typed parameter, and calls through
+    /// every storage form.
+    const STORED: &str = "type M = fn(Int64) -> Int64\n\
+        type Ops = { plus: M, minus: M }\n\
+        let mut chain: Array<M> = []\n\
+        fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
+        fn twice(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {\n\
+            let mut out: Array<Int64> = []\n\
+            for x in xs { out.push(f(x)) }\n\
+            return out }\n\
+        fn makeAdder(n: Int64) -> M { return |x| x + n }\n\
+        fn main() -> Int64 {\n\
+            let g: fn(Int64) -> Int64 = |x| x * 2\n\
+            let h = g\n\
+            let named = dbl\n\
+            chain.push(|x| x + 1)\n\
+            chain.push(dbl)\n\
+            let ops = Ops { plus: |x| x + 10, minus: |x| x - 10 }\n\
+            let p = ops.plus\n\
+            let o: Option<M> = Some(makeAdder(5))\n\
+            let q = match o { Some(f) => f(1), None => 0 }\n\
+            let m = chain[0]\n\
+            let ys = twice([1, 2], h)\n\
+            return h(1) + named(2) + p(3) + q + m(4) + ys[0] }";
 
     #[test]
-    fn stored_fn_values_fail_loudly_until_lowered() {
-        // The checker accepts storage (RFC-0037 stage 1); this backend must
-        // refuse to compile it with the named stage diagnostic — never
-        // miscompile. Each storage form hits the gate.
-        let cases: &[&str] = &[
-            // `let` annotation.
-            "fn main() -> Int64 { let g: fn(Int64) -> Int64 = |x| x * 2  return g(3) }",
-            // fn-typed return.
-            "fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
-             fn pick() -> fn(Int64) -> Int64 { return dbl }\n\
-             fn main() -> Int64 { let f = pick()  return f(21) }",
-            // Record field via type decl.
-            "type R = { f: fn(Int64) -> Int64 }\n\
-             fn main() -> Int64 { let r = R { f: |x| x + 1 }  let g = r.f  return g(1) }",
-            // Module state.
-            "type M = fn(Int64) -> Int64\nlet mut chain: Array<M> = []\n\
-             fn main() -> Int64 { chain.push(|x| x)  let m = chain[0]  return m(1) }",
-            // Bare named-fn composition with no annotation anywhere.
-            "fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
-             fn main() -> Int64 { let g = dbl  return g(4) }",
-        ];
-        for src in cases {
-            let e = emit(&check(src).unwrap()).unwrap_err();
-            assert!(
-                e.contains("not yet supported by the native/wasm backends"),
-                "expected the RFC-0037 stage gate, got: {e}\nfor:\n{src}"
-            );
+    fn stored_fn_values_lower_with_no_indirect_calls() {
+        let ir = emit(&check(STORED).unwrap()).unwrap();
+        // A dispatcher exists for the stored signature, and its calls are all
+        // direct. CRITICALLY: no indirect calls anywhere in the module — every
+        // `call` names an `@symbol` (the RFC-0023 invariant, verbatim), and no
+        // function's ADDRESS is ever taken (no `ptr @vyrn_` operand outside a
+        // direct call — the wasm backend therefore emits no table/elem entry).
+        assert!(ir.contains("@__vyrn_fndispatch_"), "dispatcher missing:\n{ir}");
+        for line in ir.lines() {
+            let t = line.trim_start();
+            if t.contains(" = call ") || t.starts_with("call ") {
+                assert!(t.contains('@'), "indirect call emitted:\n  {line}");
+            }
         }
+        // No function-pointer materialization: `@vyrn_...` / lambda symbols
+        // appear only immediately after `call <ty> ` or in a `define`.
+        for line in ir.lines() {
+            let t = line.trim_start();
+            if t.starts_with("define ") || t.starts_with("declare ") {
+                continue;
+            }
+            if let Some(i) = t.find("@vyrn_") {
+                let before = &t[..i];
+                assert!(
+                    before.trim_end().ends_with("call") || before.contains(" call "),
+                    "function symbol used outside a direct call:\n  {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stored_fn_value_is_a_two_word_enum() {
+        let ir = emit(&check(STORED).unwrap()).unwrap();
+        // Construction: `{ i64 tag, i64 payload }` aggregates built by
+        // insertvalue; a captureless source has payload 0 and a capturing
+        // lambda mallocs its capture block.
+        assert!(
+            ir.contains("insertvalue { i64, i64 } undef, i64 0, 0")
+                || ir.contains("insertvalue { i64, i64 } undef, i64 1, 0"),
+            "tagged construction missing:\n{ir}"
+        );
+        // makeAdder's `|x| x + n` captures `n` — a malloc'd single-field block.
+        assert!(
+            ir.contains("store { i64 }"),
+            "capture block store missing:\n{ir}"
+        );
+    }
+
+    #[test]
+    fn stored_value_into_v1_param_keeps_direct_lambda_path_zero_cost() {
+        let ir = emit(&check(STORED).unwrap()).unwrap();
+        // `twice(.., h)` with a STORED value specializes an instance whose
+        // capture parameter is the `{ i64, i64 }` enum, dispatched inside.
+        assert!(
+            ir.contains("@vyrn_twice__ho") && ir.contains("{ i64, i64 } %arg"),
+            "stored-value specialization missing:\n{ir}"
+        );
+        // And a DIRECT lambda argument still monomorphizes with no enum: the
+        // v1 corpus path emits a lifted-lambda call with plain params.
+        let v1 = "fn twice(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Array<Int64> {\n\
+            let mut out: Array<Int64> = []\n\
+            for x in xs { out.push(f(x)) }\n\
+            return out }\n\
+            fn main() -> Int64 { let ys = twice([1], |x| x * 2)  return ys[0] }";
+        let ir1 = emit(&check(v1).unwrap()).unwrap();
+        let ho_takes_enum = ir1
+            .lines()
+            .any(|l| l.contains("@vyrn_twice__ho") && l.contains("{ i64, i64 }"));
+        assert!(
+            !ir1.contains("fndispatch") && !ho_takes_enum,
+            "v1 direct-lambda path must stay enum-free:\n{ir1}"
+        );
+    }
+
+    #[test]
+    fn generic_bodies_store_fn_values_per_instantiation() {
+        // A stored fn type mentioning `T` resolves per instantiation: each
+        // concrete signature gets its own dispatcher, all calls direct.
+        let src = "fn relay<T>(x: T) -> T {\n\
+             let f: fn(T) -> T = |v| v\n\
+             return f(x) }\n\
+             fn main() -> Int64 {\n\
+             let n = relay(41)\n\
+             let s = relay(\"ok\")\n\
+             if s == \"ok\" { return n + 1 }\n\
+             return 0 }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        let dispatchers: std::collections::HashSet<&str> = ir
+            .lines()
+            .filter(|l| l.starts_with("define") && l.contains("@__vyrn_fndispatch_"))
+            .collect();
+        assert_eq!(dispatchers.len(), 2, "one dispatcher per concrete sig:\n{ir}");
+        for line in ir.lines() {
+            let t = line.trim_start();
+            if t.contains(" = call ") || t.starts_with("call ") {
+                assert!(t.contains('@'), "indirect call emitted:\n  {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn module_state_of_fn_type_initializes_and_reassigns() {
+        let src = "let mut cur: fn(Int64) -> Int64 = |x| x + 1\n\
+             fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
+             fn main() -> Int64 { let before = cur(10)  cur = dbl\n\
+             return before + cur(10) }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        // The global lowers to the two-word enum, initialized by the lambda
+        // variant and reassigned to the named variant.
+        assert!(
+            ir.contains("@g.cur = internal global { i64, i64 } zeroinitializer"),
+            "fn-typed module state lowering missing:\n{ir}"
+        );
+        assert!(ir.contains("@__vyrn_fndispatch_"), "dispatcher missing:\n{ir}");
+    }
+
+    #[test]
+    fn fnval_variant_tags_are_deterministic() {
+        let a = emit(&check(STORED).unwrap()).unwrap();
+        let b = emit(&check(STORED).unwrap()).unwrap();
+        assert_eq!(a, b, "emission must be deterministic");
     }
 
     // ---- worker threads (RFC-0025) ---------------------------------------

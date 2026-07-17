@@ -111,11 +111,22 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
         }
     };
     let mut in_lambda_params = false;
+    // Whether we are lexically inside a `type` declaration's right-hand side —
+    // its `|`s separate enum variants, never open a lambda (RFC-0037 lambda
+    // positions are expression contexts, which a type RHS is not).
+    let mut in_type_decl = false;
     for k in 0..toks.len() {
         let idx = toks[k];
         let prev = if k > 0 { Some(kind(toks[k - 1])) } else { None };
         let next_idx = toks.get(k + 1).copied();
         let next = next_idx.map(kind);
+        match kind(idx) {
+            Tok::Type => in_type_decl = true,
+            Tok::Fn | Tok::Let | Tok::Return | Tok::Import | Tok::Export => {
+                in_type_decl = false
+            }
+            _ => {}
+        }
         match kind(idx) {
             Tok::Lt => {
                 // A generic bracket is tight on both sides in the source; a
@@ -144,15 +155,28 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
                     roles[idx].unary_minus = true;
                 }
             }
-            // A `|` opening or closing a lambda parameter list (RFC-0023). A lambda
-            // is only ever a call argument, so its opening `|` follows `(` or `,`;
-            // the next `|` closes the list. Enum-variant `|` (after `=` or on its
-            // own line) never follows `(`/`,`, so it stays unmarked.
+            // A `|` opening or closing a lambda parameter list. A lambda is a
+            // call argument (RFC-0023: after `(`/`,`) or a storage-position
+            // source (RFC-0037: after `=`, a record/map `:`, a match arm's
+            // `=>`, `return`, or an opening `[`/`{`). Enum-variant `|` also
+            // follows `=`, but only on a `type` declaration's RHS — the
+            // `in_type_decl` guard keeps those unmarked (spaced).
             Tok::Pipe => {
                 if in_lambda_params {
                     roles[idx].lambda_close = true;
                     in_lambda_params = false;
-                } else if matches!(prev, Some(Tok::LParen) | Some(Tok::Comma)) {
+                } else if matches!(prev, Some(Tok::LParen) | Some(Tok::Comma))
+                    || (!in_type_decl
+                        && matches!(
+                            prev,
+                            Some(Tok::Eq)
+                                | Some(Tok::Colon)
+                                | Some(Tok::FatArrow)
+                                | Some(Tok::Return)
+                                | Some(Tok::LBracket)
+                                | Some(Tok::LBrace)
+                        ))
+                {
                     roles[idx].lambda_open = true;
                     in_lambda_params = true;
                 }

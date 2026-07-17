@@ -5333,6 +5333,48 @@ mod tests {
     }
 
     #[test]
+    fn generic_function_stores_fn_values_per_instantiation() {
+        // A stored fn type mentioning `T` monomorphizes with the body: each
+        // instantiation gets its own signature (and, in codegen, its own enum).
+        let src = "fn relay<T>(x: T) -> T {\n\
+             let f: fn(T) -> T = |v| v\n\
+             return f(x) }\n\
+             fn main() -> Int64 {\n\
+             let n = relay(41)\n\
+             let s = relay(\"ok\")\n\
+             if s == \"ok\" { return n + 1 }\n\
+             return 0 }";
+        assert_eq!(run(src).unwrap(), 42);
+    }
+
+    #[test]
+    fn module_state_of_fn_type_with_init_order() {
+        // A directly fn-typed module-state binding (RFC-0029 init order):
+        // the initializer lambda is replaced at runtime; reads are live.
+        let src = "let mut cur: fn(Int64) -> Int64 = |x| x + 1\n\
+             fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
+             fn main() -> Int64 {\n\
+             let before = cur(10)\n\
+             cur = dbl\n\
+             return before + cur(10) }";
+        assert_eq!(run(src).unwrap(), 31);
+    }
+
+    #[test]
+    fn stored_value_into_generic_v1_fn_parameter() {
+        // A stored value handed to a GENERIC higher-order function: the
+        // outbound type parameter solves from the stored signature's return.
+        let src = "fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> {\n\
+             let mut out: Array<U> = []  for x in xs { out.push(f(x)) }  return out }\n\
+             fn main() -> Int64 {\n\
+             let xs: Array<Int64> = [1, 2]\n\
+             let g: fn(Int64) -> Int64 = |x| x * 3\n\
+             let ys = map(xs, g)\n\
+             return ys[0] + ys[1] }";
+        assert_eq!(run(src).unwrap(), 9);
+    }
+
+    #[test]
     fn trap_inside_stored_closure_has_canonical_wording() {
         let src = "fn main() -> Int64 { let f: fn(Int64) -> Int64 = |x| 10 / x\n\
              return f(0) }";

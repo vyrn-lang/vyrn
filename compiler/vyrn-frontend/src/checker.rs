@@ -3945,7 +3945,11 @@ impl<'a> Checker<'a> {
             // A bare name: either a pass-through `fn`-typed parameter, or a named
             // top-level function used as a function value.
             Expr::Var { name: vn, .. } => {
-                if let Some(Binding { ty: Type::Fn(vptys, vret), .. }) = self.lookup(scope, vn) {
+                // Base-resolve so a stored value under a named fn-type alias
+                // (RFC-0037, e.g. `Transform`) passes through too.
+                if let Some(Type::Fn(vptys, vret)) =
+                    self.lookup(scope, vn).map(|b| self.base(&b.ty))
+                {
                     if vptys.len() != ptys.len() {
                         return Err(format!(
                             "line {line}: `{vn}` is a {}-argument function value, but \
