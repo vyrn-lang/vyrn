@@ -1167,7 +1167,10 @@ fn vyxOriginEnd() -> String {
 // ===========================================================================
 
 /// The registry of sibling components, for resolving `<Capitalized>` tags.
-type VyxRegistry = { names: Array<String>, comps: Array<VyxComp> }
+/// `themed` (RFC-0036) routes every `class` attribute through `vyxTheme.cls(…)`
+/// (compile-checked for a static literal, runtime-validated for a dynamic expr)
+/// instead of a bare `Cls(…)`.
+type VyxRegistry = { names: Array<String>, comps: Array<VyxComp>, themed: Bool }
 
 fn vyxLookup(reg: VyxRegistry, name: String) -> Int64 {
     let mut i = 0
@@ -1220,9 +1223,11 @@ fn vyxEmitElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<Vyx
     let kids2 = vyxEmitChildren(kids, kacc, path, reg, fileId, src)
     // Attributes (incl. `@event` and dyn `{expr}` values) are emitted inline on
     // the element's single push line, so they map region-level (v1) — not with
-    // their own `//@origin` directives, which need a line of their own.
-    let ae = vyxEmitAttrs(attrs, fileId)
-    let code = "let mut " + kacc + ": Array<Html> = []\n" + kids2.code + acc + ".push(el(" + vyxStrLit(tag) + ", [" + ae.code + "], " + kacc + "))\n"
+    // their own `//@origin` directives, which need a line of their own. The one
+    // exception is a themed STATIC `class`, hoisted into `ae.pre` with its own
+    // column-exact directive (RFC-0036).
+    let ae = vyxEmitAttrs(attrs, reg, fileId, src, kacc)
+    let code = "let mut " + kacc + ": Array<Html> = []\n" + kids2.code + ae.pre + acc + ".push(el(" + vyxStrLit(tag) + ", [" + ae.list + "], " + kacc + "))\n"
     return VyxEmit { code: code, err: kids2.err + ae.err }
 }
 
@@ -1364,10 +1369,19 @@ fn vyxEmitFor(v: String, it: String, key: String, body: Array<VyxNode>, line: In
 
 // ---- attributes -------------------------------------------------------------
 
+/// The attribute list plus any preamble statements that must precede the element's
+/// push line. In a themed build (RFC-0036) a STATIC `class` attribute is hoisted
+/// into its own `//@origin`-governed `let` binding (`pre`) so a `Tw` consteval
+/// error lands column-exactly on the class string in the `.vyx`; the attribute
+/// slot then references that binding. Everything else stays inline (`list`).
+type VyxAttrsEmit = { list: String, pre: String, err: String }
+
 /// Emit the comma-joined `Attr` constructors for a tag's attributes. `class` →
-/// `Cls`; `@event` → `On`; everything else → `A(name, value)`.
-fn vyxEmitAttrs(attrs: Array<VyxAttr>, fileId: String) -> VyxEmit {
+/// `Cls` (or `vyxTheme.cls` when `reg.themed`); `@event` → `On`; everything else
+/// → `A(name, value)`. `clsBase` names the hoisted class binding uniquely.
+fn vyxEmitAttrs(attrs: Array<VyxAttr>, reg: VyxRegistry, fileId: String, src: String, clsBase: String) -> VyxAttrsEmit {
     let mut parts: Array<String> = []
+    let mut pre = ""
     let mut err = ""
     for a in attrs {
         if a.evt {
@@ -1375,14 +1389,31 @@ fn vyxEmitAttrs(attrs: Array<VyxAttr>, fileId: String) -> VyxEmit {
             parts.push(ev.code)
             err = err + ev.err
         } else if a.name == "class" {
-            let cv = if a.dyn { a.value } else { vyxStrLit(a.value) }
-            parts.push("Cls(" + cv + ")")
+            if reg.themed {
+                if a.dyn {
+                    // Dynamic / interpolated class: the whole attribute is one
+                    // runtime-checked `Tw` value (a `String` coerces at the call
+                    // boundary — the standard validated-type runtime check).
+                    parts.push("vyxTheme.cls(" + a.value + ")")
+                } else {
+                    // Static class: hoisted onto its own origin-governed line so the
+                    // `Tw` consteval error maps to the class string's exact column.
+                    let clsVar = clsBase + "_cls"
+                    pre = pre + vyxOrigin(src, a.line, a.col)
+                    pre = pre + "let " + clsVar + ": Attr = vyxTheme.cls(" + vyxStrLit(a.value) + ")\n"
+                    pre = pre + vyxOriginEnd()
+                    parts.push(clsVar)
+                }
+            } else {
+                let cv = if a.dyn { a.value } else { vyxStrLit(a.value) }
+                parts.push("Cls(" + cv + ")")
+            }
         } else {
             let av = if a.dyn { a.value } else { vyxStrLit(a.value) }
             parts.push("A(" + vyxStrLit(a.name) + ", " + av + ")")
         }
     }
-    return VyxEmit { code: vyxJoin(parts, ", "), err: err }
+    return VyxAttrsEmit { list: vyxJoin(parts, ", "), pre: pre, err: err }
 }
 
 /// Emit one `@event="handler(scalar)"` binding as `On(event, "handler",
@@ -1501,8 +1532,8 @@ fn vyxEmitRootElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array
         return VyxEmit { code: code, err: pushed.err }
     }
     let kids2 = vyxEmitChildren(kids, "kr", "r", reg, fileId, src)
-    let ae = vyxEmitAttrs(attrs, fileId)
-    let code = "let mut kr: Array<Html> = []\n" + kids2.code + "return el(" + vyxStrLit(tag) + ", [" + ae.code + "], kr)\n"
+    let ae = vyxEmitAttrs(attrs, reg, fileId, src, "kr")
+    let code = "let mut kr: Array<Html> = []\n" + kids2.code + ae.pre + "return el(" + vyxStrLit(tag) + ", [" + ae.list + "], kr)\n"
     return VyxEmit { code: code, err: kids2.err + ae.err }
 }
 
@@ -1514,11 +1545,20 @@ fn vyxEmitRootWrap(root: VyxNode, reg: VyxRegistry, fileId: String, src: String)
     return VyxEmit { code: code, err: pushed.err }
 }
 
-/// Assemble the whole synthesized module from the compiled components.
-fn vyxBuildModule(comps: Array<VyxComp>) -> String {
-    let reg = VyxRegistry { names: vyxCompNames(comps), comps: comps }
+/// Assemble the whole synthesized module from the compiled components. When
+/// `themed` (RFC-0036), the module imports the theme namespaced and every `class`
+/// attribute is routed through `vyxTheme.cls(…)`; `theme` is the path passed to
+/// `componentsThemed`, resolved (like `dir`) relative to the importing module —
+/// the nested-generator import resolves against the real importer, not the
+/// synthetic banner (RFC-0033/RFC-0021).
+fn vyxBuildModule(comps: Array<VyxComp>, themed: Bool, theme: String) -> String {
+    let reg = VyxRegistry { names: vyxCompNames(comps), comps: comps, themed: themed }
     let mut out = "/// Generated by std/vyx `components` (RFC-0026 M4) — do not edit.\n"
     out = out + "import { el, text, keyed, empty, Html, Attr } from \"std/html\"\n"
+    if themed {
+        out = out + "import { tw } from \"std/tw\"\n"
+        out = out + "import * as vyxTheme from tw(" + vyxStrLit(theme) + ")\n"
+    }
 
     // Pass-through imports from every component (deduped by exact line).
     let mut seen: Array<String> = []
@@ -1562,10 +1602,25 @@ fn vyxCompNames(comps: Array<VyxComp>) -> Array<String> {
 // The generator.
 // ===========================================================================
 
+/// Assemble the synthesized module from the compiled components, or return the
+/// accumulated generation diagnostics. The PURE tail shared by `components` /
+/// `componentsThemed` — the `listDir` / `readFile` I/O stays in the `gen fn`
+/// bodies (a comptime-only builtin has no native/wasm lowering, so it may only
+/// appear directly in a generator body), and this is called with the results.
+fn vyxFinish(comps: Array<VyxComp>, err: String, themed: Bool, theme: String) -> String {
+    if comps.length == 0 {
+        return "VYX_ERROR__no_vyx_files_found_under_the_components_directory\n"
+    }
+    if err != "" {
+        return err
+    }
+    return vyxBuildModule(comps, themed, theme)
+}
+
 /// `components(dir)` — compile every `<Name>.vyx` file under `dir` into ONE module
-/// exporting one view function per component. Sibling component tags resolve
-/// internally (no cross-module imports). A generation failure returns identifier
-/// diagnostic lines naming the offending `.vyx` file and line.
+/// exporting one view function per component. `class="…"` emits an unchecked
+/// `Cls(…)` (backward-compatible, unchanged). Reach for `componentsThemed` to
+/// compile-check classes against a theme.
 export gen fn components(dir: String) -> String {
     let entries = match listDir(dir) {
         Ok(ns) => ns,
@@ -1588,13 +1643,40 @@ export gen fn components(dir: String) -> String {
             comps.push(comp)
         }
     }
-    if comps.length == 0 {
-        return "VYX_ERROR__no_vyx_files_found_under_the_components_directory\n"
+    return vyxFinish(comps, err, false, "")
+}
+
+/// `componentsThemed(dir, theme)` (RFC-0036) — like `components`, but the
+/// synthesized module imports `theme` namespaced (`import * as vyxTheme from
+/// tw(<theme>)`) and routes every `class` attribute through `vyxTheme.cls(…)`: a
+/// STATIC class literal is proven `⊆ Tw` at compile time (a typo is a `vyrn check`
+/// error mapped to the `.vyx` line:col), a dynamic `class={expr}` is coerced to
+/// `Tw` at runtime. `theme` resolves relative to the importing module, exactly
+/// like `dir`. A distinct generator entry (not an optional arg) because it changes
+/// emission and rekeys the synthesized module — the surface contract RFC-0036 locks.
+export gen fn componentsThemed(dir: String, theme: String) -> String {
+    let entries = match listDir(dir) {
+        Ok(ns) => ns,
+        Err(err) => [],
     }
-    if err != "" {
-        return err
+    let mut comps: Array<VyxComp> = []
+    let mut err = ""
+    for name in entries {
+        if name.endsWith(".vyx") {
+            let nb = bytes(name)
+            let stem = vyxSlice(nb, 0, nb.length - 4)
+            let src = match readFile(dir + "/" + name) {
+                Ok(v) => v,
+                Err(e) => "",
+            }
+            let comp = vyxCompileComponent(stem, src, dir)
+            if comp.err != "" {
+                err = err + comp.err
+            }
+            comps.push(comp)
+        }
     }
-    return vyxBuildModule(comps)
+    return vyxFinish(comps, err, true, theme)
 }
 
 // ===========================================================================
@@ -1633,17 +1715,45 @@ test "a simple component compiles to a view function" {
     assertEq(comp.err, "")
     assertEq(comp.fnName, "item")
     assertEq(comp.takesChildren, false)
-    let out = vyxBuildModule([comp])
+    let out = vyxBuildModule([comp], false, "")
     assert(out.contains("export fn item(title: String) -> Html"))
     assert(out.contains("Cls(\"row\")"))
     assert(out.contains("text((title).toString())"))
+}
+
+test "a themed build routes class through vyxTheme.cls with its own origin directive" {
+    let src = "<script>props { title: String }</script><template><li class=\"row\">{title}</li></template>"
+    let comp = vyxCompileComponent("Item", src, "./c")
+    assertEq(comp.err, "")
+    let out = vyxBuildModule([comp], true, "./theme.json")
+    // The synthesized module imports the theme namespaced (RFC-0036)…
+    assert(out.contains("import { tw } from \"std/tw\""))
+    assert(out.contains("import * as vyxTheme from tw(\"./theme.json\")"))
+    // …the static class is hoisted into its own binding, under a column-exact
+    // `//@origin` directive, and routed through `vyxTheme.cls` (so it is checked).
+    assert(out.contains("vyxTheme.cls(\"row\")"))
+    assert(out.contains(": Attr = vyxTheme.cls(\"row\")"))
+    assert(out.contains("//@origin ./c/Item.vyx:1:"))
+    // A non-themed build stays byte-identical: a bare, unchecked `Cls`.
+    let bare = vyxBuildModule([comp], false, "")
+    assert(bare.contains("Cls(\"row\")"))
+    assertEq(bare.contains("vyxTheme"), false)
+}
+
+test "a themed build coerces a dynamic class at runtime (no own directive)" {
+    let src = "<script>props { cls: String }</script><template><li class={cls}>x</li></template>"
+    let comp = vyxCompileComponent("Item", src, "./c")
+    assertEq(comp.err, "")
+    let out = vyxBuildModule([comp], true, "./theme.json")
+    // Dynamic class: the whole attribute is one runtime-checked `Tw` value.
+    assert(out.contains("vyxTheme.cls(cls)"))
 }
 
 test "an if-chain lowers to nested conditionals" {
     let src = "<template><ul>{#if n > 1}<b>many</b>{:else}<i>one</i>{/if}</ul></template>"
     let comp = vyxCompileComponent("Lst", src, "./c")
     assertEq(comp.err, "")
-    let out = vyxBuildModule([comp])
+    let out = vyxBuildModule([comp], false, "")
     assert(out.contains("if n > 1 {"))
     assert(out.contains("} else {"))
 }
@@ -1652,7 +1762,7 @@ test "a keyed for-loop lowers to keyed pushes" {
     let src = "<template><ul>{#for x in xs key={x.id}}<li>{x.name}</li>{/for}</ul></template>"
     let comp = vyxCompileComponent("Lst", src, "./c")
     assertEq(comp.err, "")
-    let out = vyxBuildModule([comp])
+    let out = vyxBuildModule([comp], false, "")
     assert(out.contains("for x in xs {"))
     assert(out.contains("keyed((x.id).toString()"))
 }
@@ -1661,7 +1771,7 @@ test "an event handler lowers to On with a scalar payload" {
     let src = "<template><button @click=\"remove(item.id)\">x</button></template>"
     let comp = vyxCompileComponent("Btn", src, "./c")
     assertEq(comp.err, "")
-    let out = vyxBuildModule([comp])
+    let out = vyxBuildModule([comp], false, "")
     assert(out.contains("On(\"click\", \"remove\", (item.id).toString())"))
 }
 
@@ -1686,14 +1796,14 @@ test "an unclosed element is rejected" {
 test "a non-scalar event arg is rejected" {
     let src = "<template><button @click=\"go(a, b)\">x</button></template>"
     let comp = vyxCompileComponent("Btn", src, "./c")
-    let out = vyxBuildModule([comp])
+    let out = vyxBuildModule([comp], false, "")
     assert(out.contains("VYX_NON_SCALAR_EVENT_ARG"))
 }
 
 test "an unknown component tag is rejected" {
     let src = "<template><ul><Missing x={1}/></ul></template>"
     let comp = vyxCompileComponent("Host", src, "./c")
-    let out = vyxBuildModule([comp])
+    let out = vyxBuildModule([comp], false, "")
     assert(out.contains("VYX_UNKNOWN_COMPONENT"))
 }
 
@@ -1702,6 +1812,6 @@ test "a component uses children when the template does" {
     let comp = vyxCompileComponent("Shell", src, "./c")
     assertEq(comp.err, "")
     assert(comp.takesChildren)
-    let out = vyxBuildModule([comp])
+    let out = vyxBuildModule([comp], false, "")
     assert(out.contains("export fn shell(children: Array<Html>) -> Html"))
 }
