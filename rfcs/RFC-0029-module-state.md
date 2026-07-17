@@ -127,15 +127,20 @@ thread-shared mutable state (workers still require state-free `handle`).
   `examples/shelf/contract.vyrn` now OWNS the `books` store and its procedure
   bodies are the real implementations; `server.vyrn`'s ~40-line hand-written
   RPC dispatch is deleted in favor of `rpcHandle` from `rpcServer("./contract")`.
-  **Finding (design constraint, not a bug):** the store could not be a
-  physically-separate module. `rpcClient` re-emits the contract's type
-  declarations VERBATIM (it never links the contract's bodies), and
-  `moduleInterface` reflects only a module's OWN declarations — so every wire
-  type (`Book`, …) must be DECLARED in the contract. A separate store owning
-  `Array<Book>` would need `Book` from the contract while the contract needs the
-  store's accessors → an import cycle (rejected). The RFC-0029-idiomatic
-  resolution is the RFC's own example: the contract module IS the store
-  ("server-side Pinia"). Verified end-to-end (`vyrn run server.vyrn`, browser).
+  **Finding (design constraint, not a bug) — superseded by RFC-0031:** the
+  store could not be a physically-separate module. `rpcClient` re-emits the
+  contract's type declarations VERBATIM (it never links the contract's bodies),
+  and `moduleInterface` reflected only a module's OWN declarations — so every
+  wire type (`Book`, …) had to be DECLARED in the contract. A separate store
+  owning `Array<Book>` would need `Book` from the contract while the contract
+  needs the store's accessors → an import cycle (rejected). The
+  RFC-0029-idiomatic resolution was the RFC's own example: the contract module
+  IS the store ("server-side Pinia"). Verified end-to-end at the time.
+  **RFC-0031 (the reachable type closure) dissolves this:** `moduleInterface`
+  now reflects the closure of types reachable from the exported signatures
+  across imports, so the shelf is re-split into `wire.vyrn` (types) +
+  `store.vyrn` (state) + a thin `contract.vyrn` delegating via
+  `import * as store` — the shape this finding said was impossible.
 - **Stateful page loaders.** `routes/index.vyrn` server-renders the LIVE list
   (`page()` reads `listBooks()`/`tagCounts()`); `routes/books/[id].vyrn`'s
   `load` reads `getBook` from the store — a valid-but-absent id or the reserved

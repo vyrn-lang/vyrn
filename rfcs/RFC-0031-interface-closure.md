@@ -1,6 +1,6 @@
 # RFC-0031 — `moduleInterface`: The Reachable Type Closure
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented — see the as-landed notes at the end
 - **Depends on:** RFC-0021 (`moduleInterface` — the reflection primitive
   this completes), RFC-0019 (`std/rpc` — the consumer whose generated
   clients need it), RFC-0029 (module state everywhere — which made the
@@ -104,3 +104,56 @@ facade use case demands it; the closure makes it unnecessary for wire
 types), reflecting functions of imported modules, protocol reflection,
 cross-package (remote) closure policy changes (remote modules already
 vendor their sources; the closure follows the same linked set).
+
+## Implementation notes & decisions (as landed)
+
+- **Where the closure lives:** `moduleInterface` now LINKS the reflected
+  module (`loader::load` through the generation resolver) instead of parsing
+  the single file, and `schema_reflect::module_interface_lit` computes the
+  closure over the linked program: roots are the reflected module's own
+  exported functions' param/return spellings (`module == None` — RFC-0010
+  attribution distinguishes own from foreign decls), edges walk every type
+  position (record fields, enum payloads, alias/validated bases, generic
+  args, `Option`/`Result`/`Array`/`Map`/`Fn`/`Omit`/`Pick`/`Merge`/
+  `Partial`/`ArrayN`/`Ref`/`Task`). Own decls are always included (today's
+  behavior kept); foreign decls only when reached. The locked ORDER falls
+  out of the linked program's decl layout (own decls first in source order,
+  foreign after in linker order), so a self-contained module's interface is
+  byte-identical to before — verified against the untouched rpc/pages
+  emit-gen assertions.
+- **Collisions:** two same-named distinct decls across linked modules were
+  already a `load` error naming both files; reflection linking the module
+  surfaces exactly that diagnostic at the generator import site, so the
+  closure can never contain two `Book`s. (Tested.)
+- **Cache soundness (the "verify" clause):** the reflection link runs
+  through a `RecordingResolver` proxy; every module file the link reads
+  joins the generator's recorded inputs, so a closure type edited in
+  `types.vyrn` misses the cache while an unrelated edit still hits.
+  (Tested: miss + fresh output vs. hit.)
+- **Scoping note:** reflection reads the reflected module's import closure —
+  exactly the file set an ordinary `import` of that module would read at
+  load time. The generator's path-argument scoping still gates the ROOT of
+  the reflection; the transitive module reads are loader-mediated, not
+  filesystem-ambient.
+- **`TypeInfo.module` (new field):** each closure entry carries the import
+  specifier of its DECLARING module (own decls carry the generator's own
+  argument spelling), computed by `loader::import_specifier` relative to the
+  real importing file — `std/` and remote keys keep their specifier form.
+  Generators that IMPORT contract types (rather than re-emit) need it:
+  `rpcServer`/`rpcInProcess` now group their type imports by declaring
+  module (`typeImportBlock`), and `std/ui`'s router imports a FOREIGN
+  `Params` under a `uiParams<idx>` alias from its declaring module (a
+  namespace reaches a module's own exports only). `rpcClient` re-emits
+  `iface.types` verbatim and needed no change. Self-contained contracts
+  emit byte-identical import lines.
+- **A latent alias-machinery bug surfaced and fixed:** a co-naming rename
+  (RFC-0022) rewrote method-sugar call names unconditionally, corrupting
+  `ns.member(..)` (RFC-0027) into `ns.renamed` when a like-named decl was
+  renamed — hit by the thin contract delegating `store.getItem(..)` while
+  `rpcInProcess`'s generated module co-named `getItem`. The plain-name
+  rewrites now skip a call whose receiver is a namespace binding (pass 5
+  owns those references).
+- **Proof:** `examples/shelf` split into `wire.vyrn` + `store.vyrn` + thin
+  `contract.vyrn` (`import * as store`), browser-verified end to end;
+  `examples/rpcsplit.vyrn` is the in-process/parity citizen of the same
+  shape; a pages fixture imports `Params`/`Data` from a shared module.
