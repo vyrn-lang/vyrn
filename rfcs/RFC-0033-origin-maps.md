@@ -1,6 +1,7 @@
 # RFC-0033 — Origin Maps: Editor Support Inside Generator Inputs
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented — see `compiler/vyrn-frontend/src/origin.rs`,
+  `std/vyx.vyrn`, `std/ui.vyrn`, `compiler/vyrn-lsp`, and `editor/vscode`.
 - **Depends on:** RFC-0021 (generator imports — whose synthesized modules
   this makes traceable), RFC-0026 M4 (the `.vyx` compiler — first
   consumer, and the RFC that demanded this be format-agnostic), the LSP
@@ -96,3 +97,54 @@ maps for non-generator transforms (there are none), embedding foreign
 LANGUAGES inside Vyrn (this is about Vyrn generated FROM foreign files),
 `.vyx`↔`Tw` class checking (needs the components↔theme coupling design;
 still deferred, though this RFC builds the road it will use).
+
+---
+
+## Implementation notes & decisions (as landed)
+
+- **The directive table lives in `origin.rs`** (`OriginMaps`), built during the
+  existing load pass. `loader::load_with_origins` returns `(Program,
+  OriginMaps)`; the table is parsed by a single line-scan over each synthesized
+  module's retained source (`Module.gen_source`) — no second parse, and the
+  directive stays a plain `//` comment (its third char is `@`, not `/`, so the
+  lexer skips it and `fmt` preserves it as trivia; the table parser is
+  indentation-insensitive, so `fmt` re-indenting the comment is harmless).
+- **One remapping implementation serves CLI + LSP.** `OriginMaps::remap(&mut
+  Diagnostic) -> bool` relocates a diagnostic at a governed generated line to its
+  origin `file:line:col`, moves the generated location into a new
+  `Diagnostic.note`, and returns whether it landed in a real input file. `vyrn
+  check`/`run` call it in `lib::load` (the note prints as `  note: …`); the LSP
+  calls the same from `symbols::analyze_inner`, splitting relocated diagnostics
+  into `Analysis.remapped` (published against the input file's URI) from the rest
+  (unchanged foreign-adoption behavior). A **malformed directive never loses the
+  diagnostic** — it stays at the generated location with a `malformed …` note.
+- **Fidelity achieved.** `std/vyx` emits `//@origin` with **column-exact**
+  positions for `{expr}` and `{@raw expr}` interpolations (the exact `.vyx`
+  column of the expression), and **region-level** directives (pointing at the
+  construct's head column) for `{#if}`/`{:else if}` chains and `{#for}` heads.
+  Event-handler and dynamic-attribute expressions are emitted inline on the
+  element's single push line, so they map region-level (no own directive) in v1.
+  `std/ui` emits **region-level** (`file:1:1`) directives bracketing each page's
+  dispatch glue, so a check error in the router (e.g. a `page` whose return type
+  isn't `Html`) is reported against the page module — the second-producer proof
+  that the mechanism isn't `.vyx`-shaped.
+- **LSP forward mapping.** `Analysis.origins` carries the table; the server keeps
+  a `vyx_owner` registry (input file → the Vyrn document that synthesized from
+  it) and an overlay-aware `EditorResolver` so unsaved `.vyx` edits regenerate
+  live. A request inside a `.vyx` maps the cursor into the governed generated
+  line — column-exact for verbatim regions via a longest-verbatim-prefix search
+  (`align_expr`), region-start for derived ones — then answers hover / completion
+  / go-to-definition against a fresh `analyze_linked` of the synthesized module.
+  Go-to-definition from a template expression jumps to an imported `.vyrn`
+  declaration (a binding local to the synthesized module has no on-disk target).
+- **Editor.** `editor/vscode` registers the `vyx` language id (forwarded to the
+  server via the client's `documentSelector`) and ships `vyx.tmLanguage.json`
+  (sections, `{…}` interpolation with embedded `source.vyrn`, control blocks,
+  component/element tags, event + dynamic attributes).
+- **Stack.** The LSP loop moved onto a 64 MB worker thread: analyzing a document
+  with generator imports runs the comptime interpreter and re-checks the
+  synthesized module — deeper than the OS default main-thread stack (~1 MB on
+  Windows) survives once the JSON/LSP frames are also on it.
+- **Cache.** Gen cache keys are unaffected by directive presence except that
+  `std/vyx` and `std/ui`'s own sources changed once (they now emit directives),
+  so modules they synthesize rekey once and self-heal.
