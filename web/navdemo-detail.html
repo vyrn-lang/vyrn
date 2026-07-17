@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nav Demo — Detail</title>
+<style>
+  /* Base sheet — present on BOTH pages, so the morph reuses it (no re-append). */
+  :root {
+    color-scheme: light dark;
+    --fg: #1a1a1a; --bg: #fdfdfd; --dim: #6b6b6b; --card: #f3f3f3; --accent: #2e9e5b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8e8e8; --bg: #131316; --dim: #9a9aa2; --card: #1e1e24; --accent: #5ad18a; }
+  }
+  body { margin: 0 auto; max-width: 46rem; padding: 2rem 1.25rem 4rem;
+    font: 16px/1.55 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
+  .sub { color: var(--dim); margin: 0 0 1.25rem; }
+  header.bar { display: flex; gap: .75rem; align-items: center; margin-bottom: 1.25rem; }
+  header.bar input { font: inherit; padding: .35rem .5rem; border-radius: 6px;
+    border: 1px solid var(--dim); background: var(--bg); color: var(--fg); flex: 1; }
+  nav a { color: var(--accent); margin-right: .75rem; text-decoration: none; }
+  ul.items { list-style: none; padding: 0; margin: 1rem 0 0; }
+  ul.items li { padding: .55rem .7rem; border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
+    border-radius: 8px; margin-bottom: .5rem; display: flex; justify-content: space-between; align-items: center; }
+  ul.items a { color: var(--accent); text-decoration: none; }
+  code { background: var(--card); padding: .1rem .35rem; border-radius: 5px; }
+  .marker { color: var(--dim); font-size: .85rem; margin-top: 1.5rem; }
+</style>
+<style>
+  /* DETAIL-ONLY sheet — absent from the list page. The morph APPENDS it to
+     <head> on the way in (never removed on the way back — additive, by design).
+     It only targets `.card`, so there is no bleed back onto the list page. */
+  .card { border: 2px solid var(--accent); border-radius: 12px;
+    padding: 1.1rem 1.25rem; background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .card h2 { margin: 0 0 .4rem; }
+  .badge { display: inline-block; font-size: .75rem; color: var(--accent);
+    border: 1px solid var(--accent); border-radius: 999px; padding: .05rem .5rem; }
+</style>
+</head>
+<body>
+<header class="bar" data-key="bar">
+  <strong>vyrn-nav demo</strong>
+  <input id="q" data-key="q" placeholder="type here — survives soft nav (identity holds)">
+</header>
+
+<h1>Book — detail</h1>
+<p class="sub">A structurally different page. Note the accent-bordered card below is
+styled by a stylesheet the list page never loaded — the morph appended it.</p>
+
+<nav>
+  <a href="./navdemo.html">← back to list</a>
+</nav>
+
+<div class="card">
+  <span class="badge">detail</span>
+  <h2 id="book-title">Book detail</h2>
+  <p>This card is styled by the detail-only &lt;head&gt; stylesheet. The
+  <code>&lt;title&gt;</code> also changed to <code>Nav Demo — Detail</code>.</p>
+</div>
+
+<p class="marker">reload sentinel (unchanged since hard load ⇒ no reload happened): <code id="marker"></code></p>
+
+<script type="module" src="./vyrn-nav.js"></script>
+<script type="module" src="./navdemo.js"></script>
+</body>
+</html>
