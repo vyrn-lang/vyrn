@@ -49,6 +49,12 @@ button.onclick = () => exports.reset();
 
 ## Surface: top-level `let`
 
+> **Superseded by RFC-0029 (Implemented):** the root-only restriction below is
+> lifted — top-level `let` is legal in ANY module. Everything else in this RFC
+> (initialization, semantics, spawn isolation, the three backends) stands
+> unchanged; RFC-0029 only removes the location restriction and pins the
+> cross-module initialization order. `export let` still does not exist.
+
 - `let [mut] name [: Type] = initializer` at the top level of the **root
   module only** (v1). A module-state declaration in an *imported* module is a
   load error ("module state is root-only" — libraries stay stateless, the same

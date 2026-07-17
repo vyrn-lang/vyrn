@@ -21,6 +21,9 @@ shelf is the first program to combine these libraries in one build*; the existin
    The RPC contract module and page modules are both *imported* (non-root), so
    neither can touch the app's `books` store. `rpcServer` is unusable; I
    hand-wrote the entire server RPC dispatch in the root. (language, structural)
+   — **RESOLVED by RFC-0029:** contract owns the store, `rpcServer`'s `rpcHandle`
+   replaces the hand dispatch, pages read the store; hand dispatch + `strings_gen`
+   deleted. See the STRUCTURAL WALL section and RFC-0029 as-landed.
 2. **BUG (FIXED, ef7522c): flat-namespace resolver ignores local shadowing.** A
    local/param/loop var whose name matches *another linked module's* top-level
    export was mis-read as an un-imported cross-module reference. This made
@@ -33,7 +36,10 @@ shelf is the first program to combine these libraries in one build*; the existin
 4. **i18n cannot be used inside a `.vyx`, and pre-generating it forfeits the
    locale state carve-out.** All labels resolve in the root and pass as props
    (prop explosion); `setLocale` had to be stripped and `Locale` threaded by hand.
-   (generator + language)
+   (generator + language) — **RESOLVED by RFC-0029:** live `i18n("./strings")` +
+   `setLocale` restored; the nested-generator path fix makes i18n compose inside
+   a `.vyx` (proven). Shelf still threads shared-locale labels to widgets by
+   choice (per-importer i18n instance).
 5. **Validated request types can't be constructed invalid on the client**, so a
    typed stub can never send a payload that triggers a server 422 — you must drop
    to raw wire. (language / RPC ergonomics)
@@ -125,6 +131,17 @@ RFC-0027 flat-namespace disease, one level below imports.)
 
 ## STRUCTURAL WALL — root-only module state (the #1 finding)
 
+> **RESOLVED by RFC-0029 (Implemented).** Module state is now legal in any
+> module. The shelf's hand-written server dispatch is DELETED (replaced by
+> `rpcHandle` from `rpcServer("./contract")` over a now-stateful contract that
+> owns the `books` store); the contract's procedure bodies are the REAL
+> implementations; the page loaders read the store directly (the home page
+> server-renders the live list; `/books/:id` fetches the real record). One
+> caveat carried into the as-landed notes: the store lives IN the contract
+> module (not a physically-separate module) because `rpcClient` re-emits the
+> contract's types verbatim and would cycle against a separate store — see
+> RFC-0029 as-landed.
+
 Module state is root-only (RFC-0013): only the entry module of a command may hold
 a top-level `let`. But:
 
@@ -175,6 +192,14 @@ to the modules these generators import. Without it, `std/rpc` server-side and
 ## GENERATOR FRICTION (.vyx / pages / rpc / i18n)
 
 ### i18n is unusable *inside* a `.vyx`
+> **RESOLVED by RFC-0029 wave.** The nested-generator path bug is fixed:
+> `run_generator` now unwraps `generated_importer` for path resolution, so an
+> `i18n(..)` (or any generator) import inside a `.vyx` script resolves its paths
+> against the real importing file. i18n composes inside a `.vyx` — proven. (The
+> shelf still threads resolved labels to its widgets: a per-importer gen-key
+> gives each `.vyx` its own i18n instance, so a SHARED locale is resolved at the
+> root — a semantics choice, not a blocker.)
+
 A generator import nested in a `.vyx` script —
 `import { tShelfCount } from i18n("../strings")` — rebases the path but the
 **nested generator** (a generated components module importing another generator)
@@ -184,6 +209,13 @@ every label is resolved in the client root and passed as a prop. With i18n unusa
 in `.vyx`, the `Labels` record grew to 14 fields threaded through every widget.
 
 ### Pre-generating i18n forfeits the state carve-out
+> **RESOLVED by RFC-0029.** `strings_gen.vyrn` is deleted; the shelf imports the
+> LIVE `i18n("./strings")` again and uses the stateful `setLocale`/`t` API —
+> module state is legal in every module (hand-written or generated), so the
+> pre-generated file no longer loses anything. `setLocale` is restored; the
+> per-accessor `loc: Locale` threading is gone (server render + client toggle
+> both `setLocale`).
+
 The generator's `setLocale`/`currentLocale`/`locale()` only work because the
 *synthesized* module gets the RFC-0021 state carve-out. Once pre-generated to a
 checked-in file (to dodge BUG 2), it's an ordinary non-root module →

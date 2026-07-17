@@ -1,54 +1,103 @@
 /// Shared server-side view helpers: the page shell (localized nav) and the
-/// static page bodies. Lives in the APP ROOT so paths resolve, and imports the
-/// PRE-GENERATED, stateless i18n module (see strings_gen.vyrn for why). Every
-/// translation call threads an explicit `loc: Locale` — the generator's stateful
-/// `setLocale` had to be dropped, so locale is a plain argument here.
+/// page bodies. Lives in the APP ROOT-adjacent module tree so paths resolve.
+///
+/// RFC-0029 restores the ERGONOMIC i18n: this imports the LIVE `i18n("./strings")`
+/// generator (not a pre-generated, state-stripped file) and uses its STATEFUL
+/// accessors — `setLocale(l)` then `tAppTitle()` — instead of threading an
+/// explicit `loc: Locale` through every call. The generated module owns its
+/// `currentLocale` state, which every module may now do. The home page also reads
+/// the `books` store DIRECTLY (a page module is no longer forbidden state) and
+/// server-renders the live list.
 import { el, text, Html, Attr } from "std/html"
-import { Locale, tAppTitle, tAppTagline, tNavHomeLabel, tNavAboutLabel, tShelfCount } from "./strings_gen"
+import { i18n } from "std/i18n"
+import { setLocale, locale, Locale, tAppTitle, tAppTagline, tNavHomeLabel, tNavAboutLabel, tShelfCount, tShelfEmpty, tShelfTags, transKey, t } from i18n("./strings")
+import { Book, BookList, TagCounts } from "./contract"
 
 /// A nav link.
 fn navLink(href: String, label: String) -> Html {
     return el("a", [A("href", href)], [text(label)])
 }
 
-/// The page chrome around `kids`: stylesheet, localized header + nav.
-export fn shell(loc: Locale, kids: Array<Html>) -> Html {
+/// The page chrome around `kids`: stylesheet, localized header + nav. Reads the
+/// ambient `currentLocale` (set by the caller via `setLocale`).
+export fn shell(kids: Array<Html>) -> Html {
     return el("div", [Id("root")], [
             el("link", [A("rel", "stylesheet"), A("href", "/style.css")], []),
             el("header", [], [
-                    el("h1", [], [text(tAppTitle(loc))]),
+                    el("h1", [], [text(tAppTitle())]),
                     el("nav", [], [
-                            navLink("/", tNavHomeLabel(loc)),
-                            navLink("/about", tNavAboutLabel(loc)),
+                            navLink("/", tNavHomeLabel()),
+                            navLink("/about", tNavAboutLabel()),
                         ]),
                 ]),
             el("main", [], kids),
         ])
 }
 
-/// The home page body — the client mounts into `#app` and fetches the shelf.
-export fn homePage(loc: Locale) -> Html {
-    return shell(loc, [
-            el("p", [Cls("sub")], [text(tAppTagline(loc))]),
-            el("div", [Id("app")], [el("p", [Cls("sub")], [text("loading shelf…")])]),
+/// One rendered book row (server-side, static — the client hydrates the
+/// interactive version). Tags localized through the dynamic-key lookup.
+fn bookRow(b: Book) -> Html {
+    let mut rating = "☆"
+    if b.rating > 0 {
+        rating = "★ \{b.rating}"
+    }
+    let mut tagKids: Array<Html> = []
+    for tag in b.tags {
+        let label = match transKey("tag." + tag) {
+            Some(k) => t(k),
+            None => tag,
+        }
+        tagKids.push(el("span", [Cls("tag")], [text(label)]))
+    }
+    return el("li", [Cls("book")], [
+            el("a", [A("href", b.url)], [text(b.title)]),
+            el("span", [Cls("rating")], [text(rating)]),
+            el("span", [Cls("tags")], tagKids),
+        ])
+}
+
+/// The home page body — SSR the live shelf list AND a tag summary read straight
+/// from the store; the client mounts into `#app` for the interactive version.
+export fn homePage(list: BookList, tags: TagCounts) -> Html {
+    let mut items: Array<Html> = []
+    for b in list.books {
+        items.push(bookRow(b))
+    }
+    let mut body: Array<Html> = []
+    if list.books.length == 0 {
+        body = [el("p", [Cls("sub")], [text(tShelfEmpty())])]
+    } else {
+        body = [el("ul", [Cls("books")], items)]
+    }
+    return shell([
+            el("p", [Cls("sub")], [text(tAppTagline())]),
+            el("p", [Cls("count")], [text(tShelfCount(list.books.length))]),
+            el("div", [Id("app")], body),
             el("script", [A("type", "module"), A("src", "/app.js")], []),
         ])
 }
 
 /// One row of the plural table: locale label, then the plural rendered in `loc`.
-fn pluralRow(loc: Locale, label: String, n: Int64) -> Html {
+/// The stateful accessor reads `currentLocale`, so we flip it per group.
+fn pluralRow(label: String, n: Int64) -> Html {
     return el("tr", [], [
             el("td", [], [text(label)]),
             el("td", [], [text("\{n}")]),
-            el("td", [], [text(tShelfCount(loc, n))]),
+            el("td", [], [text(tShelfCount(n))]),
         ])
 }
 
-/// The About page: static prose plus a live CLDR-plural demonstration rendered
-/// in English AND Ukrainian (one/few/many) side by side — locale is just an
-/// argument now, so both render in one pass with no global to flip back.
-export fn aboutPage(loc: Locale) -> Html {
-    return shell(loc, [
+/// The About page: static prose plus a live CLDR-plural demonstration rendered in
+/// English AND Ukrainian side by side. With the stateful API we `setLocale` per
+/// group (rows build eagerly), then restore the incoming locale.
+export fn aboutPage() -> Html {
+    let saved = locale()
+    setLocale(En)
+    let enRows = [pluralRow("en", 1), pluralRow("en", 2), pluralRow("en", 5)]
+    setLocale(Uk)
+    let ukRows = [pluralRow("uk", 1), pluralRow("uk", 2), pluralRow("uk", 5)]
+    setLocale(saved)
+    return shell([
             el("h2", [], [text("About")]),
             el("p", [], [text("Shelf is a tiny dogfood app exercising the whole Vyrn UI stack: std/html, std/ui pages, std/rpc, std/i18n, and Map on the wire.")]),
             el("h3", [], [text("CLDR plurals")]),
@@ -56,21 +105,35 @@ export fn aboutPage(loc: Locale) -> Html {
             el("table", [Cls("plurals")], [
                     el("thead", [], [el("tr", [], [el("th", [], [text("locale")]), el("th", [], [text("n")]), el("th", [], [text("message")])])]),
                     el("tbody", [], [
-                            pluralRow(En, "en", 1), pluralRow(En, "en", 2), pluralRow(En, "en", 5),
-                            pluralRow(Uk, "uk", 1), pluralRow(Uk, "uk", 2), pluralRow(Uk, "uk", 5),
+                            enRows[0], enRows[1], enRows[2],
+                            ukRows[0], ukRows[1], ukRows[2],
                         ]),
                 ]),
         ])
 }
 
-/// The book-detail shell: the client hydrates `#book` with the real record via
-/// the `getBook` RPC (a page module cannot read the store). `id` is already
-/// validated as an integer by the router.
-export fn detailPage(loc: Locale, id: Int64) -> Html {
-    return shell(loc, [
-            el("p", [], [navLink("/", tNavHomeLabel(loc))]),
-            el("h2", [], [text("Book #\{id}")]),
-            el("div", [Id("book"), A("data-book-id", "\{id}")], [el("p", [Cls("sub")], [text("loading book…")])]),
-            el("script", [A("type", "module"), A("src", "/app.js")], []),
+/// The book-detail page: SSR the real record read from the store (the loader
+/// validated the id and fetched the book). `id` is already an integer.
+export fn detailPage(b: Book) -> Html {
+    let mut rating = "☆"
+    if b.rating > 0 {
+        rating = "★ \{b.rating}"
+    }
+    let mut tagKids: Array<Html> = []
+    for tag in b.tags {
+        let label = match transKey("tag." + tag) {
+            Some(k) => t(k),
+            None => tag,
+        }
+        tagKids.push(el("span", [Cls("tag")], [text(label)]))
+    }
+    return shell([
+            el("p", [], [navLink("/", tNavHomeLabel())]),
+            el("h2", [], [text("Book #\{b.id}")]),
+            el("div", [Id("book")], [
+                    el("h3", [], [el("a", [A("href", b.url)], [text(b.title)])]),
+                    el("p", [Cls("rating")], [text(rating)]),
+                    el("p", [Cls("tags")], tagKids),
+                ]),
         ])
 }

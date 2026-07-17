@@ -1,22 +1,28 @@
 /// GET /books/:id — a dynamic route with a loader (RFC-0026 M3). The `[id]`
-/// segment is parsed as Int64 by the router (a non-integer 404s before this
-/// runs). Id 999 is "reserved" to exercise the 422 error page. The real book
-/// record is fetched by the client via `getBook` (a page module cannot read the
-/// store), so the loader only validates the id and the page renders the shell.
+/// segment is parsed as Int64 by the router (a NON-INTEGER 404s before this runs).
+/// RFC-0029 lets the loader read the store DIRECTLY: it fetches the real book and
+/// the page server-renders it. A missing id (or the reserved 999) is an `Invalid`
+/// => the synthesized router's 422 issues page.
 import { detailPage } from "../../view"
-import { Locale } from "../../strings_gen"
+import { getBook, Book, IdReq } from "../../contract"
 import { Html } from "std/html"
 
 export type Params = { id: Int64 }
-export type Data = { id: Int64 }
+export type Data = { found: Book }
 
 export fn load(p: Params) -> Validation<Data> {
     if p.id == 999 {
         return Invalid([Issue { key: "book.reserved", path: "id", message: "id 999 is reserved and cannot be shown" }])
     }
-    return Valid(Data { id: p.id })
+    if p.id < 0 {
+        return Invalid([Issue { key: "book.notFound", path: "id", message: "no book with id \{p.id}" }])
+    }
+    return match getBook(IdReq { id: p.id }) {
+        Ok(b) => Valid(Data { found: b }),
+        Err(why) => Invalid([Issue { key: "book.notFound", path: "id", message: why }]),
+    }
 }
 
 export fn page(p: Params, d: Data) -> Html {
-    return detailPage(En, d.id)
+    return detailPage(d.found)
 }

@@ -11,8 +11,8 @@
 /// typed stub can never CONSTRUCT an invalid `AddBookReq` (it would trap).
 import { rpcClient } from "std/rpc"
 import * as api from rpcClient("./contract")
-import * as tr from "./strings_gen"
-import { Locale } from "./strings_gen"
+import { i18n } from "std/i18n"
+import { setLocale, locale, Locale, transKey, t, tShelfAdd, tShelfTitle, tShelfUrl, tShelfTagsField, tShelfSave, tShelfRateLabel, tShelfDelete, tShelfConfirm, tShelfCancel, tShelfUnrated, tShelfEmpty, tShelfTags, tShelfFilterAll, tLangSwitch, tShelfCount } from i18n("./strings")
 import { splitTrim } from "./util"
 import { BookView, TagCount, Labels } from "./types"
 import { components } from "std/vyx"
@@ -28,7 +28,7 @@ type RawAdd = { title: String, url: String, tags: Array<String> }
 /// A parseable Int64 alias (a handler arg arrives as String).
 type IntArg = Int64
 
-// ---- client view state (root-only module state) ----------------------------
+// ---- client view state (module state; the locale lives in the i18n module) --
 
 let mut mode: String = "list"
 let mut detailId: Int64 = 0
@@ -40,7 +40,6 @@ let mut draftTitle: String = ""
 let mut draftUrl: String = ""
 let mut draftTags: String = ""
 let mut issues: String = ""
-let mut loc: Locale = En
 let mut detailStatus: String = "loading…"
 let mut detailTitle: String = ""
 let mut detailUrl: String = ""
@@ -84,24 +83,25 @@ fn renderIssues(iss: Array<Issue>) -> String {
     return out
 }
 
-/// The label bundle for the current locale (i18n cannot live in a `.vyx`, so the
-/// widgets receive resolved strings).
+/// The label bundle for the current locale. The `.vyx` widgets receive resolved
+/// strings (scalar props); the ambient `currentLocale` is read by each stateful
+/// accessor, so no `loc` is threaded.
 fn labels() -> Labels {
     return Labels {
-        add: tr.tShelfAdd(loc),
-        title: tr.tShelfTitle(loc),
-        url: tr.tShelfUrl(loc),
-        tags: tr.tShelfTagsField(loc),
-        save: tr.tShelfSave(loc),
-        rate: tr.tShelfRateLabel(loc),
-        del: tr.tShelfDelete(loc),
-        confirm: tr.tShelfConfirm(loc),
-        cancel: tr.tShelfCancel(loc),
-        unrated: tr.tShelfUnrated(loc),
-        empty: tr.tShelfEmpty(loc),
-        tagsHdr: tr.tShelfTags(loc),
-        filterAll: tr.tShelfFilterAll(loc),
-        lang: tr.tLangSwitch(loc),
+        add: tShelfAdd(),
+        title: tShelfTitle(),
+        url: tShelfUrl(),
+        tags: tShelfTagsField(),
+        save: tShelfSave(),
+        rate: tShelfRateLabel(),
+        del: tShelfDelete(),
+        confirm: tShelfConfirm(),
+        cancel: tShelfCancel(),
+        unrated: tShelfUnrated(),
+        empty: tShelfEmpty(),
+        tagsHdr: tShelfTags(),
+        filterAll: tShelfFilterAll(),
+        lang: tLangSwitch(),
     }
 }
 
@@ -141,8 +141,8 @@ fn tagViews() -> Array<TagCount> {
             Some(c) => c,
             None => 0,
         }
-        let label = match tr.transKey("tag." + name) {
-            Some(k) => tr.t(loc, k),
+        let label = match transKey("tag." + name) {
+            Some(k) => t(k),
             None => name,
         }
         let mut cls = "tag"
@@ -161,17 +161,17 @@ fn listView() -> Html {
         labels(),
         bookViews(),
         tagViews(),
-        tr.tShelfCount(loc, books.length),
+        tShelfCount(books.length),
         issues,
         draftTitle,
         draftUrl,
         draftTags,
-        tr.tLangSwitch(loc),
+        tLangSwitch(),
     )
 }
 
 fn detailView() -> Html {
-    let mut rating = tr.tShelfUnrated(loc)
+    let mut rating = tShelfUnrated()
     if detailRating > 0 {
         rating = "★ \{detailRating}"
     }
@@ -365,10 +365,10 @@ export extern fn clearFilter(arg: String) {
 }
 
 export extern fn toggleLang(arg: String) {
-    loc = match loc {
-        En => Uk,
-        Uk => En,
-    }
+    setLocale(match locale() {
+            En => Uk,
+            Uk => En,
+        })
 }
 
 /// The view as JSON for vyrn-dom.js.

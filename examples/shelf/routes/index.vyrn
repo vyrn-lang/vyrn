@@ -1,10 +1,11 @@
-/// GET / — the home shell. Stateless (a page module is non-root and cannot read
-/// the store); the browser client mounts into `#app` and fetches the shelf.
-/// Server render is English; the client offers the en/uk toggle.
+/// GET / — the home page. RFC-0029 lets this page module read the `books` store
+/// DIRECTLY (via the contract's accessors), so the shelf list is server-rendered
+/// instead of a client-fetched shell. The browser client still mounts into `#app`
+/// for the interactive version (add / rate / delete / filter / locale toggle).
 import { homePage } from "../view"
-import { Locale } from "../strings_gen"
+import { listBooks, tagCounts } from "../contract"
 import { Html } from "std/html"
 
 export fn page() -> Html {
-    return homePage(En)
+    return homePage(listBooks(), tagCounts())
 }
