@@ -1,0 +1,103 @@
+/// Method-form mutation through a PLACE, not just a bare variable (the P0 that
+/// the `examples/bin` pastebin dogfood surfaced). `push` reallocates its array
+/// and returns the new one, so a statement-position `x.push(v)` must store that
+/// result back into wherever `x` actually lives. `x` may be:
+///
+///   - a variable        `xs.push(v)`   -> `xs = push(xs, v)`
+///   - a record field     `r.xs.push(v)` -> `r.xs = push(r.xs, v)`
+///   - an array element   `a[i].push(v)` -> `a[i] = push(a[i], v)`
+///
+/// Before the fix, only the variable form wrote back; a field/element `.push`
+/// silently mutated a copy and vanished, while a sibling scalar field assign
+/// (`r.n = k`) persisted — a store that counted mutations it never kept. This
+/// example locks every place-form in, interleaved with the sibling scalar so
+/// the "half-persisted" shape can never come back, byte-identically three ways.
+
+/// A store record: a growable array field beside a scalar counter field — the
+/// exact shape that lost data (`{ pastes, counter }` in the pastebin).
+type Store = { xs: Array<Int64>, n: Int64 }
+
+/// Module state (a GLOBAL record): the field-push through a global was the
+/// reported no-op.
+let mut store: Store = Store { xs: [], n: 0 }
+
+/// Grow the global's array field IN PLACE and bump the sibling scalar beside it.
+/// Both must persist; before the fix only `n` did.
+fn record(v: Int64) -> Int64 {
+    store.xs.push(v)
+    store.n = store.n + 1
+    return 0
+}
+
+fn main() -> Int64 {
+    // ---- global record field: push + sibling scalar interleaved --------------
+    let _ = record(10)
+    let _ = record(20)
+    let _ = record(30)
+    print(store.xs.length) // 3 — the pushes stuck (was 0 before the fix)
+    print(store.n) // 3 — the sibling scalar agrees
+    print(store.xs[0]) // 10
+    print(store.xs[2]) // 30
+
+    // ---- local record field: same write-back, on a stack binding -------------
+    let mut local: Store = Store { xs: [], n: 0 }
+    local.xs.push(1)
+    local.xs.push(2)
+    local.n = local.xs.length
+    print(local.xs.length) // 2
+    print(local.n) // 2
+
+    // ---- array element that is itself an array (growable-of-growable) ---------
+    let mut rows: Array<Array<Int64>> = []
+    let mut row: Array<Int64> = []
+    row.push(7)
+    rows.push(row)
+    rows[0].push(8)
+    rows[0].push(9)
+    print(rows[0].length) // 3
+    print(rows[0][2]) // 9
+
+    // ---- heap elements + drop accounting -------------------------------------
+    // Pushing heap values (Strings) through a record FIELD, then explicitly
+    // reclaiming the buffer with `drop`: every allocation is freed with no leak
+    // and no double-free (the native and wasm reclamation paths agree with the
+    // interpreter on output and exit). `drop` takes a heap binding, so the field
+    // buffer is pulled out into a local and dropped there.
+    let mut names: NameBox = NameBox { items: [] }
+    names.items.push("ada")
+    names.items.push("grace")
+    print(names.items.length) // 2
+    print(names.items[1]) // grace
+    let owned = names.items // move the field buffer out into a local
+    drop owned // explicit reclaim of the field-pushed heap buffer
+
+    return 0
+}
+
+/// A record whose field holds heap values, to exercise reclamation of a
+/// field-pushed buffer under `drop`.
+type NameBox = { items: Array<String> }
+
+test "field push on a global record persists (not a copy)" {
+    // A fresh local mirror of the global shape: the push must survive and the
+    // sibling scalar must agree — the regression the dogfood caught.
+    let mut s: Store = Store { xs: [], n: 0 }
+    s.xs.push(100)
+    s.xs.push(200)
+    s.n = s.xs.length
+    assertEq(s.xs.length, 2)
+    assertEq(s.n, 2)
+    assertEq(s.xs[0], 100)
+    assertEq(s.xs[1], 200)
+}
+
+test "array-element push writes back through the slot" {
+    let mut rows: Array<Array<Int64>> = []
+    let mut r: Array<Int64> = []
+    r.push(1)
+    rows.push(r)
+    rows[0].push(2)
+    rows[0].push(3)
+    assertEq(rows[0].length, 3)
+    assertEq(rows[0][2], 3)
+}

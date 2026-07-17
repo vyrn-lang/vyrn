@@ -104,16 +104,12 @@ export fn createPaste(req: CreateReq) -> PasteResult {
     // typed. Hence the explicit `let created: Created`.
     let created: Created = store.counter + 1
     let id = deriveId(req.body, req.title)
-    // BUG WORKAROUND (see NOTES): an in-place `store.pastes.push(..)` on a global
-    // RECORD-FIELD array silently NO-OPS (it mutates a copy — the counter field
-    // assign below would persist, but the pushed paste vanishes). Whole-global
-    // REASSIGNMENT works, so rebuild the paste array and reinstall `store`.
-    let mut ps: Array<Paste> = []
-    for p in store.pastes {
-        ps.push(copyPaste(p))
-    }
-    ps.push(Paste { id: id, title: req.title, body: req.body, lang: req.lang, created: created })
-    store = StoreFile { pastes: ps, counter: created }
+    // Grow the global's array field in place and bump the sibling counter beside
+    // it. Both persist: a method-form `push` through a record field writes back
+    // through the field (like `store.counter = ..` does), so the pushed paste and
+    // the counter stay in step.
+    store.pastes.push(Paste { id: id, title: req.title, body: req.body, lang: req.lang, created: created })
+    store.counter = created
     persist.saveStore(snapshot())
     return findByCreated(created)
 }

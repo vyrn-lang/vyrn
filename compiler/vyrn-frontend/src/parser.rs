@@ -1915,12 +1915,74 @@ impl Parser {
                 }
                 self.eat_semi();
                 // A mutating method used as a statement writes back through its
-                // receiver variable: `sq.push(x);` desugars to `sq = push(sq, x);`
-                // (parsed as `push(sq, x)` above), so the reallocated array sticks.
+                // receiver PLACE: `push` reallocates (grows) its array and returns
+                // the new one, so a statement-position `x.push(v)` must store that
+                // result back into wherever `x` lives — otherwise the push lands on
+                // a copy and silently vanishes. The receiver (parsed as `push(recv,
+                // v)`) may be any assignable place the language already supports,
+                // and each maps to the matching in-place store:
+                //   `sq.push(v)`      (a variable)       -> `sq = push(sq, v)`
+                //   `r.f.push(v)`     (a record field)   -> `r.f = push(r.f, v)`
+                //   `a[i].push(v)`    (an array element) -> `a[i] = push(a[i], v)`
+                // Any other receiver (a temporary, or a deeper chain like
+                // `r.a.b.push(v)` / `a[i].f.push(v)` beyond one level of write-back)
+                // cannot be stored back and would silently drop the push, so it is a
+                // hard parse error rather than a no-op. `pop`/`swapRemove`/`remove`
+                // stay variable-only (the checker rejects field/element receivers);
+                // they return a value AND mutate, so there is no statement to desugar.
                 if let Expr::Call { name, args, .. } = &e {
                     if name == "push" {
-                        if let Some(Expr::Var { name: recv, .. }) = args.first() {
-                            return Ok(Stmt::Assign { name: recv.clone(), value: e, line });
+                        match args.first() {
+                            // `sq.push(v)` — a plain array variable.
+                            Some(Expr::Var { name: recv, .. }) => {
+                                return Ok(Stmt::Assign { name: recv.clone(), value: e, line });
+                            }
+                            // `r.f.push(v)` — an array FIELD of a record variable.
+                            // Writes back via `SetField` (the same place, and the
+                            // same validated-data rules, as `r.f = ..`).
+                            Some(Expr::Field { expr: base, field, .. })
+                                if matches!(base.as_ref(), Expr::Var { .. }) =>
+                            {
+                                let Expr::Var { name: recv, .. } = base.as_ref() else {
+                                    unreachable!()
+                                };
+                                return Ok(Stmt::SetField {
+                                    name: recv.clone(),
+                                    field: field.clone(),
+                                    value: e,
+                                    line,
+                                });
+                            }
+                            // `a[i].push(v)` — an array ELEMENT that is itself an
+                            // array (`a[i]` parsed as `at(a, i)`). Writes back via
+                            // `IndexSet`, mirroring `a[i] = ..`; the index is
+                            // evaluated on both the read and the store, exactly like
+                            // the `a[i].field = v` desugar.
+                            Some(Expr::Call { name: at, args: iargs, .. })
+                                if at == "at"
+                                    && iargs.len() == 2
+                                    && matches!(&iargs[0], Expr::Var { .. }) =>
+                            {
+                                let Expr::Var { name: recv, .. } = &iargs[0] else {
+                                    unreachable!()
+                                };
+                                let recv = recv.clone();
+                                let index = iargs[1].clone();
+                                return Ok(Stmt::IndexSet { name: recv, index, value: e, line });
+                            }
+                            _ => {
+                                return Err(Diagnostic::error(
+                                    line,
+                                    self.col(),
+                                    "parse",
+                                    "this `push` has no place to write back to, so it \
+                                     would silently do nothing. Its receiver must be an \
+                                     assignable place: a variable (`xs.push(v)`), a \
+                                     record field (`r.xs.push(v)`), or an array element \
+                                     (`a[i].push(v)`) — not a temporary or a deeper chain."
+                                        .to_string(),
+                                ));
+                            }
                         }
                     }
                 }
@@ -3158,6 +3220,76 @@ mod tests {
         let src = "fn main() -> Int64 { f()[0].x = 9  return 0 }";
         let e = parse(lex(src).unwrap()).unwrap_err();
         assert!(e.message.contains("plain array variable"), "{}", e.message);
+    }
+
+    // ---- statement-position `push` writes back through its receiver place ---
+
+    #[test]
+    fn push_on_variable_desugars_to_assign() {
+        // `sq.push(x)` -> `sq = push(sq, x)` (the reallocated array sticks).
+        let p = parse_src("fn main() -> Int64 { let mut sq: Array<Int64> = []  sq.push(1)  return 0 }");
+        let stmts = &p.functions[0].body.stmts;
+        match &stmts[1] {
+            Stmt::Assign { name, value: Expr::Call { name: c, .. }, .. } => {
+                assert_eq!(name, "sq");
+                assert_eq!(c, "push");
+            }
+            other => panic!("expected `sq = push(sq, 1)`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_on_record_field_desugars_to_setfield() {
+        // `r.xs.push(x)` -> `r.xs = push(r.xs, x)` — the fix for the silent
+        // global/local record-field `.push` no-op.
+        let p = parse_src(
+            "fn main() -> Int64 { let mut r: R = R { xs: [] }  r.xs.push(1)  return 0 }",
+        );
+        let stmts = &p.functions[0].body.stmts;
+        match &stmts[1] {
+            Stmt::SetField { name, field, value: Expr::Call { name: c, .. }, .. } => {
+                assert_eq!(name, "r", "writes back through the record binding");
+                assert_eq!(field, "xs");
+                assert_eq!(c, "push");
+            }
+            other => panic!("expected `r.xs = push(r.xs, 1)`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_on_array_element_desugars_to_indexset() {
+        // `a[i].push(x)` -> `a[i] = push(a[i], x)` (an array element that is
+        // itself an array), mirroring `a[i] = ..`.
+        let p = parse_src(
+            "fn main() -> Int64 { let mut a: Array<Int64> = []  a[0].push(1)  return 0 }",
+        );
+        let stmts = &p.functions[0].body.stmts;
+        match &stmts[1] {
+            Stmt::IndexSet { name, value: Expr::Call { name: c, .. }, .. } => {
+                assert_eq!(name, "a", "writes back into the array slot");
+                assert_eq!(c, "push");
+            }
+            other => panic!("expected `a[0] = push(a[0], 1)`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_on_a_temporary_is_rejected_not_silently_dropped() {
+        // A `push` whose receiver is not an assignable place used to fall through
+        // to a discarded expression statement (the silent no-op). It is now a hard
+        // parse error naming the supported places.
+        let src = "fn main() -> Int64 { make().push(1)  return 0 }";
+        let e = parse(lex(src).unwrap()).unwrap_err();
+        assert!(e.message.contains("no place to write back to"), "{}", e.message);
+    }
+
+    #[test]
+    fn push_on_a_deeper_field_chain_is_rejected() {
+        // One level of field write-back only: `r.a.b.push(x)` is a parse error,
+        // never a silent copy (mirrors the `a[i].f.g = v` rejection).
+        let src = "fn main() -> Int64 { let mut r: R = R { a: A { b: [] } }  r.a.b.push(1)  return 0 }";
+        let e = parse(lex(src).unwrap()).unwrap_err();
+        assert!(e.message.contains("no place to write back to"), "{}", e.message);
     }
 
     // ---- function values (RFC-0023) -------------------------------------
