@@ -466,6 +466,13 @@ impl Analysis<'_> {
                     self.visit(&arm.body);
                 }
             }
+            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+                self.visit(cond);
+                self.visit(then_branch);
+                if let Some(eb) = else_branch {
+                    self.visit(eb);
+                }
+            }
             Expr::StructLit { fields, .. } => {
                 for (_, v) in fields {
                     self.visit(v);

@@ -157,8 +157,10 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
             }
         }
         Expr::Call { .. } => None,
-        // match / ? / records / fallible construction are not constants in v0.1.
+        // match / if-expr / ? / records / fallible construction are not constants
+        // in v0.1.
         Expr::Match { .. }
+        | Expr::IfExpr { .. }
         | Expr::Try { .. }
         | Expr::StructLit { .. }
         | Expr::Field { .. }
@@ -183,6 +185,11 @@ pub fn contains_call(expr: &Expr) -> bool {
         Expr::Call { .. } => true,
         Expr::Match { scrutinee, arms, .. } => {
             contains_call(scrutinee) || arms.iter().any(|a| contains_call(&a.body))
+        }
+        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            contains_call(cond)
+                || contains_call(then_branch)
+                || else_branch.as_ref().is_some_and(|e| contains_call(e))
         }
         Expr::Try { expr, .. } => contains_call(expr),
         Expr::StructLit { fields, .. } => fields.iter().any(|(_, e)| contains_call(e)),

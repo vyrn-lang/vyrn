@@ -1499,6 +1499,13 @@ impl NsResolver<'_> {
                     self.walk_expr(&mut arm.body, &mut inner);
                 }
             }
+            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+                self.walk_expr(cond, locals);
+                self.walk_expr(then_branch, locals);
+                if let Some(eb) = else_branch {
+                    self.walk_expr(eb, locals);
+                }
+            }
             Expr::ArrayLit { elems, .. } => {
                 for e2 in elems.iter_mut() {
                     self.walk_expr(e2, locals);
@@ -1892,6 +1899,13 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
                     expr(&arm.body, *line, out);
                 }
             }
+            Expr::IfExpr { cond, then_branch, else_branch, line } => {
+                expr(cond, *line, out);
+                expr(then_branch, *line, out);
+                if let Some(eb) = else_branch {
+                    expr(eb, *line, out);
+                }
+            }
             Expr::ArrayLit { elems, line } => {
                 for e2 in elems {
                     expr(e2, *line, out);
@@ -2050,6 +2064,13 @@ fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(St
                 scope_expr(&arm.body, *line, &inner, out);
             }
         }
+        Expr::IfExpr { cond, then_branch, else_branch, line } => {
+            scope_expr(cond, *line, locals, out);
+            scope_expr(then_branch, *line, locals, out);
+            if let Some(eb) = else_branch {
+                scope_expr(eb, *line, locals, out);
+            }
+        }
         Expr::ArrayLit { elems, line } => {
             for e2 in elems {
                 scope_expr(e2, *line, locals, out);
@@ -2192,6 +2213,13 @@ fn rewrite_expr(e: &mut Expr, map: &HashMap<String, String>) {
                     *v = ren(map, v);
                 }
                 rewrite_expr(&mut arm.body, map);
+            }
+        }
+        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            rewrite_expr(cond, map);
+            rewrite_expr(then_branch, map);
+            if let Some(eb) = else_branch {
+                rewrite_expr(eb, map);
             }
         }
         Expr::ArrayLit { elems, .. } => {

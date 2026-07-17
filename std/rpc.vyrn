@@ -147,10 +147,7 @@ fn serverSchemaFn(iface: ModuleInterface) -> String {
     out = out + "    let mut acc = \"{\\\"procedures\\\":[\"\n"
     let mut i = 0
     for f in iface.functions {
-        let mut lead = ""
-        if i > 0 {
-            lead = ","
-        }
+        let lead = if i > 0 { "," } else { "" }
         out = out + "    acc = acc + \"" + lead + "{\\\"name\\\":\\\"" + f.name + "\\\",\\\"request\\\":\"\n"
         if f.params.length == 1 && isNamedType(f.params[0].spelling, iface) {
             out = out + "    acc = acc + jsonSchema(" + f.params[0].spelling + ")\n"

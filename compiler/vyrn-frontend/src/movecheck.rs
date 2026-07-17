@@ -298,6 +298,23 @@ impl MoveCheck<'_> {
                 }
                 Ok(())
             }
+            // `if` as an expression (RFC-0030): its two branches are match arms —
+            // the condition consumes eagerly, then each branch runs from the same
+            // base and a value consumed on either path is may-consumed afterward.
+            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+                self.expr(cond, consumed, scope)?;
+                let base = consumed.clone();
+                let mut then_c = base.clone();
+                self.expr(then_branch, &mut then_c, scope)?;
+                let mut else_c = base;
+                if let Some(eb) = else_branch {
+                    self.expr(eb, &mut else_c, scope)?;
+                }
+                for (k, v) in then_c.into_iter().chain(else_c) {
+                    consumed.entry(k).or_insert(v);
+                }
+                Ok(())
+            }
             Expr::Call { name, args, line } => {
                 let caps = self.caps.get(name);
                 // Left-to-right: check each argument, then apply its consumption,

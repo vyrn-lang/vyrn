@@ -2899,6 +2899,9 @@ impl<'a> Gen<'a> {
             Expr::Binary { op, lhs, rhs, .. } => self.gen_binary(*op, lhs, rhs),
             Expr::Call { name, args, .. } => self.gen_call(name, args),
             Expr::Match { scrutinee, arms, .. } => self.gen_match(scrutinee, arms),
+            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+                self.gen_if_expr(cond, then_branch, else_branch.as_deref())
+            }
             Expr::Try { expr, .. } => self.gen_try(expr),
             Expr::StructLit { name, fields, .. } => self.gen_struct_lit(name, fields),
             Expr::Field { expr, field, .. } => {
@@ -3178,6 +3181,53 @@ impl<'a> Gen<'a> {
         let res = self.fresh_tmp();
         self.emit(format!(
             "{res} = phi {ll} [ {one_val}, %{one_end} ], [ {zero_val}, %{zero_end} ]"
+        ));
+        Ok((res, ty))
+    }
+
+    /// Lower an `if` used as an expression (RFC-0030) to the same branch+`phi`
+    /// merge as a two-arm boolean `match`: evaluate the condition, branch to the
+    /// taken side (only that branch's code runs), then `phi` the two branch
+    /// values at the join. A `void`-typed result (both branches Unit, side
+    /// effects only) skips the merge, exactly like `gen_match`. The checker
+    /// guarantees `else_branch` is present.
+    fn gen_if_expr(
+        &mut self,
+        cond: &Expr,
+        then_branch: &Expr,
+        else_branch: Option<&Expr>,
+    ) -> Result<(String, Type), String> {
+        let else_branch = else_branch
+            .ok_or("internal: `if` expression without `else` reached codegen")?;
+        let (c, _) = self.gen_expr(cond)?;
+        let then_l = self.fresh_label("ie.then");
+        let else_l = self.fresh_label("ie.else");
+        let end_l = self.fresh_label("ie.end");
+        self.emit_term(format!("br i1 {c}, label %{then_l}, label %{else_l}"));
+
+        // then branch
+        self.emit_label(&then_l);
+        let (then_val, ty) = self.gen_expr(then_branch)?;
+        // The predecessor of the join is the CURRENT block — a nested if/match in
+        // the branch body may have moved us past `then_l`.
+        let then_end = self.cur_block.clone();
+        self.emit_term(format!("br label %{end_l}"));
+
+        // else branch
+        self.emit_label(&else_l);
+        let (else_val, _) = self.gen_expr(else_branch)?;
+        let else_end = self.cur_block.clone();
+        self.emit_term(format!("br label %{end_l}"));
+
+        // merge
+        self.emit_label(&end_l);
+        let ll = self.llt(&ty);
+        if ll == "void" {
+            return Ok((String::new(), ty));
+        }
+        let res = self.fresh_tmp();
+        self.emit(format!(
+            "{res} = phi {ll} [ {then_val}, %{then_end} ], [ {else_val}, %{else_end} ]"
         ));
         Ok((res, ty))
     }
@@ -4044,6 +4094,13 @@ impl<'a> Gen<'a> {
                         inner.insert(b.to_string());
                     }
                     self.captures_of_expr(&arm.body, &mut inner, out, seen);
+                }
+            }
+            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+                self.captures_of_expr(cond, locals, out, seen);
+                self.captures_of_expr(then_branch, locals, out, seen);
+                if let Some(eb) = else_branch {
+                    self.captures_of_expr(eb, locals, out, seen);
                 }
             }
             Expr::StructLit { fields, .. } => {
@@ -7565,6 +7622,13 @@ fn collect_regex_expr(e: &Expr, out: &mut Vec<String>) {
                 collect_regex_expr(&a.body, out);
             }
         }
+        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            collect_regex_expr(cond, out);
+            collect_regex_expr(then_branch, out);
+            if let Some(eb) = else_branch {
+                collect_regex_expr(eb, out);
+            }
+        }
         Expr::StructLit { fields, .. } => {
             for (_, v) in fields {
                 collect_regex_expr(v, out);
@@ -7681,6 +7745,13 @@ fn collect_strings_expr(e: &Expr, out: &mut Vec<String>, types: &HashMap<String,
             collect_strings_expr(scrutinee, out, types);
             for a in arms {
                 collect_strings_expr(&a.body, out, types);
+            }
+        }
+        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            collect_strings_expr(cond, out, types);
+            collect_strings_expr(then_branch, out, types);
+            if let Some(eb) = else_branch {
+                collect_strings_expr(eb, out, types);
             }
         }
         Expr::StructLit { fields, .. } => {

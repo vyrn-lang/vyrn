@@ -2275,6 +2275,20 @@ impl<'a> Interp<'a> {
                 let sv = self.expr(scrutinee, scope)?;
                 self.eval_match(sv, arms, scope)
             }
+            // `if` as an expression (RFC-0030): evaluate the condition, then ONLY
+            // the taken branch (laziness identical to statement-`if`/match). The
+            // checker guarantees `else_branch` is present.
+            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+                if self.as_bool(self.expr(cond, scope)?)? {
+                    self.expr(then_branch, scope)
+                } else if let Some(eb) = else_branch {
+                    self.expr(eb, scope)
+                } else {
+                    Err("internal: `if` expression without `else` reached the \
+                         interpreter (checker should have rejected it)"
+                        .into())
+                }
+            }
             Expr::Try { expr, .. } => {
                 let v = self.expr(expr, scope)?;
                 match v {
@@ -5147,5 +5161,44 @@ mod tests {
                  let zs = map(ys, |x| x * x)\n\
                  let mut s = 0  for z in zs { s = s + z }  return s }";
         assert_eq!(run(src).unwrap(), 14);
+    }
+
+    // ---- `if` as an expression (RFC-0030) --------------------------------
+
+    #[test]
+    fn if_expression_yields_the_taken_branch() {
+        let src = "fn main() -> Int64 {\n\
+             let x = if 2 > 1 { 10 } else { 20 }\n\
+             return x }";
+        assert_eq!(run(src).unwrap(), 10);
+    }
+
+    #[test]
+    fn if_expression_chain_selects_the_matching_arm() {
+        let src = "fn tier(s: Int64) -> Int64 {\n\
+             return if s >= 90 { 3 } else if s >= 50 { 2 } else { 1 } }\n\
+             fn main() -> Int64 { return tier(95) + tier(60) * 10 + tier(10) * 100 }";
+        // 3 + 2*10 + 1*100 = 123
+        assert_eq!(run(src).unwrap(), 123);
+    }
+
+    #[test]
+    fn only_the_taken_branch_evaluates() {
+        // `boom()` traps; it sits in the untaken branch and must never run, so the
+        // program returns cleanly. If both branches evaluated, this would trap.
+        let src = "fn boom() -> Int64 { let a: Array<Int64> = [1]  return a[99] }\n\
+             fn main() -> Int64 {\n\
+             let x = if true { 7 } else { boom() }\n\
+             return x }";
+        assert_eq!(run(src).unwrap(), 7);
+    }
+
+    #[test]
+    fn if_expression_nests_and_composes() {
+        let src = "fn main() -> Int64 {\n\
+             let n = if false { 1 } else { if true { 2 } else { 3 } }\n\
+             let xs: Array<Int64> = [if n == 2 { 100 } else { 0 }, 5]\n\
+             return xs[0] + xs[1] }";
+        assert_eq!(run(src).unwrap(), 105);
     }
 }

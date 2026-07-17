@@ -610,6 +610,21 @@ pub enum Expr {
         arms: Vec<MatchArm>,
         line: usize,
     },
+    /// `if cond { expr } else if cond2 { expr } else { expr }` used in an
+    /// EXPRESSION position (RFC-0030). Each branch is a single expression (no
+    /// statements); an `else if` chain is the nested `IfExpr` in `else_branch`.
+    /// `else_branch` is `None` only for an incomplete `if` with no `else` — the
+    /// checker rejects that ("`if` used as an expression needs an `else`"), so
+    /// every backend may assume `Some`. Lowers to the same branch+result
+    /// machinery as a two-arm boolean `match`: the condition is evaluated, then
+    /// only the taken branch; branches unify like match arms. The statement form
+    /// (`Stmt::If`) is untouched and unrelated.
+    IfExpr {
+        cond: Box<Expr>,
+        then_branch: Box<Expr>,
+        else_branch: Option<Box<Expr>>,
+        line: usize,
+    },
     /// `expr?` — unwrap an `Option`/`Result`, or propagate `None`/`Err` by
     /// returning it from the enclosing function (RFC-0005).
     Try { expr: Box<Expr>, line: usize },
@@ -692,6 +707,7 @@ impl Expr {
             | Expr::Binary { line, .. }
             | Expr::Call { line, .. }
             | Expr::Match { line, .. }
+            | Expr::IfExpr { line, .. }
             | Expr::Try { line, .. }
             | Expr::StructLit { line, .. }
             | Expr::Field { line, .. }

@@ -1,6 +1,6 @@
 # RFC-0030 — `if` as an Expression
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented (M1)
 - **Depends on:** RFC-0022 (`else if` — the statement-side chain this
   mirrors), the match-expression machinery (arm unification, backend
   lowering — everything here rides it)
@@ -77,3 +77,77 @@ explicitly out of scope.
 Ternary syntax, brace-less branches, block-value/tail-expression
 semantics (statements in expression branches), `match`-syntax changes,
 making the statement form require `else`.
+
+---
+
+## As landed
+
+Shipped exactly as designed; the statement form is byte-identical (the
+existing corpus is the regression suite) and no backend grew a new IR
+concept. **The whole feature rides the `match`-expression machinery.**
+
+- **One new AST node.** `Expr::IfExpr { cond, then_branch, else_branch:
+  Option<Box<Expr>>, line }` (`ast.rs`). An `else if` chain nests as the
+  `else_branch` `IfExpr` (self-similar, like the `else if` statement chain
+  of RFC-0022). `else_branch` is `Option` so a missing `else` parses
+  cleanly and the *checker* — not the parser — reports the totality rule;
+  every backend may then assume `Some`.
+- **Parser.** `stmt()` still dispatches a leading `if` to `if_stmt`
+  (statement form, untouched); an `if` reached in *expression* position
+  (`primary()`) calls the new `if_expr`. Each branch is parsed by
+  `if_branch`: eat `{`, parse exactly ONE expression, require `}`. A
+  leading statement keyword (`let`/`return`/`while`/…) or leftover tokens
+  before the `}` yield the explicit "single expression in each branch, not
+  statements" diagnostic. Inside the braces `no_struct` is cleared, so a
+  bare `Name { … }` is a struct literal again. A nested `if`/`match` is an
+  expression, so it composes.
+- **Checker.** `check_if_expr` is `check_match`'s twin: mandatory-`else`
+  totality error ("`if` used as an expression needs an `else`"), `Bool`
+  condition, then the two branches folded through the SAME `unify_arm`
+  helper the match arms use — so widening (a raw-`Int` branch meeting an
+  `Age` branch → the wider type) and use-boundary validated-type coercion
+  are inherited verbatim.
+- **Backends.** Interp evaluates the condition then only the taken branch
+  (`interp.rs`). Textual-IR codegen adds `gen_if_expr`: a `br` to two
+  branch blocks and a `phi` at the join — a copy of `gen_match`'s
+  Option/Result merge (`void`-typed → no phi, same as match). Movecheck
+  treats the two branches as match arms (may-consume merge). The excluded
+  Inkwell backend returns an "unsupported" stub, like its other gaps.
+- **The vyx-emitter simplification (the evidence).** The M4 accumulator
+  complaint was the `let mut head = "if "  if bi > 0 { head = "} else if "
+  }` shape in `std/vyx.vyrn`'s `vyxEmitIf`, plus twin `if a.dyn { … } else
+  { … }` value-picks in `vyxEmitAttrs`, a `nameStart` offset, and
+  `std/rpc.vyrn`'s `lead` separator. Each collapsed to a single
+  `let x = if c { … } else { … }`. These recompute the *same* emitted
+  strings, so the vyx/rpc goldens are unchanged — the win is in the
+  emitter's own source, exactly the constraint M4 flagged. (The
+  children-building `mut Array<Html>` accumulators stay imperative — they
+  append zero-or-more nodes, which is not what a value-yielding `if`
+  replaces.)
+
+    before:  `let mut head = "if "`
+             `if bi > 0 { head = "} else if " }`
+    after:   `let head = if bi > 0 { "} else if " } else { "if " }`
+
+- **fmt.** No formatter change: the printer is token-based, so an
+  expression-`if` formats by the same `if`/`else`/`{`/`}` spacing rules as
+  the statement form, never joins/splits lines, and the re-lex safety
+  invariant holds (verified on messy input). A short one-liner stays a
+  one-liner; a chain formats like a statement chain.
+- **LSP.** No new features; the server is a pure adapter over the
+  frontend, rebuilt and redeployed (`editor/vscode/server/vyrn-lsp.exe`,
+  release) since the frontend changed.
+- **Tests / parity.** New `examples/ifexpr.vyrn` is a three-way parity
+  citizen exercising every position (let init, arg, return, array element,
+  interpolation hole, match arm), the `else if` chain, nesting, the
+  laziness proof (only the taken branch's side effect prints), and
+  unification into a validated `Age`. 14 new unit tests (parser/checker/
+  interp, incl. a trap-in-untaken-branch laziness test and a
+  statement-form-still-allows-missing-`else` guard). Full corpus parity
+  (interp == native == wasm) stays green.
+
+### Deferred
+
+Statements/tail-expressions inside expression-`if` branches
+(block-value semantics) remain deliberately out of scope, as does any
+ternary or brace-less form — unchanged from the design above.

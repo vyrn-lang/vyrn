@@ -1784,6 +1784,15 @@ impl<'a> Checker<'a> {
             Expr::Match { scrutinee, arms, line } => {
                 self.check_match(scrutinee, arms, *line, scope, expected, fn_ret)
             }
+            Expr::IfExpr { cond, then_branch, else_branch, line } => self.check_if_expr(
+                cond,
+                then_branch,
+                else_branch.as_deref(),
+                *line,
+                scope,
+                expected,
+                fn_ret,
+            ),
             Expr::Try { expr, line } => self.check_try(expr, *line, scope, fn_ret),
             Expr::StructLit { name, fields, line } => {
                 self.check_struct_lit(name, fields, *line, scope, fn_ret)
@@ -2229,6 +2238,46 @@ impl<'a> Checker<'a> {
             }
         }
         result.ok_or_else(|| format!("line {line}: empty `match`"))
+    }
+
+    /// Check an `if` used as an expression (RFC-0030): a two-branch boolean
+    /// `match` in disguise. `else` is mandatory (totality); the condition is
+    /// `Bool`; the two branches unify through the exact match-arm machinery
+    /// (`unify_arm`), so validated-type coercion at the use boundary is inherited
+    /// unchanged. An `else if` chain arrives as a nested `IfExpr` in
+    /// `else_branch`, recursing here.
+    #[allow(clippy::too_many_arguments)]
+    fn check_if_expr(
+        &self,
+        cond: &Expr,
+        then_branch: &Expr,
+        else_branch: Option<&Expr>,
+        line: usize,
+        scope: &Vec<HashMap<String, Binding>>,
+        expected: Option<&Type>,
+        fn_ret: Option<&Type>,
+    ) -> Result<Type, String> {
+        // Totality: an expression must yield a value on every path.
+        let Some(else_branch) = else_branch else {
+            return Err(format!(
+                "line {line}: `if` used as an expression needs an `else` (every branch \
+                 must yield a value)"
+            ));
+        };
+        let cty = self.expr(cond, scope, Some(&Type::Bool), fn_ret)?;
+        if self.base(&cty) != Type::Bool && !matches!(cty, Type::Err) {
+            return Err(format!(
+                "line {line}: `if` condition must be Bool, found {cty}"
+            ));
+        }
+        // Branches unify exactly like match arms: the first branch is checked
+        // against the expected type, the second against the accumulated result.
+        let mut result: Option<Type> = expected.cloned();
+        let tty = self.expr(then_branch, scope, result.as_ref(), fn_ret)?;
+        self.unify_arm(&mut result, tty, line)?;
+        let ety = self.expr(else_branch, scope, result.as_ref(), fn_ret)?;
+        self.unify_arm(&mut result, ety, line)?;
+        result.ok_or_else(|| format!("line {line}: empty `if` expression"))
     }
 
     /// Fold an arm's body type into the match's result type.
@@ -3853,6 +3902,14 @@ impl<'a> Checker<'a> {
                 }
                 Ok(())
             }
+            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+                self.captures_expr(cond, outer, locals)?;
+                self.captures_expr(then_branch, outer, locals)?;
+                if let Some(eb) = else_branch {
+                    self.captures_expr(eb, outer, locals)?;
+                }
+                Ok(())
+            }
             Expr::StructLit { fields, .. } => {
                 for (_, v) in fields {
                     self.captures_expr(v, outer, locals)?;
@@ -4149,6 +4206,7 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
         }
         Expr::Call { name, .. } => format!("{name}(..)"),
         Expr::Match { .. } => "match { .. }".to_string(),
+        Expr::IfExpr { .. } => "if .. { .. } else { .. }".to_string(),
         Expr::Try { expr, .. } => format!("{}?", pred_summary(expr)),
         Expr::StructLit { name, .. } => format!("{name} {{ .. }}"),
         Expr::Field { expr, field, .. } => format!("{}.{field}", pred_summary(expr)),
@@ -4264,6 +4322,11 @@ fn expr_contains_spawn(e: &Expr) -> bool {
         }
         Expr::Match { scrutinee, arms, .. } => {
             expr_contains_spawn(scrutinee) || arms.iter().any(|a| expr_contains_spawn(&a.body))
+        }
+        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            expr_contains_spawn(cond)
+                || expr_contains_spawn(then_branch)
+                || else_branch.as_ref().is_some_and(|e| expr_contains_spawn(e))
         }
         Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_contains_spawn(v)),
         _ => false,
@@ -4590,6 +4653,13 @@ fn global_ref_expr(
             global_ref_expr(scrutinee, globals, local)
                 || arms.iter().any(|a| global_ref_expr(&a.body, globals, local))
         }
+        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            global_ref_expr(cond, globals, local)
+                || global_ref_expr(then_branch, globals, local)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|e| global_ref_expr(e, globals, local))
+        }
         Expr::StructLit { fields, .. } => {
             fields.iter().any(|(_, v)| global_ref_expr(v, globals, local))
         }
@@ -4684,6 +4754,14 @@ fn init_restrictions(
             recur(scrutinee)?;
             for a in &arms.iter().map(|a| &a.body).collect::<Vec<_>>() {
                 recur(a)?;
+            }
+            Ok(())
+        }
+        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            recur(cond)?;
+            recur(then_branch)?;
+            if let Some(eb) = else_branch {
+                recur(eb)?;
             }
             Ok(())
         }
@@ -4787,6 +4865,13 @@ fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
             calls_expr(scrutinee, out);
             for a in arms {
                 calls_expr(&a.body, out);
+            }
+        }
+        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            calls_expr(cond, out);
+            calls_expr(then_branch, out);
+            if let Some(eb) = else_branch {
+                calls_expr(eb, out);
             }
         }
         Expr::StructLit { fields, .. } => {
@@ -6854,6 +6939,76 @@ mod tests {
              let v = fromJson(M, \"{}\")\n\
              print(jsonSchema(M))\n\
              return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    // ---- `if` as an expression (RFC-0030) --------------------------------
+
+    #[test]
+    fn if_expression_typechecks_in_let_init() {
+        let src = "fn main() -> Int64 {\n\
+             let x = if true { 1 } else { 2 }\n\
+             return x }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn if_expression_needs_an_else() {
+        // A missing `else` in expression position names the totality rule (the
+        // statement form still allows a missing else — that path is untouched).
+        let src = "fn main() -> Int64 {\n\
+             let x = if true { 1 }\n\
+             return x }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("needs an `else`"), "{e}");
+    }
+
+    #[test]
+    fn if_expression_branches_must_unify() {
+        let src = "fn main() -> Int64 {\n\
+             let x = if true { 1 } else { \"no\" }\n\
+             return x }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("differing types"), "{e}");
+    }
+
+    #[test]
+    fn if_expression_condition_must_be_bool() {
+        let src = "fn main() -> Int64 {\n\
+             let x = if 3 { 1 } else { 2 }\n\
+             return x }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("condition must be Bool"), "{e}");
+    }
+
+    #[test]
+    fn if_expression_unifies_with_a_validated_type() {
+        // Raw-Int branches coerce into the validated `Age` at the `let` boundary.
+        let src = "type Age = Int64 where value >= 0\n\
+             fn main() -> Int64 {\n\
+             let a: Age = if true { 5 } else { 10 }\n\
+             return a }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn if_expression_chain_and_nesting_typecheck() {
+        let src = "fn tier(s: Int64) -> String {\n\
+             return if s >= 90 { \"gold\" } else if s >= 50 { \"silver\" } else { \"bronze\" } }\n\
+             fn main() -> Int64 {\n\
+             let n = if true { if false { 1 } else { 2 } } else { 3 }\n\
+             print(tier(n))\n\
+             return n }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn statement_if_still_allows_a_missing_else() {
+        // The statement form is untouched: no `else`, statements inside, no value.
+        let src = "fn main() -> Int64 {\n\
+             let mut x = 0\n\
+             if true { x = 1 }\n\
+             return x }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 }

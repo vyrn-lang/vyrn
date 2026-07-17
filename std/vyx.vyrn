@@ -451,10 +451,7 @@ fn vyxParseAttrs(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxAtt
         } else {
             let attrLine = vyxLineAt(ba, j)
             let evt = ba[j] == 64
-            let mut nameStart = j
-            if evt {
-                nameStart = j + 1
-            }
+            let nameStart = if evt { j + 1 } else { j }
             let mut k = nameStart
             while k < e && (vyxIsIdent(ba[k]) || ba[k] == 45) {
                 k = k + 1
@@ -1260,10 +1257,7 @@ fn vyxEmitIf(conds: Array<String>, bodies: Array<VyxBody>, els: VyxBody, has: Bo
     let mut err = ""
     let mut bi = 0
     while bi < conds.length {
-        let mut head = "if "
-        if bi > 0 {
-            head = "} else if "
-        }
+        let head = if bi > 0 { "} else if " } else { "if " }
         let bacc = "k" + path + "_b" + bi.toString()
         let inner = vyxEmitChildren(bodies[bi].nodes, bacc, path + "_b" + bi.toString(), reg, fileId)
         err = err + inner.err
@@ -1310,17 +1304,11 @@ fn vyxEmitAttrs(attrs: Array<VyxAttr>, fileId: String) -> VyxEmit {
             parts.push(ev.code)
             err = err + ev.err
         } else if a.name == "class" {
-            if a.dyn {
-                parts.push("Cls(" + a.value + ")")
-            } else {
-                parts.push("Cls(" + vyxStrLit(a.value) + ")")
-            }
+            let cv = if a.dyn { a.value } else { vyxStrLit(a.value) }
+            parts.push("Cls(" + cv + ")")
         } else {
-            if a.dyn {
-                parts.push("A(" + vyxStrLit(a.name) + ", " + a.value + ")")
-            } else {
-                parts.push("A(" + vyxStrLit(a.name) + ", " + vyxStrLit(a.value) + ")")
-            }
+            let av = if a.dyn { a.value } else { vyxStrLit(a.value) }
+            parts.push("A(" + vyxStrLit(a.name) + ", " + av + ")")
         }
     }
     return VyxEmit { code: vyxJoin(parts, ", "), err: err }

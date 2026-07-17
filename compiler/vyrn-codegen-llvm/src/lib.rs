@@ -410,6 +410,11 @@ impl<'ctx, 'a> Codegen<'ctx, 'a> {
             Expr::Spawn { name, .. } => {
                 Err(format!("`spawn {name}(..)` is not supported by the Inkwell backend"))
             }
+            // `if` as an expression (RFC-0030) is not lowered by the subset
+            // Inkwell backend; use `vyrn run` / the textual-IR backend.
+            Expr::IfExpr { .. } => {
+                Err("`if` used as an expression is not supported by the Inkwell backend".into())
+            }
         }
     }
 

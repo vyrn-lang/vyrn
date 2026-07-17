@@ -2199,6 +2199,11 @@ impl Parser {
                 Ok(Expr::ArrayLit { elems, line })
             }
             Tok::Match => self.match_expr(line),
+            // An `if` reached in expression position is the expression form
+            // (RFC-0030) — the statement form is dispatched earlier in `stmt`, so
+            // this only fires inside a `let` init, an argument, a return value, a
+            // branch of another `if`/`match`, etc. The `if` token is consumed.
+            Tok::If => self.if_expr(line),
             // `spawn f(args)` — a concurrent task over a pure function.
             Tok::Spawn => {
                 let name = self.expect_ident()?;
@@ -2411,6 +2416,84 @@ impl Parser {
         }
         self.eat(&Tok::RBrace)?;
         Ok(Expr::Match { scrutinee: Box::new(scrutinee), arms, line })
+    }
+
+    /// `if cond { expr } else if cond { expr } else { expr }` in expression
+    /// position (RFC-0030). The `if` token is already consumed. Each branch is a
+    /// SINGLE expression in braces (v1 refuses statements — an explicit
+    /// diagnostic); an `else if` chain nests as the `else_branch`. A missing
+    /// `else` parses to `else_branch: None` and is reported by the checker
+    /// ("`if` used as an expression needs an `else`"), so the diagnostic can name
+    /// the totality rule rather than being a bare parse error.
+    fn if_expr(&mut self, line: usize) -> Result<Expr, Diagnostic> {
+        let cond = self.cond_expr()?;
+        let then_branch = self.if_branch()?;
+        let else_branch = if *self.peek() == Tok::Else {
+            self.advance();
+            if *self.peek() == Tok::If {
+                // `else if` — parse the tail as a nested expression-`if`, carrying
+                // its own honest line number (diagnostics point at the real
+                // `else if`, mirroring the statement chain in `if_stmt`).
+                let else_line = self.line();
+                self.advance(); // `if`
+                Some(Box::new(self.if_expr(else_line)?))
+            } else {
+                Some(Box::new(self.if_branch()?))
+            }
+        } else {
+            None
+        };
+        Ok(Expr::IfExpr {
+            cond: Box::new(cond),
+            then_branch: Box::new(then_branch),
+            else_branch,
+            line,
+        })
+    }
+
+    /// Parse one `{ expr }` branch of an expression-`if` (RFC-0030): exactly a
+    /// single expression between the braces. A statement keyword or leftover
+    /// tokens after the expression yield the "single expression, not statements"
+    /// diagnostic — v1 deliberately refuses block/tail-expression semantics here.
+    /// A nested expression-`if` is itself an expression, so it is allowed.
+    fn if_branch(&mut self) -> Result<Expr, Diagnostic> {
+        let line = self.line();
+        self.eat(&Tok::LBrace)?;
+        // A leading statement keyword is a clear "you wrote a statement" case —
+        // give the targeted message before `expr()` produces a generic one.
+        if matches!(
+            self.peek(),
+            Tok::Let | Tok::Return | Tok::While | Tok::For | Tok::Region | Tok::Drop
+        ) {
+            return Err(Diagnostic::error(
+                self.line(),
+                self.col(),
+                "parse",
+                "an `if` used as an expression takes a single expression in each \
+                 branch, not statements — use the statement form or a function for \
+                 multi-statement branches (RFC-0030)"
+                    .to_string(),
+            ));
+        }
+        // Inside the braces we are in a delimited context (like `(..)`/`[..]`),
+        // so a bare `Name { .. }` is a struct literal again.
+        let saved = self.no_struct;
+        self.no_struct = false;
+        let e = self.expr()?;
+        self.no_struct = saved;
+        if *self.peek() != Tok::RBrace {
+            return Err(Diagnostic::error(
+                line,
+                self.col(),
+                "parse",
+                "an `if` used as an expression takes a single expression in each \
+                 branch, not statements — use the statement form or a function for \
+                 multi-statement branches (RFC-0030)"
+                    .to_string(),
+            ));
+        }
+        self.eat(&Tok::RBrace)?;
+        Ok(e)
     }
 
     /// `Name { field: expr, ... }` — a record literal (the name is consumed).
@@ -3137,5 +3220,51 @@ mod tests {
             }
             other => panic!("expected lambda with Or body, got {other:?}"),
         }
+    }
+
+    // ---- `if` as an expression (RFC-0030) --------------------------------
+
+    #[test]
+    fn if_in_expression_position_parses_to_if_expr() {
+        // `let x = if ...` reaches the expression parser and produces `IfExpr`
+        // with an `else`; the bare statement `if` still parses to `Stmt::If`.
+        let p = parse_src("fn main() -> Int64 {\n\
+                           let x = if true { 1 } else { 2 }\n\
+                           if true { print(x) }\n\
+                           return x }");
+        let f = &p.functions[0];
+        match &f.body.stmts[0] {
+            Stmt::Let { value: Expr::IfExpr { else_branch: Some(_), .. }, .. } => {}
+            other => panic!("expected IfExpr let-init, got {other:?}"),
+        }
+        assert!(matches!(f.body.stmts[1], Stmt::If { .. }), "bare `if` stays a statement");
+    }
+
+    #[test]
+    fn else_if_chain_nests_as_if_expr() {
+        let p = parse_src("fn main() -> Int64 {\n\
+                           let x = if false { 1 } else if false { 2 } else { 3 }\n\
+                           return x }");
+        let f = &p.functions[0];
+        let Stmt::Let { value: Expr::IfExpr { else_branch: Some(eb), .. }, .. } = &f.body.stmts[0]
+        else {
+            panic!("expected chained IfExpr");
+        };
+        assert!(matches!(**eb, Expr::IfExpr { .. }), "`else if` nests as an IfExpr");
+    }
+
+    #[test]
+    fn statements_in_an_expression_if_branch_are_rejected() {
+        // v1 refuses statements inside an expression-`if` branch (RFC-0030).
+        let (_, errors) = parse_accum(
+            lex("fn main() -> Int64 {\n\
+                 let x = if true { let y = 1  y } else { 0 }\n\
+                 return x }")
+            .unwrap(),
+        );
+        assert!(
+            errors.iter().any(|d| d.message.contains("single expression in each")),
+            "{errors:?}"
+        );
     }
 }

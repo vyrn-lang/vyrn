@@ -1,0 +1,65 @@
+// `if` as an expression (RFC-0030). The statement form is unchanged; in an
+// EXPRESSION position an `if` yields a value. Each branch is a single expression
+// in braces, `else` is mandatory, and the branches unify exactly like `match`
+// arms. Only the taken branch evaluates (laziness identical to statement-`if`).
+
+type Age = Int64 where value >= 0
+
+// A visible side effect per branch, so the laziness proof below is observable:
+// exactly one of these prints.
+fn loud(tag: String, n: Int64) -> Int64 {
+    print("ran \{tag}")
+    return n
+}
+
+// `else if` chain in a return position — formats and reads like the statement
+// chain, but yields the tier string directly (no mutable accumulator).
+fn tier(score: Int64) -> String {
+    return if score >= 90 { "gold" } else if score >= 50 { "silver" } else { "bronze" }
+}
+
+fn main() -> Int64 {
+    let count = 1
+
+    // let initializer
+    let label = if count == 1 { "one book" } else { "many books" }
+    print(label)
+
+    // else-if chain
+    print(tier(95))
+    print(tier(60))
+    print(tier(10))
+
+    // interpolation hole, with a nested if-expression inside
+    print("tier is \{if count > 0 { tier(95) } else { "n/a" }}")
+
+    // array-literal element position
+    let xs = [if count == 1 { 10 } else { 20 }, 30, if count > 5 { 1 } else { 2 }]
+    print("sum \{xs[0] + xs[1] + xs[2]}") // 42
+
+    // call-argument position
+    print("arg \{maxOf(if count == 1 { 7 } else { 8 }, 3)}") // 7
+
+    // laziness: only the taken branch runs, so exactly "ran then" prints
+    let picked = if count == 1 { loud("then", 1) } else { loud("else", 2) }
+    print("picked \{picked}")
+
+    // unification with a validated type — the raw-Int branches coerce into Age
+    // at the `let` boundary, running Age's refinement.
+    let a: Age = if count == 1 { 5 } else { 10 }
+    print("age \{a}")
+
+    // an if-expression as a `match` arm body
+    let opt: Option<Int64> = Some(3)
+    let r = match opt {
+        Some(n) => if n > 2 { n * 10 } else { 0 },
+        None => -1,
+    }
+    print("match \{r}") // 30
+
+    return 0
+}
+
+fn maxOf(a: Int64, b: Int64) -> Int64 {
+    return if a >= b { a } else { b }
+}
