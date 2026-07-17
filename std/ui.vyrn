@@ -788,9 +788,13 @@ fn uiFixedRuntime() -> String {
 }
 
 /// The `try`/`render` pair for one page, indexed `n` (its import-alias suffix).
+/// The whole block is bracketed by an RFC-0033 origin directive pointing at the
+/// page module, so a type error in the generated dispatch glue (e.g. a `page`
+/// whose return type isn't `Html`) is reported against the page file, not the
+/// synthesized router. Region-level (`1:1`): this is derived, not verbatim, code.
 fn uiEmitRoute(p: UiPageInfo, n: Int64) -> String {
     let idx = n.toString()
-    let mut out = ""
+    let mut out = "//@origin " + p.modPath + ".vyrn:1:1\n"
     let segCount = p.segs.length.toString()
 
     // uiTry<n>: structural match + dynamic-segment parse, returning Option<Response>.
@@ -808,6 +812,7 @@ fn uiEmitRoute(p: UiPageInfo, n: Int64) -> String {
 
     // uiRender<n>: build Params, run load (if any), render through document().
     out = out + uiEmitRender(p, idx)
+    out = out + "//@origin end\n"
     return out
 }
 
