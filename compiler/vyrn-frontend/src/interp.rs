@@ -709,6 +709,9 @@ pub struct GenOutput {
 /// [`generate`] signature stays legible.
 pub struct GenInputs<'a> {
     pub resolver: &'a dyn crate::loader::ModuleResolver,
+    /// The load options (std root + manifest aliases) — needed so `moduleInterface`
+    /// can link the reflected module's imports to follow the type closure (RFC-0031).
+    pub opts: &'a crate::loader::LoadOptions,
     /// The importing module's directory — the base for relative-path resolution.
     pub importer_dir: String,
     /// Resolved path prefixes the generator may read under (its constant path
@@ -741,6 +744,7 @@ pub fn generate(
     let mut interp = new_interp(program, &[])?;
     interp.gen = Some(GenCtx {
         resolver: inputs.resolver,
+        opts: inputs.opts,
         importer_dir: inputs.importer_dir,
         allowed: inputs.allowed,
         reads: RefCell::new(Vec::new()),
@@ -900,6 +904,9 @@ struct Interp<'a> {
 pub(crate) struct GenCtx<'a> {
     /// The loader's resolver — the single mediated I/O channel.
     resolver: &'a dyn crate::loader::ModuleResolver,
+    /// Load options (std root + manifest aliases), so `moduleInterface` can link
+    /// the reflected module's imports and follow its type closure (RFC-0031).
+    opts: &'a crate::loader::LoadOptions,
     /// The importing module's directory — the base for resolving the generator's
     /// relative path arguments (`readFile`/`listDir`/`moduleInterface`).
     importer_dir: String,
@@ -1044,13 +1051,46 @@ impl<'a> Interp<'a> {
             .read(&resolved)
             .map_err(|e| Ctrl::Err(format!("moduleInterface cannot read `{path}`: {e}")))?;
         g.reads.borrow_mut().push((resolved.clone(), source.clone().into_bytes()));
-        let tokens = crate::lexer::lex(&source)
-            .map_err(|d| Ctrl::Err(format!("moduleInterface `{path}`: {}", d.message)))?;
-        let (program, errors) = crate::parser::parse_accum(tokens);
-        if let Some(d) = errors.first() {
-            return Err(Ctrl::Err(format!("moduleInterface `{path}`: {}", d.message)));
+
+        // Follow the reflected module's imports to build the reachable type
+        // closure (RFC-0031): link it into one program so a type declared in an
+        // imported module is still visible to the closure walk. Every module the
+        // link reads is recorded through a proxy resolver, so a closure type's
+        // defining FILE joins the generator's cache inputs — editing `types.vyrn`
+        // must miss the cache even though its path was never a generator argument.
+        let rec = crate::loader::RecordingResolver::new(g.resolver);
+        let program = crate::loader::load(&source, &resolved, g.opts, &rec).map_err(|diags| {
+            let d = diags.first();
+            let where_ = d.and_then(|d| d.file.clone()).map(|f| format!(" ({f})")).unwrap_or_default();
+            let msg = d.map(|d| d.message.clone()).unwrap_or_else(|| "load failed".to_string());
+            Ctrl::Err(format!("moduleInterface `{path}`{where_}: {msg}"))
+        })?;
+        for (p, s) in rec.into_reads() {
+            // The root module was already recorded above; skip the duplicate.
+            if p != resolved {
+                g.reads.borrow_mut().push((p, s.into_bytes()));
+            }
         }
-        Ok(crate::schema_reflect::module_interface_lit(&program))
+
+        // Import specifier per declaring module, so a generator that must SHARE a
+        // closure type's identity (rpcServer/rpcInProcess) can import it from the
+        // module that declares it (RFC-0031). The reflected module's own types
+        // (`module == None`) keep the generator's own argument spelling; a foreign
+        // type gets a specifier relative to the real importing file's directory.
+        let mut specifiers: HashMap<Option<String>, String> = HashMap::new();
+        specifiers.insert(None, path.to_string());
+        for t in &program.type_decls {
+            if let Some(key) = &t.module {
+                specifiers.entry(Some(key.clone())).or_insert_with(|| {
+                    crate::loader::import_specifier(
+                        &g.importer_dir,
+                        key,
+                        g.opts.std_root.as_deref(),
+                    )
+                });
+            }
+        }
+        Ok(crate::schema_reflect::module_interface_lit(&program, &specifiers))
     }
 
     fn call(&self, name: &str, args: &[Val]) -> Result<Val, Ctrl> {

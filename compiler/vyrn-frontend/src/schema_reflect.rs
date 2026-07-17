@@ -18,23 +18,74 @@
 //! re-emission of contract types); the `Schema` values carry the RFC-0009
 //! reflection (bounds/pattern/length).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 
-/// Build the `ModuleInterface` record literal for `program`'s exported surface.
-pub fn module_interface_lit(program: &Program) -> Expr {
+/// Build the `ModuleInterface` record literal for the reflected module's exported
+/// surface — its **reachable type closure** (RFC-0031).
+///
+/// `program` is the *linked* program rooted at the reflected module: the reflected
+/// module's own declarations carry `module == None`, every transitively imported
+/// module's carry `module == Some(key)` (RFC-0010 attribution). The interface is:
+///
+/// * `functions` — the reflected module's OWN exported functions only (functions
+///   of imported modules are not part of the interface);
+/// * `types` — every named type declaration reachable from those functions'
+///   parameter/return spellings, walking transitively through record fields, enum
+///   payloads, alias/validated bases, and generic arguments, **regardless of which
+///   module declares it** — plus the reflected module's own exported-but-unreachable
+///   declarations (today's behavior, kept).
+///
+/// Order is locked: own declarations first (source order), then foreign closure
+/// entries in linker order (the merged program already lays foreign decls out
+/// after own ones, in linker order — RFC-0010 `link`). A same-name collision
+/// across modules is already a `load` error, so the closure never holds two
+/// distinct decls of one name.
+/// `specifiers` maps a declaration's owning module (`TypeDecl.module` — `None` for
+/// the reflected module itself, `Some(key)` for an imported module) to the import
+/// specifier a generator should use to reach that module from the reflected
+/// module's importer (RFC-0031). A missing entry falls back to the empty string.
+pub fn module_interface_lit(program: &Program, specifiers: &HashMap<Option<String>, String>) -> Expr {
+    // Global type table across every linked module (name -> declaration).
     let types: HashMap<String, TypeDecl> =
         program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
 
+    // Closure roots: the reflected (root) module's own exported functions. A
+    // body-less `extern` import has no surface, flattened `impl` methods carry
+    // mangled names, and an imported module's function (`module.is_some()`) is
+    // not part of this interface.
+    let is_root_fn = |f: &Function| f.exported && !f.is_extern && f.module.is_none();
+
     let mut fn_infos = Vec::new();
     for f in &program.functions {
-        // Exported functions only; a body-less `extern` import has no surface,
-        // and flattened `impl` methods (mangled names) are never exported.
-        if !f.exported || f.is_extern {
+        if is_root_fn(f) {
+            fn_infos.push(fn_info_lit(f, &types));
+        }
+    }
+
+    // Reachable-type closure: seed from every root function's parameter/return
+    // spellings, then walk each declaration's structure for further named types.
+    let mut reachable: HashSet<String> = HashSet::new();
+    let mut work: Vec<String> = Vec::new();
+    for f in &program.functions {
+        if is_root_fn(f) {
+            for p in &f.params {
+                collect_type_names(&p.ty, &mut work);
+            }
+            collect_type_names(&f.ret, &mut work);
+        }
+    }
+    while let Some(n) = work.pop() {
+        if !reachable.insert(n.clone()) {
             continue;
         }
-        fn_infos.push(fn_info_lit(f, &types));
+        if let Some(decl) = types.get(&n) {
+            // The declaration's structure (record fields / enum payloads /
+            // alias & validated base / generic args) reaches further types.
+            // The predicate references `value`, never a type — nothing to add.
+            collect_type_names(&decl.base, &mut work);
+        }
     }
 
     let mut type_infos = Vec::new();
@@ -43,13 +94,65 @@ pub fn module_interface_lit(program: &Program) -> Expr {
         if !t.exported || t.line == 0 || t.name.contains('.') {
             continue;
         }
-        type_infos.push(type_info_lit(t, &types));
+        // Own declarations are always included (today's behavior); foreign ones
+        // only when the closure reaches them.
+        if t.module.is_none() || reachable.contains(&t.name) {
+            let spec = specifiers.get(&t.module).map(|s| s.as_str()).unwrap_or("");
+            type_infos.push(type_info_lit(t, spec, &types));
+        }
     }
 
     struct_lit(
         "ModuleInterface",
         vec![("functions", array_lit(fn_infos)), ("types", array_lit(type_infos))],
     )
+}
+
+/// Collect every named type referenced anywhere in `ty` (the head of a `Named`/
+/// `App`, plus every nested position) into `out` — the closure walk's edge set.
+fn collect_type_names(ty: &Type, out: &mut Vec<String>) {
+    match ty {
+        Type::Named(n) => out.push(n.clone()),
+        Type::App(n, args) => {
+            out.push(n.clone());
+            for a in args {
+                collect_type_names(a, out);
+            }
+        }
+        Type::Option(a)
+        | Type::Ref(a)
+        | Type::Array(a)
+        | Type::Task(a)
+        | Type::Partial(a)
+        | Type::ArrayN(a, _)
+        | Type::Omit(a, _)
+        | Type::Pick(a, _) => collect_type_names(a, out),
+        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+            collect_type_names(a, out);
+            collect_type_names(b, out);
+        }
+        Type::Record(fields) => {
+            for f in fields {
+                collect_type_names(&f.ty, out);
+            }
+        }
+        Type::Enum(variants) => {
+            for v in variants {
+                for p in &v.payload {
+                    collect_type_names(p, out);
+                }
+            }
+        }
+        Type::Fn(params, ret) => {
+            for p in params {
+                collect_type_names(p, out);
+            }
+            collect_type_names(ret, out);
+        }
+        // Primitives, type parameters, loggers, and the error sentinel name no
+        // declarations.
+        _ => {}
+    }
 }
 
 fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>) -> Expr {
@@ -81,12 +184,13 @@ fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>) -> Expr {
     )
 }
 
-fn type_info_lit(t: &TypeDecl, types: &HashMap<String, TypeDecl>) -> Expr {
+fn type_info_lit(t: &TypeDecl, module_spec: &str, types: &HashMap<String, TypeDecl>) -> Expr {
     struct_lit(
         "TypeInfo",
         vec![
             ("name", Expr::Str(t.name.clone())),
             ("source", Expr::Str(render_type_decl(t, types))),
+            ("module", Expr::Str(module_spec.to_string())),
             ("schema", crate::types::schema_struct_lit(t)),
         ],
     )
@@ -278,7 +382,7 @@ mod tests {
                    export fn ping(id: Id, times: Int64) -> String { return \"pong\" } \
                    fn hidden() -> Int64 { return 0 }";
         let (program, _) = crate::parser::parse_accum(crate::lexer::lex(src).unwrap());
-        let iface = module_interface_lit(&program);
+        let iface = module_interface_lit(&program, &HashMap::new());
 
         // functions: only the exported `ping`.
         let fns = elems(field(&iface, "functions"));
@@ -298,5 +402,105 @@ mod tests {
         assert_eq!(tys.len(), 1);
         assert_eq!(str_of(field(&tys[0], "name")), "Id");
         assert_eq!(str_of(field(&tys[0], "source")), "export type Id = Int64 where value >= 1");
+    }
+
+    // ---- reachable type closure across modules (RFC-0031) ------------------
+
+    /// Link `files` (keyed by module path, `main` is the root) and reflect the
+    /// root. Returns the built `ModuleInterface` literal.
+    fn reflect_linked(files: &[(&str, &str)], root: &str) -> Expr {
+        let map: std::collections::HashMap<String, String> =
+            files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let resolver = crate::loader::MapResolver(map.clone());
+        let program = crate::loader::load(&map[root], root, &Default::default(), &resolver)
+            .expect("link");
+        let mut specs: HashMap<Option<String>, String> = HashMap::new();
+        specs.insert(None, format!("./{root}"));
+        for t in &program.type_decls {
+            if let Some(k) = &t.module {
+                specs.entry(Some(k.clone())).or_insert_with(|| {
+                    format!("./{}", k.strip_suffix(".vyrn").unwrap_or(k))
+                });
+            }
+        }
+        module_interface_lit(&program, &specs)
+    }
+
+    fn type_names_of(iface: &Expr) -> Vec<String> {
+        elems(field(iface, "types"))
+            .iter()
+            .map(|t| str_of(field(t, "name")).to_string())
+            .collect()
+    }
+
+    #[test]
+    fn closure_walks_records_enums_aliases_and_generics_across_modules() {
+        // `contract` names only `Req`/`Wrap` in signatures; the walk must reach
+        // `Book` (record field), `Id` (validated base of a field), `Shape` (enum
+        // payload) and `Inner` (generic arg), all declared in `wire`.
+        let wire = "\
+            export type Id = Int64 where value >= 1\n\
+            export type Inner = { n: Int64 }\n\
+            export type Shape = | Circle(Id) | Dot\n\
+            export type Book = { id: Id, shape: Shape }\n\
+            export type Req = { book: Book }\n\
+            export type Wrap = Array<Inner>\n\
+            export type Unused = { x: Int64 }\n";
+        let contract = "\
+            import { Req, Wrap } from \"./wire\"\n\
+            export fn make(r: Req) -> Wrap { return [] }\n";
+        let iface = reflect_linked(&[("wire.vyrn", wire), ("contract.vyrn", contract)], "contract.vyrn");
+        let names = type_names_of(&iface);
+        // Reached: Req, Wrap, Book, Id, Shape, Inner. NOT the imported-but-
+        // unreferenced `Unused`.
+        for want in ["Req", "Wrap", "Book", "Id", "Shape", "Inner"] {
+            assert!(names.contains(&want.to_string()), "closure missing {want}: {names:?}");
+        }
+        assert!(!names.contains(&"Unused".to_string()), "dragged in Unused: {names:?}");
+    }
+
+    #[test]
+    fn own_decls_come_first_then_foreign_in_source_order() {
+        // The contract declares `Local` (own, unreferenced) and names foreign
+        // `A`/`B` in signatures. Own decls lead; foreign follow in wire order.
+        let wire = "export type A = { x: Int64 }\nexport type B = { y: Int64 }\n";
+        let contract = "\
+            import { A, B } from \"./wire\"\n\
+            export type Local = { z: Int64 }\n\
+            export fn f(a: A) -> B { return B { y: 0 } }\n";
+        let iface = reflect_linked(&[("wire.vyrn", wire), ("contract.vyrn", contract)], "contract.vyrn");
+        assert_eq!(type_names_of(&iface), vec!["Local", "A", "B"]);
+    }
+
+    #[test]
+    fn foreign_types_carry_their_declaring_module_specifier() {
+        let wire = "export type A = { x: Int64 }\n";
+        let contract = "\
+            import { A } from \"./wire\"\n\
+            export type Own = { z: Int64 }\n\
+            export fn f(a: A) -> Own { return Own { z: 0 } }\n";
+        let iface = reflect_linked(&[("wire.vyrn", wire), ("contract.vyrn", contract)], "contract.vyrn");
+        let tys = elems(field(&iface, "types"));
+        // `Own` is the reflected module's own type → the root specifier.
+        let own = tys.iter().find(|t| str_of(field(t, "name")) == "Own").unwrap();
+        assert_eq!(str_of(field(own, "module")), "./contract.vyrn");
+        // `A` is foreign → its declaring module's specifier.
+        let a = tys.iter().find(|t| str_of(field(t, "name")) == "A").unwrap();
+        assert_eq!(str_of(field(a, "module")), "./wire");
+    }
+
+    #[test]
+    fn only_the_reflected_modules_functions_are_reflected() {
+        // `wire` exports a function too; it must NOT appear in the interface.
+        let wire = "\
+            export type A = { x: Int64 }\n\
+            export fn helper() -> A { return A { x: 0 } }\n";
+        let contract = "\
+            import { A } from \"./wire\"\n\
+            export fn f(a: A) -> A { return a }\n";
+        let iface = reflect_linked(&[("wire.vyrn", wire), ("contract.vyrn", contract)], "contract.vyrn");
+        let fns = elems(field(&iface, "functions"));
+        let fn_names: Vec<&str> = fns.iter().map(|f| str_of(field(f, "name"))).collect();
+        assert_eq!(fn_names, vec!["f"]);
     }
 }

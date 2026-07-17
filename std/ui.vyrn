@@ -519,6 +519,17 @@ fn uiTypeSource(iface: ModuleInterface, name: String) -> String {
     return ""
 }
 
+/// The declaring-module specifier of type `name` ("" when absent) — RFC-0031:
+/// a closure type may be declared in a module the reflected one imports.
+fn uiTypeModule(iface: ModuleInterface, name: String) -> String {
+    for t in iface.types {
+        if t.name == name {
+            return t.module
+        }
+    }
+    return ""
+}
+
 // ===========================================================================
 // Page inspection — one collected route per page module.
 // ===========================================================================
@@ -533,6 +544,12 @@ type UiPageInfo = {
     dynNames: Array<String>,
     hasLoad: Bool,
     pageArity: Int64,
+    // paramsModule: the declaring-module specifier of the page's `Params` type
+    // when it is IMPORTED from another module (RFC-0031); "" when `Params` is the
+    // page's own declaration (or absent). A foreign `Params` cannot be reached as
+    // `p<idx>.Params` (namespaces reach a module's own exports only), so the
+    // router imports it under a `uiParams<idx>` alias from this specifier.
+    paramsModule: String,
     err: String,
 }
 
@@ -561,6 +578,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>) -> UiPageInfo {
             dynNames: dyns,
             hasLoad: false,
             pageArity: 0,
+            paramsModule: "",
             err: err,
         }
     }
@@ -618,6 +636,17 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>) -> UiPageInfo {
         }
     }
 
+    // Where `Params` is declared (RFC-0031): its own page keeps the namespace
+    // path (`p<idx>.Params` — byte-identical to before); a foreign declaring
+    // module means the router must import it directly.
+    let mut paramsModule = ""
+    if needParams {
+        let declared = uiTypeModule(iface, "Params")
+        if declared != modPath {
+            paramsModule = declared
+        }
+    }
+
     return UiPageInfo {
         modPath: modPath,
         fileId: fid,
@@ -626,6 +655,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>) -> UiPageInfo {
         dynNames: dyns,
         hasLoad: hasLoad,
         pageArity: arity,
+        paramsModule: paramsModule,
         err: err,
     }
 }
@@ -843,8 +873,11 @@ fn uiEmitRender(p: UiPageInfo, idx: String) -> String {
         return out
     }
 
-    // A Params value, its fields named by the dynamic segments.
-    out = out + "    let p = p" + idx + ".Params { " + uiParamFieldInits(p.segs) + " }\n"
+    // A Params value, its fields named by the dynamic segments. A foreign
+    // `Params` (RFC-0031) is constructed through its `uiParams<idx>` import
+    // alias; a page's own through the `p<idx>` namespace, exactly as before.
+    let paramsCtor = if p.paramsModule != "" { "uiParams" + idx } else { "p" + idx + ".Params" }
+    out = out + "    let p = " + paramsCtor + " { " + uiParamFieldInits(p.segs) + " }\n"
     if p.hasLoad {
         out = out + "    return match p" + idx + ".load(p) {\n"
         out = out + "        Valid(d) => Response { status: 200, contentType: \"text/html\", body: document(" + title + ", [], p" + idx + ".page(p, d)) },\n"
@@ -876,7 +909,13 @@ fn uiParamFieldInits(segs: Array<String>) -> String {
 /// — the namespace replaces the RFC-0022 co-naming dummies this generator used to
 /// emit. Each export is reached below as `p<idx>.page`, `p<idx>.Params`, etc.
 fn uiEmitImport(p: UiPageInfo, idx: String) -> String {
-    return "import * as p" + idx + " from " + uiStrLit(p.modPath) + "\n"
+    let mut out = "import * as p" + idx + " from " + uiStrLit(p.modPath) + "\n"
+    // A foreign `Params` (declared in a module the page imports, RFC-0031) is not
+    // reachable as `p<idx>.Params`; import it directly under a per-page alias.
+    if p.paramsModule != "" {
+        out = out + "import { Params as uiParams" + idx + " } from " + uiStrLit(p.paramsModule) + "\n"
+    }
+    return out
 }
 
 /// The typed-URL helper for one route: a `href<Route>(…)` for a dynamic route, a

@@ -111,6 +111,46 @@ impl ModuleResolver for MapResolver {
     }
 }
 
+/// A resolver that forwards every call to an inner resolver while recording each
+/// successful `read` as `(resolved key, content)`. Used by `moduleInterface`
+/// (RFC-0031): reflecting a module's reachable type closure links its imports, so
+/// every module the link reads — not just the reflected file — must join the
+/// generator's recorded cache inputs. `list`/`gen_cache_*` pass straight through.
+pub struct RecordingResolver<'a> {
+    inner: &'a dyn ModuleResolver,
+    reads: std::cell::RefCell<Vec<(String, String)>>,
+}
+
+impl<'a> RecordingResolver<'a> {
+    pub fn new(inner: &'a dyn ModuleResolver) -> Self {
+        Self { inner, reads: std::cell::RefCell::new(Vec::new()) }
+    }
+    /// The recorded reads, in first-read order, deduplicated by path.
+    pub fn into_reads(self) -> Vec<(String, String)> {
+        let mut seen = HashSet::new();
+        self.reads.into_inner().into_iter().filter(|(p, _)| seen.insert(p.clone())).collect()
+    }
+}
+
+impl ModuleResolver for RecordingResolver<'_> {
+    fn read(&self, resolved: &str) -> Result<String, String> {
+        let r = self.inner.read(resolved);
+        if let Ok(s) = &r {
+            self.reads.borrow_mut().push((resolved.to_string(), s.clone()));
+        }
+        r
+    }
+    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
+        self.inner.list(resolved)
+    }
+    fn gen_cache_get(&self, key: &str) -> Option<String> {
+        self.inner.gen_cache_get(key)
+    }
+    fn gen_cache_put(&self, key: &str, value: &str) {
+        self.inner.gen_cache_put(key, value)
+    }
+}
+
 /// Lexically normalize a slash-separated path: resolve `.` and `..`, collapse
 /// duplicate separators. Purely textual (works for in-memory resolvers too).
 pub(crate) fn normalize(path: &str) -> String {
@@ -135,6 +175,49 @@ pub(crate) fn normalize(path: &str) -> String {
         format!("/{joined}")
     } else {
         joined
+    }
+}
+
+/// The import specifier a module reached at resolved key `key` should be written
+/// as from a file whose directory is `importer_dir` (RFC-0031). A `std/` module
+/// keeps its `std/`-rooted specifier, a remote module its remote key; a local
+/// module becomes a relative path (`./name`, `../name`) with the `.vyrn`
+/// extension dropped. The inverse of [`resolve_spec`] for the common cases a
+/// closure type's declaring module can take.
+pub fn import_specifier(importer_dir: &str, key: &str, std_root: Option<&str>) -> String {
+    let strip = |s: &str| s.strip_suffix(".vyrn").unwrap_or(s).to_string();
+    if is_remote(key) {
+        return strip(key);
+    }
+    if let Some(root) = std_root {
+        let root = normalize(root);
+        if let Some(rest) = normalize(key).strip_prefix(&format!("{root}/")) {
+            return format!("std/{}", strip(rest));
+        }
+    }
+    let keyn = normalize(key);
+    let from: Vec<String> = if importer_dir.is_empty() {
+        Vec::new()
+    } else {
+        normalize(importer_dir).split('/').map(str::to_string).collect()
+    };
+    let to: Vec<String> = keyn.split('/').map(str::to_string).collect();
+    let mut i = 0;
+    while i < from.len() && i < to.len() && from[i] == to[i] {
+        i += 1;
+    }
+    let mut segs: Vec<String> = Vec::new();
+    for _ in i..from.len() {
+        segs.push("..".to_string());
+    }
+    for s in &to[i..] {
+        segs.push(s.clone());
+    }
+    let joined = strip(&segs.join("/"));
+    if segs.first().map(|s| s == "..").unwrap_or(false) {
+        joined
+    } else {
+        format!("./{joined}")
     }
 }
 
@@ -668,6 +751,7 @@ fn run_generator(
         &consts,
         crate::interp::GenInputs {
             resolver,
+            opts,
             importer_dir,
             allowed,
             fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
@@ -1071,9 +1155,17 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     }
 
     // Pass 3: apply the foreign-decl renames (definition + owning module refs).
+    // The renamed module's OWN namespace bindings guard its `ns.member(..)` call
+    // sugar from the plain-name rewrite (pass 5 owns those references).
     for ((target, original), s) in &foreign_renames {
         if let Some(tm) = modules.iter_mut().find(|m| &m.key == target) {
-            rename_decl_in_module(&mut tm.program, original, s);
+            let ns_names: HashSet<String> = ns_bindings
+                .get(&tm.key)
+                .into_iter()
+                .flatten()
+                .map(|(n, _)| n.clone())
+                .collect();
+            rename_decl_in_module(&mut tm.program, original, s, &ns_names);
         }
     }
 
@@ -1081,7 +1173,13 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // bare import of the resolved decl name so register/visibility stay unaware.
     for m in modules.iter_mut() {
         if let Some(map) = rewrites.get(&m.key) {
-            rewrite_module_refs(&mut m.program, map);
+            let ns_names: HashSet<String> = ns_bindings
+                .get(&m.key)
+                .into_iter()
+                .flatten()
+                .map(|(n, _)| n.clone())
+                .collect();
+            rewrite_module_refs(&mut m.program, map, &ns_names);
         }
         for (imp, target) in m.program.imports.iter_mut().zip(&m.import_targets) {
             for n in &mut imp.names {
@@ -2182,111 +2280,128 @@ fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
 
 /// Rewrite every referenced name in `e` (call/spawn/struct-lit/try-construct
 /// callees, bare variables, and match-variant constructors) through `map`.
-fn rewrite_expr(e: &mut Expr, map: &HashMap<String, String>) {
+///
+/// `ns` holds the module's namespace-binding names (RFC-0027): a method-sugar
+/// call whose receiver is a bare namespace (`ns.member(..)` arrives as
+/// `Call { member, args: [Var(ns), ..] }`) is a NAMESPACE member reference that
+/// pass 5 (the `NsResolver`) owns — the plain-name rewrite must leave its call
+/// name alone, or a co-naming rename of a like-named local decl would corrupt
+/// `ns.member` into `ns.renamed` before pass 5 can resolve it (RFC-0031 found
+/// this via a thin contract delegating `store.getItem(..)` while a generated
+/// module co-named `getItem`).
+fn rewrite_expr(e: &mut Expr, map: &HashMap<String, String>, ns: &HashSet<String>) {
     match e {
-        Expr::Call { name, args, .. }
-        | Expr::Spawn { name, args, .. }
-        | Expr::TryConstruct { name, args, .. } => {
+        Expr::Call { name, args, .. } => {
+            let ns_receiver =
+                matches!(args.first(), Some(Expr::Var { name: h, .. }) if ns.contains(h));
+            if !ns_receiver {
+                *name = ren(map, name);
+            }
+            for a in args {
+                rewrite_expr(a, map, ns);
+            }
+        }
+        Expr::Spawn { name, args, .. } | Expr::TryConstruct { name, args, .. } => {
             *name = ren(map, name);
             for a in args {
-                rewrite_expr(a, map);
+                rewrite_expr(a, map, ns);
             }
         }
         Expr::StructLit { name, fields, .. } => {
             *name = ren(map, name);
             for (_, v) in fields {
-                rewrite_expr(v, map);
+                rewrite_expr(v, map, ns);
             }
         }
         Expr::Var { name, .. } => *name = ren(map, name),
         Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-            rewrite_expr(expr, map)
+            rewrite_expr(expr, map, ns)
         }
         Expr::Binary { lhs, rhs, .. } => {
-            rewrite_expr(lhs, map);
-            rewrite_expr(rhs, map);
+            rewrite_expr(lhs, map, ns);
+            rewrite_expr(rhs, map, ns);
         }
         Expr::Match { scrutinee, arms, .. } => {
-            rewrite_expr(scrutinee, map);
+            rewrite_expr(scrutinee, map, ns);
             for arm in arms {
                 if let Pattern::Variant(v, _) = &mut arm.pattern {
                     *v = ren(map, v);
                 }
-                rewrite_expr(&mut arm.body, map);
+                rewrite_expr(&mut arm.body, map, ns);
             }
         }
         Expr::IfExpr { cond, then_branch, else_branch, .. } => {
-            rewrite_expr(cond, map);
-            rewrite_expr(then_branch, map);
+            rewrite_expr(cond, map, ns);
+            rewrite_expr(then_branch, map, ns);
             if let Some(eb) = else_branch {
-                rewrite_expr(eb, map);
+                rewrite_expr(eb, map, ns);
             }
         }
         Expr::ArrayLit { elems, .. } => {
             for e2 in elems {
-                rewrite_expr(e2, map);
+                rewrite_expr(e2, map, ns);
             }
         }
         Expr::MapLit { entries, .. } => {
             for (k, v) in entries {
-                rewrite_expr(k, map);
-                rewrite_expr(v, map);
+                rewrite_expr(k, map, ns);
+                rewrite_expr(v, map, ns);
             }
         }
         // A lambda body (RFC-0023): rewrite referenced names inside it (its own
         // untyped params are locals, never in `map`, so blanket rewriting is safe).
         Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e2) => rewrite_expr(e2, map),
-            LambdaBody::Block(b2) => rewrite_block(b2, map),
+            LambdaBody::Expr(e2) => rewrite_expr(e2, map, ns),
+            LambdaBody::Block(b2) => rewrite_block(b2, map, ns),
         },
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
     }
 }
 
-fn rewrite_block(b: &mut Block, map: &HashMap<String, String>) {
+fn rewrite_block(b: &mut Block, map: &HashMap<String, String>, ns: &HashSet<String>) {
     for s in &mut b.stmts {
-        rewrite_stmt(s, map);
+        rewrite_stmt(s, map, ns);
     }
 }
 
-fn rewrite_stmt(s: &mut Stmt, map: &HashMap<String, String>) {
+fn rewrite_stmt(s: &mut Stmt, map: &HashMap<String, String>, ns: &HashSet<String>) {
     match s {
         Stmt::Let { value, ty, .. } => {
             if let Some(t) = ty {
                 rewrite_type(t, map);
             }
-            rewrite_expr(value, map);
+            rewrite_expr(value, map, ns);
         }
-        Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => rewrite_expr(value, map),
+        Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => rewrite_expr(value, map, ns),
         Stmt::IndexSet { index, value, .. } => {
-            rewrite_expr(index, map);
-            rewrite_expr(value, map);
+            rewrite_expr(index, map, ns);
+            rewrite_expr(value, map, ns);
         }
-        Stmt::Return { value: Some(e), .. } => rewrite_expr(e, map),
+        Stmt::Return { value: Some(e), .. } => rewrite_expr(e, map, ns),
         Stmt::Return { value: None, .. } => {}
         Stmt::If { cond, then_block, else_block, .. } => {
-            rewrite_expr(cond, map);
-            rewrite_block(then_block, map);
+            rewrite_expr(cond, map, ns);
+            rewrite_block(then_block, map, ns);
             if let Some(eb) = else_block {
-                rewrite_block(eb, map);
+                rewrite_block(eb, map, ns);
             }
         }
         Stmt::While { cond, body, .. } => {
-            rewrite_expr(cond, map);
-            rewrite_block(body, map);
+            rewrite_expr(cond, map, ns);
+            rewrite_block(body, map, ns);
         }
         Stmt::ForIn { iter, body, .. } => {
-            rewrite_expr(iter, map);
-            rewrite_block(body, map);
+            rewrite_expr(iter, map, ns);
+            rewrite_block(body, map, ns);
         }
         Stmt::Drop { .. } => {}
-        Stmt::Expr(e) => rewrite_expr(e, map),
-        Stmt::Region { body, .. } => rewrite_block(body, map),
+        Stmt::Expr(e) => rewrite_expr(e, map, ns),
+        Stmt::Region { body, .. } => rewrite_block(body, map, ns),
     }
 }
 
 /// Rewrite one function's signature types and body references through `map`.
-fn rewrite_function(f: &mut Function, map: &HashMap<String, String>) {
+fn rewrite_function(f: &mut Function, map: &HashMap<String, String>, ns: &HashSet<String>) {
     for p in &mut f.params {
         rewrite_type(&mut p.ty, map);
     }
@@ -2297,37 +2412,38 @@ fn rewrite_function(f: &mut Function, map: &HashMap<String, String>) {
             *b = ren(map, b);
         }
     }
-    rewrite_block(&mut f.body, map);
+    rewrite_block(&mut f.body, map, ns);
 }
 
 /// Rewrite every *reference* (types, calls, variables, bounds) in one module's
 /// program through `map`. Declaration names are left alone — a separate step
 /// renames a decl when a foreign name must be freed for a co-named local stub.
-fn rewrite_module_refs(p: &mut Program, map: &HashMap<String, String>) {
+/// `ns` is the module's namespace-binding names (see [`rewrite_expr`]).
+fn rewrite_module_refs(p: &mut Program, map: &HashMap<String, String>, ns: &HashSet<String>) {
     if map.is_empty() {
         return;
     }
     for f in &mut p.functions {
-        rewrite_function(f, map);
+        rewrite_function(f, map, ns);
     }
     for im in &mut p.impls {
         im.protocol = ren(map, &im.protocol);
         rewrite_type(&mut im.ty, map);
         for m in &mut im.methods {
-            rewrite_function(m, map);
+            rewrite_function(m, map, ns);
         }
     }
     for t in &mut p.type_decls {
         rewrite_type(&mut t.base, map);
         if let Some(pred) = &mut t.predicate {
-            rewrite_expr(pred, map);
+            rewrite_expr(pred, map, ns);
         }
     }
     for g in &mut p.globals {
         if let Some(t) = &mut g.ty {
             rewrite_type(t, map);
         }
-        rewrite_expr(&mut g.init, map);
+        rewrite_expr(&mut g.init, map, ns);
     }
     for pr in &mut p.protocols {
         for m in &mut pr.methods {
@@ -2338,7 +2454,7 @@ fn rewrite_module_refs(p: &mut Program, map: &HashMap<String, String>) {
         }
     }
     for t in &mut p.tests {
-        rewrite_block(&mut t.body, map);
+        rewrite_block(&mut t.body, map, ns);
     }
 }
 
@@ -2392,7 +2508,7 @@ fn program_ref_names(p: &Program) -> HashSet<String> {
 /// Rename a top-level *declaration* (its defining name) from `from` to `to` in
 /// module `p`, and rewrite that module's own references to it. Used to free a
 /// foreign name so a co-naming importer's stub can take it (RFC-0022).
-fn rename_decl_in_module(p: &mut Program, from: &str, to: &str) {
+fn rename_decl_in_module(p: &mut Program, from: &str, to: &str, ns: &HashSet<String>) {
     for t in &mut p.type_decls {
         if t.name == from {
             t.name = to.to_string();
@@ -2414,7 +2530,7 @@ fn rename_decl_in_module(p: &mut Program, from: &str, to: &str) {
         }
     }
     let map: HashMap<String, String> = std::iter::once((from.to_string(), to.to_string())).collect();
-    rewrite_module_refs(p, &map);
+    rewrite_module_refs(p, &map, ns);
 }
 
 #[cfg(test)]
@@ -3244,6 +3360,126 @@ mod gen_tests {
         let files = &[("gen.vyrn", gen), ("contract.vyrn", contract)];
         // Runs; `names()` returns "ping;" (the one exported fn).
         assert_eq!(run(root, files).unwrap(), 0);
+    }
+
+    #[test]
+    fn module_interface_closure_reaches_imported_types() {
+        // RFC-0031: the contract NAMES only `Req` in its signature and declares no
+        // types of its own; `Req`/`Book`/`Id` live in `wire`. `moduleInterface`
+        // must reach the whole closure, so the generator counting `iface.types`
+        // sees all three.
+        let wire = "export type Id = Int64 where value >= 1 \
+                    export type Book = { id: Id } \
+                    export type Req = { book: Book }";
+        let contract = "import { Req } from \"./wire\" \
+                        export fn make(r: Req) -> Req { return r }";
+        let gen = "export gen fn cnt(path: String) -> String { \
+                       let iface = moduleInterface(path) \
+                       let mut n = 0 \
+                       for t in iface.types { n = n + 1 } \
+                       return \"export fn n() -> Int64 { return \" + \"\\{n}\" + \" }\\n\" }";
+        let root = "import { cnt } from \"./gen\" \
+                    import { n } from cnt(\"./contract\") \
+                    fn main() -> Int64 { return n() }";
+        assert_eq!(
+            run(root, &[("gen.vyrn", gen), ("contract.vyrn", contract), ("wire.vyrn", wire)])
+                .unwrap(),
+            3,
+            "closure = Req + Book + Id"
+        );
+    }
+
+    #[test]
+    fn closure_type_file_edit_invalidates_the_cache_unrelated_edit_hits() {
+        // RFC-0031 cache soundness: a closure type's defining FILE (`wire.vyrn`)
+        // is never a generator ARGUMENT (the arg is `./contract`), yet editing it
+        // must miss the cache. It joins the recorded inputs through the reflection
+        // read, so the content hash changes on edit; an unrelated file does not.
+        let wire = "export type T = { a: Int64 } export fn seed(t: T) -> T { return t }";
+        let contract = "import { T } from \"./wire\" export fn f(x: T) -> T { return x }";
+        // The generator's output embeds the closure's field spelling, so a real
+        // edit to `wire.vyrn` produces FRESH output, not just a re-run.
+        let gen = "export gen fn refl(path: String) -> String { \
+                       let iface = moduleInterface(path) \
+                       let mut src = \"\" \
+                       for t in iface.types { src = src + t.source } \
+                       return \"export fn shape() -> Int64 { return \" + \"\\{src.length}\" + \" }\\n\" }";
+        let root = "import { refl } from \"./gen\" \
+                    import { shape } from refl(\"./contract\") \
+                    fn main() -> Int64 { return shape() }";
+        let mut r = CachingResolver::new(&[
+            ("gen.vyrn", gen),
+            ("contract.vyrn", contract),
+            ("wire.vyrn", wire),
+            ("noise.vyrn", "export fn unused() -> Int64 { return 0 }"),
+        ]);
+
+        let before = gen_run_count();
+        run_with(root, &r).unwrap();
+        assert_eq!(gen_run_count(), before + 1, "cold: one run");
+        run_with(root, &r).unwrap();
+        assert_eq!(gen_run_count(), before + 1, "warm: cache hit, no re-run");
+
+        // An unrelated edit (a file the closure never reads) still hits.
+        r.files.insert("noise.vyrn".to_string(), "export fn unused() -> Int64 { return 1 }".to_string());
+        run_with(root, &r).unwrap();
+        assert_eq!(gen_run_count(), before + 1, "unrelated edit: still a cache hit");
+
+        // Editing the foreign closure type's file misses → re-run + fresh output.
+        r.files.insert(
+            "wire.vyrn".to_string(),
+            "export type T = { a: Int64, b: Int64 } export fn seed(t: T) -> T { return t }"
+                .to_string(),
+        );
+        run_with(root, &r).unwrap();
+        assert_eq!(gen_run_count(), before + 2, "closure type edited: re-run");
+    }
+
+    #[test]
+    fn co_naming_rename_leaves_namespace_member_calls_alone() {
+        // RFC-0031 found this: `mid` delegates `store.get()` via a namespace
+        // (RFC-0027) while ANOTHER module co-names `get` (aliased import + a local
+        // stub of the same name, RFC-0022). The co-naming rename frees `mid`'s
+        // `get` for the stub — but must NOT rewrite `store.get()` (method-sugar
+        // call name) into `store.get__from0`; that member belongs to the
+        // namespace resolver.
+        let store = "let mut n = 41 \
+                     export fn fetch() -> Int64 { n = n + 1 return n }";
+        let mid = "import * as store from \"./store\" \
+                   export fn fetch() -> Int64 { return store.fetch() }";
+        let root = "import { fetch as fetch__real } from \"./mid\" \
+                    fn fetch() -> Int64 { return fetch__real() } \
+                    fn main() -> Int64 { return fetch() }";
+        assert_eq!(run(root, &[("store.vyrn", store), ("mid.vyrn", mid)]).unwrap(), 42);
+    }
+
+    #[test]
+    fn closure_name_collision_is_a_load_diagnostic_naming_both_modules() {
+        // RFC-0031: if the closure would hold two DISTINCT `T` decls (one per
+        // module), reflection fails with a load diagnostic naming BOTH modules —
+        // a wire format with two `T`s has no honest JSON spelling.
+        let wire_a = "export type T = { a: Int64 } export type A = { t: T }";
+        let wire_b = "export type T = { b: Int64 } export type B = { t: T }";
+        let contract = "import { A } from \"./wireA\" \
+                        import { B } from \"./wireB\" \
+                        export fn f(a: A) -> B { return B { t: T { b: 0 } } }";
+        let gen = "export gen fn cnt(path: String) -> String { \
+                       let iface = moduleInterface(path) \
+                       return \"export fn z() -> Int64 { return 0 }\\n\" }";
+        let root = "import { cnt } from \"./gen\" \
+                    import { z } from cnt(\"./contract\") \
+                    fn main() -> Int64 { return z() }";
+        let e = gen_err(
+            root,
+            &[
+                ("gen.vyrn", gen),
+                ("contract.vyrn", contract),
+                ("wireA.vyrn", wire_a),
+                ("wireB.vyrn", wire_b),
+            ],
+        );
+        assert!(e.contains("wireA.vyrn") && e.contains("wireB.vyrn"), "names both modules: {e}");
+        assert!(e.contains('T'), "names the colliding type: {e}");
     }
 
     #[test]

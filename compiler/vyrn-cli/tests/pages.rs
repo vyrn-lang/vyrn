@@ -155,6 +155,60 @@ fn route_collision_fails_naming_both_files() {
     assert!(err.contains("id") && err.contains("slug"), "diagnostic names both files:\n{err}");
 }
 
+// ---- imported Params/Data (RFC-0031: the reachable type closure) -----------
+
+#[test]
+fn imported_params_type_works_via_the_closure() {
+    let dir = scratch("importedparams");
+    // The page's `Params`/`Data` live in a SHARED module the page imports —
+    // before RFC-0031 `moduleInterface` saw only the page's own declarations, so
+    // this failed with PAGES_MISSING_PARAMS_TYPE. The closure hands the generator
+    // the imported declarations, and the router imports `Params` from its
+    // declaring module (it is not reachable as `p0.Params` — namespaces reach a
+    // module's own exports only).
+    write(
+        &dir.join("shared.vyrn"),
+        "export type Params = { id: Int64 }\n\
+         export type Data = { label: String }\n",
+    );
+    write(
+        &dir.join("pages/users/[id].vyrn"),
+        "import { el, text, Html } from \"std/html\"\n\
+         import { Params, Data } from \"../../shared\"\n\
+         export fn load(p: Params) -> Validation<Data> {\n\
+             return Valid(Data { label: \"user\\{p.id}\" })\n\
+         }\n\
+         export fn page(p: Params, d: Data) -> Html {\n\
+             return el(\"main\", [], [text(d.label)])\n\
+         }\n",
+    );
+    write(
+        &dir.join("app.vyrn"),
+        "import { pages } from \"std/ui\"\n\
+         import { route } from pages(\"./pages\")\n\
+         fn main() -> Int64 {\n\
+             let r = route(Request { method: \"GET\", path: \"/users/7\", body: \"\" })\n\
+             print(\"\\{r.status}\")\n\
+             return 0\n\
+         }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "imported-Params page must load and run:\n{combined}");
+    assert!(combined.contains("200"), "the dynamic route renders (200):\n{combined}");
+
+    // The synthesized router reaches the foreign `Params` through an aliased
+    // import from its declaring module, not through the page namespace.
+    let eg = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let src = String::from_utf8_lossy(&eg.stdout);
+    assert!(
+        src.contains("import { Params as uiParams0 } from \"./shared\""),
+        "foreign Params import:\n{src}"
+    );
+    assert!(src.contains("uiParams0 { "), "foreign Params construction:\n{src}");
+}
+
 // ---- the demo runs green ---------------------------------------------------
 
 #[test]

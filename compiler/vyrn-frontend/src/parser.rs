@@ -141,7 +141,7 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     // order-independent). A generator consumes these to emit stubs/docs/mocks.
     //   ParamInfo { name, spelling, schema }
     //   FnInfo     { name, params: Array<ParamInfo>, ret, retSchema }
-    //   TypeInfo   { name, source, schema }
+    //   TypeInfo   { name, source, module, schema }
     //   ModuleInterface { functions: Array<FnInfo>, types: Array<TypeInfo> }
     program.type_decls.push(TypeDecl {
         name: "ParamInfo".to_string(),
@@ -184,6 +184,12 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         base: Type::Record(vec![
             Field { name: "name".to_string(), ty: Type::Str },
             Field { name: "source".to_string(), ty: Type::Str },
+            // The import specifier (relative to the reflected module's importer)
+            // for the module that DECLARES this type — so a generator that must
+            // share the type's identity (rpcServer/rpcInProcess) can import it
+            // from the right module when the closure reaches across imports
+            // (RFC-0031). Own types carry the generator's own contract argument.
+            Field { name: "module".to_string(), ty: Type::Str },
             Field { name: "schema".to_string(), ty: Type::Named("Schema".to_string()) },
         ]),
         predicate: None,
