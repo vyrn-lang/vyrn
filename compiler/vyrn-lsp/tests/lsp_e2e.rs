@@ -32,6 +32,9 @@ impl LspClient {
         // `[[bin]] name = "vyrn-lsp"` in Cargo.toml).
         let bin = env!("CARGO_BIN_EXE_vyrn-lsp");
         let child = Command::new(bin)
+            // Disable the shared generator cache so RFC-0033 fixtures never hit a
+            // stale synthesized module from another run.
+            .env("VYRN_NO_GEN_CACHE", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -722,4 +725,153 @@ fn document_formatting_returns_canonical_edit() {
     assert!(bad_resp.get("error").is_none(), "no error for an unlexable buffer: {bad_resp}");
     assert!(bad_resp.get("result").is_some(), "`result` key present (not skipped): {bad_resp}");
     assert!(bad_resp["result"].is_null(), "unlexable buffer formats to null (no edit)");
+}
+
+// ===========================================================================
+// RFC-0033 — origin maps: diagnostics and editor requests inside `.vyx` inputs.
+// A tiny fixture project (app.vyrn + comp/Widget.vyx) is written to a scratch
+// dir; the server discovers `std/` by walking up from its own binary.
+// ===========================================================================
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+static RFC33_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// A `file://` URI for `path` (drive-letter absolute → `file:///C:/…`).
+fn file_uri(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    if s.starts_with('/') { format!("file://{s}") } else { format!("file:///{s}") }
+}
+
+/// The one-line app that imports a view function generated over `./comp`.
+const RFC33_APP: &str = "import { components } from \"std/vyx\"\n\
+    import { widget } from components(\"./comp\")\n\
+    fn main() -> Int64 { return 0 }\n";
+
+/// A `.vyx` whose template mistypes `title` as `titel` — a type error that
+/// RFC-0033 remaps to line 6, column 6 of the `.vyx` (`{` at col 5, `item` at 6).
+const RFC33_VYX: &str = "<script>\n\
+    type Row = { title: String }\n\
+    props { item: Row }\n\
+    </script>\n\
+    <template>\n\
+    <li>{item.titel}</li>\n\
+    </template>\n";
+
+/// A well-typed variant (`item.title`), for hover/completion where the module
+/// must link cleanly.
+const RFC33_VYX_OK: &str = "<script>\n\
+    type Row = { title: String }\n\
+    props { item: Row }\n\
+    </script>\n\
+    <template>\n\
+    <li>{item.title}</li>\n\
+    </template>\n";
+
+fn rfc33_scratch(tag: &str, vyx_body: &str) -> std::path::PathBuf {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_rfc33_{tag}_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("comp")).unwrap();
+    std::fs::write(dir.join("comp/Widget.vyx"), vyx_body).unwrap();
+    std::fs::write(dir.join("app.vyrn"), RFC33_APP).unwrap();
+    dir
+}
+
+/// Spawn + initialize + initialized, ready for didOpen.
+fn rfc33_client() -> LspClient {
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+        "params": { "capabilities": {}, "processId": null }
+    }));
+    let _ = client.read_response(&init_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    client
+}
+
+fn did_open(client: &mut LspClient, uri: &str, lang: &str, text: &str) {
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": { "textDocument": { "uri": uri, "languageId": lang, "version": 1, "text": text } }
+    }));
+}
+
+/// Read publishDiagnostics notifications until one whose URI contains `needle`.
+fn read_diags_for(client: &mut LspClient, needle: &str) -> serde_json::Value {
+    loop {
+        let msg = client.read().expect("server closed before publishing");
+        if msg.json.get("method").and_then(|m| m.as_str()) == Some("textDocument/publishDiagnostics") {
+            let uri = msg.json.pointer("/params/uri").and_then(|u| u.as_str()).unwrap_or("");
+            if uri.contains(needle) {
+                return msg.json;
+            }
+        }
+    }
+}
+
+/// A template type error is published INTO the `.vyx` buffer at the exact
+/// source line/column, not against the synthesized module.
+#[test]
+fn rfc33_vyx_type_error_publishes_into_the_vyx_buffer() {
+    let dir = rfc33_scratch("diag", RFC33_VYX);
+    let mut client = rfc33_client();
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", RFC33_APP);
+
+    let note = read_diags_for(&mut client, "Widget.vyx");
+    let diags = note.pointer("/params/diagnostics").and_then(|d| d.as_array()).expect("diags array");
+    assert!(!diags.is_empty(), "the .vyx buffer carries the remapped error: {note}");
+    let d0 = &diags[0];
+    let msg = d0.get("message").and_then(|m| m.as_str()).unwrap_or("");
+    assert!(msg.contains("titel"), "carries the checker message: {msg}");
+    // `.vyx` line 6 (0-based 5), column 6 (0-based 5) — the `{item.titel}` start.
+    assert_eq!(d0.pointer("/range/start/line").and_then(|l| l.as_i64()), Some(5), "line: {note}");
+    assert_eq!(d0.pointer("/range/start/character").and_then(|c| c.as_i64()), Some(5), "col: {note}");
+}
+
+/// Hover inside a template `{expr}` resolves against the synthesized module:
+/// hovering `item` reports its prop type.
+#[test]
+fn rfc33_hover_in_vyx_template_resolves_the_prop() {
+    let dir = rfc33_scratch("hover", RFC33_VYX_OK);
+    let mut client = rfc33_client();
+    let app_uri = file_uri(&dir.join("app.vyrn"));
+    let vyx_uri = file_uri(&dir.join("comp/Widget.vyx"));
+    did_open(&mut client, &app_uri, "vyrn", RFC33_APP);
+    let _ = read_diags_for(&mut client, "Widget.vyx"); // ownership wired up
+    did_open(&mut client, &vyx_uri, "vyx", RFC33_VYX_OK);
+
+    // `item` on `.vyx` line 6 (0-based 5), char 5 (the `i` of `item`).
+    let hover_id = serde_json::json!(100);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": hover_id, "method": "textDocument/hover",
+        "params": { "textDocument": { "uri": vyx_uri }, "position": { "line": 5, "character": 5 } }
+    }));
+    let resp = client.read_response(&hover_id);
+    let value = resp.pointer("/result/contents/value").and_then(|v| v.as_str())
+        .expect("hover contents: no result");
+    assert!(value.contains("Row"), "hover names the prop type: {value}");
+}
+
+/// Completion after `item.` inside a template offers the record's fields.
+#[test]
+fn rfc33_completion_in_vyx_template_offers_record_fields() {
+    let dir = rfc33_scratch("comp", RFC33_VYX_OK);
+    let mut client = rfc33_client();
+    let app_uri = file_uri(&dir.join("app.vyrn"));
+    let vyx_uri = file_uri(&dir.join("comp/Widget.vyx"));
+    did_open(&mut client, &app_uri, "vyrn", RFC33_APP);
+    let _ = read_diags_for(&mut client, "Widget.vyx");
+    did_open(&mut client, &vyx_uri, "vyx", RFC33_VYX_OK);
+
+    // Cursor just past `item.` on line 6 (0-based 5): `.` at char 9, so char 10.
+    let comp_id = serde_json::json!(101);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": comp_id, "method": "textDocument/completion",
+        "params": { "textDocument": { "uri": vyx_uri }, "position": { "line": 5, "character": 10 } }
+    }));
+    let resp = client.read_response(&comp_id);
+    let items = resp.get("result").and_then(|r| r.as_array()).expect("completion list");
+    let labels: Vec<&str> = items.iter().filter_map(|i| i.get("label").and_then(|l| l.as_str())).collect();
+    assert!(labels.contains(&"title"), "offers the record field `title`: {labels:?}");
 }

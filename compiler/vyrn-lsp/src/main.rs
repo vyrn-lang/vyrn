@@ -1,7 +1,8 @@
 //! A minimal, synchronous Language Server Protocol server for Vyrn.
 //!
 //! Design goals (per the project's "easy maintained" constraint):
-//!   * No async runtime — a plain blocking `lsp-server` loop on the main thread.
+//!   * No async runtime — a plain blocking `lsp-server` loop on a single worker
+//!     thread (given a large stack for the recursive generator/analysis work).
 //!   * No duplication of the compiler. The only compiler calls are
 //!     [`vyrn_frontend::analyze`] (diagnostics + a symbol index, in one pass) and
 //!     the [`vyrn_frontend::resolve`] / [`vyrn_frontend::completions`] /
@@ -53,12 +54,25 @@ use vyrn_frontend::{
 // ---------------------------------------------------------------------------
 
 /// Analyze `text`, linking imports when the document has a real filesystem
-/// path (an untitled buffer falls back to single-file [`analyze`]).
-fn analyze_doc(uri: &Url, text: &str) -> Analysis {
-    let path = match uri.to_file_path() {
-        Ok(p) => p.to_string_lossy().replace('\\', "/"),
-        Err(()) => return analyze(text),
+/// path (an untitled buffer falls back to single-file [`analyze`]). `overlays`
+/// carries every open buffer's live text (path → text) so generator inputs
+/// (`.vyx`, …) reflect unsaved edits (RFC-0033); the gen cache re-verifies the
+/// overlaid bytes and regenerates when they differ from disk.
+fn analyze_doc(uri: &Url, text: &str, overlays: &HashMap<String, String>) -> Analysis {
+    let (opts, resolver, path) = match load_context(uri, overlays) {
+        Some(ctx) => ctx,
+        None => return analyze(text),
     };
+    vyrn_frontend::analyze_linked(text, &path, &opts, &resolver)
+}
+
+/// Build the load options + overlay-aware resolver + slash path for `uri`, or
+/// `None` for an untitled buffer with no filesystem path.
+fn load_context(
+    uri: &Url,
+    overlays: &HashMap<String, String>,
+) -> Option<(vyrn_frontend::loader::LoadOptions, EditorResolver, String)> {
+    let path = uri.to_file_path().ok()?.to_string_lossy().replace('\\', "/");
     let mut opts =
         vyrn_frontend::loader::LoadOptions { std_root: std_root(), ..Default::default() };
     let manifest_dir = std::path::Path::new(&path)
@@ -69,8 +83,8 @@ fn analyze_doc(uri: &Url, text: &str) -> Analysis {
             opts.alias_base = dir.clone();
             dir
         });
-    let resolver = EditorResolver { manifest_dir };
-    vyrn_frontend::analyze_linked(text, &path, &opts, &resolver)
+    let resolver = EditorResolver { manifest_dir, overlays: overlays.clone() };
+    Some((opts, resolver, path))
 }
 
 /// The std-library root: `$VYRN_STD`, or `std/` found by walking up from the
@@ -128,11 +142,18 @@ struct EditorResolver {
     /// Directory holding `vyrn.json` (and thus `vyrn.lock` / `vyrn_vendor/`),
     /// if the document is inside a project.
     manifest_dir: Option<String>,
+    /// Live text of every open buffer (slash path → text), so generator inputs
+    /// reflect unsaved edits (RFC-0033). Empty for a plain analysis.
+    overlays: HashMap<String, String>,
 }
 
 impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
     fn read(&self, resolved: &str) -> Result<String, String> {
         if !vyrn_frontend::loader::is_remote(resolved) {
+            // Prefer the open buffer's live text over the on-disk file.
+            if let Some(text) = self.overlays.get(resolved) {
+                return Ok(text.clone());
+            }
             return std::fs::read_to_string(resolved).map_err(|e| e.to_string());
         }
         let dir = self
@@ -211,15 +232,31 @@ fn main() {
     // single-threaded and blocking — no tokio, no I/O threads.
     let (connection, io_threads) = Connection::stdio();
 
-    let mut server = Server { docs: HashMap::new(), analyses: HashMap::new() };
-
-    // `initialize` is a special handshake: read it, reply with capabilities,
-    // then enter the main loop. EOF here just means the client left.
-    if handle_initialize(&connection).is_err() {
-        return;
-    }
-
-    main_loop(&connection, &mut server);
+    // Run the whole session on a worker thread with a LARGE stack. Analysis of a
+    // document with generator imports (RFC-0021/-0033) runs the comptime
+    // interpreter and re-lexes/checks the synthesized module — deeply recursive
+    // work that overflows the OS default main-thread stack (≈1 MB on Windows)
+    // once the LSP/JSON frames are also on it. 64 MB matches the headroom the CLI
+    // and cargo's test threads already enjoy.
+    let worker = std::thread::Builder::new()
+        .name("vyrn-lsp".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let mut server = Server {
+                docs: HashMap::new(),
+                analyses: HashMap::new(),
+                vyx_owner: HashMap::new(),
+            };
+            // `initialize` is a special handshake: read it, reply with
+            // capabilities, then enter the main loop. EOF here just means the
+            // client left.
+            if handle_initialize(&connection).is_ok() {
+                main_loop(&connection, &mut server);
+            }
+            connection
+        })
+        .expect("spawn vyrn-lsp worker thread");
+    let connection = worker.join().expect("vyrn-lsp worker thread panicked");
     // Drop the connection BEFORE joining the I/O threads: the writer thread
     // only exits once its sender (owned by `connection`) is dropped, and
     // `IoThreads::join` joins the writer last. Dropping here releases it so the
@@ -230,12 +267,18 @@ fn main() {
 }
 
 struct Server {
-    /// Raw source text per URI (kept so didChange can re-analyze).
+    /// Raw source text per URI (kept so didChange can re-analyze). Holds both
+    /// Vyrn documents and generator input buffers (`.vyx`, …).
     docs: HashMap<Url, String>,
     /// Cached [`Analysis`] per URI — diagnostics + a symbol index + identifier
     /// tokens. Built once per open/change; hover/def/completion read from it, so
-    /// a request never re-parses.
+    /// a request never re-parses. Keyed by the Vyrn (root) document URI only.
     analyses: HashMap<Url, Analysis>,
+    /// RFC-0033: a generator input file (slash path) → the Vyrn document whose
+    /// analysis synthesized a module from it. Lets a `.vyx` request resolve which
+    /// root to map through, and a `.vyx` edit know which root to re-analyze.
+    /// Populated whenever a Vyrn document with generator imports is analyzed.
+    vyx_owner: HashMap<String, Url>,
 }
 
 fn handle_initialize(connection: &Connection) -> Result<(), ()> {
@@ -322,9 +365,17 @@ fn handle_request(server: &Server, req: Request) -> Response {
 
 fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
     let p: HoverParams = serde_json::from_value(params).ok()?;
-    let (analysis, _uri) = lookup(server, &p.text_document_position_params.text_document.uri)?;
+    let uri = &p.text_document_position_params.text_document.uri;
     let (line, col) = to_frontend(&p.text_document_position_params.position);
-    let r = resolve(analysis, line, col)?;
+    // RFC-0033: a request inside a generator input file (`.vyx`) is answered
+    // against the synthesized module at the mapped generated position.
+    let r = if is_vyrn_uri(uri) {
+        let (analysis, _) = lookup(server, uri)?;
+        resolve(analysis, line, col)?
+    } else {
+        let fwd = vyx_forward(server, uri, line, col)?;
+        resolve(&fwd.synth, fwd.line, fwd.col)?
+    };
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
@@ -336,9 +387,19 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
 
 fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoDefinitionResponse> {
     let p: GotoDefinitionParams = serde_json::from_value(params).ok()?;
-    let (analysis, uri) = lookup(server, &p.text_document_position_params.text_document.uri)?;
+    let uri = &p.text_document_position_params.text_document.uri;
     let (line, col) = to_frontend(&p.text_document_position_params.position);
-    let r = resolve(analysis, line, col)?;
+    // RFC-0033: from a `.vyx` template expression, resolve through the
+    // synthesized module. Only an IMPORTED declaration (with a real source file)
+    // is a useful jump target — a binding local to the synthesized module has no
+    // on-disk location, so it yields no definition (v1).
+    let (r, home_uri) = if is_vyrn_uri(uri) {
+        let (analysis, u) = lookup(server, uri)?;
+        (resolve(analysis, line, col)?, Some(u))
+    } else {
+        let fwd = vyx_forward(server, uri, line, col)?;
+        (resolve(&fwd.synth, fwd.line, fwd.col)?, None)
+    };
     // A built-in method (e.g. `push`, `info`) resolves for hover but has no source
     // declaration to jump to — return "no definition" rather than a bogus location.
     if !r.definition {
@@ -347,12 +408,14 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
     // Cross-file: an imported symbol carries its source module. Local module
     // keys are absolute slash paths (→ a file URI); a remote key (`github:...`)
     // isn't a jumpable file, so it gets hover but no definition.
-    let uri = match &r.target_file {
-        Some(f) => Url::from_file_path(f).ok()?,
-        None => uri,
+    let target_uri = match &r.target_file {
+        Some(f) => Url::from_file_path(f.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?,
+        // No source file: within the open Vyrn document, jump in place; within a
+        // `.vyx` request the target is inside the synthesized module (no file).
+        None => home_uri?,
     };
     Some(GotoDefinitionResponse::Scalar(Location {
-        uri,
+        uri: target_uri,
         range: lsp_range(r.target_line, r.target_col, r.target_end_col),
     }))
 }
@@ -360,8 +423,22 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
 fn handle_completion(server: &Server, params: serde_json::Value) -> Option<CompletionResponse> {
     let p: CompletionParams = serde_json::from_value(params).ok()?;
     let uri = &p.text_document_position.text_document.uri;
-    let (analysis, _uri) = lookup(server, uri)?;
     let (line, col) = to_frontend(&p.text_document_position.position);
+    // RFC-0033: completion inside a `.vyx` template expression runs against the
+    // synthesized module at the mapped position (record-field completion after
+    // `item.`, top-level symbols otherwise).
+    if !is_vyrn_uri(uri) {
+        let fwd = vyx_forward(server, uri, line, col)?;
+        // `is_member_context` re-extracts line `fwd.line` from the text it's
+        // given, so it must receive the WHOLE synthesized source, not one line.
+        let items = if is_member_context(Some(&fwd.gen_source), fwd.line, fwd.col) {
+            member_completions(&fwd.synth, fwd.line, fwd.col)
+        } else {
+            completions(&fwd.synth)
+        };
+        return Some(CompletionResponse::Array(items.into_iter().map(to_completion_item).collect()));
+    }
+    let (analysis, _uri) = lookup(server, uri)?;
     // A `.foo` member access → context-aware completions for the receiver's type
     // (e.g. `arr.` → push/at/alen/afree/length). Otherwise → all top-level
     // symbols; the client filters by the prefix the user typed.
@@ -377,15 +454,133 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
         completions(analysis)
     }
     .into_iter()
-    .map(|c| CompletionItem {
+    .map(to_completion_item)
+    .collect();
+    // Always return a list (possibly empty) — the client filters by prefix.
+    Some(CompletionResponse::Array(items))
+}
+
+/// Map one frontend completion to an LSP `CompletionItem`.
+fn to_completion_item(c: vyrn_frontend::Completion) -> CompletionItem {
+    CompletionItem {
         label: c.label,
         kind: Some(to_lsp_kind(c.kind)),
         detail: Some(c.detail),
         ..Default::default()
-    })
-    .collect();
-    // Always return a list (possibly empty) — the client filters by prefix.
-    Some(CompletionResponse::Array(items))
+    }
+}
+
+/// The synthesized-module analysis and the generated position an RFC-0033
+/// forward request maps to.
+struct VyxFwd {
+    /// Analysis of the synthesized module (linked under the owner's directory).
+    synth: Analysis,
+    /// The synthesized module's source (for member/string completion context).
+    gen_source: String,
+    /// 1-based generated line/column the input cursor maps to.
+    line: usize,
+    col: usize,
+}
+
+/// Map a cursor inside a generator input file (`.vyx`) to a position in the
+/// synthesized module, and analyze that module so hover/completion/definition
+/// can be answered against it (RFC-0033 forward mapping).
+///
+/// Verbatim regions map column-exactly (the input expression is located inside
+/// the governed generated line); derived regions (a `{#for}`/`{#if}` head) map
+/// to the region's start. Returns `None` when the cursor is outside any region
+/// or the owner can't be re-generated.
+fn vyx_forward(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Option<VyxFwd> {
+    let vyx_path = uri_path(vyx_uri)?;
+    let owner = server.vyx_owner.get(&vyx_path)?.clone();
+    let owner_analysis = server.analyses.get(&owner)?;
+
+    // The innermost region on this input line at or left of the cursor.
+    let mut region: Option<vyrn_frontend::origin::Region> = None;
+    for r in owner_analysis.origins.regions_for(&vyx_path) {
+        if r.origin.line == line && r.origin.col <= col {
+            let better = region.as_ref().map(|b| r.origin.col >= b.origin.col).unwrap_or(true);
+            if better {
+                region = Some(r);
+            }
+        }
+    }
+    let region = region?;
+
+    let overlays = overlays_of(server);
+    let (opts, resolver, owner_path) = load_context(&owner, &overlays)?;
+    let owner_text = server
+        .docs
+        .get(&owner)
+        .cloned()
+        .or_else(|| std::fs::read_to_string(&owner_path).ok())?;
+    // Re-obtain the synthesized module's source (cheap — the gen cache carries
+    // it); find the one this region belongs to.
+    let gen_source = vyrn_frontend::loader::generated_modules(&owner_text, &owner_path, &opts, &resolver)
+        .ok()?
+        .into_iter()
+        .find(|(banner, _)| *banner == region.gen_module)
+        .map(|(_, src)| src)?;
+
+    let vyx_text = server
+        .docs
+        .get(vyx_uri)
+        .cloned()
+        .or_else(|| std::fs::read_to_string(&vyx_path).ok())?;
+    let vyx_line = vyx_text.lines().nth(line.saturating_sub(1))?;
+    let gen_line = gen_source.lines().nth(region.gen_start_line.saturating_sub(1)).unwrap_or("");
+    let (gline, gcol) = map_into_region(vyx_line, region.origin.col, col, gen_line, region.gen_start_line);
+
+    // Analyze the synthesized module as a linked root under the owner's dir, so
+    // its imports (std/html, rebased relatives) resolve. Its own diagnostics
+    // (e.g. "no main") are ignored — only the symbol index is queried.
+    let synth_path = synth_path_for(&owner_path);
+    let synth = vyrn_frontend::analyze_linked(&gen_source, &synth_path, &opts, &resolver);
+    Some(VyxFwd { synth, gen_source, line: gline, col: gcol })
+}
+
+/// Map an input-file cursor into a generated line's verbatim text. `origin_col`
+/// is the region's 1-based input start column; the return is a 1-based
+/// `(gen_line, gen_col)`. Column-exact when the input expression is found in
+/// `gen_line`, else the generated line start (region-level).
+fn map_into_region(
+    vyx_line: &str,
+    origin_col: usize,
+    col: usize,
+    gen_line: &str,
+    gen_start_line: usize,
+) -> (usize, usize) {
+    let delta = col.saturating_sub(origin_col);
+    match align_expr(vyx_line, origin_col, gen_line) {
+        Some(gcol) => (gen_start_line, gcol + delta),
+        None => (gen_start_line, 1),
+    }
+}
+
+/// The 1-based column in `gen_line` where the verbatim input expression at
+/// `origin_col` begins, found as the longest input-tail prefix that occurs in
+/// the generated line (the expression, since the following input bytes — `}`,
+/// `>` — diverge from the generated wrapper).
+fn align_expr(vyx_line: &str, origin_col: usize, gen_line: &str) -> Option<usize> {
+    let tail: Vec<char> = vyx_line.chars().skip(origin_col.saturating_sub(1)).collect();
+    let mut len = tail.len();
+    while len >= 1 {
+        let cand: String = tail[..len].iter().collect();
+        if let Some(byte_idx) = gen_line.find(&cand) {
+            return Some(gen_line[..byte_idx].chars().count() + 1);
+        }
+        len -= 1;
+    }
+    None
+}
+
+/// A synthetic root path for a synthesized module, placed in the owner's
+/// directory so its relative imports resolve exactly as at generation time.
+fn synth_path_for(owner_path: &str) -> String {
+    match owner_path.rfind('/') {
+        Some(i) => format!("{}/__vyrn_vyx_synth__.vyrn", &owner_path[..i]),
+        None => "__vyrn_vyx_synth__.vyrn".to_string(),
+    }
 }
 
 /// Answer `textDocument/documentSymbol` from the cached symbol index: the
@@ -579,6 +774,85 @@ fn to_lsp_kind(kind: SymbolKind) -> CompletionItemKind {
     }
 }
 
+/// Whether `uri`'s path is a Vyrn source (`.vyrn`). Anything else the server
+/// tracks is a generator INPUT buffer (`.vyx`, …), analyzed only indirectly
+/// through the Vyrn document that consumes it (RFC-0033).
+fn is_vyrn_uri(uri: &Url) -> bool {
+    uri.path().ends_with(".vyrn")
+}
+
+/// The slash path of `uri`, or `None` for a non-file URI.
+fn uri_path(uri: &Url) -> Option<String> {
+    Some(uri.to_file_path().ok()?.to_string_lossy().replace('\\', "/"))
+}
+
+/// Every open buffer as `slash-path → text` — the overlay set that makes
+/// generation see unsaved edits (RFC-0033).
+fn overlays_of(server: &Server) -> HashMap<String, String> {
+    server
+        .docs
+        .iter()
+        .filter_map(|(u, t)| uri_path(u).map(|p| (p, t.clone())))
+        .collect()
+}
+
+/// (Re)analyze the Vyrn document `root_uri` (open buffer, else disk), publish
+/// its own diagnostics, and — for every generator input it reads — record the
+/// ownership and publish the input's remapped diagnostics against its own URI.
+fn reanalyze_root(connection: &Connection, server: &mut Server, root_uri: &Url) {
+    let text = match server.docs.get(root_uri) {
+        Some(t) => t.clone(),
+        None => match uri_path(root_uri).and_then(|p| std::fs::read_to_string(p).ok()) {
+            Some(t) => t,
+            None => return,
+        },
+    };
+    let overlays = overlays_of(server);
+    let analysis = analyze_doc(root_uri, &text, &overlays);
+    publish(connection, root_uri, &text, &analysis.diagnostics);
+    // Record which inputs this root synthesizes from, and surface each input's
+    // remapped diagnostics inside that input's buffer.
+    for f in analysis.origins.input_files() {
+        server.vyx_owner.insert(f, root_uri.clone());
+    }
+    publish_remapped(connection, &analysis);
+    server.analyses.insert(root_uri.clone(), analysis);
+}
+
+/// Publish origin-remapped diagnostics (RFC-0033) grouped by input file, so a
+/// template error appears inside its `.vyx` buffer. Every referenced input is
+/// republished (empty when clean) so a fixed error clears.
+fn publish_remapped(connection: &Connection, analysis: &Analysis) {
+    let mut by_file: HashMap<String, Vec<vyrn_frontend::diagnostics::Diagnostic>> = HashMap::new();
+    for f in analysis.origins.input_files() {
+        by_file.entry(f).or_default();
+    }
+    for d in &analysis.remapped {
+        if let Some(f) = &d.file {
+            by_file.entry(f.clone()).or_default().push(d.clone());
+        }
+    }
+    for (file, diags) in by_file {
+        // `file` is an absolute slash path; rebuild a native path for the URI.
+        if let Ok(uri) = Url::from_file_path(file.replace('/', std::path::MAIN_SEPARATOR_STR)) {
+            let src = std::fs::read_to_string(&file).unwrap_or_default();
+            publish(connection, &uri, &src, &diags);
+        }
+    }
+}
+
+/// React to an open/change of `uri`: a Vyrn document re-analyzes itself; a
+/// generator input buffer (`.vyx`, …) re-analyzes its owning Vyrn document (so
+/// its remapped diagnostics refresh from the edited input). An input with no
+/// known owner yet is simply stored — opening its consuming `.vyrn` wires it up.
+fn refresh_document(connection: &Connection, server: &mut Server, uri: &Url) {
+    if is_vyrn_uri(uri) {
+        reanalyze_root(connection, server, uri);
+    } else if let Some(owner) = uri_path(uri).and_then(|p| server.vyx_owner.get(&p)).cloned() {
+        reanalyze_root(connection, server, &owner);
+    }
+}
+
 fn handle_notification(connection: &Connection, server: &mut Server, notif: Notification) {
     // Dispatch on the notification method. `lsp-types` gives typed params per
     // known method; unknown notifications are ignored.
@@ -587,9 +861,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             let uri = params.text_document.uri.clone();
             let text = params.text_document.text;
             server.docs.insert(uri.clone(), text.clone());
-            let analysis = analyze_doc(&uri, &text);
-            publish(connection, &uri, &text, &analysis.diagnostics);
-            server.analyses.insert(uri, analysis);
+            refresh_document(connection, server, &uri);
         }
     } else if DidChangeTextDocument::METHOD == notif.method {
         if let Ok(params) = serde_json::from_value::<DidChangeTextDocumentParams>(notif.params) {
@@ -597,9 +869,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             // Full sync: the last change carries the entire document text.
             if let Some(change) = params.content_changes.into_iter().last() {
                 server.docs.insert(uri.clone(), change.text.clone());
-                let analysis = analyze_doc(&uri, &change.text);
-                publish(connection, &uri, &change.text, &analysis.diagnostics);
-                server.analyses.insert(uri, analysis);
+                refresh_document(connection, server, &uri);
             }
         }
     } else if DidCloseTextDocument::METHOD == notif.method {
