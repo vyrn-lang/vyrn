@@ -22,6 +22,7 @@ pub mod interp;
 pub mod lexer;
 pub mod loader;
 pub mod movecheck;
+pub mod origin;
 pub mod own;
 pub mod parser;
 pub mod regex;
@@ -104,7 +105,7 @@ pub fn load(
     opts: &loader::LoadOptions,
     resolver: &dyn loader::ModuleResolver,
 ) -> Result<ast::Program, Vec<diagnostics::Diagnostic>> {
-    let program = loader::load(root_source, root_path, opts, resolver)?;
+    let (program, origins) = loader::load_with_origins(root_source, root_path, opts, resolver)?;
     let mut diags = checker::check_accum(&program);
     if diags.is_empty() {
         diags.extend(movecheck::check_accum(&program));
@@ -112,6 +113,15 @@ pub fn load(
     if diags.is_empty() {
         Ok(program)
     } else {
+        // RFC-0033: a diagnostic in a synthesized generator module at an origin-
+        // governed line is reported against its input file (`.vyx`, …) with the
+        // generated location preserved as a note. Single-sourced in `origin`; the
+        // LSP applies the same remap. A no-op when no generator emitted directives.
+        if !origins.is_empty() {
+            for d in &mut diags {
+                origins.remap(d);
+            }
+        }
         Err(diags)
     }
 }

@@ -149,6 +149,16 @@ pub struct Analysis {
     /// through it, so `ns.` completes and `ns.member` hovers / jumps into the
     /// source module. Populated only by [`analyze_linked`].
     pub namespaces: Vec<NamespaceInfo>,
+    /// RFC-0033: the origin directive tables of every synthesized generator
+    /// module reachable from this document, for forward hover/completion/
+    /// go-to-definition inside generator input files. Empty without a linker or
+    /// when no generator emitted `//@origin` directives.
+    pub origins: crate::origin::OriginMaps,
+    /// RFC-0033: diagnostics relocated to a generator input file (`.vyx`, …).
+    /// The LSP publishes these against the input file's URI so template errors
+    /// appear in that buffer; they are excluded from [`Self::diagnostics`] (which
+    /// stays anchored to the open document).
+    pub remapped: Vec<Diagnostic>,
 }
 
 /// One `import * as ns` binding and the exported declarations it exposes
@@ -303,13 +313,20 @@ fn analyze_inner(
     // parsed root keeps powering the symbol index below. `None` = checks
     // skipped (parse failed) or linking failed (load diagnostics already in
     // `diags`).
+    // RFC-0033 origin maps for the linked program, plus the diagnostics that
+    // remap into a generator input file (published against that file's URI).
+    let mut origins = crate::origin::OriginMaps::default();
+    let mut remapped: Vec<Diagnostic> = Vec::new();
     let checked: Option<crate::ast::Program> = if parse_failed {
         None
     } else {
         match (&linker, program.imports.is_empty()) {
             (Some((root_path, opts, resolver)), false) => {
-                match crate::loader::load(source, root_path, opts, *resolver) {
-                    Ok(linked) => Some(linked),
+                match crate::loader::load_with_origins(source, root_path, opts, *resolver) {
+                    Ok((linked, o)) => {
+                        origins = o;
+                        Some(linked)
+                    }
                     Err(load_diags) => {
                         diags.extend(load_diags.into_iter().map(adopt_foreign));
                         None
@@ -325,8 +342,20 @@ fn analyze_inner(
     let let_types = match &checked {
         Some(prog) => {
             let (check_diags, let_types) = checker::check_accum_with_let_types(prog);
-            diags.extend(check_diags.into_iter().map(adopt_foreign));
-            diags.extend(movecheck::check_accum(prog).into_iter().map(adopt_foreign));
+            let mut checked_diags = check_diags;
+            checked_diags.extend(movecheck::check_accum(prog));
+            // RFC-0033: a diagnostic at an origin-governed line in a synthesized
+            // module is relocated to its input file (`.vyx`, …) and set aside so
+            // the LSP can publish it against that file's URI; everything else
+            // keeps the existing foreign-adoption behavior (shown in the root at
+            // line 0). A no-op when no generator emitted directives.
+            for mut d in checked_diags {
+                if !origins.is_empty() && origins.remap(&mut d) {
+                    remapped.push(d);
+                } else {
+                    diags.push(adopt_foreign(d));
+                }
+            }
             let_types
         }
         None => Default::default(),
@@ -439,6 +468,8 @@ fn analyze_inner(
         finite_string_types,
         fn_param_types,
         namespaces,
+        origins,
+        remapped,
     }
 }
 
@@ -458,6 +489,8 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         finite_string_types: Vec::new(),
         fn_param_types: Vec::new(),
         namespaces: Vec::new(),
+        origins: crate::origin::OriginMaps::default(),
+        remapped: Vec::new(),
     }
 }
 

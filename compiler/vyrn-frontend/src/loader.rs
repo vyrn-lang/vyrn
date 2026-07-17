@@ -403,8 +403,40 @@ pub fn load(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
 ) -> Result<Program, Vec<Diagnostic>> {
+    load_with_origins(root_source, root_path, opts, resolver).map(|(p, _)| p)
+}
+
+/// Like [`load`], but also returns the RFC-0033 origin maps built from every
+/// synthesized generator module reachable from the root. The maps drive
+/// diagnostic remapping (CLI + LSP) and the LSP's forward hover/completion/
+/// go-to-definition inside generator input files; they are empty when no
+/// reachable generator emitted `//@origin` directives.
+pub fn load_with_origins(
+    root_source: &str,
+    root_path: &str,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+) -> Result<(Program, crate::origin::OriginMaps), Vec<Diagnostic>> {
     let (modules, root_key) = load_modules(root_source, root_path, opts, resolver)?;
-    link(modules, &root_key)
+    let origins = build_origin_maps(&modules);
+    let program = link(modules, &root_key)?;
+    Ok((program, origins))
+}
+
+/// Parse the `//@origin` directives (RFC-0033) out of every synthesized module's
+/// source. A synthesized module's origin paths resolve against the directory of
+/// the real file it was generated for (its banner's `at <importer>`).
+fn build_origin_maps(modules: &[Module]) -> crate::origin::OriginMaps {
+    let mut maps = crate::origin::OriginMaps::new();
+    for m in modules {
+        if let Some(src) = &m.gen_source {
+            // `generated_importer` uses the LAST ` at `, so a nested generator's
+            // banner still yields the real on-disk file in one step.
+            let importer = generated_importer(&m.key).unwrap_or(&m.key);
+            maps.add_module(&m.key, src, dir_of(importer));
+        }
+    }
+    maps
 }
 
 /// The module dependency graph: every (module key, resolved import targets)

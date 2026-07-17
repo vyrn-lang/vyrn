@@ -39,6 +39,12 @@ pub struct Diagnostic {
     /// `"lex"` | `"parse"` | `"check"` | `"movecheck"`.
     pub stage: &'static str,
     pub message: String,
+    /// An optional secondary note (RFC-0033). When a diagnostic in a synthesized
+    /// generator module is remapped to its origin input file, the original
+    /// generated location is preserved here (`"note: in generated code …"`); a
+    /// malformed origin directive records why it could not be followed. `None`
+    /// for every ordinary diagnostic.
+    pub note: Option<String>,
 }
 
 impl Diagnostic {
@@ -53,6 +59,7 @@ impl Diagnostic {
             severity: Severity::Error,
             stage,
             message,
+            note: None,
         }
     }
 

@@ -206,6 +206,9 @@ fn emit_gen(path: &str, source: &str) -> ExitCode {
             for d in &diags {
                 let file = d.file.as_deref().unwrap_or(&root_key);
                 eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
+                if let Some(note) = &d.note {
+                    eprintln!("  note: {note}");
+                }
             }
             ExitCode::FAILURE
         }
@@ -408,6 +411,9 @@ fn deps() -> ExitCode {
             for d in &diags {
                 let file = d.file.as_deref().unwrap_or(&root_key);
                 eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
+                if let Some(note) = &d.note {
+                    eprintln!("  note: {note}");
+                }
             }
             ExitCode::FAILURE
         }
@@ -550,6 +556,9 @@ fn fmt_project_files() -> Result<Vec<String>, ExitCode> {
             for d in &diags {
                 let file = d.file.as_deref().unwrap_or(&root_key);
                 eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
+                if let Some(note) = &d.note {
+                    eprintln!("  note: {note}");
+                }
             }
             Ok(vec![root_key])
         }
@@ -612,6 +621,9 @@ fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program,
             for d in &diags {
                 let file = d.file.as_deref().unwrap_or(&root_key);
                 eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
+                if let Some(note) = &d.note {
+                    eprintln!("  note: {note}");
+                }
             }
             Err(ExitCode::FAILURE)
         }
