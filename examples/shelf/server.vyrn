@@ -11,6 +11,12 @@
 /// first (via the generated handler) and delegates everything else to `route`.
 import { rpcServer } from "std/rpc"
 import { rpcHandle } from rpcServer("./contract")
+import { connectServer } from "std/connect"
+import { connectHandle } from connectServer("./contract")
+import { openapi } from "std/openapi"
+import { openapiJson } from openapi("./contract")
+import { sdl } from "std/graphql"
+import { sdlText } from sdl("./contract")
 import { pages } from "std/ui"
 import { route } from pages("./routes")
 import { tw } from "std/tw"
@@ -64,9 +70,24 @@ fn routed(req: Request) -> Response {
     if req.method == "GET" && req.path == "/theme.css" {
         return Response { status: 200, contentType: "text/css", body: theme.css() }
     }
+    // RFC-0038: the two contract-export DOCUMENTS, baked constants served with
+    // their conventional content types.
+    if req.method == "GET" && req.path == "/openapi.json" {
+        return Response { status: 200, contentType: "application/json", body: openapiJson() }
+    }
+    if req.method == "GET" && req.path == "/schema.graphql" {
+        return Response { status: 200, contentType: "application/graphql", body: sdlText() }
+    }
+    // RFC-0038: `rpcHandle` (the `/rpc/*` surface) and `connectHandle` (the
+    // Connect `/<service>.<Proc>` surface) mount side by side — ONE contract,
+    // two protocols. `rpcHandle` claims `/rpc/*`, `connectHandle` its own paths,
+    // and anything else falls through to page routing.
     return match rpcHandle(req) {
         Some(r) => r,
-        None => route(req),
+        None => match connectHandle(req) {
+            Some(r) => r,
+            None => route(req),
+        },
     }
 }
 
@@ -84,5 +105,15 @@ fn main() -> Int64 {
     // RFC-0037 middleware: the guard answers /admin before any route runs.
     let blocked = handle(Request { method: "GET", path: "/admin/secrets", body: "" })
     print("/admin/secrets -> \{blocked.status}: \{blocked.body}")
+    // RFC-0038: the SAME contract answered over the Connect path shape, plus the
+    // two exported documents.
+    let conn = handle(Request { method: "POST", path: "/contract.listBooks", body: "{}" })
+    print("connect listBooks -> \{conn.status}")
+    let badConn = handle(Request { method: "POST", path: "/contract.addBook", body: "{\"title\":\"\",\"url\":\"nope\",\"tags\":[]}" })
+    print("connect addBook(bad) -> \{badConn.status}: \{badConn.body}")
+    let oa = handle(Request { method: "GET", path: "/openapi.json", body: "" })
+    print("/openapi.json -> \{oa.status} (\{oa.body.length} bytes)")
+    let gql = handle(Request { method: "GET", path: "/schema.graphql", body: "" })
+    print("/schema.graphql -> \{gql.status} (\{gql.body.length} bytes)")
     return 0
 }
