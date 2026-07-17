@@ -1034,7 +1034,94 @@ fn drain_ho(
 }
 
 /// Emit a complete LLVM IR module for `program`.
+/// The RFC-0037 stage gate: stored function values are checked and executable
+/// under the interpreter, but their defunctionalized lowering has not landed in
+/// this backend yet. Fail loudly rather than miscompile.
+fn rfc0037_gate(what: &str) -> String {
+    format!(
+        "{what}: stored function values (RFC-0037) are not yet supported by the \
+         native/wasm backends — run with `vyrn run` (interpreter) while the \
+         defunctionalized lowering lands"
+    )
+}
+
+/// Whether a declared type transitively mentions a function type (RFC-0037
+/// stage gate). Named references don't recurse — the alias's own declaration
+/// is scanned directly, so any fn-typed storage roots at a flagged site.
+fn mentions_fn_type(ty: &Type) -> bool {
+    match ty {
+        Type::Fn(..) => true,
+        Type::Option(i)
+        | Type::Array(i)
+        | Type::ArrayN(i, _)
+        | Type::Ref(i)
+        | Type::Task(i)
+        | Type::Partial(i)
+        | Type::Omit(i, _)
+        | Type::Pick(i, _) => mentions_fn_type(i),
+        Type::Result(a, b) | Type::Map(a, b) | Type::Merge(a, b) => {
+            mentions_fn_type(a) || mentions_fn_type(b)
+        }
+        Type::Record(fs) => fs.iter().any(|f| mentions_fn_type(&f.ty)),
+        Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(mentions_fn_type)),
+        Type::App(_, args) => args.iter().any(mentions_fn_type),
+        _ => false,
+    }
+}
+
+/// Scan for RFC-0037 storage-of-function-values the checker now accepts but
+/// this backend cannot lower yet: fn types in type declarations, module state,
+/// function returns, and `let` annotations. (Bare named-function values and
+/// lambda literals in storage positions are caught at their emission sites.)
+fn rfc0037_stage_scan(program: &Program) -> Result<(), String> {
+    for t in &program.type_decls {
+        if mentions_fn_type(&t.base) {
+            return Err(rfc0037_gate(&format!("type `{}`", t.name)));
+        }
+    }
+    for g in &program.globals {
+        if g.ty.as_ref().is_some_and(mentions_fn_type) {
+            return Err(rfc0037_gate(&format!("module state `{}`", g.name)));
+        }
+    }
+    fn scan_block(b: &Block, fname: &str) -> Result<(), String> {
+        for s in &b.stmts {
+            match s {
+                Stmt::Let { name, ty, .. } => {
+                    if ty.as_ref().is_some_and(mentions_fn_type) {
+                        return Err(rfc0037_gate(&format!("`let {name}` in `{fname}`")));
+                    }
+                }
+                Stmt::If { then_block, else_block, .. } => {
+                    scan_block(then_block, fname)?;
+                    if let Some(eb) = else_block {
+                        scan_block(eb, fname)?;
+                    }
+                }
+                Stmt::While { body, .. }
+                | Stmt::ForIn { body, .. }
+                | Stmt::Region { body, .. } => scan_block(body, fname)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    for f in &program.functions {
+        // v1 `fn`-typed PARAMETERS stay on the monomorphization path — only a
+        // fn-typed RETURN is a storage position this backend cannot lower yet.
+        if mentions_fn_type(&f.ret) {
+            return Err(rfc0037_gate(&format!("the return type of `{}`", f.name)));
+        }
+        scan_block(&f.body, &f.name)?;
+    }
+    for t in &program.tests {
+        scan_block(&t.body, &t.name)?;
+    }
+    Ok(())
+}
+
 pub fn emit(program: &Program) -> Result<String, String> {
+    rfc0037_stage_scan(program)?;
     let mut out = String::new();
     // module preamble: printf/abort + format strings (opaque-pointer style)
     out.push_str("; Vyrn v0.1 — generated LLVM IR (target: LLVM 15+)\n");
@@ -2873,7 +2960,13 @@ impl<'a> Gen<'a> {
                     }
                     return Ok((cur, Type::Named(enum_name)));
                 }
-                let (slot, ty) = self.lookup(name).ok_or_else(|| format!("unbound `{name}`"))?;
+                let Some((slot, ty)) = self.lookup(name) else {
+                    // A bare function name in a value position (RFC-0037).
+                    if self.funcs.contains_key(name.as_str()) {
+                        return Err(rfc0037_gate(&format!("`{name}` used as a function value")));
+                    }
+                    return Err(format!("unbound `{name}`"));
+                };
                 let ll = self.llt(&ty);
                 let t = self.fresh_tmp();
                 self.emit(format!("{t} = load {ll}, ptr {slot}"));
@@ -3009,11 +3102,12 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{agg} = load {{ ptr, ptr, i64, i64 }}, ptr {slot}"));
                 Ok((agg, Type::Map(Box::new(Type::Str), Box::new(val))))
             }
-            // A lambda literal is never lowered as a value (RFC-0023): it is
-            // monomorphized away at the call site that receives it, so a bare one
-            // here would be a checker bug.
+            // A lambda literal in a v1 argument position is monomorphized away
+            // at the call site that receives it (RFC-0023); one reaching the
+            // general expression path is an RFC-0037 storage source this
+            // backend cannot lower yet.
             Expr::Lambda { .. } => {
-                Err("internal: a lambda literal has no value representation".into())
+                Err(rfc0037_gate("a lambda literal in a storage position"))
             }
         }
     }
@@ -4343,6 +4437,12 @@ impl<'a> Gen<'a> {
                 ));
                 Ok((t, b.ret.clone()))
             };
+        }
+        // A call through a stored fn-typed binding (RFC-0037) — not yet lowered.
+        if let Some((_, ty)) = self.lookup(name) {
+            if matches!(self.resolve(&ty), Type::Fn(..)) {
+                return Err(rfc0037_gate(&format!("a call through the stored value `{name}`")));
+            }
         }
         // A call to a function that takes `fn`-typed parameters (RFC-0023): resolve
         // each function-value argument, specialize the callee per those targets, and
@@ -8059,6 +8159,39 @@ mod tests {
             ir.contains("@__vyrn_lambda_main_1_Int64Int64RInt64(i64 %arg0, i64 %arg1)"),
             "captured lambda should take (capture, param):\n{ir}"
         );
+    }
+
+    // ---- stored function values: stage gate (RFC-0037) --------------------
+
+    #[test]
+    fn stored_fn_values_fail_loudly_until_lowered() {
+        // The checker accepts storage (RFC-0037 stage 1); this backend must
+        // refuse to compile it with the named stage diagnostic — never
+        // miscompile. Each storage form hits the gate.
+        let cases: &[&str] = &[
+            // `let` annotation.
+            "fn main() -> Int64 { let g: fn(Int64) -> Int64 = |x| x * 2  return g(3) }",
+            // fn-typed return.
+            "fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
+             fn pick() -> fn(Int64) -> Int64 { return dbl }\n\
+             fn main() -> Int64 { let f = pick()  return f(21) }",
+            // Record field via type decl.
+            "type R = { f: fn(Int64) -> Int64 }\n\
+             fn main() -> Int64 { let r = R { f: |x| x + 1 }  let g = r.f  return g(1) }",
+            // Module state.
+            "type M = fn(Int64) -> Int64\nlet mut chain: Array<M> = []\n\
+             fn main() -> Int64 { chain.push(|x| x)  let m = chain[0]  return m(1) }",
+            // Bare named-fn composition with no annotation anywhere.
+            "fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
+             fn main() -> Int64 { let g = dbl  return g(4) }",
+        ];
+        for src in cases {
+            let e = emit(&check(src).unwrap()).unwrap_err();
+            assert!(
+                e.contains("not yet supported by the native/wasm backends"),
+                "expected the RFC-0037 stage gate, got: {e}\nfor:\n{src}"
+            );
+        }
     }
 
     // ---- worker threads (RFC-0025) ---------------------------------------

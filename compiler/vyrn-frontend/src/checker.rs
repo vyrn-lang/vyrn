@@ -29,6 +29,22 @@ use crate::diagnostics::Diagnostic;
 pub fn check_accum_with_let_types(
     program: &Program,
 ) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
+    let (out, let_types, _) = check_accum_full(program);
+    (out, let_types)
+}
+
+/// The stored-function-value facts (RFC-0037) the `--workers` gate needs:
+/// runs the checker and returns its defunctionalization collection. Diagnostics
+/// are discarded — callers gate on a prior successful check.
+pub fn stored_fn_effects(program: &Program) -> StoredFnEffects {
+    check_accum_full(program).2
+}
+
+/// The full checking pass: diagnostics, the inferred-`let`-type table, and the
+/// RFC-0037 stored-function-value collection.
+fn check_accum_full(
+    program: &Program,
+) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>, StoredFnEffects) {
     let mut out = Vec::new();
 
     // 1. Collect and validate type declarations.
@@ -258,6 +274,21 @@ pub fn check_accum_with_let_types(
         }
     }
 
+    // `extern` / `gen fn` name sets (RFC-0037: neither may become a stored
+    // function value — the checker names the restriction at the use site).
+    let extern_fns: std::collections::HashSet<String> = program
+        .functions
+        .iter()
+        .filter(|f| f.is_extern)
+        .map(|f| f.name.clone())
+        .collect();
+    let gen_fns: std::collections::HashSet<String> = program
+        .functions
+        .iter()
+        .filter(|f| f.is_gen)
+        .map(|f| f.name.clone())
+        .collect();
+
     let checker = Checker {
         sigs: &sigs,
         caps: &caps,
@@ -274,6 +305,12 @@ pub fn check_accum_with_let_types(
         errors: RefCell::new(Vec::new()),
         globals: RefCell::new(HashMap::new()),
         in_test: RefCell::new(false),
+        extern_fns: &extern_fns,
+        gen_fns: &gen_fns,
+        cur_fn: RefCell::new(String::new()),
+        stored_sources: RefCell::new(Vec::new()),
+        stored_calls: RefCell::new(Vec::new()),
+        spawn_sites: RefCell::new(Vec::new()),
     };
 
     // 2b. Module state (RFC-0013): check each initializer in declaration order,
@@ -335,17 +372,18 @@ pub fn check_accum_with_let_types(
     for f in &program.functions {
         let r = (|| -> Result<(), String> {
             for p in &f.params {
-                // A `fn`-typed parameter is legal only on an ordinary function
-                // (RFC-0023): never on an `extern` import/export, whose ABI domain
-                // is checked separately and cannot carry a monomorphized function.
-                if matches!(p.ty, Type::Fn(..)) && (f.is_extern || f.is_export_extern) {
+                // A function-value type is legal only on an ordinary function
+                // (RFC-0023/0037): never on an `extern` import/export, whose ABI
+                // domain crosses the host boundary (closures do not cross wasm),
+                // and never on a `gen fn` (generation-time signatures are wire-ish).
+                if checker.contains_fn(&p.ty) && (f.is_extern || f.is_export_extern) {
                     return Err(format!(
                         "line {}: an `extern` function may not take a `fn`-typed \
                          parameter (RFC-0023)",
                         f.line
                     ));
                 }
-                if matches!(p.ty, Type::Fn(..)) && f.is_gen {
+                if checker.contains_fn(&p.ty) && f.is_gen {
                     return Err(format!(
                         "line {}: a `gen fn` may not take a `fn`-typed parameter in v1 \
                          (RFC-0023)",
@@ -353,6 +391,19 @@ pub fn check_accum_with_let_types(
                     ));
                 }
                 checker.ensure_param_type(&p.ty, f.line)?;
+            }
+            if checker.contains_fn(&f.ret) && (f.is_extern || f.is_export_extern) {
+                return Err(format!(
+                    "line {}: an `extern` function may not return a function value \
+                     (RFC-0037 — closures do not cross the host boundary)",
+                    f.line
+                ));
+            }
+            if checker.contains_fn(&f.ret) && f.is_gen {
+                return Err(format!(
+                    "line {}: a `gen fn` may not return a function value (RFC-0037)",
+                    f.line
+                ));
             }
             checker.ensure_type_exists(&f.ret, f.line)?;
             // An `extern` import (RFC-0012 M1) has no body to check; instead
@@ -397,8 +448,41 @@ pub fn check_accum_with_let_types(
     //    type errors surface first.
     check_comptime_purity(program, &mut out);
 
+    // 8. RFC-0037: re-verify every accepted `spawn` site against the
+    //    stored-closure-EXTENDED spawn-safety fixpoint. The pre-check fixpoint
+    //    cannot see calls through stored function values (their callee set is
+    //    the signature's collected sources), so a function whose only impurity
+    //    flows through a stored value passed the inline check; catch it here.
+    let effects = StoredFnEffects {
+        sources: checker.stored_sources.borrow().clone(),
+        calls: checker.stored_calls.borrow().clone(),
+    };
+    if !effects.calls.is_empty() {
+        let ext = extend_spawn_safe(program, &spawn_safe, &effects);
+        for (caller, callee, line) in checker.spawn_sites.borrow().iter() {
+            if !ext.contains(callee.as_str()) {
+                let mut d = Diagnostic::from_rendered(
+                    format!(
+                        "line {line}: `spawn {callee}(..)` is not allowed: `{callee}` \
+                         (or something it calls) invokes a stored function value \
+                         (RFC-0037) whose possible targets do I/O or touch shared \
+                         mutable state, so running it as a task could race. A \
+                         spawned function must be isolated (pure)."
+                    ),
+                    "check",
+                );
+                d.file = program
+                    .functions
+                    .iter()
+                    .find(|f| &f.name == caller)
+                    .and_then(|f| f.module.clone());
+                out.push(d);
+            }
+        }
+    }
+
     let let_types = checker.let_types.borrow().clone();
-    (out, let_types)
+    (out, let_types, effects)
 }
 
 /// Check every `test` body (RFC-0015). Duplicate names per module are reported;
@@ -524,6 +608,23 @@ struct Checker<'a> {
     /// only when this is set; in ordinary code they are a checker error pointing
     /// at validated types / `Result`.
     in_test: RefCell<bool>,
+    /// Names of `extern` (host-provided) functions — not usable as function
+    /// values (RFC-0037: closures do not cross the host boundary).
+    extern_fns: &'a std::collections::HashSet<String>,
+    /// Names of `gen fn`s — not usable as function values (RFC-0037).
+    gen_fns: &'a std::collections::HashSet<String>,
+    /// The function whose body is currently being checked (RFC-0037 collection).
+    cur_fn: RefCell<String>,
+    /// RFC-0037 defunctionalization sources collected during checking: every
+    /// lambda literal or named function that flows into a stored fn value.
+    stored_sources: RefCell<Vec<StoredSource>>,
+    /// RFC-0037: each call through a stored (non-parameter) fn-typed binding,
+    /// as (enclosing function, signature).
+    stored_calls: RefCell<Vec<(String, Type)>>,
+    /// `spawn` sites that passed the pre-check spawn-safety test, re-verified
+    /// after checking against the stored-closure-extended fixpoint (RFC-0037):
+    /// (caller, callee, line).
+    spawn_sites: RefCell<Vec<(String, String, usize)>>,
 }
 
 /// What an enum variant name resolves to.
@@ -554,6 +655,53 @@ impl<'a> Checker<'a> {
         self.types.get(enum_name).map(|d| d.type_params.clone()).unwrap_or_default()
     }
 
+    /// Whether `ty` transitively contains a function-value type (RFC-0037),
+    /// resolving named types (cycle-safe). Used to keep function values out of
+    /// the positions that stay illegal: `extern`/`gen` signatures, `Ref`/`Task`
+    /// payloads, and nested function signatures.
+    fn contains_fn(&self, ty: &Type) -> bool {
+        fn walk(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
+            match ty {
+                Type::Fn(..) => true,
+                Type::Option(i)
+                | Type::Array(i)
+                | Type::ArrayN(i, _)
+                | Type::Ref(i)
+                | Type::Task(i)
+                | Type::Partial(i) => walk(i, types, seen),
+                Type::Result(a, b) | Type::Map(a, b) | Type::Merge(a, b) => {
+                    walk(a, types, seen) || walk(b, types, seen)
+                }
+                Type::Omit(b, _) | Type::Pick(b, _) => walk(b, types, seen),
+                Type::Record(fs) => fs.iter().any(|f| walk(&f.ty, types, seen)),
+                Type::Enum(vs) => {
+                    vs.iter().any(|v| v.payload.iter().any(|p| walk(p, types, seen)))
+                }
+                Type::App(n, args) => {
+                    args.iter().any(|a| walk(a, types, seen))
+                        || (!seen.iter().any(|s| s == n)
+                            && types.get(n).is_some_and(|d| {
+                                seen.push(n.clone());
+                                let r = walk(&d.base, types, seen);
+                                seen.pop();
+                                r
+                            }))
+                }
+                Type::Named(n) => {
+                    !seen.iter().any(|s| s == n)
+                        && types.get(n).is_some_and(|d| {
+                            seen.push(n.clone());
+                            let r = walk(&d.base, types, seen);
+                            seen.pop();
+                            r
+                        })
+                }
+                _ => false,
+            }
+        }
+        walk(ty, self.types, &mut Vec::new())
+    }
+
     /// Whether a value of type `from` can be used where `to` is expected.
     /// Validated types decay to their base (an `Age` is an `Int`), but the
     /// reverse requires explicit construction.
@@ -573,7 +721,14 @@ impl<'a> Checker<'a> {
         let transparent = |b: &Type| {
             matches!(
                 b,
-                Type::Result(..) | Type::Option(..) | Type::Map(..) | Type::Array(_) | Type::ArrayN(..)
+                Type::Result(..)
+                    | Type::Option(..)
+                    | Type::Map(..)
+                    | Type::Array(_)
+                    | Type::ArrayN(..)
+                    // A named function type (`type Middleware = fn(..) -> ..`,
+                    // RFC-0037) is interchangeable with its structural form.
+                    | Type::Fn(..)
             )
         };
         if let Type::Named(n) = to {
@@ -819,9 +974,18 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // Container types recurse so a nested `fn(..)` (RFC-0023) is caught
-            // anywhere inside them (e.g. `Array<fn(Int64) -> Int64>`).
-            Type::Array(inner) | Type::ArrayN(inner, _) | Type::Ref(inner) | Type::Task(inner) => {
+            // Container types recurse so their element types are validated.
+            Type::Array(inner) | Type::ArrayN(inner, _) => self.ensure_type_exists(inner, line)?,
+            // A `Ref`/`Task` cannot hold a function value (RFC-0037 defers it):
+            // a cell would make the closure's capture snapshot mutable-by-alias,
+            // and a task result slot has no dispatcher to receive one yet.
+            Type::Ref(inner) | Type::Task(inner) => {
+                if self.contains_fn(inner) {
+                    return Err(format!(
+                        "line {line}: a `Ref`/`Task` cannot hold a function value \
+                         (RFC-0037 defers it)"
+                    ));
+                }
                 self.ensure_type_exists(inner, line)?
             }
             // `Map<String, V>` (RFC-0028): keys are `String` in v1. A validated
@@ -840,18 +1004,33 @@ impl<'a> Checker<'a> {
             // A generic parameter is always valid in the context the parser
             // produced it (it only tags names declared in `<...>`).
             Type::Param(_) => {}
-            // A function-value type (RFC-0023) is legal ONLY as a top-level
-            // function-parameter type — never in a record, array, Option/Result,
-            // generic argument, return, `let`, or module-state position. Those
-            // positions all route through `ensure_type_exists`, so rejecting it
-            // here names the restriction everywhere except the one allowed spot
-            // (which is validated by `ensure_param_type`).
-            Type::Fn(..) => {
-                return Err(format!(
-                    "line {line}: function types are parameter-only in v1 — \
-                     `fn(..) -> ..` may appear only as a function parameter's type, \
-                     not here (RFC-0023)"
-                ))
+            // A function-value type (RFC-0037): legal in storage positions —
+            // `let` annotations, record fields, `Array`/`Map` values,
+            // `Option`/`Result`, enum payloads, returns, and module state.
+            // Its own parameter and return types must not themselves carry a
+            // function type (no higher-order-of-higher-order), and the
+            // still-illegal positions (`extern`/`gen` signatures, `Ref`/`Task`,
+            // codec/schema) are rejected at their own sites with named
+            // diagnostics.
+            Type::Fn(ptys, ret) => {
+                for p in ptys {
+                    if self.contains_fn(p) {
+                        return Err(format!(
+                            "line {line}: a function type may not take another \
+                             function value (RFC-0037 defers higher-order function \
+                             types)"
+                        ));
+                    }
+                    self.ensure_type_exists(p, line)?;
+                }
+                if self.contains_fn(ret) {
+                    return Err(format!(
+                        "line {line}: a function type may not return another \
+                         function value (RFC-0037 defers higher-order function \
+                         types)"
+                    ));
+                }
+                self.ensure_type_exists(ret, line)?;
             }
             _ => {}
         }
@@ -866,7 +1045,7 @@ impl<'a> Checker<'a> {
         match ty {
             Type::Fn(ptys, ret) => {
                 for p in ptys {
-                    if matches!(p, Type::Fn(..)) {
+                    if self.contains_fn(p) {
                         return Err(format!(
                             "line {line}: a `fn`-typed parameter may not itself take a \
                              function value in v1 (RFC-0023)"
@@ -874,7 +1053,7 @@ impl<'a> Checker<'a> {
                     }
                     self.ensure_type_exists(p, line)?;
                 }
-                if matches!(**ret, Type::Fn(..)) {
+                if self.contains_fn(ret) {
                     return Err(format!(
                         "line {line}: a `fn`-typed parameter may not return a function \
                          value in v1 (RFC-0023)"
@@ -888,6 +1067,14 @@ impl<'a> Checker<'a> {
     }
 
     fn check_type_decl(&self, t: &TypeDecl) -> Result<(), String> {
+        // A function type (RFC-0037) has no value domain a `where` predicate
+        // could constrain — a named fn type is a transparent alias only.
+        if t.predicate.is_some() && self.contains_fn(&t.base) {
+            return Err(format!(
+                "line {}: a function type cannot carry a `where` predicate (RFC-0037)",
+                t.line
+            ));
+        }
         // Structural record declaration (RFC-0002). A record may carry a `where`
         // clause referencing its fields by name — a cross-field invariant checked
         // at construction (e.g. `{ start: Int, end: Int } where start < end`).
@@ -967,6 +1154,13 @@ impl<'a> Checker<'a> {
                     if matches!(t.base, Type::Map(..)) { "Map" } else { "Array" }
                 ));
             }
+            self.ensure_type_exists(&t.base, t.line)?;
+            return Ok(());
+        }
+        // A transparent alias to a function type (RFC-0037): `type Middleware =
+        // fn(Request) -> Option<Response>`. Interchangeable with its structural
+        // form (see `assignable`); the `where` rejection happened above.
+        if matches!(t.base, Type::Fn(..)) {
             self.ensure_type_exists(&t.base, t.line)?;
             return Ok(());
         }
@@ -1176,6 +1370,7 @@ impl<'a> Checker<'a> {
 
     fn function(&self, f: &Function) -> Result<(), String> {
         *self.cur_bounds.borrow_mut() = f.type_bounds.clone();
+        *self.cur_fn.borrow_mut() = f.name.clone();
         self.errors.borrow_mut().clear();
         // Frame 0 is the module-state bindings (RFC-0013) — the outermost scope,
         // below the parameters; a local (param/let/for) with the same name
@@ -1582,6 +1777,9 @@ impl<'a> Checker<'a> {
             Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(|p| self.contains_heap(p))),
             Type::Option(inner) => self.contains_heap(&inner),
             Type::Result(a, b) => self.contains_heap(&a) || self.contains_heap(&b),
+            // A stored function value (RFC-0037) may hold heap captures
+            // (a snapshotted String/Array/record), so treat it as heap-carrying.
+            Type::Fn(..) => true,
             _ => false,
         }
     }
@@ -1624,6 +1822,28 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
+        // RFC-0037: an expected function type makes this a STORED-function-value
+        // position (a `let` annotation, record field, array/map element,
+        // `Option`/`Result` payload, return, assignment, or module state). A
+        // lambda literal or a bare function name is accepted here and recorded
+        // as a defunctionalization source; an fn-typed binding (composition
+        // `let g = h`) falls through to the ordinary paths below.
+        if let Some(exp) = expected {
+            if matches!(self.base(exp), Type::Fn(..)) {
+                match expr {
+                    Expr::Lambda { .. } => {
+                        return self.stored_fn_lambda(expr, exp, scope, fn_ret)
+                    }
+                    Expr::Var { name, line }
+                        if self.lookup(scope, name).is_none()
+                            && self.sigs.contains_key(name.as_str()) =>
+                    {
+                        return self.stored_fn_named(name, exp, *line);
+                    }
+                    _ => {}
+                }
+            }
+        }
         match expr {
             // An integer literal takes the expected sized-integer type if there is
             // one (`let x: Int32 = 5`), otherwise the default `Int` — but only if
@@ -1699,9 +1919,23 @@ impl<'a> Checker<'a> {
                         )),
                     };
                 }
-                self.lookup(scope, name)
-                    .map(|b| b.ty)
-                    .ok_or_else(|| format!("line {line}: unknown variable `{name}`"))
+                if let Some(b) = self.lookup(scope, name) {
+                    return Ok(b.ty);
+                }
+                // RFC-0037: a bare (non-generic, non-extern, non-gen) function
+                // name in a value position is a stored-function-value source —
+                // `let g = double` infers `fn(..) -> ..` from its signature.
+                if let Some((sptys, sret)) = self.sigs.get(name.as_str()) {
+                    self.storable_named_fn(name, *line)?;
+                    let sig = Type::Fn(sptys.clone(), Box::new(sret.clone()));
+                    self.stored_sources.borrow_mut().push(StoredSource {
+                        sig: self.base(&sig),
+                        named: Some(name.clone()),
+                        lambda: None,
+                    });
+                    return Ok(sig);
+                }
+                Err(format!("line {line}: unknown variable `{name}`"))
             }
             Expr::Unary { op, expr, line } => {
                 // `-9223372036854775808` is the one literal whose magnitude only
@@ -1855,6 +2089,23 @@ impl<'a> Checker<'a> {
                          could race or interleave. A spawned function must be isolated (pure)."
                     ));
                 }
+                // A spawned callee cannot take function-value parameters: its
+                // per-callee thunk carries plain data only (RFC-0037 keeps the
+                // v1 rejection, now with a named diagnostic).
+                if params.iter().any(|p| self.contains_fn(p)) {
+                    return Err(format!(
+                        "line {line}: cannot `spawn {name}(..)`: a spawned function \
+                         may not take function-value parameters (RFC-0037)"
+                    ));
+                }
+                // The pre-check spawn-safety fixpoint cannot see calls through
+                // stored function values (RFC-0037) — record the site and
+                // re-verify it against the extended fixpoint after checking.
+                self.spawn_sites.borrow_mut().push((
+                    self.cur_fn.borrow().clone(),
+                    name.clone(),
+                    *line,
+                ));
                 if params.len() != args.len() {
                     return Err(format!(
                         "line {line}: `{name}` expects {} argument(s), got {}",
@@ -1971,14 +2222,17 @@ impl<'a> Checker<'a> {
                 }
                 Ok(Type::Map(Box::new(key_ty), Box::new(val_ty)))
             }
-            // A lambda literal reaching the general expression checker is in an
+            // A lambda literal reaching the general expression checker is in a
+            // position with no function type to adopt (RFC-0037 storage
+            // positions supply one through `expected`) — in an
             // illegal position (RFC-0023): a valid one is intercepted inside
             // `call` where its `fn`-typed parameter supplies its types. Everywhere
             // else — `let` initializers, returns, operands, non-`fn` arguments — it
             // is rejected here.
             Expr::Lambda { line, .. } => Err(format!(
-                "line {line}: a lambda `|..|` is only allowed as an argument in a \
-                 function-typed parameter position (RFC-0023)"
+                "line {line}: a lambda `|..|` needs a function type from context: \
+                 pass it to a `fn`-typed parameter, or give the binding a function \
+                 type (e.g. `let f: fn(Int64) -> Int64 = |x| x * 2`) (RFC-0037)"
             )),
         }
     }
@@ -2424,31 +2678,45 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
-        // Calling a `fn`-typed parameter (RFC-0023): `f(x)` where `f` is a local
-        // bound to a function value. Checked against the parameter's `fn(..) -> R`
-        // signature before the builtins, so a parameter always shadows a same-named
-        // builtin. The parameter itself is not a storable value — only a call
-        // target (or a pass-through argument, handled where a `fn`-typed argument
-        // is expected).
-        if let Some(Binding { ty: Type::Fn(ptys, ret), .. }) = self.lookup(scope, name) {
-            if ptys.len() != args.len() {
-                return Err(format!(
-                    "line {line}: `{name}` is a function value taking {} argument(s), got {}",
-                    ptys.len(),
-                    args.len()
-                ));
-            }
-            for (i, (arg, pty)) in args.iter().zip(&ptys).enumerate() {
-                let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
-                if !self.coercible(&aty, pty) {
+        // Calling a function value (RFC-0023/0037): `f(x)` where `f` is a
+        // binding of function type — a v1 `fn`-typed parameter, or any stored
+        // fn-typed `let`/`for`-var/field-bound local/module state (RFC-0037,
+        // through a named alias too). Checked against the value's
+        // `fn(..) -> R` signature before the builtins, so a binding always
+        // shadows a same-named builtin.
+        if let Some(binding) = self.lookup(scope, name) {
+            if let Type::Fn(ptys, ret) = self.base(&binding.ty) {
+                if ptys.len() != args.len() {
                     return Err(format!(
-                        "line {line}: `{name}` argument {} expects {pty}, found {aty}",
-                        i + 1
+                        "line {line}: `{name}` is a function value taking {} argument(s), got {}",
+                        ptys.len(),
+                        args.len()
                     ));
                 }
-                self.prove_coercion(arg, pty, line)?;
+                for (i, (arg, pty)) in args.iter().zip(&ptys).enumerate() {
+                    let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
+                    if !self.coercible(&aty, pty) {
+                        return Err(format!(
+                            "line {line}: `{name}` argument {} expects {pty}, found {aty}",
+                            i + 1
+                        ));
+                    }
+                    self.prove_coercion(arg, pty, line)?;
+                }
+                // RFC-0037 effect collection: a call through a STORED value (any
+                // fn-typed binding that is not a v1 parameter — the params frame
+                // is index 1, above the globals frame 0) is dispatched over the
+                // signature's collected sources, so record (caller, signature)
+                // for the extended spawn/workers fixpoint. v1 parameter calls
+                // keep their caller-site attribution untouched.
+                let frame = scope.iter().rposition(|f| f.contains_key(name));
+                if frame != Some(1) {
+                    self.stored_calls
+                        .borrow_mut()
+                        .push((self.cur_fn.borrow().clone(), self.base(&binding.ty)));
+                }
+                return Ok((*ret).clone());
             }
-            return Ok((*ret).clone());
         }
         // Removed free-function builtins → their method/operator replacements.
         // These fire only for the *bare* user-written spelling; the desugaring
@@ -3742,6 +4010,187 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Check a lambda literal flowing into a STORED function value (RFC-0037):
+    /// the expected type is concrete (`fn(P..) -> R`, possibly through a named
+    /// alias), the capture discipline is RFC-0023's verbatim (captures are a
+    /// by-value read-only snapshot at this evaluation site), and the source is
+    /// recorded for defunctionalization (one enum variant per source) along
+    /// with the effect summary the spawn/workers analyses need.
+    fn stored_fn_lambda(
+        &self,
+        expr: &Expr,
+        exp: &Type,
+        scope: &Vec<HashMap<String, Binding>>,
+        fn_ret: Option<&Type>,
+    ) -> Result<Type, String> {
+        let Expr::Lambda { params, body, line } = expr else { unreachable!() };
+        let sig = self.base(exp);
+        let Type::Fn(ptys, ret) = &sig else { unreachable!() };
+        let ret = (**ret).clone();
+        if params.len() != ptys.len() {
+            return Err(format!(
+                "line {line}: this lambda takes {} parameter(s), but the expected \
+                 function type `{exp}` takes {}",
+                params.len(),
+                ptys.len()
+            ));
+        }
+        // Bind the lambda's parameters (typed from the signature) in a fresh
+        // frame over the enclosing scope — captures resolve through the outer
+        // frames by read.
+        let mut inner = scope.clone();
+        inner.push(HashMap::new());
+        for (pn, pty) in params.iter().zip(ptys) {
+            inner
+                .last_mut()
+                .unwrap()
+                .insert(pn.clone(), Binding { ty: pty.clone(), mutable: false });
+        }
+        // RFC-0023 capture rules verbatim: read-only, no nested lambda literal.
+        let mut locals: HashSet<String> = params.iter().cloned().collect();
+        self.check_lambda_body_captures(body, scope, &mut locals, *line)?;
+        // Calls through OTHER stored fn values inside this body belong to this
+        // lambda's own effect summary (the body runs wherever the value is
+        // invoked, not here) — snapshot the recorder around the body check.
+        let calls_before = self.stored_calls.borrow().len();
+        match body {
+            LambdaBody::Expr(e) => {
+                let t = self.expr(e, &inner, Some(&ret), fn_ret)?;
+                if ret != Type::Unit {
+                    if !self.coercible(&t, &ret) {
+                        return Err(format!(
+                            "line {line}: this lambda returns {t}, but the expected \
+                             function type `{exp}` returns {ret}"
+                        ));
+                    }
+                    self.prove_coercion(e, &ret, *line)?;
+                }
+            }
+            LambdaBody::Block(b) => {
+                let returns = self.block(b, &ret, &mut inner);
+                if ret != Type::Unit && !returns {
+                    return Err(format!(
+                        "line {line}: this lambda must return {ret} on all paths"
+                    ));
+                }
+            }
+        }
+        let nested_sigs: Vec<Type> = self.stored_calls.borrow()[calls_before..]
+            .iter()
+            .map(|(_, s)| s.clone())
+            .collect();
+        // Effect summary for the extended spawn/workers fixpoint: the body's
+        // call names, the first module-state binding it touches (if any), and
+        // whether it performs a spawn-forbidden op.
+        let mut calls: std::collections::HashSet<String> = Default::default();
+        match body {
+            LambdaBody::Expr(e) => calls_expr(e, &mut calls),
+            LambdaBody::Block(b) => calls_block(b, &mut calls),
+        }
+        // Names that shadow module state at this point: the lambda's own
+        // params/binders plus every enclosing LOCAL binding (scope frame 0 is
+        // the globals frame itself).
+        let mut local_names: HashSet<String> = params.iter().cloned().collect();
+        if let LambdaBody::Block(b) = body {
+            collect_binders_block(b, &mut local_names);
+        }
+        for frame in scope.iter().skip(1) {
+            local_names.extend(frame.keys().cloned());
+        }
+        let globals = self.globals.borrow();
+        let mut gnames: Vec<&String> = globals.keys().collect();
+        gnames.sort();
+        let touches_global = gnames
+            .into_iter()
+            .find(|g| {
+                let single: std::collections::HashSet<String> =
+                    std::iter::once((*g).clone()).collect();
+                match body {
+                    LambdaBody::Expr(e) => global_ref_expr(e, &single, &local_names),
+                    LambdaBody::Block(b) => global_ref_block(b, &single, &local_names),
+                }
+            })
+            .cloned();
+        let forbidden = calls.iter().any(|c| SPAWN_FORBIDDEN.contains(&c.as_str()))
+            || matches!(body, LambdaBody::Block(b) if contains_drop(b));
+        self.stored_sources.borrow_mut().push(StoredSource {
+            sig: sig.clone(),
+            named: None,
+            lambda: Some(StoredLambda {
+                defined_in: self.cur_fn.borrow().clone(),
+                line: *line,
+                calls,
+                touches_global,
+                forbidden,
+                nested_sigs,
+            }),
+        });
+        Ok(exp.clone())
+    }
+
+    /// Check a bare function name flowing into a stored function value
+    /// (RFC-0037): the named function's signature must match the expected
+    /// `fn(P..) -> R`; generic, `extern`, and `gen` functions are rejected with
+    /// named diagnostics. Records the source (an empty-payload enum variant).
+    fn stored_fn_named(&self, name: &str, exp: &Type, line: usize) -> Result<Type, String> {
+        let sig = self.base(exp);
+        let Type::Fn(ptys, ret) = &sig else { unreachable!() };
+        self.storable_named_fn(name, line)?;
+        let (sptys, sret) = &self.sigs[name];
+        if sptys.len() != ptys.len() {
+            return Err(format!(
+                "line {line}: `{name}` takes {} argument(s), but the expected \
+                 function type `{exp}` takes {}",
+                sptys.len(),
+                ptys.len()
+            ));
+        }
+        for (a, b) in sptys.iter().zip(ptys) {
+            if !self.assignable(b, a) {
+                return Err(format!(
+                    "line {line}: `{name}` expects a {a} argument, but `{exp}` will \
+                     pass it {b}"
+                ));
+            }
+        }
+        if **ret != Type::Unit && !self.coercible(sret, ret) {
+            return Err(format!(
+                "line {line}: `{name}` returns {sret}, but the expected function \
+                 type `{exp}` returns {ret}"
+            ));
+        }
+        self.stored_sources.borrow_mut().push(StoredSource {
+            sig: sig.clone(),
+            named: Some(name.to_string()),
+            lambda: None,
+        });
+        Ok(exp.clone())
+    }
+
+    /// The RFC-0037 gate on using a named function as a value: generic,
+    /// `extern`, and `gen` functions are rejected with named diagnostics.
+    fn storable_named_fn(&self, name: &str, line: usize) -> Result<(), String> {
+        if self.generics.contains_key(name) {
+            return Err(format!(
+                "line {line}: `{name}` is generic and cannot be used as a function \
+                 value in v1 (RFC-0023)"
+            ));
+        }
+        if self.extern_fns.contains(name) {
+            return Err(format!(
+                "line {line}: an `extern` function cannot be used as a function \
+                 value — the host boundary dispatches by name (RFC-0037)"
+            ));
+        }
+        if self.gen_fns.contains(name) {
+            return Err(format!(
+                "line {line}: a `gen fn` runs at generation time and cannot be \
+                 used as a function value (RFC-0037)"
+            ));
+        }
+        Ok(())
+    }
+
     /// Enforce a lambda's capture discipline (RFC-0023): inside the body, a
     /// captured (outer) binding may be READ but never assigned, `drop`ped, or
     /// passed to a `consume` parameter. Names introduced inside the lambda
@@ -4479,6 +4928,171 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
 /// cannot be spawned. A local (param / `let` / `for`-var) with the same name
 /// shadows the global and does not count. Slightly conservative: a name both
 /// shadowed and used as a global in disjoint scopes is treated as a touch.
+/// One source that flows into a stored function value (RFC-0037): a named
+/// top-level function or a lambda literal — one defunctionalization enum
+/// variant each, in collection (declaration/lift) order.
+#[derive(Debug, Clone)]
+pub struct StoredSource {
+    /// The structural `fn(P..) -> R` signature (named aliases resolved).
+    pub sig: Type,
+    /// `Some(name)` when the source is a named top-level function.
+    pub named: Option<String>,
+    /// `Some` when the source is a lambda literal.
+    pub lambda: Option<StoredLambda>,
+}
+
+/// A lambda source's effect summary (RFC-0037), computed where the literal is
+/// checked — the spawn/workers analyses union these over a signature's sources.
+#[derive(Debug, Clone)]
+pub struct StoredLambda {
+    /// The function whose body lexically contains the literal.
+    pub defined_in: String,
+    pub line: usize,
+    /// Every call name in the body (functions, builtins, methods).
+    pub calls: std::collections::HashSet<String>,
+    /// The first module-state binding the body reads or writes, if any.
+    pub touches_global: Option<String>,
+    /// Whether the body performs a spawn-forbidden op (I/O, cells, `drop`, ...).
+    pub forbidden: bool,
+    /// Signatures of OTHER stored function values the body itself calls.
+    pub nested_sigs: Vec<Type>,
+}
+
+/// Whole-program stored-function-value facts (RFC-0037).
+#[derive(Debug, Clone, Default)]
+pub struct StoredFnEffects {
+    pub sources: Vec<StoredSource>,
+    /// `(function, signature)` for each call through a stored fn value.
+    pub calls: Vec<(String, Type)>,
+}
+
+/// Whether two collected fn signatures could describe the same stored value.
+/// Structural equality, loosened so a generic `Type::Param` matches anything
+/// (a stored fn type inside a generic function is collected pre-substitution;
+/// matching loosely keeps the effect union conservative).
+fn fn_sigs_match(a: &Type, b: &Type) -> bool {
+    if matches!(a, Type::Param(_)) || matches!(b, Type::Param(_)) {
+        return true;
+    }
+    match (a, b) {
+        (Type::Fn(ap, ar), Type::Fn(bp, br)) => {
+            ap.len() == bp.len()
+                && ap.iter().zip(bp).all(|(x, y)| fn_sigs_match(x, y))
+                && fn_sigs_match(ar, br)
+        }
+        (Type::Option(x), Type::Option(y))
+        | (Type::Array(x), Type::Array(y))
+        | (Type::Ref(x), Type::Ref(y))
+        | (Type::Task(x), Type::Task(y)) => fn_sigs_match(x, y),
+        (Type::Result(x1, x2), Type::Result(y1, y2))
+        | (Type::Map(x1, x2), Type::Map(y1, y2)) => {
+            fn_sigs_match(x1, y1) && fn_sigs_match(x2, y2)
+        }
+        _ => a == b,
+    }
+}
+
+/// The signatures whose stored values are NOT spawn-safe to call, under the
+/// current safe-function assumption: a signature is unsafe when ANY collected
+/// source is — a named source outside `safe`, or a lambda source that touches
+/// module state, performs a forbidden op, calls an unsafe function, or calls
+/// a stored value of an unsafe signature (iterated to fixpoint).
+fn stored_unsafe_sigs(
+    effects: &StoredFnEffects,
+    safe: &std::collections::HashSet<String>,
+    fn_names: &std::collections::HashSet<String>,
+) -> Vec<Type> {
+    let mut unsafe_sigs: Vec<Type> = Vec::new();
+    loop {
+        let mut changed = false;
+        for src in &effects.sources {
+            if unsafe_sigs.iter().any(|u| fn_sigs_match(u, &src.sig)) {
+                continue;
+            }
+            let bad = if let Some(n) = &src.named {
+                !safe.contains(n)
+            } else if let Some(l) = &src.lambda {
+                l.touches_global.is_some()
+                    || l.forbidden
+                    || l.calls
+                        .iter()
+                        .any(|c| fn_names.contains(c) && !safe.contains(c))
+                    || l.nested_sigs
+                        .iter()
+                        .any(|s| unsafe_sigs.iter().any(|u| fn_sigs_match(u, s)))
+            } else {
+                false
+            };
+            if bad {
+                unsafe_sigs.push(src.sig.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    unsafe_sigs
+}
+
+/// Extend the pre-check spawn-safety set with stored-function-value edges
+/// (RFC-0037): a function that calls a stored value of an unsafe signature
+/// becomes unsafe, and the ordinary call graph re-propagates until fixed.
+fn extend_spawn_safe(
+    program: &Program,
+    pre: &std::collections::HashSet<String>,
+    effects: &StoredFnEffects,
+) -> std::collections::HashSet<String> {
+    let fn_names: std::collections::HashSet<String> =
+        program.functions.iter().map(|f| f.name.clone()).collect();
+    let mut method_impls: HashMap<String, Vec<String>> = HashMap::new();
+    for imp in &program.impls {
+        if let Some(key) = crate::types::type_key(&imp.ty) {
+            for m in &imp.methods {
+                method_impls
+                    .entry(m.name.clone())
+                    .or_default()
+                    .push(crate::types::impl_method_name(&imp.protocol, &key, &m.name));
+            }
+        }
+    }
+    let mut ext = pre.clone();
+    loop {
+        let mut changed = false;
+        let unsafe_sigs = stored_unsafe_sigs(effects, &ext, &fn_names);
+        for (f, sig) in &effects.calls {
+            if ext.contains(f) && unsafe_sigs.iter().any(|u| fn_sigs_match(u, sig)) {
+                ext.remove(f);
+                changed = true;
+            }
+        }
+        // Ordinary call-graph propagation over the shrunk set.
+        let snapshot = ext.clone();
+        for f in &program.functions {
+            if snapshot.contains(&f.name) {
+                let mut callees: std::collections::HashSet<String> = Default::default();
+                for c in fn_calls(&f.body) {
+                    if let Some(impls) = method_impls.get(&c) {
+                        callees.extend(impls.iter().cloned());
+                    }
+                    callees.insert(c);
+                }
+                let ok = callees
+                    .iter()
+                    .filter(|c| fn_names.contains(*c))
+                    .all(|c| snapshot.contains(c));
+                if !ok && ext.remove(&f.name) {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    ext
+}
+
 /// RFC-0025 (`vyrn serve --workers`): does `root` — transitively — read or
 /// write module state? Each worker owns a fully independent interpreter, so
 /// module state is the ONE thing a parallel `handle` cannot touch soundly
@@ -4489,11 +5103,27 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
 /// Deliberately narrower than spawn-safety: `print`, logging, and file I/O
 /// are thread-compatible host effects (each access-log/output line stays
 /// atomic) and do NOT gate workers — only shared mutable state does.
-pub fn module_state_use(program: &Program, root: &str) -> Option<(Vec<String>, String)> {
+pub fn module_state_use(
+    program: &Program,
+    root: &str,
+    stored: &StoredFnEffects,
+) -> Option<(Vec<String>, String)> {
     let global_names: std::collections::HashSet<String> =
         program.globals.iter().map(|g| g.name.clone()).collect();
     if global_names.is_empty() {
         return None;
+    }
+    // RFC-0037: a call through a stored function value dispatches over the
+    // signature's collected sources. Each distinct signature becomes a pseudo
+    // node (named for the chain) whose callees are the sources: a named source
+    // is an edge to that function; a lambda source that touches module state is
+    // an offender itself, and its calls/nested stored calls are further edges.
+    let pseudo_id = |sig: &Type| format!("a stored `{sig}` value");
+    let mut pseudo_sigs: Vec<Type> = Vec::new();
+    for (_, sig) in &stored.calls {
+        if !pseudo_sigs.iter().any(|s| fn_sigs_match(s, sig)) {
+            pseudo_sigs.push(sig.clone());
+        }
     }
     let funcs: HashMap<&str, &Function> =
         program.functions.iter().map(|f| (f.name.as_str(), f)).collect();
@@ -4517,7 +5147,48 @@ pub fn module_state_use(program: &Program, root: &str) -> Option<(Vec<String>, S
         HashMap::from([(root.to_string(), None)]);
     let mut queue: std::collections::VecDeque<String> =
         std::collections::VecDeque::from([root.to_string()]);
+    let chain_to = |cur: &String, parent: &HashMap<String, Option<String>>| {
+        let mut chain = vec![cur.clone()];
+        let mut p = parent[cur].clone();
+        while let Some(prev) = p {
+            p = parent[&prev].clone();
+            chain.push(prev);
+        }
+        chain.reverse();
+        chain
+    };
     while let Some(cur) = queue.pop_front() {
+        // A stored-value pseudo node (RFC-0037): its "body" is the union of the
+        // signature's sources. A module-state-touching lambda source is the
+        // offender; everything else contributes edges.
+        if let Some(sig) = pseudo_sigs.iter().find(|s| pseudo_id(s) == cur) {
+            let mut callees: Vec<String> = Vec::new();
+            for src in &stored.sources {
+                if !fn_sigs_match(&src.sig, sig) {
+                    continue;
+                }
+                if let Some(n) = &src.named {
+                    callees.push(n.clone());
+                }
+                if let Some(l) = &src.lambda {
+                    if let Some(g) = &l.touches_global {
+                        return Some((chain_to(&cur, &parent), g.clone()));
+                    }
+                    callees.extend(l.calls.iter().cloned());
+                    callees.extend(l.nested_sigs.iter().map(&pseudo_id));
+                }
+            }
+            callees.sort();
+            for callee in callees {
+                let known = funcs.contains_key(callee.as_str())
+                    || pseudo_sigs.iter().any(|s| pseudo_id(s) == callee);
+                if known && !parent.contains_key(&callee) {
+                    parent.insert(callee.clone(), Some(cur.clone()));
+                    queue.push_back(callee);
+                }
+            }
+            continue;
+        }
         let Some(f) = funcs.get(cur.as_str()) else { continue };
         if touches_globals(f, &global_names) {
             let mut names: Vec<&String> = program.globals.iter().map(|g| &g.name).collect();
@@ -4531,14 +5202,7 @@ pub fn module_state_use(program: &Program, root: &str) -> Option<(Vec<String>, S
                 })
                 .cloned()
                 .unwrap_or_default();
-            let mut chain = vec![cur.clone()];
-            let mut p = parent[&cur].clone();
-            while let Some(prev) = p {
-                p = parent[&prev].clone();
-                chain.push(prev);
-            }
-            chain.reverse();
-            return Some((chain, which));
+            return Some((chain_to(&cur, &parent), which));
         }
         let mut callees: Vec<String> = Vec::new();
         for c in fn_calls(&f.body) {
@@ -4547,9 +5211,17 @@ pub fn module_state_use(program: &Program, root: &str) -> Option<(Vec<String>, S
             }
             callees.push(c);
         }
+        // RFC-0037: calls through stored values dispatch to the pseudo node.
+        for (fname, sig) in &stored.calls {
+            if fname == &cur {
+                callees.push(pseudo_id(sig));
+            }
+        }
         callees.sort();
         for callee in callees {
-            if funcs.contains_key(callee.as_str()) && !parent.contains_key(&callee) {
+            let known = funcs.contains_key(callee.as_str())
+                || pseudo_sigs.iter().any(|s| pseudo_id(s) == callee);
+            if known && !parent.contains_key(&callee) {
                 parent.insert(callee.clone(), Some(cur.clone()));
                 queue.push_back(callee);
             }
@@ -4926,9 +5598,84 @@ mod tests {
                    fn respond() -> Int64 { return bump() }\n\
                    fn handle(n: Int64) -> Int64 { return respond() }\n";
         let program = parse(lex(src).unwrap()).unwrap();
-        let (chain, global) = module_state_use(&program, "handle").expect("stateful");
+        let (chain, global) = module_state_use(&program, "handle", &Default::default()).expect("stateful");
         assert_eq!(chain, vec!["handle", "respond", "bump"]);
         assert_eq!(global, "hits");
+    }
+
+    // ---- stored function values: spawn / workers pins (RFC-0037) ---------
+
+    #[test]
+    fn spawning_through_a_stateful_stored_value_is_rejected() {
+        // `work` looks pure to the pre-check fixpoint (its only impurity flows
+        // through a stored function value whose source reads module state) —
+        // the extended fixpoint must catch the spawn.
+        let src = "let mut hits: Int64 = 0\n\
+             fn stateful() -> Int64 { return hits }\n\
+             fn make() -> fn() -> Int64 { return stateful }\n\
+             fn work() -> Int64 { let f = make()  return f() }\n\
+             fn main() -> Int64 { let t = spawn work()  return t.join() }";
+        let e = check_src(src).unwrap_err();
+        assert!(
+            e.contains("invokes a stored function value"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn spawning_through_an_isolated_stored_value_is_fine() {
+        let src = "fn pure() -> Int64 { return 7 }\n\
+             fn make() -> fn() -> Int64 { return pure }\n\
+             fn work() -> Int64 { let f = make()  return f() }\n\
+             fn main() -> Int64 { let t = spawn work()  return t.join() }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn spawned_function_may_not_take_fn_parameters() {
+        let src = "fn hof(f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
+             fn main() -> Int64 { let t = spawn hof(|x| x)  return t.join() }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("may not take function-value parameters"), "{e}");
+    }
+
+    #[test]
+    fn workers_gate_walks_through_stored_values() {
+        // The definer (`make`) never touches state itself; the offending global
+        // is reached only THROUGH the stored value's source — the chain must
+        // name the pseudo node and the source function.
+        let src = "let mut hits: Int64 = 0\n\
+             fn stateful(x: Int64) -> Int64 { return x + hits }\n\
+             fn make() -> fn(Int64) -> Int64 { return stateful }\n\
+             fn respond(x: Int64) -> Int64 { let m = make()  return m(x) }\n\
+             fn handle(n: Int64) -> Int64 { return respond(n) }\n";
+        let program = parse(lex(src).unwrap()).unwrap();
+        let stored = stored_fn_effects(&program);
+        let (chain, global) =
+            module_state_use(&program, "handle", &stored).expect("stateful through storage");
+        assert_eq!(global, "hits");
+        assert_eq!(
+            chain,
+            vec![
+                "handle".to_string(),
+                "respond".to_string(),
+                "a stored `fn(Int64) -> Int64` value".to_string(),
+                "stateful".to_string(),
+            ],
+            "{chain:?}"
+        );
+    }
+
+    #[test]
+    fn workers_gate_ignores_isolated_stored_values() {
+        let src = "let mut hits: Int64 = 0\n\
+             fn pure(x: Int64) -> Int64 { return x * 2 }\n\
+             fn make() -> fn(Int64) -> Int64 { return pure }\n\
+             fn respond(x: Int64) -> Int64 { let m = make()  return m(x) }\n\
+             fn handle(n: Int64) -> Int64 { return respond(n) }\n";
+        let program = parse(lex(src).unwrap()).unwrap();
+        let stored = stored_fn_effects(&program);
+        assert!(module_state_use(&program, "handle", &stored).is_none());
     }
 
     #[test]
@@ -4948,7 +5695,7 @@ mod tests {
         if let Some(f) = program.functions.iter_mut().find(|f| f.name == "bump") {
             f.module = Some("store.vyrn".into());
         }
-        let (chain, global) = module_state_use(&program, "handle").expect("stateful");
+        let (chain, global) = module_state_use(&program, "handle", &Default::default()).expect("stateful");
         assert_eq!(chain, vec!["handle", "bump"]);
         assert_eq!(global, "count");
     }
@@ -4963,7 +5710,7 @@ mod tests {
                    fn handle(n: Int64) -> Int64 { print(n)\n let r = readFile(\"x\")\n \
                        return pure(n) }\n";
         let program = parse(lex(src).unwrap()).unwrap();
-        assert!(module_state_use(&program, "handle").is_none());
+        assert!(module_state_use(&program, "handle", &Default::default()).is_none());
     }
 
     #[test]
@@ -6755,26 +7502,89 @@ mod tests {
     }
 
     #[test]
-    fn fn_type_only_in_parameter_position() {
-        // Return type.
-        let ret = "fn f() -> fn(Int64) -> Int64 { return 0 } fn main() -> Int64 { return 0 }";
-        assert!(check_src(ret).unwrap_err().contains("parameter-only"), "{:?}", check_src(ret));
-        // `let` annotation.
-        let letb = "fn main() -> Int64 { let g: fn(Int64) -> Int64 = 0  return 0 }";
-        assert!(check_src(letb).unwrap_err().contains("parameter-only"), "{:?}", check_src(letb));
-        // Record field.
-        let rec = "type R = { f: fn(Int64) -> Int64 } fn main() -> Int64 { return 0 }";
-        assert!(check_src(rec).unwrap_err().contains("parameter-only"), "{:?}", check_src(rec));
-        // Array element.
-        let arr = "fn f(xs: Array<fn(Int64) -> Int64>) -> Int64 { return 0 } fn main() -> Int64 { return 0 }";
-        assert!(check_src(arr).unwrap_err().contains("parameter-only"), "{:?}", check_src(arr));
+    fn fn_types_are_storable() {
+        // RFC-0037 lifts the v1 parameter-only restriction: `fn(..) -> ..` is
+        // legal in returns, `let` annotations, record fields, array elements,
+        // Option payloads, and module state — with lambda literals and named
+        // functions accepted as sources.
+        let ret = "fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
+             fn pick() -> fn(Int64) -> Int64 { return dbl }\n\
+             fn main() -> Int64 { let f = pick()  return f(21) }";
+        assert!(check_src(ret).is_ok(), "{:?}", check_src(ret));
+        let letb = "fn main() -> Int64 { let g: fn(Int64) -> Int64 = |x| x * 2  return g(3) }";
+        assert!(check_src(letb).is_ok(), "{:?}", check_src(letb));
+        let rec = "type R = { f: fn(Int64) -> Int64 }\n\
+             fn main() -> Int64 { let r = R { f: |x| x + 1 }  let g = r.f  return g(1) }";
+        assert!(check_src(rec).is_ok(), "{:?}", check_src(rec));
+        let arr = "fn main() -> Int64 {\n\
+             let mut xs: Array<fn(Int64) -> Int64> = []\n\
+             xs.push(|x| x * 2)\n\
+             let f = xs[0]\n\
+             return f(4) }";
+        assert!(check_src(arr).is_ok(), "{:?}", check_src(arr));
+        let opt = "fn main() -> Int64 {\n\
+             let o: Option<fn(Int64) -> Int64> = Some(|x| x - 1)\n\
+             return match o { Some(f) => f(1), None => 0 } }";
+        assert!(check_src(opt).is_ok(), "{:?}", check_src(opt));
+        let state = "type Middleware = fn(Int64) -> Int64\n\
+             let mut chain: Array<Middleware> = []\n\
+             fn add() { chain.push(|x| x + 1) }\n\
+             fn main() -> Int64 { add()  let m = chain[0]  return m(1) }";
+        assert!(check_src(state).is_ok(), "{:?}", check_src(state));
+        // Composition: value-to-value flow creates no new source and stays legal.
+        let compose = "fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
+             fn main() -> Int64 { let g = dbl  let h = g  return h(5) }";
+        assert!(check_src(compose).is_ok(), "{:?}", check_src(compose));
     }
 
     #[test]
-    fn lambda_only_as_call_argument() {
+    fn fn_types_still_rejected_where_illegal() {
+        // `Ref` cannot hold a function value (RFC-0037 defers it).
+        let refv = "fn main() -> Int64 { let c: Ref<fn(Int64) -> Int64> = cell(0)  return 0 }";
+        assert!(
+            check_src(refv).unwrap_err().contains("cannot hold a function value"),
+            "{:?}",
+            check_src(refv)
+        );
+        // No higher-order-of-higher-order: a stored fn type may not take or
+        // return another function value.
+        let hof = "fn main() -> Int64 { let g: fn(fn(Int64) -> Int64) -> Int64 = |x| 0  return 0 }";
+        assert!(
+            check_src(hof).unwrap_err().contains("may not take another function value"),
+            "{:?}",
+            check_src(hof)
+        );
+        // A function type has no `where` domain.
+        let pred = "type F = fn(Int64) -> Int64 where value > 0\n fn main() -> Int64 { return 0 }";
+        assert!(
+            check_src(pred).unwrap_err().contains("cannot carry a `where` predicate"),
+            "{:?}",
+            check_src(pred)
+        );
+        // Function values have no `==`.
+        let eq = "fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
+             fn main() -> Int64 { let a = dbl  let b = dbl  if a == b { return 1 }  return 0 }";
+        assert!(
+            check_src(eq).unwrap_err().contains("`==`/`!=`"),
+            "{:?}",
+            check_src(eq)
+        );
+        // `toJson` rejects fn-typed data with the type named (functions don't
+        // go on the wire).
+        let wire = "type H = { f: fn(Int64) -> Int64 }\n\
+             fn main() -> Int64 { let h = H { f: |x| x }  let s = toJson(h)  return 0 }";
+        assert!(
+            check_src(wire).unwrap_err().contains("cannot encode"),
+            "{:?}",
+            check_src(wire)
+        );
+    }
+
+    #[test]
+    fn lambda_still_needs_a_function_type_from_context() {
         let src = "fn main() -> Int64 { let g = |x| x * 2  return 0 }";
         assert!(
-            check_src(src).unwrap_err().contains("only allowed as an argument"),
+            check_src(src).unwrap_err().contains("needs a function type from context"),
             "{:?}",
             check_src(src)
         );

@@ -1848,7 +1848,11 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
 /// effects (`print`, file I/O) are deliberately allowed — each log/output line
 /// stays atomic; only shared mutable state gates parallelism.
 fn refuse_workers_if_stateful(program: &vyrn_frontend::ast::Program) -> Option<ExitCode> {
-    let (chain, global) = vyrn_frontend::checker::module_state_use(program, "handle")?;
+    // RFC-0037: calls through stored function values dispatch over the
+    // signature's collected sources — the checker's collection feeds the walk.
+    let stored = vyrn_frontend::checker::stored_fn_effects(program);
+    let (chain, global) =
+        vyrn_frontend::checker::module_state_use(program, "handle", &stored)?;
     let path = chain.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(" -> ");
     eprintln!(
         "error: `--workers` needs a module-state-free `handle`: {path} reads or writes \

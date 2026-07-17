@@ -1131,8 +1131,9 @@ impl<'a> Interp<'a> {
         }))
     }
 
-    /// Look up `name` in the local scope and return a clone if it is a function
-    /// value (RFC-0023) — used to dispatch a call to a `fn`-typed parameter.
+    /// Look up `name` in the local scope — or module state (RFC-0037) — and
+    /// return a clone if it is a function value: the dispatch step for a call
+    /// through a `fn`-typed parameter or any stored fn-typed binding.
     fn lookup_fnval(&self, scope: &[HashMap<String, Slot>], name: &str) -> Option<FnVal> {
         for frame in scope.iter().rev() {
             if let Some(slot) = frame.get(name) {
@@ -1140,6 +1141,12 @@ impl<'a> Interp<'a> {
                     Val::Fn(fv) => Some((**fv).clone()),
                     _ => None,
                 };
+            }
+        }
+        // Module state of function type (RFC-0037) — read live, like any global.
+        if let Some(slot) = self.globals.borrow().get(name) {
+            if let Val::Fn(fv) = &slot.v {
+                return Some((**fv).clone());
             }
         }
         None
@@ -1569,10 +1576,12 @@ impl<'a> Interp<'a> {
             Expr::Float(x) => Ok(Val::Float(*x)),
             Expr::Bool(b) => Ok(Val::Bool(*b)),
             Expr::Str(s) => Ok(Val::Str(s.clone())),
-            // A lambda literal (RFC-0023). Reached only as a `fn`-typed call
-            // argument (the checker forbids it elsewhere); its parameter/return
-            // types are supplied by the call handler, so here we snapshot captures
-            // with the types left blank — a bare evaluation never actually runs.
+            // A lambda literal: a `fn`-typed call argument (RFC-0023) or a
+            // storage-position source (RFC-0037). Captures snapshot HERE (the
+            // evaluation site — the capture-timing lock); the parameter/return
+            // types are left blank and adopted from the declared `fn(..) -> R`
+            // slot type by `coerce` at the storage boundary (every storage path
+            // — `let`, assign, push-rebind, field/element store — coerces).
             Expr::Lambda { params, body, .. } => {
                 Ok(self.make_closure(params, body, scope, Vec::new(), Type::Unit))
             }
@@ -1593,6 +1602,11 @@ impl<'a> Interp<'a> {
                 // Fall back to module state (RFC-0013).
                 if let Some(slot) = self.globals.borrow().get(name) {
                     return Ok(slot.v.clone());
+                }
+                // A bare function name in a value position (RFC-0037): a stored
+                // function value with an empty capture set.
+                if self.funcs.contains_key(name.as_str()) {
+                    return Ok(Val::Fn(Box::new(FnVal::Named(name.clone()))));
                 }
                 Err(format!("unbound variable `{name}`").into())
             }
@@ -2801,6 +2815,23 @@ impl<'a> Interp<'a> {
                 }
                 Ok(Val::Map(out))
             }
+            // A function value flowing into a stored fn-typed slot (RFC-0037):
+            // adopt the slot's signature. A lambda evaluated bare (in a storage
+            // position) snapshots its captures with blank types; the declared
+            // `fn(P..) -> R` supplies the parameter coercions and the return
+            // type its invocations must honor — exactly what a `fn`-typed
+            // parameter position supplies in v1. A named source needs nothing
+            // (its own signature coerces at the call boundary).
+            (Type::Fn(ptys, ret), Val::Fn(fv)) => Ok(Val::Fn(Box::new(match *fv {
+                FnVal::Lambda { params, body, captures, .. } => FnVal::Lambda {
+                    params,
+                    body,
+                    captures,
+                    param_tys: ptys.clone(),
+                    ret: (**ret).clone(),
+                },
+                named => named,
+            }))),
             (_, v) => Ok(v),
         }
     }
@@ -5201,6 +5232,122 @@ mod tests {
                  let zs = map(ys, |x| x * x)\n\
                  let mut s = 0  for z in zs { s = s + z }  return s }";
         assert_eq!(run(src).unwrap(), 14);
+    }
+
+    // ---- stored function values (RFC-0037) -------------------------------
+
+    #[test]
+    fn stored_lambda_in_let_runs() {
+        let src = "fn main() -> Int64 { let g: fn(Int64) -> Int64 = |x| x * 2  return g(21) }";
+        assert_eq!(run(src).unwrap(), 42);
+    }
+
+    #[test]
+    fn stored_capture_survives_scope_exit() {
+        // The capture is a by-value snapshot at the lambda's evaluation site —
+        // it lives inside the value, so it survives the maker's return.
+        let src = "fn makeAdder(n: Int64) -> fn(Int64) -> Int64 { return |x| x + n }\n\
+             fn main() -> Int64 { let add5 = makeAdder(5)  let add7 = makeAdder(7)\n\
+             return add5(10) + add7(10) }";
+        assert_eq!(run(src).unwrap(), 32);
+    }
+
+    #[test]
+    fn stored_capture_is_a_snapshot_not_a_reference() {
+        // Reassigning the captured binding after the literal is evaluated is
+        // never observed (RFC-0023 capture timing, verbatim in storage).
+        let src = "fn main() -> Int64 { let mut n = 1\n\
+             let f: fn() -> Int64 = || n\n\
+             n = 5\n\
+             return f() }";
+        assert_eq!(run(src).unwrap(), 1);
+    }
+
+    #[test]
+    fn stored_values_in_arrays_records_options() {
+        let src = "type Ops = { plus: fn(Int64) -> Int64, minus: fn(Int64) -> Int64 }\n\
+             fn main() -> Int64 {\n\
+             let mut xs: Array<fn(Int64) -> Int64> = []\n\
+             xs.push(|x| x * 2)\n\
+             xs.push(|x| x + 100)\n\
+             let mut s = 0\n\
+             for f in xs { s = s + f(10) }\n\
+             let ops = Ops { plus: |x| x + 1, minus: |x| x - 1 }\n\
+             let p = ops.plus\n\
+             let m = ops.minus\n\
+             let o: Option<fn(Int64) -> Int64> = Some(|x| x * x)\n\
+             let q = match o { Some(f) => f(3), None => 0 }\n\
+             return s + p(5) + m(5) + q }";
+        // s = 20 + 110 = 130; p(5)=6; m(5)=4; q=9 → 149.
+        assert_eq!(run(src).unwrap(), 149);
+    }
+
+    #[test]
+    fn stored_fn_module_state_and_middleware_chain() {
+        // Module state holds closures (read live at call time); a middleware
+        // chain matches the RFC's surface: first Some(..) wins.
+        let src = "type Middleware = fn(Int64) -> Option<Int64>\n\
+             let mut chain: Array<Middleware> = []\n\
+             fn add(threshold: Int64) { chain.push(|x| if x > threshold { Some(x * 10) } else { None }) }\n\
+             fn runAll(x: Int64) -> Int64 {\n\
+                 let mut hit = 0 - 1\n\
+                 for m in chain {\n\
+                     if hit < 0 { hit = match m(x) { Some(r) => r, None => hit } }\n\
+                 }\n\
+                 return hit }\n\
+             fn main() -> Int64 { add(100)  add(10)  add(0)\n\
+             return runAll(50) }";
+        // 50 > 100? no. 50 > 10 → Some(500).
+        assert_eq!(run(src).unwrap(), 500);
+    }
+
+    #[test]
+    fn stored_named_fn_and_composition() {
+        let src = "fn dbl(n: Int64) -> Int64 { return n * 2 }\n\
+             fn main() -> Int64 { let g = dbl  let h = g\n\
+             let mut cur: fn(Int64) -> Int64 = h\n\
+             return cur(4) }";
+        assert_eq!(run(src).unwrap(), 8);
+    }
+
+    #[test]
+    fn stored_value_flows_into_v1_fn_parameter() {
+        // A stored value handed to a v1 `fn`-typed parameter dispatches inside
+        // the (interp-dynamic / codegen-specialized) instance.
+        let src = format!(
+            "{TWICE}fn main() -> Int64 {{ let bump = 3\n\
+             let g: fn(Int64) -> Int64 = |x| x + bump\n\
+             return sum(twice([1, 2, 3], g)) }}"
+        );
+        assert_eq!(run(&src).unwrap(), 15);
+    }
+
+    #[test]
+    fn stored_closure_reads_module_state_live() {
+        // Module state is NOT captured — a read inside the body resolves live.
+        let src = "let mut base: Int64 = 1\n\
+             fn main() -> Int64 { let f: fn() -> Int64 = || base\n\
+             base = 41\n\
+             return f() + 1 }";
+        assert_eq!(run(src).unwrap(), 42);
+    }
+
+    #[test]
+    fn trap_inside_stored_closure_has_canonical_wording() {
+        let src = "fn main() -> Int64 { let f: fn(Int64) -> Int64 = |x| 10 / x\n\
+             return f(0) }";
+        let err = run(src).unwrap_err();
+        assert!(err.contains("division by zero"), "{err}");
+    }
+
+    #[test]
+    fn stored_lambda_coerces_arguments_to_signature_types() {
+        // The declared slot type supplies the parameter coercions: a UInt8
+        // parameter wraps exactly as a named callee's would.
+        let src = "fn main() -> Int64 { let f: fn(UInt8) -> Int64 = |b| Int64(b + 200)\n\
+             return f(100) }";
+        // 100 + 200 wraps at the UInt8 parameter's width: 300 & 0xFF = 44.
+        assert_eq!(run(src).unwrap(), 44);
     }
 
     // ---- `if` as an expression (RFC-0030) --------------------------------
