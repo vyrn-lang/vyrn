@@ -1,0 +1,20 @@
+{
+  "colors": {
+    "brand": { "500": "#2563eb", "600": "#1d4ed8" },
+    "gray":  { "200": "#e5e7eb", "500": "#6b7280", "700": "#374151" },
+    "red":   { "500": "#ef4444", "600": "#dc2626" },
+    "white": "#ffffff"
+  },
+  "spacing": {
+    "0": "0", "1": "0.25rem", "2": "0.5rem", "3": "0.75rem", "4": "1rem", "6": "1.5rem"
+  },
+  "radius":  { "DEFAULT": "0.5rem", "sm": "0.25rem", "lg": "0.75rem" },
+  "fontSize": { "sm": "0.875rem", "base": "1rem", "lg": "1.25rem" },
+  "breakpoints": { "sm": "640px", "md": "768px" },
+  "safelist": [
+    "sub", "count", "bar", "lang", "empty", "issues",
+    "pastelist", "paste", "meta", "ptitle", "plang", "pwhen", "detail",
+    "pasteview", "pmeta", "pbody", "rawlink", "backlink",
+    "create", "field", "save", "row", "hint"
+  ]
+}

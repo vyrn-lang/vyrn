@@ -1,0 +1,138 @@
+/// Server-side view helpers: the page chrome (localized nav) and the page bodies.
+/// Uses the LIVE `i18n("./strings")` generator's STATEFUL accessors (RFC-0029) —
+/// `setLocale(l)` then `tAppTitle()` — and theme utilities checked against `Tw`
+/// at compile time (RFC-0032/0036).
+///
+/// The home page is rendered through the `std/ui` pages router (routes/index.vyrn
+/// returns this `Html`, the generator wraps it in `document()`). The paste VIEW
+/// and the 404 are served straight from the server root as complete documents,
+/// because `std/ui` dynamic route segments are Int64-only and paste ids are
+/// content-addressed STRINGS — see NOTES.
+import { el, text, Html, Attr, document } from "std/html"
+import { i18n } from "std/i18n"
+import { setLocale, locale, Locale, tAppTitle, tAppTagline, tNavHomeLabel, tNavAboutLabel, tBinCount, tBinEmpty, tBinUntitled, tBinViewRaw, tBinBackHome, tBinCreated, tBinRecent } from i18n("./strings")
+import { tw } from "std/tw"
+import * as theme from tw("./theme.json")
+import { Paste, PasteList } from "./wire"
+
+/// A nav link styled with theme utilities (compile-checked classes).
+fn navLink(href: String, label: String) -> Html {
+    return el("a", [A("href", href), theme.cls("mr-2 hover:text-brand-600")], [text(label)])
+}
+
+/// The page chrome around `kids`: the theme + bespoke stylesheets, the soft-nav
+/// runtime, then the localized header + nav.
+export fn shell(kids: Array<Html>) -> Html {
+    return el("div", [Id("root")], [
+            el("link", [A("rel", "stylesheet"), A("href", "/theme.css")], []),
+            el("link", [A("rel", "stylesheet"), A("href", "/style.css")], []),
+            el("script", [A("type", "module"), A("src", "/vyrn-runtime/vyrn-nav.js")], []),
+            el("header", [theme.cls("flex items-center gap-3 md:gap-6")], [
+                    el("h1", [], [text(tAppTitle())]),
+                    el("nav", [], [
+                            navLink("/", tNavHomeLabel()),
+                            navLink("/about", tNavAboutLabel()),
+                        ]),
+                ]),
+            el("main", [], kids),
+        ])
+}
+
+/// The display title of a paste — its title, or the localized "(untitled)".
+fn displayTitle(p: Paste) -> String {
+    if p.title.length == 0 {
+        return tBinUntitled()
+    }
+    return p.title
+}
+
+/// One row in the recent-pastes list, linking to the paste view. The link is
+/// marked `data-nav="prefetch"` so vyrn-nav prefetches the paste on hover.
+fn pasteRow(p: Paste) -> Html {
+    return el("li", [Cls("paste")], [
+            el("a", [A("href", "/p/\{p.id}"), A("data-nav", "prefetch"), Cls("ptitle")], [text(displayTitle(p))]),
+            el("span", [Cls("plang")], [text(p.lang)]),
+            el("span", [Cls("pwhen")], [text(tBinCreated(p.created.toString()))]),
+        ])
+}
+
+/// The home page body — SSR the recent list read from the store, plus the mount
+/// point `#app` the browser create-island hydrates.
+export fn homePage(list: PasteList) -> Html {
+    let mut rows: Array<Html> = []
+    for p in list.pastes {
+        rows.push(pasteRow(p))
+    }
+    let mut recent: Array<Html> = []
+    if list.pastes.length == 0 {
+        recent = [el("p", [Cls("empty")], [text(tBinEmpty())])]
+    } else {
+        recent = [
+            el("p", [Cls("count")], [text(tBinCount(list.pastes.length))]),
+            el("ul", [Cls("pastelist")], rows),
+        ]
+    }
+    return shell([
+            el("p", [Cls("sub")], [text(tAppTagline())]),
+            el("div", [Id("app")], []),
+            el("script", [A("type", "module"), A("src", "/app.js")], []),
+            el("h2", [], [text(tBinRecent())]),
+            el("div", [], recent),
+        ])
+}
+
+/// The paste-view body: metadata line + the ESCAPED body in a <pre> (std/html's
+/// `text()` escapes `< > &`), plus a link to the raw bytes.
+fn pasteBody(p: Paste) -> Html {
+    return shell([
+            el("p", [], [navLink("/", tBinBackHome())]),
+            el("h2", [], [text(displayTitle(p))]),
+            el("p", [Cls("pmeta")], [
+                    el("span", [Cls("plang")], [text(p.lang)]),
+                    el("span", [Cls("pwhen")], [text(tBinCreated(p.created.toString()))]),
+                    el("a", [A("href", "/raw/\{p.id}"), Cls("rawlink")], [text(tBinViewRaw())]),
+                ]),
+            el("pre", [Cls("pbody")], [text(p.body)]),
+        ])
+}
+
+/// A COMPLETE HTML document for a paste view (served from the server root).
+export fn pasteDocument(p: Paste) -> String {
+    return document(displayTitle(p), [], pasteBody(p))
+}
+
+/// A COMPLETE 404 document (served from the server root for unknown ids/paths).
+export fn notFoundDocument() -> String {
+    return document("Not Found", [], shell([
+                el("h2", [], [text("404 — not found")]),
+                el("p", [], [navLink("/", tBinBackHome())]),
+            ]))
+}
+
+/// The About page body — static prose + a live CLDR-plural demo (en + uk).
+export fn aboutPage() -> Html {
+    let saved = locale()
+    setLocale(En)
+    let enRows = [pluralRow("en", 1), pluralRow("en", 2), pluralRow("en", 5)]
+    setLocale(Uk)
+    let ukRows = [pluralRow("uk", 1), pluralRow("uk", 2), pluralRow("uk", 5)]
+    setLocale(saved)
+    return shell([
+            el("h2", [], [text("About")]),
+            el("p", [], [text("A tiny pastebin dogfooding the Vyrn stack: std/html, std/ui pages, std/rpc, std/i18n, std/tw, Map on the wire, stored-closure middleware, and — the point — persistence to disk via readFile/writeFile.")]),
+            el("h3", [], [text("CLDR plurals")]),
+            el("p", [Cls("sub")], [text("The same count message for 1 / 2 / 5 — English has two forms, Ukrainian three (one / few / many).")]),
+            el("table", [Cls("plurals")], [
+                    el("thead", [], [el("tr", [], [el("th", [], [text("locale")]), el("th", [], [text("n")]), el("th", [], [text("message")])])]),
+                    el("tbody", [], [enRows[0], enRows[1], enRows[2], ukRows[0], ukRows[1], ukRows[2]]),
+                ]),
+        ])
+}
+
+fn pluralRow(label: String, n: Int64) -> Html {
+    return el("tr", [], [
+            el("td", [], [text(label)]),
+            el("td", [], [text("\{n}")]),
+            el("td", [], [text(tBinCount(n))]),
+        ])
+}

@@ -8,6 +8,9 @@ target/
 *.pdb
 # Files written by I/O examples (RFC-0014) — recreated on every run
 examples/data/*.tmp.txt
+# Runtime store written by the `examples/bin` pastebin (persistence dogfood) —
+# it is app data, not source; recreated on demand by the running server
+examples/bin/data/
 # Browser-demo modules (regenerable via web/build.ps1)
 web/*.wasm
 web/*.shim.c

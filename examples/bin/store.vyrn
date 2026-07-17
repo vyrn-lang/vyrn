@@ -1,0 +1,178 @@
+/// The bin STORE — it OWNS the `store` module state (RFC-0029: a top-level `let`
+/// is legal in any module) and holds the REAL, stateful procedure bodies.
+///
+/// PERSISTENCE (the probe): the state is INITIALIZED from disk in its own
+/// initializer — `let mut store: StoreFile = persist.loadStore()`. This is legal
+/// ONLY because `loadStore` is imported from `persist.vyrn`: RFC-0029 lets an
+/// initializer call an imported fn (its module inits first) but not a same-module
+/// one. So load-on-init works, but ONLY via a helper in another module — the
+/// pattern the task predicted. Every mutation re-persists the WHOLE store through
+/// `persist.saveStore(snapshot())` (a deep copy, so the global is never moved out).
+import { PasteId, Paste, Created, CreateReq, IdReq, PasteList, PasteResult, StoreFile } from "./wire"
+import { fullDigest } from "./util"
+import * as persist from "./persist"
+
+/// The single source of truth: the paste array + the monotonic counter, loaded
+/// from `data/pastes.json` at startup (missing/corrupt => empty, see persist).
+let mut store: StoreFile = persist.loadStore()
+
+/// A deep copy of a paste (so a value can leave the store without moving module
+/// state — nothing may take ownership of a global).
+fn copyPaste(p: Paste) -> Paste {
+    return Paste { id: p.id, title: p.title, body: p.body, lang: p.lang, created: p.created }
+}
+
+/// A fresh, owned copy of the whole store, for handing to `persist.saveStore`
+/// (which consumes its argument) without moving the global.
+fn snapshot() -> StoreFile {
+    let mut ps: Array<Paste> = []
+    for p in store.pastes {
+        ps.push(copyPaste(p))
+    }
+    return StoreFile { pastes: ps, counter: store.counter }
+}
+
+/// True when some stored paste already uses `id`.
+fn idTaken(id: String) -> Bool {
+    for p in store.pastes {
+        if p.id == id {
+            return true
+        }
+    }
+    return false
+}
+
+/// The first `n` bytes of `s` as a String.
+fn prefixOf(s: String, n: Int64) -> String {
+    let sb = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    while i < n && i < sb.length {
+        out.push(sb[i])
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(e) => s,
+    }
+}
+
+/// Content-addressed id: the shortest 6..14-char prefix of the content digest
+/// that no stored paste already uses (extend on collision).
+fn deriveId(body: String, title: String) -> PasteId {
+    let full = fullDigest(body, title)
+    let mut len = 6
+    while len < 14 {
+        let cand = prefixOf(full, len)
+        if idTaken(cand) == false {
+            return cand
+        }
+        len = len + 1
+    }
+    return full
+}
+
+// ---- procedures (REAL, stateful implementations over the store) --------------
+
+/// List every paste, most-recent first (highest `created` counter first).
+export fn listPastes() -> PasteList {
+    let mut out: Array<Paste> = []
+    let mut i = store.pastes.length
+    while i > 0 {
+        out.push(copyPaste(store.pastes[i - 1]))
+        i = i - 1
+    }
+    return PasteList { pastes: out }
+}
+
+/// Fetch one paste by id; `Err` when absent.
+export fn getPaste(req: IdReq) -> PasteResult {
+    for p in store.pastes {
+        if p.id == req.id {
+            return Ok(copyPaste(p))
+        }
+    }
+    return Err("no paste with id \{req.id}")
+}
+
+/// Create a paste (title/body/lang already validated by `fromJson`). Assigns a
+/// content-addressed id and a monotonic `created` sequence number, persists the
+/// whole store, and returns the stored copy. Never `Err` in practice.
+export fn createPaste(req: CreateReq) -> PasteResult {
+    // FRICTION (see NOTES): `store.counter` is a validated field (`Created`), so
+    // it cannot be assigned a bare arithmetic `Int64` — the value must already be
+    // typed. Hence the explicit `let created: Created`.
+    let created: Created = store.counter + 1
+    let id = deriveId(req.body, req.title)
+    // BUG WORKAROUND (see NOTES): an in-place `store.pastes.push(..)` on a global
+    // RECORD-FIELD array silently NO-OPS (it mutates a copy — the counter field
+    // assign below would persist, but the pushed paste vanishes). Whole-global
+    // REASSIGNMENT works, so rebuild the paste array and reinstall `store`.
+    let mut ps: Array<Paste> = []
+    for p in store.pastes {
+        ps.push(copyPaste(p))
+    }
+    ps.push(Paste { id: id, title: req.title, body: req.body, lang: req.lang, created: created })
+    store = StoreFile { pastes: ps, counter: created }
+    persist.saveStore(snapshot())
+    return findByCreated(created)
+}
+
+/// Return the paste stamped `c` — `created` is a unique Int64 (a copy type), so
+/// this looks the just-created paste up without reusing a moved-out id String.
+fn findByCreated(c: Int64) -> PasteResult {
+    for p in store.pastes {
+        if p.created == c {
+            return Ok(copyPaste(p))
+        }
+    }
+    return Err("paste vanished after create")
+}
+
+/// How many pastes are stored (for the list header count).
+export fn pasteCount() -> Int64 {
+    return store.pastes.length
+}
+
+// ---- tests (id stability + load/save round-trip via the codec) ---------------
+
+test "deriveId is stable and content-addressed (same content => same prefix)" {
+    let a = fullDigest("hello world", "greeting")
+    let b = fullDigest("hello world", "greeting")
+    assertEq(a, b)
+    assertEq(a.length, 14)
+    let c = fullDigest("hello worlds", "greeting")
+    assert(a != c)
+}
+
+test "StoreFile round-trips through the JSON codec (load/save fidelity)" {
+    let s = StoreFile {
+        pastes: [Paste { id: "abc123", title: "T", body: "the body", lang: "vyrn", created: 1 }],
+        counter: 1,
+    }
+    let encoded = toJson(s)
+    let back = decodeOrEmpty(encoded)
+    assertEq(back.counter, 1)
+    assertEq(back.pastes.length, 1)
+    assertEq(back.pastes[0].id, "abc123")
+    assertEq(back.pastes[0].body, "the body")
+    assertEq(back.pastes[0].lang, "vyrn")
+}
+
+/// Decode a StoreFile, or an empty store on failure (a sentinel — `counter: 0`
+/// fails the round-trip test's `counter == 1` assert if decode ever regresses).
+/// A plain helper because `assert`/`assertEq` are test-block-only (can't factor
+/// them into a helper).
+fn decodeOrEmpty(j: String) -> StoreFile {
+    return match fromJson(StoreFile, j) {
+        Valid(b) => b,
+        Invalid(issues) => StoreFile { pastes: [], counter: 0 },
+    }
+}
+
+test "a corrupt/invalid store JSON is rejected by fromJson (no trap)" {
+    match fromJson(StoreFile, "{ not json at all ]") {
+        Valid(s) => assert(false),
+        Invalid(issues) => assert(issues.length >= 1),
+    }
+}

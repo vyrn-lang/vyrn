@@ -1,0 +1,6 @@
+{
+  "name": "bin",
+  "server": "server.vyrn",
+  "client": "client.vyrn",
+  "public": "public"
+}

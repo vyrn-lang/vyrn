@@ -1,0 +1,104 @@
+/// Local helpers the app needs but `std` does not provide: byte-walking string
+/// utilities (no `startsWith`/`substring`/`split` in `std/strings` — the shelf
+/// NOTES logged this) plus a content-addressed id derivation. Ordinary stateless
+/// Vyrn, imported by the server root (path routing) and the store (id derivation).
+///
+/// FRICTION (see NOTES): the id hash WANTED to be FNV-1a, but Vyrn has NO bitwise
+/// operators (no XOR/AND/shift — only `+ - * / %`), so FNV's `hash ^= byte` is
+/// unwritable. This uses a polynomial rolling hash (`h = (h*base + byte) % mod`,
+/// Java-`hashCode`-style) instead, kept positive by the modulo. Two independent
+/// polynomials are concatenated for a longer digest, base36-rendered.
+
+/// True when `s` begins with `p`.
+export fn hasPrefix(s: String, p: String) -> Bool {
+    let sb = bytes(s)
+    let pb = bytes(p)
+    if pb.length > sb.length {
+        return false
+    }
+    let mut i = 0
+    while i < pb.length {
+        if sb[i] != pb[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// `s` with the leading `p` removed (unchanged when `s` does not start with `p`).
+export fn dropPrefix(s: String, p: String) -> String {
+    if hasPrefix(s, p) == false {
+        return s
+    }
+    let sb = bytes(s)
+    let pb = bytes(p)
+    let mut out: Array<UInt8> = []
+    let mut i = pb.length
+    while i < sb.length {
+        out.push(sb[i])
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(e) => s,
+    }
+}
+
+/// A base36 digit (0..35) as its ASCII byte: 0-9 then a-z. Read from a lookup
+/// table rather than computed, because Vyrn has no Int64->UInt8 arithmetic
+/// (`48 + n` is Int64; a byte push wants a UInt8). Reading an existing byte is
+/// the only conversion that type-checks. See NOTES.
+fn digit36(n: Int64) -> UInt8 {
+    let table = bytes("0123456789abcdefghijklmnopqrstuvwxyz")
+    return table[n]
+}
+
+/// `n` (assumed >= 0) rendered base36, left-padded with '0' to at least `width`.
+fn base36(n: Int64, width: Int64) -> String {
+    let mut out: Array<UInt8> = []
+    let mut v = n
+    if v == 0 {
+        out.push(48)
+    }
+    while v > 0 {
+        out.push(digit36(v % 36))
+        v = v / 36
+    }
+    while out.length < width {
+        out.push(48)
+    }
+    // Digits were pushed least-significant first — reverse into big-endian order.
+    let mut rev: Array<UInt8> = []
+    let mut i = out.length
+    while i > 0 {
+        rev.push(out[i - 1])
+        i = i - 1
+    }
+    return match stringFromBytes(rev) {
+        Ok(s) => s,
+        Err(e) => "0",
+    }
+}
+
+/// A polynomial rolling hash of `s` over (base, mod), kept in [0, mod).
+fn poly(s: String, base: Int64, md: Int64) -> Int64 {
+    let sb = bytes(s)
+    let mut h = 0
+    for b in sb {
+        // `Int64(b)` widens the UInt8 (no implicit widening / UInt8 arithmetic in
+        // Vyrn — see NOTES); `+ 1` so a leading zero byte still perturbs the hash.
+        h = (h * base + (Int64(b) + 1)) % md
+    }
+    return h
+}
+
+/// The FULL content digest of a paste's (body + "\u{1}" + title): 14 base36
+/// chars, two independent 7-char polynomial hashes concatenated. The store takes
+/// a short PREFIX of this and extends it on collision (see `store.deriveId`).
+export fn fullDigest(body: String, title: String) -> String {
+    let material = body + "\n\t" + title
+    let a = poly(material, 131, 2176782317)
+    let b = poly(material, 137, 2176782331)
+    return base36(a, 7) + base36(b, 7)
+}

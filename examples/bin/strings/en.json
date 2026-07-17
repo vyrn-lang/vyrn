@@ -1,0 +1,28 @@
+{
+    "app": {
+        "title": "Vyrn Pastebin",
+        "tagline": "Paste text, get a short link. Persisted to disk."
+    },
+    "nav": {
+        "home": { "label": "New paste" },
+        "about": { "label": "About" }
+    },
+    "bin": {
+        "count": "{n, plural, one {# paste} other {# pastes}}",
+        "empty": "No pastes yet — create one below.",
+        "untitled": "(untitled)",
+        "raw": "raw",
+        "viewRaw": "view raw →",
+        "backHome": "← new paste",
+        "created": "paste #{n}",
+        "langLabel": "Language",
+        "create": "New paste",
+        "titleField": "Title (optional)",
+        "bodyField": "Body",
+        "save": "Create paste",
+        "recent": "Recent pastes"
+    },
+    "lang": {
+        "switch": "Мова: українська"
+    }
+}

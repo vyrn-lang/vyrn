@@ -1,0 +1,10 @@
+/// GET / — the home page. RFC-0029 lets this page module read the `store`
+/// DIRECTLY (via the contract's accessors), so the recent-pastes list is
+/// server-rendered. The browser client mounts into `#app` for the create island.
+import { homePage } from "../view"
+import { listPastes } from "../contract"
+import { Html } from "std/html"
+
+export fn page() -> Html {
+    return homePage(listPastes())
+}

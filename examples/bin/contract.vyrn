@@ -1,0 +1,29 @@
+/// The bin RPC contract (RFC-0019) — a THIN, stateless boundary layer.
+/// `rpcServer("./contract")` (in `server.vyrn`) synthesizes the server router from
+/// these procedures; `rpcClient("./contract")` (in `client.vyrn`) re-emits the
+/// reachable wire types verbatim and synthesizes browser stubs. `openapi("./contract")`
+/// emits the OpenAPI document.
+///
+/// The wire types live in `wire.vyrn`; the `store` state and the real procedure
+/// bodies live in `store.vyrn` (`import * as store`). `moduleInterface` follows
+/// the imports (RFC-0031) and hands the generators the full reachable type
+/// closure, so the generated client re-emits every type though none is declared
+/// here. This module only names the types its signatures use and delegates.
+import { CreateReq, IdReq, PasteList, PasteResult } from "./wire"
+import * as store from "./store"
+
+/// List every paste, most-recent first. Zero-param => POST with an empty body.
+export fn listPastes() -> PasteList {
+    return store.listPastes()
+}
+
+/// Fetch one paste by id; `Err` when absent.
+export fn getPaste(req: IdReq) -> PasteResult {
+    return store.getPaste(req)
+}
+
+/// Create a paste (title/body/lang already validated by `fromJson`); returns the
+/// stored copy with its server-assigned id and `created` sequence number.
+export fn createPaste(req: CreateReq) -> PasteResult {
+    return store.createPaste(req)
+}

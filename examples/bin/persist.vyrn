@@ -1,0 +1,63 @@
+/// The bin PERSISTENCE layer — the whole point of this dogfood. It is a plain
+/// IMPORTED module (no state of its own) so that `store.vyrn`'s module-state
+/// INITIALIZER may call `loadStore()`: RFC-0029 forbids an initializer from
+/// calling a SAME-MODULE function, but explicitly ALLOWS calling a function
+/// imported from another module (whose state initializes first). That single
+/// rule is what makes load-on-init expressible at all — see NOTES.
+///
+/// Durability caveat (reported honestly in NOTES): `writeFile` (RFC-0014) is a
+/// truncate-then-write with NO atomic rename and NO fsync. A crash mid-write can
+/// leave `data/pastes.json` truncated/corrupt — which `loadStore` then treats as
+/// an empty store (a logged warning, never a crash). This is the evidence for a
+/// future std/storage RFC.
+import { StoreFile } from "./wire"
+
+/// Where the store lives, relative to the process cwd (`examples/bin/` under
+/// `vyrn dev`). A single flat file — the simplest thing that persists.
+let path = "data/pastes.json"
+
+/// Load the store at startup. A MISSING or CORRUPT file yields an empty store
+/// plus a logged warning — it must never crash the server. This is called from
+/// `store.vyrn`'s initializer (an imported fn, so RFC-0029 permits it).
+export fn loadStore() -> StoreFile {
+    return match readFile(path) {
+        Ok(text) => parseOrEmpty(text),
+        Err(why) => emptyStore(),
+    }
+}
+
+/// Decode the file, or fall back to an empty store with a warning. `fromJson`
+/// returns `Invalid` (never traps) on malformed/invalid JSON, so a hand-corrupted
+/// file is handled the same as a decode-schema mismatch.
+fn parseOrEmpty(text: String) -> StoreFile {
+    return match fromJson(StoreFile, text) {
+        Valid(s) => s,
+        Invalid(issues) => warnEmpty(),
+    }
+}
+
+/// An empty store: no pastes, counter at 0.
+fn emptyStore() -> StoreFile {
+    return StoreFile { pastes: [], counter: 0 }
+}
+
+/// An empty store, but log first — the "corrupt file" path.
+fn warnEmpty() -> StoreFile {
+    logger("store").warn("could not decode \{path} — starting with an empty store")
+    return emptyStore()
+}
+
+/// Persist the WHOLE store after a mutation. `toJson` then `writeFile` (truncate +
+/// write). Returns whether the write succeeded; the store logs a failure but keeps
+/// serving from memory (the write is best-effort, per the durability caveat).
+export fn saveStore(s: StoreFile) -> Bool {
+    return match writeFile(path, toJson(s)) {
+        Ok(done) => done,
+        Err(why) => logFail(why),
+    }
+}
+
+fn logFail(why: String) -> Bool {
+    logger("store").error("could not persist store: \{why}")
+    return false
+}
