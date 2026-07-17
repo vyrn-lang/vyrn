@@ -10,5 +10,12 @@
   },
   "radius":  { "DEFAULT": "0.5rem", "sm": "0.25rem", "lg": "0.75rem" },
   "fontSize": { "sm": "0.875rem", "base": "1rem", "lg": "1.25rem" },
-  "breakpoints": { "sm": "640px", "md": "768px" }
+  "breakpoints": { "sm": "640px", "md": "768px" },
+  "safelist": [
+    "card", "cardbody", "rating", "tags", "issues",
+    "book", "meta", "title", "detail", "row", "rate", "danger",
+    "shelf", "bar", "count", "lang", "noissues", "cols", "col-main",
+    "books", "empty", "sidebar", "taglist", "tag", "active",
+    "add", "save"
+  ]
 }

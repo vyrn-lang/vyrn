@@ -15,8 +15,8 @@ import { i18n } from "std/i18n"
 import { setLocale, locale, Locale, transKey, t, tShelfAdd, tShelfTitle, tShelfUrl, tShelfTagsField, tShelfSave, tShelfRateLabel, tShelfDelete, tShelfConfirm, tShelfCancel, tShelfUnrated, tShelfEmpty, tShelfTags, tShelfFilterAll, tLangSwitch, tShelfCount } from i18n("./strings")
 import { splitTrim } from "./util"
 import { BookView, TagCount, Labels } from "./types"
-import { components } from "std/vyx"
-import { shelfApp, bookCard } from components("./widgets")
+import { componentsThemed } from "std/vyx"
+import { shelfApp, bookCard } from componentsThemed("./widgets", "./theme.json")
 import { Html, toHtmlString, diff } from "std/html"
 
 /// An UNVALIDATED mirror of `AddBookReq` — building this never traps, so a bad
