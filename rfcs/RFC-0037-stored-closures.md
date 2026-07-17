@@ -1,6 +1,6 @@
 # RFC-0037 — Stored Function Values by Defunctionalization (Closures v2)
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented (2026-07-17)
 - **Depends on:** RFC-0023 (function values v1 — the parameter-only
   restriction this lifts; the lambda lifting and capture-timing rules it
   reuses), RFC-0024 (payload enums — the runtime representation), RFC-0004
@@ -127,3 +127,78 @@ cross wasm).
 Everything in "deliberately defers", plus currying/partial application,
 function composition operators, and any change to `.vyx`/UI event
 dispatch (names remain the extern-boundary mechanism).
+
+## Implementation notes (as landed)
+
+- **Checker.** `ensure_type_exists` accepts `Type::Fn` (validating its
+  components; fn-in-fn stays rejected — "a function type may not take/return
+  another function value"). Legal positions as designed: `let` annotations,
+  record fields, `Array`/`Map` elements, `Option`/`Result`, **enum payloads**
+  (a natural extra), returns, module state, and `type X = fn(..)` transparent
+  aliases (interchangeable with the structural form via `assignable`; no
+  `where` predicate). Still rejected with named diagnostics: `extern`/`gen`
+  signatures (params AND returns), `Ref<fn>`/`Task<fn>`, codec/schema
+  ("cannot encode `fn(..) -> ..`"), `==` (the scalar-operand rule names it),
+  generic functions as values, and a spawned callee with fn-typed parameters.
+  Sources are accepted wherever a concrete fn type is EXPECTED (the checker's
+  `expected` channel — every storage boundary already threads it) plus the
+  bare-name value position (`let g = double` infers from the signature).
+  A lambda with no fn type in context keeps a named error suggesting the
+  annotation. Nested lambda literals stay rejected (v1 wording).
+
+- **Effects / spawn / workers.** The checker collects `StoredFnEffects`
+  during checking: every source (named | lambda w/ effect summary, in
+  declaration/lift order) keyed by base-resolved signature, and every call
+  through a NON-parameter fn-typed binding (params frame excluded — v1
+  attribution untouched). `spawn` sites that pass the pre-check fixpoint are
+  re-verified against a stored-value-extended fixpoint (union over a
+  signature's sources, loose `Type::Param` matching, nested stored calls
+  included); `module_state_use` takes the effects and walks per-signature
+  pseudo nodes, so a `--workers` refusal names the chain through
+  ``a stored `fn(..) -> ..` value`` to the offending source and global.
+
+- **Interpreter.** `Val::Fn` (v1's closure value) IS the closed
+  representation: a bare function name evaluates to `FnVal::Named`; a lambda
+  in a storage position snapshots captures at its evaluation site and adopts
+  the declared signature via `coerce` at the storage boundary (every path —
+  let/assign/push-rebind/field/element/constructor — already coerces), which
+  supplies parameter wrapping/validation and the return type exactly as a v1
+  parameter position did. Module-state fn values dispatch live.
+
+- **Codegen (shared IR → native and wasm).** `llt(fn) = { i64 tag,
+  i64 payload }`. One variant per (normalized signature, target) — named fn
+  ⇒ payload 0; lambda ⇒ pointer to a malloc'd by-value capture block (never
+  freed — the same safe leak as every boxed enum payload; copies share it,
+  which is unobservable because captures are read-only). Lifting reuses v1's
+  `emit_lifted_lambda` verbatim. Construction sites learn their signature
+  from an **expected-type stack** pushed at each storage boundary
+  (`if`/`match` arms deliberately push nothing, so conditional sources adopt
+  the outer target). Calls lower to ONE direct call to a per-signature
+  dispatcher `@__vyrn_fndispatch_<mangle>_<sha256/12>` (switch + direct
+  calls; named-source arms coerce args/results through the target's declared
+  types, so validated params re-validate and record widths re-layout; the
+  default arm is unreachable-by-construction and traps defensively). The
+  registry threads through every `Gen` (globals init, functions, generic
+  instantiations, HO instances) so tags are module-global; dispatchers emit
+  last. Fn values ride `Option`/`Result` payload words inline like `Ref`.
+  **The RFC-0023 IR invariant holds verbatim**: every `call` names an
+  `@symbol` (pinned over a storage-heavy module), and the wasm module gains
+  ZERO table/elem entries versus a v1 baseline (verified at the byte level).
+
+- **v1 interop.** A stored value passed to a v1 `fn`-typed parameter arrives
+  as a `{ i64, i64 }` capture parameter of the specialized instance and
+  dispatches inside it; direct lambda/named arguments keep the enum-free
+  zero-cost path (pinned). Generic HO functions solve their outbound
+  parameter from the stored signature's return.
+
+- **Known limits.** Calls are by NAME only (`r.f()` / `chain[0](x)` need a
+  binding first — the parser has no call-on-expression form); `Array<T>`
+  unification still wants a bound array (not a bare `[..]` literal) at
+  generic HO call sites (pre-existing); `vyrn fmt` learned the storage-position
+  lambda pipes (tight) with a type-decl guard keeping enum-variant `|` spaced.
+
+- **Consumers.** `examples/closures2.vyrn` (three-way parity citizen incl. a
+  canonical trap inside a stored closure), `std/arrays` `sortBy` (an ordinary
+  `fn` parameter — stored values flow in), and the shelf server's middleware
+  chain (`Array<Middleware>` module state: logging + an `/admin` guard in
+  front of routing) — browser-verified end to end over `vyrn dev`.

@@ -16,7 +16,49 @@ import { route } from pages("./routes")
 import { tw } from "std/tw"
 import * as theme from tw("./theme.json")
 
+/// RFC-0037: a middleware is a STORED function value — each entry may answer a
+/// request outright (`Some`) or pass it along (`None`); the chain runs in
+/// registration order in front of the real routing.
+type Middleware = fn(Request) -> Option<Response>
+
+/// Module state holding closures (the RFC-0037 shape real servers use).
+let mut middleware: Array<Middleware> = []
+
+/// Register the default chain: request logging (observably runs for every
+/// request, never answers) and a guard that answers the `/admin` prefix
+/// outright before any route sees it.
+fn installMiddleware() {
+    middleware.push(|req| {
+            logger("http").info("\{req.method} \{req.path}")
+            return None
+        })
+    middleware.push(|req| if req.path =~ "/admin.*" {
+            Some(Response { status: 403, contentType: "text/plain", body: "forbidden" })
+        } else {
+            None
+        })
+}
+
+/// Run the chain: the first `Some` wins; middleware after a hit never runs.
+fn runMiddleware(req: Request) -> Option<Response> {
+    let mut hit: Option<Response> = None
+    for m in middleware {
+        hit = match hit { Some(r) => Some(r), None => m(req) }
+    }
+    return hit
+}
+
 fn handle(req: Request) -> Response {
+    if middleware.length == 0 {
+        installMiddleware()
+    }
+    return match runMiddleware(req) {
+        Some(r) => r,
+        None => routed(req),
+    }
+}
+
+fn routed(req: Request) -> Response {
     // RFC-0032: serve the theme-derived utility stylesheet from `css()`. It is a
     // baked constant, so this is a plain string return with the CSS content type.
     if req.method == "GET" && req.path == "/theme.css" {
@@ -39,5 +81,8 @@ fn main() -> Int64 {
     print("addBook(bad) -> \{bad.status}: \{bad.body}")
     let home = handle(Request { method: "GET", path: "/", body: "" })
     print("/ -> \{home.status}")
+    // RFC-0037 middleware: the guard answers /admin before any route runs.
+    let blocked = handle(Request { method: "GET", path: "/admin/secrets", body: "" })
+    print("/admin/secrets -> \{blocked.status}: \{blocked.body}")
     return 0
 }

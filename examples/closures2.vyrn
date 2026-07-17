@@ -5,6 +5,8 @@
 /// Captures are a by-value read-only snapshot at the lambda's evaluation site
 /// (RFC-0023 timing, verbatim); module state is never captured (read live).
 
+import { sortBy } from "std/arrays"
+
 type Transform = fn(Int64) -> Int64
 
 type Middleware = fn(Int64) -> Option<Int64>
@@ -109,6 +111,13 @@ fn main() -> Int64 {
     // Module state read inside a stored closure resolves live (not captured).
     let counted: fn() -> Int64 = || chain.length
     print(counted()) // 3
+
+    // std/arrays sortBy with a STORED key function: the stored value flows
+    // into the v1 `fn`-typed parameter and dispatches inside the instance.
+    let negate: Transform = |x| 0 - x
+    let unsorted: Array<Int64> = [3, 1, 2]
+    let sorted = sortBy(unsorted, negate)
+    print(sorted[0] * 100 + sorted[1] * 10 + sorted[2]) // 321
 
     // Drop behavior: a chain of closures is an ordinary Array value.
     let mut local: Array<Transform> = []
