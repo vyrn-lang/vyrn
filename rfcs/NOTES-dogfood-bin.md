@@ -30,12 +30,14 @@ warning → 404s → clean console.
    — legal ONLY because `loadStore` is imported (RFC-0029: an initializer may
    call an imported fn, never a same-module one). Load-on-init is expressible,
    but the loader MUST live in a separate module. (persistence, as-designed)
-2. **BUG (silent, worked around): `store.pastes.push(x)` on a global RECORD-FIELD
-   array NO-OPS.** The counter field-assign beside it persisted; the pushed paste
-   vanished (`{"pastes":[],"counter":1}`). The push mutates a copy of the field.
-   Whole-global REASSIGNMENT (`store = StoreFile {…}`) works. Cost me a
-   "paste vanished after create" before I diagnosed it. (compiler — likely a real
-   bug; see below)
+2. **BUG (silent) — FIXED in `6a9010f`: `store.pastes.push(x)` on a global
+   RECORD-FIELD array NO-OPS.** The counter field-assign beside it persisted; the
+   pushed paste vanished (`{"pastes":[],"counter":1}`). The push mutated a copy of
+   the field. Whole-global REASSIGNMENT (`store = StoreFile {…}`) works. Cost me a
+   "paste vanished after create" before I diagnosed it. **Now fixed**: the
+   statement-position `push` write-back desugar covers record-field and
+   array-element receivers, not just plain variables; `store.pastes.push(p)` is
+   restored in `store.vyrn`. (compiler — real bug; see below)
 3. **No clock, no random — `created` is a monotonic counter, not a timestamp.**
    A real pastebin wants "created 3 minutes ago"; Vyrn has neither wall time nor
    randomness (parity determinism), so `created` is a persisted sequence number
@@ -97,7 +99,7 @@ tripped the push bug below). Splitting into two flat globals would instead force
 two imported loaders (double file read+parse). Neither is terrible; both are
 consequences of "no field-move out of module state".
 
-### Write-after-mutation: the silent `.push`-on-a-global-field BUG
+### Write-after-mutation: the silent `.push`-on-a-global-field BUG — FIXED (`6a9010f`)
 
 This compiled and ran, and SILENTLY dropped the write:
 
@@ -107,28 +109,40 @@ store.pastes.push(newPaste)             // NO-OP — the paste vanished
 persist.saveStore(snapshot())           // wrote {"pastes":[],"counter":1}
 ```
 
-`store.pastes` (a field projection of a global record) yields a **copy**; the
-`.push` mutates that copy and discards it, while the sibling `store.counter =`
-assignment (a direct field store) *does* persist. The result is a store that
-counts creations it never keeps. No error, no warning — the paste was simply
+`store.pastes` (a field projection of a global record) yielded a **copy**; the
+`.push` mutated that copy and discarded it, while the sibling `store.counter =`
+assignment (a direct field store) *did* persist. The result was a store that
+counted creations it never kept. No error, no warning — the paste was simply
 gone (`findByCreated` then returned `Err("paste vanished after create")`).
 
-**Workaround (marked in `store.vyrn`):** never mutate the global's field in
-place — rebuild the array and REASSIGN the whole global:
+**Root cause (found & fixed):** the parser's statement-position `push` write-back
+desugar (`sq.push(v)` → `sq = push(sq, v)`, in `parser.rs`) only fired when the
+receiver was a plain `Expr::Var`. A record-field or array-element receiver fell
+through to a discarded `Stmt::Expr(push(..))` — `push` reallocates and returns a
+NEW array, which was then thrown away. **All three backends agreed on the wrong
+answer** (a parity blind spot: interp == native == wasm all no-op'd), which is
+why the harness never caught it and only persistence-to-disk made it visible.
+
+**The fix (`6a9010f`)** extends the desugar to every assignable place, each
+lowering to the in-place store the language already implements everywhere:
 
 ```vyrn
-let mut ps: Array<Paste> = []
-for p in store.pastes { ps.push(copyPaste(p)) }
-ps.push(newPaste)
-store = StoreFile { pastes: ps, counter: created }   // whole-global reassign WORKS
+store.pastes.push(newPaste)   // r.xs.push(v)  → SetField  store.pastes = push(store.pastes, newPaste)
+store.counter = created       // (unchanged direct field store)
 ```
 
-Whole-global reassignment (shelf proved `books = kept`) and direct field-scalar
-assignment both work; only **`.push`/method-mutation through a global field**
-silently operates on a copy. This is almost certainly a real codegen/lowering bug
-(a global field should be a mutable place), and it is *dangerous* precisely
-because it is silent and half-works (the counter moved, the data didn't). Highest-
-value follow-up after this dogfood.
+- variable      `sq.push(v)`   → `sq = push(sq, v)`   (Assign, unchanged)
+- record field   `r.xs.push(v)` → `r.xs = push(r.xs, v)` (SetField)
+- array element  `a[i].push(v)` → `a[i] = push(a[i], v)` (IndexSet)
+
+Any *other* receiver (a temporary like `make().push(v)`, or a deeper chain
+`r.a.b.push(v)` / `a[i].f.push(v)`) is now a hard **parse error** naming the
+supported places — never a silent copy (silence was the bug). `pop`/`swapRemove`/
+`remove` remain variable-only through the checker's existing, non-silent
+diagnostic ("needs a plain array variable as its receiver"): they return a value
+AND mutate, so there is no statement to write back. The workaround (rebuild the
+array + whole-global reassign) is deleted from `store.vyrn`; `examples/fieldmut.vyrn`
+locks the behavior in three-way.
 
 ### Durability caveats (the std/storage evidence)
 
@@ -305,7 +319,7 @@ but surprising: for a serve app, `main` is a startup hook, not dead code. Either
 
 | # | Candidate | Evidence in bin | Scope | Kind |
 |---|-----------|-----------------|-------|------|
-| **P0 (bug)** | **Fix `.push`/method-mutation on a global record-field** (silently mutates a copy) | "paste vanished after create"; counter persisted, data didn't | small–medium | compiler |
+| ~~**P0 (bug)**~~ **FIXED `6a9010f`** | ~~Fix `.push`/method-mutation on a global record-field (silently mutates a copy)~~ — done: push write-back now covers record-field & array-element places; deeper chains are a named parse error | "paste vanished after create"; counter persisted, data didn't | small–medium | compiler |
 | **P1** | **`std/storage` — durable writes** (atomic temp+rename, fsync/durability signal, maybe append log) | whole-file rewrite per mutation; crash-mid-write loses the store; no fsync | large | library + runtime |
 | **P1** | **Time as a boundary effect** (host-injected `now()` via `extern`/capability, excluded from `where`/parity) | `created` is a counter, not a timestamp — a pastebin's core field is fake | medium | language + runtime |
 | **P2** | **`std/ui`: String/validated-string route params + loader Response content-type control** | `/p/<id>`, `/raw/<id>` can't be pages (Int64-only, text/html-only) | medium | generator |
