@@ -1,0 +1,617 @@
+/// std/graphql — the contract as a GraphQL SDL document (RFC-0038), a library
+/// entirely on RFC-0021 generator imports. One `gen fn`, `sdl(contract)`,
+/// reflects the contract with `moduleInterface` and RETURNS a synthesized module
+/// exporting `sdlText() -> String`. The compiler knows nothing about GraphQL:
+/// everything below is comptime-pure Vyrn string building over the reflected
+/// type SOURCES and procedure signatures — the SDL is BAKED as a deterministic
+/// constant at generation time (no runtime calls).
+///
+///   import { sdl } from "std/graphql"
+///   import { sdlText } from sdl("./contract")
+///   // sdlText() -> String : a deterministic GraphQL SDL document
+///
+/// Mapping rules (documented and DUMB on purpose — RFC-0038):
+///   - a wire RECORD becomes a `type`/`input` PAIR (`Book` and `BookInput`);
+///     GraphQL separates output objects from input objects, and both derive from
+///     one Vyrn record. A record field's type maps by the scalar table below; a
+///     non-`Option` field is non-null (`!`).
+///   - SCALARS map honestly: `Int64` and the sized ints => `Int`, `Float64`/
+///     `Float32` => `Float`, `String` => `String`, `Bool` => `Boolean`.
+///   - a VALIDATED scalar (e.g. `BookId = Int64 where value >= 0`) becomes a
+///     named custom `scalar` whose description documents its base and constraint
+///     (the `@constraint`-style doc comment). Fields keep the name, so the type
+///     graph stays legible and the constraint is documented once.
+///   - `Map<String, V>` has no SDL type, so it maps to a documented custom
+///     `scalar JSON` (a JSON object on the wire); a NAMED map alias becomes its
+///     own documented `scalar`.
+///   - a PAYLOAD enum (any variant carries data — including `Result<A, B>` and
+///     `Circle(Int64)`) maps to a "tagged" object `type` with one NULLABLE field
+///     per variant (nullary => `Boolean`, single payload => that type, multi
+///     payload => `JSON`): exactly one field is non-null at a time. A nullary-only
+///     enum maps to a real GraphQL `enum`.
+///   - PROCEDURES become `Query`/`Mutation` fields: a `get*`/`list*` procedure is
+///     a Query, everything else a Mutation (the split is dumb by design). A
+///     1-parameter procedure takes `(input: <Req>Input)`; the return maps by the
+///     table above. An empty `Query` gets a `_placeholder` field (GraphQL needs a
+///     non-empty query root); an empty `Mutation` is omitted.
+///   - `///` docs on TYPES become SDL descriptions. Procedure/param/module docs
+///     are NOT in `moduleInterface` reflection, so operation descriptions are
+///     absent (gap recorded in RFC-0038).
+///
+/// Scope: a DOCUMENT, not an executor. A GraphQL executor is deferred (RFC-0038).
+///
+/// Inspect the synthesized module with:  vyrn emit-gen <file>
+
+// ===========================================================================
+// Byte / string helpers — comptime-pure, so legal in a `gen fn` and its callees.
+// ===========================================================================
+
+/// The bytes `ba[s..e)` as a String ("" on the impossible non-UTF-8 slice).
+fn gqlSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
+    let mut out: Array<UInt8> = []
+    let mut i = s
+    while i < e {
+        out.push(ba[i])
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(err) => "",
+    }
+}
+
+/// True for an ASCII space, tab, CR, or LF.
+fn gqlIsWs(b: UInt8) -> Bool {
+    return b == 32 || b == 9 || b == 10 || b == 13
+}
+
+/// `s` with leading and trailing ASCII whitespace removed.
+fn gqlTrim(s: String) -> String {
+    let ba = bytes(s)
+    let mut lo = 0
+    let mut hi = ba.length
+    while lo < hi && gqlIsWs(ba[lo]) {
+        lo = lo + 1
+    }
+    while hi > lo && gqlIsWs(ba[hi - 1]) {
+        hi = hi - 1
+    }
+    return gqlSlice(ba, lo, hi)
+}
+
+/// `s` without a trailing `!` (a GraphQL non-null marker) — used to make a
+/// tagged-union field nullable.
+fn gqlStripBang(s: String) -> String {
+    if s.endsWith("!") {
+        let ba = bytes(s)
+        return gqlSlice(ba, 0, ba.length - 1)
+    }
+    return s
+}
+
+/// The inner text between the FIRST `<` and the LAST `>` of `s` (`Array<Tag>` =>
+/// `Tag`, `Map<String, Int64>` => `String, Int64`). "" when there is no `<`.
+fn gqlBetweenAngles(s: String) -> String {
+    let ba = bytes(s)
+    let mut lo = -1
+    let mut hi = -1
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == 60 && lo < 0 {
+            lo = i
+        }
+        if ba[i] == 62 {
+            hi = i
+        }
+        i = i + 1
+    }
+    if lo < 0 || hi < 0 || hi <= lo {
+        return ""
+    }
+    return gqlSlice(ba, lo + 1, hi)
+}
+
+/// Split `s` on the top-level occurrences of the separator byte `sep`, tracking
+/// `<`/`(`/`[`/`{` nesting so a separator inside `Map<String, V>` or `C(A, B)`
+/// does not split. Empty parts are dropped; each result is trimmed.
+fn gqlSplitTop(s: String, sep: UInt8) -> Array<String> {
+    let ba = bytes(s)
+    let mut out: Array<String> = []
+    let mut depth = 0
+    let mut start = 0
+    let mut i = 0
+    while i < ba.length {
+        let b = ba[i]
+        if b == 60 || b == 40 || b == 91 || b == 123 {
+            depth = depth + 1
+        } else if b == 62 || b == 41 || b == 93 || b == 125 {
+            depth = depth - 1
+        } else if b == sep && depth == 0 {
+            let part = gqlTrim(gqlSlice(ba, start, i))
+            if part.length > 0 {
+                out.push(part)
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    let last = gqlTrim(gqlSlice(ba, start, ba.length))
+    if last.length > 0 {
+        out.push(last)
+    }
+    return out
+}
+
+/// The index of the first `needle` byte in `ba` at or after `from`, or -1.
+fn gqlIndexOf(ba: Array<UInt8>, needle: UInt8, from: Int64) -> Int64 {
+    let mut i = from
+    while i < ba.length {
+        if ba[i] == needle {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// ===========================================================================
+// Type-declaration parsing — pull (name, rhs) out of a `TypeInfo.source`, and
+// classify / extract fields and variants. The source is canonical (RFC-0021
+// `render_type_decl`): `export type Name = <rhs>`.
+// ===========================================================================
+
+/// A split declaration: its name and its right-hand side.
+type GqlDecl = { name: String, rhs: String }
+
+/// Split `export type Name = RHS` into its name and RHS (both trimmed). A generic
+/// `Name<..>` keeps only the head `Name` (monomorphic wire types are assumed;
+/// a parameterized type falls back to a scalar downstream).
+fn gqlSplitDecl(source: String) -> GqlDecl {
+    let s = gqlTrim(source)
+    let ba = bytes(s)
+    // Skip a leading `export `.
+    let mut i = 0
+    if s.startsWith("export ") {
+        i = 7
+    }
+    // Skip `type `.
+    i = i + 5
+    // Find the ` = ` separator (the first top-level `=`).
+    let eq = gqlIndexOf(ba, 61, i)
+    if eq < 0 {
+        return GqlDecl { name: gqlTrim(gqlSlice(ba, i, ba.length)), rhs: "" }
+    }
+    let head = gqlTrim(gqlSlice(ba, i, eq))
+    // Strip any generic parameter list from the head.
+    let lt = gqlIndexOf(bytes(head), 60, 0)
+    let name = if lt < 0 { head } else { gqlSlice(bytes(head), 0, lt) }
+    let rhs = gqlTrim(gqlSlice(ba, eq + 1, ba.length))
+    return GqlDecl { name: name, rhs: rhs }
+}
+
+/// The `TypeInfo.source` of the named type, or "" when absent.
+fn gqlSourceOf(name: String, iface: ModuleInterface) -> String {
+    for t in iface.types {
+        if t.name == name {
+            return t.source
+        }
+    }
+    return ""
+}
+
+/// Whether the named type is a RECORD (its RHS opens with `{`) — a record is the
+/// one kind that needs an `Input` twin, so field references in input position add
+/// the `Input` suffix.
+fn gqlIsRecord(name: String, iface: ModuleInterface) -> Bool {
+    let src = gqlSourceOf(name, iface)
+    if src == "" {
+        return false
+    }
+    return gqlSplitDecl(src).rhs.startsWith("{")
+}
+
+// ===========================================================================
+// Scalar mapping — the honest table.
+// ===========================================================================
+
+/// The GraphQL scalar for a Vyrn primitive spelling, or "" when not a primitive.
+fn gqlPrim(spelling: String) -> String {
+    let s = gqlTrim(spelling)
+    if s == "Int64" || s == "Int8" || s == "Int16" || s == "Int32" || s == "UInt8" || s == "UInt16" || s == "UInt32" || s == "UInt64" {
+        return "Int"
+    }
+    if s == "Float64" || s == "Float32" || s == "Float" {
+        return "Float"
+    }
+    if s == "String" {
+        return "String"
+    }
+    if s == "Bool" {
+        return "Boolean"
+    }
+    return ""
+}
+
+/// A GraphQL type REFERENCE (including non-null markers) for a Vyrn type
+/// spelling, in output (`inputCtx == false`) or input (`inputCtx == true`)
+/// position. `Option<T>` is the one nullable form; everything else is non-null.
+fn gqlRef(spelling: String, inputCtx: Bool, iface: ModuleInterface) -> String {
+    let s = gqlTrim(spelling)
+    if s.startsWith("Option<") {
+        return gqlStripBang(gqlRef(gqlBetweenAngles(s), inputCtx, iface))
+    }
+    if s.startsWith("Array<") {
+        return "[" + gqlRef(gqlBetweenAngles(s), inputCtx, iface) + "]!"
+    }
+    if s.startsWith("Map<") {
+        return "JSON!"
+    }
+    if s.startsWith("Result<") {
+        return "JSON!"
+    }
+    let p = gqlPrim(s)
+    if p != "" {
+        return p + "!"
+    }
+    if inputCtx && gqlIsRecord(s, iface) {
+        return s + "Input!"
+    }
+    return s + "!"
+}
+
+// ===========================================================================
+// Descriptions — a type's `///` doc becomes an SDL block-string description.
+// ===========================================================================
+
+/// The raw (unwrapped, whitespace-folded) `///` doc text of a type, or "".
+fn gqlRawDoc(name: String, iface: ModuleInterface) -> String {
+    for t in iface.types {
+        if t.name == name {
+            return match t.schema.doc {
+                Some(d) => gqlFoldWs(d),
+                None => "",
+            }
+        }
+    }
+    return ""
+}
+
+/// The SDL description line for a type's doc (from `TypeInfo.schema.doc`), or "".
+/// Emitted on its own line above the definition; newlines in the doc are folded
+/// to spaces so it stays a single-line block string (dumb, safe).
+fn gqlDocOf(name: String, iface: ModuleInterface) -> String {
+    let raw = gqlRawDoc(name, iface)
+    if raw == "" {
+        return ""
+    }
+    return "\"\"\"" + raw + "\"\"\"\n"
+}
+
+/// `s` with every run of whitespace folded to a single space, trimmed — so a
+/// multi-line `///` doc rides one SDL block-string line.
+fn gqlFoldWs(s: String) -> String {
+    let ba = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut prevWs = false
+    for b in ba {
+        if gqlIsWs(b) {
+            if prevWs == false {
+                out.push(32)
+            }
+            prevWs = true
+        } else {
+            out.push(b)
+            prevWs = false
+        }
+    }
+    return gqlTrim(match stringFromBytes(out) {
+            Ok(v) => v,
+            Err(err) => "",
+        })
+}
+
+// ===========================================================================
+// Type emission.
+// ===========================================================================
+
+/// The SDL for a RECORD: the `type Name { .. }` object and the `input NameInput
+/// { .. }` twin. Each field maps by the scalar table; a non-`Option` field is
+/// non-null.
+fn gqlRecord(decl: GqlDecl, iface: ModuleInterface) -> String {
+    let inner = gqlBetweenBraces(decl.rhs)
+    let fields = gqlSplitTop(inner, 44)
+    let doc = gqlDocOf(decl.name, iface)
+    let mut obj = doc + "type " + decl.name + " {\n"
+    let mut inp = "input " + decl.name + "Input {\n"
+    for f in fields {
+        let colon = gqlIndexOf(bytes(f), 58, 0)
+        if colon >= 0 {
+            let fname = gqlTrim(gqlSlice(bytes(f), 0, colon))
+            let ftypeRaw = gqlTrim(gqlSlice(bytes(f), colon + 1, bytes(f).length))
+            let ftype = gqlStripWhere(ftypeRaw)
+            obj = obj + "  " + fname + ": " + gqlRef(ftype, false, iface) + "\n"
+            inp = inp + "  " + fname + ": " + gqlRef(ftype, true, iface) + "\n"
+        }
+    }
+    obj = obj + "}\n"
+    inp = inp + "}\n"
+    return obj + inp
+}
+
+/// The inner text between the outer `{` and `}` of a record RHS.
+fn gqlBetweenBraces(s: String) -> String {
+    let ba = bytes(s)
+    let mut lo = -1
+    let mut hi = -1
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == 123 && lo < 0 {
+            lo = i
+        }
+        if ba[i] == 125 {
+            hi = i
+        }
+        i = i + 1
+    }
+    if lo < 0 || hi <= lo {
+        return ""
+    }
+    return gqlSlice(ba, lo + 1, hi)
+}
+
+/// A field type with any inline ` where <pred>` refinement stripped (the
+/// validated base is what maps to GraphQL).
+fn gqlStripWhere(s: String) -> String {
+    if s.contains(" where ") {
+        let ba = bytes(s)
+        // Find " where " and cut before it.
+        let mut i = 0
+        while i + 7 <= ba.length {
+            if gqlSlice(ba, i, i + 7) == " where " {
+                return gqlTrim(gqlSlice(ba, 0, i))
+            }
+            i = i + 1
+        }
+    }
+    return s
+}
+
+/// The SDL for an ENUM RHS (`| A | B(T) | C(T, U)`): a real `enum` when every
+/// variant is nullary, else a tagged object `type` (one nullable field per
+/// variant).
+fn gqlEnum(decl: GqlDecl, iface: ModuleInterface) -> String {
+    let body = gqlTrim(decl.rhs)
+    // Drop a leading `|` then split the variants on top-level `|`.
+    let stripped = if body.startsWith("|") {
+        gqlTrim(gqlSlice(bytes(body), 1, bytes(body).length))
+    } else {
+        body
+    }
+    let variants = gqlSplitTop(stripped, 124)
+    let mut anyPayload = false
+    for v in variants {
+        if v.contains("(") {
+            anyPayload = true
+        }
+    }
+    let doc = gqlDocOf(decl.name, iface)
+    if anyPayload == false {
+        let mut out = doc + "enum " + decl.name + " {\n"
+        for v in variants {
+            out = out + "  " + gqlTrim(v) + "\n"
+        }
+        return out + "}\n"
+    }
+    return doc + gqlTaggedType(decl.name, variants, iface)
+}
+
+/// A tagged object `type` for a payload sum: one nullable field per variant
+/// (nullary => `Boolean`, single payload => that type, multi payload => `JSON`).
+fn gqlTaggedType(name: String, variants: Array<String>, iface: ModuleInterface) -> String {
+    let mut out = "type " + name + " {\n"
+    for v in variants {
+        let paren = gqlIndexOf(bytes(v), 40, 0)
+        if paren < 0 {
+            out = out + "  " + gqlTrim(v) + ": Boolean\n"
+        } else {
+            let vname = gqlTrim(gqlSlice(bytes(v), 0, paren))
+            let payload = gqlBetweenParens(v)
+            let parts = gqlSplitTop(payload, 44)
+            if parts.length == 1 {
+                out = out + "  " + vname + ": " + gqlStripBang(gqlRef(parts[0], false, iface)) + "\n"
+            } else {
+                out = out + "  " + vname + ": JSON\n"
+            }
+        }
+    }
+    return out + "}\n"
+}
+
+/// The inner text between the first `(` and last `)` of `s`.
+fn gqlBetweenParens(s: String) -> String {
+    let ba = bytes(s)
+    let mut lo = -1
+    let mut hi = -1
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == 40 && lo < 0 {
+            lo = i
+        }
+        if ba[i] == 41 {
+            hi = i
+        }
+        i = i + 1
+    }
+    if lo < 0 || hi <= lo {
+        return ""
+    }
+    return gqlSlice(ba, lo + 1, hi)
+}
+
+/// The SDL for a scalar-shaped alias RHS: a `Result<..>` tagged type, a `Map<..>`
+/// / validated / bare-primitive custom `scalar`. Named aliases keep their name.
+fn gqlAlias(decl: GqlDecl, iface: ModuleInterface) -> String {
+    let rhs = gqlTrim(decl.rhs)
+    let doc = gqlDocOf(decl.name, iface)
+    if rhs.startsWith("Result<") {
+        let inner = gqlBetweenAngles(rhs)
+        let parts = gqlSplitTop(inner, 44)
+        let okT = if parts.length >= 1 { parts[0] } else { "Bool" }
+        let errT = if parts.length >= 2 { parts[1] } else { "String" }
+        let mut out = doc + "type " + decl.name + " {\n"
+        out = out + "  Ok: " + gqlStripBang(gqlRef(okT, false, iface)) + "\n"
+        out = out + "  Err: " + gqlStripBang(gqlRef(errT, false, iface)) + "\n"
+        return out + "}\n"
+    }
+    // A `Map<..>` alias, a validated scalar (`Base where ..`), or a bare
+    // primitive alias => a documented custom scalar. The description carries the
+    // `///` doc AND the underlying base/constraint (the `@constraint`-style doc
+    // comment), so a validated type is documented "as its base + constraint".
+    let raw = gqlRawDoc(decl.name, iface)
+    let body = if raw != "" { raw + " — " + gqlFoldWs(rhs) } else { gqlFoldWs(rhs) }
+    return "\"\"\"" + body + "\"\"\"\n" + "scalar " + decl.name + "\n"
+}
+
+/// The SDL for one type declaration (record / enum / alias).
+fn gqlTypeSdl(t: TypeInfo, iface: ModuleInterface) -> String {
+    let decl = gqlSplitDecl(t.source)
+    if decl.rhs.startsWith("{") {
+        return gqlRecord(decl, iface)
+    }
+    if decl.rhs.startsWith("|") {
+        return gqlEnum(decl, iface)
+    }
+    return gqlAlias(decl, iface)
+}
+
+// ===========================================================================
+// Query / Mutation split.
+// ===========================================================================
+
+/// Whether a procedure name reads as a query (a `get*` / `list*` accessor).
+fn gqlIsQuery(name: String) -> Bool {
+    return name.startsWith("get") || name.startsWith("list")
+}
+
+/// One root field for a procedure: `name(input: <Req>Input): <Ret>` (or no args
+/// for a zero-parameter procedure). A `Unit` return maps to `Boolean`.
+fn gqlRootField(f: FnInfo, iface: ModuleInterface) -> String {
+    let ret = if f.ret == "" { "Boolean" } else { gqlStripBang(gqlRef(f.ret, false, iface)) }
+    if f.params.length == 1 {
+        let arg = gqlRef(f.params[0].spelling, true, iface)
+        return "  " + f.name + "(input: " + arg + "): " + ret + "\n"
+    }
+    return "  " + f.name + ": " + ret + "\n"
+}
+
+// ===========================================================================
+// The generator.
+// ===========================================================================
+
+/// `sdl(contract)` — emit a module exporting `sdlText() -> String`, a GraphQL SDL
+/// document for the contract. The document is baked as a deterministic constant.
+export gen fn sdl(contract: String) -> String {
+    let iface = moduleInterface(contract)
+    let mut doc = "# GraphQL SDL generated by std/graphql `sdl` (RFC-0038).\n"
+    doc = doc + "# Records => type/input pairs; validated scalars => custom scalars\n"
+    doc = doc + "# (base + constraint in the description); Map => the JSON scalar;\n"
+    doc = doc + "# payload enums (incl. Result) => tagged objects (one nullable\n"
+    doc = doc + "# field per variant); get*/list* => Query, else Mutation.\n"
+    // The JSON scalar (documented) — the honest stand-in for `Map<String, V>`.
+    doc = doc + "\"\"\"An arbitrary JSON value — the wire form of a Vyrn Map<String, V>.\"\"\"\n"
+    doc = doc + "scalar JSON\n"
+
+    // Types, in the reflection's deterministic order.
+    for t in iface.types {
+        doc = doc + gqlTypeSdl(t, iface)
+    }
+
+    // Query / Mutation roots.
+    let mut queries = ""
+    let mut mutations = ""
+    for f in iface.functions {
+        if gqlIsQuery(f.name) {
+            queries = queries + gqlRootField(f, iface)
+        } else {
+            mutations = mutations + gqlRootField(f, iface)
+        }
+    }
+    doc = doc + "type Query {\n"
+    if queries == "" {
+        doc = doc + "  _placeholder: Boolean\n"
+    } else {
+        doc = doc + queries
+    }
+    doc = doc + "}\n"
+    if mutations != "" {
+        doc = doc + "type Mutation {\n" + mutations + "}\n"
+    }
+
+    // Bake the whole SDL string into the emitted module.
+    let mut out = "/// Generated by std/graphql `sdl` (RFC-0038) — do not edit.\n"
+    out = out + "/// The contract's GraphQL SDL document (deterministic, byte-stable).\n"
+    out = out + "export fn sdlText() -> String {\n"
+    out = out + "    return \"" + gqlEscBody(doc) + "\"\n}\n"
+    return out
+}
+
+/// `raw` escaped as the BODY of a Vyrn string literal — baked into `sdlText()`.
+fn gqlEscBody(raw: String) -> String {
+    let ba = bytes(raw)
+    let mut out: Array<UInt8> = []
+    for b in ba {
+        if b == 92 {
+            out.push(92)
+            out.push(92)
+        } else if b == 34 {
+            out.push(92)
+            out.push(34)
+        } else if b == 10 {
+            out.push(92)
+            out.push(110)
+        } else {
+            out.push(b)
+        }
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(err) => "",
+    }
+}
+
+// ===========================================================================
+// Tests — the pure mapping helpers (the whole SDL is golden-pinned in Rust).
+// ===========================================================================
+
+test "gqlPrim maps the honest scalar table" {
+    assertEq(gqlPrim("Int64"), "Int")
+    assertEq(gqlPrim("UInt8"), "Int")
+    assertEq(gqlPrim("Float64"), "Float")
+    assertEq(gqlPrim("String"), "String")
+    assertEq(gqlPrim("Bool"), "Boolean")
+    assertEq(gqlPrim("Book"), "")
+}
+
+test "gqlSplitDecl splits name and rhs" {
+    let d = gqlSplitDecl("export type BookId = Int64 where value >= 0")
+    assertEq(d.name, "BookId")
+    assertEq(d.rhs, "Int64 where value >= 0")
+}
+
+test "gqlBetweenAngles and gqlStripWhere" {
+    assertEq(gqlBetweenAngles("Array<Tag>"), "Tag")
+    assertEq(gqlBetweenAngles("Map<String, Int64>"), "String, Int64")
+    assertEq(gqlStripWhere("String where value.length >= 1"), "String")
+}
+
+test "gqlSplitTop respects angle and paren nesting" {
+    let parts = gqlSplitTop("id: BookId, tags: Array<Tag>, m: Map<String, Int64>", 44)
+    assertEq(parts.length, 3)
+    assertEq(parts[2], "m: Map<String, Int64>")
+}
+
+test "gqlIsQuery splits accessors from mutations" {
+    assert(gqlIsQuery("getBook"))
+    assert(gqlIsQuery("listBooks"))
+    assertEq(gqlIsQuery("addBook"), false)
+}

@@ -1,0 +1,300 @@
+/// std/openapi — the contract as an OpenAPI 3.1 document (RFC-0038), a library
+/// entirely on RFC-0021 generator imports. One `gen fn`, `openapi(contract)`,
+/// reflects the contract with `moduleInterface` and RETURNS a synthesized module
+/// exporting `openapiJson() -> String`. The compiler knows nothing about OpenAPI:
+/// everything below is comptime-pure Vyrn string building (the `css()` /
+/// `rpcSchema()` precedent).
+///
+///   import { openapi } from "std/openapi"
+///   import { openapiJson } from openapi("./contract")
+///   // openapiJson() -> String : a deterministic OpenAPI 3.1 document
+///
+/// The emitted `openapiJson()`:
+///   - `openapi: "3.1.0"`, `info` (title from the contract's module base name,
+///     a deterministic `version`);
+///   - one `paths` entry per procedure IN DECLARATION ORDER, describing the
+///     `POST /rpc/<proc>` surface `std/rpc` serves: a `requestBody` `$ref` to the
+///     request type's schema, a `200` `$ref` to the response type's schema, and
+///     the `422` request-validation Issues shape (`std/rpc`'s validation status);
+///   - `components/schemas`, one entry per type in the RFC-0031 reachable
+///     closure (SORTED by name, so imported wire types appear deterministically),
+///     each the type's `jsonSchema()` (RFC-0003) with an injected `$id` so its
+///     self-contained `#/$defs/..` references resolve within that component.
+///
+/// DETERMINISM / the baking boundary (RFC-0038 as-landed): the document ENVELOPE
+/// — `openapi`/`info`/`paths`/the `$ref`s/the `422` shape — is baked as a
+/// constant here at generation time. The schema BODIES are emitted as runtime
+/// `jsonSchema()` calls (the `rpcSchema()` precedent), NOT baked, because the full
+/// recursive JSON Schema of a type is not available from `moduleInterface`
+/// reflection: `ParamInfo.schema`/`retSchema` carry only a scalar's shallow bounds
+/// (`Schema` = name/base/doc/min/max/…), never a record's fields or an enum's
+/// variants. Each `jsonSchema()` is itself a compile-time constant string, so the
+/// whole document is deterministic and byte-stable. (Gap recorded in RFC-0038.)
+///
+/// Scope: a DOCUMENT, not a runtime. No callbacks/webhooks/auth schemes.
+///
+/// Inspect the synthesized module with:  vyrn emit-gen <file>
+
+// ---- comptime-pure helpers -------------------------------------------------
+
+/// Whether `items` already contains `needle`.
+fn oaListContains(items: Array<String>, needle: String) -> Bool {
+    for it in items {
+        if it == needle {
+            return true
+        }
+    }
+    return false
+}
+
+/// The module base name of a specifier, for `info.title` (`"./contract"` =>
+/// `contract`, `"std/shelf.vyrn"` => `shelf`).
+fn oaBaseName(spec: String) -> String {
+    let ba = bytes(spec)
+    let mut start = 0
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == 47 {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    let mut seg: Array<UInt8> = []
+    let mut j = start
+    while j < ba.length {
+        seg.push(ba[j])
+        j = j + 1
+    }
+    let name = match stringFromBytes(seg) {
+        Ok(v) => v,
+        Err(e) => spec,
+    }
+    if name.endsWith(".vyrn") {
+        let nb = bytes(name)
+        let mut trimmed: Array<UInt8> = []
+        let mut k = 0
+        while k < nb.length - 5 {
+            trimmed.push(nb[k])
+            k = k + 1
+        }
+        return match stringFromBytes(trimmed) {
+            Ok(v) => v,
+            Err(e) => name,
+        }
+    }
+    return name
+}
+
+/// `raw` escaped as the BODY of a Vyrn string literal (no surrounding quotes) —
+/// so a chunk of raw JSON can be baked into the emitted `openapiJson()` as a
+/// literal `acc = acc + "…"` append.
+fn oaEscBody(raw: String) -> String {
+    let ba = bytes(raw)
+    let mut out: Array<UInt8> = []
+    for b in ba {
+        if b == 92 {
+            out.push(92)
+            out.push(92)
+        } else if b == 34 {
+            out.push(92)
+            out.push(34)
+        } else {
+            out.push(b)
+        }
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+}
+
+/// The emitted-source line `    acc = acc + "<escaped raw>"` — appends a chunk of
+/// baked JSON to the accumulator in the generated `openapiJson()`.
+fn oaAppendLit(raw: String) -> String {
+    return "    acc = acc + \"" + oaEscBody(raw) + "\"\n"
+}
+
+/// A sorted copy of `names` (insertion sort; the closure is small). SORTED
+/// `components/schemas` keys keep the document byte-stable regardless of the
+/// closure's own (source/linker) order.
+fn oaSorted(names: Array<String>) -> Array<String> {
+    let mut out: Array<String> = []
+    for n in names {
+        let mut placed = false
+        let mut res: Array<String> = []
+        for m in out {
+            if placed == false && n < m {
+                res.push(n)
+                placed = true
+            }
+            res.push(m)
+        }
+        if placed == false {
+            res.push(n)
+        }
+        out = res
+    }
+    return out
+}
+
+/// Whether `spelling` names one of the contract's exported types.
+fn oaIsNamedType(spelling: String, iface: ModuleInterface) -> Bool {
+    for t in iface.types {
+        if t.name == spelling {
+            return true
+        }
+    }
+    return false
+}
+
+/// The import block the generated module needs: every closure TYPE, imported
+/// from the module that DECLARES it (RFC-0031). No procedures — `openapiJson()`
+/// only reflects TYPES via `jsonSchema()`.
+fn oaImportBlock(iface: ModuleInterface) -> String {
+    let mut specs: Array<String> = []
+    for t in iface.types {
+        if oaListContains(specs, t.module) == false {
+            specs.push(t.module)
+        }
+    }
+    let mut out = ""
+    for spec in specs {
+        let mut names: Array<String> = []
+        for t in iface.types {
+            if t.module == spec {
+                names.push(t.name)
+            }
+        }
+        if names.length > 0 {
+            let mut line = "import { "
+            let mut i = 0
+            for n in names {
+                if i > 0 {
+                    line = line + ", "
+                }
+                line = line + n
+                i = i + 1
+            }
+            out = out + line + " } from \"" + spec + "\"\n"
+        }
+    }
+    return out
+}
+
+// ---- the 422 Issues shape (baked constant) ---------------------------------
+
+/// The JSON Schema of the `{ issues: [{ key, path, message }] }` body `std/rpc`
+/// returns on a 422 — a baked constant (the `Issue`/`Validation` shape is fixed).
+fn oaIssuesSchema() -> String {
+    return "{\"type\":\"object\",\"properties\":{\"issues\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"message\":{\"type\":\"string\"}},\"required\":[\"key\",\"path\",\"message\"]}}},\"required\":[\"issues\"]}"
+}
+
+/// The response `schema` object for a procedure's return: a `$ref` to the named
+/// return type's component, `{"type":"null"}` for a `Unit` return, or the
+/// permissive `{}` for a bare (unnamed) return.
+fn oaResponseSchema(f: FnInfo, iface: ModuleInterface) -> String {
+    if f.ret == "" {
+        return "{\"type\":\"null\"}"
+    }
+    if oaIsNamedType(f.ret, iface) {
+        return "{\"$ref\":\"#/components/schemas/" + f.ret + "\"}"
+    }
+    return "{}"
+}
+
+/// One procedure's baked `paths` entry (raw JSON): `POST /rpc/<proc>` with a
+/// `requestBody` `$ref` (for a 1-param procedure), a `200` `$ref`, and the `422`
+/// Issues shape. `lead` is "" for the first entry, "," thereafter.
+fn oaPathEntry(f: FnInfo, iface: ModuleInterface, lead: String) -> String {
+    let mut body = lead + "\"/rpc/" + f.name + "\":{\"post\":{\"operationId\":\"" + f.name + "\","
+    if f.params.length == 1 {
+        body = body + "\"requestBody\":{\"required\":true,\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/" + f.params[0].spelling + "\"}}}},"
+    }
+    body = body + "\"responses\":{"
+    body = body + "\"200\":{\"description\":\"success\",\"content\":{\"application/json\":{\"schema\":" + oaResponseSchema(f, iface) + "}}},"
+    body = body + "\"422\":{\"description\":\"request validation failed\",\"content\":{\"application/json\":{\"schema\":" + oaIssuesSchema() + "}}}"
+    body = body + "}}}"
+    return body
+}
+
+// ---- the generator ---------------------------------------------------------
+
+/// `openapi(contract)` — emit a module exporting `openapiJson() -> String`, an
+/// OpenAPI 3.1 document describing the contract's `POST /rpc/*` surface.
+export gen fn openapi(contract: String) -> String {
+    let iface = moduleInterface(contract)
+    let title = oaBaseName(contract)
+    let mut out = "/// Generated by std/openapi `openapi` (RFC-0038) — do not edit.\n"
+    out = out + oaImportBlock(iface)
+
+    // The runtime helper that scopes a self-contained `jsonSchema()` under its
+    // own `$id`, so its `#/$defs/..` back-references resolve inside the component
+    // (JSON Schema 2020-12: `$id` establishes the base URI for `#`).
+    out = out + "fn oaEmbed(id: String, schema: String) -> String {\n"
+    out = out + "    let ba = bytes(schema)\n"
+    out = out + "    let mut rest: Array<UInt8> = []\n"
+    out = out + "    let mut i = 1\n"
+    out = out + "    while i < ba.length {\n"
+    out = out + "        rest.push(ba[i])\n"
+    out = out + "        i = i + 1\n"
+    out = out + "    }\n"
+    out = out + "    let tail = match stringFromBytes(rest) {\n"
+    out = out + "        Ok(v) => v,\n"
+    out = out + "        Err(e) => \"\",\n"
+    out = out + "    }\n"
+    out = out + "    return \"{\\\"$id\\\":\\\"\" + id + \"\\\",\" + tail\n"
+    out = out + "}\n"
+
+    out = out + "/// The OpenAPI 3.1 document for this contract (deterministic, byte-stable).\n"
+    out = out + "export fn openapiJson() -> String {\n"
+    out = out + "    let mut acc = \"\"\n"
+    // Envelope + paths open.
+    out = out + oaAppendLit("{\"openapi\":\"3.1.0\",\"info\":{\"title\":\"" + title + "\",\"version\":\"0.0.0\"},\"paths\":{")
+    let mut i = 0
+    for f in iface.functions {
+        let lead = if i > 0 { "," } else { "" }
+        out = out + oaAppendLit(oaPathEntry(f, iface, lead))
+        i = i + 1
+    }
+    // Paths close, components open.
+    out = out + oaAppendLit("},\"components\":{\"schemas\":{")
+    let names = oaSorted(oaTypeNames(iface))
+    let mut j = 0
+    for name in names {
+        let lead = if j > 0 { "," } else { "" }
+        out = out + oaAppendLit(lead + "\"" + name + "\":")
+        out = out + "    acc = acc + oaEmbed(\"" + name + "\", jsonSchema(" + name + "))\n"
+        j = j + 1
+    }
+    // Components + document close.
+    out = out + oaAppendLit("}}}")
+    out = out + "    return acc\n}\n"
+    return out
+}
+
+/// The closure's type names (for sorting into `components/schemas`).
+fn oaTypeNames(iface: ModuleInterface) -> Array<String> {
+    let mut out: Array<String> = []
+    for t in iface.types {
+        out.push(t.name)
+    }
+    return out
+}
+
+// ---- tests (pure helpers; the document is golden-pinned in Rust) ------------
+
+test "oaBaseName strips the path and the .vyrn suffix" {
+    assertEq(oaBaseName("./contract"), "contract")
+    assertEq(oaBaseName("std/shelf.vyrn"), "shelf")
+}
+
+test "oaSorted orders names" {
+    let s = oaSorted(["Book", "AddBookReq", "TagCounts"])
+    assertEq(s[0], "AddBookReq")
+    assertEq(s[1], "Book")
+    assertEq(s[2], "TagCounts")
+}
+
+test "oaEscBody escapes quotes and backslashes for a Vyrn literal" {
+    assertEq(oaEscBody("a\"b"), "a\\\"b")
+}

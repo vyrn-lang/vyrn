@@ -1,0 +1,366 @@
+/// std/connect — Connect wire compatibility as a library (RFC-0038), built
+/// entirely on RFC-0021 generator imports. Two `gen fn`s over an ordinary
+/// contract module — `connectServer` (emits the `connectHandle` router) and
+/// `connectClient` (in-Vyrn caller) — that speak the Connect protocol's
+/// **unary JSON** flavor:
+///
+///   POST /<Service>.<Procedure>
+///   content-type: application/json
+///   errors: {"code": "...", "message": "...", "details": [...]}
+///
+/// The compiler knows nothing about Connect: everything below is generated Vyrn
+/// source over `moduleInterface` reflection, `fromJson`/`toJson` (RFC-0018),
+/// `extern` (RFC-0012), and the `handle` convention (RFC-0016) — the SAME
+/// machinery `std/rpc` uses, mirrored (not modified). The point being proven
+/// (RFC-0038): one contract serves `/rpc/*` and Connect paths simultaneously —
+/// two protocols, one module, zero compiler changes.
+///
+/// Scope honesty: this is Connect's unary-JSON-over-HTTP/1 flavor only. True
+/// gRPC (HTTP/2 framing + protobuf) is out — no protobuf codec exists and the
+/// `serve` runtime has no HTTP/2. Streaming, the GET/query flavor, and
+/// compression are also out (RFC-0038 "Out of scope").
+///
+/// Wire semantics (locked):
+///   - success => HTTP 200, body = `toJson(result)`;
+///   - a `fromJson` validation failure => HTTP 400, Connect error JSON with
+///     `code: "invalid_argument"` and the Issues carried LOSSLESS in `details`
+///     (each Issue's key/path/message preserved);
+///   - an unknown procedure under the service prefix => `{"code":"unimplemented"}`
+///     (HTTP 404, Connect's canonical mapping for that code);
+///   - an `Err` return of a `Result` procedure => HTTP 200 with the ordinary
+///     encoded value (RFC-0024: domain errors are values, not transport errors).
+///
+/// Inspect any generated module with:  vyrn emit-gen <file>
+
+// ---- shared pure helpers ---------------------------------------------------
+// Comptime-pure (plain string building), so legal in a `gen fn` and its callees.
+// The `connect`-prefixed duplicates of `std/rpc`'s helpers keep this generator
+// self-contained (the std-generator convention — std/rpc stays untouched).
+
+/// Uppercase the first byte of `s` (ASCII), leaving the rest untouched — the
+/// procedure `getBook` derives `onGetBook` / `connectDoneGetBook` this way.
+fn connectCapFirst(s: String) -> String {
+    let raw = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    for b in raw {
+        if i == 0 && b >= 97 && b <= 122 {
+            out.push(b - 32)
+        } else {
+            out.push(b)
+        }
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(t) => t,
+        Err(e) => s,
+    }
+}
+
+/// Join `parts` with `sep` between them.
+fn connectJoin(parts: Array<String>, sep: String) -> String {
+    let mut out = ""
+    let mut i = 0
+    for p in parts {
+        if i > 0 {
+            out = out + sep
+        }
+        out = out + p
+        i = i + 1
+    }
+    return out
+}
+
+/// Whether `items` already contains `needle`.
+fn connectListContains(items: Array<String>, needle: String) -> Bool {
+    for it in items {
+        if it == needle {
+            return true
+        }
+    }
+    return false
+}
+
+/// Whether `spelling` names one of the contract's exported types.
+fn connectIsNamedType(spelling: String, iface: ModuleInterface) -> Bool {
+    for t in iface.types {
+        if t.name == spelling {
+            return true
+        }
+    }
+    return false
+}
+
+/// The Connect SERVICE name derived from the contract specifier: the last path
+/// segment with any `.vyrn` suffix stripped (`"./contract"` => `contract`,
+/// `"std/shelf.vyrn"` => `shelf`). The Connect path shape is `/<service>.<Proc>`.
+fn connectServiceName(contract: String) -> String {
+    let ba = bytes(contract)
+    // Last path segment: everything after the final '/'.
+    let mut start = 0
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == 47 {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    let mut seg: Array<UInt8> = []
+    let mut j = start
+    while j < ba.length {
+        seg.push(ba[j])
+        j = j + 1
+    }
+    let name = match stringFromBytes(seg) {
+        Ok(v) => v,
+        Err(e) => contract,
+    }
+    if name.endsWith(".vyrn") {
+        let nb = bytes(name)
+        let mut trimmed: Array<UInt8> = []
+        let mut k = 0
+        while k < nb.length - 5 {
+            trimmed.push(nb[k])
+            k = k + 1
+        }
+        return match stringFromBytes(trimmed) {
+            Ok(v) => v,
+            Err(e) => name,
+        }
+    }
+    return name
+}
+
+/// A one-line synthesized module that fails to load, spelling a contract
+/// violation in an identifier (the std convention: the offense rides a bare
+/// top-level identifier so parsing fails immediately, attributed to the
+/// generator call site). `detail` must be a valid identifier.
+fn connectContractError(detail: String) -> String {
+    return "CONNECT_CONTRACT_ERROR__" + detail + "\n"
+}
+
+/// Reject any contract Connect cannot model: an exported procedure with more
+/// than one parameter, or a single parameter that is not an exported named
+/// (codable) type. Returns "" when the contract is clean.
+fn connectValidateContract(iface: ModuleInterface) -> String {
+    for f in iface.functions {
+        if f.params.length > 1 {
+            return connectContractError(f.name + "_must_take_at_most_one_parameter")
+        }
+        if f.params.length == 1 {
+            if connectIsNamedType(f.params[0].spelling, iface) == false {
+                return connectContractError(f.name + "_parameter_must_be_an_exported_named_codable_type")
+            }
+        }
+    }
+    return ""
+}
+
+/// The import block a server module needs (RFC-0031): the contract's procedures
+/// come from the contract itself; each closure TYPE comes from the module that
+/// DECLARES it (its `module` specifier), so a type reached across an import keeps
+/// ONE identity shared with the real procedures.
+fn connectImportBlock(iface: ModuleInterface, contract: String) -> String {
+    let mut specs: Array<String> = [contract]
+    for t in iface.types {
+        if connectListContains(specs, t.module) == false {
+            specs.push(t.module)
+        }
+    }
+    let mut out = ""
+    for spec in specs {
+        let mut names: Array<String> = []
+        if spec == contract {
+            for f in iface.functions {
+                names.push(f.name)
+            }
+        }
+        for t in iface.types {
+            if t.module == spec {
+                names.push(t.name)
+            }
+        }
+        if names.length > 0 {
+            out = out + "import { " + connectJoin(names, ", ") + " } from \"" + spec + "\"\n"
+        }
+    }
+    return out
+}
+
+// ---- connectHandle ---------------------------------------------------------
+
+/// One per-procedure dispatcher: decode the body with `fromJson`, call the real
+/// (imported) procedure, encode the 200. A decode failure becomes the Connect
+/// 400 `invalid_argument`; a `Unit` return becomes a 200 `{}` empty message.
+fn connectDispatchFn(f: FnInfo) -> String {
+    let cap = connectCapFirst(f.name)
+    let handler = "connectDispatch" + cap
+    let retUnit = f.ret == ""
+    let mut out = "fn " + handler + "(body: String) -> Response {\n"
+    if f.params.length == 1 {
+        let reqType = f.params[0].spelling
+        out = out + "    return match fromJson(" + reqType + ", body) {\n"
+        if retUnit {
+            let runName = "connectRun" + cap
+            out = out + "        Valid(input) => " + runName + "(input),\n"
+            out = out + "        Invalid(issues) => connectFail400(issues),\n"
+            out = out + "    }\n}\n"
+            out = out + "fn " + runName + "(input: " + reqType + ") -> Response {\n"
+            out = out + "    " + f.name + "(input)\n"
+            out = out + "    return Response { status: 200, contentType: \"application/json\", body: \"{}\" }\n}\n"
+        } else {
+            out = out + "        Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "(input)) },\n"
+            out = out + "        Invalid(issues) => connectFail400(issues),\n"
+            out = out + "    }\n}\n"
+        }
+    } else {
+        if retUnit {
+            out = out + "    " + f.name + "()\n"
+            out = out + "    return Response { status: 200, contentType: \"application/json\", body: \"{}\" }\n}\n"
+        } else {
+            out = out + "    return Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "()) }\n}\n"
+        }
+    }
+    return out
+}
+
+/// The exported Connect router: `POST /<service>.<Proc>` decode-call-encode, an
+/// unknown procedure under the service prefix => `unimplemented`, and `None`
+/// (not our path) for everything else — so it mounts BESIDE `rpcHandle`.
+fn connectRouterFn(iface: ModuleInterface, service: String) -> String {
+    let prefix = "/" + service + "."
+    let mut out = "export fn connectHandle(req: Request) -> Option<Response> {\n"
+    for f in iface.functions {
+        let cap = connectCapFirst(f.name)
+        out = out + "    if req.method == \"POST\" && req.path == \"" + prefix + f.name + "\" {\n"
+        out = out + "        return Some(connectDispatch" + cap + "(req.body))\n"
+        out = out + "    }\n"
+    }
+    out = out + "    if req.path.startsWith(\"" + prefix + "\") {\n"
+    out = out + "        return Some(connectCodeErr(404, \"unimplemented\"))\n"
+    out = out + "    }\n"
+    out = out + "    return None\n}\n"
+    return out
+}
+
+/// `connectServer(contract)` — emit a module that imports the contract's
+/// procedures and exposes `connectHandle(req: Request) -> Option<Response>`,
+/// mountable beside `rpcHandle` on the same `serve` root.
+///
+/// The generator is `connectServer` (not `connectHandle`) so it never shares a
+/// top-level name with the router it emits — a `gen fn` and its generated module
+/// are BOTH linked into the program, and the flat namespace forbids the clash.
+/// This mirrors the `std/rpc` precedent exactly (`rpcServer` emits `rpcHandle`);
+/// the RFC-0038 draft named the generator `connectHandle`, which is unrealizable
+/// for that reason (recorded in the RFC's as-landed notes).
+export gen fn connectServer(contract: String) -> String {
+    let iface = moduleInterface(contract)
+    let err = connectValidateContract(iface)
+    if err != "" {
+        return err
+    }
+    let service = connectServiceName(contract)
+    let mut out = "/// Generated by std/connect `connectServer` (RFC-0038) — do not edit.\n"
+    out = out + connectImportBlock(iface, contract)
+    out = out + "type ConnectError = { code: String, message: String, details: Array<Issue> }\n"
+    // The two shared error builders: a lossless 400 from Issues, and a bare
+    // code-only Connect error (`unimplemented`).
+    out = out + "fn connectFail400(issues: Array<Issue>) -> Response {\n"
+    out = out + "    return Response { status: 400, contentType: \"application/json\", body: toJson(ConnectError { code: \"invalid_argument\", message: \"request validation failed\", details: issues }) }\n}\n"
+    out = out + "fn connectCodeErr(status: Int64, code: String) -> Response {\n"
+    out = out + "    return Response { status: status, contentType: \"application/json\", body: \"{\\\"code\\\":\\\"\" + code + \"\\\"}\" }\n}\n"
+    for f in iface.functions {
+        out = out + connectDispatchFn(f)
+    }
+    out = out + connectRouterFn(iface, service)
+    return out
+}
+
+// ---- connectClient ---------------------------------------------------------
+
+/// The per-procedure result unifier: 200 => decode the body (or `Valid(true)`
+/// for a `Unit` procedure); 400 => the server's Connect error, its `details`
+/// Issues surfaced as `Invalid`; a transport / other status => a single
+/// `connect.transport` Issue (status 0 = unreachable).
+fn connectUnifyFn(f: FnInfo, service: String) -> String {
+    let cap = connectCapFirst(f.name)
+    let unify = "connectUnify" + cap
+    let retUnit = f.ret == ""
+    let mut out = ""
+    if retUnit {
+        out = out + "fn " + unify + "(status: Int64, body: String) -> Validation<Bool> {\n"
+        out = out + "    if status == 200 { return Valid(true) }\n"
+    } else {
+        out = out + "fn " + unify + "(status: Int64, body: String) -> Validation<" + f.ret + "> {\n"
+        out = out + "    if status == 200 { return fromJson(" + f.ret + ", body) }\n"
+    }
+    out = out + "    if status == 400 {\n"
+    out = out + "        return match fromJson(ConnectError, body) {\n"
+    out = out + "            Valid(err) => Invalid(err.details),\n"
+    out = out + "            Invalid(issues) => Invalid(issues),\n"
+    out = out + "        }\n"
+    out = out + "    }\n"
+    out = out + "    if status == 0 {\n"
+    out = out + "        return Invalid([Issue { key: \"connect.transport\", path: \"\", message: \"procedure `" + f.name + "` is unreachable\" }])\n"
+    out = out + "    }\n"
+    out = out + "    return Invalid([Issue { key: \"connect.transport\", path: \"\", message: \"procedure `" + f.name + "` failed with status \" + status.toString() }])\n}\n"
+    return out
+}
+
+/// One procedure's client surface: the same-named stub that fires the single
+/// shared transport extern against the Connect path, plus the per-procedure
+/// completion dispatcher (`export extern fn` the host calls) that unifies the
+/// reply and hands it to the user's plain `on<Proc>` handler.
+fn connectProcFns(f: FnInfo, service: String) -> String {
+    let cap = connectCapFirst(f.name)
+    let path = "/" + service + "." + f.name
+    let mut out = connectUnifyFn(f, service)
+    if f.params.length == 1 {
+        out = out + "export fn " + f.name + "(req: " + f.params[0].spelling + ") {\n"
+        out = out + "    vyrnConnectCall(\"" + path + "\", toJson(req))\n}\n"
+    } else {
+        out = out + "export fn " + f.name + "() {\n"
+        out = out + "    vyrnConnectCall(\"" + path + "\", \"{}\")\n}\n"
+    }
+    out = out + "export extern fn connectDone" + cap + "(id: Int64, status: Int64, body: String) {\n"
+    out = out + "    on" + cap + "(id, connectUnify" + cap + "(status, body))\n}\n"
+    return out
+}
+
+/// `connectClient(contract)` — emit the symmetric in-Vyrn client surface: the
+/// contract's TYPE declarations verbatim, one same-named stub per procedure over
+/// a single shared `vyrnConnectCall` extern that POSTs to the Connect path, and
+/// one `export extern fn` completion dispatcher per procedure. The user writes
+/// only `fn onGetBook(id: Int64, res: Validation<T>)`. Mirrors `rpcClient`'s
+/// structure, speaking Connect paths/errors.
+export gen fn connectClient(contract: String) -> String {
+    let iface = moduleInterface(contract)
+    let err = connectValidateContract(iface)
+    if err != "" {
+        return err
+    }
+    let service = connectServiceName(contract)
+    let mut out = "/// Generated by std/connect `connectClient` (RFC-0038) — do not edit.\n"
+    for t in iface.types {
+        out = out + t.source + "\n"
+    }
+    out = out + "type ConnectError = { code: String, message: String, details: Array<Issue> }\n"
+    out = out + "extern fn vyrnConnectCall(path: String, body: String) -> Int64\n"
+    for f in iface.functions {
+        out = out + connectProcFns(f, service)
+    }
+    return out
+}
+
+// ---- tests (pure helpers; the emitted modules are golden-pinned in Rust) ----
+
+test "connectServiceName strips the path and the .vyrn suffix" {
+    assertEq(connectServiceName("./contract"), "contract")
+    assertEq(connectServiceName("std/shelf.vyrn"), "shelf")
+    assertEq(connectServiceName("wire"), "wire")
+}
+
+test "connectCapFirst uppercases only the first ASCII byte" {
+    assertEq(connectCapFirst("getBook"), "GetBook")
+    assertEq(connectCapFirst("tagCounts"), "TagCounts")
+}
