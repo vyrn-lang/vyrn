@@ -85,7 +85,18 @@ rules that the normative style left implicit had to be pinned down:
   `i < 1`). This matches the entire corpus and needs no type information (fmt
   builds no AST). Space *after* a generic `>` follows the ordinary rules, so
   `Box<T> =` keeps its space and never fuses into `>=`; a generic `>` before `(`
-  attaches (`fn id<T>(x)`).
+  attaches (`fn id<T>(x)`). **Source-tightness alone is not sufficient**, though: a
+  tight comparison against a literal (`x>0`, `n<10`) looks exactly like a stray
+  generic bracket. Two extra rules close that hole (both re-verified as zero-churn
+  over examples/ + std/): (1) a `<` immediately before an **integer literal** is a
+  comparison, never a generic open — the first generic argument is always a *type*,
+  and a const-generic size (`Array<Int64, 3>`) is a *later* argument, never right
+  after `<`; (2) a closing `>` is a generic bracket only while a generic `<` is
+  **open** (an internal balanced depth counter) — a lone tight `>` whose left side
+  is an operand (`x>0`) is a comparison. Before this, `x>0` misformatted to `x> 0`
+  and `n<10` stayed fused (found during RFC-0030); both now re-space to `x > 0` /
+  `n < 10` while every generic spelling (`Array<Int64>`, `Map<String, V>`,
+  `<T: Show>`, `fn(..)` types) stays byte-stable.
 - **Unary vs binary `-`.** By the previous token: `-` is unary unless it follows
   an operand (identifier, literal, `)`, `]`, `?`). Unary binds tight (`-1`,
   `(-1)`, `=> -1`); binary is spaced (`a - 1`).

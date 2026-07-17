@@ -115,6 +115,12 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
     // its `|`s separate enum variants, never open a lambda (RFC-0037 lambda
     // positions are expression contexts, which a type RHS is not).
     let mut in_type_decl = false;
+    // How many generic `<` are currently open (balanced by their `>` closes). A
+    // closing `>` is a generic bracket ONLY while one is open — otherwise a lone
+    // tight `>` (`x>0`, prev = operand) is a comparison, not a stray generic
+    // close. Source-tightness alone cannot tell `x>0` from `Int64>`; the open-`<`
+    // context does, and needs no type information.
+    let mut generic_depth: i32 = 0;
     for k in 0..toks.len() {
         let idx = toks[k];
         let prev = if k > 0 { Some(kind(toks[k - 1])) } else { None };
@@ -130,24 +136,29 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
         match kind(idx) {
             Tok::Lt => {
                 // A generic bracket is tight on both sides in the source; a
-                // comparison is spaced. `next` may be a type name (`Box<T>`) or a
-                // const-generic integer (`Array<Int64, 3>` — but the leading arg is
-                // a type, so `Int` here only matters for `<` before a size).
+                // comparison is spaced. The first argument after `<` is always a
+                // type name (`Box<T>`, `Array<Int64, 3>` — the const-generic size
+                // is a *later* argument, never right after `<`), so a `<` directly
+                // before an integer literal (`n<10`) is a comparison, not a generic.
                 let tight_before = !items[idx].space_before;
                 let tight_after = next_idx.map(|n| !items[n].space_before).unwrap_or(false);
                 let prev_ok = matches!(prev, Some(Tok::Ident(_)) | Some(Tok::Gt));
-                let next_ok = matches!(next, Some(Tok::Ident(_)) | Some(Tok::Int(_)));
+                let next_ok = matches!(next, Some(Tok::Ident(_)));
                 if tight_before && tight_after && prev_ok && next_ok {
                     roles[idx].generic_angle = true;
+                    generic_depth += 1;
                 }
             }
             Tok::Gt => {
                 // The closing `>` is tight against a type name (`Int64>`), a nested
                 // close (`>>`), or a const-generic integer size (`Array<Int64, 3>`).
+                // It is generic ONLY while a generic `<` is open — a lone tight `>`
+                // whose left side is an operand (`x>0`) is a comparison.
                 let tight_before = !items[idx].space_before;
                 let prev_ok = matches!(prev, Some(Tok::Ident(_)) | Some(Tok::Gt) | Some(Tok::Int(_)));
-                if tight_before && prev_ok {
+                if generic_depth > 0 && tight_before && prev_ok {
                     roles[idx].generic_angle = true;
+                    generic_depth -= 1;
                 }
             }
             Tok::Minus => {
@@ -494,6 +505,23 @@ mod tests {
         assert_eq!(f("let b = a < c\n"), "let b = a < c\n");
         assert_eq!(f("if i < 1 { return a }\n"), "if i < 1 { return a }\n");
         assert_eq!(f("let b = a > c\n"), "let b = a > c\n");
+    }
+
+    #[test]
+    fn tight_comparisons_re_space() {
+        // A tight comparison (no matching generic `<`) must re-space, not be
+        // mistaken for a stray generic close (`x>0` -> `x > 0`, never `x> 0`).
+        assert_eq!(f("if x>0 { return a }\n"), "if x > 0 { return a }\n");
+        assert_eq!(f("if n<10 { return a }\n"), "if n < 10 { return a }\n");
+        assert_eq!(f("let b = i>=0\n"), "let b = i >= 0\n");
+        assert_eq!(f("let b = a<=b\n"), "let b = a <= b\n");
+        // A comparison against a literal on both sides.
+        assert_eq!(f("let b = 3>0\n"), "let b = 3 > 0\n");
+        // A generic still fuses when a real `<` opened, even next to a comparison.
+        assert_eq!(
+            f("let m: Map<String, Int64> = x\nlet b = i>0\n"),
+            "let m: Map<String, Int64> = x\nlet b = i > 0\n"
+        );
     }
 
     #[test]
