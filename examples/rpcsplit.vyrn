@@ -1,0 +1,45 @@
+/// Split-contract typed RPC (RFC-0031), in-process flavor — a three-way parity
+/// citizen (interp == native == wasm). Where `examples/rpc.vyrn` reflects a
+/// SELF-CONTAINED contract, this one reflects a contract whose wire types live in
+/// a separate `wire` leaf and whose state lives in a `store` module. It proves
+/// `rpcInProcess` handles the reachable type closure: the generated dispatch
+/// module imports `GetReq`/`ItemResult` from `./rpcsplit/wire` (their declaring
+/// module), not from the contract that merely re-imports them.
+///
+/// Inspect the synthesized dispatch module with:  vyrn emit-gen examples/rpcsplit.vyrn
+import { rpcInProcess } from "std/rpc"
+import { getItem } from rpcInProcess("./rpcsplit/contract")
+import { Id, Item, GetReq, ItemResult } from "./rpcsplit/wire"
+
+// Module state: the last dispatch result, filled by the handler below.
+let mut line: String = "(none)"
+
+/// The completion handler for `getItem` — in-process, always `Valid` (validated
+/// types cannot be constructed invalid without the wire's `fromJson`).
+fn onGetItem(id: Int64, res: Validation<ItemResult>) {
+    line = match res {
+        Valid(r) => match r {
+            Ok(it) => "getItem -> \{it.label}",
+            Err(why) => "getItem -> \{why}",
+        },
+        Invalid(issues) => "getItem failed",
+    }
+}
+
+fn main() -> Int64 {
+    getItem(GetReq { id: 1 })
+    print(line)
+    getItem(GetReq { id: 9 })
+    print(line)
+    return 0
+}
+
+test "in-process getItem runs the real store procedure through the thin contract" {
+    getItem(GetReq { id: 2 })
+    assertEq(line, "getItem -> beta")
+}
+
+test "in-process getItem carries the store's Err outcome for a missing id" {
+    getItem(GetReq { id: 9 })
+    assertEq(line, "getItem -> no item 9")
+}

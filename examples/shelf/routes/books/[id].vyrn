@@ -4,7 +4,8 @@
 /// the page server-renders it. A missing id (or the reserved 999) is an `Invalid`
 /// => the synthesized router's 422 issues page.
 import { detailPage } from "../../view"
-import { getBook, Book, IdReq } from "../../contract"
+import { getBook } from "../../contract"
+import { Book, IdReq } from "../../wire"
 import { Html } from "std/html"
 
 export type Params = { id: Int64 }

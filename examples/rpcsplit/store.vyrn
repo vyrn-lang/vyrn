@@ -1,0 +1,19 @@
+/// The store for the split in-process RPC demo — it OWNS the item list as module
+/// state (RFC-0029) and imports its wire types from `wire.vyrn` (RFC-0031). The
+/// thin `contract.vyrn` delegates its procedure here.
+import { Id, Item, GetReq, ItemResult } from "./wire"
+
+let mut items: Array<Item> = [
+    Item { id: 1, label: "alpha" },
+    Item { id: 2, label: "beta" },
+]
+
+/// Fetch one item by id; `Err` when absent.
+export fn getItem(req: GetReq) -> ItemResult {
+    for it in items {
+        if it.id == req.id {
+            return Ok(Item { id: it.id, label: it.label })
+        }
+    }
+    return Err("no item \{req.id}")
+}

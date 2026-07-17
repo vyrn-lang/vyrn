@@ -1,0 +1,149 @@
+/// The shelf STORE — it OWNS the `books` module state (RFC-0029: a top-level
+/// `let` is legal in any module) and holds the REAL, stateful procedure bodies.
+/// It imports its wire types from `wire.vyrn` (RFC-0031) and exports its
+/// accessors; the thin `contract.vyrn` delegates every procedure here via
+/// `import * as store`.
+///
+/// This split is exactly what RFC-0031 unlocks: before it, reflection saw only a
+/// module's OWN declarations, so the contract had to BE the store (every wire type
+/// had to be declared in the contract for `rpcClient` to re-emit it). Now the
+/// state lives here, the types live in `wire.vyrn`, and the contract is honest
+/// boundary layer — "server-side Pinia, nothing special".
+import { BookId, Rating, Stars, Title, Url, Tag, Book, IdReq, AddBookReq, RateReq, BookList, BookResult, DeleteResult, TagCounts } from "./wire"
+
+let mut books: Array<Book> = [
+    Book { id: 0, title: "The Pragmatic Programmer", url: "https://pragprog.com/titles/tpp20", tags: ["reference", "web"], rating: 5 },
+    Book { id: 1, title: "Dune", url: "https://example.com/dune", tags: ["fiction"], rating: 4 },
+    Book { id: 2, title: "SICP", url: "https://mitpress.mit.edu/sicp", tags: ["reference"], rating: 0 },
+]
+let mut nextId: Int64 = 3
+
+/// A fresh deep copy of a book (so a value can leave the store without moving
+/// module state out — nothing may take ownership of a global).
+fn copyBook(b: Book) -> Book {
+    let mut tags: Array<Tag> = []
+    for t in b.tags {
+        tags.push(t)
+    }
+    return Book { id: b.id, title: b.title, url: b.url, tags: tags, rating: b.rating }
+}
+
+// ---- procedures (REAL, stateful implementations over the store) --------------
+
+/// List every book. Zero-param => POST with an empty body.
+export fn listBooks() -> BookList {
+    let mut out: Array<Book> = []
+    for b in books {
+        out.push(copyBook(b))
+    }
+    return BookList { books: out }
+}
+
+/// Fetch one book by id; `Err` when absent.
+export fn getBook(req: IdReq) -> BookResult {
+    for b in books {
+        if b.id == req.id {
+            return Ok(copyBook(b))
+        }
+    }
+    return Err("no book with id \{req.id}")
+}
+
+/// Add a book (title/url/tags already validated by `fromJson`); `Err` never in
+/// practice, returns the stored copy.
+export fn addBook(req: AddBookReq) -> BookResult {
+    let id = nextId
+    let mut tags: Array<Tag> = []
+    for t in req.tags {
+        tags.push(t)
+    }
+    books.push(Book { id: id, title: req.title, url: req.url, tags: tags, rating: 0 })
+    nextId = nextId + 1
+    return getBook(IdReq { id: id })
+}
+
+/// Delete a book by id. The seed book (id 0) is refused — an application outcome.
+export fn deleteBook(req: IdReq) -> DeleteResult {
+    if req.id == 0 {
+        return Err("the seed book cannot be deleted")
+    }
+    let mut kept: Array<Book> = []
+    let mut found = false
+    for b in books {
+        if b.id == req.id {
+            found = true
+        } else {
+            kept.push(copyBook(b))
+        }
+    }
+    books = kept
+    if found {
+        return Ok(true)
+    }
+    return Err("no book with id \{req.id}")
+}
+
+/// Set a book's rating (already validated 1..5); `Err` when the book is absent.
+export fn rateBook(req: RateReq) -> BookResult {
+    let mut i = 0
+    while i < books.length {
+        if books[i].id == req.id {
+            let s: Stars = req.rating
+            books[i].rating = s
+            return getBook(IdReq { id: req.id })
+        }
+        i = i + 1
+    }
+    return Err("no book with id \{req.id}")
+}
+
+/// Tag histogram over the whole shelf — the `Map<String, Int64>` pillar.
+export fn tagCounts() -> TagCounts {
+    let mut m: Map<String, Int64> = [:]
+    for b in books {
+        for t in b.tags {
+            let cur = match m[t] {
+                Some(c) => c,
+                None => 0,
+            }
+            m[t] = cur + 1
+        }
+    }
+    return m
+}
+
+/// Look a tag's count up in a `TagCounts` map (-1 when absent), for tests.
+fn countOf(m: TagCounts, tag: String) -> Int64 {
+    return match m[tag] {
+        Some(c) => c,
+        None => -1,
+    }
+}
+
+test "tag folding over the seed shelf builds the right Map (insertion order)" {
+    let m = tagCounts()
+    assertEq(m.length, 3)
+    assertEq(countOf(m, "reference"), 2)
+    assertEq(countOf(m, "web"), 1)
+    assertEq(countOf(m, "fiction"), 1)
+    // First-insertion order: reference (book 0), web (book 0), fiction (book 1).
+    assertEq(m.keys()[0], "reference")
+    assertEq(m.keys()[1], "web")
+    assertEq(m.keys()[2], "fiction")
+}
+
+test "listBooks returns the three seed books (state owned by this module)" {
+    let snap = listBooks()
+    assertEq(snap.books.length, 3)
+    assertEq(snap.books[0].title, "The Pragmatic Programmer")
+}
+
+test "an invalid AddBookReq is rejected by fromJson with accumulated Issues" {
+    let before = listBooks()
+    match fromJson(AddBookReq, "{\"title\":\"\",\"url\":\"nope\",\"tags\":[]}") {
+        Valid(req) => assertEq("should not validate", "did"),
+        Invalid(issues) => assert(issues.length >= 1),
+    }
+    // The store is untouched — a rejected decode never reaches `addBook`.
+    assertEq(listBooks().books.length, before.books.length)
+}

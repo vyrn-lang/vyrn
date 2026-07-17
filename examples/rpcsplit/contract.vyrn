@@ -1,0 +1,12 @@
+/// The thin contract for the split in-process RPC demo (RFC-0031): it imports the
+/// wire type its signature names and delegates the procedure to the store
+/// (`import * as store`). It declares NO types of its own — `rpcInProcess`
+/// reaches `GetReq`/`ItemResult`/`Item`/`Id` through the reachable type closure
+/// and imports each from the module that declares it.
+import { GetReq, ItemResult } from "./wire"
+import * as store from "./store"
+
+/// Fetch one item by id.
+export fn getItem(req: GetReq) -> ItemResult {
+    return store.getItem(req)
+}
