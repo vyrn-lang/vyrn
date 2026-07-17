@@ -1,0 +1,40 @@
+/// RFC-0029 — module state everywhere. A diamond of stateful modules whose
+/// single shared `store` lives OUTSIDE the root:
+///
+///        trace  (leaf, stateless print helper)
+///          |
+///        store  (owns the shared `count`)
+///        /   \
+///     left   right   (both mutate the one shared store)
+///        \   /
+///        (root)      (this file — reads and mutates through accessors)
+///
+/// It demonstrates, byte-identically across interp / native / wasm:
+///   - non-root state reached only through exported accessor functions,
+///   - a diamond sharing ONE store instance (left + right + root agree),
+///   - initialization in LINKER ORDER (dependencies first), printed live,
+///   - an initializer READING an imported module's already-initialized state.
+
+import { currentCount, bump } from "./statemod/store"
+import { bumpFromLeft } from "./statemod/left"
+import { bumpFromRight } from "./statemod/right"
+import { mark } from "./statemod/trace"
+
+/// Root's own init-order marker — prints LAST (the root is the graph's sink,
+/// so every module it depends on has already initialized).
+let rootInit: Int64 = mark("init root")
+
+/// An initializer reading imported module state: `store` initialized before the
+/// root, so `currentCount()` here is well-defined — the count is 0 at startup.
+let startCount: Int64 = currentCount()
+
+fn main() -> Int64 {
+    print(startCount) // 0 — the store's count at init time
+
+    bumpFromLeft() // count -> 1
+    bumpFromRight() // count -> 2 (the SAME store, via the other arm)
+    bump() // count -> 3 (directly, via the store's own accessor)
+
+    print(currentCount()) // 3 — one shared instance across the whole diamond
+    return 0
+}

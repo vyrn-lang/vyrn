@@ -1,0 +1,12 @@
+/// One arm of the import diamond. Imports the shared `store` and mutates it —
+/// proving that a non-root module reaches non-root state through accessors.
+import { bump } from "./store"
+import { mark } from "./trace"
+
+/// Init-order marker for this arm (after `store`, which it imports).
+let leftInit: Int64 = mark("init left")
+
+/// Bump the shared store from the left arm.
+export fn bumpFromLeft() {
+    bump()
+}

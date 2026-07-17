@@ -1,0 +1,28 @@
+/// The store module — server-side state living OUTSIDE the root (RFC-0029).
+/// It owns `count`; every reader and writer goes through its exported accessor
+/// functions (`currentCount`/`bump`). No `export let` exists — state is module-private.
+///
+/// `store` imports `trace`, so `trace` initializes first; `store`'s own
+/// initializer then calls the imported `mark`, printing "init store" — an
+/// initializer legally observing an already-initialized imported module.
+import { mark } from "./trace"
+
+/// The single shared instance: one per process, shared across every module in
+/// the import diamond (left, right, and the root all reach this one `count`).
+let mut count: Int64 = 0
+
+/// Init-order marker: runs when `store` initializes (after `trace`, before the
+/// modules that import `store`).
+let storeInit: Int64 = mark("init store")
+
+/// Read the shared count.
+export fn currentCount() -> Int64 {
+    return count
+}
+
+/// Mutate the shared count. Reaching this from a `handle`/`spawn` is what the
+/// isolation analyses key on — module-agnostic, so it gates the same whether
+/// the state lives in the root or here.
+export fn bump() {
+    count = count + 1
+}

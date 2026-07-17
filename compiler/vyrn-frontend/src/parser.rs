@@ -450,11 +450,18 @@ impl Parser {
                     && !is_export_extern
                     && !is_export_gen
                 {
-                    errors.push(Diagnostic::error(
-                        self.line(), self.col(), "parse",
+                    // `export let` gets its own named diagnostic (RFC-0029):
+                    // module state is legal in any module but never exportable —
+                    // cross-module access goes through exported accessor functions.
+                    let msg = if *self.peek() == Tok::Let {
+                        "module state is not exportable — export accessor functions \
+                         (a top-level `let` is module-private in every module)"
+                    } else {
                         "`export` must be followed by `fn`, `type`, `protocol`, `extern fn`, or \
                          `gen fn`"
-                            .to_string(),
+                    };
+                    errors.push(Diagnostic::error(
+                        self.line(), self.col(), "parse", msg.to_string(),
                     ));
                     self.sync_to_decl();
                     continue;
@@ -501,9 +508,10 @@ impl Parser {
                     Err(d) => { errors.push(d); self.sync_to_decl(); }
                 },
                 // Top-level `let [mut] name [: Type] = init` — module state
-                // (RFC-0013). Shares the `let` keyword with body-local bindings;
-                // recognized here at brace depth 0. `export let` is rejected by
-                // the `export` guard above (module state is not importable in v1).
+                // (RFC-0013, any module per RFC-0029). Shares the `let` keyword
+                // with body-local bindings; recognized here at brace depth 0.
+                // `export let` is rejected by the `export` guard above (module
+                // state is module-private — export accessor functions instead).
                 Tok::Let => match self.global_decl() {
                     Ok(mut g) => { g.doc = doc; globals.push(g); }
                     Err(d) => { errors.push(d); self.sync_to_decl(); }
@@ -2609,6 +2617,15 @@ mod tests {
         );
         let g = p.functions.iter().find(|f| f.name == "g").unwrap();
         assert!(g.is_gen && g.exported);
+    }
+
+    #[test]
+    fn export_let_is_rejected_with_a_named_diagnostic() {
+        // RFC-0029: module state is legal in any module but never exportable.
+        let err = parse(lex("export let x = 1 fn main() -> Int64 { return 0 }").unwrap())
+            .unwrap_err();
+        assert!(err.message.contains("module state is not exportable"), "{}", err.message);
+        assert!(err.message.contains("accessor functions"), "{}", err.message);
     }
 
     #[test]

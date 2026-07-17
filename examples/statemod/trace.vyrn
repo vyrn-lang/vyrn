@@ -1,0 +1,7 @@
+/// A stateless leaf module: a `print` helper the stateful modules call from
+/// their initializers to make INIT ORDER observable (RFC-0029). Being a leaf,
+/// `trace` initializes first — but it holds no state, so nothing prints for it.
+export fn mark(label: String) -> Int64 {
+    print(label)
+    return 0
+}

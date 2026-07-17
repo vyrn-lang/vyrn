@@ -1095,16 +1095,34 @@ impl<'a> Checker<'a> {
     /// and may not call user or extern functions. A failed global still binds (as
     /// `Type::Err`) so function bodies referring to it don't cascade.
     fn check_globals(&self, program: &Program, out: &mut Vec<Diagnostic>) {
-        // Names whose call is forbidden in an initializer: every user/extern
-        // function and every protocol method. Builtins (`print`, `cell`, `str`,
-        // …), constructors (`Some`, enum variants, `Age(n)`) are not in this set.
-        let mut forbidden: HashSet<String> =
-            program.functions.iter().map(|f| f.name.clone()).collect();
+        // Names whose call is forbidden in ANY initializer: every `extern`
+        // function (a host call — unavailable before `main`) and every protocol
+        // method. Builtins (`print`, `cell`, `str`, …), constructors (`Some`,
+        // enum variants, `Age(n)`) are not in this set.
+        //
+        // An ORDINARY (non-extern) function's callability depends on WHERE it
+        // lives (RFC-0029): a function imported from another module is legal to
+        // call, because imported modules initialize first (post-order over the
+        // import graph) so their state is ready; a SAME-MODULE function stays
+        // forbidden (no own user code runs before `main`). `fn_module` maps each
+        // ordinary function to its owning module for that comparison.
+        let mut forbidden: HashSet<String> = program
+            .functions
+            .iter()
+            .filter(|f| f.is_extern || f.is_export_extern)
+            .map(|f| f.name.clone())
+            .collect();
         for p in &program.protocols {
             for m in &p.methods {
                 forbidden.insert(m.name.clone());
             }
         }
+        let fn_module: HashMap<String, Option<String>> = program
+            .functions
+            .iter()
+            .filter(|f| !f.is_extern && !f.is_export_extern)
+            .map(|f| (f.name.clone(), f.module.clone()))
+            .collect();
         let all_globals: HashSet<&str> =
             program.globals.iter().map(|g| g.name.as_str()).collect();
         // Ready-so-far names (the earlier globals) grow as we go.
@@ -1113,7 +1131,10 @@ impl<'a> Checker<'a> {
             let bty = (|| -> Result<Type, String> {
                 // Initializer restrictions (walked before typing so the messages
                 // are precise): no user/extern call, no later-global read.
-                init_restrictions(&g.init, &forbidden, &all_globals, &ready, &g.name, g.line)?;
+                init_restrictions(
+                    &g.init, &forbidden, &fn_module, &g.module, &all_globals, &ready, &g.name,
+                    g.line,
+                )?;
                 if let Some(declared) = &g.ty {
                     self.ensure_type_exists(declared, g.line)?;
                 }
@@ -4586,17 +4607,26 @@ fn global_ref_expr(
     }
 }
 
-/// Enforce a module-state initializer's restrictions (RFC-0013): it may not call
-/// a user or extern function (or protocol method), and may not read a global
-/// that is declared later (or itself). Returns the first violation.
+/// Enforce a module-state initializer's restrictions (RFC-0013, RFC-0029): it
+/// may not read a global declared later (or itself), and it may call only
+/// literals/operators/built-ins, constructors, and functions IMPORTED from
+/// another module (which initialize first). A same-module ordinary function,
+/// any `extern`, a protocol method, or a `spawn` is rejected. Returns the first
+/// violation.
+#[allow(clippy::too_many_arguments)]
 fn init_restrictions(
     e: &Expr,
     forbidden: &HashSet<String>,
+    fn_module: &HashMap<String, Option<String>>,
+    own_module: &Option<String>,
     all_globals: &HashSet<&str>,
     ready: &HashSet<String>,
     own_name: &str,
     line: usize,
 ) -> Result<(), String> {
+    let recur = |e: &Expr| {
+        init_restrictions(e, forbidden, fn_module, own_module, all_globals, ready, own_name, line)
+    };
     match e {
         Expr::Var { name, .. } => {
             if all_globals.contains(name.as_str()) && !ready.contains(name) {
@@ -4615,22 +4645,28 @@ fn init_restrictions(
         }
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
         Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            init_restrictions(expr, forbidden, all_globals, ready, own_name, line)
+            recur(expr)
         }
         Expr::Binary { lhs, rhs, .. } => {
-            init_restrictions(lhs, forbidden, all_globals, ready, own_name, line)?;
-            init_restrictions(rhs, forbidden, all_globals, ready, own_name, line)
+            recur(lhs)?;
+            recur(rhs)
         }
         Expr::Call { name, args, .. } => {
-            if forbidden.contains(name) {
+            // An `extern` or protocol method is never callable before `main`.
+            let forbidden_here = forbidden.contains(name)
+                // A SAME-MODULE ordinary function is forbidden too — only
+                // imported modules are guaranteed initialized first (RFC-0029).
+                || matches!(fn_module.get(name), Some(m) if m == own_module);
+            if forbidden_here {
                 return Err(format!(
                     "line {line}: initializer of `{own_name}` may not call `{name}` — a \
                      module-state initializer runs before `main`, so it may use only \
-                     literals, operators, and built-ins (no user or extern calls)"
+                     literals, operators, built-ins, and functions imported from another \
+                     module (whose state initializes first)"
                 ));
             }
             for a in args {
-                init_restrictions(a, forbidden, all_globals, ready, own_name, line)?;
+                recur(a)?;
             }
             Ok(())
         }
@@ -4640,33 +4676,33 @@ fn init_restrictions(
         )),
         Expr::TryConstruct { args, .. } => {
             for a in args {
-                init_restrictions(a, forbidden, all_globals, ready, own_name, line)?;
+                recur(a)?;
             }
             Ok(())
         }
         Expr::Match { scrutinee, arms, .. } => {
-            init_restrictions(scrutinee, forbidden, all_globals, ready, own_name, line)?;
+            recur(scrutinee)?;
             for a in &arms.iter().map(|a| &a.body).collect::<Vec<_>>() {
-                init_restrictions(a, forbidden, all_globals, ready, own_name, line)?;
+                recur(a)?;
             }
             Ok(())
         }
         Expr::StructLit { fields, .. } => {
             for (_, v) in fields {
-                init_restrictions(v, forbidden, all_globals, ready, own_name, line)?;
+                recur(v)?;
             }
             Ok(())
         }
         Expr::ArrayLit { elems, .. } => {
             for v in elems {
-                init_restrictions(v, forbidden, all_globals, ready, own_name, line)?;
+                recur(v)?;
             }
             Ok(())
         }
         Expr::MapLit { entries, .. } => {
             for (k, v) in entries {
-                init_restrictions(k, forbidden, all_globals, ready, own_name, line)?;
-                init_restrictions(v, forbidden, all_globals, ready, own_name, line)?;
+                recur(k)?;
+                recur(v)?;
             }
             Ok(())
         }
@@ -4674,9 +4710,7 @@ fn init_restrictions(
         // position rule rejects it outside a call argument, and initializers make
         // no calls); recurse for completeness so the deeper diagnostic still fires.
         Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e2) => {
-                init_restrictions(e2, forbidden, all_globals, ready, own_name, line)
-            }
+            LambdaBody::Expr(e2) => recur(e2),
             LambdaBody::Block(_) => Ok(()),
         },
     }
@@ -4810,6 +4844,28 @@ mod tests {
         let (chain, global) = module_state_use(&program, "handle").expect("stateful");
         assert_eq!(chain, vec!["handle", "respond", "bump"]);
         assert_eq!(global, "hits");
+    }
+
+    #[test]
+    fn module_state_use_gates_on_non_root_module_state() {
+        // RFC-0029: the `--workers` gate is module-agnostic — after linking, a
+        // global owned by an imported module is an ordinary program global, so a
+        // `handle` reaching it gates workers exactly as a root global would. We
+        // simulate the post-link program by tagging the state and its accessor
+        // with a foreign module; the gate must still fire and name the global.
+        let src = "let mut count: Int64 = 0\n\
+                   fn bump() -> Int64 { count = count + 1\n return count }\n\
+                   fn handle(n: Int64) -> Int64 { return bump() }\n";
+        let mut program = parse(lex(src).unwrap()).unwrap();
+        for g in &mut program.globals {
+            g.module = Some("store.vyrn".into());
+        }
+        if let Some(f) = program.functions.iter_mut().find(|f| f.name == "bump") {
+            f.module = Some("store.vyrn".into());
+        }
+        let (chain, global) = module_state_use(&program, "handle").expect("stateful");
+        assert_eq!(chain, vec!["handle", "bump"]);
+        assert_eq!(global, "count");
     }
 
     #[test]
