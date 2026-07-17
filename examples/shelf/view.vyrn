@@ -11,19 +11,26 @@
 import { el, text, Html, Attr } from "std/html"
 import { i18n } from "std/i18n"
 import { setLocale, locale, Locale, tAppTitle, tAppTagline, tNavHomeLabel, tNavAboutLabel, tShelfCount, tShelfEmpty, tShelfTags, transKey, t } from i18n("./strings")
+import { tw } from "std/tw"
+import * as theme from tw("./theme.json")
 import { Book, BookList, TagCounts } from "./wire"
 
-/// A nav link.
+/// A nav link, styled with theme utilities: the `hover:` state variant recolours
+/// on hover (RFC-0032 pseudo-class emission), all checked against `Tw` at compile
+/// time — a typo in the class string here would fail `vyrn check`.
 fn navLink(href: String, label: String) -> Html {
-    return el("a", [A("href", href)], [text(label)])
+    return el("a", [A("href", href), theme.cls("mr-2 hover:text-brand-600")], [text(label)])
 }
 
-/// The page chrome around `kids`: stylesheet, localized header + nav. Reads the
-/// ambient `currentLocale` (set by the caller via `setLocale`).
+/// The page chrome around `kids`: the theme stylesheet (`/theme.css`) plus the
+/// small bespoke sheet (`/style.css`), then the localized header + nav. The header
+/// uses theme utilities including a `md:` responsive variant (`md:gap-6`) — proven
+/// members of `Tw`. Reads the ambient `currentLocale` (set via `setLocale`).
 export fn shell(kids: Array<Html>) -> Html {
     return el("div", [Id("root")], [
+            el("link", [A("rel", "stylesheet"), A("href", "/theme.css")], []),
             el("link", [A("rel", "stylesheet"), A("href", "/style.css")], []),
-            el("header", [], [
+            el("header", [theme.cls("flex items-center gap-3 md:gap-6")], [
                     el("h1", [], [text(tAppTitle())]),
                     el("nav", [], [
                             navLink("/", tNavHomeLabel()),
@@ -130,7 +137,7 @@ export fn detailPage(b: Book) -> Html {
     return shell([
             el("p", [], [navLink("/", tNavHomeLabel())]),
             el("h2", [], [text("Book #\{b.id}")]),
-            el("div", [Id("book")], [
+            el("div", [Id("book"), theme.cls("p-4 rounded-lg border")], [
                     el("h3", [], [el("a", [A("href", b.url)], [text(b.title)])]),
                     el("p", [Cls("rating")], [text(rating)]),
                     el("p", [Cls("tags")], tagKids),

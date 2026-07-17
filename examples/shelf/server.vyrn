@@ -13,8 +13,15 @@ import { rpcServer } from "std/rpc"
 import { rpcHandle } from rpcServer("./contract")
 import { pages } from "std/ui"
 import { route } from pages("./routes")
+import { tw } from "std/tw"
+import * as theme from tw("./theme.json")
 
 fn handle(req: Request) -> Response {
+    // RFC-0032: serve the theme-derived utility stylesheet from `css()`. It is a
+    // baked constant, so this is a plain string return with the CSS content type.
+    if req.method == "GET" && req.path == "/theme.css" {
+        return Response { status: 200, contentType: "text/css", body: theme.css() }
+    }
     return match rpcHandle(req) {
         Some(r) => r,
         None => route(req),

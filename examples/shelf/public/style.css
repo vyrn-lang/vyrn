@@ -3,12 +3,13 @@ body {
   font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   max-width: 860px; margin: 2rem auto; padding: 0 1rem;
 }
-header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+/* header layout + nav spacing/hover now come from theme utilities (RFC-0032):
+   `flex items-center gap-3 md:gap-6` on <header>, `mr-2 hover:text-brand-600`
+   on the nav links. Only the bespoke rules utilities can't express stay here. */
 h1 { font-size: 1.5rem; margin: 0; }
 h2 { font-size: 1.05rem; margin: 0 0 0.6rem; }
 h3 { font-size: 0.95rem; margin: 1rem 0 0.3rem; }
 .sub { opacity: 0.7; margin-top: 0; }
-nav a { margin-right: 0.8rem; }
 .bar { display: flex; align-items: center; gap: 1rem; margin: 0.5rem 0 1rem; }
 .count { font-weight: 600; }
 .cols { display: grid; grid-template-columns: 1fr 220px; gap: 1.5rem; align-items: start; }
