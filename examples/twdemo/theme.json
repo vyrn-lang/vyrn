@@ -1,0 +1,7 @@
+{
+  "colors":  { "brand": { "500": "#4f46e5", "600": "#4338ca" }, "gray": { "200": "#e5e7eb" }, "white": "#ffffff" },
+  "spacing": { "0": "0", "1": "0.25rem", "2": "0.5rem", "4": "1rem" },
+  "radius":  { "DEFAULT": "0.5rem", "full": "9999px" },
+  "fontSize": { "sm": "0.875rem", "base": "1rem" },
+  "breakpoints": { "md": "768px" }
+}

@@ -1,6 +1,6 @@
 # RFC-0032 — `std/tw`: Theme-Derived Utility Classes as a Checked Type
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented. See the as-landed notes at the end.
 - **Depends on:** RFC-0021 (generator imports), RFC-0003/0020 (validated /
   regex string types + consteval literal checking — the machinery that
   makes a typo a compile error), RFC-0026 (`std/html`/pages — where the
@@ -101,3 +101,76 @@ fn badge(label: String, active: Bool) -> Html {
 Everything in "NOT in v1", `.vyx` template integration (deferred above),
 used-only CSS pruning, non-JSON theme formats, runtime theme switching
 (a second theme is a second generator import).
+
+---
+
+## As landed
+
+Shipped as `std/tw.vyrn` — one `export gen fn tw(theme)`, ZERO compiler/CLI
+changes (a pure RFC-0021 generator library, exactly like `std/i18n` and
+`std/ui`). The synthesized module exports precisely the four locked names:
+`type TwClass`, `type Tw`, `cls(c: Tw) -> Attr`, `css() -> String`.
+
+**How the types are spelled.** The vocabulary is factored so the emitted
+regex stays small — a single **token grammar** written once and reused:
+`(sm:|md:|…)?(hover:|focus:)?(base₁|base₂|…)`. Base names are validated to
+`[a-z][a-z0-9-]*`, so none are regex metacharacters and no escaping is
+needed. `TwClass` is that token (no repetition ⇒ a FINITE type ⇒
+enumeration-backed LSP completion). `Tw` is `(token( token)*)` — a
+space-separated non-empty sequence; NOT finite (the `( token)*` loop), so it
+rides the general validated-regex path: a `String` **literal** handed to
+`cls` is proven `⊆ Tw` at compile time by the existing consteval containment
+machinery (the RoutePath / finitekeys precedent), and a typo fails
+`vyrn check` with `"…" does not satisfy `Tw``. Runtime strings validate at
+the boundary like any validated type.
+
+**JSON-reader decision.** `std/i18n`'s object reader is module-private (not
+exported), so — mirroring how `std/ui` carries its own `ui*`-prefixed
+helpers rather than importing i18n's — `std/tw` carries its own small
+`tw*`-prefixed flattening reader (`twParseTheme`, dotted keys, string
+leaves only). Keeping the generator self-contained beat widening i18n's
+export surface for one caller.
+
+**Regex / DFA size — measured.** On a realistic theme (6 colours × ~5
+shades, 8 spacing steps, 3 breakpoints ⇒ ~252 base classes), the token
+alternation is ~4 KB of regex source. `vyrn run`/`check` (which builds the
+`Tw` DFA and consteval-checks a literal) completes in ~4.3–4.7 s cold
+(generator uncached) and the DFA handles it comfortably — no blow-up. The
+factoring is what keeps it small: TwClass's language is base × prefixes
+(bounded), but the regex never expands that product; the DFA does.
+
+**The one real wall (and the fix).** The comptime interpreter's string `+`
+and array `push` COPY their operand (functional semantics; native/wasm
+mutate in place), so assembling the ~10³-rule (~120 KB) stylesheet by a
+left-leaning fold is O(n²) — it timed out past 2 min. Fix, no compiler
+change: build `css()` by **divide-and-conquer concatenation** over the
+rule-index range (`twBlockLit` splits each block in half and concatenates —
+a balanced tree, O(n · log n)), escaping per-rule. Generation dropped to
+~3.9 s and `css()` is baked as a deterministic constant, so it is O(1) at
+runtime. `css()` byte-stability is by construction (fixed family/theme/
+variant order); proven by a `css() == css()` test plus emit-gen goldens.
+
+**Emission.** Family order bg/text/border × colours, then p/px/…/pl + m
+twins × spacing, gap, rounded/radius, text × fontSize, w/h × spacing, then
+the fixed static utilities; base rules, then `hover:`/`focus:` variants,
+then one `@media (min-width:…)` block per breakpoint (each carrying the same
+base+state rules under the breakpoint prefix). CSS selectors escape `:` as
+`\:`. Generation diagnostics ride bare top-level identifiers (the std
+convention): `TW_UNKNOWN_KEY__<key>`, `TW_PARSE_ERROR__<reason>` (non-string
+leaf), `TW_UNSAFE_NAME__<class>`.
+
+**Consumers / proof.** `examples/shelf` adopts it: `theme.json`, a
+`/theme.css` route in `handle` returning `css()` with `text/css`, and its
+hand-written header/nav CSS replaced by theme utilities on the
+server-rendered chrome (`flex items-center gap-3 md:gap-6` on `<header>`,
+`mr-2 hover:text-brand-600` on nav links, `p-4 rounded-lg border` on the
+book-detail card) — bespoke rules (color-mix borders, the responsive grid,
+inputs, tables) stay in `public/style.css`. The client-hydrated `#app`
+content keeps its semantic classes (the `.vyx` ↔ tw coupling is the deferred
+follow-up). Browser-verified via `vyrn dev`: `/theme.css` serves 60 KB of
+`text/css`, `<header>` computes `display:flex; gap:24px` (the `md:gap-6`
+media query is live at ≥768 px), and the `hover:text-brand-600` rule
+resolves to `#4338ca`. `examples/twdemo.vyrn` is a three-way parity citizen;
+`compiler/vyrn-cli/tests/tw.rs` covers emit-gen shape, the compile-error
+demonstration (a typo'd literal fails `check`), the three malformed-theme
+diagnostics, and the green demo/unit tests.

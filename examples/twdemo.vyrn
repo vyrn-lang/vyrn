@@ -1,0 +1,61 @@
+/// Theme-derived utility classes as a checked type (RFC-0032), a library on
+/// generator imports (RFC-0021).
+///
+/// `tw("./twdemo/theme.json")` runs the std/tw generator at load time: it reads a
+/// flat theme file, derives a CLOSED utility vocabulary (colours × bg/text/border,
+/// the spacing scale × padding/margin/gap/size, radius, font sizes, a fixed set of
+/// static utilities), and synthesizes a module of:
+///   - `type TwClass` — the finite validated type of one class (base × the bounded
+///     `md:` responsive and `hover:`/`focus:` state prefixes); the LSP completes it.
+///   - `type Tw` — the regex type of space-separated sequences of them. A `String`
+///     literal handed to `cls` is proven ⊆ `Tw` at COMPILE TIME (a typo like
+///     `bg-brnd-500` is a compile error at the literal — see the checker tests).
+///   - `cls(c: Tw) -> Attr` — the checked bridge into std/html.
+///   - `css() -> String` — the whole stylesheet, a deterministic baked constant.
+///
+/// Everything below is then ordinary Vyrn — a normal interp == native == wasm
+/// parity citizen. Inspect the synthesized module with:  vyrn emit-gen examples/twdemo.vyrn
+import { el, text, toHtmlString } from "std/html"
+import { tw } from "std/tw"
+import * as theme from tw("./twdemo/theme.json")
+
+/// A styled badge, built with checked utility classes. The classes — including a
+/// `md:` responsive variant and a `hover:` state variant — are all proven members
+/// of the theme's `Tw` type when this file compiles.
+fn badge(label: String) -> String {
+    let node = el("span", [theme.cls("px-2 rounded bg-brand-500 text-white md:hover:bg-brand-600")], [text(label)])
+    return toHtmlString(node)
+}
+
+fn main() -> Int64 {
+    let sheet = theme.css()
+    // The stylesheet is a deterministic baked constant, so its length and content
+    // are byte-identical under every backend.
+    print("css bytes: \{sheet.length}")
+    print("has base rule: \{sheet.contains(".bg-brand-500 {background-color:#4f46e5}")}")
+    print("has hover rule: \{sheet.contains(".hover\\:bg-brand-500:hover {background-color:#4f46e5}")}")
+    print("has media block: \{sheet.contains("@media (min-width:768px) {")}")
+    print("has responsive+state: \{sheet.contains(".md\\:hover\\:bg-brand-600:hover {background-color:#4338ca}")}")
+    print(badge("new"))
+    return 0
+}
+
+test "css() is a deterministic baked constant" {
+    assertEq(theme.css(), theme.css())
+    assert(theme.css().length > 0)
+}
+
+test "css() carries base, state, and responsive rules" {
+    let s = theme.css()
+    assert(s.contains(".bg-white {background-color:#ffffff}"))
+    assert(s.contains(".focus\\:rounded:focus {border-radius:0.5rem}"))
+    assert(s.contains("@media (min-width:768px) {"))
+    assert(s.contains(".md\\:p-2 {padding:0.5rem}"))
+}
+
+test "cls accepts a proven multi-token literal with variants" {
+    // If any token here were not in the theme vocabulary, this file would not
+    // compile — so reaching this assertion is itself the check.
+    let html = badge("ok")
+    assert(html.contains("class=\"px-2 rounded bg-brand-500 text-white md:hover:bg-brand-600\""))
+}
