@@ -30,6 +30,7 @@ export fn shell(kids: Array<Html>) -> Html {
     return el("div", [Id("root")], [
             el("link", [A("rel", "stylesheet"), A("href", "/theme.css")], []),
             el("link", [A("rel", "stylesheet"), A("href", "/style.css")], []),
+            el("script", [A("type", "module"), A("src", "/vyrn-runtime/vyrn-nav.js")], []),
             el("header", [theme.cls("flex items-center gap-3 md:gap-6")], [
                     el("h1", [], [text(tAppTitle())]),
                     el("nav", [], [
@@ -58,6 +59,7 @@ fn bookRow(b: Book) -> Html {
     }
     return el("li", [Cls("book")], [
             el("a", [A("href", b.url)], [text(b.title)]),
+            el("a", [A("href", "/books/\{b.id}"), A("data-nav", "prefetch"), Cls("detail")], [text("details →")]),
             el("span", [Cls("rating")], [text(rating)]),
             el("span", [Cls("tags")], tagKids),
         ])

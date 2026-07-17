@@ -26,7 +26,7 @@ import { BookView, TagCount, Labels } from "../types"
     <div class="cols">
         <div class="col-main">
             <AddForm addLabel={labels.add} titleLabel={labels.title} urlLabel={labels.url} tagsLabel={labels.tags} saveLabel={labels.save} draftTitle={draftTitle} draftUrl={draftUrl} draftTags={draftTags}/>
-            {#if books.length > 0}<ul class="books">{#for b in books key={b.id}}<BookRow id={b.id} title={b.title} url={b.url} rating={b.rating} tagsText={b.tagsText} confirming={b.confirming} unratedLabel={labels.unrated} delLabel={labels.del} confirmLabel={labels.confirm} cancelLabel={labels.cancel}/>{/for}</ul>{:else}<p class="empty">{labels.empty}</p>{/if}
+            {#if books.length > 0}<ul class="books">{#for b in books key={b.id}}<BookRow id={b.id} title={b.title} url={b.url} rating={b.rating} tagsText={b.tagsText} confirming={b.confirming} detailHref={b.detailHref} unratedLabel={labels.unrated} delLabel={labels.del} confirmLabel={labels.confirm} cancelLabel={labels.cancel}/>{/for}</ul>{:else}<p class="empty">{labels.empty}</p>{/if}
         </div>
         <aside class="sidebar">
             <h2>{labels.tagsHdr}</h2>

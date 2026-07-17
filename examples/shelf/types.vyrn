@@ -11,6 +11,7 @@ export type BookView = {
     rating: Int64,
     tagsText: String,
     confirming: Bool,
+    detailHref: String,
 }
 
 /// One tag histogram entry (the client turns the wire `Map<String,Int64>` into a

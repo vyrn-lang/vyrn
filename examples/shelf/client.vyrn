@@ -124,6 +124,7 @@ fn bookViews() -> Array<BookView> {
                     rating: b.rating,
                     tagsText: tagsText(b.tags),
                     confirming: b.id == confirmId,
+                    detailHref: "/books/\{b.id}",
                 })
         }
     }

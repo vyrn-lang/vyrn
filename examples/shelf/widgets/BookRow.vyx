@@ -6,6 +6,7 @@ props {
     rating: Int64,
     tagsText: String,
     confirming: Bool,
+    detailHref: String,
     unratedLabel: String,
     delLabel: String,
     confirmLabel: String,
@@ -17,6 +18,7 @@ props {
 <li class="book">
     <div class="meta">
         <a class="title" href={url}>{title}</a>
+        <a class="detail" href={detailHref} data-nav="prefetch">details →</a>
         <span class="tags">{tagsText}</span>
     </div>
     <div class="row">
