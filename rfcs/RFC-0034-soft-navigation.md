@@ -1,6 +1,6 @@
 # RFC-0034 — Soft Navigation: SPA Feel over MPA Truth
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented (see "As landed" below)
 - **Depends on:** RFC-0026 (M2 `vyrn-dom.js` — the differ this extends;
   M3 pages — the SSR routes being navigated), RFC-0031 (the shelf
   architecture this must not disturb)
@@ -96,3 +96,71 @@ history, and event surface are built to carry it unchanged.
 Data-only/isomorphic navigation (v2 above), form submits, view
 transitions API styling, streaming/partial morphs, offline caching,
 generator cooperation of any kind.
+
+## As landed
+
+Host-runtime only — zero compiler/generator/language/`std` changes. Suite
+unchanged: 847 workspace + 11 LSP tests, three-way parity green.
+
+- **The morph lives in `web/vyrn-nav.js`, not `vyrn-dom.js`.** `vyrn-dom.js`
+  is the *tree↔DOM* differ (vnode JSON → DOM); the soft-nav morph is a
+  *DOM↔DOM* differ (parsed `<body>` → live `<body>`) with no vnodes. They
+  share a discipline (keyed identity via `data-key`, positional otherwise,
+  attribute patching) but not a data model, so keeping the morph in
+  `vyrn-nav.js` lets it stay a self-contained, import-nothing sibling and
+  keeps `vyrn-dom.js` focused. `morphChildren`/`morphKeyed`/`morphNode`
+  mirror `patchChildren`/`patchKeyed`/`patchNode`.
+- **Focus / form preservation is emergent, not bolted on.** Where identity
+  holds the morph *reuses* the DOM node (never `replaceChild`), so
+  `document.activeElement` and any typed-in `.value` (a live property
+  `setAttribute` never touches) survive for free. For a non-focused form
+  control the live value is synced to the incoming server value; the focused
+  field is left alone. A focused node that must be replaced is re-focused by
+  `id` if a same-`id` node survives. Verified: a typed value in a keyed
+  header input survives list⇄detail navigation.
+- **Stylesheets are additive; `<title>` is swapped.** New `<head>`
+  stylesheets (by `href`, and `<style>` by text) are appended, never
+  removed — a returning page keeps sheets a prior page added (no FOUC, no
+  reflow churn). Shelf keeps its `<link>`s in `<body>` (inside `#root`), so
+  the body morph reuses them in place; the `web/` demo exercises the
+  `<head>` append path.
+- **Refinement to interception rule 2 (non-200):** an HTML response is
+  MORPHED regardless of status, so a 404/422 error *page* is reached softly
+  (flash-free) — which is what the guardrail "soft nav must never make an
+  error page unreachable" actually wants. Hard fallback fires on a
+  **non-HTML** response, a fetch failure/timeout/abort, a mid-flight second
+  click, or a morph that throws. Verified: `/books/999` (422) and
+  `/books/abc` (404) morph softly; `/theme.css` (non-HTML) and a
+  fetch-failure both hard-navigate for real.
+- **Island protocol.** Because morphed-in `<script>`s are not re-executed,
+  the client boot registers via `window.vyrnNav.registerIsland(sel, boot)`;
+  vyrn-nav owns the lifecycle — boot on first appearance, tear down +
+  re-boot on every real navigation, leave alone on same-page revalidation
+  morphs. Shelf's `app.js` registers `#app` and returns a `destroy()` that
+  also removes its injected button (no accumulation across re-boots); it
+  falls back to booting inline when `window.vyrnNav` is absent
+  (progressive-enhancement proof: deleting the include hard-navigates every
+  link and the island still boots). `syncScripts` additionally appends any
+  new `<script type=module src>` (idempotent — ES modules evaluate once) so
+  a boot reached mid-session still loads.
+- **Scroll corner actually hit.** Per-entry scroll is stamped
+  *synchronously* into the leaving entry at `pushState` time (a late
+  throttled frame must not write it into the new entry). On `popstate` the
+  saved offset is re-applied on a short bounded schedule (0/60/160/320/520
+  ms) because an async island re-boot briefly clears `#app` and collapses
+  page height right after the morph, which would otherwise clamp the restore
+  to 0. Verified: scroll 300 on the list, into a detail, back → 299
+  restored.
+- **Progress indicator.** Shipped as a built-in top bar in `vyrn-nav.js`
+  that rides the `vyrn:nav-start/end/error` events (the RFC frames progress
+  as event-driven), marked `data-vyrn-nav-ui` and appended to
+  `<html>` so no morph touches it; opt out with
+  `window.__vyrnNavConfig = { progress: false }` and hook the events
+  yourself. Shelf gets it for free — its pages stay untouched beyond the one
+  `<script>` include and the prefetch `data-nav` on the book-list detail
+  links.
+- **Consumers:** `web/navdemo.html` + `web/navdemo-detail.html` +
+  `web/navdemo.js` (keyed list ⇄ detail, `<title>`/stylesheet swap, prefetch,
+  reload sentinel); shelf's `view.vyrn` shell includes the runtime, the SSR
+  and `.vyx` book rows gained a prefetch `/books/:id` detail link, and
+  `public/app.js` became an island.
