@@ -275,6 +275,439 @@ export fn toHtmlString(h: Html) -> String {
     }
 }
 
+// ===========================================================================
+// The patch protocol (RFC-0035) — wasm-side diffing.
+// ===========================================================================
+
+/// A minimal edit to the live DOM, produced by `diff` and applied strictly in
+/// order by `web/vyrn-dom.js`. Moving the diff into wasm means only the CHANGES
+/// cross the extern boundary each event (O(changes)), not the whole view tree
+/// (O(tree)).
+///
+/// A `path` is a child-index vector from the mount root: `[]` is the root node,
+/// `[2]` its third child, `[2, 0]` that child's first child. Each vnode maps to
+/// exactly one DOM node (`Empty`→comment, `Text`→text, `Raw`→wrapper,
+/// `El`→element), so a vnode child index equals the live DOM `childNodes`
+/// index — the host resolves a path by walking `childNodes` naively.
+///
+///   - `OpSetText(path, s)` — set the text of the node AT `path` to `s`.
+///   - `OpSetAttrs(path, attrs)` — replace the attribute set of the element AT
+///     `path` wholesale; the host reconciles attribute-by-attribute against the
+///     live element (event attrs, `data-key`, form `value`/`checked` as
+///     properties) exactly as the full-view loop does.
+///   - `OpReplace(path, html)` — build `html` and replace the node AT `path`
+///     (a tag change, a `Raw` string change, or a kind change).
+///   - `OpInsert(parent, index, html)` — build `html` and insert it as the
+///     `index`-th child of the element AT `parent`.
+///   - `OpRemove(parent, index)` — remove the `index`-th child of `parent`.
+///   - `OpMove(parent, from, to)` — move `parent`'s child from index `from` to
+///     index `to` (reused DOM node — focus/typed-value/JS-property survive).
+///
+/// ## Emission-order convention (locked)
+///
+/// `diff` emits ops so that each op's path/index is valid against the DOM AS
+/// ALREADY PATCHED by every preceding op — the host applies them naively in
+/// order and lands on the correct tree. The discipline, per level:
+///
+///   - node level: a kind/tag change is a single `OpReplace` (no recursion into
+///     it); otherwise `OpSetText`/`OpSetAttrs` for this node come BEFORE its
+///     children's ops.
+///   - positional children: recurse the common prefix first (those indices are
+///     stable), then `OpRemove` the surplus tail HIGH-TO-LOW (so lower indices
+///     stay valid), then `OpInsert` the new tail LOW-TO-HIGH.
+///   - keyed children (mirrors `web/vyrn-dom.js`'s `patchKeyed`): first
+///     `OpRemove` every dropped key HIGH-TO-LOW; then, scanning the new order
+///     LEFT-TO-RIGHT, `OpInsert` each new key and `OpMove` each reused key into
+///     place (reused nodes only ever move leftward, so a single `insertBefore`
+///     realizes each move); finally recurse into the surviving matched children
+///     at their FINAL indices. Structure is fully settled before any content op
+///     for that level's children, so every content path is the node's final
+///     position.
+///
+/// `PatchOp` is an ordinary payload enum (RFC-0024), so `toJson(diff(a, b))` is
+/// the wire form the host parses, and `diff` is a pure, total, three-way parity
+/// citizen like the rest of `std/html`.
+export type PatchOp =
+    | OpSetText(Array<Int64>, String)
+    | OpSetAttrs(Array<Int64>, Array<Attr>)
+    | OpReplace(Array<Int64>, Html)
+    | OpInsert(Array<Int64>, Int64, Html)
+    | OpRemove(Array<Int64>, Int64)
+    | OpMove(Array<Int64>, Int64, Int64)
+
+/// Diff two view trees into a minimal, ordered `PatchOp` stream. Pure and total:
+/// any two `Html` values diff to a stream whose in-order application turns a DOM
+/// built from `old` into one identical to a DOM built from `new`.
+export fn diff(old: Html, new: Html) -> Array<PatchOp> {
+    let root: Array<Int64> = []
+    return diffNode(root, old, new)
+}
+
+/// An empty op list with the right element type (a bare `[]` needs the hint).
+fn noOps() -> Array<PatchOp> {
+    let o: Array<PatchOp> = []
+    return o
+}
+
+/// The `Key` of a node, if it is a keyed element (`None` for text/raw/empty and
+/// for unkeyed elements).
+fn htmlKey(h: Html) -> Option<String> {
+    return match h {
+        El(tag, attrs, kids) => attrKey(attrs),
+        Empty => None,
+        Text(s) => None,
+        Raw(s) => None,
+    }
+}
+
+/// The last `Key(k)` in an attribute list, if any (`keyed` appends exactly one).
+fn attrKey(attrs: Array<Attr>) -> Option<String> {
+    let mut found: Option<String> = None
+    for a in attrs {
+        found = match a {
+            Key(k) => Some(k),
+            Cls(v) => found,
+            Id(v) => found,
+            A(n, v) => found,
+            On(e, h, p) => found,
+        }
+    }
+    return found
+}
+
+/// `true` when `a` and `b` are the same node kind — and, for elements, the same
+/// tag. A `false` here forces `OpReplace` (identity cannot be preserved across a
+/// tag change).
+fn sameKind(a: Html, b: Html) -> Bool {
+    return match a {
+        Empty => match b {
+            Empty => true,
+            Text(y) => false,
+            Raw(y) => false,
+            El(t, at, k) => false,
+        },
+        Text(s) => match b {
+            Empty => false,
+            Text(y) => true,
+            Raw(y) => false,
+            El(t, at, k) => false,
+        },
+        Raw(s) => match b {
+            Empty => false,
+            Text(y) => false,
+            Raw(y) => true,
+            El(t, at, k) => false,
+        },
+        El(tag, at, k) => match b {
+            Empty => false,
+            Text(y) => false,
+            Raw(y) => false,
+            El(tag2, at2, k2) => tag == tag2,
+        },
+    }
+}
+
+/// The text of a `Text` node ("" for other kinds — unreachable behind `sameKind`).
+fn htmlText(h: Html) -> String {
+    return match h {
+        Text(s) => s,
+        Empty => "",
+        Raw(s) => s,
+        El(t, a, k) => "",
+    }
+}
+
+/// The string of a `Raw` node ("" for other kinds).
+fn htmlRaw(h: Html) -> String {
+    return match h {
+        Raw(s) => s,
+        Empty => "",
+        Text(s) => s,
+        El(t, a, k) => "",
+    }
+}
+
+/// The attributes of an element (empty list for other kinds).
+fn htmlAttrs(h: Html) -> Array<Attr> {
+    return match h {
+        El(t, a, k) => a,
+        Empty => [],
+        Text(s) => [],
+        Raw(s) => [],
+    }
+}
+
+/// The children of an element (empty list for other kinds).
+fn htmlKids(h: Html) -> Array<Html> {
+    return match h {
+        El(t, a, k) => k,
+        Empty => [],
+        Text(s) => [],
+        Raw(s) => [],
+    }
+}
+
+/// Two attribute lists are "equal" iff they RENDER identically — a total,
+/// order-sensitive notion that reuses `renderAttrs` and never traps. A false
+/// negative only costs a redundant `OpSetAttrs` (still correct); in practice
+/// rendering is injective enough that equal views produce no op.
+fn attrsEqual(a: Array<Attr>, b: Array<Attr>) -> Bool {
+    return renderAttrs(a) == renderAttrs(b)
+}
+
+/// `path` with `i` appended (a fresh copy — paths never alias).
+fn childPath(p: Array<Int64>, i: Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    for x in p {
+        out.push(x)
+    }
+    out.push(i)
+    return out
+}
+
+/// Diff one node against another at `path`.
+fn diffNode(path: Array<Int64>, old: Html, new: Html) -> Array<PatchOp> {
+    if !sameKind(old, new) {
+        return [OpReplace(path, new)]
+    }
+    return match old {
+        Empty => noOps(),
+        Text(s) => diffText(path, s, new),
+        Raw(s) => diffRaw(path, s, new),
+        El(tag, attrs, kids) => diffEl(path, attrs, kids, new),
+    }
+}
+
+fn diffText(path: Array<Int64>, oldS: String, new: Html) -> Array<PatchOp> {
+    let newS = htmlText(new)
+    if oldS == newS {
+        return noOps()
+    }
+    return [OpSetText(path, newS)]
+}
+
+fn diffRaw(path: Array<Int64>, oldS: String, new: Html) -> Array<PatchOp> {
+    let newS = htmlRaw(new)
+    if oldS == newS {
+        return noOps()
+    }
+    return [OpReplace(path, new)]
+}
+
+fn diffEl(path: Array<Int64>, oldAttrs: Array<Attr>, oldKids: Array<Html>, new: Html) -> Array<PatchOp> {
+    let newAttrs = htmlAttrs(new)
+    let newKids = htmlKids(new)
+    let mut ops: Array<PatchOp> = []
+    if !attrsEqual(oldAttrs, newAttrs) {
+        ops.push(OpSetAttrs(path, newAttrs))
+    }
+    for o in diffChildren(path, oldKids, newKids) {
+        ops.push(o)
+    }
+    return ops
+}
+
+/// `true` if any child carries a `Key` — the switch between keyed and
+/// positional reconciliation, mirroring `web/vyrn-dom.js`'s `patchChildren`.
+fn anyKeyed(kids: Array<Html>) -> Bool {
+    for k in kids {
+        let has = match htmlKey(k) {
+            Some(x) => true,
+            None => false,
+        }
+        if has {
+            return true
+        }
+    }
+    return false
+}
+
+fn diffChildren(path: Array<Int64>, oldKids: Array<Html>, newKids: Array<Html>) -> Array<PatchOp> {
+    if anyKeyed(oldKids) || anyKeyed(newKids) {
+        return diffKeyed(path, oldKids, newKids)
+    }
+    return diffPositional(path, oldKids, newKids)
+}
+
+fn diffPositional(path: Array<Int64>, oldKids: Array<Html>, newKids: Array<Html>) -> Array<PatchOp> {
+    let mut ops: Array<PatchOp> = []
+    let oldLen = oldKids.length
+    let newLen = newKids.length
+    let mut common = oldLen
+    if newLen < common {
+        common = newLen
+    }
+    let mut i = 0
+    while i < common {
+        let cp = childPath(path, i)
+        for o in diffNode(cp, oldKids[i], newKids[i]) {
+            ops.push(o)
+        }
+        i = i + 1
+    }
+    let mut r = oldLen - 1
+    while r >= common {
+        ops.push(OpRemove(path, r))
+        r = r - 1
+    }
+    let mut k = common
+    while k < newLen {
+        ops.push(OpInsert(path, k, newKids[k]))
+        k = k + 1
+    }
+    return ops
+}
+
+fn diffKeyed(path: Array<Int64>, oldKids: Array<Html>, newKids: Array<Html>) -> Array<PatchOp> {
+    let oldLen = oldKids.length
+    let newLen = newKids.length
+    let mut ops: Array<PatchOp> = []
+
+    // Match each new child to an old index (or -1), consuming each old once.
+    let mut used: Array<Bool> = []
+    let mut u = 0
+    while u < oldLen {
+        used.push(false)
+        u = u + 1
+    }
+    let mut matchOf: Array<Int64> = []
+    let mut ni = 0
+    while ni < newLen {
+        let m = matchNew(oldKids, used, newKids[ni])
+        if m >= 0 {
+            used[m] = true
+        }
+        matchOf.push(m)
+        ni = ni + 1
+    }
+
+    // 1) Remove the old children that are not reused, HIGH-TO-LOW.
+    let mut r = oldLen - 1
+    while r >= 0 {
+        if !used[r] {
+            ops.push(OpRemove(path, r))
+        }
+        r = r - 1
+    }
+
+    // The live children after removal: reused old indices, ascending.
+    let mut cur: Array<Int64> = []
+    let mut a = 0
+    while a < oldLen {
+        if used[a] {
+            cur.push(a)
+        }
+        a = a + 1
+    }
+
+    // 2) Walk the new order LEFT-TO-RIGHT: insert new keys, move reused ones.
+    let mut i = 0
+    while i < newLen {
+        let m = matchOf[i]
+        if m < 0 {
+            ops.push(OpInsert(path, i, newKids[i]))
+            cur = listInsert(cur, i, -2)
+        } else {
+            let j = listIndexOf(cur, m)
+            if j != i {
+                ops.push(OpMove(path, j, i))
+                cur = listMove(cur, j, i)
+            }
+        }
+        i = i + 1
+    }
+
+    // 3) Content pass: recurse into surviving matched children at final indices.
+    let mut c = 0
+    while c < newLen {
+        let m = matchOf[c]
+        if m >= 0 {
+            let cp = childPath(path, c)
+            for o in diffNode(cp, oldKids[m], newKids[c]) {
+                ops.push(o)
+            }
+        }
+        c = c + 1
+    }
+    return ops
+}
+
+/// The old index that reuses `newChild` (same key AND same kind), or -1.
+fn matchNew(oldKids: Array<Html>, used: Array<Bool>, newChild: Html) -> Int64 {
+    return match htmlKey(newChild) {
+        None => -1,
+        Some(k) => findOld(oldKids, used, k, newChild),
+    }
+}
+
+fn findOld(oldKids: Array<Html>, used: Array<Bool>, key: String, newChild: Html) -> Int64 {
+    let mut j = 0
+    let mut found = -1
+    while j < oldKids.length {
+        if found < 0 {
+            if !used[j] {
+                let sameKey = match htmlKey(oldKids[j]) {
+                    Some(x) => x == key,
+                    None => false,
+                }
+                if sameKey {
+                    if sameKind(oldKids[j], newChild) {
+                        found = j
+                    }
+                }
+            }
+        }
+        j = j + 1
+    }
+    return found
+}
+
+/// Insert `v` at index `at` in `xs`, returning a fresh array.
+fn listInsert(xs: Array<Int64>, at: Int64, v: Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < xs.length {
+        if i == at {
+            out.push(v)
+        }
+        out.push(xs[i])
+        i = i + 1
+    }
+    if at >= xs.length {
+        out.push(v)
+    }
+    return out
+}
+
+/// The first index of `v` in `xs`, or -1.
+fn listIndexOf(xs: Array<Int64>, v: Int64) -> Int64 {
+    let mut i = 0
+    let mut found = -1
+    while i < xs.length {
+        if found < 0 {
+            if xs[i] == v {
+                found = i
+            }
+        }
+        i = i + 1
+    }
+    return found
+}
+
+/// Move the element at `from` to index `to`, returning a fresh array.
+fn listMove(xs: Array<Int64>, from: Int64, to: Int64) -> Array<Int64> {
+    let v = xs[from]
+    let mut without: Array<Int64> = []
+    let mut i = 0
+    while i < xs.length {
+        if i != from {
+            without.push(xs[i])
+        }
+        i = i + 1
+    }
+    return listInsert(without, to, v)
+}
+
 /// Wrap a view in a full `<!doctype html>` page. `title` is escaped as text;
 /// `head` is a list of head nodes (meta/link/script via `el`/`Raw`); `body` is
 /// the page body tree. Used by SSR and by M3's route dispatcher.

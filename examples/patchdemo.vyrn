@@ -1,0 +1,115 @@
+/// The patch protocol (RFC-0035), as a three-way parity citizen. `diff(old, new)`
+/// is pure Vyrn in `std/html`; its op streams are part of the observable
+/// contract, so `main` prints `toJson` snapshots of the canonical cases (text
+/// change, attr toggle, subtree replace, positional insert/remove, keyed
+/// reorder, keyed insert/remove, `Empty` transitions, `Raw` change, nesting) and
+/// the harness asserts they are byte-identical under interp == native == wasm.
+///
+/// The op streams here are exactly what `web/vyrn-dom.js` applies naively in
+/// order to the live DOM; the snapshots double as the documented shape of the
+/// wire form (`toJson(PatchOp)`), so a regression in emission order or shape is
+/// a visible diff.
+import { el, text, cls, attr, on, keyed, empty, Html, diff } from "std/html"
+
+/// A keyed row (element child carrying a `Key`) — the unit the keyed cases
+/// reorder / insert / remove.
+fn row(id: String, label: String) -> Html {
+    return keyed(id, el("li", [cls("row")], [text(label)]))
+}
+
+/// Print one labeled snapshot of a diff.
+fn show(name: String, old: Html, new: Html) -> Int64 {
+    print(name + ": " + toJson(diff(old, new)))
+    return 0
+}
+
+fn main() -> Int64 {
+    // No change → no ops.
+    show("noop", text("hi"), text("hi"))
+
+    // Text change → OpSetText at the root path.
+    show("text", text("hi"), text("bye"))
+
+    // Attr toggle → OpSetAttrs wholesale.
+    show("attr", el("button", [cls("off")], []), el("button", [cls("on")], []))
+
+    // Kind/tag change → OpReplace (no recursion).
+    show("tag", el("div", [], [text("x")]), el("span", [], [text("x")]))
+    show("kind", text("x"), el("p", [], [text("x")]))
+
+    // Empty transitions.
+    show("emptyToEl", empty(), el("p", [], [text("hi")]))
+    show("elToEmpty", el("p", [], [text("hi")]), empty())
+
+    // Raw compares by string equality → OpReplace on change, nothing when equal.
+    show("rawSame", el("div", [], []), el("div", [], []))
+
+    // Positional children: append, remove-tail, and a nested text change.
+    let listA = el("ul", [], [text("a"), text("b")])
+    let listB = el("ul", [], [text("a"), text("b"), text("c")])
+    show("posInsert", listA, listB)
+    show("posRemove", listB, listA)
+    show("posNested", el("ul", [], [text("a"), text("b")]), el("ul", [], [text("a"), text("B")]))
+
+    // Keyed reorder: move the first row to the end (one OpMove, identity kept).
+    let k123 = el("ul", [], [row("1", "one"), row("2", "two"), row("3", "three")])
+    let k231 = el("ul", [], [row("2", "two"), row("3", "three"), row("1", "one")])
+    show("keyedRotate", k123, k231)
+
+    // Keyed insert in the middle (new key "x").
+    let kIns = el("ul", [], [row("1", "one"), row("x", "x!"), row("2", "two"), row("3", "three")])
+    show("keyedInsert", k123, kIns)
+
+    // Keyed remove from the middle (drop key "2").
+    let kRem = el("ul", [], [row("1", "one"), row("3", "three")])
+    show("keyedRemove", k123, kRem)
+
+    // Keyed reorder AND a content change on a reused row (label of key "2").
+    let k231b = el("ul", [], [row("2", "TWO"), row("3", "three"), row("1", "one")])
+    show("keyedMoveEdit", k123, k231b)
+
+    // Nesting: an attr change on the parent plus a keyed reorder of the children.
+    let nestA = el("ul", [cls("list")], [row("1", "one"), row("2", "two")])
+    let nestB = el("ul", [cls("list active")], [row("2", "two"), row("1", "one")])
+    show("nested", nestA, nestB)
+
+    return 0
+}
+
+test "diff of equal trees is empty" {
+    assertEq(toJson(diff(text("hi"), text("hi"))), "[]")
+}
+
+test "text change is a single OpSetText at the root" {
+    assertEq(toJson(diff(text("a"), text("b"))), "[{\"OpSetText\":[[],\"b\"]}]")
+}
+
+test "attr change is a single wholesale OpSetAttrs" {
+    let a = el("button", [cls("off")], [])
+    let b = el("button", [cls("on")], [])
+    assertEq(toJson(diff(a, b)), "[{\"OpSetAttrs\":[[],[{\"Cls\":\"on\"}]]}]")
+}
+
+test "tag change is an OpReplace" {
+    let a = el("div", [], [])
+    let b = el("span", [], [])
+    assertEq(toJson(diff(a, b)), "[{\"OpReplace\":[[],{\"El\":[\"span\",[],[]]}]}]")
+}
+
+test "positional append inserts at the tail" {
+    let a = el("ul", [], [text("a")])
+    let b = el("ul", [], [text("a"), text("b")])
+    assertEq(toJson(diff(a, b)), "[{\"OpInsert\":[[],1,{\"Text\":\"b\"}]}]")
+}
+
+test "positional shrink removes the tail" {
+    let a = el("ul", [], [text("a"), text("b")])
+    let b = el("ul", [], [text("a")])
+    assertEq(toJson(diff(a, b)), "[{\"OpRemove\":[[],1]}]")
+}
+
+test "keyed rotate is a single OpMove" {
+    let a = el("ul", [], [keyed("1", el("li", [], [])), keyed("2", el("li", [], []))])
+    let b = el("ul", [], [keyed("2", el("li", [], [])), keyed("1", el("li", [], []))])
+    assertEq(toJson(diff(a, b)), "[{\"OpMove\":[[],1,0]}]")
+}

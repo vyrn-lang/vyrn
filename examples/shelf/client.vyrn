@@ -17,7 +17,7 @@ import { splitTrim } from "./util"
 import { BookView, TagCount, Labels } from "./types"
 import { components } from "std/vyx"
 import { shelfApp, bookCard } from components("./widgets")
-import { Html, toHtmlString } from "std/html"
+import { Html, toHtmlString, diff } from "std/html"
 
 /// An UNVALIDATED mirror of `AddBookReq` — building this never traps, so a bad
 /// draft can be encoded then run through `fromJson` (which returns `Invalid`
@@ -44,6 +44,11 @@ let mut detailTitle: String = ""
 let mut detailUrl: String = ""
 let mut detailRating: Int64 = 0
 let mut detailTags: String = ""
+
+/// The retained previous view for the RFC-0035 patch protocol. `vyrnPatch` diffs
+/// the fresh view against this and returns only the changes, so a keystroke, a
+/// rate cycle, or a delete ships O(changes) ops instead of the whole shelf tree.
+let mut lastTree: Html = Empty
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -391,9 +396,21 @@ export extern fn toggleLang(arg: String) {
         })
 }
 
-/// The view as JSON for vyrn-dom.js.
+/// The view as JSON for vyrn-dom.js (the boot view; the host builds the DOM once
+/// from this).
 export extern fn vyrnView() -> String {
     return toJson(view())
+}
+
+/// The RFC-0035 patch loop: after boot, `web/vyrn-dom.js` calls this on every
+/// render and applies the returned op stream, so only the changed nodes cross
+/// the extern boundary. Its presence is the host's protocol switch; `view()`,
+/// the widgets, and every handler are untouched.
+export extern fn vyrnPatch() -> String {
+    let next = view()
+    let ops = diff(lastTree, next)
+    lastTree = next
+    return toJson(ops)
 }
 
 fn main() -> Int64 {

@@ -1,6 +1,7 @@
 # RFC-0035 — The Patch Protocol: Wasm-Side Diffing (Reactivity M5a)
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented
+- **Status (was):** Draft (design locked)
 - **Depends on:** RFC-0026 (M1 `Html` tree + M2 `vyrn-dom.js` — whose
   update loop this upgrades), RFC-0029 (module state everywhere — the
   retained previous tree lives in module state), RFC-0024 (payload enums
@@ -110,3 +111,98 @@ M5b compiled reactivity (recorded above), binary encodings (JSON ops are
 already O(changes); revisit only with numbers), server-side use of
 `diff` (nothing stops it, nothing needs it), any `.vyx`/generator
 changes.
+
+---
+
+## As-landed notes
+
+Library + host-runtime milestone, ZERO compiler changes, as predicted.
+
+### Where it lives
+
+- `std/html`: `PatchOp` (the six locked ops) + `diff(old, new) ->
+  Array<PatchOp>`, pure/total Vyrn (recursion over the tree, keyed and
+  positional child reconciliation, no `break`/`continue`/`%` — none exist
+  in the language, so loops carry `found`/flag variables). Attribute
+  equality is `renderAttrs(a) == renderAttrs(b)` — a total, order-sensitive
+  reuse of the existing renderer; a false negative only costs a redundant
+  (still-correct) `OpSetAttrs`.
+- `web/vyrn-dom.js`: `applyOps` (naive in-order path resolution against
+  `childNodes`), `reconcileAttrs` (reuses the existing per-attribute
+  `applyAttrs` with old attrs read from the LIVE element — form
+  `value`/`checked` stay live properties, so a reorder or unrelated attr
+  change never clobbers a typed value), `runEffectsDom` (effects keyed off
+  the live DOM, since the new vnode tree never reaches JS), and host-side
+  negotiation (`typeof exports.vyrnPatch === "function"`). Boot with a
+  patch export = an `Empty` root comment + the first patch (a full
+  `OpReplace`), which primes wasm's `lastTree` and builds the DOM through
+  the same applier every render uses.
+- Consumers: `examples/vyxdomdemo` and `examples/shelf` client each added
+  one `let mut lastTree: Html = Empty` + `export extern fn vyrnPatch()`;
+  view/handler/widget code untouched, `app.js` untouched (negotiation is
+  entirely inside `mount()`). `examples/domdemo` deliberately keeps only
+  `vyrnView` as the fallback regression. `examples/patchdemo.vyrn` is the
+  new parity citizen (op-stream `toJson` snapshots, three-way byte-identical).
+
+### The locked op-emission order (documented in `std/html`)
+
+Per element's children, so a naive in-order applier always lands right:
+
+- **node level:** kind/tag change → one `OpReplace` (no recursion);
+  otherwise `OpSetText`/`OpSetAttrs` for the node before its children.
+- **positional:** recurse the common prefix (stable indices) → `OpRemove`
+  the surplus tail HIGH-TO-LOW → `OpInsert` the new tail LOW-TO-HIGH.
+- **keyed** (mirrors `vyrn-dom.js`'s `patchKeyed`): `OpRemove` dropped keys
+  HIGH-TO-LOW → walk the new order LEFT-TO-RIGHT emitting `OpInsert`/`OpMove`
+  (reused nodes only ever move leftward, so one `insertBefore` realizes
+  each move; identity — focus/typed value/JS property — preserved by
+  construction) → recurse into surviving matched children at their FINAL
+  indices. Structure fully settles before any content op for that level, so
+  every content path is the node's final position.
+
+### Bytes per interaction (shelf, measured in-browser: op stream vs the full-view JSON the old loop shipped)
+
+| Interaction              | ops bytes | full-view bytes | reduction |
+|--------------------------|-----------|-----------------|-----------|
+| unchanged render         | 2         | 1209            | 99.8%     |
+| tag filter               | 273       | 2791            | 90.2%     |
+| rate (cycle 1..5)        | 236       | 2799            | 91.6%     |
+| delete — confirm prompt  | 396       | 2904            | 86.4%     |
+| delete — complete        | 248       | 2254            | 89.0%     |
+| add a book               | 987       | 2968            | 66.7%     |
+| locale toggle (en↔uk)    | 720       | 2982            | 75.9%     |
+| server 422 panel         | 329       | 3096            | 89.4%     |
+
+The initial list populate (boot `Empty`→full list) is a genuine full
+render — `2475` vs `3322`, i.e. the first patch is a whole-tree `OpReplace`
+and is expectedly the same order of magnitude as the full view (it is one).
+
+### Browser evidence
+
+- shelf: add / rate / delete (two-step confirm) / tag filter / locale
+  toggle / 422 panel all green under patching; console clean (no errors).
+- **Keyed under patching (M2 guarantee re-proven):** typed value
+  `SURVIVE-ME-42` + JS property `js-prop-99` + focus on an input in the
+  first keyed row; `rotate` moved that row to last via `OpMove`; the SAME
+  DOM node was reused (`===`) and all three survived.
+- **data-effect:** a `data-effect` node gated on `count > 0` mounts and
+  unmounts as `+1`/`-1` add/remove it via ops; the registered effect logged
+  `flash MOUNT` (and applied its outline) then `flash UNMOUNT` (cleanup).
+- **Fallback:** `domdemo` exports no `vyrnPatch` → runtime stays on the
+  full-view loop; increment + keyed rotate (value/property/identity
+  survive) work. Both negotiation branches thus proven live.
+- **Soft-nav interplay (RFC-0034):** navigated shelf home → /about → home
+  via soft-nav; the island re-booted with a FRESH interpreter instance
+  (locale reset to default, i.e. module state — including `lastTree` —
+  re-initialized), and incremental patching resumed correctly (296-byte
+  filter op post-reboot). No stale wasm state.
+
+### Corners
+
+- No language walls hit: `Array<PatchOp>` (payload enum with `Array<Int64>`
+  and `Html`/`Attr` payloads) codes and round-trips through the existing
+  RFC-0024 codec unchanged; recursion depth was a non-issue for these trees.
+- Enum variants come into scope with the type import, so
+  `let mut lastTree: Html = Empty` needs only `import { Html } from "std/html"`.
+- 847 workspace tests + 11 LSP tests + 4 three-way parity suites green,
+  0 warnings; `patchdemo` adds 7 in-language snapshot tests.

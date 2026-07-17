@@ -107,8 +107,9 @@ export async function mount(wasmBytes, mountEl, opts = {}) {
   const { effects = {}, ...runHooks } = opts;
   const result = await runVyrn(wasmBytes, {
     ...runHooks,
-    // vyrnView / vyrnSubs return Strings; name them so the export glue decodes.
-    exportReturns: { vyrnView: "string", vyrnSubs: "string", ...(runHooks.exportReturns || {}) },
+    // vyrnView / vyrnSubs / vyrnPatch return Strings; name them so the export
+    // glue decodes (RFC-0035 adds vyrnPatch — the op stream, when present).
+    exportReturns: { vyrnView: "string", vyrnSubs: "string", vyrnPatch: "string", ...(runHooks.exportReturns || {}) },
   });
   const exports = result.exports;
   if (typeof exports.vyrnView !== "function") {
@@ -118,11 +119,18 @@ export async function mount(wasmBytes, mountEl, opts = {}) {
     );
   }
 
+  // Protocol negotiation (RFC-0035, host-side): if the module exports
+  // `vyrnPatch`, the wasm side owns the diff — we boot from `vyrnView()` once,
+  // then apply the op stream `vyrnPatch()` returns on every render. If it does
+  // NOT, we keep today's full `vyrnView()` + JS-diff loop, untouched.
+  const hasPatch = typeof exports.vyrnPatch === "function";
+
   const effectRegistry = { ...effects };
   const activeEffects = new Map(); // domNode -> { name, cleanup }
   const activeSubs = new Map(); // subKey -> teardown fn
   const wiredEvents = new Set(); // event types with a delegated root listener
-  let current = null; // the retained root vnode
+  let current = null; // the retained root vnode (full-view loop only)
+  let rootDom = null; // the single mounted DOM node (patch loop: path [] resolves here)
   let destroyed = false;
 
   // --- invoke an exported handler, then re-render -------------------------
@@ -286,6 +294,121 @@ export async function mount(wasmBytes, mountEl, opts = {}) {
     }
   }
 
+  // --- the patch protocol (RFC-0035) --------------------------------------
+  // `vyrnPatch()` returns a `PatchOp` stream (std/html's `diff`). Paths are
+  // child-index vectors from the mount root; each vnode is exactly one DOM node
+  // so a path indexes `childNodes` directly. Ops apply strictly in order — the
+  // differ emits them so each op's path/index is valid at its turn (see
+  // std/html's emission-order docs), so this applier is deliberately naive.
+
+  // Resolve a child-index path against the live subtree. `[]` is the root node.
+  function nodeAt(path) {
+    let n = rootDom;
+    for (const idx of path) {
+      if (!n) return null;
+      n = n.childNodes[idx];
+    }
+    return n;
+  }
+
+  // Re-run the existing per-attribute reconciliation for an OpSetAttrs. Old
+  // attrs come from the LIVE element's attributes (form `value`/`checked` are
+  // never attributes — they stay live properties, so a reorder or an unrelated
+  // attr change never clobbers a typed value; only a changed `value`/`checked`
+  // in the view rewrites the property, exactly as the full-view loop does).
+  function reconcileAttrs(el, attrsJson) {
+    const parsed = parseAttrs(attrsJson || []);
+    const oldAttrs = {};
+    for (const name of el.getAttributeNames()) oldAttrs[name] = el.getAttribute(name);
+    applyAttrs(el, oldAttrs, parsed.attrs);
+  }
+
+  function applyOp(op) {
+    if ("OpSetText" in op) {
+      const [path, txt] = op.OpSetText;
+      const n = nodeAt(path);
+      if (n) n.textContent = String(txt);
+    } else if ("OpSetAttrs" in op) {
+      const [path, attrsJson] = op.OpSetAttrs;
+      const n = nodeAt(path);
+      if (n && n.nodeType === 1) reconcileAttrs(n, attrsJson);
+    } else if ("OpReplace" in op) {
+      const [path, htmlJson] = op.OpReplace;
+      const dom = createNode(parseHtml(htmlJson));
+      if (path.length === 0) {
+        if (rootDom && rootDom.parentNode) rootDom.parentNode.replaceChild(dom, rootDom);
+        rootDom = dom;
+      } else {
+        const old = nodeAt(path);
+        if (old && old.parentNode) old.parentNode.replaceChild(dom, old);
+      }
+    } else if ("OpInsert" in op) {
+      const [ppath, index, htmlJson] = op.OpInsert;
+      const parent = nodeAt(ppath);
+      if (!parent) return;
+      const dom = createNode(parseHtml(htmlJson));
+      parent.insertBefore(dom, parent.childNodes[index] || null);
+    } else if ("OpRemove" in op) {
+      const [ppath, index] = op.OpRemove;
+      const parent = nodeAt(ppath);
+      if (!parent) return;
+      const child = parent.childNodes[index];
+      if (child) parent.removeChild(child);
+    } else if ("OpMove" in op) {
+      const [ppath, from, to] = op.OpMove;
+      const parent = nodeAt(ppath);
+      if (!parent) return;
+      const node = parent.childNodes[from];
+      if (!node) return;
+      // insertBefore also relocates: reference the node currently at `to`
+      // (accounting for the removal when moving rightward).
+      const ref = from < to ? parent.childNodes[to + 1] || null : parent.childNodes[to] || null;
+      parent.insertBefore(node, ref);
+    }
+  }
+
+  function applyOps(ops) {
+    for (const op of ops) applyOp(op);
+  }
+
+  function patchTick() {
+    let ops;
+    try {
+      ops = JSON.parse(exports.vyrnPatch());
+    } catch {
+      return;
+    }
+    applyOps(ops || []);
+  }
+
+  // Effect reconciliation for the patch loop: the new vnode tree never reaches
+  // JS (only ops do), so effects are keyed off the LIVE DOM — inserts, removes,
+  // and replaces that add/drop a `data-effect` element fire the registry both
+  // ways by construction.
+  function runEffectsDom() {
+    const seen = new Map();
+    if (rootDom && rootDom.nodeType === 1 && rootDom.hasAttribute("data-effect")) {
+      seen.set(rootDom, rootDom.getAttribute("data-effect"));
+    }
+    const scope = rootDom && rootDom.querySelectorAll ? rootDom : mountEl;
+    for (const el of scope.querySelectorAll("[data-effect]")) {
+      seen.set(el, el.getAttribute("data-effect"));
+    }
+    for (const [dom, name] of seen) {
+      if (!activeEffects.has(dom)) {
+        const reg = effectRegistry[name];
+        const cleanup = typeof reg === "function" ? reg(dom) : null;
+        activeEffects.set(dom, { name, cleanup });
+      }
+    }
+    for (const [dom, info] of [...activeEffects]) {
+      if (!seen.has(dom)) {
+        if (typeof info.cleanup === "function") info.cleanup(dom);
+        activeEffects.delete(dom);
+      }
+    }
+  }
+
   // --- effects (imperative escape hatch) ----------------------------------
   function collectEffects(v, out) {
     if (!v) return;
@@ -365,6 +488,12 @@ export async function mount(wasmBytes, mountEl, opts = {}) {
 
   function rerender() {
     if (destroyed) return;
+    if (hasPatch) {
+      patchTick();
+      runEffectsDom();
+      syncSubs();
+      return;
+    }
     const next = readView();
     patchChildren(mountEl, [current], [next]);
     current = next;
@@ -373,11 +502,23 @@ export async function mount(wasmBytes, mountEl, opts = {}) {
   }
 
   // initial mount
-  current = readView();
   mountEl.textContent = "";
-  mountEl.appendChild(createNode(current));
-  runEffects();
-  syncSubs();
+  if (hasPatch) {
+    // Boot the patch loop: start from an empty root, then the FIRST patch (a
+    // diff of `Empty` against the initial view) builds the tree — so the boot
+    // primes wasm's retained `lastTree` and constructs the DOM in one step,
+    // through the same op applier every later render uses.
+    rootDom = document.createComment("");
+    mountEl.appendChild(rootDom);
+    patchTick();
+    runEffectsDom();
+    syncSubs();
+  } else {
+    current = readView();
+    mountEl.appendChild(createNode(current));
+    runEffects();
+    syncSubs();
+  }
 
   return {
     exports,

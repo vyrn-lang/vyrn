@@ -163,6 +163,11 @@ export extern fn rotate(arg: String) {
 
 // ---- the host bridge -------------------------------------------------------
 
+// NOTE (RFC-0035): this demo DELIBERATELY exports only `vyrnView` and no
+// `vyrnPatch`. It is the regression proof for the host's protocol fallback —
+// with `vyrnPatch` absent, `web/vyrn-dom.js` keeps using today's full-view +
+// JS-diff loop unchanged. `vyxdomdemo` and the shelf client are the ones that
+// switch to the wasm-side patch loop.
 export extern fn vyrnView() -> String {
     return toJson(view())
 }

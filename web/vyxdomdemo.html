@@ -78,6 +78,16 @@ async function boot() {
     const app = await mount(bytes, document.getElementById("app"), {
       // stdout from main() runs once on _start; the page ignores it.
       onStdout: () => {},
+      // RFC-0035 proof: an imperative effect fired off the applied DOM. The
+      // `flash` node appears when count > 0 and disappears at 0, so this logs
+      // MOUNT and UNMOUNT as ops add / remove the `data-effect` element.
+      effects: {
+        flash: (el) => {
+          console.log("[effect] flash MOUNT");
+          el.style.outline = "2px solid var(--accent)";
+          return () => console.log("[effect] flash UNMOUNT");
+        },
+      },
     });
     // Expose for manual poking in the console / automated checks.
     window.__vyrnApp = app;

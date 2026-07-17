@@ -13,16 +13,33 @@
 /// view.
 import { components } from "std/vyx"
 import { counter, rows } from components("./vyxdomcomp")
-import { toHtmlString, el, text, Html } from "std/html"
+import { toHtmlString, el, text, attr, empty, Html, diff } from "std/html"
 
 // ---- module state (root-only, RFC-0013) -----------------------------------
 let mut count: Int64 = 0
 let mut order: Array<Int64> = [1, 2, 3, 4]
 
+/// The retained previous view for the RFC-0035 patch protocol. `vyrnPatch`
+/// diffs the freshly-computed view against this and returns only the changes,
+/// so a reorder ships a couple of `OpMove`s instead of the whole tree.
+let mut lastTree: Html = Empty
+
 // ---- the view (pure, compiled from .vyx components) ------------------------
 
+/// A `data-effect` node that appears only while `count > 0` — so the +1/-1
+/// buttons make it mount and unmount. Under the RFC-0035 patch loop this is an
+/// `Empty`↔`El` transition (an `OpReplace`), and `web/vyrn-dom.js` fires the
+/// registered `flash` effect both ways off the applied DOM. It is the M2
+/// imperative-effect escape hatch, re-proven under patching.
+fn effectBadge() -> Html {
+    if count > 0 {
+        return el("p", [attr("data-effect", "flash")], [text("effect mounted (count > 0)")])
+    }
+    return empty()
+}
+
 fn view() -> Html {
-    return el("main", [], [el("h1", [], [text("vyrn-dom demo (.vyx components)")]), counter(count), el("hr", [], []), rows(order)])
+    return el("main", [], [el("h1", [], [text("vyrn-dom demo (.vyx components)")]), counter(count), effectBadge(), el("hr", [], []), rows(order)])
 }
 
 // ---- handlers (exported; the browser and `main` both call these) -----------
@@ -52,6 +69,16 @@ export extern fn rotate(arg: String) {
 
 export extern fn vyrnView() -> String {
     return toJson(view())
+}
+
+/// The RFC-0035 patch loop: `web/vyrn-dom.js` boots from `vyrnView()` once, then
+/// on every subsequent render calls this and applies the returned op stream. The
+/// presence of this export is the host's protocol switch; `view()` is untouched.
+export extern fn vyrnPatch() -> String {
+    let next = view()
+    let ops = diff(lastTree, next)
+    lastTree = next
+    return toJson(ops)
 }
 
 fn main() -> Int64 {
