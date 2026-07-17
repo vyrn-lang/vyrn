@@ -623,7 +623,13 @@ fn run_generator(
     }
 
     // 5. Content-addressed cache key: generator sources ++ args ++ inputs read.
-    let importer_dir = dir_of(importer).to_string();
+    // A generator imported BY a generated module (a nested generator, e.g. an
+    // `i18n(..)` import inside a `.vyx` script that `components(..)` synthesized)
+    // must resolve its path arguments against the REAL importing file's
+    // directory, not the synthetic banner key — exactly as `resolve_spec`
+    // unwraps `generated_importer` for path imports (RFC-0021).
+    let path_importer = generated_importer(importer).unwrap_or(importer);
+    let importer_dir = dir_of(path_importer).to_string();
     let join_dir = |s: &str| -> String {
         normalize(&if importer_dir.is_empty() { s.to_string() } else { format!("{importer_dir}/{s}") })
     };
@@ -3232,12 +3238,39 @@ mod gen_tests {
     }
 
     #[test]
+    fn nested_generator_resolves_paths_against_the_real_importer() {
+        // RFC-0029 wave: a generator imported BY a generated module (a nested
+        // generator — e.g. `i18n(..)` inside a `.vyx` script that `components(..)`
+        // synthesized) must resolve its path arguments against the REAL importing
+        // file's directory, not the synthetic banner key. `outer` emits a module
+        // that imports `inner("./sub/data")`; `inner` reflects that module — which
+        // it can only read if the path resolves to `sub/data.vyrn`.
+        let gen = "export gen fn inner(path: String) -> String { \
+                       let iface = moduleInterface(path) \
+                       let mut n = 0 \
+                       for f in iface.functions { n = n + 1 } \
+                       return \"export fn cnt() -> Int64 { return \" + \"\\{n}\" + \" }\\n\" } \
+                   export gen fn outer(dummy: String) -> String { \
+                       return \"import { inner } from \\\"./gen\\\"\\n\" \
+                            + \"import { cnt } from inner(\\\"./sub/data\\\")\\n\" \
+                            + \"export fn go() -> Int64 { return cnt() }\\n\" }";
+        let data = "export fn a() -> Int64 { return 1 } export fn b() -> Int64 { return 2 }";
+        let root = "import { outer } from \"./gen\" \
+                    import { go } from outer(\"x\") \
+                    fn main() -> Int64 { return go() }";
+        // `sub/data` has two exported functions, so `cnt()` — hence `go()` — is 2.
+        assert_eq!(
+            run(root, &[("gen.vyrn", gen), ("sub/data.vyrn", data)]).unwrap(),
+            2
+        );
+    }
+
+    #[test]
     fn generated_module_may_declare_module_state() {
-        // RFC-0021/RFC-0020 M2 carve-out: a module SYNTHESIZED BY A GENERATOR may
-        // own module state (a hand-written imported module still cannot — see
-        // `non_root_module_state_is_an_error`). The generated `currentLocale`-style
-        // global initializes before `main` and persists across handler calls made
-        // from the root module (the setLocale/locale + t() shape).
+        // Module state is legal in a generated module (RFC-0021's carve-out, now
+        // the general RFC-0029 rule — see `non_root_module_state_is_legal_via_accessors`).
+        // The generated `currentLocale`-style global initializes before `main` and
+        // persists across handler calls made from the root (the setLocale/locale + t() shape).
         let gen = "export gen fn mk(tag: String) -> String { \
                        return \"let mut cur = 10\\n\" \
                             + \"export fn bump() { cur = cur + 1 }\\n\" \
