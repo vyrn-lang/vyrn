@@ -340,8 +340,48 @@ fn twParseTheme(src: String) -> TwTheme {
             } else if c == 123 {
                 prefix.push(ks.value)
                 i = i + 1
+            } else if c == 91 {
+                // A JSON array of strings (RFC-0036 `safelist`). Each element
+                // flattens to `<key>.<index>` so it projects as an axis in source
+                // order (`safelist.0`, `safelist.1`, …). Only string elements.
+                let mut full = ""
+                for p in prefix {
+                    full = full + p + "."
+                }
+                full = full + ks.value
+                i = i + 1
+                let mut idx = 0
+                let mut done = false
+                while done == false {
+                    i = twSkipWs(ba, i, e)
+                    if i >= e {
+                        return twThemeError("unterminated array")
+                    }
+                    if ba[i] == 93 {
+                        i = i + 1
+                        done = true
+                    } else if ba[i] == 34 {
+                        let es = twScanString(ba, i, e)
+                        if es.ok == false {
+                            return twThemeError("malformed string in array")
+                        }
+                        keys.push(full + "." + idx.toString())
+                        vals.push(es.value)
+                        idx = idx + 1
+                        i = twSkipWs(ba, es.next, e)
+                        if i < e && ba[i] == 44 {
+                            i = i + 1
+                        }
+                    } else {
+                        return twThemeError("array elements must be strings")
+                    }
+                }
+                i = twSkipWs(ba, i, e)
+                if i < e && ba[i] == 44 {
+                    i = i + 1
+                }
             } else {
-                return twThemeError("unsupported value (only strings and nested objects are allowed)")
+                return twThemeError("unsupported value (only strings, arrays of strings, and nested objects are allowed)")
             }
         }
     }
@@ -426,10 +466,18 @@ fn twKnownFamilies() -> Array<String> {
     return ["colors", "spacing", "radius", "fontSize", "breakpoints"]
 }
 
+/// The recognised top-level theme keys: the vocabulary families plus `safelist`
+/// (RFC-0036 — literal names folded into the token grammar but not the CSS).
+fn twKnownTopLevel() -> Array<String> {
+    let mut out = twKnownFamilies()
+    out.push("safelist")
+    return out
+}
+
 /// Any top-level key of the flat theme that is not a recognised family — one
 /// diagnostic line per unknown key.
 fn twUnknownKeyErrors(theme: TwTheme) -> String {
-    let known = twKnownFamilies()
+    let known = twKnownTopLevel()
     let mut seen: Array<String> = []
     let mut out = ""
     for k in theme.keys {
@@ -645,6 +693,27 @@ fn twBuildVocab(theme: TwTheme) -> TwVocab {
     return v
 }
 
+/// The safelist class names (RFC-0036 `safelist: [..]`), in source order. Empty
+/// when the theme carries no `safelist`. These fold into the `TwClass` token
+/// grammar verbatim (so `class="book-card p-4"` checks) but emit NO CSS rule —
+/// the app owns their styling in a bespoke stylesheet (Tailwind safelist
+/// semantics).
+fn twSafelist(theme: TwTheme) -> Array<String> {
+    return twAxisOf(theme, "safelist").values
+}
+
+/// One diagnostic line per safelisted name that is not `[a-z][a-z0-9-]*` (the
+/// same CSS-safe shape as a derived class), naming the offender.
+fn twUnsafeSafelistErrors(safelist: Array<String>) -> String {
+    let mut out = ""
+    for name in safelist {
+        if twClassSafe(name) == false {
+            out = out + "TW_UNSAFE_SAFELIST__" + twIdentOf(name) + "\n"
+        }
+    }
+    return out
+}
+
 /// One diagnostic line per base class name that is not `[a-z][a-z0-9-]*` (the
 /// theme carried an unsafe segment).
 fn twUnsafeNameErrors(vocab: TwVocab) -> String {
@@ -752,8 +821,10 @@ fn twBuildCss(vocab: TwVocab, breakpoints: TwAxis) -> String {
 
 /// The token regex body: an optional responsive prefix, an optional state prefix,
 /// then the base-class alternation. Base names are `[a-z0-9-]` only (validated),
-/// so none are regex metacharacters — no escaping is needed.
-fn twTokenRegex(vocab: TwVocab, breakpoints: TwAxis) -> String {
+/// so none are regex metacharacters — no escaping is needed. Safelisted names
+/// (RFC-0036) join the base alternation AFTER the derived vocabulary in source
+/// order, so `class="book-card p-4"` checks while the CSS stays derived-only.
+fn twTokenRegex(vocab: TwVocab, breakpoints: TwAxis, safelist: Array<String>) -> String {
     let mut out = ""
     if breakpoints.tokens.length > 0 {
         let mut bps: Array<String> = []
@@ -763,7 +834,14 @@ fn twTokenRegex(vocab: TwVocab, breakpoints: TwAxis) -> String {
         out = out + "(" + twJoin(bps, "|") + ")?"
     }
     out = out + "(hover:|focus:)?"
-    out = out + "(" + twJoin(vocab.names, "|") + ")"
+    let mut bases: Array<String> = []
+    for n in vocab.names {
+        bases.push(n)
+    }
+    for s in safelist {
+        bases.push(s)
+    }
+    out = out + "(" + twJoin(bases, "|") + ")"
     return out
 }
 
@@ -772,8 +850,8 @@ fn twTokenRegex(vocab: TwVocab, breakpoints: TwAxis) -> String {
 // ===========================================================================
 
 /// Assemble the synthesized module: the two types, `cls`, and `css()`.
-fn twBuildModule(vocab: TwVocab, breakpoints: TwAxis) -> String {
-    let token = twTokenRegex(vocab, breakpoints)
+fn twBuildModule(vocab: TwVocab, breakpoints: TwAxis, safelist: Array<String>) -> String {
+    let token = twTokenRegex(vocab, breakpoints, safelist)
     // The stylesheet is baked as one escaped literal (balanced comptime assembly).
     let cssLit = twCssBody(vocab, breakpoints, true)
     let mut out = "/// Generated by std/tw `tw` (RFC-0032) — do not edit.\n"
@@ -824,8 +902,13 @@ export gen fn tw(theme: String) -> String {
     if unsafe != "" {
         return unsafe
     }
+    let safelist = twSafelist(parsed)
+    let unsafeSafelist = twUnsafeSafelistErrors(safelist)
+    if unsafeSafelist != "" {
+        return unsafeSafelist
+    }
     let breakpoints = twAxisOf(parsed, "breakpoints")
-    return twBuildModule(vocab, breakpoints)
+    return twBuildModule(vocab, breakpoints, safelist)
 }
 
 // ===========================================================================
@@ -913,9 +996,41 @@ test "twBuildCss is deterministic and puts media queries last" {
 test "twTokenRegex factors the prefixes over the base alternation" {
     let t = twParseTheme("{ \"colors\": { \"white\": \"#fff\" }, \"breakpoints\": { \"md\": \"768px\" } }")
     let v = twBuildVocab(t)
-    let r = twTokenRegex(v, twAxisOf(t, "breakpoints"))
+    let r = twTokenRegex(v, twAxisOf(t, "breakpoints"), [])
     assert(r.startsWith("(md:)?(hover:|focus:)?("))
     assert(r.contains("bg-white"))
+}
+
+test "safelist folds names into the token grammar after the derived vocabulary" {
+    let t = twParseTheme("{ \"colors\": { \"white\": \"#fff\" }, \"safelist\": [\"book-card\", \"row\"] }")
+    assert(t.ok)
+    let sl = twSafelist(t)
+    assertEq(sl.length, 2)
+    assertEq(sl[0], "book-card")
+    assertEq(sl[1], "row")
+    let v = twBuildVocab(t)
+    let r = twTokenRegex(v, twAxisOf(t, "breakpoints"), sl)
+    // The safelisted names join the base alternation (so `class="book-card"` checks)…
+    assert(r.contains("book-card"))
+    assert(r.contains("row"))
+    // …but css() emits NO rule for them — only the derived vocabulary is styled.
+    let css = twBuildCss(v, twAxisOf(t, "breakpoints"))
+    assertEq(css.contains(".book-card"), false)
+    assertEq(css.contains(".row "), false)
+    assert(css.contains(".bg-white"))
+}
+
+test "safelist rejects a name that is not CSS-safe" {
+    let t = twParseTheme("{ \"colors\": { \"white\": \"#fff\" }, \"safelist\": [\"Book_Card\"] }")
+    assert(t.ok)
+    let e = twUnsafeSafelistErrors(twSafelist(t))
+    assert(e.contains("TW_UNSAFE_SAFELIST__Book_Card"))
+}
+
+test "safelist is a recognised top-level key (not an unknown-key error)" {
+    let t = twParseTheme("{ \"safelist\": [\"prose\"] }")
+    assert(t.ok)
+    assertEq(twUnknownKeyErrors(t), "")
 }
 
 test "twUnknownKeyErrors names an unrecognised top-level key" {

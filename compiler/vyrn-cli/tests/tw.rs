@@ -207,5 +207,5 @@ fn std_tw_unit_tests_run_green() {
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "std/tw unit tests failed:\n{combined}");
-    assert!(combined.contains("11 passed, 0 failed"), "expected 11 green tests:\n{combined}");
+    assert!(combined.contains("14 passed, 0 failed"), "expected 14 green tests:\n{combined}");
 }
