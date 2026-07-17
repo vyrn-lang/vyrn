@@ -5,6 +5,6 @@ import { Item } from "./models"
 
 <template>
 <ul class="listing">
-    {#for it in items key={it.id}}<Row item={it}/>{/for}
+    <Row v-for="it in items" :key="it.id" :item="it"/>
 </ul>
 </template>

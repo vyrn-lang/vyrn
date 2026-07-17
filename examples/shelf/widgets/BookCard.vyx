@@ -4,6 +4,7 @@ props { title: String, url: String, rating: String, tagsText: String, status: St
 
 <template>
 <div class="card">
-    {#if status.length > 0}<p class="issues">{status}</p>{:else}<div class="cardbody"><h3><a href={url}>{title}</a></h3><p class="rating">{rating}</p><p class="tags">{tagsText}</p></div>{/if}
+    <p v-if="status.length > 0" class="issues">{{ status }}</p>
+    <div v-else class="cardbody"><h3><a :href="url">{{ title }}</a></h3><p class="rating">{{ rating }}</p><p class="tags">{{ tagsText }}</p></div>
 </div>
 </template>

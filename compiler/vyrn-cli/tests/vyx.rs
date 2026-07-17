@@ -1,13 +1,13 @@
-//! Integration tests for the `.vyx` component compiler (RFC-0026 M4) — the
-//! `std/vyx` `components` generator driven through the real `vyrn` binary.
+//! Integration tests for the `.vyx` component compiler (RFC-0026 M4, RFC-0039 v2)
+//! — the `std/vyx` `components` generator driven through the real `vyrn` binary.
 //!
 //!   * `emit-gen` the demo and assert the synthesized module's shape (one view
-//!     function per component, the keyed `{#for}`, the `On` event ABI, `Cls`
-//!     classes, the `{children}` splice, the `{@raw}` passthrough, the rebased
+//!     function per component, the keyed `v-for`, the `On` event ABI, `Cls`
+//!     classes, the `<slot/>` splice, the `v-html` passthrough, the rebased
 //!     relative import);
 //!   * generation-diagnostic fixtures (built in tempdirs) each fail the load with
 //!     a diagnostic naming the offending `.vyx` file and line: an unclosed
-//!     element, a missing `{#for}` key, an unknown component tag, a non-scalar
+//!     element, a missing `v-for` `:key`, an unknown component tag, a non-scalar
 //!     event argument, multiple roots, a malformed props block, and a missing
 //!     `<template>` section;
 //!   * the demo runs green under `vyrn test`.
@@ -109,7 +109,7 @@ fn missing_for_key_fails_naming_the_file() {
     let dir = scratch("nokey");
     write(
         &dir.join("comp/Widget.vyx"),
-        "<template>\n<ul>\n{#for x in xs}<li>{x}</li>{/for}\n</ul>\n</template>\n",
+        "<template>\n<ul>\n<li v-for=\"x in xs\">{{ x }}</li>\n</ul>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
@@ -121,7 +121,7 @@ fn missing_for_key_fails_naming_the_file() {
 #[test]
 fn unknown_component_fails_naming_the_tag() {
     let dir = scratch("unknowncomp");
-    write(&dir.join("comp/Widget.vyx"), "<template>\n<ul><Missing x={1}/></ul>\n</template>\n");
+    write(&dir.join("comp/Widget.vyx"), "<template>\n<ul><Missing :x=\"1\"/></ul>\n</template>\n");
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
     assert!(!ok, "an unknown component tag must fail to load");
@@ -185,16 +185,17 @@ fn missing_template_section_fails() {
 fn type_error_in_template_expression_remaps_to_the_vyx() {
     let dir = scratch("remap");
     // `Row` has `title`; the template mistypes it as `titel`. The interpolation
-    // is on line 6, and `{` is at column 5, so `item` begins at column 6.
+    // is on line 6 as `<li>{{ item.titel }}`; `<li>{{ ` is 7 chars, so `item`
+    // begins at column 8.
     write(
         &dir.join("comp/Widget.vyx"),
-        "<script>\ntype Row = { title: String }\nprops { item: Row }\n</script>\n<template>\n<li>{item.titel}</li>\n</template>\n",
+        "<script>\ntype Row = { title: String }\nprops { item: Row }\n</script>\n<template>\n<li>{{ item.titel }}</li>\n</template>\n",
     );
     write(&dir.join("app.vyrn"), APP);
     let (ok, err) = run_app(&dir);
     assert!(!ok, "a template type error must fail to load");
     // The diagnostic points at the `.vyx` file, the interpolation's line/column.
-    assert!(err.contains("Widget.vyx:6:6:"), "remapped location:\n{err}");
+    assert!(err.contains("Widget.vyx:6:8:"), "remapped location:\n{err}");
     assert!(err.contains("titel"), "carries the checker message:\n{err}");
     // The generated location survives as a note (the `emit-gen` breadcrumb).
     assert!(err.contains("note: in generated code"), "keeps the generated note:\n{err}");
@@ -276,7 +277,7 @@ fn themed_safelist_and_utilities_check_and_run() {
         &dir.join("comp/Widget.vyx"),
         "<script>props { cls: String }</script>\n\
          <template>\n\
-         <li class=\"card flex p-2\"><span class={cls}>x</span></li>\n\
+         <li class=\"card flex p-2\"><span :class=\"cls\">x</span></li>\n\
          </template>\n",
     );
     write(&dir.join("theme.json"), THEME_JSON);

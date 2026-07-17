@@ -12,8 +12,10 @@ fn qtyClass(q: Int64) -> String {
 
 <template>
 <li class="row">
-    <span class="name">{item.name}</span>
-    {#if item.qty > 5}<em class={qtyClass(item.qty)}>lots ({item.qty})</em>{:else if item.qty == 1}<em class="one">last one</em>{:else}<em class="some">{item.qty} left</em>{/if}
+    <span class="name">{{ item.name }}</span>
+    <em v-if="item.qty > 5" :class="qtyClass(item.qty)">lots ({{ item.qty }})</em>
+    <em v-else-if="item.qty == 1" class="one">last one</em>
+    <em v-else class="some">{{ item.qty }} left</em>
     <button class="rm" @click="removeRow(item.id)">remove</button>
     <input class="q" @input="setQty(item.name)"/>
 </li>

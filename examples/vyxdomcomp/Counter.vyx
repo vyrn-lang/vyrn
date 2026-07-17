@@ -5,7 +5,7 @@ props { count: Int64 }
 <template>
 <section id="counter">
     <h2>Counter</h2>
-    <p id="count">count = {count}</p>
+    <p id="count">count = {{ count }}</p>
     <button id="inc" @click="increment">+1</button>
     <button id="dec" @click="decrement">-1</button>
 </section>

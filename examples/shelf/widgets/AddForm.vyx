@@ -13,10 +13,10 @@ props {
 
 <template>
 <section class="add">
-    <h2>{addLabel}</h2>
-    <label>{titleLabel}<input type="text" value={draftTitle} @input="setDraftTitle"/></label>
-    <label>{urlLabel}<input type="text" value={draftUrl} @input="setDraftUrl"/></label>
-    <label>{tagsLabel}<input type="text" value={draftTags} @input="setDraftTags"/></label>
-    <button class="save" @click="submitAdd">{saveLabel}</button>
+    <h2>{{ addLabel }}</h2>
+    <label>{{ titleLabel }}<input type="text" :value="draftTitle" @input="setDraftTitle"/></label>
+    <label>{{ urlLabel }}<input type="text" :value="draftUrl" @input="setDraftUrl"/></label>
+    <label>{{ tagsLabel }}<input type="text" :value="draftTags" @input="setDraftTags"/></label>
+    <button class="save" @click="submitAdd">{{ saveLabel }}</button>
 </section>
 </template>

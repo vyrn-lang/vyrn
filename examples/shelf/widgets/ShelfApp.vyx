@@ -1,7 +1,7 @@
 <script>
-// The only widget that imports the shared record types — children take scalars,
-// so no type is imported by two components (the .vyx generator would otherwise
-// emit a duplicate import into the one synthesized module). See NOTES.
+// The shell widget: it imports the shared record types directly (RFC-0039 §3
+// dedups imports across component scripts, so a type used by more than one
+// component no longer forces a duplicate import into the synthesized module).
 props {
     labels: Labels,
     books: Array<BookView>,
@@ -19,20 +19,22 @@ import { BookView, TagCount, Labels } from "../types"
 <template>
 <div class="shelf">
     <div class="bar">
-        <span class="count">{count}</span>
-        <button class="lang" @click="toggleLang">{langLabel}</button>
+        <span class="count">{{ count }}</span>
+        <button class="lang" @click="toggleLang">{{ langLabel }}</button>
     </div>
-    {#if issues.length > 0}<p class="issues">{issues}</p>{:else}<span class="noissues"></span>{/if}
+    <p v-if="issues.length > 0" class="issues">{{ issues }}</p>
+    <span v-else class="noissues"></span>
     <div class="cols">
         <div class="col-main">
-            <AddForm addLabel={labels.add} titleLabel={labels.title} urlLabel={labels.url} tagsLabel={labels.tags} saveLabel={labels.save} draftTitle={draftTitle} draftUrl={draftUrl} draftTags={draftTags}/>
-            {#if books.length > 0}<ul class="books">{#for b in books key={b.id}}<BookRow id={b.id} title={b.title} url={b.url} rating={b.rating} tagsText={b.tagsText} confirming={b.confirming} detailHref={b.detailHref} unratedLabel={labels.unrated} delLabel={labels.del} confirmLabel={labels.confirm} cancelLabel={labels.cancel}/>{/for}</ul>{:else}<p class="empty">{labels.empty}</p>{/if}
+            <AddForm :addLabel="labels.add" :titleLabel="labels.title" :urlLabel="labels.url" :tagsLabel="labels.tags" :saveLabel="labels.save" :draftTitle="draftTitle" :draftUrl="draftUrl" :draftTags="draftTags"/>
+            <ul v-if="books.length > 0" class="books"><BookRow v-for="b in books" :key="b.id" :id="b.id" :title="b.title" :url="b.url" :rating="b.rating" :tagsText="b.tagsText" :confirming="b.confirming" :detailHref="b.detailHref" :unratedLabel="labels.unrated" :delLabel="labels.del" :confirmLabel="labels.confirm" :cancelLabel="labels.cancel"/></ul>
+            <p v-else class="empty">{{ labels.empty }}</p>
         </div>
         <aside class="sidebar">
-            <h2>{labels.tagsHdr}</h2>
+            <h2>{{ labels.tagsHdr }}</h2>
             <ul class="taglist">
-                <li><button class="tag" @click="clearFilter">{labels.filterAll}</button></li>
-                {#for t in tags key={t.name}}<TagItem name={t.name} label={t.label} count={t.count} cls={t.cls}/>{/for}
+                <li><button class="tag" @click="clearFilter">{{ labels.filterAll }}</button></li>
+                <TagItem v-for="t in tags" :key="t.name" :name="t.name" :label="t.label" :count="t.count" :cls="t.cls"/>
             </ul>
         </aside>
     </div>

@@ -1,11 +1,16 @@
 <script>
 props { title: String }
+
+/// The raw separator markup, injected verbatim via `v-html` (NOT escaped).
+fn sepMarkup() -> String {
+    return "<hr class=\"sep\"/>"
+}
 </script>
 
 <template>
 <section class="panel">
-    <h2 class="title">{title}</h2>
-    {@raw "<hr class=\"sep\"/>"}
-    {children}
+    <h2 class="title">{{ title }}</h2>
+    <div class="sepwrap" v-html="sepMarkup()"></div>
+    <slot/>
 </section>
 </template>

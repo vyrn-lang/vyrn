@@ -23,7 +23,7 @@ fn labelFor(id: Int64) -> String {
     <h2>Keyed list</h2>
     <button id="rotate" @click="rotate">rotate (first to last)</button>
     <ul id="rows">
-        {#for id in order key={id}}<li class="row"><span class="tag">#{id} {labelFor(id)}</span><input placeholder="note…"/></li>{/for}
+        <li class="row" v-for="id in order" :key="id"><span class="tag">#{{ id }} {{ labelFor(id) }}</span><input placeholder="note…"/></li>
     </ul>
 </section>
 </template>
