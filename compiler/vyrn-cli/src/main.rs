@@ -455,11 +455,21 @@ fn fmt_cmd(rest: &[String]) -> ExitCode {
                 continue;
             }
         };
-        // Normalize to LF for a stable comparison; the formatter emits LF and one
-        // trailing newline. (Repo files are LF; a CRLF checkout still formats to LF.)
+        // CRLF policy (RFC-0017): the formatter decides the whitespace *between*
+        // tokens, never the platform newline convention. A file's existing
+        // line-ending style is preserved — a CRLF (Windows-authored) file
+        // round-trips to CRLF, an LF file to LF — so a canonically-formatted CRLF
+        // file is NOT a spurious diff under `--check`, and `fmt` never rewrites a
+        // whole file just to flip its newlines. We normalize to LF for the
+        // formatter (whose safety invariant re-lexes LF), then re-apply CRLF if
+        // the source used it. (A file that mixes styles canonicalizes to CRLF
+        // when any CRLF is present — a deliberate, idempotent choice.)
+        let uses_crlf = source.contains("\r\n");
         let normalized = source.replace("\r\n", "\n");
         match vyrn_frontend::fmt(&normalized) {
             Ok(formatted) => {
+                let formatted =
+                    if uses_crlf { formatted.replace('\n', "\r\n") } else { formatted };
                 if formatted != source {
                     if check {
                         would_change.push(path.clone());

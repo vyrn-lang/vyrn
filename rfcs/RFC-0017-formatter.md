@@ -107,6 +107,19 @@ rules that the normative style left implicit had to be pinned down:
   so line structure is preserved rather than rewritten.)
 - **Semicolons.** Dropped. A stray single-line `a; b` becomes `a b`; v1 does not
   reflow it onto two lines, and the no-semicolon parser accepts the result.
+- **CRLF line endings (policy).** The formatter decides the whitespace *between*
+  tokens, never the platform's newline convention — so `fmt` **preserves a
+  file's existing line-ending style**. A CRLF (Windows-authored) file
+  round-trips to CRLF, an LF file to LF. The CLI normalizes to LF for the
+  formatter (whose safety invariant re-lexes LF and whose token spacing is
+  newline-agnostic), then re-applies CRLF when the source used it. Two
+  consequences: (1) a canonically-formatted CRLF file is **not** a spurious diff
+  under `--check` (it round-trips byte-for-byte), and (2) `fmt` never rewrites a
+  whole file just to flip its newlines — a real reformat of a CRLF file stays
+  CRLF. A file that mixes both styles canonicalizes to CRLF whenever any CRLF is
+  present (deliberate and idempotent). This matches the repo reality, where
+  Windows-authored files exist alongside LF ones. Verified by
+  `vyrn-cli/tests/fmt.rs` (the `--check` gate and the CRLF round-trip).
 
 ## Out of scope
 
