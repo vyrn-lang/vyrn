@@ -182,6 +182,29 @@ fn vyxLineAt(ba: Array<UInt8>, off: Int64) -> Int64 {
     return line
 }
 
+/// The 1-based column of byte offset `off` within `ba` (chars since the last LF).
+/// RFC-0033 origin directives are 1-based; this feeds their `:col` field so a
+/// diagnostic in a template pass-through maps to the exact `.vyx` column.
+fn vyxColAt(ba: Array<UInt8>, off: Int64) -> Int64 {
+    let mut col = 1
+    let mut i = off
+    while i > 0 && ba[i - 1] != 10 {
+        col = col + 1
+        i = i - 1
+    }
+    return col
+}
+
+/// The byte offset of the first non-whitespace byte in `ba[from..)`, so a
+/// `{  expr }` brace maps to the actual start column of `expr`, not the `{`.
+fn vyxSkipWs(ba: Array<UInt8>, from: Int64, e: Int64) -> Int64 {
+    let mut i = from
+    while i < e && vyxIsWs(ba[i]) {
+        i = i + 1
+    }
+    return i
+}
+
 // ---- emitting Vyrn source: escape a raw string as a `"…"` literal -----------
 
 /// The second byte of a Vyrn string-literal escape for `b`, or 0 when `b` needs
@@ -295,18 +318,21 @@ fn vyxCollapseWs(s: String) -> String {
 // ===========================================================================
 
 /// One attribute on a template element. `dyn` = braced `{expr}` value; `evt` = an
-/// `@event` binding (its `name` has the `@` stripped).
-type VyxAttr = { name: String, value: String, dyn: Bool, evt: Bool, line: Int64 }
+/// `@event` binding (its `name` has the `@` stripped). `line`/`col` are the
+/// 1-based position of the attribute value in the `.vyx` file (RFC-0033 origins).
+type VyxAttr = { name: String, value: String, dyn: Bool, evt: Bool, line: Int64, col: Int64 }
 
-/// A node in a parsed template.
+/// A node in a parsed template. The trailing `Int64` pair on position-bearing
+/// variants is the 1-based `(line, col)` of the pass-through in the `.vyx` file,
+/// so RFC-0033 origin directives point at the exact source column.
 type VyxNode =
     | VNText(String)
-    | VNInterp(String, Int64)
-    | VNRaw(String, Int64)
+    | VNInterp(String, Int64, Int64)
+    | VNRaw(String, Int64, Int64)
     | VNChildren
     | VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64)
-    | VNIf(Array<String>, Array<VyxBody>, VyxBody, Bool)
-    | VNFor(String, String, String, Array<VyxNode>, Int64)
+    | VNIf(Array<String>, Array<VyxBody>, VyxBody, Bool, Int64, Int64)
+    | VNFor(String, String, String, Array<VyxNode>, Int64, Int64)
 
 /// A node-list wrapper, so an `Array<VyxNode>` can nest inside another node's
 /// payload (an if-chain's per-branch bodies) without an `Array<Array<…>>`.
@@ -469,18 +495,19 @@ fn vyxParseAttrs(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxAtt
                 }
                 if m < e && ba[m] == 34 {
                     let vEnd = vyxScanQuote(ba, m, e)
-                    attrs.push(VyxAttr { name: name, value: vyxSlice(ba, m + 1, vEnd - 1), dyn: false, evt: evt, line: attrLine })
+                    attrs.push(VyxAttr { name: name, value: vyxSlice(ba, m + 1, vEnd - 1), dyn: false, evt: evt, line: attrLine, col: vyxColAt(ba, m + 1) })
                     j = vEnd
                 } else if m < e && ba[m] == 123 {
                     let vEnd = vyxMatchBrace(ba, m, e)
-                    attrs.push(VyxAttr { name: name, value: vyxTrim(vyxSlice(ba, m + 1, vEnd - 1)), dyn: true, evt: evt, line: attrLine })
+                    let exprAt = vyxSkipWs(ba, m + 1, vEnd - 1)
+                    attrs.push(VyxAttr { name: name, value: vyxTrim(vyxSlice(ba, m + 1, vEnd - 1)), dyn: true, evt: evt, line: vyxLineAt(ba, exprAt), col: vyxColAt(ba, exprAt) })
                     j = vEnd
                 } else {
                     return VyxAttrs { attrs: attrs, next: m, selfClose: false, err: vyxErr("VYX_BAD_ATTR_VALUE", fileId, attrLine) }
                 }
             } else {
                 // A valueless attribute renders as `name=""`.
-                attrs.push(VyxAttr { name: name, value: "", dyn: false, evt: evt, line: attrLine })
+                attrs.push(VyxAttr { name: name, value: "", dyn: false, evt: evt, line: attrLine, col: vyxColAt(ba, nameStart) })
                 j = k
             }
         }
@@ -535,24 +562,33 @@ fn vyxParseNodes(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxPar
             if br.kind == "elseif" || br.kind == "else" || br.kind == "endif" || br.kind == "endfor" {
                 return VyxParse { nodes: nodes, next: j, stop: br.kind, err: "" }
             }
+            // The expression offset inside `{…}`: the first non-space byte past
+            // the `{` (and, for `{@raw …}`, past the `@raw` keyword). This is the
+            // exact column the RFC-0033 origin directive names.
+            let inAt = vyxSkipWs(ba, j + 1, br.next - 1)
             if br.kind == "interp" {
-                nodes.push(VNInterp(br.inner, vyxLineAt(ba, j)))
+                nodes.push(VNInterp(br.inner, vyxLineAt(ba, inAt), vyxColAt(ba, inAt)))
                 j = br.next
             } else if br.kind == "raw" {
-                nodes.push(VNRaw(br.inner, vyxLineAt(ba, j)))
+                let rawAt = vyxSkipWs(ba, inAt + 4, br.next - 1)
+                nodes.push(VNRaw(br.inner, vyxLineAt(ba, rawAt), vyxColAt(ba, rawAt)))
                 j = br.next
             } else if br.kind == "children" {
                 nodes.push(VNChildren)
                 j = br.next
             } else if br.kind == "if" {
-                let r = vyxParseIf(ba, br.next, e, fileId, br.inner, vyxLineAt(ba, j))
+                // `{#if cond}`: the condition starts past `#if` and its space.
+                let condAt = vyxSkipWs(ba, inAt + 3, br.next - 1)
+                let r = vyxParseIf(ba, br.next, e, fileId, br.inner, vyxLineAt(ba, condAt), vyxColAt(ba, condAt))
                 if r.err != "" {
                     return VyxParse { nodes: nodes, next: r.next, stop: "", err: r.err }
                 }
                 nodes.push(r.node)
                 j = r.next
             } else {
-                let r = vyxParseFor(ba, br.next, e, fileId, br.inner, vyxLineAt(ba, j))
+                // `{#for head}`: the header starts past `#for` and its space.
+                let hdrAt = vyxSkipWs(ba, inAt + 4, br.next - 1)
+                let r = vyxParseFor(ba, br.next, e, fileId, br.inner, vyxLineAt(ba, hdrAt), vyxColAt(ba, hdrAt))
                 if r.err != "" {
                     return VyxParse { nodes: nodes, next: r.next, stop: "", err: r.err }
                 }
@@ -622,7 +658,7 @@ fn vyxParseElem(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxNode
 }
 
 /// Parse an `{#if}` chain from just past the opening `{#if cond}` brace.
-fn vyxParseIf(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String, firstCond: String, line: Int64) -> VyxNodeR {
+fn vyxParseIf(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String, firstCond: String, line: Int64, col: Int64) -> VyxNodeR {
     let mut conds: Array<String> = [firstCond]
     let mut bodies: Array<VyxBody> = []
     let mut elseBody = VyxBody { nodes: [] }
@@ -661,7 +697,7 @@ fn vyxParseIf(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String, firstCond: S
             return VyxNodeR { node: VNText(""), next: pr.next, err: vyxErr("VYX_UNCLOSED_IF", fileId, line) }
         }
     }
-    return VyxNodeR { node: VNIf(conds, bodies, elseBody, hasElse), next: cur, err: "" }
+    return VyxNodeR { node: VNIf(conds, bodies, elseBody, hasElse, line, col), next: cur, err: "" }
 }
 
 /// A parsed `#for` header: loop variable, iterable expression, key expression.
@@ -725,7 +761,7 @@ fn vyxFindLast(ba: Array<UInt8>, needle: Array<UInt8>, from: Int64) -> Int64 {
 }
 
 /// Parse a `{#for}` block from just past the opening `{#for …}` brace.
-fn vyxParseFor(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String, header: String, line: Int64) -> VyxNodeR {
+fn vyxParseFor(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String, header: String, line: Int64, col: Int64) -> VyxNodeR {
     let h = vyxParseForHeader(header, fileId, line)
     if h.err != "" {
         return VyxNodeR { node: VNText(""), next: i, err: h.err }
@@ -738,7 +774,7 @@ fn vyxParseFor(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String, header: Str
         return VyxNodeR { node: VNText(""), next: pr.next, err: vyxErr("VYX_UNCLOSED_FOR", fileId, line) }
     }
     let br = vyxReadBrace(ba, pr.next, e)
-    return VyxNodeR { node: VNFor(h.var, h.iter, h.key, pr.nodes, line), next: br.next, err: "" }
+    return VyxNodeR { node: VNFor(h.var, h.iter, h.key, pr.nodes, line, col), next: br.next, err: "" }
 }
 
 // ===========================================================================
@@ -945,6 +981,7 @@ type VyxComp = {
     name: String,
     fnName: String,
     fileId: String,
+    srcPath: String,
     propNames: Array<String>,
     propTypes: Array<String>,
     imports: Array<String>,
@@ -968,11 +1005,11 @@ fn vyxNodeUsesChildren(n: VyxNode) -> Bool {
     return match n {
         VNChildren => true,
         VNElem(t, c, a, kids, l) => vyxUsesChildren(kids),
-        VNIf(conds, bodies, els, has) => vyxIfUsesChildren(bodies, els, has),
-        VNFor(v, it, k, body, l) => vyxUsesChildren(body),
+        VNIf(conds, bodies, els, has, l, c) => vyxIfUsesChildren(bodies, els, has),
+        VNFor(v, it, k, body, l, c) => vyxUsesChildren(body),
         VNText(s) => false,
-        VNInterp(x, l) => false,
-        VNRaw(x, l) => false,
+        VNInterp(x, l, c) => false,
+        VNRaw(x, l, c) => false,
     }
 }
 
@@ -996,11 +1033,15 @@ export fn vyxCompileComponent(compName: String, source: String, dir: String) -> 
     let ba = bytes(source)
     let fileId = vyxIdentOf(compName + ".vyx")
     let fnName = vyxLowerFirst(compName)
+    // The `.vyx` path relative to the generator's importing module — the base
+    // RFC-0033 origin directives resolve against (identical to the `readFile`
+    // path this component was read from).
+    let srcPath = dir + "/" + compName + ".vyx"
 
     let scriptSec = vyxSection(ba, "script")
     let templateSec = vyxSection(ba, "template")
     if templateSec.found == false {
-        return vyxCompErr(compName, fnName, fileId, vyxErr("VYX_NO_TEMPLATE", fileId, 0))
+        return vyxCompErr(compName, fnName, fileId, srcPath, vyxErr("VYX_NO_TEMPLATE", fileId, 0))
     }
 
     let mut propNames: Array<String> = []
@@ -1010,7 +1051,7 @@ export fn vyxCompileComponent(compName: String, source: String, dir: String) -> 
     if scriptSec.found {
         let sc = vyxParseScript(vyxSlice(ba, scriptSec.start, scriptSec.end), dir, fileId)
         if sc.err != "" {
-            return vyxCompErr(compName, fnName, fileId, sc.err)
+            return vyxCompErr(compName, fnName, fileId, srcPath, sc.err)
         }
         propNames = sc.propNames
         propTypes = sc.propTypes
@@ -1021,21 +1062,22 @@ export fn vyxCompileComponent(compName: String, source: String, dir: String) -> 
     // Parse the template (over absolute file offsets, for true line numbers).
     let parsed = vyxParseNodes(ba, templateSec.start, templateSec.end, fileId)
     if parsed.err != "" {
-        return vyxCompErr(compName, fnName, fileId, parsed.err)
+        return vyxCompErr(compName, fnName, fileId, srcPath, parsed.err)
     }
     // Exactly one root element (whitespace-only text is already dropped).
     let roots = vyxElementRoots(parsed.nodes)
     if roots.length == 0 {
-        return vyxCompErr(compName, fnName, fileId, vyxErr("VYX_NO_ROOT", fileId, 0))
+        return vyxCompErr(compName, fnName, fileId, srcPath, vyxErr("VYX_NO_ROOT", fileId, 0))
     }
     if roots.length > 1 {
-        return vyxCompErr(compName, fnName, fileId, vyxErr("VYX_MULTIPLE_ROOTS", fileId, vyxRootLine(roots)))
+        return vyxCompErr(compName, fnName, fileId, srcPath, vyxErr("VYX_MULTIPLE_ROOTS", fileId, vyxRootLine(roots)))
     }
     let root = roots[0]
     return VyxComp {
         name: compName,
         fnName: fnName,
         fileId: fileId,
+        srcPath: srcPath,
         propNames: propNames,
         propTypes: propTypes,
         imports: imports,
@@ -1054,11 +1096,11 @@ fn vyxElementRoots(nodes: Array<VyxNode>) -> Array<VyxNode> {
         let keep = match n {
             VNElem(t, c, a, k, l) => true,
             VNText(s) => false,
-            VNInterp(x, l) => true,
-            VNRaw(x, l) => true,
+            VNInterp(x, l, c) => true,
+            VNRaw(x, l, c) => true,
             VNChildren => true,
-            VNIf(cc, bb, ee, hh) => true,
-            VNFor(v, it, kk, bd, l) => true,
+            VNIf(cc, bb, ee, hh, l, c) => true,
+            VNFor(v, it, kk, bd, l, c) => true,
         }
         if keep {
             out.push(n)
@@ -1071,21 +1113,22 @@ fn vyxElementRoots(nodes: Array<VyxNode>) -> Array<VyxNode> {
 fn vyxRootLine(roots: Array<VyxNode>) -> Int64 {
     return match roots[1] {
         VNElem(t, c, a, k, l) => l,
-        VNInterp(x, l) => l,
-        VNRaw(x, l) => l,
-        VNFor(v, it, kk, bd, l) => l,
+        VNInterp(x, l, c) => l,
+        VNRaw(x, l, c) => l,
+        VNFor(v, it, kk, bd, l, c) => l,
         VNChildren => 0,
         VNText(s) => 0,
-        VNIf(cc, bb, ee, hh) => 0,
+        VNIf(cc, bb, ee, hh, l, c) => 0,
     }
 }
 
 /// A `VyxComp` carrying only an error.
-fn vyxCompErr(name: String, fnName: String, fileId: String, err: String) -> VyxComp {
+fn vyxCompErr(name: String, fnName: String, fileId: String, srcPath: String, err: String) -> VyxComp {
     return VyxComp {
         name: name,
         fnName: fnName,
         fileId: fileId,
+        srcPath: srcPath,
         propNames: [],
         propTypes: [],
         imports: [],
@@ -1097,9 +1140,30 @@ fn vyxCompErr(name: String, fnName: String, fileId: String, err: String) -> VyxC
 }
 
 // ===========================================================================
+// RFC-0033 origin directives — the format-agnostic breadcrumbs the toolchain
+// remaps diagnostics and editor requests through. A directive attributes the
+// generated lines that FOLLOW it to a `.vyx` position, until the next directive
+// or `//@origin end`. It is an ordinary `//` comment: inert for parsing, gen
+// cache hashing, `fmt`, and `emit-gen`.
+// ===========================================================================
+
+/// A `//@origin <path>:<line>:<col>` directive line (RFC-0033).
+fn vyxOrigin(src: String, line: Int64, col: Int64) -> String {
+    return "//@origin " + src + ":" + line.toString() + ":" + col.toString() + "\n"
+}
+
+/// A `//@origin end` line — following generated lines are attributed to the
+/// synthesized module itself (a derived region), not the last input position.
+fn vyxOriginEnd() -> String {
+    return "//@origin end\n"
+}
+
+// ===========================================================================
 // Code generation — a post-order walk emitting `std/html` hyperscript. Every
 // element builds a `mut Array<Html>` accumulator (named by its unique tree path),
 // so `{#if}` / `{#for}` / `{children}` all lower to ordinary imperative pushes.
+// Each verbatim pass-through (`{expr}`, `{@raw}`, `{#for}` head, event/dyn attr
+// value) is wrapped in an `//@origin` directive with the exact `.vyx` column.
 // ===========================================================================
 
 /// The registry of sibling components, for resolving `<Capitalized>` tags.
@@ -1121,12 +1185,12 @@ fn vyxLookup(reg: VyxRegistry, name: String) -> Int64 {
 /// (returned via the result).
 type VyxEmit = { code: String, err: String }
 
-fn vyxEmitChildren(nodes: Array<VyxNode>, acc: String, path: String, reg: VyxRegistry, fileId: String) -> VyxEmit {
+fn vyxEmitChildren(nodes: Array<VyxNode>, acc: String, path: String, reg: VyxRegistry, fileId: String, src: String) -> VyxEmit {
     let mut code = ""
     let mut err = ""
     let mut j = 0
     for n in nodes {
-        let r = vyxEmitPush(n, acc, path + "_" + j.toString(), reg, fileId)
+        let r = vyxEmitPush(n, acc, path + "_" + j.toString(), reg, fileId, src)
         code = code + r.code
         err = err + r.err
         j = j + 1
@@ -1135,25 +1199,28 @@ fn vyxEmitChildren(nodes: Array<VyxNode>, acc: String, path: String, reg: VyxReg
 }
 
 /// Emit the statements that push one node into `acc`.
-fn vyxEmitPush(n: VyxNode, acc: String, path: String, reg: VyxRegistry, fileId: String) -> VyxEmit {
+fn vyxEmitPush(n: VyxNode, acc: String, path: String, reg: VyxRegistry, fileId: String, src: String) -> VyxEmit {
     return match n {
         VNText(s) => VyxEmit { code: acc + ".push(text(" + vyxStrLit(s) + "))\n", err: "" },
-        VNInterp(x, l) => VyxEmit { code: "// vyx " + fileId + " line " + l.toString() + "\n" + acc + ".push(text((" + x + ").toString()))\n", err: "" },
-        VNRaw(x, l) => VyxEmit { code: "// vyx " + fileId + " line " + l.toString() + "\n" + acc + ".push(Raw(" + x + "))\n", err: "" },
+        VNInterp(x, l, c) => VyxEmit { code: vyxOrigin(src, l, c) + acc + ".push(text((" + x + ").toString()))\n" + vyxOriginEnd(), err: "" },
+        VNRaw(x, l, c) => VyxEmit { code: vyxOrigin(src, l, c) + acc + ".push(Raw(" + x + "))\n" + vyxOriginEnd(), err: "" },
         VNChildren => VyxEmit { code: "for vyxCh in children {\n" + acc + ".push(vyxCh)\n}\n", err: "" },
-        VNElem(tag, isComp, attrs, kids, l) => vyxEmitElem(tag, isComp, attrs, kids, l, acc, path, reg, fileId),
-        VNIf(conds, bodies, els, has) => vyxEmitIf(conds, bodies, els, has, acc, path, reg, fileId),
-        VNFor(v, it, k, body, l) => vyxEmitFor(v, it, k, body, l, acc, path, reg, fileId),
+        VNElem(tag, isComp, attrs, kids, l) => vyxEmitElem(tag, isComp, attrs, kids, l, acc, path, reg, fileId, src),
+        VNIf(conds, bodies, els, has, l, c) => vyxEmitIf(conds, bodies, els, has, l, c, acc, path, reg, fileId, src),
+        VNFor(v, it, k, body, l, c) => vyxEmitFor(v, it, k, body, l, c, acc, path, reg, fileId, src),
     }
 }
 
 /// Emit an element (or dispatch to a component call).
-fn vyxEmitElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, reg: VyxRegistry, fileId: String) -> VyxEmit {
+fn vyxEmitElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, reg: VyxRegistry, fileId: String, src: String) -> VyxEmit {
     if isComp {
-        return vyxEmitComp(tag, attrs, kids, line, acc, path, reg, fileId)
+        return vyxEmitComp(tag, attrs, kids, line, acc, path, reg, fileId, src)
     }
     let kacc = "k" + path
-    let kids2 = vyxEmitChildren(kids, kacc, path, reg, fileId)
+    let kids2 = vyxEmitChildren(kids, kacc, path, reg, fileId, src)
+    // Attributes (incl. `@event` and dyn `{expr}` values) are emitted inline on
+    // the element's single push line, so they map region-level (v1) — not with
+    // their own `//@origin` directives, which need a line of their own.
     let ae = vyxEmitAttrs(attrs, fileId)
     let code = "let mut " + kacc + ": Array<Html> = []\n" + kids2.code + acc + ".push(el(" + vyxStrLit(tag) + ", [" + ae.code + "], " + kacc + "))\n"
     return VyxEmit { code: code, err: kids2.err + ae.err }
@@ -1161,7 +1228,7 @@ fn vyxEmitElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<Vyx
 
 /// Emit a component call, resolving props by name against the component's
 /// declaration and passing `{children}` when it accepts them.
-fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, reg: VyxRegistry, fileId: String) -> VyxEmit {
+fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, reg: VyxRegistry, fileId: String, src: String) -> VyxEmit {
     let idx = vyxLookup(reg, tag)
     if idx < 0 {
         return VyxEmit { code: acc + ".push(empty())\n", err: vyxErrDetail("VYX_UNKNOWN_COMPONENT", fileId, line, tag) }
@@ -1195,7 +1262,7 @@ fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: I
     let hasKids = vyxTrim(vyxChildText(kids)).length > 0 || kids.length > 0
     if comp.takesChildren {
         let kacc = "k" + path
-        let kids2 = vyxEmitChildren(kids, kacc, path, reg, fileId)
+        let kids2 = vyxEmitChildren(kids, kacc, path, reg, fileId, src)
         let code = "let mut " + kacc + ": Array<Html> = []\n" + kids2.code + acc + ".push(" + comp.fnName + "(" + vyxJoinArgs(args) + kacc + "))\n"
         return VyxEmit { code: code, err: err + kids2.err }
     }
@@ -1227,12 +1294,12 @@ fn vyxChildText(kids: Array<VyxNode>) -> String {
     for n in kids {
         out = out + match n {
             VNText(s) => s,
-            VNInterp(x, l) => "x",
-            VNRaw(x, l) => "x",
+            VNInterp(x, l, c) => "x",
+            VNRaw(x, l, c) => "x",
             VNChildren => "c",
             VNElem(t, c, a, k, l) => "e",
-            VNIf(cc, bb, ee, hh) => "i",
-            VNFor(v, it, kk, bd, l) => "f",
+            VNIf(cc, bb, ee, hh, l, c) => "i",
+            VNFor(v, it, kk, bd, l, c) => "f",
         }
     }
     return out
@@ -1252,23 +1319,25 @@ fn vyxFindAttr(attrs: Array<VyxAttr>, name: String) -> VyxAttrFound {
 
 /// Emit an `{#if}` chain: each branch fills its own accumulator, then splices it
 /// into `acc`; a missing `{:else}` elides to Empty (nothing pushed).
-fn vyxEmitIf(conds: Array<String>, bodies: Array<VyxBody>, els: VyxBody, has: Bool, acc: String, path: String, reg: VyxRegistry, fileId: String) -> VyxEmit {
+fn vyxEmitIf(conds: Array<String>, bodies: Array<VyxBody>, els: VyxBody, has: Bool, line: Int64, col: Int64, acc: String, path: String, reg: VyxRegistry, fileId: String, src: String) -> VyxEmit {
     let mut code = ""
     let mut err = ""
     let mut bi = 0
     while bi < conds.length {
         let head = if bi > 0 { "} else if " } else { "if " }
         let bacc = "k" + path + "_b" + bi.toString()
-        let inner = vyxEmitChildren(bodies[bi].nodes, bacc, path + "_b" + bi.toString(), reg, fileId)
+        let inner = vyxEmitChildren(bodies[bi].nodes, bacc, path + "_b" + bi.toString(), reg, fileId, src)
         err = err + inner.err
-        code = code + head + conds[bi] + " {\n"
+        // The whole `{#if}` chain maps region-level to its head position; each
+        // branch condition is verbatim on the `if …` line the directive governs.
+        code = code + vyxOrigin(src, line, col) + head + conds[bi] + " {\n" + vyxOriginEnd()
         code = code + "let mut " + bacc + ": Array<Html> = []\n" + inner.code
         code = code + "for vyxN in " + bacc + " {\n" + acc + ".push(vyxN)\n}\n"
         bi = bi + 1
     }
     if has {
         let eacc = "k" + path + "_be"
-        let inner = vyxEmitChildren(els.nodes, eacc, path + "_be", reg, fileId)
+        let inner = vyxEmitChildren(els.nodes, eacc, path + "_be", reg, fileId, src)
         err = err + inner.err
         code = code + "} else {\n"
         code = code + "let mut " + eacc + ": Array<Html> = []\n" + inner.code
@@ -1280,11 +1349,13 @@ fn vyxEmitIf(conds: Array<String>, bodies: Array<VyxBody>, els: VyxBody, has: Bo
 
 /// Emit a `{#for}` loop: each iteration fills a fresh accumulator, then splices it
 /// into `acc` with a `Key` (the key expression rendered to a String).
-fn vyxEmitFor(v: String, it: String, key: String, body: Array<VyxNode>, line: Int64, acc: String, path: String, reg: VyxRegistry, fileId: String) -> VyxEmit {
+fn vyxEmitFor(v: String, it: String, key: String, body: Array<VyxNode>, line: Int64, col: Int64, acc: String, path: String, reg: VyxRegistry, fileId: String, src: String) -> VyxEmit {
     let facc = "k" + path + "_f"
-    let inner = vyxEmitChildren(body, facc, path + "_f", reg, fileId)
-    let mut code = "// vyx " + fileId + " line " + line.toString() + "\n"
-    code = code + "for " + v + " in " + it + " {\n"
+    let inner = vyxEmitChildren(body, facc, path + "_f", reg, fileId, src)
+    // The `{#for}` head (loop var + iterable + key) is verbatim on the `for …`
+    // line; the directive points at the header column.
+    let mut code = vyxOrigin(src, line, col)
+    code = code + "for " + v + " in " + it + " {\n" + vyxOriginEnd()
     code = code + "let mut " + facc + ": Array<Html> = []\n" + inner.code
     code = code + "for vyxN in " + facc + " {\n" + acc + ".push(keyed((" + key + ").toString(), vyxN))\n}\n"
     code = code + "}\n"
@@ -1404,32 +1475,32 @@ fn vyxEmitSignature(comp: VyxComp) -> String {
 /// children built into a fresh accumulator first).
 fn vyxEmitComponent(comp: VyxComp, reg: VyxRegistry) -> VyxEmit {
     let mut out = vyxEmitSignature(comp)
-    let rootEmit = vyxEmitRoot(comp.root, reg, comp.fileId)
+    let rootEmit = vyxEmitRoot(comp.root, reg, comp.fileId, comp.srcPath)
     out = out + rootEmit.code + "}\n"
     return VyxEmit { code: out, err: rootEmit.err }
 }
 
 /// Emit the root node as `let …; return <expr>` (the view fn returns one `Html`).
-fn vyxEmitRoot(root: VyxNode, reg: VyxRegistry, fileId: String) -> VyxEmit {
+fn vyxEmitRoot(root: VyxNode, reg: VyxRegistry, fileId: String, src: String) -> VyxEmit {
     return match root {
-        VNElem(tag, isComp, attrs, kids, l) => vyxEmitRootElem(tag, isComp, attrs, kids, l, reg, fileId),
+        VNElem(tag, isComp, attrs, kids, l) => vyxEmitRootElem(tag, isComp, attrs, kids, l, reg, fileId, src),
         VNText(s) => VyxEmit { code: "return text(" + vyxStrLit(s) + ")\n", err: "" },
-        VNInterp(x, l) => VyxEmit { code: "return text((" + x + ").toString())\n", err: "" },
-        VNRaw(x, l) => VyxEmit { code: "return Raw(" + x + ")\n", err: "" },
+        VNInterp(x, l, c) => VyxEmit { code: vyxOrigin(src, l, c) + "return text((" + x + ").toString())\n" + vyxOriginEnd(), err: "" },
+        VNRaw(x, l, c) => VyxEmit { code: vyxOrigin(src, l, c) + "return Raw(" + x + ")\n" + vyxOriginEnd(), err: "" },
         VNChildren => VyxEmit { code: "let mut kr: Array<Html> = []\nfor vyxCh in children {\nkr.push(vyxCh)\n}\nreturn el(\"div\", [], kr)\n", err: "" },
-        VNIf(cc, bb, ee, hh) => vyxEmitRootWrap(root, reg, fileId),
-        VNFor(v, it, k, bd, l) => vyxEmitRootWrap(root, reg, fileId),
+        VNIf(cc, bb, ee, hh, l, c) => vyxEmitRootWrap(root, reg, fileId, src),
+        VNFor(v, it, k, bd, l, c) => vyxEmitRootWrap(root, reg, fileId, src),
     }
 }
 
 /// A root element/component returned directly.
-fn vyxEmitRootElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, reg: VyxRegistry, fileId: String) -> VyxEmit {
+fn vyxEmitRootElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, reg: VyxRegistry, fileId: String, src: String) -> VyxEmit {
     if isComp {
-        let pushed = vyxEmitComp(tag, attrs, kids, line, "kr", "r", reg, fileId)
+        let pushed = vyxEmitComp(tag, attrs, kids, line, "kr", "r", reg, fileId, src)
         let code = "let mut kr: Array<Html> = []\n" + pushed.code + "return kr[0]\n"
         return VyxEmit { code: code, err: pushed.err }
     }
-    let kids2 = vyxEmitChildren(kids, "kr", "r", reg, fileId)
+    let kids2 = vyxEmitChildren(kids, "kr", "r", reg, fileId, src)
     let ae = vyxEmitAttrs(attrs, fileId)
     let code = "let mut kr: Array<Html> = []\n" + kids2.code + "return el(" + vyxStrLit(tag) + ", [" + ae.code + "], kr)\n"
     return VyxEmit { code: code, err: kids2.err + ae.err }
@@ -1437,8 +1508,8 @@ fn vyxEmitRootElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array
 
 /// A root that is a bare `{#if}` / `{#for}` — pushed into a `<div>` wrapper (kept
 /// simple; the common root is a real element).
-fn vyxEmitRootWrap(root: VyxNode, reg: VyxRegistry, fileId: String) -> VyxEmit {
-    let pushed = vyxEmitPush(root, "kr", "r", reg, fileId)
+fn vyxEmitRootWrap(root: VyxNode, reg: VyxRegistry, fileId: String, src: String) -> VyxEmit {
+    let pushed = vyxEmitPush(root, "kr", "r", reg, fileId, src)
     let code = "let mut kr: Array<Html> = []\n" + pushed.code + "return el(\"div\", [], kr)\n"
     return VyxEmit { code: code, err: pushed.err }
 }
