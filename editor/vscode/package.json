@@ -8,7 +8,7 @@
   "icon": "icons/vyrn.png",
   "engines": { "vscode": "^1.70.0" },
   "categories": ["Programming Languages"],
-  "activationEvents": ["onLanguage:vyrn"],
+  "activationEvents": ["onLanguage:vyrn", "onLanguage:vyx"],
   "main": "./extension.js",
   "scripts": {
     "package": "node scripts/make-vsix.mjs"
@@ -21,6 +21,13 @@
         "extensions": [".vyrn"],
         "icon": { "light": "./icons/vyrn.svg", "dark": "./icons/vyrn.svg" },
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "vyx",
+        "aliases": ["Vyx", "vyx"],
+        "extensions": [".vyx"],
+        "icon": { "light": "./icons/vyrn.svg", "dark": "./icons/vyrn.svg" },
+        "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
@@ -28,6 +35,11 @@
         "language": "vyrn",
         "scopeName": "source.vyrn",
         "path": "./vyrn.tmLanguage.json"
+      },
+      {
+        "language": "vyx",
+        "scopeName": "source.vyx",
+        "path": "./vyx.tmLanguage.json"
       }
     ],
     "snippets": [

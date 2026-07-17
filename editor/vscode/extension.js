@@ -68,7 +68,13 @@ function activate(context) {
   };
 
   const clientOptions = {
-    documentSelector: [{ scheme: "file", language: "vyrn" }],
+    // `.vyrn` sources, plus `.vyx` generator inputs (RFC-0033): the server maps
+    // hover/completion/go-to-definition and remapped diagnostics into the `.vyx`
+    // buffer through the synthesized module that consumes it.
+    documentSelector: [
+      { scheme: "file", language: "vyrn" },
+      { scheme: "file", language: "vyx" },
+    ],
   };
 
   const client = new LanguageClient(

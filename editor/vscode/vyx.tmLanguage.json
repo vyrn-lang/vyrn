@@ -1,0 +1,165 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Vyx",
+  "scopeName": "source.vyx",
+  "patterns": [
+    { "include": "#script-section" },
+    { "include": "#template-section" }
+  ],
+  "repository": {
+    "script-section": {
+      "comment": "The <script> block holds ordinary Vyrn (props, imports, helpers).",
+      "begin": "(<)(script)(>)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.vyx" },
+        "2": { "name": "entity.name.tag.script.vyx" },
+        "3": { "name": "punctuation.definition.tag.end.vyx" }
+      },
+      "end": "(</)(script)(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.vyx" },
+        "2": { "name": "entity.name.tag.script.vyx" },
+        "3": { "name": "punctuation.definition.tag.end.vyx" }
+      },
+      "patterns": [
+        { "match": "\\bprops\\b", "name": "keyword.control.props.vyx" },
+        { "include": "source.vyrn" }
+      ]
+    },
+    "template-section": {
+      "begin": "(<)(template)(>)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.vyx" },
+        "2": { "name": "entity.name.tag.template.vyx" },
+        "3": { "name": "punctuation.definition.tag.end.vyx" }
+      },
+      "end": "(</)(template)(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.vyx" },
+        "2": { "name": "entity.name.tag.template.vyx" },
+        "3": { "name": "punctuation.definition.tag.end.vyx" }
+      },
+      "patterns": [{ "include": "#template-body" }]
+    },
+    "template-body": {
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#control-block" },
+        { "include": "#raw-interp" },
+        { "include": "#interp" },
+        { "include": "#component-tag" },
+        { "include": "#element-tag" }
+      ]
+    },
+    "comments": {
+      "begin": "<!--",
+      "end": "-->",
+      "name": "comment.block.vyx"
+    },
+    "control-block": {
+      "comment": "{#if} / {:else if} / {:else} / {/if} / {#for} / {/for} / {children}",
+      "patterns": [
+        {
+          "begin": "(\\{)(#if|#for|:else if)\\b",
+          "beginCaptures": {
+            "1": { "name": "punctuation.section.embedded.begin.vyx" },
+            "2": { "name": "keyword.control.flow.vyx" }
+          },
+          "end": "\\}",
+          "endCaptures": { "0": { "name": "punctuation.section.embedded.end.vyx" } },
+          "patterns": [
+            { "match": "\\b(in|key)\\b", "name": "keyword.control.flow.vyx" },
+            { "include": "source.vyrn" }
+          ]
+        },
+        {
+          "match": "(\\{)(:else|/if|/for|children)(\\})",
+          "captures": {
+            "1": { "name": "punctuation.section.embedded.begin.vyx" },
+            "2": { "name": "keyword.control.flow.vyx" },
+            "3": { "name": "punctuation.section.embedded.end.vyx" }
+          }
+        }
+      ]
+    },
+    "raw-interp": {
+      "comment": "{@raw expr} — unescaped interpolation.",
+      "begin": "(\\{)(@raw)\\b",
+      "beginCaptures": {
+        "1": { "name": "punctuation.section.embedded.begin.vyx" },
+        "2": { "name": "keyword.other.raw.vyx" }
+      },
+      "end": "\\}",
+      "endCaptures": { "0": { "name": "punctuation.section.embedded.end.vyx" } },
+      "patterns": [{ "include": "source.vyrn" }]
+    },
+    "interp": {
+      "comment": "{expr} — an escaped interpolation carrying a Vyrn expression.",
+      "begin": "\\{",
+      "beginCaptures": { "0": { "name": "punctuation.section.embedded.begin.vyx" } },
+      "end": "\\}",
+      "endCaptures": { "0": { "name": "punctuation.section.embedded.end.vyx" } },
+      "patterns": [{ "include": "source.vyrn" }]
+    },
+    "component-tag": {
+      "comment": "A <Capitalized> sibling-component call.",
+      "begin": "(</?)([A-Z][A-Za-z0-9_]*)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.vyx" },
+        "2": { "name": "entity.name.type.component.vyx" }
+      },
+      "end": "(/?>)",
+      "endCaptures": { "1": { "name": "punctuation.definition.tag.end.vyx" } },
+      "patterns": [{ "include": "#attributes" }]
+    },
+    "element-tag": {
+      "comment": "An ordinary lowercase HTML element.",
+      "begin": "(</?)([a-z][A-Za-z0-9_-]*)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.vyx" },
+        "2": { "name": "entity.name.tag.vyx" }
+      },
+      "end": "(/?>)",
+      "endCaptures": { "1": { "name": "punctuation.definition.tag.end.vyx" } },
+      "patterns": [{ "include": "#attributes" }]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "comment": "@event=\"handler(arg)\" — an event binding with a Vyrn expression.",
+          "begin": "(@[a-z]+)(=)(\")",
+          "beginCaptures": {
+            "1": { "name": "entity.other.attribute-name.event.vyx" },
+            "2": { "name": "punctuation.separator.key-value.vyx" },
+            "3": { "name": "punctuation.definition.string.begin.vyx" }
+          },
+          "end": "\"",
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.vyx" } },
+          "patterns": [{ "include": "source.vyrn" }]
+        },
+        {
+          "comment": "attr={expr} — a dynamic attribute value.",
+          "begin": "([A-Za-z_][A-Za-z0-9_-]*)(=)(\\{)",
+          "beginCaptures": {
+            "1": { "name": "entity.other.attribute-name.vyx" },
+            "2": { "name": "punctuation.separator.key-value.vyx" },
+            "3": { "name": "punctuation.section.embedded.begin.vyx" }
+          },
+          "end": "\\}",
+          "endCaptures": { "0": { "name": "punctuation.section.embedded.end.vyx" } },
+          "patterns": [{ "include": "source.vyrn" }]
+        },
+        {
+          "comment": "attr=\"literal\" — a static attribute value.",
+          "match": "([A-Za-z_][A-Za-z0-9_-]*)(=)(\"[^\"]*\")",
+          "captures": {
+            "1": { "name": "entity.other.attribute-name.vyx" },
+            "2": { "name": "punctuation.separator.key-value.vyx" },
+            "3": { "name": "string.quoted.double.vyx" }
+          }
+        },
+        { "match": "\\b[A-Za-z_][A-Za-z0-9_-]*\\b", "name": "entity.other.attribute-name.vyx" }
+      ]
+    }
+  }
+}
