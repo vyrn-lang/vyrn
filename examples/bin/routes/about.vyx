@@ -1,0 +1,50 @@
+<script>
+// GET /about — static prose + a live CLDR-plural demo (en + uk) as a .vyx PAGE
+// (RFC-0039 §4): the table rows are plain records built by a helper (the locale
+// flip lives in the labels module), rendered by a keyed v-for.
+import { labelAppTitle, labelNavHome, labelNavAbout, labelCountIn } from "../labels"
+
+type PluralRow = { loc: String, n: Int64, msg: String }
+
+fn pluralRow(loc: String, n: Int64) -> PluralRow {
+    return PluralRow { loc: loc, n: n, msg: labelCountIn(loc, n) }
+}
+
+fn pluralRows() -> Array<PluralRow> {
+    return [
+        pluralRow("en", 1),
+        pluralRow("en", 2),
+        pluralRow("en", 5),
+        pluralRow("uk", 1),
+        pluralRow("uk", 2),
+        pluralRow("uk", 5),
+    ]
+}
+</script>
+
+<template>
+<div id="root">
+    <link rel="stylesheet" href="/theme.css"/>
+    <link rel="stylesheet" href="/style.css"/>
+    <script type="module" src="/vyrn-runtime/vyrn-nav.js"></script>
+    <header class="flex items-center gap-3 md:gap-6">
+        <h1>{{ labelAppTitle() }}</h1>
+        <nav>
+            <a href="/" class="mr-2 hover:text-brand-600">{{ labelNavHome() }}</a>
+            <a href="/about" class="mr-2 hover:text-brand-600">{{ labelNavAbout() }}</a>
+        </nav>
+    </header>
+    <main>
+        <h2>About</h2>
+        <p>A tiny pastebin dogfooding the Vyrn stack: std/html, std/ui pages, std/rpc, std/i18n, std/tw, Map on the wire, stored-closure middleware, and — the point — persistence to disk via readFile/writeFile.</p>
+        <h3>CLDR plurals</h3>
+        <p class="sub">The same count message for 1 / 2 / 5 — English has two forms, Ukrainian three (one / few / many).</p>
+        <table class="plurals">
+            <thead><tr><th>locale</th><th>n</th><th>message</th></tr></thead>
+            <tbody>
+                <tr v-for="r in pluralRows()" :key='r.loc + "-" + r.n.toString()'><td>{{ r.loc }}</td><td>{{ r.n }}</td><td>{{ r.msg }}</td></tr>
+            </tbody>
+        </table>
+    </main>
+</div>
+</template>

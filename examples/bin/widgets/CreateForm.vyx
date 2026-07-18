@@ -1,29 +1,27 @@
 <script>
-// Scalar-only inputs (the shelf discipline: a type imported into two component
-// scripts would emit a duplicate import into the one synthesized module). The
-// labels are resolved in the client root and threaded in. NOTE: the word
-// p-r-o-p-s must not appear above this block — the .vyx parser byte-scans for the
-// keyword and would match it inside a comment (see NOTES).
+// Labels resolve HERE through the widget's own import of the app's labels
+// module (RFC-0039 §3: the synthesized components module dedups imports across
+// component scripts, so a shared module may be imported where it is used). The
+// root threads only the draft-state props it owns — and yes, this comment may
+// say props, template, and script freely: the v2 scanner never keyword-matches
+// inside comments (the v1 warning crutch this comment replaces is deleted).
 props {
-    heading: String,
-    titleLabel: String,
-    langLabel: String,
-    bodyLabel: String,
-    saveLabel: String,
     draftTitle: String,
     draftLang: String,
     draftBody: String,
     issues: String,
 }
+import { labelCreate, labelTitleField, labelLangField, labelBodyField, labelSave } from "../labels"
 </script>
 
 <template>
 <section class="create">
-    <h2>{heading}</h2>
-    {#if issues.length > 0}<p class="issues">{issues}</p>{:else}<span class="hint"></span>{/if}
-    <label class="field">{titleLabel}<input type="text" value={draftTitle} @input="setDraftTitle"/></label>
-    <label class="field">{langLabel}<select value={draftLang} @change="setDraftLang"><option value="text">text</option><option value="vyrn">vyrn</option><option value="json">json</option><option value="rust">rust</option><option value="js">js</option><option value="html">html</option></select></label>
-    <label class="field">{bodyLabel}<textarea value={draftBody} @input="setDraftBody"></textarea></label>
-    <button class="save" @click="submitCreate">{saveLabel}</button>
+    <h2>{{ labelCreate() }}</h2>
+    <p v-if="issues.length > 0" class="issues">{{ issues }}</p>
+    <span v-else class="hint"></span>
+    <label class="field">{{ labelTitleField() }}<input type="text" :value="draftTitle" @input="setDraftTitle"/></label>
+    <label class="field">{{ labelLangField() }}<select :value="draftLang" @change="setDraftLang"><option value="text">text</option><option value="vyrn">vyrn</option><option value="json">json</option><option value="rust">rust</option><option value="js">js</option><option value="html">html</option></select></label>
+    <label class="field">{{ labelBodyField() }}<textarea :value="draftBody" @input="setDraftBody"></textarea></label>
+    <button class="save" @click="submitCreate">{{ labelSave() }}</button>
 </section>
 </template>

@@ -1,0 +1,40 @@
+<script>
+// The SSR paste-view body, rendered by the /p/[id] respond page (RFC-0039 §5).
+// Imports its own wire type and labels directly (§3 import dedup); the labels
+// module owns the program's single i18n instance.
+props { paste: Paste }
+import { Paste } from "../wire"
+import { labelAppTitle, labelNavHome, labelNavAbout, labelUntitled, labelViewRaw, labelBackHome, labelCreated } from "../labels"
+
+fn displayTitle(p: Paste) -> String {
+    if p.title.length == 0 {
+        return labelUntitled()
+    }
+    return p.title
+}
+</script>
+
+<template>
+<div id="root">
+    <link rel="stylesheet" href="/theme.css"/>
+    <link rel="stylesheet" href="/style.css"/>
+    <script type="module" src="/vyrn-runtime/vyrn-nav.js"></script>
+    <header class="flex items-center gap-3 md:gap-6">
+        <h1>{{ labelAppTitle() }}</h1>
+        <nav>
+            <a href="/" class="mr-2 hover:text-brand-600">{{ labelNavHome() }}</a>
+            <a href="/about" class="mr-2 hover:text-brand-600">{{ labelNavAbout() }}</a>
+        </nav>
+    </header>
+    <main>
+        <p><a href="/" class="mr-2 hover:text-brand-600">{{ labelBackHome() }}</a></p>
+        <h2>{{ displayTitle(paste) }}</h2>
+        <p class="pmeta">
+            <span class="plang">{{ paste.lang }}</span>
+            <span class="pwhen">{{ labelCreated(paste.created.toString()) }}</span>
+            <a :href='"/raw/" + paste.id' class="rawlink">{{ labelViewRaw() }}</a>
+        </p>
+        <pre class="pbody">{{ paste.body }}</pre>
+    </main>
+</div>
+</template>

@@ -1,0 +1,56 @@
+<script>
+// GET / — the home page as a .vyx PAGE (RFC-0039 §4). Helpers read the store
+// directly through the contract accessors (RFC-0029); labels come from the
+// app's labels module (the program's single i18n instance). The browser
+// create-island hydrates #app.
+import { listPastes } from "../contract"
+import { Paste } from "../wire"
+import { labelAppTitle, labelTagline, labelNavHome, labelNavAbout, labelCount, labelEmpty, labelUntitled, labelCreated, labelRecent } from "../labels"
+
+fn recent() -> Array<Paste> {
+    return listPastes().pastes
+}
+
+fn pasteTally() -> Int64 {
+    return listPastes().pastes.length
+}
+
+fn shownTitle(p: Paste) -> String {
+    if p.title.length == 0 {
+        return labelUntitled()
+    }
+    return p.title
+}
+</script>
+
+<template>
+<div id="root">
+    <link rel="stylesheet" href="/theme.css"/>
+    <link rel="stylesheet" href="/style.css"/>
+    <script type="module" src="/vyrn-runtime/vyrn-nav.js"></script>
+    <header class="flex items-center gap-3 md:gap-6">
+        <h1>{{ labelAppTitle() }}</h1>
+        <nav>
+            <a href="/" class="mr-2 hover:text-brand-600">{{ labelNavHome() }}</a>
+            <a href="/about" class="mr-2 hover:text-brand-600">{{ labelNavAbout() }}</a>
+        </nav>
+    </header>
+    <main>
+        <p class="sub">{{ labelTagline() }}</p>
+        <div id="app"></div>
+        <script type="module" src="/app.js"></script>
+        <h2>{{ labelRecent() }}</h2>
+        <p v-if="pasteTally() == 0" class="empty">{{ labelEmpty() }}</p>
+        <div v-else>
+            <p class="count">{{ labelCount(pasteTally()) }}</p>
+            <ul class="pastelist">
+                <li class="paste" v-for="p in recent()" :key="p.id">
+                    <a :href='"/p/" + p.id' data-nav="prefetch" class="ptitle">{{ shownTitle(p) }}</a>
+                    <span class="plang">{{ p.lang }}</span>
+                    <span class="pwhen">{{ labelCreated(p.created.toString()) }}</span>
+                </li>
+            </ul>
+        </div>
+    </main>
+</div>
+</template>

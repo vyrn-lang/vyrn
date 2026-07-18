@@ -1,25 +1,20 @@
 /// The bin server ROOT. Generators compose here: `rpcServer("./contract")`
 /// synthesizes `rpcHandle` from the contract's REAL, stateful procedures (backed
-/// by the persistent `store`), `pages("./routes")` synthesizes `route` for the
-/// static pages (`/`, `/about`), `openapi("./contract")` bakes the API document,
-/// and `tw("./theme.json")` the utility stylesheet.
-///
-/// The paste VIEW (`/p/<id>`) and RAW (`/raw/<id>`) routes are hand-dispatched
-/// here (the `/theme.css` precedent) because `std/ui` dynamic segments are
-/// Int64-only and paste ids are content-addressed STRINGS — see NOTES. `/raw`
-/// also needs a `text/plain` content type, which page routes don't offer.
+/// by the persistent `store`), `pagesThemed("./routes", "./theme.json")`
+/// synthesizes `route` for EVERY page — the `.vyx` pages (`/`, `/about`), the
+/// String-segment paste view (`/p/[id]`, a `respond` page), and the raw bytes
+/// (`/raw/[id]`, `respond` with its own content type) — `openapi` bakes the API
+/// document, and `tw("./theme.json")` the utility stylesheet. The v1
+/// hand-dispatch of `/p/<id>` and `/raw/<id>` is GONE (RFC-0039 §5: String
+/// segments + respond() moved both routes inside the router).
 import { rpcServer } from "std/rpc"
 import { rpcHandle } from rpcServer("./contract")
 import { openapi } from "std/openapi"
 import { openapiJson } from openapi("./contract")
-import { pages } from "std/ui"
-import { route } from pages("./routes")
+import { pagesThemed } from "std/ui"
+import { route } from pagesThemed("./routes", "./theme.json")
 import { tw } from "std/tw"
 import * as theme from tw("./theme.json")
-import { getPaste } from "./contract"
-import { IdReq, Paste } from "./wire"
-import { pasteDocument, notFoundDocument } from "./view"
-import { hasPrefix, dropPrefix } from "./util"
 
 /// RFC-0037: a middleware is a STORED function value — each entry may answer a
 /// request outright (`Some`) or pass it along (`None`); the chain runs in
@@ -57,33 +52,6 @@ fn handle(req: Request) -> Response {
     }
 }
 
-/// A 404 HTML response.
-fn notFound() -> Response {
-    return Response { status: 404, contentType: "text/html", body: notFoundDocument() }
-}
-
-/// GET /p/<id> — the SSR paste view. Unknown id => 404.
-fn pasteView(id: String) -> Response {
-    return match getPaste(IdReq { id: id }) {
-        Ok(p) => Response { status: 200, contentType: "text/html", body: pasteDocument(p) },
-        Err(why) => notFound(),
-    }
-}
-
-/// GET /raw/<id> — the exact body bytes as text/plain. Unknown id => 404.
-fn rawView(id: String) -> Response {
-    return match getPaste(IdReq { id: id }) {
-        Ok(p) => Response { status: 200, contentType: "text/plain; charset=utf-8", body: rawBody(p) },
-        Err(why) => notFound(),
-    }
-}
-
-/// Pull just the body out of a paste result (a small helper so the `match` arm
-/// above stays a single expression).
-fn rawBody(p: Paste) -> String {
-    return p.body
-}
-
 fn routed(req: Request) -> Response {
     // Baked constants served with their conventional content types.
     if req.method == "GET" && req.path == "/theme.css" {
@@ -92,22 +60,12 @@ fn routed(req: Request) -> Response {
     if req.method == "GET" && req.path == "/openapi.json" {
         return Response { status: 200, contentType: "application/json", body: openapiJson() }
     }
-    // The RPC surface (`/rpc/*`) claims its paths first.
+    // The RPC surface (`/rpc/*`) claims its paths first; everything else is the
+    // generated page router (incl. /p/[id] and /raw/[id], RFC-0039 §5).
     return match rpcHandle(req) {
         Some(r) => r,
-        None => pageOrPaste(req),
+        None => route(req),
     }
-}
-
-/// The hand-dispatched string-id routes, then the generated page router.
-fn pageOrPaste(req: Request) -> Response {
-    if req.method == "GET" && hasPrefix(req.path, "/raw/") {
-        return rawView(dropPrefix(req.path, "/raw/"))
-    }
-    if req.method == "GET" && hasPrefix(req.path, "/p/") {
-        return pasteView(dropPrefix(req.path, "/p/"))
-    }
-    return route(req)
 }
 
 fn main() -> Int64 {
@@ -123,6 +81,8 @@ fn main() -> Int64 {
     print("/ -> \{home.status}")
     let miss = handle(Request { method: "GET", path: "/p/deadbeef", body: "" })
     print("/p/deadbeef -> \{miss.status}")
+    let rawMiss = handle(Request { method: "GET", path: "/raw/deadbeef", body: "" })
+    print("/raw/deadbeef -> \{rawMiss.status}")
     let oa = handle(Request { method: "GET", path: "/openapi.json", body: "" })
     print("/openapi.json -> \{oa.status} (\{oa.body.length} bytes)")
     return 0

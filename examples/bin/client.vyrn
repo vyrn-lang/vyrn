@@ -6,13 +6,11 @@
 /// wires to `window.vyrnNav.navigate`.
 ///
 /// RPC: typed stubs from `rpcClient("./contract")`, imported namespaced
-/// (`import * as api`, RFC-0027). Labels come from the LIVE `i18n("./strings")`
-/// generator, resolved in this root and threaded as scalar props to the `.vyx`
-/// widget (i18n-in-.vyx uses a per-importer instance — the shelf design).
+/// (`import * as api`, RFC-0027). Labels resolve INSIDE the `.vyx` widget via
+/// its own `i18n("../strings")` import (RFC-0039 §3 import dedup killed the
+/// scalar threading) — this root threads only the draft state it owns.
 import { rpcClient } from "std/rpc"
 import * as api from rpcClient("./contract")
-import { i18n } from "std/i18n"
-import { setLocale, locale, Locale, t, tBinCreate, tBinTitleField, tBinLangLabel, tBinBodyField, tBinSave } from i18n("./strings")
 import { componentsThemed } from "std/vyx"
 import { createForm } from componentsThemed("./widgets", "./theme.json")
 import { Html, toHtmlString, diff } from "std/html"
@@ -55,17 +53,7 @@ fn renderIssues(iss: Array<Issue>) -> String {
 // ---- the view --------------------------------------------------------------
 
 fn view() -> Html {
-    return createForm(
-        tBinCreate(),
-        tBinTitleField(),
-        tBinLangLabel(),
-        tBinBodyField(),
-        tBinSave(),
-        draftTitle,
-        draftLang,
-        draftBody,
-        issues,
-    )
+    return createForm(draftTitle, draftLang, draftBody, issues)
 }
 
 // ---- RPC completion handler (called by the generated dispatcher) ------------
@@ -163,6 +151,8 @@ test "a valid draft decodes to a CreateReq" {
 }
 
 test "createForm renders the heading and save button (a .vyx view snapshot)" {
-    let html = toHtmlString(createForm("New paste", "Title", "Language", "Body", "Create", "", "text", "", ""))
-    assert(html.length > 0)
+    let html = toHtmlString(createForm("", "text", "", ""))
+    // The labels resolve inside the widget (its own i18n import, default En).
+    assert(html.contains("New paste"))
+    assert(html.contains("Create paste"))
 }

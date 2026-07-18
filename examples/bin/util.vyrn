@@ -1,49 +1,13 @@
-/// Local helpers the app needs but `std` does not provide: byte-walking string
-/// utilities (no `startsWith`/`substring`/`split` in `std/strings` — the shelf
-/// NOTES logged this) plus a content-addressed id derivation. Ordinary stateless
-/// Vyrn, imported by the server root (path routing) and the store (id derivation).
+/// Local helpers the app needs but `std` does not provide: the content-addressed
+/// id derivation, imported by the store. (The `hasPrefix`/`dropPrefix` path
+/// helpers that served the v1 hand-dispatch are gone — RFC-0039 §5 moved
+/// `/p/<id>` and `/raw/<id>` into the generated router.)
 ///
 /// FRICTION (see NOTES): the id hash WANTED to be FNV-1a, but Vyrn has NO bitwise
 /// operators (no XOR/AND/shift — only `+ - * / %`), so FNV's `hash ^= byte` is
 /// unwritable. This uses a polynomial rolling hash (`h = (h*base + byte) % mod`,
 /// Java-`hashCode`-style) instead, kept positive by the modulo. Two independent
 /// polynomials are concatenated for a longer digest, base36-rendered.
-
-/// True when `s` begins with `p`.
-export fn hasPrefix(s: String, p: String) -> Bool {
-    let sb = bytes(s)
-    let pb = bytes(p)
-    if pb.length > sb.length {
-        return false
-    }
-    let mut i = 0
-    while i < pb.length {
-        if sb[i] != pb[i] {
-            return false
-        }
-        i = i + 1
-    }
-    return true
-}
-
-/// `s` with the leading `p` removed (unchanged when `s` does not start with `p`).
-export fn dropPrefix(s: String, p: String) -> String {
-    if hasPrefix(s, p) == false {
-        return s
-    }
-    let sb = bytes(s)
-    let pb = bytes(p)
-    let mut out: Array<UInt8> = []
-    let mut i = pb.length
-    while i < sb.length {
-        out.push(sb[i])
-        i = i + 1
-    }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(e) => s,
-    }
-}
 
 /// A base36 digit (0..35) as its ASCII byte: 0-9 then a-z. Read from a lookup
 /// table rather than computed, because Vyrn has no Int64->UInt8 arithmetic
