@@ -6,10 +6,10 @@ props { userLine: String, issueLine: String, idText: String }
 <main>
     <h1>vyrn fullstack — typed RPC through .vyx components</h1>
     <Section title="Typed round trip" kind="roundtrip">
-        <Roundtrip idText={idText} userLine={userLine}/>
+        <Roundtrip :idText="idText" :userLine="userLine"/>
     </Section>
     <Section title="Issues (server-side, off the wire)" kind="issues">
-        <IssuePanel issueLine={issueLine}/>
+        <IssuePanel :issueLine="issueLine"/>
     </Section>
 </main>
 </template>

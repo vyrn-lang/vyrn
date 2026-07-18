@@ -10,7 +10,8 @@ fn issueClass(line: String) -> String {
 </script>
 
 <template>
-<p id="issueOut" class={issueClass(issueLine)}>
-    {#if issueLine.length > 0}{issueLine}{:else}<span class="ok">no issues</span>{/if}
+<p id="issueOut" :class="issueClass(issueLine)">
+    <span v-if="issueLine.length > 0">{{ issueLine }}</span>
+    <span v-else class="ok">no issues</span>
 </p>
 </template>

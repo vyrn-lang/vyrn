@@ -467,6 +467,22 @@ fn vyxScanQuote(ba: Array<UInt8>, q: Int64, e: Int64) -> Int64 {
     return i + 1
 }
 
+/// The index just past the delimiter closing the attribute value whose opening
+/// delimiter (`"` or `'`) is at `q`. Single-quoted attribute values (RFC-0039 §1,
+/// the Vue convention) let an expression carry Vyrn `"…"` string literals:
+/// `:href='"/raw/" + p.id'`.
+fn vyxScanAttrValue(ba: Array<UInt8>, q: Int64, e: Int64) -> Int64 {
+    let delim = ba[q]
+    let mut i = q + 1
+    while i < e && ba[i] != delim {
+        if ba[i] == 92 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return i + 1
+}
+
 // ===========================================================================
 // The parser — recursive descent over the template section. `vyxParseNodes` reads
 // a run of sibling nodes until a `</…>` close tag (leaving `next` AT it for the
@@ -548,8 +564,10 @@ fn vyxParseAttrs(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxAtt
                 while m < e && vyxIsWs(ba[m]) {
                     m = m + 1
                 }
-                if m < e && ba[m] == 34 {
-                    let vEnd = vyxScanQuote(ba, m, e)
+                if m < e && (ba[m] == 34 || ba[m] == 39) {
+                    // `"…"` or `'…'` — single quotes (the Vue convention) let the
+                    // value expression carry Vyrn `"…"` string literals.
+                    let vEnd = vyxScanAttrValue(ba, m, e)
                     let valStart = vyxSkipWs(ba, m + 1, vEnd - 1)
                     attrs.push(VyxAttr { name: name, value: vyxTrim(vyxSlice(ba, m + 1, vEnd - 1)), dyn: dynMark, evt: evt, line: vyxLineAt(ba, valStart), col: vyxColAt(ba, valStart) })
                     j = vEnd
@@ -923,7 +941,28 @@ type VyxSection = { found: Bool, start: Int64, end: Int64 }
 /// (RFC-0039 §2). The `<script>` body scans in code mode; `<template>` scans
 /// string-aware only (its content has no `//` comments).
 fn vyxSection(ba: Array<UInt8>, name: String, codeMode: Bool) -> VyxSection {
-    let openAt = vyxFind(ba, bytes("<" + name + ">"), 0)
+    return vyxSectionAvoid(ba, name, codeMode, 0 - 1, 0 - 1)
+}
+
+/// `vyxSection` with an avoid range: an open tag inside `[avoidS, avoidE)` is
+/// skipped, so a literal `<template>` inside a script helper string never claims
+/// the template section (the caller passes the script section's bounds).
+fn vyxSectionAvoid(ba: Array<UInt8>, name: String, codeMode: Bool, avoidS: Int64, avoidE: Int64) -> VyxSection {
+    let openPat = bytes("<" + name + ">")
+    let mut from = 0
+    let mut openAt = 0 - 1
+    let mut searching = true
+    while searching {
+        let at = vyxFind(ba, openPat, from)
+        if at < 0 {
+            searching = false
+        } else if avoidS >= 0 && at >= avoidS && at < avoidE {
+            from = at + 1
+        } else {
+            openAt = at
+            searching = false
+        }
+    }
     if openAt < 0 {
         return VyxSection { found: false, start: 0, end: 0 }
     }
@@ -1018,7 +1057,14 @@ fn vyxLineLeading(ba: Array<UInt8>, at: Int64) -> Bool {
 }
 
 fn vyxFindPropsBlock(ba: Array<UInt8>) -> VyxProps {
-    let kw = bytes("props")
+    return vyxFindKwBlock(ba, "props")
+}
+
+/// The generalized statement-leading `<kw> { … }` block finder (see
+/// `vyxFindPropsBlock`) — used for `props` in components and `params` in `.vyx`
+/// pages (RFC-0039 §4).
+fn vyxFindKwBlock(ba: Array<UInt8>, kwStr: String) -> VyxProps {
+    let kw = bytes(kwStr)
     let mut from = 0
     let mut searching = true
     while searching {
@@ -1243,7 +1289,9 @@ export fn vyxCompileComponent(compName: String, source: String, dir: String) -> 
     let srcPath = dir + "/" + compName + ".vyx"
 
     let scriptSec = vyxSection(ba, "script", true)
-    let templateSec = vyxSection(ba, "template", false)
+    // The template open tag skips the script section's range, so a literal
+    // `<template>` inside a helper string never claims the section.
+    let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
     if templateSec.found == false {
         return vyxCompErr(compName, fnName, fileId, srcPath, vyxErr("VYX_NO_TEMPLATE", fileId, 0))
     }
@@ -2063,6 +2111,228 @@ export gen fn componentsThemed(dir: String, theme: String) -> String {
 }
 
 // ===========================================================================
+// `.vyx` pages (RFC-0039 §4) — a `.vyx` PAGE has a `<script>` with a `params { … }`
+// block (bracket-segment binding, the page analogue of `props`), plain helper fns,
+// imports, and optionally `fn load(<params>) -> Validation<Data>` (+ `type Data`);
+// its `<template>` is the page body. `std/ui`'s `pages` reads the file itself
+// (comptime builtins in its gen body) and calls the pure `vyxBuildPageModule`
+// core here, which synthesizes a page module exporting `page`/`Params`/`load`/
+// `Data` — exactly the shape the router already consumes. `load` and `Data` are
+// auto-exported so the router reaches them through the page's namespace.
+// ===========================================================================
+
+/// The shape `std/ui` needs to route a `.vyx` page: its `params` fields (parallel
+/// name/type arrays) and whether it declares a loader. `err` names a params fault.
+type VyxPageShape = { paramNames: Array<String>, paramTypes: Array<String>, hasLoad: Bool, err: String }
+
+/// Whether the script text declares a statement-leading `fn load` (or
+/// `export fn load`) — the page's optional loader.
+fn vyxScriptHasLoad(script: String) -> Bool {
+    for line in vyxLines(script) {
+        let t = vyxTrim(line)
+        if t.startsWith("fn load") || t.startsWith("export fn load") {
+            return true
+        }
+    }
+    return false
+}
+
+/// Reflect a `.vyx` page's `<script>` — its `params` fields and loader presence.
+/// EXPORTED so `std/ui` learns the page's routing shape without duplicating the
+/// scanner. (`err` is set on a malformed `params` block.)
+export fn vyxPageShape(source: String) -> VyxPageShape {
+    let ba = bytes(source)
+    let scriptSec = vyxSection(ba, "script", true)
+    if scriptSec.found == false {
+        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, err: "" }
+    }
+    let script = vyxSlice(ba, scriptSec.start, scriptSec.end)
+    let sb = bytes(script)
+    let pb = vyxFindKwBlock(sb, "params")
+    let mut names: Array<String> = []
+    let mut types: Array<String> = []
+    if pb.found {
+        if pb.malformed {
+            return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, err: "VYX_BAD_PARAMS\n" }
+        }
+        let end = vyxMatchCurly(sb, pb.braceAt)
+        for part in vyxSplitFields(vyxSlice(sb, pb.braceAt + 1, end - 1)) {
+            let trimmed = vyxTrim(part)
+            if trimmed.length > 0 {
+                let pbf = bytes(trimmed)
+                let mut colon = 0 - 1
+                let mut k = 0
+                while k < pbf.length && colon < 0 {
+                    if pbf[k] == 58 {
+                        colon = k
+                    }
+                    k = k + 1
+                }
+                if colon < 0 {
+                    return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, err: "VYX_BAD_PARAMS\n" }
+                }
+                names.push(vyxTrim(vyxSlice(pbf, 0, colon)))
+                types.push(vyxTrim(vyxSlice(pbf, colon + 1, pbf.length)))
+            }
+        }
+    }
+    return VyxPageShape { paramNames: names, paramTypes: types, hasLoad: vyxScriptHasLoad(script), err: "" }
+}
+
+/// Prefix `export ` onto a statement-leading `fn load` / `type Data` line so the
+/// synthesized page module exports them (the router reaches them through the
+/// page's namespace). Lines already `export`ed pass through.
+fn vyxAutoExportPageDecls(script: String) -> String {
+    let mut out = ""
+    for line in vyxLines(script) {
+        let t = vyxTrim(line)
+        if t.startsWith("fn load") || t.startsWith("type Data") {
+            out = out + "export " + line + "\n"
+        } else {
+            out = out + line + "\n"
+        }
+    }
+    return out
+}
+
+/// The comma-joined `p.<name>` argument list forwarding a `Params` value into the
+/// compiled page-body view fn.
+fn vyxPageArgs(names: Array<String>) -> String {
+    let mut parts: Array<String> = []
+    for n in names {
+        parts.push("p." + n)
+    }
+    return vyxJoin(parts, ", ")
+}
+
+/// Build a full `.vyx`-PAGE module (RFC-0039 §4). The template compiles to a
+/// `uiPageBody(<params>[, data: Data])` view fn; the module exports `page`/`Params`
+/// (and passes through `load`/`Data` auto-exported). EXPORTED so `std/ui`'s `pages`
+/// gen fn synthesizes it from a nested `vyxPage(…)` import.
+export fn vyxBuildPageModule(source: String, dir: String, themed: Bool, theme: String) -> String {
+    let ba = bytes(source)
+    let scriptSec = vyxSection(ba, "script", true)
+    let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
+    if templateSec.found == false {
+        return "VYX_PAGE_NO_TEMPLATE\n"
+    }
+    let templateBody = vyxSlice(ba, templateSec.start, templateSec.end)
+    let script = if scriptSec.found { vyxSlice(ba, scriptSec.start, scriptSec.end) } else { "" }
+
+    // Pull the `params { … }` fields; the rest of the script (imports + helpers,
+    // incl. load/Data) stays, with load/Data auto-exported.
+    let sb = bytes(script)
+    let pb = vyxFindKwBlock(sb, "params")
+    let mut paramFields = ""
+    let mut restScript = script
+    if pb.found && pb.malformed == false {
+        let end = vyxMatchCurly(sb, pb.braceAt)
+        paramFields = vyxTrim(vyxSlice(sb, pb.braceAt + 1, end - 1))
+        restScript = vyxSlice(sb, 0, pb.kwAt) + vyxSlice(sb, end, sb.length)
+    }
+    let hasLoad = vyxScriptHasLoad(script)
+    let restExported = vyxAutoExportPageDecls(restScript)
+
+    // The synthetic component: a `props` block of the params (+ a `data: Data`
+    // param when there is a loader) drives the compiled view fn's parameters.
+    let dataField = if hasLoad {
+        if paramFields.length > 0 { ", data: Data" } else { "data: Data" }
+    } else {
+        ""
+    }
+    let propsInner = paramFields + dataField
+    let mut synthScript = restExported
+    if propsInner.length > 0 {
+        synthScript = "props { " + propsInner + " }\n" + restExported
+    }
+    let synthSource = "<script>\n" + synthScript + "\n</script>\n<template>\n" + templateBody + "\n</template>\n"
+    let comp = vyxCompileComponent("UiPageBody", synthSource, dir)
+    if comp.err != "" {
+        return comp.err
+    }
+    let moduleStr = vyxBuildModule([comp], themed, theme)
+    if moduleStr.contains("export fn uiPageBody") == false {
+        // vyxBuildModule returned a diagnostic (identifier lines), not a module.
+        return moduleStr
+    }
+
+    // Parse the param field NAMES (for the Params type + the page's forwarding).
+    let mut paramNames: Array<String> = []
+    if paramFields.length > 0 {
+        for part in vyxSplitFields(paramFields) {
+            let t = vyxTrim(part)
+            if t.length > 0 {
+                let pbf = bytes(t)
+                let mut colon = 0 - 1
+                let mut k = 0
+                while k < pbf.length && colon < 0 {
+                    if pbf[k] == 58 {
+                        colon = k
+                    }
+                    k = k + 1
+                }
+                if colon >= 0 {
+                    paramNames.push(vyxTrim(vyxSlice(pbf, 0, colon)))
+                }
+            }
+        }
+    }
+
+    let mut out = moduleStr
+    if paramFields.length > 0 {
+        out = out + "export type Params = { " + paramFields + " }\n"
+    }
+    // The page entry the router calls, forwarding the Params fields (and the
+    // loaded Data when there is a loader) into the compiled body.
+    if hasLoad {
+        let args = if paramNames.length > 0 { vyxPageArgs(paramNames) + ", d" } else { "d" }
+        out = out + "export fn page(p: Params, d: Data) -> Html {\n    return uiPageBody(" + args + ")\n}\n"
+    } else if paramNames.length > 0 {
+        out = out + "export fn page(p: Params) -> Html {\n    return uiPageBody(" + vyxPageArgs(paramNames) + ")\n}\n"
+    } else {
+        out = out + "export fn page() -> Html {\n    return uiPageBody()\n}\n"
+    }
+    return out
+}
+
+/// `vyxPage(vyxPath)` — synthesize a `.vyx` page module from the file at
+/// `vyxPath` (RFC-0039 §4). A `gen fn` (its `readFile` is comptime-only). The
+/// FULL `.vyx` path is the constant argument (not the stem), because the generator
+/// sandbox admits reads of exactly its path arguments — reading `arg + ".vyx"`
+/// would escape the declared inputs. `std/ui`'s `pages` imports this per `.vyx`
+/// page: `import * as p<n> from vyxPage("routes/foo.vyx")`.
+export gen fn vyxPage(vyxPath: String) -> String {
+    let src = match readFile(vyxPath) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    let dir = vyxDirOf(vyxPath)
+    return vyxBuildPageModule(src, dir, false, "")
+}
+
+/// `vyxPageThemed(vyxPath, theme)` — the themed variant (RFC-0036): the page
+/// body's classes are compile-checked against `theme`.
+export gen fn vyxPageThemed(vyxPath: String, theme: String) -> String {
+    let src = match readFile(vyxPath) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    let dir = vyxDirOf(vyxPath)
+    return vyxBuildPageModule(src, dir, true, theme)
+}
+
+/// The directory portion of `path` (everything before the last `/`), so relative
+/// imports in a `.vyx` page rebase against the page's directory.
+fn vyxDirOf(path: String) -> String {
+    let ba = bytes(path)
+    let slash = vyxFindLast(ba, bytes("/"), 0)
+    if slash < 0 {
+        return "."
+    }
+    return vyxSlice(ba, 0, slash)
+}
+
+// ===========================================================================
 // Tests — the pure helpers (parsing + codegen) are covered without file I/O by
 // feeding them source strings directly.
 // ===========================================================================
@@ -2235,6 +2505,14 @@ test "a dynamic attr is hoisted under an origin directive" {
     assert(out.contains("A(\"href\", u)"))
 }
 
+test "a single-quoted attr value carries a string literal expression" {
+    let src = "<script>props { id: String }</script><template><a :href='\"/raw/\" + id'>raw</a></template>"
+    let comp = vyxCompileComponent("Lnk", src, "./c")
+    assertEq(comp.err, "")
+    let out = vyxBuildModule([comp], false, "")
+    assert(out.contains("A(\"href\", \"/raw/\" + id)"))
+}
+
 // ---- RFC-0039 §2: the real scanner — comments/strings never miscompile ------
 
 test "a comment mentioning props before the real props block is ignored" {
@@ -2285,6 +2563,34 @@ test "a literal close-script tag inside a helper string does not truncate the se
     assert(vyxSlice(ba, s.start, s.end).contains("return"))
 }
 
+test "a helper string containing props-brace and template tags is inert" {
+    // The scanner never keyword-matches inside a string literal: a helper string
+    // spelling `props {`, `<template>`, or `</script>`-adjacent words compiles as
+    // plain data, with no props block conjured and no section confusion.
+    let src = "<script>\nfn f() -> String { return \"props { fake: Int64 } <template> script\" }\n</script>\n<template><li>{{ f() }}</li></template>"
+    let comp = vyxCompileComponent("C", src, "./c")
+    assertEq(comp.err, "")
+    assertEq(comp.propNames.length, 0)
+    assert(comp.helpers.contains("props { fake: Int64 }"))
+}
+
+test "comments may mention props template and script freely (the CreateForm regression)" {
+    // The RFC-0039 §2 regression: a comment naming all three section keywords
+    // parses to the same component as a file without it (same props, same view
+    // fn — the comment line passes through into the helpers as inert Vyrn).
+    let src = "<script>\n// the props for this template's script are below\nprops { title: String }\n</script>\n<template><li>{{ title }}</li></template>"
+    let withComment = vyxCompileComponent("C", src, "./c")
+    let bare = vyxCompileComponent("C", "<script>\nprops { title: String }\n</script>\n<template><li>{{ title }}</li></template>", "./c")
+    assertEq(withComment.err, "")
+    assertEq(withComment.propNames.length, 1)
+    assertEq(withComment.propNames[0], "title")
+    let a = vyxBuildModule([withComment], false, "")
+    let b = vyxBuildModule([bare], false, "")
+    // Identical view function; only the pass-through comment line may differ.
+    assert(a.contains("export fn c(title: String) -> Html"))
+    assert(b.contains("export fn c(title: String) -> Html"))
+}
+
 test "identical imports collapse and same-spec selective imports union" {
     let a = vyxCompileComponent("A", "<script>import { x } from \"std/html\"\nimport { t } from \"../s\"</script><template><li>{{ x }}</li></template>", "./w")
     let b = vyxCompileComponent("B", "<script>import { y } from \"std/html\"\nimport { t } from \"../s\"</script><template><li>{{ y }}</li></template>", "./w")
@@ -2302,4 +2608,41 @@ test "a same-name-different-spec import conflict names both files" {
     assert(out.contains("VYX_IMPORT_CONFLICT"))
     assert(out.contains("A_vyx"))
     assert(out.contains("B_vyx"))
+}
+
+// ---- RFC-0039 §4: .vyx pages ------------------------------------------------
+
+test "a .vyx page shape reports its params and loader" {
+    let src = "<script>\nparams { id: String }\nexport fn load(p: Params) -> Validation<Data> { return valid }\ntype Data = { title: String }\n</script>\n<template><h1>{{ data.title }}</h1></template>"
+    let shape = vyxPageShape(src)
+    assertEq(shape.err, "")
+    assertEq(shape.paramNames.length, 1)
+    assertEq(shape.paramNames[0], "id")
+    assertEq(shape.paramTypes[0], "String")
+    assert(shape.hasLoad)
+}
+
+test "a .vyx page module exports Params and a page fn binding the segment" {
+    let src = "<script>\nparams { id: String }\n</script>\n<template><h1>paste {{ id }}</h1></template>"
+    let out = vyxBuildPageModule(src, "./routes/p", false, "")
+    assert(out.contains("export type Params = { id: String }"))
+    assert(out.contains("export fn uiPageBody(id: String) -> Html"))
+    assert(out.contains("export fn page(p: Params) -> Html"))
+    assert(out.contains("return uiPageBody(p.id)"))
+}
+
+test "a .vyx page with a loader forwards Data and auto-exports load and Data" {
+    let src = "<script>\nparams { id: Int64 }\nfn load(p: Params) -> Validation<Data> { return valid }\ntype Data = { title: String }\n</script>\n<template><h1>{{ data.title }}</h1></template>"
+    let out = vyxBuildPageModule(src, "./routes/book", false, "")
+    assert(out.contains("export fn page(p: Params, d: Data) -> Html"))
+    assert(out.contains("return uiPageBody(p.id, d)"))
+    assert(out.contains("export fn load(p: Params)"))
+    assert(out.contains("export type Data"))
+}
+
+test "a static .vyx page needs no Params" {
+    let src = "<template><h1>about</h1></template>"
+    let out = vyxBuildPageModule(src, "./routes", false, "")
+    assert(out.contains("export fn page() -> Html"))
+    assertEq(out.contains("export type Params"), false)
 }

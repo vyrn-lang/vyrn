@@ -6,10 +6,10 @@ props { idText: String, userLine: String }
 <div id="roundtrip">
     <label>
         id
-        <input id="uid" type="number" value={idText} @input="setId"/>
+        <input id="uid" type="number" :value="idText" @input="setId"/>
     </label>
     <button id="fetchBtn" @click="loadUser">getUser (typed stub)</button>
     <button id="delBtn" @click="removeUser">deleteUser (Result)</button>
-    <p id="userOut" class="out">{userLine}</p>
+    <p id="userOut" class="out">{{ userLine }}</p>
 </div>
 </template>

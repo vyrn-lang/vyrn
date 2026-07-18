@@ -135,11 +135,11 @@ fn page_type_error_remaps_to_the_page_module() {
 #[test]
 fn unsupported_param_type_fails_naming_the_file() {
     let dir = scratch("badtype");
-    // A `String` param is unsupported in v1 (Int64 only).
+    // `Int64`/`String` are supported (RFC-0039 §5); `Float64` is not.
     write(
         &dir.join("pages/tag/[id].vyrn"),
         "import { el, text, Html } from \"std/html\"\n\
-         export type Params = { id: String }\n\
+         export type Params = { id: Float64 }\n\
          export fn page(p: Params) -> Html { return el(\"main\", [], []) }\n",
     );
     write(&dir.join("app.vyrn"), APP);
@@ -148,6 +148,99 @@ fn unsupported_param_type_fails_naming_the_file() {
     let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(err.contains("PAGES_UNSUPPORTED_PARAM_TYPE"), "unsupported-type diagnostic:\n{err}");
     assert!(err.contains("tag"), "diagnostic names the file:\n{err}");
+}
+
+/// A `String` dynamic segment (RFC-0039 §5) matches any non-empty, non-`/`
+/// segment and binds it into `Params`; a raw-response page exports `respond`
+/// for full content-type/status control. Both route through the generated
+/// router, and a `Float64`-looking or empty segment is handled correctly.
+#[test]
+fn string_segment_and_respond_route_end_to_end() {
+    let dir = scratch("stringseg");
+    write(&dir.join("pages/index.vyrn"), "import { el, text, Html } from \"std/html\"\nexport fn page() -> Html { return el(\"h1\", [], [text(\"home\")]) }\n");
+    write(
+        &dir.join("pages/p/[id].vyrn"),
+        "import { el, text, Html } from \"std/html\"\n\
+         export type Params = { id: String }\n\
+         export fn page(p: Params) -> Html { return el(\"h1\", [], [text(\"paste \" + p.id)]) }\n",
+    );
+    write(
+        &dir.join("pages/raw/[id].vyrn"),
+        "export type Params = { id: String }\n\
+         export fn respond(p: Params) -> Response {\n\
+         return Response { status: 200, contentType: \"text/plain; charset=utf-8\", body: \"raw:\" + p.id }\n\
+         }\n",
+    );
+    write(
+        &dir.join("app.vyrn"),
+        "import { pages } from \"std/ui\"\n\
+         import { route } from pages(\"./pages\")\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, body: \"\" }) }\n\
+         fn main() -> Int64 {\n\
+         let a = h(\"/p/deadbeef\")\n\
+         print(\"P:\\{a.status}:\\{a.body.length}\")\n\
+         let b = h(\"/raw/cafe\")\n\
+         print(\"R:\\{b.status}:\\{b.contentType}:\\{b.body}\")\n\
+         return 0\n\
+         }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "String-segment + respond app must run:\n{combined}");
+    // The String segment binds "deadbeef" and renders an HTML document (200).
+    assert!(combined.contains("P:200:"), "String segment page renders 200:\n{combined}");
+    // The respond page owns the content type and body verbatim.
+    assert!(combined.contains("R:200:text/plain; charset=utf-8:raw:cafe"), "respond raw bytes:\n{combined}");
+}
+
+/// A `.vyx` page (RFC-0039 §4) routes through `pagesThemed`: its `params {}`
+/// block binds the bracket segment, its `fn load` runs, its template classes are
+/// theme-checked, and a non-integer `Int64` segment 404s before user code.
+#[test]
+fn vyx_page_with_loader_routes_through_pages_themed() {
+    let dir = scratch("vyxpage");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<template>\n<main class=\"home\"><h1>home</h1></main>\n</template>\n",
+    );
+    write(
+        &dir.join("pages/book/[id].vyx"),
+        "<script>\n\
+         params { id: Int64 }\n\
+         fn load(p: Params) -> Validation<Data> {\n\
+         return Valid(Data { title: \"Book #\" + p.id.toString() })\n\
+         }\n\
+         type Data = { title: String }\n\
+         </script>\n\
+         <template>\n\
+         <article class=\"book\"><h1>{{ data.title }}</h1><p class=\"p-2\">id {{ id }}</p></article>\n\
+         </template>\n",
+    );
+    write(
+        &dir.join("theme.json"),
+        "{ \"spacing\": { \"2\": \"0.5rem\" }, \"safelist\": [\"home\", \"book\"] }\n",
+    );
+    write(
+        &dir.join("app.vyrn"),
+        "import { pagesThemed } from \"std/ui\"\n\
+         import { route } from pagesThemed(\"./pages\", \"./theme.json\")\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, body: \"\" }) }\n\
+         fn main() -> Int64 {\n\
+         let a = h(\"/\")\n\
+         print(\"home:\\{a.status}\")\n\
+         let b = h(\"/book/42\")\n\
+         print(\"book:\\{b.status}:\\{b.body.contains(\"Book #42\")}:\\{b.body.contains(\"id 42\")}\")\n\
+         let c = h(\"/book/notint\")\n\
+         print(\"badid:\\{c.status}\")\n\
+         return 0\n\
+         }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), ".vyx pages app must run:\n{combined}");
+    assert!(combined.contains("home:200"), "static .vyx page:\n{combined}");
+    assert!(combined.contains("book:200:true:true"), "loader .vyx page binds segment + Data:\n{combined}");
+    assert!(combined.contains("badid:404"), "non-integer Int64 segment 404s:\n{combined}");
 }
 
 #[test]

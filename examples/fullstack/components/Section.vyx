@@ -3,8 +3,8 @@ props { title: String, kind: String }
 </script>
 
 <template>
-<section class={kind}>
-    <h2>{title}</h2>
-    {children}
+<section :class="kind">
+    <h2>{{ title }}</h2>
+    <slot/>
 </section>
 </template>

@@ -42,6 +42,12 @@
 ///
 /// Inspect the synthesized module with:  vyrn emit-gen <file>
 
+// `.vyx` pages (RFC-0039 §4) reuse std/vyx's exposed pure compiler core: `pages`
+// learns a `.vyx` page's routing shape from `vyxPageShape`, and the synthesized
+// router imports each `.vyx` page through a nested `vyxPage(…)` generator import.
+// (std↔std pure-fn imports are legal — verified; the loader does not fight them.)
+import { vyxPageShape } from "std/vyx"
+
 // ===========================================================================
 // Byte / string helpers — all comptime-pure (plain string building), so they are
 // legal in a `gen fn` and its transitive callees.
@@ -313,14 +319,17 @@ fn uiUrlPatternOf(segs: Array<String>) -> String {
 
 /// The regex branch for a route (static tokens literal; an `Int64` param as its
 /// integer-spelling regex). The root route is the bare `/`.
-fn uiRoutePathBranch(segs: Array<String>) -> String {
+fn uiRoutePathBranch(segs: Array<String>, dynTypes: Array<String>) -> String {
     if segs.length == 0 {
         return "/"
     }
     let mut parts: Array<String> = []
+    let mut k = 0
     for s in segs {
         if uiIsDynSeg(s) {
-            parts.push("(0|-?[1-9][0-9]*)")
+            let ty = if k < dynTypes.length { dynTypes[k] } else { "Int64" }
+            parts.push(uiSegRegex(ty))
+            k = k + 1
         } else {
             parts.push(uiRegexEscapeLit(s))
         }
@@ -402,7 +411,8 @@ fn uiRecordBody(source: String) -> String {
     return uiSliceStr(ba, open + 1, close)
 }
 
-/// Split a record body on commas at generic depth 0 (`Array<A, B>` stays whole).
+/// Split a record body on commas at generic (`<>`) AND nested-record (`{}`) depth
+/// 0, so `Array<A, B>` and `meta: { x: Int64, y: Int64 }` each stay whole.
 fn uiSplitFields(body: String) -> Array<String> {
     let ba = bytes(body)
     let mut parts: Array<String> = []
@@ -411,9 +421,9 @@ fn uiSplitFields(body: String) -> Array<String> {
     let mut i = 0
     while i < ba.length {
         let b = ba[i]
-        if b == 60 {
+        if b == 60 || b == 123 {
             depth = depth + 1
-        } else if b == 62 {
+        } else if b == 62 || b == 125 {
             depth = depth - 1
         } else if b == 44 && depth == 0 {
             parts.push(uiSliceStr(ba, start, i))
@@ -463,9 +473,21 @@ fn uiFieldType(f: UiFields, name: String) -> String {
     return ""
 }
 
-/// Whether a param type spelling is supported as a dynamic segment (v1: `Int64`).
+/// Whether a param type spelling is supported as a dynamic segment. `Int64`
+/// matches an integer spelling; `String` (RFC-0039 §5) matches any non-empty,
+/// non-`/` segment (URL-decoded).
 fn uiSupportedParamType(spelling: String) -> Bool {
-    return spelling == "Int64"
+    return spelling == "Int64" || spelling == "String"
+}
+
+/// The regex fragment a dynamic segment of type `spelling` contributes to the
+/// `RoutePath` language: an integer for `Int64`, any non-empty non-slash run for
+/// `String`.
+fn uiSegRegex(spelling: String) -> String {
+    if spelling == "String" {
+        return "([^/]+)"
+    }
+    return "(0|-?[1-9][0-9]*)"
 }
 
 // ===========================================================================
@@ -542,7 +564,16 @@ type UiPageInfo = {
     segs: Array<String>,
     urlPattern: String,
     dynNames: Array<String>,
+    // dynTypes: the declared type spelling of each dynamic segment, parallel to
+    // dynNames (`Int64` or `String`, RFC-0039 §5).
+    dynTypes: Array<String>,
     hasLoad: Bool,
+    // hasRespond: the page exports `fn respond(p: Params) -> Response` INSTEAD of
+    // `page` — full content-type/status control, dispatched directly (RFC-0039 §5).
+    hasRespond: Bool,
+    // isVyx: a `.vyx` page (RFC-0039 §4) — imported through a nested `vyxPage(…)`
+    // generator import rather than a plain module specifier.
+    isVyx: Bool,
     pageArity: Int64,
     // paramsModule: the declaring-module specifier of the page's `Params` type
     // when it is IMPORTED from another module (RFC-0031); "" when `Params` is the
@@ -568,24 +599,24 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>) -> UiPageInfo {
     let iface = moduleInterface(modPath)
     let mut err = ""
 
-    if uiHasFn(iface, "page") == false {
+    // A page exports EITHER `page` (rendered through document()) or `respond`
+    // (a raw Response, full content-type/status control, RFC-0039 §5).
+    let hasPage = uiHasFn(iface, "page")
+    let hasRespond = uiHasFn(iface, "respond")
+    if hasPage == false && hasRespond == false {
         err = err + uiErrLine("PAGES_MISSING_PAGE_EXPORT", fid)
-        return UiPageInfo {
-            modPath: modPath,
-            fileId: fid,
-            segs: segs,
-            urlPattern: uiUrlPatternOf(segs),
-            dynNames: dyns,
-            hasLoad: false,
-            pageArity: 0,
-            paramsModule: "",
-            err: err,
-        }
+        return uiPageErr(modPath, fid, segs, dyns, err)
     }
-
-    let arity = uiFnArity(iface, "page")
+    let entry = if hasRespond { "respond" } else { "page" }
+    let arity = uiFnArity(iface, entry)
     let hasLoad = uiHasFn(iface, "load")
     let needParams = dyns.length > 0 || hasLoad
+
+    // dynTypes: each dynamic segment's declared type, parallel to `dyns`.
+    let mut dynTypes: Array<String> = []
+    for d in dyns {
+        dynTypes.push("Int64")
+    }
 
     // Params: field names must match the dynamic segments exactly, and every
     // param type must be supported.
@@ -598,6 +629,15 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>) -> UiPageInfo {
                 if uiContainsStr(f.names, d) == false {
                     err = err + uiErrLine("PAGES_PARAM_MISMATCH", fid + "__segment_" + d + "_absent_from_Params")
                 }
+            }
+            // Resolve each dynamic segment's declared type (default Int64).
+            let mut di = 0
+            while di < dyns.length {
+                let t = uiFieldType(f, dyns[di])
+                if t.length > 0 {
+                    dynTypes[di] = t
+                }
+                di = di + 1
             }
             let mut i = 0
             while i < f.names.length {
@@ -614,7 +654,22 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>) -> UiPageInfo {
     }
 
     // Signature / loader agreement.
-    if hasLoad {
+    if hasRespond {
+        // A raw-response page owns rendering entirely: no loader, `respond(p)` for
+        // a dynamic route or `respond()` for a static one, returning `Response`.
+        if hasLoad {
+            err = err + uiErrLine("PAGES_RESPOND_NO_LOAD", fid + "__respond_pages_own_rendering_no_load")
+        }
+        if dyns.length > 0 && arity != 1 {
+            err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__dynamic_respond_must_be_respond_p_Params")
+        }
+        if dyns.length == 0 && arity != 0 {
+            err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__static_respond_must_be_respond_without_parameters")
+        }
+        if uiFnRet(iface, "respond") != "Response" {
+            err = err + uiErrLine("PAGES_RESPOND_SIGNATURE", fid + "__respond_must_return_Response")
+        }
+    } else if hasLoad {
         if arity != 2 {
             err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__loader_page_must_be_page_p_Params_d_Data")
         }
@@ -653,9 +708,102 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>) -> UiPageInfo {
         segs: segs,
         urlPattern: uiUrlPatternOf(segs),
         dynNames: dyns,
+        dynTypes: dynTypes,
         hasLoad: hasLoad,
+        hasRespond: hasRespond,
+        isVyx: false,
         pageArity: arity,
         paramsModule: paramsModule,
+        err: err,
+    }
+}
+
+/// Reflect a `.vyx` PAGE (RFC-0039 §4): read the file, learn its `params`/loader
+/// shape via std/vyx's `vyxPageShape`, and validate it against the route segments
+/// exactly as `uiInspectPage` does for a `.vyrn` page. A `gen fn` (it `readFile`s
+/// the `.vyx`). `modPath` is the file path without the `.vyx` extension.
+gen fn uiInspectVyxPage(modPath: String, segs: Array<String>) -> UiPageInfo {
+    let fid = uiIdentOf(modPath)
+    let dyns = uiDynNamesOf(segs)
+    let src = match readFile(modPath + ".vyx") {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    let shape = vyxPageShape(src)
+    let mut err = shape.err
+    let hasLoad = shape.hasLoad
+
+    // dynTypes + Params/segment agreement (mirrors uiInspectPage).
+    let mut dynTypes: Array<String> = []
+    for d in dyns {
+        dynTypes.push("Int64")
+    }
+    let needParams = dyns.length > 0 || hasLoad
+    if needParams {
+        for d in dyns {
+            if uiContainsStr(shape.paramNames, d) == false {
+                err = err + uiErrLine("PAGES_PARAM_MISMATCH", fid + "__segment_" + d + "_absent_from_params")
+            }
+        }
+        let mut di = 0
+        while di < dyns.length {
+            let mut ti = 0
+            while ti < shape.paramNames.length {
+                if shape.paramNames[ti] == dyns[di] {
+                    dynTypes[di] = shape.paramTypes[ti]
+                }
+                ti = ti + 1
+            }
+            di = di + 1
+        }
+        let mut i = 0
+        while i < shape.paramNames.length {
+            let nm = shape.paramNames[i]
+            if uiContainsStr(dyns, nm) == false {
+                err = err + uiErrLine("PAGES_PARAM_MISMATCH", fid + "__params_field_" + nm + "_has_no_segment")
+            }
+            if uiSupportedParamType(shape.paramTypes[i]) == false {
+                err = err + uiErrLine("PAGES_UNSUPPORTED_PARAM_TYPE", fid + "__" + nm + "_is_" + uiIdentOf(shape.paramTypes[i]))
+            }
+            i = i + 1
+        }
+    }
+
+    let arity = if hasLoad { 2 } else { if dyns.length > 0 { 1 } else { 0 } }
+    return UiPageInfo {
+        modPath: modPath,
+        fileId: fid,
+        segs: segs,
+        urlPattern: uiUrlPatternOf(segs),
+        dynNames: dyns,
+        dynTypes: dynTypes,
+        hasLoad: hasLoad,
+        hasRespond: false,
+        isVyx: true,
+        pageArity: arity,
+        paramsModule: "",
+        err: err,
+    }
+}
+
+/// A `UiPageInfo` carrying only an error (the entry export is missing).
+fn uiPageErr(modPath: String, fid: String, segs: Array<String>, dyns: Array<String>, err: String) -> UiPageInfo {
+    let mut dynTypes: Array<String> = []
+    for d in dyns {
+        dynTypes.push("Int64")
+    }
+    return UiPageInfo {
+        modPath: modPath,
+        fileId: fid,
+        segs: segs,
+        urlPattern: uiUrlPatternOf(segs),
+        dynNames: dyns,
+        dynTypes: dynTypes,
+        hasLoad: false,
+        hasRespond: false,
+        isVyx: false,
+        pageArity: 0,
+        paramsModule: "",
         err: err,
     }
 }
@@ -684,6 +832,11 @@ gen fn uiScanPages(dir: String, prefix: Array<String>) -> Array<UiPageInfo> {
             let st = uiStem(name)
             let modPath = dir + "/" + st
             out.push(uiInspectPage(modPath, uiRouteSegsFor(prefix, st)))
+        } else if name.endsWith(".vyx") {
+            let nb = bytes(name)
+            let st = uiSliceStr(nb, 0, nb.length - 4)
+            let modPath = dir + "/" + st
+            out.push(uiInspectVyxPage(modPath, uiRouteSegsFor(prefix, st)))
         } else {
             let sub = dir + "/" + name
             if uiIsDir(sub) {
@@ -784,6 +937,13 @@ fn uiFixedRuntime() -> String {
     out = out + "    }\n"
     out = out + "    return el(\"main\", [], [el(\"h1\", [], [text(\"Unable to load this page\")]), el(\"ul\", [], items)])\n"
     out = out + "}\n"
+    // uiRouteDecode: a `String` dynamic segment is passed through as-is. Full
+    // percent-decoding (`%XX` → byte) needs an Int64→UInt8 narrowing builtin,
+    // which Vyrn does not have (the same no-narrowing wall `examples/bin/util`
+    // documents), so it is deferred; segments are already `/`-split and non-empty.
+    out = out + "fn uiRouteDecode(s: String) -> String {\n"
+    out = out + "    return s\n"
+    out = out + "}\n"
     return out
 }
 
@@ -807,7 +967,17 @@ fn uiEmitRoute(p: UiPageInfo, n: Int64) -> String {
         }
         i = i + 1
     }
-    // The dynamic segments, parsed left-to-right into a nested match.
+    // String segments bind directly (any non-empty non-slash matches, decoded);
+    // Int64 segments parse left-to-right into a nested match that 404s on a
+    // non-integer segment (never reaching user code).
+    let mut k = 0
+    while k < p.dynNames.length {
+        if p.dynTypes[k] == "String" {
+            let segIdx = uiDynSegIndex(p.segs, k)
+            out = out + "    let v" + k.toString() + " = uiRouteDecode(segs[" + segIdx.toString() + "])\n"
+        }
+        k = k + 1
+    }
     out = out + "    return " + uiEmitDynMatch(p, 0, idx) + "\n}\n"
 
     // uiRender<n>: build Params, run load (if any), render through document().
@@ -816,12 +986,16 @@ fn uiEmitRoute(p: UiPageInfo, n: Int64) -> String {
     return out
 }
 
-/// The nested `fromJson` parse over the dynamic segments (position `k` in
-/// `dynNames`), ending in `Some(uiRender<idx>(args))`. With no dynamic segments
-/// it is simply `Some(uiRender<idx>())`.
+/// The nested `fromJson` parse over the INTEGER dynamic segments (position `k` in
+/// `dynNames`), ending in `Some(uiRender<idx>(args))`. String segments are already
+/// bound as `let v<k>` in `uiTry`, so they are skipped here.
 fn uiEmitDynMatch(p: UiPageInfo, k: Int64, idx: String) -> String {
     if k >= p.dynNames.length {
         return "Some(uiRender" + idx + "(" + uiJoinList(uiDynArgs(p.dynNames), ", ") + "))"
+    }
+    if p.dynTypes[k] == "String" {
+        // Already bound in uiTry; move on.
+        return uiEmitDynMatch(p, k + 1, idx)
     }
     // Find the segment index of the k-th dynamic segment.
     let segIdx = uiDynSegIndex(p.segs, k)
@@ -863,18 +1037,22 @@ fn uiDynSegIndex(segs: Array<String>, k: Int64) -> Int64 {
 /// The `uiRender<idx>` function: build `Params`, optionally `load`, then render.
 fn uiEmitRender(p: UiPageInfo, idx: String) -> String {
     let title = uiStrLit(p.urlPattern)
-    // Parameter list `(v0: Int64, v1: Int64)` matching the dynamic segments.
+    // Parameter list `(v0: <type>, v1: <type>)` matching the dynamic segments.
     let mut params: Array<String> = []
     let mut ai = 0
     while ai < p.dynNames.length {
-        params.push("v" + ai.toString() + ": Int64")
+        params.push("v" + ai.toString() + ": " + p.dynTypes[ai])
         ai = ai + 1
     }
     let mut out = "fn uiRender" + idx + "(" + uiJoinList(params, ", ") + ") -> Response {\n"
 
     if p.pageArity == 0 {
         // Static page, no params, no loader.
-        out = out + "    return Response { status: 200, contentType: \"text/html\", body: document(" + title + ", [], p" + idx + ".page()) }\n}\n"
+        if p.hasRespond {
+            out = out + "    return p" + idx + ".respond()\n}\n"
+        } else {
+            out = out + "    return Response { status: 200, contentType: \"text/html\", body: document(" + title + ", [], p" + idx + ".page()) }\n}\n"
+        }
         return out
     }
 
@@ -883,7 +1061,10 @@ fn uiEmitRender(p: UiPageInfo, idx: String) -> String {
     // alias; a page's own through the `p<idx>` namespace, exactly as before.
     let paramsCtor = if p.paramsModule != "" { "uiParams" + idx } else { "p" + idx + ".Params" }
     out = out + "    let p = " + paramsCtor + " { " + uiParamFieldInits(p.segs) + " }\n"
-    if p.hasLoad {
+    if p.hasRespond {
+        // A raw-response page owns the whole Response (content-type, status).
+        out = out + "    return p" + idx + ".respond(p)\n}\n"
+    } else if p.hasLoad {
         out = out + "    return match p" + idx + ".load(p) {\n"
         out = out + "        Valid(d) => Response { status: 200, contentType: \"text/html\", body: document(" + title + ", [], p" + idx + ".page(p, d)) },\n"
         out = out + "        Invalid(issues) => Response { status: 422, contentType: \"text/html\", body: document(\"Error\", [], uiRouteError(issues)) },\n"
@@ -913,7 +1094,17 @@ fn uiParamFieldInits(segs: Array<String>) -> String {
 /// export `page`/`Params`/`load`/`Data` coexist with no collision and no aliasing
 /// — the namespace replaces the RFC-0022 co-naming dummies this generator used to
 /// emit. Each export is reached below as `p<idx>.page`, `p<idx>.Params`, etc.
-fn uiEmitImport(p: UiPageInfo, idx: String) -> String {
+fn uiEmitImport(p: UiPageInfo, idx: String, themed: Bool, theme: String) -> String {
+    if p.isVyx {
+        // A `.vyx` page (RFC-0039 §4) is synthesized on the fly through a nested
+        // `vyxPage`/`vyxPageThemed` generator import; the router reaches its
+        // `page`/`Params`/`load`/`Data` through the `p<idx>` namespace exactly as
+        // for a `.vyrn` page.
+        if themed {
+            return "import * as p" + idx + " from vyxPageThemed(" + uiStrLit(p.modPath + ".vyx") + ", " + uiStrLit(theme) + ")\n"
+        }
+        return "import * as p" + idx + " from vyxPage(" + uiStrLit(p.modPath + ".vyx") + ")\n"
+    }
     let mut out = "import * as p" + idx + " from " + uiStrLit(p.modPath) + "\n"
     // A foreign `Params` (declared in a module the page imports, RFC-0031) is not
     // reachable as `p<idx>.Params`; import it directly under a per-page alias.
@@ -928,9 +1119,11 @@ fn uiEmitImport(p: UiPageInfo, idx: String) -> String {
 fn uiEmitTypedUrl(p: UiPageInfo) -> String {
     if p.dynNames.length > 0 {
         let mut params: Array<String> = []
+        let mut k = 0
         for s in p.segs {
             if uiIsDynSeg(s) {
-                params.push(uiDynName(s) + ": Int64")
+                params.push(uiDynName(s) + ": " + p.dynTypes[k])
+                k = k + 1
             }
         }
         return "export fn " + uiDynHelperName(p.segs) + "(" + uiJoinList(params, ", ") + ") -> RoutePath {\n    return " + uiDynHelperBody(p.segs) + "\n}\n"
@@ -938,17 +1131,37 @@ fn uiEmitTypedUrl(p: UiPageInfo) -> String {
     return "export fn " + uiStaticHelperName(p.segs) + "() -> RoutePath {\n    return " + uiStrLit(uiUrlPatternOf(p.segs)) + "\n}\n"
 }
 
-/// Assemble the whole synthesized router module from the collected pages.
-fn uiBuildModule(pages: Array<UiPageInfo>) -> String {
-    let mut out = "/// Generated by std/ui `pages` (RFC-0026 M3) — do not edit.\n"
+/// Whether any page in the set is a `.vyx` page (so the router imports the
+/// `.vyx`-page generator from std/vyx).
+fn uiAnyVyx(pages: Array<UiPageInfo>) -> Bool {
+    for p in pages {
+        if p.isVyx {
+            return true
+        }
+    }
+    return false
+}
+
+/// Assemble the whole synthesized router module from the collected pages. When
+/// `themed` (RFC-0036/0039 §4), `.vyx` pages compile their classes against `theme`.
+fn uiBuildModule(pages: Array<UiPageInfo>, themed: Bool, theme: String) -> String {
+    let mut out = "/// Generated by std/ui `pages` (RFC-0026 M3, RFC-0039 §4) — do not edit.\n"
     out = out + "import { el, text, empty, document, toHtmlString, Html, Attr } from \"std/html\"\n"
+    // The `.vyx`-page generator (RFC-0039 §4) when any page is a `.vyx` page.
+    if uiAnyVyx(pages) {
+        if themed {
+            out = out + "import { vyxPageThemed } from \"std/vyx\"\n"
+        } else {
+            out = out + "import { vyxPage } from \"std/vyx\"\n"
+        }
+    }
 
     // Per-page namespace imports (RFC-0027): each page module is bound as
     // `p<idx>`, so same-named exports across pages never collide in the flat
     // namespace and no co-naming dummies are needed.
     let mut i = 0
     while i < pages.length {
-        out = out + uiEmitImport(pages[i], i.toString())
+        out = out + uiEmitImport(pages[i], i.toString(), themed, theme)
         i = i + 1
     }
 
@@ -962,7 +1175,7 @@ fn uiBuildModule(pages: Array<UiPageInfo>) -> String {
         if i > 0 {
             out = out + "|"
         }
-        out = out + uiRoutePathBranch(pages[i].segs)
+        out = out + uiRoutePathBranch(pages[i].segs, pages[i].dynTypes)
         i = i + 1
     }
     out = out + ")\"\n"
@@ -1021,7 +1234,8 @@ fn uiDispatchOrder(pages: Array<UiPageInfo>) -> Array<Int64> {
 // The generator.
 // ===========================================================================
 
-/// `pages(dir)` — scan `dir` for page modules and synthesize the router module.
+/// `pages(dir)` — scan `dir` for page modules (`.vyrn` and, RFC-0039 §4, `.vyx`)
+/// and synthesize the router module.
 export gen fn pages(dir: String) -> String {
     let infos = uiScanPages(dir, [])
     if infos.length == 0 {
@@ -1035,7 +1249,27 @@ export gen fn pages(dir: String) -> String {
     if err != "" {
         return err
     }
-    return uiBuildModule(infos)
+    return uiBuildModule(infos, false, "")
+}
+
+/// `pagesThemed(dir, theme)` (RFC-0036/0039 §4) — like `pages`, but every `.vyx`
+/// page in `dir` compiles its template classes against `theme` (a static class is
+/// proven `⊆ Tw` at compile time, a dynamic one coerces at runtime). `.vyrn` pages
+/// are unaffected. `theme` resolves relative to the importing module, like `dir`.
+export gen fn pagesThemed(dir: String, theme: String) -> String {
+    let infos = uiScanPages(dir, [])
+    if infos.length == 0 {
+        return "PAGES_ERROR__no_page_modules_found_under_the_pages_directory\n"
+    }
+    let mut err = ""
+    for p in infos {
+        err = err + p.err
+    }
+    err = err + uiCollisionErrors(infos)
+    if err != "" {
+        return err
+    }
+    return uiBuildModule(infos, true, theme)
 }
 
 // ===========================================================================
@@ -1047,8 +1281,25 @@ test "route segments and dynamic detection" {
     assertEq(uiCollisionKey(["users", "[id]"]), "/users/:")
     assert(uiIsDynSeg("[id]"))
     assertEq(uiDynName("[id]"), "id")
-    assertEq(uiRoutePathBranch(["users", "[id]"]), "/users/(0|-?[1-9][0-9]*)")
-    assertEq(uiRoutePathBranch([]), "/")
+    assertEq(uiRoutePathBranch(["users", "[id]"], ["Int64"]), "/users/(0|-?[1-9][0-9]*)")
+    assertEq(uiRoutePathBranch(["p", "[id]"], ["String"]), "/p/([^/]+)")
+    assertEq(uiRoutePathBranch([], []), "/")
+}
+
+test "String param types are supported and shape their segment regex" {
+    assert(uiSupportedParamType("String"))
+    assert(uiSupportedParamType("Int64"))
+    assertEq(uiSupportedParamType("Float64"), false)
+    assertEq(uiSegRegex("String"), "([^/]+)")
+    assertEq(uiSegRegex("Int64"), "(0|-?[1-9][0-9]*)")
+}
+
+test "uiSplitFields is brace-aware for nested-record field types" {
+    let f = uiParseFields("type Params = { id: String, meta: { x: Int64, y: Int64 } }")
+    assertEq(f.names.length, 2)
+    assertEq(f.names[0], "id")
+    assertEq(f.names[1], "meta")
+    assertEq(f.types[1], "{ x: Int64, y: Int64 }")
 }
 
 test "typed-URL helper names and bodies" {
@@ -1066,7 +1317,8 @@ test "record-field parsing pulls names and types" {
     assertEq(f.names[1], "slug")
     assertEq(f.types[1], "String")
     assert(uiSupportedParamType("Int64"))
-    assertEq(uiSupportedParamType("String"), false)
+    assert(uiSupportedParamType("String"))
+    assertEq(uiSupportedParamType("Float64"), false)
 }
 
 test "uiStem and route mapping" {
