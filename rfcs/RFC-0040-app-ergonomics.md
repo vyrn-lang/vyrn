@@ -1,6 +1,6 @@
 # RFC-0040 — App Ergonomics: Generator Identity, RPC Callbacks, `.vyx` Order
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented (§1–§5; see as-landed notes — one downstream wall recorded)
 - **Depends on:** RFC-0021/0031 (generator identity + cache keys), RFC-0037
   (stored closures — the RPC-callback unlock), RFC-0039 (`.vyx` v2 — the
   script-section order rule lands there), RFC-0019 (`std/rpc` — the
@@ -100,3 +100,60 @@ stay (they are the serve-app test surface) but lose their narration.
 Re-exports (deferred again, see §1), clock/random and std/storage (the
 next design round), `v-model`, any server/wire change, `on<Proc>`-style
 compat shims (clean break).
+
+---
+
+## As-landed notes
+
+- **§1 / §2 (prior commits `6a7761e`, `caccec9`):** generator-import identity
+  keyed on resolved inputs; std/rpc client callbacks; `on<Proc>` retired.
+- **§3 (`a074da1`) — `.vyx` imports-first:** a `props`/`params` block that
+  precedes an import in a script section is `VYX_IMPORTS_FIRST` (file/line). The
+  check runs on the ORIGINAL source in `vyxCompileComponent` (props) and
+  `vyxBuildPageModule` / `vyxPageShape` (params); the page synthesizer now trails
+  its synthetic `props` block AFTER the page's imports so it satisfies the rule.
+  Emitted modules are byte-identical (proven via `emit-gen` diff on `vyxdemo` —
+  source order only). All repo `.vyx` migrated (CreateForm, PasteView, ShelfApp,
+  Listing, Row). Tests: 6 in-language + 2 integration.
+- **§4 (`6c78c64`) — labels.vyrn deleted, middleware honest:**
+  `examples/bin/labels.vyrn` (17 wrappers) is gone; each widget/page imports
+  `i18n("<its-spelling>/strings")` directly (§1 shares the one instance), and the
+  explicit-locale plural demo moved to the about page as a local `countIn` helper.
+  **VERDICT — a lambda literal in a module-state initializer is LEGAL:** RFC-0029's
+  init restrictions govern CALLS, not construction, and the checker accepts it
+  (verified interp + server smoke — logging fires per-request). `bin/server.vyrn`
+  now installs its chain at init (`let mut middleware: Array<Middleware> = [ |req|
+  … ]`), deleting the lazy `installMiddleware()` + length-check. No RFC-0029/0037
+  composition gap. Shelf's `Labels` record was left as legitimate root-owned state
+  (its i18n imports are all `"./strings"` at the root, leaf widgets take resolved
+  scalar props — it never had the two-spelling collision labels.vyrn dodged).
+- **§5 (`6a9b8cd`) — style pass:** RFC citations, mechanism narration, and
+  teaching asides stripped from bin (thorough) and shelf (egregious first);
+  shelf's server middleware also moved to the same direct init as bin (deleting
+  its lazy-install wart). `server.vyrn` 89→72, `client.vyrn` 154→142 (bin).
+
+### Verification & downstream wall
+
+- **SSR verified (via `vyrn serve`, no wasm client needed):** bin — home list
+  `2 pastes` (en), `/about` en+uk CLDR plurals (`1 вставка / 2 вставки / 5 вставок`
+  — the RELOCATED demo, and proof the §1 shared instance flips uk then restores en
+  for the home render), `/p/<id>` HTML-escaped, `/raw/<id>` byte-exact
+  `text/plain`, 404s, **restart survival** (2 pastes reload from disk). shelf —
+  home (3 books), `/about` en+uk plurals, `/books/1` loader, `/admin` guard **403**
+  (middleware direct-init), 404/422, openapi+graphql. Full suite 900 + full parity
+  green at every commit; fullstack `rpc.rs` passes.
+- **WALL (pre-existing, NOT this RFC's §3–§5) — the §2 callback clients cannot
+  build to wasm/native.** `vyrn dev` fails with `error: unbound cb` for BOTH bin
+  and fullstack (fullstack is untouched by §3–§5, so this predates this work and
+  was never covered — the parity harness and `rpc.rs` only exercise interp/serve).
+  Root cause: an RFC-0023 × RFC-0037 codegen composition gap — a monomorphized
+  `fn`-value PARAMETER whose payload is a NON-SCALAR (record / `Validation<Record>`)
+  type is not slot-bound when the function is instantiated, so STORING it
+  (`pending[k] = cb`) resolves `cb` as a bare name and fails. Minimal repro:
+  `fn store(k, cb: fn(User)) { pend[k] = cb }` called with any concrete fn-value
+  builds fine for `fn(Int64)` but errors for `fn(User)`; interp is correct in both.
+  This blocks browser verification of the interactive islands only (create→soft-nav
+  in bin; add/rate/delete/filter/locale in shelf) — the SSR surface is unaffected.
+  Fixing it is native-codegen work in `vyrn-codegen` (materializing a
+  defunctionalized fn-value aggregate from a monomorphized binding, aggregate ABI),
+  outside §3–§5 scope; flagged for a dedicated follow-up.

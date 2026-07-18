@@ -288,6 +288,12 @@ but surprising: for a serve app, `main` is a startup hook, not dead code. Either
   only calls `createPaste`, but `onListPastes`/`onGetPaste` must still exist (no-op)
   or checking fails (`call to unknown function onListPastes`). Same as shelf's
   `onTagCounts`. Fine, but the coupling is invisible until it errors.
+  **RESOLVED (RFC-0040 §2):** each stub now takes a completion callback at the call
+  site (`api.createPaste(req, |res| …)`); a procedure the client never calls needs
+  no handler at all. `on<Proc>` is retired. (Caveat found during RFC-0040 §6
+  verification: the callback clients do not yet build to `wasm`/native — a
+  pre-existing RFC-0023×RFC-0037 codegen gap, see RFC-0040 as-landed "downstream
+  wall"; SSR is unaffected.)
 
 ---
 
