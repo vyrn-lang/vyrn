@@ -84,6 +84,34 @@ fn emit_gen_shows_the_synthesized_translation_module() {
 
     // The argument-less lookup.
     assert!(src.contains("export fn t(key: TransKey) -> String"), "t():\n{src}");
+
+    // RFC-0041 §4: every key ALSO exports an un-prefixed alias for namespace
+    // access (`import * as t` → `t.cartItems()`), delegating to the prefixed fn.
+    assert!(src.contains("export fn cartItems(count: Int64) -> String"), "un-prefixed plural fn:\n{src}");
+    assert!(src.contains("export fn greeting(name: String) -> String"), "un-prefixed string-arg fn:\n{src}");
+}
+
+// ---- RFC-0041 §4: namespace access via the un-prefixed aliases --------------
+
+#[test]
+fn namespace_access_reads_unprefixed_keys() {
+    let dir = scratch("nsaccess");
+    write(&dir.join("locales/en.json"), "{ \"app\": { \"title\": \"Paste Bin\" }, \"greeting\": \"Hi {name}\" }");
+    write(
+        &dir.join("app.vyrn"),
+        "import { i18n } from \"std/i18n\"\n\
+         import * as t from i18n(\"./locales\")\n\
+         fn main() -> Int64 {\n\
+         print(t.appTitle())\n\
+         print(t.greeting(\"Bob\"))\n\
+         return 0\n\
+         }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "namespace i18n access must run:\n{combined}");
+    assert!(combined.contains("Paste Bin"), "un-prefixed arg-less key:\n{combined}");
+    assert!(combined.contains("Hi Bob"), "un-prefixed arg key:\n{combined}");
 }
 
 // ---- drift: a mismatched locale pair fails the load ------------------------

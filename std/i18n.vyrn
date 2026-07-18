@@ -159,6 +159,33 @@ fn keyFnName(key: String) -> String {
     return "t" + keyTypeBase(key)
 }
 
+/// The un-prefixed per-key name for namespace access (RFC-0041 §4):
+/// `cart.items` → `cartItems`, so `import * as t from i18n("…")` reads
+/// `t.cartItems()` (the `t` prefix is redundant under a namespace). Emitted
+/// ALONGSIDE the `t`-prefixed name, which flat imports keep using.
+fn keyPlainName(key: String) -> String {
+    return lowerFirst(keyTypeBase(key))
+}
+
+/// Lowercase the first ASCII byte of `s` (`AppTitle` → `appTitle`).
+fn lowerFirst(s: String) -> String {
+    let ba = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    for b in ba {
+        if i == 0 && b >= 65 && b <= 90 {
+            out.push(b + 32)
+        } else {
+            out.push(b)
+        }
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(err) => s,
+    }
+}
+
 // ===========================================================================
 // Emitting Vyrn source — escape a raw string as a Vyrn `"…"` literal.
 // ===========================================================================
@@ -1397,6 +1424,14 @@ fn buildKeyFns(key: String, baseVal: String, tags: Array<String>, datas: Array<L
         li = li + 1
     }
     out = out + "    }\n}\n"
+
+    // The un-prefixed alias for namespace access (RFC-0041 §4): `appTitle`
+    // alongside `tAppTitle`, delegating to the prefixed dispatcher so both share
+    // one body and one locale switch. Flat `import { tAppTitle }` is unchanged.
+    let plain = keyPlainName(key)
+    out = out + "/// " + docComment(baseVal) + "\n"
+    out = out + "export fn " + plain + params + " -> String {\n"
+    out = out + "    return " + fnName + args + "\n}\n"
     return out
 }
 
