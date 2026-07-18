@@ -748,13 +748,14 @@ const RFC33_APP: &str = "import { components } from \"std/vyx\"\n\
     fn main() -> Int64 { return 0 }\n";
 
 /// A `.vyx` whose template mistypes `title` as `titel` — a type error that
-/// RFC-0033 remaps to line 6, column 6 of the `.vyx` (`{` at col 5, `item` at 6).
+/// RFC-0033 remaps to line 6, column 8 of the `.vyx` (RFC-0039 v2 grammar:
+/// `<li>{{ ` is 7 chars, so `item` starts at col 8).
 const RFC33_VYX: &str = "<script>\n\
     type Row = { title: String }\n\
     props { item: Row }\n\
     </script>\n\
     <template>\n\
-    <li>{item.titel}</li>\n\
+    <li>{{ item.titel }}</li>\n\
     </template>\n";
 
 /// A well-typed variant (`item.title`), for hover/completion where the module
@@ -764,7 +765,7 @@ const RFC33_VYX_OK: &str = "<script>\n\
     props { item: Row }\n\
     </script>\n\
     <template>\n\
-    <li>{item.title}</li>\n\
+    <li>{{ item.title }}</li>\n\
     </template>\n";
 
 fn rfc33_scratch(tag: &str, vyx_body: &str) -> std::path::PathBuf {
@@ -824,9 +825,10 @@ fn rfc33_vyx_type_error_publishes_into_the_vyx_buffer() {
     let d0 = &diags[0];
     let msg = d0.get("message").and_then(|m| m.as_str()).unwrap_or("");
     assert!(msg.contains("titel"), "carries the checker message: {msg}");
-    // `.vyx` line 6 (0-based 5), column 6 (0-based 5) — the `{item.titel}` start.
+    // `.vyx` line 6 (0-based 5), column 8 (0-based 7) — where `item` starts
+    // inside `{{ item.titel }}` (RFC-0039 v2).
     assert_eq!(d0.pointer("/range/start/line").and_then(|l| l.as_i64()), Some(5), "line: {note}");
-    assert_eq!(d0.pointer("/range/start/character").and_then(|c| c.as_i64()), Some(5), "col: {note}");
+    assert_eq!(d0.pointer("/range/start/character").and_then(|c| c.as_i64()), Some(7), "col: {note}");
 }
 
 /// Hover inside a template `{expr}` resolves against the synthesized module:
@@ -841,11 +843,12 @@ fn rfc33_hover_in_vyx_template_resolves_the_prop() {
     let _ = read_diags_for(&mut client, "Widget.vyx"); // ownership wired up
     did_open(&mut client, &vyx_uri, "vyx", RFC33_VYX_OK);
 
-    // `item` on `.vyx` line 6 (0-based 5), char 5 (the `i` of `item`).
+    // `item` on `.vyx` line 6 (0-based 5), char 7 (the `i` of `item` inside
+    // `{{ item.title }}`, RFC-0039 v2).
     let hover_id = serde_json::json!(100);
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "id": hover_id, "method": "textDocument/hover",
-        "params": { "textDocument": { "uri": vyx_uri }, "position": { "line": 5, "character": 5 } }
+        "params": { "textDocument": { "uri": vyx_uri }, "position": { "line": 5, "character": 7 } }
     }));
     let resp = client.read_response(&hover_id);
     let value = resp.pointer("/result/contents/value").and_then(|v| v.as_str())
@@ -864,11 +867,12 @@ fn rfc33_completion_in_vyx_template_offers_record_fields() {
     let _ = read_diags_for(&mut client, "Widget.vyx");
     did_open(&mut client, &vyx_uri, "vyx", RFC33_VYX_OK);
 
-    // Cursor just past `item.` on line 6 (0-based 5): `.` at char 9, so char 10.
+    // Cursor just past `item.` on line 6 (0-based 5): `<li>{{ ` is 7 chars, so
+    // `.` sits at char 11 and the cursor lands at char 12 (RFC-0039 v2).
     let comp_id = serde_json::json!(101);
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "id": comp_id, "method": "textDocument/completion",
-        "params": { "textDocument": { "uri": vyx_uri }, "position": { "line": 5, "character": 10 } }
+        "params": { "textDocument": { "uri": vyx_uri }, "position": { "line": 5, "character": 12 } }
     }));
     let resp = client.read_response(&comp_id);
     let items = resp.get("result").and_then(|r| r.as_array()).expect("completion list");
