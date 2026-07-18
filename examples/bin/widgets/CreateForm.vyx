@@ -1,5 +1,6 @@
 <script>
-import { labelCreate, labelTitleField, labelLangField, labelBodyField, labelSave } from "../labels"
+import { i18n } from "std/i18n"
+import { tBinCreate, tBinTitleField, tBinLangLabel, tBinBodyField, tBinSave } from i18n("../strings")
 props {
     draftTitle: String,
     draftLang: String,
@@ -10,12 +11,12 @@ props {
 
 <template>
 <section class="create">
-    <h2>{{ labelCreate() }}</h2>
+    <h2>{{ tBinCreate() }}</h2>
     <p v-if="issues.length > 0" class="issues">{{ issues }}</p>
     <span v-else class="hint"></span>
-    <label class="field">{{ labelTitleField() }}<input type="text" :value="draftTitle" @input="setDraftTitle"/></label>
-    <label class="field">{{ labelLangField() }}<select :value="draftLang" @change="setDraftLang"><option value="text">text</option><option value="vyrn">vyrn</option><option value="json">json</option><option value="rust">rust</option><option value="js">js</option><option value="html">html</option></select></label>
-    <label class="field">{{ labelBodyField() }}<textarea :value="draftBody" @input="setDraftBody"></textarea></label>
-    <button class="save" @click="submitCreate">{{ labelSave() }}</button>
+    <label class="field">{{ tBinTitleField() }}<input type="text" :value="draftTitle" @input="setDraftTitle"/></label>
+    <label class="field">{{ tBinLangLabel() }}<select :value="draftLang" @change="setDraftLang"><option value="text">text</option><option value="vyrn">vyrn</option><option value="json">json</option><option value="rust">rust</option><option value="js">js</option><option value="html">html</option></select></label>
+    <label class="field">{{ tBinBodyField() }}<textarea :value="draftBody" @input="setDraftBody"></textarea></label>
+    <button class="save" @click="submitCreate">{{ tBinSave() }}</button>
 </section>
 </template>

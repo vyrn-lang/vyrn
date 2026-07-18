@@ -1,13 +1,27 @@
 <script>
 // GET /about — static prose + a live CLDR-plural demo (en + uk) as a .vyx PAGE
-// (RFC-0039 §4): the table rows are plain records built by a helper (the locale
-// flip lives in the labels module), rendered by a keyed v-for.
-import { labelAppTitle, labelNavHome, labelNavAbout, labelCountIn } from "../labels"
+// (RFC-0039 §4): the table rows are plain records built by a helper, rendered by
+// a keyed v-for.
+import { i18n } from "std/i18n"
+import { tAppTitle, tNavHomeLabel, tNavAboutLabel, tBinCount, setLocale, locale, Locale } from i18n("../strings")
 
 type PluralRow = { loc: String, n: Int64, msg: String }
 
+// The count message under an explicit locale, restoring the current locale after.
+fn countIn(loc: String, n: Int64) -> String {
+    let saved = locale()
+    if loc == "uk" {
+        setLocale(Uk)
+    } else {
+        setLocale(En)
+    }
+    let msg = tBinCount(n)
+    setLocale(saved)
+    return msg
+}
+
 fn pluralRow(loc: String, n: Int64) -> PluralRow {
-    return PluralRow { loc: loc, n: n, msg: labelCountIn(loc, n) }
+    return PluralRow { loc: loc, n: n, msg: countIn(loc, n) }
 }
 
 fn pluralRows() -> Array<PluralRow> {
@@ -28,10 +42,10 @@ fn pluralRows() -> Array<PluralRow> {
     <link rel="stylesheet" href="/style.css"/>
     <script type="module" src="/vyrn-runtime/vyrn-nav.js"></script>
     <header class="flex items-center gap-3 md:gap-6">
-        <h1>{{ labelAppTitle() }}</h1>
+        <h1>{{ tAppTitle() }}</h1>
         <nav>
-            <a href="/" class="mr-2 hover:text-brand-600">{{ labelNavHome() }}</a>
-            <a href="/about" class="mr-2 hover:text-brand-600">{{ labelNavAbout() }}</a>
+            <a href="/" class="mr-2 hover:text-brand-600">{{ tNavHomeLabel() }}</a>
+            <a href="/about" class="mr-2 hover:text-brand-600">{{ tNavAboutLabel() }}</a>
         </nav>
     </header>
     <main>

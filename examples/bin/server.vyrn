@@ -16,22 +16,18 @@ import { route } from pagesThemed("./routes", "./theme.json")
 import { tw } from "std/tw"
 import * as theme from tw("./theme.json")
 
-/// RFC-0037: a middleware is a STORED function value — each entry may answer a
-/// request outright (`Some`) or pass it along (`None`); the chain runs in
-/// registration order in front of routing.
+/// A middleware may answer a request outright (`Some`) or pass it along (`None`);
+/// the chain runs in registration order in front of routing.
 type Middleware = fn(Request) -> Option<Response>
 
-/// Module state holding closures (the RFC-0037 shape real servers use).
-let mut middleware: Array<Middleware> = []
-
-/// Register the default chain: request logging (observably runs for every
-/// request, never answers).
-fn installMiddleware() {
-    middleware.push(|req| {
-            logger("http").info("\{req.method} \{req.path}")
-            return None
-        })
-}
+/// The chain, installed at module-state init. Request logging runs for every
+/// request and never answers.
+let mut middleware: Array<Middleware> = [
+        |req| {
+        logger("http").info("\{req.method} \{req.path}")
+        return None
+    },
+]
 
 /// Run the chain: the first `Some` wins; middleware after a hit never runs.
 fn runMiddleware(req: Request) -> Option<Response> {
@@ -43,9 +39,6 @@ fn runMiddleware(req: Request) -> Option<Response> {
 }
 
 fn handle(req: Request) -> Response {
-    if middleware.length == 0 {
-        installMiddleware()
-    }
     return match runMiddleware(req) {
         Some(r) => r,
         None => routed(req),
