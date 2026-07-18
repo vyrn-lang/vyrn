@@ -96,18 +96,30 @@ impl OriginMaps {
         for (i, raw) in source.lines().enumerate() {
             total = i + 1;
             let trimmed = raw.trim_start();
-            let Some(rest) = trimmed.strip_prefix("//@origin") else { continue };
+            let Some(rest) = trimmed.strip_prefix("//@origin") else {
+                continue;
+            };
             let rest = rest.trim();
             let gen_line = i + 2; // the directive governs the NEXT line onward
             if rest == "end" {
-                dirs.push(Directive { gen_line, origin: None, malformed: None });
+                dirs.push(Directive {
+                    gen_line,
+                    origin: None,
+                    malformed: None,
+                });
                 continue;
             }
             match parse_origin_body(rest, importer_dir) {
-                Ok(origin) => dirs.push(Directive { gen_line, origin: Some(origin), malformed: None }),
-                Err(reason) => {
-                    dirs.push(Directive { gen_line, origin: None, malformed: Some(reason) })
-                }
+                Ok(origin) => dirs.push(Directive {
+                    gen_line,
+                    origin: Some(origin),
+                    malformed: None,
+                }),
+                Err(reason) => dirs.push(Directive {
+                    gen_line,
+                    origin: None,
+                    malformed: Some(reason),
+                }),
             }
         }
         if !dirs.is_empty() {
@@ -130,8 +142,12 @@ impl OriginMaps {
     /// directive keeps the generated location (the latter adds a note explaining
     /// why it could not be followed).
     pub fn remap(&self, d: &mut Diagnostic) -> bool {
-        let Some(file) = d.file.clone() else { return false };
-        let Some(dirs) = self.modules.get(&file) else { return false };
+        let Some(file) = d.file.clone() else {
+            return false;
+        };
+        let Some(dirs) = self.modules.get(&file) else {
+            return false;
+        };
         // The governing directive is the last one whose region starts at or
         // before the diagnostic's generated line.
         let Some(gov) = dirs.iter().rev().find(|dir| dir.gen_line <= d.line) else {
@@ -213,8 +229,12 @@ impl OriginMaps {
 /// paths are plain relative specifiers, so this is exact.
 fn parse_origin_body(body: &str, importer_dir: &str) -> Result<Origin, String> {
     // Split from the right so the path keeps any interior separators.
-    let (rest, col) = body.rsplit_once(':').ok_or_else(|| "missing `:col`".to_string())?;
-    let (path, line) = rest.rsplit_once(':').ok_or_else(|| "missing `:line`".to_string())?;
+    let (rest, col) = body
+        .rsplit_once(':')
+        .ok_or_else(|| "missing `:col`".to_string())?;
+    let (path, line) = rest
+        .rsplit_once(':')
+        .ok_or_else(|| "missing `:line`".to_string())?;
     let line: usize = line.parse().map_err(|_| format!("bad line `{line}`"))?;
     let col: usize = col.parse().map_err(|_| format!("bad column `{col}`"))?;
     if line == 0 || col == 0 {
@@ -223,7 +243,11 @@ fn parse_origin_body(body: &str, importer_dir: &str) -> Result<Origin, String> {
     if path.is_empty() {
         return Err("empty path".to_string());
     }
-    Ok(Origin { file: resolve_origin_path(importer_dir, path), line, col })
+    Ok(Origin {
+        file: resolve_origin_path(importer_dir, path),
+        line,
+        col,
+    })
 }
 
 /// Resolve a directive `path` (relative to the generator's importing module)

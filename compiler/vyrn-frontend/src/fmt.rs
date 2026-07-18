@@ -128,9 +128,7 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
         let next = next_idx.map(kind);
         match kind(idx) {
             Tok::Type => in_type_decl = true,
-            Tok::Fn | Tok::Let | Tok::Return | Tok::Import | Tok::Export => {
-                in_type_decl = false
-            }
+            Tok::Fn | Tok::Let | Tok::Return | Tok::Import | Tok::Export => in_type_decl = false,
             _ => {}
         }
         match kind(idx) {
@@ -155,7 +153,10 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
                 // It is generic ONLY while a generic `<` is open — a lone tight `>`
                 // whose left side is an operand (`x>0`) is a comparison.
                 let tight_before = !items[idx].space_before;
-                let prev_ok = matches!(prev, Some(Tok::Ident(_)) | Some(Tok::Gt) | Some(Tok::Int(_)));
+                let prev_ok = matches!(
+                    prev,
+                    Some(Tok::Ident(_)) | Some(Tok::Gt) | Some(Tok::Int(_))
+                );
                 if generic_depth > 0 && tight_before && prev_ok {
                     roles[idx].generic_angle = true;
                     generic_depth -= 1;
@@ -457,7 +458,10 @@ mod tests {
     #[test]
     fn indents_by_brace_depth() {
         let src = "fn main() -> Int64 {\nlet x = 1\nreturn x\n}\n";
-        assert_eq!(f(src), "fn main() -> Int64 {\n    let x = 1\n    return x\n}\n");
+        assert_eq!(
+            f(src),
+            "fn main() -> Int64 {\n    let x = 1\n    return x\n}\n"
+        );
     }
 
     #[test]
@@ -490,14 +494,23 @@ mod tests {
 
     #[test]
     fn generic_angles_have_no_spaces() {
-        assert_eq!(f("type Box<T> = { value: T }\n"), "type Box<T> = { value: T }\n");
+        assert_eq!(
+            f("type Box<T> = { value: T }\n"),
+            "type Box<T> = { value: T }\n"
+        );
         assert_eq!(
             f("let p: Pair<Int64, String> = x\n"),
             "let p: Pair<Int64, String> = x\n"
         );
-        assert_eq!(f("fn id<T>(x: T) -> T { return x }\n"), "fn id<T>(x: T) -> T { return x }\n");
+        assert_eq!(
+            f("fn id<T>(x: T) -> T { return x }\n"),
+            "fn id<T>(x: T) -> T { return x }\n"
+        );
         // Nested generics fuse `>>` without a comparison being inferred.
-        assert_eq!(f("let a: Array<Array<Int64>> = x\n"), "let a: Array<Array<Int64>> = x\n");
+        assert_eq!(
+            f("let a: Array<Array<Int64>> = x\n"),
+            "let a: Array<Array<Int64>> = x\n"
+        );
     }
 
     #[test]
@@ -529,7 +542,10 @@ mod tests {
         assert_eq!(f("let x = -1\n"), "let x = -1\n");
         assert_eq!(f("let x = a - 1\n"), "let x = a - 1\n");
         assert_eq!(f("let x = (-1)\n"), "let x = (-1)\n");
-        assert_eq!(f("return match s { Err(e) => -1, }\n"), "return match s { Err(e) => -1, }\n");
+        assert_eq!(
+            f("return match s { Err(e) => -1, }\n"),
+            "return match s { Err(e) => -1, }\n"
+        );
     }
 
     #[test]
@@ -573,13 +589,19 @@ mod tests {
     fn string_literals_reproduced_exactly() {
         // Interpolation holes and escapes are not reformatted.
         let src = "fn f() -> String { return \"n=\\{n + n}, x\\t\" }\n";
-        assert_eq!(f(src), "fn f() -> String { return \"n=\\{n + n}, x\\t\" }\n");
+        assert_eq!(
+            f(src),
+            "fn f() -> String { return \"n=\\{n + n}, x\\t\" }\n"
+        );
     }
 
     #[test]
     fn multiline_string_internal_newlines_preserved() {
         let src = "fn f() -> Int64 {\nlet b = \"a\nc\"\nreturn 0\n}\n";
-        assert_eq!(f(src), "fn f() -> Int64 {\n    let b = \"a\nc\"\n    return 0\n}\n");
+        assert_eq!(
+            f(src),
+            "fn f() -> Int64 {\n    let b = \"a\nc\"\n    return 0\n}\n"
+        );
     }
 
     #[test]
@@ -599,7 +621,10 @@ mod tests {
             f("let fixed: Array<Int64, 5> = x\n"),
             "let fixed: Array<Int64, 5> = x\n"
         );
-        assert_eq!(f("fn w() -> Array<String, 3> { return x }\n"), "fn w() -> Array<String, 3> { return x }\n");
+        assert_eq!(
+            f("fn w() -> Array<String, 3> { return x }\n"),
+            "fn w() -> Array<String, 3> { return x }\n"
+        );
     }
 
     #[test]

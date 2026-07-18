@@ -28,13 +28,21 @@ fn names(a: &vyrn_frontend::Analysis) -> HashSet<String> {
 #[test]
 fn indexes_enum_example_symbols() {
     let a = analyze(&enum_vyrn());
-    assert!(a.diagnostics.is_empty(), "enum.vyrn should be clean: {:?}", a.diagnostics);
+    assert!(
+        a.diagnostics.is_empty(),
+        "enum.vyrn should be clean: {:?}",
+        a.diagnostics
+    );
     let n = names(&a);
     for expected in ["Shape", "Circle", "Rect", "Unit", "area", "main"] {
         assert!(n.contains(expected), "missing symbol {expected}: {:?}", n);
     }
     for injected in ["Value", "IntVal", "StrVal", "BoolVal"] {
-        assert!(!n.contains(injected), "injected {injected} should be filtered: {:?}", n);
+        assert!(
+            !n.contains(injected),
+            "injected {injected} should be filtered: {:?}",
+            n
+        );
     }
 }
 
@@ -100,7 +108,10 @@ fn resolve_type_at_annotation() {
     assert_eq!(r.kind, SymbolKind::Type);
     assert_eq!(r.target_line, 4);
     assert_eq!(r.target_col, 6);
-    assert_eq!(r.hover, "type Shape = Circle(Int64) | Rect(Int64, Int64) | Unit");
+    assert_eq!(
+        r.hover,
+        "type Shape = Circle(Int64) | Rect(Int64, Int64) | Unit"
+    );
 }
 
 /// A cursor not on an identifier resolves to nothing.
@@ -119,10 +130,17 @@ fn completions_list_top_level() {
     let a = analyze(&enum_vyrn());
     let labels: HashSet<String> = completions(&a).into_iter().map(|c| c.label).collect();
     for expected in ["Shape", "Circle", "Rect", "Unit", "area", "main"] {
-        assert!(labels.contains(expected), "completion missing {expected}: {:?}", labels);
+        assert!(
+            labels.contains(expected),
+            "completion missing {expected}: {:?}",
+            labels
+        );
     }
     for injected in ["Value", "IntVal", "StrVal", "BoolVal"] {
-        assert!(!labels.contains(injected), "injected {injected} leaked into completions");
+        assert!(
+            !labels.contains(injected),
+            "injected {injected} leaked into completions"
+        );
     }
 }
 
@@ -134,16 +152,30 @@ fn synthetic_field_refinement_types_are_filtered() {
     let src = "type User = { age: Int64 where value >= 18 }\n\
                fn main() -> Int64 { let u = User { age: 21 } return u.age }\n";
     let a = analyze(src);
-    assert!(a.diagnostics.is_empty(), "clean source: {:?}", a.diagnostics);
+    assert!(
+        a.diagnostics.is_empty(),
+        "clean source: {:?}",
+        a.diagnostics
+    );
     let n = names(&a);
     assert!(n.contains("User"), "the record is indexed: {n:?}");
-    assert!(!n.iter().any(|s| s.contains('.')), "no synthetic types leak: {n:?}");
+    assert!(
+        !n.iter().any(|s| s.contains('.')),
+        "no synthetic types leak: {n:?}"
+    );
     let labels: HashSet<String> = completions(&a).into_iter().map(|c| c.label).collect();
-    assert!(!labels.iter().any(|s| s.contains('.')), "completions clean: {labels:?}");
+    assert!(
+        !labels.iter().any(|s| s.contains('.')),
+        "completions clean: {labels:?}"
+    );
     // Hovering the record renders the refinement as the user WROTE it — the
     // synthetic name never leaks into hover text.
     let user = a.symbols.iter().find(|s| s.name == "User").unwrap();
-    assert_eq!(user.detail, "type User = { age: Int64 where value >= 18 }", "{}", user.detail);
+    assert_eq!(
+        user.detail, "type User = { age: Int64 where value >= 18 }",
+        "{}",
+        user.detail
+    );
 }
 
 /// A body parse error no longer blanks the file. With statement-level recovery
@@ -160,8 +192,15 @@ fn parse_error_still_indexes_symbols() {
                    return good\n\
                }";
     let a = analyze(src);
-    assert!(a.symbols.iter().any(|s| s.name == "main"), "fn symbol indexed: {:?}", a.symbols);
-    assert!(!a.tokens.is_empty(), "identifier tokens cached for cursor mapping");
+    assert!(
+        a.symbols.iter().any(|s| s.name == "main"),
+        "fn symbol indexed: {:?}",
+        a.symbols
+    );
+    assert!(
+        !a.tokens.is_empty(),
+        "identifier tokens cached for cursor mapping"
+    );
     assert!(
         a.locals.iter().any(|l| l.name == "good"),
         "the good local survives the bad statement"
@@ -177,7 +216,10 @@ fn parse_error_still_indexes_symbols() {
 #[test]
 fn diagnostics_delegate_matches_analyze() {
     let a = analyze(&enum_vyrn());
-    assert_eq!(a.diagnostics.len(), vyrn_frontend::diagnostics(&enum_vyrn()).len());
+    assert_eq!(
+        a.diagnostics.len(),
+        vyrn_frontend::diagnostics(&enum_vyrn()).len()
+    );
     assert!(a.diagnostics.is_empty());
 
     // A broken file: both report one parse diagnostic with the same message.
@@ -220,7 +262,11 @@ fn resolve_param_at_use_site() {
 #[test]
 fn resolve_annotated_let() {
     let a = analyze(&foreach_vyrn());
-    assert!(a.diagnostics.is_empty(), "foreach.vyrn should be clean: {:?}", a.diagnostics);
+    assert!(
+        a.diagnostics.is_empty(),
+        "foreach.vyrn should be clean: {:?}",
+        a.diagnostics
+    );
     // Line 13: `    for s in squares {` — `squares` is at col 14.
     let r = resolve(&a, 13, 14).expect("squares at (13,14) should resolve");
     assert_eq!(r.kind, SymbolKind::Local);
@@ -274,7 +320,11 @@ fn main() -> Int64 {
 }
 ";
     let a = analyze(src);
-    assert!(a.diagnostics.is_empty(), "clean source: {:?}", a.diagnostics);
+    assert!(
+        a.diagnostics.is_empty(),
+        "clean source: {:?}",
+        a.diagnostics
+    );
     // Line 2: `    let s = "hi";` — `s` is at col 9.
     let r = resolve(&a, 2, 9).expect("s at (2,9) should resolve");
     assert_eq!(r.kind, SymbolKind::Local);
@@ -320,7 +370,10 @@ fn main() -> Int64 { return 0; }
     // `match` is on line 3: `    let r = match x {` — "match" at 1-based cols
     // 13-17, so col=13, end_col=18.
     assert_eq!(d.line, 3);
-    assert_eq!(d.col, 13, "pinned to the `match` keyword, not col 0 (whole line)");
+    assert_eq!(
+        d.col, 13,
+        "pinned to the `match` keyword, not col 0 (whole line)"
+    );
     assert_eq!(d.end_col, 18);
 }
 
@@ -346,7 +399,10 @@ fn main() -> Int64 {
         .expect("an if-condition diagnostic");
     // Line 2: `    if 5 {` — 4 spaces, then `if` at 1-based cols 5-6.
     assert_eq!(d.line, 2);
-    assert_eq!(d.col, 5, "pinned to the `if` keyword, not col 0 (whole line)");
+    assert_eq!(
+        d.col, 5,
+        "pinned to the `if` keyword, not col 0 (whole line)"
+    );
     assert_eq!(d.end_col, 7);
 }
 
@@ -369,7 +425,10 @@ fn main() -> Int64 {
     // Line 2: `    return x;` — `x` at 1-based col 12 (4 spaces + "return" +
     // space + x).
     assert_eq!(d.line, 2);
-    assert_eq!(d.col, 12, "pinned to the `x` identifier, not col 0 (whole line)");
+    assert_eq!(
+        d.col, 12,
+        "pinned to the `x` identifier, not col 0 (whole line)"
+    );
     assert_eq!(d.end_col, 13);
 }
 
@@ -416,7 +475,10 @@ fn main() -> Int64 { return 0; }
         .expect("an unknown-type diagnostic");
     // Line 1: `fn f(x: Foo) -> Int {` — `Foo` at 1-based cols 9-11.
     assert_eq!(d.line, 1);
-    assert_eq!(d.col, 9, "pinned to the `Foo` identifier, not col 0 (whole line)");
+    assert_eq!(
+        d.col, 9,
+        "pinned to the `Foo` identifier, not col 0 (whole line)"
+    );
     assert_eq!(d.end_col, 12);
 }
 
@@ -432,7 +494,10 @@ fn binding_not_visible_before_its_line() {
     // Line 2: `    return x;` — `x` used before its binding on line 3. No local
     // with line <= 2 named `x`, and no top-level `x` → resolve returns None.
     // (x at col 12 on line 2: 4 spaces + "return" (5-10) + space (11) + x (12).)
-    assert!(resolve(&a, 2, 12).is_none(), "use before binding should not resolve");
+    assert!(
+        resolve(&a, 2, 12).is_none(),
+        "use before binding should not resolve"
+    );
     // Line 4: `    return x;` — now the binding on line 3 is in scope.
     let r = resolve(&a, 4, 12).expect("x at (4,12) should resolve to the let");
     assert_eq!(r.kind, SymbolKind::Local);
@@ -457,7 +522,11 @@ fn main() -> Int64 {
 }
 ";
     let a = analyze(src);
-    assert!(a.diagnostics.is_empty(), "clean source: {:?}", a.diagnostics);
+    assert!(
+        a.diagnostics.is_empty(),
+        "clean source: {:?}",
+        a.diagnostics
+    );
     // Line 3: `    a.push(1);` — 4 spaces, `a` (5), `.` (6), `push` cols 7-11.
     let r = resolve(&a, 3, 7).expect("push at (3,7) should resolve to a builtin");
     assert_eq!(r.kind, SymbolKind::Method);
@@ -478,12 +547,20 @@ fn main() -> Int64 {
 }
 ";
     let a = analyze(src);
-    assert!(a.diagnostics.is_empty(), "clean source: {:?}", a.diagnostics);
+    assert!(
+        a.diagnostics.is_empty(),
+        "clean source: {:?}",
+        a.diagnostics
+    );
     // Line 3: `    log.info("hi");` — 4 spaces, `log` 5-8, `.` 9, `info` 10-14.
     let r = resolve(&a, 3, 10).expect("info at (3,10) should resolve to a builtin");
     assert_eq!(r.name, "info");
     assert!(!r.definition);
-    assert!(r.hover.contains("info(logger, message)"), "hover: {}", r.hover);
+    assert!(
+        r.hover.contains("info(logger, message)"),
+        "hover: {}",
+        r.hover
+    );
 }
 
 /// A user-defined local of the same name as a built-in wins over the built-in
@@ -519,13 +596,22 @@ fn main() -> Int64 {
 ";
     let a = analyze(src);
     // Line 3: `    a.push(1);` — cursor just after the dot (col 7).
-    let labels: HashSet<String> =
-        member_completions(&a, 3, 7).into_iter().map(|c| c.label).collect();
+    let labels: HashSet<String> = member_completions(&a, 3, 7)
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
     for expected in ["push", "at", "alen", "afree", "length"] {
-        assert!(labels.contains(expected), "array member {expected} missing: {:?}", labels);
+        assert!(
+            labels.contains(expected),
+            "array member {expected} missing: {:?}",
+            labels
+        );
     }
     // A Logger method must NOT appear for an array receiver.
-    assert!(!labels.contains("info"), "info is a Logger method, not an array's");
+    assert!(
+        !labels.contains("info"),
+        "info is a Logger method, not an array's"
+    );
 }
 
 /// `member_completions` after `log.` lists the five log levels, keyed off the
@@ -541,13 +627,22 @@ fn main() -> Int64 {
 ";
     let a = analyze(src);
     // Line 3: `    log.info("hi");` — cursor just after the dot (col 10).
-    let labels: HashSet<String> =
-        member_completions(&a, 3, 10).into_iter().map(|c| c.label).collect();
+    let labels: HashSet<String> = member_completions(&a, 3, 10)
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
     for expected in ["trace", "debug", "info", "warn", "error"] {
-        assert!(labels.contains(expected), "logger member {expected} missing: {:?}", labels);
+        assert!(
+            labels.contains(expected),
+            "logger member {expected} missing: {:?}",
+            labels
+        );
     }
     // An array method must NOT appear for a Logger receiver.
-    assert!(!labels.contains("push"), "push is an array method, not a Logger's");
+    assert!(
+        !labels.contains("push"),
+        "push is an array method, not a Logger's"
+    );
 }
 
 /// `member_completions` returns nothing when the receiver's type can't be
@@ -558,7 +653,10 @@ fn member_completions_empty_without_receiver_type() {
     let src = "fn main() -> Int64 { let a: Array<Int64> = []; return a.length; }\n";
     let a = analyze(src);
     // Line 1, col 1 — no dot at/before the cursor → no member context.
-    assert!(member_completions(&a, 1, 1).is_empty(), "no dot → no members");
+    assert!(
+        member_completions(&a, 1, 1).is_empty(),
+        "no dot → no members"
+    );
 }
 
 /// `analyze_linked` resolves imports through the loader: a two-file program
@@ -567,26 +665,40 @@ fn member_completions_empty_without_receiver_type() {
 /// into `lib.vyrn`), and it appears in completions.
 #[test]
 fn analyze_linked_resolves_imports() {
-    let root = "import { double } from \"./lib\"\n\nfn main() -> Int64 {\n    return double(21)\n}\n";
+    let root =
+        "import { double } from \"./lib\"\n\nfn main() -> Int64 {\n    return double(21)\n}\n";
     let lib = "export fn double(x: Int64) -> Int64 {\n    return x * 2\n}\n";
 
     // Single-file analyze: `double` is unknown.
     assert!(
-        analyze(root).diagnostics.iter().any(|d| d.message.contains("double")),
+        analyze(root)
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("double")),
         "plain analyze should flag the imported name"
     );
 
     let resolver = vyrn_frontend::loader::MapResolver(
-        [("lib.vyrn".to_string(), lib.to_string())].into_iter().collect(),
+        [("lib.vyrn".to_string(), lib.to_string())]
+            .into_iter()
+            .collect(),
     );
     let opts = vyrn_frontend::loader::LoadOptions::default();
     let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver);
-    assert!(a.diagnostics.is_empty(), "linked analyze should be clean: {:?}", a.diagnostics);
+    assert!(
+        a.diagnostics.is_empty(),
+        "linked analyze should be clean: {:?}",
+        a.diagnostics
+    );
     let syms = names(&a);
     assert!(syms.contains("main"));
 
     // The imported symbol is indexed with its source file...
-    let d = a.symbols.iter().find(|s| s.name == "double").expect("imported symbol indexed");
+    let d = a
+        .symbols
+        .iter()
+        .find(|s| s.name == "double")
+        .expect("imported symbol indexed");
     assert_eq!(d.file.as_deref(), Some("lib.vyrn"));
     assert_eq!(d.line, 1, "declaration line in the imported file");
     assert_eq!(d.col, 0, "foreign columns are unknown (whole-line)");
@@ -597,12 +709,22 @@ fn analyze_linked_resolves_imports() {
     assert_eq!(r.name, "double");
     assert_eq!(r.target_file.as_deref(), Some("lib.vyrn"));
     assert_eq!(r.target_line, 1);
-    assert!(r.definition, "an imported symbol has a real declaration to jump to");
-    assert!(r.hover.contains("double"), "hover shows the signature: {}", r.hover);
+    assert!(
+        r.definition,
+        "an imported symbol has a real declaration to jump to"
+    );
+    assert!(
+        r.hover.contains("double"),
+        "hover shows the signature: {}",
+        r.hover
+    );
 
     // ...and is offered as a completion.
     let labels: HashSet<String> = completions(&a).into_iter().map(|c| c.label).collect();
-    assert!(labels.contains("double"), "imported names complete: {labels:?}");
+    assert!(
+        labels.contains("double"),
+        "imported names complete: {labels:?}"
+    );
 }
 
 /// Importing a name that collides with a root declaration is a LINK error
@@ -614,11 +736,16 @@ fn import_collision_errors_but_root_index_survives() {
     let root = "import { helper } from \"./lib\"\n\nfn helper(x: Int64) -> Int64 {\n    return x\n}\n\nfn main() -> Int64 {\n    return helper(1)\n}\n";
     let lib = "export fn helper(x: Int64) -> Int64 {\n    return x + 1\n}\n";
     let resolver = vyrn_frontend::loader::MapResolver(
-        [("lib.vyrn".to_string(), lib.to_string())].into_iter().collect(),
+        [("lib.vyrn".to_string(), lib.to_string())]
+            .into_iter()
+            .collect(),
     );
     let opts = vyrn_frontend::loader::LoadOptions::default();
     let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver);
-    assert!(!a.diagnostics.is_empty(), "the name collision must be reported");
+    assert!(
+        !a.diagnostics.is_empty(),
+        "the name collision must be reported"
+    );
     // Line 8: `    return helper(1)` — cursor inside `helper`.
     let r = resolve(&a, 8, 13).expect("call site still resolves");
     assert_eq!(r.target_file, None, "resolves to the root declaration");
@@ -632,7 +759,9 @@ fn analyze_linked_adopts_foreign_errors() {
     let root = "import { bad } from \"./lib\"\n\nfn main() -> Int64 {\n    return bad(1)\n}\n";
     let lib = "export fn bad(x: Int64) -> Int64 {\n    return \"nope\"\n}\n";
     let resolver = vyrn_frontend::loader::MapResolver(
-        [("lib.vyrn".to_string(), lib.to_string())].into_iter().collect(),
+        [("lib.vyrn".to_string(), lib.to_string())]
+            .into_iter()
+            .collect(),
     );
     let opts = vyrn_frontend::loader::LoadOptions::default();
     let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver);
@@ -652,8 +781,14 @@ fn analyze_linked_missing_module_still_indexes_root() {
     let resolver = vyrn_frontend::loader::MapResolver(Default::default());
     let opts = vyrn_frontend::loader::LoadOptions::default();
     let a = vyrn_frontend::analyze_linked(root, "main.vyrn", &opts, &resolver);
-    assert!(!a.diagnostics.is_empty(), "unresolvable import must be reported");
-    assert!(names(&a).contains("main"), "root symbols survive a load failure");
+    assert!(
+        !a.diagnostics.is_empty(),
+        "unresolvable import must be reported"
+    );
+    assert!(
+        names(&a).contains("main"),
+        "root symbols survive a load failure"
+    );
 }
 
 /// `.foo` member completion offers user protocol methods (RFC-0002 §5):
@@ -664,19 +799,33 @@ fn analyze_linked_missing_module_still_indexes_root() {
 fn member_completion_offers_protocol_methods() {
     let src = "protocol Show {\n    fn show(self) -> String\n}\n\nimpl Show for Int64 {\n    fn show(self) -> String { return self.toString() }\n}\n\nfn describe<T: Show>(x: T) -> String {\n    return x.show()\n}\n\nfn main() -> Int64 {\n    let n: Int64 = 5\n    let s = n.show()\n    return 0\n}\n";
     let a = analyze(src);
-    assert!(a.diagnostics.is_empty(), "clean program: {:?}", a.diagnostics);
+    assert!(
+        a.diagnostics.is_empty(),
+        "clean program: {:?}",
+        a.diagnostics
+    );
 
     // Concrete receiver: line 15 `    let s = n.show()` - cursor inside `show`
     // (the dot is at col 14). `n: Int64` + `impl Show for Int64` -> show.
-    let labels: HashSet<String> =
-        member_completions(&a, 15, 15).into_iter().map(|c| c.label).collect();
-    assert!(labels.contains("show"), "impl method offered for Int64 receiver: {labels:?}");
+    let labels: HashSet<String> = member_completions(&a, 15, 15)
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(
+        labels.contains("show"),
+        "impl method offered for Int64 receiver: {labels:?}"
+    );
 
     // Bounded generic receiver: line 10 `    return x.show()` in
     // `describe<T: Show>` - the bound protocol's methods are offered.
-    let labels: HashSet<String> =
-        member_completions(&a, 10, 14).into_iter().map(|c| c.label).collect();
-    assert!(labels.contains("show"), "protocol method offered for bounded T: {labels:?}");
+    let labels: HashSet<String> = member_completions(&a, 10, 14)
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(
+        labels.contains("show"),
+        "protocol method offered for bounded T: {labels:?}"
+    );
 
     // An unbounded/unknown receiver offers nothing from protocols; and hover
     // on `show` at the call site resolves to a real declaration (the impl
@@ -684,7 +833,11 @@ fn member_completion_offers_protocol_methods() {
     let r = resolve(&a, 15, 15).expect("method name resolves");
     assert_eq!(r.name, "show");
     assert!(r.definition, "user impl method has a source declaration");
-    assert!(r.hover.contains("show"), "hover shows the signature: {}", r.hover);
+    assert!(
+        r.hover.contains("show"),
+        "hover shows the signature: {}",
+        r.hover
+    );
 }
 
 /// `.foo` member completion on a record receiver offers the record's fields,
@@ -693,12 +846,19 @@ fn member_completion_offers_protocol_methods() {
 fn member_completion_offers_record_fields() {
     let src = "type User = { age: Int64 where value >= 18, name: String }\nfn main() -> Int64 {\n    let u: User = User { age: 21, name: \"max\" }\n    let a = u.age\n    return 0\n}\n";
     let a = analyze(src);
-    assert!(a.diagnostics.is_empty(), "clean program: {:?}", a.diagnostics);
+    assert!(
+        a.diagnostics.is_empty(),
+        "clean program: {:?}",
+        a.diagnostics
+    );
     // Line 4 `    let a = u.age` - the dot is at col 14, cursor inside `age`.
     let items = member_completions(&a, 4, 15);
     let by_label: std::collections::HashMap<String, String> =
         items.into_iter().map(|c| (c.label, c.detail)).collect();
-    assert!(by_label.contains_key("name"), "plain field offered: {by_label:?}");
+    assert!(
+        by_label.contains_key("name"),
+        "plain field offered: {by_label:?}"
+    );
     assert_eq!(
         by_label.get("age").map(String::as_str),
         Some("age: Int64 where value >= 18"),

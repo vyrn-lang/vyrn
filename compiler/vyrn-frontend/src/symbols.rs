@@ -250,7 +250,11 @@ fn adopt_foreign(mut d: Diagnostic) -> Diagnostic {
 
 fn analyze_inner(
     source: &str,
-    linker: Option<(&str, &crate::loader::LoadOptions, &dyn crate::loader::ModuleResolver)>,
+    linker: Option<(
+        &str,
+        &crate::loader::LoadOptions,
+        &dyn crate::loader::ModuleResolver,
+    )>,
 ) -> Analysis {
     let tokens = match lexer::lex(source) {
         Ok(t) => t,
@@ -413,7 +417,11 @@ fn analyze_inner(
         .functions
         .iter()
         .chain(program.impls.iter().flat_map(|i| i.methods.iter()))
-        .flat_map(|f| f.type_bounds.iter().map(|(tp, bs)| (f.line, tp.clone(), bs.clone())))
+        .flat_map(|f| {
+            f.type_bounds
+                .iter()
+                .map(|(tp, bs)| (f.line, tp.clone(), bs.clone()))
+        })
         .collect();
     let mut record_fields = Vec::new();
     for t in &member_src.type_decls {
@@ -451,7 +459,12 @@ fn analyze_inner(
     let fn_param_types = member_src
         .functions
         .iter()
-        .map(|f| (f.name.clone(), f.params.iter().map(|p| p.ty.clone()).collect()))
+        .map(|f| {
+            (
+                f.name.clone(),
+                f.params.iter().map(|p| p.ty.clone()).collect(),
+            )
+        })
         .collect();
 
     Analysis {
@@ -570,7 +583,10 @@ fn backtick_tokens(msg: &str) -> Vec<&str> {
 /// for pinned diagnostics, as it already was for `match`.
 fn pin_diagnostics(
     diags: &mut [Diagnostic],
-    kw_cols: &std::collections::HashMap<usize, std::collections::HashMap<&'static str, (usize, usize)>>,
+    kw_cols: &std::collections::HashMap<
+        usize,
+        std::collections::HashMap<&'static str, (usize, usize)>,
+    >,
     tok_info: &[TokenInfo],
 ) {
     for d in diags.iter_mut() {
@@ -582,7 +598,10 @@ fn pin_diagnostics(
         for target in backtick_tokens(&d.message) {
             // Identifier path: a user name on this line (the common case — the
             // offending use is on the error's line).
-            if let Some(t) = tok_info.iter().find(|t| t.line == d.line && t.text == target) {
+            if let Some(t) = tok_info
+                .iter()
+                .find(|t| t.line == d.line && t.text == target)
+            {
                 d.col = t.col;
                 d.end_col = t.end_col;
                 break;
@@ -590,9 +609,7 @@ fn pin_diagnostics(
             // Keyword/operator path: `if`/`while`/`where`/`drop`/`match`/`?`/
             // `&&`/`||`/`!`. Reserved words are never identifiers, so the
             // identifier path above won't have matched them.
-            if let Some(&(col, end_col)) =
-                kw_cols.get(&d.line).and_then(|kws| kws.get(target))
-            {
+            if let Some(&(col, end_col)) = kw_cols.get(&d.line).and_then(|kws| kws.get(target)) {
                 d.col = col;
                 d.end_col = end_col;
                 break;
@@ -648,7 +665,10 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
     // decl doesn't capture a qualified member reference.
     if let Some(recv) = receiver_before_dot(analysis, tok.line, tok.col) {
         let shadowed = enclosing_fn_line(analysis, line).is_some_and(|fl| {
-            analysis.locals.iter().any(|b| b.fn_line == fl && b.name == recv && b.line <= line)
+            analysis
+                .locals
+                .iter()
+                .any(|b| b.fn_line == fl && b.name == recv && b.line <= line)
         });
         if !shadowed {
             if let Some(nsi) = analysis.namespaces.iter().find(|n| n.name == recv) {
@@ -737,7 +757,11 @@ fn enclosing_fn_line(analysis: &Analysis, cursor_line: usize) -> Option<usize> {
         .find(|&&l| l <= cursor_line)
         .copied()?;
     // That segment is a function iff its decl line is a function line.
-    analysis.fn_lines.iter().any(|&l| l == seg_start).then_some(seg_start)
+    analysis
+        .fn_lines
+        .iter()
+        .any(|&l| l == seg_start)
+        .then_some(seg_start)
 }
 
 /// All top-level symbols as completion items. The client filters by the prefix
@@ -746,7 +770,11 @@ pub fn completions(analysis: &Analysis) -> Vec<Completion> {
     analysis
         .symbols
         .iter()
-        .map(|s| Completion { label: s.name.clone(), kind: s.kind, detail: s.detail.clone() })
+        .map(|s| Completion {
+            label: s.name.clone(),
+            kind: s.kind,
+            detail: s.detail.clone(),
+        })
         .collect()
 }
 
@@ -894,7 +922,11 @@ pub fn string_literal_completions(
     let Some(ty_name) = expected_string_type(analysis, source, line, col) else {
         return Vec::new();
     };
-    let Some((_, domain)) = analysis.finite_string_types.iter().find(|(n, _)| n == &ty_name) else {
+    let Some((_, domain)) = analysis
+        .finite_string_types
+        .iter()
+        .find(|(n, _)| n == &ty_name)
+    else {
         return Vec::new();
     };
     domain
@@ -938,10 +970,7 @@ fn expected_string_type(
 
     // Case A: annotated `let name : T = "…"`. The tokens immediately before the
     // string are `… : TypeIdent =`, so `toks[str_idx-3..str_idx]` is `: T =`.
-    if str_idx >= 3
-        && toks[str_idx - 1].tok == Tok::Eq
-        && toks[str_idx - 3].tok == Tok::Colon
-    {
+    if str_idx >= 3 && toks[str_idx - 1].tok == Tok::Eq && toks[str_idx - 3].tok == Tok::Colon {
         if let Tok::Ident(tn) = &toks[str_idx - 2].tok {
             return Some(tn.clone());
         }
@@ -1077,11 +1106,7 @@ fn name_col_on_line(tok_info: &[TokenInfo], name: &str, line: usize) -> (usize, 
         .unwrap_or((0, 0))
 }
 
-fn index_symbols(
-    program: &ast::Program,
-    tok_info: &[TokenInfo],
-    lines: &[usize],
-) -> Vec<Symbol> {
+fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]) -> Vec<Symbol> {
     let mut out = Vec::new();
 
     for f in &program.functions {
@@ -1172,7 +1197,11 @@ fn index_symbols(
         if let Type::Enum(variants) = &t.base {
             // Variants carry no AST line; find the name token between this decl's
             // line and the next top-level declaration (or EOF).
-            let until = lines.iter().find(|&&l| l > t.line).copied().unwrap_or(usize::MAX);
+            let until = lines
+                .iter()
+                .find(|&&l| l > t.line)
+                .copied()
+                .unwrap_or(usize::MAX);
             for v in variants {
                 let found = tok_info
                     .iter()
@@ -1333,9 +1362,15 @@ fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Sym
 fn index_namespaces(
     source: &str,
     root: &ast::Program,
-    linker: Option<(&str, &crate::loader::LoadOptions, &dyn crate::loader::ModuleResolver)>,
+    linker: Option<(
+        &str,
+        &crate::loader::LoadOptions,
+        &dyn crate::loader::ModuleResolver,
+    )>,
 ) -> Vec<NamespaceInfo> {
-    let Some((root_path, opts, resolver)) = linker else { return Vec::new() };
+    let Some((root_path, opts, resolver)) = linker else {
+        return Vec::new();
+    };
     if !root.imports.iter().any(|i| i.namespace.is_some()) {
         return Vec::new();
     }
@@ -1365,8 +1400,12 @@ fn index_namespaces(
 /// that can't be read (a synthesized generator module has no file) yields no
 /// members — completion after that `ns.` simply offers nothing.
 fn namespace_members(target: &str, resolver: &dyn crate::loader::ModuleResolver) -> Vec<Symbol> {
-    let Ok(text) = resolver.read(target) else { return Vec::new() };
-    let Ok(tokens) = lexer::lex(&text) else { return Vec::new() };
+    let Ok(text) = resolver.read(target) else {
+        return Vec::new();
+    };
+    let Ok(tokens) = lexer::lex(&text) else {
+        return Vec::new();
+    };
     let (program, _errs) = parser::parse_accum(tokens);
     let mut out = Vec::new();
     for f in &program.functions {
@@ -1491,7 +1530,13 @@ fn collect_lets(
 ) {
     for stmt in &block.stmts {
         match stmt {
-            Stmt::Let { name, mutable, ty, line, .. } => {
+            Stmt::Let {
+                name,
+                mutable,
+                ty,
+                line,
+                ..
+            } => {
                 // Synthetic desugar temporaries (e.g. `ps[]`, from `a[i].f = v`)
                 // are unspellable — they contain characters no real identifier
                 // can — and have no source token; never surface them as
@@ -1516,7 +1561,9 @@ fn collect_lets(
                     fn_line,
                 });
             }
-            Stmt::ForIn { var, body, line, .. } => {
+            Stmt::ForIn {
+                var, body, line, ..
+            } => {
                 let (col, end_col) = name_col_on_line(tok_info, var, *line);
                 // The element type is inferred by the checker and retained in
                 // `let_types`; fall back to None if it isn't there.
@@ -1532,7 +1579,11 @@ fn collect_lets(
                 });
                 collect_lets(body, fn_line, tok_info, let_types, out);
             }
-            Stmt::If { then_block, else_block, .. } => {
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
                 collect_lets(then_block, fn_line, tok_info, let_types, out);
                 if let Some(eb) = else_block {
                     collect_lets(eb, fn_line, tok_info, let_types, out);
@@ -1607,7 +1658,14 @@ fn function_detail(f: &Function) -> String {
     } else {
         "fn"
     };
-    format!("{} {}{}({}) -> {}", kw, f.name, tp, params, type_to_string(&f.ret))
+    format!(
+        "{} {}{}({}) -> {}",
+        kw,
+        f.name,
+        tp,
+        params,
+        type_to_string(&f.ret)
+    )
 }
 
 /// Hover text for a module-state binding (RFC-0013), e.g. `let mut hits: Int64`.
@@ -1631,9 +1689,10 @@ fn infer_literal_type(e: &Expr) -> Option<Type> {
         Expr::Bool(_) => Some(Type::Bool),
         Expr::Str(_) => Some(Type::Str),
         Expr::Unary { expr, .. } => infer_literal_type(expr),
-        Expr::ArrayLit { elems, .. } => {
-            elems.first().and_then(infer_literal_type).map(|t| Type::Array(Box::new(t)))
-        }
+        Expr::ArrayLit { elems, .. } => elems
+            .first()
+            .and_then(infer_literal_type)
+            .map(|t| Type::Array(Box::new(t))),
         _ => None,
     }
 }
@@ -1641,13 +1700,27 @@ fn infer_literal_type(e: &Expr) -> Option<Type> {
 fn method_sig_detail(m: &MethodSig) -> String {
     // MethodSig.params are types only (names are dropped by the parser); the
     // receiver `self` is implied and prepended.
-    let params = m.params.iter().map(type_to_string).collect::<Vec<_>>().join(", ");
-    let sig = if params.is_empty() { "self".to_string() } else { format!("self, {}", params) };
+    let params = m
+        .params
+        .iter()
+        .map(type_to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sig = if params.is_empty() {
+        "self".to_string()
+    } else {
+        format!("self, {}", params)
+    };
     format!("fn {}({}) -> {}", m.name, sig, type_to_string(&m.ret))
 }
 
 fn protocol_detail(p: &ProtocolDecl) -> String {
-    let ms = p.methods.iter().map(method_sig_detail).collect::<Vec<_>>().join("; ");
+    let ms = p
+        .methods
+        .iter()
+        .map(method_sig_detail)
+        .collect::<Vec<_>>()
+        .join("; ");
     if ms.is_empty() {
         format!("protocol {}", p.name)
     } else {
@@ -1683,8 +1756,11 @@ fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl]) -> String {
             format!("type {} = {}", t.name, arms)
         }
         Type::Record(fields) => {
-            let fs =
-                fields.iter().map(|f| field_detail(f, all)).collect::<Vec<_>>().join(", ");
+            let fs = fields
+                .iter()
+                .map(|f| field_detail(f, all))
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("type {} = {{ {} }}", t.name, fs)
         }
         _ => {
@@ -1705,7 +1781,11 @@ fn variant_arm(v: &EnumVariant) -> String {
         format!(
             "{}({})",
             v.name,
-            v.payload.iter().map(type_to_string).collect::<Vec<_>>().join(", ")
+            v.payload
+                .iter()
+                .map(type_to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     }
 }
@@ -1718,7 +1798,11 @@ fn variant_detail(enum_name: &str, v: &EnumVariant) -> String {
             "variant of {}: {}({})",
             enum_name,
             v.name,
-            v.payload.iter().map(type_to_string).collect::<Vec<_>>().join(", ")
+            v.payload
+                .iter()
+                .map(type_to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     }
 }
@@ -1802,26 +1886,40 @@ fn builtin_methods_for(ty: &Type) -> Vec<BuiltinMethod> {
         .flatten()
         .collect(),
         // A fixed-size `Array<T, N>` cannot shrink — no `pop`/`swapRemove`.
-        Type::ArrayN(..) => vec![by_name("push"), by_name("at"), by_name("alen"), by_name("afree")]
-            .into_iter()
-            .flatten()
-            .collect(),
+        Type::ArrayN(..) => vec![
+            by_name("push"),
+            by_name("at"),
+            by_name("alen"),
+            by_name("afree"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
         // A `Map<String, V>` (RFC-0028): `has`/`remove`/`keys` methods plus the
         // `.length` field (surfaced by field completion, like a String's length).
         Type::Map(..) => vec![by_name("has"), by_name("remove"), by_name("keys")]
             .into_iter()
             .flatten()
             .collect(),
-        Type::Ref(_) => vec![by_name("get"), by_name("set"), by_name("release")].into_iter().flatten().collect(),
+        Type::Ref(_) => vec![by_name("get"), by_name("set"), by_name("release")]
+            .into_iter()
+            .flatten()
+            .collect(),
         // `String` renders with `.toString()` (its byte length is the `.length`
         // field, surfaced by record/field completion, not here).
         Type::Str | Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool => {
             vec![by_name("toString")].into_iter().flatten().collect()
         }
-        Type::Logger => vec![by_name("trace"), by_name("debug"), by_name("info"), by_name("warn"), by_name("error")]
-            .into_iter()
-            .flatten()
-            .collect(),
+        Type::Logger => vec![
+            by_name("trace"),
+            by_name("debug"),
+            by_name("info"),
+            by_name("warn"),
+            by_name("error"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
         Type::Task(_) => vec![by_name("join")].into_iter().flatten().collect(),
         _ => Vec::new(),
     }
@@ -1840,13 +1938,21 @@ mod tests {
                    let banner: String = \"hi\"\n\
                    fn main() -> Int64 { return hits }";
         let a = analyze(src);
-        let hits = a.symbols.iter().find(|s| s.name == "hits").expect("hits symbol");
+        let hits = a
+            .symbols
+            .iter()
+            .find(|s| s.name == "hits")
+            .expect("hits symbol");
         assert_eq!(hits.kind, SymbolKind::Global);
         assert_eq!(hits.detail, "let mut hits: Int64");
         assert_eq!(hits.line, 1);
         assert!(hits.col > 0, "has a name column for go-to-def");
 
-        let banner = a.symbols.iter().find(|s| s.name == "banner").expect("banner symbol");
+        let banner = a
+            .symbols
+            .iter()
+            .find(|s| s.name == "banner")
+            .expect("banner symbol");
         assert_eq!(banner.kind, SymbolKind::Global);
         assert_eq!(banner.detail, "let banner: String");
     }
@@ -1858,7 +1964,11 @@ mod tests {
         let src = "test \"adds up\" { assert(1 + 1 == 2) }\n\
                    fn main() -> Int64 { return 0 }";
         let a = analyze(src);
-        let t = a.symbols.iter().find(|s| s.name == "adds up").expect("test symbol");
+        let t = a
+            .symbols
+            .iter()
+            .find(|s| s.name == "adds up")
+            .expect("test symbol");
         assert_eq!(t.kind, SymbolKind::Method);
         assert_eq!(t.detail, "test \"adds up\"");
         assert_eq!(t.line, 1);
@@ -1887,9 +1997,15 @@ mod tests {
         assert!(
             a.diagnostics.is_empty(),
             "diags: {:?}",
-            a.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
+            a.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
         );
-        assert!(a.symbols.iter().any(|s| s.name == "magic"), "generated `magic` is indexed");
+        assert!(
+            a.symbols.iter().any(|s| s.name == "magic"),
+            "generated `magic` is indexed"
+        );
     }
 
     #[test]
@@ -1913,11 +2029,21 @@ mod tests {
             .iter()
             .find(|s| s.name == "fetchUser" && s.file.is_some())
             .expect("aliased import indexed under the local name");
-        assert!(sym.detail.contains("alias of `getUser`"), "hover detail: {}", sym.detail);
-        assert_eq!(sym.file.as_deref(), Some("api.vyrn"), "go-to-def jumps to the source module");
+        assert!(
+            sym.detail.contains("alias of `getUser`"),
+            "hover detail: {}",
+            sym.detail
+        );
+        assert_eq!(
+            sym.file.as_deref(),
+            Some("api.vyrn"),
+            "go-to-def jumps to the source module"
+        );
         // The original name is NOT indexed as an imported symbol.
         assert!(
-            !a.symbols.iter().any(|s| s.name == "getUser" && s.file.is_some()),
+            !a.symbols
+                .iter()
+                .any(|s| s.name == "getUser" && s.file.is_some()),
             "original name is hidden by the alias"
         );
     }
@@ -1930,7 +2056,8 @@ mod tests {
         let files: std::collections::HashMap<String, String> = [(
             "api.vyrn".to_string(),
             "export type User = { id: Int64 }\n\
-             export fn getUser(id: Int64) -> User { return User { id: id } }".to_string(),
+             export fn getUser(id: Int64) -> User { return User { id: id } }"
+                .to_string(),
         )]
         .into_iter()
         .collect();
@@ -1941,8 +2068,15 @@ mod tests {
         assert!(a.diagnostics.is_empty(), "diags: {:?}", a.diagnostics);
 
         // The namespace binding and its members are recorded.
-        let nsi = a.namespaces.iter().find(|n| n.name == "api").expect("namespace `api` indexed");
-        assert!(nsi.members.iter().any(|m| m.name == "getUser"), "getUser member");
+        let nsi = a
+            .namespaces
+            .iter()
+            .find(|n| n.name == "api")
+            .expect("namespace `api` indexed");
+        assert!(
+            nsi.members.iter().any(|m| m.name == "getUser"),
+            "getUser member"
+        );
         assert!(nsi.members.iter().any(|m| m.name == "User"), "User member");
 
         // Columns are 1-based; line 2 is the `fn main` body.
@@ -1951,19 +2085,39 @@ mod tests {
 
         // Completion at the `getUser` member position offers the module's exports.
         let comps = member_completions(&a, 2, getuser_col);
-        assert!(comps.iter().any(|c| c.label == "getUser"), "completions: {comps:?}");
-        assert!(comps.iter().all(|c| c.detail.contains("via namespace `api`")), "via-namespace note");
+        assert!(
+            comps.iter().any(|c| c.label == "getUser"),
+            "completions: {comps:?}"
+        );
+        assert!(
+            comps
+                .iter()
+                .all(|c| c.detail.contains("via namespace `api`")),
+            "via-namespace note"
+        );
 
         // Go-to-definition on the `getUser` in `api.getUser` jumps into api.vyrn.
         let r = resolve(&a, 2, getuser_col).expect("resolve api.getUser");
         assert_eq!(r.name, "getUser");
-        assert_eq!(r.target_file.as_deref(), Some("api.vyrn"), "cross-file go-to-def");
-        assert!(r.hover.contains("via namespace `api`"), "hover note: {}", r.hover);
+        assert_eq!(
+            r.target_file.as_deref(),
+            Some("api.vyrn"),
+            "cross-file go-to-def"
+        );
+        assert!(
+            r.hover.contains("via namespace `api`"),
+            "hover note: {}",
+            r.hover
+        );
 
         // Hovering the `api` binding shows the namespace hover (not a value).
         let acol = body.find("api.").unwrap() + 1;
         let rn = resolve(&a, 2, acol).expect("resolve namespace name");
-        assert!(rn.hover.contains("namespace `api`"), "namespace hover: {}", rn.hover);
+        assert!(
+            rn.hover.contains("namespace `api`"),
+            "namespace hover: {}",
+            rn.hover
+        );
     }
 
     // ---- RFC-0028: Map method completion ------------------------------------
@@ -1985,7 +2139,10 @@ mod tests {
             assert!(labels.contains(&want), "expected `{want}` in {labels:?}");
         }
         // Array-only shrinking ops are NOT offered on a Map.
-        assert!(!labels.contains(&"pop"), "map must not offer `pop`: {labels:?}");
+        assert!(
+            !labels.contains(&"pop"),
+            "map must not offer `pop`: {labels:?}"
+        );
     }
 
     // ---- RFC-0020 M1: string-literal completion -----------------------------
@@ -2001,7 +2158,10 @@ mod tests {
             .iter()
             .find(|(n, _)| n == "TransKey")
             .expect("TransKey enumerated");
-        assert_eq!(domain, &vec!["nav.about.label".to_string(), "nav.home.label".to_string()]);
+        assert_eq!(
+            domain,
+            &vec!["nav.about.label".to_string(), "nav.home.label".to_string()]
+        );
     }
 
     #[test]
@@ -2018,9 +2178,7 @@ mod tests {
 
     #[test]
     fn string_literal_completion_at_an_annotated_let() {
-        let src = format!(
-            "{TRANSKEY}fn main() -> Int64 {{ let k: TransKey = \"\"  return 0 }}"
-        );
+        let src = format!("{TRANSKEY}fn main() -> Int64 {{ let k: TransKey = \"\"  return 0 }}");
         // Line 2: `... let k: TransKey = ""  ...` — the `""` opens at col 40.
         let items = string_literal_completions(&analyze(&src), &src, 2, 41);
         let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();

@@ -24,8 +24,16 @@ fn accumulates_across_functions() {
     assert_eq!(diags.len(), 2, "{:?}", diags);
     assert_eq!(diags[0].stage, "check");
     assert_eq!(diags[1].stage, "check");
-    assert!(diags[0].message.contains("return type mismatch"), "{:?}", diags[0]);
-    assert!(diags[1].message.contains("`+` concatenates two Strings"), "{:?}", diags[1]);
+    assert!(
+        diags[0].message.contains("return type mismatch"),
+        "{:?}",
+        diags[0]
+    );
+    assert!(
+        diags[1].message.contains("`+` concatenates two Strings"),
+        "{:?}",
+        diags[1]
+    );
     // f is on line 1, g on line 2.
     assert_eq!(diags[0].line, 1);
     assert_eq!(diags[1].line, 2);
@@ -40,7 +48,11 @@ fn lex_error_is_single_and_has_a_column() {
     assert_eq!(diags[0].stage, "lex");
     // `@` is the 30th character (1-based) of `fn main() -> Int64 { let x = @; ...`.
     assert_eq!(diags[0].col, 30);
-    assert!(diags[0].message.contains("unexpected character"), "{:?}", diags[0]);
+    assert!(
+        diags[0].message.contains("unexpected character"),
+        "{:?}",
+        diags[0]
+    );
 }
 
 /// A parse error is reported alone (the parser stops at the first problem);
@@ -62,7 +74,10 @@ fn check_shim_matches_first_rendered() {
     let via_shim = vyrn_frontend::check(src).unwrap_err();
     // The shim returns the FIRST diagnostic rendered, which is f's error on line 1.
     assert_eq!(via_shim, diags[0].render());
-    assert_eq!(via_shim, "line 1: return type mismatch: expected Int64, found Bool");
+    assert_eq!(
+        via_shim,
+        "line 1: return type mismatch: expected Int64, found Bool"
+    );
 }
 
 /// A move-check error (use-after-consume) is reported with the right stage and
@@ -79,7 +94,12 @@ fn movecheck_accumulates_with_check() {
     let move_errs = diags.iter().filter(|d| d.stage == "movecheck").count();
     assert_eq!(check_errs, 1, "{:?}", diags);
     assert_eq!(move_errs, 1, "{:?}", diags);
-    assert!(diags.iter().any(|d| d.stage == "movecheck" && d.message.contains("already consumed")), "{diags:?}");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.stage == "movecheck" && d.message.contains("already consumed")),
+        "{diags:?}"
+    );
 }
 
 /// Inside-body accumulation for movecheck (RFC-0006): two *independent*
@@ -95,7 +115,13 @@ fn movecheck_accumulates_within_function_body() {
     let diags = diagnostics(src);
     let move_errs: Vec<_> = diags.iter().filter(|d| d.stage == "movecheck").collect();
     assert_eq!(move_errs.len(), 2, "{:?}", diags);
-    assert!(move_errs.iter().all(|d| d.message.contains("already consumed")), "{:?}", move_errs);
+    assert!(
+        move_errs
+            .iter()
+            .all(|d| d.message.contains("already consumed")),
+        "{:?}",
+        move_errs
+    );
     assert_eq!(move_errs[0].line, 4);
     assert_eq!(move_errs[1].line, 5);
 }
@@ -147,8 +173,18 @@ fn accumulates_within_function_body() {
     assert_eq!(diags.len(), 2, "{:?}", diags);
     assert_eq!(diags[0].stage, "check");
     assert_eq!(diags[1].stage, "check");
-    assert!(diags[0].message.contains("`+` concatenates two Strings"), "{:?}", diags[0]);
-    assert!(diags[1].message.contains("arithmetic needs matching numeric"), "{:?}", diags[1]);
+    assert!(
+        diags[0].message.contains("`+` concatenates two Strings"),
+        "{:?}",
+        diags[0]
+    );
+    assert!(
+        diags[1]
+            .message
+            .contains("arithmetic needs matching numeric"),
+        "{:?}",
+        diags[1]
+    );
     assert_eq!(diags[0].line, 2);
     assert_eq!(diags[1].line, 3);
 }
@@ -161,7 +197,11 @@ fn failed_let_does_not_cascade_through_binop() {
     let src = "fn main() -> Int64 {\n  let a = \"s\" + 1;\n  let b = a + 1;\n  return b;\n}";
     let diags = diagnostics(src);
     assert_eq!(diags.len(), 1, "{:?}", diags);
-    assert!(diags[0].message.contains("`+` concatenates two Strings"), "{:?}", diags[0]);
+    assert!(
+        diags[0].message.contains("`+` concatenates two Strings"),
+        "{:?}",
+        diags[0]
+    );
     assert_eq!(diags[0].line, 2);
 }
 
@@ -173,6 +213,10 @@ fn failed_let_does_not_cascade_through_builtin() {
     let src = "fn main() -> Int64 {\n  let a = \"s\" + 1;\n  let n = a.length;\n  return 0;\n}";
     let diags = diagnostics(src);
     assert_eq!(diags.len(), 1, "{:?}", diags);
-    assert!(diags[0].message.contains("`+` concatenates two Strings"), "{:?}", diags[0]);
+    assert!(
+        diags[0].message.contains("`+` concatenates two Strings"),
+        "{:?}",
+        diags[0]
+    );
     assert_eq!(diags[0].line, 2);
 }

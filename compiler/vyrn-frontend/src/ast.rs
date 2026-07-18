@@ -124,7 +124,10 @@ pub struct ImportName {
 impl ImportName {
     /// A bare (unaliased) import of `name`.
     pub fn bare(name: impl Into<String>) -> Self {
-        ImportName { original: name.into(), alias: None }
+        ImportName {
+            original: name.into(),
+            alias: None,
+        }
     }
     /// The name this binding is known by in the importing module — the alias if
     /// present, else the original. This is what visibility, collision, and
@@ -166,7 +169,11 @@ pub enum ImportSource {
     /// `args` are its arguments, which must be consteval-provable constants. The
     /// loader runs the call in the compiler's interpreter and links the returned
     /// `String` as a synthesized module.
-    Generator { name: String, args: Vec<Expr>, line: usize },
+    Generator {
+        name: String,
+        args: Vec<Expr>,
+        line: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -324,7 +331,10 @@ pub enum Type {
     /// A sized integer: `Int8`/`Int16`/`Int32` signed, `UInt8`/`UInt16`/`UInt32`/
     /// `UInt64` unsigned. `bits` ∈ {8, 16, 32, 64}; arithmetic wraps at that width
     /// (two's complement). `Int`/`Int64` stays the distinct default [`Type::Int`].
-    IntN { bits: u8, signed: bool },
+    IntN {
+        bits: u8,
+        signed: bool,
+    },
     /// 64-bit IEEE-754 floating point (`Float64`, also spelled `Float`).
     Float,
     /// 32-bit IEEE-754 floating point (`Float32`). Arithmetic rounds to single
@@ -584,7 +594,10 @@ pub enum Expr {
     Bool(bool),
     /// A string literal (already decoded).
     Str(String),
-    Var { name: String, line: usize },
+    Var {
+        name: String,
+        line: usize,
+    },
     Unary {
         op: UnOp,
         expr: Box<Expr>,
@@ -627,7 +640,10 @@ pub enum Expr {
     },
     /// `expr?` — unwrap an `Option`/`Result`, or propagate `None`/`Err` by
     /// returning it from the enclosing function (RFC-0005).
-    Try { expr: Box<Expr>, line: usize },
+    Try {
+        expr: Box<Expr>,
+        line: usize,
+    },
     /// A record literal, e.g. `User { name: 1, age: 30 }` (RFC-0002).
     StructLit {
         name: String,
@@ -649,21 +665,35 @@ pub enum Expr {
         line: usize,
     },
     /// A fixed-size array literal `[a, b, c]` — type `Array<T, N>`.
-    ArrayLit { elems: Vec<Expr>, line: usize },
+    ArrayLit {
+        elems: Vec<Expr>,
+        line: usize,
+    },
     /// A map literal (RFC-0028): the empty `[:]` (contextual, like `[]`) or a
     /// non-empty `["a": 1, "b": 2]`. Each entry is a `(key, value)` expression
     /// pair in written order; the value type comes from the expected `Map` type.
-    MapLit { entries: Vec<(Expr, Expr)>, line: usize },
+    MapLit {
+        entries: Vec<(Expr, Expr)>,
+        line: usize,
+    },
     /// `spawn f(args)` — run a *pure* function as a concurrent task, yielding a
     /// `Task<T>` (RFC-0004 §Q4). The callee must be isolated (no I/O, no shared
     /// mutable state); the result is deterministic regardless of scheduling.
-    Spawn { name: String, args: Vec<Expr>, line: usize },
+    Spawn {
+        name: String,
+        args: Vec<Expr>,
+        line: usize,
+    },
     /// A lambda literal (RFC-0023): `|x| expr` or `|x, y| { block }`. The
     /// parameters are untyped in the literal — their types flow from the expected
     /// `fn(..) -> R` type of the parameter position it is passed to. Legal ONLY as
     /// a call argument in a function-typed parameter position (enforced by the
     /// checker). Captures outer locals by read; monomorphized away in codegen.
-    Lambda { params: Vec<String>, body: LambdaBody, line: usize },
+    Lambda {
+        params: Vec<String>,
+        body: LambdaBody,
+        line: usize,
+    },
 }
 
 /// A lambda's body (RFC-0023): a single expression (`|x| x * 2`) or a

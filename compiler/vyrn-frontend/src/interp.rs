@@ -19,7 +19,11 @@ pub enum Val {
     Int(i64),
     /// A sized integer (`Int8`/`Int16`/`Int32`). `v` is the logical value,
     /// sign-extended into `i64`; arithmetic wraps back to `bits`.
-    IntN { v: i64, bits: u8, signed: bool },
+    IntN {
+        v: i64,
+        bits: u8,
+        signed: bool,
+    },
     /// A 64-bit float (`Float64`).
     Float(f64),
     /// A 32-bit float (`Float32`). Stored as `f32` so arithmetic rounds to single
@@ -39,7 +43,10 @@ pub enum Val {
     /// A generational reference (RFC-0004 §4, Path B): a slab slot index plus
     /// the generation captured when the reference was made. Access checks it
     /// against the slot's current generation.
-    Ref { slot: usize, gen: u64 },
+    Ref {
+        slot: usize,
+        gen: u64,
+    },
     /// A growable array (`Vec`). Used linearly; `push` returns a new value.
     Array(Vec<Val>),
     /// A growable, insertion-ordered dictionary (RFC-0028): a `Vec` of
@@ -121,8 +128,12 @@ enum Flow {
 fn scalar_to_string(v: &Val) -> String {
     match v {
         Val::Int(n) => n.to_string(),
-        Val::IntN { v, signed: true, .. } => v.to_string(),
-        Val::IntN { v, signed: false, .. } => (*v as u64).to_string(),
+        Val::IntN {
+            v, signed: true, ..
+        } => v.to_string(),
+        Val::IntN {
+            v, signed: false, ..
+        } => (*v as u64).to_string(),
         Val::Float(f) => format!("{f:.6}"),
         Val::Float32(f) => format!("{:.6}", *f as f64),
         Val::Bool(b) => if *b { "true" } else { "false" }.to_string(),
@@ -169,7 +180,11 @@ fn intn_from_num(n: &crate::codec::Num, bits: u8, signed: bool) -> Option<i64> {
         Some(wrap_intn(v, bits, signed))
     } else {
         let v = n.text.parse::<u64>().ok()?;
-        let max = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        let max = if bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
         if v > max {
             return None;
         }
@@ -201,22 +216,34 @@ fn convert_val(v: Val, target: &Type) -> Val {
                 Val::Float32(f) => f as i64,
                 other => return other,
             };
-            Val::IntN { v: wrap_intn(n, *bits, *signed), bits: *bits, signed: *signed }
+            Val::IntN {
+                v: wrap_intn(n, *bits, *signed),
+                bits: *bits,
+                signed: *signed,
+            }
         }
         Type::Float => match v {
             Val::Int(n) => Val::Float(n as f64),
             // An unsigned source reads its bits as `u64` before converting
             // (native uses `uitofp`); signed sign-extends via `as f64`.
-            Val::IntN { v, signed: false, .. } => Val::Float(v as u64 as f64),
-            Val::IntN { v, signed: true, .. } => Val::Float(v as f64),
+            Val::IntN {
+                v, signed: false, ..
+            } => Val::Float(v as u64 as f64),
+            Val::IntN {
+                v, signed: true, ..
+            } => Val::Float(v as f64),
             Val::Float32(f) => Val::Float(f as f64), // fpext
             other => other,
         },
         // Float32 rounds every source to single precision (`as f32`).
         Type::Float32 => match v {
             Val::Int(n) => Val::Float32(n as f32),
-            Val::IntN { v, signed: false, .. } => Val::Float32(v as u64 as f32),
-            Val::IntN { v, signed: true, .. } => Val::Float32(v as f32),
+            Val::IntN {
+                v, signed: false, ..
+            } => Val::Float32(v as u64 as f32),
+            Val::IntN {
+                v, signed: true, ..
+            } => Val::Float32(v as f32),
             Val::Float(f) => Val::Float32(f as f32), // fptrunc
             other => other,
         },
@@ -350,8 +377,16 @@ fn url_encode(s: &str) -> String {
             out.push(b as char);
         } else {
             out.push('%');
-            out.push(char::from_digit((b >> 4) as u32, 16).unwrap().to_ascii_uppercase());
-            out.push(char::from_digit((b & 0xf) as u32, 16).unwrap().to_ascii_uppercase());
+            out.push(
+                char::from_digit((b >> 4) as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
+            out.push(
+                char::from_digit((b & 0xf) as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
         }
     }
     out
@@ -601,9 +636,15 @@ fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeRespons
                 Some(Val::Str(s)) => s.clone(),
                 _ => return Err("handle returned a Response without a String `body`".into()),
             };
-            Ok(ServeResponse { status, content_type, body })
+            Ok(ServeResponse {
+                status,
+                content_type,
+                body,
+            })
         }
-        Ok(other) => Err(format!("handle returned {other:?}, expected a Response record")),
+        Ok(other) => Err(format!(
+            "handle returned {other:?}, expected a Response record"
+        )),
         Err(Ctrl::Err(s)) => Err(s),
         Err(Ctrl::Return(_)) => Err("internal: `?` propagated past handle".into()),
     }
@@ -657,8 +698,12 @@ where
                 if interp.funcs.contains_key("main") {
                     match interp.call("main", &[]) {
                         Ok(Val::Int(0)) => {}
-                        Ok(Val::Int(n)) => return Err(format!("main returned {n}, aborting serve")),
-                        Ok(other) => return Err(format!("main returned {other:?}, expected Int64")),
+                        Ok(Val::Int(n)) => {
+                            return Err(format!("main returned {n}, aborting serve"))
+                        }
+                        Ok(other) => {
+                            return Err(format!("main returned {other:?}, expected Int64"))
+                        }
                         Err(Ctrl::Err(e)) => return Err(e),
                         Err(Ctrl::Return(_)) => {
                             return Err("internal: `?` propagated past main".into())
@@ -798,14 +843,23 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
     let ownership = crate::own::analyze(program);
     let droppable: HashMap<usize, crate::own::DropKind> =
         ownership.droppable.into_values().flatten().collect();
-    let funcs: HashMap<&str, &Function> =
-        program.functions.iter().map(|f| (f.name.as_str(), f)).collect();
-    let types: HashMap<&str, &TypeDecl> =
-        program.type_decls.iter().map(|t| (t.name.as_str(), t)).collect();
+    let funcs: HashMap<&str, &Function> = program
+        .functions
+        .iter()
+        .map(|f| (f.name.as_str(), f))
+        .collect();
+    let types: HashMap<&str, &TypeDecl> = program
+        .type_decls
+        .iter()
+        .map(|t| (t.name.as_str(), t))
+        .collect();
     // Owned copy for `crate::types::resolve` / `crate::codec` (JSON codec,
     // RFC-0018), which need `&HashMap<String, TypeDecl>`.
-    let type_map: HashMap<String, TypeDecl> =
-        program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+    let type_map: HashMap<String, TypeDecl> = program
+        .type_decls
+        .iter()
+        .map(|t| (t.name.clone(), t.clone()))
+        .collect();
     // Enum variant names, so constructor uses (Var/Call) can be recognized.
     let mut variants: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for t in &program.type_decls {
@@ -950,7 +1004,13 @@ impl<'a> Interp<'a> {
             if let Some(t) = &g.ty {
                 v = self.coerce(v, t)?;
             }
-            self.globals.borrow_mut().insert(g.name.clone(), Slot { v, ty: g.ty.clone() });
+            self.globals.borrow_mut().insert(
+                g.name.clone(),
+                Slot {
+                    v,
+                    ty: g.ty.clone(),
+                },
+            );
         }
         Ok(())
     }
@@ -968,9 +1028,10 @@ impl<'a> Interp<'a> {
             format!("{}/{arg}", g.importer_dir)
         };
         let resolved = crate::loader::normalize(&joined);
-        let ok = g.allowed.iter().any(|root| {
-            resolved == *root || resolved.starts_with(&format!("{root}/"))
-        });
+        let ok = g
+            .allowed
+            .iter()
+            .any(|root| resolved == *root || resolved.starts_with(&format!("{root}/")));
         if !ok {
             return Err(Ctrl::Err(format!(
                 "generator read `{arg}` escapes its declared inputs ({}) — a generator may only \
@@ -988,7 +1049,9 @@ impl<'a> Interp<'a> {
         let g = self.gen.as_ref().unwrap();
         match g.resolver.read(&resolved) {
             Ok(content) => {
-                g.reads.borrow_mut().push((resolved, content.clone().into_bytes()));
+                g.reads
+                    .borrow_mut()
+                    .push((resolved, content.clone().into_bytes()));
                 if content.as_bytes().contains(&0) {
                     return Ok(Val::Result(
                         false,
@@ -1050,7 +1113,9 @@ impl<'a> Interp<'a> {
             .resolver
             .read(&resolved)
             .map_err(|e| Ctrl::Err(format!("moduleInterface cannot read `{path}`: {e}")))?;
-        g.reads.borrow_mut().push((resolved.clone(), source.clone().into_bytes()));
+        g.reads
+            .borrow_mut()
+            .push((resolved.clone(), source.clone().into_bytes()));
 
         // Follow the reflected module's imports to build the reachable type
         // closure (RFC-0031): link it into one program so a type declared in an
@@ -1061,8 +1126,13 @@ impl<'a> Interp<'a> {
         let rec = crate::loader::RecordingResolver::new(g.resolver);
         let program = crate::loader::load(&source, &resolved, g.opts, &rec).map_err(|diags| {
             let d = diags.first();
-            let where_ = d.and_then(|d| d.file.clone()).map(|f| format!(" ({f})")).unwrap_or_default();
-            let msg = d.map(|d| d.message.clone()).unwrap_or_else(|| "load failed".to_string());
+            let where_ = d
+                .and_then(|d| d.file.clone())
+                .map(|f| format!(" ({f})"))
+                .unwrap_or_default();
+            let msg = d
+                .map(|d| d.message.clone())
+                .unwrap_or_else(|| "load failed".to_string());
             Ctrl::Err(format!("moduleInterface `{path}`{where_}: {msg}"))
         })?;
         for (p, s) in rec.into_reads() {
@@ -1090,7 +1160,10 @@ impl<'a> Interp<'a> {
                 });
             }
         }
-        Ok(crate::schema_reflect::module_interface_lit(&program, &specifiers))
+        Ok(crate::schema_reflect::module_interface_lit(
+            &program,
+            &specifiers,
+        ))
     }
 
     fn call(&self, name: &str, args: &[Val]) -> Result<Val, Ctrl> {
@@ -1188,7 +1261,13 @@ impl<'a> Interp<'a> {
     fn call_fnval(&self, fv: &FnVal, args: &[Val]) -> Result<Val, Ctrl> {
         match fv {
             FnVal::Named(name) => self.call(name, args),
-            FnVal::Lambda { params, body, captures, param_tys, ret } => {
+            FnVal::Lambda {
+                params,
+                body,
+                captures,
+                param_tys,
+                ret,
+            } => {
                 let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
                 // The captured environment is the outer (read-only) frame.
                 for (k, v) in captures {
@@ -1203,7 +1282,13 @@ impl<'a> Interp<'a> {
                         Some(t) => self.coerce(v, t)?,
                         None => v,
                     };
-                    scope.last_mut().unwrap().insert(p.clone(), Slot { v, ty: param_tys.get(i).cloned() });
+                    scope.last_mut().unwrap().insert(
+                        p.clone(),
+                        Slot {
+                            v,
+                            ty: param_tys.get(i).cloned(),
+                        },
+                    );
                 }
                 let out = match body {
                     LambdaBody::Expr(e) => self.expr(e, &mut scope)?,
@@ -1240,7 +1325,13 @@ impl<'a> Interp<'a> {
             // Coerce each argument to its parameter type (sized-int wrapping,
             // and automatic validation into predicated types).
             let coerced = self.coerce(v.clone(), &p.ty)?;
-            scope[0].insert(p.name.clone(), Slot { v: coerced, ty: Some(p.ty.clone()) });
+            scope[0].insert(
+                p.name.clone(),
+                Slot {
+                    v: coerced,
+                    ty: Some(p.ty.clone()),
+                },
+            );
         }
         // A `?` inside the body surfaces as Ctrl::Return; catch it as the result.
         let ret = match self.block(&f.body, &mut scope) {
@@ -1254,7 +1345,12 @@ impl<'a> Interp<'a> {
         let finals = f
             .params
             .iter()
-            .map(|p| scope[0].get(&p.name).map(|s| s.v.clone()).unwrap_or(Val::Unit))
+            .map(|p| {
+                scope[0]
+                    .get(&p.name)
+                    .map(|s| s.v.clone())
+                    .unwrap_or(Val::Unit)
+            })
             .collect();
         Ok((ret, finals))
     }
@@ -1332,7 +1428,9 @@ impl<'a> Interp<'a> {
             g.fuel.set(fuel - 1);
         }
         match stmt {
-            Stmt::Let { name, value, ty, .. } => {
+            Stmt::Let {
+                name, value, ty, ..
+            } => {
                 let mut v = self.expr(value, scope)?;
                 // An annotation coerces the initializer (sized-int wrapping,
                 // automatic validation) and is remembered so reassignments run
@@ -1351,7 +1449,10 @@ impl<'a> Interp<'a> {
                     Some(t) => Some(t.clone()),
                     None => self.type_of(value, scope),
                 };
-                scope.last_mut().unwrap().insert(name.clone(), Slot { v, ty: slot_ty });
+                scope
+                    .last_mut()
+                    .unwrap()
+                    .insert(name.clone(), Slot { v, ty: slot_ty });
                 Ok(Flow::Normal)
             }
             Stmt::Assign { name, value, .. } => {
@@ -1380,15 +1481,25 @@ impl<'a> Interp<'a> {
                 }
                 Err(format!("assignment to unbound variable `{name}`").into())
             }
-            Stmt::SetField { name, field, value, .. } => {
+            Stmt::SetField {
+                name, field, value, ..
+            } => {
                 let v = self.expr(value, scope)?;
                 for frame in scope.iter_mut().rev() {
-                    if let Some(Slot { v: Val::Record(map), .. }) = frame.get_mut(name) {
+                    if let Some(Slot {
+                        v: Val::Record(map),
+                        ..
+                    }) = frame.get_mut(name)
+                    {
                         map.insert(field.clone(), v);
                         return Ok(Flow::Normal);
                     }
                 }
-                if let Some(Slot { v: Val::Record(map), .. }) = self.globals.borrow_mut().get_mut(name) {
+                if let Some(Slot {
+                    v: Val::Record(map),
+                    ..
+                }) = self.globals.borrow_mut().get_mut(name)
+                {
                     map.insert(field.clone(), v);
                     return Ok(Flow::Normal);
                 }
@@ -1398,7 +1509,9 @@ impl<'a> Interp<'a> {
             // value coerces into the declared element type (sized-int wrapping,
             // automatic validation), then is written through the shared buffer;
             // an out-of-bounds index traps with the read path's wording.
-            Stmt::IndexSet { name, index, value, .. } => {
+            Stmt::IndexSet {
+                name, index, value, ..
+            } => {
                 let iv = self.expr(index, scope)?;
                 // `m[k] = v` on a Map (RFC-0028) — insert or update in place.
                 // An existing key keeps its slot (order preserved); a new key is
@@ -1413,7 +1526,10 @@ impl<'a> Interp<'a> {
                         .rev()
                         .find_map(|f| f.get(name).map(|s| matches!(s.v, Val::Map(_))))
                         .or_else(|| {
-                            self.globals.borrow().get(name).map(|s| matches!(s.v, Val::Map(_)))
+                            self.globals
+                                .borrow()
+                                .get(name)
+                                .map(|s| matches!(s.v, Val::Map(_)))
                         })
                         .unwrap_or(false);
                     if is_map {
@@ -1435,13 +1551,17 @@ impl<'a> Interp<'a> {
                             }
                         }
                         for frame in scope.iter_mut().rev() {
-                            if let Some(Slot { v: Val::Map(pairs), .. }) = frame.get_mut(name) {
+                            if let Some(Slot {
+                                v: Val::Map(pairs), ..
+                            }) = frame.get_mut(name)
+                            {
                                 insert_pair(pairs, k, v);
                                 return Ok(Flow::Normal);
                             }
                         }
-                        if let Some(Slot { v: Val::Map(pairs), .. }) =
-                            self.globals.borrow_mut().get_mut(name)
+                        if let Some(Slot {
+                            v: Val::Map(pairs), ..
+                        }) = self.globals.borrow_mut().get_mut(name)
                         {
                             insert_pair(pairs, k, v);
                             return Ok(Flow::Normal);
@@ -1451,7 +1571,9 @@ impl<'a> Interp<'a> {
                 }
                 let idx = match iv {
                     Val::Int(n) => n,
-                    other => return Err(format!("array index must be an Int64, found {other:?}").into()),
+                    other => {
+                        return Err(format!("array index must be an Int64, found {other:?}").into())
+                    }
                 };
                 let mut v = self.expr(value, scope)?;
                 // Coerce into the element type of the array binding's declared
@@ -1470,7 +1592,11 @@ impl<'a> Interp<'a> {
                     v = self.coerce(v, t)?;
                 }
                 for frame in scope.iter_mut().rev() {
-                    if let Some(Slot { v: Val::Array(items), .. }) = frame.get_mut(name) {
+                    if let Some(Slot {
+                        v: Val::Array(items),
+                        ..
+                    }) = frame.get_mut(name)
+                    {
                         if idx < 0 || idx as usize >= items.len() {
                             return Err(format!("array index {idx} out of bounds").into());
                         }
@@ -1478,7 +1604,11 @@ impl<'a> Interp<'a> {
                         return Ok(Flow::Normal);
                     }
                 }
-                if let Some(Slot { v: Val::Array(items), .. }) = self.globals.borrow_mut().get_mut(name) {
+                if let Some(Slot {
+                    v: Val::Array(items),
+                    ..
+                }) = self.globals.borrow_mut().get_mut(name)
+                {
                     if idx < 0 || idx as usize >= items.len() {
                         return Err(format!("array index {idx} out of bounds").into());
                     }
@@ -1494,7 +1624,12 @@ impl<'a> Interp<'a> {
                 };
                 Ok(Flow::Return(v))
             }
-            Stmt::If { cond, then_block, else_block, .. } => {
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 if self.as_bool(self.expr(cond, scope)?)? {
                     self.block(then_block, scope)
                 } else if let Some(eb) = else_block {
@@ -1511,7 +1646,9 @@ impl<'a> Interp<'a> {
                 }
                 Ok(Flow::Normal)
             }
-            Stmt::ForIn { var, iter, body, .. } => {
+            Stmt::ForIn {
+                var, iter, body, ..
+            } => {
                 let items = match self.expr(iter, scope)? {
                     Val::Array(items) => items,
                     // Iterating a String yields each byte as an Int.
@@ -1522,7 +1659,10 @@ impl<'a> Interp<'a> {
                     // Fresh frame per iteration holding the loop variable; the
                     // body's own inner frame nests inside it.
                     scope.push(HashMap::new());
-                    scope.last_mut().unwrap().insert(var.clone(), Slot::untyped(item));
+                    scope
+                        .last_mut()
+                        .unwrap()
+                        .insert(var.clone(), Slot::untyped(item));
                     let flow = self.block(body, scope);
                     scope.pop();
                     if let Flow::Return(v) = flow? {
@@ -1616,9 +1756,11 @@ impl<'a> Interp<'a> {
                     // wrapping: -i64::MIN has no representation; two's complement
                     // keeps it MIN, exactly as native `sub i64 0, %n` does.
                     (UnOp::Neg, Val::Int(n)) => Ok(Val::Int(n.wrapping_neg())),
-                    (UnOp::Neg, Val::IntN { v, bits, signed }) => {
-                        Ok(Val::IntN { v: wrap_intn(v.wrapping_neg(), bits, signed), bits, signed })
-                    }
+                    (UnOp::Neg, Val::IntN { v, bits, signed }) => Ok(Val::IntN {
+                        v: wrap_intn(v.wrapping_neg(), bits, signed),
+                        bits,
+                        signed,
+                    }),
                     (UnOp::Neg, Val::Float(x)) => Ok(Val::Float(-x)),
                     (UnOp::Neg, Val::Float32(x)) => Ok(Val::Float32(-x)),
                     (UnOp::Not, Val::Bool(b)) => Ok(Val::Bool(!b)),
@@ -1664,9 +1806,7 @@ impl<'a> Interp<'a> {
                         Val::Bool(false) => {
                             return Err(format!("assertion failed at line {line}").into())
                         }
-                        other => {
-                            return Err(format!("assert of non-Bool {other:?}").into())
-                        }
+                        other => return Err(format!("assert of non-Bool {other:?}").into()),
                     }
                 }
                 if name == "assertEq" {
@@ -1711,7 +1851,10 @@ impl<'a> Interp<'a> {
                             // interpreter keeps borrows, so materialize one here (only
                             // on this rare compile-time-reflection call).
                             let owned: std::collections::HashMap<String, crate::ast::TypeDecl> =
-                                self.types.iter().map(|(k, v)| (k.to_string(), (*v).clone())).collect();
+                                self.types
+                                    .iter()
+                                    .map(|(k, v)| (k.to_string(), (*v).clone()))
+                                    .collect();
                             let js = crate::types::json_schema_string(&owned[tn.as_str()], &owned);
                             return Ok(Val::Str(js));
                         }
@@ -1735,7 +1878,9 @@ impl<'a> Interp<'a> {
                 // `Issue`. The first argument is a type name (not a value).
                 if name == "fromJson" {
                     let tn = match args.first() {
-                        Some(Expr::Var { name: tn, .. }) if self.types.contains_key(tn.as_str()) => {
+                        Some(Expr::Var { name: tn, .. })
+                            if self.types.contains_key(tn.as_str()) =>
+                        {
                             tn.clone()
                         }
                         _ => return Err("`fromJson` needs a declared type name".into()),
@@ -1758,13 +1903,19 @@ impl<'a> Interp<'a> {
                 if name == "@pop" {
                     if let Some(Expr::Var { name: recv, .. }) = args.first() {
                         for frame in scope.iter_mut().rev() {
-                            if let Some(Slot { v: Val::Array(items), .. }) = frame.get_mut(recv) {
+                            if let Some(Slot {
+                                v: Val::Array(items),
+                                ..
+                            }) = frame.get_mut(recv)
+                            {
                                 let popped = items.pop();
                                 return Ok(Val::Option(popped.map(Box::new)));
                             }
                         }
-                        if let Some(Slot { v: Val::Array(items), .. }) =
-                            self.globals.borrow_mut().get_mut(recv)
+                        if let Some(Slot {
+                            v: Val::Array(items),
+                            ..
+                        }) = self.globals.borrow_mut().get_mut(recv)
                         {
                             let popped = items.pop();
                             return Ok(Val::Option(popped.map(Box::new)));
@@ -1783,19 +1934,27 @@ impl<'a> Interp<'a> {
                     let idx = match self.expr(&args[1], scope)? {
                         Val::Int(n) => n,
                         other => {
-                            return Err(format!("array index must be an Int64, found {other:?}").into())
+                            return Err(
+                                format!("array index must be an Int64, found {other:?}").into()
+                            )
                         }
                     };
                     for frame in scope.iter_mut().rev() {
-                        if let Some(Slot { v: Val::Array(items), .. }) = frame.get_mut(&recv) {
+                        if let Some(Slot {
+                            v: Val::Array(items),
+                            ..
+                        }) = frame.get_mut(&recv)
+                        {
                             if idx < 0 || idx as usize >= items.len() {
                                 return Err(format!("array index {idx} out of bounds").into());
                             }
                             return Ok(items.swap_remove(idx as usize));
                         }
                     }
-                    if let Some(Slot { v: Val::Array(items), .. }) =
-                        self.globals.borrow_mut().get_mut(&recv)
+                    if let Some(Slot {
+                        v: Val::Array(items),
+                        ..
+                    }) = self.globals.borrow_mut().get_mut(&recv)
                     {
                         if idx < 0 || idx as usize >= items.len() {
                             return Err(format!("array index {idx} out of bounds").into());
@@ -1815,7 +1974,9 @@ impl<'a> Interp<'a> {
                     let key = match self.expr(&args[1], scope)? {
                         Val::Str(s) => s,
                         other => {
-                            return Err(format!("a map key must be a String, found {other:?}").into())
+                            return Err(
+                                format!("a map key must be a String, found {other:?}").into()
+                            )
                         }
                     };
                     let remove_from = |pairs: &mut Vec<(String, Val)>| -> bool {
@@ -1827,12 +1988,16 @@ impl<'a> Interp<'a> {
                         }
                     };
                     for frame in scope.iter_mut().rev() {
-                        if let Some(Slot { v: Val::Map(pairs), .. }) = frame.get_mut(&recv) {
+                        if let Some(Slot {
+                            v: Val::Map(pairs), ..
+                        }) = frame.get_mut(&recv)
+                        {
                             return Ok(Val::Bool(remove_from(pairs)));
                         }
                     }
-                    if let Some(Slot { v: Val::Map(pairs), .. }) =
-                        self.globals.borrow_mut().get_mut(&recv)
+                    if let Some(Slot {
+                        v: Val::Map(pairs), ..
+                    }) = self.globals.borrow_mut().get_mut(&recv)
                     {
                         return Ok(Val::Bool(remove_from(pairs)));
                     }
@@ -1867,8 +2032,12 @@ impl<'a> Interp<'a> {
                             Val::Int(n) => println!("{n}"),
                             // A sized int prints its logical value; unsigned
                             // formats the bits as `u64` (native uses %lu).
-                            Val::IntN { v, signed: true, .. } => println!("{v}"),
-                            Val::IntN { v, signed: false, .. } => println!("{}", *v as u64),
+                            Val::IntN {
+                                v, signed: true, ..
+                            } => println!("{v}"),
+                            Val::IntN {
+                                v, signed: false, ..
+                            } => println!("{}", *v as u64),
                             // Fixed 6-decimal precision matches native `printf("%f")`
                             // exactly (Rust's shortest-repr Display would not). A
                             // Float32 promotes to f64 for printing, as C varargs do.
@@ -1932,7 +2101,11 @@ impl<'a> Interp<'a> {
                     "bytes" => match &vals[0] {
                         Val::Str(s) => Ok(Val::Array(
                             s.bytes()
-                                .map(|b| Val::IntN { v: b as i64, bits: 8, signed: false })
+                                .map(|b| Val::IntN {
+                                    v: b as i64,
+                                    bits: 8,
+                                    signed: false,
+                                })
                                 .collect(),
                         )),
                         _ => Err("bytes of non-String".into()),
@@ -1946,16 +2119,19 @@ impl<'a> Interp<'a> {
                     // Input I/O (RFC-0014). Error payloads are canonical Vyrn
                     // wording (never Rust `io::Error` text) — kept byte-identical
                     // to the codegen's format strings so all three backends agree.
-                    "args" => {
-                        Ok(Val::Array(self.args.iter().map(|s| Val::Str(s.clone())).collect()))
-                    }
+                    "args" => Ok(Val::Array(
+                        self.args.iter().map(|s| Val::Str(s.clone())).collect(),
+                    )),
                     "readLine" => {
                         use std::io::BufRead;
                         // Read one raw line (bytes up to and including `\n`, or
                         // EOF). Locking the global stdin per call still streams:
                         // the buffer lives in the shared handle, not the guard.
                         let mut buf: Vec<u8> = Vec::new();
-                        let n = std::io::stdin().lock().read_until(b'\n', &mut buf).unwrap_or(0);
+                        let n = std::io::stdin()
+                            .lock()
+                            .read_until(b'\n', &mut buf)
+                            .unwrap_or(0);
                         if n == 0 {
                             return Ok(Val::Option(None)); // EOF
                         }
@@ -2006,9 +2182,7 @@ impl<'a> Interp<'a> {
                                     Ok(s) => Ok(Val::Result(true, Box::new(Val::Str(s)))),
                                     Err(_) => Ok(Val::Result(
                                         false,
-                                        Box::new(Val::Str(format!(
-                                            "`{path}` is not valid UTF-8"
-                                        ))),
+                                        Box::new(Val::Str(format!("`{path}` is not valid UTF-8"))),
                                     )),
                                 }
                             }
@@ -2037,9 +2211,7 @@ impl<'a> Interp<'a> {
                                 names.sort();
                                 Ok(Val::Result(
                                     true,
-                                    Box::new(Val::Array(
-                                        names.into_iter().map(Val::Str).collect(),
-                                    )),
+                                    Box::new(Val::Array(names.into_iter().map(Val::Str).collect())),
                                 ))
                             }
                             Err(_) => Ok(Val::Result(
@@ -2065,11 +2237,15 @@ impl<'a> Interp<'a> {
                     "writeFile" => {
                         let path = match &vals[0] {
                             Val::Str(s) => s.clone(),
-                            other => return Err(format!("writeFile of non-String {other:?}").into()),
+                            other => {
+                                return Err(format!("writeFile of non-String {other:?}").into())
+                            }
                         };
                         let contents = match &vals[1] {
                             Val::Str(s) => s.clone(),
-                            other => return Err(format!("writeFile of non-String {other:?}").into()),
+                            other => {
+                                return Err(format!("writeFile of non-String {other:?}").into())
+                            }
                         };
                         match std::fs::write(&path, contents.as_bytes()) {
                             Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
@@ -2093,7 +2269,11 @@ impl<'a> Interp<'a> {
                                 Box::new(Val::Array(
                                     bytes
                                         .into_iter()
-                                        .map(|b| Val::IntN { v: b as i64, bits: 8, signed: false })
+                                        .map(|b| Val::IntN {
+                                            v: b as i64,
+                                            bits: 8,
+                                            signed: false,
+                                        })
                                         .collect(),
                                 )),
                             )),
@@ -2211,7 +2391,11 @@ impl<'a> Interp<'a> {
                         (Val::Str(s), Val::Int(i)) => s
                             .as_bytes()
                             .get(*i as usize)
-                            .map(|b| Val::IntN { v: *b as i64, bits: 8, signed: false })
+                            .map(|b| Val::IntN {
+                                v: *b as i64,
+                                bits: 8,
+                                signed: false,
+                            })
                             .ok_or_else(|| format!("string index {i} out of bounds").into()),
                         // `m[k]` on a Map (RFC-0028) → `Option<V>`.
                         (Val::Map(pairs), Val::Str(k)) => Ok(Val::Option(
@@ -2232,9 +2416,9 @@ impl<'a> Interp<'a> {
                     // `m.keys()` (RFC-0028) — a fresh snapshot Array<String> in
                     // insertion order (safe to mutate the map while iterating it).
                     "@keys" => match &vals[0] {
-                        Val::Map(pairs) => {
-                            Ok(Val::Array(pairs.iter().map(|(k, _)| Val::Str(k.clone())).collect()))
-                        }
+                        Val::Map(pairs) => Ok(Val::Array(
+                            pairs.iter().map(|(k, _)| Val::Str(k.clone())).collect(),
+                        )),
                         other => Err(format!("`keys` needs a Map, found {other:?}").into()),
                     },
                     "alen" => match &vals[0] {
@@ -2325,14 +2509,21 @@ impl<'a> Interp<'a> {
                     }
                 }
             }
-            Expr::Match { scrutinee, arms, .. } => {
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
                 let sv = self.expr(scrutinee, scope)?;
                 self.eval_match(sv, arms, scope)
             }
             // `if` as an expression (RFC-0030): evaluate the condition, then ONLY
             // the taken branch (laziness identical to statement-`if`/match). The
             // checker guarantees `else_branch` is present.
-            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 if self.as_bool(self.expr(cond, scope)?)? {
                     self.expr(then_branch, scope)
                 } else if let Some(eb) = else_branch {
@@ -2363,8 +2554,7 @@ impl<'a> Interp<'a> {
                 // sized-int wrapping and automatic validation for predicated
                 // field types (`age: Age` from a raw Int64 runs Age's check).
                 // Generic field types (Params) pass through coerce untouched.
-                if let Some(Type::Record(rfields)) =
-                    self.types.get(name.as_str()).map(|d| &d.base)
+                if let Some(Type::Record(rfields)) = self.types.get(name.as_str()).map(|d| &d.base)
                 {
                     for f in rfields {
                         if let Some(v) = map.remove(&f.name) {
@@ -2446,7 +2636,9 @@ impl<'a> Interp<'a> {
                     let k = match self.expr(ke, scope)? {
                         Val::Str(s) => s,
                         other => {
-                            return Err(format!("a map key must be a String, found {other:?}").into())
+                            return Err(
+                                format!("a map key must be a String, found {other:?}").into()
+                            )
                         }
                     };
                     let v = self.expr(ve, scope)?;
@@ -2482,8 +2674,10 @@ impl<'a> Interp<'a> {
             None => return Ok(true),
             Some(p) => p,
         };
-        let mut scope =
-            vec![HashMap::from([("value".to_string(), Slot::untyped(v.clone()))])];
+        let mut scope = vec![HashMap::from([(
+            "value".to_string(),
+            Slot::untyped(v.clone()),
+        )])];
         match self.expr(pred, &mut scope)? {
             Val::Bool(b) => Ok(b),
             other => Err(format!(
@@ -2504,10 +2698,14 @@ impl<'a> Interp<'a> {
         for arm in arms {
             // (does this arm match?, payload bindings)
             let (matched, bindings): (bool, Vec<(String, Val)>) = match (&arm.pattern, &sv) {
-                (Pattern::Some(b), Val::Option(Some(v))) => (true, vec![(b.clone(), (**v).clone())]),
+                (Pattern::Some(b), Val::Option(Some(v))) => {
+                    (true, vec![(b.clone(), (**v).clone())])
+                }
                 (Pattern::None, Val::Option(None)) => (true, vec![]),
                 (Pattern::Ok(b), Val::Result(true, v)) => (true, vec![(b.clone(), (**v).clone())]),
-                (Pattern::Err(b), Val::Result(false, v)) => (true, vec![(b.clone(), (**v).clone())]),
+                (Pattern::Err(b), Val::Result(false, v)) => {
+                    (true, vec![(b.clone(), (**v).clone())])
+                }
                 (Pattern::Variant(n, binds), Val::Enum(vn, payload)) if n == vn => {
                     let bs = binds.iter().cloned().zip(payload.iter().cloned()).collect();
                     (true, bs)
@@ -2580,7 +2778,11 @@ impl<'a> Interp<'a> {
                 Val::Int(n) => wrap_intn(n, bits, signed),
                 _ => return Err("type error in sized-int binop".into()),
             };
-            let mk = |v: i64| Val::IntN { v: wrap_intn(v, bits, signed), bits, signed };
+            let mk = |v: i64| Val::IntN {
+                v: wrap_intn(v, bits, signed),
+                bits,
+                signed,
+            };
             // The sized type's minimum, for the signed-overflow division trap
             // (MIN / -1 has no representable result; native sdiv traps on it).
             // Arithmetic shift sign-extends, so this is exact for bits = 8..64.
@@ -2617,10 +2819,26 @@ impl<'a> Interp<'a> {
                         (x as u64).wrapping_rem(y as u64) as i64
                     })
                 }
-                Lt => Val::Bool(if signed { x < y } else { (x as u64) < (y as u64) }),
-                LtEq => Val::Bool(if signed { x <= y } else { (x as u64) <= (y as u64) }),
-                Gt => Val::Bool(if signed { x > y } else { (x as u64) > (y as u64) }),
-                GtEq => Val::Bool(if signed { x >= y } else { (x as u64) >= (y as u64) }),
+                Lt => Val::Bool(if signed {
+                    x < y
+                } else {
+                    (x as u64) < (y as u64)
+                }),
+                LtEq => Val::Bool(if signed {
+                    x <= y
+                } else {
+                    (x as u64) <= (y as u64)
+                }),
+                Gt => Val::Bool(if signed {
+                    x > y
+                } else {
+                    (x as u64) > (y as u64)
+                }),
+                GtEq => Val::Bool(if signed {
+                    x >= y
+                } else {
+                    (x as u64) >= (y as u64)
+                }),
                 Eq => Val::Bool(x == y),
                 NotEq => Val::Bool(x != y),
                 And | Or | Match => return Err("`&&`/`||` need Bool operands".into()),
@@ -2733,17 +2951,23 @@ impl<'a> Interp<'a> {
     /// elements are coerced (and therefore validated) recursively.
     fn coerce(&self, v: Val, ty: &Type) -> Result<Val, Ctrl> {
         match (ty, v) {
-            (Type::IntN { bits, signed }, Val::Int(n)) => {
-                Ok(Val::IntN { v: wrap_intn(n, *bits, *signed), bits: *bits, signed: *signed })
-            }
-            (Type::IntN { bits, signed }, Val::IntN { v, .. }) => {
-                Ok(Val::IntN { v: wrap_intn(v, *bits, *signed), bits: *bits, signed: *signed })
-            }
+            (Type::IntN { bits, signed }, Val::Int(n)) => Ok(Val::IntN {
+                v: wrap_intn(n, *bits, *signed),
+                bits: *bits,
+                signed: *signed,
+            }),
+            (Type::IntN { bits, signed }, Val::IntN { v, .. }) => Ok(Val::IntN {
+                v: wrap_intn(v, *bits, *signed),
+                bits: *bits,
+                signed: *signed,
+            }),
             // A float literal in a `Float32` slot rounds to single precision; an
             // already-f32 value stays put.
             (Type::Float32, Val::Float(f)) => Ok(Val::Float32(f as f32)),
             (Type::Named(n), v) => {
-                let Some(decl) = self.types.get(n.as_str()) else { return Ok(v) };
+                let Some(decl) = self.types.get(n.as_str()) else {
+                    return Ok(v);
+                };
                 // Coerce toward the base first (a record base coerces fields;
                 // a scalar base wraps), then run the predicate on the result.
                 let v = self.coerce(v, &decl.base)?;
@@ -2754,9 +2978,9 @@ impl<'a> Interp<'a> {
                         match &v {
                             Val::Record(map) => {
                                 let mut env = vec![map
-                            .iter()
-                            .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
-                            .collect::<HashMap<_, _>>()];
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
+                                    .collect::<HashMap<_, _>>()];
                                 match self.expr(pred, &mut env)? {
                                     Val::Bool(b) => b,
                                     other => {
@@ -2799,7 +3023,8 @@ impl<'a> Interp<'a> {
                 let inner = if is_ok { tok } else { terr };
                 Ok(Val::Result(is_ok, Box::new(self.coerce(*p, inner)?)))
             }
-            (Type::Array(inner), Val::Array(items)) | (Type::ArrayN(inner, _), Val::Array(items)) => {
+            (Type::Array(inner), Val::Array(items))
+            | (Type::ArrayN(inner, _), Val::Array(items)) => {
                 let mut out = Vec::with_capacity(items.len());
                 for it in items {
                     out.push(self.coerce(it, inner)?);
@@ -2823,7 +3048,12 @@ impl<'a> Interp<'a> {
             // parameter position supplies in v1. A named source needs nothing
             // (its own signature coerces at the call boundary).
             (Type::Fn(ptys, ret), Val::Fn(fv)) => Ok(Val::Fn(Box::new(match *fv {
-                FnVal::Lambda { params, body, captures, .. } => FnVal::Lambda {
+                FnVal::Lambda {
+                    params,
+                    body,
+                    captures,
+                    ..
+                } => FnVal::Lambda {
                     params,
                     body,
                     captures,
@@ -2863,7 +3093,10 @@ impl<'a> Interp<'a> {
                 }
                 let mut fs = Vec::new();
                 for (k, ve) in fields {
-                    fs.push(Field { name: k.clone(), ty: self.type_of(ve, scope)? });
+                    fs.push(Field {
+                        name: k.clone(),
+                        ty: self.type_of(ve, scope)?,
+                    });
                 }
                 Some(Type::Record(fs))
             }
@@ -3013,7 +3246,12 @@ impl<'a> Interp<'a> {
                 // `Result<T, E>` on the wire (RFC-0024): `{"Ok":<T>}` / `{"Err":<E>}`.
                 if let Val::Result(is_ok, payload) = v {
                     let (tag, pty) = if *is_ok { ("Ok", &*t) } else { ("Err", &*e) };
-                    self.encode_variant(tag, std::slice::from_ref(&**payload), std::slice::from_ref(pty), out)?;
+                    self.encode_variant(
+                        tag,
+                        std::slice::from_ref(&**payload),
+                        std::slice::from_ref(pty),
+                        out,
+                    )?;
                 }
             }
             Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool => {
@@ -3216,7 +3454,11 @@ impl<'a> Interp<'a> {
                     _ => None,
                 };
                 match ok {
-                    Some(v) => Some(Val::IntN { v, bits: *bits, signed: *signed }),
+                    Some(v) => Some(Val::IntN {
+                        v,
+                        bits: *bits,
+                        signed: *signed,
+                    }),
                     None => {
                         issues.push(self.type_issue(path, "integer", json));
                         None
@@ -3259,8 +3501,14 @@ impl<'a> Interp<'a> {
                 // `Result<T, E>` decodes from `{"Ok":<T>}` / `{"Err":<E>}`
                 // (RFC-0024) — a two-variant payload enum with single payloads.
                 let vs = vec![
-                    EnumVariant { name: "Ok".to_string(), payload: vec![(**t).clone()] },
-                    EnumVariant { name: "Err".to_string(), payload: vec![(**e).clone()] },
+                    EnumVariant {
+                        name: "Ok".to_string(),
+                        payload: vec![(**t).clone()],
+                    },
+                    EnumVariant {
+                        name: "Err".to_string(),
+                        payload: vec![(**e).clone()],
+                    },
                 ];
                 let expected = crate::codec::result_expected();
                 self.decode_variant(json, &vs, &expected, path, issues)
@@ -3350,7 +3598,9 @@ impl<'a> Interp<'a> {
     /// accumulating `validate` check. Mirrors `coerce`'s predicate evaluation:
     /// a record base binds field names; a scalar base binds `value`.
     fn run_predicate(&self, decl: &TypeDecl, v: &Val) -> Result<bool, Ctrl> {
-        let Some(pred) = &decl.predicate else { return Ok(true) };
+        let Some(pred) = &decl.predicate else {
+            return Ok(true);
+        };
         if matches!(decl.base, Type::Record(_)) {
             if let Val::Record(map) = v {
                 let mut env = vec![map
@@ -3378,7 +3628,11 @@ impl<'a> Interp<'a> {
 
     /// A `json.type` Issue: `expected <what>, found <kind>`.
     fn type_issue(&self, path: &str, expected: &str, json: &crate::codec::JsonV) -> Val {
-        self.issue_val("json.type", path, &crate::codec::type_message(expected, json.kind()))
+        self.issue_val(
+            "json.type",
+            path,
+            &crate::codec::type_message(expected, json.kind()),
+        )
     }
 
     fn as_ref(&self, v: &Val) -> Result<(usize, u64), Ctrl> {
@@ -3400,7 +3654,10 @@ impl<'a> Interp<'a> {
         let mut cells = self.cells.borrow_mut();
         if let Some(slot) = self.free.borrow_mut().pop() {
             cells[slot].val = v; // generation already bumped at release
-            return Ok(Val::Ref { slot, gen: cells[slot].gen });
+            return Ok(Val::Ref {
+                slot,
+                gen: cells[slot].gen,
+            });
         }
         let slot = cells.len();
         // The native slab is a fixed 65536-slot array; mirror its capacity (and
@@ -3500,7 +3757,10 @@ mod tests {
         assert_eq!((passed, failed), (1, 2));
         assert_eq!(results[0].0, "passes");
         assert!(results[0].1.is_ok());
-        assert_eq!(results[1].1.as_ref().unwrap_err(), "assertion failed at line 2");
+        assert_eq!(
+            results[1].1.as_ref().unwrap_err(),
+            "assertion failed at line 2"
+        );
         assert_eq!(
             results[2].1.as_ref().unwrap_err(),
             "assertion failed at line 3: 7 != 8"
@@ -3513,9 +3773,10 @@ mod tests {
                    test \"beta\" { assert(true) }\n";
         let program = crate::check(src).unwrap();
         let mut names = Vec::new();
-        let (passed, failed) =
-            super::run_tests(&program, Some("alph"), |name, _| names.push(name.to_string()))
-                .unwrap();
+        let (passed, failed) = super::run_tests(&program, Some("alph"), |name, _| {
+            names.push(name.to_string())
+        })
+        .unwrap();
         assert_eq!((passed, failed), (1, 0));
         assert_eq!(names, vec!["alpha".to_string()]);
     }
@@ -3528,10 +3789,7 @@ mod tests {
 
     /// A unique temp path (forward slashes, so it can embed in Vyrn source).
     fn temp_path(tag: &str) -> String {
-        let p = std::env::temp_dir().join(format!(
-            "vyrn-io-test-{tag}-{}.txt",
-            std::process::id()
-        ));
+        let p = std::env::temp_dir().join(format!("vyrn-io-test-{tag}-{}.txt", std::process::id()));
         p.to_string_lossy().replace('\\', "/")
     }
 
@@ -3641,7 +3899,10 @@ mod tests {
     fn args_default_to_empty() {
         // `run` (no args) must present an empty argv[1..] — the parity harness
         // runs every example argument-less on all three backends.
-        assert_eq!(run("fn main() -> Int64 { return args().length }").unwrap(), 0);
+        assert_eq!(
+            run("fn main() -> Int64 { return args().length }").unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -3728,7 +3989,13 @@ mod tests {
 
     #[test]
     fn parse_rejects_non_integers() {
-        let cases = [("\"12x\"", -1), ("\"\"", -1), ("\"-\"", -1), ("\" 5\"", -1), ("\"42\"", 42)];
+        let cases = [
+            ("\"12x\"", -1),
+            ("\"\"", -1),
+            ("\"-\"", -1),
+            ("\" 5\"", -1),
+            ("\"42\"", 42),
+        ];
         for (lit, want) in cases {
             let src = format!(
                 "fn main() -> Int64 {{ return match parse({lit}) {{ Some(n) => n, None => 0 - 1 }}; }}"
@@ -4082,7 +4349,8 @@ mod tests {
 
     #[test]
     fn rejects_mixing_different_int_widths() {
-        let src = "fn main() -> Int64 { let a: Int32 = 1; let b: Int8 = 2; let c = a + b; return 0; }";
+        let src =
+            "fn main() -> Int64 { let a: Int32 = 1; let b: Int8 = 2; let c = a + b; return 0; }";
         assert!(run(src).unwrap_err().contains("matching numeric"));
     }
 
@@ -4195,7 +4463,8 @@ mod tests {
         // widens it for an Int64 return; a char literal adapts to the byte.
         let src = "fn main() -> Int64 { let s = \"hello\"; return Int64(s[1]); }";
         assert_eq!(run(src).unwrap(), 101);
-        let cmp = "fn main() -> Int64 { let s = \"hello\"; if s[0] == 'h' { return 1; } return 0; }";
+        let cmp =
+            "fn main() -> Int64 { let s = \"hello\"; if s[0] == 'h' { return 1; } return 0; }";
         assert_eq!(run(cmp).unwrap(), 1);
     }
 
@@ -4244,7 +4513,10 @@ mod tests {
         assert_eq!(url_encode("a b&c"), "a%20b%26c");
         assert_eq!(url_decode("a%20b%26c").as_deref(), Some("a b&c"));
         // A UTF-8 round-trip through base64.
-        assert_eq!(base64_decode(&base64_encode("café")).as_deref(), Some("café"));
+        assert_eq!(
+            base64_decode(&base64_encode("café")).as_deref(),
+            Some("café")
+        );
     }
 
     #[test]
@@ -4314,7 +4586,9 @@ mod tests {
         let src = "type Name = String where value.length >= 3; \
                    fn mk(s: String) -> Name { return Name(s); } \
                    fn main() -> Int64 { let n = mk(\"x\"); return 0; }";
-        assert!(run(src).unwrap_err().contains("validation failed for `Name`"));
+        assert!(run(src)
+            .unwrap_err()
+            .contains("validation failed for `Name`"));
     }
 
     #[test]
@@ -4337,7 +4611,9 @@ mod tests {
         let src = "type TransKey = String where value =~ \"nav\\\\.(home|about)\\\\.label\"\n\
                    fn build(x: String) -> Int64 { let k: TransKey = \"nav.\\{x}.label\"  return 0 }\n\
                    fn main() -> Int64 { return build(\"BAD\") }";
-        assert!(run(src).unwrap_err().contains("validation failed for `TransKey`"));
+        assert!(run(src)
+            .unwrap_err()
+            .contains("validation failed for `TransKey`"));
     }
 
     #[test]
@@ -4423,7 +4699,10 @@ mod tests {
                   fn span(r: Range) -> Int64 { return r.end - r.start } \
                   fn mk(a: Int64, b: Int64) -> Plain { return Plain { start: a, end: b } } \
                   fn main() -> Int64 { return span(mk(9, 3)) }";
-        assert_eq!(run(xf).unwrap_err(), "validation failed: `Range` violates its `where` clause");
+        assert_eq!(
+            run(xf).unwrap_err(),
+            "validation failed: `Range` violates its `where` clause"
+        );
     }
 
     #[test]
@@ -4442,7 +4721,9 @@ mod tests {
         // …and a provably-bad constant is rejected at compile time.
         let constant = "type User = { age: Int64 where value >= 18 } \
                         fn main() -> Int64 { let u = User { age: 5 } return 0 }";
-        assert!(run(constant).unwrap_err().contains("does not satisfy `User.age`"));
+        assert!(run(constant)
+            .unwrap_err()
+            .contains("does not satisfy `User.age`"));
     }
 
     #[test]
@@ -4469,7 +4750,9 @@ mod tests {
         let bad = "type Ratio = Float64 where value > 0.0 && value <= 1.0; \
                    fn mk(x: Float64) -> Ratio { return Ratio(x); } \
                    fn main() -> Int64 { let r = mk(2.5); return 0; }";
-        assert!(run(bad).unwrap_err().contains("validation failed for `Ratio`"));
+        assert!(run(bad)
+            .unwrap_err()
+            .contains("validation failed for `Ratio`"));
     }
 
     #[test]
@@ -4547,7 +4830,9 @@ mod tests {
         let src = "type Code = String where value =~ \"[A-Z][A-Z][A-Z]\"; \
                    fn mk(s: String) -> Code { return Code(s); } \
                    fn main() -> Int64 { let c = mk(\"ab\"); return 0; }";
-        assert!(run(src).unwrap_err().contains("validation failed for `Code`"));
+        assert!(run(src)
+            .unwrap_err()
+            .contains("validation failed for `Code`"));
     }
 
     #[test]
@@ -4629,7 +4914,8 @@ mod tests {
     #[test]
     fn logging_is_forbidden_in_spawned_tasks() {
         // A spawned function must be pure; logging is observable I/O.
-        let src = "fn work(n: Int64) -> Int64 { let l = logger(\"w\"); l.info(\"hi\"); return n; } \
+        let src =
+            "fn work(n: Int64) -> Int64 { let l = logger(\"w\"); l.info(\"hi\"); return n; } \
                    fn main() -> Int64 { let t = spawn work(1); return t.join(); }";
         assert!(run(src).is_err());
     }
@@ -4869,7 +5155,10 @@ mod tests {
                        let t = jsNow()\n\
                        return 0\n\
                    }";
-        assert_eq!(run(src).unwrap_err(), "extern `jsNow` is not available on this target");
+        assert_eq!(
+            run(src).unwrap_err(),
+            "extern `jsNow` is not available on this target"
+        );
         // Declaring without calling is harmless.
         let src = "extern fn jsNow() -> Float64\nfn main() -> Int64 { return 7 }";
         assert_eq!(run(src).unwrap(), 7);
@@ -5191,7 +5480,8 @@ mod tests {
 
     #[test]
     fn lambda_argument_runs() {
-        let src = format!("{TWICE}fn main() -> Int64 {{ return sum(twice([1, 2, 3], |x| x * 2)) }}");
+        let src =
+            format!("{TWICE}fn main() -> Int64 {{ return sum(twice([1, 2, 3], |x| x * 2)) }}");
         assert_eq!(run(&src).unwrap(), 12);
     }
 

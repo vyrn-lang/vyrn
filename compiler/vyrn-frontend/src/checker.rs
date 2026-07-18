@@ -44,7 +44,11 @@ pub fn stored_fn_effects(program: &Program) -> StoredFnEffects {
 /// RFC-0037 stored-function-value collection.
 fn check_accum_full(
     program: &Program,
-) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>, StoredFnEffects) {
+) -> (
+    Vec<Diagnostic>,
+    HashMap<(usize, String), Type>,
+    StoredFnEffects,
+) {
     let mut out = Vec::new();
 
     // 1. Collect and validate type declarations.
@@ -52,7 +56,10 @@ fn check_accum_full(
     for t in &program.type_decls {
         if matches!(t.name.as_str(), "Int64" | "Bool" | "Unit") {
             let mut d = Diagnostic::from_rendered(
-                format!("line {}: cannot redefine built-in type `{}`", t.line, t.name),
+                format!(
+                    "line {}: cannot redefine built-in type `{}`",
+                    t.line, t.name
+                ),
                 "check",
             );
             d.file = t.module.clone();
@@ -72,17 +79,74 @@ fn check_accum_full(
     }
 
     const RESERVED: &[&str] = &[
-        "print", "len", "concat", "Some", "None", "Ok", "Err", "match", "cell", "get", "set",
-        "release", "array", "push", "at", "alen", "afree", "str", "parse", "join", "logger",
-        "contains", "startsWith", "endsWith", "bytes", "chars",
-        "hexEncode", "hexDecode", "base64Encode", "base64Decode", "urlEncode", "urlDecode",
-        "args", "readLine", "readFile", "writeFile", "readFileBytes", "stringFromBytes",
-        "listDir", "moduleInterface",
-        "trace", "debug", "info", "warn", "error", "value", "list", "schemaOf", "jsonSchema",
-        "toJson", "fromJson",
-        "toString", "pop", "swapRemove", "assert", "assertEq",
-        "Int", "Int64", "Int32", "Int16", "Int8", "Float", "Float64", "Float32",
-        "UInt8", "UInt16", "UInt32", "UInt64",
+        "print",
+        "len",
+        "concat",
+        "Some",
+        "None",
+        "Ok",
+        "Err",
+        "match",
+        "cell",
+        "get",
+        "set",
+        "release",
+        "array",
+        "push",
+        "at",
+        "alen",
+        "afree",
+        "str",
+        "parse",
+        "join",
+        "logger",
+        "contains",
+        "startsWith",
+        "endsWith",
+        "bytes",
+        "chars",
+        "hexEncode",
+        "hexDecode",
+        "base64Encode",
+        "base64Decode",
+        "urlEncode",
+        "urlDecode",
+        "args",
+        "readLine",
+        "readFile",
+        "writeFile",
+        "readFileBytes",
+        "stringFromBytes",
+        "listDir",
+        "moduleInterface",
+        "trace",
+        "debug",
+        "info",
+        "warn",
+        "error",
+        "value",
+        "list",
+        "schemaOf",
+        "jsonSchema",
+        "toJson",
+        "fromJson",
+        "toString",
+        "pop",
+        "swapRemove",
+        "assert",
+        "assertEq",
+        "Int",
+        "Int64",
+        "Int32",
+        "Int16",
+        "Int8",
+        "Float",
+        "Float64",
+        "Float32",
+        "UInt8",
+        "UInt16",
+        "UInt32",
+        "UInt64",
     ];
 
     // 1b. Collect enum variants into a global constructor table.
@@ -99,21 +163,30 @@ fn check_accum_full(
                 }
                 if variants.contains_key(&v.name) {
                     out.push(Diagnostic::from_rendered(
-                        format!("line {}: enum variant `{}` is defined twice", t.line, v.name),
+                        format!(
+                            "line {}: enum variant `{}` is defined twice",
+                            t.line, v.name
+                        ),
                         "check",
                     ));
                     continue;
                 }
                 if types.contains_key(&v.name) {
                     out.push(Diagnostic::from_rendered(
-                        format!("line {}: enum variant `{}` clashes with a type name", t.line, v.name),
+                        format!(
+                            "line {}: enum variant `{}` clashes with a type name",
+                            t.line, v.name
+                        ),
                         "check",
                     ));
                     continue;
                 }
                 variants.insert(
                     v.name.clone(),
-                    VariantInfo { enum_name: t.name.clone(), payload: v.payload.clone() },
+                    VariantInfo {
+                        enum_name: t.name.clone(),
+                        payload: v.payload.clone(),
+                    },
                 );
             }
         }
@@ -132,7 +205,10 @@ fn check_accum_full(
         }
         if variants.contains_key(&f.name) {
             out.push(Diagnostic::from_rendered(
-                format!("line {}: `{}` is both a function and an enum variant", f.line, f.name),
+                format!(
+                    "line {}: `{}` is both a function and an enum variant",
+                    f.line, f.name
+                ),
                 "check",
             ));
             continue;
@@ -146,7 +222,10 @@ fn check_accum_full(
         }
         if types.contains_key(&f.name) {
             out.push(Diagnostic::from_rendered(
-                format!("line {}: `{}` is both a type and a function name", f.line, f.name),
+                format!(
+                    "line {}: `{}` is both a type and a function name",
+                    f.line, f.name
+                ),
                 "check",
             ));
             continue;
@@ -157,13 +236,21 @@ fn check_accum_full(
             generics.insert(f.name.clone(), f.type_params.clone());
         }
     }
-    let all_bounds: HashMap<String, HashMap<String, Vec<String>>> =
-        program.functions.iter().map(|f| (f.name.clone(), f.type_bounds.clone())).collect();
+    let all_bounds: HashMap<String, HashMap<String, Vec<String>>> = program
+        .functions
+        .iter()
+        .map(|f| (f.name.clone(), f.type_bounds.clone()))
+        .collect();
     // Each function's parameter capabilities, for checking `modify` call sites.
     let caps: HashMap<String, Vec<Capability>> = program
         .functions
         .iter()
-        .map(|f| (f.name.clone(), f.params.iter().map(|p| p.capability).collect()))
+        .map(|f| {
+            (
+                f.name.clone(),
+                f.params.iter().map(|p| p.capability).collect(),
+            )
+        })
         .collect();
 
     // Which functions are "spawn-safe" — pure enough to run as a concurrent task:
@@ -354,10 +441,12 @@ fn check_accum_full(
             "check",
         )),
         None => {}
-        Some(main) if !main.0.is_empty() || main.1 != Type::Int => out.push(Diagnostic::from_rendered(
-            "`main` must have signature `fn main() -> Int64`".to_string(),
-            "check",
-        )),
+        Some(main) if !main.0.is_empty() || main.1 != Type::Int => {
+            out.push(Diagnostic::from_rendered(
+                "`main` must have signature `fn main() -> Int64`".to_string(),
+                "check",
+            ))
+        }
         _ => {}
     }
 
@@ -652,7 +741,10 @@ impl<'a> Checker<'a> {
     /// The generic parameters of the enum a variant belongs to (empty if the
     /// enum is not generic).
     fn enum_type_params(&self, enum_name: &str) -> Vec<String> {
-        self.types.get(enum_name).map(|d| d.type_params.clone()).unwrap_or_default()
+        self.types
+            .get(enum_name)
+            .map(|d| d.type_params.clone())
+            .unwrap_or_default()
     }
 
     /// Whether `ty` transitively contains a function-value type (RFC-0037),
@@ -674,9 +766,9 @@ impl<'a> Checker<'a> {
                 }
                 Type::Omit(b, _) | Type::Pick(b, _) => walk(b, types, seen),
                 Type::Record(fs) => fs.iter().any(|f| walk(&f.ty, types, seen)),
-                Type::Enum(vs) => {
-                    vs.iter().any(|v| v.payload.iter().any(|p| walk(p, types, seen)))
-                }
+                Type::Enum(vs) => vs
+                    .iter()
+                    .any(|v| v.payload.iter().any(|p| walk(p, types, seen))),
                 Type::App(n, args) => {
                     args.iter().any(|a| walk(a, types, seen))
                         || (!seen.iter().any(|s| s == n)
@@ -1099,7 +1191,13 @@ impl<'a> Checker<'a> {
                 // The predicate sees every field in scope, by name.
                 let mut scope: Vec<HashMap<String, Binding>> = vec![HashMap::new()];
                 for f in fields {
-                    scope[0].insert(f.name.clone(), Binding { ty: f.ty.clone(), mutable: false });
+                    scope[0].insert(
+                        f.name.clone(),
+                        Binding {
+                            ty: f.ty.clone(),
+                            mutable: false,
+                        },
+                    );
                 }
                 let pty = self.expr(pred, &scope, None, None)?;
                 if self.base(&pty) != Type::Bool {
@@ -1114,10 +1212,16 @@ impl<'a> Checker<'a> {
         // Enum declaration (RFC-0002 §4).
         if let Type::Enum(vs) = &t.base {
             if t.predicate.is_some() {
-                return Err(format!("line {}: an enum type cannot have a `where` clause", t.line));
+                return Err(format!(
+                    "line {}: an enum type cannot have a `where` clause",
+                    t.line
+                ));
             }
             if vs.is_empty() {
-                return Err(format!("line {}: enum `{}` has no variants", t.line, t.name));
+                return Err(format!(
+                    "line {}: enum `{}` has no variants",
+                    t.line, t.name
+                ));
             }
             for v in vs {
                 for p in &v.payload {
@@ -1136,7 +1240,11 @@ impl<'a> Checker<'a> {
                 return Err(format!(
                     "line {}: a `{}` alias cannot have a `where` clause",
                     t.line,
-                    if matches!(t.base, Type::Result(..)) { "Result" } else { "Option" }
+                    if matches!(t.base, Type::Result(..)) {
+                        "Result"
+                    } else {
+                        "Option"
+                    }
                 ));
             }
             self.ensure_type_exists(&t.base, t.line)?;
@@ -1151,7 +1259,11 @@ impl<'a> Checker<'a> {
                 return Err(format!(
                     "line {}: a `{}` alias cannot have a `where` clause",
                     t.line,
-                    if matches!(t.base, Type::Map(..)) { "Map" } else { "Array" }
+                    if matches!(t.base, Type::Map(..)) {
+                        "Map"
+                    } else {
+                        "Array"
+                    }
                 ));
             }
             self.ensure_type_exists(&t.base, t.line)?;
@@ -1165,13 +1277,22 @@ impl<'a> Checker<'a> {
             return Ok(());
         }
         // A transformer alias, e.g. `type Public = Omit<User, password>;`.
-        if matches!(t.base, Type::Omit(..) | Type::Pick(..) | Type::Merge(..) | Type::Partial(..)) {
+        if matches!(
+            t.base,
+            Type::Omit(..) | Type::Pick(..) | Type::Merge(..) | Type::Partial(..)
+        ) {
             if t.predicate.is_some() {
-                return Err(format!("line {}: a record type cannot have a `where` clause", t.line));
+                return Err(format!(
+                    "line {}: a record type cannot have a `where` clause",
+                    t.line
+                ));
             }
             self.ensure_type_exists(&t.base, t.line)?;
             if crate::types::record_fields(&t.base, self.types).is_none() {
-                return Err(format!("line {}: `{}` does not resolve to a record", t.line, t.name));
+                return Err(format!(
+                    "line {}: `{}` does not resolve to a record",
+                    t.line, t.name
+                ));
             }
             return Ok(());
         }
@@ -1198,7 +1319,13 @@ impl<'a> Checker<'a> {
             }
             // Predicate is checked in an environment where `value` has the base type.
             let mut scope: Vec<HashMap<String, Binding>> = vec![HashMap::new()];
-            scope[0].insert("value".into(), Binding { ty: t.base.clone(), mutable: false });
+            scope[0].insert(
+                "value".into(),
+                Binding {
+                    ty: t.base.clone(),
+                    mutable: false,
+                },
+            );
             let pty = self.expr(pred, &scope, None, None)?;
             if self.base(&pty) != Type::Bool {
                 return Err(format!(
@@ -1233,8 +1360,19 @@ impl<'a> Checker<'a> {
     fn type_satisfies(&self, ty: &Type, bound: &str) -> bool {
         let base = self.base(ty);
         match bound {
-            "Num" | "Ord" => matches!(base, Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }),
-            "Eq" => matches!(base, Type::Int | Type::Float | Type::Float32 | Type::IntN { .. } | Type::Bool | Type::Str),
+            "Num" | "Ord" => matches!(
+                base,
+                Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
+            ),
+            "Eq" => matches!(
+                base,
+                Type::Int
+                    | Type::Float
+                    | Type::Float32
+                    | Type::IntN { .. }
+                    | Type::Bool
+                    | Type::Str
+            ),
             // A user protocol: satisfied iff the concrete type implements it.
             _ if self.protocol_methods.values().any(|(p, _)| p == bound)
                 || self.impls.iter().any(|(p, _)| p == bound) =>
@@ -1317,8 +1455,7 @@ impl<'a> Checker<'a> {
             .filter(|f| !f.is_extern && !f.is_export_extern)
             .map(|f| (f.name.clone(), f.module.clone()))
             .collect();
-        let all_globals: HashSet<&str> =
-            program.globals.iter().map(|g| g.name.as_str()).collect();
+        let all_globals: HashSet<&str> = program.globals.iter().map(|g| g.name.as_str()).collect();
         // Ready-so-far names (the earlier globals) grow as we go.
         let mut ready: HashSet<String> = HashSet::new();
         for g in &program.globals {
@@ -1326,7 +1463,13 @@ impl<'a> Checker<'a> {
                 // Initializer restrictions (walked before typing so the messages
                 // are precise): no user/extern call, no later-global read.
                 init_restrictions(
-                    &g.init, &forbidden, &fn_module, &g.module, &all_globals, &ready, &g.name,
+                    &g.init,
+                    &forbidden,
+                    &fn_module,
+                    &g.module,
+                    &all_globals,
+                    &ready,
+                    &g.name,
                     g.line,
                 )?;
                 if let Some(declared) = &g.ty {
@@ -1334,8 +1477,7 @@ impl<'a> Checker<'a> {
                 }
                 // Type-check the initializer against the annotation, seeing only
                 // the earlier globals.
-                let scope: Vec<HashMap<String, Binding>> =
-                    vec![self.globals.borrow().clone()];
+                let scope: Vec<HashMap<String, Binding>> = vec![self.globals.borrow().clone()];
                 let vty = self.expr(&g.init, &scope, g.ty.as_ref(), None)?;
                 if self.base(&vty) == Type::Unit {
                     return Err(format!(
@@ -1355,12 +1497,18 @@ impl<'a> Checker<'a> {
                 Ok(g.ty.clone().unwrap_or(vty))
             })();
             let binding = match bty {
-                Ok(t) => Binding { ty: t, mutable: g.mutable },
+                Ok(t) => Binding {
+                    ty: t,
+                    mutable: g.mutable,
+                },
                 Err(s) => {
                     let mut d = Diagnostic::from_rendered(s, "check");
                     d.file = g.module.clone();
                     out.push(d);
-                    Binding { ty: Type::Err, mutable: g.mutable }
+                    Binding {
+                        ty: Type::Err,
+                        mutable: g.mutable,
+                    }
                 }
             };
             self.globals.borrow_mut().insert(g.name.clone(), binding);
@@ -1381,7 +1529,13 @@ impl<'a> Checker<'a> {
             // A `modify` parameter is mutable inside the body (that is the point);
             // others are read-only bindings.
             let mutable = p.capability == Capability::Modify;
-            scope.last_mut().unwrap().insert(p.name.clone(), Binding { ty: p.ty.clone(), mutable });
+            scope.last_mut().unwrap().insert(
+                p.name.clone(),
+                Binding {
+                    ty: p.ty.clone(),
+                    mutable,
+                },
+            );
         }
         // `block` no longer propagates the first error via `?`; it pushes each
         // statement's error to the `errors` sink and continues, so every
@@ -1390,9 +1544,10 @@ impl<'a> Checker<'a> {
         if f.ret != Type::Unit && !returns {
             // A missing-return diagnostic is reported alongside any body errors
             // (it is about the function as a whole, not one statement).
-            self.errors
-                .borrow_mut()
-                .push(format!("line {}: function `{}` must return {} on all paths", f.line, f.name, f.ret));
+            self.errors.borrow_mut().push(format!(
+                "line {}: function `{}` must return {} on all paths",
+                f.line, f.name, f.ret
+            ));
         }
         // Surface this function's collected errors as the "result": the first
         // becomes the `Err` (preserving the historical single-error surface for
@@ -1410,12 +1565,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn block(
-        &self,
-        block: &Block,
-        ret: &Type,
-        scope: &mut Vec<HashMap<String, Binding>>,
-    ) -> bool {
+    fn block(&self, block: &Block, ret: &Type, scope: &mut Vec<HashMap<String, Binding>>) -> bool {
         scope.push(HashMap::new());
         let mut always_returns = false;
         for stmt in &block.stmts {
@@ -1448,19 +1598,25 @@ impl<'a> Checker<'a> {
     fn recover_binding(&self, stmt: &Stmt, scope: &mut Vec<HashMap<String, Binding>>) {
         match stmt {
             Stmt::Let { name, mutable, .. } => {
-                scope
-                    .last_mut()
-                    .unwrap()
-                    .insert(name.clone(), Binding { ty: Type::Err, mutable: *mutable });
+                scope.last_mut().unwrap().insert(
+                    name.clone(),
+                    Binding {
+                        ty: Type::Err,
+                        mutable: *mutable,
+                    },
+                );
             }
             Stmt::ForIn { var, .. } => {
                 // The loop variable's frame is pushed inside `stmt`'s `ForIn`
                 // arm; on error that arm returned before pushing it, so bind in
                 // the current (block) frame as a best-effort recovery.
-                scope
-                    .last_mut()
-                    .unwrap()
-                    .insert(var.clone(), Binding { ty: Type::Err, mutable: false });
+                scope.last_mut().unwrap().insert(
+                    var.clone(),
+                    Binding {
+                        ty: Type::Err,
+                        mutable: false,
+                    },
+                );
             }
             _ => {}
         }
@@ -1473,7 +1629,13 @@ impl<'a> Checker<'a> {
         scope: &mut Vec<HashMap<String, Binding>>,
     ) -> Result<bool, String> {
         match stmt {
-            Stmt::Let { name, mutable, ty, value, line } => {
+            Stmt::Let {
+                name,
+                mutable,
+                ty,
+                value,
+                line,
+            } => {
                 if let Some(declared) = ty {
                     self.ensure_type_exists(declared, *line)?;
                 }
@@ -1494,17 +1656,22 @@ impl<'a> Checker<'a> {
                 let bty = ty.clone().unwrap_or(vty);
                 // Retain it for the symbol-query layer so hovering an
                 // unannotated `let x = 5` shows `let x: Int`.
-                self.let_types.borrow_mut().insert((*line, name.clone()), bty.clone());
-                scope
-                    .last_mut()
-                    .unwrap()
-                    .insert(name.clone(), Binding { ty: bty, mutable: *mutable });
+                self.let_types
+                    .borrow_mut()
+                    .insert((*line, name.clone()), bty.clone());
+                scope.last_mut().unwrap().insert(
+                    name.clone(),
+                    Binding {
+                        ty: bty,
+                        mutable: *mutable,
+                    },
+                );
                 Ok(false)
             }
             Stmt::Assign { name, value, line } => {
-                let b = self
-                    .lookup(scope, name)
-                    .ok_or_else(|| format!("line {line}: assignment to unknown variable `{name}`"))?;
+                let b = self.lookup(scope, name).ok_or_else(|| {
+                    format!("line {line}: assignment to unknown variable `{name}`")
+                })?;
                 if !b.mutable {
                     return Err(format!(
                         "line {line}: cannot assign to `{name}` (declared without `mut`)"
@@ -1522,7 +1689,12 @@ impl<'a> Checker<'a> {
                 self.region_store_guard(name, &b.ty, scope, *line)?;
                 Ok(false)
             }
-            Stmt::SetField { name, field, value, line } => {
+            Stmt::SetField {
+                name,
+                field,
+                value,
+                line,
+            } => {
                 let b = self.lookup(scope, name).ok_or_else(|| {
                     format!("line {line}: assignment to field of unknown variable `{name}`")
                 })?;
@@ -1551,7 +1723,9 @@ impl<'a> Checker<'a> {
                     .iter()
                     .find(|f| &f.name == field)
                     .map(|f| f.ty.clone())
-                    .ok_or_else(|| format!("line {line}: record `{name}` has no field `{field}`"))?;
+                    .ok_or_else(|| {
+                        format!("line {line}: record `{name}` has no field `{field}`")
+                    })?;
                 // A predicated FIELD type cannot be written in place either: the
                 // interpreter's record values are type-erased, so the field's
                 // check has no reliable runtime hook there. Only the exact named
@@ -1579,7 +1753,12 @@ impl<'a> Checker<'a> {
             // value coerces into the element type (validated element types are
             // rejected at compile time here via `prove_coercion`, at runtime via
             // the coerce the interpreter/codegen emit on store).
-            Stmt::IndexSet { name, index, value, line } => {
+            Stmt::IndexSet {
+                name,
+                index,
+                value,
+                line,
+            } => {
                 let b = self.lookup(scope, name).ok_or_else(|| {
                     format!("line {line}: index-assignment to unknown variable `{name}`")
                 })?;
@@ -1593,8 +1772,7 @@ impl<'a> Checker<'a> {
                 // `V` is predicated, exactly like an array element store).
                 if let Type::Map(_, val) = self.base(&b.ty) {
                     let k = self.base(&self.expr(index, scope, Some(&Type::Str), Some(ret))?);
-                    if !matches!(k, Type::Err)
-                        && crate::types::resolve(&k, self.types) != Type::Str
+                    if !matches!(k, Type::Err) && crate::types::resolve(&k, self.types) != Type::Str
                     {
                         return Err(format!(
                             "line {line}: a map key must be a String, found {k}"
@@ -1669,10 +1847,17 @@ impl<'a> Checker<'a> {
                 }
                 Ok(true)
             }
-            Stmt::If { cond, then_block, else_block, line } => {
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                line,
+            } => {
                 let cty = self.expr(cond, scope, None, Some(ret))?;
                 if self.base(&cty) != Type::Bool {
-                    return Err(format!("line {line}: `if` condition must be Bool, found {cty}"));
+                    return Err(format!(
+                        "line {line}: `if` condition must be Bool, found {cty}"
+                    ));
                 }
                 let then_ret = self.block(then_block, ret, scope);
                 match else_block {
@@ -1686,12 +1871,19 @@ impl<'a> Checker<'a> {
             Stmt::While { cond, body, line } => {
                 let cty = self.expr(cond, scope, None, Some(ret))?;
                 if self.base(&cty) != Type::Bool {
-                    return Err(format!("line {line}: `while` condition must be Bool, found {cty}"));
+                    return Err(format!(
+                        "line {line}: `while` condition must be Bool, found {cty}"
+                    ));
                 }
                 self.block(body, ret, scope);
                 Ok(false)
             }
-            Stmt::ForIn { var, iter, body, line } => {
+            Stmt::ForIn {
+                var,
+                iter,
+                body,
+                line,
+            } => {
                 let ity = self.expr(iter, scope, None, Some(ret))?;
                 let elem = match self.base(&ity) {
                     Type::Array(inner) | Type::ArrayN(inner, _) => (*inner).clone(),
@@ -1706,12 +1898,17 @@ impl<'a> Checker<'a> {
                 // Bind the loop variable (immutable, element-typed) in a scope
                 // frame that wraps the body, so it is not visible after the loop.
                 // Retain the element type so `for s in arr` hovers as `for s: Int`.
-                self.let_types.borrow_mut().insert((*line, var.clone()), elem.clone());
+                self.let_types
+                    .borrow_mut()
+                    .insert((*line, var.clone()), elem.clone());
                 scope.push(HashMap::new());
-                scope
-                    .last_mut()
-                    .unwrap()
-                    .insert(var.clone(), Binding { ty: elem, mutable: false });
+                scope.last_mut().unwrap().insert(
+                    var.clone(),
+                    Binding {
+                        ty: elem,
+                        mutable: false,
+                    },
+                );
                 self.block(body, ret, scope);
                 scope.pop();
                 // A `for` may run zero times, so it never guarantees a return.
@@ -1774,7 +1971,9 @@ impl<'a> Checker<'a> {
             Type::Map(..) => true,
             Type::Ref(inner) | Type::Task(inner) => self.contains_heap(&inner),
             Type::Record(fs) => fs.iter().any(|f| self.contains_heap(&f.ty)),
-            Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(|p| self.contains_heap(p))),
+            Type::Enum(vs) => vs
+                .iter()
+                .any(|v| v.payload.iter().any(|p| self.contains_heap(p))),
             Type::Option(inner) => self.contains_heap(&inner),
             Type::Result(a, b) => self.contains_heap(&a) || self.contains_heap(&b),
             // A stored function value (RFC-0037) may hold heap captures
@@ -1831,9 +2030,7 @@ impl<'a> Checker<'a> {
         if let Some(exp) = expected {
             if matches!(self.base(exp), Type::Fn(..)) {
                 match expr {
-                    Expr::Lambda { .. } => {
-                        return self.stored_fn_lambda(expr, exp, scope, fn_ret)
-                    }
+                    Expr::Lambda { .. } => return self.stored_fn_lambda(expr, exp, scope, fn_ret),
                     Expr::Var { name, line }
                         if self.lookup(scope, name).is_none()
                             && self.sigs.contains_key(name.as_str()) =>
@@ -1947,9 +2144,18 @@ impl<'a> Checker<'a> {
                 }
                 let t = self.base(&self.expr(expr, scope, None, fn_ret)?);
                 match op {
-                    UnOp::Neg if matches!(t, Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }) => Ok(t),
+                    UnOp::Neg
+                        if matches!(
+                            t,
+                            Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
+                        ) =>
+                    {
+                        Ok(t)
+                    }
                     UnOp::Not if t == Type::Bool => Ok(Type::Bool),
-                    UnOp::Neg => Err(format!("line {line}: unary `-` needs a numeric type, found {t}")),
+                    UnOp::Neg => Err(format!(
+                        "line {line}: unary `-` needs a numeric type, found {t}"
+                    )),
                     UnOp::Not => Err(format!("line {line}: unary `!` needs Bool, found {t}")),
                 }
             }
@@ -2005,20 +2211,27 @@ impl<'a> Checker<'a> {
                                 return Err(format!("line {line}: invalid regex `{pat}`: {e}"));
                             }
                         }
-                        _ => {
-                            return Err(format!(
-                                "line {line}: the right side of `=~` must be a string-literal pattern"
-                            ))
-                        }
+                        _ => return Err(format!(
+                            "line {line}: the right side of `=~` must be a string-literal pattern"
+                        )),
                     }
                 }
                 self.binop_type(*op, l, r, *line)
             }
-            Expr::Call { name, args, line } => self.call(name, args, *line, scope, expected, fn_ret),
-            Expr::Match { scrutinee, arms, line } => {
-                self.check_match(scrutinee, arms, *line, scope, expected, fn_ret)
+            Expr::Call { name, args, line } => {
+                self.call(name, args, *line, scope, expected, fn_ret)
             }
-            Expr::IfExpr { cond, then_branch, else_branch, line } => self.check_if_expr(
+            Expr::Match {
+                scrutinee,
+                arms,
+                line,
+            } => self.check_match(scrutinee, arms, *line, scope, expected, fn_ret),
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch,
+                line,
+            } => self.check_if_expr(
                 cond,
                 then_branch,
                 else_branch.as_deref(),
@@ -2049,9 +2262,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .find(|f| &f.name == field)
                         .map(|f| f.ty.clone())
-                        .ok_or_else(|| {
-                            format!("line {line}: type {ety} has no field `{field}`")
-                        }),
+                        .ok_or_else(|| format!("line {line}: type {ety} has no field `{field}`")),
                     other => Err(format!(
                         "line {line}: cannot access field `{field}` on non-record type {other}"
                     )),
@@ -2059,7 +2270,9 @@ impl<'a> Checker<'a> {
             }
             Expr::TryConstruct { name, args, line } => {
                 let base = match self.types.get(name) {
-                    Some(d) if matches!(d.base, Type::Int | Type::Bool | Type::Str) => d.base.clone(),
+                    Some(d) if matches!(d.base, Type::Int | Type::Bool | Type::Str) => {
+                        d.base.clone()
+                    }
                     Some(_) => {
                         return Err(format!(
                             "line {line}: `{name}?(..)` is only for validated/nominal scalar types"
@@ -2068,7 +2281,10 @@ impl<'a> Checker<'a> {
                     None => return Err(format!("line {line}: unknown type `{name}`")),
                 };
                 if args.len() != 1 {
-                    return Err(format!("line {line}: `{name}?` takes 1 argument, got {}", args.len()));
+                    return Err(format!(
+                        "line {line}: `{name}?` takes 1 argument, got {}",
+                        args.len()
+                    ));
                 }
                 let aty = self.expr(&args[0], scope, Some(&base), fn_ret)?;
                 if !self.assignable(&aty, &base) {
@@ -2198,8 +2414,7 @@ impl<'a> Checker<'a> {
                 // first value. The key type is `String` (the expected key type
                 // when present — a validated string type stays honest).
                 let key_ty = key_ty.unwrap_or(Type::Str);
-                let first_val =
-                    self.expr(&entries[0].1, scope, val_expected.as_ref(), fn_ret)?;
+                let first_val = self.expr(&entries[0].1, scope, val_expected.as_ref(), fn_ret)?;
                 let val_ty = val_expected.unwrap_or(first_val);
                 for (k, v) in entries {
                     let kt = self.expr(k, scope, Some(&key_ty), fn_ret)?;
@@ -2274,7 +2489,10 @@ impl<'a> Checker<'a> {
         // Every declared field must be provided.
         for f in &rfields {
             if !provided.contains(&f.name) {
-                return Err(format!("line {line}: missing field `{}` for `{name}`", f.name));
+                return Err(format!(
+                    "line {line}: missing field `{}` for `{name}`",
+                    f.name
+                ));
             }
         }
         // Cross-field predicate: if every field is a compile-time constant, the
@@ -2312,7 +2530,11 @@ impl<'a> Checker<'a> {
                 ));
             }
         }
-        let args = decl.type_params.iter().map(|tp| subst[tp].clone()).collect();
+        let args = decl
+            .type_params
+            .iter()
+            .map(|tp| subst[tp].clone())
+            .collect();
         Ok(Type::App(name.to_string(), args))
     }
 
@@ -2327,9 +2549,8 @@ impl<'a> Checker<'a> {
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
         let ety = self.expr(expr, scope, None, fn_ret)?;
-        let ret = fn_ret.ok_or_else(|| {
-            format!("line {line}: `?` can only be used inside a function")
-        })?;
+        let ret =
+            fn_ret.ok_or_else(|| format!("line {line}: `?` can only be used inside a function"))?;
         match &ety {
             Type::Option(t) => match ret {
                 Type::Option(_) => Ok((**t).clone()),
@@ -2349,7 +2570,9 @@ impl<'a> Checker<'a> {
                      but it returns {ret}"
                 )),
             },
-            other => Err(format!("line {line}: `?` needs an Option or Result, found {other}")),
+            other => Err(format!(
+                "line {line}: `?` needs an Option or Result, found {other}"
+            )),
         }
     }
 
@@ -2387,11 +2610,9 @@ impl<'a> Checker<'a> {
         let want: [&str; 2] = match &sty {
             Type::Option(_) => ["Some", "None"],
             Type::Result(_, _) => ["Ok", "Err"],
-            other => {
-                return Err(format!(
-                    "line {line}: `match` scrutinee must be an Option, Result, or enum, found {other}"
-                ))
-            }
+            other => return Err(format!(
+                "line {line}: `match` scrutinee must be an Option, Result, or enum, found {other}"
+            )),
         };
         let mut seen: Vec<&str> = Vec::new();
         let mut result: Option<Type> = expected.cloned();
@@ -2421,10 +2642,13 @@ impl<'a> Checker<'a> {
             if let Some(name) = bind {
                 let bty = self.binding_type(&sty, tag);
                 inner_scope.push(HashMap::new());
-                inner_scope
-                    .last_mut()
-                    .unwrap()
-                    .insert(name.to_string(), Binding { ty: bty, mutable: false });
+                inner_scope.last_mut().unwrap().insert(
+                    name.to_string(),
+                    Binding {
+                        ty: bty,
+                        mutable: false,
+                    },
+                );
             }
             let bty = self.expr(&arm.body, &inner_scope, result.as_ref(), fn_ret)?;
             self.unify_arm(&mut result, bty, line)?;
@@ -2477,10 +2701,13 @@ impl<'a> Checker<'a> {
             if !bind.is_empty() {
                 inner.push(HashMap::new());
                 for (bname, pty) in bind.iter().zip(&ev.payload) {
-                    inner
-                        .last_mut()
-                        .unwrap()
-                        .insert(bname.clone(), Binding { ty: pty.clone(), mutable: false });
+                    inner.last_mut().unwrap().insert(
+                        bname.clone(),
+                        Binding {
+                            ty: pty.clone(),
+                            mutable: false,
+                        },
+                    );
                 }
             }
             let bty = self.expr(&arm.body, &inner, result.as_ref(), fn_ret)?;
@@ -2488,7 +2715,10 @@ impl<'a> Checker<'a> {
         }
         for v in evs {
             if !seen.contains(&v.name) {
-                return Err(format!("line {line}: `match` is missing variant `{}`", v.name));
+                return Err(format!(
+                    "line {line}: `match` is missing variant `{}`",
+                    v.name
+                ));
             }
         }
         result.ok_or_else(|| format!("line {line}: empty `match`"))
@@ -2588,18 +2818,25 @@ impl<'a> Checker<'a> {
                 }
                 Lt | LtEq | Gt | GtEq if self.param_has_bound(t, "Ord") => Ok(Type::Bool),
                 Eq | NotEq if self.param_has_bound(t, "Eq") => Ok(Type::Bool),
-                Add | Sub | Mul | Div | Rem => {
-                    Err(format!("line {line}: `{t}` needs a `Num` bound for arithmetic"))
-                }
-                Lt | LtEq | Gt | GtEq => {
-                    Err(format!("line {line}: `{t}` needs an `Ord` bound to compare"))
-                }
+                Add | Sub | Mul | Div | Rem => Err(format!(
+                    "line {line}: `{t}` needs a `Num` bound for arithmetic"
+                )),
+                Lt | LtEq | Gt | GtEq => Err(format!(
+                    "line {line}: `{t}` needs an `Ord` bound to compare"
+                )),
                 Eq | NotEq => Err(format!("line {line}: `{t}` needs an `Eq` bound")),
                 And | Or => Err(format!("line {line}: `&&`/`||` need Bool operands")),
-                Match => Err(format!("line {line}: `=~` needs a String operand, not `{t}`")),
+                Match => Err(format!(
+                    "line {line}: `=~` needs a String operand, not `{t}`"
+                )),
             };
         }
-        let numeric = |t: &Type| matches!(t, Type::Int | Type::Float | Type::Float32 | Type::IntN { .. });
+        let numeric = |t: &Type| {
+            matches!(
+                t,
+                Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
+            )
+        };
         match op {
             // `+` on two Strings is concatenation (replacing the old `concat`
             // builtin); it lowers to the same heap allocation and drop analysis.
@@ -2624,7 +2861,9 @@ impl<'a> Checker<'a> {
                 if l == r && matches!(l, Type::Int | Type::IntN { .. }) {
                     Ok(l)
                 } else {
-                    Err(format!("line {line}: `%` needs matching integer operands, found {l} and {r}"))
+                    Err(format!(
+                        "line {line}: `%` needs matching integer operands, found {l} and {r}"
+                    ))
                 }
             }
             // Ordering: matching numeric operands, or two Strings (byte-wise
@@ -2653,7 +2892,9 @@ impl<'a> Checker<'a> {
                 if l == Type::Bool && r == Type::Bool {
                     Ok(Type::Bool)
                 } else {
-                    Err(format!("line {line}: `&&`/`||` needs Bool operands, found {l} and {r}"))
+                    Err(format!(
+                        "line {line}: `&&`/`||` needs Bool operands, found {l} and {r}"
+                    ))
                 }
             }
             // `=~` matches a String against a regex literal → Bool (the literal
@@ -2663,7 +2904,9 @@ impl<'a> Checker<'a> {
                 if l == Type::Str && r == Type::Str {
                     Ok(Type::Bool)
                 } else {
-                    Err(format!("line {line}: `=~` needs a String and a pattern, found {l} and {r}"))
+                    Err(format!(
+                        "line {line}: `=~` needs a String and a pattern, found {l} and {r}"
+                    ))
                 }
             }
         }
@@ -2797,7 +3040,12 @@ impl<'a> Checker<'a> {
             let equatable = |t: &Type| {
                 matches!(
                     t,
-                    Type::Int | Type::Float | Type::Float32 | Type::IntN { .. } | Type::Bool | Type::Str
+                    Type::Int
+                        | Type::Float
+                        | Type::Float32
+                        | Type::IntN { .. }
+                        | Type::Bool
+                        | Type::Str
                 )
             };
             if a != b || !equatable(&a) {
@@ -2811,13 +3059,24 @@ impl<'a> Checker<'a> {
         // built-in: print(Int|Bool) -> Unit
         if name == "print" {
             if args.len() != 1 {
-                return Err(format!("line {line}: print expects 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: print expects 1 argument, got {}",
+                    args.len()
+                ));
             }
             let t = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
             if matches!(t, Type::Err) {
                 return Ok(Type::Err);
             }
-            if !matches!(t, Type::Int | Type::Float | Type::Float32 | Type::IntN { .. } | Type::Bool | Type::Str) {
+            if !matches!(
+                t,
+                Type::Int
+                    | Type::Float
+                    | Type::Float32
+                    | Type::IntN { .. }
+                    | Type::Bool
+                    | Type::Str
+            ) {
                 return Err(format!(
                     "line {line}: print needs a number, Bool, or String, found {t}"
                 ));
@@ -2828,14 +3087,19 @@ impl<'a> Checker<'a> {
         // built-in: logger(String) -> Logger (RFC-0008).
         if name == "logger" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `logger` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `logger` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
             if matches!(t, Type::Err) {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!("line {line}: `logger` needs a String name, found {t}"));
+                return Err(format!(
+                    "line {line}: `logger` needs a String name, found {t}"
+                ));
             }
             return Ok(Type::Logger);
         }
@@ -2863,7 +3127,9 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if m != Type::Str {
-                return Err(format!("line {line}: `{name}` message must be a String, found {m}"));
+                return Err(format!(
+                    "line {line}: `{name}` message must be a String, found {m}"
+                ));
             }
             return Ok(Type::Unit);
         }
@@ -2875,7 +3141,10 @@ impl<'a> Checker<'a> {
         // the codegen, kept byte-identical.
         if name == "args" {
             if !args.is_empty() {
-                return Err(format!("line {line}: `args` takes no arguments, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `args` takes no arguments, got {}",
+                    args.len()
+                ));
             }
             return Ok(Type::Array(Box::new(Type::Str)));
         }
@@ -2890,14 +3159,19 @@ impl<'a> Checker<'a> {
         }
         if name == "readFile" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `readFile` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `readFile` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
             if matches!(t, Type::Err) {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!("line {line}: `readFile` needs a String path, found {t}"));
+                return Err(format!(
+                    "line {line}: `readFile` needs a String path, found {t}"
+                ));
             }
             return Ok(Type::Result(Box::new(Type::Str), Box::new(Type::Str)));
         }
@@ -2909,14 +3183,19 @@ impl<'a> Checker<'a> {
         // \`p\``.
         if name == "listDir" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `listDir` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `listDir` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
             if matches!(t, Type::Err) {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!("line {line}: `listDir` needs a String path, found {t}"));
+                return Err(format!(
+                    "line {line}: `listDir` needs a String path, found {t}"
+                ));
             }
             return Ok(Type::Result(
                 Box::new(Type::Array(Box::new(Type::Str))),
@@ -2957,7 +3236,9 @@ impl<'a> Checker<'a> {
                     return Ok(Type::Err);
                 }
                 if t != Type::Str {
-                    return Err(format!("line {line}: `writeFile` needs String arguments, found {t}"));
+                    return Err(format!(
+                        "line {line}: `writeFile` needs String arguments, found {t}"
+                    ));
                 }
             }
             return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
@@ -2975,10 +3256,15 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if t != Type::Str {
-                return Err(format!("line {line}: `readFileBytes` needs a String path, found {t}"));
+                return Err(format!(
+                    "line {line}: `readFileBytes` needs a String path, found {t}"
+                ));
             }
             return Ok(Type::Result(
-                Box::new(Type::Array(Box::new(Type::IntN { bits: 8, signed: false }))),
+                Box::new(Type::Array(Box::new(Type::IntN {
+                    bits: 8,
+                    signed: false,
+                }))),
                 Box::new(Type::Str),
             ));
         }
@@ -2989,7 +3275,10 @@ impl<'a> Checker<'a> {
                     args.len()
                 ));
             }
-            let want = Type::Array(Box::new(Type::IntN { bits: 8, signed: false }));
+            let want = Type::Array(Box::new(Type::IntN {
+                bits: 8,
+                signed: false,
+            }));
             let t = self.base(&self.expr(&args[0], scope, Some(&want), fn_ret)?);
             if matches!(t, Type::Err) {
                 return Ok(Type::Err);
@@ -3009,7 +3298,10 @@ impl<'a> Checker<'a> {
         // also `s.contains(sub)` etc.). Each takes two Strings and yields a Bool.
         if matches!(name, "contains" | "startsWith" | "endsWith") {
             if args.len() != 2 {
-                return Err(format!("line {line}: `{name}` takes 2 arguments, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `{name}` takes 2 arguments, got {}",
+                    args.len()
+                ));
             }
             for a in args {
                 let t = self.base(&self.expr(a, scope, Some(&Type::Str), fn_ret)?);
@@ -3017,7 +3309,9 @@ impl<'a> Checker<'a> {
                     return Ok(Type::Err);
                 }
                 if t != Type::Str {
-                    return Err(format!("line {line}: `{name}` needs String arguments, found {t}"));
+                    return Err(format!(
+                        "line {line}: `{name}` needs String arguments, found {t}"
+                    ));
                 }
             }
             return Ok(Type::Bool);
@@ -3027,7 +3321,10 @@ impl<'a> Checker<'a> {
         // Option<String> (None on malformed input or a non-UTF-8 result).
         if matches!(name, "hexEncode" | "base64Encode" | "urlEncode") {
             if args.len() != 1 {
-                return Err(format!("line {line}: `{name}` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `{name}` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
             if matches!(t, Type::Err) {
@@ -3040,7 +3337,10 @@ impl<'a> Checker<'a> {
         }
         if matches!(name, "hexDecode" | "base64Decode" | "urlDecode") {
             if args.len() != 1 {
-                return Err(format!("line {line}: `{name}` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `{name}` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
             if matches!(t, Type::Err) {
@@ -3057,7 +3357,10 @@ impl<'a> Checker<'a> {
         // Array<Int> (the Unicode scalar values / code points).
         if matches!(name, "bytes" | "chars") {
             if args.len() != 1 {
-                return Err(format!("line {line}: `{name}` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `{name}` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
             if matches!(t, Type::Err) {
@@ -3066,8 +3369,14 @@ impl<'a> Checker<'a> {
             if t != Type::Str {
                 return Err(format!("line {line}: `{name}` needs a String, found {t}"));
             }
-            let elem =
-                if name == "bytes" { Type::IntN { bits: 8, signed: false } } else { Type::Int };
+            let elem = if name == "bytes" {
+                Type::IntN {
+                    bits: 8,
+                    signed: false,
+                }
+            } else {
+                Type::Int
+            };
             return Ok(Type::Array(Box::new(elem)));
         }
 
@@ -3076,7 +3385,10 @@ impl<'a> Checker<'a> {
         // never by user source. Heap-allocated result.
         if name == "@concat" {
             if args.len() != 2 {
-                return Err(format!("line {line}: `@concat` takes 2 arguments, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `@concat` takes 2 arguments, got {}",
+                    args.len()
+                ));
             }
             for a in args {
                 let t = self.base(&self.expr(a, scope, None, fn_ret)?);
@@ -3098,7 +3410,11 @@ impl<'a> Checker<'a> {
             match self.base(&self.expr(&args[0], scope, None, fn_ret)?) {
                 Type::Task(inner) => return Ok((*inner).clone()),
                 Type::Err => return Ok(Type::Err),
-                other => return Err(format!("line {line}: `.join()` needs a Task, found {other}")),
+                other => {
+                    return Err(format!(
+                        "line {line}: `.join()` needs a Task, found {other}"
+                    ))
+                }
             }
         }
 
@@ -3117,7 +3433,12 @@ impl<'a> Checker<'a> {
             }
             if !matches!(
                 t,
-                Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool | Type::Str
+                Type::Int
+                    | Type::IntN { .. }
+                    | Type::Float
+                    | Type::Float32
+                    | Type::Bool
+                    | Type::Str
             ) {
                 return Err(format!(
                     "line {line}: `toString` renders a number, Bool, or String, found {t}"
@@ -3127,7 +3448,10 @@ impl<'a> Checker<'a> {
         }
         if name == "parse" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `parse` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `parse` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
             if matches!(t, Type::Err) {
@@ -3145,7 +3469,10 @@ impl<'a> Checker<'a> {
         // cell(v: T) -> Ref<T> — the element type is inferred from `v`.
         if name == "cell" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `cell` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `cell` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let elem_expected = match expected {
                 Some(Type::Ref(t)) => Some((**t).clone()),
@@ -3163,7 +3490,10 @@ impl<'a> Checker<'a> {
         // get(r: Ref<T>) -> T
         if name == "get" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `get` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `get` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let rt = self.expr(&args[0], scope, None, fn_ret)?;
             match self.base(&rt) {
@@ -3175,7 +3505,10 @@ impl<'a> Checker<'a> {
         // set(r: Ref<T>, v: T) -> Unit
         if name == "set" {
             if args.len() != 2 {
-                return Err(format!("line {line}: `set` takes 2 arguments, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `set` takes 2 arguments, got {}",
+                    args.len()
+                ));
             }
             let rt = self.expr(&args[0], scope, None, fn_ret)?;
             let elem = match self.base(&rt) {
@@ -3204,7 +3537,10 @@ impl<'a> Checker<'a> {
         // release(r: Ref<T>) -> Unit
         if name == "release" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `release` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `release` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let rt = self.expr(&args[0], scope, None, fn_ret)?;
             let rt = self.base(&rt);
@@ -3221,7 +3557,10 @@ impl<'a> Checker<'a> {
         // -> Array<T>, at(Array<T>, Int) -> T, alen(Array<T>) -> Int.
         if name == "array" {
             if !args.is_empty() {
-                return Err(format!("line {line}: `array` takes no arguments, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `array` takes no arguments, got {}",
+                    args.len()
+                ));
             }
             match expected {
                 Some(Type::Array(t)) => return Ok(Type::Array(t.clone())),
@@ -3235,7 +3574,10 @@ impl<'a> Checker<'a> {
         }
         if name == "push" {
             if args.len() != 2 {
-                return Err(format!("line {line}: `push` takes 2 arguments, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `push` takes 2 arguments, got {}",
+                    args.len()
+                ));
             }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
             let elem = match self.base(&at) {
@@ -3266,7 +3608,10 @@ impl<'a> Checker<'a> {
         }
         if name == "at" {
             if args.len() != 2 {
-                return Err(format!("line {line}: `at` takes 2 arguments, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `at` takes 2 arguments, got {}",
+                    args.len()
+                ));
             }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
             // `m[k]` on a Map (RFC-0028): the key coerces to `String` and the
@@ -3289,7 +3634,10 @@ impl<'a> Checker<'a> {
                 // (RFC-0022 — consistent with `bytes(s): Array<UInt8>` and
                 // `s.length` counting bytes; mixed arithmetic needs an explicit
                 // `Int64(s[i])`).
-                Type::Str => Type::IntN { bits: 8, signed: false },
+                Type::Str => Type::IntN {
+                    bits: 8,
+                    signed: false,
+                },
                 Type::Err => return Ok(Type::Err),
                 other => {
                     return Err(format!(
@@ -3302,13 +3650,18 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Err);
             }
             if i != Type::Int {
-                return Err(format!("line {line}: `at` index must be an Int64, found {i}"));
+                return Err(format!(
+                    "line {line}: `at` index must be an Int64, found {i}"
+                ));
             }
             return Ok(elem);
         }
         if name == "alen" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `alen` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `alen` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
             let at = self.base(&at);
@@ -3322,7 +3675,10 @@ impl<'a> Checker<'a> {
         }
         if name == "afree" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `afree` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `afree` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
             let at = self.base(&at);
@@ -3412,7 +3768,9 @@ impl<'a> Checker<'a> {
             }
             let k = self.base(&self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?);
             if !matches!(k, Type::Err) && crate::types::resolve(&k, self.types) != Type::Str {
-                return Err(format!("line {line}: a map key must be a String, found {k}"));
+                return Err(format!(
+                    "line {line}: a map key must be a String, found {k}"
+                ));
             }
             return Ok(Type::Bool);
         }
@@ -3429,7 +3787,10 @@ impl<'a> Checker<'a> {
             if matches!(src, Type::Err) {
                 return Ok(Type::Err);
             }
-            if !matches!(src, Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }) {
+            if !matches!(
+                src,
+                Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
+            ) {
                 return Err(format!(
                     "line {line}: `{name}(..)` converts a number, found {src}"
                 ));
@@ -3538,7 +3899,10 @@ impl<'a> Checker<'a> {
         // type (RFC-0007). What a tagged template's holes desugar to.
         if name == "value" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `value` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `value` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let t = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
             if matches!(t, Type::Err) {
@@ -3558,16 +3922,19 @@ impl<'a> Checker<'a> {
         // growable one. (User source uses a contextual array literal instead.)
         if name == "@list" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `@list` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `@list` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let a = self.expr(&args[0], scope, None, fn_ret)?;
             match self.base(&a) {
-                Type::ArrayN(inner, _) | Type::Array(inner) => {
-                    return Ok(Type::Array(inner))
-                }
+                Type::ArrayN(inner, _) | Type::Array(inner) => return Ok(Type::Array(inner)),
                 Type::Err => return Ok(Type::Err),
                 other => {
-                    return Err(format!("line {line}: `@list` needs an Array, found {other}"))
+                    return Err(format!(
+                        "line {line}: `@list` needs an Array, found {other}"
+                    ))
                 }
             }
         }
@@ -3575,7 +3942,10 @@ impl<'a> Checker<'a> {
         // built-in: Some(x) -> Option<typeof x>
         if name == "Some" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `Some` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `Some` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             let inner_expected = match expected {
                 Some(Type::Option(t)) => Some((**t).clone()),
@@ -3583,7 +3953,9 @@ impl<'a> Checker<'a> {
             };
             let aty = self.expr(&args[0], scope, inner_expected.as_ref(), fn_ret)?;
             if matches!(aty, Type::Option(_) | Type::Result(..)) {
-                return Err(format!("line {line}: nested Option/Result is not supported in v0.1"));
+                return Err(format!(
+                    "line {line}: nested Option/Result is not supported in v0.1"
+                ));
             }
             if let Some(want) = &inner_expected {
                 if !self.coercible(&aty, want) {
@@ -3600,18 +3972,27 @@ impl<'a> Checker<'a> {
         // built-in: Ok(x) / Err(e) — need the other type parameter from context.
         if name == "Ok" || name == "Err" {
             if args.len() != 1 {
-                return Err(format!("line {line}: `{name}` takes 1 argument, got {}", args.len()));
+                return Err(format!(
+                    "line {line}: `{name}` takes 1 argument, got {}",
+                    args.len()
+                ));
             }
             // Resolve a named alias (`type DeleteResult = Result<..>`) so the
             // expected `Result<T, E>` is visible for payload inference (RFC-0024).
             let expected_res = expected.map(|e| crate::types::resolve(e, self.types));
             let want = match &expected_res {
-                Some(Type::Result(t, e)) => Some((name == "Ok").then(|| (**t).clone()).unwrap_or_else(|| (**e).clone())),
+                Some(Type::Result(t, e)) => Some(
+                    (name == "Ok")
+                        .then(|| (**t).clone())
+                        .unwrap_or_else(|| (**e).clone()),
+                ),
                 _ => None,
             };
             let aty = self.expr(&args[0], scope, want.as_ref(), fn_ret)?;
             if matches!(aty, Type::Option(_) | Type::Result(..)) {
-                return Err(format!("line {line}: nested Option/Result is not supported in v0.1"));
+                return Err(format!(
+                    "line {line}: nested Option/Result is not supported in v0.1"
+                ));
             }
             let (t, e) = match &expected_res {
                 Some(Type::Result(t, e)) => ((**t).clone(), (**e).clone()),
@@ -3868,7 +4249,11 @@ impl<'a> Checker<'a> {
             _ => return Ok(()),
         };
         match arg {
-            Expr::Lambda { params, body, line: lline } => {
+            Expr::Lambda {
+                params,
+                body,
+                line: lline,
+            } => {
                 if params.len() != ptys.len() {
                     return Err(format!(
                         "line {lline}: this lambda takes {} parameter(s), but `{callee}` \
@@ -3884,10 +4269,13 @@ impl<'a> Checker<'a> {
                 let mut inner = scope.clone();
                 inner.push(HashMap::new());
                 for (pn, pty) in params.iter().zip(&ptys) {
-                    inner
-                        .last_mut()
-                        .unwrap()
-                        .insert(pn.clone(), Binding { ty: pty.clone(), mutable: false });
+                    inner.last_mut().unwrap().insert(
+                        pn.clone(),
+                        Binding {
+                            ty: pty.clone(),
+                            mutable: false,
+                        },
+                    );
                 }
                 // Enforce the capture rules: a lambda may not assign to, `drop`, or
                 // `consume` a captured (outer) binding — it captures by read.
@@ -4027,9 +4415,13 @@ impl<'a> Checker<'a> {
         scope: &Vec<HashMap<String, Binding>>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, String> {
-        let Expr::Lambda { params, body, line } = expr else { unreachable!() };
+        let Expr::Lambda { params, body, line } = expr else {
+            unreachable!()
+        };
         let sig = self.base(exp);
-        let Type::Fn(ptys, ret) = &sig else { unreachable!() };
+        let Type::Fn(ptys, ret) = &sig else {
+            unreachable!()
+        };
         let ret = (**ret).clone();
         if params.len() != ptys.len() {
             return Err(format!(
@@ -4045,10 +4437,13 @@ impl<'a> Checker<'a> {
         let mut inner = scope.clone();
         inner.push(HashMap::new());
         for (pn, pty) in params.iter().zip(ptys) {
-            inner
-                .last_mut()
-                .unwrap()
-                .insert(pn.clone(), Binding { ty: pty.clone(), mutable: false });
+            inner.last_mut().unwrap().insert(
+                pn.clone(),
+                Binding {
+                    ty: pty.clone(),
+                    mutable: false,
+                },
+            );
         }
         // RFC-0023 capture rules verbatim: read-only, no nested lambda literal.
         let mut locals: HashSet<String> = params.iter().cloned().collect();
@@ -4138,7 +4533,9 @@ impl<'a> Checker<'a> {
     /// named diagnostics. Records the source (an empty-payload enum variant).
     fn stored_fn_named(&self, name: &str, exp: &Type, line: usize) -> Result<Type, String> {
         let sig = self.base(exp);
-        let Type::Fn(ptys, ret) = &sig else { unreachable!() };
+        let Type::Fn(ptys, ret) = &sig else {
+            unreachable!()
+        };
         self.storable_named_fn(name, line)?;
         let (sptys, sret) = &self.sigs[name];
         if sptys.len() != ptys.len() {
@@ -4251,7 +4648,9 @@ impl<'a> Checker<'a> {
                 }
                 self.captures_expr(value, outer, locals)
             }
-            Stmt::SetField { name, value, line, .. } => {
+            Stmt::SetField {
+                name, value, line, ..
+            } => {
                 if is_capture(name, locals) {
                     return Err(format!(
                         "a lambda captures by read; it cannot mutate a field of the \
@@ -4260,7 +4659,12 @@ impl<'a> Checker<'a> {
                 }
                 self.captures_expr(value, outer, locals)
             }
-            Stmt::IndexSet { name, index, value, line } => {
+            Stmt::IndexSet {
+                name,
+                index,
+                value,
+                line,
+            } => {
                 if is_capture(name, locals) {
                     return Err(format!(
                         "a lambda captures by read; it cannot store into the captured \
@@ -4281,7 +4685,12 @@ impl<'a> Checker<'a> {
             Stmt::Return { value: Some(e), .. } => self.captures_expr(e, outer, locals),
             Stmt::Return { value: None, .. } => Ok(()),
             Stmt::Expr(e) => self.captures_expr(e, outer, locals),
-            Stmt::If { cond, then_block, else_block, .. } => {
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 self.captures_expr(cond, outer, locals)?;
                 self.captures_block(then_block, outer, &mut locals.clone())?;
                 if let Some(eb) = else_block {
@@ -4293,7 +4702,9 @@ impl<'a> Checker<'a> {
                 self.captures_expr(cond, outer, locals)?;
                 self.captures_block(body, outer, &mut locals.clone())
             }
-            Stmt::ForIn { var, iter, body, .. } => {
+            Stmt::ForIn {
+                var, iter, body, ..
+            } => {
                 self.captures_expr(iter, outer, locals)?;
                 let mut inner = locals.clone();
                 inner.insert(var.clone());
@@ -4309,8 +4720,7 @@ impl<'a> Checker<'a> {
         outer: &Vec<HashMap<String, Binding>>,
         locals: &HashSet<String>,
     ) -> Result<(), String> {
-        let is_capture =
-            |n: &str| !locals.contains(n) && self.lookup(outer, n).is_some();
+        let is_capture = |n: &str| !locals.contains(n) && self.lookup(outer, n).is_some();
         match e {
             Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
                 // Passing a captured binding to a `consume` parameter would move it
@@ -4344,7 +4754,9 @@ impl<'a> Checker<'a> {
                 self.captures_expr(lhs, outer, locals)?;
                 self.captures_expr(rhs, outer, locals)
             }
-            Expr::Match { scrutinee, arms, .. } => {
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
                 self.captures_expr(scrutinee, outer, locals)?;
                 for arm in arms {
                     let mut inner = locals.clone();
@@ -4355,7 +4767,12 @@ impl<'a> Checker<'a> {
                 }
                 Ok(())
             }
-            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.captures_expr(cond, outer, locals)?;
                 self.captures_expr(then_branch, outer, locals)?;
                 if let Some(eb) = else_branch {
@@ -4677,9 +5094,7 @@ fn has_nested_wrap(ty: &Type) -> bool {
     let wrapped = |t: &Type| matches!(t, Type::Option(_) | Type::Result(..));
     match ty {
         Type::Option(t) => wrapped(t) || has_nested_wrap(t),
-        Type::Result(a, b) => {
-            wrapped(a) || wrapped(b) || has_nested_wrap(a) || has_nested_wrap(b)
-        }
+        Type::Result(a, b) => wrapped(a) || wrapped(b) || has_nested_wrap(a) || has_nested_wrap(b),
         Type::Array(t) | Type::ArrayN(t, _) | Type::Ref(t) | Type::Task(t) => has_nested_wrap(t),
         Type::Map(k, v) => has_nested_wrap(k) || has_nested_wrap(v),
         Type::Record(fs) => fs.iter().any(|f| has_nested_wrap(&f.ty)),
@@ -4695,7 +5110,11 @@ fn int_literal_fits(n: i64, bits: u8, signed: bool) -> bool {
     if bits == 64 {
         return !signed || n >= 0;
     }
-    let max = if signed { i64::MAX >> (64 - u32::from(bits)) } else { (1i64 << bits) - 1 };
+    let max = if signed {
+        i64::MAX >> (64 - u32::from(bits))
+    } else {
+        (1i64 << bits) - 1
+    };
     (0..=max).contains(&n)
 }
 
@@ -4710,7 +5129,11 @@ fn intn_range(bits: u8, signed: bool) -> String {
         let shift = 64 - u32::from(bits);
         format!("{}..={}", i64::MIN >> shift, i64::MAX >> shift)
     } else {
-        let max: u64 = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        let max: u64 = if bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
         format!("0..={max}")
     }
 }
@@ -4718,7 +5141,11 @@ fn intn_range(bits: u8, signed: bool) -> String {
 /// Render a literal as the user wrote it: a negative `n` is a wrapped
 /// u64-range literal, so show its unsigned value.
 fn render_int_literal(n: i64) -> String {
-    if n < 0 { (n as u64).to_string() } else { n.to_string() }
+    if n < 0 {
+        (n as u64).to_string()
+    } else {
+        n.to_string()
+    }
 }
 
 /// Builtins a concurrent task may not use: `print` (observable ordering),
@@ -4726,11 +5153,26 @@ fn render_int_literal(n: i64) -> String {
 /// buffer the caller may still hold across the task boundary), and the log
 /// methods. `get` is a read-only slab access and is allowed.
 const SPAWN_FORBIDDEN: &[&str] = &[
-    "print", "cell", "set", "release", "afree", "trace", "debug", "info", "warn", "error",
+    "print",
+    "cell",
+    "set",
+    "release",
+    "afree",
+    "trace",
+    "debug",
+    "info",
+    "warn",
+    "error",
     // Input I/O effects (RFC-0014): observe/mutate the outside world (stdin
     // cursor, the filesystem), so they must not cross a task boundary. `listDir`
     // reads the filesystem too (RFC-0021).
-    "args", "readLine", "readFile", "writeFile", "readFileBytes", "stringFromBytes", "listDir",
+    "args",
+    "readLine",
+    "readFile",
+    "writeFile",
+    "readFileBytes",
+    "stringFromBytes",
+    "listDir",
 ];
 
 /// Whether a type may appear in an `extern` signature (RFC-0012 ABI). The scalar
@@ -4752,9 +5194,11 @@ fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
 fn contains_drop(b: &Block) -> bool {
     b.stmts.iter().any(|s| match s {
         Stmt::Drop { .. } => true,
-        Stmt::If { then_block, else_block, .. } => {
-            contains_drop(then_block) || else_block.as_ref().is_some_and(contains_drop)
-        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => contains_drop(then_block) || else_block.as_ref().is_some_and(contains_drop),
         Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
             contains_drop(body)
         }
@@ -4770,13 +5214,18 @@ fn expr_contains_spawn(e: &Expr) -> bool {
             expr_contains_spawn(expr)
         }
         Expr::Binary { lhs, rhs, .. } => expr_contains_spawn(lhs) || expr_contains_spawn(rhs),
-        Expr::Call { args, .. } | Expr::TryConstruct { args, .. } | Expr::ArrayLit { elems: args, .. } => {
-            args.iter().any(expr_contains_spawn)
-        }
-        Expr::Match { scrutinee, arms, .. } => {
-            expr_contains_spawn(scrutinee) || arms.iter().any(|a| expr_contains_spawn(&a.body))
-        }
-        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+        Expr::Call { args, .. }
+        | Expr::TryConstruct { args, .. }
+        | Expr::ArrayLit { elems: args, .. } => args.iter().any(expr_contains_spawn),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => expr_contains_spawn(scrutinee) || arms.iter().any(|a| expr_contains_spawn(&a.body)),
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             expr_contains_spawn(cond)
                 || expr_contains_spawn(then_branch)
                 || else_branch.as_ref().is_some_and(|e| expr_contains_spawn(e))
@@ -4799,7 +5248,12 @@ fn contains_spawn(b: &Block) -> bool {
             Stmt::IndexSet { index, value, .. } => {
                 expr_contains_spawn(index) || expr_contains_spawn(value)
             }
-            Stmt::If { cond, then_block, else_block, .. } => {
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 expr_contains_spawn(cond)
                     || contains_spawn(then_block)
                     || else_block.as_ref().is_some_and(contains_spawn)
@@ -4819,7 +5273,15 @@ fn contains_spawn(b: &Block) -> bool {
 /// ABSENT — they route through the loader's resolver at generation time and are
 /// recorded as cache inputs. Logging sinks (`trace`..`error`) are here too.
 const COMPTIME_FORBIDDEN: &[&str] = &[
-    "writeFile", "readLine", "args", "readFileBytes", "trace", "debug", "info", "warn", "error",
+    "writeFile",
+    "readLine",
+    "args",
+    "readFileBytes",
+    "trace",
+    "debug",
+    "info",
+    "warn",
+    "error",
 ];
 
 /// Comptime-purity analysis (RFC-0021), the spawn-isolation sibling. Every
@@ -4837,10 +5299,17 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
     if gen_fns.is_empty() {
         return;
     }
-    let fn_map: HashMap<&str, &Function> =
-        program.functions.iter().map(|f| (f.name.as_str(), f)).collect();
-    let extern_fns: std::collections::HashSet<&str> =
-        program.functions.iter().filter(|f| f.is_extern).map(|f| f.name.as_str()).collect();
+    let fn_map: HashMap<&str, &Function> = program
+        .functions
+        .iter()
+        .map(|f| (f.name.as_str(), f))
+        .collect();
+    let extern_fns: std::collections::HashSet<&str> = program
+        .functions
+        .iter()
+        .filter(|f| f.is_extern)
+        .map(|f| f.name.as_str())
+        .collect();
     let global_names: std::collections::HashSet<String> =
         program.globals.iter().map(|g| g.name.clone()).collect();
     // Surface method name -> impl mangled names, so a protocol-method call edge
@@ -4988,8 +5457,7 @@ fn fn_sigs_match(a: &Type, b: &Type) -> bool {
         | (Type::Array(x), Type::Array(y))
         | (Type::Ref(x), Type::Ref(y))
         | (Type::Task(x), Type::Task(y)) => fn_sigs_match(x, y),
-        (Type::Result(x1, x2), Type::Result(y1, y2))
-        | (Type::Map(x1, x2), Type::Map(y1, y2)) => {
+        (Type::Result(x1, x2), Type::Result(y1, y2)) | (Type::Map(x1, x2), Type::Map(y1, y2)) => {
             fn_sigs_match(x1, y1) && fn_sigs_match(x2, y2)
         }
         _ => a == b,
@@ -5129,8 +5597,11 @@ pub fn module_state_use(
             pseudo_sigs.push(sig.clone());
         }
     }
-    let funcs: HashMap<&str, &Function> =
-        program.functions.iter().map(|f| (f.name.as_str(), f)).collect();
+    let funcs: HashMap<&str, &Function> = program
+        .functions
+        .iter()
+        .map(|f| (f.name.as_str(), f))
+        .collect();
     // Surface method names expand to every registered impl, exactly like the
     // spawn-safety fixpoint — otherwise a global-touching impl reached through
     // a protocol method call would hide from the walk.
@@ -5147,8 +5618,7 @@ pub fn module_state_use(
     }
     // BFS from `root` with parent links, so the first hit yields the shortest
     // chain (deterministic: candidates visit in sorted order).
-    let mut parent: HashMap<String, Option<String>> =
-        HashMap::from([(root.to_string(), None)]);
+    let mut parent: HashMap<String, Option<String>> = HashMap::from([(root.to_string(), None)]);
     let mut queue: std::collections::VecDeque<String> =
         std::collections::VecDeque::from([root.to_string()]);
     let chain_to = |cur: &String, parent: &HashMap<String, Option<String>>| {
@@ -5193,7 +5663,9 @@ pub fn module_state_use(
             }
             continue;
         }
-        let Some(f) = funcs.get(cur.as_str()) else { continue };
+        let Some(f) = funcs.get(cur.as_str()) else {
+            continue;
+        };
         if touches_globals(f, &global_names) {
             let mut names: Vec<&String> = program.globals.iter().map(|g| &g.name).collect();
             names.sort();
@@ -5256,7 +5728,11 @@ fn collect_binders_block(b: &Block, out: &mut std::collections::HashSet<String>)
                 out.insert(var.clone());
                 collect_binders_block(body, out);
             }
-            Stmt::If { then_block, else_block, .. } => {
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
                 collect_binders_block(then_block, out);
                 if let Some(eb) = else_block {
                     collect_binders_block(eb, out);
@@ -5280,21 +5756,29 @@ fn global_ref_block(
     let is_global = |n: &str| globals.contains(n) && !local.contains(n);
     b.stmts.iter().any(|s| match s {
         Stmt::Let { value, .. } | Stmt::Expr(value) => global_ref_expr(value, globals, local),
-        Stmt::Assign { name, value, .. }
-        | Stmt::SetField { name, value, .. } => {
+        Stmt::Assign { name, value, .. } | Stmt::SetField { name, value, .. } => {
             is_global(name) || global_ref_expr(value, globals, local)
         }
-        Stmt::IndexSet { name, index, value, .. } => {
+        Stmt::IndexSet {
+            name, index, value, ..
+        } => {
             is_global(name)
                 || global_ref_expr(index, globals, local)
                 || global_ref_expr(value, globals, local)
         }
         Stmt::Return { value: Some(e), .. } => global_ref_expr(e, globals, local),
         Stmt::Return { value: None, .. } => false,
-        Stmt::If { cond, then_block, else_block, .. } => {
+        Stmt::If {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
             global_ref_expr(cond, globals, local)
                 || global_ref_block(then_block, globals, local)
-                || else_block.as_ref().is_some_and(|eb| global_ref_block(eb, globals, local))
+                || else_block
+                    .as_ref()
+                    .is_some_and(|eb| global_ref_block(eb, globals, local))
         }
         Stmt::While { cond, body, .. } => {
             global_ref_expr(cond, globals, local) || global_ref_block(body, globals, local)
@@ -5325,20 +5809,29 @@ fn global_ref_expr(
         Expr::Call { args, .. } | Expr::Spawn { args, .. } | Expr::TryConstruct { args, .. } => {
             args.iter().any(|a| global_ref_expr(a, globals, local))
         }
-        Expr::Match { scrutinee, arms, .. } => {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
             global_ref_expr(scrutinee, globals, local)
-                || arms.iter().any(|a| global_ref_expr(&a.body, globals, local))
+                || arms
+                    .iter()
+                    .any(|a| global_ref_expr(&a.body, globals, local))
         }
-        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             global_ref_expr(cond, globals, local)
                 || global_ref_expr(then_branch, globals, local)
                 || else_branch
                     .as_ref()
                     .is_some_and(|e| global_ref_expr(e, globals, local))
         }
-        Expr::StructLit { fields, .. } => {
-            fields.iter().any(|(_, v)| global_ref_expr(v, globals, local))
-        }
+        Expr::StructLit { fields, .. } => fields
+            .iter()
+            .any(|(_, v)| global_ref_expr(v, globals, local)),
         Expr::ArrayLit { elems, .. } => elems.iter().any(|v| global_ref_expr(v, globals, local)),
         Expr::MapLit { entries, .. } => entries
             .iter()
@@ -5371,7 +5864,16 @@ fn init_restrictions(
     line: usize,
 ) -> Result<(), String> {
     let recur = |e: &Expr| {
-        init_restrictions(e, forbidden, fn_module, own_module, all_globals, ready, own_name, line)
+        init_restrictions(
+            e,
+            forbidden,
+            fn_module,
+            own_module,
+            all_globals,
+            ready,
+            own_name,
+            line,
+        )
     };
     match e {
         Expr::Var { name, .. } => {
@@ -5390,9 +5892,7 @@ fn init_restrictions(
             Ok(())
         }
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            recur(expr)
-        }
+        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => recur(expr),
         Expr::Binary { lhs, rhs, .. } => {
             recur(lhs)?;
             recur(rhs)
@@ -5426,14 +5926,21 @@ fn init_restrictions(
             }
             Ok(())
         }
-        Expr::Match { scrutinee, arms, .. } => {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
             recur(scrutinee)?;
             for a in &arms.iter().map(|a| &a.body).collect::<Vec<_>>() {
                 recur(a)?;
             }
             Ok(())
         }
-        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             recur(cond)?;
             recur(then_branch)?;
             if let Some(eb) = else_branch {
@@ -5492,7 +5999,12 @@ fn calls_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
                 calls_expr(e, out);
             }
         }
-        Stmt::If { cond, then_block, else_block, .. } => {
+        Stmt::If {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
             calls_expr(cond, out);
             calls_block(then_block, out);
             if let Some(eb) = else_block {
@@ -5537,13 +6049,20 @@ fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
                 calls_expr(a, out);
             }
         }
-        Expr::Match { scrutinee, arms, .. } => {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
             calls_expr(scrutinee, out);
             for a in arms {
                 calls_expr(&a.body, out);
             }
         }
-        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             calls_expr(cond, out);
             calls_expr(then_branch, out);
             if let Some(eb) = else_branch {
@@ -5577,8 +6096,6 @@ fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5602,7 +6119,8 @@ mod tests {
                    fn respond() -> Int64 { return bump() }\n\
                    fn handle(n: Int64) -> Int64 { return respond() }\n";
         let program = parse(lex(src).unwrap()).unwrap();
-        let (chain, global) = module_state_use(&program, "handle", &Default::default()).expect("stateful");
+        let (chain, global) =
+            module_state_use(&program, "handle", &Default::default()).expect("stateful");
         assert_eq!(chain, vec!["handle", "respond", "bump"]);
         assert_eq!(global, "hits");
     }
@@ -5620,10 +6138,7 @@ mod tests {
              fn work() -> Int64 { let f = make()  return f() }\n\
              fn main() -> Int64 { let t = spawn work()  return t.join() }";
         let e = check_src(src).unwrap_err();
-        assert!(
-            e.contains("invokes a stored function value"),
-            "{e}"
-        );
+        assert!(e.contains("invokes a stored function value"), "{e}");
     }
 
     #[test]
@@ -5699,7 +6214,8 @@ mod tests {
         if let Some(f) = program.functions.iter_mut().find(|f| f.name == "bump") {
             f.module = Some("store.vyrn".into());
         }
-        let (chain, global) = module_state_use(&program, "handle", &Default::default()).expect("stateful");
+        let (chain, global) =
+            module_state_use(&program, "handle", &Default::default()).expect("stateful");
         assert_eq!(chain, vec!["handle", "bump"]);
         assert_eq!(global, "count");
     }
@@ -5750,7 +6266,10 @@ mod tests {
                    fn main() -> Int64 { return 0 }";
         let e = check_src(src).unwrap_err();
         assert!(e.contains("cannot encode"), "{e}");
-        assert!(e.contains("variant `Boxed`"), "names the offending variant: {e}");
+        assert!(
+            e.contains("variant `Boxed`"),
+            "names the offending variant: {e}"
+        );
     }
 
     #[test]
@@ -5803,7 +6322,10 @@ mod tests {
              fn main() -> Int64 { return 0 }",
         )
         .unwrap_err();
-        assert!(e.contains("not comptime-pure") && e.contains("spawn"), "{e}");
+        assert!(
+            e.contains("not comptime-pure") && e.contains("spawn"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -5814,7 +6336,10 @@ mod tests {
              fn main() -> Int64 { return 0 }",
         )
         .unwrap_err();
-        assert!(e.contains("not comptime-pure") && e.contains("extern"), "{e}");
+        assert!(
+            e.contains("not comptime-pure") && e.contains("extern"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -5825,7 +6350,10 @@ mod tests {
              fn main() -> Int64 { return 0 }",
         )
         .unwrap_err();
-        assert!(e.contains("not comptime-pure") && e.contains("module state"), "{e}");
+        assert!(
+            e.contains("not comptime-pure") && e.contains("module state"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -5900,25 +6428,26 @@ mod tests {
     fn io_builtins_reject_wrong_arguments() {
         let e = check_src("fn main() -> Int64 { let r = readFile(5); return 0 }").unwrap_err();
         assert!(e.contains("`readFile` needs a String path"), "{e}");
-        let e = check_src("fn main() -> Int64 { let r = writeFile(\"p\"); return 0 }")
-            .unwrap_err();
+        let e = check_src("fn main() -> Int64 { let r = writeFile(\"p\"); return 0 }").unwrap_err();
         assert!(e.contains("`writeFile` takes 2 arguments"), "{e}");
         let e = check_src("fn main() -> Int64 { let a = args(1); return 0 }").unwrap_err();
         assert!(e.contains("`args` takes no arguments"), "{e}");
-        let e = check_src("fn main() -> Int64 { let l = readLine(\"x\"); return 0 }")
-            .unwrap_err();
+        let e = check_src("fn main() -> Int64 { let l = readLine(\"x\"); return 0 }").unwrap_err();
         assert!(e.contains("`readLine` takes no arguments"), "{e}");
-        let e =
-            check_src("fn main() -> Int64 { let s = stringFromBytes(\"x\"); return 0 }")
-                .unwrap_err();
+        let e = check_src("fn main() -> Int64 { let s = stringFromBytes(\"x\"); return 0 }")
+            .unwrap_err();
         assert!(e.contains("`stringFromBytes` needs an Array<UInt8>"), "{e}");
     }
 
     #[test]
     fn io_builtins_are_spawn_forbidden() {
         // A function touching stdin/files/argv is an effect — never a task.
-        for body in ["let l = readLine()", "let r = readFile(\"p\")",
-                     "let w = writeFile(\"p\", \"c\")", "let a = args()"] {
+        for body in [
+            "let l = readLine()",
+            "let r = readFile(\"p\")",
+            "let w = writeFile(\"p\", \"c\")",
+            "let a = args()",
+        ] {
             let src = format!(
                 "fn job() -> Int64 {{ {body} return 0 }} \
                  fn main() -> Int64 {{ let t = spawn job() return t.join() }}"
@@ -5944,10 +6473,9 @@ mod tests {
         // RFC-0014 M2: `bytes(s)` is Array<UInt8> (was Array<Int64>).
         let ok = "fn main() -> Int64 { let b: Array<UInt8> = bytes(\"hi\") return b.length }";
         assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
-        let e = check_src(
-            "fn main() -> Int64 { let b: Array<Int64> = bytes(\"hi\") return b.length }",
-        )
-        .unwrap_err();
+        let e =
+            check_src("fn main() -> Int64 { let b: Array<Int64> = bytes(\"hi\") return b.length }")
+                .unwrap_err();
         assert!(e.contains("Array<UInt8>"), "{e}");
     }
 
@@ -5966,7 +6494,8 @@ mod tests {
         // RFC-0022: `< <= > >=` accept two Strings and yield Bool. Mixing a String
         // with a non-String is rejected with the numeric-or-String wording.
         for op in ["<", "<=", ">", ">="] {
-            let ok = format!("fn main() -> Int64 {{ if \"a\" {op} \"b\" {{ return 1 }} return 0 }}");
+            let ok =
+                format!("fn main() -> Int64 {{ if \"a\" {op} \"b\" {{ return 1 }} return 0 }}");
             assert!(check_src(&ok).is_ok(), "{op}: {:?}", check_src(&ok));
         }
         let e = check_src("fn main() -> Int64 { if \"a\" < 3 { return 1 } return 0 }").unwrap_err();
@@ -5998,18 +6527,22 @@ mod tests {
 
     #[test]
     fn rejects_spawn_of_impure_function() {
-        let e = check_src("fn noisy(n: Int64) -> Int64 { print(n); return n; } \
-                           fn main() -> Int64 { let t = spawn noisy(5); return t.join(); }")
-            .unwrap_err();
+        let e = check_src(
+            "fn noisy(n: Int64) -> Int64 { print(n); return n; } \
+                           fn main() -> Int64 { let t = spawn noisy(5); return t.join(); }",
+        )
+        .unwrap_err();
         assert!(e.contains("isolated (pure)"), "{e}");
     }
 
     #[test]
     fn rejects_spawn_of_transitively_impure_function() {
-        let e = check_src("fn inner(n: Int64) -> Int64 { print(n); return n; } \
+        let e = check_src(
+            "fn inner(n: Int64) -> Int64 { print(n); return n; } \
                            fn outer(n: Int64) -> Int64 { return inner(n); } \
-                           fn main() -> Int64 { let t = spawn outer(5); return t.join(); }")
-            .unwrap_err();
+                           fn main() -> Int64 { let t = spawn outer(5); return t.join(); }",
+        )
+        .unwrap_err();
         assert!(e.contains("isolated (pure)"), "{e}");
     }
 
@@ -6070,8 +6603,8 @@ mod tests {
 
     #[test]
     fn duplicate_test_names_are_rejected() {
-        let e = check_src("test \"dup\" { assert(true) } test \"dup\" { assert(true) }")
-            .unwrap_err();
+        let e =
+            check_src("test \"dup\" { assert(true) } test \"dup\" { assert(true) }").unwrap_err();
         assert!(e.contains("duplicate test name"), "{e}");
     }
 
@@ -6127,10 +6660,14 @@ mod tests {
 
     #[test]
     fn extern_with_body_is_a_parse_error() {
-        let toks = lex("extern fn f() -> Int64 { return 1; } fn main() -> Int64 { return 0; }")
-            .unwrap();
+        let toks =
+            lex("extern fn f() -> Int64 { return 1; } fn main() -> Int64 { return 0; }").unwrap();
         let e = parse(toks).unwrap_err();
-        assert!(e.message.contains("an `extern fn` has no body"), "{}", e.message);
+        assert!(
+            e.message.contains("an `extern fn` has no body"),
+            "{}",
+            e.message
+        );
     }
 
     // ---- export extern (RFC-0012 M2) -------------------------------------
@@ -6139,8 +6676,7 @@ mod tests {
     fn export_extern_without_a_body_is_a_parse_error() {
         // The exported direction MUST supply an implementation; a body-less form
         // is an import, which is not how you write `export`.
-        let toks =
-            lex("export extern fn f() -> Int64 fn main() -> Int64 { return 0 }").unwrap();
+        let toks = lex("export extern fn f() -> Int64 fn main() -> Int64 { return 0 }").unwrap();
         let e = parse(toks).unwrap_err();
         assert!(
             e.message.contains("an exported extern needs a body"),
@@ -6175,7 +6711,10 @@ mod tests {
              fn main() -> Int64 { return 0 }",
         )
         .unwrap_err();
-        assert!(!e.is_empty(), "a type error in the body must be reported: {e}");
+        assert!(
+            !e.is_empty(),
+            "a type error in the body must be reported: {e}"
+        );
     }
 
     #[test]
@@ -6216,17 +6755,21 @@ mod tests {
 
     #[test]
     fn rejects_modify_with_immutable_argument() {
-        let e = check_src("type C = { x: Int64 }; fn f(c: modify C) { c.x = 1; } \
-                           fn main() -> Int64 { let c = C { x: 0 }; f(c); return c.x; }")
-            .unwrap_err();
+        let e = check_src(
+            "type C = { x: Int64 }; fn f(c: modify C) { c.x = 1; } \
+                           fn main() -> Int64 { let c = C { x: 0 }; f(c); return c.x; }",
+        )
+        .unwrap_err();
         assert!(e.contains("must be declared `mut`"), "{e}");
     }
 
     #[test]
     fn rejects_modify_with_temporary_argument() {
-        let e = check_src("type C = { x: Int64 }; fn f(c: modify C) { c.x = 1; } \
-                           fn main() -> Int64 { f(C { x: 0 }); return 0; }")
-            .unwrap_err();
+        let e = check_src(
+            "type C = { x: Int64 }; fn f(c: modify C) { c.x = 1; } \
+                           fn main() -> Int64 { f(C { x: 0 }); return 0; }",
+        )
+        .unwrap_err();
         assert!(e.contains("pass a mutable variable"), "{e}");
     }
 
@@ -6242,17 +6785,21 @@ mod tests {
 
     #[test]
     fn rejects_field_mutation_without_mut() {
-        let e = check_src("type P = { x: Int64 }; \
-                           fn main() -> Int64 { let p = P { x: 1 }; p.x = 2; return p.x; }")
-            .unwrap_err();
+        let e = check_src(
+            "type P = { x: Int64 }; \
+                           fn main() -> Int64 { let p = P { x: 1 }; p.x = 2; return p.x; }",
+        )
+        .unwrap_err();
         assert!(e.contains("without `mut`"), "{e}");
     }
 
     #[test]
     fn rejects_field_mutation_wrong_type() {
-        let e = check_src("type P = { x: Int64 }; \
-                           fn main() -> Int64 { let mut p = P { x: 1 }; p.x = \"s\"; return 0; }")
-            .unwrap_err();
+        let e = check_src(
+            "type P = { x: Int64 }; \
+                           fn main() -> Int64 { let mut p = P { x: 1 }; p.x = \"s\"; return 0; }",
+        )
+        .unwrap_err();
         assert!(e.contains("field `x`"), "{e}");
     }
 
@@ -6267,9 +6814,11 @@ mod tests {
 
     #[test]
     fn rejects_push_wrong_element_type() {
-        let e = check_src("fn main() -> Int64 { let mut a: Array<Int64> = array(); \
-                           a = push(a, \"x\"); return 0; }")
-            .unwrap_err();
+        let e = check_src(
+            "fn main() -> Int64 { let mut a: Array<Int64> = array(); \
+                           a = push(a, \"x\"); return 0; }",
+        )
+        .unwrap_err();
         assert!(e.contains("the array holds"), "{e}");
     }
 
@@ -6291,29 +6840,36 @@ mod tests {
 
     #[test]
     fn index_store_requires_mut() {
-        let e = check_src("fn main() -> Int64 { let a: Array<Int64> = [1, 2]; a[0] = 9; return 0; }")
-            .unwrap_err();
+        let e =
+            check_src("fn main() -> Int64 { let a: Array<Int64> = [1, 2]; a[0] = 9; return 0; }")
+                .unwrap_err();
         assert!(e.contains("without `mut`"), "{e}");
     }
 
     #[test]
     fn pop_requires_mut() {
-        let e = check_src("fn main() -> Int64 { let a: Array<Int64> = [1, 2]; let p = a.pop(); return 0; }")
-            .unwrap_err();
+        let e = check_src(
+            "fn main() -> Int64 { let a: Array<Int64> = [1, 2]; let p = a.pop(); return 0; }",
+        )
+        .unwrap_err();
         assert!(e.contains("without `mut`"), "{e}");
     }
 
     #[test]
     fn index_store_rejects_wrong_element_type() {
-        let e = check_src("fn main() -> Int64 { let mut a: Array<Int64> = [1, 2]; a[0] = \"x\"; return 0; }")
-            .unwrap_err();
+        let e = check_src(
+            "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2]; a[0] = \"x\"; return 0; }",
+        )
+        .unwrap_err();
         assert!(e.contains("holds Int64"), "{e}");
     }
 
     #[test]
     fn index_store_rejects_non_int_index() {
-        let e = check_src("fn main() -> Int64 { let mut a: Array<Int64> = [1, 2]; a[\"i\"] = 9; return 0; }")
-            .unwrap_err();
+        let e = check_src(
+            "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2]; a[\"i\"] = 9; return 0; }",
+        )
+        .unwrap_err();
         assert!(e.contains("index must be an Int64"), "{e}");
     }
 
@@ -6359,8 +6915,10 @@ mod tests {
     #[test]
     fn free_pop_is_not_callable() {
         // `pop`/`swapRemove` are method-only; a free `pop(a)` is not a builtin.
-        let e = check_src("fn main() -> Int64 { let mut a: Array<Int64> = [1]; let p = pop(a); return 0; }")
-            .unwrap_err();
+        let e = check_src(
+            "fn main() -> Int64 { let mut a: Array<Int64> = [1]; let p = pop(a); return 0; }",
+        )
+        .unwrap_err();
         assert!(e.contains("pop"), "{e}");
     }
 
@@ -6639,7 +7197,10 @@ mod tests {
         ];
         for src in cases {
             let e = check_src(src).unwrap_err();
-            assert!(e.contains("does not satisfy `Age`"), "case: {src}\ngot: {e}");
+            assert!(
+                e.contains("does not satisfy `Age`"),
+                "case: {src}\ngot: {e}"
+            );
         }
     }
 
@@ -6666,8 +7227,8 @@ mod tests {
     fn rejects_bare_u64_range_literal_in_int_context() {
         // The lexer wraps literals above i64::MAX into the i64 bit pattern;
         // without a UInt64 context that would silently print a negative number.
-        let e = check_src("fn main() -> Int64 { let x = 9223372036854775808; return 0; }")
-            .unwrap_err();
+        let e =
+            check_src("fn main() -> Int64 { let x = 9223372036854775808; return 0; }").unwrap_err();
         assert!(e.contains("exceeds Int64's maximum"), "{e}");
         assert!(e.contains("9223372036854775808"), "{e}");
     }
@@ -6934,7 +7495,10 @@ mod tests {
         let bad = "type UserId = String; \
                    fn f(x: UserId) -> Int64 { return 0; } \
                    fn main() -> Int64 { return f(\"raw\"); }";
-        assert!(check_src(bad).unwrap_err().contains("UserId"), "raw string rejected");
+        assert!(
+            check_src(bad).unwrap_err().contains("UserId"),
+            "raw string rejected"
+        );
     }
 
     #[test]
@@ -6972,12 +7536,30 @@ mod tests {
     #[test]
     fn removed_builtins_emit_migration_hints() {
         let cases = [
-            ("fn main() -> Int64 { let s = str(1); return 0; }", "`str(x)` was removed"),
-            ("fn main() -> Int64 { let s = concat(\"a\", \"b\"); return 0; }", "`concat(a, b)` was removed"),
-            ("fn main() -> Int64 { let s = \"a\"; return len(s); }", "`len(s)` was removed"),
-            ("fn main() -> Int64 { let a: Array<Int64> = list([1, 2]); return 0; }", "`list([..])` was removed"),
-            ("fn main() -> Int64 { let n = 5; return join(n); }", "`join(t)` was removed"),
-            ("fn main() -> Int64 { let s = toString(1); return 0; }", "`toString` is a method"),
+            (
+                "fn main() -> Int64 { let s = str(1); return 0; }",
+                "`str(x)` was removed",
+            ),
+            (
+                "fn main() -> Int64 { let s = concat(\"a\", \"b\"); return 0; }",
+                "`concat(a, b)` was removed",
+            ),
+            (
+                "fn main() -> Int64 { let s = \"a\"; return len(s); }",
+                "`len(s)` was removed",
+            ),
+            (
+                "fn main() -> Int64 { let a: Array<Int64> = list([1, 2]); return 0; }",
+                "`list([..])` was removed",
+            ),
+            (
+                "fn main() -> Int64 { let n = 5; return join(n); }",
+                "`join(t)` was removed",
+            ),
+            (
+                "fn main() -> Int64 { let s = toString(1); return 0; }",
+                "`toString` is a method",
+            ),
         ];
         for (src, want) in cases {
             let e = check_src(src).unwrap_err();
@@ -7170,7 +7752,10 @@ mod tests {
         assert!(check_src(src).is_ok());
         let bad = "type Port = Int64 where value >= 1 && value <= 65535; \
                    fn main() -> Int64 { let p = Port(70000); return 0; }";
-        assert!(check_src(bad).unwrap_err().contains("does not satisfy"), "port");
+        assert!(
+            check_src(bad).unwrap_err().contains("does not satisfy"),
+            "port"
+        );
     }
 
     #[test]
@@ -7182,7 +7767,12 @@ mod tests {
         // A provably-too-short constant is rejected at compile time.
         let bad = "type Name = String where value.length >= 3; \
                    fn main() -> Int64 { let n = Name(\"ab\"); return 0; }";
-        assert!(check_src(bad).unwrap_err().contains("does not satisfy `Name`"), "short");
+        assert!(
+            check_src(bad)
+                .unwrap_err()
+                .contains("does not satisfy `Name`"),
+            "short"
+        );
     }
 
     #[test]
@@ -7199,7 +7789,10 @@ mod tests {
         // A provably-violating constant literal is rejected at compile time.
         let bad = "type R = { a: Int64, b: Int64 } where a < b; \
                    fn main() -> Int64 { let r = R { a: 5, b: 1 }; return 0; }";
-        assert!(check_src(bad).unwrap_err().contains("violates"), "cross-field");
+        assert!(
+            check_src(bad).unwrap_err().contains("violates"),
+            "cross-field"
+        );
     }
 
     #[test]
@@ -7210,7 +7803,9 @@ mod tests {
         // A non-literal pattern is rejected.
         let dyn_pat = "fn f(s: String, p: String) -> Bool { return s =~ p; } \
                        fn main() -> Int64 { return 0; }";
-        assert!(check_src(dyn_pat).unwrap_err().contains("string-literal pattern"));
+        assert!(check_src(dyn_pat)
+            .unwrap_err()
+            .contains("string-literal pattern"));
         // An invalid regex is rejected at compile time (reversed class range).
         let bad = "fn f(s: String) -> Bool { return s =~ \"[z-a]\"; } \
                    fn main() -> Int64 { return 0; }";
@@ -7292,7 +7887,10 @@ mod tests {
              fn main() -> Int64 { let t = spawn bump() return t.join() }",
         )
         .unwrap_err();
-        assert!(e.contains("isolated") || e.contains("spawn") || e.contains("pure"), "{e}");
+        assert!(
+            e.contains("isolated") || e.contains("spawn") || e.contains("pure"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -7305,7 +7903,10 @@ mod tests {
              fn main() -> Int64 { let t = spawn outer() return t.join() }",
         )
         .unwrap_err();
-        assert!(e.contains("isolated") || e.contains("spawn") || e.contains("pure"), "{e}");
+        assert!(
+            e.contains("isolated") || e.contains("spawn") || e.contains("pure"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -7448,9 +8049,8 @@ mod tests {
         // Section ⊆ TransKey? No — but a Section variable might still hold a
         // conforming value, so flowing it into TransKey is NOT an error (runtime
         // check stays). This must type-check.
-        let runtime = format!(
-            "{KEYS}fn main() -> Int64 {{ let s: Section = \"home\"  return t(s) }}"
-        );
+        let runtime =
+            format!("{KEYS}fn main() -> Int64 {{ let s: Section = \"home\"  return t(s) }}");
         assert!(check_src(&runtime).is_ok(), "{:?}", check_src(&runtime));
 
         // A finite type that IS contained in the target flows with no error.
@@ -7546,7 +8146,9 @@ mod tests {
         // `Ref` cannot hold a function value (RFC-0037 defers it).
         let refv = "fn main() -> Int64 { let c: Ref<fn(Int64) -> Int64> = cell(0)  return 0 }";
         assert!(
-            check_src(refv).unwrap_err().contains("cannot hold a function value"),
+            check_src(refv)
+                .unwrap_err()
+                .contains("cannot hold a function value"),
             "{:?}",
             check_src(refv)
         );
@@ -7554,14 +8156,18 @@ mod tests {
         // return another function value.
         let hof = "fn main() -> Int64 { let g: fn(fn(Int64) -> Int64) -> Int64 = |x| 0  return 0 }";
         assert!(
-            check_src(hof).unwrap_err().contains("may not take another function value"),
+            check_src(hof)
+                .unwrap_err()
+                .contains("may not take another function value"),
             "{:?}",
             check_src(hof)
         );
         // A function type has no `where` domain.
         let pred = "type F = fn(Int64) -> Int64 where value > 0\n fn main() -> Int64 { return 0 }";
         assert!(
-            check_src(pred).unwrap_err().contains("cannot carry a `where` predicate"),
+            check_src(pred)
+                .unwrap_err()
+                .contains("cannot carry a `where` predicate"),
             "{:?}",
             check_src(pred)
         );
@@ -7588,7 +8194,9 @@ mod tests {
     fn lambda_still_needs_a_function_type_from_context() {
         let src = "fn main() -> Int64 { let g = |x| x * 2  return 0 }";
         assert!(
-            check_src(src).unwrap_err().contains("needs a function type from context"),
+            check_src(src)
+                .unwrap_err()
+                .contains("needs a function type from context"),
             "{:?}",
             check_src(src)
         );
@@ -7596,15 +8204,24 @@ mod tests {
 
     #[test]
     fn lambda_arity_mismatch_is_rejected() {
-        let src = format!("{TWICE}fn main() -> Int64 {{ let a = twice([1], |x, y| x + y)  return 0 }}");
-        assert!(check_src(&src).unwrap_err().contains("parameter"), "{:?}", check_src(&src));
+        let src =
+            format!("{TWICE}fn main() -> Int64 {{ let a = twice([1], |x, y| x + y)  return 0 }}");
+        assert!(
+            check_src(&src).unwrap_err().contains("parameter"),
+            "{:?}",
+            check_src(&src)
+        );
     }
 
     #[test]
     fn lambda_return_type_mismatch_is_rejected() {
-        let src = format!("{TWICE}fn main() -> Int64 {{ let a = twice([1], |x| x > 0)  return 0 }}");
+        let src =
+            format!("{TWICE}fn main() -> Int64 {{ let a = twice([1], |x| x > 0)  return 0 }}");
         let e = check_src(&src).unwrap_err();
-        assert!(e.contains("returns Bool") || e.contains("expects it to return"), "{e}");
+        assert!(
+            e.contains("returns Bool") || e.contains("expects it to return"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -7613,7 +8230,9 @@ mod tests {
             "{TWICE}fn main() -> Int64 {{ let mut c = 0  let a = twice([1], |x| {{ c = c + x  return c }})  return 0 }}"
         );
         assert!(
-            check_src(&src).unwrap_err().contains("cannot assign to the captured"),
+            check_src(&src)
+                .unwrap_err()
+                .contains("cannot assign to the captured"),
             "{:?}",
             check_src(&src)
         );
@@ -7623,7 +8242,13 @@ mod tests {
     fn cannot_drop_captured_binding() {
         let src = "fn apply(s: String, f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
              fn main() -> Int64 { let name = \"hi\"  let r = apply(name, |x| { drop name  return x })  return 0 }";
-        assert!(check_src(src).unwrap_err().contains("cannot `drop` the captured"), "{:?}", check_src(src));
+        assert!(
+            check_src(src)
+                .unwrap_err()
+                .contains("cannot `drop` the captured"),
+            "{:?}",
+            check_src(src)
+        );
     }
 
     #[test]
@@ -7631,7 +8256,13 @@ mod tests {
         let src = "fn take(s: consume String) -> Int64 { return 1 }\n\
              fn apply(s: String, f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
              fn main() -> Int64 { let name = \"hi\"  let r = apply(name, |x| { let z = take(name)  return x })  return 0 }";
-        assert!(check_src(src).unwrap_err().contains("cannot consume the captured"), "{:?}", check_src(src));
+        assert!(
+            check_src(src)
+                .unwrap_err()
+                .contains("cannot consume the captured"),
+            "{:?}",
+            check_src(src)
+        );
     }
 
     #[test]
@@ -7640,7 +8271,9 @@ mod tests {
             "{TWICE}fn main() -> Int64 {{ let a = twice([1], |x| twice([x], |y| y + 1).length)  return 0 }}"
         );
         assert!(
-            check_src(&src).unwrap_err().contains("another lambda literal"),
+            check_src(&src)
+                .unwrap_err()
+                .contains("another lambda literal"),
             "{:?}",
             check_src(&src)
         );
@@ -7672,13 +8305,21 @@ mod tests {
              fn apply(x: Int64, f: fn(Int64) -> Int64) -> Int64 { return f(x) }\n\
              fn worker(x: Int64) -> Int64 { return apply(x, |y| y + g) }\n\
              fn main() -> Int64 { let t = spawn worker(1)  return t.join() }";
-        assert!(check_src(src).unwrap_err().contains("not allowed"), "{:?}", check_src(src));
+        assert!(
+            check_src(src).unwrap_err().contains("not allowed"),
+            "{:?}",
+            check_src(src)
+        );
     }
 
     #[test]
     fn extern_cannot_take_fn_param() {
         let src = "extern fn e(f: fn(Int64) -> Int64) -> Int64\nfn main() -> Int64 { return 0 }";
-        assert!(check_src(src).unwrap_err().contains("extern"), "{:?}", check_src(src));
+        assert!(
+            check_src(src).unwrap_err().contains("extern"),
+            "{:?}",
+            check_src(src)
+        );
     }
 
     // ---- Map<String, V> (RFC-0028) -------------------------------------

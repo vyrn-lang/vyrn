@@ -87,12 +87,22 @@ pub fn regex_dfa_of_type(decl: &TypeDecl) -> Option<Dfa> {
 /// language.
 fn collect_match_clauses(pred: &Expr, out: &mut Vec<String>) -> Option<()> {
     match pred {
-        Expr::Binary { op: BinOp::And, lhs, rhs, .. } => {
+        Expr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+            ..
+        } => {
             collect_match_clauses(lhs, out)?;
             collect_match_clauses(rhs, out)?;
             Some(())
         }
-        Expr::Binary { op: BinOp::Match, lhs, rhs, .. } => match (&**lhs, &**rhs) {
+        Expr::Binary {
+            op: BinOp::Match,
+            lhs,
+            rhs,
+            ..
+        } => match (&**lhs, &**rhs) {
             // Exactly `value =~ "pattern-literal"`.
             (Expr::Var { name, .. }, Expr::Str(pat)) if name == "value" => {
                 out.push(pat.clone());
@@ -107,7 +117,9 @@ fn collect_match_clauses(pred: &Expr, out: &mut Vec<String>) -> Option<()> {
 /// Whether `decl` is a **finite** string type: a pure-regex validated `String`
 /// whose language is finite.
 pub fn is_finite_string_type(decl: &TypeDecl) -> bool {
-    regex_dfa_of_type(decl).map(|d| d.is_finite()).unwrap_or(false)
+    regex_dfa_of_type(decl)
+        .map(|d| d.is_finite())
+        .unwrap_or(false)
 }
 
 /// If `ty` is a named validated `String` type, return its declaration.
@@ -238,8 +250,12 @@ pub fn prove_string_flow(
 ) -> Proof {
     // The target must be a pure-regex validated string type; otherwise this is a
     // length/other predicate → runtime fallback.
-    let Some(tdecl) = string_type_decl(to, types) else { return Proof::NotApplicable };
-    let Some(target) = regex_dfa_of_type(tdecl) else { return Proof::NotApplicable };
+    let Some(tdecl) = string_type_decl(to, types) else {
+        return Proof::NotApplicable;
+    };
+    let Some(target) = regex_dfa_of_type(tdecl) else {
+        return Proof::NotApplicable;
+    };
 
     // Case 1: `expr` is an interpolation. Its language is exactly what it can
     // produce, so non-containment is a hard error (with a witness).

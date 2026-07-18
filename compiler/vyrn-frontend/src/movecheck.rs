@@ -12,8 +12,8 @@
 //! reassignment revives a variable, and consuming a pre-loop variable inside a
 //! loop body is rejected (it would be reused next iteration).
 
-use std::collections::{HashMap, HashSet};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
@@ -32,10 +32,19 @@ pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
     let caps: HashMap<String, Vec<Capability>> = program
         .functions
         .iter()
-        .map(|f| (f.name.clone(), f.params.iter().map(|p| p.capability).collect()))
+        .map(|f| {
+            (
+                f.name.clone(),
+                f.params.iter().map(|p| p.capability).collect(),
+            )
+        })
         .collect();
     let globals: HashSet<String> = program.globals.iter().map(|g| g.name.clone()).collect();
-    let mc = MoveCheck { caps: &caps, globals: &globals, errors: RefCell::new(Vec::new()) };
+    let mc = MoveCheck {
+        caps: &caps,
+        globals: &globals,
+        errors: RefCell::new(Vec::new()),
+    };
     let mut out = Vec::new();
     for f in &program.functions {
         mc.errors.borrow_mut().clear();
@@ -106,12 +115,7 @@ impl MoveCheck<'_> {
         self.block(&f.body, &mut consumed, &mut scope);
     }
 
-    fn block(
-        &self,
-        b: &Block,
-        consumed: &mut Consumed,
-        scope: &mut Vec<HashSet<String>>,
-    ) {
+    fn block(&self, b: &Block, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) {
         scope.push(HashSet::new());
         for s in &b.stmts {
             if let Err(msg) = self.stmt(s, consumed, scope) {
@@ -160,7 +164,12 @@ impl MoveCheck<'_> {
                 }
                 Ok(())
             }
-            Stmt::If { cond, then_block, else_block, .. } => {
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 self.expr(cond, consumed, scope)?;
                 let mut then_c = consumed.clone();
                 self.block(then_block, &mut then_c, scope);
@@ -272,7 +281,9 @@ impl MoveCheck<'_> {
                 }
                 Ok(())
             }
-            Expr::Match { scrutinee, arms, .. } => {
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
                 self.expr(scrutinee, consumed, scope)?;
                 let base = consumed.clone();
                 let mut merged: Option<Consumed> = None;
@@ -301,7 +312,12 @@ impl MoveCheck<'_> {
             // `if` as an expression (RFC-0030): its two branches are match arms —
             // the condition consumes eagerly, then each branch runs from the same
             // base and a value consumed on either path is may-consumed afterward.
-            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.expr(cond, consumed, scope)?;
                 let base = consumed.clone();
                 let mut then_c = base.clone();
@@ -405,7 +421,11 @@ impl MoveCheck<'_> {
         line: usize,
     ) -> Result<(), String> {
         if self.globals.contains(v) {
-            let form = if spawned { format!("spawn {callee}(..)") } else { format!("{callee}(..)") };
+            let form = if spawned {
+                format!("spawn {callee}(..)")
+            } else {
+                format!("{callee}(..)")
+            };
             return Err(format!(
                 "line {line}: module state `{v}` may not be passed to a `consume` parameter \
                  via `{form}` — nothing may take ownership of module state (it lives for the \

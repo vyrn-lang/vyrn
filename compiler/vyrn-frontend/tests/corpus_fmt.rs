@@ -31,7 +31,11 @@ fn corpus() -> Vec<PathBuf> {
         }
     }
     files.sort();
-    assert!(files.len() >= 45, "expected the full corpus, found {}", files.len());
+    assert!(
+        files.len() >= 45,
+        "expected the full corpus, found {}",
+        files.len()
+    );
     files
 }
 

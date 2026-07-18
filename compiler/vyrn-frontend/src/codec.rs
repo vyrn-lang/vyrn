@@ -111,7 +111,10 @@ pub fn parse(src: &str) -> Result<JsonV, ParseError> {
     let v = p.value()?;
     p.ws();
     if p.i != b.len() {
-        return Err(ParseError(format!("trailing characters at position {}", p.i)));
+        return Err(ParseError(format!(
+            "trailing characters at position {}",
+            p.i
+        )));
     }
     Ok(v)
 }
@@ -170,12 +173,20 @@ impl Parser<'_> {
         loop {
             self.ws();
             if self.b.get(self.i) != Some(&b'"') {
-                return Err(if self.i >= self.b.len() { self.eoi() } else { self.unexpected() });
+                return Err(if self.i >= self.b.len() {
+                    self.eoi()
+                } else {
+                    self.unexpected()
+                });
             }
             let k = self.string()?;
             self.ws();
             if self.b.get(self.i) != Some(&b':') {
-                return Err(if self.i >= self.b.len() { self.eoi() } else { self.unexpected() });
+                return Err(if self.i >= self.b.len() {
+                    self.eoi()
+                } else {
+                    self.unexpected()
+                });
             }
             self.i += 1;
             self.ws();
@@ -279,7 +290,11 @@ impl Parser<'_> {
         }
         // integer part
         if !matches!(self.b.get(self.i), Some(c) if c.is_ascii_digit()) {
-            return Err(if self.i >= self.b.len() { self.eoi() } else { self.unexpected() });
+            return Err(if self.i >= self.b.len() {
+                self.eoi()
+            } else {
+                self.unexpected()
+            });
         }
         while matches!(self.b.get(self.i), Some(c) if c.is_ascii_digit()) {
             self.i += 1;
@@ -289,7 +304,11 @@ impl Parser<'_> {
             is_int = false;
             self.i += 1;
             if !matches!(self.b.get(self.i), Some(c) if c.is_ascii_digit()) {
-                return Err(if self.i >= self.b.len() { self.eoi() } else { self.unexpected() });
+                return Err(if self.i >= self.b.len() {
+                    self.eoi()
+                } else {
+                    self.unexpected()
+                });
             }
             while matches!(self.b.get(self.i), Some(c) if c.is_ascii_digit()) {
                 self.i += 1;
@@ -303,7 +322,11 @@ impl Parser<'_> {
                 self.i += 1;
             }
             if !matches!(self.b.get(self.i), Some(c) if c.is_ascii_digit()) {
-                return Err(if self.i >= self.b.len() { self.eoi() } else { self.unexpected() });
+                return Err(if self.i >= self.b.len() {
+                    self.eoi()
+                } else {
+                    self.unexpected()
+                });
             }
             while matches!(self.b.get(self.i), Some(c) if c.is_ascii_digit()) {
                 self.i += 1;
@@ -393,7 +416,10 @@ pub fn missing_message(field: &str) -> String {
 /// Issue instead of trapping.
 pub fn validate_message(decl: &TypeDecl) -> String {
     if matches!(decl.base, Type::Record(_)) {
-        format!("validation failed: `{}` violates its `where` clause", decl.name)
+        format!(
+            "validation failed: `{}` violates its `where` clause",
+            decl.name
+        )
     } else {
         format!("validation failed for `{}`", decl.name)
     }
@@ -575,7 +601,10 @@ mod tests {
 
         // A non-codable value type (a `Ref`) makes the whole map non-codable,
         // and the offender is named.
-        let bad = Type::Map(Box::new(Type::Str), Box::new(Type::Ref(Box::new(Type::Int))));
+        let bad = Type::Map(
+            Box::new(Type::Str),
+            Box::new(Type::Ref(Box::new(Type::Int))),
+        );
         assert_eq!(encodable(&bad, &types).unwrap_err(), "Ref");
     }
 

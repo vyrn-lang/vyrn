@@ -113,10 +113,21 @@ pub fn analyze(program: &Program) -> Ownership {
     for (i, t) in program.tests.iter().enumerate() {
         droppable.insert(
             format!("test@{i}"),
-            analyze_body(&[], &t.body, &Type::Unit, &owned, &string_fns, &string_types).droppable,
+            analyze_body(
+                &[],
+                &t.body,
+                &Type::Unit,
+                &owned,
+                &string_fns,
+                &string_types,
+            )
+            .droppable,
         );
     }
-    Ownership { owned_fns: owned, droppable }
+    Ownership {
+        owned_fns: owned,
+        droppable,
+    }
 }
 
 /// Whether `ty` is a `String` or a nominal type whose base is `String`.
@@ -183,7 +194,10 @@ fn analyze_body(
         str_vars: vec![params],
     };
     a.block(body);
-    FnResult { droppable: a.droppable, is_owned: a.ret_is_heap && a.all_returns_owned }
+    FnResult {
+        droppable: a.droppable,
+        is_owned: a.ret_is_heap && a.all_returns_owned,
+    }
 }
 
 /// The identity key for a statement: its node address.
@@ -227,7 +241,12 @@ impl Analysis<'_> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
-            Stmt::Let { name, mutable, value, .. } => {
+            Stmt::Let {
+                name,
+                mutable,
+                value,
+                ..
+            } => {
                 // Account for uses in the initializer *before* the new binding
                 // exists (so `let x = x + b` escapes the old `x`).
                 self.visit(value);
@@ -247,9 +266,8 @@ impl Analysis<'_> {
                     // single-assignment to be tracked.
                     // A `mut` Map is mutated in place (`m[k] = v`) and keeps its
                     // identity, so — like an array — it can still own its buffers.
-                    let assignable_ok = !*mutable
-                        || kind == DropKind::AfreeArr
-                        || kind == DropKind::FreeMap;
+                    let assignable_ok =
+                        !*mutable || kind == DropKind::AfreeArr || kind == DropKind::FreeMap;
                     if assignable_ok && !region_owns {
                         let key = id(s);
                         self.live.last_mut().unwrap().insert(name.clone(), key);
@@ -263,7 +281,10 @@ impl Analysis<'_> {
                 // its ownership unclear, so it is dropped from tracking (a safe
                 // leak). Pushed values are still accounted for as escapes.
                 if self.is_candidate(name) {
-                    if let Expr::Call { name: fname, args, .. } = value {
+                    if let Expr::Call {
+                        name: fname, args, ..
+                    } = value
+                    {
                         let self_update = fname == "push"
                             && matches!(args.first(), Some(Expr::Var { name: a, .. }) if a == name);
                         if self_update {
@@ -290,7 +311,12 @@ impl Analysis<'_> {
                 self.visit(value);
             }
             Stmt::Return { value, .. } => self.ret(value.as_ref()),
-            Stmt::If { cond, then_block, else_block, .. } => {
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 self.visit(cond);
                 self.block(then_block);
                 if let Some(eb) = else_block {
@@ -390,7 +416,11 @@ impl Analysis<'_> {
             Expr::Str(_) => true,
             Expr::Call { name, .. } if name == "@concat" || name == "@str" => true,
             Expr::Call { name, .. } => self.string_fns.contains(name),
-            Expr::Binary { op: BinOp::Add, lhs, .. } => self.expr_is_string(lhs),
+            Expr::Binary {
+                op: BinOp::Add,
+                lhs,
+                ..
+            } => self.expr_is_string(lhs),
             Expr::Var { name, .. } => self.is_string_var(name),
             _ => false,
         }
@@ -460,13 +490,20 @@ impl Analysis<'_> {
                     }
                 }
             }
-            Expr::Match { scrutinee, arms, .. } => {
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
                 self.visit(scrutinee);
                 for arm in arms {
                     self.visit(&arm.body);
                 }
             }
-            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.visit(cond);
                 self.visit(then_branch);
                 if let Some(eb) = else_branch {
@@ -674,7 +711,10 @@ mod tests {
 
     fn drop_kinds(src: &str, which: &str) -> Vec<DropKind> {
         let (o, _) = analyze_src(src);
-        o.droppable.get(which).map(|m| m.values().copied().collect()).unwrap_or_default()
+        o.droppable
+            .get(which)
+            .map(|m| m.values().copied().collect())
+            .unwrap_or_default()
     }
 
     #[test]
@@ -734,7 +774,8 @@ mod tests {
 
     #[test]
     fn factory_returning_cell_is_owned() {
-        let src = "fn make(v: Int64) -> Ref<Int64> { return cell(v); } fn main() -> Int64 { return 0; }";
+        let src =
+            "fn make(v: Int64) -> Ref<Int64> { return cell(v); } fn main() -> Int64 { return 0; }";
         let (o, _) = analyze_src(src);
         assert_eq!(o.owned_fns.get("make"), Some(&DropKind::ReleaseRef));
     }

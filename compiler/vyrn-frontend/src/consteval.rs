@@ -132,7 +132,9 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
                     BinOp::Eq => Some(ConstVal::Bool(a == b)),
                     BinOp::NotEq => Some(ConstVal::Bool(a != b)),
                     // `s =~ "pat"` compiles the (literal) pattern and full-matches.
-                    BinOp::Match => crate::regex::compile(&b).ok().map(|dfa| ConstVal::Bool(dfa.matches(&a))),
+                    BinOp::Match => crate::regex::compile(&b)
+                        .ok()
+                        .map(|dfa| ConstVal::Bool(dfa.matches(&a))),
                     _ => None,
                 },
                 _ => None,
@@ -150,9 +152,10 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
         // what lets a refinement predicate inspect individual characters.
         Expr::Call { name, args, .. } if name == "at" && args.len() == 2 => {
             match (eval(&args[0], env)?, eval(&args[1], env)?) {
-                (ConstVal::Str(s), ConstVal::Int(i)) if i >= 0 => {
-                    s.as_bytes().get(i as usize).map(|b| ConstVal::Int(*b as i64))
-                }
+                (ConstVal::Str(s), ConstVal::Int(i)) if i >= 0 => s
+                    .as_bytes()
+                    .get(i as usize)
+                    .map(|b| ConstVal::Int(*b as i64)),
                 _ => None,
             }
         }
@@ -183,10 +186,15 @@ pub fn contains_call(expr: &Expr) -> bool {
         // is permitted in a refinement predicate; only its arguments are scanned.
         Expr::Call { name, args, .. } if name == "at" => args.iter().any(contains_call),
         Expr::Call { .. } => true,
-        Expr::Match { scrutinee, arms, .. } => {
-            contains_call(scrutinee) || arms.iter().any(|a| contains_call(&a.body))
-        }
-        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => contains_call(scrutinee) || arms.iter().any(|a| contains_call(&a.body)),
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             contains_call(cond)
                 || contains_call(then_branch)
                 || else_branch.as_ref().is_some_and(|e| contains_call(e))
@@ -196,9 +204,9 @@ pub fn contains_call(expr: &Expr) -> bool {
         Expr::Field { expr, .. } => contains_call(expr),
         Expr::TryConstruct { args, .. } => args.iter().any(contains_call),
         Expr::ArrayLit { elems, .. } => elems.iter().any(contains_call),
-        Expr::MapLit { entries, .. } => {
-            entries.iter().any(|(k, v)| contains_call(k) || contains_call(v))
-        }
+        Expr::MapLit { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| contains_call(k) || contains_call(v)),
         Expr::Spawn { .. } => true,
         // A lambda literal is not a constant and never appears in a refinement
         // predicate (the checker forbids it outside a call argument).

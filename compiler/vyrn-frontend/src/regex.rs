@@ -71,7 +71,10 @@ struct ReParser<'a> {
 
 impl<'a> ReParser<'a> {
     fn parse(pat: &str) -> Result<Re, String> {
-        let mut p = ReParser { b: pat.as_bytes(), i: 0 };
+        let mut p = ReParser {
+            b: pat.as_bytes(),
+            i: 0,
+        };
         let re = p.alt()?;
         if p.i < p.b.len() {
             // Only a stray `)` can be left over (concat stops at `|`/`)`).
@@ -86,7 +89,11 @@ impl<'a> ReParser<'a> {
             self.i += 1;
             branches.push(self.concat()?);
         }
-        Ok(if branches.len() == 1 { branches.pop().unwrap() } else { Re::Alt(branches) })
+        Ok(if branches.len() == 1 {
+            branches.pop().unwrap()
+        } else {
+            Re::Alt(branches)
+        })
     }
 
     fn concat(&mut self) -> Result<Re, String> {
@@ -152,7 +159,9 @@ impl<'a> ReParser<'a> {
                 return Err(format!("counted repetition `{{{m},{n}}}` has max < min"));
             }
         }
-        let mut parts: Vec<Re> = std::iter::repeat_with(|| atom.clone()).take(m as usize).collect();
+        let mut parts: Vec<Re> = std::iter::repeat_with(|| atom.clone())
+            .take(m as usize)
+            .collect();
         match n {
             None => parts.push(Re::Star(Box::new(atom))),
             Some(n) => {
@@ -178,7 +187,9 @@ impl<'a> ReParser<'a> {
             return Err("counted repetition needs a number (`{m}`, `{m,}`, `{m,n}`)".into());
         }
         let text = std::str::from_utf8(&self.b[start..self.i]).unwrap();
-        let v: u32 = text.parse().map_err(|_| format!("repetition count `{text}` too large"))?;
+        let v: u32 = text
+            .parse()
+            .map_err(|_| format!("repetition count `{text}` too large"))?;
         if v > 255 {
             return Err(format!("repetition count {v} exceeds the maximum (255)"));
         }
@@ -304,7 +315,8 @@ fn parse_class(b: &[u8], start: usize) -> Result<(ByteClass, usize), String> {
             if b[i] > b[i + 2] {
                 return Err(format!(
                     "reversed range `{}-{}` in character class",
-                    b[i] as char, b[i + 2] as char
+                    b[i] as char,
+                    b[i + 2] as char
                 ));
             }
             cl.add_range(b[i], b[i + 2]);
@@ -339,14 +351,21 @@ struct Nfa {
 
 impl Nfa {
     fn add(states: &mut Vec<NfaState>) -> usize {
-        states.push(NfaState { eps: Vec::new(), edge: None });
+        states.push(NfaState {
+            eps: Vec::new(),
+            edge: None,
+        });
         states.len() - 1
     }
 
     fn build(re: &Re) -> Nfa {
         let mut states: Vec<NfaState> = Vec::new();
         let (start, accept) = Nfa::frag(&mut states, re);
-        Nfa { states, start, accept }
+        Nfa {
+            states,
+            start,
+            accept,
+        }
     }
 
     /// Build a Thompson fragment for `re`, returning its `(in, out)` states.
@@ -742,7 +761,11 @@ fn product(a: &Dfa, b: &Dfa, accept: impl Fn(bool, bool) -> bool) -> Dfa {
     for (i, &(sa, sb)) in work.iter().enumerate() {
         accepting[i] = accept(a.accepting[sa], b.accepting[sb]);
     }
-    Dfa { start: 0, accepting, table }
+    Dfa {
+        start: 0,
+        accepting,
+        table,
+    }
 }
 
 // ---- concatenation of literals and hole DFAs (RFC-0020) ---------------------
@@ -772,7 +795,10 @@ impl GenNfa {
         GenNfa { states: Vec::new() }
     }
     fn add(&mut self) -> usize {
-        self.states.push(GenState { eps: Vec::new(), edges: Vec::new() });
+        self.states.push(GenState {
+            eps: Vec::new(),
+            edges: Vec::new(),
+        });
         self.states.len() - 1
     }
 
@@ -820,7 +846,10 @@ impl GenNfa {
                 if Some(t) == dead {
                     continue;
                 }
-                by_target.entry(t).or_insert_with(ByteClass::empty).set(b as u8);
+                by_target
+                    .entry(t)
+                    .or_insert_with(ByteClass::empty)
+                    .set(b as u8);
             }
             for (t, cl) in by_target {
                 self.states[map[s]].edges.push((cl, map[t]));
@@ -895,7 +924,11 @@ impl GenNfa {
         for (i, set) in sets.iter().enumerate() {
             accepting[i] = set.contains(&accept);
         }
-        Dfa { start: 0, accepting, table }
+        Dfa {
+            start: 0,
+            accepting,
+            table,
+        }
     }
 }
 
@@ -992,7 +1025,11 @@ pub fn compile(pattern: &str) -> Result<Dfa, String> {
         accepting[i] = set.contains(&nfa.accept);
     }
 
-    Ok(Dfa { start, accepting, table })
+    Ok(Dfa {
+        start,
+        accepting,
+        table,
+    })
 }
 
 #[cfg(test)]
@@ -1168,12 +1205,19 @@ mod tests {
     fn enumeration_is_exact_and_ordered() {
         assert_eq!(
             dfa("cat|dog|bird").enumerate(10),
-            Some(vec!["bird".to_string(), "cat".to_string(), "dog".to_string()])
+            Some(vec![
+                "bird".to_string(),
+                "cat".to_string(),
+                "dog".to_string()
+            ])
         );
         // Lexicographic (byte) order, deterministic.
         assert_eq!(
             dfa("nav\\.(home|about)\\.label").enumerate(10),
-            Some(vec!["nav.about.label".to_string(), "nav.home.label".to_string()])
+            Some(vec![
+                "nav.about.label".to_string(),
+                "nav.home.label".to_string()
+            ])
         );
         // A single literal is a one-element language (`.` escaped to a literal).
         assert_eq!(dfa("home\\.title").enumerate(10).map(|v| v.len()), Some(1));
@@ -1258,13 +1302,23 @@ mod tests {
         assert!(!l.matches("nav.home.label.x"));
         assert_eq!(
             l.enumerate(10),
-            Some(vec!["nav.about.label".to_string(), "nav.home.label".to_string()])
+            Some(vec![
+                "nav.about.label".to_string(),
+                "nav.home.label".to_string()
+            ])
         );
         // Empty piece list denotes {""}.
-        assert_eq!(concat_language(&[]).enumerate(10), Some(vec!["".to_string()]));
+        assert_eq!(
+            concat_language(&[]).enumerate(10),
+            Some(vec!["".to_string()])
+        );
         // A hole whose language includes the empty string concatenates correctly.
         let opt = dfa("x?");
-        let l2 = concat_language(&[ConcatPiece::Lit(b"a"), ConcatPiece::Dfa(&opt), ConcatPiece::Lit(b"b")]);
+        let l2 = concat_language(&[
+            ConcatPiece::Lit(b"a"),
+            ConcatPiece::Dfa(&opt),
+            ConcatPiece::Lit(b"b"),
+        ]);
         assert!(l2.matches("ab"));
         assert!(l2.matches("axb"));
         assert!(!l2.matches("axxb"));

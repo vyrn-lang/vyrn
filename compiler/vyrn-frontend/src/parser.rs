@@ -27,17 +27,16 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
 /// diagnostics should treat a non-empty error list as "do not run downstream
 /// checks" (a partial program would only produce cascading type errors).
 pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
-    let (mut program, errors) =
-        Parser {
-            tokens,
-            pos: 0,
-            no_struct: false,
-            type_params: Vec::new(),
-            field_preds: None,
-            extra_stmts: Vec::new(),
-            errors: Vec::new(),
-        }
-        .program_accum();
+    let (mut program, errors) = Parser {
+        tokens,
+        pos: 0,
+        no_struct: false,
+        type_params: Vec::new(),
+        field_preds: None,
+        extra_stmts: Vec::new(),
+        errors: Vec::new(),
+    }
+    .program_accum();
     // The built-in `Value` enum (RFC-0007): the closed set of types a tagged
     // template can interpolate. Injected so every program can name `Array<Value>`
     // and match `IntVal`/`StrVal`/`BoolVal` — the tag surface — without a `use`.
@@ -48,9 +47,18 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         doc: None,
         type_params: Vec::new(),
         base: Type::Enum(vec![
-            EnumVariant { name: "IntVal".to_string(), payload: vec![Type::Int] },
-            EnumVariant { name: "StrVal".to_string(), payload: vec![Type::Str] },
-            EnumVariant { name: "BoolVal".to_string(), payload: vec![Type::Bool] },
+            EnumVariant {
+                name: "IntVal".to_string(),
+                payload: vec![Type::Int],
+            },
+            EnumVariant {
+                name: "StrVal".to_string(),
+                payload: vec![Type::Str],
+            },
+            EnumVariant {
+                name: "BoolVal".to_string(),
+                payload: vec![Type::Bool],
+            },
         ]),
         predicate: None,
         line: 0,
@@ -65,7 +73,10 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         doc: None,
         type_params: Vec::new(),
         base: Type::Record(vec![
-            Field { name: "parts".to_string(), ty: Type::Array(Box::new(Type::Str)) },
+            Field {
+                name: "parts".to_string(),
+                ty: Type::Array(Box::new(Type::Str)),
+            },
             Field {
                 name: "values".to_string(),
                 ty: Type::Array(Box::new(Type::Named("Value".to_string()))),
@@ -85,9 +96,18 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         doc: None,
         type_params: Vec::new(),
         base: Type::Record(vec![
-            Field { name: "key".to_string(), ty: Type::Str },
-            Field { name: "path".to_string(), ty: Type::Str },
-            Field { name: "message".to_string(), ty: Type::Str },
+            Field {
+                name: "key".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "path".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "message".to_string(),
+                ty: Type::Str,
+            },
         ]),
         predicate: None,
         line: 0,
@@ -99,7 +119,10 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         doc: None,
         type_params: vec!["T".to_string()],
         base: Type::Enum(vec![
-            EnumVariant { name: "Valid".to_string(), payload: vec![Type::Param("T".to_string())] },
+            EnumVariant {
+                name: "Valid".to_string(),
+                payload: vec![Type::Param("T".to_string())],
+            },
             EnumVariant {
                 name: "Invalid".to_string(),
                 payload: vec![Type::Array(Box::new(Type::Named("Issue".to_string())))],
@@ -120,15 +143,42 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         doc: None,
         type_params: Vec::new(),
         base: Type::Record(vec![
-            Field { name: "name".to_string(), ty: Type::Str },
-            Field { name: "base".to_string(), ty: Type::Str },
-            Field { name: "doc".to_string(), ty: Type::Option(Box::new(Type::Str)) },
-            Field { name: "min".to_string(), ty: Type::Option(Box::new(Type::Int)) },
-            Field { name: "max".to_string(), ty: Type::Option(Box::new(Type::Int)) },
-            Field { name: "multipleOf".to_string(), ty: Type::Option(Box::new(Type::Int)) },
-            Field { name: "minLength".to_string(), ty: Type::Option(Box::new(Type::Int)) },
-            Field { name: "maxLength".to_string(), ty: Type::Option(Box::new(Type::Int)) },
-            Field { name: "pattern".to_string(), ty: Type::Option(Box::new(Type::Str)) },
+            Field {
+                name: "name".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "base".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "doc".to_string(),
+                ty: Type::Option(Box::new(Type::Str)),
+            },
+            Field {
+                name: "min".to_string(),
+                ty: Type::Option(Box::new(Type::Int)),
+            },
+            Field {
+                name: "max".to_string(),
+                ty: Type::Option(Box::new(Type::Int)),
+            },
+            Field {
+                name: "multipleOf".to_string(),
+                ty: Type::Option(Box::new(Type::Int)),
+            },
+            Field {
+                name: "minLength".to_string(),
+                ty: Type::Option(Box::new(Type::Int)),
+            },
+            Field {
+                name: "maxLength".to_string(),
+                ty: Type::Option(Box::new(Type::Int)),
+            },
+            Field {
+                name: "pattern".to_string(),
+                ty: Type::Option(Box::new(Type::Str)),
+            },
         ]),
         predicate: None,
         line: 0,
@@ -150,9 +200,18 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         doc: None,
         type_params: Vec::new(),
         base: Type::Record(vec![
-            Field { name: "name".to_string(), ty: Type::Str },
-            Field { name: "spelling".to_string(), ty: Type::Str },
-            Field { name: "schema".to_string(), ty: Type::Named("Schema".to_string()) },
+            Field {
+                name: "name".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "spelling".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "schema".to_string(),
+                ty: Type::Named("Schema".to_string()),
+            },
         ]),
         predicate: None,
         line: 0,
@@ -164,13 +223,22 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         doc: None,
         type_params: Vec::new(),
         base: Type::Record(vec![
-            Field { name: "name".to_string(), ty: Type::Str },
+            Field {
+                name: "name".to_string(),
+                ty: Type::Str,
+            },
             Field {
                 name: "params".to_string(),
                 ty: Type::Array(Box::new(Type::Named("ParamInfo".to_string()))),
             },
-            Field { name: "ret".to_string(), ty: Type::Str },
-            Field { name: "retSchema".to_string(), ty: Type::Named("Schema".to_string()) },
+            Field {
+                name: "ret".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "retSchema".to_string(),
+                ty: Type::Named("Schema".to_string()),
+            },
         ]),
         predicate: None,
         line: 0,
@@ -182,15 +250,27 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         doc: None,
         type_params: Vec::new(),
         base: Type::Record(vec![
-            Field { name: "name".to_string(), ty: Type::Str },
-            Field { name: "source".to_string(), ty: Type::Str },
+            Field {
+                name: "name".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "source".to_string(),
+                ty: Type::Str,
+            },
             // The import specifier (relative to the reflected module's importer)
             // for the module that DECLARES this type — so a generator that must
             // share the type's identity (rpcServer/rpcInProcess) can import it
             // from the right module when the closure reaches across imports
             // (RFC-0031). Own types carry the generator's own contract argument.
-            Field { name: "module".to_string(), ty: Type::Str },
-            Field { name: "schema".to_string(), ty: Type::Named("Schema".to_string()) },
+            Field {
+                name: "module".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "schema".to_string(),
+                ty: Type::Named("Schema".to_string()),
+            },
         ]),
         predicate: None,
         line: 0,
@@ -228,9 +308,18 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         doc: None,
         type_params: Vec::new(),
         base: Type::Record(vec![
-            Field { name: "method".to_string(), ty: Type::Str },
-            Field { name: "path".to_string(), ty: Type::Str },
-            Field { name: "body".to_string(), ty: Type::Str },
+            Field {
+                name: "method".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "path".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "body".to_string(),
+                ty: Type::Str,
+            },
         ]),
         predicate: None,
         line: 0,
@@ -242,9 +331,18 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         doc: None,
         type_params: Vec::new(),
         base: Type::Record(vec![
-            Field { name: "status".to_string(), ty: Type::Int },
-            Field { name: "contentType".to_string(), ty: Type::Str },
-            Field { name: "body".to_string(), ty: Type::Str },
+            Field {
+                name: "status".to_string(),
+                ty: Type::Int,
+            },
+            Field {
+                name: "contentType".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "body".to_string(),
+                ty: Type::Str,
+            },
         ]),
         predicate: None,
         line: 0,
@@ -467,7 +565,10 @@ impl Parser {
                          `gen fn`"
                     };
                     errors.push(Diagnostic::error(
-                        self.line(), self.col(), "parse", msg.to_string(),
+                        self.line(),
+                        self.col(),
+                        "parse",
+                        msg.to_string(),
                     ));
                     self.sync_to_decl();
                     continue;
@@ -479,7 +580,10 @@ impl Parser {
             match self.peek() {
                 Tok::Import => match self.import_decl() {
                     Ok(i) => imports.push(i),
-                    Err(d) => { errors.push(d); self.sync_to_decl(); }
+                    Err(d) => {
+                        errors.push(d);
+                        self.sync_to_decl();
+                    }
                 },
                 Tok::Type => match self.type_decl() {
                     Ok(mut ds) => {
@@ -487,11 +591,21 @@ impl Parser {
                         ds[0].exported = exported;
                         type_decls.extend(ds);
                     }
-                    Err(d) => { errors.push(d); self.sync_to_decl(); }
+                    Err(d) => {
+                        errors.push(d);
+                        self.sync_to_decl();
+                    }
                 },
                 Tok::Fn => match self.function(false) {
-                    Ok(mut f) => { f.doc = doc; f.exported = exported; functions.push(f); }
-                    Err(d) => { errors.push(d); self.sync_to_decl(); }
+                    Ok(mut f) => {
+                        f.doc = doc;
+                        f.exported = exported;
+                        functions.push(f);
+                    }
+                    Err(d) => {
+                        errors.push(d);
+                        self.sync_to_decl();
+                    }
                 },
                 // `gen fn ..` — a compile-time module generator (RFC-0021). `gen`
                 // is a contextual starter (a plain identifier elsewhere); recognize
@@ -501,17 +615,34 @@ impl Parser {
                 {
                     self.advance(); // `gen` (a contextual Ident)
                     match self.function(true) {
-                        Ok(mut f) => { f.doc = doc; f.exported = exported; functions.push(f); }
-                        Err(d) => { errors.push(d); self.sync_to_decl(); }
+                        Ok(mut f) => {
+                            f.doc = doc;
+                            f.exported = exported;
+                            functions.push(f);
+                        }
+                        Err(d) => {
+                            errors.push(d);
+                            self.sync_to_decl();
+                        }
                     }
                 }
                 Tok::Protocol => match self.protocol_decl() {
-                    Ok(mut p) => { p.doc = doc; p.exported = exported; protocols.push(p); }
-                    Err(d) => { errors.push(d); self.sync_to_decl(); }
+                    Ok(mut p) => {
+                        p.doc = doc;
+                        p.exported = exported;
+                        protocols.push(p);
+                    }
+                    Err(d) => {
+                        errors.push(d);
+                        self.sync_to_decl();
+                    }
                 },
                 Tok::Impl => match self.impl_block() {
                     Ok(i) => impls.push(i),
-                    Err(d) => { errors.push(d); self.sync_to_decl(); }
+                    Err(d) => {
+                        errors.push(d);
+                        self.sync_to_decl();
+                    }
                 },
                 // Top-level `let [mut] name [: Type] = init` — module state
                 // (RFC-0013, any module per RFC-0029). Shares the `let` keyword
@@ -519,22 +650,33 @@ impl Parser {
                 // `export let` is rejected by the `export` guard above (module
                 // state is module-private — export accessor functions instead).
                 Tok::Let => match self.global_decl() {
-                    Ok(mut g) => { g.doc = doc; globals.push(g); }
-                    Err(d) => { errors.push(d); self.sync_to_decl(); }
+                    Ok(mut g) => {
+                        g.doc = doc;
+                        globals.push(g);
+                    }
+                    Err(d) => {
+                        errors.push(d);
+                        self.sync_to_decl();
+                    }
                 },
                 // `extern fn ..` — a JS-interop import (RFC-0012). `extern` is a
                 // contextual starter (a plain identifier elsewhere); recognize it
                 // only when `fn` follows, so a variable named `extern` is unharmed.
                 Tok::Ident(name)
-                    if name == "extern"
-                        && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
+                    if name == "extern" && matches!(self.tokens[self.pos + 1].tok, Tok::Fn) =>
                 {
                     // `extern fn` (no `export`) is a body-less JS *import* (M1);
                     // `export extern fn ... { body }` is a Vyrn function *exported*
                     // to JS (M2). The `exported` flag decides which shape is legal.
                     match self.extern_function(exported) {
-                        Ok(mut f) => { f.doc = doc; functions.push(f); }
-                        Err(d) => { errors.push(d); self.sync_to_decl(); }
+                        Ok(mut f) => {
+                            f.doc = doc;
+                            functions.push(f);
+                        }
+                        Err(d) => {
+                            errors.push(d);
+                            self.sync_to_decl();
+                        }
                     }
                 }
                 // `test "name" { body }` — a test declaration (RFC-0015).
@@ -545,8 +687,14 @@ impl Parser {
                     if name == "test" && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
                 {
                     match self.test_decl() {
-                        Ok(mut t) => { t.doc = doc; tests.push(t); }
-                        Err(d) => { errors.push(d); self.sync_to_decl(); }
+                        Ok(mut t) => {
+                            t.doc = doc;
+                            tests.push(t);
+                        }
+                        Err(d) => {
+                            errors.push(d);
+                            self.sync_to_decl();
+                        }
                     }
                 }
                 // `logging { level: <name> }` — the RFC-0008 config block.
@@ -555,7 +703,9 @@ impl Parser {
                     let col = self.col();
                     if saw_logging {
                         errors.push(Diagnostic::error(
-                            line, col, "parse",
+                            line,
+                            col,
+                            "parse",
                             "duplicate `logging` config block".to_string(),
                         ));
                         self.sync_to_decl();
@@ -563,13 +713,21 @@ impl Parser {
                     }
                     saw_logging = true;
                     match self.logging_config() {
-                        Ok((lvl, sink)) => { log_level = lvl; log_sink = sink; }
-                        Err(d) => { errors.push(d); self.sync_to_decl(); }
+                        Ok((lvl, sink)) => {
+                            log_level = lvl;
+                            log_sink = sink;
+                        }
+                        Err(d) => {
+                            errors.push(d);
+                            self.sync_to_decl();
+                        }
                     }
                 }
                 other => {
                     errors.push(Diagnostic::error(
-                        self.line(), self.col(), "parse",
+                        self.line(),
+                        self.col(),
+                        "parse",
                         format!(
                             "expected `fn`, `type`, `protocol`, `impl`, `let`, or `logging` at \
                              top level, found {other:?}"
@@ -585,7 +743,20 @@ impl Parser {
         let mut errors = errors;
         errors.append(&mut self.errors);
         errors.sort_by_key(|d| (d.line, d.col));
-        (Program { imports, type_decls, functions, protocols, impls, globals, tests, log_level, log_sink }, errors)
+        (
+            Program {
+                imports,
+                type_decls,
+                functions,
+                protocols,
+                impls,
+                globals,
+                tests,
+                log_level,
+                log_sink,
+            },
+            errors,
+        )
     }
 
     /// Recovery sync point: advance until the cursor sits on a top-level
@@ -605,9 +776,22 @@ impl Parser {
         let mut depth = 0i32;
         while *self.peek() != Tok::Eof {
             match self.peek() {
-                Tok::LBrace => { depth += 1; self.advance(); }
-                Tok::RBrace => { if depth > 0 { depth -= 1; } self.advance(); }
-                Tok::Fn | Tok::Type | Tok::Protocol | Tok::Impl | Tok::Import | Tok::Export
+                Tok::LBrace => {
+                    depth += 1;
+                    self.advance();
+                }
+                Tok::RBrace => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                    self.advance();
+                }
+                Tok::Fn
+                | Tok::Type
+                | Tok::Protocol
+                | Tok::Impl
+                | Tok::Import
+                | Tok::Export
                 | Tok::Let
                     if depth == 0 =>
                 {
@@ -631,7 +815,9 @@ impl Parser {
                 {
                     return
                 }
-                _ => { self.advance(); }
+                _ => {
+                    self.advance();
+                }
             }
         }
     }
@@ -670,10 +856,22 @@ impl Parser {
                 Type::Unit
             };
             self.eat_semi();
-            methods.push(MethodSig { name: mname, params, ret, line: mline });
+            methods.push(MethodSig {
+                name: mname,
+                params,
+                ret,
+                line: mline,
+            });
         }
         self.eat(&Tok::RBrace)?;
-        Ok(ProtocolDecl { exported: false, module: None, name, doc: None, methods, line })
+        Ok(ProtocolDecl {
+            exported: false,
+            module: None,
+            name,
+            doc: None,
+            methods,
+            line,
+        })
     }
 
     /// `impl P for T { fn m(self, ..) -> R { .. } .. }` — a type's methods for a
@@ -694,7 +892,12 @@ impl Parser {
             methods.push(self.impl_method(&ty)?);
         }
         self.eat(&Tok::RBrace)?;
-        Ok(ImplBlock { protocol, ty, methods, line })
+        Ok(ImplBlock {
+            protocol,
+            ty,
+            methods,
+            line,
+        })
     }
 
     /// One `fn m(self, ..) -> R { .. }` inside an `impl`. Returns a [`Function`]
@@ -716,7 +919,11 @@ impl Parser {
             self.eat(&Tok::Colon)?;
             let capability = self.parse_capability();
             let ty = self.type_()?;
-            params.push(Param { name: pname, capability, ty });
+            params.push(Param {
+                name: pname,
+                capability,
+                ty,
+            });
         }
         self.eat(&Tok::RParen)?;
         let ret = if *self.peek() == Tok::Arrow {
@@ -858,7 +1065,12 @@ impl Parser {
             }
             let source = self.import_source(line)?;
             self.eat_semi();
-            return Ok(ImportDecl { names: Vec::new(), namespace: Some(ns), source, line });
+            return Ok(ImportDecl {
+                names: Vec::new(),
+                namespace: Some(ns),
+                source,
+                line,
+            });
         }
         // Optional `type` marker (JSON Schema imports read naturally).
         if *self.peek() == Tok::Type {
@@ -907,7 +1119,12 @@ impl Parser {
         }
         let source = self.import_source(line)?;
         self.eat_semi();
-        Ok(ImportDecl { names, namespace: None, source, line })
+        Ok(ImportDecl {
+            names,
+            namespace: None,
+            source,
+            line,
+        })
     }
 
     /// The right-hand side after `from`: a module path string, or a generator
@@ -933,7 +1150,11 @@ impl Parser {
                     }
                 }
                 self.eat(&Tok::RParen)?;
-                Ok(ImportSource::Generator { name: gen_name, args, line: call_line })
+                Ok(ImportSource::Generator {
+                    name: gen_name,
+                    args,
+                    line: call_line,
+                })
             }
             other => Err(Diagnostic::error(
                 line,
@@ -1187,7 +1408,11 @@ impl Parser {
             self.eat(&Tok::Colon)?;
             let capability = self.parse_capability();
             let ty = self.type_()?;
-            params.push(Param { name: pname, capability, ty });
+            params.push(Param {
+                name: pname,
+                capability,
+                ty,
+            });
             if *self.peek() == Tok::Comma {
                 self.advance();
             } else {
@@ -1206,7 +1431,21 @@ impl Parser {
 
         let body = self.block()?;
         self.type_params.clear();
-        Ok(Function { name, exported: false, module: None, doc: None, type_params, type_bounds, params, ret, body, line, is_extern: false, is_export_extern: false, is_gen })
+        Ok(Function {
+            name,
+            exported: false,
+            module: None,
+            doc: None,
+            type_params,
+            type_bounds,
+            params,
+            ret,
+            body,
+            line,
+            is_extern: false,
+            is_export_extern: false,
+            is_gen,
+        })
     }
 
     /// `test "name" { body }` — a test declaration (RFC-0015). `test` is a
@@ -1232,7 +1471,13 @@ impl Parser {
         self.type_params.clear();
         let body = self.block()?;
         self.type_params.clear();
-        Ok(TestDecl { name, body, doc: None, module: None, line })
+        Ok(TestDecl {
+            name,
+            body,
+            doc: None,
+            module: None,
+            line,
+        })
     }
 
     /// `extern fn name(params) -> Ret` — a body-less JS-interop declaration
@@ -1263,7 +1508,11 @@ impl Parser {
             self.eat(&Tok::Colon)?;
             let capability = self.parse_capability();
             let ty = self.type_()?;
-            params.push(Param { name: pname, capability, ty });
+            params.push(Param {
+                name: pname,
+                capability,
+                ty,
+            });
             if *self.peek() == Tok::Comma {
                 self.advance();
             } else {
@@ -1410,14 +1659,35 @@ impl Parser {
             // is always written explicitly — there is no unsized `Int`.
             "Int64" => Type::Int,
             // Sized signed integers.
-            "Int8" => Type::IntN { bits: 8, signed: true },
-            "Int16" => Type::IntN { bits: 16, signed: true },
-            "Int32" => Type::IntN { bits: 32, signed: true },
+            "Int8" => Type::IntN {
+                bits: 8,
+                signed: true,
+            },
+            "Int16" => Type::IntN {
+                bits: 16,
+                signed: true,
+            },
+            "Int32" => Type::IntN {
+                bits: 32,
+                signed: true,
+            },
             // Sized unsigned integers.
-            "UInt8" => Type::IntN { bits: 8, signed: false },
-            "UInt16" => Type::IntN { bits: 16, signed: false },
-            "UInt32" => Type::IntN { bits: 32, signed: false },
-            "UInt64" => Type::IntN { bits: 64, signed: false },
+            "UInt8" => Type::IntN {
+                bits: 8,
+                signed: false,
+            },
+            "UInt16" => Type::IntN {
+                bits: 16,
+                signed: false,
+            },
+            "UInt32" => Type::IntN {
+                bits: 32,
+                signed: false,
+            },
+            "UInt64" => Type::IntN {
+                bits: 64,
+                signed: false,
+            },
             // `Float64` is 64-bit IEEE-754; `Float32` is 32-bit.
             "Float64" => Type::Float,
             "Float32" => Type::Float32,
@@ -1582,8 +1852,8 @@ impl Parser {
         let mut stmts = Vec::new();
         while *self.peek() != Tok::RBrace && *self.peek() != Tok::Eof {
             self.take_docs(); // discard any stray `///` inside a body
-            // Semicolons are optional separators: a stray one (e.g. after an
-            // `if { .. };`) is skipped, never a parse error.
+                              // Semicolons are optional separators: a stray one (e.g. after an
+                              // `if { .. };`) is skipped, never a parse error.
             if *self.peek() == Tok::Semi {
                 self.advance();
                 continue;
@@ -1610,12 +1880,12 @@ impl Parser {
                 Err(d) => {
                     self.errors.push(d);
                     self.extra_stmts.clear(); // drop any partial desugar
-                    // Guarantee forward progress: a statement parser that failed
-                    // without consuming anything (e.g. a bad leading token) would
-                    // otherwise re-error here forever. One that already advanced
-                    // (the common case — it consumed a `let`/name/`=` before
-                    // failing) needs no nudge; skipping a token could eat the
-                    // block's `}`.
+                                              // Guarantee forward progress: a statement parser that failed
+                                              // without consuming anything (e.g. a bad leading token) would
+                                              // otherwise re-error here forever. One that already advanced
+                                              // (the common case — it consumed a `let`/name/`=` before
+                                              // failing) needs no nudge; skipping a token could eat the
+                                              // block's `}`.
                     if self.pos == start {
                         self.advance();
                     }
@@ -1698,7 +1968,15 @@ impl Parser {
         self.eat(&Tok::Eq)?;
         let init = self.expr()?;
         self.eat_semi();
-        Ok(GlobalDecl { name, mutable, ty, init, doc: None, module: None, line })
+        Ok(GlobalDecl {
+            name,
+            mutable,
+            ty,
+            init,
+            doc: None,
+            module: None,
+            line,
+        })
     }
 
     /// Parse an `if` statement whose `if` token is current (`line` is its
@@ -1717,14 +1995,21 @@ impl Parser {
             if *self.peek() == Tok::If {
                 let else_line = self.line();
                 let nested = self.if_stmt(else_line)?;
-                Some(Block { stmts: vec![nested] })
+                Some(Block {
+                    stmts: vec![nested],
+                })
             } else {
                 Some(self.block()?)
             }
         } else {
             None
         };
-        Ok(Stmt::If { cond, then_block, else_block, line })
+        Ok(Stmt::If {
+            cond,
+            then_block,
+            else_block,
+            line,
+        })
     }
 
     fn stmt(&mut self) -> Result<Stmt, Diagnostic> {
@@ -1748,7 +2033,13 @@ impl Parser {
                 self.eat(&Tok::Eq)?;
                 let value = self.expr()?;
                 self.eat_semi();
-                Ok(Stmt::Let { name, mutable, ty, value, line })
+                Ok(Stmt::Let {
+                    name,
+                    mutable,
+                    ty,
+                    value,
+                    line,
+                })
             }
             Tok::Return => {
                 self.advance();
@@ -1777,7 +2068,12 @@ impl Parser {
                 // condition) so a bare `{` opens the loop body, not a struct lit.
                 let iter = self.cond_expr()?;
                 let body = self.block()?;
-                Ok(Stmt::ForIn { var, iter, body, line })
+                Ok(Stmt::ForIn {
+                    var,
+                    iter,
+                    body,
+                    line,
+                })
             }
             Tok::Region => {
                 self.advance();
@@ -1812,7 +2108,12 @@ impl Parser {
                 self.eat(&Tok::Eq)?;
                 let value = self.expr()?;
                 self.eat_semi();
-                Ok(Stmt::SetField { name, field, value, line })
+                Ok(Stmt::SetField {
+                    name,
+                    field,
+                    value,
+                    line,
+                })
             }
             _ => {
                 let e = self.expr()?;
@@ -1829,7 +2130,12 @@ impl Parser {
                                 self.advance(); // eat `=`
                                 let value = self.expr()?;
                                 self.eat_semi();
-                                return Ok(Stmt::IndexSet { name: recv, index, value, line });
+                                return Ok(Stmt::IndexSet {
+                                    name: recv,
+                                    index,
+                                    value,
+                                    line,
+                                });
                             }
                             return Err(Diagnostic::error(
                                 line,
@@ -1878,7 +2184,10 @@ impl Parser {
                                     self.extra_stmts.push(Stmt::IndexSet {
                                         name: recv,
                                         index: args[1].clone(),
-                                        value: Expr::Var { name: tmp.clone(), line },
+                                        value: Expr::Var {
+                                            name: tmp.clone(),
+                                            line,
+                                        },
                                         line,
                                     });
                                     return Ok(Stmt::Let {
@@ -1935,14 +2244,18 @@ impl Parser {
                         match args.first() {
                             // `sq.push(v)` — a plain array variable.
                             Some(Expr::Var { name: recv, .. }) => {
-                                return Ok(Stmt::Assign { name: recv.clone(), value: e, line });
+                                return Ok(Stmt::Assign {
+                                    name: recv.clone(),
+                                    value: e,
+                                    line,
+                                });
                             }
                             // `r.f.push(v)` — an array FIELD of a record variable.
                             // Writes back via `SetField` (the same place, and the
                             // same validated-data rules, as `r.f = ..`).
-                            Some(Expr::Field { expr: base, field, .. })
-                                if matches!(base.as_ref(), Expr::Var { .. }) =>
-                            {
+                            Some(Expr::Field {
+                                expr: base, field, ..
+                            }) if matches!(base.as_ref(), Expr::Var { .. }) => {
                                 let Expr::Var { name: recv, .. } = base.as_ref() else {
                                     unreachable!()
                                 };
@@ -1958,17 +2271,25 @@ impl Parser {
                             // `IndexSet`, mirroring `a[i] = ..`; the index is
                             // evaluated on both the read and the store, exactly like
                             // the `a[i].field = v` desugar.
-                            Some(Expr::Call { name: at, args: iargs, .. })
-                                if at == "at"
-                                    && iargs.len() == 2
-                                    && matches!(&iargs[0], Expr::Var { .. }) =>
+                            Some(Expr::Call {
+                                name: at,
+                                args: iargs,
+                                ..
+                            }) if at == "at"
+                                && iargs.len() == 2
+                                && matches!(&iargs[0], Expr::Var { .. }) =>
                             {
                                 let Expr::Var { name: recv, .. } = &iargs[0] else {
                                     unreachable!()
                                 };
                                 let recv = recv.clone();
                                 let index = iargs[1].clone();
-                                return Ok(Stmt::IndexSet { name: recv, index, value: e, line });
+                                return Ok(Stmt::IndexSet {
+                                    name: recv,
+                                    index,
+                                    value: e,
+                                    line,
+                                });
                             }
                             _ => {
                                 return Err(Diagnostic::error(
@@ -2039,7 +2360,12 @@ impl Parser {
             self.advance();
             // left-associative: parse rhs with strictly higher binding power
             let rhs = self.binary(bp + 1)?;
-            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs), line };
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                line,
+            };
         }
         Ok(lhs)
     }
@@ -2049,11 +2375,19 @@ impl Parser {
         match self.peek() {
             Tok::Minus => {
                 self.advance();
-                Ok(Expr::Unary { op: UnOp::Neg, expr: Box::new(self.unary()?), line })
+                Ok(Expr::Unary {
+                    op: UnOp::Neg,
+                    expr: Box::new(self.unary()?),
+                    line,
+                })
             }
             Tok::Bang => {
                 self.advance();
-                Ok(Expr::Unary { op: UnOp::Not, expr: Box::new(self.unary()?), line })
+                Ok(Expr::Unary {
+                    op: UnOp::Not,
+                    expr: Box::new(self.unary()?),
+                    line,
+                })
             }
             _ => self.postfix(),
         }
@@ -2067,7 +2401,10 @@ impl Parser {
             match self.peek() {
                 Tok::Question => {
                     self.advance();
-                    e = Expr::Try { expr: Box::new(e), line };
+                    e = Expr::Try {
+                        expr: Box::new(e),
+                        line,
+                    };
                 }
                 Tok::Dot => {
                     self.advance();
@@ -2124,11 +2461,17 @@ impl Parser {
                         // loader splits on the dot, verifies `ns` is an in-scope
                         // namespace, and rewrites it to the plain resolved decl,
                         // so the checker/backends never see a dotted name.
-                        let Expr::Var { name: ns, .. } = e else { unreachable!() };
+                        let Expr::Var { name: ns, .. } = e else {
+                            unreachable!()
+                        };
                         e = self.struct_lit(format!("{ns}.{name}"), line)?;
                     } else {
                         // Property / field access `recv.name` (e.g. `arr.length`).
-                        e = Expr::Field { expr: Box::new(e), field: name, line };
+                        e = Expr::Field {
+                            expr: Box::new(e),
+                            field: name,
+                            line,
+                        };
                     }
                 }
                 Tok::LBracket => {
@@ -2139,7 +2482,11 @@ impl Parser {
                     let idx = self.expr()?;
                     self.no_struct = saved;
                     self.eat(&Tok::RBracket)?;
-                    e = Expr::Call { name: "at".to_string(), args: vec![e, idx], line };
+                    e = Expr::Call {
+                        name: "at".to_string(),
+                        args: vec![e, idx],
+                        line,
+                    };
                 }
                 _ => break,
             }
@@ -2197,7 +2544,10 @@ impl Parser {
             Tok::Float(v) => Ok(Expr::Float(v)),
             Tok::Str(s) => Ok(Expr::Str(s)),
             // `self` — the receiver inside an `impl` method; an ordinary binding.
-            Tok::Vself => Ok(Expr::Var { name: "self".to_string(), line }),
+            Tok::Vself => Ok(Expr::Var {
+                name: "self".to_string(),
+                line,
+            }),
             Tok::TemplateStr { parts, exprs } => self.template(parts, exprs, line, col),
             Tok::True => Ok(Expr::Bool(true)),
             Tok::False => Ok(Expr::Bool(false)),
@@ -2222,12 +2572,18 @@ impl Parser {
                     self.advance();
                     self.no_struct = saved;
                     self.eat(&Tok::RBracket)?;
-                    return Ok(Expr::MapLit { entries: Vec::new(), line });
+                    return Ok(Expr::MapLit {
+                        entries: Vec::new(),
+                        line,
+                    });
                 }
                 if *self.peek() == Tok::RBracket {
                     self.no_struct = saved;
                     self.advance();
-                    return Ok(Expr::ArrayLit { elems: Vec::new(), line });
+                    return Ok(Expr::ArrayLit {
+                        elems: Vec::new(),
+                        line,
+                    });
                 }
                 let first = self.expr()?;
                 // A `:` after the first element makes this a map literal.
@@ -2315,8 +2671,8 @@ impl Parser {
                     ));
                 }
                 // Fallible construction: `Name?(args)`.
-                let fallible = *self.peek() == Tok::Question
-                    && self.tokens[self.pos + 1].tok == Tok::LParen;
+                let fallible =
+                    *self.peek() == Tok::Question && self.tokens[self.pos + 1].tok == Tok::LParen;
                 if fallible {
                     self.advance(); // consume `?`
                 }
@@ -2378,7 +2734,11 @@ impl Parser {
             // `str`/`concat` builtins: the parser produces them for desugaring,
             // but the lexer can never produce a leading `@`, so user source
             // hitting the bare `str`/`concat` names gets the migration hint.
-            pieces.push(Expr::Call { name: "@str".to_string(), args: vec![e], line });
+            pieces.push(Expr::Call {
+                name: "@str".to_string(),
+                args: vec![e],
+                line,
+            });
             if !parts[k + 1].is_empty() {
                 pieces.push(Expr::Str(parts[k + 1].clone()));
             }
@@ -2388,7 +2748,11 @@ impl Parser {
         let mut iter = pieces.into_iter();
         let mut acc = iter.next().unwrap();
         for p in iter {
-            acc = Expr::Call { name: "@concat".to_string(), args: vec![acc, p], line };
+            acc = Expr::Call {
+                name: "@concat".to_string(),
+                args: vec![acc, p],
+                line,
+            };
         }
         Ok(acc)
     }
@@ -2397,7 +2761,12 @@ impl Parser {
     /// sharing the enclosing function's generic parameters.
     fn parse_hole(&self, src: &str, line: usize, col: usize) -> Result<Expr, Diagnostic> {
         let toks = crate::lexer::lex(src).map_err(|e| {
-            Diagnostic::error(line, col, "parse", format!("in interpolation: {}", e.render()))
+            Diagnostic::error(
+                line,
+                col,
+                "parse",
+                format!("in interpolation: {}", e.render()),
+            )
         })?;
         let mut sub = Parser {
             tokens: toks,
@@ -2412,14 +2781,22 @@ impl Parser {
         // snippet — anchor it at the template and embed the detail, exactly
         // like the lex-error wrapping above.
         let e = sub.expr().map_err(|d| {
-            Diagnostic::error(line, col, "parse", format!("in interpolation: {}", d.message))
+            Diagnostic::error(
+                line,
+                col,
+                "parse",
+                format!("in interpolation: {}", d.message),
+            )
         })?;
         if *sub.peek() != Tok::Eof {
             return Err(Diagnostic::error(
                 line,
                 col,
                 "parse",
-                format!("unexpected tokens after interpolation expression `{}`", src.trim()),
+                format!(
+                    "unexpected tokens after interpolation expression `{}`",
+                    src.trim()
+                ),
             ));
         }
         Ok(e)
@@ -2444,12 +2821,23 @@ impl Parser {
         let mut values = Vec::new();
         for src in &exprs {
             let e = self.parse_hole(src, line, col)?;
-            values.push(Expr::Call { name: "value".to_string(), args: vec![e], line });
+            values.push(Expr::Call {
+                name: "value".to_string(),
+                args: vec![e],
+                line,
+            });
         }
-        let values_lit = Expr::ArrayLit { elems: values, line };
+        let values_lit = Expr::ArrayLit {
+            elems: values,
+            line,
+        };
         // `@list` is the internal spelling of the removed `list` builtin (see
         // `@str`/`@concat` above): produced only by desugaring, never lexable.
-        let wrap = |e| Expr::Call { name: "@list".to_string(), args: vec![e], line };
+        let wrap = |e| Expr::Call {
+            name: "@list".to_string(),
+            args: vec![e],
+            line,
+        };
         // The built-in `template` tag yields the first-class `Template` record;
         // any other tag is an ordinary function call `tag(parts, values)`.
         if tag == "template" {
@@ -2462,7 +2850,11 @@ impl Parser {
                 line,
             });
         }
-        Ok(Expr::Call { name: tag, args: vec![wrap(parts_lit), wrap(values_lit)], line })
+        Ok(Expr::Call {
+            name: tag,
+            args: vec![wrap(parts_lit), wrap(values_lit)],
+            line,
+        })
     }
 
     /// `match scrutinee { pattern => expr, ... }` (the `match` keyword is already
@@ -2483,7 +2875,11 @@ impl Parser {
             }
         }
         self.eat(&Tok::RBrace)?;
-        Ok(Expr::Match { scrutinee: Box::new(scrutinee), arms, line })
+        Ok(Expr::Match {
+            scrutinee: Box::new(scrutinee),
+            arms,
+            line,
+        })
     }
 
     /// `if cond { expr } else if cond { expr } else { expr }` in expression
@@ -2672,7 +3068,10 @@ mod tests {
         assert_eq!(f.body.stmts.len(), 4);
         assert!(matches!(f.body.stmts[0], Stmt::Let { .. }));
         assert!(matches!(f.body.stmts[2], Stmt::Assign { .. }));
-        assert!(matches!(f.body.stmts[3], Stmt::Return { value: Some(_), .. }));
+        assert!(matches!(
+            f.body.stmts[3],
+            Stmt::Return { value: Some(_), .. }
+        ));
     }
 
     #[test]
@@ -2691,12 +3090,21 @@ mod tests {
                    }";
         let p = parse_src(src);
         let f = &p.functions[0];
-        let Stmt::If { else_block: Some(eb), .. } = &f.body.stmts[0] else {
+        let Stmt::If {
+            else_block: Some(eb),
+            ..
+        } = &f.body.stmts[0]
+        else {
             panic!("expected an if with an else");
         };
         // The else-block holds exactly the chained `if`, at its real source line 4.
         assert_eq!(eb.stmts.len(), 1);
-        let Stmt::If { line, else_block: Some(inner), .. } = &eb.stmts[0] else {
+        let Stmt::If {
+            line,
+            else_block: Some(inner),
+            ..
+        } = &eb.stmts[0]
+        else {
             panic!("else-block's sole statement is the chained if");
         };
         assert_eq!(*line, 4, "chained if keeps its own line for diagnostics");
@@ -2730,7 +3138,9 @@ mod tests {
         assert!(p.imports[0].names.is_empty());
         assert!(matches!(&p.imports[0].source, ImportSource::Path(s) if s == "./api"));
         assert_eq!(p.imports[1].namespace.as_deref(), Some("ui"));
-        assert!(matches!(&p.imports[1].source, ImportSource::Generator { name, .. } if name == "pages"));
+        assert!(
+            matches!(&p.imports[1].source, ImportSource::Generator { name, .. } if name == "pages")
+        );
     }
 
     #[test]
@@ -2740,7 +3150,12 @@ mod tests {
             "import * as api from \"./api\" \
              fn main() -> Int64 { let r: api.User = api.Req { id: 1 } return 0 }",
         );
-        let Stmt::Let { ty: Some(ty), value, .. } = &p.functions[0].body.stmts[0] else {
+        let Stmt::Let {
+            ty: Some(ty),
+            value,
+            ..
+        } = &p.functions[0].body.stmts[0]
+        else {
             panic!("let with type")
         };
         assert_eq!(*ty, Type::Named("api.User".into()));
@@ -2773,10 +3188,18 @@ mod tests {
     #[test]
     fn export_let_is_rejected_with_a_named_diagnostic() {
         // RFC-0029: module state is legal in any module but never exportable.
-        let err = parse(lex("export let x = 1 fn main() -> Int64 { return 0 }").unwrap())
-            .unwrap_err();
-        assert!(err.message.contains("module state is not exportable"), "{}", err.message);
-        assert!(err.message.contains("accessor functions"), "{}", err.message);
+        let err =
+            parse(lex("export let x = 1 fn main() -> Int64 { return 0 }").unwrap()).unwrap_err();
+        assert!(
+            err.message.contains("module state is not exportable"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("accessor functions"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
@@ -2826,7 +3249,10 @@ mod tests {
         assert_eq!(
             p.imports[0].names,
             vec![
-                ImportName { original: "getUser".into(), alias: Some("fetchUser".into()) },
+                ImportName {
+                    original: "getUser".into(),
+                    alias: Some("fetchUser".into())
+                },
                 ImportName::bare("User"),
             ]
         );
@@ -2849,12 +3275,18 @@ mod tests {
                    fn main() -> Int64 { return 0 }";
         let p = parse_src(src);
         // The synthetic `User.name` decl carries the predicate…
-        let synth = p.type_decls.iter().find(|t| t.name == "User.name").expect("synthetic decl");
+        let synth = p
+            .type_decls
+            .iter()
+            .find(|t| t.name == "User.name")
+            .expect("synthetic decl");
         assert_eq!(synth.base, Type::Str);
         assert!(synth.predicate.is_some());
         // …and the field's type is rewritten to reference it.
         let user = p.type_decls.iter().find(|t| t.name == "User").unwrap();
-        let Type::Record(fields) = &user.base else { panic!("record") };
+        let Type::Record(fields) = &user.base else {
+            panic!("record")
+        };
         assert_eq!(fields[0].ty, Type::Named("User.name".into()));
         assert_eq!(fields[1].ty, Type::Int, "unrefined fields untouched");
         assert!(user.predicate.is_none());
@@ -2866,8 +3298,14 @@ mod tests {
                    fn main() -> Int64 { return 0 }";
         let p = parse_src(src);
         let r = p.type_decls.iter().find(|t| t.name == "R").unwrap();
-        assert!(r.predicate.is_some(), "cross-field where stays on the record");
-        assert!(p.type_decls.iter().any(|t| t.name == "R.a"), "field where desugars");
+        assert!(
+            r.predicate.is_some(),
+            "cross-field where stays on the record"
+        );
+        assert!(
+            p.type_decls.iter().any(|t| t.name == "R.a"),
+            "field where desugars"
+        );
     }
 
     #[test]
@@ -2916,8 +3354,14 @@ mod tests {
         // following function — recovery syncs to the next top-level `fn`.
         let src = "let 123 = 5\nfn main() -> Int64 { return 0 }";
         let (p, errors) = parse_accum(lex(src).unwrap());
-        assert!(!errors.is_empty(), "expected a parse error for the bad global");
-        assert!(p.functions.iter().any(|f| f.name == "main"), "recovered to `main`");
+        assert!(
+            !errors.is_empty(),
+            "expected a parse error for the bad global"
+        );
+        assert!(
+            p.functions.iter().any(|f| f.name == "main"),
+            "recovered to `main`"
+        );
     }
 
     // ---- RFC-0015 tests ------------------------------------------------
@@ -2958,8 +3402,14 @@ mod tests {
         // recovery syncs to the next top-level starter.
         let src = "test \"broken\" { let = }\nfn main() -> Int64 { return 0 }";
         let (p, errors) = parse_accum(lex(src).unwrap());
-        assert!(!errors.is_empty(), "expected a parse error for the bad test");
-        assert!(p.functions.iter().any(|f| f.name == "main"), "recovered to `main`");
+        assert!(
+            !errors.is_empty(),
+            "expected a parse error for the bad test"
+        );
+        assert!(
+            p.functions.iter().any(|f| f.name == "main"),
+            "recovered to `main`"
+        );
     }
 
     #[test]
@@ -2977,7 +3427,10 @@ mod tests {
         let p = parse_src(src);
         assert!(matches!(
             p.functions[0].body.stmts[0],
-            Stmt::Let { ty: Some(Type::Array(_)), .. }
+            Stmt::Let {
+                ty: Some(Type::Array(_)),
+                ..
+            }
         ));
     }
 
@@ -3025,8 +3478,16 @@ mod tests {
         };
         let (prog, errors) = p.program_accum();
         assert!(!errors.is_empty(), "the broken decl must actually fail");
-        let ok = prog.functions.iter().find(|f| f.name == "ok").expect("ok parsed");
-        assert_eq!(ok.params[0].ty, Type::Named("T".into()), "not a stale Param");
+        let ok = prog
+            .functions
+            .iter()
+            .find(|f| f.name == "ok")
+            .expect("ok parsed");
+        assert_eq!(
+            ok.params[0].ty,
+            Type::Named("T".into()),
+            "not a stale Param"
+        );
     }
 
     #[test]
@@ -3036,7 +3497,10 @@ mod tests {
         let f = p.functions.iter().find(|f| f.name == "f").unwrap();
         match &f.body.stmts[0] {
             Stmt::If { then_block, .. } => {
-                assert!(matches!(then_block.stmts[0], Stmt::Return { value: None, .. }));
+                assert!(matches!(
+                    then_block.stmts[0],
+                    Stmt::Return { value: None, .. }
+                ));
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -3080,7 +3544,15 @@ mod tests {
         let p = parse_src("fn main() -> Int64 { return 1 + 2 * 3; }");
         let f = &p.functions[0];
         match &f.body.stmts[0] {
-            Stmt::Return { value: Some(Expr::Binary { op: BinOp::Add, rhs, .. }), .. } => {
+            Stmt::Return {
+                value:
+                    Some(Expr::Binary {
+                        op: BinOp::Add,
+                        rhs,
+                        ..
+                    }),
+                ..
+            } => {
                 assert!(matches!(**rhs, Expr::Binary { op: BinOp::Mul, .. }));
             }
             other => panic!("unexpected: {other:?}"),
@@ -3117,12 +3589,18 @@ mod tests {
                    return good\n\
                    }";
         let (p, errors) = parse_accum(lex(src).unwrap());
-        assert_eq!(errors.len(), 2, "one diagnostic per bad statement: {errors:?}");
+        assert_eq!(
+            errors.len(),
+            2,
+            "one diagnostic per bad statement: {errors:?}"
+        );
         assert_eq!(errors[0].line, 2);
         assert_eq!(errors[1].line, 4);
         // The good statements between/after the bad ones are kept.
         let body = &p.functions[0].body.stmts;
-        assert!(body.iter().any(|s| matches!(s, Stmt::Let { name, .. } if name == "good")));
+        assert!(body
+            .iter()
+            .any(|s| matches!(s, Stmt::Let { name, .. } if name == "good")));
         assert!(matches!(body.last(), Some(Stmt::Return { .. })));
     }
 
@@ -3137,10 +3615,19 @@ mod tests {
                    }\n\
                    fn bad<T>(x: T -> T { return x }";
         let (p, errors) = parse_accum(lex(src).unwrap());
-        assert!(errors.len() >= 2, "body error AND decl error both reported: {errors:?}");
+        assert!(
+            errors.len() >= 2,
+            "body error AND decl error both reported: {errors:?}"
+        );
         assert_eq!(errors[0].line, 2, "body error comes first in source order");
-        assert!(errors.iter().any(|e| e.line >= 5), "the bad decl is also reported: {errors:?}");
-        assert!(p.functions.iter().any(|f| f.name == "main"), "main survives");
+        assert!(
+            errors.iter().any(|e| e.line >= 5),
+            "the bad decl is also reported: {errors:?}"
+        );
+        assert!(
+            p.functions.iter().any(|f| f.name == "main"),
+            "main survives"
+        );
     }
 
     #[test]
@@ -3159,11 +3646,17 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(errors[0].line, 4);
         let body = &p.functions[0].body.stmts;
-        assert!(matches!(body.last(), Some(Stmt::Return { .. })), "return survives");
+        assert!(
+            matches!(body.last(), Some(Stmt::Return { .. })),
+            "return survives"
+        );
         match body.iter().find(|s| matches!(s, Stmt::If { .. })) {
             Some(Stmt::If { then_block, .. }) => {
                 // The bad `let x` is dropped; the good `n = 1` remains.
-                assert!(then_block.stmts.iter().any(|s| matches!(s, Stmt::Assign { .. })));
+                assert!(then_block
+                    .stmts
+                    .iter()
+                    .any(|s| matches!(s, Stmt::Assign { .. })));
             }
             _ => panic!("the `if` statement survives"),
         }
@@ -3175,14 +3668,18 @@ mod tests {
     fn index_field_assign_desugars_to_load_setfield_store() {
         // `a[i].f = v` becomes exactly `let mut a[] = a[i]  a[].f = v  a[i] = a[]`
         // (three statements spliced into the block, in order).
-        let p = parse_src(
-            "fn main() -> Int64 { let mut a: Array<Int64> = []  a[0].f = 9  return 0 }",
-        );
+        let p =
+            parse_src("fn main() -> Int64 { let mut a: Array<Int64> = []  a[0].f = 9  return 0 }");
         let stmts = &p.functions[0].body.stmts;
         // let a  |  let mut a[]=a[0]  |  a[].f=9  |  a[0]=a[]  |  return
         assert_eq!(stmts.len(), 5);
         match &stmts[1] {
-            Stmt::Let { name, mutable, value: Expr::Call { name: c, args, .. }, .. } => {
+            Stmt::Let {
+                name,
+                mutable,
+                value: Expr::Call { name: c, args, .. },
+                ..
+            } => {
                 assert_eq!(name, "a[]");
                 assert!(mutable, "the element copy must be mut so SetField applies");
                 assert_eq!(c, "at");
@@ -3198,7 +3695,11 @@ mod tests {
             other => panic!("expected SetField on the temp, got {other:?}"),
         }
         match &stmts[3] {
-            Stmt::IndexSet { name, value: Expr::Var { name: v, .. }, .. } => {
+            Stmt::IndexSet {
+                name,
+                value: Expr::Var { name: v, .. },
+                ..
+            } => {
                 assert_eq!(name, "a", "stores back into the real array binding");
                 assert_eq!(v, "a[]");
             }
@@ -3211,7 +3712,11 @@ mod tests {
         // One level only: `a[i].f.g = v` is a parse error.
         let src = "fn main() -> Int64 { let mut a: Array<Int64> = []  a[0].f.g = 9  return 0 }";
         let e = parse(lex(src).unwrap()).unwrap_err();
-        assert!(e.message.contains("single field write-through"), "{}", e.message);
+        assert!(
+            e.message.contains("single field write-through"),
+            "{}",
+            e.message
+        );
     }
 
     #[test]
@@ -3238,10 +3743,15 @@ mod tests {
     #[test]
     fn push_on_variable_desugars_to_assign() {
         // `sq.push(x)` -> `sq = push(sq, x)` (the reallocated array sticks).
-        let p = parse_src("fn main() -> Int64 { let mut sq: Array<Int64> = []  sq.push(1)  return 0 }");
+        let p =
+            parse_src("fn main() -> Int64 { let mut sq: Array<Int64> = []  sq.push(1)  return 0 }");
         let stmts = &p.functions[0].body.stmts;
         match &stmts[1] {
-            Stmt::Assign { name, value: Expr::Call { name: c, .. }, .. } => {
+            Stmt::Assign {
+                name,
+                value: Expr::Call { name: c, .. },
+                ..
+            } => {
                 assert_eq!(name, "sq");
                 assert_eq!(c, "push");
             }
@@ -3253,12 +3763,16 @@ mod tests {
     fn push_on_record_field_desugars_to_setfield() {
         // `r.xs.push(x)` -> `r.xs = push(r.xs, x)` — the fix for the silent
         // global/local record-field `.push` no-op.
-        let p = parse_src(
-            "fn main() -> Int64 { let mut r: R = R { xs: [] }  r.xs.push(1)  return 0 }",
-        );
+        let p =
+            parse_src("fn main() -> Int64 { let mut r: R = R { xs: [] }  r.xs.push(1)  return 0 }");
         let stmts = &p.functions[0].body.stmts;
         match &stmts[1] {
-            Stmt::SetField { name, field, value: Expr::Call { name: c, .. }, .. } => {
+            Stmt::SetField {
+                name,
+                field,
+                value: Expr::Call { name: c, .. },
+                ..
+            } => {
                 assert_eq!(name, "r", "writes back through the record binding");
                 assert_eq!(field, "xs");
                 assert_eq!(c, "push");
@@ -3276,7 +3790,11 @@ mod tests {
         );
         let stmts = &p.functions[0].body.stmts;
         match &stmts[1] {
-            Stmt::IndexSet { name, value: Expr::Call { name: c, .. }, .. } => {
+            Stmt::IndexSet {
+                name,
+                value: Expr::Call { name: c, .. },
+                ..
+            } => {
                 assert_eq!(name, "a", "writes back into the array slot");
                 assert_eq!(c, "push");
             }
@@ -3291,16 +3809,25 @@ mod tests {
         // parse error naming the supported places.
         let src = "fn main() -> Int64 { make().push(1)  return 0 }";
         let e = parse(lex(src).unwrap()).unwrap_err();
-        assert!(e.message.contains("no place to write back to"), "{}", e.message);
+        assert!(
+            e.message.contains("no place to write back to"),
+            "{}",
+            e.message
+        );
     }
 
     #[test]
     fn push_on_a_deeper_field_chain_is_rejected() {
         // One level of field write-back only: `r.a.b.push(x)` is a parse error,
         // never a silent copy (mirrors the `a[i].f.g = v` rejection).
-        let src = "fn main() -> Int64 { let mut r: R = R { a: A { b: [] } }  r.a.b.push(1)  return 0 }";
+        let src =
+            "fn main() -> Int64 { let mut r: R = R { a: A { b: [] } }  r.a.b.push(1)  return 0 }";
         let e = parse(lex(src).unwrap()).unwrap_err();
-        assert!(e.message.contains("no place to write back to"), "{}", e.message);
+        assert!(
+            e.message.contains("no place to write back to"),
+            "{}",
+            e.message
+        );
     }
 
     // ---- function values (RFC-0023) -------------------------------------
@@ -3308,7 +3835,10 @@ mod tests {
     fn only_arg(p: &Program) -> Expr {
         // The single call argument of `f(<arg>)` in `main`'s first statement.
         match &p.functions.last().unwrap().body.stmts[0] {
-            Stmt::Let { value: Expr::Call { args, .. }, .. } => args[0].clone(),
+            Stmt::Let {
+                value: Expr::Call { args, .. },
+                ..
+            } => args[0].clone(),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -3322,13 +3852,18 @@ mod tests {
         );
         // `fn()` (no arrow) is a Unit-returning function type.
         let q = parse_src("fn f(g: fn()) -> Int64 { return 0 }");
-        assert_eq!(q.functions[0].params[0].ty, Type::Fn(vec![], Box::new(Type::Unit)));
+        assert_eq!(
+            q.functions[0].params[0].ty,
+            Type::Fn(vec![], Box::new(Type::Unit))
+        );
     }
 
     #[test]
     fn parses_expression_lambda() {
-        let p = parse_src("fn f(g: fn(Int64) -> Int64) -> Int64 { return 0 }\n\
-                           fn main() -> Int64 { let a = f(|x| x * 2)  return 0 }");
+        let p = parse_src(
+            "fn f(g: fn(Int64) -> Int64) -> Int64 { return 0 }\n\
+                           fn main() -> Int64 { let a = f(|x| x * 2)  return 0 }",
+        );
         match only_arg(&p) {
             Expr::Lambda { params, body, .. } => {
                 assert_eq!(params, vec!["x".to_string()]);
@@ -3340,8 +3875,10 @@ mod tests {
 
     #[test]
     fn parses_block_and_multiparam_and_niladic_lambda() {
-        let p = parse_src("fn f(g: fn(Int64, Int64) -> Int64) -> Int64 { return 0 }\n\
-                           fn main() -> Int64 { let a = f(|x, y| { return x + y })  return 0 }");
+        let p = parse_src(
+            "fn f(g: fn(Int64, Int64) -> Int64) -> Int64 { return 0 }\n\
+                           fn main() -> Int64 { let a = f(|x, y| { return x + y })  return 0 }",
+        );
         match only_arg(&p) {
             Expr::Lambda { params, body, .. } => {
                 assert_eq!(params, vec!["x".to_string(), "y".to_string()]);
@@ -3350,8 +3887,10 @@ mod tests {
             other => panic!("expected lambda, got {other:?}"),
         }
         // `||` is the zero-parameter lambda.
-        let q = parse_src("fn f(g: fn() -> Int64) -> Int64 { return 0 }\n\
-                           fn main() -> Int64 { let a = f(|| 7)  return 0 }");
+        let q = parse_src(
+            "fn f(g: fn() -> Int64) -> Int64 { return 0 }\n\
+                           fn main() -> Int64 { let a = f(|| 7)  return 0 }",
+        );
         match only_arg(&q) {
             Expr::Lambda { params, .. } => assert!(params.is_empty()),
             other => panic!("expected niladic lambda, got {other:?}"),
@@ -3361,10 +3900,15 @@ mod tests {
     #[test]
     fn lambda_body_precedence_spans_or() {
         // `|x| a || b` — the body is the whole `a || b`, not just `a`.
-        let p = parse_src("fn f(g: fn(Bool) -> Bool) -> Int64 { return 0 }\n\
-                           fn main() -> Int64 { let a = f(|x| x || false)  return 0 }");
+        let p = parse_src(
+            "fn f(g: fn(Bool) -> Bool) -> Int64 { return 0 }\n\
+                           fn main() -> Int64 { let a = f(|x| x || false)  return 0 }",
+        );
         match only_arg(&p) {
-            Expr::Lambda { body: LambdaBody::Expr(e), .. } => {
+            Expr::Lambda {
+                body: LambdaBody::Expr(e),
+                ..
+            } => {
                 assert!(matches!(*e, Expr::Binary { op: BinOp::Or, .. }));
             }
             other => panic!("expected lambda with Or body, got {other:?}"),
@@ -3377,29 +3921,53 @@ mod tests {
     fn if_in_expression_position_parses_to_if_expr() {
         // `let x = if ...` reaches the expression parser and produces `IfExpr`
         // with an `else`; the bare statement `if` still parses to `Stmt::If`.
-        let p = parse_src("fn main() -> Int64 {\n\
+        let p = parse_src(
+            "fn main() -> Int64 {\n\
                            let x = if true { 1 } else { 2 }\n\
                            if true { print(x) }\n\
-                           return x }");
+                           return x }",
+        );
         let f = &p.functions[0];
         match &f.body.stmts[0] {
-            Stmt::Let { value: Expr::IfExpr { else_branch: Some(_), .. }, .. } => {}
+            Stmt::Let {
+                value:
+                    Expr::IfExpr {
+                        else_branch: Some(_),
+                        ..
+                    },
+                ..
+            } => {}
             other => panic!("expected IfExpr let-init, got {other:?}"),
         }
-        assert!(matches!(f.body.stmts[1], Stmt::If { .. }), "bare `if` stays a statement");
+        assert!(
+            matches!(f.body.stmts[1], Stmt::If { .. }),
+            "bare `if` stays a statement"
+        );
     }
 
     #[test]
     fn else_if_chain_nests_as_if_expr() {
-        let p = parse_src("fn main() -> Int64 {\n\
+        let p = parse_src(
+            "fn main() -> Int64 {\n\
                            let x = if false { 1 } else if false { 2 } else { 3 }\n\
-                           return x }");
+                           return x }",
+        );
         let f = &p.functions[0];
-        let Stmt::Let { value: Expr::IfExpr { else_branch: Some(eb), .. }, .. } = &f.body.stmts[0]
+        let Stmt::Let {
+            value:
+                Expr::IfExpr {
+                    else_branch: Some(eb),
+                    ..
+                },
+            ..
+        } = &f.body.stmts[0]
         else {
             panic!("expected chained IfExpr");
         };
-        assert!(matches!(**eb, Expr::IfExpr { .. }), "`else if` nests as an IfExpr");
+        assert!(
+            matches!(**eb, Expr::IfExpr { .. }),
+            "`else if` nests as an IfExpr"
+        );
     }
 
     #[test]
@@ -3412,7 +3980,9 @@ mod tests {
             .unwrap(),
         );
         assert!(
-            errors.iter().any(|d| d.message.contains("single expression in each")),
+            errors
+                .iter()
+                .any(|d| d.message.contains("single expression in each")),
             "{errors:?}"
         );
     }

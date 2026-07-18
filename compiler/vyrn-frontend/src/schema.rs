@@ -203,14 +203,15 @@ impl P<'_> {
         if self.peek() == Some('-') {
             self.i += 1;
         }
-        while self
-            .peek()
-            .is_some_and(|c| c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-')
-        {
+        while self.peek().is_some_and(|c| {
+            c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-'
+        }) {
             self.i += 1;
         }
         let text: String = self.b[start..self.i].iter().collect();
-        text.parse::<f64>().map(Json::Num).map_err(|_| format!("bad number `{text}`"))
+        text.parse::<f64>()
+            .map(Json::Num)
+            .map_err(|_| format!("bad number `{text}`"))
     }
 }
 
@@ -315,12 +316,23 @@ pub fn synthesize(
 }
 
 fn doc_of(schema: &Json) -> Option<String> {
-    schema.get("description").and_then(|d| d.as_str()).map(|s| s.to_string())
+    schema
+        .get("description")
+        .and_then(|d| d.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Known-informational keywords, ignored everywhere.
-const INFORMATIONAL: &[&str] =
-    &["$schema", "$id", "title", "description", "$comment", "examples", "default", "$defs"];
+const INFORMATIONAL: &[&str] = &[
+    "$schema",
+    "$id",
+    "title",
+    "description",
+    "$comment",
+    "examples",
+    "default",
+    "$defs",
+];
 
 /// Convert one schema object into (base type, predicate, $defs-referenced
 /// names to synthesize). Nested inline objects error (kept simple: name your
@@ -344,7 +356,11 @@ fn convert(
             let target = root.ok_or_else(|| {
                 format!("{module}: type `{name}`: `$ref` `#` needs a root `title`")
             })?;
-            return Ok((Type::Named(target.to_string()), None, vec![target.to_string()]));
+            return Ok((
+                Type::Named(target.to_string()),
+                None,
+                vec![target.to_string()],
+            ));
         }
         let target = r.strip_prefix("#/$defs/").ok_or_else(|| {
             format!(
@@ -352,7 +368,11 @@ fn convert(
                  `#/$defs/..` are supported)"
             )
         })?;
-        return Ok((Type::Named(target.to_string()), None, vec![target.to_string()]));
+        return Ok((
+            Type::Named(target.to_string()),
+            None,
+            vec![target.to_string()],
+        ));
     }
 
     // `enum` of strings → a payload-less Vyrn enum (each entry a nullary
@@ -369,9 +389,10 @@ fn convert(
         let mut variants = Vec::new();
         for it in items {
             match it {
-                Json::Str(s) => {
-                    variants.push(crate::ast::EnumVariant { name: s.clone(), payload: Vec::new() })
-                }
+                Json::Str(s) => variants.push(crate::ast::EnumVariant {
+                    name: s.clone(),
+                    payload: Vec::new(),
+                }),
                 _ => {
                     return Err(format!(
                         "{module}: type `{name}`: `enum` entries must all be strings"
@@ -398,20 +419,28 @@ fn convert(
         let mut variants = Vec::new();
         let mut refs = Vec::new();
         for m in members {
-            variants.push(convert_oneof_member(m, name, module, root, nested, &mut refs)?);
+            variants.push(convert_oneof_member(
+                m, name, module, root, nested, &mut refs,
+            )?);
         }
         return Ok((Type::Enum(variants), None, refs));
     }
 
-    let ty = schema.get("type").and_then(|t| t.as_str()).ok_or_else(|| {
-        format!("{module}: type `{name}`: schema has no `type` (or `$ref`)")
-    })?;
+    let ty = schema
+        .get("type")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| format!("{module}: type `{name}`: schema has no `type` (or `$ref`)"))?;
 
     let allowed: &[&str] = match ty {
-        "integer" | "number" => {
-            &["type", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
-              "multipleOf", "not"]
-        }
+        "integer" | "number" => &[
+            "type",
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "multipleOf",
+            "not",
+        ],
         "string" => &["type", "minLength", "maxLength", "pattern", "allOf"],
         "boolean" => &["type"],
         "object" => &["type", "properties", "required", "additionalProperties"],
@@ -470,7 +499,10 @@ fn convert(
                         "{module}: type `{name}`: `not.const` must be a number here"
                     ));
                 };
-                clauses.push(cmp(BinOp::NotEq, num_expr(*n, is_int, module, name, "not.const")?));
+                clauses.push(cmp(
+                    BinOp::NotEq,
+                    num_expr(*n, is_int, module, name, "not.const")?,
+                ));
             }
             Ok((base, conjoin(clauses), refs))
         }
@@ -519,10 +551,11 @@ fn convert(
             Ok((Type::Str, conjoin(clauses), refs))
         }
         "array" => {
-            let items = schema.get("items").ok_or_else(|| {
-                format!("{module}: type `{name}`: `array` schema needs `items`")
-            })?;
-            let (inner, pred, mut r) = convert(items, &format!("{name}.item"), module, root, nested)?;
+            let items = schema
+                .get("items")
+                .ok_or_else(|| format!("{module}: type `{name}`: `array` schema needs `items`"))?;
+            let (inner, pred, mut r) =
+                convert(items, &format!("{name}.item"), module, root, nested)?;
             refs.append(&mut r);
             let inner = if pred.is_some() {
                 // Constrained elements become a synthetic validated type, so
@@ -613,7 +646,10 @@ fn convert(
                 } else {
                     Type::Option(Box::new(fty))
                 };
-                rec_fields.push(Field { name: fname.clone(), ty: fty });
+                rec_fields.push(Field {
+                    name: fname.clone(),
+                    ty: fty,
+                });
             }
             Ok((Type::Record(rec_fields), None, refs))
         }
@@ -640,7 +676,9 @@ fn convert_oneof_member(
              `{{\"const\":\"Name\"}}` or a single-property tagged object)"
         )
     };
-    let Json::Obj(mfields) = m else { return Err(bad()) };
+    let Json::Obj(mfields) = m else {
+        return Err(bad());
+    };
     // Nullary: `{"const":"Name"}`.
     if let Some(Json::Str(cname)) = m.get("const") {
         for (k, _) in mfields {
@@ -648,7 +686,10 @@ fn convert_oneof_member(
                 return Err(bad());
             }
         }
-        return Ok(crate::ast::EnumVariant { name: cname.clone(), payload: Vec::new() });
+        return Ok(crate::ast::EnumVariant {
+            name: cname.clone(),
+            payload: Vec::new(),
+        });
     }
     // Payload: a single-property tagged object.
     if m.get("type").and_then(|t| t.as_str()) == Some("object") {
@@ -669,9 +710,12 @@ fn convert_oneof_member(
             _ => return Err(bad()),
         }
         // Tuple payload: `{"type":"array","prefixItems":[..],"items":false}`.
-        if sub.get("type").and_then(|t| t.as_str()) == Some("array") && sub.get("prefixItems").is_some()
+        if sub.get("type").and_then(|t| t.as_str()) == Some("array")
+            && sub.get("prefixItems").is_some()
         {
-            let Json::Obj(sfields) = sub else { return Err(bad()) };
+            let Json::Obj(sfields) = sub else {
+                return Err(bad());
+            };
             for (k, _) in sfields {
                 if !["type", "prefixItems", "items"].contains(&k.as_str())
                     && !INFORMATIONAL.contains(&k.as_str())
@@ -684,18 +728,28 @@ fn convert_oneof_member(
                     "{module}: type `{name}`: `oneOf` tuple payload needs `\"items\":false`"
                 ));
             }
-            let Some(Json::Arr(pis)) = sub.get("prefixItems") else { return Err(bad()) };
+            let Some(Json::Arr(pis)) = sub.get("prefixItems") else {
+                return Err(bad());
+            };
             let mut payload = Vec::new();
             for (i, pi) in pis.iter().enumerate() {
                 let sub_name = format!("{name}.{vname}.{i}");
-                payload.push(convert_payload_type(pi, &sub_name, module, root, nested, refs)?);
+                payload.push(convert_payload_type(
+                    pi, &sub_name, module, root, nested, refs,
+                )?);
             }
-            return Ok(crate::ast::EnumVariant { name: vname.clone(), payload });
+            return Ok(crate::ast::EnumVariant {
+                name: vname.clone(),
+                payload,
+            });
         }
         // Single payload.
         let sub_name = format!("{name}.{vname}");
         let pty = convert_payload_type(sub, &sub_name, module, root, nested, refs)?;
-        return Ok(crate::ast::EnumVariant { name: vname.clone(), payload: vec![pty] });
+        return Ok(crate::ast::EnumVariant {
+            name: vname.clone(),
+            payload: vec![pty],
+        });
     }
     Err(bad())
 }
@@ -731,11 +785,19 @@ fn convert_payload_type(
 }
 
 fn value_var() -> Expr {
-    Expr::Var { name: "value".to_string(), line: 1 }
+    Expr::Var {
+        name: "value".to_string(),
+        line: 1,
+    }
 }
 
 fn cmp(op: BinOp, rhs: Expr) -> Expr {
-    Expr::Binary { op, lhs: Box::new(value_var()), rhs: Box::new(rhs), line: 1 }
+    Expr::Binary {
+        op,
+        lhs: Box::new(value_var()),
+        rhs: Box::new(rhs),
+        line: 1,
+    }
 }
 
 fn len_cmp(op: BinOp, n: i64) -> Expr {
@@ -768,14 +830,22 @@ fn num_expr(n: f64, is_int: bool, module: &str, name: &str, key: &str) -> Result
             Expr::Int(n as i64)
         })
     } else if n < 0.0 {
-        Ok(Expr::Unary { op: UnOp::Neg, expr: Box::new(Expr::Float(-n)), line: 1 })
+        Ok(Expr::Unary {
+            op: UnOp::Neg,
+            expr: Box::new(Expr::Float(-n)),
+            line: 1,
+        })
     } else {
         Ok(Expr::Float(n))
     }
 }
 
 fn conjoin(mut clauses: Vec<Expr>) -> Option<Expr> {
-    let first = if clauses.is_empty() { return None } else { clauses.remove(0) };
+    let first = if clauses.is_empty() {
+        return None;
+    } else {
+        clauses.remove(0)
+    };
     Some(clauses.into_iter().fold(first, |acc, c| Expr::Binary {
         op: BinOp::And,
         lhs: Box::new(acc),
@@ -813,9 +883,8 @@ mod tests {
 
     #[test]
     fn integer_bounds_become_where_clauses() {
-        let decls = synth(
-            r#"{"title": "Port", "type": "integer", "minimum": 1, "maximum": 65535}"#,
-        );
+        let decls =
+            synth(r#"{"title": "Port", "type": "integer", "minimum": 1, "maximum": 65535}"#);
         let port = &decls[0];
         assert_eq!(port.name, "Port");
         assert_eq!(port.base, Type::Int);
@@ -825,9 +894,8 @@ mod tests {
 
     #[test]
     fn string_constraints_and_pattern() {
-        let decls = synth(
-            r#"{"title": "Slug", "type": "string", "minLength": 1, "pattern": "^[a-z]+$"}"#,
-        );
+        let decls =
+            synth(r#"{"title": "Slug", "type": "string", "minLength": 1, "pattern": "^[a-z]+$"}"#);
         let pred = crate::checker::pred_summary(decls[0].predicate.as_ref().unwrap());
         assert_eq!(pred, "value.length >= 1 && value =~ \"[a-z]+\"");
     }
@@ -841,7 +909,9 @@ mod tests {
                 "required": ["age"]}"#,
         );
         let user = decls.iter().find(|d| d.name == "User").unwrap();
-        let Type::Record(fields) = &user.base else { panic!("record") };
+        let Type::Record(fields) = &user.base else {
+            panic!("record")
+        };
         assert_eq!(fields[0].ty, Type::Named("User.age".into()));
         assert_eq!(fields[1].ty, Type::Option(Box::new(Type::Str)));
         let age = decls.iter().find(|d| d.name == "User.age").unwrap();
@@ -858,7 +928,9 @@ mod tests {
                 "$defs": {"Port": {"type": "integer", "minimum": 1}}}"##,
         );
         let server = decls.iter().find(|d| d.name == "Server").unwrap();
-        let Type::Record(fields) = &server.base else { panic!("record") };
+        let Type::Record(fields) = &server.base else {
+            panic!("record")
+        };
         assert_eq!(fields[0].ty, Type::Named("Port".into()));
         assert!(decls.iter().any(|d| d.name == "Port"));
     }
@@ -866,10 +938,22 @@ mod tests {
     #[test]
     fn unsupported_keywords_are_hard_errors() {
         for (doc, needle) in [
-            (r#"{"title": "X", "type": "string", "format": "email"}"#, "`format`"),
-            (r#"{"title": "X", "oneOf": [{"type": "string"}]}"#, "unsupported `oneOf` member"),
-            (r#"{"title": "X", "type": "integer", "exclusiveMaximum": 5, "weird": 1}"#, "`weird`"),
-            (r#"{"title": "X", "type": "string", "pattern": "a(?=b)"}"#, "regex subset"),
+            (
+                r#"{"title": "X", "type": "string", "format": "email"}"#,
+                "`format`",
+            ),
+            (
+                r#"{"title": "X", "oneOf": [{"type": "string"}]}"#,
+                "unsupported `oneOf` member",
+            ),
+            (
+                r#"{"title": "X", "type": "integer", "exclusiveMaximum": 5, "weird": 1}"#,
+                "`weird`",
+            ),
+            (
+                r#"{"title": "X", "type": "string", "pattern": "a(?=b)"}"#,
+                "regex subset",
+            ),
         ] {
             let e = synthesize(doc, None, "t.json").unwrap_err();
             assert!(e.contains(needle), "doc: {doc}\nerror: {e}");
@@ -895,8 +979,11 @@ mod tests {
                    type User = { name: Username, age: Age, nick: Option<String> } \
                    fn main() -> Int64 { return 0 }";
         let program = crate::check(src).unwrap();
-        let types: HashMap<String, TypeDecl> =
-            program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        let types: HashMap<String, TypeDecl> = program
+            .type_decls
+            .iter()
+            .map(|t| (t.name.clone(), t.clone()))
+            .collect();
         let emitted = crate::types::json_schema_string(&types["User"], &types);
         // Give the document a title so the importer can bind the root.
         let doc = emitted.replacen("{", "{\"title\":\"User\",", 1);
@@ -904,8 +991,7 @@ mod tests {
         let decls = synthesize(&doc, Some(&["User".to_string()]), "t.json").unwrap();
         let reimported: HashMap<String, TypeDecl> =
             decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
-        let reemitted =
-            crate::types::json_schema_string(&reimported["User"], &reimported);
+        let reemitted = crate::types::json_schema_string(&reimported["User"], &reimported);
         assert_eq!(emitted, reemitted, "schema round-trip must be exact");
     }
 
@@ -918,8 +1004,11 @@ mod tests {
                    type Bag = { counts: Counts } \
                    fn main() -> Int64 { return 0 }";
         let program = crate::check(src).unwrap();
-        let types: HashMap<String, TypeDecl> =
-            program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        let types: HashMap<String, TypeDecl> = program
+            .type_decls
+            .iter()
+            .map(|t| (t.name.clone(), t.clone()))
+            .collect();
         let emitted = crate::types::json_schema_string(&types["Bag"], &types);
         assert!(
             emitted.contains("\"additionalProperties\":{\"type\":\"integer\"}"),
@@ -933,7 +1022,9 @@ mod tests {
         assert_eq!(emitted, reemitted, "map schema round-trip must be exact");
         // The imported field is a `Map<String, Int64>`.
         let bag = decls.iter().find(|d| d.name == "Bag").unwrap();
-        let Type::Record(fields) = &bag.base else { panic!("record") };
+        let Type::Record(fields) = &bag.base else {
+            panic!("record")
+        };
         // The field's synthetic type resolves to a Map with a String key.
         let fty = crate::types::resolve(&fields[0].ty, &reimported);
         assert!(
@@ -966,8 +1057,11 @@ mod tests {
         // Round trip: emit from Vyrn, import, re-emit — byte-equal.
         let src = "type Color = | Red | Green | Blue\nfn main() -> Int64 { return 0 }";
         let program = crate::check(src).unwrap();
-        let types: HashMap<String, TypeDecl> =
-            program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        let types: HashMap<String, TypeDecl> = program
+            .type_decls
+            .iter()
+            .map(|t| (t.name.clone(), t.clone()))
+            .collect();
         let emitted = crate::types::json_schema_string(&types["Color"], &types);
         let doc = emitted.replacen("{", "{\"title\":\"Color\",", 1);
         let decls = synthesize(&doc, Some(&["Color".to_string()]), "t.json").unwrap();
@@ -987,11 +1081,17 @@ mod tests {
         let src = "type Shape = | Circle(Int64) | Rect(Int64, Int64) | Unit\n\
                    fn main() -> Int64 { return 0 }";
         let program = crate::check(src).unwrap();
-        let types: HashMap<String, TypeDecl> =
-            program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        let types: HashMap<String, TypeDecl> = program
+            .type_decls
+            .iter()
+            .map(|t| (t.name.clone(), t.clone()))
+            .collect();
         let emitted = crate::types::json_schema_string(&types["Shape"], &types);
         assert!(emitted.contains("\"oneOf\""), "{emitted}");
-        assert!(emitted.contains("\"prefixItems\""), "tuple payload: {emitted}");
+        assert!(
+            emitted.contains("\"prefixItems\""),
+            "tuple payload: {emitted}"
+        );
         assert!(emitted.contains("\"const\":\"Unit\""), "nullary: {emitted}");
         let doc = emitted.replacen("{", "{\"title\":\"Shape\",", 1);
         let decls = synthesize(&doc, Some(&["Shape".to_string()]), "t.json").unwrap();
@@ -1024,14 +1124,22 @@ mod tests {
                    type Resp = { outcome: Result<User, String> }\n\
                    fn main() -> Int64 { return 0 }";
         let program = crate::check(src).unwrap();
-        let types: HashMap<String, TypeDecl> =
-            program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        let types: HashMap<String, TypeDecl> = program
+            .type_decls
+            .iter()
+            .map(|t| (t.name.clone(), t.clone()))
+            .collect();
         let emitted = crate::types::json_schema_string(&types["Resp"], &types);
-        assert!(emitted.contains("\"properties\":{\"Ok\":{\"$ref\":\"#/$defs/User\"}}"), "{emitted}");
-        assert!(emitted.contains("\"properties\":{\"Err\":{\"type\":\"string\"}}"), "{emitted}");
+        assert!(
+            emitted.contains("\"properties\":{\"Ok\":{\"$ref\":\"#/$defs/User\"}}"),
+            "{emitted}"
+        );
+        assert!(
+            emitted.contains("\"properties\":{\"Err\":{\"type\":\"string\"}}"),
+            "{emitted}"
+        );
         let doc = emitted.replacen("{", "{\"title\":\"Resp\",", 1);
-        let decls =
-            synthesize(&doc, Some(&["Resp".to_string()]), "t.json").unwrap();
+        let decls = synthesize(&doc, Some(&["Resp".to_string()]), "t.json").unwrap();
         let reimported: HashMap<String, TypeDecl> =
             decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
         assert_eq!(
@@ -1058,7 +1166,10 @@ mod tests {
             "t.json",
         )
         .unwrap_err();
-        assert!(err.contains("unsupported keyword `type` alongside `enum`"), "{err}");
+        assert!(
+            err.contains("unsupported keyword `type` alongside `enum`"),
+            "{err}"
+        );
     }
 
     /// A recursive type round-trips through its `$ref` back-edge: the emitter
@@ -1069,8 +1180,11 @@ mod tests {
         let src = "type Node = { name: String, next: Option<Node> }\n\
                    fn main() -> Int64 { return 0 }";
         let program = crate::check(src).unwrap();
-        let types: HashMap<String, TypeDecl> =
-            program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        let types: HashMap<String, TypeDecl> = program
+            .type_decls
+            .iter()
+            .map(|t| (t.name.clone(), t.clone()))
+            .collect();
         let emitted = crate::types::json_schema_string(&types["Node"], &types);
         assert!(emitted.contains("\"next\":{\"$ref\":\"#\"}"), "{emitted}");
         let doc = emitted.replacen("{", "{\"title\":\"Node\",", 1);
@@ -1091,10 +1205,16 @@ mod tests {
     fn sized_int_bounds_round_trip() {
         let src = "type Byte = UInt8\nfn main() -> Int64 { return 0 }";
         let program = crate::check(src).unwrap();
-        let types: HashMap<String, TypeDecl> =
-            program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        let types: HashMap<String, TypeDecl> = program
+            .type_decls
+            .iter()
+            .map(|t| (t.name.clone(), t.clone()))
+            .collect();
         let emitted = crate::types::json_schema_string(&types["Byte"], &types);
-        assert!(emitted.contains("\"minimum\":0,\"maximum\":255"), "{emitted}");
+        assert!(
+            emitted.contains("\"minimum\":0,\"maximum\":255"),
+            "{emitted}"
+        );
         let doc = emitted.replacen("{", "{\"title\":\"Byte\",", 1);
         let decls = synthesize(&doc, Some(&["Byte".to_string()]), "t.json").unwrap();
         let reimported: HashMap<String, TypeDecl> =

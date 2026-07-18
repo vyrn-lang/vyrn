@@ -46,10 +46,16 @@ use crate::ast::*;
 /// the reflected module itself, `Some(key)` for an imported module) to the import
 /// specifier a generator should use to reach that module from the reflected
 /// module's importer (RFC-0031). A missing entry falls back to the empty string.
-pub fn module_interface_lit(program: &Program, specifiers: &HashMap<Option<String>, String>) -> Expr {
+pub fn module_interface_lit(
+    program: &Program,
+    specifiers: &HashMap<Option<String>, String>,
+) -> Expr {
     // Global type table across every linked module (name -> declaration).
-    let types: HashMap<String, TypeDecl> =
-        program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+    let types: HashMap<String, TypeDecl> = program
+        .type_decls
+        .iter()
+        .map(|t| (t.name.clone(), t.clone()))
+        .collect();
 
     // Closure roots: the reflected (root) module's own exported functions. A
     // body-less `extern` import has no surface, flattened `impl` methods carry
@@ -104,7 +110,10 @@ pub fn module_interface_lit(program: &Program, specifiers: &HashMap<Option<Strin
 
     struct_lit(
         "ModuleInterface",
-        vec![("functions", array_lit(fn_infos)), ("types", array_lit(type_infos))],
+        vec![
+            ("functions", array_lit(fn_infos)),
+            ("types", array_lit(type_infos)),
+        ],
     )
 }
 
@@ -172,7 +181,11 @@ fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>) -> Expr {
         .collect();
     // Unit return spells as "" (the RFC's convention), everything else by its
     // ordinary Vyrn spelling.
-    let ret_spelling = if f.ret == Type::Unit { String::new() } else { f.ret.to_string() };
+    let ret_spelling = if f.ret == Type::Unit {
+        String::new()
+    } else {
+        f.ret.to_string()
+    };
     struct_lit(
         "FnInfo",
         vec![
@@ -304,7 +317,10 @@ fn render_field_type(
 fn struct_lit(name: &str, fields: Vec<(&str, Expr)>) -> Expr {
     Expr::StructLit {
         name: name.to_string(),
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
         line: 0,
     }
 }
@@ -314,7 +330,10 @@ fn array_lit(elems: Vec<Expr>) -> Expr {
 }
 
 fn none() -> Expr {
-    Expr::Var { name: "None".to_string(), line: 0 }
+    Expr::Var {
+        name: "None".to_string(),
+        line: 0,
+    }
 }
 
 #[cfg(test)]
@@ -323,7 +342,10 @@ mod tests {
 
     fn types_of(src: &str) -> HashMap<String, TypeDecl> {
         let (p, _) = crate::parser::parse_accum(crate::lexer::lex(src).unwrap());
-        p.type_decls.into_iter().map(|t| (t.name.clone(), t)).collect()
+        p.type_decls
+            .into_iter()
+            .map(|t| (t.name.clone(), t))
+            .collect()
     }
     fn decl(src: &str, name: &str) -> (TypeDecl, HashMap<String, TypeDecl>) {
         let types = types_of(src);
@@ -333,7 +355,10 @@ mod tests {
     #[test]
     fn renders_validated_scalar_with_predicate() {
         let (d, t) = decl("export type Id = Int64 where value >= 1\n", "Id");
-        assert_eq!(render_type_decl(&d, &t), "export type Id = Int64 where value >= 1");
+        assert_eq!(
+            render_type_decl(&d, &t),
+            "export type Id = Int64 where value >= 1"
+        );
     }
 
     #[test]
@@ -351,7 +376,10 @@ mod tests {
     #[test]
     fn renders_enum() {
         let (d, t) = decl("export type Shape = | Circle(Int64) | Dot\n", "Shape");
-        assert_eq!(render_type_decl(&d, &t), "export type Shape = | Circle(Int64) | Dot");
+        assert_eq!(
+            render_type_decl(&d, &t),
+            "export type Shape = | Circle(Int64) | Dot"
+        );
     }
 
     /// Pull a named field out of a StructLit for assertions.
@@ -401,7 +429,10 @@ mod tests {
         let tys = elems(field(&iface, "types"));
         assert_eq!(tys.len(), 1);
         assert_eq!(str_of(field(&tys[0], "name")), "Id");
-        assert_eq!(str_of(field(&tys[0], "source")), "export type Id = Int64 where value >= 1");
+        assert_eq!(
+            str_of(field(&tys[0], "source")),
+            "export type Id = Int64 where value >= 1"
+        );
     }
 
     // ---- reachable type closure across modules (RFC-0031) ------------------
@@ -409,18 +440,20 @@ mod tests {
     /// Link `files` (keyed by module path, `main` is the root) and reflect the
     /// root. Returns the built `ModuleInterface` literal.
     fn reflect_linked(files: &[(&str, &str)], root: &str) -> Expr {
-        let map: std::collections::HashMap<String, String> =
-            files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let map: std::collections::HashMap<String, String> = files
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         let resolver = crate::loader::MapResolver(map.clone());
-        let program = crate::loader::load(&map[root], root, &Default::default(), &resolver)
-            .expect("link");
+        let program =
+            crate::loader::load(&map[root], root, &Default::default(), &resolver).expect("link");
         let mut specs: HashMap<Option<String>, String> = HashMap::new();
         specs.insert(None, format!("./{root}"));
         for t in &program.type_decls {
             if let Some(k) = &t.module {
-                specs.entry(Some(k.clone())).or_insert_with(|| {
-                    format!("./{}", k.strip_suffix(".vyrn").unwrap_or(k))
-                });
+                specs
+                    .entry(Some(k.clone()))
+                    .or_insert_with(|| format!("./{}", k.strip_suffix(".vyrn").unwrap_or(k)));
             }
         }
         module_interface_lit(&program, &specs)
@@ -449,14 +482,23 @@ mod tests {
         let contract = "\
             import { Req, Wrap } from \"./wire\"\n\
             export fn make(r: Req) -> Wrap { return [] }\n";
-        let iface = reflect_linked(&[("wire.vyrn", wire), ("contract.vyrn", contract)], "contract.vyrn");
+        let iface = reflect_linked(
+            &[("wire.vyrn", wire), ("contract.vyrn", contract)],
+            "contract.vyrn",
+        );
         let names = type_names_of(&iface);
         // Reached: Req, Wrap, Book, Id, Shape, Inner. NOT the imported-but-
         // unreferenced `Unused`.
         for want in ["Req", "Wrap", "Book", "Id", "Shape", "Inner"] {
-            assert!(names.contains(&want.to_string()), "closure missing {want}: {names:?}");
+            assert!(
+                names.contains(&want.to_string()),
+                "closure missing {want}: {names:?}"
+            );
         }
-        assert!(!names.contains(&"Unused".to_string()), "dragged in Unused: {names:?}");
+        assert!(
+            !names.contains(&"Unused".to_string()),
+            "dragged in Unused: {names:?}"
+        );
     }
 
     #[test]
@@ -468,7 +510,10 @@ mod tests {
             import { A, B } from \"./wire\"\n\
             export type Local = { z: Int64 }\n\
             export fn f(a: A) -> B { return B { y: 0 } }\n";
-        let iface = reflect_linked(&[("wire.vyrn", wire), ("contract.vyrn", contract)], "contract.vyrn");
+        let iface = reflect_linked(
+            &[("wire.vyrn", wire), ("contract.vyrn", contract)],
+            "contract.vyrn",
+        );
         assert_eq!(type_names_of(&iface), vec!["Local", "A", "B"]);
     }
 
@@ -479,13 +524,22 @@ mod tests {
             import { A } from \"./wire\"\n\
             export type Own = { z: Int64 }\n\
             export fn f(a: A) -> Own { return Own { z: 0 } }\n";
-        let iface = reflect_linked(&[("wire.vyrn", wire), ("contract.vyrn", contract)], "contract.vyrn");
+        let iface = reflect_linked(
+            &[("wire.vyrn", wire), ("contract.vyrn", contract)],
+            "contract.vyrn",
+        );
         let tys = elems(field(&iface, "types"));
         // `Own` is the reflected module's own type → the root specifier.
-        let own = tys.iter().find(|t| str_of(field(t, "name")) == "Own").unwrap();
+        let own = tys
+            .iter()
+            .find(|t| str_of(field(t, "name")) == "Own")
+            .unwrap();
         assert_eq!(str_of(field(own, "module")), "./contract.vyrn");
         // `A` is foreign → its declaring module's specifier.
-        let a = tys.iter().find(|t| str_of(field(t, "name")) == "A").unwrap();
+        let a = tys
+            .iter()
+            .find(|t| str_of(field(t, "name")) == "A")
+            .unwrap();
         assert_eq!(str_of(field(a, "module")), "./wire");
     }
 
@@ -498,7 +552,10 @@ mod tests {
         let contract = "\
             import { A } from \"./wire\"\n\
             export fn f(a: A) -> A { return a }\n";
-        let iface = reflect_linked(&[("wire.vyrn", wire), ("contract.vyrn", contract)], "contract.vyrn");
+        let iface = reflect_linked(
+            &[("wire.vyrn", wire), ("contract.vyrn", contract)],
+            "contract.vyrn",
+        );
         let fns = elems(field(&iface, "functions"));
         let fn_names: Vec<&str> = fns.iter().map(|f| str_of(field(f, "name"))).collect();
         assert_eq!(fn_names, vec!["f"]);

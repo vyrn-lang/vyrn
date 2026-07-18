@@ -87,7 +87,10 @@ pub struct MapResolver(pub HashMap<String, String>);
 
 impl ModuleResolver for MapResolver {
     fn read(&self, resolved: &str) -> Result<String, String> {
-        self.0.get(resolved).cloned().ok_or_else(|| format!("module not found: {resolved}"))
+        self.0
+            .get(resolved)
+            .cloned()
+            .ok_or_else(|| format!("module not found: {resolved}"))
     }
     fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
         // Every key directly under `resolved/` contributes its next path segment.
@@ -123,12 +126,19 @@ pub struct RecordingResolver<'a> {
 
 impl<'a> RecordingResolver<'a> {
     pub fn new(inner: &'a dyn ModuleResolver) -> Self {
-        Self { inner, reads: std::cell::RefCell::new(Vec::new()) }
+        Self {
+            inner,
+            reads: std::cell::RefCell::new(Vec::new()),
+        }
     }
     /// The recorded reads, in first-read order, deduplicated by path.
     pub fn into_reads(self) -> Vec<(String, String)> {
         let mut seen = HashSet::new();
-        self.reads.into_inner().into_iter().filter(|(p, _)| seen.insert(p.clone())).collect()
+        self.reads
+            .into_inner()
+            .into_iter()
+            .filter(|(p, _)| seen.insert(p.clone()))
+            .collect()
     }
 }
 
@@ -136,7 +146,9 @@ impl ModuleResolver for RecordingResolver<'_> {
     fn read(&self, resolved: &str) -> Result<String, String> {
         let r = self.inner.read(resolved);
         if let Ok(s) = &r {
-            self.reads.borrow_mut().push((resolved.to_string(), s.clone()));
+            self.reads
+                .borrow_mut()
+                .push((resolved.to_string(), s.clone()));
         }
         r
     }
@@ -199,7 +211,10 @@ pub fn import_specifier(importer_dir: &str, key: &str, std_root: Option<&str>) -
     let from: Vec<String> = if importer_dir.is_empty() {
         Vec::new()
     } else {
-        normalize(importer_dir).split('/').map(str::to_string).collect()
+        normalize(importer_dir)
+            .split('/')
+            .map(str::to_string)
+            .collect()
     };
     let to: Vec<String> = keyn.split('/').map(str::to_string).collect();
     let mut i = 0;
@@ -271,7 +286,9 @@ fn remote_base(key: &str) -> Option<String> {
 
 /// Normalize the path part of a remote key (the scheme/anchor is left alone).
 fn normalize_remote(key: &str) -> String {
-    let Some(base) = remote_base(key) else { return key.to_string() };
+    let Some(base) = remote_base(key) else {
+        return key.to_string();
+    };
     let rest = &key[base.len()..];
     let rest = rest.trim_start_matches('/');
     format!("{base}/{}", normalize(rest))
@@ -290,9 +307,10 @@ fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String
         }
     };
     if let Some(rest) = spec.strip_prefix("std/") {
-        let root = opts.std_root.as_deref().ok_or_else(|| {
-            "std library not available (no std root configured)".to_string()
-        })?;
+        let root = opts
+            .std_root
+            .as_deref()
+            .ok_or_else(|| "std library not available (no std root configured)".to_string())?;
         return Ok(normalize(&with_ext(format!("{root}/{rest}"))));
     }
     if spec.starts_with("http://") {
@@ -302,8 +320,7 @@ fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String
     // into content via the lockfile/cache/network.
     if is_remote(spec) {
         let key = normalize_remote(&with_ext(spec.to_string()));
-        remote_base(&key)
-            .ok_or_else(|| format!("malformed remote specifier `{spec}`"))?;
+        remote_base(&key).ok_or_else(|| format!("malformed remote specifier `{spec}`"))?;
         return Ok(key);
     }
     if spec.starts_with("./") || spec.starts_with("../") {
@@ -322,8 +339,11 @@ fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String
             return Ok(key);
         }
         let base = dir_of(importer);
-        let joined =
-            if base.is_empty() { spec.to_string() } else { format!("{base}/{spec}") };
+        let joined = if base.is_empty() {
+            spec.to_string()
+        } else {
+            format!("{base}/{spec}")
+        };
         return Ok(normalize(&with_ext(joined)));
     }
     // A bare specifier resolves through the manifest's dependency map; the
@@ -389,7 +409,10 @@ pub fn generated_modules(
     resolver: &dyn ModuleResolver,
 ) -> Result<Vec<(String, String)>, Vec<Diagnostic>> {
     let (modules, _) = load_modules(root_source, root_path, opts, resolver)?;
-    Ok(modules.into_iter().filter_map(|m| m.gen_source.map(|s| (m.key, s))).collect())
+    Ok(modules
+        .into_iter()
+        .filter_map(|m| m.gen_source.map(|s| (m.key, s)))
+        .collect())
 }
 
 /// Load `root_source` (already read; its path is `root_path`) and every module
@@ -448,7 +471,10 @@ pub fn module_graph(
     resolver: &dyn ModuleResolver,
 ) -> Result<Vec<(String, Vec<String>)>, Vec<Diagnostic>> {
     let (modules, _) = load_modules(root_source, root_path, opts, resolver)?;
-    Ok(modules.into_iter().map(|m| (m.key, m.import_targets)).collect())
+    Ok(modules
+        .into_iter()
+        .map(|m| (m.key, m.import_targets))
+        .collect())
 }
 
 fn load_modules(
@@ -461,7 +487,14 @@ fn load_modules(
     let mut modules: Vec<Module> = Vec::new();
     let mut states: HashMap<String, bool> = HashMap::new(); // false = loading
     let mut stack: Vec<String> = Vec::new();
+    // Generator-import identity (RFC-0040 §1): a resolved-inputs key
+    // (`name\0resolved-arg\0…`) mapped to the banner of the FIRST module
+    // synthesized for it. Two imports whose path args RESOLVE identically —
+    // however they are spelled (`./strings` vs `../strings` from a rebased `.vyx`
+    // import) — reuse that one module: one instance, shared state, no collision.
+    let mut identities: HashMap<String, String> = HashMap::new();
 
+    #[allow(clippy::too_many_arguments)]
     fn visit(
         key: &str,
         source: Option<&str>,
@@ -469,6 +502,7 @@ fn load_modules(
         resolver: &dyn ModuleResolver,
         modules: &mut Vec<Module>,
         states: &mut HashMap<String, bool>,
+        identities: &mut HashMap<String, String>,
         stack: &mut Vec<String>,
         root_key: &str,
     ) -> Result<(), Vec<Diagnostic>> {
@@ -491,7 +525,12 @@ fn load_modules(
         let text = match source {
             Some(t) => t.to_string(),
             None => resolver.read(key).map_err(|e| {
-                vec![Diagnostic::error(0, 0, "load", format!("cannot load `{key}`: {e}"))]
+                vec![Diagnostic::error(
+                    0,
+                    0,
+                    "load",
+                    format!("cannot load `{key}`: {e}"),
+                )]
             })?,
         };
         let is_root = key == root_key;
@@ -598,33 +637,55 @@ fn load_modules(
                     }
                     vec![d]
                 })?;
-                visit(&target, None, opts, resolver, modules, states, stack, root_key)?;
+                visit(
+                    &target, None, opts, resolver, modules, states, identities, stack, root_key,
+                )?;
                 import_targets[i] = Some(target);
             }
         }
         // Generator-call imports (RFC-0021): run each generator now that its
-        // module is loaded, synthesize the module source, and visit it. Identical
-        // calls dedup on `gen_key` (already-loaded ⇒ no source, no re-run).
+        // module is loaded, synthesize the module source, and visit it. Calls whose
+        // path args RESOLVE identically dedup on the resolved-inputs identity
+        // (RFC-0040 §1) — one module, shared state; an exact repeat dedups on
+        // `gen_key` (already-loaded ⇒ no source, no re-run).
         for (i, imp) in program.imports.iter().enumerate() {
             if let ImportSource::Generator { name, args, line } = &imp.source {
                 let (gen_key, gen_source) = run_generator(
-                    key, is_root, name, args, *line, opts, resolver, modules, states, root_key,
+                    key, is_root, name, args, *line, opts, resolver, modules, states, identities,
+                    root_key,
                 )?;
                 if let Some(src) = gen_source {
-                    visit(&gen_key, Some(&src), opts, resolver, modules, states, stack, root_key)?;
+                    visit(
+                        &gen_key,
+                        Some(&src),
+                        opts,
+                        resolver,
+                        modules,
+                        states,
+                        identities,
+                        stack,
+                        root_key,
+                    )?;
                 }
                 import_targets[i] = Some(gen_key);
             }
         }
-        let import_targets: Vec<String> =
-            import_targets.into_iter().map(|t| t.expect("every import resolved")).collect();
+        let import_targets: Vec<String> = import_targets
+            .into_iter()
+            .map(|t| t.expect("every import resolved"))
+            .collect();
 
         stack.pop();
         states.insert(key.to_string(), true);
         // A module synthesized by a generator (RFC-0021) keeps its source text
         // (its key is the generator banner) so `vyrn emit-gen` can print it.
         let gen_source = key.starts_with("generated by ").then(|| text.clone());
-        modules.push(Module { key: key.to_string(), program, import_targets, gen_source });
+        modules.push(Module {
+            key: key.to_string(),
+            program,
+            import_targets,
+            gen_source,
+        });
         Ok(())
     }
 
@@ -635,6 +696,7 @@ fn load_modules(
         resolver,
         &mut modules,
         &mut states,
+        &mut identities,
         &mut stack,
         &root_key,
     )?;
@@ -666,6 +728,7 @@ fn run_generator(
     resolver: &dyn ModuleResolver,
     modules: &[Module],
     states: &HashMap<String, bool>,
+    identities: &mut HashMap<String, String>,
     _root_key: &str,
 ) -> Result<(String, Option<String>), Vec<Diagnostic>> {
     let err = |msg: String| -> Vec<Diagnostic> {
@@ -690,19 +753,68 @@ fn run_generator(
             }
         }
     }
-    let arg_repr = consts.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ");
+    let arg_repr = consts
+        .iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
 
-    // 2. The synthesized module's key IS its diagnostic banner. It omits the
-    //    line, so two identical calls dedup; different arguments ⇒ different key.
+    // A generator imported BY a generated module (a nested generator, e.g. an
+    // `i18n(..)` import inside a `.vyx` script that `components(..)` synthesized)
+    // resolves its path arguments against the REAL importing file's directory, not
+    // the synthetic banner key — as `resolve_spec` unwraps `generated_importer`.
+    let path_importer = generated_importer(importer).unwrap_or(importer);
+    let importer_dir = dir_of(path_importer).to_string();
+    let join_dir = |s: &str| -> String {
+        normalize(&if importer_dir.is_empty() {
+            s.to_string()
+        } else {
+            format!("{importer_dir}/{s}")
+        })
+    };
+
+    // 2. Identity (RFC-0040 §1): a generator import's module is keyed by its
+    //    RESOLVED inputs — the generator name, each string path argument REBASED
+    //    onto the importer's directory, and every non-string argument verbatim.
+    //    Two imports whose paths resolve identically (however spelled — `./strings`
+    //    from the root vs a rebased `./widgets/../strings` from a `.vyx` widget)
+    //    share ONE synthesized module: one instance, shared state, no top-level
+    //    collision. The banner below anchors that module's own relative imports and
+    //    visibility at the FIRST importer to trigger it; the generated source is a
+    //    pure function of these resolved inputs, so a later importer reusing it is
+    //    byte-identical.
+    let mut ident = format!("{name}\u{0}");
+    for c in &consts {
+        match c {
+            crate::consteval::ConstVal::Str(s) => {
+                ident.push_str(&join_dir(s));
+            }
+            other => ident.push_str(&other.to_string()),
+        }
+        ident.push('\u{0}');
+    }
+    if let Some(existing) = identities.get(&ident) {
+        return Ok((existing.clone(), None));
+    }
+
+    // The synthesized module's key IS its diagnostic banner. It carries the raw
+    // spelling + importer for readable `emit-gen` output; identity above governs
+    // dedup. An exact repeat still short-circuits on the banner.
     let gen_key = format!("generated by {name}({arg_repr}) at {importer}");
     if states.contains_key(&gen_key) {
         return Ok((gen_key, None));
     }
+    identities.insert(ident, gen_key.clone());
 
     // 3. The generator must be an exported `gen fn` in a module this file loaded.
     let gen_mod_key = modules
         .iter()
-        .find(|m| m.program.functions.iter().any(|f| f.name == name && f.is_gen && f.exported))
+        .find(|m| {
+            m.program
+                .functions
+                .iter()
+                .any(|f| f.name == name && f.is_gen && f.exported)
+        })
         .map(|m| m.key.clone())
         .ok_or_else(|| {
             err(format!(
@@ -725,9 +837,11 @@ fn run_generator(
 
     // 4. Load + check the generator module as a runnable program (its own
     //    comptime-purity is enforced by the check).
-    let gen_source = resolver
-        .read(&gen_mod_key)
-        .map_err(|e| err(format!("cannot re-read generator module `{gen_mod_key}`: {e}")))?;
+    let gen_source = resolver.read(&gen_mod_key).map_err(|e| {
+        err(format!(
+            "cannot re-read generator module `{gen_mod_key}`: {e}"
+        ))
+    })?;
     let gen_program = load(&gen_source, &gen_mod_key, opts, resolver)?;
     let mut gdiags = crate::checker::check_accum(&gen_program);
     if gdiags.is_empty() {
@@ -738,16 +852,6 @@ fn run_generator(
     }
 
     // 5. Content-addressed cache key: generator sources ++ args ++ inputs read.
-    // A generator imported BY a generated module (a nested generator, e.g. an
-    // `i18n(..)` import inside a `.vyx` script that `components(..)` synthesized)
-    // must resolve its path arguments against the REAL importing file's
-    // directory, not the synthetic banner key — exactly as `resolve_spec`
-    // unwraps `generated_importer` for path imports (RFC-0021).
-    let path_importer = generated_importer(importer).unwrap_or(importer);
-    let importer_dir = dir_of(path_importer).to_string();
-    let join_dir = |s: &str| -> String {
-        normalize(&if importer_dir.is_empty() { s.to_string() } else { format!("{importer_dir}/{s}") })
-    };
     // Each constant string path argument becomes an allowed input root. A path
     // that names a module (no extension) also admits its `.vyrn` file, so
     // `moduleInterface("./contract")` may read `contract.vyrn`.
@@ -761,7 +865,13 @@ fn run_generator(
         }
     }
     let sources_hash = generator_sources_hash(
-        &gen_source, &gen_mod_key, opts, resolver, name, &arg_repr, &allowed,
+        &gen_source,
+        &gen_mod_key,
+        opts,
+        resolver,
+        name,
+        &arg_repr,
+        &allowed,
     )?;
     let no_cache = std::env::var("VYRN_NO_GEN_CACHE").is_ok();
 
@@ -769,7 +879,10 @@ fn run_generator(
     if !no_cache {
         if let Some(cached) = resolver.gen_cache_get(&sources_hash) {
             if let Some((inputs, output)) = parse_cache_entry(&cached) {
-                if inputs.iter().all(|(path, hash)| current_input_hash(resolver, path) == Some(hash.clone())) {
+                if inputs
+                    .iter()
+                    .all(|(path, hash)| current_input_hash(resolver, path) == Some(hash.clone()))
+                {
                     return Ok((gen_key, Some(output)));
                 }
             }
@@ -787,7 +900,9 @@ fn run_generator(
             importer_dir,
             allowed,
             fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
-            max_output: GEN_MAX_OUTPUT_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_MAX_OUTPUT),
+            max_output: GEN_MAX_OUTPUT_OVERRIDE
+                .with(|c| c.get())
+                .unwrap_or(GEN_MAX_OUTPUT),
         },
     )
     .map_err(|trap| err(format!("generator `{name}({arg_repr})` failed: {trap}")))?;
@@ -829,7 +944,12 @@ fn generator_sources_hash(
     let mut blob: Vec<u8> = Vec::new();
     for k in &keys {
         let src = resolver.read(k).map_err(|e| {
-            vec![Diagnostic::error(0, 0, "load", format!("cannot read `{k}`: {e}"))]
+            vec![Diagnostic::error(
+                0,
+                0,
+                "load",
+                format!("cannot read `{k}`: {e}"),
+            )]
         })?;
         blob.extend_from_slice(k.as_bytes());
         blob.push(0);
@@ -863,7 +983,9 @@ fn current_input_hash(resolver: &dyn ModuleResolver, path: &str) -> Option<Strin
         names.sort();
         Some(crate::hash::sha256_hex(names.join("\n").as_bytes()))
     } else {
-        Some(crate::hash::sha256_hex(resolver.read(path).ok()?.as_bytes()))
+        Some(crate::hash::sha256_hex(
+            resolver.read(path).ok()?.as_bytes(),
+        ))
     }
 }
 
@@ -1150,8 +1272,11 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // co-naming uses). `ns.member` and any selective importer both resolve to
     // that symbol; a name unique to its module keeps it (no churn). This is what
     // lets two namespaced modules export the same name and coexist.
-    let namespaced_targets: HashSet<String> =
-        ns_bindings.values().flatten().map(|(_, t)| t.clone()).collect();
+    let namespaced_targets: HashSet<String> = ns_bindings
+        .values()
+        .flatten()
+        .map(|(_, t)| t.clone())
+        .collect();
     for target in &namespaced_targets {
         let exports = module_exports.get(target).cloned().unwrap_or_default();
         // Deterministic order so the minted suffixes are stable across runs.
@@ -1177,10 +1302,16 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                     .unwrap_or_else(|| n.original.clone());
                 if n.alias.is_some() {
                     // The alias resolves to the decl (renamed or original).
-                    rewrites.entry(m.key.clone()).or_default().insert(n.local().to_string(), resolved);
+                    rewrites
+                        .entry(m.key.clone())
+                        .or_default()
+                        .insert(n.local().to_string(), resolved);
                 } else if resolved != n.original {
                     // A bare (real-name) importer of a co-named decl follows the rename.
-                    rewrites.entry(m.key.clone()).or_default().insert(n.original.clone(), resolved);
+                    rewrites
+                        .entry(m.key.clone())
+                        .or_default()
+                        .insert(n.original.clone(), resolved);
                 }
             }
         }
@@ -1278,7 +1409,10 @@ impl NsResolver<'_> {
     /// collision rename), or an error if the target does not EXPORT it.
     fn resolve_member(&mut self, ns: &str, member: &str, line: usize) -> Option<String> {
         let target = self.ns.get(ns).cloned()?;
-        let exported = self.module_exports.get(&target).is_some_and(|s| s.contains(member));
+        let exported = self
+            .module_exports
+            .get(&target)
+            .is_some_and(|s| s.contains(member));
         if !exported {
             self.err(
                 line,
@@ -1299,8 +1433,7 @@ impl NsResolver<'_> {
 
     fn resolve_program(&mut self, p: &mut Program) {
         for f in &mut p.functions {
-            let mut locals: HashSet<String> =
-                f.params.iter().map(|pm| pm.name.clone()).collect();
+            let mut locals: HashSet<String> = f.params.iter().map(|pm| pm.name.clone()).collect();
             self.walk_type_positions_fn(f, &locals.clone());
             self.walk_block(&mut f.body, &mut locals);
         }
@@ -1386,8 +1519,14 @@ impl NsResolver<'_> {
                     self.rewrite_type(a);
                 }
             }
-            Type::Option(a) | Type::Ref(a) | Type::Array(a) | Type::Task(a) | Type::Partial(a)
-            | Type::ArrayN(a, _) | Type::Omit(a, _) | Type::Pick(a, _) => self.rewrite_type(a),
+            Type::Option(a)
+            | Type::Ref(a)
+            | Type::Array(a)
+            | Type::Task(a)
+            | Type::Partial(a)
+            | Type::ArrayN(a, _)
+            | Type::Omit(a, _)
+            | Type::Pick(a, _) => self.rewrite_type(a),
             Type::Result(a, b) | Type::Merge(a, b) => {
                 self.rewrite_type(a);
                 self.rewrite_type(b);
@@ -1427,7 +1566,9 @@ impl NsResolver<'_> {
 
     fn walk_stmt(&mut self, s: &mut Stmt, locals: &mut HashSet<String>) {
         match s {
-            Stmt::Let { name, value, ty, .. } => {
+            Stmt::Let {
+                name, value, ty, ..
+            } => {
                 if let Some(t) = ty {
                     self.rewrite_type(t);
                 }
@@ -1445,7 +1586,12 @@ impl NsResolver<'_> {
             }
             Stmt::Return { value: Some(e), .. } => self.walk_expr(e, locals),
             Stmt::Return { value: None, .. } => {}
-            Stmt::If { cond, then_block, else_block, .. } => {
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 self.walk_expr(cond, locals);
                 let mut inner = locals.clone();
                 self.walk_block(then_block, &mut inner);
@@ -1459,7 +1605,9 @@ impl NsResolver<'_> {
                 let mut inner = locals.clone();
                 self.walk_block(body, &mut inner);
             }
-            Stmt::ForIn { var, iter, body, .. } => {
+            Stmt::ForIn {
+                var, iter, body, ..
+            } => {
                 self.walk_expr(iter, locals);
                 let mut inner = locals.clone();
                 inner.insert(var.clone());
@@ -1556,7 +1704,12 @@ impl NsResolver<'_> {
                     }
                 }
                 // `ns.Enum.Variant` (nullary variant) — `ns.Enum` is the inner field.
-                if let Expr::Field { expr: inner, field: enum_name, .. } = expr.as_ref() {
+                if let Expr::Field {
+                    expr: inner,
+                    field: enum_name,
+                    ..
+                } = expr.as_ref()
+                {
                     if let Expr::Var { name: head, .. } = inner.as_ref() {
                         if self.is_ns(head, locals) {
                             let (head, enum_name, variant) =
@@ -1568,7 +1721,10 @@ impl NsResolver<'_> {
                                 .is_some_and(|vs| vs.contains(&variant));
                             if is_variant {
                                 let _ = self.resolve_member(&head, &enum_name, l);
-                                *e = Expr::Var { name: variant, line: l };
+                                *e = Expr::Var {
+                                    name: variant,
+                                    line: l,
+                                };
                             } else {
                                 self.err(
                                     l,
@@ -1595,7 +1751,11 @@ impl NsResolver<'_> {
                 self.walk_expr(lhs, locals);
                 self.walk_expr(rhs, locals);
             }
-            Expr::Match { scrutinee, arms, line } => {
+            Expr::Match {
+                scrutinee,
+                arms,
+                line,
+            } => {
                 let l = *line;
                 self.walk_expr(scrutinee, locals);
                 for arm in arms.iter_mut() {
@@ -1608,10 +1768,8 @@ impl NsResolver<'_> {
                             if let Some(idx) = v.find('.') {
                                 let ns = v[..idx].to_string();
                                 let rest = &v[idx + 1..];
-                                let variant =
-                                    rest.rsplit('.').next().unwrap_or(rest).to_string();
-                                let enum_name =
-                                    rest.split('.').next().unwrap_or(rest).to_string();
+                                let variant = rest.rsplit('.').next().unwrap_or(rest).to_string();
+                                let enum_name = rest.split('.').next().unwrap_or(rest).to_string();
                                 if self.ns.contains_key(&ns) {
                                     let _ = self.resolve_member(&ns, &enum_name, l);
                                     *v = variant;
@@ -1629,7 +1787,12 @@ impl NsResolver<'_> {
                     self.walk_expr(&mut arm.body, &mut inner);
                 }
             }
-            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.walk_expr(cond, locals);
                 self.walk_expr(then_branch, locals);
                 if let Some(eb) = else_branch {
@@ -1948,7 +2111,9 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     fn stmt(s: &Stmt, out: &mut Vec<(String, usize)>) {
         match s {
-            Stmt::Let { value, line, ty, .. } => {
+            Stmt::Let {
+                value, line, ty, ..
+            } => {
                 if let Some(t) = ty {
                     for n in type_names(t) {
                         out.push((n, *line));
@@ -1959,13 +2124,23 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
             Stmt::Assign { value, line, .. } | Stmt::SetField { value, line, .. } => {
                 expr(value, *line, out)
             }
-            Stmt::IndexSet { index, value, line, .. } => {
+            Stmt::IndexSet {
+                index, value, line, ..
+            } => {
                 expr(index, *line, out);
                 expr(value, *line, out)
             }
-            Stmt::Return { value: Some(e), line } => expr(e, *line, out),
+            Stmt::Return {
+                value: Some(e),
+                line,
+            } => expr(e, *line, out),
             Stmt::Return { value: None, .. } => {}
-            Stmt::If { cond, then_block, else_block, line } => {
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                line,
+            } => {
                 expr(cond, *line, out);
                 block(then_block, out);
                 if let Some(eb) = else_block {
@@ -1976,7 +2151,9 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
                 expr(cond, *line, out);
                 block(body, out);
             }
-            Stmt::ForIn { iter, body, line, .. } => {
+            Stmt::ForIn {
+                iter, body, line, ..
+            } => {
                 expr(iter, *line, out);
                 block(body, out);
             }
@@ -2020,7 +2197,11 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
                 expr(lhs, *line, out);
                 expr(rhs, *line, out);
             }
-            Expr::Match { scrutinee, arms, line } => {
+            Expr::Match {
+                scrutinee,
+                arms,
+                line,
+            } => {
                 expr(scrutinee, *line, out);
                 for arm in arms {
                     if let Pattern::Variant(v, _) = &arm.pattern {
@@ -2029,7 +2210,12 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
                     expr(&arm.body, *line, out);
                 }
             }
-            Expr::IfExpr { cond, then_branch, else_branch, line } => {
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch,
+                line,
+            } => {
                 expr(cond, *line, out);
                 expr(then_branch, *line, out);
                 if let Some(eb) = else_branch {
@@ -2085,7 +2271,13 @@ fn scope_block(b: &Block, locals: &mut HashSet<String>, out: &mut Vec<(String, u
 
 fn scope_stmt(s: &Stmt, locals: &mut HashSet<String>, out: &mut Vec<(String, usize)>) {
     match s {
-        Stmt::Let { name, value, ty, line, .. } => {
+        Stmt::Let {
+            name,
+            value,
+            ty,
+            line,
+            ..
+        } => {
             if let Some(t) = ty {
                 for n in type_names(t) {
                     out.push((n, *line));
@@ -2099,13 +2291,23 @@ fn scope_stmt(s: &Stmt, locals: &mut HashSet<String>, out: &mut Vec<(String, usi
         Stmt::Assign { value, line, .. } | Stmt::SetField { value, line, .. } => {
             scope_expr(value, *line, locals, out)
         }
-        Stmt::IndexSet { index, value, line, .. } => {
+        Stmt::IndexSet {
+            index, value, line, ..
+        } => {
             scope_expr(index, *line, locals, out);
             scope_expr(value, *line, locals, out);
         }
-        Stmt::Return { value: Some(e), line } => scope_expr(e, *line, locals, out),
+        Stmt::Return {
+            value: Some(e),
+            line,
+        } => scope_expr(e, *line, locals, out),
         Stmt::Return { value: None, .. } => {}
-        Stmt::If { cond, then_block, else_block, line } => {
+        Stmt::If {
+            cond,
+            then_block,
+            else_block,
+            line,
+        } => {
             scope_expr(cond, *line, locals, out);
             let mut inner = locals.clone();
             scope_block(then_block, &mut inner, out);
@@ -2119,7 +2321,12 @@ fn scope_stmt(s: &Stmt, locals: &mut HashSet<String>, out: &mut Vec<(String, usi
             let mut inner = locals.clone();
             scope_block(body, &mut inner, out);
         }
-        Stmt::ForIn { var, iter, body, line } => {
+        Stmt::ForIn {
+            var,
+            iter,
+            body,
+            line,
+        } => {
             scope_expr(iter, *line, locals, out);
             let mut inner = locals.clone();
             inner.insert(var.clone());
@@ -2172,7 +2379,11 @@ fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(St
             scope_expr(lhs, *line, locals, out);
             scope_expr(rhs, *line, locals, out);
         }
-        Expr::Match { scrutinee, arms, line } => {
+        Expr::Match {
+            scrutinee,
+            arms,
+            line,
+        } => {
             scope_expr(scrutinee, *line, locals, out);
             for arm in arms {
                 let mut inner = locals.clone();
@@ -2194,7 +2405,12 @@ fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(St
                 scope_expr(&arm.body, *line, &inner, out);
             }
         }
-        Expr::IfExpr { cond, then_branch, else_branch, line } => {
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            line,
+        } => {
             scope_expr(cond, *line, locals, out);
             scope_expr(then_branch, *line, locals, out);
             if let Some(eb) = else_branch {
@@ -2238,8 +2454,12 @@ fn type_names(ty: &Type) -> Vec<String> {
                     walk(a, out);
                 }
             }
-            Type::Option(a) | Type::Ref(a) | Type::Array(a) | Type::Task(a)
-            | Type::Partial(a) | Type::ArrayN(a, _) => walk(a, out),
+            Type::Option(a)
+            | Type::Ref(a)
+            | Type::Array(a)
+            | Type::Task(a)
+            | Type::Partial(a)
+            | Type::ArrayN(a, _) => walk(a, out),
             Type::Result(a, b) | Type::Merge(a, b) => {
                 walk(a, out);
                 walk(b, out);
@@ -2288,8 +2508,14 @@ fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
                 rewrite_type(a, map);
             }
         }
-        Type::Option(a) | Type::Ref(a) | Type::Array(a) | Type::Task(a) | Type::Partial(a)
-        | Type::ArrayN(a, _) | Type::Omit(a, _) | Type::Pick(a, _) => rewrite_type(a, map),
+        Type::Option(a)
+        | Type::Ref(a)
+        | Type::Array(a)
+        | Type::Task(a)
+        | Type::Partial(a)
+        | Type::ArrayN(a, _)
+        | Type::Omit(a, _)
+        | Type::Pick(a, _) => rewrite_type(a, map),
         Type::Result(a, b) | Type::Merge(a, b) => {
             rewrite_type(a, map);
             rewrite_type(b, map);
@@ -2353,7 +2579,9 @@ fn rewrite_expr(e: &mut Expr, map: &HashMap<String, String>, ns: &HashSet<String
             rewrite_expr(lhs, map, ns);
             rewrite_expr(rhs, map, ns);
         }
-        Expr::Match { scrutinee, arms, .. } => {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
             rewrite_expr(scrutinee, map, ns);
             for arm in arms {
                 if let Pattern::Variant(v, _) = &mut arm.pattern {
@@ -2362,7 +2590,12 @@ fn rewrite_expr(e: &mut Expr, map: &HashMap<String, String>, ns: &HashSet<String
                 rewrite_expr(&mut arm.body, map, ns);
             }
         }
-        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             rewrite_expr(cond, map, ns);
             rewrite_expr(then_branch, map, ns);
             if let Some(eb) = else_branch {
@@ -2411,7 +2644,12 @@ fn rewrite_stmt(s: &mut Stmt, map: &HashMap<String, String>, ns: &HashSet<String
         }
         Stmt::Return { value: Some(e), .. } => rewrite_expr(e, map, ns),
         Stmt::Return { value: None, .. } => {}
-        Stmt::If { cond, then_block, else_block, .. } => {
+        Stmt::If {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
             rewrite_expr(cond, map, ns);
             rewrite_block(then_block, map, ns);
             if let Some(eb) = else_block {
@@ -2561,7 +2799,8 @@ fn rename_decl_in_module(p: &mut Program, from: &str, to: &str, ns: &HashSet<Str
             g.name = to.to_string();
         }
     }
-    let map: HashMap<String, String> = std::iter::once((from.to_string(), to.to_string())).collect();
+    let map: HashMap<String, String> =
+        std::iter::once((from.to_string(), to.to_string())).collect();
     rewrite_module_refs(p, &map, ns);
 }
 
@@ -2570,11 +2809,19 @@ mod tests {
     use super::*;
 
     pub(super) fn map(entries: &[(&str, &str)]) -> MapResolver {
-        MapResolver(entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+        MapResolver(
+            entries
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
     }
 
     pub(super) fn opts() -> LoadOptions {
-        LoadOptions { std_root: Some("std".into()), ..Default::default() }
+        LoadOptions {
+            std_root: Some("std".into()),
+            ..Default::default()
+        }
     }
 
     fn run_multi(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
@@ -2590,7 +2837,11 @@ mod tests {
     fn load_err(root: &str, files: &[(&str, &str)]) -> String {
         match load(root, "main.vyrn", &opts(), &map(files)) {
             Ok(_) => panic!("expected a load error"),
-            Err(ds) => ds.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("\n"),
+            Err(ds) => ds
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"),
         }
     }
 
@@ -2753,7 +3004,11 @@ mod tests {
                     import { b } from \"./b\" \
                     fn main() -> Int64 { return a() + b() }";
         assert_eq!(
-            run_multi(root, &[("shared.vyrn", shared), ("a.vyrn", a), ("b.vyrn", b)]).unwrap(),
+            run_multi(
+                root,
+                &[("shared.vyrn", shared), ("a.vyrn", a), ("b.vyrn", b)]
+            )
+            .unwrap(),
             32
         );
     }
@@ -2763,7 +3018,10 @@ mod tests {
         let lib = "logging { level: trace } export fn f() -> Int64 { return 1 }";
         let root = "import { f } from \"./lib\" fn main() -> Int64 { return f() }";
         let e = load_err(root, &[("lib.vyrn", lib)]);
-        assert!(e.contains("only the root module may configure `logging"), "{e}");
+        assert!(
+            e.contains("only the root module may configure `logging"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -2792,7 +3050,11 @@ mod tests {
         assert_eq!(
             run_multi(
                 root,
-                &[("store.vyrn", store), ("left.vyrn", left), ("right.vyrn", right)]
+                &[
+                    ("store.vyrn", store),
+                    ("left.vyrn", left),
+                    ("right.vyrn", right)
+                ]
             )
             .unwrap(),
             2
@@ -2821,7 +3083,10 @@ mod tests {
                     fn worker() -> Int64 { return bump() } \
                     fn main() -> Int64 { let h = spawn worker() return h.join() }";
         let e = run_multi(root, &[("store.vyrn", store)]).unwrap_err();
-        assert!(e.contains("is not allowed") && e.contains("isolated"), "{e}");
+        assert!(
+            e.contains("is not allowed") && e.contains("isolated"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -2966,7 +3231,10 @@ mod tests {
                     fn main() -> Int64 { let a = cls(\"x\") let b = item(\"y\") return 0 }";
         // Links html (exports `cls`) + the synthesized module (param `cls`) with
         // no false \"cls not imported\" error.
-        assert_eq!(run_multi(root, &[("html.vyrn", html), ("gen.vyrn", gen)]).unwrap(), 0);
+        assert_eq!(
+            run_multi(root, &[("html.vyrn", html), ("gen.vyrn", gen)]).unwrap(),
+            0
+        );
     }
 
     // ---- RFC-0027: namespaced imports ------------------------------------
@@ -3019,7 +3287,10 @@ mod tests {
         let root = "import * as a from \"./a\" \
                     import * as b from \"./b\" \
                     fn main() -> Int64 { return a.render() + b.render() }";
-        assert_eq!(run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]).unwrap(), 21);
+        assert_eq!(
+            run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]).unwrap(),
+            21
+        );
     }
 
     #[test]
@@ -3116,7 +3387,11 @@ mod remote_tests {
     fn load_err_at(root: &str, files: &[(&str, &str)]) -> String {
         match load(root, "main.vyrn", &opts(), &map(files)) {
             Ok(_) => panic!("expected a load error"),
-            Err(ds) => ds.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("\n"),
+            Err(ds) => ds
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"),
         }
     }
 
@@ -3173,7 +3448,12 @@ mod remote_tests {
                     fn main() -> Int64 { return a() }";
         let mut o = opts();
         o.aliases.insert("money".into(), "./money".into());
-        let e = match load(root, "main.vyrn", &o, &map(&[("gist:demko/abc123/a.vyrn", a)])) {
+        let e = match load(
+            root,
+            "main.vyrn",
+            &o,
+            &map(&[("gist:demko/abc123/a.vyrn", a)]),
+        ) {
             Ok(_) => panic!("expected error"),
             Err(ds) => ds[0].message.clone(),
         };
@@ -3203,14 +3483,20 @@ mod gen_tests {
     impl CachingResolver {
         fn new(entries: &[(&str, &str)]) -> CachingResolver {
             CachingResolver {
-                files: entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                files: entries
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
                 cache: RefCell::new(HashMap::new()),
             }
         }
     }
     impl ModuleResolver for CachingResolver {
         fn read(&self, resolved: &str) -> Result<String, String> {
-            self.files.get(resolved).cloned().ok_or_else(|| format!("not found: {resolved}"))
+            self.files
+                .get(resolved)
+                .cloned()
+                .ok_or_else(|| format!("not found: {resolved}"))
         }
         fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
             let prefix = format!("{}/", resolved.trim_end_matches('/'));
@@ -3236,7 +3522,9 @@ mod gen_tests {
             self.cache.borrow().get(key).cloned()
         }
         fn gen_cache_put(&self, key: &str, value: &str) {
-            self.cache.borrow_mut().insert(key.to_string(), value.to_string());
+            self.cache
+                .borrow_mut()
+                .insert(key.to_string(), value.to_string());
         }
     }
 
@@ -3251,7 +3539,12 @@ mod gen_tests {
     }
 
     fn map(entries: &[(&str, &str)]) -> MapResolver {
-        MapResolver(entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+        MapResolver(
+            entries
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
     }
     fn run(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
         run_with(root, &map(files))
@@ -3262,7 +3555,11 @@ mod gen_tests {
                 Some(d) => d.message.clone(),
                 None => panic!("expected an error, load+check succeeded"),
             },
-            Err(ds) => ds.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("\n"),
+            Err(ds) => ds
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"),
         }
     }
 
@@ -3331,6 +3628,52 @@ mod gen_tests {
                     import { tag2 } from mk(\"2\") \
                     fn main() -> Int64 { return tag1() + tag2() }";
         assert_eq!(run(root, &[("gen.vyrn", gen)]).unwrap(), 3);
+    }
+
+    #[test]
+    fn same_resolved_path_different_spellings_share_one_stateful_module() {
+        // RFC-0040 §1: two importers call the same generator with path args that
+        // RESOLVE identically but are spelled differently (`./data` vs the rebased
+        // `./x/../data`). They must synthesize ONE module — so its module state (`n`)
+        // exists once and both importers mutate the SAME instance. Without the
+        // resolved-inputs identity, two modules each define `n`/`bump` and collide.
+        let gen = "export gen fn mk(dir: String) -> String { \
+                       return \"let mut n: Int64 = 0\\n\
+                                export fn bump() -> Int64 { n = n + 1\\nreturn n }\\n\" }";
+        let a = "import { mk } from \"./gen\" \
+                 import { bump } from mk(\"./data\") \
+                 export fn a() -> Int64 { return bump() }";
+        let b = "import { mk } from \"./gen\" \
+                 import { bump } from mk(\"./x/../data\") \
+                 export fn b() -> Int64 { return bump() }";
+        let root = "import { a } from \"./a\" \
+                    import { b } from \"./b\" \
+                    fn main() -> Int64 { return a() + b() }";
+        // One shared `n`: a() = 1, b() = 2, sum = 3.
+        assert_eq!(
+            run(root, &[("gen.vyrn", gen), ("a.vyrn", a), ("b.vyrn", b)]).unwrap(),
+            3,
+        );
+    }
+
+    #[test]
+    fn different_resolved_paths_stay_distinct_modules() {
+        // The flip side of §1: two calls that resolve to DIFFERENT targets are
+        // still two modules. Each emits `bump`, so the flat namespace collides —
+        // proof the identity did not over-merge distinct targets.
+        let gen = "export gen fn mk(dir: String) -> String { \
+                       return \"export fn bump() -> Int64 { return 1 }\\n\" }";
+        let a = "import { mk } from \"./gen\" \
+                 import { bump } from mk(\"./data\") \
+                 export fn a() -> Int64 { return bump() }";
+        let b = "import { mk } from \"./gen\" \
+                 import { bump } from mk(\"./other\") \
+                 export fn b() -> Int64 { return bump() }";
+        let root = "import { a } from \"./a\" \
+                    import { b } from \"./b\" \
+                    fn main() -> Int64 { return a() + b() }";
+        let e = gen_err(root, &[("gen.vyrn", gen), ("a.vyrn", a), ("b.vyrn", b)]);
+        assert!(e.contains("defined in both") || e.contains("unique"), "{e}");
     }
 
     #[test]
@@ -3414,8 +3757,15 @@ mod gen_tests {
                     import { n } from cnt(\"./contract\") \
                     fn main() -> Int64 { return n() }";
         assert_eq!(
-            run(root, &[("gen.vyrn", gen), ("contract.vyrn", contract), ("wire.vyrn", wire)])
-                .unwrap(),
+            run(
+                root,
+                &[
+                    ("gen.vyrn", gen),
+                    ("contract.vyrn", contract),
+                    ("wire.vyrn", wire)
+                ]
+            )
+            .unwrap(),
             3,
             "closure = Req + Book + Id"
         );
@@ -3453,9 +3803,16 @@ mod gen_tests {
         assert_eq!(gen_run_count(), before + 1, "warm: cache hit, no re-run");
 
         // An unrelated edit (a file the closure never reads) still hits.
-        r.files.insert("noise.vyrn".to_string(), "export fn unused() -> Int64 { return 1 }".to_string());
+        r.files.insert(
+            "noise.vyrn".to_string(),
+            "export fn unused() -> Int64 { return 1 }".to_string(),
+        );
         run_with(root, &r).unwrap();
-        assert_eq!(gen_run_count(), before + 1, "unrelated edit: still a cache hit");
+        assert_eq!(
+            gen_run_count(),
+            before + 1,
+            "unrelated edit: still a cache hit"
+        );
 
         // Editing the foreign closure type's file misses → re-run + fresh output.
         r.files.insert(
@@ -3482,7 +3839,10 @@ mod gen_tests {
         let root = "import { fetch as fetch__real } from \"./mid\" \
                     fn fetch() -> Int64 { return fetch__real() } \
                     fn main() -> Int64 { return fetch() }";
-        assert_eq!(run(root, &[("store.vyrn", store), ("mid.vyrn", mid)]).unwrap(), 42);
+        assert_eq!(
+            run(root, &[("store.vyrn", store), ("mid.vyrn", mid)]).unwrap(),
+            42
+        );
     }
 
     #[test]
@@ -3510,7 +3870,10 @@ mod gen_tests {
                 ("wireB.vyrn", wire_b),
             ],
         );
-        assert!(e.contains("wireA.vyrn") && e.contains("wireB.vyrn"), "names both modules: {e}");
+        assert!(
+            e.contains("wireA.vyrn") && e.contains("wireB.vyrn"),
+            "names both modules: {e}"
+        );
         assert!(e.contains('T'), "names the colliding type: {e}");
     }
 
@@ -3609,7 +3972,11 @@ mod gen_tests {
                       fn main() -> Int64 { return which() }";
         let r = CachingResolver::new(&[("gen.vyrn", gen)]);
         assert_eq!(run_with(root_a, &r).unwrap(), 1, "generator `a` output");
-        assert_eq!(run_with(root_b, &r).unwrap(), 2, "generator `b` must not reuse `a`'s cache");
+        assert_eq!(
+            run_with(root_b, &r).unwrap(),
+            2,
+            "generator `b` must not reuse `a`'s cache"
+        );
     }
 
     #[test]

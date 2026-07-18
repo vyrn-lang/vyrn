@@ -14,7 +14,10 @@ pub enum Tok {
     /// An interpolated string `"a\{e}b\{f}c"` (RFC-0007). `parts` are the decoded
     /// literal fragments (always `exprs.len() + 1` of them); `exprs` are the raw,
     /// un-lexed source of each `\{ .. }` hole, re-parsed by the parser.
-    TemplateStr { parts: Vec<String>, exprs: Vec<String> },
+    TemplateStr {
+        parts: Vec<String>,
+        exprs: Vec<String>,
+    },
     /// A `///` documentation comment line (markdown). One leading space after the
     /// slashes is stripped. Attached to the following declaration by the parser.
     Doc(String),
@@ -64,20 +67,20 @@ pub enum Tok {
     Star,
     Slash,
     Percent,
-    Eq,     // =
-    EqEq,   // ==
+    Eq,         // =
+    EqEq,       // ==
     TildeMatch, // =~
-    NotEq,  // !=
-    Lt,     // <
-    LtEq,   // <=
-    Gt,     // >
-    GtEq,   // >=
-    AndAnd,   // &&
-    OrOr,     // ||
-    Bang,     // !
-    Question, // ?
-    Pipe,     // |
-    Amp,      // &
+    NotEq,      // !=
+    Lt,         // <
+    LtEq,       // <=
+    Gt,         // >
+    GtEq,       // >=
+    AndAnd,     // &&
+    OrOr,       // ||
+    Bang,       // !
+    Question,   // ?
+    Pipe,       // |
+    Amp,        // &
 
     Eof,
 }
@@ -256,7 +259,11 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
                 i += 1;
             }
             out.push(Triv {
-                kind: if is_doc { TrivKind::Doc } else { TrivKind::Comment },
+                kind: if is_doc {
+                    TrivKind::Doc
+                } else {
+                    TrivKind::Comment
+                },
                 text: trim_comment(&chars[start..i]),
                 start_line,
                 end_line: start_line,
@@ -271,7 +278,12 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
             i += 1;
             loop {
                 if i >= chars.len() {
-                    return Err(Diagnostic::error(line, 0, "lex", "unterminated string literal".into()));
+                    return Err(Diagnostic::error(
+                        line,
+                        0,
+                        "lex",
+                        "unterminated string literal".into(),
+                    ));
                 }
                 let ch = chars[i];
                 if ch == '"' {
@@ -285,7 +297,12 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
                 }
                 if ch == '\\' {
                     if i + 1 >= chars.len() {
-                        return Err(Diagnostic::error(line, 0, "lex", "unterminated escape in string".into()));
+                        return Err(Diagnostic::error(
+                            line,
+                            0,
+                            "lex",
+                            "unterminated escape in string".into(),
+                        ));
                     }
                     if chars[i + 1] == '{' {
                         // interpolation hole: scan raw to matching `}` (mirroring
@@ -307,7 +324,12 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
                                         i += if chars[i] == '\\' { 2 } else { 1 };
                                     }
                                     if i >= chars.len() {
-                                        return Err(Diagnostic::error(line, 0, "lex", "unterminated string in interpolation".into()));
+                                        return Err(Diagnostic::error(
+                                            line,
+                                            0,
+                                            "lex",
+                                            "unterminated string in interpolation".into(),
+                                        ));
                                     }
                                     i += 1;
                                 }
@@ -317,7 +339,13 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
                                         i += if chars[i] == '\\' { 2 } else { 1 };
                                     }
                                     if i >= chars.len() || chars[i] == '\n' {
-                                        return Err(Diagnostic::error(line, 0, "lex", "unterminated character literal in interpolation".into()));
+                                        return Err(Diagnostic::error(
+                                            line,
+                                            0,
+                                            "lex",
+                                            "unterminated character literal in interpolation"
+                                                .into(),
+                                        ));
                                     }
                                     i += 1;
                                 }
@@ -341,7 +369,12 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
                             }
                         }
                         if depth != 0 {
-                            return Err(Diagnostic::error(line, 0, "lex", "unterminated `\\{` interpolation".into()));
+                            return Err(Diagnostic::error(
+                                line,
+                                0,
+                                "lex",
+                                "unterminated `\\{` interpolation".into(),
+                            ));
                         }
                         i += 1; // closing `}`
                         continue;
@@ -386,7 +419,12 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
             if i < chars.len() && chars[i] == '\'' {
                 i += 1;
             } else {
-                return Err(Diagnostic::error(start_line, 0, "lex", "unterminated character literal".into()));
+                return Err(Diagnostic::error(
+                    start_line,
+                    0,
+                    "lex",
+                    "unterminated character literal".into(),
+                ));
             }
             out.push(Triv {
                 kind: TrivKind::Tok(Tok::Int(0)),
@@ -442,7 +480,11 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
         }
 
         // multi-char then single-char operators.
-        if let Some(tok) = i.checked_add(1).filter(|&j| j < chars.len()).and_then(|j| two_char_op(c, chars[j])) {
+        if let Some(tok) = i
+            .checked_add(1)
+            .filter(|&j| j < chars.len())
+            .and_then(|j| two_char_op(c, chars[j]))
+        {
             i += 2;
             out.push(Triv {
                 kind: TrivKind::Tok(tok),
@@ -467,7 +509,12 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
                 space_before = false;
             }
             None => {
-                return Err(Diagnostic::error(line, 0, "lex", format!("unexpected character {c:?}")));
+                return Err(Diagnostic::error(
+                    line,
+                    0,
+                    "lex",
+                    format!("unexpected character {c:?}"),
+                ));
             }
         }
     }
@@ -497,8 +544,7 @@ fn parse_unicode_escape(
     if j >= chars.len() {
         return Err(err("unterminated `\\u{` escape"));
     }
-    let cp = u32::from_str_radix(hex.trim(), 16)
-        .map_err(|_| err("`\\u{}` needs hex digits"))?;
+    let cp = u32::from_str_radix(hex.trim(), 16).map_err(|_| err("`\\u{}` needs hex digits"))?;
     let ch = char::from_u32(cp).ok_or_else(|| err("invalid Unicode scalar in `\\u{}`"))?;
     Ok((ch, j + 1)) // past the closing `}`
 }
@@ -547,7 +593,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                 // only) — strip it so it never leaks into rendered markdown.
                 let text = text.strip_suffix('\r').unwrap_or(&text);
                 let text = text.strip_prefix(' ').unwrap_or(text).to_string();
-                out.push(Token { tok: Tok::Doc(text), line, col });
+                out.push(Token {
+                    tok: Tok::Doc(text),
+                    line,
+                    col,
+                });
             }
             continue;
         }
@@ -629,8 +679,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                                 // (`'}'`, `'\u{1F600}'`) must not close the hole.
                                 '\'' => {
                                     i += 1;
-                                    while i < chars.len() && chars[i] != '\'' && chars[i] != '\n'
-                                    {
+                                    while i < chars.len() && chars[i] != '\'' && chars[i] != '\n' {
                                         i += if chars[i] == '\\' { 2 } else { 1 };
                                     }
                                     if i >= chars.len() || chars[i] == '\n' {
@@ -743,11 +792,21 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
         if c == '\'' {
             let start_col = col;
             if i + 1 >= chars.len() {
-                return Err(Diagnostic::error(line, start_col, "lex", "unterminated character literal".into()));
+                return Err(Diagnostic::error(
+                    line,
+                    start_col,
+                    "lex",
+                    "unterminated character literal".into(),
+                ));
             }
             let (cp, consumed) = if chars[i + 1] == '\\' {
                 if i + 2 >= chars.len() {
-                    return Err(Diagnostic::error(line, start_col, "lex", "unterminated character escape".into()));
+                    return Err(Diagnostic::error(
+                        line,
+                        start_col,
+                        "lex",
+                        "unterminated character escape".into(),
+                    ));
                 }
                 if chars[i + 2] == 'u' {
                     // `'\u{HEX}'` — a Unicode scalar by code point.
@@ -786,9 +845,18 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                 (chars[i + 1] as u32, 2) // 'x' — any Unicode scalar
             };
             if i + consumed >= chars.len() || chars[i + consumed] != '\'' {
-                return Err(Diagnostic::error(line, start_col, "lex", "unterminated character literal".into()));
+                return Err(Diagnostic::error(
+                    line,
+                    start_col,
+                    "lex",
+                    "unterminated character literal".into(),
+                ));
             }
-            out.push(Token { tok: Tok::Int(cp as i64), line, col: start_col });
+            out.push(Token {
+                tok: Tok::Int(cp as i64),
+                line,
+                col: start_col,
+            });
             i += consumed + 1; // include closing quote
             continue;
         }
@@ -811,7 +879,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                 let value: f64 = text.parse().map_err(|_| {
                     Diagnostic::error(line, col, "lex", format!("invalid float literal: {text}"))
                 })?;
-                out.push(Token { tok: Tok::Float(value), line, col });
+                out.push(Token {
+                    tok: Tok::Float(value),
+                    line,
+                    col,
+                });
                 continue;
             }
             let text: String = chars[start..i].iter().collect();

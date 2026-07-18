@@ -21,13 +21,34 @@ pub fn numeric_conv_target(name: &str) -> Option<Type> {
     match name {
         // Only the sized spellings exist — there is no `Int(x)`/`Float(x)`.
         "Int64" => Some(Type::Int),
-        "Int32" => Some(Type::IntN { bits: 32, signed: true }),
-        "Int16" => Some(Type::IntN { bits: 16, signed: true }),
-        "Int8" => Some(Type::IntN { bits: 8, signed: true }),
-        "UInt8" => Some(Type::IntN { bits: 8, signed: false }),
-        "UInt16" => Some(Type::IntN { bits: 16, signed: false }),
-        "UInt32" => Some(Type::IntN { bits: 32, signed: false }),
-        "UInt64" => Some(Type::IntN { bits: 64, signed: false }),
+        "Int32" => Some(Type::IntN {
+            bits: 32,
+            signed: true,
+        }),
+        "Int16" => Some(Type::IntN {
+            bits: 16,
+            signed: true,
+        }),
+        "Int8" => Some(Type::IntN {
+            bits: 8,
+            signed: true,
+        }),
+        "UInt8" => Some(Type::IntN {
+            bits: 8,
+            signed: false,
+        }),
+        "UInt16" => Some(Type::IntN {
+            bits: 16,
+            signed: false,
+        }),
+        "UInt32" => Some(Type::IntN {
+            bits: 32,
+            signed: false,
+        }),
+        "UInt64" => Some(Type::IntN {
+            bits: 64,
+            signed: false,
+        }),
         "Float64" => Some(Type::Float),
         "Float32" => Some(Type::Float32),
         _ => None,
@@ -99,7 +120,13 @@ pub fn predicate_multiple_of(pred: &Expr) -> Option<i64> {
         match op {
             BinOp::And => return predicate_multiple_of(lhs).or_else(|| predicate_multiple_of(rhs)),
             BinOp::Eq => {
-                if let Expr::Binary { op: BinOp::Rem, lhs: base, rhs: k, .. } = &**lhs {
+                if let Expr::Binary {
+                    op: BinOp::Rem,
+                    lhs: base,
+                    rhs: k,
+                    ..
+                } = &**lhs
+                {
                     if matches!(&**base, Expr::Var { name, .. } if name == "value")
                         && matches!(&**rhs, Expr::Int(0))
                     {
@@ -166,13 +193,34 @@ pub fn predicate_pattern(pred: &Expr) -> Option<String> {
 fn base_spelling(ty: &Type) -> &'static str {
     match ty {
         Type::Int => "Int64",
-        Type::IntN { bits: 8, signed: true } => "Int8",
-        Type::IntN { bits: 16, signed: true } => "Int16",
-        Type::IntN { bits: 32, signed: true } => "Int32",
-        Type::IntN { bits: 8, signed: false } => "UInt8",
-        Type::IntN { bits: 16, signed: false } => "UInt16",
-        Type::IntN { bits: 32, signed: false } => "UInt32",
-        Type::IntN { bits: 64, signed: false } => "UInt64",
+        Type::IntN {
+            bits: 8,
+            signed: true,
+        } => "Int8",
+        Type::IntN {
+            bits: 16,
+            signed: true,
+        } => "Int16",
+        Type::IntN {
+            bits: 32,
+            signed: true,
+        } => "Int32",
+        Type::IntN {
+            bits: 8,
+            signed: false,
+        } => "UInt8",
+        Type::IntN {
+            bits: 16,
+            signed: false,
+        } => "UInt16",
+        Type::IntN {
+            bits: 32,
+            signed: false,
+        } => "UInt32",
+        Type::IntN {
+            bits: 64,
+            signed: false,
+        } => "UInt64",
         Type::IntN { .. } => "?",
         Type::Float => "Float64",
         Type::Float32 => "Float32",
@@ -196,18 +244,35 @@ pub fn schema_struct_lit(decl: &TypeDecl) -> Expr {
     let multiple_of = pred.and_then(predicate_multiple_of);
     let pattern = pred.and_then(predicate_pattern);
     let opt = |n: Option<i64>| match n {
-        Some(v) => Expr::Call { name: "Some".to_string(), args: vec![Expr::Int(v)], line: 0 },
-        None => Expr::Var { name: "None".to_string(), line: 0 },
+        Some(v) => Expr::Call {
+            name: "Some".to_string(),
+            args: vec![Expr::Int(v)],
+            line: 0,
+        },
+        None => Expr::Var {
+            name: "None".to_string(),
+            line: 0,
+        },
     };
     let opt_str = |s: Option<String>| match s {
-        Some(v) => Expr::Call { name: "Some".to_string(), args: vec![Expr::Str(v)], line: 0 },
-        None => Expr::Var { name: "None".to_string(), line: 0 },
+        Some(v) => Expr::Call {
+            name: "Some".to_string(),
+            args: vec![Expr::Str(v)],
+            line: 0,
+        },
+        None => Expr::Var {
+            name: "None".to_string(),
+            line: 0,
+        },
     };
     Expr::StructLit {
         name: "Schema".to_string(),
         fields: vec![
             ("name".to_string(), Expr::Str(decl.name.clone())),
-            ("base".to_string(), Expr::Str(base_spelling(&decl.base).to_string())),
+            (
+                "base".to_string(),
+                Expr::Str(base_spelling(&decl.base).to_string()),
+            ),
             ("doc".to_string(), opt_str(decl.doc.clone())),
             ("min".to_string(), opt(min)),
             ("max".to_string(), opt(max)),
@@ -231,7 +296,11 @@ pub fn schema_struct_lit(decl: &TypeDecl) -> Expr {
 /// `object` with `properties` and a `required` list (non-`Option` fields).
 pub fn json_schema_string(decl: &TypeDecl, types: &HashMap<String, TypeDecl>) -> String {
     let dialect = "\"$schema\":\"https://json-schema.org/draft/2020-12/schema\"";
-    let mut cx = SchemaCx { types, root: &decl.name, defs: Vec::new() };
+    let mut cx = SchemaCx {
+        types,
+        root: &decl.name,
+        defs: Vec::new(),
+    };
     // Render the root's body directly — inside the expansion, `Named(root)`
     // is a back-edge and renders as `{"$ref":"#"}`.
     let inner = named_schema(decl, &mut cx);
@@ -246,7 +315,11 @@ pub fn json_schema_string(decl: &TypeDecl, types: &HashMap<String, TypeDecl>) ->
             .iter()
             .map(|(n, s)| format!("\"{}\":{}", json_escape(n), s.as_deref().unwrap_or("{}")))
             .collect();
-        format!("{},\"$defs\":{{{}}}}}", &inner[..inner.len() - 1], defs.join(","))
+        format!(
+            "{},\"$defs\":{{{}}}}}",
+            &inner[..inner.len() - 1],
+            defs.join(",")
+        )
     };
     if body == "{}" {
         format!("{{{dialect}}}")
@@ -287,7 +360,10 @@ fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
         // by omission from the enclosing object's `required` list.
         Type::Option(inner) => type_schema(inner, cx),
         Type::Array(inner) | Type::ArrayN(inner, _) => {
-            format!("{{\"type\":\"array\",\"items\":{}}}", type_schema(inner, cx))
+            format!(
+                "{{\"type\":\"array\",\"items\":{}}}",
+                type_schema(inner, cx)
+            )
         }
         // A `Map<String, V>` (RFC-0028) is a free-form JSON object whose values
         // all share `V`'s schema: `additionalProperties` carries it.
@@ -329,8 +405,10 @@ fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
         // tagged `oneOf`, which the importer recognizes back into an enum decl.
         Type::Enum(variants) => {
             if variants.iter().all(|v| v.payload.is_empty()) {
-                let names: Vec<String> =
-                    variants.iter().map(|v| format!("\"{}\"", json_escape(&v.name))).collect();
+                let names: Vec<String> = variants
+                    .iter()
+                    .map(|v| format!("\"{}\"", json_escape(&v.name)))
+                    .collect();
                 format!("{{\"enum\":[{}]}}", names.join(","))
             } else {
                 enum_oneof_schema(variants, cx)
@@ -340,8 +418,14 @@ fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
         // (`{"Ok":<T>}` / `{"Err":<E>}`) — emit the identical `oneOf` (RFC-0024).
         Type::Result(t, e) => {
             let variants = vec![
-                EnumVariant { name: "Ok".to_string(), payload: vec![(**t).clone()] },
-                EnumVariant { name: "Err".to_string(), payload: vec![(**e).clone()] },
+                EnumVariant {
+                    name: "Ok".to_string(),
+                    payload: vec![(**t).clone()],
+                },
+                EnumVariant {
+                    name: "Err".to_string(),
+                    payload: vec![(**e).clone()],
+                },
             ];
             enum_oneof_schema(&variants, cx)
         }
@@ -390,8 +474,7 @@ fn enum_oneof_schema(variants: &[EnumVariant], cx: &mut SchemaCx) -> String {
 /// what a Vyrn `where` clause (an `Int64` literal) can express on re-import,
 /// so only its `minimum` is emitted.
 fn intn_schema(bits: u8, signed: bool, extra: &[(String, String)]) -> String {
-    const BOUND_KEYS: [&str; 4] =
-        ["minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum"];
+    const BOUND_KEYS: [&str; 4] = ["minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum"];
     let mut parts = vec!["\"type\":\"integer\"".to_string()];
     let has = |k: &str| extra.iter().any(|(ek, _)| ek == k);
     // Bound keywords in the importer's canonical clause order, so
@@ -407,7 +490,11 @@ fn intn_schema(bits: u8, signed: bool, extra: &[(String, String)]) -> String {
             let lo: i64 = if signed { i64::MIN >> (64 - bits) } else { 0 };
             parts.push(format!("\"minimum\":{lo}"));
         } else if key == "maximum" && !has("exclusiveMaximum") && !(bits == 64 && !signed) {
-            let hi: i64 = if signed { i64::MAX >> (64 - bits) } else { (1i64 << bits) - 1 };
+            let hi: i64 = if signed {
+                i64::MAX >> (64 - bits)
+            } else {
+                (1i64 << bits) - 1
+            };
             parts.push(format!("\"maximum\":{hi}"));
         }
     }
@@ -430,12 +517,18 @@ fn named_schema(decl: &TypeDecl, cx: &mut SchemaCx) -> String {
         // keyword model can't fully capture is documented, as for scalars.
         Type::IntN { bits, signed } => {
             let mut cs = Vec::new();
-            let complete = pred.map(|p| collect_constraints(p, &mut cs)).unwrap_or(true);
+            let complete = pred
+                .map(|p| collect_constraints(p, &mut cs))
+                .unwrap_or(true);
             let s = intn_schema(*bits, *signed, &cs);
             if complete {
                 s
             } else {
-                format!("{},{}}}", &s[..s.len() - 1], unmapped_comment(pred.unwrap()))
+                format!(
+                    "{},{}}}",
+                    &s[..s.len() - 1],
+                    unmapped_comment(pred.unwrap())
+                )
             }
         }
         Type::Float | Type::Float32 => scalar_with_constraints("number", pred),
@@ -475,7 +568,11 @@ fn string_with_constraints(pred: Option<&Expr>) -> String {
         let complete = collect_string_constraints(p, &mut cs);
         // A JSON Schema object allows only one `pattern`; collect them apart so
         // several regex clauses can be `allOf`-combined instead of clashing.
-        let patterns: Vec<String> = cs.iter().filter(|(k, _)| k == "pattern").map(|(_, v)| v.clone()).collect();
+        let patterns: Vec<String> = cs
+            .iter()
+            .filter(|(k, _)| k == "pattern")
+            .map(|(_, v)| v.clone())
+            .collect();
         for (k, v) in &cs {
             if k != "pattern" {
                 parts.push(format!("\"{k}\":{v}"));
@@ -485,8 +582,10 @@ fn string_with_constraints(pred: Option<&Expr>) -> String {
             0 => {}
             1 => parts.push(format!("\"pattern\":{}", patterns[0])),
             _ => {
-                let branches: Vec<String> =
-                    patterns.iter().map(|p| format!("{{\"pattern\":{p}}}")).collect();
+                let branches: Vec<String> = patterns
+                    .iter()
+                    .map(|p| format!("{{\"pattern\":{p}}}"))
+                    .collect();
                 parts.push(format!("\"allOf\":[{}]", branches.join(",")));
             }
         }
@@ -500,7 +599,9 @@ fn string_with_constraints(pred: Option<&Expr>) -> String {
 /// Collect `minLength`/`maxLength` from a `String` predicate over `value.length`,
 /// returning whether it was captured in full.
 fn collect_string_constraints(pred: &Expr, out: &mut Vec<(String, String)>) -> bool {
-    let Expr::Binary { op, lhs, rhs, .. } = pred else { return false };
+    let Expr::Binary { op, lhs, rhs, .. } = pred else {
+        return false;
+    };
     if *op == BinOp::And {
         let a = collect_string_constraints(lhs, out);
         let b = collect_string_constraints(rhs, out);
@@ -511,7 +612,10 @@ fn collect_string_constraints(pred: &Expr, out: &mut Vec<(String, String)>) -> b
     if *op == BinOp::Match {
         if is_value(lhs) {
             if let Expr::Str(pat) = &**rhs {
-                out.push(("pattern".to_string(), format!("\"{}\"", json_escape(&format!("^{pat}$")))));
+                out.push((
+                    "pattern".to_string(),
+                    format!("\"{}\"", json_escape(&format!("^{pat}$"))),
+                ));
                 return true;
             }
         }
@@ -542,7 +646,11 @@ fn is_length_of_value(e: &Expr) -> bool {
 fn int_lit(e: &Expr) -> Option<i64> {
     match e {
         Expr::Int(n) => Some(*n),
-        Expr::Unary { op: UnOp::Neg, expr, .. } => match &**expr {
+        Expr::Unary {
+            op: UnOp::Neg,
+            expr,
+            ..
+        } => match &**expr {
             Expr::Int(n) => Some(-n),
             _ => None,
         },
@@ -607,7 +715,11 @@ fn record_schema(fields: &[Field], cx: &mut SchemaCx) -> String {
     } else {
         format!(",\"required\":[{}]", required.join(","))
     };
-    format!("{{\"type\":\"object\",\"properties\":{{{}}}{}}}", props.join(","), req)
+    format!(
+        "{{\"type\":\"object\",\"properties\":{{{}}}{}}}",
+        props.join(","),
+        req
+    )
 }
 
 /// Collect JSON Schema numeric constraints from a `where` predicate, returning
@@ -617,7 +729,9 @@ fn record_schema(fields: &[Field], cx: &mut SchemaCx) -> String {
 /// or float literals. A disjunction or any other form leaves `false` (the caller
 /// then documents the true predicate in a `$comment`).
 fn collect_constraints(pred: &Expr, out: &mut Vec<(String, String)>) -> bool {
-    let Expr::Binary { op, lhs, rhs, .. } = pred else { return false };
+    let Expr::Binary { op, lhs, rhs, .. } = pred else {
+        return false;
+    };
     match op {
         // Both sides must be captured for the conjunction to be complete.
         BinOp::And => {
@@ -627,7 +741,13 @@ fn collect_constraints(pred: &Expr, out: &mut Vec<(String, String)>) -> bool {
         }
         // `value % K == 0` → multipleOf: K (any other `==` is not a keyword).
         BinOp::Eq => {
-            if let Expr::Binary { op: BinOp::Rem, lhs: base, rhs: k, .. } = &**lhs {
+            if let Expr::Binary {
+                op: BinOp::Rem,
+                lhs: base,
+                rhs: k,
+                ..
+            } = &**lhs
+            {
                 if is_value(base) && is_zero(rhs) {
                     if let Some(kv) = num_lit(k) {
                         out.push(("multipleOf".to_string(), kv));
@@ -696,7 +816,11 @@ fn num_lit(e: &Expr) -> Option<String> {
         // `{}` gives the shortest round-tripping form; bounds are always finite
         // (JSON has no NaN/Infinity), so this is always valid JSON.
         Expr::Float(f) => Some(format!("{f}")),
-        Expr::Unary { op: UnOp::Neg, expr, .. } => match &**expr {
+        Expr::Unary {
+            op: UnOp::Neg,
+            expr,
+            ..
+        } => match &**expr {
             Expr::Int(n) => Some((-n).to_string()),
             Expr::Float(f) => Some(format!("{}", -f)),
             _ => None,
@@ -711,16 +835,21 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
     match ty {
         Type::Param(t) => subst.get(t).cloned().unwrap_or_else(|| ty.clone()),
         Type::Option(inner) => Type::Option(Box::new(substitute(inner, subst))),
-        Type::Result(a, b) => {
-            Type::Result(Box::new(substitute(a, subst)), Box::new(substitute(b, subst)))
-        }
-        Type::App(name, args) => {
-            Type::App(name.clone(), args.iter().map(|a| substitute(a, subst)).collect())
-        }
+        Type::Result(a, b) => Type::Result(
+            Box::new(substitute(a, subst)),
+            Box::new(substitute(b, subst)),
+        ),
+        Type::App(name, args) => Type::App(
+            name.clone(),
+            args.iter().map(|a| substitute(a, subst)).collect(),
+        ),
         Type::Record(fields) => Type::Record(
             fields
                 .iter()
-                .map(|f| Field { name: f.name.clone(), ty: substitute(&f.ty, subst) })
+                .map(|f| Field {
+                    name: f.name.clone(),
+                    ty: substitute(&f.ty, subst),
+                })
                 .collect(),
         ),
         Type::Enum(vs) => Type::Enum(
@@ -733,16 +862,18 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
         ),
         Type::Omit(b, k) => Type::Omit(Box::new(substitute(b, subst)), k.clone()),
         Type::Pick(b, k) => Type::Pick(Box::new(substitute(b, subst)), k.clone()),
-        Type::Merge(a, b) => {
-            Type::Merge(Box::new(substitute(a, subst)), Box::new(substitute(b, subst)))
-        }
+        Type::Merge(a, b) => Type::Merge(
+            Box::new(substitute(a, subst)),
+            Box::new(substitute(b, subst)),
+        ),
         Type::Partial(b) => Type::Partial(Box::new(substitute(b, subst))),
         Type::Ref(inner) => Type::Ref(Box::new(substitute(inner, subst))),
         Type::Array(inner) => Type::Array(Box::new(substitute(inner, subst))),
         Type::ArrayN(inner, n) => Type::ArrayN(Box::new(substitute(inner, subst)), *n),
-        Type::Map(k, v) => {
-            Type::Map(Box::new(substitute(k, subst)), Box::new(substitute(v, subst)))
-        }
+        Type::Map(k, v) => Type::Map(
+            Box::new(substitute(k, subst)),
+            Box::new(substitute(v, subst)),
+        ),
         Type::Task(inner) => Type::Task(Box::new(substitute(inner, subst))),
         // A function-value type (RFC-0023): substitute into its parameter and
         // return types so a generic `fn(T) -> U` monomorphizes with the rest.
@@ -780,8 +911,12 @@ fn resolve_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Type
         // resolve the result.
         Type::App(name, args) => match types.get(name) {
             Some(d) if d.type_params.len() == args.len() => {
-                let s: HashMap<String, Type> =
-                    d.type_params.iter().cloned().zip(args.iter().cloned()).collect();
+                let s: HashMap<String, Type> = d
+                    .type_params
+                    .iter()
+                    .cloned()
+                    .zip(args.iter().cloned())
+                    .collect();
                 let based = substitute(&d.base, &s);
                 resolve_d(&based, types, depth + 1)
             }
@@ -803,7 +938,10 @@ fn resolve_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Type
         Type::Partial(base) => match fields_d(base, types, depth) {
             Some(fs) => Type::Record(
                 fs.into_iter()
-                    .map(|f| Field { name: f.name, ty: Type::Option(Box::new(f.ty)) })
+                    .map(|f| Field {
+                        name: f.name,
+                        ty: Type::Option(Box::new(f.ty)),
+                    })
                     .collect(),
             ),
             None => Type::Unit,
@@ -847,8 +985,11 @@ mod json_schema_tests {
     fn schema_of(src: &str, name: &str) -> String {
         let toks = crate::lexer::lex(src).expect("lex");
         let prog = crate::parser::parse(toks).expect("parse");
-        let types: HashMap<String, TypeDecl> =
-            prog.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        let types: HashMap<String, TypeDecl> = prog
+            .type_decls
+            .iter()
+            .map(|t| (t.name.clone(), t.clone()))
+            .collect();
         json_schema_string(&types[name], &types)
     }
 
@@ -944,7 +1085,10 @@ mod json_schema_tests {
     fn not_equal_maps_to_not_const() {
         // A multi-clause predicate is captured faithfully: `!= N` → not/const.
         assert_eq!(
-            schema_of("type Score = Int64 where value > 0 && value % 2 == 0 && value != 100", "Score"),
+            schema_of(
+                "type Score = Int64 where value > 0 && value % 2 == 0 && value != 100",
+                "Score"
+            ),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"integer\",\
              \"exclusiveMinimum\":0,\"multipleOf\":2,\"not\":{\"const\":100}}"
         );
@@ -955,7 +1099,10 @@ mod json_schema_tests {
         // A predicate the keyword model can't encode keeps a faithful `$comment`
         // rather than silently under-specifying.
         assert_eq!(
-            schema_of("type Small = Int64 where value < 10 || value > 1000", "Small"),
+            schema_of(
+                "type Small = Int64 where value < 10 || value > 1000",
+                "Small"
+            ),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"integer\",\
              \"$comment\":\"constrained by: value < 10 || value > 1000\"}"
         );
@@ -965,16 +1112,25 @@ mod json_schema_tests {
     fn partial_capture_keeps_mapped_parts_and_comments() {
         // `value >= 0` maps; the `!= 7` after an OR makes the whole thing partial,
         // so the mapped bound stays AND the full predicate is documented.
-        let s = schema_of("type T = Int64 where value >= 0 && (value < 3 || value > 5)", "T");
+        let s = schema_of(
+            "type T = Int64 where value >= 0 && (value < 3 || value > 5)",
+            "T",
+        );
         assert!(s.contains("\"minimum\":0"), "keeps mapped bound: {s}");
-        assert!(s.contains("\"$comment\":\"constrained by:"), "documents remainder: {s}");
+        assert!(
+            s.contains("\"$comment\":\"constrained by:"),
+            "documents remainder: {s}"
+        );
     }
 
     #[test]
     fn regex_maps_to_anchored_pattern() {
         // `=~` reflects to an anchored JSON Schema `pattern` (backslashes escaped).
         let s = schema_of("type Slug = String where value =~ \"[a-z]+\"", "Slug");
-        assert!(s.contains("\"pattern\":\"^[a-z]+$\""), "anchored pattern: {s}");
+        assert!(
+            s.contains("\"pattern\":\"^[a-z]+$\""),
+            "anchored pattern: {s}"
+        );
     }
 
     #[test]
@@ -991,7 +1147,10 @@ mod json_schema_tests {
             "patterns combined via allOf: {s}"
         );
         // Exactly one `pattern` key would be a duplicate → must not appear bare.
-        assert!(!s.contains("$\",\"pattern\""), "no duplicate pattern key: {s}");
+        assert!(
+            !s.contains("$\",\"pattern\""),
+            "no duplicate pattern key: {s}"
+        );
     }
 
     #[test]
@@ -999,10 +1158,7 @@ mod json_schema_tests {
         // A self-referential record must not expand forever (this used to
         // stack-overflow the compiler); the back-edge is a real `$ref` to the
         // document root — a faithful recursive schema, not a lossy comment.
-        let s = schema_of(
-            "type Node = { name: String, next: Option<Node> }",
-            "Node",
-        );
+        let s = schema_of("type Node = { name: String, next: Option<Node> }", "Node");
         assert!(s.contains("\"next\":{\"$ref\":\"#\"}"), "{s}");
         assert!(s.contains("\"name\":{\"type\":\"string\"}"), "{s}");
     }
@@ -1016,7 +1172,12 @@ mod json_schema_tests {
             "A",
         );
         assert!(s.contains("\"b\":{\"$ref\":\"#/$defs/B\"}"), "{s}");
-        assert!(s.contains("\"$defs\":{\"B\":{\"type\":\"object\",\"properties\":{\"a\":{\"$ref\":\"#\"}}}}"), "{s}");
+        assert!(
+            s.contains(
+                "\"$defs\":{\"B\":{\"type\":\"object\",\"properties\":{\"a\":{\"$ref\":\"#\"}}}}"
+            ),
+            "{s}"
+        );
     }
 
     #[test]
@@ -1041,17 +1202,32 @@ mod json_schema_tests {
                            age: Int64 where value >= 18 } where age < 150",
             "User",
         );
-        assert!(s.contains("\"name\":{\"type\":\"string\",\"minLength\":3}"), "{s}");
-        assert!(s.contains("\"age\":{\"type\":\"integer\",\"minimum\":18}"), "{s}");
-        assert!(s.contains("\"$comment\":\"constrained by: age < 150\""), "{s}");
+        assert!(
+            s.contains("\"name\":{\"type\":\"string\",\"minLength\":3}"),
+            "{s}"
+        );
+        assert!(
+            s.contains("\"age\":{\"type\":\"integer\",\"minimum\":18}"),
+            "{s}"
+        );
+        assert!(
+            s.contains("\"$comment\":\"constrained by: age < 150\""),
+            "{s}"
+        );
     }
 
     #[test]
     fn cross_field_record_documents_invariant() {
         let s = schema_of("type R = { a: Int64, b: Int64 } where a < b", "R");
         assert!(s.contains("\"type\":\"object\""), "still an object: {s}");
-        assert!(s.contains("\"required\":[\"a\",\"b\"]"), "required intact: {s}");
-        assert!(s.contains("\"$comment\":\"constrained by: a < b\""), "documents invariant: {s}");
+        assert!(
+            s.contains("\"required\":[\"a\",\"b\"]"),
+            "required intact: {s}"
+        );
+        assert!(
+            s.contains("\"$comment\":\"constrained by: a < b\""),
+            "documents invariant: {s}"
+        );
     }
 
     #[test]
@@ -1100,7 +1276,10 @@ mod json_schema_tests {
     #[test]
     fn payload_enum_emits_oneof() {
         // RFC-0024: a payload enum is externally tagged, arity-shaped `oneOf`.
-        let s = schema_of("type Shape = | Circle(Int64) | Rect(Int64, Int64) | Unit", "Shape");
+        let s = schema_of(
+            "type Shape = | Circle(Int64) | Rect(Int64, Int64) | Unit",
+            "Shape",
+        );
         assert_eq!(
             s,
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\
