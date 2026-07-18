@@ -207,5 +207,55 @@ fn std_tw_unit_tests_run_green() {
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "std/tw unit tests failed:\n{combined}");
-    assert!(combined.contains("14 passed, 0 failed"), "expected 14 green tests:\n{combined}");
+    assert!(combined.contains("17 passed, 0 failed"), "expected 17 green tests:\n{combined}");
+}
+
+// ---- soundness: a breakpoint key cannot forge the token grammar ------------
+
+#[test]
+fn a_forging_breakpoint_key_fails_generation() {
+    let dir = scratch("bpforge");
+    // `ev|xhack` as a breakpoint key would inject `(ev|xhack:)?` into the token
+    // regex, making a forged class like `evbg-white` match — defeating the type.
+    write(
+        &dir.join("theme.json"),
+        "{ \"colors\": { \"white\": \"#fff\" }, \"breakpoints\": { \"ev|xhack\": \"1px\" } }",
+    );
+    write(
+        &dir.join("app.vyrn"),
+        "import { tw } from \"std/tw\"\n\
+         import * as theme from tw(\"./theme.json\")\n\
+         import { Attr } from \"std/html\"\n\
+         fn main() -> Int64 {\n\
+         let c: Attr = theme.cls(\"evbg-white\")\n\
+         return 0\n\
+         }\n",
+    );
+    let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("check");
+    assert!(!out.status.success(), "a forging breakpoint key must fail generation (was: `evbg-white` compiled)");
+    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(err.contains("TW_UNSAFE_BREAKPOINT__ev_xhack"), "breakpoint diagnostic naming the key:\n{err}");
+}
+
+// ---- soundness: a CSS-injecting leaf value cannot reach the stylesheet ------
+
+#[test]
+fn a_css_injecting_value_fails_generation() {
+    let dir = scratch("cssinject");
+    // A color value carrying `}`…`{` would break out of its rule and inject a
+    // `body{display:none}` block into the served stylesheet.
+    write(
+        &dir.join("theme.json"),
+        "{ \"colors\": { \"evil\": \"red} body{display:none\" } }",
+    );
+    write(
+        &dir.join("app.vyrn"),
+        "import { tw } from \"std/tw\"\n\
+         import * as theme from tw(\"./theme.json\")\n\
+         fn main() -> Int64 { return 0 }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    assert!(!out.status.success(), "a CSS-injecting leaf value must fail generation");
+    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(err.contains("TW_UNSAFE_VALUE__colors_evil"), "value diagnostic naming the key:\n{err}");
 }

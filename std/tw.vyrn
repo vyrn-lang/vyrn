@@ -149,6 +149,71 @@ fn twClassSafe(name: String) -> Bool {
     return true
 }
 
+/// Leaf-VALUE safety (RFC-0032): a theme's CSS value is baked verbatim into a rule
+/// body (`background-color:<value>`) and a `@media (min-width:<value>)`, so an
+/// unvalidated value with `}`/`{`/`;`/whitespace escapes its rule and injects CSS
+/// into the served stylesheet. The accepted value grammar is narrow on purpose —
+/// exactly what a flat theme needs:
+///   - a HEX color: `#` then 3, 4, 6, or 8 hex digits (`#fff`, `#4f46e5`);
+///   - a LENGTH / number: starts with a digit or `.`, then only digits, `.`, an
+///     optional letter unit, or `%` (`0`, `0.25rem`, `9999px`, `100%`);
+///   - a bare CSS IDENT keyword: `[a-zA-Z][a-zA-Z0-9-]*` (`white`, `currentColor`).
+/// Anything else (a space, `{`, `}`, `;`, `:`, `(`, `)`, `,`) is rejected — no
+/// `rgb(…)`/multi-token value in v1; write such a rule in the app's own sheet.
+fn twValueSafe(v: String) -> Bool {
+    let ba = bytes(v)
+    if ba.length == 0 {
+        return false
+    }
+    let first = ba[0]
+    if first == 35 {
+        // `#` hex color: 3/4/6/8 hex digits.
+        let n = ba.length - 1
+        if n != 3 && n != 4 && n != 6 && n != 8 {
+            return false
+        }
+        let mut i = 1
+        while i < ba.length {
+            let b = ba[i]
+            let hex = (b >= 48 && b <= 57) || (b >= 97 && b <= 102) || (b >= 65 && b <= 70)
+            if hex == false {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+    let digitStart = (first >= 48 && first <= 57) || first == 46
+    if digitStart {
+        // A length / number: digits, dots, an optional letter unit, or `%`.
+        let mut i = 0
+        while i < ba.length {
+            let b = ba[i]
+            let ok = (b >= 48 && b <= 57) || b == 46 || (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || b == 37
+            if ok == false {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+    let alphaStart = (first >= 97 && first <= 122) || (first >= 65 && first <= 90)
+    if alphaStart {
+        // A bare CSS ident keyword: letters, digits, dashes.
+        let mut i = 0
+        while i < ba.length {
+            let b = ba[i]
+            let ok = (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) || b == 45
+            if ok == false {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+    return false
+}
+
 // ---- emitting Vyrn source: escape a raw string as a `"…"` literal -----------
 
 /// The second byte of a Vyrn string-literal escape for `b`, or 0 when `b` needs no
@@ -726,6 +791,42 @@ fn twUnsafeNameErrors(vocab: TwVocab) -> String {
     return out
 }
 
+/// One diagnostic line per BREAKPOINT key that is not `[a-z][a-z0-9-]*`. A
+/// breakpoint key becomes a `<bp>:` prefix in the `TwClass`/`Tw` regex AND a CSS
+/// selector prefix, so a key like `ev|xhack` would inject a bare regex alternative
+/// (`(ev|xhack:)?` — making `theme.cls("evbg-white")` COMPILE, silently defeating
+/// the type) or a metachar key would hard-error at the import site. Validated
+/// through the SAME rule as every other class-name segment closes the hole.
+fn twUnsafeBreakpointErrors(breakpoints: TwAxis) -> String {
+    let mut out = ""
+    for tok in breakpoints.tokens {
+        if twClassSafe(tok) == false {
+            out = out + "TW_UNSAFE_BREAKPOINT__" + twIdentOf(tok) + "\n"
+        }
+    }
+    return out
+}
+
+/// One diagnostic line per CSS-emitting leaf VALUE that is not `twValueSafe`. Every
+/// family EXCEPT `safelist` (whose leaves are class NAMES, checked separately)
+/// bakes its value into a rule body or a `@media` query, so an unvalidated `}`/`{`
+/// leaks structural CSS into the served stylesheet — the diagnostic names the
+/// offending dotted key.
+fn twUnsafeValueErrors(theme: TwTheme) -> String {
+    let families = twKnownFamilies()
+    let mut out = ""
+    let mut i = 0
+    while i < theme.keys.length {
+        if twContains(families, twHeadOf(theme.keys[i])) {
+            if twValueSafe(theme.vals[i]) == false {
+                out = out + "TW_UNSAFE_VALUE__" + twIdentOf(theme.keys[i]) + "\n"
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
 // ===========================================================================
 // CSS emission — a deterministic stylesheet baked at generation time. Family
 // order, theme order within a family, base rules then state variants, responsive
@@ -894,6 +995,12 @@ export gen fn tw(theme: String) -> String {
     if unknown != "" {
         return unknown
     }
+    // A leaf value is baked verbatim into the CSS — validate every CSS-emitting
+    // value before it can inject structure into the served stylesheet.
+    let unsafeValue = twUnsafeValueErrors(parsed)
+    if unsafeValue != "" {
+        return unsafeValue
+    }
     let vocab = twBuildVocab(parsed)
     if vocab.names.length == 0 {
         return "TW_ERROR__theme_yielded_no_classes\n"
@@ -908,6 +1015,12 @@ export gen fn tw(theme: String) -> String {
         return unsafeSafelist
     }
     let breakpoints = twAxisOf(parsed, "breakpoints")
+    // A breakpoint key becomes a regex prefix AND a CSS selector prefix — validate
+    // it through the same class-name rule so it cannot forge the token grammar.
+    let unsafeBreakpoint = twUnsafeBreakpointErrors(breakpoints)
+    if unsafeBreakpoint != "" {
+        return unsafeBreakpoint
+    }
     return twBuildModule(vocab, breakpoints, safelist)
 }
 
@@ -1037,4 +1150,43 @@ test "twUnknownKeyErrors names an unrecognised top-level key" {
     let t = twParseTheme("{ \"shadows\": { \"lg\": \"x\" } }")
     let e = twUnknownKeyErrors(t)
     assert(e.contains("TW_UNKNOWN_KEY__shadows"))
+}
+
+test "twValueSafe accepts hex/length/ident and rejects injection" {
+    assert(twValueSafe("#fff"))
+    assert(twValueSafe("#4f46e5"))
+    assert(twValueSafe("0"))
+    assert(twValueSafe("0.25rem"))
+    assert(twValueSafe("9999px"))
+    assert(twValueSafe("100%"))
+    assert(twValueSafe("white"))
+    assert(twValueSafe("currentColor"))
+    // Injection payloads and multi-token / structural values are rejected.
+    assertEq(twValueSafe("red} body{display:none"), false)
+    assertEq(twValueSafe("#ggg"), false)
+    assertEq(twValueSafe("#12345"), false)
+    assertEq(twValueSafe("rgb(0,0,0)"), false)
+    assertEq(twValueSafe("0 1px 2px"), false)
+    assertEq(twValueSafe(""), false)
+}
+
+test "twUnsafeValueErrors names a CSS-injecting leaf value by key" {
+    let t = twParseTheme("{ \"colors\": { \"evil\": \"red} body{display:none\" } }")
+    assert(t.ok)
+    let e = twUnsafeValueErrors(t)
+    assert(e.contains("TW_UNSAFE_VALUE__colors_evil"))
+    // A clean theme yields no value errors.
+    let ok = twParseTheme("{ \"colors\": { \"white\": \"#fff\" }, \"spacing\": { \"2\": \"0.5rem\" } }")
+    assertEq(twUnsafeValueErrors(ok), "")
+}
+
+test "twUnsafeBreakpointErrors names a forging breakpoint key" {
+    // A `|` in a breakpoint key would inject a bare regex alternative.
+    let t = twParseTheme("{ \"breakpoints\": { \"ev|xhack\": \"1px\" } }")
+    assert(t.ok)
+    let e = twUnsafeBreakpointErrors(twAxisOf(t, "breakpoints"))
+    assert(e.contains("TW_UNSAFE_BREAKPOINT__ev_xhack"))
+    // A normal breakpoint key passes.
+    let good = twParseTheme("{ \"breakpoints\": { \"md\": \"768px\" } }")
+    assertEq(twUnsafeBreakpointErrors(twAxisOf(good, "breakpoints")), "")
 }
