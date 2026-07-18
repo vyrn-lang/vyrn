@@ -1,6 +1,6 @@
 <script>
-props { items: Array<Item> }
 import { Item } from "./models"
+props { items: Array<Item> }
 </script>
 
 <template>

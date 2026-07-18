@@ -2,6 +2,7 @@
 // The shell widget: it imports the shared record types directly (RFC-0039 §3
 // dedups imports across component scripts, so a type used by more than one
 // component no longer forces a duplicate import into the synthesized module).
+import { BookView, TagCount, Labels } from "../types"
 props {
     labels: Labels,
     books: Array<BookView>,
@@ -13,7 +14,6 @@ props {
     draftTags: String,
     langLabel: String,
 }
-import { BookView, TagCount, Labels } from "../types"
 </script>
 
 <template>

@@ -1117,6 +1117,55 @@ fn vyxMatchCurly(ba: Array<UInt8>, open: Int64) -> Int64 {
     return ba.length
 }
 
+/// The 1-based FILE line of the first `import …` statement in the script section
+/// `[sStart, sEnd)` that begins AFTER the statement-leading `kwStr` (`props` /
+/// `params`) block — i.e. an import placed after the block, violating the
+/// imports-first rule (RFC-0040 §3). Returns 0 when no such block exists or every
+/// import correctly precedes it. Offsets are whole-file, so the line names the
+/// `.vyx` source directly.
+fn vyxImportsFirstViolation(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, kwStr: String) -> Int64 {
+    let kw = bytes(kwStr)
+    // Find the statement-leading block keyword inside the section (code-aware, so a
+    // match in a comment/string/helper identifier never counts).
+    let mut kwAt = 0 - 1
+    let mut from = sStart
+    let mut scanning = true
+    while scanning {
+        let at = vyxScanFindCode(ba, kw, from, true)
+        if at < 0 || at >= sEnd {
+            scanning = false
+        } else {
+            let afterAt = at + kw.length
+            let boundary = afterAt >= ba.length || vyxIsWs(ba[afterAt]) || ba[afterAt] == 123
+            if boundary && vyxLineLeading(ba, at) {
+                kwAt = at
+                scanning = false
+            } else {
+                from = at + 1
+            }
+        }
+    }
+    if kwAt < 0 {
+        return 0
+    }
+    // Any `import` line whose first byte lies after the block keyword is misordered.
+    let mut lineStart = sStart
+    let mut i = sStart
+    while i <= sEnd {
+        if i == sEnd || ba[i] == 10 {
+            if lineStart > kwAt {
+                let t = vyxTrim(vyxSlice(ba, lineStart, i))
+                if t.startsWith("import ") {
+                    return vyxLineAt(ba, lineStart)
+                }
+            }
+            lineStart = i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 /// Parse the `<script>` section text: pull the single `props {…}` block, collect
 /// (and rebase) import lines, and pass everything else through as helper source.
 fn vyxParseScript(script: String, dir: String, fileId: String) -> VyxScript {
@@ -1301,6 +1350,10 @@ export fn vyxCompileComponent(compName: String, source: String, dir: String) -> 
     let mut imports: Array<String> = []
     let mut helpers = ""
     if scriptSec.found {
+        let bad = vyxImportsFirstViolation(ba, scriptSec.start, scriptSec.end, "props")
+        if bad > 0 {
+            return vyxCompErr(compName, fnName, fileId, srcPath, vyxErr("VYX_IMPORTS_FIRST", fileId, bad))
+        }
         let sc = vyxParseScript(vyxSlice(ba, scriptSec.start, scriptSec.end), dir, fileId)
         if sc.err != "" {
             return vyxCompErr(compName, fnName, fileId, srcPath, sc.err)
@@ -2146,6 +2199,10 @@ export fn vyxPageShape(source: String) -> VyxPageShape {
     if scriptSec.found == false {
         return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, err: "" }
     }
+    let bad = vyxImportsFirstViolation(ba, scriptSec.start, scriptSec.end, "params")
+    if bad > 0 {
+        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, err: vyxErr("VYX_IMPORTS_FIRST", "vyx_page", bad) }
+    }
     let script = vyxSlice(ba, scriptSec.start, scriptSec.end)
     let sb = bytes(script)
     let pb = vyxFindKwBlock(sb, "params")
@@ -2218,6 +2275,12 @@ export fn vyxBuildPageModule(source: String, dir: String, themed: Bool, theme: S
     }
     let templateBody = vyxSlice(ba, templateSec.start, templateSec.end)
     let script = if scriptSec.found { vyxSlice(ba, scriptSec.start, scriptSec.end) } else { "" }
+    if scriptSec.found {
+        let bad = vyxImportsFirstViolation(ba, scriptSec.start, scriptSec.end, "params")
+        if bad > 0 {
+            return vyxErr("VYX_IMPORTS_FIRST", "vyx_page", bad)
+        }
+    }
 
     // Pull the `params { … }` fields; the rest of the script (imports + helpers,
     // incl. load/Data) stays, with load/Data auto-exported.
@@ -2243,7 +2306,10 @@ export fn vyxBuildPageModule(source: String, dir: String, themed: Bool, theme: S
     let propsInner = paramFields + dataField
     let mut synthScript = restExported
     if propsInner.length > 0 {
-        synthScript = "props { " + propsInner + " }\n" + restExported
+        // The synthetic component's `props` block trails the page's own imports so
+        // it satisfies the imports-first rule (RFC-0040 §3); the emitted module is
+        // order-independent (imports and helpers are collected separately).
+        synthScript = restExported + "props { " + propsInner + " }\n"
     }
     let synthSource = "<script>\n" + synthScript + "\n</script>\n<template>\n" + templateBody + "\n</template>\n"
     let comp = vyxCompileComponent("UiPageBody", synthSource, dir)
@@ -2464,6 +2530,41 @@ test "an unclosed element is rejected" {
     let src = "<template><li>oops</template>"
     let comp = vyxCompileComponent("Bad", src, "./c")
     assert(comp.err.contains("VYX_UNCLOSED_ELEMENT"))
+}
+
+test "a props block before an import is a named diagnostic (imports first)" {
+    let src = "<script>\nprops { x: Int64 }\nimport { t } from \"../s\"\n</script>\n<template><li>{{ x }}</li></template>"
+    let comp = vyxCompileComponent("Bad", src, "./c")
+    assert(comp.err.contains("VYX_IMPORTS_FIRST"))
+    assert(comp.err.contains("Bad_vyx"))
+    assert(comp.err.contains("line_3"))
+}
+
+test "imports before a props block compile" {
+    let src = "<script>\nimport { t } from \"../s\"\nprops { x: Int64 }\n</script>\n<template><li>{{ x }}</li></template>"
+    let comp = vyxCompileComponent("Ok", src, "./c")
+    assertEq(comp.err, "")
+    let out = vyxBuildModule([comp], false, "")
+    assert(out.contains("export fn ok(x: Int64) -> Html"))
+    assert(out.contains("from \"./c/../s\""))
+}
+
+test "a props keyword in a comment does not trip imports-first" {
+    let src = "<script>\nimport { t } from \"../s\"\n// props go here\nprops { x: Int64 }\n</script>\n<template><li>{{ x }}</li></template>"
+    let comp = vyxCompileComponent("Ok", src, "./c")
+    assertEq(comp.err, "")
+}
+
+test "a .vyx page with params before an import is rejected" {
+    let src = "<script>\nparams { id: String }\nimport { Paste } from \"../wire\"\n</script>\n<template><h1>{{ id }}</h1></template>"
+    let out = vyxBuildPageModule(src, "./routes", false, "")
+    assert(out.contains("VYX_IMPORTS_FIRST"))
+}
+
+test "a .vyx page with imports before params compiles" {
+    let src = "<script>\nimport { Paste } from \"../wire\"\nparams { id: String }\n</script>\n<template><h1>{{ id }}</h1></template>"
+    let out = vyxBuildPageModule(src, "./routes", false, "")
+    assert(out.contains("export fn page"))
 }
 
 test "a non-scalar event arg is rejected" {

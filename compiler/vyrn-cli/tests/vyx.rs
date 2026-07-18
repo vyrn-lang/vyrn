@@ -167,6 +167,36 @@ fn malformed_props_fails() {
 }
 
 #[test]
+fn props_before_import_fails_naming_the_file_and_line() {
+    let dir = scratch("importsfirst");
+    // A `props` block ahead of the import violates the imports-first rule.
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<script>\nprops { x: Int64 }\nimport { t } from \"../s\"\n</script>\n<template><li>{{ x }}</li></template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let (ok, err) = run_app(&dir);
+    assert!(!ok, "a props block before an import must fail to load");
+    assert!(err.contains("VYX_IMPORTS_FIRST"), "imports-first diagnostic:\n{err}");
+    assert!(err.contains("Widget_vyx"), "diagnostic names the file:\n{err}");
+    assert!(err.contains("line_3"), "diagnostic carries the import's line:\n{err}");
+}
+
+#[test]
+fn imports_before_props_loads_and_runs() {
+    let dir = scratch("importsok");
+    // Imports ahead of the props block is the required order — it loads and runs.
+    write(&dir.join("s.vyrn"), "export type T = { v: Int64 }\n");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<script>\nimport { T } from \"../s\"\nprops { x: T }\n</script>\n<template><li>{{ x.v }}</li></template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let (ok, err) = run_app(&dir);
+    assert!(ok, "imports-first must load and run:\n{err}");
+}
+
+#[test]
 fn missing_template_section_fails() {
     let dir = scratch("notemplate");
     write(&dir.join("comp/Widget.vyx"), "<script>props { x: Int64 }</script>\n");

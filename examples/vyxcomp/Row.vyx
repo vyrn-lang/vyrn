@@ -1,6 +1,6 @@
 <script>
-props { item: Item }
 import { Item } from "./models"
+props { item: Item }
 
 fn qtyClass(q: Int64) -> String {
     if q > 5 {

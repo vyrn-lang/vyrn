@@ -1,17 +1,11 @@
 <script>
-// Labels resolve HERE through the widget's own import of the app's labels
-// module (RFC-0039 §3: the synthesized components module dedups imports across
-// component scripts, so a shared module may be imported where it is used). The
-// root threads only the draft-state props it owns — and yes, this comment may
-// say props, template, and script freely: the v2 scanner never keyword-matches
-// inside comments (the v1 warning crutch this comment replaces is deleted).
+import { labelCreate, labelTitleField, labelLangField, labelBodyField, labelSave } from "../labels"
 props {
     draftTitle: String,
     draftLang: String,
     draftBody: String,
     issues: String,
 }
-import { labelCreate, labelTitleField, labelLangField, labelBodyField, labelSave } from "../labels"
 </script>
 
 <template>

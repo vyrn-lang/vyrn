@@ -2,9 +2,9 @@
 // The SSR paste-view body, rendered by the /p/[id] respond page (RFC-0039 §5).
 // Imports its own wire type and labels directly (§3 import dedup); the labels
 // module owns the program's single i18n instance.
-props { paste: Paste }
 import { Paste } from "../wire"
 import { labelAppTitle, labelNavHome, labelNavAbout, labelUntitled, labelViewRaw, labelBackHome, labelCreated } from "../labels"
+props { paste: Paste }
 
 fn displayTitle(p: Paste) -> String {
     if p.title.length == 0 {
