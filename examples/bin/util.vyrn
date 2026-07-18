@@ -1,18 +1,8 @@
-/// Local helpers the app needs but `std` does not provide: the content-addressed
-/// id derivation, imported by the store. (The `hasPrefix`/`dropPrefix` path
-/// helpers that served the v1 hand-dispatch are gone — RFC-0039 §5 moved
-/// `/p/<id>` and `/raw/<id>` into the generated router.)
-///
-/// FRICTION (see NOTES): the id hash WANTED to be FNV-1a, but Vyrn has NO bitwise
-/// operators (no XOR/AND/shift — only `+ - * / %`), so FNV's `hash ^= byte` is
-/// unwritable. This uses a polynomial rolling hash (`h = (h*base + byte) % mod`,
-/// Java-`hashCode`-style) instead, kept positive by the modulo. Two independent
-/// polynomials are concatenated for a longer digest, base36-rendered.
+/// Content-addressed id derivation: a polynomial rolling hash of the paste
+/// content, base36-rendered. Two independent polynomials are concatenated for a
+/// longer digest. (Vyrn has no bitwise operators, so not FNV-1a.)
 
-/// A base36 digit (0..35) as its ASCII byte: 0-9 then a-z. Read from a lookup
-/// table rather than computed, because Vyrn has no Int64->UInt8 arithmetic
-/// (`48 + n` is Int64; a byte push wants a UInt8). Reading an existing byte is
-/// the only conversion that type-checks. See NOTES.
+/// A base36 digit (0..35) as its ASCII byte: 0-9 then a-z, via a lookup table.
 fn digit36(n: Int64) -> UInt8 {
     let table = bytes("0123456789abcdefghijklmnopqrstuvwxyz")
     return table[n]
@@ -50,16 +40,14 @@ fn poly(s: String, base: Int64, md: Int64) -> Int64 {
     let sb = bytes(s)
     let mut h = 0
     for b in sb {
-        // `Int64(b)` widens the UInt8 (no implicit widening / UInt8 arithmetic in
-        // Vyrn — see NOTES); `+ 1` so a leading zero byte still perturbs the hash.
+        // +1 so a leading zero byte still perturbs the hash.
         h = (h * base + (Int64(b) + 1)) % md
     }
     return h
 }
 
-/// The FULL content digest of a paste's (body + "\u{1}" + title): 14 base36
-/// chars, two independent 7-char polynomial hashes concatenated. The store takes
-/// a short PREFIX of this and extends it on collision (see `store.deriveId`).
+/// The full 14-char content digest: two 7-char polynomial hashes concatenated.
+/// The store takes a short prefix and extends it on collision.
 export fn fullDigest(body: String, title: String) -> String {
     let material = body + "\n\t" + title
     let a = poly(material, 131, 2176782317)

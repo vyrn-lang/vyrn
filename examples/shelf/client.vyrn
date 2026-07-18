@@ -1,15 +1,8 @@
-/// The browser client ROOT. It holds all client-side view state (the fetched
-/// books, the tag histogram Map, the draft form, the delete-confirm id, the tag
-/// filter, the current locale) and drives the reactive UI through vyrn-dom.js.
-///
-/// RPC: the typed stubs come from `rpcClient("./contract")`, imported namespaced
-/// (`import * as api`, RFC-0027) — each takes a completion callback at the call
-/// site (`api.listBooks(onListBooks)`, `api.addBook(req, onAddBook)`, RFC-0040 §2),
-/// and the payload types (`api.BookList`, `api.BookResult`, …) the callbacks
-/// pattern-match. The ADD path
-/// validates the draft with `fromJson` (returns `Invalid` rather than trapping)
-/// before firing the stub; a genuine SERVER 422 is demoed from app.js, because a
-/// typed stub can never CONSTRUCT an invalid `AddBookReq` (it would trap).
+/// The browser client root. It holds all client-side view state (the fetched
+/// books, the tag histogram, the draft form, the delete-confirm id, the tag
+/// filter, the current locale) and drives the reactive UI. The typed RPC stubs
+/// each take a completion callback at the call site; the add path validates the
+/// draft with fromJson before firing the stub.
 import { rpcClient } from "std/rpc"
 import * as api from rpcClient("./contract")
 import { i18n } from "std/i18n"
@@ -20,10 +13,8 @@ import { componentsThemed } from "std/vyx"
 import { shelfApp, bookCard } from componentsThemed("./widgets", "./theme.json")
 import { Html, toHtmlString, diff } from "std/html"
 
-/// An UNVALIDATED mirror of `AddBookReq` — building this never traps, so a bad
-/// draft can be encoded then run through `fromJson` (which returns `Invalid`
-/// instead of trapping), surfacing the SAME Issues the server would. A real
-/// server 422 is demoed from app.js (a typed stub can never send invalid data).
+/// An unvalidated mirror of AddBookReq — constructing it never traps, so a bad
+/// draft can be encoded and run through fromJson to surface Issues instead.
 type RawAdd = { title: String, url: String, tags: Array<String> }
 
 /// A parseable Int64 alias (a handler arg arrives as String).
@@ -51,7 +42,7 @@ let mut detailUrl: String = ""
 let mut detailRating: Int64 = 0
 let mut detailTags: String = ""
 
-/// The retained previous view for the RFC-0035 patch protocol. `vyrnPatch` diffs
+/// The retained previous view for the patch protocol. `vyrnPatch` diffs
 /// the fresh view against this and returns only the changes, so a keystroke, a
 /// rate cycle, or a delete ships O(changes) ops instead of the whole shelf tree.
 let mut lastTree: Html = Empty
@@ -215,7 +206,7 @@ fn view() -> Html {
     return listView()
 }
 
-// ---- RPC completion callbacks (passed at each call site, RFC-0040 §2) --------
+// ---- RPC completion callbacks (passed at each call site) --------------------
 
 fn onListBooks(res: Validation<api.BookList>) {
     match res {
@@ -412,10 +403,8 @@ export extern fn vyrnView() -> String {
     return toJson(view())
 }
 
-/// The RFC-0035 patch loop: after boot, `web/vyrn-dom.js` calls this on every
-/// render and applies the returned op stream, so only the changed nodes cross
-/// the extern boundary. Its presence is the host's protocol switch; `view()`,
-/// the widgets, and every handler are untouched.
+/// The patch loop: the host calls this on every render and applies the returned
+/// op stream, so only the changed nodes cross the extern boundary.
 export extern fn vyrnPatch() -> String {
     let next = view()
     let ops = diff(lastTree, next)

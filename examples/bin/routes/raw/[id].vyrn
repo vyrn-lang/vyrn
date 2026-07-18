@@ -1,6 +1,5 @@
-/// GET /raw/[id] — the exact paste bytes as text/plain, INSIDE the router
-/// (RFC-0039 §5): `respond` owns the content type and status outright, which is
-/// exactly what the hand-dispatched route existed for.
+/// GET /raw/[id] — the exact paste bytes as text/plain; respond owns the content
+/// type and status outright.
 import { getPaste } from "../../contract"
 import { IdReq, Paste } from "../../wire"
 

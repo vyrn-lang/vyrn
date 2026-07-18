@@ -1,7 +1,5 @@
 <script>
-// The SSR paste-view body, rendered by the /p/[id] respond page (RFC-0039 §5).
-// The i18n accessors resolve against the program's single strings instance
-// (imports dedup across component scripts, RFC-0039 §3).
+// The SSR paste-view body, rendered by the /p/[id] route.
 import { Paste } from "../wire"
 import { i18n } from "std/i18n"
 import { tAppTitle, tNavHomeLabel, tNavAboutLabel, tBinUntitled, tBinViewRaw, tBinBackHome, tBinCreated } from i18n("../strings")

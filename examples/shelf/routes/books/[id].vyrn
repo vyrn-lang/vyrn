@@ -1,8 +1,6 @@
-/// GET /books/:id — a dynamic route with a loader (RFC-0026 M3). The `[id]`
-/// segment is parsed as Int64 by the router (a NON-INTEGER 404s before this runs).
-/// RFC-0029 lets the loader read the store DIRECTLY: it fetches the real book and
-/// the page server-renders it. A missing id (or the reserved 999) is an `Invalid`
-/// => the synthesized router's 422 issues page.
+/// GET /books/:id — a dynamic route with a loader. The [id] segment is parsed as
+/// Int64 (a non-integer 404s first); the loader fetches the real book and the page
+/// server-renders it. A missing id (or the reserved 999) yields the router's 422.
 import { detailPage } from "../../view"
 import { getBook } from "../../contract"
 import { Book, IdReq } from "../../wire"

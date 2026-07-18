@@ -1,22 +1,6 @@
-/// The shelf RPC contract (RFC-0019) — now a THIN, stateless boundary layer.
-/// `rpcServer("./contract")` (in `server.vyrn`) synthesizes the server router from
-/// these procedures; `rpcClient("./contract")` (in `client.vyrn`) re-emits the
-/// reachable wire types verbatim and synthesizes browser stubs.
-///
-/// RFC-0031 (the reachable type closure) is the point of this file's shape. The
-/// wire types live in `wire.vyrn`; the `books` state and the real procedure bodies
-/// live in `store.vyrn` (`import * as store`). This module only imports the wire
-/// types its signatures NAME and delegates each procedure to the store —
-/// `moduleInterface` follows the imports and hands `rpcClient` the full type
-/// closure (`Book`, `Title`, `Rating`, … reached through `store`/`wire`), so the
-/// generated client still re-emits every type though none is declared here.
-///
-/// Before RFC-0031, reflection saw only a module's OWN declarations, so the
-/// contract had to BE the store (see the RFC-0029 as-landed note, now superseded):
-/// every wire type had to be declared in the contract and the state had to live in
-/// it too. The cycle — a store needing `Book` from the contract while the contract
-/// needed the store's accessors — is gone: types flow down from the `wire` leaf,
-/// state lives in the store, and the contract is the boundary it was meant to be.
+/// The shelf RPC contract: a thin, stateless boundary. The server, client, and
+/// document generators read these procedure signatures; the wire types live in
+/// wire.vyrn and the bodies delegate to the store.
 import { IdReq, AddBookReq, RateReq, BookList, BookResult, DeleteResult, TagCounts } from "./wire"
 import * as store from "./store"
 

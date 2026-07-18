@@ -1,7 +1,6 @@
-/// GET / — the home page. RFC-0029 lets this page module read the `books` store
-/// DIRECTLY (via the contract's accessors), so the shelf list is server-rendered
-/// instead of a client-fetched shell. The browser client still mounts into `#app`
-/// for the interactive version (add / rate / delete / filter / locale toggle).
+/// GET / — the home page. The loader reads the books store through the contract
+/// accessors and server-renders the shelf list; the browser client mounts into
+/// #app for the interactive version (add / rate / delete / filter / locale).
 import { homePage } from "../view"
 import { listBooks, tagCounts } from "../contract"
 import { Html } from "std/html"

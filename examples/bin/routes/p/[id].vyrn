@@ -1,7 +1,6 @@
-/// GET /p/[id] — the SSR paste view, INSIDE the router (RFC-0039 §5): a
-/// `String` segment binds the content-addressed id, and `respond` (not `page`)
-/// keeps full status control so an unknown id is an honest 404. The body is the
-/// PasteView .vyx widget; only this thin dispatch glue is hand-written.
+/// GET /p/[id] — the SSR paste view. A String segment binds the content-addressed
+/// id; respond keeps full status control so an unknown id is a 404. The body is
+/// the PasteView widget.
 import { getPaste } from "../../contract"
 import { IdReq, Paste } from "../../wire"
 import { componentsThemed } from "std/vyx"

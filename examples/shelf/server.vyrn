@@ -1,14 +1,7 @@
-/// The shelf server ROOT. Two generators compose here (RFC-0029 makes both
-/// stateful-capable): `rpcServer("./contract")` synthesizes `rpcHandle` from the
-/// contract's REAL, stateful procedures (the `books` store now lives IN the
-/// contract module — see contract.vyrn), and `pages("./routes")` synthesizes
-/// `route` from the file-based pages directory. The page loaders read the SAME
-/// store directly (a page module is no longer forbidden state), so the home page
-/// server-renders the live list instead of a client-fetched shell.
-///
-/// The ~40-line hand-written RPC dispatch this file used to carry is GONE —
-/// `rpcHandle` is exactly what it reimplemented by hand. `handle` checks `/rpc/*`
-/// first (via the generated handler) and delegates everything else to `route`.
+/// The shelf server root: the RPC and Connect handlers, the OpenAPI and GraphQL
+/// documents, the page router, and the theme stylesheet, all built from one
+/// contract. Page loaders read the store directly, so the home page
+/// server-renders the live list.
 import { rpcServer } from "std/rpc"
 import { rpcHandle } from rpcServer("./contract")
 import { connectServer } from "std/connect"
@@ -22,28 +15,23 @@ import { route } from pages("./routes")
 import { tw } from "std/tw"
 import * as theme from tw("./theme.json")
 
-/// RFC-0037: a middleware is a STORED function value — each entry may answer a
-/// request outright (`Some`) or pass it along (`None`); the chain runs in
-/// registration order in front of the real routing.
+/// A middleware may answer a request outright (`Some`) or pass it along (`None`);
+/// the chain runs in registration order in front of routing.
 type Middleware = fn(Request) -> Option<Response>
 
-/// Module state holding closures (the RFC-0037 shape real servers use).
-let mut middleware: Array<Middleware> = []
-
-/// Register the default chain: request logging (observably runs for every
-/// request, never answers) and a guard that answers the `/admin` prefix
-/// outright before any route sees it.
-fn installMiddleware() {
-    middleware.push(|req| {
-            logger("http").info("\{req.method} \{req.path}")
-            return None
-        })
-    middleware.push(|req| if req.path =~ "/admin.*" {
-            Some(Response { status: 403, contentType: "text/plain", body: "forbidden" })
-        } else {
-            None
-        })
-}
+/// The chain, installed at module-state init: request logging (never answers),
+/// then a guard that answers the /admin prefix outright before any route runs.
+let mut middleware: Array<Middleware> = [
+        |req| {
+        logger("http").info("\{req.method} \{req.path}")
+        return None
+    },
+        |req| if req.path =~ "/admin.*" {
+        Some(Response { status: 403, contentType: "text/plain", body: "forbidden" })
+    } else {
+        None
+    },
+]
 
 /// Run the chain: the first `Some` wins; middleware after a hit never runs.
 fn runMiddleware(req: Request) -> Option<Response> {
@@ -55,9 +43,6 @@ fn runMiddleware(req: Request) -> Option<Response> {
 }
 
 fn handle(req: Request) -> Response {
-    if middleware.length == 0 {
-        installMiddleware()
-    }
     return match runMiddleware(req) {
         Some(r) => r,
         None => routed(req),
@@ -65,23 +50,18 @@ fn handle(req: Request) -> Response {
 }
 
 fn routed(req: Request) -> Response {
-    // RFC-0032: serve the theme-derived utility stylesheet from `css()`. It is a
-    // baked constant, so this is a plain string return with the CSS content type.
+    // Baked constants served with their conventional content types.
     if req.method == "GET" && req.path == "/theme.css" {
         return Response { status: 200, contentType: "text/css", body: theme.css() }
     }
-    // RFC-0038: the two contract-export DOCUMENTS, baked constants served with
-    // their conventional content types.
     if req.method == "GET" && req.path == "/openapi.json" {
         return Response { status: 200, contentType: "application/json", body: openapiJson() }
     }
     if req.method == "GET" && req.path == "/schema.graphql" {
         return Response { status: 200, contentType: "application/graphql", body: sdlText() }
     }
-    // RFC-0038: `rpcHandle` (the `/rpc/*` surface) and `connectHandle` (the
-    // Connect `/<service>.<Proc>` surface) mount side by side — ONE contract,
-    // two protocols. `rpcHandle` claims `/rpc/*`, `connectHandle` its own paths,
-    // and anything else falls through to page routing.
+    // rpcHandle (/rpc/*) and connectHandle (the Connect /<service>.<Proc> surface)
+    // mount side by side — one contract, two protocols; anything else routes.
     return match rpcHandle(req) {
         Some(r) => r,
         None => match connectHandle(req) {
@@ -92,8 +72,8 @@ fn routed(req: Request) -> Response {
 }
 
 fn main() -> Int64 {
-    // Drive `handle` so `vyrn run server.vyrn` is a quick smoke test over the
-    // live store (mutating calls persist for the process, so run order matters).
+    // A smoke over handle. Mutating calls persist for the process, so run order
+    // matters.
     let list = handle(Request { method: "POST", path: "/rpc/listBooks", body: "" })
     print("listBooks -> \{list.status}")
     let tags = handle(Request { method: "POST", path: "/rpc/tagCounts", body: "" })
@@ -102,11 +82,9 @@ fn main() -> Int64 {
     print("addBook(bad) -> \{bad.status}: \{bad.body}")
     let home = handle(Request { method: "GET", path: "/", body: "" })
     print("/ -> \{home.status}")
-    // RFC-0037 middleware: the guard answers /admin before any route runs.
+    // The guard answers /admin before any route runs.
     let blocked = handle(Request { method: "GET", path: "/admin/secrets", body: "" })
     print("/admin/secrets -> \{blocked.status}: \{blocked.body}")
-    // RFC-0038: the SAME contract answered over the Connect path shape, plus the
-    // two exported documents.
     let conn = handle(Request { method: "POST", path: "/contract.listBooks", body: "{}" })
     print("connect listBooks -> \{conn.status}")
     let badConn = handle(Request { method: "POST", path: "/contract.addBook", body: "{\"title\":\"\",\"url\":\"nope\",\"tags\":[]}" })

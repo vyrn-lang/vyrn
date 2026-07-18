@@ -1,14 +1,6 @@
-/// The shelf STORE — it OWNS the `books` module state (RFC-0029: a top-level
-/// `let` is legal in any module) and holds the REAL, stateful procedure bodies.
-/// It imports its wire types from `wire.vyrn` (RFC-0031) and exports its
-/// accessors; the thin `contract.vyrn` delegates every procedure here via
-/// `import * as store`.
-///
-/// This split is exactly what RFC-0031 unlocks: before it, reflection saw only a
-/// module's OWN declarations, so the contract had to BE the store (every wire type
-/// had to be declared in the contract for `rpcClient` to re-emit it). Now the
-/// state lives here, the types live in `wire.vyrn`, and the contract is honest
-/// boundary layer — "server-side Pinia, nothing special".
+/// The shelf store: owns the `books` module state and the stateful procedure
+/// bodies. It imports its wire types from wire.vyrn and exports its accessors;
+/// the contract delegates every procedure here.
 import { BookId, Rating, Stars, Title, Url, Tag, Book, IdReq, AddBookReq, RateReq, BookList, BookResult, DeleteResult, TagCounts } from "./wire"
 
 let mut books: Array<Book> = [

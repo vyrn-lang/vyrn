@@ -1,8 +1,6 @@
 <script>
-// GET / — the home page as a .vyx PAGE (RFC-0039 §4). Helpers read the store
-// directly through the contract accessors (RFC-0029); the i18n accessors resolve
-// against the program's single strings instance. The browser create-island
-// hydrates #app.
+// GET / — the home page. Helpers read the store through the contract accessors;
+// the browser create-island hydrates #app.
 import { listPastes } from "../contract"
 import { Paste } from "../wire"
 import { i18n } from "std/i18n"

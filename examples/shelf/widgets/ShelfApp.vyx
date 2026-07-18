@@ -1,7 +1,5 @@
 <script>
-// The shell widget: it imports the shared record types directly (RFC-0039 §3
-// dedups imports across component scripts, so a type used by more than one
-// component no longer forces a duplicate import into the synthesized module).
+// The shell widget: distributes the label bundle and book rows to its children.
 import { BookView, TagCount, Labels } from "../types"
 props {
     labels: Labels,

@@ -1,7 +1,6 @@
 <script>
-// GET /about — static prose + a live CLDR-plural demo (en + uk) as a .vyx PAGE
-// (RFC-0039 §4): the table rows are plain records built by a helper, rendered by
-// a keyed v-for.
+// GET /about — static prose plus a live CLDR-plural demo (en + uk): the table
+// rows are plain records built by a helper, rendered by a keyed v-for.
 import { i18n } from "std/i18n"
 import { tAppTitle, tNavHomeLabel, tNavAboutLabel, tBinCount, setLocale, locale, Locale } from i18n("../strings")
 

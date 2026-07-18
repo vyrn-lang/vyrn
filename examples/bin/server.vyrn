@@ -1,12 +1,5 @@
-/// The bin server ROOT. Generators compose here: `rpcServer("./contract")`
-/// synthesizes `rpcHandle` from the contract's REAL, stateful procedures (backed
-/// by the persistent `store`), `pagesThemed("./routes", "./theme.json")`
-/// synthesizes `route` for EVERY page — the `.vyx` pages (`/`, `/about`), the
-/// String-segment paste view (`/p/[id]`, a `respond` page), and the raw bytes
-/// (`/raw/[id]`, `respond` with its own content type) — `openapi` bakes the API
-/// document, and `tw("./theme.json")` the utility stylesheet. The v1
-/// hand-dispatch of `/p/<id>` and `/raw/<id>` is GONE (RFC-0039 §5: String
-/// segments + respond() moved both routes inside the router).
+/// The bin server root: RPC handler, page router, OpenAPI document, and theme
+/// stylesheet, composed from the contract and the routes directory.
 import { rpcServer } from "std/rpc"
 import { rpcHandle } from rpcServer("./contract")
 import { openapi } from "std/openapi"
@@ -53,8 +46,7 @@ fn routed(req: Request) -> Response {
     if req.method == "GET" && req.path == "/openapi.json" {
         return Response { status: 200, contentType: "application/json", body: openapiJson() }
     }
-    // The RPC surface (`/rpc/*`) claims its paths first; everything else is the
-    // generated page router (incl. /p/[id] and /raw/[id], RFC-0039 §5).
+    // The RPC surface (/rpc/*) claims its paths first; everything else routes.
     return match rpcHandle(req) {
         Some(r) => r,
         None => route(req),
@@ -62,10 +54,8 @@ fn routed(req: Request) -> Response {
 }
 
 fn main() -> Int64 {
-    // A READ-ONLY smoke over `handle`. NOTE (see NOTES): `vyrn serve`/`vyrn dev`
-    // run `main()` once at startup before serving, so a mutating main would seed
-    // the live store on every restart — main stays read-only. The persistence
-    // WRITE path is proven by the browser create flow (and the store tests).
+    // A read-only smoke over handle. `vyrn serve`/`vyrn dev` run main() once at
+    // startup, so it must not mutate the live store.
     let list = handle(Request { method: "POST", path: "/rpc/listPastes", body: "" })
     print("listPastes -> \{list.status}: \{list.body}")
     let bad = handle(Request { method: "POST", path: "/rpc/createPaste", body: "{\"title\":\"x\",\"body\":\"\",\"lang\":\"klingon\"}" })

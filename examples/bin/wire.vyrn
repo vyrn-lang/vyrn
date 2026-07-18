@@ -1,36 +1,25 @@
-/// The bin WIRE types — the validated records and scalars that cross the RPC
-/// boundary AND the persisted-file shape, in their OWN leaf module (RFC-0031).
-/// Nothing here holds state or behavior: `store.vyrn` imports these to type its
-/// `store` state, `persist.vyrn` imports `StoreFile` to serialize it, and the
-/// thin `contract.vyrn` imports the ones its procedure signatures name.
-///
-/// `rpcClient("./contract")` / `rpcServer("./contract")` reach every wire type
-/// below through `moduleInterface`'s reachable-type closure, so a type declared
-/// here is re-emitted into the generated client verbatim though the contract only
-/// imports it.
+/// The wire types: the validated records and scalars that cross the RPC boundary
+/// and define the persisted-file shape. Pure data — no state, no behavior.
 
-/// A paste id: a short content-addressed base36 string (see `util.deriveId`).
+/// A paste id: a short content-addressed base36 string.
 export type PasteId = String where value.length >= 1 && value.length <= 16
 
-/// A paste title. MAY be empty (rendered as "untitled"); length-bounded.
+/// A paste title. May be empty (rendered as "untitled").
 export type Title = String where value.length <= 80
 
-/// The paste body: non-empty, capped ~100k so a runaway paste can't blow the
-/// store file. A too-long body fails `fromJson` on the server => a 422.
+/// The paste body: non-empty, capped so a runaway paste can't bloat the store.
 export type Body = String where value.length >= 1 && value.length <= 100000
 
-/// The syntax label — a small FINITE set. An unknown lang fails validation.
+/// The syntax label — a small finite set; anything else fails validation.
 export type Lang = String where value == "vyrn" || value == "text" || value == "json" || value == "rust" || value == "js" || value == "html"
 
-/// The `created` stamp. NOT wall-clock time — Vyrn has no clock (parity
-/// determinism), so this is a monotonic sequence number from the store's
-/// persisted counter. See NOTES: the no-clock finding.
+/// The created stamp: a monotonic sequence number (Vyrn has no clock), not time.
 export type Created = Int64 where value >= 0
 
 /// A stored paste. Every field is validated on every decode boundary.
 export type Paste = { id: PasteId, title: Title, body: Body, lang: Lang, created: Created }
 
-// ---- request / response shapes (named so fromJson/jsonSchema can take them) --
+// ---- request / response shapes ----------------------------------------------
 
 /// The create payload (id + created are server-assigned, not sent by the client).
 export type CreateReq = { title: Title, body: Body, lang: Lang }
@@ -38,16 +27,13 @@ export type CreateReq = { title: Title, body: Body, lang: Lang }
 /// A lookup by id.
 export type IdReq = { id: PasteId }
 
-/// A list wrapper (a bare `Array<Paste>` is codable, but a named record keeps the
-/// wire an object and reads better as a procedure return).
+/// A list wrapper, so the wire stays an object.
 export type PasteList = { pastes: Array<Paste> }
 
-/// Application-level outcomes (RFC-0024): an `Err` is a 200 carrying `{"Err":..}`,
-/// distinct from a 422 request-validation failure.
+/// Application outcome: an Err is a 200 carrying {"Err":..}, distinct from a 422
+/// request-validation failure.
 export type PasteResult = Result<Paste, String>
 
-/// The PERSISTED file shape: the whole paste array plus the monotonic counter
-/// that drives both `created` stamps and (indirectly) id uniqueness. This is what
-/// `persist.saveStore` writes to `data/pastes.json` and `persist.loadStore` reads
-/// back — one record, round-tripped through the same codec the RPC wire uses.
+/// The persisted-file shape: the paste array plus the monotonic counter, written
+/// to data/pastes.json through the same codec the RPC wire uses.
 export type StoreFile = { pastes: Array<Paste>, counter: Created }

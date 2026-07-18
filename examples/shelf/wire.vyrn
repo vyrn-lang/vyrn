@@ -1,14 +1,7 @@
-/// The shelf WIRE types — the validated records and scalars that cross the
-/// RPC boundary, in their OWN leaf module (RFC-0031). Nothing here holds state
-/// or behavior; the store (`store.vyrn`) imports these to type its `books`, and
-/// the thin `contract.vyrn` imports the ones its procedure signatures name.
-///
-/// `rpcClient("./contract")` / `rpcServer("./contract")` reach every type below
-/// through `moduleInterface`'s reachable-type closure — a wire type declared here
-/// is re-emitted into the generated client verbatim even though the contract only
-/// imports it. Before RFC-0031 reflection saw a module's OWN declarations only, so
-/// every wire type had to live in the contract and the contract had to BE the
-/// store; now types flow down from this leaf and the contract is a thin boundary.
+/// The shelf wire types: the validated records and scalars that cross the RPC
+/// boundary, in their own leaf module. Pure data — no state, no behavior. The
+/// store types its `books` from these; the contract names the ones its procedure
+/// signatures use.
 
 /// A book id (non-negative). A plain Int64 on the wire.
 export type BookId = Int64 where value >= 0
@@ -23,8 +16,7 @@ export type Stars = Int64 where value >= 0 && value <= 5
 /// A non-empty, bounded title.
 export type Title = String where value.length >= 1 && value.length <= 80
 
-/// A URL: must look like http(s)://…  (a real regex-validated string, RFC-0020).
-/// A bad URL fails `fromJson` on the server => structured 422 issues.
+/// A URL: must look like http(s)://…  A bad URL fails validation => a 422.
 export type Url = String where value =~ "https?://.+"
 
 /// A short tag label.
@@ -33,21 +25,19 @@ export type Tag = String where value.length >= 1 && value.length <= 20
 /// A stored book. Every field is validated on every decode boundary.
 export type Book = { id: BookId, title: Title, url: Url, tags: Array<Tag>, rating: Stars }
 
-// ---- request / response shapes (named so fromJson/jsonSchema can take them) --
+// ---- request / response shapes --------------------------------------------
 
 export type IdReq = { id: BookId }
 export type AddBookReq = { title: Title, url: Url, tags: Array<Tag> }
 export type RateReq = { id: BookId, rating: Rating }
 
-/// A list wrapper (a bare `Array<Book>` is codable, but a named record keeps the
-/// wire an object and reads better as a procedure return).
+/// A list wrapper, so the wire stays an object.
 export type BookList = { books: Array<Book> }
 
-/// Application-level outcomes (RFC-0024): an `Err` is a 200 carrying `{"Err":..}`,
-/// distinct from a 422 request-validation failure.
+/// Application outcome: an Err is a 200 carrying {"Err":..}, distinct from a 422
+/// request-validation failure.
 export type BookResult = Result<Book, String>
 export type DeleteResult = Result<Bool, String>
 
-/// Tag -> count. A `Map<String, Int64>` crossing the wire as a JSON object
-/// (RFC-0028) — the map pillar end to end.
+/// Tag -> count: a Map<String, Int64> crossing the wire as a JSON object.
 export type TagCounts = Map<String, Int64>

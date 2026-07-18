@@ -1,14 +1,5 @@
-/// The bin RPC contract (RFC-0019) — a THIN, stateless boundary layer.
-/// `rpcServer("./contract")` (in `server.vyrn`) synthesizes the server router from
-/// these procedures; `rpcClient("./contract")` (in `client.vyrn`) re-emits the
-/// reachable wire types verbatim and synthesizes browser stubs. `openapi("./contract")`
-/// emits the OpenAPI document.
-///
-/// The wire types live in `wire.vyrn`; the `store` state and the real procedure
-/// bodies live in `store.vyrn` (`import * as store`). `moduleInterface` follows
-/// the imports (RFC-0031) and hands the generators the full reachable type
-/// closure, so the generated client re-emits every type though none is declared
-/// here. This module only names the types its signatures use and delegates.
+/// The RPC contract: a thin, stateless boundary. The server, client, and OpenAPI
+/// generators read these procedure signatures; the bodies delegate to the store.
 import { CreateReq, IdReq, PasteList, PasteResult } from "./wire"
 import * as store from "./store"
 

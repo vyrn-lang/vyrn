@@ -1,13 +1,7 @@
-/// Shared server-side view helpers: the page shell (localized nav) and the
-/// page bodies. Lives in the APP ROOT-adjacent module tree so paths resolve.
-///
-/// RFC-0029 restores the ERGONOMIC i18n: this imports the LIVE `i18n("./strings")`
-/// generator (not a pre-generated, state-stripped file) and uses its STATEFUL
-/// accessors — `setLocale(l)` then `tAppTitle()` — instead of threading an
-/// explicit `loc: Locale` through every call. The generated module owns its
-/// `currentLocale` state, which every module may now do. The home page also reads
-/// the `books` store DIRECTLY (a page module is no longer forbidden state) and
-/// server-renders the live list.
+/// Shared server-side view helpers: the page shell (localized nav) and the page
+/// bodies. Labels come from the live i18n instance via its stateful accessors
+/// (setLocale then tAppTitle), and the home page reads the books store directly to
+/// server-render the live list.
 import { el, text, Html, Attr } from "std/html"
 import { i18n } from "std/i18n"
 import { setLocale, locale, Locale, tAppTitle, tAppTagline, tNavHomeLabel, tNavAboutLabel, tShelfCount, tShelfEmpty, tShelfTags, transKey, t } from i18n("./strings")
@@ -15,9 +9,8 @@ import { tw } from "std/tw"
 import * as theme from tw("./theme.json")
 import { Book, BookList, TagCounts } from "./wire"
 
-/// A nav link, styled with theme utilities: the `hover:` state variant recolours
-/// on hover (RFC-0032 pseudo-class emission), all checked against `Tw` at compile
-/// time — a typo in the class string here would fail `vyrn check`.
+/// A nav link, styled with theme utilities checked against Tw at compile time —
+/// a typo in the class string here would fail `vyrn check`.
 fn navLink(href: String, label: String) -> Html {
     return el("a", [A("href", href), theme.cls("mr-2 hover:text-brand-600")], [text(label)])
 }

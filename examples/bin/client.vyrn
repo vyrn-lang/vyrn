@@ -1,24 +1,15 @@
-/// The browser client ROOT — the CREATE ISLAND that hydrates `#app` on the home
-/// page. It holds the draft form state, validates the draft with `fromJson`
-/// (which returns `Invalid` rather than trapping, unlike constructing a validated
-/// `CreateReq` directly), fires the typed `createPaste` stub, and on success asks
-/// the host to SOFT-NAVIGATE to the new paste (`/p/<id>`) via an extern the boot
-/// wires to `window.vyrnNav.navigate`.
-///
-/// RPC: typed stubs from `rpcClient("./contract")`, imported namespaced
-/// (`import * as api`, RFC-0027). Each stub takes a completion callback at the
-/// call site (`api.createPaste(req, onCreatePaste)`, RFC-0040 §2). Labels resolve
-/// INSIDE the `.vyx` widget via its own `i18n("../strings")` import (RFC-0039 §3
-/// import dedup killed the scalar threading) — this root threads only draft state.
+/// The browser client root: the create island that hydrates #app on the home
+/// page. It holds the draft form state, validates the draft with fromJson, fires
+/// the typed createPaste stub with a completion callback, and on success asks the
+/// host to soft-navigate to the new paste via the takeNav extern.
 import { rpcClient } from "std/rpc"
 import * as api from rpcClient("./contract")
 import { componentsThemed } from "std/vyx"
 import { createForm } from componentsThemed("./widgets", "./theme.json")
 import { Html, toHtmlString, diff } from "std/html"
 
-/// An UNVALIDATED mirror of `CreateReq` — building this never traps, so a bad
-/// draft can be encoded then run through `fromJson` (which returns `Invalid`),
-/// surfacing the SAME Issues the server would rather than trapping the client.
+/// An unvalidated mirror of CreateReq — constructing it never traps, so a bad
+/// draft can be encoded and run through fromJson to surface Issues instead.
 type RawCreate = { title: String, body: String, lang: String }
 
 // ---- client view state (module state) --------------------------------------
@@ -28,11 +19,11 @@ let mut draftBody: String = ""
 let mut draftLang: String = "text"
 let mut issues: String = ""
 
-/// The soft-nav target the host should navigate to after a successful create,
-/// or "" for none. `takeNav` (below) hands it to the boot JS, which clears it.
+/// The soft-nav target after a successful create, or "" for none. takeNav hands
+/// it to the host, which clears it.
 let mut navTarget: String = ""
 
-/// The retained previous view for the RFC-0035 patch protocol.
+/// The retained previous view, for the patch protocol.
 let mut lastTree: Html = Empty
 
 // ---- helpers ---------------------------------------------------------------
@@ -59,10 +50,8 @@ fn view() -> Html {
 
 // ---- RPC completion callback ------------------------------------------------
 
-/// Passed to `api.createPaste` at the call site (RFC-0040 §2). The client never
-/// calls `listPastes`/`getPaste` — the home list and paste view are
-/// server-rendered — so those procedures need no callback here at all (their
-/// server procs + codecs stay exercised by the store tests and the smoke).
+/// Passed to api.createPaste at the call site. The home list and paste view are
+/// server-rendered, so listPastes/getPaste need no client callback.
 fn onCreatePaste(res: Validation<api.PasteResult>) {
     match res {
         Valid(r) => afterCreate(r),
@@ -82,7 +71,7 @@ fn setIssues(s: String) {
     issues = s
 }
 
-// ---- event handlers (exported to JS, one String arg — the locked ABI) -------
+// ---- event handlers (exported to JS, one String arg) ------------------------
 
 export extern fn setDraftTitle(arg: String) {
     draftTitle = arg
@@ -94,9 +83,8 @@ export extern fn setDraftLang(arg: String) {
     draftLang = arg
 }
 
-/// Validate the draft with `fromJson` (returns `Invalid` instead of trapping);
-/// valid => fire the typed stub (a real server round trip), invalid => surface
-/// the Issues in the form.
+/// Validate the draft with fromJson; valid => fire the typed stub, invalid =>
+/// surface the Issues in the form.
 export extern fn submitCreate(arg: String) {
     let raw = RawCreate { title: draftTitle, body: draftBody, lang: draftLang }
     match fromJson(api.CreateReq, toJson(raw)) {
@@ -105,20 +93,20 @@ export extern fn submitCreate(arg: String) {
     }
 }
 
-/// Hand the pending soft-nav target to the host (and clear it). The boot JS polls
-/// this after each render; a non-empty result triggers `window.vyrnNav.navigate`.
+/// Hand the pending soft-nav target to the host and clear it. The host polls this
+/// after each render; a non-empty result triggers a navigation.
 export extern fn takeNav() -> String {
     let target = navTarget
     navTarget = ""
     return target
 }
 
-/// The boot view as JSON for vyrn-dom.js.
+/// The boot view as JSON for the host.
 export extern fn vyrnView() -> String {
     return toJson(view())
 }
 
-/// The RFC-0035 patch loop: only changed nodes cross the extern boundary.
+/// The patch loop: only changed nodes cross the extern boundary.
 export extern fn vyrnPatch() -> String {
     let next = view()
     let ops = diff(lastTree, next)
