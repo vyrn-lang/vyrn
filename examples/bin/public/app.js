@@ -35,8 +35,8 @@ async function bootApp(mountEl) {
     if (target) softNav(target);
   }
 
-  // Every RPC completion updates module state via on<Proc>; re-render, then check
-  // for a queued navigation.
+  // Every RPC completion runs the callback the stub stored (updating module
+  // state); re-render, then check for a queued navigation.
   rpc.bind(
     new Proxy(app.exports, {
       get(target, prop) {

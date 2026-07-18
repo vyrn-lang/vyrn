@@ -2,42 +2,42 @@
 /// this is an ordinary three-way parity citizen (interp == native == wasm).
 ///
 /// `rpcInProcess("./fullstack/api")` reads the SAME contract the browser demo
-/// serves and synthesizes **same-named** `<proc>` dispatchers that run the real
-/// procedures and hand the result to the plain `on<Proc>` handlers below — no
-/// wire, no externs, no host. Same-named stubs come from import aliasing
-/// (RFC-0022): the generated module imports each procedure as `<proc>__real` and
-/// its stub takes the real name. The wire flavors (`rpcServer` / `rpcClient`) add
-/// a network and a JS runtime, so they live in `examples/fullstack/` under
-/// `vyrn dev`; this file keeps the contract's logic covered by the parity corpus.
+/// serves and synthesizes **same-named** `<proc>(req, cb)` dispatchers that run the
+/// real procedures and hand the result to the callback synchronously — no wire, no
+/// externs, no host. Same-named stubs come from import aliasing (RFC-0022): the
+/// generated module imports each procedure as `<proc>__real` and its stub takes the
+/// real name. The wire flavors (`rpcServer` / `rpcClient`) add a network and a JS
+/// runtime, so they live in `examples/fullstack/` under `vyrn dev`; this file keeps
+/// the contract's logic covered by the parity corpus.
 ///
 /// Inspect the synthesized dispatch module with:  vyrn emit-gen examples/rpc.vyrn
 import { rpcInProcess } from "std/rpc"
 import { getUser, createUser, deleteUser } from rpcInProcess("./fullstack/api")
 import { GetUserReq, CreateUserReq, User, DeleteReq, DeleteResult } from "./fullstack/api"
 
-// Module state: the last dispatch result, filled by the handlers below.
+// Module state: the last dispatch result, filled by the callbacks below.
 let mut line: String = "(none)"
 
-/// The completion handler for `getUser` — in-process, always `Valid`.
-fn onGetUser(id: Int64, res: Validation<User>) {
+/// The completion callback for `getUser` — in-process, always `Valid`.
+fn onGetUser(res: Validation<User>) {
     line = match res {
         Valid(u) => "getUser -> \{u.name} (age \{u.age})",
         Invalid(issues) => "getUser failed",
     }
 }
 
-/// The completion handler for `createUser`.
-fn onCreateUser(id: Int64, res: Validation<User>) {
+/// The completion callback for `createUser`.
+fn onCreateUser(res: Validation<User>) {
     line = match res {
         Valid(u) => "createUser -> id \{u.id} \{u.name}",
         Invalid(issues) => "createUser failed",
     }
 }
 
-/// The completion handler for `deleteUser` — a `Result` procedure (RFC-0024). An
+/// The completion callback for `deleteUser` — a `Result` procedure (RFC-0024). An
 /// application-level `Err` is a `Valid(Err(..))` here, distinct from the wire's
 /// decode failures (`Invalid`).
-fn onDeleteUser(id: Int64, res: Validation<DeleteResult>) {
+fn onDeleteUser(res: Validation<DeleteResult>) {
     line = match res {
         Valid(r) => match r {
             Ok(done) => "deleteUser -> ok",
@@ -48,30 +48,30 @@ fn onDeleteUser(id: Int64, res: Validation<DeleteResult>) {
 }
 
 fn main() -> Int64 {
-    getUser(GetUserReq { id: 7 })
+    getUser(GetUserReq { id: 7 }, onGetUser)
     print(line)
-    createUser(CreateUserReq { name: "Ada", age: 36 })
+    createUser(CreateUserReq { name: "Ada", age: 36 }, onCreateUser)
     print(line)
-    deleteUser(DeleteReq { id: 5 })
+    deleteUser(DeleteReq { id: 5 }, onDeleteUser)
     print(line)
-    deleteUser(DeleteReq { id: 0 })
+    deleteUser(DeleteReq { id: 0 }, onDeleteUser)
     print(line)
     return 0
 }
 
 test "in-process getUser runs the real contract procedure" {
-    getUser(GetUserReq { id: 42 })
+    getUser(GetUserReq { id: 42 }, onGetUser)
     assertEq(line, "getUser -> user42 (age 30)")
 }
 
 test "in-process createUser echoes its validated fields" {
-    createUser(CreateUserReq { name: "Grace", age: 45 })
+    createUser(CreateUserReq { name: "Grace", age: 45 }, onCreateUser)
     assertEq(line, "createUser -> id 1000 Grace")
 }
 
 test "in-process deleteUser carries a Result outcome (RFC-0024)" {
-    deleteUser(DeleteReq { id: 5 })
+    deleteUser(DeleteReq { id: 5 }, onDeleteUser)
     assertEq(line, "deleteUser -> ok")
-    deleteUser(DeleteReq { id: 0 })
+    deleteUser(DeleteReq { id: 0 }, onDeleteUser)
     assertEq(line, "deleteUser -> refused: cannot delete the root user")
 }

@@ -163,9 +163,11 @@ no framework, nothing new in the shim.
   completion dispatcher per procedure, `vyrnRpcDone<Proc>(id, status, body)`.
   `makeRpcTransport({ baseUrl })` supplies the extern (a `fetch` `POST` to
   `<baseUrl>/rpc/<name>`) and, when the request settles, calls the matching
-  dispatcher back into the module — so your plain Vyrn `onGetUser(id, res)` runs
-  with a decoded `Validation<T>`. The proc→dispatcher name is the shared
-  convention: `vyrnRpcDone` + the procedure name with its first letter uppercased
+  dispatcher back into the module with the **same id** the extern returned — the
+  module routes the reply to the pending callback the stub stored under that id
+  (RFC-0040 §2), so the callback you passed at the call site runs with a decoded
+  `Validation<T>`. The proc→dispatcher name is the shared convention:
+  `vyrnRpcDone` + the procedure name with its first letter uppercased
   (`getUser` → `vyrnRpcDoneGetUser`). A network failure reports **status 0**,
   which the generated unifier turns into an `rpc.transport` "unreachable" `Issue`.
   `runVyrnRpc(bytes, { baseUrl })` wires it onto `runVyrn` in one call.
@@ -177,17 +179,18 @@ no framework, nothing new in the shim.
     exportReturns: { uiUser: "string" },   // name any String-returning getters
   });
   exports.loadUser(7n);   // your exported wrapper fires the typed stub; the
-                          // reply flows to the Vyrn `onGetUser` handler
+                          // reply flows to the callback it passed
   ```
 
-- **[vyrn-query.js](vyrn-query.js) — the cache ("colada").** ~110 lines, zero
-  deps. `createQueryClient({ exports, baseUrl })` keys requests by
-  `(proc, requestJson)`: concurrent callers share one in-flight fetch (dedupe), a
-  settled entry is served within `staleTime`, `invalidate(proc | key)` drops
-  entries and `refetch` forces a new one; `fetchCount` is observable. It drives
-  the *same* dispatchers, so it is a cache in front of the transport, not a
-  parallel path. Deliberately not TanStack Query — no retries, no focus
-  revalidation, no GC.
+- **[vyrn-query.js](vyrn-query.js) — the cache ("colada").** ~120 lines, zero
+  deps. `createQueryClient({ baseUrl, staleTime })` **is a transport**: it
+  supplies `vyrnRpcCall`, mints the request ids the module's pending-callback
+  maps key on, and dispatches every settle (network or cache) under the same id.
+  Requests key by `(proc, requestJson)`: concurrent callers share one in-flight
+  fetch (dedupe), a settled entry is served within `staleTime`,
+  `invalidate(proc | key)` drops entries; `fetchCount` is observable. Drop it in
+  the extern slot *instead of* vyrn-rpc.js's transport. Deliberately not
+  TanStack Query — no retries, no focus revalidation, no GC.
 
 **`vyrn dev`** ties it together for local development: it reads `vyrn.json`'s
 `server` / `client` (+ optional `public`), builds the client to wasm (a *plain*

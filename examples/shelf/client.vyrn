@@ -2,10 +2,11 @@
 /// books, the tag histogram Map, the draft form, the delete-confirm id, the tag
 /// filter, the current locale) and drives the reactive UI through vyrn-dom.js.
 ///
-/// RPC: the typed stubs + completion dispatchers come from `rpcClient("./contract")`,
-/// imported namespaced (`import * as api`, RFC-0027) — `api.listBooks()`,
-/// `api.addBook(api.AddBookReq { .. })`, and the payload types (`api.BookList`,
-/// `api.BookResult`, …) the completion handlers pattern-match. The ADD path
+/// RPC: the typed stubs come from `rpcClient("./contract")`, imported namespaced
+/// (`import * as api`, RFC-0027) — each takes a completion callback at the call
+/// site (`api.listBooks(onListBooks)`, `api.addBook(req, onAddBook)`, RFC-0040 §2),
+/// and the payload types (`api.BookList`, `api.BookResult`, …) the callbacks
+/// pattern-match. The ADD path
 /// validates the draft with `fromJson` (returns `Invalid` rather than trapping)
 /// before firing the stub; a genuine SERVER 422 is demoed from app.js, because a
 /// typed stub can never CONSTRUCT an invalid `AddBookReq` (it would trap).
@@ -27,6 +28,11 @@ type RawAdd = { title: String, url: String, tags: Array<String> }
 
 /// A parseable Int64 alias (a handler arg arrives as String).
 type IntArg = Int64
+
+/// The wire shape of a server 422 (`{"issues":[…]}`) — mirrored here for the
+/// raw-payload demo: app.js POSTs a body no typed stub could build and hands the
+/// server's reply to `showServerIssues` for rendering.
+type IssueBag = { issues: Array<Issue> }
 
 // ---- client view state (module state; the locale lives in the i18n module) --
 
@@ -209,9 +215,9 @@ fn view() -> Html {
     return listView()
 }
 
-// ---- RPC completion handlers (called by the generated dispatchers) ----------
+// ---- RPC completion callbacks (passed at each call site, RFC-0040 §2) --------
 
-fn onListBooks(id: Int64, res: Validation<api.BookList>) {
+fn onListBooks(res: Validation<api.BookList>) {
     match res {
         Valid(l) => setBooks(l),
         Invalid(iss) => setIssues(renderIssues(iss)),
@@ -221,16 +227,11 @@ fn setBooks(l: api.BookList) {
     books = l.books
 }
 
-/// Completion handler for the contract's `tagCounts` procedure. The reactive tag
-/// panel now derives its histogram from `books` (see `histogram`/`tagViews`), so
-/// the client no longer depends on this server round-trip — but the generated
-/// dispatcher `vyrnRpcDoneTagCounts` still calls `onTagCounts`, so it must exist.
-/// It intentionally does nothing (the server proc + its Map round-trip remain
-/// exercised by the contract's own tests).
-fn onTagCounts(id: Int64, res: Validation<api.TagCounts>) {
-}
-
-fn onGetBook(id: Int64, res: Validation<api.BookResult>) {
+/// The reactive tag panel derives its histogram from `books` (see
+/// `histogram`/`tagViews`), so the client never calls `tagCounts` — with callbacks
+/// passed at the call site, that procedure simply needs no handler here (the server
+/// proc + its Map round-trip stay exercised by the contract's own tests).
+fn onGetBook(res: Validation<api.BookResult>) {
     match res {
         Valid(r) => showDetail(r),
         Invalid(iss) => setDetailStatus(renderIssues(iss)),
@@ -253,7 +254,7 @@ fn setDetailStatus(s: String) {
     detailStatus = s
 }
 
-fn onAddBook(id: Int64, res: Validation<api.BookResult>) {
+fn onAddBook(res: Validation<api.BookResult>) {
     match res {
         Valid(r) => afterAdd(r),
         Invalid(iss) => setIssues(renderIssues(iss)),
@@ -273,7 +274,7 @@ fn addSucceeded() {
     refetch()
 }
 
-fn onDeleteBook(id: Int64, res: Validation<api.DeleteResult>) {
+fn onDeleteBook(res: Validation<api.DeleteResult>) {
     match res {
         Valid(r) => afterDelete(r),
         Invalid(iss) => setIssues(renderIssues(iss)),
@@ -291,7 +292,7 @@ fn refetchClear() {
     refetch()
 }
 
-fn onRateBook(id: Int64, res: Validation<api.BookResult>) {
+fn onRateBook(res: Validation<api.BookResult>) {
     match res {
         Valid(r) => afterRate(r),
         Invalid(iss) => setIssues(renderIssues(iss)),
@@ -313,7 +314,7 @@ fn setIssues(s: String) {
 /// list AND its tag counts in a single render — no second, racing `tagCounts`
 /// RPC, hence no post-delete stale window.
 fn refetch() {
-    api.listBooks()
+    api.listBooks(onListBooks)
 }
 
 // ---- event handlers (exported to JS, one String arg — the locked ABI) -------
@@ -327,7 +328,7 @@ export extern fn bootDetail(arg: String) {
     mode = "detail"
     detailId = parseId(arg)
     detailStatus = "loading…"
-    api.getBook(api.IdReq { id: detailId })
+    api.getBook(api.IdReq { id: detailId }, onGetBook)
 }
 
 export extern fn setDraftTitle(arg: String) {
@@ -346,7 +347,7 @@ export extern fn setDraftTags(arg: String) {
 export extern fn submitAdd(arg: String) {
     let raw = RawAdd { title: draftTitle, url: draftUrl, tags: splitTrim(draftTags, 44) }
     match fromJson(api.AddBookReq, toJson(raw)) {
-        Valid(req) => api.addBook(req),
+        Valid(req) => api.addBook(req, onAddBook),
         Invalid(iss) => setIssues(renderIssues(iss)),
     }
 }
@@ -361,14 +362,14 @@ export extern fn confirmDelete(arg: String) {
     deleteById(parseId(arg))
 }
 fn deleteById(id: Int64) {
-    api.deleteBook(api.IdReq { id: id })
+    api.deleteBook(api.IdReq { id: id }, onDeleteBook)
 }
 
 /// Cycle a book's rating 0/5 -> 1 -> … -> 5 -> 1 (always a valid 1..5 request).
 export extern fn cycleRate(arg: String) {
     let id = parseId(arg)
     let next = nextRating(id)
-    api.rateBook(api.RateReq { id: id, rating: next })
+    api.rateBook(api.RateReq { id: id, rating: next }, onRateBook)
 }
 fn nextRating(id: Int64) -> Int64 {
     for b in books {
@@ -380,6 +381,15 @@ fn nextRating(id: Int64) -> Int64 {
         }
     }
     return 1
+}
+
+/// Render a raw server 422 body (the raw-payload demo). A body that is not an
+/// issue bag surfaces the decode issues instead.
+export extern fn showServerIssues(arg: String) {
+    match fromJson(IssueBag, arg) {
+        Valid(bag) => setIssues(renderIssues(bag.issues)),
+        Invalid(iss) => setIssues(renderIssues(iss)),
+    }
 }
 
 export extern fn setFilter(arg: String) {

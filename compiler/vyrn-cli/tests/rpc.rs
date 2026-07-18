@@ -239,12 +239,26 @@ fn emit_gen_client_shows_stubs_and_dispatchers() {
     let src = String::from_utf8_lossy(&out.stdout);
     // The single shared transport, declared once.
     assert!(src.contains("extern fn vyrnRpcCall(name: String, body: String) -> Int64"), "{src}");
-    // A same-named stub and a completion dispatcher per procedure.
-    assert!(src.contains("export fn getUser(req: GetUserReq)"), "getUser stub:\n{src}");
+    // Each stub takes (req, cb) and records the callback under the call id
+    // (RFC-0040 §2); the completion dispatcher routes the reply to it.
+    assert!(
+        src.contains("export fn getUser(req: GetUserReq, cb: fn(Validation<User>))"),
+        "getUser stub:\n{src}"
+    );
+    assert!(
+        src.contains("let mut rpcPendingGetUser: Map<String, fn(Validation<User>)> = [:]"),
+        "getUser pending map:\n{src}"
+    );
     assert!(
         src.contains("export extern fn vyrnRpcDoneGetUser(id: Int64, status: Int64, body: String)"),
         "getUser dispatcher:\n{src}"
     );
+    assert!(
+        src.contains("Some(cb) => rpcDeliverGetUser(key, cb, rpcUnifyGetUser(status, body))"),
+        "getUser dispatch routes to the pending callback:\n{src}"
+    );
+    // No `on<Proc>` convention survives (clean break).
+    assert!(!src.contains("onGetUser"), "no on<Proc> emission:\n{src}");
     assert!(src.contains("export extern fn vyrnRpcDoneCreateUser("), "createUser dispatcher");
     // The contract types are re-emitted verbatim (not imported).
     assert!(src.contains("export type User = { id: Int64, name: Username, age: Age }"), "{src}");

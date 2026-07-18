@@ -22,7 +22,8 @@ async function bootApp(mountEl) {
     extern: { vyrnRpcCall: rpc.vyrnRpcCall },
   });
 
-  // Every RPC completion updates module state via on<Proc>; re-render after each.
+  // Every RPC completion runs the callback the stub stored (updating module
+  // state); re-render after each.
   rpc.bind(
     new Proxy(app.exports, {
       get(target, prop) {
@@ -44,13 +45,20 @@ async function bootApp(mountEl) {
     app.exports.bootList("");
 
     // A genuine SERVER 422: a typed stub can never build an invalid AddBookReq,
-    // so this posts a raw bad body straight through the transport. The reply
-    // (422 with the server's own Issues) flows to onAddBook -> the issues panel.
+    // so no stub (and no pending callback) is involved — POST the raw bad body,
+    // then hand the server's 422 issues to the exported renderer (RFC-0040 §2).
     badBtn = document.createElement("button");
     badBtn.textContent = "force server 422 (raw wire: empty title, bad url)";
     badBtn.className = "raw422";
-    badBtn.onclick = () =>
-      rpc.vyrnRpcCall("addBook", JSON.stringify({ title: "", url: "nope", tags: ["waaaaaaaaaaaaaaaaaaaaaaaaay-too-long"] }));
+    badBtn.onclick = async () => {
+      const res = await fetch("/rpc/addBook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "", url: "nope", tags: ["waaaaaaaaaaaaaaaaaaaaaaaaay-too-long"] }),
+      });
+      app.exports.showServerIssues(await res.text());
+      app.rerender();
+    };
     mountEl.parentNode.appendChild(badBtn);
   } else {
     const id = mountEl.getAttribute("data-book-id") || "0";

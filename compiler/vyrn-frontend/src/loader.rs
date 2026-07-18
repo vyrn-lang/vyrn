@@ -1549,6 +1549,10 @@ impl NsResolver<'_> {
                 }
                 self.rewrite_type(ret);
             }
+            Type::Map(k, v) => {
+                self.rewrite_type(k);
+                self.rewrite_type(v);
+            }
             _ => {}
         }
     }
@@ -2477,6 +2481,18 @@ fn type_names(ty: &Type) -> Vec<String> {
                     }
                 }
             }
+            // Stored function values (RFC-0037) and Maps carry decl references
+            // in their component types too (RFC-0040 §2 exposed this).
+            Type::Fn(params, ret) => {
+                for p in params {
+                    walk(p, out);
+                }
+                walk(ret, out);
+            }
+            Type::Map(k, v) => {
+                walk(k, out);
+                walk(v, out);
+            }
             _ => {}
         }
     }
@@ -2531,6 +2547,20 @@ fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
                     rewrite_type(p, map);
                 }
             }
+        }
+        // Stored function values (RFC-0037) and Map values reference decl names
+        // too — a generated module's `fn(Validation<T>)` callback type or
+        // `Map<String, fn(..)>` pending map must follow a co-naming/namespace
+        // rename of `T` like every other position (RFC-0040 §2 exposed this).
+        Type::Fn(params, ret) => {
+            for p in params {
+                rewrite_type(p, map);
+            }
+            rewrite_type(ret, map);
+        }
+        Type::Map(k, v) => {
+            rewrite_type(k, map);
+            rewrite_type(v, map);
         }
         _ => {}
     }

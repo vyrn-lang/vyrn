@@ -4,18 +4,21 @@
 // extern, `vyrn.vyrnRpcCall(name, body) -> Int64`, and exports one completion
 // dispatcher per procedure, `vyrnRpcDone<Proc>(id, status, body)`. This module
 // supplies that extern (a `fetch` POST to `<baseUrl>/rpc/<name>`) and, when the
-// request settles, calls the matching dispatcher back into the module — so the
-// user's plain `onGetUser(id, res)` handler runs with a decoded `Validation<T>`.
+// request settles, calls the matching dispatcher back into the module with the
+// SAME id the extern returned — so the module routes the reply to the pending
+// callback the stub stored under that id (RFC-0040 §2). The extern ABI is
+// unchanged from the pre-callback design, so this transport is untouched by it.
 //
 // The proc→dispatcher name is the shared convention: `vyrnRpcDone` + the
 // procedure name with its first letter uppercased (`getUser` → `vyrnRpcDoneGetUser`).
-// vyrn-rpc made the request, so it always knows which dispatcher owns the reply —
-// no shared client state is needed anywhere (RFC-0019).
+// vyrn-rpc made the request, so it always knows which dispatcher owns the reply,
+// and it echoes back the request id the extern minted, so the module's pending
+// map finds the right callback (RFC-0019 + RFC-0040 §2).
 //
 // Usage:
 //   import { runVyrnRpc } from "./vyrn-rpc.js";
 //   const { exports } = await runVyrnRpc(bytes, { baseUrl: "" });
-//   // now call an exported stub; its reply flows to your Vyrn `on<Proc>` handler:
+//   // call an exported stub with a callback; its reply flows to that callback:
 //   exports.getUser(/* the module builds+sends the request */);
 //
 // Or wire it onto an existing runVyrn call yourself:

@@ -19,8 +19,8 @@ async function main() {
   });
 
   // Bind the transport to the module's dispatchers, wrapped so that every
-  // completion (which updates module state via on<Proc>) triggers a re-render —
-  // the reply is async, so there is no event to piggyback on.
+  // completion (which runs the callback the stub stored, updating module state)
+  // triggers a re-render — the reply is async, so there is no event to piggyback on.
   rpc.bind(
     new Proxy(app.exports, {
       get(target, prop) {
@@ -44,10 +44,16 @@ async function main() {
   status.innerHTML = `<span class="ok">mounted</span> · client.wasm exports: ${Object.keys(app.exports).join(", ")}`;
 
   // Raw create with an invalid age — the one payload a typed stub could never
-  // build. The transport POSTs it; the server 422s; the reply flows to
-  // onCreateUser -> module state -> re-render (issues panel).
-  $("badBtn").onclick = () => {
-    rpc.vyrnRpcCall("createUser", JSON.stringify({ name: "Bob", age: 200 }));
+  // build, so no stub (and no pending callback) is involved: POST it raw, then
+  // hand the server's 422 body to the exported renderer (RFC-0040 §2).
+  $("badBtn").onclick = async () => {
+    const res = await fetch("/rpc/createUser", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Bob", age: 200 }),
+    });
+    app.exports.showServerIssues(await res.text());
+    app.rerender();
   };
 
   // The procedure registry — a raw GET, straight from the server.

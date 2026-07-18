@@ -17,7 +17,7 @@
 // a `gen fn` and its transitive callees.)
 
 /// Uppercase the first byte of `s` (ASCII), leaving the rest untouched — the
-/// procedure `getUser` derives `onGetUser` / `vyrnRpcDoneGetUser` this way.
+/// procedure `getUser` derives `vyrnRpcDoneGetUser` / `rpcPendingGetUser` this way.
 fn capFirst(s: String) -> String {
     let raw = bytes(s)
     let mut out: Array<UInt8> = []
@@ -285,32 +285,59 @@ fn clientUnifyFn(f: FnInfo) -> String {
     return out
 }
 
-/// One procedure's client surface: the same-named stub that fires the single
-/// shared transport extern, plus the per-procedure completion dispatcher (an
-/// `export extern fn` the host calls) that unifies the reply and hands it to the
-/// user's plain `onGetUser` handler.
+/// The Vyrn spelling of a procedure's callback type: `fn(Validation<Ret>)`, with
+/// a `Unit` return modeled as `Validation<Bool>` (the unifier's `Valid(true)`).
+fn cbType(f: FnInfo) -> String {
+    let ret = if f.ret == "" { "Bool" } else { f.ret }
+    return "fn(Validation<" + ret + ">)"
+}
+
+/// One procedure's client surface (RFC-0040 §2): a per-procedure pending-callback
+/// map keyed by call id, the same-named stub `(req, cb)` that fires the single
+/// shared transport and remembers `cb` under the id it returns, a private deliver
+/// helper (drop the callback, then invoke it — match arms are single expressions,
+/// so the drop+call pair lives in a fn body), and the completion dispatcher (an
+/// `export extern fn` the host calls) that unifies the reply and routes it to the
+/// pending callback. No `on<Proc>` convention: a procedure the client never calls
+/// needs no handler at all.
 fn clientProcFns(f: FnInfo) -> String {
     let cap = capFirst(f.name)
+    let cb = cbType(f)
+    let ret = if f.ret == "" { "Bool" } else { f.ret }
     let mut out = clientUnifyFn(f)
-    // The stub.
+    // The per-procedure pending-callback map (module state), keyed by call id.
+    out = out + "let mut rpcPending" + cap + ": Map<String, " + cb + "> = [:]\n"
+    // The stub: fire the shared transport, remember the caller's callback by id.
     if f.params.length == 1 {
-        out = out + "export fn " + f.name + "(req: " + f.params[0].spelling + ") {\n"
-        out = out + "    vyrnRpcCall(\"" + f.name + "\", toJson(req))\n}\n"
+        out = out + "export fn " + f.name + "(req: " + f.params[0].spelling + ", cb: " + cb + ") {\n"
+        out = out + "    let id = vyrnRpcCall(\"" + f.name + "\", toJson(req))\n"
     } else {
-        out = out + "export fn " + f.name + "() {\n"
-        out = out + "    vyrnRpcCall(\"" + f.name + "\", \"\")\n}\n"
+        out = out + "export fn " + f.name + "(cb: " + cb + ") {\n"
+        out = out + "    let id = vyrnRpcCall(\"" + f.name + "\", \"\")\n"
     }
-    // The completion dispatcher → the user's `on<Proc>` handler.
+    out = out + "    rpcPending" + cap + "[id.toString()] = cb\n}\n"
+    // The deliver helper: drop the pending callback, then invoke it (RFC-0037:
+    // a fetched callback is bound to the `cb` param before it is called).
+    out = out + "fn rpcDeliver" + cap + "(key: String, cb: " + cb + ", res: Validation<" + ret + ">) {\n"
+    out = out + "    rpcPending" + cap + ".remove(key)\n"
+    out = out + "    cb(res)\n}\n"
+    // The completion dispatcher: unify the reply, route it to the pending callback
+    // (or ignore a reply with no pending callback).
     out = out + "export extern fn vyrnRpcDone" + cap + "(id: Int64, status: Int64, body: String) {\n"
-    out = out + "    on" + cap + "(id, rpcUnify" + cap + "(status, body))\n}\n"
+    out = out + "    let key = id.toString()\n"
+    out = out + "    match rpcPending" + cap + "[key] {\n"
+    out = out + "        Some(cb) => rpcDeliver" + cap + "(key, cb, rpcUnify" + cap + "(status, body)),\n"
+    out = out + "        None => rpcIgnoreReply(),\n"
+    out = out + "    }\n}\n"
     return out
 }
 
 /// `rpcClient(contract)` — emit the client surface: the contract's TYPE
 /// declarations verbatim (the client build never links server bodies, so there
 /// is nothing to strip), one same-named stub per procedure over a single shared
-/// `vyrnRpcCall` extern, and one `export extern fn` completion dispatcher per
-/// procedure. The user writes only `fn onGetUser(id: Int64, res: Validation<T>)`.
+/// `vyrnRpcCall` extern, a per-procedure pending-callback map, and one
+/// `export extern fn` completion dispatcher per procedure. The caller passes the
+/// callback inline: `createPaste(req, |res| match res { .. })` (RFC-0040 §2).
 export gen fn rpcClient(contract: String) -> String {
     let iface = moduleInterface(contract)
     let err = validateContract(iface)
@@ -325,6 +352,9 @@ export gen fn rpcClient(contract: String) -> String {
     out = out + "type RpcIssues = { issues: Array<Issue> }\n"
     // The single shared transport, declared once.
     out = out + "extern fn vyrnRpcCall(name: String, body: String) -> Int64\n"
+    // A reply with no pending callback is ignored (dispatcher `None` arm — match
+    // arms are single expressions, so this is a nullary helper).
+    out = out + "fn rpcIgnoreReply() {\n}\n"
     for f in iface.functions {
         out = out + clientProcFns(f)
     }
@@ -333,35 +363,34 @@ export gen fn rpcClient(contract: String) -> String {
 
 // ---- rpcInProcess ----------------------------------------------------------
 
-/// One in-process dispatcher: a **same-named** stub that calls the real (aliased)
-/// procedure directly and invokes the user's `on<Proc>` handler synchronously
-/// with `Valid(..)` before returning. The real procedure is reached through its
-/// `__real` import alias (RFC-0022); the stub therefore takes the wire name, so
-/// callers use the exact procedure name the client flavor exposes. Validated
-/// types cannot be constructed invalid in-process, so the deterministic flavor
-/// only ever produces `Valid` — the `Invalid` paths are a wire concern
-/// (`fromJson` of an untrusted payload). Request ids are always 0: in-process
-/// dispatch allocates none (wire ids come from the JS runtime).
+/// One in-process dispatcher (RFC-0040 §2): a **same-named** stub `(req, cb)` that
+/// calls the real (aliased) procedure directly and invokes the caller's `cb`
+/// synchronously with `Valid(..)` before returning. The real procedure is reached
+/// through its `__real` import alias (RFC-0022); the stub therefore takes the wire
+/// name, so callers use the exact procedure name the client flavor exposes.
+/// Validated types cannot be constructed invalid in-process, so the deterministic
+/// flavor only ever produces `Valid` — the `Invalid` paths are a wire concern
+/// (`fromJson` of an untrusted payload). `cb` is a param, so it is called by name.
 fn inProcStub(f: FnInfo) -> String {
-    let cap = capFirst(f.name)
+    let cb = cbType(f)
     let real = f.name + "__real"
     let retUnit = f.ret == ""
     let mut out = ""
     if f.params.length == 1 {
-        out = out + "export fn " + f.name + "(req: " + f.params[0].spelling + ") {\n"
+        out = out + "export fn " + f.name + "(req: " + f.params[0].spelling + ", cb: " + cb + ") {\n"
         if retUnit {
             out = out + "    " + real + "(req)\n"
-            out = out + "    on" + cap + "(0, Valid(true))\n}\n"
+            out = out + "    cb(Valid(true))\n}\n"
         } else {
-            out = out + "    on" + cap + "(0, Valid(" + real + "(req)))\n}\n"
+            out = out + "    cb(Valid(" + real + "(req)))\n}\n"
         }
     } else {
-        out = out + "export fn " + f.name + "() {\n"
+        out = out + "export fn " + f.name + "(cb: " + cb + ") {\n"
         if retUnit {
             out = out + "    " + real + "()\n"
-            out = out + "    on" + cap + "(0, Valid(true))\n}\n"
+            out = out + "    cb(Valid(true))\n}\n"
         } else {
-            out = out + "    on" + cap + "(0, Valid(" + real + "()))\n}\n"
+            out = out + "    cb(Valid(" + real + "()))\n}\n"
         }
     }
     return out
@@ -369,9 +398,9 @@ fn inProcStub(f: FnInfo) -> String {
 
 /// `rpcInProcess(contract)` — the deterministic test / SSR flavor. Emits a
 /// module that imports the real procedures (each under a `__real` alias) + their
-/// types from the contract and exposes a **same-named** `<proc>` dispatcher per
-/// procedure that runs the real logic and fires `on<Proc>(0, Valid(..))`
-/// synchronously. Callers use the exact procedure names the wire client exposes.
+/// types from the contract and exposes a **same-named** `<proc>(req, cb)` stub per
+/// procedure that runs the real logic and calls `cb(Valid(..))` synchronously
+/// (RFC-0040 §2). Callers use the exact procedure names the wire client exposes.
 ///
 /// Same-named stubs are possible because of import aliasing (RFC-0022): the
 /// generated module imports `getUser as getUser__real` and its stub takes the

@@ -6,9 +6,10 @@
 /// wires to `window.vyrnNav.navigate`.
 ///
 /// RPC: typed stubs from `rpcClient("./contract")`, imported namespaced
-/// (`import * as api`, RFC-0027). Labels resolve INSIDE the `.vyx` widget via
-/// its own `i18n("../strings")` import (RFC-0039 §3 import dedup killed the
-/// scalar threading) — this root threads only the draft state it owns.
+/// (`import * as api`, RFC-0027). Each stub takes a completion callback at the
+/// call site (`api.createPaste(req, onCreatePaste)`, RFC-0040 §2). Labels resolve
+/// INSIDE the `.vyx` widget via its own `i18n("../strings")` import (RFC-0039 §3
+/// import dedup killed the scalar threading) — this root threads only draft state.
 import { rpcClient } from "std/rpc"
 import * as api from rpcClient("./contract")
 import { componentsThemed } from "std/vyx"
@@ -56,18 +57,13 @@ fn view() -> Html {
     return createForm(draftTitle, draftLang, draftBody, issues)
 }
 
-// ---- RPC completion handler (called by the generated dispatcher) ------------
+// ---- RPC completion callback ------------------------------------------------
 
-/// The client never calls `listPastes`/`getPaste` (the home list and paste view
-/// are server-rendered), but `rpcClient` synthesizes a completion dispatcher for
-/// EVERY procedure, so these `on<Proc>` handlers must exist (they no-op). The
-/// server procs + their codecs stay exercised by the store tests and the smoke.
-fn onListPastes(id: Int64, res: Validation<api.PasteList>) {
-}
-fn onGetPaste(id: Int64, res: Validation<api.PasteResult>) {
-}
-
-fn onCreatePaste(id: Int64, res: Validation<api.PasteResult>) {
+/// Passed to `api.createPaste` at the call site (RFC-0040 §2). The client never
+/// calls `listPastes`/`getPaste` — the home list and paste view are
+/// server-rendered — so those procedures need no callback here at all (their
+/// server procs + codecs stay exercised by the store tests and the smoke).
+fn onCreatePaste(res: Validation<api.PasteResult>) {
     match res {
         Valid(r) => afterCreate(r),
         Invalid(iss) => setIssues(renderIssues(iss)),
@@ -104,7 +100,7 @@ export extern fn setDraftLang(arg: String) {
 export extern fn submitCreate(arg: String) {
     let raw = RawCreate { title: draftTitle, body: draftBody, lang: draftLang }
     match fromJson(api.CreateReq, toJson(raw)) {
-        Valid(req) => api.createPaste(req),
+        Valid(req) => api.createPaste(req, onCreatePaste),
         Invalid(iss) => setIssues(renderIssues(iss)),
     }
 }
