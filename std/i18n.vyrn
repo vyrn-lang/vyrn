@@ -391,6 +391,32 @@ fn parseLocaleJson(src: String) -> LocaleData {
 // scanner (for drift + signatures) and the body compiler (for the emitted code).
 // ===========================================================================
 
+/// The resolution of an apostrophe under ICU quoting: whether a literal `'` byte
+/// is produced, the resulting quote mode, and how many bytes were consumed.
+type IcuQuote = { emit: Bool, quoted: Bool, advance: Int64 }
+
+/// Resolve an apostrophe at `ba[j]` per ICU MessageFormat quoting (v1 subset):
+///   - `''` is ALWAYS one literal apostrophe (mode unchanged);
+///   - a lone `'` opens a quoted literal ONLY when it is not already quoting AND
+///     the next byte is a syntax char it can quote (`{`, `}`, `#`);
+///   - a `'` while quoting CLOSES the quote;
+///   - any other lone `'` (e.g. the one in `It's`) is a LITERAL apostrophe — ICU
+///     is lenient, so an apostrophe not before a syntax char neither quotes nor is
+///     deleted.
+/// This is the single source of the rule for every quote-aware scanner below.
+fn icuApostrophe(ba: Array<UInt8>, j: Int64, e: Int64, quoted: Bool) -> IcuQuote {
+    if j + 1 < e && ba[j + 1] == 39 {
+        return IcuQuote { emit: true, quoted: quoted, advance: 2 }
+    }
+    if quoted {
+        return IcuQuote { emit: false, quoted: false, advance: 1 }
+    }
+    if j + 1 < e && (ba[j + 1] == 123 || ba[j + 1] == 125 || ba[j + 1] == 35) {
+        return IcuQuote { emit: false, quoted: true, advance: 1 }
+    }
+    return IcuQuote { emit: true, quoted: false, advance: 1 }
+}
+
 /// A literal run: decoded text (apostrophe quoting resolved) and the next index.
 /// `hash` is true when the run stopped at an unquoted `#` (plural number).
 type LitRead = { text: String, next: Int64, hash: Bool }
@@ -404,17 +430,12 @@ fn readLiteral(ba: Array<UInt8>, i: Int64, e: Int64, stopHash: Bool) -> LitRead 
     while j < e {
         let b = ba[j]
         if b == 39 {
-            if j + 1 < e && ba[j + 1] == 39 {
+            let q = icuApostrophe(ba, j, e, quoted)
+            if q.emit {
                 out.push(39)
-                j = j + 2
-            } else {
-                if quoted {
-                    quoted = false
-                } else {
-                    quoted = true
-                }
-                j = j + 1
             }
+            quoted = q.quoted
+            j = j + q.advance
         } else if quoted {
             out.push(b)
             j = j + 1
@@ -452,16 +473,9 @@ fn matchBrace(ba: Array<UInt8>, open: Int64, e: Int64) -> Int64 {
     while i < e {
         let b = ba[i]
         if b == 39 {
-            if i + 1 < e && ba[i + 1] == 39 {
-                i = i + 2
-            } else {
-                if quoted {
-                    quoted = false
-                } else {
-                    quoted = true
-                }
-                i = i + 1
-            }
+            let q = icuApostrophe(ba, i, e, quoted)
+            quoted = q.quoted
+            i = i + q.advance
         } else if quoted {
             i = i + 1
         } else if b == 123 {
@@ -491,16 +505,9 @@ fn splitTopCommas(ba: Array<UInt8>, s: Int64, e: Int64) -> Array<String> {
     while i < e {
         let b = ba[i]
         if b == 39 {
-            if i + 1 < e && ba[i + 1] == 39 {
-                i = i + 2
-            } else {
-                if quoted {
-                    quoted = false
-                } else {
-                    quoted = true
-                }
-                i = i + 1
-            }
+            let q = icuApostrophe(ba, i, e, quoted)
+            quoted = q.quoted
+            i = i + q.advance
         } else if quoted {
             i = i + 1
         } else if b == 123 {
@@ -708,16 +715,9 @@ fn branchBlob(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
     while i < e {
         let b = ba[i]
         if b == 39 {
-            if i + 1 < e && ba[i + 1] == 39 {
-                i = i + 2
-            } else {
-                if quoted {
-                    quoted = false
-                } else {
-                    quoted = true
-                }
-                i = i + 1
-            }
+            let q = icuApostrophe(ba, i, e, quoted)
+            quoted = q.quoted
+            i = i + q.advance
         } else if quoted {
             i = i + 1
         } else if b == 123 {
@@ -1007,6 +1007,66 @@ fn listContains(arr: Array<String>, x: String) -> Bool {
     return false
 }
 
+/// Whether a message has a malformed brace: a `{` with no matching `}`, or a stray
+/// `}` — quote-aware (a `'{'`/`'}'` is a quoted literal, not a delimiter). An
+/// unbalanced brace otherwise fabricates a phantom `{sale` param or drops text
+/// silently; this makes it a loud GENERATION diagnostic instead.
+fn icuBadBrace(msg: String) -> Bool {
+    let ba = bytes(msg)
+    let e = ba.length
+    let mut depth = 0
+    let mut quoted = false
+    let mut i = 0
+    while i < e {
+        let b = ba[i]
+        if b == 39 {
+            let q = icuApostrophe(ba, i, e, quoted)
+            quoted = q.quoted
+            i = i + q.advance
+        } else if quoted {
+            i = i + 1
+        } else if b == 123 {
+            depth = depth + 1
+            i = i + 1
+        } else if b == 125 {
+            if depth == 0 {
+                return true
+            }
+            depth = depth - 1
+            i = i + 1
+        } else {
+            i = i + 1
+        }
+    }
+    return depth != 0
+}
+
+/// Key-collision errors for the base locale. TWO injectivity failures both surface
+/// today as a confusing "function `t…` defined twice"; each becomes a NAMED
+/// diagnostic listing the colliding keys instead of a silent rename:
+///   - a DOTTED key (`"a.b"`) and a NESTED object (`"a": {"b": …}`) flatten to the
+///     same `a.b` — `I18N_DUP_KEY__<key>`;
+///   - two distinct keys whose PascalCase concatenation collides (`home.title` and
+///     `homeTitle` both make `tHomeTitle`) — `I18N_KEY_COLLISION__<a>__<b>`.
+fn keyCollisionErrors(base: LocaleData) -> String {
+    let keys = base.keys
+    let mut out = ""
+    let mut i = 0
+    while i < keys.length {
+        let mut j = i + 1
+        while j < keys.length {
+            if keys[i] == keys[j] {
+                out = out + "I18N_DUP_KEY__" + identKey(keys[i]) + "\n"
+            } else if keyFnName(keys[i]) == keyFnName(keys[j]) {
+                out = out + "I18N_KEY_COLLISION__" + identKey(keys[i]) + "__" + identKey(keys[j]) + "\n"
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
 // ===========================================================================
 // The generator.
 // ===========================================================================
@@ -1038,6 +1098,33 @@ export gen fn i18n(dir: String) -> String {
     }
     if tags.length == 0 {
         return "I18N_ERROR__no_locale_json_files_found\n"
+    }
+
+    // ---- key-collision check: two keys flattening to one entry, or two keys
+    // whose PascalCase concatenation collides, would otherwise emit a duplicate
+    // function — a NAMED diagnostic listing the colliding keys instead.
+    let collisions = keyCollisionErrors(datas[0])
+    if collisions != "" {
+        return collisions
+    }
+
+    // ---- brace check: a `{` with no matching `}` (or a stray `}`) in ANY locale
+    // fabricates a phantom param or drops text silently — fail loud, naming the key.
+    let mut braceErr = ""
+    let mut bi = 0
+    while bi < tags.length {
+        let bd = datas[bi]
+        let mut bk = 0
+        while bk < bd.keys.length {
+            if icuBadBrace(bd.vals[bk]) {
+                braceErr = braceErr + "I18N_BAD_BRACES__locale_" + tags[bi] + "__" + identKey(bd.keys[bk]) + "\n"
+            }
+            bk = bk + 1
+        }
+        bi = bi + 1
+    }
+    if braceErr != "" {
+        return braceErr
     }
 
     // ---- drift check: every locale must share the base key set AND per-key
@@ -1439,4 +1526,46 @@ test "regexEscapeKey doubles the backslash for dots" {
     let r = regexEscapeKey("a.b")
     // a \\ . b  == 5 bytes
     assertEq(r.length, 5)
+}
+
+test "readLiteral keeps a lone apostrophe and does not swallow the placeholder" {
+    // "It's " must survive with its apostrophe, and stop AT the `{`.
+    let lit = readLiteral(bytes("It's {name}!"), 0, bytes("It's {name}!").length, false)
+    assertEq(lit.text, "It's ")
+    // The scanner stopped at the `{`, so the placeholder is still to come.
+    assertEq(bytes("It's {name}!")[lit.next], 123)
+}
+
+test "readLiteral: paired '' is one apostrophe, '{' is a literal brace" {
+    let a = readLiteral(bytes("b''c"), 0, bytes("b''c").length, false)
+    assertEq(a.text, "b'c")
+    let d = readLiteral(bytes("x '{' y"), 0, bytes("x '{' y").length, false)
+    assertEq(d.text, "x { y")
+}
+
+test "scanArgs sees the arg through an apostrophe-bearing literal" {
+    let sc = scanArgs("It's {name}!")
+    assert(sc.ok)
+    assertEq(sc.names.length, 1)
+    assertEq(sc.names[0], "name")
+}
+
+test "icuBadBrace flags an unmatched or stray brace, quote-aware" {
+    assert(icuBadBrace("50% off { sale"))
+    assert(icuBadBrace("a } b"))
+    assertEq(icuBadBrace("Hello, {name}!"), false)
+    // A quoted brace is a literal, not a delimiter.
+    assertEq(icuBadBrace("x '{' y"), false)
+}
+
+test "keyCollisionErrors names both collision classes" {
+    // Dotted vs nested flatten to the same `a.b`.
+    let dup = LocaleData { ok: true, error: "", keys: ["a.b", "a.b"], vals: ["x", "y"] }
+    assert(keyCollisionErrors(dup).contains("I18N_DUP_KEY__a_b"))
+    // home.title and homeTitle both make tHomeTitle.
+    let clash = LocaleData { ok: true, error: "", keys: ["home.title", "homeTitle"], vals: ["A", "B"] }
+    assert(keyCollisionErrors(clash).contains("I18N_KEY_COLLISION__home_title__homeTitle"))
+    // A clean key set collides with nothing.
+    let ok = LocaleData { ok: true, error: "", keys: ["home.title", "cart.items"], vals: ["A", "B"] }
+    assertEq(keyCollisionErrors(ok), "")
 }

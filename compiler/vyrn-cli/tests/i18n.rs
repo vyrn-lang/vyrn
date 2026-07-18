@@ -146,6 +146,100 @@ fn plural_in_a_locale_without_a_rule_fails() {
     assert!(err.contains("I18N_NO_PLURAL_RULE__locale_xx"), "no-plural-rule diagnostic:\n{err}");
 }
 
+// ---- ICU apostrophe quoting (RFC-0020): a lone apostrophe is a literal --------
+
+#[test]
+fn a_lone_apostrophe_is_literal_and_keeps_the_placeholder() {
+    let dir = scratch("apos");
+    // "It's {name}!" previously deleted the apostrophe AND swallowed {name}.
+    write(&dir.join("locales/en.json"), "{ \"greet\": \"It's {name}!\" }");
+    write(
+        &dir.join("app.vyrn"),
+        "import { i18n } from \"std/i18n\"\n\
+         import { tGreet } from i18n(\"./locales\")\n\
+         fn main() -> Int64 { print(tGreet(\"Bob\")) return 0 }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    assert!(out.status.success(), "apostrophe message must compile with the arg:\n{}", String::from_utf8_lossy(&out.stderr));
+    let sout = String::from_utf8_lossy(&out.stdout);
+    assert!(sout.contains("It's Bob!"), "expected `It's Bob!`, got:\n{sout}");
+}
+
+#[test]
+fn paired_and_quoting_apostrophes_render_per_icu() {
+    let dir = scratch("apos2");
+    // `''` -> one apostrophe; `'{'` -> a literal brace.
+    write(&dir.join("locales/en.json"), "{ \"a\": \"b''c\", \"d\": \"x '{' y\" }");
+    write(
+        &dir.join("app.vyrn"),
+        "import { i18n } from \"std/i18n\"\n\
+         import { tA, tD } from i18n(\"./locales\")\n\
+         fn main() -> Int64 { print(tA()) print(tD()) return 0 }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let sout = String::from_utf8_lossy(&out.stdout);
+    assert!(sout.contains("b'c"), "paired '' -> one apostrophe:\n{sout}");
+    assert!(sout.contains("x { y"), "'{{' -> literal brace:\n{sout}");
+}
+
+// ---- unmatched braces are a loud generation diagnostic ---------------------
+
+#[test]
+fn an_unmatched_brace_fails_generation() {
+    let dir = scratch("brace");
+    // A lone `{` used to fabricate a phantom param; now a named diagnostic.
+    write(&dir.join("locales/en.json"), "{ \"msg\": \"50% off { sale\" }");
+    write(
+        &dir.join("app.vyrn"),
+        "import { i18n } from \"std/i18n\"\n\
+         import { t } from i18n(\"./locales\")\n\
+         fn main() -> Int64 { return 0 }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    assert!(!out.status.success(), "an unmatched brace must fail generation");
+    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(err.contains("I18N_BAD_BRACES__locale_en__msg"), "brace diagnostic naming the key:\n{err}");
+}
+
+// ---- key collisions are named, not a confusing "defined twice" -------------
+
+#[test]
+fn a_dotted_vs_nested_key_collision_is_named() {
+    let dir = scratch("dupkey");
+    // "a.b" and {"a":{"b":…}} flatten to the same entry.
+    write(&dir.join("locales/en.json"), "{ \"a.b\": \"x\", \"a\": { \"b\": \"y\" } }");
+    write(
+        &dir.join("app.vyrn"),
+        "import { i18n } from \"std/i18n\"\n\
+         import { t } from i18n(\"./locales\")\n\
+         fn main() -> Int64 { return 0 }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    assert!(!out.status.success(), "a duplicate flattened key must fail generation");
+    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(err.contains("I18N_DUP_KEY__a_b"), "dup-key diagnostic:\n{err}");
+    assert!(!err.contains("defined twice"), "must not surface as the confusing duplicate-fn error:\n{err}");
+}
+
+#[test]
+fn a_fn_name_key_collision_is_named() {
+    let dir = scratch("clashkey");
+    // home.title and homeTitle both make tHomeTitle.
+    write(&dir.join("locales/en.json"), "{ \"home.title\": \"A\", \"homeTitle\": \"B\" }");
+    write(
+        &dir.join("app.vyrn"),
+        "import { i18n } from \"std/i18n\"\n\
+         import { t } from i18n(\"./locales\")\n\
+         fn main() -> Int64 { return 0 }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    assert!(!out.status.success(), "a fn-name key collision must fail generation");
+    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(err.contains("I18N_KEY_COLLISION__home_title__homeTitle"), "collision diagnostic listing both keys:\n{err}");
+    assert!(!err.contains("defined twice"), "must not surface as the confusing duplicate-fn error:\n{err}");
+}
+
 // ---- the demo runs green ---------------------------------------------------
 
 #[test]
