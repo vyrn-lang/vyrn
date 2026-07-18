@@ -1,6 +1,6 @@
 # RFC-0039 — `.vyx` v2: Vue-Flavored Templates, `.vyx` Pages, Real Parsing
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented (see "As landed" at the end)
 - **Depends on:** RFC-0026 M4 (the `.vyx` compiler this revises), RFC-0033
   (origin maps — fidelity improves here), RFC-0036 (`componentsThemed` —
   class checking carries over), RFC-0031 (`TypeInfo.module` — import
@@ -120,3 +120,89 @@ instead of beside it.
 about who owns state), `<template>` grouping, scoped styles, `v-show`,
 component-local state (unchanged position), the clock/random and
 std/storage findings (separate upcoming designs).
+
+## As landed (2026-07-18)
+
+Zero compiler changes, as designed. Everything below is `std/vyx` +
+`std/ui` + app migrations.
+
+**Grammar addendum — single-quoted attribute values.** `:attr="expr"`
+cannot carry a Vyrn string literal (Vyrn strings are double-quoted only),
+so attribute values may be single-quoted, the Vue convention:
+`:href='"/raw/" + p.id'`. Both quote kinds work on every attribute form
+(static, `:dyn`, `@event`, `v-…`); inside a value, a backslash escapes the
+next byte.
+
+**Scanner rules (§2).** Section close tags and the `props`/`params`
+keyword are found by a walk that skips `"…"` strings and (in `<script>`)
+`//` line + `/* */` block comments, so a keyword match inside either is
+impossible. `props`/`params` must additionally be STATEMENT-LEADING (first
+token on its line) — `let props = …` is an ordinary helper identifier. A
+literal `<template>` inside a script helper string cannot claim the
+template section (the open-tag search skips the script section's range).
+In templates, `<!-- … -->` is inert and a lone `{` is literal text (only
+`{{` opens an interpolation); `{{ … }}` and attr values are quote-aware.
+All six audited v1 miscompiles have regression tests; the CreateForm
+warning comment is deleted and its replacement deliberately names props/
+template/script.
+
+**Origin fidelity (§1).** `{{ expr }}`, each `v-if`/`v-else-if` condition
+(per-branch), `v-for` heads, `:attr` values, `@event` scalar args, and
+themed classes each get a column-exact `//@origin`; expression-bearing
+attributes are hoisted onto their own `let … : Attr` lines to make that
+possible. M4's region-level events/dyn-attrs gap is closed and tested
+(a bad event arg maps to the arg's exact column).
+
+**Import dedup (§3).** As designed: exact-line collapse, same-spec
+selective union (first-seen spec order), `import * as` dedup by
+(alias, spec) — an alias reused for a different spec, or the same name
+from two specs across two files, is `VYX_IMPORT_CONFLICT` naming both.
+Generator imports (`from i18n("…")`) dedup by their rebased call text.
+
+**std↔std pure imports: VERDICT — they just work.** `std/ui` imports
+`vyxPageShape` (and the router emits imports of `vyxPage`/
+`vyxPageThemed`) from `std/vyx`; the loader needed no changes. One
+sandbox rule surfaced: a generator may read only UNDER its constant path
+arguments, so `vyxPage` takes the full `.vyx` path (`"routes/foo.vyx"`),
+not the stem.
+
+**.vyx pages (§4) surface.** `pages(dir)` and `pagesThemed(dir, theme)`
+(the themed variant) accept `<name>.vyx` alongside `.vyrn`. A page's
+`<script>` may declare `params { … }`, imports, helpers, and
+`fn load(p: Params) -> Validation<Data>` + `type Data` (both
+auto-exported). Mechanism: the router imports each `.vyx` page through a
+nested `vyxPage(path)` generator import; `vyxBuildPageModule` (exposed
+pure core) synthesizes a module exporting `page`/`Params` around the
+compiled template body (`uiPageBody`). Pages are SELF-CONTAINED: a page
+template cannot reference `<Capitalized>` components (they resolve within
+one synthesized module only) — shared chrome is either inlined or lives in
+a widgets component rendered by a `.vyrn` respond page. Lifting that
+(components-dir convention for pages) is future work.
+
+**§5.** `String` segments match any non-empty non-`/` segment and bind
+directly; `Int64` keeps its parse-or-404 rule; `RoutePath` regex gains
+`([^/]+)` branches. `respond(p: Params) -> Response` (or `respond()`)
+replaces `page` for full status/content-type control — no loader allowed
+with it. Percent-decoding of String segments is DEFERRED: it needs an
+Int64→UInt8 narrowing builtin Vyrn does not have (`uiRouteDecode` is an
+identity pass-through, documented in the generated router).
+
+**Finding — a stateful generator instantiates once per program.** Top-
+level names are program-unique, and `import * as` renames only EXPORTS —
+never a generated module's internals (`currentLocale`, helper fns). Three
+`i18n(…)` instances (widgets + two `.vyx` pages) collide no matter how
+they are imported. The sanctioned pattern is one thin wrapper module
+(`examples/bin/labels.vyrn`) owning the single instance and exporting
+plain fns; §3's dedup makes the shared import free. Corollary: `.vyx`
+script HELPER names are program-unique too (two files defining
+`displayTitle` collide — bin renamed one `shownTitle`). Shelf keeps its
+one-record `Labels` prop (its root owns locale state; that threading is
+parent→child data flow, not the nine-scalar crutch this RFC killed).
+
+**bin as landed.** `view.vyrn` deleted; `routes/index.vyx` +
+`routes/about.vyx` are `.vyx` pages; `/p/[id]` and `/raw/[id]` are
+String-segment `respond` pages inside `pagesThemed` (404 on unknown id
+preserved — a loader page would 422); the paste body is `PasteView.vyx`;
+`CreateForm.vyx` dropped 9 → 4 props (draft state only). Browser-verified
+end to end, including restart survival (note: `data/` must exist —
+`writeFile` does not mkdir).

@@ -3,7 +3,7 @@
 /// `examples/domdemo.vyrn`. The client root keeps the module state and the
 /// `export extern fn` handlers (RFC-0013); `view()` composes the compiled
 /// `counter` and `rows` view functions, and `web/vyxdomdemo.html` mounts it
-/// through `web/vyrn-dom.js`. The keyed `{#for}` in `Rows.vyx` emits a `Key`
+/// through `web/vyrn-dom.js`. The keyed `v-for` in `Rows.vyx` emits a `Key`
 /// per row, so `rotate` reorders DOM nodes (the differ MOVES them) — the same
 /// keyed-list guarantee the M2 demo proves, now driven by the template compiler.
 ///

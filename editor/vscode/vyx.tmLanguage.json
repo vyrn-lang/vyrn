@@ -8,7 +8,7 @@
   ],
   "repository": {
     "script-section": {
-      "comment": "The <script> block holds ordinary Vyrn (props, imports, helpers).",
+      "comment": "The <script> block holds ordinary Vyrn (props/params, imports, helpers).",
       "begin": "(<)(script)(>)",
       "beginCaptures": {
         "1": { "name": "punctuation.definition.tag.begin.vyx" },
@@ -22,7 +22,7 @@
         "3": { "name": "punctuation.definition.tag.end.vyx" }
       },
       "patterns": [
-        { "match": "\\bprops\\b", "name": "keyword.control.props.vyx" },
+        { "match": "^\\s*(props|params)\\b", "captures": { "1": { "name": "keyword.control.props.vyx" } } },
         { "include": "source.vyrn" }
       ]
     },
@@ -44,8 +44,6 @@
     "template-body": {
       "patterns": [
         { "include": "#comments" },
-        { "include": "#control-block" },
-        { "include": "#raw-interp" },
         { "include": "#interp" },
         { "include": "#component-tag" },
         { "include": "#element-tag" }
@@ -56,48 +54,11 @@
       "end": "-->",
       "name": "comment.block.vyx"
     },
-    "control-block": {
-      "comment": "{#if} / {:else if} / {:else} / {/if} / {#for} / {/for} / {children}",
-      "patterns": [
-        {
-          "begin": "(\\{)(#if|#for|:else if)\\b",
-          "beginCaptures": {
-            "1": { "name": "punctuation.section.embedded.begin.vyx" },
-            "2": { "name": "keyword.control.flow.vyx" }
-          },
-          "end": "\\}",
-          "endCaptures": { "0": { "name": "punctuation.section.embedded.end.vyx" } },
-          "patterns": [
-            { "match": "\\b(in|key)\\b", "name": "keyword.control.flow.vyx" },
-            { "include": "source.vyrn" }
-          ]
-        },
-        {
-          "match": "(\\{)(:else|/if|/for|children)(\\})",
-          "captures": {
-            "1": { "name": "punctuation.section.embedded.begin.vyx" },
-            "2": { "name": "keyword.control.flow.vyx" },
-            "3": { "name": "punctuation.section.embedded.end.vyx" }
-          }
-        }
-      ]
-    },
-    "raw-interp": {
-      "comment": "{@raw expr} — unescaped interpolation.",
-      "begin": "(\\{)(@raw)\\b",
-      "beginCaptures": {
-        "1": { "name": "punctuation.section.embedded.begin.vyx" },
-        "2": { "name": "keyword.other.raw.vyx" }
-      },
-      "end": "\\}",
-      "endCaptures": { "0": { "name": "punctuation.section.embedded.end.vyx" } },
-      "patterns": [{ "include": "source.vyrn" }]
-    },
     "interp": {
-      "comment": "{expr} — an escaped interpolation carrying a Vyrn expression.",
-      "begin": "\\{",
+      "comment": "{{ expr }} — an escaped interpolation carrying a Vyrn expression (RFC-0039 v2).",
+      "begin": "\\{\\{",
       "beginCaptures": { "0": { "name": "punctuation.section.embedded.begin.vyx" } },
-      "end": "\\}",
+      "end": "\\}\\}",
       "endCaptures": { "0": { "name": "punctuation.section.embedded.end.vyx" } },
       "patterns": [{ "include": "source.vyrn" }]
     },
@@ -113,7 +74,7 @@
       "patterns": [{ "include": "#attributes" }]
     },
     "element-tag": {
-      "comment": "An ordinary lowercase HTML element.",
+      "comment": "An ordinary lowercase HTML element (incl. <slot/>).",
       "begin": "(</?)([a-z][A-Za-z0-9_-]*)",
       "beginCaptures": {
         "1": { "name": "punctuation.definition.tag.begin.vyx" },
@@ -125,6 +86,41 @@
     },
     "attributes": {
       "patterns": [
+        {
+          "comment": "v-if / v-else-if / v-for / v-html with a double-quoted Vyrn expression (RFC-0039 v2).",
+          "begin": "(v-if|v-else-if|v-for|v-html)(=)(\")",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.directive.vyx" },
+            "2": { "name": "punctuation.separator.key-value.vyx" },
+            "3": { "name": "punctuation.definition.string.begin.vyx" }
+          },
+          "end": "\"",
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.vyx" } },
+          "patterns": [
+            { "match": "\\bin\\b", "name": "keyword.control.flow.vyx" },
+            { "include": "source.vyrn" }
+          ]
+        },
+        {
+          "comment": "v-if / v-else-if / v-for / v-html with a single-quoted expression.",
+          "begin": "(v-if|v-else-if|v-for|v-html)(=)(')",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.directive.vyx" },
+            "2": { "name": "punctuation.separator.key-value.vyx" },
+            "3": { "name": "punctuation.definition.string.begin.vyx" }
+          },
+          "end": "'",
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.vyx" } },
+          "patterns": [
+            { "match": "\\bin\\b", "name": "keyword.control.flow.vyx" },
+            { "include": "source.vyrn" }
+          ]
+        },
+        {
+          "comment": "v-else — the bare chain directive.",
+          "match": "\\bv-else\\b",
+          "name": "keyword.control.directive.vyx"
+        },
         {
           "comment": "@event=\"handler(arg)\" — an event binding with a Vyrn expression.",
           "begin": "(@[a-z]+)(=)(\")",
@@ -138,24 +134,48 @@
           "patterns": [{ "include": "source.vyrn" }]
         },
         {
-          "comment": "attr={expr} — a dynamic attribute value.",
-          "begin": "([A-Za-z_][A-Za-z0-9_-]*)(=)(\\{)",
+          "comment": "@event='handler(arg)' — single-quoted event binding.",
+          "begin": "(@[a-z]+)(=)(')",
           "beginCaptures": {
-            "1": { "name": "entity.other.attribute-name.vyx" },
+            "1": { "name": "entity.other.attribute-name.event.vyx" },
             "2": { "name": "punctuation.separator.key-value.vyx" },
-            "3": { "name": "punctuation.section.embedded.begin.vyx" }
+            "3": { "name": "punctuation.definition.string.begin.vyx" }
           },
-          "end": "\\}",
-          "endCaptures": { "0": { "name": "punctuation.section.embedded.end.vyx" } },
+          "end": "'",
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.vyx" } },
+          "patterns": [{ "include": "source.vyrn" }]
+        },
+        {
+          "comment": ":attr=\"expr\" — a dynamic attribute (incl. :key, :class) with a Vyrn expression.",
+          "begin": "(:[A-Za-z_][A-Za-z0-9_-]*)(=)(\")",
+          "beginCaptures": {
+            "1": { "name": "entity.other.attribute-name.dynamic.vyx" },
+            "2": { "name": "punctuation.separator.key-value.vyx" },
+            "3": { "name": "punctuation.definition.string.begin.vyx" }
+          },
+          "end": "\"",
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.vyx" } },
+          "patterns": [{ "include": "source.vyrn" }]
+        },
+        {
+          "comment": ":attr='expr' — single quotes let the expression carry Vyrn string literals.",
+          "begin": "(:[A-Za-z_][A-Za-z0-9_-]*)(=)(')",
+          "beginCaptures": {
+            "1": { "name": "entity.other.attribute-name.dynamic.vyx" },
+            "2": { "name": "punctuation.separator.key-value.vyx" },
+            "3": { "name": "punctuation.definition.string.begin.vyx" }
+          },
+          "end": "'",
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.vyx" } },
           "patterns": [{ "include": "source.vyrn" }]
         },
         {
           "comment": "attr=\"literal\" — a static attribute value.",
-          "match": "([A-Za-z_][A-Za-z0-9_-]*)(=)(\"[^\"]*\")",
+          "match": "([A-Za-z_][A-Za-z0-9_-]*)(=)(\"[^\"]*\"|'[^']*')",
           "captures": {
             "1": { "name": "entity.other.attribute-name.vyx" },
             "2": { "name": "punctuation.separator.key-value.vyx" },
-            "3": { "name": "string.quoted.double.vyx" }
+            "3": { "name": "string.quoted.vyx" }
           }
         },
         { "match": "\\b[A-Za-z_][A-Za-z0-9_-]*\\b", "name": "entity.other.attribute-name.vyx" }

@@ -5,9 +5,9 @@
 /// string with `toHtmlString` is an ordinary interp == native == wasm parity
 /// citizen — the SSR string is the parity surface.
 ///
-///   examples/vyxcomp/Row.vyx    → fn row(item)            (if/else-if/else, @click, @input, dynamic class, helper)
-///   examples/vyxcomp/Listing.vyx → fn listing(items)       (keyed {#for}, component nesting)
-///   examples/vyxcomp/Panel.vyx  → fn panel(title, children) ({@raw}, {children})
+///   examples/vyxcomp/Row.vyx    → fn row(item)            (v-if/v-else-if/v-else, @click, @input, :class, helper)
+///   examples/vyxcomp/Listing.vyx → fn listing(items)       (keyed v-for, component nesting)
+///   examples/vyxcomp/Panel.vyx  → fn panel(title, children) (v-html, <slot/>)
 ///
 /// Inspect the synthesized module with:  vyrn emit-gen examples/vyxdemo.vyrn
 import { components } from "std/vyx"
@@ -31,12 +31,12 @@ fn main() -> Int64 {
 
 test "the compiled components render the expected SSR string" {
     let html = toHtmlString(demo())
-    // Component nesting + {children}: Panel wraps the List.
+    // Component nesting + <slot/>: Panel wraps the List.
     assert(html.contains("<section class=\"panel\">"))
     assert(html.contains("<h2 class=\"title\">Inventory</h2>"))
-    // {@raw} passes markup through unescaped.
+    // v-html passes markup through unescaped.
     assert(html.contains("<hr class=\"sep\"/>"))
-    // Keyed {#for} emits a data-key per item, in order.
+    // Keyed v-for emits a data-key per item, in order.
     assert(html.contains("<li class=\"row\" data-key=\"1\">"))
     assert(html.contains("data-key=\"2\""))
     assert(html.contains("data-key=\"3\""))

@@ -15,12 +15,13 @@ export type BookView = {
 }
 
 /// One tag histogram entry (the client turns the wire `Map<String,Int64>` into a
-/// list of these so a `{#for}` can render it). `cls` is a precomputed class
-/// string ("tag" / "tag active") because a `.vyx` `class={..}` needs a String.
+/// list of these so a `v-for` can render it). `cls` is a precomputed class
+/// string ("tag" / "tag active") because a `.vyx` `:class` needs a String.
 export type TagCount = { name: String, label: String, count: Int64, cls: String }
 
-/// Every localized label the widgets need, resolved once in the client root
-/// (i18n cannot be used inside a `.vyx` — see NOTES — so labels arrive as props).
+/// Every localized label the widgets need, resolved once in the client root.
+/// (A stateful generator instantiates once per program, and the root owns the
+/// locale state, so labels arrive as one record prop — see RFC-0039 notes.)
 export type Labels = {
     add: String,
     title: String,
