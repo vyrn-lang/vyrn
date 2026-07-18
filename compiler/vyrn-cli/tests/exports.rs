@@ -278,6 +278,8 @@ fn graphql_sdl_is_wellformed_and_deterministic() {
     // Grammar sanity check (no new dependency): balanced braces/parens/brackets,
     // and every block opener is a `type|input|enum Name {` header.
     sdl_grammar_sane(&sdl);
+    // Stronger: block-string-aware well-formedness (descriptions are opaque).
+    sdl_block_strings_wellformed(&sdl);
 
     // The honest mappings.
     // A record => type/input pair.
@@ -307,6 +309,114 @@ fn graphql_sdl_is_wellformed_and_deterministic() {
     assert!(m.contains("createUser(input: CreateReqInput!): UserResult"), "createUser in Mutation:\n{m}");
     // A type's /// doc becomes a description block string.
     assert!(sdl.contains("\"\"\"A stored user.\"\"\""), "type doc -> description:\n{sdl}");
+}
+
+/// A validated scalar whose regex predicate carries a `"` (and a `,` and `}`),
+/// plus a type whose `///` doc embeds a literal `"""`, previously folded UNESCAPED
+/// into a `"""…"""` description and produced INVALID SDL (four consecutive quotes
+/// at the Url boundary; a phantom field from the comma). Now sanitized.
+#[test]
+fn graphql_sdl_escapes_descriptions_and_splits_string_aware() {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_gql_torture_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // A URL-like scalar (trailing quote in the regex — the shelf `Url` shape) and a
+    // scalar whose predicate holds a comma, a brace, and an escaped quote.
+    write(
+        &dir.join("wire.vyrn"),
+        r#"/// A URL: must look like http(s)://…
+export type Url = String where value =~ "https?://.+"
+/// A weird scalar with a comma, a brace } and a quote in the predicate.
+export type Weird = String where value =~ "a,b}c\"d"
+/// A record referencing both validated scalars.
+export type Rec = { url: Url, weird: Weird }
+export type IdReq = { id: Int64 }
+"#,
+    );
+    write(
+        &dir.join("contract.vyrn"),
+        r#"import { Rec, Url, Weird, IdReq } from "./wire"
+/// Fetch a record.
+export fn getRec(req: IdReq) -> Rec {
+    return Rec { url: "http://x", weird: "y" }
+}
+"#,
+    );
+    write(&dir.join("gql.vyrn"), GQL_ROOT);
+    let sdl = run(&dir.join("gql.vyrn"));
+
+    // The document must now be valid SDL (was invalid before the fix).
+    sdl_block_strings_wellformed(&sdl);
+    // The record split into EXACTLY two fields — the predicate's comma did not
+    // fabricate a phantom field.
+    let rec = sdl.split("type Rec {").nth(1).unwrap().split('}').next().unwrap();
+    assert!(rec.contains("url: Url!"), "url field:\n{rec}");
+    assert!(rec.contains("weird: Weird!"), "weird field:\n{rec}");
+    assert_eq!(rec.matches(':').count(), 2, "exactly two fields:\n{rec}");
+    // The trailing-quote description is emitted on its own line (the padded form).
+    assert!(sdl.contains("\"\"\"\nA URL: must look like http(s)://… — String where value =~ \"https?://.+\"\n\"\"\""),
+        "padded Url description:\n{sdl}");
+}
+
+/// A block-string-aware SDL well-formedness check (no new dependency): scans the
+/// document as a GraphQL lexer would, treating `"""…"""` descriptions as OPAQUE
+/// (their interior braces/quotes are content, not code) and honoring `\"""` as the
+/// sole block-string escape. Asserts every block string terminates, no stray quote
+/// survives (the old `""""` boundary bug lexes as an unterminated string here), and
+/// braces/parens/brackets balance OUTSIDE strings and `#` comments. Stronger than
+/// `sdl_grammar_sane` — a description that contains `,` `}` or `"` cannot corrupt it.
+fn sdl_block_strings_wellformed(sdl: &str) {
+    let b = sdl.as_bytes();
+    let n = b.len();
+    let (mut i, mut depth, mut paren, mut brack) = (0usize, 0i32, 0i32, 0i32);
+    let is_tq = |j: usize| j + 2 < n && b[j] == b'"' && b[j + 1] == b'"' && b[j + 2] == b'"';
+    while i < n {
+        if b[i] == b'#' {
+            while i < n && b[i] != b'\n' {
+                i += 1;
+            }
+        } else if is_tq(i) {
+            i += 3;
+            loop {
+                assert!(i < n, "unterminated block string in SDL:\n{sdl}");
+                if b[i] == b'\\' && i + 3 < n && b[i + 1] == b'"' && b[i + 2] == b'"' && b[i + 3] == b'"' {
+                    i += 4; // an escaped `\"""`
+                } else if is_tq(i) {
+                    i += 3;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if b[i] == b'"' {
+            // A bare quote outside a block string: the old trailing-quote/`""""`
+            // boundary bug lands here and fails to terminate.
+            i += 1;
+            while i < n && b[i] != b'"' {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            assert!(i < n, "stray quote / quadruple-quote boundary in SDL:\n{sdl}");
+            i += 1;
+        } else {
+            match b[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    assert!(depth >= 0, "unbalanced }} in SDL:\n{sdl}");
+                }
+                b'(' => paren += 1,
+                b')' => paren -= 1,
+                b'[' => brack += 1,
+                b']' => brack -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    assert_eq!(depth, 0, "unbalanced braces in SDL:\n{sdl}");
+    assert_eq!(paren, 0, "unbalanced parens in SDL:\n{sdl}");
+    assert_eq!(brack, 0, "unbalanced brackets in SDL:\n{sdl}");
 }
 
 /// A dependency-free SDL grammar sanity check: brackets balance, and each `{`
