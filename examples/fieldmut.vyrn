@@ -21,6 +21,24 @@ type Store = { xs: Array<Int64>, n: Int64 }
 /// reported no-op.
 let mut store: Store = Store { xs: [], n: 0 }
 
+/// A record whose field is a growable array-of-arrays — a record-field boundary
+/// for a nested array LITERAL.
+type Cell = { grid: Array<Array<Int64>> }
+
+/// Module state initialized from a nested array LITERAL (the top-level boundary).
+let mut gGrid: Array<Array<Int64>> = [[9], [7, 8]]
+
+/// Sum the first inner row of a nested array passed as a fn ARGUMENT.
+fn sumFirst(g: Array<Array<Int64>>) -> Int64 {
+    let mut acc = 0
+    let mut i = 0
+    while i < g[0].length {
+        acc = acc + g[0][i]
+        i = i + 1
+    }
+    return acc
+}
+
 /// Grow the global's array field IN PLACE and bump the sibling scalar beside it.
 /// Both must persist; before the fix only `n` did.
 fn record(v: Int64) -> Int64 {
@@ -56,6 +74,31 @@ fn main() -> Int64 {
     rows[0].push(9)
     print(rows[0].length) // 3
     print(rows[0][2]) // 9
+
+    // ---- nested ARRAY LITERALS into a growable Array<Array<T>> ----------------
+    // A literal whose element type is itself a growable array must lower each
+    // inner literal to the `{ptr,len,cap}` heap triple — NOT a fixed 2-D C-array
+    // (which is the wrong repr and fails to build the moment inner lengths differ,
+    // as `[1]` vs `[2, 3]` do here). Exercised across every storage boundary the
+    // literal can flow through, so all lower the same way three ways.
+    let litRows: Array<Array<Int64>> = [[1], [2, 3]] // let-annotated, ragged
+    print(litRows.length) // 2
+    print(litRows[0][0]) // 1
+    print(litRows[1][1]) // 3
+    let litStrs: Array<Array<String>> = [["ada"], ["grace", "hopper"]] // string inner
+    print(litStrs[1][1]) // hopper
+    let cell: Cell = Cell { grid: [[4, 5], [6]] } // record-field init
+    print(cell.grid[0][1]) // 5
+    print(sumFirst([[10, 11], [12]])) // 21 — fn arg
+    print(gGrid[1][1]) // 8 — module state (top-level nested literal)
+    let litMap: Map<String, Array<Array<Int64>>> = ["k": [[5], [6, 7]]] // map value
+    let got = match litMap["k"] {
+        Some(v) => v[1][1],
+        None => 0,
+    }
+    print(got) // 7
+    let deep: Array<Array<Array<Int64>>> = [[[1]], [[2], [3, 4]]] // triple nesting
+    print(deep[1][1][1]) // 4
 
     // ---- heap elements + drop accounting -------------------------------------
     // Pushing heap values (Strings) through a record FIELD, then explicitly
@@ -100,4 +143,26 @@ test "array-element push writes back through the slot" {
     rows[0].push(3)
     assertEq(rows[0].length, 3)
     assertEq(rows[0][2], 3)
+}
+
+test "nested array literals lower to growable rows, ragged included" {
+    // The inner literals differ in length, so a fixed 2-D C-array cannot even
+    // represent this — each row must be its own heap triple.
+    let litRows: Array<Array<Int64>> = [[1], [2, 3]]
+    assertEq(litRows.length, 2)
+    assertEq(litRows[0].length, 1)
+    assertEq(litRows[1].length, 2)
+    assertEq(litRows[1][1], 3)
+    // A pushed row is representationally the same as a literal row.
+    let mut mixed: Array<Array<Int64>> = [[1, 2]]
+    mixed.push([3, 4, 5])
+    assertEq(mixed[1].length, 3)
+    assertEq(mixed[1][2], 5)
+    // Nested literal as a map value survives storage + retrieval.
+    let m: Map<String, Array<Array<Int64>>> = ["k": [[5], [6, 7]]]
+    let got = match m["k"] {
+        Some(v) => v[1][1],
+        None => 0,
+    }
+    assertEq(got, 7)
 }

@@ -3111,13 +3111,35 @@ impl<'a> Gen<'a> {
                 if let Some(t) = &elem_expect {
                     self.expect.push(t.clone());
                 }
+                // When the enclosing storage boundary expects a GROWABLE element
+                // (an `Array<T>` or `Map<K,V>` — e.g. an `Array<Array<Int64>>`),
+                // every element literal must be lowered to that heap representation
+                // BEFORE it enters the outer aggregate. Otherwise a nested literal
+                // like `[[1], [2, 3]]` lowers as a fixed 2-D C-array `[2 x [1 x
+                // i64]]`, which is the wrong repr AND fails to build the moment two
+                // inner literals differ in length. Build the aggregate at the
+                // declared element type and coerce each element into it — the same
+                // declared-type coercion the enum-payload path uses. (A flat/scalar
+                // element type keeps the inferred-from-`elems[0]` path unchanged.)
+                let growable_elem = matches!(
+                    elem_expect.as_ref().map(|t| self.resolve(t)),
+                    Some(Type::Array(_)) | Some(Type::Map(_, _))
+                );
                 let build = (|| -> Result<(String, Type), String> {
-                    // Build the [N x T] value aggregate by inserting each element.
-                    let (v0, ety) = self.gen_expr(&elems[0])?;
+                    let (ety, first) = if growable_elem {
+                        let ety = elem_expect.clone().unwrap();
+                        let (v0, v0t) = self.gen_expr(&elems[0])?;
+                        let (v0, _) = self.coerce(v0, &v0t, &ety)?;
+                        (ety, v0)
+                    } else {
+                        // Build the [N x T] value aggregate by inserting each element.
+                        let (v0, ety) = self.gen_expr(&elems[0])?;
+                        (ety, v0)
+                    };
                     let ell = self.llt(&ety);
                     let aty = format!("[{} x {ell}]", elems.len());
                     let mut cur = self.fresh_tmp();
-                    self.emit(format!("{cur} = insertvalue {aty} undef, {ell} {v0}, 0"));
+                    self.emit(format!("{cur} = insertvalue {aty} undef, {ell} {first}, 0"));
                     for (i, e) in elems.iter().enumerate().skip(1) {
                         let (v, vt) = self.gen_expr(e)?;
                         let (v, _) = self.coerce(v, &vt, &ety)?;
@@ -3165,7 +3187,14 @@ impl<'a> Gen<'a> {
                 let build = (|| -> Result<Type, String> {
                     let (kv0, _) = self.gen_expr(&entries[0].0)?;
                     let (v0, vty0) = self.gen_expr(&entries[0].1)?;
-                    let val = vty0;
+                    // Store values at the DECLARED value type when the boundary
+                    // supplies one, coercing each into it — otherwise a value that
+                    // lowers as a fixed `[N x T]` (a nested array literal like
+                    // `[[5],[6,7]]`) would be stored at the wrong width and read
+                    // back as a corrupt `{ptr,len,cap}`. No annotation => infer
+                    // from the first value (a no-op coercion, byte-identical).
+                    let val = val_expect.clone().unwrap_or_else(|| vty0.clone());
+                    let (v0, _) = self.coerce(v0, &vty0, &val)?;
                     self.emit_map_set(&slot, &kv0, &v0, &val);
                     for (ke, ve) in entries.iter().skip(1) {
                         let (kv, _) = self.gen_expr(ke)?;
