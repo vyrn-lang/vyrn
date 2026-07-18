@@ -3222,6 +3222,17 @@ mod tests {
         assert!(e.message.contains("plain array variable"), "{}", e.message);
     }
 
+    #[test]
+    fn index_assign_on_a_record_field_array_is_rejected() {
+        // `s.xs[i] = v` where `xs` is a record-field array is NOT a plain array
+        // variable, so it is a parse error today — pinning the CURRENT behavior.
+        // (Whether index-assign should gain the same field write-back that `push`
+        // has is a DEFERRED design question; see NOTES-dogfood-bin.md.)
+        let src = "fn main() -> Int64 { let mut s: S = S { xs: [1, 2] }  s.xs[0] = 9  return 0 }";
+        let e = parse(lex(src).unwrap()).unwrap_err();
+        assert!(e.message.contains("plain array variable"), "{}", e.message);
+    }
+
     // ---- statement-position `push` writes back through its receiver place ---
 
     #[test]

@@ -144,6 +144,18 @@ AND mutate, so there is no statement to write back. The workaround (rebuild the
 array + whole-global reassign) is deleted from `store.vyrn`; `examples/fieldmut.vyrn`
 locks the behavior in three-way.
 
+**Open item (DEFERRED) — index-assign write-through for a record-field array.**
+`push` now writes back through a record field (`r.xs.push(v)`), but the sibling
+element-store `r.xs[i] = v` does *not*: it is a hard parse error today ("the left
+side of an index assignment `[i] = ..` must be a plain array variable"). This is
+an **intentional inconsistency for now** — the safe, non-silent behavior (reject,
+don't copy) — but it means a caller who can `r.xs.push(v)` cannot `r.xs[i] = v` and
+must hoist the field into a local first. Whether `[i] =` should gain the same
+one-level field/element write-back the `push` desugar has is a design question left
+open. The current rejection is pinned by `parser.rs`
+`index_assign_on_a_record_field_array_is_rejected` so the behavior can't drift while
+undecided.
+
 ### Durability caveats (the std/storage evidence)
 
 `writeFile` (RFC-0014) is truncate-then-write with **no atomic rename and no
