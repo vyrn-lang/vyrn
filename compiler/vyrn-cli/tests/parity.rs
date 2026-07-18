@@ -327,6 +327,81 @@ fn task_trap_prints_once_and_exits_1_threaded() {
     }
 }
 
+/// Regression for the RFC-0040 §2 wall (RFC-0023 × RFC-0037): a monomorphized
+/// `fn`-value PARAMETER used as a VALUE — stored, not called — must materialize
+/// its defunctionalized enum and compile, for ANY payload signature. Storing a
+/// fn-param with a NON-SCALAR payload (`fn(User)`, `fn(Validation<User>)`,
+/// `fn(Result<User, String>)`) used to emit `error: unbound `cb`` where a scalar
+/// `fn(Int64)` built; the fix binds every signature identically. This pins the
+/// native build SUCCEEDING and matching the interpreter for each payload shape.
+/// Needs clang, so it is `#[ignore]`d like the rest of this file's build tests.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn stored_fn_param_compiles_for_any_payload() {
+    let out_dir = std::env::temp_dir().join("vyrn-parity");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    // (payload type, sample value, callback body reading the payload). Each stores
+    // `cb` (a fn-param) into module-state Map<String, fn(Payload)>, then retrieves
+    // and calls it — the exact shape the std/rpc v2 client emits.
+    let cases: &[(&str, &str, &str, &str)] = &[
+        ("scalar", "Int64", "7", "print(\"got: \\{p}\")"),
+        ("record", "User", "User { id: 1, name: \"ada\" }", "print(\"got: \\{p.id}/\\{p.name}\")"),
+        (
+            "validation",
+            "Validation<User>",
+            "Valid(User { id: 3, name: \"mei\" })",
+            "match p { Valid(u) => print(\"valid: \\{u.name}\"), Invalid(i) => print(\"invalid: \\{i.length}\") }",
+        ),
+        (
+            "result",
+            "Result<User, String>",
+            "Ok(User { id: 42, name: \"zed\" })",
+            "match p { Ok(u) => print(\"ok: \\{u.id}\"), Err(e) => print(\"err: \\{e}\") }",
+        ),
+    ];
+
+    for (label, payload_ty, sample, body) in cases {
+        let src = format!(
+            "type User = {{ id: Int64, name: String }}\n\
+             type Sink = fn({payload_ty})\n\
+             let mut pending: Map<String, Sink> = [:]\n\
+             fn on(k: String, cb: Sink) {{\n    pending[k] = cb\n}}\n\
+             fn fire(k: String, p: {payload_ty}) {{\n    \
+             match pending[k] {{ Some(cb) => cb(p), None => print(\"none\") }}\n}}\n\
+             fn main() -> Int64 {{\n    on(\"a\", |p| {body})\n    \
+             fire(\"a\", {sample})\n    return 0\n}}\n"
+        );
+        let file = out_dir.join(format!("fnparam_{label}.vyrn"));
+        std::fs::write(&file, &src).unwrap();
+
+        let interp = vyrn().arg("run").arg(&file).output().expect("run interp");
+        assert!(
+            interp.status.success(),
+            "{label}: interp must succeed:\n{}",
+            norm(&interp.stderr)
+        );
+
+        let exe = out_dir.join(format!("fnparam_{label}.exe"));
+        let build =
+            vyrn().arg("build").arg(&file).arg("-o").arg(&exe).output().expect("build");
+        assert!(
+            build.status.success(),
+            "{label}: native build of a stored fn-param ({payload_ty}) must succeed \
+             (the RFC-0040 §2 wall), got:\n{}{}",
+            norm(&build.stdout),
+            norm(&build.stderr)
+        );
+        let native = Command::new(&exe).output().expect("run native");
+        assert_eq!(
+            norm(&native.stdout),
+            norm(&interp.stdout),
+            "{label}: native stdout must match the interpreter"
+        );
+        assert_eq!(native.status.code(), interp.status.code(), "{label}: exit code");
+    }
+}
+
 #[test]
 fn expected_check_failures_do_fail() {
     let dir = examples_dir();

@@ -1,0 +1,178 @@
+/// Storing a `fn`-value that arrives as a PARAMETER (RFC-0037 × RFC-0023): the
+/// exact shape the std/rpc v2 client emits — `fn onX(k, cb: fn(T)) { pending[k]
+/// = cb }` — for a SCALAR payload and for NON-SCALAR payloads (a record, a
+/// `Validation<Record>`, a `Result<Record, String>`). A fn-param used as a
+/// value (stored into a Map, an Array, or a record field, or captured in a
+/// closure) materializes the same defunctionalized enum a lambda/named source
+/// does, so storing never diverges from calling — for any signature. The
+/// stored value is retrieved (a match binds it to a local name) and invoked.
+/// Interp == native == wasm, including a record capture surviving scope exit
+/// and drop of a map of stored closures.
+
+type User = { id: Int64, name: String }
+
+type IntSink = fn(Int64)
+
+type UserSink = fn(User)
+
+type ValSink = fn(Validation<User>)
+
+type ResSink = fn(Result<User, String>)
+
+type Handlers = { onSave: UserSink }
+
+/// Callback tables keyed by call id, exactly like the rpc client's `pending`.
+let mut intPending: Map<String, IntSink> = [:]
+
+let mut userPending: Map<String, UserSink> = [:]
+
+let mut valPending: Map<String, ValSink> = [:]
+
+let mut resPending: Map<String, ResSink> = [:]
+
+/// A module-state Array of stored closures (the container the miscompile also
+/// hit through `chain.push(cb)`).
+let mut intChain: Array<IntSink> = []
+
+/// The miscompiling shape: a `fn`-typed PARAMETER stored into a Map value.
+fn onInt(k: String, cb: IntSink) {
+    intPending[k] = cb
+}
+
+fn onUser(k: String, cb: UserSink) {
+    userPending[k] = cb
+}
+
+fn onVal(k: String, cb: ValSink) {
+    valPending[k] = cb
+}
+
+fn onRes(k: String, cb: ResSink) {
+    resPending[k] = cb
+}
+
+/// A fn-param stored into an Array (the same value position, container aside).
+fn pushInt(cb: IntSink) {
+    intChain.push(cb)
+}
+
+/// A fn-param stored into a record FIELD, then returned — the closure (and any
+/// capture it carries) survives this function's scope exit.
+fn makeHandlers(cb: UserSink) -> Handlers {
+    return Handlers { onSave: cb }
+}
+
+/// The captured value is a RECORD (`tag`): the lambda flows into `onUser`, whose
+/// `cb` param is then stored — so the stored fn-value's capture block is a
+/// non-scalar record, boxed by value at the store site.
+fn onUserTagged(k: String, tag: User) {
+    onUser(k, |u| print("\{tag.name}#\{tag.id} -> \{u.name}#\{u.id}"))
+}
+
+/// A named function stored as a value (the empty-payload variant).
+fn double(n: Int64) {
+    print("chain-b: \{n * 2}")
+}
+
+/// Retrieve a stored sink (the match binds it to a local name) and fire it.
+fn fireInt(k: String, n: Int64) {
+    match intPending[k] {
+        Some(cb) => cb(n),
+        None => print("no int sink: \{k}"),
+    }
+}
+
+fn fireUser(k: String, u: User) {
+    match userPending[k] {
+        Some(cb) => cb(u),
+        None => print("no user sink: \{k}"),
+    }
+}
+
+fn fireVal(k: String, v: Validation<User>) {
+    match valPending[k] {
+        Some(cb) => cb(v),
+        None => print("no val sink: \{k}"),
+    }
+}
+
+fn fireRes(k: String, r: Result<User, String>) {
+    match resPending[k] {
+        Some(cb) => cb(r),
+        None => print("no res sink: \{k}"),
+    }
+}
+
+/// The stored `Validation<User>` sink: a "fat" boxed payload as the argument.
+fn showValidation(v: Validation<User>) {
+    match v {
+        Valid(u) => print("valid: \{u.name}"),
+        Invalid(iss) => print("invalid: \{iss.length}"),
+    }
+}
+
+fn showResult(r: Result<User, String>) {
+    match r {
+        Ok(u) => print("ok: \{u.id}"),
+        Err(e) => print("err: \{e}"),
+    }
+}
+
+fn main() -> Int64 {
+    // Scalar payload: a fn-param stored into a Map, no capture.
+    onInt("plain", |n| print("plain: \{n}"))
+    fireInt("plain", 7) // plain: 7
+    fireInt("missing", 0) // no int sink: missing
+
+    // Scalar payload with a CAPTURE, stored through the param.
+    let base = 100
+    onInt("shifted", |n| print("shifted: \{n + base}"))
+    fireInt("shifted", 5) // shifted: 105
+
+    // Record payload (non-scalar): the exact miscompile from the wall note.
+    onUser("save", |u| print("save: \{u.id}/\{u.name}"))
+    fireUser("save", User { id: 1, name: "ada" }) // save: 1/ada
+
+    // Record capture stored through the param (non-scalar capture block).
+    onUserTagged("audit", User { id: 9, name: "root" })
+    fireUser("audit", User { id: 2, name: "lin" }) // root#9 -> lin#2
+
+    // Validation<Record> payload — dispatched to a named sink.
+    onVal("form", showValidation)
+    fireVal("form", Valid(User { id: 3, name: "mei" })) // valid: mei
+    let mut iss: Array<Issue> = []
+    iss.push(Issue { key: "name.required", path: "name", message: "required" })
+    fireVal("form", Invalid(iss)) // invalid: 1
+
+    // Result<Record, String> payload.
+    onRes("fetch", showResult)
+    fireRes("fetch", Ok(User { id: 42, name: "zed" })) // ok: 42
+    fireRes("fetch", Err("timeout")) // err: timeout
+
+    // A fn-param stored into an ARRAY, then dispatched from the element binding.
+    pushInt(|n| print("chain-a: \{n}"))
+    pushInt(double)
+    let mut i = 0
+    while i < intChain.length {
+        let f = intChain[i]
+        f(i) // chain-a: 0 ; chain-b: 2
+        i = i + 1
+    }
+
+    // A fn-param stored into a record FIELD, surviving scope exit.
+    let handlers = makeHandlers(|u| print("field: \{u.name}"))
+    let save = handlers.onSave
+    save(User { id: 5, name: "cy" }) // field: cy
+
+    // Drop a LOCAL map of stored closures: an ordinary Map<String, fn> value,
+    // its closures freed with it (drop/leak accounting inherited from the enum).
+    let mut local: Map<String, IntSink> = [:]
+    local["a"] = |n| print("local: \{n}")
+    match local["a"] {
+        Some(cb) => cb(3), // local: 3
+        None => print("no local sink"),
+    }
+    drop local
+
+    return 0
+}

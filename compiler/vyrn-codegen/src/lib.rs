@@ -3003,6 +3003,17 @@ impl<'a> Gen<'a> {
                     return Ok((cur, Type::Named(enum_name)));
                 }
                 let Some((slot, ty)) = self.lookup(name) else {
+                    // A `fn`-typed PARAMETER used as a VALUE (RFC-0037 × RFC-0023):
+                    // inside a specialized instance the parameter has no slot — it
+                    // lives in `fn_bindings` as a known target + capture SSA values.
+                    // STORING it (`pend[k] = cb`, `let g = cb`, `return cb`, a
+                    // record field, …) materializes the same `{ i64, i64 }`
+                    // defunctionalized aggregate a lambda/named source does, so
+                    // storing a fn-param never diverges from calling it — for any
+                    // signature, scalar or non-scalar payload alike.
+                    if let Some(b) = self.fn_bindings.get(name).cloned() {
+                        return self.construct_fnval_binding(&b);
+                    }
                     // A bare function name in a value position (RFC-0037): an
                     // empty-payload defunctionalization variant.
                     if self.funcs.contains_key(name.as_str()) {
@@ -4635,6 +4646,56 @@ impl<'a> Gen<'a> {
             tgt_ret,
         );
         Ok((self.fnval_aggregate(tag, "0"), sig))
+    }
+
+    /// Construct a stored function value from a `fn`-typed PARAMETER (RFC-0037 ×
+    /// RFC-0023): inside a specialized instance the parameter is defunctionalized
+    /// — its direct-call target and its capture SSA values (this instance's own
+    /// leading extra parameters) are statically known — so storing it materializes
+    /// exactly the `{ i64, i64 }` aggregate a lambda/named source builds. The
+    /// captures are boxed by value into a heap block (an empty capture set is
+    /// payload 0), identical to `construct_fnval_lambda`; the only difference is
+    /// the capture values are already-materialized instance parameters rather than
+    /// freshly loaded slots. This makes storing a fn-param behave exactly as
+    /// calling it — for any signature, scalar or non-scalar payload alike.
+    fn construct_fnval_binding(&mut self, b: &FnBinding) -> Result<(String, Type), String> {
+        let sig = self.expected_fn_sig().unwrap_or_else(|| {
+            self.normalize_sig(&Type::Fn(b.param_tys.clone(), Box::new(b.ret.clone())))
+        });
+        let cap_tys: Vec<Type> = b.captures.iter().map(|(t, _)| t.clone()).collect();
+        let payload = if cap_tys.is_empty() {
+            "0".to_string()
+        } else {
+            let block_ll = format!(
+                "{{ {} }}",
+                cap_tys.iter().map(|t| self.llt(t)).collect::<Vec<_>>().join(", ")
+            );
+            let mut cur = "undef".to_string();
+            for (i, (t, v)) in b.captures.iter().enumerate() {
+                let ins = self.fresh_tmp();
+                let ll = self.llt(t);
+                self.emit(format!("{ins} = insertvalue {block_ll} {cur}, {ll} {v}, {i}"));
+                cur = ins;
+            }
+            let size = self.fresh_tmp();
+            let p = self.fresh_tmp();
+            self.emit(format!(
+                "{size} = ptrtoint ptr getelementptr ({block_ll}, ptr null, i64 1) to i64"
+            ));
+            self.emit(format!("{p} = call ptr @__vyrn_malloc(i64 {size})"));
+            self.emit(format!("store {block_ll} {cur}, ptr {p}"));
+            let iv = self.fresh_tmp();
+            self.emit(format!("{iv} = ptrtoint ptr {p} to i64"));
+            iv
+        };
+        let tag = self.register_fnval(
+            &sig,
+            b.target_sym.clone(),
+            cap_tys,
+            b.param_tys.clone(),
+            b.ret.clone(),
+        );
+        Ok((self.fnval_aggregate(tag, &payload), sig))
     }
 
     /// Record that signature `sig` is called through a stored value somewhere,

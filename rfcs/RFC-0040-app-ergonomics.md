@@ -1,6 +1,6 @@
 # RFC-0040 — App Ergonomics: Generator Identity, RPC Callbacks, `.vyx` Order
 
-- **Status:** Implemented (§1–§5; see as-landed notes — one downstream wall recorded)
+- **Status:** Implemented (§1–§5; the recorded downstream wall is now RESOLVED — see as-landed notes)
 - **Depends on:** RFC-0021/0031 (generator identity + cache keys), RFC-0037
   (stored closures — the RPC-callback unlock), RFC-0039 (`.vyx` v2 — the
   script-section order rule lands there), RFC-0019 (`std/rpc` — the
@@ -142,18 +142,30 @@ compat shims (clean break).
   home (3 books), `/about` en+uk plurals, `/books/1` loader, `/admin` guard **403**
   (middleware direct-init), 404/422, openapi+graphql. Full suite 900 + full parity
   green at every commit; fullstack `rpc.rs` passes.
-- **WALL (pre-existing, NOT this RFC's §3–§5) — the §2 callback clients cannot
-  build to wasm/native.** `vyrn dev` fails with `error: unbound cb` for BOTH bin
-  and fullstack (fullstack is untouched by §3–§5, so this predates this work and
-  was never covered — the parity harness and `rpc.rs` only exercise interp/serve).
-  Root cause: an RFC-0023 × RFC-0037 codegen composition gap — a monomorphized
-  `fn`-value PARAMETER whose payload is a NON-SCALAR (record / `Validation<Record>`)
-  type is not slot-bound when the function is instantiated, so STORING it
-  (`pending[k] = cb`) resolves `cb` as a bare name and fails. Minimal repro:
-  `fn store(k, cb: fn(User)) { pend[k] = cb }` called with any concrete fn-value
-  builds fine for `fn(Int64)` but errors for `fn(User)`; interp is correct in both.
-  This blocks browser verification of the interactive islands only (create→soft-nav
-  in bin; add/rate/delete/filter/locale in shelf) — the SSR surface is unaffected.
-  Fixing it is native-codegen work in `vyrn-codegen` (materializing a
-  defunctionalized fn-value aggregate from a monomorphized binding, aggregate ABI),
-  outside §3–§5 scope; flagged for a dedicated follow-up.
+- **WALL (pre-existing, NOT this RFC's §3–§5) — RESOLVED (follow-up task_9c712034).** The §2 callback clients could not build to
+  wasm/native: `vyrn dev` failed with `error: unbound cb` for bin, shelf, AND
+  fullstack (untouched by §3–§5, so it predated this work and was never covered —
+  the parity harness and `rpc.rs` only exercise interp/serve). Root cause was an
+  RFC-0023 × RFC-0037 codegen composition gap in `vyrn-codegen`: a monomorphized
+  `fn`-value PARAMETER lives in `fn_bindings` (a known defunctionalization target +
+  its capture SSA values) with NO local slot, so using it as a VALUE — `pending[k]
+  = cb`, `let g = cb`, `return cb`, a record field, an array push — fell through
+  `gen_expr`'s `Expr::Var` arm to `unbound`. (It was signature-agnostic: `fn(Int64)`
+  failed too the moment it was STORED rather than immediately called; scalar
+  "worked" only where the value was consumed inline.) **Fix:** the `Expr::Var` arm
+  now materializes the same `{ i64, i64 }` aggregate a lambda/named source builds
+  via a new `construct_fnval_binding` — box the binding's captures by value (empty ⇒
+  payload 0), `register_fnval` the (signature, target, captures), return the
+  aggregate — so STORING a fn-param never diverges from CALLING it, for any payload
+  (scalar or non-scalar, no record special-case). The RFC-0023 IR invariant holds
+  (every emitted `call` still names an `@symbol`; zero wasm table entries). Proof:
+  a new three-way parity citizen `examples/fnvalstore.vyrn` (scalar / record /
+  `Validation<Record>` / `Result<Record,String>` payloads stored via a fn-param
+  into a Map, an Array, and a record field; a record-capturing closure; drop of a
+  map of closures) — the exact path the harness was blind to — plus a
+  `stored_fn_param_compiles_for_any_payload` codegen regression test; bin, shelf, and
+  fullstack clients now build to wasm; and BROWSER-VERIFIED islands over `vyrn dev`:
+  bin create → soft-nav to `/p/<id>` (`createPaste -> 200`), shelf add/rate/delete
+  (two-step confirm)/tag-filter/locale-toggle (`addBook`/`rateBook`/`deleteBook ->
+  200`). 900 workspace tests (unchanged; the regression test is `#[ignore]`,
+  needs clang) + full three-way parity green (now including `fnvalstore.vyrn`).
