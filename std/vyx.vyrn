@@ -976,11 +976,20 @@ fn vyxSectionAvoid(ba: Array<UInt8>, name: String, codeMode: Bool, avoidS: Int64
 
 /// The parsed `<script>` section: props (parallel name/type arrays), rebased
 /// import lines, and pass-through helper source. `err` is set on a props fault.
+/// RFC-0048 §1: `importLines`/`importCols` are the 1-based `.vyx` position of each
+/// import's leading keyword (parallel to `imports`), and `helperTexts` are the
+/// pass-through helper lines with their `helperLines`/`helperCols` positions, so
+/// the synthesized module can carry `//@origin` directives back to the script.
 type VyxScript = {
     propNames: Array<String>,
     propTypes: Array<String>,
     imports: Array<String>,
+    importLines: Array<Int64>,
+    importCols: Array<Int64>,
     helpers: String,
+    helperTexts: Array<String>,
+    helperLines: Array<Int64>,
+    helperCols: Array<Int64>,
     err: String,
 }
 
@@ -1166,11 +1175,35 @@ fn vyxImportsFirstViolation(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, kwStr:
     return 0
 }
 
-/// Parse the `<script>` section text: pull the single `props {…}` block, collect
-/// (and rebase) import lines, and pass everything else through as helper source.
+/// The offset (within `ba`) of the first non-whitespace byte in `[s, e)`, or `s`
+/// when the whole range is whitespace — the column anchor for an RFC-0033 origin.
+fn vyxFirstNonWs(ba: Array<UInt8>, s: Int64, e: Int64) -> Int64 {
+    let mut i = s
+    while i < e && vyxIsWs(ba[i]) {
+        i = i + 1
+    }
+    return i
+}
+
+/// Parse the `<script>` section text (a standalone string, positions relative to
+/// its own start) — the string wrapper kept for the pure unit tests.
 fn vyxParseScript(script: String, dir: String, fileId: String) -> VyxScript {
     let ba = bytes(script)
-    let props = vyxFindPropsBlock(ba)
+    return vyxParseScriptAt(ba, 0, ba.length, dir, fileId)
+}
+
+/// Parse the `<script>` section `ba[sStart, sEnd)`: pull the single `props {…}`
+/// block, collect (and rebase) import lines, and pass everything else through as
+/// helper source — recording every import's and helper line's 1-based
+/// `.vyx`-FILE position (RFC-0048 §1), so the synthesized module can emit
+/// `//@origin` directives back onto the copied script region. Positions are
+/// whole-file (computed against `ba`), so an import specifier or a helper `fn`
+/// maps to its exact `.vyx` line:col.
+fn vyxParseScriptAt(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, dir: String, fileId: String) -> VyxScript {
+    // props detection works on the section substring (relative offsets); a
+    // relative offset `r` is whole-file offset `sStart + r`.
+    let sub = bytes(vyxSlice(ba, sStart, sEnd))
+    let props = vyxFindPropsBlock(sub)
     let mut propNames: Array<String> = []
     let mut propTypes: Array<String> = []
     let mut bodyEnd = 0 - 1
@@ -1180,13 +1213,13 @@ fn vyxParseScript(script: String, dir: String, fileId: String) -> VyxScript {
             return vyxScriptErr(vyxErr("VYX_BAD_PROPS", fileId, 0))
         }
         bodyStart = props.braceAt
-        bodyEnd = vyxMatchCurly(ba, bodyStart)
+        bodyEnd = vyxMatchCurly(sub, bodyStart)
         // A second props block is an error.
-        let more = vyxFindPropsBlockFrom(ba, bodyEnd)
+        let more = vyxFindPropsBlockFrom(sub, bodyEnd)
         if more.found {
             return vyxScriptErr(vyxErr("VYX_MULTIPLE_PROPS", fileId, 0))
         }
-        let fields = vyxSplitFields(vyxSlice(ba, bodyStart + 1, bodyEnd - 1))
+        let fields = vyxSplitFields(vyxSlice(sub, bodyStart + 1, bodyEnd - 1))
         for part in fields {
             let trimmed = vyxTrim(part)
             if trimmed.length > 0 {
@@ -1207,23 +1240,55 @@ fn vyxParseScript(script: String, dir: String, fileId: String) -> VyxScript {
             }
         }
     }
-    // The rest of the script, with the props block sliced out.
-    let mut rest = script
-    if bodyStart >= 0 {
-        rest = vyxSlice(ba, 0, props.kwAt) + vyxSlice(ba, bodyEnd, ba.length)
-    }
-    // Line-wise: `import` lines (rebased) vs. pass-through helpers.
+    // Walk the section line by line (relative offsets into `sub`), excluding the
+    // props block's line span, classifying each line as an import (rebased) or a
+    // pass-through helper, and recording its whole-file origin position.
     let mut imports: Array<String> = []
+    let mut importLines: Array<Int64> = []
+    let mut importCols: Array<Int64> = []
     let mut helpers = ""
-    for line in vyxLines(rest) {
-        let t = vyxTrim(line)
-        if t.startsWith("import ") {
-            imports.push(vyxRebaseImport(t, dir))
-        } else if t.length > 0 {
-            helpers = helpers + line + "\n"
+    let mut helperTexts: Array<String> = []
+    let mut helperLines: Array<Int64> = []
+    let mut helperCols: Array<Int64> = []
+    let mut lineStart = 0
+    let mut i = 0
+    while i <= sub.length {
+        if i == sub.length || sub[i] == 10 {
+            let lineEnd = if i > lineStart && sub[i - 1] == 13 { i - 1 } else { i }
+            let lineText = vyxSlice(sub, lineStart, lineEnd)
+            // Skip a line that overlaps the props block (its bytes were sliced out
+            // in the pre-RFC-0048 pipeline; whole-line props is the norm).
+            let inProps = bodyStart >= 0 && lineStart < bodyEnd && lineEnd > props.kwAt
+            if inProps == false {
+                let t = vyxTrim(lineText)
+                let fnwAbs = sStart + vyxFirstNonWs(sub, lineStart, lineEnd)
+                if t.startsWith("import ") {
+                    imports.push(vyxRebaseImport(t, dir))
+                    importLines.push(vyxLineAt(ba, fnwAbs))
+                    importCols.push(vyxColAt(ba, fnwAbs))
+                } else if t.length > 0 {
+                    helpers = helpers + lineText + "\n"
+                    helperTexts.push(lineText)
+                    helperLines.push(vyxLineAt(ba, fnwAbs))
+                    helperCols.push(vyxColAt(ba, fnwAbs))
+                }
+            }
+            lineStart = i + 1
         }
+        i = i + 1
     }
-    return VyxScript { propNames: propNames, propTypes: propTypes, imports: imports, helpers: helpers, err: "" }
+    return VyxScript {
+        propNames: propNames,
+        propTypes: propTypes,
+        imports: imports,
+        importLines: importLines,
+        importCols: importCols,
+        helpers: helpers,
+        helperTexts: helperTexts,
+        helperLines: helperLines,
+        helperCols: helperCols,
+        err: "",
+    }
 }
 
 /// A `props` block search starting at `from` (for the second-block check).
@@ -1244,7 +1309,18 @@ fn vyxFindPropsBlockFrom(ba: Array<UInt8>, from: Int64) -> VyxProps {
 
 /// A `VyxScript` carrying only an error.
 fn vyxScriptErr(err: String) -> VyxScript {
-    return VyxScript { propNames: [], propTypes: [], imports: [], helpers: "", err: err }
+    return VyxScript {
+        propNames: [],
+        propTypes: [],
+        imports: [],
+        importLines: [],
+        importCols: [],
+        helpers: "",
+        helperTexts: [],
+        helperLines: [],
+        helperCols: [],
+        err: err,
+    }
 }
 
 /// Split `s` into lines (LF-separated, CR stripped).
@@ -1276,6 +1352,12 @@ fn vyxLines(s: String) -> Array<String> {
 
 /// One parsed `.vyx` component: its tag name, view-fn name, props, imports,
 /// helpers, root node, whether it uses `<slot/>`, and any parse error.
+/// RFC-0048 §1: `importLines`/`importCols` (parallel to `imports`) and
+/// `helperTexts`/`helperLines`/`helperCols` carry the `.vyx`-file origin of each
+/// copied script region, so the synthesized module emits `//@origin` for them.
+/// `srcPath` is the origin file the template AST's node lines are stated against;
+/// for a `.vyx` page/layout/error compiled through a synthetic source, `std/ui`
+/// overrides these with the real route file's path + positions (RFC-0048 §2).
 type VyxComp = {
     name: String,
     fnName: String,
@@ -1284,7 +1366,12 @@ type VyxComp = {
     propNames: Array<String>,
     propTypes: Array<String>,
     imports: Array<String>,
+    importLines: Array<Int64>,
+    importCols: Array<Int64>,
     helpers: String,
+    helperTexts: Array<String>,
+    helperLines: Array<Int64>,
+    helperCols: Array<Int64>,
     root: VyxNode,
     takesChildren: Bool,
     err: String,
@@ -1348,20 +1435,30 @@ export fn vyxCompileComponent(compName: String, source: String, dir: String) -> 
     let mut propNames: Array<String> = []
     let mut propTypes: Array<String> = []
     let mut imports: Array<String> = []
+    let mut importLines: Array<Int64> = []
+    let mut importCols: Array<Int64> = []
     let mut helpers = ""
+    let mut helperTexts: Array<String> = []
+    let mut helperLines: Array<Int64> = []
+    let mut helperCols: Array<Int64> = []
     if scriptSec.found {
         let bad = vyxImportsFirstViolation(ba, scriptSec.start, scriptSec.end, "props")
         if bad > 0 {
             return vyxCompErr(compName, fnName, fileId, srcPath, vyxErr("VYX_IMPORTS_FIRST", fileId, bad))
         }
-        let sc = vyxParseScript(vyxSlice(ba, scriptSec.start, scriptSec.end), dir, fileId)
+        let sc = vyxParseScriptAt(ba, scriptSec.start, scriptSec.end, dir, fileId)
         if sc.err != "" {
             return vyxCompErr(compName, fnName, fileId, srcPath, sc.err)
         }
         propNames = sc.propNames
         propTypes = sc.propTypes
         imports = sc.imports
+        importLines = sc.importLines
+        importCols = sc.importCols
         helpers = sc.helpers
+        helperTexts = sc.helperTexts
+        helperLines = sc.helperLines
+        helperCols = sc.helperCols
     }
 
     // Parse the template (over absolute file offsets, for true line numbers), then
@@ -1391,7 +1488,12 @@ export fn vyxCompileComponent(compName: String, source: String, dir: String) -> 
         propNames: propNames,
         propTypes: propTypes,
         imports: imports,
+        importLines: importLines,
+        importCols: importCols,
         helpers: helpers,
+        helperTexts: helperTexts,
+        helperLines: helperLines,
+        helperCols: helperCols,
         root: root,
         takesChildren: vyxUsesChildren([root]),
         err: "",
@@ -1442,7 +1544,12 @@ fn vyxCompErr(name: String, fnName: String, fileId: String, srcPath: String, err
         propNames: [],
         propTypes: [],
         imports: [],
+        importLines: [],
+        importCols: [],
         helpers: "",
+        helperTexts: [],
+        helperLines: [],
+        helperCols: [],
         root: VNText(""),
         takesChildren: false,
         err: err,
@@ -1460,6 +1567,168 @@ fn vyxCompErr(name: String, fnName: String, fileId: String, srcPath: String, err
 /// A `//@origin <path>:<line>:<col>` directive line (RFC-0033).
 fn vyxOrigin(src: String, line: Int64, col: Int64) -> String {
     return "//@origin " + src + ":" + line.toString() + ":" + col.toString() + "\n"
+}
+
+// ---- template line relocation (RFC-0048 §2) ---------------------------------
+// A `.vyx` page/layout/error is compiled through a synthetic source whose
+// `<template>` body is a VERBATIM copy of the real route file's template (same
+// bytes, same newlines, same columns) sitting at a shifted line. Adding a
+// constant `dLine` to every template node's line — and pointing `srcPath` at the
+// real file — makes each template origin land on the real `.vyx` at real
+// coordinates, with NO change to the generated code (RFC-0048 §2).
+
+/// Every attribute's line shifted by `d` (columns unchanged).
+fn vyxShiftAttrs(attrs: Array<VyxAttr>, d: Int64) -> Array<VyxAttr> {
+    let mut out: Array<VyxAttr> = []
+    for a in attrs {
+        out.push(VyxAttr { name: a.name, value: a.value, dyn: a.dyn, evt: a.evt, line: a.line + d, col: a.col })
+    }
+    return out
+}
+
+/// A node list with every node's line(s) shifted by `d`.
+fn vyxShiftNodes(nodes: Array<VyxNode>, d: Int64) -> Array<VyxNode> {
+    let mut out: Array<VyxNode> = []
+    for n in nodes {
+        out.push(vyxShiftNode(n, d))
+    }
+    return out
+}
+
+/// One template node with every line field shifted by `d` (RFC-0048 §2).
+fn vyxShiftNode(n: VyxNode, d: Int64) -> VyxNode {
+    return match n {
+        VNText(s) => VNText(s),
+        VNInterp(x, l, c) => VNInterp(x, l + d, c),
+        VNRaw(x, l, c) => VNRaw(x, l + d, c),
+        VNChildren => VNChildren,
+        VNElem(t, comp, a, k, l) => VNElem(t, comp, vyxShiftAttrs(a, d), vyxShiftNodes(k, d), l + d),
+        VNIf(conds, cl, cc, bodies, els, has) => vyxShiftIf(conds, cl, cc, bodies, els, has, d),
+        VNFor(v, it, k, body, l, c) => VNFor(v, it, k, vyxShiftNodes(body, d), l + d, c),
+    }
+}
+
+/// A `VNIf`'s per-condition line array and branch bodies shifted by `d`.
+fn vyxShiftIf(conds: Array<String>, condLines: Array<Int64>, condCols: Array<Int64>, bodies: Array<VyxBody>, els: VyxBody, has: Bool, d: Int64) -> VyxNode {
+    let mut cl: Array<Int64> = []
+    for x in condLines {
+        cl.push(x + d)
+    }
+    let mut bs: Array<VyxBody> = []
+    for b in bodies {
+        bs.push(VyxBody { nodes: vyxShiftNodes(b.nodes, d) })
+    }
+    let es = VyxBody { nodes: vyxShiftNodes(els.nodes, d) }
+    return VNIf(conds, cl, condCols, bs, es, has)
+}
+
+/// The number of LF bytes in `s` — the line count of a synthesized prefix, so a
+/// page's synthetic template start line can be compared to the real file's.
+fn vyxCountNewlines(s: String) -> Int64 {
+    let mut n = 0
+    for b in bytes(s) {
+        if b == 10 {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+/// Normalize a script line for content matching (RFC-0048 §2): trim, then drop a
+/// leading `export ` (added by page auto-export, or already present on a
+/// user-exported helper), so the same code matches whether or not it was
+/// re-exported when copied into the synthesized page module.
+fn vyxNormHelper(line: String) -> String {
+    let t = vyxTrim(line)
+    if t.startsWith("export ") {
+        return vyxTrim(vyxSlice(bytes(t), 7, bytes(t).length))
+    }
+    return t
+}
+
+/// Relocate a `.vyx` page/layout/error component compiled through a synthetic
+/// source so its `//@origin` directives target the REAL route file at REAL
+/// coordinates (RFC-0048 §2). `realBa` is the real file's bytes; `[sStart, sEnd)`
+/// its `<script>` section (or `sFound=false`); `dLine` the template line shift.
+/// The template AST is line-shifted; import and helper origins are taken from the
+/// real file (matched by identity/order), so a generator-synthesized import (the
+/// error page's injected `PageError`) or an unmatched line is emitted origin-less.
+fn vyxRelocateComp(comp: VyxComp, realBa: Array<UInt8>, sStart: Int64, sEnd: Int64, sFound: Bool, dLine: Int64, realSrc: String, dir: String, fileId: String) -> VyxComp {
+    // Default every script origin to "unknown" (0) → emitted bare.
+    let mut importLines: Array<Int64> = []
+    let mut importCols: Array<Int64> = []
+    let mut il = 0
+    while il < comp.imports.length {
+        importLines.push(0)
+        importCols.push(0)
+        il = il + 1
+    }
+    let mut helperLines: Array<Int64> = []
+    let mut helperCols: Array<Int64> = []
+    let mut hl = 0
+    while hl < comp.helperTexts.length {
+        helperLines.push(0)
+        helperCols.push(0)
+        hl = hl + 1
+    }
+    if sFound {
+        let real = vyxParseScriptAt(realBa, sStart, sEnd, dir, fileId)
+        // Imports: match each emitted import to the real file's import of the same
+        // (rebased) text, walking forward to respect order + duplicates.
+        let mut ic = 0
+        let mut i = 0
+        while i < comp.imports.length {
+            let mut j = ic
+            let mut done = false
+            while j < real.imports.length && done == false {
+                if real.imports[j] == comp.imports[i] {
+                    importLines[i] = real.importLines[j]
+                    importCols[i] = real.importCols[j]
+                    ic = j + 1
+                    done = true
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        // Helpers: match each emitted helper line to the real script's line of the
+        // same content (ignoring a re-added `export `), walking forward.
+        let mut hc = 0
+        let mut h = 0
+        while h < comp.helperTexts.length {
+            let needle = vyxNormHelper(comp.helperTexts[h])
+            let mut j = hc
+            let mut done = false
+            while j < real.helperTexts.length && done == false {
+                if vyxNormHelper(real.helperTexts[j]) == needle {
+                    helperLines[h] = real.helperLines[j]
+                    helperCols[h] = real.helperCols[j]
+                    hc = j + 1
+                    done = true
+                }
+                j = j + 1
+            }
+            h = h + 1
+        }
+    }
+    return VyxComp {
+        name: comp.name,
+        fnName: comp.fnName,
+        fileId: comp.fileId,
+        srcPath: realSrc,
+        propNames: comp.propNames,
+        propTypes: comp.propTypes,
+        imports: comp.imports,
+        importLines: importLines,
+        importCols: importCols,
+        helpers: comp.helpers,
+        helperTexts: comp.helperTexts,
+        helperLines: helperLines,
+        helperCols: helperCols,
+        root: vyxShiftNode(comp.root, dLine),
+        takesChildren: comp.takesChildren,
+        err: comp.err,
+    }
 }
 
 /// A `//@origin end` line — following generated lines are attributed to the
@@ -1870,14 +2139,27 @@ type VyxMerge = { block: String, err: String }
 
 fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
     // Selective imports: first-seen spec order, unioned names; track each name's
-    // (spec, file) to detect a same-name/different-spec conflict.
+    // (spec, file) to detect a same-name/different-spec conflict. RFC-0048 §1:
+    // each bucket also carries the origin (src/line/col) of its SOLE contributing
+    // source line and a contributor count — a bucket that unioned two `.vyx`
+    // sources is derived (no column-exact origin), a singleton is verbatim.
     let mut selSpecs: Array<String> = []
     let mut selNames: Array<Array<String>> = []
-    // Namespace imports deduped by (alias, spec).
+    let mut selSrc: Array<String> = []
+    let mut selLine: Array<Int64> = []
+    let mut selCol: Array<Int64> = []
+    let mut selCount: Array<Int64> = []
+    // Namespace imports deduped by (alias, spec), origin = first occurrence.
     let mut nsAlias: Array<String> = []
     let mut nsSpec: Array<String> = []
-    // Raw pass-through lines (unrecognized shapes), deduped exactly.
+    let mut nsSrc: Array<String> = []
+    let mut nsLine: Array<Int64> = []
+    let mut nsCol: Array<Int64> = []
+    // Raw pass-through lines (unrecognized shapes), deduped exactly, with origins.
     let mut rawLines: Array<String> = []
+    let mut rawSrc: Array<String> = []
+    let mut rawLine: Array<Int64> = []
+    let mut rawCol: Array<Int64> = []
     // Conflict tracking: name → spec/file first seen.
     let mut cName: Array<String> = []
     let mut cSpec: Array<String> = []
@@ -1885,11 +2167,18 @@ fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
     let mut err = ""
 
     for c in comps {
-        for line in c.imports {
+        let mut li = 0
+        while li < c.imports.length {
+            let line = c.imports[li]
+            let oL = if li < c.importLines.length { c.importLines[li] } else { 0 }
+            let oC = if li < c.importCols.length { c.importCols[li] } else { 0 }
             let imp = vyxParseImport(line)
             if imp.ok == false {
                 if vyxContains(rawLines, line) == false {
                     rawLines.push(line)
+                    rawSrc.push(c.srcPath)
+                    rawLine.push(oL)
+                    rawCol.push(oC)
                 }
             } else if imp.ns {
                 // Dedup by (alias, spec); an alias reused for a different spec is a
@@ -1908,6 +2197,9 @@ fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
                 if found == false {
                     nsAlias.push(imp.alias)
                     nsSpec.push(imp.spec)
+                    nsSrc.push(c.srcPath)
+                    nsLine.push(oL)
+                    nsCol.push(oC)
                 }
             } else {
                 // Selective: union into the spec's name set; check each name for a
@@ -1942,6 +2234,10 @@ fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
                 if si < 0 {
                     selSpecs.push(imp.spec)
                     selNames.push(imp.names)
+                    selSrc.push(c.srcPath)
+                    selLine.push(oL)
+                    selCol.push(oC)
+                    selCount.push(1)
                 } else {
                     let mut cur = selNames[si]
                     for nm in imp.names {
@@ -1950,26 +2246,47 @@ fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
                         }
                     }
                     selNames[si] = cur
+                    selCount[si] = selCount[si] + 1
                 }
             }
+            li = li + 1
         }
     }
 
     let mut out = ""
     let mut i = 0
     while i < selSpecs.length {
-        out = out + "import { " + vyxJoin(selNames[i], ", ") + " } from " + selSpecs[i] + "\n"
+        let line = "import { " + vyxJoin(selNames[i], ", ") + " } from " + selSpecs[i]
+        // A single-source bucket is a verbatim copy → column-exact origin; a
+        // unioned bucket (two `.vyx` sources) is derived → no origin.
+        let hasOrigin = selCount[i] == 1
+        out = out + vyxImportLine(line, hasOrigin, selSrc[i], selLine[i], selCol[i])
         i = i + 1
     }
     i = 0
     while i < nsAlias.length {
-        out = out + "import * as " + nsAlias[i] + " from " + nsSpec[i] + "\n"
+        let line = "import * as " + nsAlias[i] + " from " + nsSpec[i]
+        out = out + vyxImportLine(line, true, nsSrc[i], nsLine[i], nsCol[i])
         i = i + 1
     }
-    for line in rawLines {
-        out = out + line + "\n"
+    i = 0
+    while i < rawLines.length {
+        out = out + vyxImportLine(rawLines[i], true, rawSrc[i], rawLine[i], rawCol[i])
+        i = i + 1
     }
     return VyxMerge { block: out, err: err }
+}
+
+/// One emitted import line, optionally bracketed by an RFC-0033 origin directive
+/// pointing at its `.vyx` source position (RFC-0048 §1). The import CODE is
+/// unchanged; only the surrounding `//@origin` comment lines are added, so the
+/// runtime output stays byte-identical. A `line == 0` origin (unknown position,
+/// e.g. a generator-synthesized import) is emitted bare.
+fn vyxImportLine(line: String, hasOrigin: Bool, src: String, oLine: Int64, oCol: Int64) -> String {
+    if hasOrigin && oLine > 0 && oCol > 0 {
+        return vyxOrigin(src, oLine, oCol) + line + "\n" + vyxOriginEnd()
+    }
+    return line + "\n"
 }
 
 // ===========================================================================
@@ -2056,9 +2373,12 @@ export fn vyxBuildModule(comps: Array<VyxComp>, themed: Bool, theme: String) -> 
     out = out + merged.block
 
     // Pass-through helpers (module-internal, flat namespace across components).
+    // RFC-0048 §1: each verbatim-copied helper line is bracketed by its own
+    // `//@origin` directive so a helper `fn`/`type`/`let` identifier maps back to
+    // the `.vyx` — the helper CODE is unchanged, only origin comments are added.
     for c in comps {
         if vyxTrim(c.helpers).length > 0 {
-            out = out + c.helpers
+            out = out + vyxHelperBlock(c)
         }
     }
     // One view function per component.
@@ -2070,6 +2390,30 @@ export fn vyxBuildModule(comps: Array<VyxComp>, themed: Bool, theme: String) -> 
     }
     if err != "" {
         return err
+    }
+    return out
+}
+
+/// The pass-through helper block for one component, each verbatim line bracketed
+/// by its `.vyx` origin (RFC-0048 §1). When a line's position is unknown (a page's
+/// generator-synthesized helper, or a fallback), the line is emitted bare. Falls
+/// back to the raw `helpers` string when no per-line positions were recorded, so
+/// the emitted code is always byte-identical to the pre-RFC-0048 helper text.
+fn vyxHelperBlock(c: VyxComp) -> String {
+    if c.helperTexts.length == 0 {
+        return c.helpers
+    }
+    let mut out = ""
+    let mut i = 0
+    while i < c.helperTexts.length {
+        let l = if i < c.helperLines.length { c.helperLines[i] } else { 0 }
+        let cc = if i < c.helperCols.length { c.helperCols[i] } else { 0 }
+        if l > 0 && cc > 0 {
+            out = out + vyxOrigin(c.srcPath, l, cc) + c.helperTexts[i] + "\n" + vyxOriginEnd()
+        } else {
+            out = out + c.helperTexts[i] + "\n"
+        }
+        i = i + 1
     }
     return out
 }
@@ -2477,8 +2821,20 @@ fn vyxEmitHeadFns(head: VyxHead, sig: String, prelude: String) -> String {
 /// Build a full `.vyx`-PAGE module (RFC-0039 §4). The template compiles to a
 /// `uiPageBody(<params>[, data: Data])` view fn; the module exports `page`/`Params`
 /// (and passes through `load`/`Data` auto-exported). EXPORTED so `std/ui`'s `pages`
-/// gen fn synthesizes it from a nested `vyxPage(…)` import.
+/// gen fn synthesizes it from a nested `vyxPage(…)` import. This is the wrapper
+/// carrying the pre-RFC-0048 synthetic `UiPageBody.vyx` origins (still used by the
+/// pure unit tests, which assert on the generated code, not on origins).
 export fn vyxBuildPageModule(source: String, dir: String, themed: Bool, theme: String) -> String {
+    return vyxBuildPageModuleAt(source, "", dir, themed, theme)
+}
+
+/// `vyxBuildPageModule` threading the REAL route-file path (RFC-0048 §2): when
+/// `srcPath` is non-empty the compiled page's template AND script `//@origin`
+/// directives target the real `.vyx` at real coordinates (via a template
+/// line-shift + import/helper origin matching), instead of the synthetic
+/// `UiPageBody.vyx`. The generated page/`respond` code is byte-identical either
+/// way — only the origin comments differ.
+export fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
@@ -2535,10 +2891,18 @@ export fn vyxBuildPageModule(source: String, dir: String, themed: Bool, theme: S
         // order-independent (imports and helpers are collected separately).
         synthScript = restExported + "props { " + propsInner + " }\n"
     }
-    let synthSource = "<script>\n" + synthScript + "\n</script>\n<template>\n" + templateBody + "\n</template>\n"
-    let comp = vyxCompileComponent("UiPageBody", synthSource, dir)
-    if comp.err != "" {
-        return comp.err
+    let synthPrefix = "<script>\n" + synthScript + "\n</script>\n<template>\n"
+    let synthSource = synthPrefix + templateBody + "\n</template>\n"
+    let comp0 = vyxCompileComponent("UiPageBody", synthSource, dir)
+    if comp0.err != "" {
+        return comp0.err
+    }
+    // RFC-0048 §2: retarget origins at the real route file (real line:col) when the
+    // caller threaded its path; the synthetic-source origins are kept otherwise.
+    let mut comp = comp0
+    if srcPath != "" {
+        let dLine = vyxLineAt(ba, templateSec.start) - (vyxCountNewlines(synthPrefix) + 1)
+        comp = vyxRelocateComp(comp0, ba, scriptSec.start, scriptSec.end, scriptSec.found, dLine, srcPath, dir, "vyx_page")
     }
     let moduleStr = vyxBuildModule([comp], themed, theme)
     if moduleStr.contains("export fn uiPageBody") == false {
@@ -2609,7 +2973,8 @@ export gen fn vyxPage(vyxPath: String) -> String {
         Err(e) => "",
     }
     let dir = vyxDirOf(vyxPath)
-    return vyxBuildPageModule(src, dir, false, "")
+    // RFC-0048 §2: thread the real route-file path so origins target it directly.
+    return vyxBuildPageModuleAt(src, vyxPath, dir, false, "")
 }
 
 /// `vyxPageThemed(vyxPath, theme)` — the themed variant (RFC-0036): the page
@@ -2620,7 +2985,7 @@ export gen fn vyxPageThemed(vyxPath: String, theme: String) -> String {
         Err(e) => "",
     }
     let dir = vyxDirOf(vyxPath)
-    return vyxBuildPageModule(src, dir, true, theme)
+    return vyxBuildPageModuleAt(src, vyxPath, dir, true, theme)
 }
 
 /// The directory portion of `path` (everything before the last `/`), so relative
@@ -2647,6 +3012,11 @@ fn vyxDirOf(path: String) -> String {
 /// `headTitle()` from its head block. EXPORTED so `std/ui`'s router synthesizes it
 /// from a nested `vyxLayout(…)` import.
 export fn vyxBuildLayoutModule(source: String, dir: String, themed: Bool, theme: String) -> String {
+    return vyxBuildLayoutModuleAt(source, "", dir, themed, theme)
+}
+
+/// `vyxBuildLayoutModule` threading the real `layout.vyx` path (RFC-0048 §2).
+export fn vyxBuildLayoutModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
@@ -2661,10 +3031,16 @@ export fn vyxBuildLayoutModule(source: String, dir: String, themed: Bool, theme:
     if hs.head.err != "" {
         return hs.head.err
     }
-    let synthSource = "<script>\n" + hs.rest + "\n</script>\n<template>\n" + templateBody + "\n</template>\n"
-    let comp = vyxCompileComponent("UiLayoutBody", synthSource, dir)
-    if comp.err != "" {
-        return comp.err
+    let synthPrefix = "<script>\n" + hs.rest + "\n</script>\n<template>\n"
+    let synthSource = synthPrefix + templateBody + "\n</template>\n"
+    let comp0 = vyxCompileComponent("UiLayoutBody", synthSource, dir)
+    if comp0.err != "" {
+        return comp0.err
+    }
+    let mut comp = comp0
+    if srcPath != "" {
+        let dLine = vyxLineAt(ba, templateSec.start) - (vyxCountNewlines(synthPrefix) + 1)
+        comp = vyxRelocateComp(comp0, ba, scriptSec.start, scriptSec.end, scriptSec.found, dLine, srcPath, dir, "vyx_layout")
     }
     // A layout MUST render the page body through a `<slot/>`.
     if comp.takesChildren == false {
@@ -2687,7 +3063,7 @@ export gen fn vyxLayout(vyxPath: String) -> String {
         Ok(v) => v,
         Err(e) => "",
     }
-    return vyxBuildLayoutModule(src, vyxDirOf(vyxPath), false, "")
+    return vyxBuildLayoutModuleAt(src, vyxPath, vyxDirOf(vyxPath), false, "")
 }
 
 /// `vyxLayoutThemed(vyxPath, theme)` — the themed layout variant (RFC-0036): the
@@ -2697,7 +3073,7 @@ export gen fn vyxLayoutThemed(vyxPath: String, theme: String) -> String {
         Ok(v) => v,
         Err(e) => "",
     }
-    return vyxBuildLayoutModule(src, vyxDirOf(vyxPath), true, theme)
+    return vyxBuildLayoutModuleAt(src, vyxPath, vyxDirOf(vyxPath), true, theme)
 }
 
 // ===========================================================================
@@ -2712,6 +3088,13 @@ export gen fn vyxLayoutThemed(vyxPath: String, theme: String) -> String {
 /// compiled template, with an injected `error: PageError` prop. EXPORTED so
 /// `std/ui`'s router synthesizes it from a nested `vyxError(…)` import.
 export fn vyxBuildErrorModule(source: String, dir: String, themed: Bool, theme: String) -> String {
+    return vyxBuildErrorModuleAt(source, "", dir, themed, theme)
+}
+
+/// `vyxBuildErrorModule` threading the real `error.vyx` path (RFC-0048 §2). The
+/// injected `PageError` import is generator-synthesized (not in the user file), so
+/// it stays origin-less; the template + any user script map to the real file.
+export fn vyxBuildErrorModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
@@ -2728,10 +3111,16 @@ export fn vyxBuildErrorModule(source: String, dir: String, themed: Bool, theme: 
         return hs.head.err
     }
     let synthScript = "import { PageError } from \"std/ui\"\n" + hs.rest + "\nprops { error: PageError }\n"
-    let synthSource = "<script>\n" + synthScript + "\n</script>\n<template>\n" + templateBody + "\n</template>\n"
-    let comp = vyxCompileComponent("UiErrorBody", synthSource, dir)
-    if comp.err != "" {
-        return comp.err
+    let synthPrefix = "<script>\n" + synthScript + "\n</script>\n<template>\n"
+    let synthSource = synthPrefix + templateBody + "\n</template>\n"
+    let comp0 = vyxCompileComponent("UiErrorBody", synthSource, dir)
+    if comp0.err != "" {
+        return comp0.err
+    }
+    let mut comp = comp0
+    if srcPath != "" {
+        let dLine = vyxLineAt(ba, templateSec.start) - (vyxCountNewlines(synthPrefix) + 1)
+        comp = vyxRelocateComp(comp0, ba, scriptSec.start, scriptSec.end, scriptSec.found, dLine, srcPath, dir, "vyx_error")
     }
     let moduleStr = vyxBuildModule([comp], themed, theme)
     if moduleStr.contains("export fn uiErrorBody") == false {
@@ -2748,7 +3137,7 @@ export gen fn vyxError(vyxPath: String) -> String {
         Ok(v) => v,
         Err(e) => "",
     }
-    return vyxBuildErrorModule(src, vyxDirOf(vyxPath), false, "")
+    return vyxBuildErrorModuleAt(src, vyxPath, vyxDirOf(vyxPath), false, "")
 }
 
 /// `vyxErrorThemed(vyxPath, theme)` — the themed error-page variant (RFC-0036).
@@ -2757,7 +3146,7 @@ export gen fn vyxErrorThemed(vyxPath: String, theme: String) -> String {
         Ok(v) => v,
         Err(e) => "",
     }
-    return vyxBuildErrorModule(src, vyxDirOf(vyxPath), true, theme)
+    return vyxBuildErrorModuleAt(src, vyxPath, vyxDirOf(vyxPath), true, theme)
 }
 
 // ===========================================================================
