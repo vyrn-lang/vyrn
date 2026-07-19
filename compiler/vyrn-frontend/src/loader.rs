@@ -295,7 +295,14 @@ fn normalize_remote(key: &str) -> String {
 }
 
 /// Resolve an import specifier written inside `importer` to a module key.
-fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String, String> {
+///
+/// Public so the editor can reuse the loader's exact resolution for
+/// go-to-definition on an import path string (RFC-0050 §2) — no second,
+/// drifting copy of the path logic. The returned key is a local slash path for
+/// relative / `std/` specifiers (with `.vyrn` appended when extension-less) or a
+/// remote key (`github:` / `gist:` / `https://`) the editor treats as
+/// un-jumpable. Read-only: it touches no filesystem.
+pub fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String, String> {
     // A generated module (RFC-0021) has no path of its own — its imports resolve
     // against the real file that triggered generation, encoded in its banner key.
     let importer = generated_importer(importer).unwrap_or(importer);

@@ -2163,6 +2163,230 @@ pub fn classify_at(analysis: &Analysis, line: usize, col: usize) -> Option<(SemK
     classify_token(analysis, tok)
 }
 
+// ---------------------------------------------------------------------------
+// RFC-0050 §1 — scope-aware references (documentHighlight)
+// ---------------------------------------------------------------------------
+
+/// One reference to a binding, for `textDocument/documentHighlight`. `write`
+/// marks the defining occurrence (the declaration); every use is a read.
+#[derive(Debug, Clone)]
+pub struct RefRange {
+    pub line: usize,
+    pub col: usize,
+    pub end_col: usize,
+    pub write: bool,
+}
+
+/// Whether `tok` sits in member position — immediately after a `.` on the same
+/// line (`recv.tok`). Such a token references a member/field, NOT a binding of
+/// the same bare name, so binding highlights must skip it.
+fn is_member_position(analysis: &Analysis, tok: &TokenInfo) -> bool {
+    analysis
+        .tokens
+        .iter()
+        .any(|d| d.text == "." && d.line == tok.line && d.end_col == tok.col)
+}
+
+/// The local binding [`resolve`] would pick for a use of `name` on `line` inside
+/// the function at `fn_line`: the latest same-named binding defined at or before
+/// the line (line-based scope, mirroring [`resolve`]).
+fn binding_for<'a>(
+    analysis: &'a Analysis,
+    fn_line: usize,
+    name: &str,
+    line: usize,
+) -> Option<&'a LocalBinding> {
+    analysis
+        .locals
+        .iter()
+        .filter(|b| b.fn_line == fn_line && b.name == name && b.line <= line)
+        .max_by_key(|b| b.line)
+}
+
+/// Scope-aware references to the binding under the 1-based `(line, col)` cursor
+/// (RFC-0050 §1). Returns the ranges of that binding's ACTUAL occurrences — the
+/// same resolution hover/definition use — never a textual word-match: a `let`/
+/// param highlights only its in-scope uses (an out-of-scope same-named binding
+/// in another function is excluded), a top-level symbol its real references
+/// (excluded where a local shadows the name), a namespace binding its qualifier
+/// occurrences. Comments are never lexed to tokens, so they never appear.
+///
+/// An empty result means "nothing resolves here" — the server returns it as an
+/// empty highlight list so the editor does not fall back to word-matching.
+pub fn references(analysis: &Analysis, line: usize, col: usize) -> Vec<RefRange> {
+    let Some(tok) = analysis
+        .tokens
+        .iter()
+        .find(|t| t.text != "." && t.line == line && col >= t.col && col < t.end_col)
+    else {
+        return Vec::new();
+    };
+    let name = tok.text.clone();
+    let cursor_member = is_member_position(analysis, tok);
+
+    // A member occurrence (`recv.member`): highlight the same member accessed
+    // through the same-named receiver (namespace exports, record fields, builtin
+    // methods). Kept receiver-scoped so unrelated same-named members elsewhere
+    // are not swept in.
+    if cursor_member {
+        let recv = receiver_before_dot(analysis, tok.line, tok.col);
+        let mut out = Vec::new();
+        for t in &analysis.tokens {
+            if t.text != name || !is_member_position(analysis, t) {
+                continue;
+            }
+            if receiver_before_dot(analysis, t.line, t.col).as_deref() == recv.as_deref() {
+                out.push(RefRange { line: t.line, col: t.col, end_col: t.end_col, write: false });
+            }
+        }
+        return dedup_refs(out);
+    }
+
+    // A local binding (param / let / for-var) shadows everything: highlight only
+    // the uses that resolve to THIS binding, and only within the same function.
+    if let Some(fn_line) = enclosing_fn_line(analysis, line) {
+        if let Some(target) = binding_for(analysis, fn_line, &name, line) {
+            let (t_line, t_col) = (target.line, target.col);
+            let mut out = Vec::new();
+            for t in &analysis.tokens {
+                if t.text != name || is_member_position(analysis, t) {
+                    continue;
+                }
+                if enclosing_fn_line(analysis, t.line) != Some(fn_line) {
+                    continue;
+                }
+                match binding_for(analysis, fn_line, &name, t.line) {
+                    Some(b) if b.line == t_line && b.col == t_col => {
+                        let write = t.line == t_line && t.col == t_col;
+                        out.push(RefRange {
+                            line: t.line,
+                            col: t.col,
+                            end_col: t.end_col,
+                            write,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            return dedup_refs(out);
+        }
+    }
+
+    // A namespace binding (`import * as ns` and every `ns.` qualifier): its
+    // occurrences are the bare-`ns` tokens not shadowed by a local at that point.
+    if analysis.namespaces.iter().any(|n| n.name == name) {
+        let mut out = Vec::new();
+        for t in &analysis.tokens {
+            if t.text != name || is_member_position(analysis, t) {
+                continue;
+            }
+            let shadowed = enclosing_fn_line(analysis, t.line).is_some_and(|fl| {
+                analysis
+                    .locals
+                    .iter()
+                    .any(|b| b.fn_line == fl && b.name == name && b.line <= t.line)
+            });
+            if shadowed {
+                continue;
+            }
+            out.push(RefRange { line: t.line, col: t.col, end_col: t.end_col, write: false });
+        }
+        return dedup_refs(out);
+    }
+
+    // A top-level symbol: its real references, excluding positions where an
+    // in-scope local of the same name shadows it (there the token is the local).
+    if let Some(sym) = analysis
+        .symbols
+        .iter()
+        .filter(|s| s.name == name)
+        .max_by_key(|s| (s.file.is_none(), s.line))
+    {
+        let (s_line, s_col, s_local) = (sym.line, sym.col, sym.file.is_none());
+        let mut out = Vec::new();
+        for t in &analysis.tokens {
+            if t.text != name || is_member_position(analysis, t) {
+                continue;
+            }
+            let shadowed = enclosing_fn_line(analysis, t.line).is_some_and(|fl| {
+                analysis
+                    .locals
+                    .iter()
+                    .any(|b| b.fn_line == fl && b.name == name && b.line <= t.line)
+            });
+            if shadowed {
+                continue;
+            }
+            let write = s_local && t.line == s_line && t.col == s_col;
+            out.push(RefRange { line: t.line, col: t.col, end_col: t.end_col, write });
+        }
+        return dedup_refs(out);
+    }
+
+    // Unresolved (a keyword, an unknown name, a builtin): no binding to
+    // highlight — an empty list, which suppresses the editor's word-match.
+    Vec::new()
+}
+
+/// Drop duplicate ranges (overlapping scopes could otherwise double-list a
+/// position), keeping the first — which retains a `write` flag over a later
+/// `read` at the same spot.
+fn dedup_refs(mut refs: Vec<RefRange>) -> Vec<RefRange> {
+    refs.sort_by_key(|r| (r.line, r.col, !r.write));
+    refs.dedup_by_key(|r| (r.line, r.col));
+    refs
+}
+
+// ---------------------------------------------------------------------------
+// RFC-0050 §2 — import-path string under the cursor
+// ---------------------------------------------------------------------------
+
+/// If the 1-based `(line, col)` cursor is inside an import's SOURCE STRING — a
+/// plain specifier (`"./store"`, `"std/time"`) or a string argument of a
+/// generator-call import (`i18n("../strings")`, `componentsThemed("./a","./b")`)
+/// — return the specifier text (RFC-0050 §2). The server then resolves it to a
+/// file through the loader. `None` when the cursor is not on an import string.
+///
+/// Import statements may span several lines (`import {\n ..\n} from "path"`), so
+/// membership is decided by statement span, not the physical line: the greatest
+/// import-or-declaration line at/above the string must be an import line.
+pub fn import_spec_at(source: &str, line: usize, col: usize) -> Option<String> {
+    let toks = lexer::lex(source).ok()?;
+    // The string-literal token whose span contains the cursor.
+    let (str_line, spec) = toks.iter().find_map(|t| {
+        if t.line != line {
+            return None;
+        }
+        if let Tok::Str(s) = &t.tok {
+            let start = t.col;
+            let end = t.col + s.chars().count() + 2; // + the two quotes
+            if col >= start && col <= end {
+                return Some((t.line, s.clone()));
+            }
+        }
+        None
+    })?;
+
+    let (program, _errs) = parser::parse_accum(toks);
+    // Statement-start lines: every top-level declaration AND every import. The
+    // greatest one at/above the string's line is the statement it belongs to.
+    let mut stmt_lines: Vec<(usize, bool)> = decl_lines(&program)
+        .into_iter()
+        .map(|l| (l, false))
+        .collect();
+    for imp in &program.imports {
+        stmt_lines.push((imp.line, true));
+    }
+    stmt_lines.sort_by_key(|(l, _)| *l);
+    let is_import = stmt_lines
+        .iter()
+        .rev()
+        .find(|(l, _)| *l <= str_line)
+        .map(|(_, is_imp)| *is_imp)
+        .unwrap_or(false);
+    is_import.then_some(spec)
+}
+
 /// The classification core: given an identifier [`TokenInfo`], resolve it to a
 /// [`SemKind`] + [`SemMods`] using the same local → namespace → symbol → builtin
 /// precedence as [`resolve`].
