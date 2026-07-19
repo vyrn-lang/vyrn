@@ -190,6 +190,51 @@ export async function runVyrn(wasmBytes, hooks = {}) {
       throw new VyrnExit(code);
     },
 
+    // ---- time & randomness (RFC-0043): host-provided, backed by the browser --
+    // The C shim's now()/monotonic()/randomSeed() reach WASI clock_time_get /
+    // random_get (via wasi-libc's timespec_get / getentropy). Back them with the
+    // browser clock and CSPRNG. A page has no env, so the fixed-clock injection
+    // (VYRN_FIXED_TIME / VYRN_FIXED_SEED) can be supplied here instead via
+    // hooks.fixedTime / hooks.fixedSeed for reproducible demos (the parity
+    // harness fixes the wasm column through wasmtime's --env, not this shim).
+    //
+    // clock_time_get(clockId, precision, outPtr) -> errno. clockId 0 = REALTIME
+    // (ns since the Unix epoch, from Date.now()), else MONOTONIC (performance.now).
+    clock_time_get: (clockId, _precision, outPtr) => {
+      const view = new DataView(memory.buffer);
+      let ns;
+      if (clockId === 0) {
+        ns =
+          typeof hooks.fixedTime === "number" || typeof hooks.fixedTime === "bigint"
+            ? BigInt(hooks.fixedTime) * 1000000n // ms -> ns
+            : BigInt(Math.round(Date.now() * 1e6));
+      } else {
+        ns = BigInt(Math.round(performance.now() * 1e6));
+      }
+      view.setBigUint64(outPtr, ns, true);
+      return ERRNO_SUCCESS;
+    },
+    // random_get(buf, len) -> errno: fill linear memory with CSPRNG bytes.
+    // hooks.fixedSeed, when set, makes the fill deterministic (a tiny SplitMix64
+    // stream over the buffer) so a page can reproduce a seeded run.
+    random_get: (buf, len) => {
+      const bytes = new Uint8Array(memory.buffer, buf, len);
+      if (typeof hooks.fixedSeed === "number" || typeof hooks.fixedSeed === "bigint") {
+        let s = BigInt.asUintN(64, BigInt(hooks.fixedSeed));
+        for (let k = 0; k < len; k++) {
+          s = BigInt.asUintN(64, s + 0x9e3779b97f4a7c15n);
+          let z = s;
+          z = BigInt.asUintN(64, (z ^ (z >> 30n)) * 0xbf58476d1ce4e5b9n);
+          z = BigInt.asUintN(64, (z ^ (z >> 27n)) * 0x94d049bb133111ebn);
+          z = z ^ (z >> 31n);
+          bytes[k] = Number(z & 0xffn);
+        }
+      } else {
+        crypto.getRandomValues(bytes);
+      }
+      return ERRNO_SUCCESS;
+    },
+
     // ---- input I/O (RFC-0014): graceful degradation, not file access -------
     // A page has no argv: zero arguments, zero buffer bytes.
     args_sizes_get: (argcPtr, bufSizePtr) => {

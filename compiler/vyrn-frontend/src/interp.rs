@@ -13,6 +13,18 @@ use std::io::Write as _;
 
 use crate::ast::*;
 
+/// An injected fixed value for a host-boundary extern (RFC-0043): the decimal
+/// `Int64` in env var `key`, or `None` when unset/empty/unparsable. The parity
+/// harness sets `VYRN_FIXED_TIME`/`VYRN_FIXED_SEED` so time/random examples are
+/// byte-identical across the three backends (the native/wasi shims read the same
+/// env via `strtoll`).
+fn fixed_env_i64(key: &str) -> Option<i64> {
+    match std::env::var(key) {
+        Ok(s) if !s.is_empty() => s.trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
 /// A runtime value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Val {
@@ -906,6 +918,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         region_depth: std::cell::Cell::new(0),
         globals: RefCell::new(HashMap::new()),
         args: prog_args.to_vec(),
+        mono_counter: std::cell::Cell::new(0),
         gen: None,
     };
     Ok(interp)
@@ -945,6 +958,11 @@ struct Interp<'a> {
     globals: RefCell<HashMap<String, Slot>>,
     /// The program's command-line arguments (RFC-0014 `args()`), argv[1..].
     args: Vec<String>,
+    /// Per-call counter for the fixed monotonic clock (RFC-0043): under
+    /// `VYRN_FIXED_TIME`, `monotonic()` returns `1e9 + n * 1e6` on the nth call,
+    /// mirroring the C shim exactly so successive readings are byte-identical
+    /// across the three backends.
+    mono_counter: std::cell::Cell<i64>,
     /// Set only while running a `gen fn` as a generation target (RFC-0021). When
     /// present: `readFile`/`listDir`/`moduleInterface` route through the loader's
     /// resolver (path-scoped + recorded as cache inputs), and every statement
@@ -1170,6 +1188,52 @@ impl<'a> Interp<'a> {
         Ok(self.call_capturing(name, args)?.0)
     }
 
+    /// The value of an RFC-0043 host-boundary extern (`hostNowMillis` /
+    /// `hostMonotonicNanos` / `hostRandomSeed`), or `None` for any other extern.
+    /// Honors `VYRN_FIXED_TIME` / `VYRN_FIXED_SEED` exactly like the native/wasi
+    /// C shims (the parity contract); absent the env vars, reads the real host.
+    fn host_boundary_value(&self, name: &str) -> Option<Val> {
+        match name {
+            "hostNowMillis" => {
+                if let Some(ms) = fixed_env_i64("VYRN_FIXED_TIME") {
+                    return Some(Val::Int(ms));
+                }
+                let ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                Some(Val::Int(ms))
+            }
+            "hostMonotonicNanos" => {
+                if fixed_env_i64("VYRN_FIXED_TIME").is_some() {
+                    // Mirror the C shim: 1e9 + n*1e6 on the nth call.
+                    let n = self.mono_counter.get();
+                    self.mono_counter.set(n + 1);
+                    return Some(Val::Int(1_000_000_000 + n * 1_000_000));
+                }
+                let ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0);
+                Some(Val::Int(ns))
+            }
+            "hostRandomSeed" => {
+                if let Some(seed) = fixed_env_i64("VYRN_FIXED_SEED") {
+                    return Some(Val::Int(seed));
+                }
+                // No injected seed: derive one from the wall clock (the CSPRNG
+                // guarantee is a native/wasm property; the interpreter is the
+                // reference for the FIXED path, which is all parity observes).
+                let ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0);
+                Some(Val::Int(ns))
+            }
+            _ => None,
+        }
+    }
+
     /// Materialize a lambda literal into a closure value (RFC-0023). Captures are
     /// the CURRENT values of every visible local binding — a by-value snapshot,
     /// which is semantically exact because captures are read-only. Fixing them
@@ -1316,6 +1380,12 @@ impl<'a> Interp<'a> {
         // the native backend's inline trap). Declaring one is fine — only calling
         // it here is the effect the interpreter cannot honor.
         if f.is_extern {
+            // RFC-0043 host-boundary externs (time/random) have real semantics
+            // here too — honoring the same injected env the native/wasi shims do,
+            // so a fixed-clock/fixed-seed program is byte-identical to them.
+            if let Some(v) = self.host_boundary_value(name) {
+                return Ok((v, Vec::new()));
+            }
             return Err(Ctrl::Err(format!(
                 "extern `{name}` is not available on this target"
             )));

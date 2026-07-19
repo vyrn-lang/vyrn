@@ -865,11 +865,20 @@ const RUNTIME_SHIM: &str = r#"
 /* MSVC's UCRT deprecates fopen in favor of fopen_s; the portable spelling is
    intentional (glibc and wasi-libc have no fopen_s), so silence the advisory. */
 #define _CRT_SECURE_NO_WARNINGS
+/* rand_s (a UCRT CSPRNG) needs this defined before <stdlib.h> on MSVC/UCRT; it
+   is the native Windows seed source (RFC-0043). Harmless elsewhere. */
+#define _CRT_RAND_S
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#if !defined(_WIN32)
+/* getentropy: the POSIX/wasi seed CSPRNG (glibc >= 2.25 and wasi-libc). */
+#include <unistd.h>
+#include <sys/random.h>
+#endif
 
 void* __vyrn_stderr(void) { return stderr; }
 void* __vyrn_stdout(void) { return stdout; }
@@ -1050,6 +1059,65 @@ int __vyrn_write_file(const char* path, const char* contents) {
     int bad = (wrote != n);
     if (fclose(f) != 0) bad = 1;
     return bad ? 1 : 0;
+}
+
+/* ---- time & randomness at the host boundary (RFC-0043) ------------------ */
+/* now()/monotonic()/randomSeed() are host INPUTS, not part of the deterministic
+   core. Each honors an injected value (VYRN_FIXED_TIME / VYRN_FIXED_SEED) so the
+   parity harness can fix the clock and seed identically in every backend; the
+   interpreter reads the same env. Absent the env vars they read the real host.
+   These symbols are compiled on EVERY target (native + wasi), so a clock/random
+   program links and runs under wasmtime with no `vyrn` host page: timespec_get /
+   clock_gettime / getentropy lower to WASI clock_time_get / random_get. */
+
+/* Wall clock, epoch milliseconds (UTC). timespec_get(TIME_UTC) is the portable
+   spelling across UCRT, glibc, and wasi-libc. */
+long long __vyrn_now_millis(void) {
+    const char* e = getenv("VYRN_FIXED_TIME");
+    if (e && e[0]) return strtoll(e, 0, 10);
+    struct timespec ts;
+    if (timespec_get(&ts, TIME_UTC) == 0) return 0;
+    return (long long)ts.tv_sec * 1000 + (long long)(ts.tv_nsec / 1000000);
+}
+
+/* Monotonic nanoseconds. Under a fixed clock: a fixed base plus a deterministic
+   per-call increment, so successive calls are byte-identical across backends
+   (the interpreter mirrors this base/step exactly: 1e9 + n*1e6). */
+static long long __vyrn_mono_ctr = 0;
+long long __vyrn_monotonic_nanos(void) {
+    const char* e = getenv("VYRN_FIXED_TIME");
+    if (e && e[0]) {
+        long long v = 1000000000LL + __vyrn_mono_ctr * 1000000LL;
+        __vyrn_mono_ctr++;
+        return v;
+    }
+#if defined(_WIN32)
+    /* UCRT has no clock_gettime(CLOCK_MONOTONIC); the wall clock in ns is an
+       adequate elapsed source (never exercised under the fixed-clock harness). */
+    struct timespec ts;
+    timespec_get(&ts, TIME_UTC);
+    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+#endif
+}
+
+/* An unpredictable Int64 seed from the host CSPRNG. */
+long long __vyrn_random_seed(void) {
+    const char* e = getenv("VYRN_FIXED_SEED");
+    if (e && e[0]) return strtoll(e, 0, 10);
+#if defined(_WIN32)
+    unsigned int a = 0, b = 0;
+    rand_s(&a);
+    rand_s(&b);
+    return (long long)(((unsigned long long)a << 32) ^ (unsigned long long)b);
+#else
+    unsigned long long v = 0;
+    if (getentropy(&v, sizeof v) != 0) v = 0;
+    return (long long)v;
+#endif
 }
 
 /* ---- JSON codec runtime (RFC-0018) -------------------------------------- */
@@ -1612,7 +1680,13 @@ int main(int argc, char** argv) {
 /// the caller's argument/return registers are never observed.
 fn extern_trap_stubs(program: &vyrn_frontend::ast::Program) -> String {
     let mut s = String::new();
-    for f in program.functions.iter().filter(|f| f.is_extern) {
+    for f in program
+        .functions
+        .iter()
+        // RFC-0043 host-boundary externs (time/random) have REAL implementations
+        // in RUNTIME_SHIM on every target, so they get no trap stub.
+        .filter(|f| f.is_extern && vyrn_codegen::host_boundary_extern(&f.name).is_none())
+    {
         // `f.name` is a Vyrn identifier (alphanumeric + `_`), safe to inline
         // into both a C symbol and a C string literal.
         s.push_str(&format!(

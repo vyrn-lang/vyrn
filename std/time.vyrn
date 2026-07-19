@@ -1,0 +1,148 @@
+/// std/time — wall-clock time at the host boundary (RFC-0043).
+///
+/// Time is a host INPUT, not part of Vyrn's deterministic core: you must import
+/// `now()`, and calling it is a host effect (forbidden in `gen`/comptime, like
+/// I/O). Everything ELSE here — the UTC calendar breakdown and the formatters —
+/// is pure Vyrn computed from the epoch milliseconds, so it is an ordinary
+/// three-way parity citizen (interp == native == wasm) usable anywhere,
+/// including generators. Parity holds for a clock example because the harness
+/// FIXES the clock (`VYRN_FIXED_TIME`): every backend reads the same injected
+/// millis.
+///
+/// v1 is UTC-only (no timezone database, no DST, no locale); a `+HH:MM` offset
+/// is the escape hatch a later revision can add.
+
+/// Milliseconds since the Unix epoch (1970-01-01T00:00:00Z), UTC. A distinct
+/// validated type so a timestamp can't be silently mixed with a plain count;
+/// `toMillis`/`fromMillis` bridge to raw `Int64`.
+export type Instant = Int64 where value >= 0
+
+/// A UTC calendar date, the pure breakdown of an `Instant`'s day component.
+export type Civil = { year: Int64, month: Int64, day: Int64 }
+
+/// The host clock extern (RFC-0043). NOT an ordinary RFC-0012 `vyrn`-namespace
+/// import: the runtime shim implements it (native `timespec_get`, wasi
+/// `clock_time_get`), honoring `VYRN_FIXED_TIME` so the parity harness can
+/// inject a fixed clock. Kept module-private; `now()` wraps it into `Instant`.
+extern fn hostNowMillis() -> Int64
+
+/// A monotonic nanosecond counter for elapsed-time measurement (no epoch
+/// meaning). Shim-implemented like the clock; under `VYRN_FIXED_TIME` it returns
+/// a fixed base plus a deterministic per-call increment, so it stays parity-safe.
+extern fn hostMonotonicNanos() -> Int64
+
+/// The current wall-clock instant (UTC epoch millis). HOST EFFECT: reads the
+/// clock, so it is forbidden in generators/comptime and cannot cross a `spawn`
+/// boundary (exactly like `print`/file I/O).
+export fn now() -> Instant {
+    return fromMillis(hostNowMillis())
+}
+
+/// A monotonic nanosecond reading for measuring elapsed time. HOST EFFECT. Use
+/// this for durations (not `now()`, which can jump when the wall clock is set).
+export fn monotonic() -> Int64 {
+    return hostMonotonicNanos()
+}
+
+/// The raw epoch milliseconds of an instant.
+export fn toMillis(i: Instant) -> Int64 {
+    return i
+}
+
+/// An instant from raw epoch milliseconds (validated non-negative at the boundary).
+export fn fromMillis(n: Int64) -> Instant {
+    return n
+}
+
+/// The UTC calendar date for a count of whole days since the Unix epoch, via
+/// Howard Hinnant's `civil_from_days` (branch-free, exact for days >= 0 — which
+/// every non-negative `Instant` yields). Pure: constants are inlined (no module
+/// state), so it runs in generators/comptime too.
+fn civilFromDays(days: Int64) -> Civil {
+    let z = days + 719468
+    let era = z / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let y = yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }
+    let year = if m <= 2 { y + 1 } else { y }
+    return Civil { year: year, month: m, day: d }
+}
+
+/// The UTC calendar date (year/month/day) of an instant.
+export fn civil(i: Instant) -> Civil {
+    return civilFromDays(i / 86400000)
+}
+
+/// The UTC year of an instant (e.g. 2023).
+export fn year(i: Instant) -> Int64 {
+    return civil(i).year
+}
+
+/// The UTC month of an instant (1..12).
+export fn month(i: Instant) -> Int64 {
+    return civil(i).month
+}
+
+/// The UTC day-of-month of an instant (1..31).
+export fn day(i: Instant) -> Int64 {
+    return civil(i).day
+}
+
+/// The UTC hour of an instant (0..23).
+export fn hour(i: Instant) -> Int64 {
+    let secOfDay = (i / 1000) % 86400
+    return secOfDay / 3600
+}
+
+/// The UTC minute of an instant (0..59).
+export fn minute(i: Instant) -> Int64 {
+    let secOfDay = (i / 1000) % 86400
+    return (secOfDay % 3600) / 60
+}
+
+/// The UTC second of an instant (0..59).
+export fn second(i: Instant) -> Int64 {
+    return (i / 1000) % 60
+}
+
+/// Two-digit zero-padded decimal (for calendar fields 0..99).
+fn pad2(n: Int64) -> String {
+    if n < 10 {
+        return "0\{n}"
+    }
+    return "\{n}"
+}
+
+/// Four-digit zero-padded year (for years 0..9999; wider years widen naturally).
+fn pad4(n: Int64) -> String {
+    if n < 10 {
+        return "000\{n}"
+    }
+    if n < 100 {
+        return "00\{n}"
+    }
+    if n < 1000 {
+        return "0\{n}"
+    }
+    return "\{n}"
+}
+
+/// Human-readable UTC timestamp `YYYY-MM-DD HH:MM:SS` (a parity citizen: pure).
+export fn format(i: Instant) -> String {
+    let c = civil(i)
+    let date = "\{pad4(c.year)}-\{pad2(c.month)}-\{pad2(c.day)}"
+    let time = "\{pad2(hour(i))}:\{pad2(minute(i))}:\{pad2(second(i))}"
+    return "\{date} \{time}"
+}
+
+/// ISO-8601 UTC timestamp `YYYY-MM-DDTHH:MM:SSZ` (a parity citizen: pure).
+export fn formatIso(i: Instant) -> String {
+    let c = civil(i)
+    let date = "\{pad4(c.year)}-\{pad2(c.month)}-\{pad2(c.day)}"
+    let time = "\{pad2(hour(i))}:\{pad2(minute(i))}:\{pad2(second(i))}"
+    return "\{date}T\{time}Z"
+}

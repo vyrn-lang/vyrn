@@ -976,6 +976,25 @@ fn extern_symbol(name: &str) -> String {
     format!("__vyrn_extern_{name}")
 }
 
+/// The host-boundary externs of RFC-0043 (time / randomness). Unlike ordinary
+/// RFC-0012 externs — which lower to imports from the `vyrn` wasm namespace and
+/// trap on native — these three are implemented by the C runtime shim on EVERY
+/// target (native `timespec_get`/CSPRNG, wasi `clock_time_get`/`random_get` via
+/// wasi-libc, honoring `VYRN_FIXED_TIME`/`VYRN_FIXED_SEED`). So they call a real
+/// shim symbol at each use site instead of a host import, which keeps a
+/// clock/random example a full three-way parity citizen: wasmtime supplies the
+/// WASI clocks/random, so no `vyrn` host page is needed. Returns the shim symbol
+/// for the recognized Vyrn extern name. Matched by name (like the I/O builtins);
+/// these `host*` names are reserved.
+pub fn host_boundary_extern(name: &str) -> Option<&'static str> {
+    match name {
+        "hostNowMillis" => Some("__vyrn_now_millis"),
+        "hostMonotonicNanos" => Some("__vyrn_monotonic_nanos"),
+        "hostRandomSeed" => Some("__vyrn_random_seed"),
+        _ => None,
+    }
+}
+
 /// The extern (JS-boundary) ABI value type for one primitive, per the RFC-0012
 /// table: `Int64`/`i64`, sized ints ≤32-bit widen to `i32`, `Bool` is `i32`,
 /// floats stay `double`/`float`, `String` returns as a bare `ptr`, `Unit` is a
@@ -1138,7 +1157,12 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // stays honest instead of silently stubbing. Attribute groups are collected
     // here and appended at module end.
     let mut extern_attr_groups = String::new();
-    for (i, f) in program.functions.iter().filter(|f| f.is_extern).enumerate() {
+    for (i, f) in program
+        .functions
+        .iter()
+        .filter(|f| f.is_extern && host_boundary_extern(&f.name).is_none())
+        .enumerate()
+    {
         let ret = extern_abi_ll(&f.ret);
         let params = extern_decl_params(f);
         let grp = 100 + i; // arbitrary, distinct ids; no other groups in this IR
@@ -1148,6 +1172,11 @@ pub fn emit(program: &Program) -> Result<String, String> {
             f.name
         ));
     }
+    // RFC-0043 host-boundary externs resolve to plain C-shim symbols (no `vyrn`
+    // import), so they link the same on native and wasm.
+    out.push_str("declare i64 @__vyrn_now_millis()\n");
+    out.push_str("declare i64 @__vyrn_monotonic_nanos()\n");
+    out.push_str("declare i64 @__vyrn_random_seed()\n");
     // For a `file(..)` sink: a global stream handle plus the path/mode constants.
     if let LogSink::File(path) = &program.log_sink {
         out.push_str("@__vyrn_log_file = global ptr null\n");
@@ -6637,7 +6666,9 @@ impl<'a> Gen<'a> {
                 arg_ops.push(format!("{abi_ll} {abi_v}"));
             }
         }
-        let sym = extern_symbol(&f.name);
+        let sym = host_boundary_extern(&f.name)
+            .map(str::to_string)
+            .unwrap_or_else(|| extern_symbol(&f.name));
         let ret_ll = extern_abi_ll(&f.ret);
         if ret_ll == "void" {
             self.emit(format!("call void @{sym}({})", arg_ops.join(", ")));

@@ -1,0 +1,69 @@
+/// std/random — deterministic pseudo-randomness with a host-seeded escape
+/// (RFC-0043).
+///
+/// Randomness splits cleanly: a PURE, value-type generator (`Rng`) that is
+/// always a parity citizen, and ONE host extern (`randomSeed`) for an
+/// unpredictable starting seed. There is deliberately no ambient `random()` —
+/// that would be an implicit host effect everywhere and a parity hazard. You
+/// thread the generator explicitly: each draw returns the value AND the advanced
+/// `Rng`, so nothing is hidden and a seeded run is fully reproducible.
+///
+/// The generator is a multiplicative-congruential (Lehmer / MINSTD) PRNG:
+/// `state' = state * 48271 mod (2^31 - 1)`. Vyrn has no bitwise operators, so
+/// the bit-mixing generators the RFC named (SplitMix64 / PCG) can't be written
+/// in-language; a well-known arithmetic-only generator delivers the same
+/// contract — pure value type, deterministic, seed-threaded — using multiply,
+/// add and modulo. Products stay < 2^47, far under `Int64`, so there is no
+/// overflow and no interp/native divergence. It is not cryptographic; use it for
+/// shuffles, sampling, and reproducible tests, not for secrets.
+
+/// PRNG state — a value type (no ambient/hidden generator). Copy it to fork a
+/// reproducible stream.
+export type Rng = { state: Int64 }
+
+/// One draw: the value produced AND the advanced generator, threaded back by the
+/// caller (Vyrn has no tuples, so the two results ride a small record).
+export type Draw = { value: Int64, rng: Rng }
+
+/// The host CSPRNG extern (RFC-0043): the ONE non-deterministic piece, for when
+/// you want an unpredictable seed (`seededRng(randomSeed())`). Shim-implemented
+/// (native/wasi CSPRNG), honoring `VYRN_FIXED_SEED` under the parity harness.
+/// Kept module-private; `randomSeed()` re-exports it.
+extern fn hostRandomSeed() -> Int64
+
+/// An unpredictable Int64 seed from the host CSPRNG. HOST EFFECT (forbidden in
+/// generators/comptime; cannot cross a `spawn` boundary). Isolated here so 99%
+/// of randomness — the pure `Rng` below — stays deterministic and host-free.
+export fn randomSeed() -> Int64 {
+    return hostRandomSeed()
+}
+
+/// A generator seeded by any `Int64` — fully deterministic and parity-safe. The
+/// seed is folded into the valid MINSTD state range `[1, 2^31 - 2]` (any Int64,
+/// including negatives, maps in without overflow).
+export fn seededRng(seed: Int64) -> Rng {
+    let period = 2147483646
+    let s = seed % period
+    let nonNeg = if s < 0 { s + period } else { s }
+    return Rng { state: nonNeg + 1 }
+}
+
+/// Advance the generator once. `value` is in `[1, 2^31 - 2]`; thread `.rng` into
+/// the next draw. Pure (MINSTD constants inlined — no module state), so it runs
+/// in generators/comptime too.
+export fn nextInt(rng: Rng) -> Draw {
+    let next = (rng.state * 48271) % 2147483647
+    return Draw { value: next, rng: Rng { state: next } }
+}
+
+/// A draw in the inclusive range `[lo, hi]` (returns `lo` if the range is empty).
+/// Uses modulo reduction — a slight low-bias for very wide ranges, acceptable for
+/// v1 (sampling/tests, not cryptography).
+export fn nextInRange(rng: Rng, lo: Int64, hi: Int64) -> Draw {
+    if hi <= lo {
+        return Draw { value: lo, rng: rng }
+    }
+    let span = hi - lo + 1
+    let d = nextInt(rng)
+    return Draw { value: lo + (d.value % span), rng: d.rng }
+}
