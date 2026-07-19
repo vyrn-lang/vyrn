@@ -1883,3 +1883,152 @@ fn main() -> Int64 { return store.ping() }
 
     let _ = client.child.kill();
 }
+
+// ===========================================================================
+// RFC-0051 — hover quality: `///` docs, member hover, record structure, and
+// class-token precision. Every assertion here is a symptom the user measured
+// against the deployed server before the fix (docs never rendered anywhere;
+// `x.field` / `ns.member` hovered null inside a `.vyx`).
+// ===========================================================================
+
+/// §1: a `///` doc renders beneath the signature — for a declaration in the
+/// open document AND for one imported from another module.
+#[test]
+fn rfc51_doc_comment_renders_in_hover() {
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-51doc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "/// Adds one. A parity citizen: pure.\nexport fn bump(n: Int64) -> Int64 { return n + 1 }\n",
+    )
+    .unwrap();
+    let app = "\
+import { bump } from \"./lib\"
+/// The entry point, documented.
+fn main() -> Int64 { return bump(1) }
+";
+    let app_path = dir.join("app.vyrn");
+    std::fs::write(&app_path, app).unwrap();
+    let uri = file_uri(&app_path);
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", app);
+
+    // Imported: hover `bump` at its use site.
+    let (l, c) = at(app, 3, "bump(1)");
+    let h = hover_value(&mut client, &uri, l, c).expect("hover on imported fn");
+    assert!(h.starts_with("fn bump(n: Int64) -> Int64"), "signature first: {h}");
+    assert!(h.contains("Adds one. A parity citizen: pure."), "imported doc rendered: {h}");
+
+    // Own document: hover `main` at its declaration.
+    let (l, c) = at(app, 3, "main");
+    let h = hover_value(&mut client, &uri, l, c).expect("hover on own fn");
+    assert!(h.contains("The entry point, documented."), "own-module doc rendered: {h}");
+
+    let _ = client.child.kill();
+}
+
+/// §1 + §2: a namespace over a GENERATED module (`i18n(..)`) resolves its
+/// members, and the generated `///` — the translation itself — is the doc.
+/// This is RFC-0020's "hover a key, see the translation" working for the first
+/// time: before, `namespace_members` tried to `read` the module's banner key,
+/// failed, and the namespace had zero members (so `t.x` hovered null).
+#[test]
+fn rfc51_generated_namespace_member_hover_shows_translation() {
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-51i18n-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("strings")).unwrap();
+    std::fs::write(
+        dir.join("strings/en.json"),
+        "{ \"app\": { \"tagline\": \"Paste text, get a short link.\" } }",
+    )
+    .unwrap();
+    let app = "\
+import { i18n } from \"std/i18n\"
+import * as t from i18n(\"./strings\")
+fn main() -> Int64 { let s = t.appTagline() return 0 }
+";
+    let app_path = dir.join("app.vyrn");
+    std::fs::write(&app_path, app).unwrap();
+    let uri = file_uri(&app_path);
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", app);
+
+    let (l, c) = at(app, 3, "appTagline");
+    let h = hover_value(&mut client, &uri, l, c).expect("hover on generated ns member");
+    assert!(h.contains("fn appTagline() -> String"), "member signature: {h}");
+    assert!(h.contains("Paste text, get a short link."), "translation as doc: {h}");
+    assert!(h.contains("via namespace `t`"), "notes the namespace: {h}");
+
+    let _ = client.child.kill();
+}
+
+/// §2 + §3 inside a `.vyx` template: hovering the segment after the `.`
+/// resolves the record FIELD (it was null — `resolve` had no member path at
+/// all), and hovering the receiver shows the record's SHAPE, not just its name.
+#[test]
+fn rfc51_member_and_structure_hover_in_vyx_template() {
+    let dir = rfc33_scratch("hover51", RFC33_VYX_OK);
+    let mut client = rfc33_client();
+    let app_uri = file_uri(&dir.join("app.vyrn"));
+    let vyx_uri = file_uri(&dir.join("comp/Widget.vyx"));
+    did_open(&mut client, &app_uri, "vyrn", RFC33_APP);
+    let _ = read_diags_for(&mut client, "Widget.vyx");
+    did_open(&mut client, &vyx_uri, "vyx", RFC33_VYX_OK);
+
+    // `<li>{{ item.title }}` on line 6 (0-based 5): `item` at char 7, the `.`
+    // at 11, `title` from 12.
+    let h = hover_value(&mut client, &vyx_uri, 5, 13).expect("member hover in a .vyx template");
+    assert!(h.contains("title: String"), "the field's type: {h}");
+
+    let h = hover_value(&mut client, &vyx_uri, 5, 7).expect("receiver hover");
+    assert!(h.contains("item: Row"), "the value's type: {h}");
+    assert!(h.contains("type Row = { title: String }"), "the record's shape: {h}");
+
+    let _ = client.child.kill();
+}
+
+/// §4: with two classes in one `class="…"`, hover reports the token actually
+/// under the cursor — and class COMPLETION replaces exactly that token's range
+/// (hover and completion must agree on where a token starts).
+#[test]
+fn rfc51_class_hover_and_completion_agree_on_the_token_under_the_cursor() {
+    let (mut client, uri) = rfc42_open();
+
+    // `class="bg-brand-500 md:hover:bg-brand-600"` — the first token.
+    let (l, c) = pos_after(RFC42_VYX, "bg-brand-5");
+    let h = hover_value(&mut client, &uri, l, c).expect("hover on the first class");
+    assert!(h.contains("`bg-brand-500`"), "the token under the cursor: {h}");
+    assert!(!h.contains("md:hover:"), "not the LAST token on the line: {h}");
+
+    // The second token, on the same attribute.
+    let (l2, c2) = pos_after(RFC42_VYX, "md:hover:bg-brand-6");
+    let h2 = hover_value(&mut client, &uri, l2, c2).expect("hover on the second class");
+    assert!(h2.contains("`md:hover:bg-brand-600`"), "the variant token: {h2}");
+
+    // Completion at the same cursor replaces the whole token, from its start.
+    let id = serde_json::json!("rfc51-cls");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/completion",
+        "params": { "textDocument": { "uri": uri }, "position": { "line": l2, "character": c2 } }
+    }));
+    let resp = client.read_response(&id);
+    let items = resp.get("result").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+    let item = items
+        .iter()
+        .find(|i| i.get("label").and_then(|s| s.as_str()) == Some("md:hover:bg-brand-600"))
+        .expect("the variant class is offered");
+    let start = item
+        .pointer("/textEdit/range/start/character")
+        .and_then(|v| v.as_u64())
+        .expect("a replace range");
+    let end = item.pointer("/textEdit/range/end/character").and_then(|v| v.as_u64()).unwrap();
+    // The token starts right after the space that ends `bg-brand-500`.
+    let tok_start = (c2 as u64) - ("md:hover:bg-brand-6".len() as u64);
+    assert_eq!(start, tok_start, "completion replaces from the token start: {item}");
+    assert_eq!(end, c2 as u64, "…up to the cursor: {item}");
+
+    let _ = client.child.kill();
+}

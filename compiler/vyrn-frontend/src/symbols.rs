@@ -57,6 +57,11 @@ pub struct Symbol {
     pub end_col: usize,
     /// Hover / signature text.
     pub detail: String,
+    /// RFC-0051 §1: the declaration's `///` documentation (markdown), as the
+    /// parser attached it — rendered beneath the signature on hover. `None` for
+    /// declarations without a doc comment and for kinds the AST carries no doc
+    /// on (enum variants, protocol method signatures).
+    pub doc: Option<String>,
     /// The module file this symbol was declared in — `None` for the open
     /// document itself, `Some(path)` for a symbol imported from another file
     /// (only populated by [`analyze_linked`]). Foreign symbols have `col == 0`
@@ -210,6 +215,8 @@ pub struct Completion {
     pub label: String,
     pub kind: SymbolKind,
     pub detail: String,
+    /// RFC-0051 §1: the item's `///` documentation, when its declaration has one.
+    pub doc: Option<String>,
 }
 
 /// Lex, parse, type-check, move-check, and index `source` in one pass.
@@ -407,6 +414,7 @@ fn analyze_inner(
                     label: m.name.clone(),
                     kind: SymbolKind::Method,
                     detail: function_detail(m),
+                    doc: m.doc.clone(),
                 },
             ));
         }
@@ -420,6 +428,7 @@ fn analyze_inner(
                     label: m.name.clone(),
                     kind: SymbolKind::Method,
                     detail: method_sig_detail(m),
+                    doc: None,
                 },
             ));
         }
@@ -449,6 +458,7 @@ fn analyze_inner(
                         label: f.name.clone(),
                         kind: SymbolKind::Field,
                         detail: field_detail(f, &member_src.type_decls),
+                        doc: None,
                     },
                 ));
             }
@@ -694,7 +704,7 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
             .filter(|b| b.fn_line == fn_line && b.name == tok.text && b.line <= line)
             .max_by_key(|b| b.line);
         if let Some(b) = local {
-            return Some(local_resolution(b));
+            return Some(local_resolution(analysis, b));
         }
     }
 
@@ -719,11 +729,46 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
                         target_col: m.col,
                         target_end_col: m.end_col,
                         target_file: m.file.clone(),
-                        hover: format!("{}\n\n— via namespace `{}`", m.detail, recv),
+                        hover: format!(
+                            "{}\n\n— via namespace `{}`",
+                            with_doc(&m.detail, &m.doc),
+                            recv
+                        ),
                         definition: m.file.is_some(),
                     });
                 }
             }
+        }
+    }
+
+    // RFC-0051 §2: `receiver.member` — a member token whose receiver has a known
+    // type resolves to that member (a record field, a builtin/array/map member,
+    // a protocol/impl method). Answered from the very table `.`-completion uses,
+    // so hover and completion can never disagree. Checked before the top-level
+    // fallback so `p.title` is the FIELD, not a same-named top-level decl.
+    if is_member_position(analysis, tok) {
+        if let Some(c) = member_completions(analysis, tok.line, tok.col)
+            .into_iter()
+            .find(|c| c.label == tok.text)
+        {
+            // A user protocol/impl method IS an indexed symbol — keep its
+            // declaration site so go-to-definition still works on `x.show()`.
+            // A record field or builtin method has none: it hovers, no jump.
+            let decl = analysis
+                .symbols
+                .iter()
+                .filter(|s| s.name == c.label && s.kind == SymbolKind::Method)
+                .max_by_key(|s| (s.file.is_none(), s.line));
+            return Some(Resolution {
+                name: c.label.clone(),
+                kind: c.kind,
+                target_line: decl.map_or(0, |d| d.line),
+                target_col: decl.map_or(0, |d| d.col),
+                target_end_col: decl.map_or(0, |d| d.end_col),
+                target_file: decl.and_then(|d| d.file.clone()),
+                hover: with_doc(&c.detail, &c.doc.clone().or_else(|| decl.and_then(|d| d.doc.clone()))),
+                definition: decl.is_some(),
+            });
         }
     }
 
@@ -763,7 +808,7 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
             target_col: best.col,
             target_end_col: best.end_col,
             target_file: best.file.clone(),
-            hover: best.detail.clone(),
+            hover: with_doc(&best.detail, &best.doc),
             definition: true,
         });
     }
@@ -813,6 +858,7 @@ pub fn completions(analysis: &Analysis) -> Vec<Completion> {
             label: s.name.clone(),
             kind: s.kind,
             detail: s.detail.clone(),
+            doc: s.doc.clone(),
         })
         .collect()
 }
@@ -852,6 +898,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
                         label: s.name.clone(),
                         kind: s.kind,
                         detail: format!("{}\n\n— via namespace `{}`", s.detail, recv),
+                        doc: s.doc.clone(),
                     })
                     .collect();
             }
@@ -870,6 +917,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
             label: b.name.to_string(),
             kind: SymbolKind::Method,
             detail: b.detail.to_string(),
+            doc: None,
         })
         .collect();
     // `arr.length` is the element-count field sugar — a read-only field on
@@ -879,6 +927,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
             label: "length".to_string(),
             kind: SymbolKind::Field,
             detail: "length: Int64 — element count (read-only)".to_string(),
+            doc: None,
         });
     }
     // `map.length` is the entry-count field sugar (RFC-0028).
@@ -887,6 +936,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
             label: "length".to_string(),
             kind: SymbolKind::Field,
             detail: "length: Int64 — entry count (read-only)".to_string(),
+            doc: None,
         });
     }
     // Record fields: a named record receiver offers its declaration's fields;
@@ -905,6 +955,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
                     label: f.name.clone(),
                     kind: SymbolKind::Field,
                     detail: format!("{}: {}", f.name, type_to_string(&f.ty)),
+                    doc: None,
                 });
             }
         }
@@ -974,6 +1025,7 @@ pub fn string_literal_completions(
             label: k.clone(),
             kind: SymbolKind::Variant,
             detail: format!("{ty_name} — a key of this finite string type"),
+            doc: None,
         })
         .collect()
 }
@@ -1007,6 +1059,7 @@ pub fn class_completions(
                 label: c.clone(),
                 kind: SymbolKind::Variant,
                 detail: format!("{ty_name} — theme utility/safelist class"),
+                doc: None,
             })
             .collect(),
     )
@@ -1334,6 +1387,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
             col,
             end_col,
             detail: function_detail(f),
+            doc: f.doc.clone(),
             file: None,
         });
     }
@@ -1348,6 +1402,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
             col,
             end_col,
             detail: global_detail(g),
+            doc: g.doc.clone(),
             file: None,
         });
     }
@@ -1362,6 +1417,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
                 col,
                 end_col,
                 detail: function_detail(m),
+                doc: m.doc.clone(),
                 file: None,
             });
         }
@@ -1376,6 +1432,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
             col,
             end_col,
             detail: protocol_detail(p),
+            doc: p.doc.clone(),
             file: None,
         });
         for m in &p.methods {
@@ -1387,6 +1444,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
                 col,
                 end_col,
                 detail: method_sig_detail(m),
+                doc: None,
                 file: None,
             });
         }
@@ -1408,6 +1466,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
             col,
             end_col,
             detail: type_decl_detail(t, &program.type_decls),
+            doc: t.doc.clone(),
             file: None,
         });
         if let Type::Enum(variants) = &t.base {
@@ -1433,6 +1492,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
                     col,
                     end_col,
                     detail: variant_detail(&t.name, v),
+                    doc: None,
                     file: None,
                 });
             }
@@ -1452,6 +1512,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
             col,
             end_col,
             detail: format!("test {:?}", t.name),
+            doc: t.doc.clone(),
             file: None,
         });
     }
@@ -1500,6 +1561,7 @@ fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Sym
                     col: 0,
                     end_col: 0,
                     detail: alias_note(local, &f.name, function_detail(f)),
+                    doc: f.doc.clone(),
                     file: Some(file.clone()),
                 });
             }
@@ -1516,6 +1578,7 @@ fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Sym
                     col: 0,
                     end_col: 0,
                     detail: alias_note(local, &p.name, protocol_detail(p)),
+                    doc: p.doc.clone(),
                     file: Some(file.clone()),
                 });
                 for m in &p.methods {
@@ -1526,6 +1589,7 @@ fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Sym
                         col: 0,
                         end_col: 0,
                         detail: method_sig_detail(m),
+                        doc: None,
                         file: Some(file.clone()),
                     });
                 }
@@ -1548,6 +1612,7 @@ fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Sym
                     col: 0,
                     end_col: 0,
                     detail: alias_note(local, &t.name, type_decl_detail(t, &linked.type_decls)),
+                    doc: t.doc.clone(),
                     file: Some(file.clone()),
                 });
                 if let Type::Enum(variants) = &t.base {
@@ -1559,6 +1624,7 @@ fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Sym
                             col: 0,
                             end_col: 0,
                             detail: variant_detail(&t.name, v),
+                            doc: None,
                             file: Some(file.clone()),
                         });
                     }
@@ -1590,20 +1656,28 @@ fn index_namespaces(
     if !root.imports.iter().any(|i| i.namespace.is_some()) {
         return Vec::new();
     }
-    // The root module's resolved import targets, in `root.imports` order.
-    let Ok(graph) = crate::loader::module_graph(source, root_path, opts, resolver) else {
+    // The root module's resolved import targets, in `root.imports` order —
+    // carrying each module's synthesized source, since a namespace may name a
+    // GENERATED module (`import * as t from i18n("./strings")`) whose key is a
+    // banner no resolver can read (RFC-0051 §2).
+    let Ok(graph) = crate::loader::module_graph_with_sources(source, root_path, opts, resolver)
+    else {
         return Vec::new();
     };
     let root_key = crate::loader::normalize(root_path);
-    let Some((_, targets)) = graph.iter().find(|(k, _)| *k == root_key) else {
+    let Some((_, targets, _)) = graph.iter().find(|(k, _, _)| *k == root_key) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for (imp, target) in root.imports.iter().zip(targets) {
         if let Some(ns) = &imp.namespace {
+            let gen = graph
+                .iter()
+                .find(|(k, _, _)| k == target)
+                .and_then(|(_, _, g)| g.as_deref());
             out.push(NamespaceInfo {
                 name: ns.clone(),
-                members: namespace_members(target, resolver),
+                members: namespace_members(target, resolver, gen),
             });
         }
     }
@@ -1613,11 +1687,28 @@ fn index_namespaces(
 /// The exported declarations of `target` as hover/goto-ready [`Symbol`]s. Parses
 /// the target's own source (so names/lines are the module's, and a collision
 /// rename in the linked program never leaks into what the editor shows). A target
-/// that can't be read (a synthesized generator module has no file) yields no
-/// members — completion after that `ns.` simply offers nothing.
-fn namespace_members(target: &str, resolver: &dyn crate::loader::ModuleResolver) -> Vec<Symbol> {
-    let Ok(text) = resolver.read(target) else {
-        return Vec::new();
+/// that can't be read and has no `gen_source` yields no members — completion
+/// after that `ns.` simply offers nothing.
+///
+/// RFC-0051 §2: `gen_source` is the SYNTHESIZED text when `target` is a
+/// generated module (its key is a banner, not a path). Its members hover but
+/// carry no `file`, since there is nothing on disk to jump to — which is
+/// exactly what makes `t.appTagline` (an `i18n(..)` namespace) resolve at last,
+/// docs (the generated translation) included.
+fn namespace_members(
+    target: &str,
+    resolver: &dyn crate::loader::ModuleResolver,
+    gen_source: Option<&str>,
+) -> Vec<Symbol> {
+    let text = match gen_source {
+        Some(g) => g.to_string(),
+        None => match resolver.read(target) {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
+        },
+    };
+    let file = |t: &str| -> Option<String> {
+        if gen_source.is_some() { None } else { Some(t.to_string()) }
     };
     let Ok(tokens) = lexer::lex(&text) else {
         return Vec::new();
@@ -1633,7 +1724,8 @@ fn namespace_members(target: &str, resolver: &dyn crate::loader::ModuleResolver)
                 col: 0,
                 end_col: 0,
                 detail: function_detail(f),
-                file: Some(target.to_string()),
+                doc: f.doc.clone(),
+                file: file(target),
             });
         }
     }
@@ -1646,7 +1738,8 @@ fn namespace_members(target: &str, resolver: &dyn crate::loader::ModuleResolver)
                 col: 0,
                 end_col: 0,
                 detail: protocol_detail(p),
-                file: Some(target.to_string()),
+                doc: p.doc.clone(),
+                file: file(target),
             });
         }
     }
@@ -1661,7 +1754,8 @@ fn namespace_members(target: &str, resolver: &dyn crate::loader::ModuleResolver)
             col: 0,
             end_col: 0,
             detail: type_decl_detail(t, &program.type_decls),
-            file: Some(target.to_string()),
+            doc: t.doc.clone(),
+            file: file(target),
         });
         if let Type::Enum(variants) = &t.base {
             for v in variants {
@@ -1672,7 +1766,8 @@ fn namespace_members(target: &str, resolver: &dyn crate::loader::ModuleResolver)
                     col: 0,
                     end_col: 0,
                     detail: variant_detail(&t.name, v),
-                    file: Some(target.to_string()),
+                    doc: None,
+                    file: file(target),
                 });
             }
         }
@@ -1813,7 +1908,55 @@ fn collect_lets(
 }
 
 /// Build a [`Resolution`] for a local binding.
-fn local_resolution(b: &LocalBinding) -> Resolution {
+/// RFC-0051 §1: hover text = the signature, then the declaration's `///` doc
+/// (already markdown, passed through verbatim) when it has one.
+fn with_doc(detail: &str, doc: &Option<String>) -> String {
+    match doc {
+        Some(d) if !d.trim().is_empty() => format!("{detail}\n\n{}", d.trim_end()),
+        _ => detail.to_string(),
+    }
+}
+
+/// RFC-0051 §3: the declaration of the user record/enum named `name`, rendered
+/// beneath a value's hover so `error: PageError` also shows the shape. Bounded
+/// on purpose: the type's own one-line declaration (+ its doc), never a
+/// recursive expansion of the field types. `None` when the name isn't an
+/// indexed user type (a builtin like `Int64`, or a type from a module the root
+/// doesn't import).
+fn type_structure(analysis: &Analysis, name: &str) -> Option<String> {
+    let sym = analysis
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Type && s.name == name)
+        .max_by_key(|s| (s.file.is_none(), s.line))?;
+    // Only structural declarations (`type T = { .. }` / `A | B`) add information
+    // a value's hover doesn't already carry; a protocol is not a value's type.
+    if !sym.detail.starts_with("type ") {
+        return None;
+    }
+    Some(with_doc(&format!("```vyrn\n{}\n```", sym.detail), &sym.doc))
+}
+
+/// The user type a binding's hover should expand (RFC-0051 §3): the binding's
+/// own named type, or the element type of an array/map of a named type.
+fn structural_name(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Named(n) => Some(n.as_str()),
+        Type::Array(inner) => structural_name(inner),
+        Type::ArrayN(inner, _) => structural_name(inner),
+        Type::Map(_, v) => structural_name(v),
+        _ => None,
+    }
+}
+
+fn local_resolution(analysis: &Analysis, b: &LocalBinding) -> Resolution {
+    let hover = match b.ty.as_ref().and_then(structural_name) {
+        Some(n) => match type_structure(analysis, n) {
+            Some(s) => format!("{}\n\n{}", local_detail(b), s),
+            None => local_detail(b),
+        },
+        None => local_detail(b),
+    };
     Resolution {
         name: b.name.clone(),
         kind: match b.kind {
@@ -1824,7 +1967,7 @@ fn local_resolution(b: &LocalBinding) -> Resolution {
         target_col: b.col,
         target_end_col: b.end_col,
         target_file: None,
-        hover: local_detail(b),
+        hover,
         definition: true,
     }
 }

@@ -38,7 +38,7 @@ use lsp_types::{
     CompletionTextEdit, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, Diagnostic as LspDiagnostic, DiagnosticSeverity,
     DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
-    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Documentation,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     InitializeParams, InitializeResult, Location, MarkupContent, MarkupKind, OneOf, Position,
     PublishDiagnosticsParams, Range, SemanticToken, SemanticTokenModifier, SemanticTokenType,
@@ -1115,6 +1115,11 @@ fn to_completion_item(c: vyrn_frontend::Completion) -> CompletionItem {
         label: c.label,
         kind: Some(to_lsp_kind(c.kind)),
         detail: Some(c.detail),
+        // RFC-0051 §1: the declaration's `///` doc, shown in the completion
+        // item's detail pane (markdown, verbatim).
+        documentation: c.doc.map(|d| {
+            Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: d })
+        }),
         ..Default::default()
     }
 }

@@ -254,7 +254,15 @@ fn resolve_param_at_use_site() {
     // `fn area(s: Shape)` is on line 10; `s` is at col 9.
     assert_eq!(r.target_line, 10);
     assert_eq!(r.target_col, 9);
-    assert_eq!(r.hover, "s: Shape");
+    // RFC-0051 §3: a value of a user type also shows that type's shape.
+    assert_eq!(
+        r.hover,
+        "s: Shape
+
+```vyrn
+type Shape = Circle(Int64) | Rect(Int64, Int64) | Unit
+```"
+    );
 }
 
 /// Hovering an annotated `let` at a use site resolves to the binding with its

@@ -484,6 +484,25 @@ pub fn module_graph(
         .collect())
 }
 
+/// Like [`module_graph`], but each entry also carries the module's SYNTHESIZED
+/// source when it was produced by a generator (RFC-0021) — `None` for a module
+/// read from disk. RFC-0051 §2: the symbol indexer needs it to list the exports
+/// of an `import * as ns from gen(..)` namespace, whose "file" is a banner key
+/// no resolver can read.
+#[allow(clippy::type_complexity)]
+pub fn module_graph_with_sources(
+    root_source: &str,
+    root_path: &str,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+) -> Result<Vec<(String, Vec<String>, Option<String>)>, Vec<Diagnostic>> {
+    let (modules, _) = load_modules(root_source, root_path, opts, resolver)?;
+    Ok(modules
+        .into_iter()
+        .map(|m| (m.key, m.import_targets, m.gen_source))
+        .collect())
+}
+
 fn load_modules(
     root_source: &str,
     root_path: &str,
