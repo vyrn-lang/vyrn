@@ -1,6 +1,7 @@
 # RFC-0050 — LSP: Scope-Aware Highlight, Import-Path Definition, Namespace Colour
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented
+- **Status (history):** Draft (design locked)
 - **Depends on:** RFC-0047 (semantic tokens + the `classify_at` resolver),
   RFC-0027 (namespace bindings), RFC-0033/0049 (the `.vyx` mapping + owner
   discovery — these fixes apply in `.vyx` too, once owned)
@@ -79,6 +80,92 @@ and asserting:
 - LSP e2e tests added for each. Full suite + LSP green, 0 warnings.
 - **Rebuild + HASH-VERIFIED redeploy** of `vyrn-lsp.exe` (fresh ==
   deployed) — and report the driver transcript, not just "tests pass".
+
+## As landed
+
+LSP-only + read-only frontend queries; no change to compilation, emitted code,
+or parity. 926 workspace tests unchanged; LSP e2e 25 → 28 (+3, all default-run);
+0 warnings. Deployed `editor/vscode/server/vyrn-lsp.exe` hash-verified equal to
+the fresh release build.
+
+**§1 documentHighlight (the headline).** New read-only frontend query
+`vyrn_frontend::references(&Analysis, line, col) -> Vec<RefRange>` (in
+`symbols.rs`), mirroring `resolve`'s precedence — local → namespace → top-level
+symbol — to return a binding's ACTUAL occurrences:
+
+- A token in **member position** (immediately after a `.`) highlights the same
+  member accessed through the same-named receiver (namespace exports, record
+  fields, builtin methods), receiver-scoped.
+- A **local** (param/let/for-var) highlights only the uses that resolve to *that*
+  binding, and only within the same function — computed per candidate token by
+  the same "latest same-named binding at or before this line" rule `resolve`
+  uses, so an out-of-scope same-named binding in another function is excluded.
+- A **namespace** binding highlights its bare-`ns` occurrences (import binding +
+  every `ns.` qualifier), skipping positions shadowed by a local.
+- A **top-level symbol** highlights its real references, excluding positions
+  where an in-scope local shadows the name.
+- Declaration occurrence → `Write`, uses → `Read`. Unresolved token → empty
+  `Some([])` so VS Code does not word-match. Comments are never lexed to tokens,
+  so they never appear. `.vyx` maps synth-module references back through the
+  origin regions (`vyx_highlights`, the inverse of `vyx_semantic_tokens`).
+
+Driver transcript over the DEPLOYED binary (real `file:///N:/...` URIs), on a
+fixture where `count` is a `tally` local, a comment word, AND an `other()`
+binding:
+
+```
+[§1] documentHighlight on `count` (decl line 5):
+   line 5 col 13 kind=3(Write)
+   line 8 col 9  kind=2(Read)
+   line 8 col 17 kind=2(Read)
+   line 10 col 12 kind=2(Read)
+   lines: [5, 8, 10]   # comment line 14 and other()'s count (15,16) ABSENT
+```
+
+And on `examples/namespace.vyrn`, highlighting `colorName`'s param `c` returns
+only lines 19 (Write) + 20 (Read) — `main`'s for-var `c` on lines 35–37 is
+absent (scope-aware). Against the OLD deployed binary the same requests returned
+`result: NULL` (no provider → VS Code fell back to word-match, hitting the
+comment and the out-of-scope binding).
+
+**§2 definition on import path.** `resolve_spec` in `loader.rs` made `pub` (a
+read-only reuse — no second copy of the path logic); new frontend query
+`import_spec_at(source, line, col)` identifies the specifier string under the
+cursor by *statement span* (so multi-line `import {\n..\n} from "path"` works and
+generator-call string args are covered). The server's `import_path_definition`
+resolves it and returns a top-of-file `Location`; a directory arg falls back to
+an entry file inside it (else the dir). Remote/uncached specs → nothing, quietly.
+Driver transcript (deployed binary):
+
+```
+[§2] definition on "./lib/shapes" (namespace.vyrn:15)
+   -> file:///N:/lang/examples/lib/shapes.vyrn
+[§2] definition on "std/time" (clock.vyrn:23)
+   -> file:///N:/lang/std/time.vyrn
+```
+
+(OLD binary: both returned `null` — Ctrl+Click did nothing.)
+
+**§3 namespace colour — verdict: THEME, not a server bug.** The classifier
+already returns `namespace` (legend index 0) for both the `import * as ns`
+binding token and the `ns.` qualifier — confirmed by driving semanticTokens on
+the OLD binary too (it returned type index `0` before any change) and on the new
+one. `classify_token` consults the `NamespaceInfo` index (step 3) BEFORE the
+type/symbol fallthrough, so precedence was already correct. NO code change was
+made for §3; the green the user sees is their theme colouring `namespace` like
+`type` (common and standard). A token test pins the classification either way.
+Driver transcript (deployed binary):
+
+```
+[§3] namespace.vyrn line15 `shapes` binding @col13  -> type 0 (namespace)
+[§3] namespace.vyrn line29 `shapes` qualifier @col27 -> type 0 (namespace)
+```
+
+**Tests.** `rfc0050_document_highlight_is_scope_aware` (advertisement, Write/Read
+kinds, comment + out-of-scope exclusion, empty-not-null on a keyword),
+`rfc0050_definition_on_import_path` (`./store`, `std/time`, plus the identifier
+path still works), `rfc0050_namespace_binding_classifies_as_namespace` (binding +
+qualifier → `namespace`).
 
 ## Out of scope
 
