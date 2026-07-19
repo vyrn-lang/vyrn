@@ -2175,8 +2175,11 @@ export gen fn componentsThemed(dir: String, theme: String) -> String {
 // ===========================================================================
 
 /// The shape `std/ui` needs to route a `.vyx` page: its `params` fields (parallel
-/// name/type arrays) and whether it declares a loader. `err` names a params fault.
-type VyxPageShape = { paramNames: Array<String>, paramTypes: Array<String>, hasLoad: Bool, err: String }
+/// name/type arrays), whether it declares a loader, the loader's return-type
+/// spelling (`loadRet` — `Validation<…>` or `Result<…>`, RFC-0041 §3), and whether
+/// it opts out of the layout with `layout="none"` (RFC-0041 §1). `err` names a
+/// params fault.
+type VyxPageShape = { paramNames: Array<String>, paramTypes: Array<String>, hasLoad: Bool, loadRet: String, layoutNone: Bool, err: String }
 
 /// Whether the script text declares a statement-leading `fn load` (or
 /// `export fn load`) — the page's optional loader.
@@ -2190,6 +2193,56 @@ fn vyxScriptHasLoad(script: String) -> Bool {
     return false
 }
 
+/// The loader's declared return-type spelling — the text between `->` and the
+/// opening `{` of the `fn load(…)` line (RFC-0041 §3: `Validation<Data>` vs
+/// `Result<Data, PageError>`). "" when there is no loader.
+fn vyxScriptLoadRet(script: String) -> String {
+    for line in vyxLines(script) {
+        let t = vyxTrim(line)
+        if t.startsWith("fn load") || t.startsWith("export fn load") {
+            let tb = bytes(t)
+            let arrow = vyxFind(tb, bytes("->"), 0)
+            if arrow < 0 {
+                return ""
+            }
+            let brace = vyxFind(tb, bytes("{"), arrow)
+            let end = if brace < 0 { tb.length } else { brace }
+            return vyxTrim(vyxSlice(tb, arrow + 2, end))
+        }
+    }
+    return ""
+}
+
+/// Whether the page opts out of the layout with a statement-leading
+/// `layout="none"` directive in its `<script>` (RFC-0041 §1). Spaces around the
+/// `=` are tolerated; the value must be the string `none`.
+fn vyxScriptLayoutNone(script: String) -> Bool {
+    for line in vyxLines(script) {
+        let t = vyxTrim(line)
+        if t.startsWith("layout") {
+            let rest = vyxTrim(vyxSlice(bytes(t), 6, bytes(t).length))
+            if rest.startsWith("=") {
+                let val = vyxTrim(vyxSlice(bytes(rest), 1, bytes(rest).length))
+                if val == "\"none\"" || val == "'none'" || val == "none" {
+                    return true
+                }
+            }
+        }
+    }
+    return false
+}
+
+/// Whether a script line is the `layout="none"` directive (dropped from the
+/// pass-through script — it is not valid Vyrn).
+fn vyxIsLayoutLine(line: String) -> Bool {
+    let t = vyxTrim(line)
+    if t.startsWith("layout") == false {
+        return false
+    }
+    let rest = vyxTrim(vyxSlice(bytes(t), 6, bytes(t).length))
+    return rest.startsWith("=")
+}
+
 /// Reflect a `.vyx` page's `<script>` — its `params` fields and loader presence.
 /// EXPORTED so `std/ui` learns the page's routing shape without duplicating the
 /// scanner. (`err` is set on a malformed `params` block.)
@@ -2197,20 +2250,22 @@ export fn vyxPageShape(source: String) -> VyxPageShape {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     if scriptSec.found == false {
-        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, err: "" }
+        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadRet: "", layoutNone: false, err: "" }
     }
     let bad = vyxImportsFirstViolation(ba, scriptSec.start, scriptSec.end, "params")
     if bad > 0 {
-        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, err: vyxErr("VYX_IMPORTS_FIRST", "vyx_page", bad) }
+        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadRet: "", layoutNone: false, err: vyxErr("VYX_IMPORTS_FIRST", "vyx_page", bad) }
     }
     let script = vyxSlice(ba, scriptSec.start, scriptSec.end)
     let sb = bytes(script)
+    let loadRet = vyxScriptLoadRet(script)
+    let layoutNone = vyxScriptLayoutNone(script)
     let pb = vyxFindKwBlock(sb, "params")
     let mut names: Array<String> = []
     let mut types: Array<String> = []
     if pb.found {
         if pb.malformed {
-            return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, err: "VYX_BAD_PARAMS\n" }
+            return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadRet: "", layoutNone: false, err: "VYX_BAD_PARAMS\n" }
         }
         let end = vyxMatchCurly(sb, pb.braceAt)
         for part in vyxSplitFields(vyxSlice(sb, pb.braceAt + 1, end - 1)) {
@@ -2226,14 +2281,14 @@ export fn vyxPageShape(source: String) -> VyxPageShape {
                     k = k + 1
                 }
                 if colon < 0 {
-                    return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, err: "VYX_BAD_PARAMS\n" }
+                    return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadRet: "", layoutNone: false, err: "VYX_BAD_PARAMS\n" }
                 }
                 names.push(vyxTrim(vyxSlice(pbf, 0, colon)))
                 types.push(vyxTrim(vyxSlice(pbf, colon + 1, pbf.length)))
             }
         }
     }
-    return VyxPageShape { paramNames: names, paramTypes: types, hasLoad: vyxScriptHasLoad(script), err: "" }
+    return VyxPageShape { paramNames: names, paramTypes: types, hasLoad: vyxScriptHasLoad(script), loadRet: loadRet, layoutNone: layoutNone, err: "" }
 }
 
 /// Prefix `export ` onto a statement-leading `fn load` / `type Data` line so the
@@ -2243,7 +2298,10 @@ fn vyxAutoExportPageDecls(script: String) -> String {
     let mut out = ""
     for line in vyxLines(script) {
         let t = vyxTrim(line)
-        if t.startsWith("fn load") || t.startsWith("type Data") {
+        if vyxIsLayoutLine(line) {
+            // The `layout="none"` opt-out directive is consumed by the router
+            // shape; it is not valid Vyrn, so it never reaches the module.
+        } else if t.startsWith("fn load") || t.startsWith("type Data") {
             out = out + "export " + line + "\n"
         } else {
             out = out + line + "\n"
@@ -2260,6 +2318,109 @@ fn vyxPageArgs(names: Array<String>) -> String {
         parts.push("p." + n)
     }
     return vyxJoin(parts, ", ")
+}
+
+// ===========================================================================
+// The `head { … }` block (RFC-0041 §2) — a layout/page `<script>` may declare a
+// small head block emitting `<link>`/`<meta>`/`<title>`/`<script>` into the
+// document head that `std/ui` threads into `document(title, head, body)`. To keep
+// the enclosing `<script>` section scannable, script includes use keyword forms
+// (`module`/`script`) rather than literal `<script>…</script>` tags (whose close
+// tag would truncate the section). Each entry is one statement-leading line:
+//
+//   head {
+//       title: displayTitle(data)      // the document <title> (dynamic ok)
+//       stylesheet "/theme.css"        // <link rel="stylesheet" href=…>
+//       module "/app.js"               // <script type="module" src=…></script>
+//       script "/legacy.js"            // <script src=…></script>
+//   }
+// ===========================================================================
+
+/// One head entry: a `kind` (`stylesheet`/`module`/`script`) and its Vyrn source
+/// `expr` (usually a string literal, but any String expression is legal).
+type VyxHeadItem = { kind: String, expr: String }
+
+/// A parsed head block: whether it declared a `title:`, that title expression,
+/// the ordered head entries, and any diagnostic.
+type VyxHead = { found: Bool, hasTitle: Bool, titleExpr: String, items: Array<VyxHeadItem>, err: String }
+
+/// An empty head (no block present).
+fn vyxNoHead() -> VyxHead {
+    return VyxHead { found: false, hasTitle: false, titleExpr: "", items: [], err: "" }
+}
+
+/// Parse the body of a `head { … }` block (the text between its braces).
+fn vyxParseHead(body: String, fileId: String) -> VyxHead {
+    let mut hasTitle = false
+    let mut titleExpr = ""
+    let mut items: Array<VyxHeadItem> = []
+    for line in vyxLines(body) {
+        let t = vyxTrim(line)
+        if t.length == 0 || t.startsWith("//") {
+            // blank / comment
+        } else if t.startsWith("title:") {
+            hasTitle = true
+            titleExpr = vyxTrim(vyxSlice(bytes(t), 6, bytes(t).length))
+        } else if t.startsWith("stylesheet ") {
+            items.push(VyxHeadItem { kind: "stylesheet", expr: vyxTrim(vyxSlice(bytes(t), 11, bytes(t).length)) })
+        } else if t.startsWith("module ") {
+            items.push(VyxHeadItem { kind: "module", expr: vyxTrim(vyxSlice(bytes(t), 7, bytes(t).length)) })
+        } else if t.startsWith("script ") {
+            items.push(VyxHeadItem { kind: "script", expr: vyxTrim(vyxSlice(bytes(t), 7, bytes(t).length)) })
+        } else {
+            return VyxHead { found: true, hasTitle: hasTitle, titleExpr: titleExpr, items: items, err: vyxErrDetail("VYX_BAD_HEAD_ENTRY", fileId, 0, t) }
+        }
+    }
+    return VyxHead { found: true, hasTitle: hasTitle, titleExpr: titleExpr, items: items, err: "" }
+}
+
+/// A script with its `head { … }` block sliced out, plus the parsed head.
+type VyxHeadSplit = { rest: String, head: VyxHead }
+
+/// Locate + remove a statement-leading `head { … }` block from `script`,
+/// returning the remaining script and the parsed head (found=false when absent).
+fn vyxStripHead(script: String, fileId: String) -> VyxHeadSplit {
+    let sb = bytes(script)
+    let hb = vyxFindKwBlock(sb, "head")
+    if hb.found == false || hb.malformed {
+        return VyxHeadSplit { rest: script, head: vyxNoHead() }
+    }
+    let end = vyxMatchCurly(sb, hb.braceAt)
+    let body = vyxSlice(sb, hb.braceAt + 1, end - 1)
+    let rest = vyxSlice(sb, 0, hb.kwAt) + vyxSlice(sb, end, sb.length)
+    return VyxHeadSplit { rest: rest, head: vyxParseHead(body, fileId) }
+}
+
+/// The `std/html` element expression for one head entry.
+fn vyxHeadItemExpr(it: VyxHeadItem) -> String {
+    if it.kind == "stylesheet" {
+        return "el(\"link\", [A(\"rel\", \"stylesheet\"), A(\"href\", (" + it.expr + "))], [])"
+    }
+    if it.kind == "module" {
+        return "el(\"script\", [A(\"type\", \"module\"), A(\"src\", (" + it.expr + "))], [])"
+    }
+    return "el(\"script\", [A(\"src\", (" + it.expr + "))], [])"
+}
+
+/// Emit the module's `head(<sig>) -> Array<Html>` and `headTitle(<sig>) -> String`
+/// functions from a parsed head. `sig` is the parameter list (e.g. `p: Params, d:
+/// Data`, or "" for a layout); `prelude` binds the flat locals the entry
+/// expressions reference (`let id = p.id`, `let data = d`) so a `.vyx` page's head
+/// can be dynamic in its params/data. Always emitted (empty head → `[]` / "").
+fn vyxEmitHeadFns(head: VyxHead, sig: String, prelude: String) -> String {
+    let mut out = "export fn head(" + sig + ") -> Array<Html> {\n" + prelude
+    out = out + "    let mut uiHd: Array<Html> = []\n"
+    for it in head.items {
+        out = out + "    uiHd.push(" + vyxHeadItemExpr(it) + ")\n"
+    }
+    out = out + "    return uiHd\n}\n"
+    out = out + "export fn headTitle(" + sig + ") -> String {\n" + prelude
+    if head.hasTitle {
+        out = out + "    return (" + head.titleExpr + ")\n}\n"
+    } else {
+        out = out + "    return \"\"\n}\n"
+    }
+    return out
 }
 
 /// Build a full `.vyx`-PAGE module (RFC-0039 §4). The template compiles to a
@@ -2293,6 +2454,14 @@ export fn vyxBuildPageModule(source: String, dir: String, themed: Bool, theme: S
         paramFields = vyxTrim(vyxSlice(sb, pb.braceAt + 1, end - 1))
         restScript = vyxSlice(sb, 0, pb.kwAt) + vyxSlice(sb, end, sb.length)
     }
+    // Pull the `head { … }` block (RFC-0041 §2) out of the remaining script — its
+    // entries become the module's `head()`/`headTitle()`, and it must not reach
+    // the compiled body as pass-through source.
+    let hs = vyxStripHead(restScript, "vyx_page")
+    if hs.head.err != "" {
+        return hs.head.err
+    }
+    restScript = hs.rest
     let hasLoad = vyxScriptHasLoad(script)
     let restExported = vyxAutoExportPageDecls(restScript)
 
@@ -2358,6 +2527,18 @@ export fn vyxBuildPageModule(source: String, dir: String, themed: Bool, theme: S
     } else {
         out = out + "export fn page() -> Html {\n    return uiPageBody()\n}\n"
     }
+    // The `head()`/`headTitle()` pair (RFC-0041 §2), taking the same shape as
+    // `page` so a dynamic head can read the params/loaded data. `std/ui` threads
+    // the result into `document(title, head, body)`.
+    let sig = if hasLoad { "p: Params, d: Data" } else { if paramNames.length > 0 { "p: Params" } else { "" } }
+    let mut prelude = ""
+    for n in paramNames {
+        prelude = prelude + "    let " + n + " = p." + n + "\n"
+    }
+    if hasLoad {
+        prelude = prelude + "    let data = d\n"
+    }
+    out = out + vyxEmitHeadFns(hs.head, sig, prelude)
     return out
 }
 
@@ -2396,6 +2577,132 @@ fn vyxDirOf(path: String) -> String {
         return "."
     }
     return vyxSlice(ba, 0, slash)
+}
+
+// ===========================================================================
+// `.vyx` LAYOUTS (RFC-0041 §1) — a `layout.vyx` is a `.vyx` component with a
+// `<slot/>` (where the page body renders) and an optional `head { … }`. It is NOT
+// a route. `std/ui`'s router imports each layout through a nested `vyxLayout(…)`
+// generator import and wraps every page body (nearest-ancestor first, composing
+// outermost-last) in `layout(children)` before `document(…)`.
+// ===========================================================================
+
+/// Build a `.vyx`-LAYOUT module: `layout(children: Array<Html>) -> Html` around
+/// the compiled template (which must contain `<slot/>`), plus `head()`/
+/// `headTitle()` from its head block. EXPORTED so `std/ui`'s router synthesizes it
+/// from a nested `vyxLayout(…)` import.
+export fn vyxBuildLayoutModule(source: String, dir: String, themed: Bool, theme: String) -> String {
+    let ba = bytes(source)
+    let scriptSec = vyxSection(ba, "script", true)
+    let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
+    if templateSec.found == false {
+        return "VYX_LAYOUT_NO_TEMPLATE\n"
+    }
+    let templateBody = vyxSlice(ba, templateSec.start, templateSec.end)
+    let script = if scriptSec.found { vyxSlice(ba, scriptSec.start, scriptSec.end) } else { "" }
+
+    // Pull the head block; the rest is imports + helpers (passed through).
+    let hs = vyxStripHead(script, "vyx_layout")
+    if hs.head.err != "" {
+        return hs.head.err
+    }
+    let synthSource = "<script>\n" + hs.rest + "\n</script>\n<template>\n" + templateBody + "\n</template>\n"
+    let comp = vyxCompileComponent("UiLayoutBody", synthSource, dir)
+    if comp.err != "" {
+        return comp.err
+    }
+    // A layout MUST render the page body through a `<slot/>`.
+    if comp.takesChildren == false {
+        return "VYX_LAYOUT_NO_SLOT__" + vyxIdentOf(dir) + "\n"
+    }
+    let moduleStr = vyxBuildModule([comp], themed, theme)
+    if moduleStr.contains("export fn uiLayoutBody") == false {
+        return moduleStr
+    }
+    let mut out = moduleStr
+    out = out + "export fn layout(children: Array<Html>) -> Html {\n    return uiLayoutBody(children)\n}\n"
+    out = out + vyxEmitHeadFns(hs.head, "", "")
+    return out
+}
+
+/// `vyxLayout(vyxPath)` — synthesize a `.vyx` layout module (RFC-0041 §1). A
+/// `gen fn` (its `readFile` is comptime-only).
+export gen fn vyxLayout(vyxPath: String) -> String {
+    let src = match readFile(vyxPath) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    return vyxBuildLayoutModule(src, vyxDirOf(vyxPath), false, "")
+}
+
+/// `vyxLayoutThemed(vyxPath, theme)` — the themed layout variant (RFC-0036): the
+/// layout's template classes are compile-checked against `theme`.
+export gen fn vyxLayoutThemed(vyxPath: String, theme: String) -> String {
+    let src = match readFile(vyxPath) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    return vyxBuildLayoutModule(src, vyxDirOf(vyxPath), true, theme)
+}
+
+// ===========================================================================
+// `.vyx` ERROR PAGES (RFC-0041 §3) — an `error.vyx` is a `.vyx` component the
+// router renders (in place of the page, wrapped in the same layout) when a page's
+// `load` fails. The framework injects an `error: PageError` prop (imported from
+// `std/ui`); the template reads `error.status` / `error.message`. It is NOT a
+// route.
+// ===========================================================================
+
+/// Build a `.vyx`-ERROR module: `errorPage(e: PageError) -> Html` around the
+/// compiled template, with an injected `error: PageError` prop. EXPORTED so
+/// `std/ui`'s router synthesizes it from a nested `vyxError(…)` import.
+export fn vyxBuildErrorModule(source: String, dir: String, themed: Bool, theme: String) -> String {
+    let ba = bytes(source)
+    let scriptSec = vyxSection(ba, "script", true)
+    let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
+    if templateSec.found == false {
+        return "VYX_ERROR_NO_TEMPLATE\n"
+    }
+    let templateBody = vyxSlice(ba, templateSec.start, templateSec.end)
+    let script = if scriptSec.found { vyxSlice(ba, scriptSec.start, scriptSec.end) } else { "" }
+
+    // Strip any head block (error pages render inside the layout, which owns the
+    // head), then inject the `error: PageError` prop and its import.
+    let hs = vyxStripHead(script, "vyx_error")
+    if hs.head.err != "" {
+        return hs.head.err
+    }
+    let synthScript = "import { PageError } from \"std/ui\"\n" + hs.rest + "\nprops { error: PageError }\n"
+    let synthSource = "<script>\n" + synthScript + "\n</script>\n<template>\n" + templateBody + "\n</template>\n"
+    let comp = vyxCompileComponent("UiErrorBody", synthSource, dir)
+    if comp.err != "" {
+        return comp.err
+    }
+    let moduleStr = vyxBuildModule([comp], themed, theme)
+    if moduleStr.contains("export fn uiErrorBody") == false {
+        return moduleStr
+    }
+    let mut out = moduleStr
+    out = out + "export fn errorPage(e: PageError) -> Html {\n    return uiErrorBody(e)\n}\n"
+    return out
+}
+
+/// `vyxError(vyxPath)` — synthesize a `.vyx` error-page module (RFC-0041 §3).
+export gen fn vyxError(vyxPath: String) -> String {
+    let src = match readFile(vyxPath) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    return vyxBuildErrorModule(src, vyxDirOf(vyxPath), false, "")
+}
+
+/// `vyxErrorThemed(vyxPath, theme)` — the themed error-page variant (RFC-0036).
+export gen fn vyxErrorThemed(vyxPath: String, theme: String) -> String {
+    let src = match readFile(vyxPath) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    return vyxBuildErrorModule(src, vyxDirOf(vyxPath), true, theme)
 }
 
 // ===========================================================================

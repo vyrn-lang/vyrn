@@ -322,6 +322,105 @@ fn imported_params_type_works_via_the_closure() {
     assert!(src.contains("uiParams0 { "), "foreign Params construction:\n{src}");
 }
 
+// ---- RFC-0041: layouts, head, error pages ----------------------------------
+
+/// A `routes/layout.vyx` wraps every page body (its `<slot/>`), a page/layout
+/// `head { … }` block threads `<link>`/`<script>`/dynamic `<title>` into the
+/// document head, a `load -> Result<Data, PageError>` failure renders the nearest
+/// `error.vyx` at the carried status, a `Validation` failure folds into a 422
+/// error page, and `layout="none"` opts a page out of the shell.
+#[test]
+fn layout_head_and_error_pages_route_end_to_end() {
+    let dir = scratch("layout");
+    write(&dir.join("theme.json"), "{ \"safelist\": [\"shell\", \"home\", \"book\", \"err\", \"solo\"] }\n");
+    // The layout: the shell (with a <slot/>) plus a head block (stylesheet + boot).
+    write(
+        &dir.join("pages/layout.vyx"),
+        "<script>\nhead {\n    stylesheet \"/style.css\"\n    module \"/nav.js\"\n}\n</script>\n\
+         <template>\n<div class=\"shell\"><nav>bin</nav><main><slot/></main></div>\n</template>\n",
+    );
+    write(&dir.join("pages/index.vyx"), "<template>\n<h1 class=\"home\">Home</h1>\n</template>\n");
+    // A Result loader: Ok renders with a dynamic head title, Err → the error page.
+    write(
+        &dir.join("pages/p/[id].vyx"),
+        "<script>\n\
+         import { PageError, notFound } from \"std/ui\"\n\
+         params { id: String }\n\
+         head {\n    title: data.name\n}\n\
+         fn load(p: Params) -> Result<Data, PageError> {\n\
+         if p.id == \"good\" {\n    return Ok(Data { name: \"Good One\" })\n}\n\
+         return Err(notFound(\"no id \" + p.id))\n}\n\
+         type Data = { name: String }\n\
+         </script>\n\
+         <template>\n<article class=\"book\"><h1>{{ data.name }}</h1></article>\n</template>\n",
+    );
+    // A Validation loader → 422 folded into a PageError.
+    write(
+        &dir.join("pages/v/[id].vyx"),
+        "<script>\nparams { id: Int64 }\n\
+         fn load(p: Params) -> Validation<Data> {\n\
+         if p.id > 0 {\n    return Valid(Data { n: p.id })\n}\n\
+         return Invalid([Issue { key: \"id.pos\", path: \"id\", message: \"must be positive\" }])\n}\n\
+         type Data = { n: Int64 }\n</script>\n\
+         <template>\n<p class=\"book\">n {{ data.n }}</p>\n</template>\n",
+    );
+    // The themed error page: reads the injected `error` prop.
+    write(
+        &dir.join("pages/error.vyx"),
+        "<template>\n<section class=\"err\"><h1>Oops {{ error.status }}</h1><p>{{ error.message }}</p></section>\n</template>\n",
+    );
+    // A page opting out of the layout entirely.
+    write(
+        &dir.join("pages/solo/index.vyx"),
+        "<script>\nlayout=\"none\"\n</script>\n<template>\n<h1 class=\"solo\">Solo</h1>\n</template>\n",
+    );
+    write(
+        &dir.join("app.vyrn"),
+        "import { pagesThemed } from \"std/ui\"\n\
+         import { route } from pagesThemed(\"./pages\", \"./theme.json\")\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, body: \"\" }) }\n\
+         fn main() -> Int64 {\n\
+         let a = h(\"/\")\n\
+         print(\"home:\\{a.status}:\\{a.body.contains(\"class=\\\"shell\\\"\")}:\\{a.body.contains(\"/style.css\")}\")\n\
+         let b = h(\"/p/good\")\n\
+         print(\"good:\\{b.status}:\\{b.body.contains(\"<title>Good One</title>\")}:\\{b.body.contains(\"class=\\\"shell\\\"\")}\")\n\
+         let c = h(\"/p/bad\")\n\
+         print(\"bad:\\{c.status}:\\{c.body.contains(\"Oops 404\")}:\\{c.body.contains(\"no id bad\")}:\\{c.body.contains(\"class=\\\"shell\\\"\")}\")\n\
+         let d = h(\"/v/-1\")\n\
+         print(\"val:\\{d.status}:\\{d.body.contains(\"Oops 422\")}:\\{d.body.contains(\"must be positive\")}\")\n\
+         let e = h(\"/solo\")\n\
+         print(\"solo:\\{e.status}:\\{e.body.contains(\"class=\\\"shell\\\"\")}:\\{e.body.contains(\"Solo\")}\")\n\
+         return 0\n\
+         }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "layout/error app must run:\n{combined}");
+    // Home: wrapped in the layout, the layout head stylesheet threaded.
+    assert!(combined.contains("home:200:true:true"), "layout wrap + head:\n{combined}");
+    // Result Ok: dynamic <title> from the page head block, still under the layout.
+    assert!(combined.contains("good:200:true:true"), "dynamic head title under layout:\n{combined}");
+    // Result Err: the themed error page at the carried 404, wrapped in the layout.
+    assert!(combined.contains("bad:404:true:true:true"), "Result error page:\n{combined}");
+    // Validation Invalid: folded into a 422 error page.
+    assert!(combined.contains("val:422:true:true"), "Validation 422 error page:\n{combined}");
+    // layout="none": no shell.
+    assert!(combined.contains("solo:200:false:true"), "layout opt-out:\n{combined}");
+}
+
+/// A `layout.vyx` without a `<slot/>` is a named generation diagnostic.
+#[test]
+fn a_layout_without_a_slot_is_a_diagnostic() {
+    let dir = scratch("noslot");
+    write(&dir.join("pages/layout.vyx"), "<template>\n<div>no slot</div>\n</template>\n");
+    write(&dir.join("pages/index.vyx"), "<template>\n<h1>home</h1>\n</template>\n");
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    assert!(!out.status.success(), "a slot-less layout must fail to load");
+    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(err.contains("VYX_LAYOUT_NO_SLOT"), "no-slot diagnostic:\n{err}");
+}
+
 // ---- the demo runs green ---------------------------------------------------
 
 #[test]
