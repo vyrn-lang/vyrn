@@ -287,6 +287,7 @@ fn main() {
                 vyx_owner: HashMap::new(),
                 vyx_ownerless: HashSet::new(),
                 synth_cache: RefCell::new(HashMap::new()),
+                css_cache: RefCell::new(HashMap::new()),
             };
             // `initialize` is a special handshake: read it, reply with
             // capabilities, then enter the main loop. EOF here just means the
@@ -334,6 +335,19 @@ struct Server {
     /// `RefCell` because request handlers hold `&Server` (the server is
     /// single-threaded, so a borrow never races).
     synth_cache: RefCell<HashMap<Url, OwnerSynth>>,
+    /// RFC-0052: per app root, the app's own stylesheets (path + text) used to
+    /// answer a safelisted-class hover. Keyed by app root; refreshed only when the
+    /// cheap signature (each file's len+mtime, plus the app-root and `public/`
+    /// directory mtimes) changes, so a tooltip never re-walks/re-reads the disk.
+    css_cache: RefCell<HashMap<std::path::PathBuf, CssIndex>>,
+}
+
+/// RFC-0052: one app root's discovered stylesheets, with the signature they were
+/// read at.
+struct CssIndex {
+    sig: u64,
+    /// `(absolute path, file text)` in discovery order (declared order first).
+    files: Vec<(std::path::PathBuf, String)>,
 }
 
 /// RFC-0049 §2: one owner root's cached generation + per-module analyses.
@@ -536,6 +550,9 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
             None => class_token_hover(&fwd.synth.analysis, &fwd.synth.gen_source, fwd.line, fwd.col)?,
         }
     };
+    // RFC-0052: a safelisted class generates no `std/tw` rule, but the app itself
+    // styles it — append the matching rule(s) from the app's own stylesheet(s).
+    let value = with_app_css(server, uri, value);
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
@@ -2163,4 +2180,316 @@ fn publish(
 /// to the line end, and Vyrn sources are overwhelmingly ASCII.)
 fn line_char_len(source: &str, line_idx: usize) -> u32 {
     source.lines().nth(line_idx).map(|l| l.chars().count() as u32).unwrap_or(0)
+}
+// ---------------------------------------------------------------------------
+// RFC-0052 — a safelisted class hovers with the app's OWN CSS.
+//
+// `std/tw` generates nothing for a safelist entry, so the RFC-0042 hover can only
+// say "safelisted (app-styled)". The rule is nevertheless right there in the
+// app's stylesheet (the one its `head { stylesheet "…" }` declares), so we find
+// it and append it verbatim. This is a heuristic tooltip, not a CSS model: no
+// parser, no cascade, no "which rule wins" — it either finds whole-token
+// selector matches or degrades to today's text.
+// ---------------------------------------------------------------------------
+
+/// Cap: at most this many matched rules per hover (a tooltip, not a stylesheet).
+const MAX_CSS_RULES: usize = 3;
+/// Cap: stop appending rules once the shown CSS reaches this many lines.
+const MAX_CSS_LINES: usize = 40;
+/// Bound on the `.vyx` files scanned for `stylesheet "…"` declarations.
+const MAX_VYX_SCAN: usize = 64;
+
+/// If `hover` is the RFC-0042 "safelisted (app-styled)" text, append the app's
+/// own matching CSS rule(s); otherwise (a utility's generated rule, or any other
+/// hover) return it untouched.
+fn with_app_css(server: &Server, uri: &Url, hover: String) -> String {
+    let Some(class) = safelisted_class_of(&hover) else { return hover };
+    let Some(path) = uri_path(uri) else { return hover };
+    let file = std::path::PathBuf::from(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let Some(dir) = file.parent() else { return hover };
+    let root = app_root_for(dir);
+    let rules = app_css_rules(server, &root, &class);
+    if rules.is_empty() {
+        return hover;
+    }
+    let mut out = hover;
+    for (rel, line, rule) in rules {
+        out.push_str(&format!("\n\n```css\n{rule}\n```\n— {rel}:{line}"));
+    }
+    out
+}
+
+/// The class name of an RFC-0042 safelisted hover (`` **`plang`** — safelisted
+/// (app-styled)``), or `None` for any other hover text.
+fn safelisted_class_of(hover: &str) -> Option<String> {
+    if !hover.ends_with("— safelisted (app-styled)") {
+        return None;
+    }
+    let rest = hover.strip_prefix("**`")?;
+    let end = rest.find("`**")?;
+    Some(rest[..end].to_string())
+}
+
+/// The app's own rules matching `class`, as `(path relative to the app root,
+/// 1-based line, rule text)`, in stylesheet then file order, capped.
+fn app_css_rules(
+    server: &Server,
+    root: &std::path::Path,
+    class: &str,
+) -> Vec<(String, usize, String)> {
+    let mut out = Vec::new();
+    let mut lines = 0usize;
+    for (path, text) in app_stylesheets(server, root) {
+        for (line, rule) in css_rules_for_class(&text, class) {
+            let rel =
+                path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+            lines += rule.lines().count();
+            out.push((rel, line, rule));
+            if out.len() >= MAX_CSS_RULES || lines >= MAX_CSS_LINES {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// The app's stylesheets (path + text), from the per-root cache when the cheap
+/// signature is unchanged, else re-discovered and re-read.
+fn app_stylesheets(server: &Server, root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
+    let mut cache = server.css_cache.borrow_mut();
+    if let Some(idx) = cache.get(root) {
+        if idx.sig == css_sig(root, idx.files.iter().map(|(p, _)| p.as_path())) {
+            return idx.files.clone();
+        }
+    }
+    let files: Vec<(std::path::PathBuf, String)> = discover_stylesheets(root)
+        .into_iter()
+        .filter_map(|p| std::fs::read_to_string(&p).ok().map(|t| (p, t)))
+        .collect();
+    let sig = css_sig(root, files.iter().map(|(p, _)| p.as_path()));
+    cache.insert(root.to_path_buf(), CssIndex { sig, files: files.clone() });
+    files
+}
+
+/// Cheap change signature for a root's stylesheets: every file's path, length and
+/// mtime, plus the app root's and its `public/`'s directory mtimes (a directory
+/// mtime moves when a stylesheet is added or removed, so a NEW stylesheet is
+/// picked up without re-walking on every hover). Only `stat`s — never reads.
+fn css_sig<'a>(root: &std::path::Path, files: impl Iterator<Item = &'a std::path::Path>) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    fn stamp(p: &std::path::Path, h: &mut std::collections::hash_map::DefaultHasher) {
+        p.to_string_lossy().hash(h);
+        if let Ok(m) = std::fs::metadata(p) {
+            m.len().hash(h);
+            if let Ok(t) = m.modified() {
+                if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                    d.as_nanos().hash(h);
+                }
+            }
+        }
+    }
+    stamp(root, &mut h);
+    stamp(&root.join("public"), &mut h);
+    for f in files {
+        stamp(f, &mut h);
+    }
+    h.finish()
+}
+
+/// Stylesheet files for an app root, in priority order:
+/// 1. **Declared** — every `head { stylesheet "…" }` URL found in the app's `.vyx`
+///    files, mapped by the serve convention (`/style.css` →
+///    `<root>/public/style.css`, falling back to `<root>/style.css`). This is what
+///    the browser actually loads.
+/// 2. **Fallback** (only when nothing was declared or none of the declared files
+///    exist) — every `*.css` directly under `<root>/public/` then `<root>/`.
+///
+/// Deduplicated; existing files only.
+fn discover_stylesheets(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    fn push(p: std::path::PathBuf, out: &mut Vec<std::path::PathBuf>) {
+        if p.is_file() && !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    let mut vyx = Vec::new();
+    collect_vyx(root, 0, &mut vyx);
+    vyx.sort();
+    for v in &vyx {
+        let Ok(src) = std::fs::read_to_string(v) else { continue };
+        for url in stylesheet_urls(&src) {
+            let rel = url.trim_start_matches('/');
+            if rel.is_empty() {
+                continue;
+            }
+            let rel = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
+            let in_public = root.join("public").join(&rel);
+            if in_public.is_file() {
+                push(in_public, &mut out);
+            } else {
+                push(root.join(&rel), &mut out);
+            }
+        }
+    }
+    if !out.is_empty() {
+        return out;
+    }
+    for dir in [root.join("public"), root.to_path_buf()] {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let mut css: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("css"))
+            .collect();
+        css.sort();
+        for p in css {
+            push(p, &mut out);
+        }
+    }
+    out
+}
+
+/// The URLs of `stylesheet "…"` declarations in a `.vyx` source (the RFC-0041
+/// `head` block). Textual — a `stylesheet` keyword followed by a string literal.
+fn stylesheet_urls(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("stylesheet") else { continue };
+        let Some(rest) = rest.trim_start().strip_prefix('"') else { continue };
+        if let Some(end) = rest.find('"') {
+            out.push(rest[..end].to_string());
+        }
+    }
+    out
+}
+
+/// Recursively collect `.vyx` files under `root` (skipping vendored/hidden/build
+/// and `public/` dirs), bounded like the RFC-0049 owner walk.
+fn collect_vyx(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+    if depth > MAX_WALK_UP || out.len() >= MAX_VYX_SCAN {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut subdirs = Vec::new();
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if name.starts_with('.')
+                || name == "vyrn_vendor"
+                || name == "target"
+                || name == "node_modules"
+                || name == "public"
+            {
+                continue;
+            }
+            subdirs.push(p);
+        } else if p.extension().and_then(|x| x.to_str()) == Some("vyx") {
+            out.push(p);
+        }
+    }
+    subdirs.sort();
+    for d in subdirs {
+        collect_vyx(&d, depth + 1, out);
+    }
+}
+
+/// Every rule block in `css` whose selector mentions `class` as a WHOLE token, as
+/// `(1-based line of the block, verbatim block text)`.
+///
+/// Deliberately heuristic (RFC-0052): brace- and `/* … */`-aware scanning, no
+/// parser. `.plang` matches `li.paste .plang`, `.plang:hover` and `a.plang`, but
+/// NOT `.plangs` or `.plang-x`. At-rule bodies (`@media { … }`) are descended into
+/// so inner rules are found; the at-rule context itself is not shown. No cascade
+/// resolution — every textual match is reported, in file order.
+fn css_rules_for_class(css: &str, class: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    collect_css_rules(css, 0, class, &mut out);
+    out
+}
+
+/// Scan the top level of `css` (a whole file, or an at-rule's inner text starting
+/// at byte `base` within the file) for matching rule blocks.
+fn collect_css_rules(css: &str, base: usize, class: &str, out: &mut Vec<(usize, String)>) {
+    let b = css.as_bytes();
+    let mut i = 0usize;
+    let mut sel_start = 0usize;
+    while i < b.len() {
+        // Skip comments wholesale (they must not open or close a block).
+        if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+            match css[i + 2..].find("*/") {
+                Some(rel) => i += 2 + rel + 2,
+                None => return,
+            }
+            sel_start = i;
+            continue;
+        }
+        if b[i] == b'{' {
+            let selector = css[sel_start..i].trim();
+            let Some(close) = matching_brace(css, i) else { return };
+            if selector.starts_with('@') {
+                collect_css_rules(&css[i + 1..close], base + i + 1, class, out);
+            } else if selector_has_class(selector, class) {
+                let lead = css[sel_start..].len() - css[sel_start..].trim_start().len();
+                let start = sel_start + lead;
+                out.push((line_of(css, base + start), css[start..=close].trim().to_string()));
+            }
+            i = close + 1;
+            sel_start = i;
+            continue;
+        }
+        if b[i] == b'}' {
+            i += 1;
+            sel_start = i;
+            continue;
+        }
+        i += 1;
+    }
+}
+
+/// Byte index of the `}` closing the `{` at `open`, comment-aware.
+fn matching_brace(css: &str, open: usize) -> Option<usize> {
+    let b = css.as_bytes();
+    let mut depth = 0i32;
+    let mut i = open;
+    while i < b.len() {
+        if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+            i += 2 + css[i + 2..].find("*/")? + 2;
+            continue;
+        }
+        match b[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether a selector mentions `class` as a whole class token: a `.` immediately
+/// before it and no class-name character (alphanumeric, `-`, `_`) after it — so
+/// `.plang` matches `li.paste .plang` and `.plang:hover`, but not `.plang-x`.
+fn selector_has_class(selector: &str, class: &str) -> bool {
+    let needle = format!(".{class}");
+    let mut from = 0usize;
+    while let Some(rel) = selector[from..].find(&needle) {
+        let at = from + rel;
+        let after = selector[at + needle.len()..].chars().next();
+        if !matches!(after, Some(c) if c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return true;
+        }
+        from = at + needle.len();
+    }
+    false
+}
+
+/// 1-based line number of byte offset `at` in `css`.
+fn line_of(css: &str, at: usize) -> usize {
+    css[..at.min(css.len())].matches('\n').count() + 1
 }
