@@ -8,14 +8,17 @@
 /// thread the generator explicitly: each draw returns the value AND the advanced
 /// `Rng`, so nothing is hidden and a seeded run is fully reproducible.
 ///
-/// The generator is a multiplicative-congruential (Lehmer / MINSTD) PRNG:
-/// `state' = state * 48271 mod (2^31 - 1)`. Vyrn has no bitwise operators, so
-/// the bit-mixing generators the RFC named (SplitMix64 / PCG) can't be written
-/// in-language; a well-known arithmetic-only generator delivers the same
-/// contract — pure value type, deterministic, seed-threaded — using multiply,
-/// add and modulo. Products stay < 2^47, far under `Int64`, so there is no
-/// overflow and no interp/native divergence. It is not cryptographic; use it for
-/// shuffles, sampling, and reproducible tests, not for secrets.
+/// The generator is **SplitMix64** — the standard bit-mixing PRNG (Vigna's
+/// reference constants). Each `nextInt` advances the 64-bit state by the golden
+/// ratio increment, then runs the state through two xor-shift-multiply rounds
+/// and a final xor-shift to produce a well-distributed 64-bit output:
+/// `z = (z ^ (z >> 30)) * C1; z = (z ^ (z >> 27)) * C2; z ^ (z >> 31)`. It
+/// passes the usual statistical batteries, has no bad seeds (any 64-bit state is
+/// valid), and is deterministic across every backend — the mixing is expressed
+/// with the bitwise operators (RFC-0045), which undoes the RFC-0043 MINSTD
+/// downgrade (that era had no `^`/`>>`, so only a multiplicative-congruential
+/// generator was writable). It is not cryptographic; use it for shuffles,
+/// sampling, and reproducible tests, not for secrets.
 
 /// PRNG state — a value type (no ambient/hidden generator). Copy it to fork a
 /// reproducible stream.
@@ -38,32 +41,45 @@ export fn randomSeed() -> Int64 {
     return hostRandomSeed()
 }
 
-/// A generator seeded by any `Int64` — fully deterministic and parity-safe. The
-/// seed is folded into the valid MINSTD state range `[1, 2^31 - 2]` (any Int64,
-/// including negatives, maps in without overflow).
+/// A generator seeded by any `Int64` — fully deterministic and parity-safe.
+/// SplitMix64 has no bad states, so the seed IS the initial state directly (no
+/// folding needed; negative seeds are fine — the state is a 64-bit word).
 export fn seededRng(seed: Int64) -> Rng {
-    let period = 2147483646
-    let s = seed % period
-    let nonNeg = if s < 0 { s + period } else { s }
-    return Rng { state: nonNeg + 1 }
+    return Rng { state: seed }
 }
 
-/// Advance the generator once. `value` is in `[1, 2^31 - 2]`; thread `.rng` into
-/// the next draw. Pure (MINSTD constants inlined — no module state), so it runs
-/// in generators/comptime too.
+/// Advance the generator once via SplitMix64. Returns the mixed 64-bit `value`
+/// (the full `Int64` range, incl. negatives) AND the advanced `.rng` to thread
+/// into the next draw. Pure (constants inlined — no module state), so it runs in
+/// generators/comptime too. The mixing runs in `UInt64` (unsigned `>>` = logical,
+/// wrapping `*`), with the state threaded as its `Int64` bit pattern.
 export fn nextInt(rng: Rng) -> Draw {
-    let next = (rng.state * 48271) % 2147483647
-    return Draw { value: next, rng: Rng { state: next } }
+    // SplitMix64 constants (Vigna): golden-ratio increment and two mix
+    // multipliers. Each exceeds `Int64`'s max, so it is bound with an explicit
+    // `UInt64` annotation (a bare literal in an operand position has no expected
+    // type to adopt).
+    let gamma: UInt64 = 11400714819323198485 // 0x9E3779B97F4A7C15
+    let c1: UInt64 = 13787848793156543929 // 0xBF58476D1CE4E5B9
+    let c2: UInt64 = 10723151780598845931 // 0x94D049BB133111EB
+    let s: UInt64 = UInt64(rng.state) + gamma
+    let mut z: UInt64 = s
+    z = (z ^ (z >> 30)) * c1
+    z = (z ^ (z >> 27)) * c2
+    z = z ^ (z >> 31)
+    return Draw { value: Int64(z), rng: Rng { state: Int64(s) } }
 }
 
 /// A draw in the inclusive range `[lo, hi]` (returns `lo` if the range is empty).
-/// Uses modulo reduction — a slight low-bias for very wide ranges, acceptable for
-/// v1 (sampling/tests, not cryptography).
+/// Uses unsigned modulo reduction over the full 64-bit output — a slight low-bias
+/// for very wide ranges, acceptable for v1 (sampling/tests, not cryptography).
 export fn nextInRange(rng: Rng, lo: Int64, hi: Int64) -> Draw {
     if hi <= lo {
         return Draw { value: lo, rng: rng }
     }
     let span = hi - lo + 1
     let d = nextInt(rng)
-    return Draw { value: lo + (d.value % span), rng: d.rng }
+    // Reduce the (possibly "negative" as Int64) 64-bit output unsigned so the
+    // result always lands in `[0, span)` — then offset into `[lo, hi]`.
+    let u: UInt64 = UInt64(d.value) % UInt64(span)
+    return Draw { value: lo + Int64(u), rng: d.rng }
 }

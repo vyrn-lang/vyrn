@@ -1,0 +1,65 @@
+/// Bitwise operators (RFC-0045): `& | ^ ~ << >>` on the sized integer types.
+///
+/// Operands share one integer type (no implicit widening, like `+`); the whole
+/// family binds tighter than comparison, so `flags & mask == mask` reads as
+/// `(flags & mask) == mask` (the C footgun is designed out). Signed `>>` is
+/// arithmetic (sign-extends); unsigned `>>` is logical (zero-fills); `~`
+/// complements within the operand's width. A shift by `>= the bit width` (or a
+/// negative amount) TRAPS — the canonical numeric-trap protocol, byte-identical
+/// across the interpreter, native, and wasm.
+
+/// A shift amount the compiler cannot fold to a constant, so the out-of-range
+/// shift at the end is a RUNTIME trap (a constant amount would be a compile
+/// error instead — the const-eval path).
+fn dynamicWidth() -> Int64 {
+    return 64
+}
+
+fn main() -> Int64 {
+    // ---- the six operators on Int64 -----------------------------------------
+    let a: Int64 = 12
+    let b: Int64 = 10
+    print(a & b) // 8
+    print(a | b) // 14
+    print(a ^ b) // 6
+    print(a << 3) // 96
+    print(a >> 2) // 3
+    print(~a) // -13
+
+    // ---- precedence: bitwise binds tighter than comparison ------------------
+    let flagRead: Int64 = 1
+    let flagWrite: Int64 = 2
+    let flagExec: Int64 = 4
+    let perms: Int64 = flagRead | flagExec // 5
+    // A masked-flags membership test — no parentheses needed (RFC-0045).
+    print(perms & flagExec == flagExec) // true  (exec bit set)
+    print(perms & flagWrite == flagWrite) // false (write bit clear)
+    // `<<` binds looser than `+`: `1 + 1 << 4` is `(1 + 1) << 4`.
+    print(1 + 1 << 4) // 32
+
+    // ---- `~` at each width (complement stays within the width) --------------
+    let zero8: UInt8 = 0
+    print(~zero8) // 255
+    let zero32: Int32 = 0
+    print(~zero32) // -1
+    let zero64: Int64 = 0
+    print(~zero64) // -1
+
+    // ---- signed `>>` is arithmetic, unsigned `>>` is logical ----------------
+    let eight: Int32 = 8
+    let neg: Int32 = 0 - eight // -8 as Int32
+    print(neg >> 1) // -4   (arithmetic: sign-extends)
+    let big: UInt8 = 200
+    print(big >> 1) // 100  (logical: zero-fills)
+
+    // ---- a UInt64 mixing round (the shape real PRNGs/hashes use) ------------
+    let z: UInt64 = 1234567890
+    print((z ^ (z >> 30)) * 7) // 8641975237
+
+    // ---- finally: an out-of-range shift TRAPS (canonical wording, exit 1) ---
+    // `dynamicWidth()` returns 64, which is not < 64 — so shifting an Int64 by
+    // it is out of range and traps here. Nothing after this line runs.
+    let one: Int64 = 1
+    print(one << dynamicWidth())
+    return 0
+}

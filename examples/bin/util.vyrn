@@ -1,6 +1,10 @@
-/// Content-addressed id derivation: a polynomial rolling hash of the paste
-/// content, base36-rendered. Two independent polynomials are concatenated for a
-/// longer digest. (Vyrn has no bitwise operators, so not FNV-1a.)
+/// Content-addressed id derivation: an FNV-1a-64 hash of the paste content,
+/// base36-rendered (RFC-0045 gave Vyrn the bitwise operators FNV needs — this
+/// replaced the hand-rolled polynomial rolling hash used before them). Ids are
+/// content hashes, not persisted keys, so switching the algorithm just changes
+/// what a given paste hashes to; nothing needs migrating.
+
+import { fnv1aStr } from "std/hash"
 
 /// A base36 digit (0..35) as its ASCII byte: 0-9 then a-z, via a lookup table.
 fn digit36(n: Int64) -> UInt8 {
@@ -8,16 +12,19 @@ fn digit36(n: Int64) -> UInt8 {
     return table[n]
 }
 
-/// `n` (assumed >= 0) rendered base36, left-padded with '0' to at least `width`.
-fn base36(n: Int64, width: Int64) -> String {
+/// `n` rendered base36, left-padded with '0' to at least `width`. Takes a
+/// `UInt64` (the FNV digest is unsigned and uses the full 64-bit range), reduced
+/// with unsigned divide/modulo.
+fn base36(n: UInt64, width: Int64) -> String {
     let mut out: Array<UInt8> = []
     let mut v = n
+    let base: UInt64 = 36
     if v == 0 {
         out.push(48)
     }
     while v > 0 {
-        out.push(digit36(v % 36))
-        v = v / 36
+        out.push(digit36(Int64(v % base)))
+        v = v / base
     }
     while out.length < width {
         out.push(48)
@@ -35,22 +42,15 @@ fn base36(n: Int64, width: Int64) -> String {
     }
 }
 
-/// A polynomial rolling hash of `s` over (base, mod), kept in [0, mod).
-fn poly(s: String, base: Int64, md: Int64) -> Int64 {
-    let sb = bytes(s)
-    let mut h = 0
-    for b in sb {
-        // +1 so a leading zero byte still perturbs the hash.
-        h = (h * base + (Int64(b) + 1)) % md
-    }
-    return h
-}
-
-/// The full 14-char content digest: two 7-char polynomial hashes concatenated.
-/// The store takes a short prefix and extends it on collision.
+/// The full 14-char content digest: the FNV-1a-64 hash of `body + title` split
+/// into two 7-char base36 halves (each below 36^7, so the two together encode
+/// the whole 64-bit digest). The store takes a short prefix and extends it on
+/// collision.
 export fn fullDigest(body: String, title: String) -> String {
     let material = body + "\n\t" + title
-    let a = poly(material, 131, 2176782317)
-    let b = poly(material, 137, 2176782331)
-    return base36(a, 7) + base36(b, 7)
+    let h = fnv1aStr(material)
+    let modulus: UInt64 = 78364164096 // 36^7 — one base36 half's range
+    let lo = h % modulus
+    let hi = (h / modulus) % modulus
+    return base36(lo, 7) + base36(hi, 7)
 }
