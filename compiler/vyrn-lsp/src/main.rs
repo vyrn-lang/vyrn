@@ -23,6 +23,8 @@
 
 use std::collections::HashMap;
 
+mod templates;
+
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
@@ -30,18 +32,21 @@ use lsp_types::notification::{
 };
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    Diagnostic as LspDiagnostic, DiagnosticSeverity, DocumentFormattingParams, DocumentSymbol,
-    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
-    Hover, HoverContents, HoverParams, InitializeParams, InitializeResult, Location, MarkupContent,
-    MarkupKind, OneOf, Position, PublishDiagnosticsParams, Range, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
+    CompletionTextEdit, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, Diagnostic as LspDiagnostic, DiagnosticSeverity,
+    DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    InitializeParams, InitializeResult, Location, MarkupContent, MarkupKind, OneOf, Position,
+    PublishDiagnosticsParams, Range, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url,
 };
 
 use vyrn_frontend::{
-    analyze, completions, member_completions, resolve, string_literal_completions, Analysis,
-    SymbolKind,
+    analyze, class_completions, class_token_hover, completions, member_completions, resolve,
+    string_literal_completions, Analysis, Completion, SymbolKind,
 };
+
+use templates::VyxCursor;
 
 // ---------------------------------------------------------------------------
 // Multi-file analysis (RFC-0010). A document with `import`s is analyzed via
@@ -293,7 +298,11 @@ fn handle_initialize(connection: &Connection) -> Result<(), ()> {
         hover_provider: Some(true.into()),
         definition_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
-            trigger_characters: Some(vec![".".into()]),
+            // `.` for member access; `<`/`@`/`:`/`-`/space for `.vyx` template
+            // structural + class-token completion (RFC-0042).
+            trigger_characters: Some(
+                [".", "<", "@", ":", "-", " ", "\""].iter().map(|s| s.to_string()).collect(),
+            ),
             ..Default::default()
         }),
         document_symbol_provider: Some(OneOf::Left(true)),
@@ -368,18 +377,30 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
     let uri = &p.text_document_position_params.text_document.uri;
     let (line, col) = to_frontend(&p.text_document_position_params.position);
     // RFC-0033: a request inside a generator input file (`.vyx`) is answered
-    // against the synthesized module at the mapped generated position.
-    let r = if is_vyrn_uri(uri) {
+    // against the synthesized module at the mapped generated position. RFC-0042:
+    // when nothing resolves (the cursor is on a class token inside a string, not an
+    // identifier), fall back to `Tw` class hover — the CSS rule `css()` emits, or
+    // "safelisted (app-styled)".
+    let value = if is_vyrn_uri(uri) {
         let (analysis, _) = lookup(server, uri)?;
-        resolve(analysis, line, col)?
+        match resolve(analysis, line, col) {
+            Some(r) => r.hover,
+            None => server
+                .docs
+                .get(uri)
+                .and_then(|src| class_token_hover(analysis, src, line, col))?,
+        }
     } else {
         let fwd = vyx_forward(server, uri, line, col)?;
-        resolve(&fwd.synth, fwd.line, fwd.col)?
+        match resolve(&fwd.synth, fwd.line, fwd.col) {
+            Some(r) => r.hover,
+            None => class_token_hover(&fwd.synth, &fwd.gen_source, fwd.line, fwd.col)?,
+        }
     };
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
-            value: r.hover,
+            value,
         }),
         range: None,
     })
@@ -424,31 +445,33 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
     let p: CompletionParams = serde_json::from_value(params).ok()?;
     let uri = &p.text_document_position.text_document.uri;
     let (line, col) = to_frontend(&p.text_document_position.position);
-    // RFC-0033: completion inside a `.vyx` template expression runs against the
-    // synthesized module at the mapped position (record-field completion after
-    // `item.`, top-level symbols otherwise).
     if !is_vyrn_uri(uri) {
-        let fwd = vyx_forward(server, uri, line, col)?;
-        // `is_member_context` re-extracts line `fwd.line` from the text it's
-        // given, so it must receive the WHOLE synthesized source, not one line.
-        let items = if is_member_context(Some(&fwd.gen_source), fwd.line, fwd.col) {
-            member_completions(&fwd.synth, fwd.line, fwd.col)
-        } else {
-            completions(&fwd.synth)
-        };
-        return Some(CompletionResponse::Array(items.into_iter().map(to_completion_item).collect()));
+        return vyx_completion(server, uri, line, col);
     }
     let (analysis, _uri) = lookup(server, uri)?;
     // A `.foo` member access → context-aware completions for the receiver's type
     // (e.g. `arr.` → push/at/alen/afree/length). Otherwise → all top-level
     // symbols; the client filters by the prefix the user typed.
     let raw = server.docs.get(uri);
-    // RFC-0020 M1: inside a string literal whose expected type is a finite
-    // string type, offer that type's language (`t("` → every key). Falls back to
-    // member / top-level completion otherwise.
-    let items = if is_string_literal_context(raw, line, col) {
-        raw.map(|src| string_literal_completions(analysis, src, line, col)).unwrap_or_default()
-    } else if is_member_context(raw, line, col) {
+    // RFC-0020 M1 / RFC-0042: inside a string literal whose expected type is a
+    // finite string type, offer its language (`t("` → every key); whose expected
+    // type is a sequence type (`theme.cls("…")` → `Tw`), offer the class alphabet
+    // as token-in-sequence replacements. Falls back to member / top-level.
+    if is_string_literal_context(raw, line, col) {
+        if let (Some(src), Some(cls)) =
+            (raw, raw.and_then(|s| class_completions(analysis, s, line, col)))
+        {
+            return Some(class_completion_response(src, line, col, cls));
+        }
+        let items = raw
+            .map(|src| string_literal_completions(analysis, src, line, col))
+            .unwrap_or_default()
+            .into_iter()
+            .map(to_completion_item)
+            .collect();
+        return Some(CompletionResponse::Array(items));
+    }
+    let items = if is_member_context(raw, line, col) {
         member_completions(analysis, line, col)
     } else {
         completions(analysis)
@@ -459,6 +482,245 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
     // Always return a list (possibly empty) — the client filters by prefix.
     Some(CompletionResponse::Array(items))
 }
+
+/// Completion inside a `.vyx` template (RFC-0042). First a structural scan of the
+/// raw `.vyx` classifies the cursor (attribute name / event / tag / component
+/// prop / class value); anything structural is answered from the discovery
+/// vocabularies or sibling components. A non-structural position (`{{ expr }}`,
+/// script) falls through to the RFC-0033 forward-map path, which now also serves
+/// finite/sequence string-literal completion (TransKey keys, `Tw` classes).
+fn vyx_completion(server: &Server, uri: &Url, line: usize, col: usize) -> Option<CompletionResponse> {
+    let raw = server
+        .docs
+        .get(uri)
+        .cloned()
+        .or_else(|| uri_path(uri).and_then(|p| std::fs::read_to_string(p).ok()))?;
+    match templates::classify(&raw, line, col) {
+        VyxCursor::TagName { prefix, start_col } => {
+            Some(tag_name_completion(uri, &prefix, line, start_col, col))
+        }
+        VyxCursor::AttrName { tag, prefix: _, is_component, start_col } => {
+            Some(attr_name_completion(uri, &tag, is_component, line, start_col, col))
+        }
+        VyxCursor::EventName { prefix: _, start_col } => {
+            Some(event_name_completion(line, start_col, col))
+        }
+        VyxCursor::ClassValue { token: _, start_col } => {
+            // The Tw alphabet comes from the synthesized (themed) module via the
+            // forward map; a non-themed `.vyx` has no domain and gets nothing.
+            let fwd = vyx_forward(server, uri, line, col)?;
+            let cls = class_completions(&fwd.synth, &fwd.gen_source, fwd.line, fwd.col)?;
+            Some(class_token_response(&raw, line, start_col, col, cls))
+        }
+        VyxCursor::Other => {
+            let fwd = vyx_forward(server, uri, line, col)?;
+            // A string literal in the generated code → finite keys or `Tw` classes.
+            if is_string_literal_context(Some(&fwd.gen_source), fwd.line, fwd.col) {
+                if let Some(cls) =
+                    class_completions(&fwd.synth, &fwd.gen_source, fwd.line, fwd.col)
+                {
+                    // A generated class string reached via `{{ }}` is rare, but map
+                    // the token in the .vyx line if present.
+                    return Some(class_completion_response(&raw, line, col, cls));
+                }
+                let items = string_literal_completions(&fwd.synth, &fwd.gen_source, fwd.line, fwd.col)
+                    .into_iter()
+                    .map(to_completion_item)
+                    .collect();
+                return Some(CompletionResponse::Array(items));
+            }
+            let items = if is_member_context(Some(&fwd.gen_source), fwd.line, fwd.col) {
+                member_completions(&fwd.synth, fwd.line, fwd.col)
+            } else {
+                completions(&fwd.synth)
+            };
+            Some(CompletionResponse::Array(items.into_iter().map(to_completion_item).collect()))
+        }
+    }
+}
+
+/// Component tags (sibling PascalCase `.vyx`) plus, for a lowercase prefix, the
+/// document's plain symbols. Each item replaces the partial tag name.
+fn tag_name_completion(
+    uri: &Url,
+    prefix: &str,
+    line: usize,
+    start_col: usize,
+    col: usize,
+) -> CompletionResponse {
+    let range = replace_range(line, start_col, col);
+    let mut items: Vec<CompletionItem> = Vec::new();
+    if let Some((dir, self_name)) = vyx_dir_and_name(uri) {
+        for name in templates::sibling_components(&dir, &self_name) {
+            items.push(edit_item(&name, CompletionItemKind::CLASS, "component", range));
+        }
+    }
+    // Common HTML elements, for a lowercase tag start.
+    if !prefix.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        for el in HTML_ELEMENTS {
+            items.push(edit_item(el, CompletionItemKind::KEYWORD, "html element", range));
+        }
+    }
+    CompletionResponse::Array(items)
+}
+
+/// Attribute-name completion: a component tag offers its declared props; an
+/// element offers global + per-element HTML attributes and the `v-*` directives.
+fn attr_name_completion(
+    uri: &Url,
+    tag: &str,
+    is_component: bool,
+    line: usize,
+    start_col: usize,
+    col: usize,
+) -> CompletionResponse {
+    let range = replace_range(line, start_col, col);
+    let mut items: Vec<CompletionItem> = Vec::new();
+    if is_component {
+        if let Some((dir, _)) = vyx_dir_and_name(uri) {
+            let path = dir.join(format!("{tag}.vyx"));
+            for prop in templates::component_props(&path) {
+                let label = prop.name.clone();
+                let detail = format!("prop: {}", prop.ty);
+                items.push(edit_item(&label, CompletionItemKind::FIELD, &detail, range));
+                // Also offer the dynamic-bound form `:prop`.
+                items.push(edit_item(
+                    &format!(":{label}"),
+                    CompletionItemKind::FIELD,
+                    &detail,
+                    range,
+                ));
+            }
+        }
+        return CompletionResponse::Array(items);
+    }
+    for a in templates::GLOBAL_ATTRS {
+        items.push(edit_item(a, CompletionItemKind::PROPERTY, "html attribute", range));
+    }
+    for a in templates::element_attrs(tag) {
+        items.push(edit_item(a, CompletionItemKind::PROPERTY, "html attribute", range));
+    }
+    for (d, detail) in templates::DIRECTIVES {
+        items.push(edit_item(d, CompletionItemKind::KEYWORD, detail, range));
+    }
+    CompletionResponse::Array(items)
+}
+
+/// `@event` completion: the DOM events the runtime dispatches.
+fn event_name_completion(line: usize, start_col: usize, col: usize) -> CompletionResponse {
+    // Replace from the `@` (start_col) so the inserted `@click` keeps the sigil.
+    let range = replace_range(line, start_col, col);
+    let items = templates::EVENTS
+        .iter()
+        .map(|e| edit_item(&format!("@{e}"), CompletionItemKind::EVENT, "dom event", range))
+        .collect();
+    CompletionResponse::Array(items)
+}
+
+/// Build class-token completions replacing the current token in a `.vyx` line.
+fn class_token_response(
+    raw: &str,
+    line: usize,
+    start_col: usize,
+    col: usize,
+    alphabet: Vec<Completion>,
+) -> CompletionResponse {
+    let prefix = line_slice(raw, line, start_col, col);
+    let range = replace_range(line, start_col, col);
+    let items = alphabet
+        .into_iter()
+        .filter(|c| c.label.starts_with(&prefix))
+        .map(|c| edit_item(&c.label, CompletionItemKind::CONSTANT, &c.detail, range))
+        .collect();
+    CompletionResponse::Array(items)
+}
+
+/// Class-token completion where the token span is computed from the buffer line
+/// directly (the `.vyrn` `theme.cls("…")` path and generated-string fallback).
+fn class_completion_response(
+    raw: &str,
+    line: usize,
+    col: usize,
+    alphabet: Vec<Completion>,
+) -> CompletionResponse {
+    let start_col = class_token_start(raw, line, col);
+    class_token_response(raw, line, start_col, col, alphabet)
+}
+
+/// The 1-based start column of the whitespace/quote-delimited token containing the
+/// 1-based cursor `col` on `line`.
+fn class_token_start(raw: &str, line: usize, col: usize) -> usize {
+    let Some(text) = raw.lines().nth(line.saturating_sub(1)) else {
+        return col;
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let mut lo = col.saturating_sub(1).min(chars.len());
+    while lo > 0 {
+        let c = chars[lo - 1];
+        if c.is_whitespace() || c == '"' || c == '\'' {
+            break;
+        }
+        lo -= 1;
+    }
+    lo + 1
+}
+
+/// The substring of `line` from 1-based `start_col` up to (excluding) 1-based
+/// `col` — the token prefix already typed.
+fn line_slice(raw: &str, line: usize, start_col: usize, col: usize) -> String {
+    let Some(text) = raw.lines().nth(line.saturating_sub(1)) else {
+        return String::new();
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let lo = start_col.saturating_sub(1).min(chars.len());
+    let hi = col.saturating_sub(1).min(chars.len());
+    if lo >= hi {
+        return String::new();
+    }
+    chars[lo..hi].iter().collect()
+}
+
+/// A zero-width-safe LSP range on `line` (1-based) from `start_col`..`col`
+/// (1-based, exclusive) — the span a completion `textEdit` replaces.
+fn replace_range(line: usize, start_col: usize, col: usize) -> Range {
+    let l = line.saturating_sub(1) as u32;
+    Range {
+        start: Position { line: l, character: start_col.saturating_sub(1) as u32 },
+        end: Position { line: l, character: col.saturating_sub(1) as u32 },
+    }
+}
+
+/// A completion item that replaces `range` with `label` (token-in-sequence /
+/// prefix-replace insertion, so multi-char tokens like `md:hover:bg-…` don't
+/// duplicate the already-typed prefix).
+fn edit_item(label: &str, kind: CompletionItemKind, detail: &str, range: Range) -> CompletionItem {
+    CompletionItem {
+        label: label.to_string(),
+        kind: Some(kind),
+        detail: Some(detail.to_string()),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range,
+            new_text: label.to_string(),
+        })),
+        ..Default::default()
+    }
+}
+
+/// The directory of a `.vyx` URI and the component's own base name (no `.vyx`).
+fn vyx_dir_and_name(uri: &Url) -> Option<(std::path::PathBuf, String)> {
+    let path = uri.to_file_path().ok()?;
+    let dir = path.parent()?.to_path_buf();
+    let name = path.file_stem()?.to_string_lossy().into_owned();
+    Some((dir, name))
+}
+
+/// A small set of common HTML element names for lowercase tag completion.
+const HTML_ELEMENTS: &[&str] = &[
+    "div", "span", "p", "a", "ul", "ol", "li", "section", "header", "footer",
+    "nav", "main", "article", "aside", "h1", "h2", "h3", "h4", "h5", "h6",
+    "button", "input", "label", "select", "option", "textarea", "form", "img",
+    "table", "thead", "tbody", "tr", "td", "th", "pre", "code", "strong", "em",
+];
 
 /// Map one frontend completion to an LSP `CompletionItem`.
 fn to_completion_item(c: vyrn_frontend::Completion) -> CompletionItem {

@@ -879,3 +879,214 @@ fn rfc33_completion_in_vyx_template_offers_record_fields() {
     let labels: Vec<&str> = items.iter().filter_map(|i| i.get("label").and_then(|l| l.as_str())).collect();
     assert!(labels.contains(&"title"), "offers the record field `title`: {labels:?}");
 }
+
+// ===========================================================================
+// RFC-0042 — template editor intelligence: class / attribute / component /
+// TransKey completion inside `.vyx` (and `theme.cls("…")` in `.vyrn`).
+// ===========================================================================
+
+/// 0-based (line, char) just past the first occurrence of `needle` in `text`.
+fn pos_after(text: &str, needle: &str) -> (u32, u32) {
+    let idx =
+        text.find(needle).unwrap_or_else(|| panic!("needle {needle:?} not found")) + needle.len();
+    let pre = &text[..idx];
+    let line = pre.matches('\n').count() as u32;
+    let col = (pre.len() - pre.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32;
+    (line, col)
+}
+
+/// A tiny theme: two brand shades, two spacings, an `md` breakpoint (so `md:`
+/// variants exist), and a `book-card` safelist entry.
+const RFC42_THEME: &str = "{ \"colors\": { \"brand\": { \"500\": \"#4f46e5\", \"600\": \"#4338ca\" } },\n\
+  \"spacing\": { \"2\": \"0.5rem\", \"4\": \"1rem\" },\n\
+  \"breakpoints\": { \"md\": \"768px\" },\n\
+  \"safelist\": [\"book-card\"] }";
+
+/// The app importing a themed component view over `./comp`.
+const RFC42_APP: &str = "import { componentsThemed } from \"std/vyx\"\n\
+    import { widget } from componentsThemed(\"./comp\", \"./theme.json\")\n\
+    fn main() -> Int64 { return 0 }\n";
+
+/// A themed widget: a valid utility class, a safelisted class, a base + variant
+/// utility, and a finite `TransKey` interpolation (`{{ t("home") }}`).
+const RFC42_VYX: &str = "<script>\n\
+    type TransKey = String where value =~ \"(home|about)\"\n\
+    fn t(k: TransKey) -> String { return k }\n\
+    props { x: String }\n\
+    </script>\n\
+    <template>\n\
+    <div class=\"flex p-4\"><span class=\"book-card\">{{ x }}</span><p class=\"bg-brand-500 md:hover:bg-brand-600\">{{ t(\"home\") }}</p></div>\n\
+    </template>\n";
+
+fn rfc42_scratch() -> std::path::PathBuf {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_rfc42_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("comp")).unwrap();
+    std::fs::write(dir.join("comp/Widget.vyx"), RFC42_VYX).unwrap();
+    std::fs::write(dir.join("app.vyrn"), RFC42_APP).unwrap();
+    std::fs::write(dir.join("theme.json"), RFC42_THEME).unwrap();
+    dir
+}
+
+/// Open the themed app (wires ownership) then the widget; returns (client, vyx_uri).
+fn rfc42_open() -> (LspClient, String) {
+    let dir = rfc42_scratch();
+    let mut client = rfc33_client();
+    let app_uri = file_uri(&dir.join("app.vyrn"));
+    did_open(&mut client, &app_uri, "vyrn", RFC42_APP);
+    let _ = read_diags_for(&mut client, "Widget.vyx"); // ownership wired
+    let vyx_uri = file_uri(&dir.join("comp/Widget.vyx"));
+    did_open(&mut client, &vyx_uri, "vyx", RFC42_VYX);
+    (client, vyx_uri)
+}
+
+fn completion_labels(client: &mut LspClient, uri: &str, line: u32, ch: u32) -> Vec<String> {
+    let id = serde_json::json!(format!("c{line}_{ch}"));
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/completion",
+        "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": ch } }
+    }));
+    let resp = client.read_response(&id);
+    let items = resp.get("result").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+    items
+        .iter()
+        .filter_map(|i| i.get("label").and_then(|l| l.as_str()).map(String::from))
+        .collect()
+}
+
+fn hover_value(client: &mut LspClient, uri: &str, line: u32, ch: u32) -> Option<String> {
+    let id = serde_json::json!(format!("h{line}_{ch}"));
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/hover",
+        "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": ch } }
+    }));
+    let resp = client.read_response(&id);
+    resp.pointer("/result/contents/value").and_then(|v| v.as_str()).map(String::from)
+}
+
+/// Phase A: a `class="…"` token inside a themed `.vyx` offers the `Tw` alphabet
+/// filtered by the token under the cursor — utilities, a safelisted name, and
+/// `md:`/`hover:` variants.
+#[test]
+fn rfc42_class_token_completion_offers_tw_alphabet() {
+    let (mut client, uri) = rfc42_open();
+    // `class="flex p-4"` — cursor right after the `p` of `p-4`.
+    let (l, c) = pos_after(RFC42_VYX, "flex p");
+    let labels = completion_labels(&mut client, &uri, l, c);
+    assert!(labels.contains(&"p-4".to_string()), "utility p-4 offered: {labels:?}");
+    assert!(labels.contains(&"px-2".to_string()), "utility px-2 offered: {labels:?}");
+    // Top-level symbols must NOT leak into a class value.
+    assert!(!labels.contains(&"widget".to_string()), "no top-level leak: {labels:?}");
+
+    // Safelisted name: `class="book-card"` — cursor after `book`.
+    let (l, c) = pos_after(RFC42_VYX, "\"book");
+    let labels = completion_labels(&mut client, &uri, l, c);
+    assert!(labels.contains(&"book-card".to_string()), "safelisted offered: {labels:?}");
+
+    // Variant: cursor after `md:h` in `md:hover:bg-brand-600`.
+    let (l, c) = pos_after(RFC42_VYX, "md:h");
+    let labels = completion_labels(&mut client, &uri, l, c);
+    assert!(
+        labels.iter().any(|s| s.starts_with("md:hover:")),
+        "md:hover: variants offered: {labels:?}"
+    );
+}
+
+/// Phase A: hover on a class token shows the CSS rule for a utility, or
+/// "safelisted (app-styled)" for a safelist entry.
+#[test]
+fn rfc42_hover_on_class_shows_css_or_safelisted() {
+    let (mut client, uri) = rfc42_open();
+    // Hover inside `bg-brand-500`.
+    let (l, c) = pos_after(RFC42_VYX, "bg-brand-5");
+    let v = hover_value(&mut client, &uri, l, c).expect("hover on utility class");
+    assert!(v.contains("background-color:#4f46e5"), "utility CSS rule: {v}");
+
+    // Hover inside the safelisted `book-card`.
+    let (l, c) = pos_after(RFC42_VYX, "book-car");
+    let v = hover_value(&mut client, &uri, l, c).expect("hover on safelisted class");
+    assert!(v.contains("safelisted"), "safelisted note: {v}");
+}
+
+/// Phase D: a finite `TransKey` string inside `{{ t("…") }}` completes the key
+/// domain — the RFC-0033 forward map now routes string-literal contexts.
+#[test]
+fn rfc42_transkey_completion_inside_mustache() {
+    let (mut client, uri) = rfc42_open();
+    // `{{ t("home") }}` — cursor just inside the opening quote (after `t("`).
+    let (l, c) = pos_after(RFC42_VYX, "t(\"");
+    let labels = completion_labels(&mut client, &uri, l, c);
+    assert!(labels.contains(&"home".to_string()), "TransKey home: {labels:?}");
+    assert!(labels.contains(&"about".to_string()), "TransKey about: {labels:?}");
+}
+
+// --- Phase B/C: structural completion on the raw `.vyx` (no owner needed) ----
+
+const RFC42_STRUCT_PANEL: &str = "<template>\n\
+    <Book></Book>\n\
+    <BookCard t></BookCard>\n\
+    <a v-i></a>\n\
+    <button @cl></button>\n\
+    </template>\n";
+
+const RFC42_STRUCT_CARD: &str =
+    "<script>\nprops { title: String, url: String }\n</script>\n\
+    <template>\n<div>{{ title }}</div>\n</template>\n";
+
+fn rfc42_struct_dir() -> std::path::PathBuf {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_rfc42s_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Panel.vyx"), RFC42_STRUCT_PANEL).unwrap();
+    std::fs::write(dir.join("BookCard.vyx"), RFC42_STRUCT_CARD).unwrap();
+    dir
+}
+
+/// Phase C: `<Boo…` offers sibling PascalCase components.
+#[test]
+fn rfc42_component_tag_completion() {
+    let dir = rfc42_struct_dir();
+    let mut client = rfc33_client();
+    let uri = file_uri(&dir.join("Panel.vyx"));
+    did_open(&mut client, &uri, "vyx", RFC42_STRUCT_PANEL);
+    let (l, c) = pos_after(RFC42_STRUCT_PANEL, "<Book");
+    let labels = completion_labels(&mut client, &uri, l, c);
+    assert!(labels.contains(&"BookCard".to_string()), "sibling component offered: {labels:?}");
+}
+
+/// Phase C: an attribute position inside a component tag offers its props.
+#[test]
+fn rfc42_component_prop_completion() {
+    let dir = rfc42_struct_dir();
+    let mut client = rfc33_client();
+    let uri = file_uri(&dir.join("Panel.vyx"));
+    did_open(&mut client, &uri, "vyx", RFC42_STRUCT_PANEL);
+    // `<BookCard t` — cursor after the `t`.
+    let (l, c) = pos_after(RFC42_STRUCT_PANEL, "<BookCard t");
+    let labels = completion_labels(&mut client, &uri, l, c);
+    assert!(labels.contains(&"title".to_string()), "prop title offered: {labels:?}");
+    assert!(labels.contains(&":url".to_string()), "dynamic-bound prop offered: {labels:?}");
+}
+
+/// Phase B: an attribute-name position on an element offers HTML attributes and
+/// `v-*` directives; an `@…` position offers DOM events.
+#[test]
+fn rfc42_attribute_and_event_completion() {
+    let dir = rfc42_struct_dir();
+    let mut client = rfc33_client();
+    let uri = file_uri(&dir.join("Panel.vyx"));
+    did_open(&mut client, &uri, "vyx", RFC42_STRUCT_PANEL);
+
+    // `<a v-i` — attribute name position.
+    let (l, c) = pos_after(RFC42_STRUCT_PANEL, "<a v-i");
+    let labels = completion_labels(&mut client, &uri, l, c);
+    assert!(labels.contains(&"v-if".to_string()), "directive v-if: {labels:?}");
+    assert!(labels.contains(&"href".to_string()), "element attr href on <a>: {labels:?}");
+
+    // `<button @cl` — event name position.
+    let (l, c) = pos_after(RFC42_STRUCT_PANEL, "@cl");
+    let labels = completion_labels(&mut client, &uri, l, c);
+    assert!(labels.contains(&"@click".to_string()), "event @click: {labels:?}");
+}
