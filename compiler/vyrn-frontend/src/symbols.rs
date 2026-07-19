@@ -145,6 +145,17 @@ pub struct Analysis {
     /// Top-level function name → parameter types, so string-literal completion
     /// can find the expected type at a call argument position.
     pub fn_param_types: Vec<(String, Vec<Type>)>,
+    /// RFC-0042: for every *sequence* validated string type — one whose language is
+    /// an infinite space-separated sequence over a finite alphabet (`Tw` =
+    /// `token( token)*`) — its enumerated single-token **alphabet** (`= L(TwClass)`).
+    /// Powers `class="…"` / `theme.cls("…")` token-in-sequence completion: the
+    /// alphabet is derived from the same DFA the compiler checks against.
+    pub sequence_string_types: Vec<(String, Vec<String>)>,
+    /// RFC-0042: the theme's utility stylesheet — the constant `std/tw` `css()`
+    /// returns — captured when a sequence string type (a `Tw`) is present, so hover
+    /// on a class token can show the exact CSS rule `css()` emits (utilities) or
+    /// report "safelisted (app-styled)" (no rule). Empty when no theme is linked.
+    pub tw_css: String,
     /// RFC-0027: each `import * as ns` binding and the exported symbols reachable
     /// through it, so `ns.` completes and `ns.member` hovers / jumps into the
     /// source module. Populated only by [`analyze_linked`].
@@ -467,6 +478,30 @@ fn analyze_inner(
         })
         .collect();
 
+    // RFC-0042: enumerate the token alphabet of each *sequence* validated string
+    // type (an infinite space-separated regex over a finite alphabet — a `Tw`),
+    // for class-attribute token-in-sequence completion. A higher cap than the
+    // finite whole-domain path: a realistic theme's alphabet (utilities × bounded
+    // prefixes + safelist) runs to a couple thousand tokens.
+    const CLASS_ALPHABET_CAP: usize = 8192;
+    let mut sequence_string_types = Vec::new();
+    for t in &member_src.type_decls {
+        if t.name.contains('.') {
+            continue;
+        }
+        if let Some(alphabet) = crate::finite::enumerate_alphabet(t, CLASS_ALPHABET_CAP) {
+            sequence_string_types.push((t.name.clone(), alphabet));
+        }
+    }
+    // Capture the theme stylesheet (`std/tw` `css()` — a baked constant) only when a
+    // sequence type is present, so hover on a class token can show its CSS rule.
+    // Gating on a present `Tw` avoids picking up an unrelated user `css()`.
+    let tw_css = if sequence_string_types.is_empty() {
+        String::new()
+    } else {
+        css_constant(member_src).unwrap_or_default()
+    };
+
     Analysis {
         diagnostics: diags,
         symbols,
@@ -480,6 +515,8 @@ fn analyze_inner(
         record_fields,
         finite_string_types,
         fn_param_types,
+        sequence_string_types,
+        tw_css,
         namespaces,
         origins,
         remapped,
@@ -501,6 +538,8 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         record_fields: Vec::new(),
         finite_string_types: Vec::new(),
         fn_param_types: Vec::new(),
+        sequence_string_types: Vec::new(),
+        tw_css: String::new(),
         namespaces: Vec::new(),
         origins: crate::origin::OriginMaps::default(),
         remapped: Vec::new(),
@@ -937,6 +976,183 @@ pub fn string_literal_completions(
             detail: format!("{ty_name} — a key of this finite string type"),
         })
         .collect()
+}
+
+/// RFC-0042: completions for a `class="…"` / `theme.cls("…")` string whose
+/// expected type is a **sequence** validated string type (a `Tw`). Returns the
+/// theme's whole token alphabet (utilities + safelist), each labelled with a hint
+/// detail; the caller filters by the whitespace-delimited token under the cursor
+/// and applies the insertion (token-in-sequence). `None` when the cursor's string
+/// is not a sequence-typed argument — the caller then falls back to the finite
+/// whole-domain path ([`string_literal_completions`]) for keys, etc.
+pub fn class_completions(
+    analysis: &Analysis,
+    source: &str,
+    line: usize,
+    col: usize,
+) -> Option<Vec<Completion>> {
+    // The string must be an argument of the std/tw checked bridge `cls(…)`
+    // (`theme.cls("…")` in `.vyrn`, `vyxTheme.cls("…")` in a themed `.vyx`'s
+    // generated code), with a sequence (`Tw`) string type in scope. Gating on the
+    // `cls` call — the stable public bridge — rather than the parameter's declared
+    // type, since a linked module lowers the `Tw` alias to its `String` base.
+    if !cls_call_arg(source, line, col) {
+        return None;
+    }
+    let (ty_name, alphabet) = analysis.sequence_string_types.first()?;
+    Some(
+        alphabet
+            .iter()
+            .map(|c| Completion {
+                label: c.clone(),
+                kind: SymbolKind::Variant,
+                detail: format!("{ty_name} — theme utility/safelist class"),
+            })
+            .collect(),
+    )
+}
+
+/// Whether the string literal under the cursor is a direct argument of a `cls(…)`
+/// call — the std/tw checked-class bridge. Re-lexes `source` and scans left from
+/// the string to the enclosing `(`, requiring the callee identifier to be `cls`
+/// (bare or the trailing segment of a namespaced `ns.cls`).
+fn cls_call_arg(source: &str, line: usize, col: usize) -> bool {
+    let Ok(toks) = lexer::lex(source) else {
+        return false;
+    };
+    let Some(str_idx) = toks.iter().position(|t| {
+        if t.line != line {
+            return false;
+        }
+        if let Tok::Str(s) = &t.tok {
+            let start = t.col;
+            let end = t.col + s.chars().count() + 2;
+            col >= start && col <= end
+        } else {
+            false
+        }
+    }) else {
+        return false;
+    };
+    let mut depth = 0i32;
+    let mut i = str_idx;
+    while i > 0 {
+        i -= 1;
+        match &toks[i].tok {
+            Tok::RParen => depth += 1,
+            Tok::LParen => {
+                if depth == 0 {
+                    return i >= 1 && matches!(&toks[i - 1].tok, Tok::Ident(c) if c == "cls");
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// RFC-0042: hover text for the class token under the cursor inside a
+/// sequence-typed (`Tw`) `class="…"` / `theme.cls("…")` string. Shows the exact
+/// CSS rule `std/tw` `css()` emits for a utility, or "safelisted (app-styled)" for
+/// a safelist entry (no rule). `None` when the cursor is not on a valid class
+/// token of a linked theme.
+pub fn class_token_hover(
+    analysis: &Analysis,
+    source: &str,
+    line: usize,
+    col: usize,
+) -> Option<String> {
+    if !cls_call_arg(source, line, col) {
+        return None;
+    }
+    let (ty_name, alphabet) = analysis.sequence_string_types.first()?;
+    let token = class_token_at(source, line, col)?;
+    if !alphabet.iter().any(|c| c == &token) {
+        return None;
+    }
+    match css_rule_for(&analysis.tw_css, &token) {
+        Some(rule) => Some(format!("**`{token}`** — `{ty_name}` utility class\n\n```css\n{rule}\n```")),
+        None => Some(format!("**`{token}`** — safelisted (app-styled)")),
+    }
+}
+
+/// The whitespace-delimited token containing the cursor inside the string literal
+/// on `line` — the class word the user is on/typing. 1-based `col`.
+fn class_token_at(source: &str, line: usize, col: usize) -> Option<String> {
+    let line_text = source.lines().nth(line.saturating_sub(1))?;
+    let chars: Vec<char> = line_text.chars().collect();
+    // 0-based index of the char the cursor sits just after (col is 1-based).
+    let mut start = col.saturating_sub(1);
+    if start > chars.len() {
+        start = chars.len();
+    }
+    let is_word = |c: char| !c.is_whitespace() && c != '"' && c != '\'';
+    // Walk left to the token start.
+    let mut lo = start;
+    while lo > 0 && is_word(chars[lo - 1]) {
+        lo -= 1;
+    }
+    // Walk right to the token end.
+    let mut hi = start;
+    while hi < chars.len() && is_word(chars[hi]) {
+        hi += 1;
+    }
+    if lo == hi {
+        return None;
+    }
+    Some(chars[lo..hi].iter().collect())
+}
+
+/// Extract the CSS rule `css()` emits for a class name from the captured theme
+/// stylesheet. `std/tw` renders base rules as `.<class> {…}` and variant rules
+/// with the selector's `:` escaped (`.md\:hover\:bg-… {…}`), so the selector is
+/// matched with `:` escaped. Returns the whole `.<selector> {…}` rule text, or
+/// `None` when no rule exists (a safelisted name).
+fn css_rule_for(css: &str, class: &str) -> Option<String> {
+    if css.is_empty() {
+        return None;
+    }
+    let escaped: String = class.chars().flat_map(|c| {
+        if c == ':' { vec!['\\', ':'] } else { vec![c] }
+    }).collect();
+    // `css()` renders base rules as `.<class> {…}` and variant rules with the
+    // selector's `:` escaped plus an appended pseudo (`.md\:hover\:bg-… :hover {…}`),
+    // so match the escaped selector prefix and take the rule up to its `}`. The
+    // leading `.` prevents a prefixed variant (`.md\:…:bg-brand-500`) from being
+    // mistaken for the base `.bg-brand-500`.
+    let selector = format!(".{escaped}");
+    // Find an occurrence whose following char does not extend the class token
+    // (so `.p-2` is not satisfied by `.p-20`, and a prefixed variant does not
+    // masquerade as the base rule).
+    let mut from = 0usize;
+    while let Some(rel) = css[from..].find(&selector) {
+        let at = from + rel;
+        let after = css[at + selector.len()..].chars().next();
+        if !matches!(after, Some(c) if c.is_ascii_alphanumeric() || c == '-') {
+            let open = css[at..].find('{')?;
+            let close = css[at + open..].find('}')?;
+            return Some(css[at..at + open + close + 1].trim().to_string());
+        }
+        from = at + selector.len();
+    }
+    None
+}
+
+/// The constant string a zero-parameter `css()` function returns (`std/tw`'s baked
+/// stylesheet), if present in the (linked) program. The body is a single
+/// `return "<literal>"`, so the return expression is a string literal.
+fn css_constant(program: &ast::Program) -> Option<String> {
+    let f = program
+        .functions
+        .iter()
+        .find(|f| f.name == "css" && f.params.is_empty())?;
+    for stmt in &f.body.stmts {
+        if let Stmt::Return { value: Some(Expr::Str(s)), .. } = stmt {
+            return Some(s.clone());
+        }
+    }
+    None
 }
 
 /// The name of the validated string type expected at the string literal under
@@ -1928,6 +2144,55 @@ fn builtin_methods_for(ty: &Type) -> Vec<BuiltinMethod> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC-0042: a sequence (`Tw`) validated string type's alphabet is enumerated
+    /// into `sequence_string_types`; `class_completions` offers it at a `cls("…")`
+    /// argument; `class_token_hover` shows the utility's CSS or "safelisted".
+    #[test]
+    fn rfc42_tw_alphabet_completion_and_hover() {
+        let src = "type TwClass = String where value =~ \"(a-1|a-2|flex)\"\n\
+                   type Tw = String where value =~ \"(a-1|a-2|flex)( (a-1|a-2|flex))*\"\n\
+                   fn cls(c: Tw) -> Int64 { return 0 }\n\
+                   fn css() -> String { return \".a-1 {color:red}\\n.flex {display:flex}\" }\n\
+                   fn main() -> Int64 { return cls(\"flex a-1\") }\n";
+        let a = analyze(src);
+        // The alphabet is enumerated (order-independent set check).
+        let (_, alpha) = a.sequence_string_types.iter().find(|(n, _)| n == "Tw").expect("Tw seq");
+        for m in ["a-1", "a-2", "flex"] {
+            assert!(alpha.iter().any(|s| s == m), "alphabet has {m}: {alpha:?}");
+        }
+        // A finite type is NOT a sequence type (whole-domain path owns those).
+        assert!(!a.sequence_string_types.iter().any(|(n, _)| n == "TwClass"));
+
+        // `return cls("flex a-1")` is on line 5; the string opens at the `"`.
+        let line = 5;
+        let col = src.lines().nth(4).unwrap().find("flex a-1").unwrap() + 1 + 1; // inside 'flex'
+        let items = class_completions(&a, src, line, col).expect("class completions");
+        assert!(items.iter().any(|c| c.label == "flex"));
+        assert!(items.iter().any(|c| c.label == "a-2"));
+
+        // Hover on the `flex` token → its CSS rule; on `a-2` (no rule) → safelisted.
+        let hv = class_token_hover(&a, src, line, col).expect("hover on class token");
+        assert!(hv.contains("display:flex"), "utility CSS: {hv}");
+        let col_a1 = src.lines().nth(4).unwrap().find("a-1\")").unwrap() + 1 + 1;
+        let hv2 = class_token_hover(&a, src, line, col_a1).expect("hover a-1");
+        assert!(hv2.contains("color:red"), "a-1 rule: {hv2}");
+    }
+
+    /// `css_rule_for` extracts base and variant rules and resists prefix
+    /// collisions (`.p-2` must not be satisfied by `.p-20`).
+    #[test]
+    fn rfc42_css_rule_lookup() {
+        let css = ".p-2 {padding:0.5rem}\n.p-20 {padding:5rem}\n\
+                   .md\\:hover\\:bg-x:hover {background:#000}";
+        assert_eq!(css_rule_for(css, "p-2").as_deref(), Some(".p-2 {padding:0.5rem}"));
+        assert_eq!(css_rule_for(css, "p-20").as_deref(), Some(".p-20 {padding:5rem}"));
+        assert_eq!(
+            css_rule_for(css, "md:hover:bg-x").as_deref(),
+            Some(".md\\:hover\\:bg-x:hover {background:#000}")
+        );
+        assert_eq!(css_rule_for(css, "missing"), None);
+    }
 
     #[test]
     fn module_state_is_indexed_with_hover_detail() {

@@ -308,3 +308,21 @@ pub fn string_flow_proven(
 pub fn enumerate_type(decl: &TypeDecl, cap: usize) -> Option<Vec<String>> {
     regex_dfa_of_type(decl)?.enumerate(cap)
 }
+
+/// Enumerate the **alphabet** of a *sequence* validated string type — a pure-regex
+/// `String` type whose language is INFINITE but whose members are space-separated
+/// tokens (`Tw` = `token( token)*`, RFC-0032/0042). The alphabet is every accepted
+/// string containing no space (`= L(TwClass)`), which is finite; it is enumerated
+/// straight from the same DFA the compiler checks against — no second enumeration,
+/// no drift. `None` when the type is finite (use [`enumerate_type`] for those),
+/// not a pure-regex string type, or its space-free sublanguage exceeds `cap`.
+pub fn enumerate_alphabet(decl: &TypeDecl, cap: usize) -> Option<Vec<String>> {
+    let dfa = regex_dfa_of_type(decl)?;
+    // A finite type is a whole-domain type, not a sequence — its members ARE the
+    // completions (the `enumerate_type` path). Only an infinite regex string type
+    // is a candidate sequence whose alphabet we enumerate.
+    if dfa.is_finite() {
+        return None;
+    }
+    dfa.enumerate_without(b' ', cap)
+}

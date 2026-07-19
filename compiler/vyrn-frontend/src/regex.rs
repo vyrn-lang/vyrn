@@ -632,6 +632,56 @@ impl Dfa {
         Some(out.into_iter().map(|b| escape_bytes(&b)).collect())
     }
 
+    /// Enumerate every accepted string that contains **no** `exclude` byte, up to
+    /// `cap` strings, in lexicographic order. Returns `None` if there are more
+    /// than `cap` such strings (or the sublanguage is unbounded).
+    ///
+    /// This is how a *sequence* validated-string type yields its **alphabet**
+    /// (RFC-0042): `Tw`'s language is `token( token)*` — infinite — but the strings
+    /// it accepts that contain no space are exactly the single tokens (`= L(TwClass)`),
+    /// which is finite. Excluding the separator byte and enumerating the residual
+    /// finite sublanguage gives the completion/checking alphabet straight from the
+    /// same DFA the compiler validates against (one enumeration, no drift).
+    pub fn enumerate_without(&self, exclude: u8, cap: usize) -> Option<Vec<String>> {
+        let acc = self.can_reach_accept();
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        // BFS by length. Excluding `exclude` prunes the transition that restarts a
+        // fresh token, so the residual paths are bounded by the token DFA — the
+        // safety bound below is never the terminating condition when the sublanguage
+        // is finite, but guards against an `exclude`-free cycle (unbounded) by
+        // returning `None` via the `cap` overflow first.
+        let mut frontier: Vec<(usize, Vec<u8>)> = vec![(self.start as usize, Vec::new())];
+        let max_len = self.num_states() + 1;
+        let mut depth = 0;
+        while !frontier.is_empty() && depth <= max_len {
+            let mut next: Vec<(usize, Vec<u8>)> = Vec::new();
+            for (st, s) in &frontier {
+                if self.accepting[*st] {
+                    out.push(s.clone());
+                    if out.len() > cap {
+                        return None;
+                    }
+                }
+                for b in 0..256usize {
+                    if b as u8 == exclude {
+                        continue;
+                    }
+                    let t = self.table[*st * 256 + b] as usize;
+                    if acc[t] {
+                        let mut ns = s.clone();
+                        ns.push(b as u8);
+                        next.push((t, ns));
+                    }
+                }
+            }
+            frontier = next;
+            depth += 1;
+        }
+        out.sort();
+        out.dedup();
+        Some(out.into_iter().map(|b| escape_bytes(&b)).collect())
+    }
+
     /// The complement DFA: same transitions, accepting bits flipped. Correct
     /// because the DFA is **total** (the subset construction always interns the
     /// empty set as a dead sink with all-self transitions), so every byte string

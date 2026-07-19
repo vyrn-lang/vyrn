@@ -36,8 +36,9 @@ pub mod types;
 // directly. `diagnostics` (below) delegates to `symbols::analyze`, so the whole
 // pipeline lives in one place.
 pub use symbols::{
-    analyze, analyze_linked, completions, member_completions, resolve, string_literal_completions,
-    Analysis, Completion, LocalBinding, LocalKind, Resolution, Symbol, SymbolKind, TokenInfo,
+    analyze, analyze_linked, class_completions, class_token_hover, completions,
+    member_completions, resolve, string_literal_completions, Analysis, Completion, LocalBinding,
+    LocalKind, Resolution, Symbol, SymbolKind, TokenInfo,
 };
 
 // The canonical formatter (RFC-0017). `fmt` the module and `fmt` the function
