@@ -344,13 +344,29 @@ fn analyze_inner(
     } else {
         match (&linker, program.imports.is_empty()) {
             (Some((root_path, opts, resolver)), false) => {
-                match crate::loader::load_with_origins(source, root_path, opts, *resolver) {
-                    Ok((linked, o)) => {
-                        origins = o;
-                        Some(linked)
-                    }
+                let (loaded, o) =
+                    crate::loader::load_with_origins(source, root_path, opts, *resolver);
+                // RFC-0053: the maps come back even when the load FAILED (they
+                // need no successful parse), so a `.vyx` whose template stopped
+                // lexing still knows its owner and still gets its squiggle.
+                origins = o;
+                match loaded {
+                    Ok(linked) => Some(linked),
                     Err(load_diags) => {
-                        diags.extend(load_diags.into_iter().map(adopt_foreign));
+                        // RFC-0053: the loader already remapped lex/parse/load
+                        // failures inside a synthesized module onto the `.vyx`
+                        // (or other input) they came from. Those name a real
+                        // file, so they join `remapped` and are published
+                        // against that file's URI — the squiggle lands in the
+                        // buffer the user is typing in. Everything else keeps
+                        // the existing foreign-adoption behavior.
+                        for d in load_diags {
+                            if d.from_generated {
+                                remapped.push(d);
+                            } else {
+                                diags.push(adopt_foreign(d));
+                            }
+                        }
                         None
                     }
                 }

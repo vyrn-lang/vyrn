@@ -2160,7 +2160,15 @@ fn publish(
                 code: None,
                 code_description: None,
                 source: Some("vyrn".into()),
-                message: d.message.clone(),
+                // RFC-0033/0053: a remapped diagnostic keeps the generated
+                // location as a note. VS Code renders a diagnostic's message
+                // verbatim and has nowhere else to put it, so it is appended —
+                // without it the squiggle in a `.vyx` gives no way to find the
+                // generated line it actually fired on.
+                message: match &d.note {
+                    Some(n) => format!("{}\n{n}", d.message),
+                    None => d.message.clone(),
+                },
                 related_information: None,
                 tags: None,
                 data: None,
