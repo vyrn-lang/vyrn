@@ -107,7 +107,9 @@ pub fn load(
     opts: &loader::LoadOptions,
     resolver: &dyn loader::ModuleResolver,
 ) -> Result<ast::Program, Vec<diagnostics::Diagnostic>> {
-    let (program, origins) = loader::load_with_origins(root_source, root_path, opts, resolver)?;
+    let (loaded, origins) = loader::load_with_origins(root_source, root_path, opts, resolver);
+    // RFC-0053: load/lex/parse diagnostics are already remapped by the loader.
+    let program = loaded?;
     let mut diags = checker::check_accum(&program);
     if diags.is_empty() {
         diags.extend(movecheck::check_accum(&program));

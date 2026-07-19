@@ -415,7 +415,8 @@ pub fn generated_modules(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
 ) -> Result<Vec<(String, String)>, Vec<Diagnostic>> {
-    let (modules, _) = load_modules(root_source, root_path, opts, resolver)?;
+    let (modules, _, _) =
+        load_modules(root_source, root_path, opts, resolver).map_err(|(d, _)| d)?;
     Ok(modules
         .into_iter()
         .filter_map(|m| m.gen_source.map(|s| (m.key, s)))
@@ -433,7 +434,7 @@ pub fn load(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
 ) -> Result<Program, Vec<Diagnostic>> {
-    load_with_origins(root_source, root_path, opts, resolver).map(|(p, _)| p)
+    load_with_origins(root_source, root_path, opts, resolver).0
 }
 
 /// Like [`load`], but also returns the RFC-0033 origin maps built from every
@@ -441,32 +442,22 @@ pub fn load(
 /// diagnostic remapping (CLI + LSP) and the LSP's forward hover/completion/
 /// go-to-definition inside generator input files; they are empty when no
 /// reachable generator emitted `//@origin` directives.
+///
+/// RFC-0053: the maps are returned **whether or not the load succeeded** — they
+/// are a line-scan over each synthesized module's text and need no successful
+/// parse, so a `.vyx` whose template fails to lex still maps its generated lines
+/// back to the file the user is editing. The returned diagnostics have already
+/// been remapped through them.
 pub fn load_with_origins(
     root_source: &str,
     root_path: &str,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
-) -> Result<(Program, crate::origin::OriginMaps), Vec<Diagnostic>> {
-    let (modules, root_key) = load_modules(root_source, root_path, opts, resolver)?;
-    let origins = build_origin_maps(&modules);
-    let program = link(modules, &root_key)?;
-    Ok((program, origins))
-}
-
-/// Parse the `//@origin` directives (RFC-0033) out of every synthesized module's
-/// source. A synthesized module's origin paths resolve against the directory of
-/// the real file it was generated for (its banner's `at <importer>`).
-fn build_origin_maps(modules: &[Module]) -> crate::origin::OriginMaps {
-    let mut maps = crate::origin::OriginMaps::new();
-    for m in modules {
-        if let Some(src) = &m.gen_source {
-            // `generated_importer` uses the LAST ` at `, so a nested generator's
-            // banner still yields the real on-disk file in one step.
-            let importer = generated_importer(&m.key).unwrap_or(&m.key);
-            maps.add_module(&m.key, src, dir_of(importer));
-        }
+) -> (Result<Program, Vec<Diagnostic>>, crate::origin::OriginMaps) {
+    match load_modules(root_source, root_path, opts, resolver) {
+        Err((diags, origins)) => (Err(diags), origins),
+        Ok((modules, root_key, origins)) => (link(modules, &root_key), origins),
     }
-    maps
 }
 
 /// The module dependency graph: every (module key, resolved import targets)
@@ -477,7 +468,8 @@ pub fn module_graph(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
 ) -> Result<Vec<(String, Vec<String>)>, Vec<Diagnostic>> {
-    let (modules, _) = load_modules(root_source, root_path, opts, resolver)?;
+    let (modules, _, _) =
+        load_modules(root_source, root_path, opts, resolver).map_err(|(d, _)| d)?;
     Ok(modules
         .into_iter()
         .map(|m| (m.key, m.import_targets))
@@ -496,19 +488,32 @@ pub fn module_graph_with_sources(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
 ) -> Result<Vec<(String, Vec<String>, Option<String>)>, Vec<Diagnostic>> {
-    let (modules, _) = load_modules(root_source, root_path, opts, resolver)?;
+    let (modules, _, _) =
+        load_modules(root_source, root_path, opts, resolver).map_err(|(d, _)| d)?;
     Ok(modules
         .into_iter()
         .map(|m| (m.key, m.import_targets, m.gen_source))
         .collect())
 }
 
+/// Load every module reachable from the root, returning them with the root key
+/// and the RFC-0033 origin maps.
+///
+/// RFC-0053: the maps are accumulated **as each synthesized module is entered**,
+/// from its source text alone — a line-scan that needs no successful parse — so a
+/// module that fails to lex or parse still has a map. On the error path the
+/// diagnostics are routed through the very same [`crate::origin::OriginMaps::remap`]
+/// the checker's use, so a stray character inside a `.vyx` template expression is
+/// reported at that `.vyx` line:col instead of at a dead-end banner key. The
+/// never-lose guarantee is unchanged: an error on a line with no governing
+/// directive (generator glue) keeps its generated location plus the note.
 fn load_modules(
     root_source: &str,
     root_path: &str,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
-) -> Result<(Vec<Module>, String), Vec<Diagnostic>> {
+) -> Result<(Vec<Module>, String, crate::origin::OriginMaps), (Vec<Diagnostic>, crate::origin::OriginMaps)>
+{
     let root_key = normalize(root_path);
     let mut modules: Vec<Module> = Vec::new();
     let mut states: HashMap<String, bool> = HashMap::new(); // false = loading
@@ -519,6 +524,7 @@ fn load_modules(
     // however they are spelled (`./strings` vs `../strings` from a rebased `.vyx`
     // import) — reuse that one module: one instance, shared state, no collision.
     let mut identities: HashMap<String, String> = HashMap::new();
+    let mut origins = crate::origin::OriginMaps::new();
 
     #[allow(clippy::too_many_arguments)]
     fn visit(
@@ -529,6 +535,7 @@ fn load_modules(
         modules: &mut Vec<Module>,
         states: &mut HashMap<String, bool>,
         identities: &mut HashMap<String, String>,
+        origins: &mut crate::origin::OriginMaps,
         stack: &mut Vec<String>,
         root_key: &str,
     ) -> Result<(), Vec<Diagnostic>> {
@@ -560,6 +567,17 @@ fn load_modules(
             })?,
         };
         let is_root = key == root_key;
+
+        // RFC-0053: register a synthesized module's `//@origin` table NOW, before
+        // it is lexed — the table is a pure line-scan over the text, so a module
+        // that never lexes or parses still gets one, and its lex/parse errors can
+        // be remapped onto the `.vyx` (or other input) the text came from.
+        // `generated_importer` uses the LAST ` at `, so a nested generator's banner
+        // still yields the real on-disk file in one step.
+        if key.starts_with("generated by ") {
+            let importer = generated_importer(key).unwrap_or(key);
+            origins.add_module(key, &text, dir_of(importer));
+        }
 
         // A `.json` module is a JSON Schema document: synthesize validated
         // type declarations from it (RFC-0010 M2) instead of parsing Vyrn.
@@ -664,7 +682,8 @@ fn load_modules(
                     vec![d]
                 })?;
                 visit(
-                    &target, None, opts, resolver, modules, states, identities, stack, root_key,
+                    &target, None, opts, resolver, modules, states, identities, origins, stack,
+                    root_key,
                 )?;
                 import_targets[i] = Some(target);
             }
@@ -689,6 +708,7 @@ fn load_modules(
                         modules,
                         states,
                         identities,
+                        origins,
                         stack,
                         root_key,
                     )?;
@@ -715,7 +735,7 @@ fn load_modules(
         Ok(())
     }
 
-    visit(
+    if let Err(mut diags) = visit(
         &root_key,
         Some(root_source),
         opts,
@@ -723,11 +743,23 @@ fn load_modules(
         &mut modules,
         &mut states,
         &mut identities,
+        &mut origins,
         &mut stack,
         &root_key,
-    )?;
+    ) {
+        // RFC-0053: lex/parse/load failures inside a synthesized module are
+        // remapped onto their originating input file, exactly as check/movecheck
+        // diagnostics are on the success path (`lib::load`). Ungoverned lines keep
+        // their generated location.
+        if !origins.is_empty() {
+            for d in &mut diags {
+                origins.remap(d);
+            }
+        }
+        return Err((diags, origins));
+    }
 
-    Ok((modules, root_key))
+    Ok((modules, root_key, origins))
 }
 
 /// Guardrails (RFC-0021): a generator's step budget and output-size cap.

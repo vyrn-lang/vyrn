@@ -172,6 +172,7 @@ impl OriginMaps {
         d.line = origin.line;
         d.col = origin.col;
         d.end_col = 0;
+        d.from_generated = true;
         true
     }
 

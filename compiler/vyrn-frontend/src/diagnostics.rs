@@ -45,6 +45,12 @@ pub struct Diagnostic {
     /// malformed origin directive records why it could not be followed. `None`
     /// for every ordinary diagnostic.
     pub note: Option<String>,
+    /// `true` once [`crate::origin::OriginMaps::remap`] has relocated this
+    /// diagnostic out of a synthesized generator module and onto the input file
+    /// (`.vyx`, …) the generated text came from (RFC-0033, RFC-0053). `file`
+    /// then names a real file the user can open, so the LSP publishes it against
+    /// that file's URI instead of adopting it into the root at line 0.
+    pub from_generated: bool,
 }
 
 impl Diagnostic {
@@ -60,6 +66,7 @@ impl Diagnostic {
             stage,
             message,
             note: None,
+            from_generated: false,
         }
     }
 
