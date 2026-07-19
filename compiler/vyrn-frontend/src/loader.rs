@@ -1291,6 +1291,67 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         }
     }
 
+    // Name-privacy (RFC-0046 §3): a NON-EXPORTED top-level decl is invisible
+    // outside its module, so it must never force a consumer to rename. When such
+    // a decl's name also appears in another module, auto-rename it to a fresh
+    // program-wide symbol (the same `member__fromN` machinery co-naming uses) —
+    // always safe, since nothing can import a non-exported name by name, and its
+    // module's own references follow (pass 3's `rename_decl_in_module`). Without
+    // this, `std/time`'s private `pad2` collided with a consumer's local `pad2`
+    // ("private names aren't private to name resolution"). Deterministic order so
+    // the minted suffixes are stable.
+    let mut priv_targets: Vec<&Module> = modules.iter().collect();
+    priv_targets.sort_by(|a, b| a.key.cmp(&b.key));
+    for m in priv_targets {
+        let exported = module_exports.get(&m.key).cloned().unwrap_or_default();
+        // A name the module itself imports is NOT eligible: a private decl whose
+        // name is also brought into scope by an import is a genuine local clash
+        // (import vs. declaration) the user must resolve — auto-renaming would
+        // silently hide it. Renaming stays limited to names invisible outside
+        // their module AND not shadowing an in-scope import here.
+        let imported: HashSet<String> = m
+            .program
+            .imports
+            .iter()
+            .flat_map(|imp| imp.names.iter())
+            .map(|n| n.local().to_string())
+            .collect();
+        // Non-exported top-level decl names (skip parser-injected line-0 types,
+        // which are the same in every module and must never be renamed). Globals
+        // are never exported (RFC-0029), so they are always candidates.
+        let mut privates: Vec<String> = Vec::new();
+        for t in &m.program.type_decls {
+            if t.line != 0 && !exported.contains(&t.name) {
+                privates.push(t.name.clone());
+            }
+        }
+        for f in &m.program.functions {
+            if !exported.contains(&f.name) {
+                privates.push(f.name.clone());
+            }
+        }
+        for p in &m.program.protocols {
+            if !exported.contains(&p.name) {
+                privates.push(p.name.clone());
+            }
+        }
+        for g in &m.program.globals {
+            privates.push(g.name.clone());
+        }
+        privates.sort();
+        privates.dedup();
+        for name in privates {
+            if imported.contains(&name) {
+                continue;
+            }
+            if name_module_count.get(&name).copied().unwrap_or(0) >= 2 {
+                foreign_renames
+                    .entry((m.key.clone(), name.clone()))
+                    .or_insert_with(|| mint(&name, &mut all_names));
+            }
+        }
+    }
+
     // Pass 2: per-module reference-rewrite maps (alias/local -> resolved decl).
     let mut rewrites: HashMap<String, HashMap<String, String>> = HashMap::new();
     for m in modules.iter() {
@@ -3117,6 +3178,35 @@ mod tests {
             e.contains("is not allowed") && e.contains("isolated"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn two_modules_with_a_private_same_named_helper_link_cleanly() {
+        // RFC-0046 §3: a non-exported decl is invisible outside its module, so
+        // two modules may each carry a private `helper` without colliding — the
+        // linker auto-renames the non-exported decls.
+        let a = "fn helper() -> Int64 { return 1 } \
+                 export fn aVal() -> Int64 { return helper() }";
+        let b = "fn helper() -> Int64 { return 2 } \
+                 export fn bVal() -> Int64 { return helper() }";
+        let root = "import { aVal } from \"./a\" \
+                    import { bVal } from \"./b\" \
+                    fn main() -> Int64 { return aVal() + bVal() }";
+        assert_eq!(run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]).unwrap(), 3);
+    }
+
+    #[test]
+    fn local_may_shadow_a_private_std_internal_name() {
+        // RFC-0046 §3 (the vlog `pad2` bug): `std/time`'s private `pad2` forced a
+        // consumer to rename its own `pad2`. A non-exported foreign name no longer
+        // consumes the consumer's namespace — the local `pad2` compiles unchanged,
+        // and each module's `pad2` resolves to its own.
+        let lib = "fn pad2(n: Int64) -> Int64 { return n } \
+                   export fn tick() -> Int64 { return pad2(7) }";
+        let root = "import { tick } from \"./lib\" \
+                    fn pad2(n: Int64) -> Int64 { return n + 100 } \
+                    fn main() -> Int64 { return tick() + pad2(0) }";
+        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 7 + 100);
     }
 
     #[test]
