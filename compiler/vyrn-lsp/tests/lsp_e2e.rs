@@ -1695,3 +1695,191 @@ fn rfc49_live_transcript_examples_bin() {
     // Warm hover must not be dramatically slower than cold — the cache holds.
     assert!(warm_ms <= cold_ms + 50, "warm hover ({warm_ms}ms) ≤ cold ({cold_ms}ms)+slack");
 }
+
+// ---------------------------------------------------------------------------
+// RFC-0050 — scope-aware highlight, import-path definition, namespace colour
+// ---------------------------------------------------------------------------
+
+/// One `textDocument/documentHighlight` occurrence: 1-based line, 0-based start
+/// char, and the LSP `DocumentHighlightKind` (2 = Read, 3 = Write).
+#[derive(Debug)]
+struct Highlight {
+    line: u32,
+    ch: u32,
+    kind: u64,
+}
+
+/// Request `textDocument/documentHighlight` at 0-based `(line, ch)`. Returns the
+/// occurrences (empty when the cursor resolves to no binding — a `Some([])`
+/// result the server sends so VS Code does not word-match). Panics on a null
+/// result (which would be a missing-provider regression).
+fn document_highlight(client: &mut LspClient, uri: &str, line: u32, ch: u32) -> Vec<Highlight> {
+    let id = serde_json::json!(format!("hl{line}_{ch}"));
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/documentHighlight",
+        "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": ch } }
+    }));
+    let resp = client.read_response(&id);
+    resp.pointer("/result")
+        .and_then(|r| r.as_array())
+        .expect("documentHighlight must return an array (never null)")
+        .iter()
+        .map(|h| Highlight {
+            line: h.pointer("/range/start/line").and_then(|v| v.as_u64()).unwrap() as u32 + 1,
+            ch: h.pointer("/range/start/character").and_then(|v| v.as_u64()).unwrap() as u32,
+            kind: h.get("kind").and_then(|k| k.as_u64()).unwrap_or(0),
+        })
+        .collect()
+}
+
+/// A `.vyrn` where `count` is a local in `tally`, a word in a comment, AND an
+/// out-of-scope binding in `other`. Highlighting the `tally` `count` must return
+/// ONLY its in-scope occurrences — never the comment word, never `other`'s
+/// binding (the exact user complaint against VS Code's word-match).
+const RFC50_HL: &str = "\
+fn tally() -> Int64 {
+    let mut count = 0
+    for i in [1, 2, 3] {
+        count = count + i
+    }
+    return count
+}
+
+fn other() -> Int64 {
+    // this comment mentions count but must never be highlighted
+    let count = 99
+    return count
+}
+
+fn main() -> Int64 { return tally() }
+";
+
+/// RFC-0050 §1: `documentHighlight` resolves the binding under the cursor and
+/// returns its ACTUAL, scope-aware references — the declaration as `Write`, uses
+/// as `Read` — excluding a same-named token in a comment and an out-of-scope
+/// same-named binding. The provider must be advertised so VS Code stops
+/// word-matching.
+#[test]
+fn rfc0050_document_highlight_is_scope_aware() {
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-hl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("hl.vyrn");
+    std::fs::write(&path, RFC50_HL).unwrap();
+    let uri = file_uri(&path);
+
+    // Advertisement.
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+        "params": { "capabilities": {}, "processId": null }
+    }));
+    let caps = client.read_response(&init_id);
+    assert!(
+        caps.pointer("/result/capabilities/documentHighlightProvider").is_some(),
+        "documentHighlight capability advertised"
+    );
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    did_open(&mut client, &uri, "vyrn", RFC50_HL);
+
+    // Cursor on the `count` declaration in `tally` (1-based line 2).
+    let (l, c) = at(RFC50_HL, 2, "count");
+    let hls = document_highlight(&mut client, &uri, l, c);
+    let lines: Vec<u32> = hls.iter().map(|h| h.line).collect();
+
+    // In-scope occurrences only: decl on line 2, uses on line 4 (×2) and 6.
+    assert!(lines.contains(&2), "decl line 2 highlighted: {hls:?}");
+    assert!(lines.contains(&4), "use line 4 highlighted: {hls:?}");
+    assert!(lines.contains(&6), "use line 6 highlighted: {hls:?}");
+    // The declaration occurrence is a Write; the uses are Reads.
+    let decl = hls.iter().find(|h| h.line == 2).unwrap();
+    assert_eq!(decl.kind, 3, "declaration is Write: {decl:?}");
+    assert!(hls.iter().filter(|h| h.line != 2).all(|h| h.kind == 2), "uses are Read: {hls:?}");
+
+    // Never the comment word (line 11) nor the out-of-scope binding in `other`
+    // (lines 12/13) — the whole point of resolving instead of word-matching.
+    assert!(!lines.contains(&11), "comment `count` NOT highlighted: {hls:?}");
+    assert!(!lines.contains(&12), "other()'s `count` decl NOT highlighted: {hls:?}");
+    assert!(!lines.contains(&13), "other()'s `count` use NOT highlighted: {hls:?}");
+
+    // An unresolved cursor (a keyword) returns an EMPTY list, not null — so VS
+    // Code does not fall back to word-match.
+    let hls2 = document_highlight(&mut client, &uri, 0, 0); // the `f` of `fn`
+    assert!(hls2.is_empty(), "unresolved cursor yields empty (not word-match): {hls2:?}");
+
+    let _ = client.child.kill();
+}
+
+/// RFC-0050 §2: `definition` on an import SOURCE STRING resolves it through the
+/// loader to the imported file's `Location` — a relative spec (`"./store"`) to
+/// the sibling file, and a `std/` spec (`"std/time"`) to the std module.
+#[test]
+fn rfc0050_definition_on_import_path() {
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-imp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("store.vyrn"), "export fn get() -> Int64 { return 1 }\n").unwrap();
+    let app = "\
+import { get } from \"./store\"
+import { now } from \"std/time\"
+fn main() -> Int64 { return get() + now() }
+";
+    let app_path = dir.join("app.vyrn");
+    std::fs::write(&app_path, app).unwrap();
+    let uri = file_uri(&app_path);
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", app);
+
+    // Cursor inside `"./store"` (line 1, 0-based) → store.vyrn.
+    let (l, c) = at(app, 1, "./store");
+    let store = definition_target(&mut client, &uri, l, c).expect("definition on ./store");
+    assert!(store.ends_with("/store.vyrn"), "./store → sibling store.vyrn: {store}");
+
+    // Cursor inside `"std/time"` (line 2) → the std time module.
+    let (l, c) = at(app, 2, "std/time");
+    let stdt = definition_target(&mut client, &uri, l, c).expect("definition on std/time");
+    assert!(stdt.replace('\\', "/").ends_with("std/time.vyrn"), "std/time → std file: {stdt}");
+
+    // A cursor NOT on an import string (the `get` call) still does identifier
+    // go-to-definition — the import-path path is additive, not a hijack.
+    let (l, c) = at(app, 3, "get");
+    let g = definition_target(&mut client, &uri, l, c).expect("definition on get() call");
+    assert!(g.ends_with("/store.vyrn"), "get() → its imported decl in store.vyrn: {g}");
+
+    let _ = client.child.kill();
+}
+
+/// RFC-0050 §3: the `import * as ns` binding token AND every `ns.` qualifier
+/// classify as `namespace` (legend index 0), NOT `type` — so a namespace is
+/// never mis-coloured as a type by the server. (When a user still sees it green,
+/// that is their theme colouring `namespace` like `type` — standard, not a
+/// server bug.)
+#[test]
+fn rfc0050_namespace_binding_classifies_as_namespace() {
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-ns-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("lib.vyrn"), "export fn ping() -> Int64 { return 1 }\n").unwrap();
+    let app = "\
+import * as store from \"./lib\"
+fn main() -> Int64 { return store.ping() }
+";
+    let app_path = dir.join("app.vyrn");
+    std::fs::write(&app_path, app).unwrap();
+    let uri = file_uri(&app_path);
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", app);
+    let toks = semantic_tokens_full(&mut client, &uri);
+
+    // The binding `store` in `import * as store` (line 1) → namespace.
+    let (l, c) = at(app, 1, "store");
+    assert_eq!(kind_at(&toks, l, c), Some("namespace"), "import binding → namespace: {toks:?}");
+    // The `store` qualifier in `store.ping()` (line 2) → namespace.
+    let (l, c) = at(app, 2, "store");
+    assert_eq!(kind_at(&toks, l, c), Some("namespace"), "ns qualifier → namespace: {toks:?}");
+
+    let _ = client.child.kill();
+}
