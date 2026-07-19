@@ -103,6 +103,7 @@ fn check_accum_full(
         "contains",
         "startsWith",
         "endsWith",
+        "slice",
         "bytes",
         "chars",
         "hexEncode",
@@ -3413,6 +3414,40 @@ impl<'a> Checker<'a> {
             return Ok(Type::Bool);
         }
 
+        // built-in: slice(s, start, end) -> String (RFC-0046). A byte-range
+        // substring — the primitive `std/strings` builds on. `start`/`end` are
+        // byte offsets (Int64). O(1) validated at runtime: a cut inside a
+        // multi-byte UTF-8 character traps (`error: slice splits a UTF-8
+        // character`), an out-of-range offset traps like an array OOB
+        // (`error: slice index out of range`).
+        if name == "slice" {
+            if args.len() != 3 {
+                return Err(format!(
+                    "line {line}: `slice` takes 3 arguments (s, start, end), got {}",
+                    args.len()
+                ));
+            }
+            let s = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
+            if matches!(s, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if s != Type::Str {
+                return Err(format!("line {line}: `slice` needs a String, found {s}"));
+            }
+            for a in &args[1..] {
+                let t = self.base(&self.expr(a, scope, Some(&Type::Int), fn_ret)?);
+                if matches!(t, Type::Err) {
+                    return Ok(Type::Err);
+                }
+                if !matches!(t, Type::Int) {
+                    return Err(format!(
+                        "line {line}: `slice` needs Int64 offsets, found {t}"
+                    ));
+                }
+            }
+            return Ok(Type::Str);
+        }
+
         // Text encodings. Encoders: String -> String. Decoders: String ->
         // Option<String> (None on malformed input or a non-UTF-8 result).
         if matches!(name, "hexEncode" | "base64Encode" | "urlEncode") {
@@ -6543,6 +6578,22 @@ mod tests {
         let e = check_src("fn main() -> Int64 { let s = stringFromBytes(\"x\"); return 0 }")
             .unwrap_err();
         assert!(e.contains("`stringFromBytes` needs an Array<UInt8>"), "{e}");
+    }
+
+    #[test]
+    fn slice_builtin_signature() {
+        // slice(String, Int64, Int64) -> String (RFC-0046).
+        assert!(check_src(
+            "fn main() -> Int64 { let x: String = slice(\"hello\", 1, 3) return x.length }"
+        )
+        .is_ok());
+        let e = check_src("fn main() -> Int64 { let x = slice(\"hi\") return 0 }").unwrap_err();
+        assert!(e.contains("`slice` takes 3 arguments"), "{e}");
+        let e = check_src("fn main() -> Int64 { let x = slice(42, 0, 1) return 0 }").unwrap_err();
+        assert!(e.contains("`slice` needs a String"), "{e}");
+        let e =
+            check_src("fn main() -> Int64 { let x = slice(\"hi\", \"a\", 1) return 0 }").unwrap_err();
+        assert!(e.contains("`slice` needs Int64 offsets"), "{e}");
     }
 
     #[test]

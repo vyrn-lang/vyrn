@@ -771,6 +771,27 @@ ret:
   ret {ptr, i64, i64} %r2
 }
 
+; Copy %n bytes from %src into %dst (the `slice` builtin's body — RFC-0046).
+; Both cut points are already validated at the call site (bounds + UTF-8
+; boundary), so this is an unconditional byte copy; the caller NUL-terminates.
+define void @__vyrn_bytecopy(ptr %dst, ptr %src, i64 %n) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i2, %body ]
+  %done = icmp uge i64 %i, %n
+  br i1 %done, label %ret, label %body
+body:
+  %sp = getelementptr i8, ptr %src, i64 %i
+  %b = load i8, ptr %sp
+  %dp = getelementptr i8, ptr %dst, i64 %i
+  store i8 %b, ptr %dp
+  %i2 = add i64 %i, 1
+  br label %loop
+ret:
+  ret void
+}
+
 define {ptr, i64, i64} @__vyrn_str_chars(ptr %s) {
 entry:
   %len = call i64 @__vyrn_strlen(ptr %s)
@@ -1210,7 +1231,20 @@ pub fn emit(program: &Program) -> Result<String, String> {
     );
     out.push_str(
         "@.trap.soob = private unnamed_addr constant [40 x i8] \
-         c\"error: string index %lld out of bounds\\0A\\00\"\n\n",
+         c\"error: string index %lld out of bounds\\0A\\00\"\n",
+    );
+    // `slice(s, start, end)` traps (RFC-0046), single-sourced here beside the
+    // other index traps: an out-of-range offset mirrors the array-OOB wording,
+    // and a cut inside a multi-byte UTF-8 character gets its own message. Both
+    // are byte-identical to the interpreter's `slice index out of range` /
+    // `slice splits a UTF-8 character` as the CLI renders them (`error: ..`).
+    out.push_str(
+        "@.trap.sliceoob = private unnamed_addr constant [33 x i8] \
+         c\"error: slice index out of range\\0A\\00\"\n",
+    );
+    out.push_str(
+        "@.trap.slicesplit = private unnamed_addr constant [39 x i8] \
+         c\"error: slice splits a UTF-8 character\\0A\\00\"\n\n",
     );
 
     // ---- region / arena runtime (RFC-0004 §4) ---------------------------
@@ -5703,6 +5737,67 @@ impl<'a> Gen<'a> {
             self.emit(format!("{r} = phi i1 [ {eq}, %{cmp_end} ], [ false, %{no_l} ]"));
             return Ok((r, Type::Bool));
         }
+        // slice(s, start, end) -> String (RFC-0046): the byte-range substring.
+        // Validated O(1) — no whole-slice UTF-8 revalidation: bounds are checked,
+        // then the single byte at each cut point must not be a UTF-8 continuation
+        // byte (`(b & 0xC0) == 0x80`, the same test `chars` uses). Reading `s[len]`
+        // (the NUL terminator, 0) is safe and never a continuation byte, so the
+        // whole-string / empty-tail cases fall through. Routed like `concat`:
+        // the copy buffer is region-arena'd inside a `region`, else malloc'd.
+        if name == "slice" {
+            let (s, _) = self.gen_expr(&args[0])?;
+            let (start, _) = self.gen_expr(&args[1])?;
+            let (end, _) = self.gen_expr(&args[2])?;
+            let len = self.fresh_tmp();
+            self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {s})"));
+            // Bounds: start < 0 || end > len || start > end.
+            let c1 = self.fresh_tmp();
+            let c2 = self.fresh_tmp();
+            let c3 = self.fresh_tmp();
+            let o1 = self.fresh_tmp();
+            let oob = self.fresh_tmp();
+            self.emit(format!("{c1} = icmp slt i64 {start}, 0"));
+            self.emit(format!("{c2} = icmp sgt i64 {end}, {len}"));
+            self.emit(format!("{c3} = icmp sgt i64 {start}, {end}"));
+            self.emit(format!("{o1} = or i1 {c1}, {c2}"));
+            self.emit(format!("{oob} = or i1 {o1}, {c3}"));
+            self.trap_if(&oob, "@.trap.sliceoob", "slice.oob");
+            // UTF-8 boundary: neither cut point may land on a continuation byte.
+            let sp = self.fresh_tmp();
+            let bs = self.fresh_tmp();
+            let ms = self.fresh_tmp();
+            let cs = self.fresh_tmp();
+            self.emit(format!("{sp} = getelementptr i8, ptr {s}, i64 {start}"));
+            self.emit(format!("{bs} = load i8, ptr {sp}"));
+            self.emit(format!("{ms} = and i8 {bs}, -64"));
+            self.emit(format!("{cs} = icmp eq i8 {ms}, -128"));
+            let ep = self.fresh_tmp();
+            let be = self.fresh_tmp();
+            let me = self.fresh_tmp();
+            let ce = self.fresh_tmp();
+            self.emit(format!("{ep} = getelementptr i8, ptr {s}, i64 {end}"));
+            self.emit(format!("{be} = load i8, ptr {ep}"));
+            self.emit(format!("{me} = and i8 {be}, -64"));
+            self.emit(format!("{ce} = icmp eq i8 {me}, -128"));
+            let split = self.fresh_tmp();
+            self.emit(format!("{split} = or i1 {cs}, {ce}"));
+            self.trap_if(&split, "@.trap.slicesplit", "slice.split");
+            // Copy the byte range into a fresh NUL-terminated buffer.
+            let sublen = self.fresh_tmp();
+            let tot = self.fresh_tmp();
+            self.emit(format!("{sublen} = sub i64 {end}, {start}"));
+            self.emit(format!("{tot} = add i64 {sublen}, 1"));
+            let buf = self.heap_alloc(&tot);
+            let srcp = self.fresh_tmp();
+            self.emit(format!("{srcp} = getelementptr i8, ptr {s}, i64 {start}"));
+            self.emit(format!(
+                "call void @__vyrn_bytecopy(ptr {buf}, ptr {srcp}, i64 {sublen})"
+            ));
+            let nulp = self.fresh_tmp();
+            self.emit(format!("{nulp} = getelementptr i8, ptr {buf}, i64 {sublen}"));
+            self.emit(format!("store i8 0, ptr {nulp}"));
+            return Ok((buf, Type::Str));
+        }
         // concat(String, String) -> String. Heap-allocated. Routing is decided
         // lexically: inside a `region` the buffer is drawn from the arena (freed
         // when the region exits); outside, it comes from `malloc` and is freed by
@@ -9658,6 +9753,21 @@ mod tests {
         assert!(ir.contains("load i8"), "loads a byte: {ir}");
         assert!(ir.contains("zext i8") && ir.contains("to i64"), "Int64(..) widens: {ir}");
         assert!(ir.contains("@.trap.soob"), "bounds-checked: {ir}");
+    }
+
+    #[test]
+    fn slice_lowers_with_both_traps() {
+        // `slice(s, a, b)` (RFC-0046): bounds + UTF-8 boundary checks, then a
+        // byte copy into a fresh NUL-terminated buffer. Both canonical traps and
+        // the copy helper are present.
+        let src = "fn main() -> Int64 { let s = \"hello\"; let x = slice(s, 1, 3); return 0; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("@.trap.sliceoob"), "out-of-range trap: {ir}");
+        assert!(ir.contains("@.trap.slicesplit"), "mid-codepoint trap: {ir}");
+        assert!(ir.contains("call void @__vyrn_bytecopy"), "byte copy: {ir}");
+        // The O(1) UTF-8 boundary test reuses the continuation-byte mask.
+        assert!(ir.contains("and i8") && ir.contains(", -128"), "boundary check: {ir}");
+        assert!(exit_calls(&ir) > exit_baseline(), "slice emits runtime traps: {ir}");
     }
 
     #[test]

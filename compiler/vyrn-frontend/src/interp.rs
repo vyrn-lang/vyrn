@@ -2188,6 +2188,27 @@ impl<'a> Interp<'a> {
                         (Val::Str(a), Val::Str(b)) => Ok(Val::Bool(a.ends_with(b.as_str()))),
                         _ => Err("endsWith of non-Strings".into()),
                     },
+                    // `slice(s, start, end)` (RFC-0046): the byte-range substring.
+                    // O(1)-validated — an out-of-range offset or a cut inside a
+                    // multi-byte UTF-8 character traps with the canonical wording
+                    // (`is_char_boundary` is the two-continuation-byte check the
+                    // codegen open-codes; both cut points already-valid UTF-8 need
+                    // no whole-slice revalidation). Trap strings mirror the
+                    // `@.trap.slice*` codegen globals, byte-for-byte via the CLI.
+                    "slice" => match (&vals[0], &vals[1], &vals[2]) {
+                        (Val::Str(s), Val::Int(start), Val::Int(end)) => {
+                            let len = s.len() as i64;
+                            if *start < 0 || *end > len || *start > *end {
+                                return Err("slice index out of range".into());
+                            }
+                            let (a, b) = (*start as usize, *end as usize);
+                            if !s.is_char_boundary(a) || !s.is_char_boundary(b) {
+                                return Err("slice splits a UTF-8 character".into());
+                            }
+                            Ok(Val::Str(s[a..b].to_string()))
+                        }
+                        _ => Err("slice of non-String/Int".into()),
+                    },
                     // `bytes` decodes the UTF-8 bytes as UInt8 (RFC-0014 M2);
                     // `chars` the code points as Int64.
                     "bytes" => match &vals[0] {
