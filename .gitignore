@@ -8,6 +8,10 @@ target/
 *.pdb
 # Files written by I/O examples (RFC-0014) — recreated on every run
 examples/data/*.tmp.txt
+# storage.vyrn (RFC-0044) atomic-write artifacts — recreated on every run
+# (`.store.json` targets and their transient `.store.json.tmp` siblings)
+examples/data/*.store.json
+examples/data/*.store.json.tmp
 # Runtime store written by the `examples/bin` pastebin (persistence dogfood) —
 # it is app data, not source; recreated on demand by the running server
 examples/bin/data/

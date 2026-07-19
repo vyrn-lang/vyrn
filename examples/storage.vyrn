@@ -1,0 +1,61 @@
+/// Storage — RFC-0044. Crash-safe persistence over the JSON codec: `writeAtomic`
+/// (temp-then-rename, never tears), `save`/`load`/`loadOr` (typed convenience),
+/// and the three honest load outcomes `Missing`/`Corrupt`/`Loaded`.
+///
+/// Like files.vyrn this runs from `examples/` (wasm gets it preopened via
+/// `wasmtime --dir .`); every artifact is a gitignored `*.store.json` under
+/// `data/`, and `writeAtomic` renames its `.tmp` away, so a normal save leaves no
+/// `.tmp` litter and the example stays re-runnable + three-way byte-identical.
+
+import { writeAtomic } from "std/storage"
+
+/// A tiny persisted document (codable: scalars + String).
+type Config = { version: Int64, name: String }
+
+fn describe(r: LoadResult<Config>) -> String {
+    return match r {
+        Missing => "Missing",
+        Corrupt(issues) => "Corrupt(\{issues.length} issue)",
+        Loaded(c) => "Loaded(v\{c.version} \{c.name})",
+    }
+}
+
+fn main() -> Int64 {
+    let cfg = Config { version: 2, name: "vyrn" }
+
+    // save = toJson + writeAtomic. A successful save leaves the target complete
+    // and NO `.tmp` sibling (the rename moved it into place).
+    print(match save("data/config.store.json", cfg) {
+            Ok(done) => "saved: \{done}",
+            Err(e) => "error: \{e}",
+        })
+
+    // load distinguishes present-and-valid from absent from corrupt.
+    print("present: \{describe(load(Config, "data/config.store.json"))}")
+    print("absent:  \{describe(load(Config, "data/missing.store.json"))}")
+
+    // A hand-corrupted file decodes to Corrupt (never a crash, never Missing).
+    let wrote = match writeAtomic("data/broken.store.json", "{ not json ]") {
+        Ok(done) => "wrote broken: \{done}",
+        Err(e) => "error: \{e}",
+    }
+    print(wrote)
+    print("broken:  \{describe(load(Config, "data/broken.store.json"))}")
+
+    // loadOr collapses Missing/Corrupt to a default in one call.
+    let fallback = Config { version: 0, name: "default" }
+    let picked = loadOr(Config, "data/missing.store.json", fallback)
+    print("loadOr missing -> v\{picked.version} \{picked.name}")
+
+    // The raw string primitive round-trips through an atomic write.
+    let raw = match writeAtomic("data/raw.store.json", "hello atomic") {
+        Ok(done) => "wrote raw: \{done}",
+        Err(e) => "error: \{e}",
+    }
+    print(raw)
+    print(match readFile("data/raw.store.json") {
+            Ok(s) => "read back: \{s}",
+            Err(e) => "error: \{e}",
+        })
+    return 0
+}

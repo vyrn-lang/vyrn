@@ -1,29 +1,26 @@
 /// Persistence: load the store at startup and re-write it after every mutation.
 /// A stateless imported module, so store.vyrn's initializer may call loadStore()
 /// (a module-state initializer may call an imported fn, not a same-module one).
-/// writeFile is truncate-then-write with no atomic rename or fsync, so a crash
-/// mid-write can corrupt the file — which loadStore then degrades to an empty
-/// store, never a crash.
+///
+/// RFC-0044: writes go through `writeAtomic` (temp-then-rename), so a crash
+/// mid-write can no longer tear the file — a reader/next-boot sees the whole old
+/// store or the whole new one. Reads go through `load`, whose three honest
+/// outcomes (`Missing`/`Corrupt`/`Loaded`) replace the hand-rolled
+/// `readFile`+`fromJson` dance and let us keep logging a corrupt file distinctly
+/// from an absent one.
 import { StoreFile } from "./wire"
+import { writeAtomic } from "std/storage"
 
 /// The store file, relative to the process cwd (examples/bin/ under vyrn dev).
 let path = "data/pastes.json"
 
-/// Load the store at startup. A missing or corrupt file yields an empty store and
-/// a logged warning — never a crash.
+/// Load the store at startup. A missing file starts empty silently; a corrupt one
+/// starts empty WITH a warning; a good one loads — never a crash.
 export fn loadStore() -> StoreFile {
-    return match readFile(path) {
-        Ok(text) => parseOrEmpty(text),
-        Err(why) => emptyStore(),
-    }
-}
-
-/// Decode the file, or fall back to an empty store with a warning. fromJson never
-/// traps, so a hand-corrupted file is handled like any decode mismatch.
-fn parseOrEmpty(text: String) -> StoreFile {
-    return match fromJson(StoreFile, text) {
-        Valid(s) => s,
-        Invalid(issues) => warnEmpty(),
+    return match load(StoreFile, path) {
+        Loaded(s) => s,
+        Corrupt(issues) => warnEmpty(),
+        Missing => emptyStore(),
     }
 }
 
@@ -38,10 +35,11 @@ fn warnEmpty() -> StoreFile {
     return emptyStore()
 }
 
-/// Persist the whole store after a mutation. Best-effort: a failed write is
-/// logged and serving continues from memory.
+/// Persist the whole store after a mutation, atomically (RFC-0044): a crash can
+/// never leave a torn file. Best-effort: a failed write is logged and serving
+/// continues from memory (the on-disk store is left untouched).
 export fn saveStore(s: StoreFile) -> Bool {
-    return match writeFile(path, toJson(s)) {
+    return match writeAtomic(path, toJson(s)) {
         Ok(done) => done,
         Err(why) => logFail(why),
     }
