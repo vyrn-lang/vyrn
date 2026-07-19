@@ -831,6 +831,90 @@ fn rfc33_vyx_type_error_publishes_into_the_vyx_buffer() {
     assert_eq!(d0.pointer("/range/start/character").and_then(|c| c.as_i64()), Some(7), "col: {note}");
 }
 
+// ---- RFC-0053: lex errors in generated code reach the `.vyx` buffer -------
+
+/// A `.vyx` whose template expression carries a stray `\` — the character the
+/// LEXER rejects, so the synthesized module never parses at all.
+const RFC53_VYX_BAD: &str = "<script>\n\
+    type Row = { title: String }\n\
+    props { item: Row }\n\
+    </script>\n\
+    <template>\n\
+    <li>{{ item.title\\ }}</li>\n\
+    </template>\n";
+
+/// Like [`read_diags_for`], but skips the empty publishes (a clean file is
+/// republished every analysis so a fixed error clears).
+fn read_nonempty_diags_for(client: &mut LspClient, needle: &str) -> serde_json::Value {
+    loop {
+        let note = read_diags_for(client, needle);
+        let n = note
+            .pointer("/params/diagnostics")
+            .and_then(|d| d.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if n > 0 {
+            return note;
+        }
+    }
+}
+
+/// RFC-0053 §1: a LEX error inside a template expression — which leaves the
+/// synthesized module unparseable — is still published into the `.vyx` buffer at
+/// the expression's line/column, with the generated location kept in the message
+/// as the `emit-gen` breadcrumb. Before RFC-0053 this class of error was adopted
+/// into the ROOT document at line 0 as a dead-end banner string.
+#[test]
+fn rfc53_vyx_lex_error_publishes_into_the_vyx_buffer() {
+    let dir = rfc33_scratch("lex", RFC53_VYX_BAD);
+    let mut client = rfc33_client();
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", RFC33_APP);
+
+    let note = read_nonempty_diags_for(&mut client, "Widget.vyx");
+    let diags = note.pointer("/params/diagnostics").and_then(|d| d.as_array()).expect("diags array");
+    let d0 = &diags[0];
+    let msg = d0.get("message").and_then(|m| m.as_str()).unwrap_or("");
+    assert!(msg.contains("unexpected character"), "carries the lexer message: {msg}");
+    assert!(msg.contains("in generated code"), "keeps the generated breadcrumb: {msg}");
+    // Line 6 (0-based 5), column 8 (0-based 7) — the start of the expression.
+    assert_eq!(d0.pointer("/range/start/line").and_then(|l| l.as_i64()), Some(5), "line: {note}");
+    assert_eq!(d0.pointer("/range/start/character").and_then(|c| c.as_i64()), Some(7), "col: {note}");
+}
+
+/// RFC-0053 §2: an UNSAVED `.vyx` edit re-generates. The fixture on disk is
+/// well-formed and stays untouched; the break is introduced by a `didChange`
+/// overlay only, and the diagnostic must still appear in the `.vyx` buffer —
+/// proving the RFC-0021 gen cache re-verifies its recorded inputs through the
+/// overlay-aware resolver (a keystroke, not a save, drives the squiggle).
+#[test]
+fn rfc53_unsaved_vyx_edit_regenerates_and_squiggles() {
+    let dir = rfc33_scratch("overlay", RFC33_VYX_OK);
+    let vyx_path = dir.join("comp/Widget.vyx");
+    let vyx_uri = file_uri(&vyx_path);
+    let mut client = rfc33_client();
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", RFC33_APP);
+    // The clean analysis wires up `.vyx` ownership.
+    let _ = read_diags_for(&mut client, "Widget.vyx");
+    did_open(&mut client, &vyx_uri, "vyx", RFC33_VYX_OK);
+
+    // Break it in the BUFFER only — disk keeps the good text (asserted below).
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": vyx_uri, "version": 2 },
+            "contentChanges": [{ "text": RFC53_VYX_BAD }]
+        }
+    }));
+
+    let note = read_nonempty_diags_for(&mut client, "Widget.vyx");
+    let diags = note.pointer("/params/diagnostics").and_then(|d| d.as_array()).expect("diags array");
+    let msg = diags[0].get("message").and_then(|m| m.as_str()).unwrap_or("");
+    assert!(msg.contains("unexpected character"), "the unsaved edit re-generated: {msg}");
+    // The file on disk was never written — the diagnostic tracks the buffer.
+    let on_disk = std::fs::read_to_string(&vyx_path).unwrap();
+    assert_eq!(on_disk, RFC33_VYX_OK, "the test must never touch disk");
+}
+
 /// Hover inside a template `{expr}` resolves against the synthesized module:
 /// hovering `item` reports its prop type.
 #[test]
