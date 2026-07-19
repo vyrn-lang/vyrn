@@ -1,10 +1,10 @@
-/// Shared server-side view helpers: the page shell (localized nav) and the page
-/// bodies. Labels come from the live i18n instance via its stateful accessors
-/// (setLocale then tAppTitle), and the home page reads the books store directly to
+/// Shared server-side view helpers: the page bodies (the shell now lives in
+/// routes/layout.vyx, RFC-0041 §1). Labels come from the live i18n instance via its
+/// stateful accessors, and the home page reads the books store directly to
 /// server-render the live list.
 import { el, text, Html, Attr } from "std/html"
 import { i18n } from "std/i18n"
-import { setLocale, locale, Locale, tAppTitle, tAppTagline, tNavHomeLabel, tNavAboutLabel, tShelfCount, tShelfEmpty, tShelfTags, transKey, t } from i18n("./strings")
+import { setLocale, locale, Locale, tAppTagline, tNavHomeLabel, tShelfCount, tShelfEmpty, tShelfTags, transKey, t } from i18n("./strings")
 import { tw } from "std/tw"
 import * as theme from tw("./theme.json")
 import { Book, BookList, TagCounts } from "./wire"
@@ -13,26 +13,6 @@ import { Book, BookList, TagCounts } from "./wire"
 /// a typo in the class string here would fail `vyrn check`.
 fn navLink(href: String, label: String) -> Html {
     return el("a", [A("href", href), theme.cls("mr-2 hover:text-brand-600")], [text(label)])
-}
-
-/// The page chrome around `kids`: the theme stylesheet (`/theme.css`) plus the
-/// small bespoke sheet (`/style.css`), then the localized header + nav. The header
-/// uses theme utilities including a `md:` responsive variant (`md:gap-6`) — proven
-/// members of `Tw`. Reads the ambient `currentLocale` (set via `setLocale`).
-export fn shell(kids: Array<Html>) -> Html {
-    return el("div", [Id("root")], [
-            el("link", [A("rel", "stylesheet"), A("href", "/theme.css")], []),
-            el("link", [A("rel", "stylesheet"), A("href", "/style.css")], []),
-            el("script", [A("type", "module"), A("src", "/vyrn-runtime/vyrn-nav.js")], []),
-            el("header", [theme.cls("flex items-center gap-3 md:gap-6")], [
-                    el("h1", [], [text(tAppTitle())]),
-                    el("nav", [], [
-                            navLink("/", tNavHomeLabel()),
-                            navLink("/about", tNavAboutLabel()),
-                        ]),
-                ]),
-            el("main", [], kids),
-        ])
 }
 
 /// One rendered book row (server-side, static — the client hydrates the
@@ -71,7 +51,7 @@ export fn homePage(list: BookList, tags: TagCounts) -> Html {
     } else {
         body = [el("ul", [Cls("books")], items)]
     }
-    return shell([
+    return el("main", [], [
             el("p", [Cls("sub")], [text(tAppTagline())]),
             el("p", [Cls("count")], [text(tShelfCount(list.books.length))]),
             el("div", [Id("app")], body),
@@ -99,7 +79,7 @@ export fn aboutPage() -> Html {
     setLocale(Uk)
     let ukRows = [pluralRow("uk", 1), pluralRow("uk", 2), pluralRow("uk", 5)]
     setLocale(saved)
-    return shell([
+    return el("main", [], [
             el("h2", [], [text("About")]),
             el("p", [], [text("Shelf is a tiny dogfood app exercising the whole Vyrn UI stack: std/html, std/ui pages, std/rpc, std/i18n, and Map on the wire.")]),
             el("h3", [], [text("CLDR plurals")]),
@@ -129,7 +109,7 @@ export fn detailPage(b: Book) -> Html {
         }
         tagKids.push(el("span", [Cls("tag")], [text(label)]))
     }
-    return shell([
+    return el("main", [], [
             el("p", [], [navLink("/", tNavHomeLabel())]),
             el("h2", [], [text("Book #\{b.id}")]),
             el("div", [Id("book"), theme.cls("p-4 rounded-lg border")], [
