@@ -164,7 +164,11 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
     fn read(&self, resolved: &str) -> Result<String, String> {
         if !vyrn_frontend::loader::is_remote(resolved) {
             // Prefer the open buffer's live text over the on-disk file.
-            if let Some(text) = self.overlays.get(resolved) {
+            // Overlay keys come from `uri_path` (normalized); `resolved` comes
+            // from the loader (original case) — normalize or unsaved edits miss.
+            if let Some(text) =
+                self.overlays.get(&vyrn_frontend::origin::OriginMaps::norm_path_key(resolved))
+            {
                 return Ok(text.clone());
             }
             return std::fs::read_to_string(resolved).map_err(|e| e.to_string());
@@ -240,10 +244,32 @@ fn gen_cache_dir() -> std::path::PathBuf {
     std::path::Path::new(&home).join(".vyrn/cache/gen")
 }
 
+/// Diagnostic trace: append a line to `$VYRN_LSP_LOG`, else
+/// `%TEMP%/vyrn-lsp-debug.log`. Always on and configuration-free so a user can
+/// produce a trace by just opening a file — the editor-integration bugs of
+/// RFC-0047..0050 were all invisible from outside the running editor.
+fn dbg_log(msg: &str) {
+    use std::io::Write;
+    let path = std::env::var("VYRN_LSP_LOG").unwrap_or_else(|_| {
+        let tmp = std::env::var("TEMP")
+            .or_else(|_| std::env::var("TMPDIR"))
+            .unwrap_or_else(|_| ".".into());
+        format!("{tmp}/vyrn-lsp-debug.log")
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{msg}");
+    }
+}
+
 fn main() {
     // `Connection::stdio` sets up the stdin/stdout channels. The server is
     // single-threaded and blocking — no tokio, no I/O threads.
     let (connection, io_threads) = Connection::stdio();
+    dbg_log(&format!(
+        "=== vyrn-lsp start pid={} cwd={:?} ===",
+        std::process::id(),
+        std::env::current_dir().ok()
+    ));
 
     // Run the whole session on a worker thread with a LARGE stack. Analysis of a
     // document with generator imports (RFC-0021/-0033) runs the comptime
@@ -391,10 +417,37 @@ fn main_loop(connection: &Connection, server: &mut Server) {
                 if connection.handle_shutdown(&req).unwrap_or(false) {
                     return;
                 }
+                let m = req.method.clone();
+                let u = request_uri(&req).map(|u| u.to_string()).unwrap_or_default();
+                dbg_log(&format!("REQ  {m} uri={u}"));
                 let resp = handle_request(server, req);
+                let empty = match &resp.result {
+                    None => true,
+                    Some(serde_json::Value::Null) => true,
+                    Some(serde_json::Value::Array(a)) => a.is_empty(),
+                    _ => false,
+                };
+                dbg_log(&format!(
+                    "RESP {m} -> {}{}",
+                    if empty { "EMPTY/null" } else { "ok" },
+                    resp.error.as_ref().map(|e| format!(" ERROR {}", e.message)).unwrap_or_default()
+                ));
                 let _ = connection.sender.send(Message::Response(resp));
             }
             Message::Notification(notif) => {
+                dbg_log(&format!(
+                    "NOTIF {} {}",
+                    notif.method,
+                    notif
+                        .params
+                        .get("textDocument")
+                        .map(|d| format!(
+                            "uri={} languageId={}",
+                            d.get("uri").and_then(|v| v.as_str()).unwrap_or("?"),
+                            d.get("languageId").and_then(|v| v.as_str()).unwrap_or("-")
+                        ))
+                        .unwrap_or_default()
+                ));
                 handle_notification(connection, server, notif);
             }
             Message::Response(_) => {} // we sent no requests; ignore responses
@@ -413,6 +466,12 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
     if let Some(uri) = request_uri(&req) {
         if !is_vyrn_uri(&uri) {
             ensure_vyx_owner(server, &uri);
+            dbg_log(&format!(
+                "  vyx owner for {} => {:?} (ownerless={})",
+                uri.path(),
+                uri_path(&uri).and_then(|p| server.vyx_owner.get(&p)).map(|u| u.to_string()),
+                uri_path(&uri).map(|p| server.vyx_ownerless.contains(&p)).unwrap_or(false)
+            ));
         }
     }
     let server: &Server = server;
@@ -1639,7 +1698,13 @@ fn is_vyrn_uri(uri: &Url) -> bool {
 
 /// The slash path of `uri`, or `None` for a non-file URI.
 fn uri_path(uri: &Url) -> Option<String> {
-    Some(uri.to_file_path().ok()?.to_string_lossy().replace('\\', "/"))
+    // Normalized: VS Code sends a Windows drive letter percent-encoded AND
+    // lower-cased (`file:///n%3A/…`), while origin directives and the loader
+    // carry `N:/…`. Windows paths are case-insensitive but `String` equality is
+    // not, so an un-normalized key made every `.vyx` lookup miss — the bug
+    // behind "hover/Ctrl+Click/colour do nothing in .vyx".
+    let p = uri.to_file_path().ok()?.to_string_lossy().replace('\\', "/");
+    Some(vyrn_frontend::origin::OriginMaps::norm_path_key(&p))
 }
 
 /// The document URI a `textDocument/*` request targets (all such requests carry
@@ -1694,6 +1759,8 @@ fn install_root(
     // Record which inputs this root synthesizes from; a discovered owner clears the
     // negative cache for its inputs (they are owned after all).
     for f in analysis.origins.input_files() {
+        // Normalized to match `uri_path` — see its note (Windows drive-letter case).
+        let f = vyrn_frontend::origin::OriginMaps::norm_path_key(&f);
         server.vyx_ownerless.remove(&f);
         server.vyx_owner.insert(f, root_uri.clone());
     }
@@ -1790,7 +1857,15 @@ fn probe_owner(server: &Server, vyx_path: &str) -> Option<(Url, Analysis)> {
             None => continue,
         };
         let analysis = analyze_doc(&cand, &text, &overlays);
-        if analysis.origins.input_files().iter().any(|f| f == vyx_path) {
+        // Compare normalized: `vyx_path` came from a URI (lower-cased drive on
+        // Windows), the origin paths from the loader (`N:/…`).
+        let want = vyrn_frontend::origin::OriginMaps::norm_path_key(vyx_path);
+        if analysis
+            .origins
+            .input_files()
+            .iter()
+            .any(|f| vyrn_frontend::origin::OriginMaps::norm_path_key(f) == want)
+        {
             return Some((cand, analysis));
         }
     }

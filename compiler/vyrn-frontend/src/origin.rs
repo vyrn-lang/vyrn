@@ -175,16 +175,17 @@ impl OriginMaps {
         true
     }
 
-    /// The input-file regions whose origin file equals `input_file` — the
+    /// The input-file regions whose origin file matches `input_file` — the
     /// forward-mapping index the LSP queries for hover/completion/go-to-def.
     /// Regions are returned with their governed generated line span.
     pub fn regions_for(&self, input_file: &str) -> Vec<Region> {
+        let want = Self::norm_path_key(input_file);
         let mut out = Vec::new();
         for (banner, dirs) in &self.modules {
             let total = self.module_lines.get(banner).copied().unwrap_or(0);
             for (idx, dir) in dirs.iter().enumerate() {
                 let Some(origin) = &dir.origin else { continue };
-                if origin.file != input_file {
+                if Self::norm_path_key(&origin.file) != want {
                     continue;
                 }
                 // The region ends on the line before the next directive's own
@@ -204,6 +205,23 @@ impl OriginMaps {
             }
         }
         out
+    }
+
+    /// Canonical comparison key for a filesystem path.
+    ///
+    /// Origin directives carry paths as the loader resolved them (`N:/lang/…`),
+    /// while an editor supplies them from a URI — and VS Code sends a Windows
+    /// drive letter percent-encoded AND lower-cased (`file:///n%3A/…` →
+    /// `n:/lang/…`). Windows paths are case-insensitive, but string equality is
+    /// not, so every path comparison here MUST go through this or a `.vyx`
+    /// silently resolves to nothing (the RFC-0047..0050 editor bugs).
+    pub fn norm_path_key(p: &str) -> String {
+        let s = p.replace('\\', "/");
+        if cfg!(windows) {
+            s.to_lowercase()
+        } else {
+            s
+        }
     }
 
     /// Every input file referenced by some directive (for the LSP's registry of
