@@ -1090,3 +1090,191 @@ fn rfc42_attribute_and_event_completion() {
     let labels = completion_labels(&mut client, &uri, l, c);
     assert!(labels.contains(&"@click".to_string()), "event @click: {labels:?}");
 }
+
+// ===========================================================================
+// RFC-0047 — semantic tokens + import hover.
+// ===========================================================================
+
+/// The token-type legend order the server registers (see `semantic_tokens_legend`).
+const SEM_TYPES: &[&str] = &[
+    "namespace", "type", "enumMember", "parameter", "variable", "property",
+    "function", "method", "macro", "keyword",
+];
+
+/// One decoded semantic token: absolute 0-based (line, char), length, type name,
+/// modifier bitset.
+#[derive(Debug, Clone)]
+struct SemTok {
+    line: u32,
+    ch: u32,
+    len: u32,
+    ty: String,
+    mods: u32,
+}
+
+/// Request `textDocument/semanticTokens/full` for `uri` and decode the delta
+/// stream into absolute tokens.
+fn semantic_tokens_full(client: &mut LspClient, uri: &str) -> Vec<SemTok> {
+    let id = serde_json::json!("sem_full");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/semanticTokens/full",
+        "params": { "textDocument": { "uri": uri } }
+    }));
+    let resp = client.read_response(&id);
+    let raw: Vec<u32> = resp
+        .pointer("/result/data")
+        .and_then(|d| d.as_array())
+        .expect("semanticTokens result.data")
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u32)
+        .collect();
+    let mut out = Vec::new();
+    let (mut line, mut ch) = (0u32, 0u32);
+    for chunk in raw.chunks(5) {
+        let (dl, ds) = (chunk[0], chunk[1]);
+        if dl == 0 {
+            ch += ds;
+        } else {
+            line += dl;
+            ch = ds;
+        }
+        out.push(SemTok {
+            line,
+            ch,
+            len: chunk[2],
+            ty: SEM_TYPES[chunk[3] as usize].to_string(),
+            mods: chunk[4],
+        });
+    }
+    out
+}
+
+/// The 0-based (line, char) of the first occurrence of `name` on 1-based `line`.
+fn at(src: &str, line: usize, name: &str) -> (u32, u32) {
+    let text = src.lines().nth(line - 1).unwrap_or_else(|| panic!("no line {line}"));
+    let col = text.find(name).unwrap_or_else(|| panic!("`{name}` not on line {line}: {text:?}"));
+    ((line - 1) as u32, col as u32)
+}
+
+/// The type name of the token starting exactly at (line, ch), if classified.
+fn kind_at(toks: &[SemTok], line: u32, ch: u32) -> Option<&str> {
+    toks.iter().find(|t| t.line == line && t.ch == ch).map(|t| t.ty.as_str())
+}
+
+/// RFC-0047 §1: `semanticTokens/full` classifies each identifier by KIND — the
+/// headline being that an import specifier gets its real kind (`greet`→function,
+/// `Color`→type), which TextMate cannot do. Also covers function / type /
+/// parameter / property / variable classification and go-to-def-consistency.
+#[test]
+fn semantic_tokens_classify_by_kind() {
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-sem-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "export fn greet(name: String) -> String {\n    return name\n}\n\
+         export type Color = | Red | Green | Blue\n",
+    )
+    .unwrap();
+    let main_src = "import { greet, Color } from \"./lib\"\n\
+\n\
+type Point = { x: Int64, y: Int64 }\n\
+\n\
+fn dist(p: Point) -> Int64 {\n\
+    return p.x + p.y\n\
+}\n\
+\n\
+fn pick() -> Color {\n\
+    return Green\n\
+}\n\
+\n\
+fn main() -> Int64 {\n\
+    let msg = greet(\"hi\")\n\
+    return dist(Point { x: 1, y: 2 })\n\
+}\n";
+    let root_path = dir.join("main.vyrn");
+    std::fs::write(&root_path, main_src).unwrap();
+    let uri = format!("file:///{}", root_path.to_string_lossy().replace('\\', "/"));
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", main_src);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let toks = semantic_tokens_full(&mut client, &uri);
+    assert!(!toks.is_empty(), "semantic tokens returned");
+
+    // THE headline: import specifiers get their real kind.
+    let (l, c) = at(main_src, 1, "greet");
+    assert_eq!(kind_at(&toks, l, c), Some("function"), "import specifier `greet` → function");
+    let (l, c) = at(main_src, 1, "Color");
+    assert_eq!(kind_at(&toks, l, c), Some("type"), "import specifier `Color` → type");
+
+    // Declarations and uses.
+    let (l, c) = at(main_src, 5, "dist");
+    assert_eq!(kind_at(&toks, l, c), Some("function"), "`dist` decl → function");
+    let (l, c) = at(main_src, 5, "p"); // the parameter `p`
+    assert_eq!(kind_at(&toks, l, c), Some("parameter"), "param `p` → parameter");
+    let (l, c) = at(main_src, 5, "Point"); // annotation
+    assert_eq!(kind_at(&toks, l, c), Some("type"), "`Point` annotation → type");
+
+    // A record-field member access → property (the `x` in `p.x`).
+    let (l, c) = at(main_src, 6, "p.x");
+    assert_eq!(kind_at(&toks, l, c + 2), Some("property"), "`p.x` field → property");
+
+    // A `let` binding → variable; the call target is a function.
+    let (l, c) = at(main_src, 14, "msg");
+    assert_eq!(kind_at(&toks, l, c), Some("variable"), "`let msg` → variable");
+    let (l, c) = at(main_src, 14, "greet");
+    assert_eq!(kind_at(&toks, l, c), Some("function"), "call `greet` → function");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RFC-0047 §2: hover fires at the IMPORT SITE of a specifier (not just the use
+/// site), showing the imported declaration's signature — one resolver, both
+/// positions.
+#[test]
+fn hover_on_import_specifier_shows_signature() {
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-imphover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "export fn greet(name: String) -> String {\n    return name\n}\n",
+    )
+    .unwrap();
+    let main_src = "import { greet } from \"./lib\"\n\nfn main() -> Int64 {\n    return 0\n}\n";
+    let root_path = dir.join("main.vyrn");
+    std::fs::write(&root_path, main_src).unwrap();
+    let uri = format!("file:///{}", root_path.to_string_lossy().replace('\\', "/"));
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", main_src);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    // `greet` inside the import list: line 1, char at "greet".
+    let (l, c) = at(main_src, 1, "greet");
+    let v = hover_value(&mut client, &uri, l, c).expect("hover at import specifier");
+    assert!(v.contains("greet"), "import-site hover shows the signature: {v}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RFC-0047 §1 (`.vyx`): a template `{{ item.title }}` classifies through the
+/// origin map — `item` (a prop) → parameter, `title` (a field) → property.
+#[test]
+fn semantic_tokens_in_vyx_template() {
+    let dir = rfc33_scratch("sem", RFC33_VYX_OK);
+    let mut client = rfc33_client();
+    let app_uri = file_uri(&dir.join("app.vyrn"));
+    let vyx_uri = file_uri(&dir.join("comp/Widget.vyx"));
+    did_open(&mut client, &app_uri, "vyrn", RFC33_APP);
+    let _ = read_diags_for(&mut client, "Widget.vyx"); // ownership wired
+    did_open(&mut client, &vyx_uri, "vyx", RFC33_VYX_OK);
+
+    let toks = semantic_tokens_full(&mut client, &vyx_uri);
+    // `<li>{{ item.title }}` on `.vyx` line 6 (0-based 5): `item` at char 7.
+    assert_eq!(kind_at(&toks, 5, 7), Some("parameter"), "template `item` (prop) → parameter: {toks:?}");
+    // `.title` — the `title` member at char 12.
+    assert_eq!(kind_at(&toks, 5, 12), Some("property"), "template `title` field → property: {toks:?}");
+}

@@ -37,13 +37,16 @@ use lsp_types::{
     DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     InitializeParams, InitializeResult, Location, MarkupContent, MarkupKind, OneOf, Position,
-    PublishDiagnosticsParams, Range, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url,
+    PublishDiagnosticsParams, Range, SemanticToken, SemanticTokenModifier, SemanticTokenType,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
 };
 
 use vyrn_frontend::{
     analyze, class_completions, class_token_hover, completions, member_completions, resolve,
-    string_literal_completions, Analysis, Completion, SymbolKind,
+    string_literal_completions, Analysis, Completion, SemKind, SemMods, SymbolKind,
 };
 
 use templates::VyxCursor;
@@ -309,6 +312,17 @@ fn handle_initialize(connection: &Connection) -> Result<(), ()> {
         // Whole-document formatting (RFC-0017): the handler runs `vyrn_frontend::fmt`
         // and returns one full-range replace. VS Code format-on-save then works.
         document_formatting_provider: Some(OneOf::Left(true)),
+        // Semantic tokens (RFC-0047 §1): the server classifies every identifier
+        // from the cached `Analysis` (function vs type vs variable vs …), which
+        // TextMate cannot distinguish. `full` + `range` are both served.
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
+                work_done_progress_options: Default::default(),
+                legend: semantic_tokens_legend(),
+                range: Some(true),
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+            },
+        )),
         ..Default::default()
     };
     let result = InitializeResult {
@@ -360,6 +374,12 @@ fn handle_request(server: &Server, req: Request) -> Response {
             Response::new_ok(req.id, handle_document_symbol(server, req.params))
         }
         "textDocument/formatting" => Response::new_ok(req.id, handle_formatting(server, req.params)),
+        "textDocument/semanticTokens/full" => {
+            Response::new_ok(req.id, handle_semantic_tokens_full(server, req.params))
+        }
+        "textDocument/semanticTokens/range" => {
+            Response::new_ok(req.id, handle_semantic_tokens_range(server, req.params))
+        }
         _ => Response {
             id: req.id,
             result: None,
@@ -901,6 +921,241 @@ fn whole_document_range(text: &str) -> Range {
         start: Position { line: 0, character: 0 },
         end: Position { line: last_line, character: last_line_len },
     }
+}
+
+// ---------------------------------------------------------------------------
+// Semantic tokens (RFC-0047 §1)
+// ---------------------------------------------------------------------------
+
+/// The token legend advertised in server capabilities. The ORDER of both vecs is
+/// load-bearing: it defines the integer indices the wire encoding uses, so
+/// [`sem_type_index`] / [`sem_mods_bits`] must agree with it.
+fn semantic_tokens_legend() -> SemanticTokensLegend {
+    SemanticTokensLegend {
+        token_types: vec![
+            SemanticTokenType::NAMESPACE,   // 0
+            SemanticTokenType::TYPE,        // 1
+            SemanticTokenType::ENUM_MEMBER, // 2
+            SemanticTokenType::PARAMETER,   // 3
+            SemanticTokenType::VARIABLE,    // 4
+            SemanticTokenType::PROPERTY,    // 5
+            SemanticTokenType::FUNCTION,    // 6
+            SemanticTokenType::METHOD,      // 7
+            SemanticTokenType::MACRO,       // 8
+            SemanticTokenType::KEYWORD,     // 9 (in the legend for §3 parity; not
+                                            //    currently emitted — the grammar
+                                            //    owns keywords)
+        ],
+        token_modifiers: vec![
+            SemanticTokenModifier::DECLARATION,     // bit 0
+            SemanticTokenModifier::READONLY,        // bit 1
+            SemanticTokenModifier::DEFAULT_LIBRARY, // bit 2
+        ],
+    }
+}
+
+/// The legend index of a frontend [`SemKind`]. Must match [`semantic_tokens_legend`].
+fn sem_type_index(k: SemKind) -> u32 {
+    match k {
+        SemKind::Namespace => 0,
+        SemKind::Type => 1,
+        SemKind::EnumMember => 2,
+        SemKind::Parameter => 3,
+        SemKind::Variable => 4,
+        SemKind::Property => 5,
+        SemKind::Function => 6,
+        SemKind::Method => 7,
+        SemKind::Macro => 8,
+    }
+}
+
+/// The modifier bitset for a frontend [`SemMods`]. Must match [`semantic_tokens_legend`].
+fn sem_mods_bits(m: SemMods) -> u32 {
+    let mut b = 0;
+    if m.declaration {
+        b |= 1 << 0;
+    }
+    if m.readonly {
+        b |= 1 << 1;
+    }
+    if m.default_library {
+        b |= 1 << 2;
+    }
+    b
+}
+
+/// `textDocument/semanticTokens/full` (RFC-0047 §1): classify every identifier in
+/// the document. `.vyrn` classifies directly from the cached analysis; `.vyx`
+/// classifies its template/script tokens by mapping through the origin map into
+/// the synthesized module (region-level/unmapped spans stay TextMate-only).
+fn handle_semantic_tokens_full(
+    server: &Server,
+    params: serde_json::Value,
+) -> Option<SemanticTokensResult> {
+    let p: SemanticTokensParams = serde_json::from_value(params).ok()?;
+    let toks = document_sem_tokens(server, &p.text_document.uri)?;
+    Some(SemanticTokensResult::Tokens(encode_tokens(toks)))
+}
+
+/// `textDocument/semanticTokens/range`: the same classification, filtered to the
+/// requested line range (v1 computes the whole document then filters — the
+/// documents are small and the analysis is already cached).
+fn handle_semantic_tokens_range(
+    server: &Server,
+    params: serde_json::Value,
+) -> Option<SemanticTokensRangeResult> {
+    let p: SemanticTokensRangeParams = serde_json::from_value(params).ok()?;
+    let mut toks = document_sem_tokens(server, &p.text_document.uri)?;
+    let start = (p.range.start.line + 1) as usize;
+    let end = (p.range.end.line + 1) as usize;
+    toks.retain(|t| t.line >= start && t.line <= end);
+    Some(SemanticTokensRangeResult::Tokens(encode_tokens(toks)))
+}
+
+/// The classified tokens for `uri`: from the cached analysis for a `.vyrn`
+/// document, or origin-mapped from the synthesized module for a `.vyx` input.
+fn document_sem_tokens(server: &Server, uri: &Url) -> Option<Vec<vyrn_frontend::SemToken>> {
+    if is_vyrn_uri(uri) {
+        let (analysis, _) = lookup(server, uri)?;
+        Some(vyrn_frontend::semantic_tokens(analysis))
+    } else {
+        Some(vyx_semantic_tokens(server, uri))
+    }
+}
+
+/// Delta-encode classified tokens into the LSP wire form. Tokens are sorted by
+/// (line, col) and encoded as the required `[Δline, Δstart, len, type, mods]`
+/// quintuples (0-based positions).
+fn encode_tokens(mut toks: Vec<vyrn_frontend::SemToken>) -> SemanticTokens {
+    toks.sort_by_key(|t| (t.line, t.col));
+    let mut data = Vec::with_capacity(toks.len());
+    let mut prev_line = 0u32;
+    let mut prev_col = 0u32;
+    for t in toks {
+        let line = t.line.saturating_sub(1) as u32;
+        let col = t.col.saturating_sub(1) as u32;
+        let delta_line = line.saturating_sub(prev_line);
+        let delta_start = if delta_line == 0 { col.saturating_sub(prev_col) } else { col };
+        data.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length: t.len as u32,
+            token_type: sem_type_index(t.kind),
+            token_modifiers_bitset: sem_mods_bits(t.mods),
+        });
+        prev_line = line;
+        prev_col = col;
+    }
+    SemanticTokens { result_id: None, data }
+}
+
+/// Classify a `.vyx` input's identifiers by mapping each verbatim origin region
+/// (RFC-0033) back from the synthesized module's classification into the input
+/// file's coordinates (RFC-0047 §1). The synthesized module is analyzed once per
+/// generated module (banner); each region's generated line is scanned for the
+/// tokens that fall inside its verbatim span, which are re-anchored at the
+/// corresponding input columns. Regions that don't align verbatim (derived
+/// spans) contribute nothing, leaving them to the TextMate grammar.
+fn vyx_semantic_tokens(server: &Server, vyx_uri: &Url) -> Vec<vyrn_frontend::SemToken> {
+    let mut out = Vec::new();
+    let Some(vyx_path) = uri_path(vyx_uri) else { return out };
+    let Some(owner) = server.vyx_owner.get(&vyx_path).cloned() else { return out };
+    let Some(owner_analysis) = server.analyses.get(&owner) else { return out };
+    let regions = owner_analysis.origins.regions_for(&vyx_path);
+    if regions.is_empty() {
+        return out;
+    }
+
+    let overlays = overlays_of(server);
+    let Some((opts, resolver, owner_path)) = load_context(&owner, &overlays) else { return out };
+    let Some(owner_text) = server
+        .docs
+        .get(&owner)
+        .cloned()
+        .or_else(|| std::fs::read_to_string(&owner_path).ok())
+    else {
+        return out;
+    };
+    let Some(vyx_text) = server
+        .docs
+        .get(vyx_uri)
+        .cloned()
+        .or_else(|| std::fs::read_to_string(&vyx_path).ok())
+    else {
+        return out;
+    };
+
+    let gen_modules =
+        vyrn_frontend::loader::generated_modules(&owner_text, &owner_path, &opts, &resolver)
+            .unwrap_or_default();
+    let synth_path = synth_path_for(&owner_path);
+
+    // (gen_source, its semantic tokens) cached per generated module banner, so a
+    // module is analyzed and classified at most once regardless of region count.
+    let mut synth_cache: HashMap<String, (String, Vec<vyrn_frontend::SemToken>)> = HashMap::new();
+
+    for region in &regions {
+        let (gen_source, synth_toks) =
+            synth_cache.entry(region.gen_module.clone()).or_insert_with(|| {
+                let gen_source = gen_modules
+                    .iter()
+                    .find(|(b, _)| *b == region.gen_module)
+                    .map(|(_, s)| s.clone())
+                    .unwrap_or_default();
+                let synth = vyrn_frontend::analyze_linked(&gen_source, &synth_path, &opts, &resolver);
+                let toks = vyrn_frontend::semantic_tokens(&synth);
+                (gen_source, toks)
+            });
+
+        let Some(vyx_line) = vyx_text.lines().nth(region.origin.line.saturating_sub(1)) else {
+            continue;
+        };
+        let Some(gen_line) = gen_source.lines().nth(region.gen_start_line.saturating_sub(1)) else {
+            continue;
+        };
+        // Where the verbatim input expression lands in the generated line, and how
+        // long (in chars) the verbatim run is.
+        let Some((gcol, span_len)) = align_expr_span(vyx_line, region.origin.col, gen_line) else {
+            continue;
+        };
+        for st in synth_toks.iter() {
+            // Only tokens on the region's first generated line, wholly inside the
+            // verbatim span, map cleanly back to the input.
+            if st.line != region.gen_start_line || st.col < gcol {
+                continue;
+            }
+            if st.col + st.len > gcol + span_len {
+                continue;
+            }
+            out.push(vyrn_frontend::SemToken {
+                line: region.origin.line,
+                col: region.origin.col + (st.col - gcol),
+                len: st.len,
+                kind: st.kind,
+                mods: st.mods,
+            });
+        }
+    }
+    // Overlapping regions (rare) could double-emit a position; keep one per spot.
+    out.sort_by_key(|t| (t.line, t.col));
+    out.dedup_by_key(|t| (t.line, t.col));
+    out
+}
+
+/// Like [`align_expr`], but also returns the char length of the matched verbatim
+/// run — the longest input tail (from `origin_col`) that occurs in `gen_line`.
+/// `(1-based gen col, matched char length)`, or `None` when nothing aligns.
+fn align_expr_span(vyx_line: &str, origin_col: usize, gen_line: &str) -> Option<(usize, usize)> {
+    let tail: Vec<char> = vyx_line.chars().skip(origin_col.saturating_sub(1)).collect();
+    let mut len = tail.len();
+    while len >= 1 {
+        let cand: String = tail[..len].iter().collect();
+        if let Some(byte_idx) = gen_line.find(&cand) {
+            return Some((gen_line[..byte_idx].chars().count() + 1, len));
+        }
+        len -= 1;
+    }
+    None
 }
 
 /// Map one frontend [`Symbol`](vyrn_frontend::Symbol) to an LSP `DocumentSymbol`.

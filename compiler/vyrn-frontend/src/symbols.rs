@@ -2036,6 +2036,241 @@ fn type_to_string(ty: &Type) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// semantic tokens (RFC-0047 §1)
+// ---------------------------------------------------------------------------
+
+/// The kind an identifier resolves to for semantic highlighting. A superset of
+/// the categories the checker already tracks, mapped 1:1 onto the LSP standard
+/// token-type set by the server (`namespace`/`type`/`enumMember`/`parameter`/
+/// `variable`/`property`/`function`/`method`/`macro`). This is what lets the
+/// editor colour a function call differently from a variable — the distinction
+/// TextMate cannot make without name resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemKind {
+    /// An `import * as ns` binding, or a `ns.` qualifier.
+    Namespace,
+    /// A type or enum name (incl. imported types).
+    Type,
+    /// An enum variant / option-result constructor (`Circle`, `Some`, `Ok`).
+    EnumMember,
+    /// A function parameter.
+    Parameter,
+    /// A `let` / `for`-var local, or module state.
+    Variable,
+    /// A record field accessed as a member.
+    Property,
+    /// A function (definition, call, or imported fn).
+    Function,
+    /// A protocol/builtin method.
+    Method,
+    /// A compiler builtin free function (`toJson`, `slice`, `bytes`, `print`, …)
+    /// — coloured distinctly from user calls.
+    Macro,
+}
+
+/// Semantic-token modifiers, packed into a small struct (the server encodes them
+/// as an LSP bitset). `declaration` marks the defining occurrence; `readonly`
+/// marks a non-`mut` binding; `default_library` marks std / builtins.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SemMods {
+    pub declaration: bool,
+    pub readonly: bool,
+    pub default_library: bool,
+}
+
+/// One classified identifier occurrence (RFC-0047 §1): its 1-based position, its
+/// character length, its [`SemKind`], and its [`SemMods`].
+#[derive(Debug, Clone)]
+pub struct SemToken {
+    pub line: usize,
+    pub col: usize,
+    pub len: usize,
+    pub kind: SemKind,
+    pub mods: SemMods,
+}
+
+/// Compiler builtin *free functions* (not the `x.method()` builtins, which are
+/// handled by [`builtin_method`]). These are reserved call names the checker
+/// lowers inline; colouring them `macro` reads them apart from user functions.
+/// Contextual reserved words (`value`/`list` in a `where` clause) are excluded so
+/// they are never mis-coloured. Kept in sync with the checker's `RESERVED` list.
+static MACRO_BUILTINS: &[&str] = &[
+    "print", "len", "concat", "slice", "bytes", "chars", "hexEncode", "hexDecode",
+    "base64Encode", "base64Decode", "urlEncode", "urlDecode", "args", "readLine",
+    "readFile", "writeFile", "renameFile", "fsyncFile", "readFileBytes",
+    "stringFromBytes", "listDir", "moduleInterface", "schemaOf", "jsonSchema",
+    "toJson", "fromJson", "assert", "assertEq", "cell", "array", "parse", "str",
+];
+
+/// Option / result constructors — builtin enum-like variants, coloured as
+/// `enumMember` (same as user variants).
+static CONSTRUCTOR_BUILTINS: &[&str] = &["Some", "None", "Ok", "Err"];
+
+/// Map a [`SymbolKind`] to the semantic-token [`SemKind`].
+fn sem_of_symbol_kind(k: SymbolKind) -> SemKind {
+    match k {
+        SymbolKind::Function => SemKind::Function,
+        SymbolKind::Type => SemKind::Type,
+        SymbolKind::Variant => SemKind::EnumMember,
+        SymbolKind::Method => SemKind::Method,
+        SymbolKind::Field => SemKind::Property,
+        SymbolKind::Param => SemKind::Parameter,
+        SymbolKind::Local => SemKind::Variable,
+        SymbolKind::Global => SemKind::Variable,
+    }
+}
+
+/// Whether an imported symbol's source file is a std-library module (so it earns
+/// the `defaultLibrary` modifier).
+fn is_std_file(file: &Option<String>) -> bool {
+    file.as_deref().is_some_and(|f| f.contains("/std/") || f.starts_with("std/"))
+}
+
+/// Classify every identifier in the document for semantic highlighting
+/// (RFC-0047 §1). Computed from the already-built [`Analysis`] — no reparse.
+/// Import specifiers resolve to their imported declaration's real kind (so
+/// `import { format, Locale }` yields `format`→function, `Locale`→type), exactly
+/// as go-to-definition does. Tokens that resolve to nothing (keywords, unknown
+/// names) are omitted, leaving them to the TextMate grammar.
+pub fn semantic_tokens(analysis: &Analysis) -> Vec<SemToken> {
+    let mut out = Vec::new();
+    for t in &analysis.tokens {
+        if t.text == "." {
+            continue;
+        }
+        if let Some((kind, mods)) = classify_token(analysis, t) {
+            out.push(SemToken {
+                line: t.line,
+                col: t.col,
+                len: t.end_col.saturating_sub(t.col),
+                kind,
+                mods,
+            });
+        }
+    }
+    out
+}
+
+/// Classify the identifier token covering 1-based `(line, col)`, if any — the
+/// entry point the `.vyx` forward-mapper uses to classify a template token
+/// against a synthesized module's analysis (RFC-0047 §1). Mirrors [`resolve`]'s
+/// precedence exactly, so a semantic colour always agrees with hover.
+pub fn classify_at(analysis: &Analysis, line: usize, col: usize) -> Option<(SemKind, SemMods)> {
+    let tok = analysis
+        .tokens
+        .iter()
+        .find(|t| t.text != "." && t.line == line && col >= t.col && col < t.end_col)?;
+    classify_token(analysis, tok)
+}
+
+/// The classification core: given an identifier [`TokenInfo`], resolve it to a
+/// [`SemKind`] + [`SemMods`] using the same local → namespace → symbol → builtin
+/// precedence as [`resolve`].
+fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemMods)> {
+    let line = tok.line;
+
+    // 1. Local bindings (params / lets / for-vars) shadow everything else.
+    if let Some(fn_line) = enclosing_fn_line(analysis, line) {
+        if let Some(b) = analysis
+            .locals
+            .iter()
+            .filter(|b| b.fn_line == fn_line && b.name == tok.text && b.line <= line)
+            .max_by_key(|b| b.line)
+        {
+            let kind = match b.kind {
+                LocalKind::Param => SemKind::Parameter,
+                LocalKind::Let { .. } | LocalKind::ForVar => SemKind::Variable,
+            };
+            let readonly = matches!(b.kind, LocalKind::Let { mutable: false } | LocalKind::ForVar);
+            let declaration = b.line == tok.line && b.col == tok.col;
+            return Some((kind, SemMods { declaration, readonly, default_library: false }));
+        }
+    }
+
+    // 2. A member access `recv.tok`. First `ns.member` (an in-scope namespace
+    //    qualifier); then a record field on a typed receiver → `property`.
+    if let Some(recv) = receiver_before_dot(analysis, tok.line, tok.col) {
+        let shadowed = enclosing_fn_line(analysis, line).is_some_and(|fl| {
+            analysis
+                .locals
+                .iter()
+                .any(|b| b.fn_line == fl && b.name == recv && b.line <= line)
+        });
+        if !shadowed {
+            if let Some(nsi) = analysis.namespaces.iter().find(|n| n.name == recv) {
+                if let Some(m) = nsi.members.iter().find(|m| m.name == tok.text) {
+                    return Some((
+                        sem_of_symbol_kind(m.kind),
+                        SemMods {
+                            declaration: false,
+                            readonly: false,
+                            default_library: is_std_file(&m.file),
+                        },
+                    ));
+                }
+            }
+        }
+        // A record field on a receiver whose type we can resolve (a typed local /
+        // param). `u.age` → `property`, mirroring member completion.
+        if let Some(ty) = resolve_receiver_type(analysis, tok.line, tok.col) {
+            let is_field = match &ty {
+                Type::Named(n) => analysis
+                    .record_fields
+                    .iter()
+                    .any(|(tn, c)| tn == n && c.label == tok.text),
+                Type::Record(fields) => fields.iter().any(|f| f.name == tok.text),
+                _ => false,
+            };
+            if is_field {
+                return Some((SemKind::Property, SemMods::default()));
+            }
+        }
+    }
+
+    // 3. The namespace binding itself (`ns` in `import * as ns` / `ns.member`).
+    if analysis.namespaces.iter().any(|n| n.name == tok.text) {
+        return Some((SemKind::Namespace, SemMods::default()));
+    }
+
+    // 4. Top-level symbols (open document wins over an imported same-name;
+    //    latest declaration wins) — this is where import specifiers get their
+    //    real kind, since imported decls are indexed with their source file.
+    if let Some(best) = analysis
+        .symbols
+        .iter()
+        .filter(|s| s.name == tok.text)
+        .max_by_key(|s| (s.file.is_none(), s.line))
+    {
+        let declaration = best.file.is_none() && best.line == tok.line && best.col == tok.col;
+        let readonly = best.kind == SymbolKind::Global
+            && best.detail.starts_with("let ")
+            && !best.detail.starts_with("let mut");
+        return Some((
+            sem_of_symbol_kind(best.kind),
+            SemMods { declaration, readonly, default_library: is_std_file(&best.file) },
+        ));
+    }
+
+    // 5. Compiler builtins: free-function intrinsics → macro; option/result
+    //    constructors → enumMember; method builtins (`push`, `info`) → method.
+    if MACRO_BUILTINS.contains(&tok.text.as_str()) {
+        return Some((SemKind::Macro, mods_default_lib()));
+    }
+    if CONSTRUCTOR_BUILTINS.contains(&tok.text.as_str()) {
+        return Some((SemKind::EnumMember, mods_default_lib()));
+    }
+    if builtin_method(&tok.text).is_some() {
+        return Some((SemKind::Method, mods_default_lib()));
+    }
+    None
+}
+
+/// `SemMods` with only `default_library` set (the common builtin shape).
+fn mods_default_lib() -> SemMods {
+    SemMods { declaration: false, readonly: false, default_library: true }
+}
+
+// ---------------------------------------------------------------------------
 // built-in methods (method-call resolution + `.foo` member completion)
 // ---------------------------------------------------------------------------
 
