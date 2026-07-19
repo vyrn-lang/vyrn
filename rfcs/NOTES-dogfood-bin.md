@@ -55,9 +55,13 @@ warning → 404s → clean console.
    Content-addressed ids are UNCHANGED (the pure PRNG is available but ids stay
    hashes). `examples/clock.vyrn` proves the whole surface byte-identical
    three-way. (language gap → closed)
-4. **No bitwise operators → no FNV-1a.** Only `+ - * / %` exist (no `^ & | << >>`),
-   so FNV's `hash ^= byte` is unwritable. Used a polynomial rolling hash
-   (`h = (h*base + byte) % mod`) instead. (language)
+4. **No bitwise operators → no FNV-1a.** ~~Only `+ - * / %` exist (no
+   `^ & | << >>`), so FNV's `hash ^= byte` is unwritable. Used a polynomial
+   rolling hash (`h = (h*base + byte) % mod`) instead.~~ **RESOLVED (RFC-0045):**
+   bitwise operators landed; `std/hash` now provides FNV-1a-64 and bin's
+   `util.fullDigest` uses it (ids re-derived once — content hashes, no
+   migration). Same RFC undid the RFC-0043 `std/random` MINSTD downgrade
+   (now real SplitMix64). (language gap → closed)
 5. **`std/ui` dynamic route segments are Int64-ONLY.** The pages generator hard-codes
    `fromJson(UiRouteInt, …)` and `v0: Int64` for every dynamic segment, so string
    ids (`/p/<base36>`) can't be a page — I hand-dispatched `/p/<id>` and
@@ -364,7 +368,7 @@ but surprising: for a serve app, `main` is a startup hook, not dead code. Either
 | **P1** | **Time as a boundary effect** (host-injected `now()` via `extern`/capability, excluded from `where`/parity) | `created` is a counter, not a timestamp — a pastebin's core field is fake | medium | language + runtime |
 | **P2** | **`std/ui`: String/validated-string route params + loader Response content-type control** | `/p/<id>`, `/raw/<id>` can't be pages (Int64-only, text/html-only) | medium | generator |
 | **P2** | **Randomness / entropy source** (seeded, capability, or store-persisted) for non-content ids | content addressing works but can't mint an unguessable/opaque id | medium | language + runtime |
-| **P2** | **Bitwise operators** (`^ & | << >>`) OR a `std/hash` (FNV/SipHash) | no FNV-1a possible; hand-rolled polynomial hash | small (ops) / medium (lib) | language / library |
+| ~~**P2**~~ **DONE** | ~~**Bitwise operators** (`^ & \| << >>`) OR a `std/hash` (FNV/SipHash)~~ **RFC-0045: both** — bitwise ops landed AND `std/hash` (FNV-1a-64); bin ids use it | ~~no FNV-1a possible; hand-rolled polynomial hash~~ | done | language + library |
 | **P3** | **`UInt8`↔`Int64` ergonomics** (implicit widening in arithmetic, or `UInt8` arithmetic) | every byte op needs `Int64(b)`; can't build a byte from an int | small | language |
 | **P3** | **Derive-able structural copy (`.clone()`) for records** | hand-written `copyPaste`/`snapshot` deep copies | medium | language |
 | **P3** | **`serve`/`dev` should skip `main`** (or document it runs) | a mutating `main` seeded the live store on every restart | small | tooling |
