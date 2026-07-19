@@ -1,4 +1,17 @@
-/// std/strings — string helpers, written in Vyrn itself.
+/// std/strings — string helpers, written in Vyrn itself on the `slice` builtin
+/// (RFC-0046) and `bytes()`. A `String` is UTF-8 bytes; indices and lengths are
+/// BYTE offsets, and `slice` keeps every result on a codepoint boundary (a cut
+/// inside a multi-byte character traps). The case and whitespace helpers are
+/// ASCII-only by necessity — a real Unicode case fold or whitespace class would
+/// need tables this library does not carry; non-ASCII bytes pass through
+/// unchanged, so multi-byte text is never corrupted (documented per function).
+///
+/// The three predicates `s.contains(sub)` / `s.startsWith(sub)` /
+/// `s.endsWith(sub)` are compiler BUILTINS (methods, also callable as free
+/// functions) available everywhere WITHOUT importing this module — so a single
+/// `import { .. } from "std/strings"` plus those builtins covers the surface.
+/// `indexOf`/`lastIndexOf` return an honest `Option<Int64>` (the house idiom —
+/// no `-1` sentinel), `None` when the needle is absent.
 
 /// `s` repeated `n` times ("" for n <= 0).
 export fn repeat(s: String, n: Int64) -> String {
@@ -23,4 +36,288 @@ export fn joinWith(parts: Array<String>, sep: String) -> String {
         i = i + 1
     }
     return out
+}
+
+/// A byte-range substring — a friendly alias of the `slice` builtin. `start`/`end`
+/// are byte offsets; a cut inside a multi-byte UTF-8 character or an out-of-range
+/// offset traps (RFC-0046).
+export fn substring(s: String, start: Int64, end: Int64) -> String {
+    return slice(s, start, end)
+}
+
+/// ASCII whitespace: space, tab, LF, CR. (A Unicode whitespace class is out of
+/// scope — these are the bytes a text/line tool cares about.)
+fn isAsciiSpace(b: UInt8) -> Bool {
+    return b == 32 || b == 9 || b == 10 || b == 13
+}
+
+/// The byte offset of the first occurrence of `needle` in `s`, or `None`. An
+/// empty needle matches at 0. Byte-level search (needle bytes compared against
+/// `s`'s), so it is UTF-8-safe: a match only ever lands on a codepoint boundary
+/// because `needle` is itself valid UTF-8.
+export fn indexOf(s: String, needle: String) -> Option<Int64> {
+    let nl = needle.length
+    if nl == 0 {
+        return Some(0)
+    }
+    if nl > s.length {
+        return None
+    }
+    let mut i = 0
+    while i + nl <= s.length {
+        let mut j = 0
+        while j < nl && s[i + j] == needle[j] {
+            j = j + 1
+        }
+        if j == nl {
+            return Some(i)
+        }
+        i = i + 1
+    }
+    return None
+}
+
+/// The byte offset of the LAST occurrence of `needle` in `s`, or `None`. An empty
+/// needle matches at `s.length`.
+export fn lastIndexOf(s: String, needle: String) -> Option<Int64> {
+    let nl = needle.length
+    if nl == 0 {
+        return Some(s.length)
+    }
+    if nl > s.length {
+        return None
+    }
+    let mut i = s.length - nl
+    while i >= 0 {
+        let mut j = 0
+        while j < nl && s[i + j] == needle[j] {
+            j = j + 1
+        }
+        if j == nl {
+            return Some(i)
+        }
+        i = i - 1
+    }
+    return None
+}
+
+/// Split `s` on every occurrence of `sep`. Adjacent/leading/trailing separators
+/// yield empty segments (like Rust/JS). An EMPTY separator returns `[s]` unsplit:
+/// per-byte "char" splitting would cut multi-byte UTF-8 characters (a `slice`
+/// trap), so it is deliberately not done — iterate codepoints another way if you
+/// need them.
+export fn split(s: String, sep: String) -> Array<String> {
+    let sl = sep.length
+    let mut out: Array<String> = []
+    if sl == 0 {
+        out.push(s)
+        return out
+    }
+    let mut start = 0
+    let mut i = 0
+    while i + sl <= s.length {
+        let mut j = 0
+        while j < sl && s[i + j] == sep[j] {
+            j = j + 1
+        }
+        if j == sl {
+            out.push(slice(s, start, i))
+            start = i + sl
+            i = i + sl
+        } else {
+            i = i + 1
+        }
+    }
+    out.push(slice(s, start, s.length))
+    return out
+}
+
+/// Split `s` into lines on `\n`, stripping a trailing `\r` from each (so a
+/// `\r\n`-delimited file reads exactly like `readLine()`). A trailing newline
+/// does NOT produce a final empty line; a non-empty tail without a newline is
+/// its own line.
+export fn lines(s: String) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut start = 0
+    let mut i = 0
+    while i < s.length {
+        if s[i] == 10 {
+            let mut end = i
+            if end > start && s[end - 1] == 13 {
+                end = end - 1
+            }
+            out.push(slice(s, start, end))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start < s.length {
+        out.push(slice(s, start, s.length))
+    }
+    return out
+}
+
+/// Split `s` on runs of ASCII whitespace, dropping empty segments (leading,
+/// trailing, and repeated whitespace produce no empty elements).
+export fn splitWhitespace(s: String) -> Array<String> {
+    let mut out: Array<String> = []
+    let n = s.length
+    let mut i = 0
+    while i < n {
+        while i < n && isAsciiSpace(s[i]) {
+            i = i + 1
+        }
+        let start = i
+        while i < n && !isAsciiSpace(s[i]) {
+            i = i + 1
+        }
+        if i > start {
+            out.push(slice(s, start, i))
+        }
+    }
+    return out
+}
+
+/// `s` with leading ASCII whitespace removed.
+export fn trimStart(s: String) -> String {
+    let mut a = 0
+    while a < s.length && isAsciiSpace(s[a]) {
+        a = a + 1
+    }
+    return slice(s, a, s.length)
+}
+
+/// `s` with trailing ASCII whitespace removed.
+export fn trimEnd(s: String) -> String {
+    let mut b = s.length
+    while b > 0 && isAsciiSpace(s[b - 1]) {
+        b = b - 1
+    }
+    return slice(s, 0, b)
+}
+
+/// `s` with leading AND trailing ASCII whitespace removed.
+export fn trim(s: String) -> String {
+    let mut a = 0
+    let mut b = s.length
+    while a < b && isAsciiSpace(s[a]) {
+        a = a + 1
+    }
+    while b > a && isAsciiSpace(s[b - 1]) {
+        b = b - 1
+    }
+    return slice(s, a, b)
+}
+
+/// `s` lowercased over ASCII `A`–`Z`. Non-ASCII bytes pass through unchanged (a
+/// real Unicode case fold is out of scope).
+export fn toLower(s: String) -> String {
+    let b = bytes(s)
+    let mut out: Array<UInt8> = []
+    for c in b {
+        if c >= 65 && c <= 90 {
+            out.push(c + 32)
+        } else {
+            out.push(c)
+        }
+    }
+    return match stringFromBytes(out) {
+        Ok(x) => x,
+        Err(e) => s,
+    }
+}
+
+/// `s` uppercased over ASCII `a`–`z`. Non-ASCII bytes pass through unchanged.
+export fn toUpper(s: String) -> String {
+    let b = bytes(s)
+    let mut out: Array<UInt8> = []
+    for c in b {
+        if c >= 97 && c <= 122 {
+            out.push(c - 32)
+        } else {
+            out.push(c)
+        }
+    }
+    return match stringFromBytes(out) {
+        Ok(x) => x,
+        Err(e) => s,
+    }
+}
+
+/// Every non-overlapping occurrence of `from` in `s` replaced with `to`. An empty
+/// `from` returns `s` unchanged.
+export fn replace(s: String, from: String, to: String) -> String {
+    let fl = from.length
+    if fl == 0 {
+        return s
+    }
+    let mut out = ""
+    let mut start = 0
+    let mut i = 0
+    while i + fl <= s.length {
+        let mut j = 0
+        while j < fl && s[i + j] == from[j] {
+            j = j + 1
+        }
+        if j == fl {
+            out = out + slice(s, start, i) + to
+            start = i + fl
+            i = i + fl
+        } else {
+            i = i + 1
+        }
+    }
+    out = out + slice(s, start, s.length)
+    return out
+}
+
+/// `s` left-padded with `fill` to at least `len` BYTES. `fill` should be ASCII
+/// (typically a single character such as `" "` or `"0"`); a multi-byte `fill`
+/// that does not tile the padding width evenly traps on a codepoint boundary.
+/// A `s` already `len` bytes or longer is returned unchanged.
+export fn padStart(s: String, len: Int64, fill: String) -> String {
+    if s.length >= len || fill.length == 0 {
+        return s
+    }
+    let mut pad = ""
+    while pad.length < len - s.length {
+        pad = pad + fill
+    }
+    return slice(pad, 0, len - s.length) + s
+}
+
+/// `s` right-padded with `fill` to at least `len` BYTES (see `padStart` for the
+/// ASCII `fill` note).
+export fn padEnd(s: String, len: Int64, fill: String) -> String {
+    if s.length >= len || fill.length == 0 {
+        return s
+    }
+    let mut pad = ""
+    while pad.length < len - s.length {
+        pad = pad + fill
+    }
+    return s + slice(pad, 0, len - s.length)
+}
+
+/// The lowercase 16-digit hex of a `UInt64` (e.g. a hash fingerprint). Integer
+/// `.toString()` is decimal-only, so hex is built nibble-by-nibble via the
+/// bitwise ops (RFC-0045).
+export fn toHex(n: UInt64) -> String {
+    let db = bytes("0123456789abcdef")
+    let mut out: Array<UInt8> = []
+    let mut sh: UInt64 = 60
+    let mut going = true
+    while going {
+        let nib = (n >> sh) & 15
+        out.push(db[Int64(nib)])
+        if sh == 0 {
+            going = false
+        } else {
+            sh = sh - 4
+        }
+    }
+    return match stringFromBytes(out) {
+        Ok(x) => x,
+        Err(e) => "",
+    }
 }

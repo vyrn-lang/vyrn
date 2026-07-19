@@ -1,0 +1,87 @@
+/// std/strings — the string library (RFC-0046), exercised as a three-way parity
+/// citizen. Every op runs identically under interp, native, and wasm. The tail
+/// of `main` deliberately slices INTO a multi-byte UTF-8 character, so the run
+/// ends in the canonical `error: slice splits a UTF-8 character` trap (exit 1) —
+/// byte-identical across all three backends, the same trap protocol the array
+/// and shift traps use.
+///
+/// Multi-byte UTF-8 (`é` is two bytes) runs through `lines`/`slice`/`indexOf`/
+/// `substring` throughout, proving the byte-offset ops stay codepoint-safe.
+
+import {
+    split,
+    lines,
+    splitWhitespace,
+    trim,
+    trimStart,
+    trimEnd,
+    toLower,
+    toUpper,
+    indexOf,
+    lastIndexOf,
+    replace,
+    padStart,
+    padEnd,
+    substring,
+    repeat,
+    joinWith,
+    toHex,
+} from "std/strings"
+
+/// `Option<Int64>` rendered for the search demos.
+fn showIdx(label: String, o: Option<Int64>) -> Int64 {
+    print(match o {
+            Some(i) => "\{label}: \{i}",
+            None => "\{label}: none",
+        })
+    return 0
+}
+
+fn main() -> Int64 {
+    // ---- split / join --------------------------------------------------------
+    let parts = split("a,b,,c", ",")
+    print("split: \{joinWith(parts, "|")}") // a|b||c
+    print("count: \{parts.length}") // 4
+    print("empty-sep: \{joinWith(split("xyz", ""), "|")}") // xyz (unsplit)
+
+    // ---- lines (\r\n stripped, no trailing empty) ----------------------------
+    let ls = lines("café\r\nrésumé\nlast")
+    print("lines: \{ls.length}") // 3
+    print("line0: \{ls[0]}") // café
+    print("line1: \{ls[1]}") // résumé
+
+    // ---- whitespace ----------------------------------------------------------
+    let ws = splitWhitespace("  the  quick \t brown  ")
+    print("ws: \{joinWith(ws, "-")}") // the-quick-brown
+    print("trim: [\{trim("  hi \t")}]") // [hi]
+    print("trimStart: [\{trimStart("  hi  ")}]") // [hi  ]
+    print("trimEnd: [\{trimEnd("  hi  ")}]") // [  hi]
+
+    // ---- case (ASCII only; é passes through) ---------------------------------
+    print("lower: \{toLower("Café LATTE")}") // café latte
+    print("upper: \{toUpper("Café latte")}") // CAFé LATTE
+
+    // ---- search (Option idiom), on multi-byte text ---------------------------
+    // "héllo wörld": é and ö are each two bytes.
+    let s = "héllo wörld"
+    let x = showIdx("indexOf llo", indexOf(s, "llo")) // byte 3 (h=0, é=1..2, l=3)
+    let y = showIdx("indexOf zzz", indexOf(s, "zzz")) // none
+    let z = showIdx("lastIndexOf l", lastIndexOf("level", "l")) // 4
+
+    // ---- substring / slice on multi-byte text (codepoint-safe) ---------------
+    print("substr: \{substring(s, 3, 6)}") // "llo" (bytes 3..6)
+    print("firstChar: \{substring(s, 0, 1)}") // "h"
+
+    // ---- replace / pad / repeat / hex ---------------------------------------
+    print("replace: \{replace("a.b.c", ".", "/")}") // a/b/c
+    print("padStart: [\{padStart("7", 4, "0")}]") // [0007]
+    print("padEnd: [\{padEnd("7", 4, ".")}]") // [7...]
+    print("repeat: \{repeat("ab", 3)}") // ababab
+    print("hex: \{toHex(255)}") // 00000000000000ff
+
+    // ---- the mid-codepoint trap (canonical wording) --------------------------
+    // Byte 2 is inside `é` (bytes 1..2) — this cut splits a UTF-8 character.
+    print("about to split a codepoint...")
+    print(substring(s, 0, 2))
+    return 0
+}
