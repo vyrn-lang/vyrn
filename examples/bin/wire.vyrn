@@ -13,7 +13,10 @@ export type Body = String where value.length >= 1 && value.length <= 100000
 /// The syntax label — a small finite set; anything else fails validation.
 export type Lang = String where value == "vyrn" || value == "text" || value == "json" || value == "rust" || value == "js" || value == "html"
 
-/// The created stamp: a monotonic sequence number (Vyrn has no clock), not time.
+/// The created stamp: real wall-clock time as Unix epoch milliseconds (RFC-0043
+/// gave Vyrn a clock). Structurally an `Int64`, so it round-trips through the
+/// JSON codec unchanged; `std/time.fromMillis`/`format` render it. `StoreFile`'s
+/// counter reuses the type as a plain monotonic count.
 export type Created = Int64 where value >= 0
 
 /// A stored paste. Every field is validated on every decode boundary.

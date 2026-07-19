@@ -5,6 +5,7 @@
 // The <title> is the paste title, declared in the head block.
 import { getPaste } from "../../contract"
 import { IdReq, Paste } from "../../wire"
+import { format, fromMillis } from "std/time"
 import { PageError, notFound } from "std/ui"
 import { i18n } from "std/i18n"
 import * as t from i18n("../../strings")
@@ -34,7 +35,7 @@ fn pasteTitle(p: Paste) -> String {
     <h2>{{ pasteTitle(data) }}</h2>
     <p class="pmeta">
         <span class="plang">{{ data.lang }}</span>
-        <span class="pwhen">{{ t.binCreated(data.created.toString()) }}</span>
+        <span class="pwhen">{{ t.binCreated(format(fromMillis(data.created))) }}</span>
         <a :href='"/raw/" + data.id' class="rawlink">{{ t.binViewRaw() }}</a>
     </p>
     <pre class="pbody">{{ data.body }}</pre>

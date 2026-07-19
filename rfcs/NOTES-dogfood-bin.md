@@ -39,10 +39,22 @@ warning → 404s → clean console.
    array-element receivers, not just plain variables; `store.pastes.push(p)` is
    restored in `store.vyrn`. (compiler — real bug; see below)
 3. **No clock, no random — `created` is a monotonic counter, not a timestamp.**
-   A real pastebin wants "created 3 minutes ago"; Vyrn has neither wall time nor
+   ~~A real pastebin wants "created 3 minutes ago"; Vyrn has neither wall time nor
    randomness (parity determinism), so `created` is a persisted sequence number
-   and ids are content-addressed. This is the finding we were fishing for.
-   (language, by-design tension)
+   and ids are content-addressed. This is the finding we were fishing for.~~
+   **RESOLVED by RFC-0043 (time & randomness at the host boundary).** Time/random
+   are host INPUTS the parity harness FIXES (`VYRN_FIXED_TIME`/`VYRN_FIXED_SEED`),
+   exactly like `.stdin`/args — so a clock is an effect at the boundary, NOT a
+   break in determinism. `std/time` gives `now()` (an `extern` shim-implemented on
+   every target: native `timespec_get`, wasi `clock_time_get`) plus a PURE UTC
+   breakdown + `format`/`formatIso`; `std/random` gives a pure value-type PRNG
+   with one `randomSeed()` host extern. `Paste.created` is now a real wall-clock
+   `Instant` (epoch millis, stamped `now()` at create, rendered
+   `format(fromMillis(created))` → "created 2023-11-14 22:13:20 UTC"); it
+   round-trips the JSON codec unchanged (still an `Int64`) and survives restart.
+   Content-addressed ids are UNCHANGED (the pure PRNG is available but ids stay
+   hashes). `examples/clock.vyrn` proves the whole surface byte-identical
+   three-way. (language gap → closed)
 4. **No bitwise operators → no FNV-1a.** Only `+ - * / %` exist (no `^ & | << >>`),
    so FNV's `hash ^= byte` is unwritable. Used a polynomial rolling hash
    (`h = (h*base + byte) % mod`) instead. (language)

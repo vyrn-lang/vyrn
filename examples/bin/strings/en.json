@@ -14,7 +14,7 @@
         "raw": "raw",
         "viewRaw": "view raw →",
         "backHome": "← new paste",
-        "created": "paste #{n}",
+        "created": "created {n} UTC",
         "langLabel": "Language",
         "create": "New paste",
         "titleField": "Title (optional)",

@@ -3,6 +3,7 @@
 /// persist.loadStore) and re-persisted in full after every mutation.
 import { PasteId, Paste, Created, CreateReq, IdReq, PasteList, PasteResult, StoreFile } from "./wire"
 import { fullDigest } from "./util"
+import { now, toMillis } from "std/time"
 import * as persist from "./persist"
 
 /// The single source of truth: the paste array + the monotonic counter, loaded
@@ -88,28 +89,24 @@ export fn getPaste(req: IdReq) -> PasteResult {
 }
 
 /// Create a paste (title/body/lang already validated by `fromJson`). Assigns a
-/// content-addressed id and a monotonic `created` sequence number, persists the
-/// whole store, and returns the stored copy. Never `Err` in practice.
+/// content-addressed id, stamps `created` with the real wall clock (RFC-0043
+/// `now()`, epoch millis — persisted as an ordinary `Int64`), persists the whole
+/// store, and returns the stored copy. Never `Err` in practice.
 export fn createPaste(req: CreateReq) -> PasteResult {
-    // counter is a validated Created, so the incremented value must be typed
-    // before assignment.
-    let created: Created = store.counter + 1
+    // A real timestamp now (was a monotonic counter, pre-clock). `now()` is a
+    // host effect — fine in a procedure, forbidden in gen/comptime.
+    let created: Created = toMillis(now())
     let id = deriveId(req.body, req.title)
     store.pastes.push(Paste { id: id, title: req.title, body: req.body, lang: req.lang, created: created })
-    store.counter = created
+    // The counter is now just a total-created tally (no longer the stamp source).
+    // Module-state's validated `Created` field takes an already-typed value.
+    let bumped: Created = store.counter + 1
+    store.counter = bumped
     persist.saveStore(snapshot())
-    return findByCreated(created)
-}
-
-/// Return the paste stamped `c` — a unique Int64, so the just-created paste can
-/// be looked up without reusing a moved-out id String.
-fn findByCreated(c: Int64) -> PasteResult {
-    for p in store.pastes {
-        if p.created == c {
-            return Ok(copyPaste(p))
-        }
-    }
-    return Err("paste vanished after create")
+    // The just-created paste is the one we appended — the last element. (Two
+    // pastes can now share a millisecond, so a `created` scan is no longer a
+    // unique lookup; position is.)
+    return Ok(copyPaste(store.pastes[store.pastes.length - 1]))
 }
 
 /// How many pastes are stored (for the list header count).
