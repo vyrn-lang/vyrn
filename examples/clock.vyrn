@@ -1,0 +1,65 @@
+// Time & randomness at the host boundary (RFC-0043). now(), monotonic() and
+// randomSeed() are host INPUTS — not part of Vyrn's deterministic core — so this
+// file would normally be non-reproducible. It stays an ordinary three-way parity
+// citizen anyway because the harness FIXES the inputs (VYRN_FIXED_TIME /
+// VYRN_FIXED_SEED): interp == native == wasm because every backend reads the
+// same injected millis and seed. Everything else — the UTC calendar breakdown,
+// the formatters, and the whole seeded PRNG — is pure Vyrn, deterministic with
+// no host at all.
+
+import {
+    now,
+    monotonic,
+    format,
+    formatIso,
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    fromMillis,
+    Instant,
+} from "std/time"
+import { seededRng, nextInt, nextInRange, randomSeed, Rng, Draw } from "std/random"
+
+// Print the full UTC breakdown of one instant — the pure computation from epoch
+// millis, identical in every backend.
+fn showFields(label: String, i: Instant) {
+    print("\{label}: \{formatIso(i)}")
+    print("  y=\{year(i)} m=\{month(i)} d=\{day(i)} \{hour(i)}:\{minute(i)}:\{second(i)}")
+}
+
+fn main() -> Int64 {
+    // ---- the host clock (fixed by the harness) -----------------------------
+    let t = now()
+    print("now (human): \{format(t)}")
+    print("now (iso):   \{formatIso(t)}")
+
+    // ---- pure UTC breakdown across a range of instants, incl. a leap day ----
+    showFields("epoch    ", fromMillis(0)) // 1970-01-01T00:00:00Z
+    showFields("leap day ", fromMillis(1709208000000)) // 2024-02-29T12:00:00Z
+    showFields("year end ", fromMillis(1704067199000)) // 2023-12-31T23:59:59Z
+
+    // ---- monotonic: a fixed base + deterministic per-call increment ---------
+    let a = monotonic()
+    let b = monotonic()
+    print("monotonic delta: \{b - a}")
+
+    // ---- a seeded PRNG: pure, deterministic, threaded explicitly ------------
+    let mut rng: Rng = seededRng(42)
+    print("d6 rolls (seed 42):")
+    let mut i = 0
+    while i < 6 {
+        let d = nextInRange(rng, 1, 6)
+        print(d.value)
+        rng = d.rng
+        i = i + 1
+    }
+
+    // ---- a draw seeded from randomSeed() (fixed by the harness) -------------
+    let seeded = seededRng(randomSeed())
+    let first = nextInt(seeded)
+    print("randomSeed-seeded first draw: \{first.value}")
+    return 0
+}

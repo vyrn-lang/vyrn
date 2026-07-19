@@ -6658,6 +6658,57 @@ mod tests {
         assert!(e.contains("isolated (pure)"), "{e}");
     }
 
+    // ---- RFC-0043 time/random effect pins --------------------------------
+    // now()/monotonic()/randomSeed() are host-boundary externs, so the EXISTING
+    // purity analysis (not new machinery) governs where they may appear: they
+    // are host effects. The pure PRNG/formatting — ordinary arithmetic, no
+    // extern — stays usable anywhere, including generators.
+
+    #[test]
+    fn rfc0043_host_clock_extern_is_rejected_in_a_generator() {
+        // A gen fn reaching the clock extern (what `now()` wraps) is not
+        // comptime-pure — pinned via the existing extern rule.
+        let e = check_src(
+            "extern fn hostNowMillis() -> Int64 \
+             fn now() -> Int64 { return hostNowMillis() } \
+             gen fn g() -> String { let t = now() return \"\" } \
+             fn main() -> Int64 { return 0 }",
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("not comptime-pure") && e.contains("extern"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn rfc0043_pure_prng_is_comptime_usable() {
+        // The seeded PRNG is pure arithmetic (MINSTD): a gen fn may use it, so a
+        // reproducible generator is fine — only the host SEED is an effect.
+        let src = "gen fn g() -> String { \
+                     let seed = 42 \
+                     let next = (seed * 48271) % 2147483647 \
+                     return \"\" \
+                   } \
+                   fn main() -> Int64 { return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn rfc0043_spawned_task_calling_the_clock_is_rejected() {
+        // A task calling now()/randomSeed() does host I/O; like print/file I/O it
+        // is not isolated, so `spawn` rejects it (consistent treatment — the RFC
+        // prose's "allowed" is inaccurate: host I/O in a task is forbidden, as
+        // `parallel.vyrn` documents).
+        let e = check_src(
+            "extern fn hostRandomSeed() -> Int64 \
+             fn seed() -> Int64 { return hostRandomSeed() } \
+             fn main() -> Int64 { let t = spawn seed(); return t.join() }",
+        )
+        .unwrap_err();
+        assert!(e.contains("isolated (pure)"), "{e}");
+    }
+
     #[test]
     fn extern_with_body_is_a_parse_error() {
         let toks =

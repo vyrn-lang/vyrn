@@ -51,12 +51,25 @@ fn norm(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n")
 }
 
+/// The fixed clock and seed the harness injects (RFC-0043) so a time/random
+/// example is a byte-identical three-way parity citizen: `now()` returns exactly
+/// these epoch millis and `randomSeed()` this seed, in interp/native/wasm alike
+/// (each backend's shim honors the same env). `1_700_000_000_000` ms is
+/// 2023-11-14T22:13:20Z.
+const FIXED_TIME: &str = "1700000000000";
+const FIXED_SEED: &str = "424242";
+
 /// Run `cmd` with the RFC-0014 I/O conventions: cwd = `examples/` (so relative
 /// paths in examples resolve identically under every backend) and stdin piped
 /// from `examples/<name>.stdin` when that fixture exists, else closed (EOF) —
-/// never inherited, so a `readLine()` example can't hang the harness.
+/// never inherited, so a `readLine()` example can't hang the harness. The
+/// RFC-0043 fixed clock/seed are set for every backend process (native + interp
+/// read them directly; the wasm run additionally forwards them into the guest —
+/// see the `--env` args on the wasmtime command).
 fn run_io(mut cmd: Command, dir: &Path, stdin_fixture: &Path) -> std::process::Output {
     cmd.current_dir(dir);
+    cmd.env("VYRN_FIXED_TIME", FIXED_TIME);
+    cmd.env("VYRN_FIXED_SEED", FIXED_SEED);
     if stdin_fixture.exists() {
         cmd.stdin(std::fs::File::open(stdin_fixture).expect("open stdin fixture"));
     } else {
@@ -189,7 +202,12 @@ fn examples_interp_native_parity() {
             // `examples/` — so WASI file access sees the same tree the other
             // two backends do (wasmtime v46: `--dir <HOST_DIR[::GUEST_DIR]>`).
             let mut wasm_cmd = Command::new(wasmtime);
-            wasm_cmd.arg("run").arg("--dir").arg(".").arg(&module);
+            wasm_cmd.arg("run").arg("--dir").arg(".");
+            // Forward the RFC-0043 fixed clock/seed into the guest: wasmtime does
+            // not inherit host env, so the shim's getenv only sees them via --env.
+            wasm_cmd.arg("--env").arg(format!("VYRN_FIXED_TIME={FIXED_TIME}"));
+            wasm_cmd.arg("--env").arg(format!("VYRN_FIXED_SEED={FIXED_SEED}"));
+            wasm_cmd.arg(&module);
             let w = run_io(wasm_cmd, &dir, &stdin_fixture);
             let (w_out, w_err) = (norm(&w.stdout), norm(&w.stderr));
             let w_code = w.status.code();
