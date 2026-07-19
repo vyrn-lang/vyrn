@@ -36,21 +36,30 @@ rendering). No 4th silent bug surfaced on the string/stdin path — the codec,
 
 ---
 
+> **RESOLVED by RFC-0046** (items 1, 2, 3, 6, 7 below): `std/strings` now ships
+> `split`/`lines`/`splitWhitespace`/`trim*`/`toLower`/`toUpper`/`indexOf`/
+> `lastIndexOf`/`replace`/`padStart`/`padEnd`/`substring`/`toHex` on a new
+> `slice` builtin (O(1)-validated byte-range substring — no `bytes()` +
+> `stringFromBytes` round-trip). Non-exported names are now private to name
+> resolution (item 6). The `s[i]` doc drift is fixed (item 7). vlog dropped all
+> six hand-rolled ops + `padTwo`. Items 4 (block match arms / `if let`) and 5
+> (`std/args`) remain open.
+
 ## TL;DR — top friction items (evidence in one line each)
 
-1. **`std/strings` is nearly empty → six hand-rolled string ops.** substring,
-   split, indexOf, trim, lower/upper case, int→hex all had to be written in the
-   app. This is the clear **#1 next-RFC candidate (`std/strings`)**. (library)
-2. **A byte has no one-character `String` form, so EVERY substring round-trips
-   through `bytes()` + `stringFromBytes`.** `s[i]` is a `UInt8`; there is no
-   `String(byte)` and `"\{s[i]}"` interpolates the *number* (`"97"`), so
-   `sliceStr` must build an `Array<UInt8>` and revalidate it as UTF-8. This makes
-   even a 3-line helper allocate-and-revalidate. (language/library)
-3. **No `split` → `readFile` + a hand-rolled `splitLines`; `readLine()` is the
-   ergonomic path.** The streaming loop needs no splitting (readLine strips
-   `\r?\n` for free); the file path has to dice the whole String on `\n` by hand
-   AND strip a surviving `\r` later via `trim`. Splitting is the headline gap for
-   any file-oriented text tool. (library — `split`/`lines`)
+1. **[RESOLVED — RFC-0046] `std/strings` is nearly empty → six hand-rolled
+   string ops.** substring, split, indexOf, trim, lower/upper case, int→hex all
+   had to be written in the app. Now all in `std/strings`. (library)
+2. **[RESOLVED — RFC-0046] A byte has no one-character `String` form, so EVERY
+   substring round-trips through `bytes()` + `stringFromBytes`.** `s[i]` is a
+   `UInt8`; there is no `String(byte)` and `"\{s[i]}"` interpolates the *number*
+   (`"97"`), so `sliceStr` had to build an `Array<UInt8>` and revalidate it as
+   UTF-8. The `slice` builtin is O(1)-validated and skips the revalidation, so
+   no substring allocates-and-revalidates anymore. (language/library)
+3. **[RESOLVED — RFC-0046] No `split` → `readFile` + a hand-rolled `splitLines`;
+   `readLine()` is the ergonomic path.** `std/strings.lines(s)` strips `\r?\n`
+   per element exactly like `readLine()`, so a file source now shares the
+   streaming pipeline (vlog's `loadLines` uses it). (library — `split`/`lines`)
 4. **`match` arms are expression-only (no statement blocks) + no `if let`/`while
    let` → bool-tagged records to branch a sum type.** Reading stdin, decoding a
    line, and choosing a source each wrap their `Option`/`Validation` in a
@@ -59,13 +68,14 @@ rendering). No 4th silent bug surfaced on the string/stdin path — the codec,
 5. **No arg parser → hand-rolled `getFlag`.** `--flag value` and `--flag=value`
    both work, but only because the app re-derives them from `indexOfByte`/
    `sliceStr`. A tiny `std/args` would erase this. (library, lower priority)
-6. **A module's *private* `fn pad2` still collides across the linked program.**
-   `std/time`'s unexported `pad2` forced me to rename my local `pad2` → `padTwo`
-   (`` `pad2` is defined in both … top-level names must be unique ``). Private
-   helpers are not private to name resolution. (compiler — reported, not fixed)
-7. **Doc drift: `s[i]` is a `UInt8`, but `examples/stringops.vyrn` documents it
-   as `Int64`.** Cost one compile-error round-trip (`==` needs matching scalar
-   operands, found UInt8 and Int64). (docs)
+6. **[RESOLVED — RFC-0046 §3] A module's *private* `fn pad2` still collides
+   across the linked program.** `std/time`'s unexported `pad2` forced me to
+   rename my local `pad2` → `padTwo`. The linker now auto-renames a non-exported
+   decl on a cross-module name collision (nothing can import it by name), so a
+   local may shadow a private std-internal freely. (compiler — fixed)
+7. **[RESOLVED — RFC-0046 §4] Doc drift: `s[i]` is a `UInt8`, but
+   `examples/stringops.vyrn` documented it as `Int64`.** Corrected (`s[i]` is a
+   `UInt8`; `for b in s` iterates `UInt8`). (docs)
 
 Nothing here is a silent-wrong bug; #6 and #7 are the compiler/docs issues, both
 surfaced loudly at compile time.

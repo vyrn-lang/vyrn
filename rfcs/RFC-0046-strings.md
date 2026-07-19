@@ -1,6 +1,6 @@
 # RFC-0046 — `std/strings`: The String Library (+ a `slice` builtin)
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented (as-landed notes at the end)
 - **Depends on:** RFC-0014 (bytes/String — `bytes()`/`stringFromBytes`,
   the UTF-8 invariant), RFC-0007 (string templates), RFC-0045 (bitwise —
   used inside some helpers), RFC-0027/0031 (the name-resolution machinery
@@ -98,3 +98,57 @@ bytes; `slice` + codepoint-aware iteration is the model), locale
 collation, `format`/`printf`-style templating (string templates already
 cover interpolation), a `StringBuilder` (append via `+`/`joinWith` for
 now — revisit only with a measured perf case).
+
+---
+
+## As landed
+
+- **`slice` builtin (§1).** `slice(s: String, start: Int64, end: Int64) ->
+  String`, implemented in checker (signature), interp (`is_char_boundary` —
+  the two-continuation-byte test in one call), and codegen (shared
+  native/wasm IR + a `@__vyrn_bytecopy` runtime helper; the copy buffer is
+  region-arena'd inside a `region`, else `malloc`'d, exactly like `concat`).
+  The O(1) boundary check reads the single byte at each cut point and masks
+  `(b & 0xC0) == 0x80` (the same test `chars` uses); reading `s[len]` is safe
+  (the NUL terminator, never a continuation byte), so whole-string / empty-
+  tail slices fall through. Two traps, single-sourced beside the array-OOB
+  globals: `error: slice index out of range` (start<0 / end>len / start>end,
+  mirroring array OOB) and `error: slice splits a UTF-8 character`.
+  Byte-identical three-way including both trap lines (verified via
+  `examples/strings.vyrn`; parity 73 checked, 0 failed).
+- **Name-privacy fix (§3) — mechanism.** In the loader's `resolve_aliases`,
+  a new pass (right after the namespace-rename pass, before the reference
+  rewrite) mints a `member__fromN` rename for every **non-exported**
+  top-level decl whose name also appears in another module
+  (`name_module_count >= 2`), so `link`'s uniqueness check never sees the
+  clash. `rename_decl_in_module` (pass 3) rewrites the owning module's own
+  references. **Guard:** a name the module *itself imports* is skipped — that
+  is a genuine import-vs-declaration clash the user must resolve, and it
+  still errors (this preserved three existing collision tests). Injected
+  line-0 types are skipped. Pins: two modules with a private same-named
+  helper link cleanly; a local may shadow a private std-internal (`pad2`).
+- **`split` empty-separator decision (§2).** Returns `[s]` (the input
+  unsplit). Per-byte "char" splitting would cut multi-byte UTF-8 (a `slice`
+  trap), and pure Vyrn cannot raise a custom-worded trap (no `panic`/assert
+  outside tests), so the safe, documented no-op was chosen over both listed
+  options.
+- **`indexOf` return idiom (§2).** `Option<Int64>` (`None` when absent), not
+  a `-1` sentinel — matching the house idiom (`parse`, `Map` lookup). Same
+  for `lastIndexOf`.
+- **methods vs functions (§2).** `contains`/`startsWith`/`endsWith` stayed
+  compiler **builtins** (methods via UFCS, also free functions), available
+  everywhere without importing `std/strings`; documented in the module
+  header so one `import { .. } from "std/strings"` plus those builtins
+  covers the surface. `toHex(n: UInt64)` landed here (vlog's fingerprint),
+  not in `std/hash`.
+- **Consumers (§4).** `vlog` dropped all six hand-rolled ops + the private
+  `padTwo` (~110 lines) for `substring`/`indexOf`/`trim`/`toLower`/`toUpper`/
+  `lines`/`padStart`/`toHex`; overview parity byte-identical, 11 tests pass.
+  `shelf/util` collapsed to a `std/strings`-based `splitTrim` (its `sep` is
+  now a `String`); `bin/store`'s `prefixOf` became `substring`.
+  `examples/stringops.vyrn` doc drift (`s[i]` is a `UInt8`) corrected.
+- **No wall.** The privacy fix did not fight the rename machinery — the
+  `member__fromN` mint + `rename_decl_in_module` already did exactly what was
+  needed; the only subtlety was the import-vs-declaration guard. `slice`'s
+  UTF-8 boundary check had no codegen subtlety (the NUL terminator makes the
+  end-of-string read safe without a special case).
