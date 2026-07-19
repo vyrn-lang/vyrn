@@ -1,6 +1,7 @@
 # RFC-0048 — Complete `.vyx` Origins: Script Sections & Real-File Pages
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented (§1–§3 as-landed 2026-07-19; see "As landed")
+- **Status (historical):** Draft (design locked)
 - **Depends on:** RFC-0033 (origin maps — the directive contract this
   completes), RFC-0047 (semantic tokens + import hover — the LSP machinery
   already built to CONSUME these origins), RFC-0039/0041 (the `.vyx`
@@ -110,3 +111,76 @@ injected theme import — no user text there), remote/vendored `.vyx`,
 `.vyx` `<style>` blocks (none yet), inlay hints, and any change to what
 the generators *emit as runtime code* (this RFC only adds comment
 directives + fixes line mapping — zero runtime delta).
+
+---
+
+## As landed (2026-07-19)
+
+Both sections shipped entirely in the generator layer (`std/vyx.vyrn`); the
+LSP binary and `std/ui.vyrn` are **unchanged** (`vyrn-lsp.exe` hash-verified
+equal to a fresh release build of HEAD). The load-bearing invariant held: for
+every `.vyx`-using example (`bin`, `shelf`, `fullstack`), the `emit-gen`
+output with `//@origin` lines stripped is **byte-identical** before and after —
+the only diff is added `//@origin` comment lines. Full three-way parity green,
+926 workspace + 22 LSP tests (2 added), 0 warnings.
+
+**§1 — script-section origins (`std/vyx`).** `vyxParseScript` became a
+position-aware core, `vyxParseScriptAt(ba, sStart, sEnd, …)`, walking the
+`<script>` section over WHOLE-FILE offsets and recording, per copied line, its
+1-based `.vyx` `(line, col)` (first-non-ws anchor):
+
+- **Imports** — `VyxComp` carries `importLines`/`importCols` parallel to
+  `imports`; `vyxMergeImports` emits each merged import bracketed by
+  `//@origin <file>:<line>:<col>` … `//@origin end`. A single-source bucket
+  (the norm, and every page/layout) is verbatim → column-exact; a bucket that
+  UNIONED two components' same-spec imports is derived → emitted origin-less
+  (graceful, per RFC-0033). The import CODE is untouched — only the surrounding
+  comment lines are added — so `import { format, fromMillis } from "std/time"`
+  now hovers/classifies each specifier, and `import * as t` classifies `t` as a
+  namespace.
+- **Helpers** — `helperTexts`/`helperLines`/`helperCols` carry each pass-through
+  helper line; `vyxHelperBlock` brackets each with its own directive, so a
+  helper `fn`/`type` and its body identifiers map back (each line is its own
+  region — the LSP maps a region's first generated line, which for verbatim
+  one-line copies is the line itself).
+- **Prop/param field types** were left origin-less (they are consumed into the
+  synthesized fn signature / synthetic `props` block — generator text — and the
+  money-shot identifiers are all imports/helpers). A future extension.
+
+**§2 — real-file page/layout/error origins (`std/vyx`).** The page/layout/error
+builders gained `*At` variants threading the REAL route-file path
+(`vyxBuildPageModuleAt` / `vyxBuildLayoutModuleAt` / `vyxBuildErrorModuleAt`);
+the `vyxPage`/`vyxLayout`/`vyxError` gen fns pass the `.vyx` path they already
+receive. The compile still goes through the synthetic source (page rendering
+code is byte-identical), but the result is **relocated** onto the real file by
+`vyxRelocateComp`:
+
+- **Template** — the synthetic `<template>` body is a verbatim, newline-aligned
+  copy of the real template at a shifted line, so a single constant
+  `dLine = realTemplateStartLine − synthTemplateStartLine` (columns identical)
+  plus `srcPath = <real file>` makes every template origin land on the real
+  `.vyx` at real coordinates. The AST is line-shifted by `vyxShiftNode`.
+- **Script** — import/helper origins are re-derived from the REAL file
+  (`vyxParseScriptAt` on the real bytes) and matched onto the emitted comp by
+  identity (imports) / content+order (helpers, ignoring a re-added `export `);
+  the error page's injected `PageError` import and any unmatched line stay
+  origin-less. So `routes/index.vyx` / `layout.vyx` now emit origins like
+  `//@origin ./routes/index.vyx:7:1`, and the LSP's `vyx_owner` registry —
+  which auto-derives from `origins.input_files()` — resolves the REAL route file
+  to the generated router module with **no LSP change**. RFC-0042 class
+  completion + Tw hover and RFC-0047 semantic tokens + import hover now fire in
+  pages and layouts (they returned nothing before, when origins pointed at the
+  synthetic `UiPageBody.vyx`).
+
+**§3 — proof.** New LSP e2e tests
+`rfc48_vyx_script_import_hover_and_classification` (script import hover +
+`format`/`fromMillis`→function, `clk`→namespace, helper `shown`→function) and
+`rfc48_page_semantic_tokens_and_class_completion` (a real `routes/index.vyx`:
+non-empty semantic tokens + `format`→function + `p-4` Tw completion). A live
+transcript over `examples/bin` confirms the user's exact positions light up:
+`listPastes`/`format`/`fromMillis`/`i18n` hover with signatures, `t`→namespace,
+`class="mr-2 hover:text-brand-600"` offers Tw completion + CSS hover, and
+`routes/index.vyx` semantic tokens went from 0 to non-empty.
+
+**RFC-0047 walls resolved:** §2 (`.vyx` import hover blocked in the generator)
+and §4 (pages not LSP-wired) are both closed here — see RFC-0047 "As landed".

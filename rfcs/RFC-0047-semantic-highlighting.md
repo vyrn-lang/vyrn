@@ -147,6 +147,10 @@ resolve — those specifiers live in the `.vyx` `<script>` section, which has no
 origin map (above). Fixing it needs `std/vyx` to emit `//@origin` for the script
 region — an emitted-code (generator) change, out of this task's LSP/grammar/
 read-only-frontend scope and under the parity invariant. **Recorded as a wall.**
+**RESOLVED by RFC-0048 §1 (2026-07-19):** `std/vyx` now emits `//@origin` for
+the script region's import + helper lines, so those specifiers (`format`,
+`fromMillis`, `i18n`, `import * as t`, `listPastes`) hover and classify. No LSP
+change was needed — the existing verbatim-region forward map consumes them.
 
 **§3 — Grammar gaps (shipped).**
 - `vyrn.tmLanguage.json`: added a `#contextual-keywords` block colouring `as`
@@ -181,6 +185,12 @@ LSP/grammar/read-only-frontend scope. **Recorded as a wall with options:**
 `vyxBuildPageModule`/`vyxCompileComponent`; (b) additionally emit `//@origin`
 for the script region so import specifiers hover; (c) both, as a dedicated
 follow-up RFC, verified under the parity harness.
+**RESOLVED by RFC-0048 §2 (2026-07-19):** option (c) landed — the page/layout/
+error builders thread the real route-file path and relocate the compiled comp
+(template line-shift + real script origins) onto it, so `routes/index.vyx` /
+`layout.vyx` now get semantic tokens + class completion + import hover. The
+`vyx_owner` registry auto-wires from the new origins with no LSP change; the
+page rendering code is byte-identical (proven via `emit-gen`, parity green).
 
 ## Out of scope
 
