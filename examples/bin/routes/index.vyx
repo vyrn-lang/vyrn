@@ -1,10 +1,14 @@
 <script>
-// GET / — the home page. Helpers read the store through the contract accessors;
-// the browser create-island hydrates #app.
+// GET / — the home page body (the shell now lives in routes/layout.vyx). Helpers
+// read the store through the contract accessors; the browser create-island
+// hydrates #app, booted by the /app.js head include (RFC-0041 §2).
 import { listPastes } from "../contract"
 import { Paste } from "../wire"
 import { i18n } from "std/i18n"
-import { tAppTitle, tAppTagline, tNavHomeLabel, tNavAboutLabel, tBinCount, tBinEmpty, tBinUntitled, tBinCreated, tBinRecent } from i18n("../strings")
+import * as t from i18n("../strings")
+head {
+    module "/app.js"
+}
 
 fn recent() -> Array<Paste> {
     return listPastes().pastes
@@ -16,40 +20,27 @@ fn pasteTally() -> Int64 {
 
 fn shownTitle(p: Paste) -> String {
     if p.title.length == 0 {
-        return tBinUntitled()
+        return t.binUntitled()
     }
     return p.title
 }
 </script>
 
 <template>
-<div id="root">
-    <link rel="stylesheet" href="/theme.css"/>
-    <link rel="stylesheet" href="/style.css"/>
-    <script type="module" src="/vyrn-runtime/vyrn-nav.js"></script>
-    <header class="flex items-center gap-3 md:gap-6">
-        <h1>{{ tAppTitle() }}</h1>
-        <nav>
-            <a href="/" class="mr-2 hover:text-brand-600">{{ tNavHomeLabel() }}</a>
-            <a href="/about" class="mr-2 hover:text-brand-600">{{ tNavAboutLabel() }}</a>
-        </nav>
-    </header>
-    <main>
-        <p class="sub">{{ tAppTagline() }}</p>
-        <div id="app"></div>
-        <script type="module" src="/app.js"></script>
-        <h2>{{ tBinRecent() }}</h2>
-        <p v-if="pasteTally() == 0" class="empty">{{ tBinEmpty() }}</p>
-        <div v-else>
-            <p class="count">{{ tBinCount(pasteTally()) }}</p>
-            <ul class="pastelist">
-                <li class="paste" v-for="p in recent()" :key="p.id">
-                    <a :href='"/p/" + p.id' data-nav="prefetch" class="ptitle">{{ shownTitle(p) }}</a>
-                    <span class="plang">{{ p.lang }}</span>
-                    <span class="pwhen">{{ tBinCreated(p.created.toString()) }}</span>
-                </li>
-            </ul>
-        </div>
-    </main>
-</div>
+<main>
+    <p class="sub">{{ t.appTagline() }}</p>
+    <div id="app"></div>
+    <h2>{{ t.binRecent() }}</h2>
+    <p v-if="pasteTally() == 0" class="empty">{{ t.binEmpty() }}</p>
+    <div v-else>
+        <p class="count">{{ t.binCount(pasteTally()) }}</p>
+        <ul class="pastelist">
+            <li class="paste" v-for="p in recent()" :key="p.id">
+                <a :href='"/p/" + p.id' data-nav="prefetch" class="ptitle">{{ shownTitle(p) }}</a>
+                <span class="plang">{{ p.lang }}</span>
+                <span class="pwhen">{{ t.binCreated(p.created.toString()) }}</span>
+            </li>
+        </ul>
+    </div>
+</main>
 </template>

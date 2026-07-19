@@ -1,0 +1,25 @@
+<script>
+// The app shell, written once (RFC-0041 §1): every page body renders into the
+// <slot/>. The head block (RFC-0041 §2) owns the stylesheets and the nav-runtime
+// module — the plumbing that every page used to repeat.
+import { i18n } from "std/i18n"
+import * as t from i18n("../strings")
+head {
+    stylesheet "/theme.css"
+    stylesheet "/style.css"
+    module "/vyrn-runtime/vyrn-nav.js"
+}
+</script>
+
+<template>
+<div id="root">
+    <header class="flex items-center gap-3 md:gap-6">
+        <h1>{{ t.appTitle() }}</h1>
+        <nav>
+            <a href="/" class="mr-2 hover:text-brand-600">{{ t.navHomeLabel() }}</a>
+            <a href="/about" class="mr-2 hover:text-brand-600">{{ t.navAboutLabel() }}</a>
+        </nav>
+    </header>
+    <slot/>
+</div>
+</template>

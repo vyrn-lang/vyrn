@@ -1,0 +1,42 @@
+<script>
+// GET /p/[id] — the SSR paste view (RFC-0041 §3). A String segment binds the
+// content-addressed id; the loader returns Result<Paste, PageError>, so an unknown
+// id renders the themed error.vyx at 404 instead of a hand-built hyperscript 404.
+// The <title> is the paste title, declared in the head block.
+import { getPaste } from "../../contract"
+import { IdReq, Paste } from "../../wire"
+import { PageError, notFound } from "std/ui"
+import { i18n } from "std/i18n"
+import * as t from i18n("../../strings")
+params { id: String }
+head {
+    title: pasteTitle(data)
+}
+
+fn load(p: Params) -> Result<Paste, PageError> {
+    return match getPaste(IdReq { id: p.id }) {
+        Ok(paste) => Ok(paste),
+        Err(why) => Err(notFound(why)),
+    }
+}
+
+fn pasteTitle(p: Paste) -> String {
+    if p.title.length == 0 {
+        return t.binUntitled()
+    }
+    return p.title
+}
+</script>
+
+<template>
+<main>
+    <p><a href="/" class="mr-2 hover:text-brand-600">{{ t.binBackHome() }}</a></p>
+    <h2>{{ pasteTitle(data) }}</h2>
+    <p class="pmeta">
+        <span class="plang">{{ data.lang }}</span>
+        <span class="pwhen">{{ t.binCreated(data.created.toString()) }}</span>
+        <a :href='"/raw/" + data.id' class="rawlink">{{ t.binViewRaw() }}</a>
+    </p>
+    <pre class="pbody">{{ data.body }}</pre>
+</main>
+</template>
