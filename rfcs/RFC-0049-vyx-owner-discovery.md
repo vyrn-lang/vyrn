@@ -1,6 +1,6 @@
 # RFC-0049 — `.vyx` Owner Discovery & Cached Forward-Mapping (the LSP unblock)
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented (see "As-landed" below)
 - **Depends on:** RFC-0033 (the `vyx_owner` registry + origin forward-map),
   RFC-0047/0048 (semantic tokens + `.vyx` script/page origins — all
   invisible without this), RFC-0042 (`.vyx` completion)
@@ -101,3 +101,114 @@ filesystem for owner changes (discovery is on `.vyx` open/change +
 owner change), analyzing every `.vyrn` in a huge repo eagerly (bounded
 discovery only), inlay hints, and any change to what generators emit
 (RFC-0048 already emits the origins this consumes).
+
+---
+
+## As-landed (Implemented)
+
+LSP-only change (`compiler/vyrn-lsp`, the excluded crate); zero change to
+compilation semantics, emitted code, or parity.
+
+### §1 — Owner discovery (algorithm + bound)
+
+When a `.vyx` with no `vyx_owner` entry is opened/changed
+(`refresh_document` → `discover_vyx_owner`, publishing) OR a hover/
+tokens/def/completion request arrives for one (`handle_request` →
+`ensure_vyx_owner`, non-publishing), the server discovers the owner:
+
+1. **App root** (`app_root_for`): walk up from the `.vyx`'s directory
+   (≤ `MAX_WALK_UP` = 8 levels) to the nearest ancestor with `vyrn.json`;
+   else the nearest ancestor holding a `.vyrn` that imports a
+   directory-consuming generator (`pages`/`pagesThemed`/`components`/
+   `componentsThemed`); else the `.vyx`'s own directory.
+2. **Candidates** (`collect_vyrn` + `candidate_owners`): gather the
+   `.vyrn` files under the app root (recursive, skipping
+   `.*`/`vyrn_vendor`/`target`/`node_modules`/`public`), capped at
+   `MAX_OWNER_CANDIDATES` = 48. Rank by a cheap textual read: a root
+   importing a generator **and** naming the `.vyx`'s directory scores
+   highest (+6), any generator-importing root next (+2), ties broken by
+   path proximity. (For `examples/bin`, this puts `server.vyrn` first for
+   `routes/*.vyx` and `client.vyrn` first for `widgets/*.vyx` — one probe,
+   no wasted generation.)
+3. **Probe** (`probe_owner`): analyze each candidate nearest-first; the
+   owner is the first whose `analysis.origins.input_files()` contains this
+   `.vyx`. Register the whole owner→inputs map in one shot
+   (`install_root`), so sibling `.vyx` under the same root wire up
+   together, and the winning analysis is cached (no second generation —
+   discovery and the first request share it).
+4. **Negative cache** (`vyx_ownerless`): a `.vyx` with no consumer is
+   remembered owner-less so discovery does not re-run per keystroke.
+   Cleared per-file on a `.vyx` (re)open (explicit retry) and wholesale on
+   any `.vyrn` open/change (the project may have gained an owner).
+
+### §2 — Cached synthesized analysis (key + invalidation)
+
+`synth_for(owner, banner)` memoizes the synthesized module's work in
+`Server.synth_cache` (a `RefCell<HashMap<owner_url, OwnerSynth>>`):
+
+- **Level 1** — one `generated_modules(owner)` run per owner, keyed by
+  `owner_sig` = a hash of the owner's text **plus** every open buffer
+  under its directory (the `.vyx`/theme inputs a generator reads). Any
+  edit to the owner or a linked input changes the signature and
+  regenerates; otherwise the generation is reused across all requests.
+- **Level 2** — per generated-module banner, the analyzed synthesized
+  `Analysis` + its semantic tokens, filled lazily and reused. Hover,
+  semantic tokens, definition and completion all go through this one
+  cache (previously each re-ran `generated_modules` + `analyze_linked`
+  **per request**).
+
+### §3 — Go-to-definition through `.vyx`
+
+- A call/type/import specifier resolves through the origin map into the
+  synthesized module, then to the real decl via the RFC-0027/0031
+  cross-file def machinery (e.g. `format` in a page `.vyx` →
+  `std/time.vyrn`). A name resolving only into synthesized glue (no source
+  file) yields no definition rather than a dead synthetic location.
+- A component tag `<Cap>` (`component_tag_definition`, structural, before
+  the forward map) → the sibling `Cap.vyx`.
+- `.vyrn` definition is unchanged and pinned by the existing e2e.
+
+### Verification / perf / hashes
+
+- **New always-on regression guards** (fast scratch apps, open ONLY the
+  `.vyx`): `rfc49_open_only_page_vyx_is_fully_analyzed` (owned via
+  `pagesThemed`, app root via `vyrn.json`) and
+  `rfc49_open_only_component_vyx_is_fully_analyzed` (owned via
+  `componentsThemed`, app root via the generator-import signal). Each
+  asserts hover, non-empty semantic tokens with functions classified as
+  `function`, definition into `std/time`, and Tw class completion.
+- **On-demand live money-shot** (`#[ignore]`d — the harness disables the
+  on-disk gen cache, so the first uncached generation of bin's full
+  `rpc`+`openapi`+`pages`+`tw`+`i18n` stack is slow):
+  `rfc49_live_transcript_examples_bin` opens ONLY
+  `examples/bin/routes/index.vyx` and ONLY `widgets/CreateForm.vyx`. Run:
+  `cargo test -p vyrn-lsp rfc49_live -- --ignored --nocapture`. Observed:
+  - `hover format@7 → fn format(i: Instant) -> String`,
+    `fromMillis → fn fromMillis(n: Int64) -> Instant`,
+    `pasteTally → fn pasteTally() -> Int64`;
+    `tBinCreate → fn tBinCreate() -> String`.
+  - `semanticTokens/full`: 39 tokens (page) / 17 (component), all
+    functions classified `function` (pre-RFC: 0 tokens — owner-less).
+  - `definition format@42 → file:///N:/lang/std/time.vyrn`.
+  - class completion: `["p-0","p-1","p-2","p-3", …]` of 1638 labels.
+- **Perf (§2)**: on the bin page `.vyx`, hover latency **cold 89.8 s → warm
+  0 ms** (gen-cache disabled in the harness; the cold cost is the
+  uncached generator run, which in a real editor is served from the warm
+  gen cache). Before §2 every hover paid the cold cost; after, all but the
+  first hit the in-process cache. (Removing a redundant discovery
+  re-generation cut cold from 141 s → 89.8 s.)
+- **Suite**: workspace 926 passed / 0 failed; LSP e2e 25 passed + 1
+  ignored / 0 failed (was 23); 0 warnings.
+- **Redeploy**: `vyrn-lsp.exe` rebuilt `--release` and hash-verified —
+  fresh == deployed
+  `222ec8bf729981152b75e22d94dac258fb0084d7cb97694103e57c276c6c61cf`.
+
+### Notes / limits
+
+- Discovery is bounded (48 candidates, 8 walk-up levels); a `.vyx`
+  consumed by multiple roots resolves to the highest-ranked owner (page/
+  component roots naming the `.vyx`'s directory win) — no ambiguity in the
+  single-app-root layouts this targets.
+- The §2 signature covers open buffers under the owner's directory; a
+  disk-only edit to an input that is not open is picked up on the next
+  owner/`.vyx` open or change (the editor only tracks open buffers).

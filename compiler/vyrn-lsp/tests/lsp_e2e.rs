@@ -965,6 +965,18 @@ fn hover_value(client: &mut LspClient, uri: &str, line: u32, ch: u32) -> Option<
     resp.pointer("/result/contents/value").and_then(|v| v.as_str()).map(String::from)
 }
 
+/// The target URI of a `textDocument/definition` (a scalar `Location`), or
+/// `None` when the server returns no definition.
+fn definition_target(client: &mut LspClient, uri: &str, line: u32, ch: u32) -> Option<String> {
+    let id = serde_json::json!(format!("d{line}_{ch}"));
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/definition",
+        "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": ch } }
+    }));
+    let resp = client.read_response(&id);
+    resp.pointer("/result/uri").and_then(|u| u.as_str()).map(String::from)
+}
+
 /// Phase A: a `class="…"` token inside a themed `.vyx` offers the `Tw` alphabet
 /// filtered by the token under the cursor — utilities, a safelisted name, and
 /// `md:`/`hover:` variants.
@@ -1452,4 +1464,234 @@ fn rfc48_live_transcript_pagesthemed() {
     assert!(css.contains("margin") || css.contains("brand") || css.contains("#43"), "CSS hover on variant class: {css}");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ===========================================================================
+// RFC-0049 — `.vyx` owner discovery + cached forward-mapping. THE tests every
+// prior `.vyx` test skipped: they open ONLY the `.vyx` (never its owning
+// `.vyrn` first), the normal user action. Before this RFC these returned
+// NOTHING (no owner ⇒ no analysis). Now discovery finds the owner on didOpen.
+// ===========================================================================
+
+/// RFC-0049 §1/§2/§3 on a PAGE `.vyx` (owned via `pagesThemed`): open ONLY
+/// `routes/index.vyx` — its owner `app.vyrn` is never opened — and assert hover,
+/// semantic tokens (functions classified as `function`), go-to-definition (into
+/// the imported `std/time`), and Tw class completion all work. App root found via
+/// `vyrn.json`.
+#[test]
+fn rfc49_open_only_page_vyx_is_fully_analyzed() {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_rfc49page_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("routes")).unwrap();
+    std::fs::write(dir.join("routes/index.vyx"), RFC48_INDEX).unwrap();
+    std::fs::write(dir.join("app.vyrn"), RFC48_PAGE_APP).unwrap();
+    std::fs::write(dir.join("theme.json"), RFC42_THEME).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"p\" }").unwrap();
+
+    let mut client = rfc33_client();
+    let index_uri = file_uri(&dir.join("routes/index.vyx"));
+    // OPEN ONLY THE `.vyx` — the owner `app.vyrn` is never opened.
+    did_open(&mut client, &index_uri, "vyx", RFC48_INDEX);
+
+    // Hover on a script import specifier → its std/time signature (owner
+    // discovered, forward map + synth analysis served from the §2 cache).
+    let (hl, hc) = at(RFC48_INDEX, 2, "format");
+    let v = hover_value(&mut client, &index_uri, hl, hc)
+        .expect("hover works on a standalone-opened page .vyx (owner discovered)");
+    assert!(v.contains("format"), "hover shows the imported signature: {v}");
+
+    // Semantic tokens non-empty and functions classify as `function` (not the
+    // TextMate `variable` fallback the user reported).
+    let toks = semantic_tokens_full(&mut client, &index_uri);
+    assert!(!toks.is_empty(), "standalone page .vyx has semantic tokens (was 0)");
+    let (fl, fc) = at(RFC48_INDEX, 2, "format");
+    assert_eq!(kind_at(&toks, fl, fc), Some("function"), "`format` → function: {toks:?}");
+    let (ml, mc) = at(RFC48_INDEX, 2, "fromMillis");
+    assert_eq!(kind_at(&toks, ml, mc), Some("function"), "`fromMillis` → function: {toks:?}");
+
+    // Go-to-definition on a `format` call → the imported std/time source.
+    let (dl, dc) = at(RFC48_INDEX, 4, "format");
+    let target = definition_target(&mut client, &index_uri, dl, dc)
+        .expect("definition jumps from a standalone page .vyx");
+    assert!(target.contains("time"), "definition lands in std/time: {target}");
+
+    // Tw class completion in the template.
+    let (cl, cc) = pos_after(RFC48_INDEX, "flex p");
+    let labels = completion_labels(&mut client, &index_uri, cl, cc);
+    assert!(labels.contains(&"p-4".to_string()), "class completion on a standalone page: {labels:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `componentsThemed` app + a themed widget importing std/time — used by the
+/// component standalone test. NO `vyrn.json`: discovery finds the app root via the
+/// generator-importing `.vyrn` signal instead.
+const RFC49_COMP_APP: &str = "import { componentsThemed } from \"std/vyx\"\n\
+    import { widget } from componentsThemed(\"./widgets\", \"./theme.json\")\n\
+    fn main() -> Int64 { return 0 }\n";
+const RFC49_WIDGET: &str = "<script>\n\
+    import { format, fromMillis } from \"std/time\"\n\
+    props { label: String }\n\
+    fn shown() -> String { return format(fromMillis(0)) }\n\
+    </script>\n\
+    <template>\n\
+    <section class=\"flex p-4\">{{ shown() }} {{ label }}</section>\n\
+    </template>\n";
+
+/// RFC-0049 §1/§2/§3 on a COMPONENT `.vyx` (owned via `componentsThemed`): open
+/// ONLY `widgets/Widget.vyx`; its owner is discovered via the generator-import
+/// app-root signal (no `vyrn.json`). Same four capabilities asserted.
+#[test]
+fn rfc49_open_only_component_vyx_is_fully_analyzed() {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_rfc49comp_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("widgets")).unwrap();
+    std::fs::write(dir.join("widgets/Widget.vyx"), RFC49_WIDGET).unwrap();
+    std::fs::write(dir.join("app.vyrn"), RFC49_COMP_APP).unwrap();
+    std::fs::write(dir.join("theme.json"), RFC42_THEME).unwrap();
+
+    let mut client = rfc33_client();
+    let widget_uri = file_uri(&dir.join("widgets/Widget.vyx"));
+    // OPEN ONLY THE `.vyx` — the owner `app.vyrn` is never opened.
+    did_open(&mut client, &widget_uri, "vyx", RFC49_WIDGET);
+
+    let (hl, hc) = at(RFC49_WIDGET, 2, "format");
+    let v = hover_value(&mut client, &widget_uri, hl, hc)
+        .expect("hover works on a standalone-opened component .vyx (owner discovered)");
+    assert!(v.contains("format"), "hover shows the imported signature: {v}");
+
+    let toks = semantic_tokens_full(&mut client, &widget_uri);
+    assert!(!toks.is_empty(), "standalone component .vyx has semantic tokens (was 0)");
+    let (fl, fc) = at(RFC49_WIDGET, 2, "format");
+    assert_eq!(kind_at(&toks, fl, fc), Some("function"), "`format` → function: {toks:?}");
+    let (sl, sc) = at(RFC49_WIDGET, 4, "shown");
+    assert_eq!(kind_at(&toks, sl, sc), Some("function"), "helper `shown` def → function: {toks:?}");
+
+    let (dl, dc) = at(RFC49_WIDGET, 4, "format");
+    let target = definition_target(&mut client, &widget_uri, dl, dc)
+        .expect("definition jumps from a standalone component .vyx");
+    assert!(target.contains("time"), "definition lands in std/time: {target}");
+
+    let (cl, cc) = pos_after(RFC49_WIDGET, "flex p");
+    let labels = completion_labels(&mut client, &widget_uri, cl, cc);
+    assert!(labels.contains(&"p-4".to_string()), "class completion on a standalone component: {labels:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RFC-0049 LIVE TRANSCRIPT over the REAL `examples/bin` app — the user's exact
+/// scenario. Opens ONLY `routes/index.vyx` (page, owned by `server.vyrn` via
+/// `pagesThemed`) and ONLY `widgets/CreateForm.vyx` (component, owned by
+/// `client.vyrn` via `componentsThemed`); NEITHER owner is opened. Prints the
+/// hover / token-kind / definition / completion results at the user's positions,
+/// and a cold-vs-warm hover-latency number proving the §2 cache makes it
+/// interactive.
+///
+/// `#[ignore]` — an ON-DEMAND live money-shot over the whole `examples/bin`
+/// stack: the harness disables the on-disk gen cache (`VYRN_NO_GEN_CACHE`), so
+/// the FIRST generation of bin's `rpc`+`openapi`+`pages`+`tw`+`i18n` stack is
+/// very slow (minutes) — in a real editor the gen cache is warm and this is
+/// seconds. The two always-on scratch tests above are the fast regression
+/// guards; run this explicitly for the transcript:
+///   `cargo test -p vyrn-lsp rfc49_live -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn rfc49_live_transcript_examples_bin() {
+    // The repo root is two levels above this crate's manifest dir. Build the path
+    // directly (no `canonicalize`, which on Windows yields a `\\?\` verbatim path
+    // that does not round-trip through a `file://` URI).
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let bin = repo.join("examples").join("bin");
+    assert!(bin.join("vyrn.json").is_file(), "examples/bin exists at {bin:?}");
+    let index_path = bin.join("routes/index.vyx");
+    let form_path = bin.join("widgets/CreateForm.vyx");
+    let index_src = std::fs::read_to_string(&index_path).expect("routes/index.vyx");
+    let form_src = std::fs::read_to_string(&form_path).expect("widgets/CreateForm.vyx");
+    let index_uri = file_uri(&index_path);
+    let form_uri = file_uri(&form_path);
+
+    let mut client = rfc33_client();
+
+    // ---- PAGE: open ONLY routes/index.vyx (server.vyrn never opened) ----------
+    let t_open = std::time::Instant::now();
+    did_open(&mut client, &index_uri, "vyx", &index_src);
+    // First hover: cold (owner discovery already generated once on didOpen; this
+    // is the first synth-analysis of the mapped module).
+    let (fl, fc) = at(&index_src, 7, "format");
+    let cold = std::time::Instant::now();
+    let hf = hover_value(&mut client, &index_uri, fl, fc).unwrap_or("<none>".into());
+    let cold_ms = cold.elapsed().as_millis();
+    // Second identical hover: warm (§2 cache hit — no generator/analyze rerun).
+    let warm = std::time::Instant::now();
+    let _ = hover_value(&mut client, &index_uri, fl, fc);
+    let warm_ms = warm.elapsed().as_millis();
+
+    println!("\n===== RFC-0049 LIVE TRANSCRIPT — examples/bin, opening ONLY the .vyx =====");
+    println!("[PAGE] routes/index.vyx (owner server.vyrn via pagesThemed; NOT opened)");
+    println!("  didOpen+discovery: {} ms", t_open.elapsed().as_millis());
+    println!("  hover format @7 -> {}", hf.replace('\n', " ⏎ "));
+    let (ml, mc) = at(&index_src, 7, "fromMillis");
+    let hm = hover_value(&mut client, &index_uri, ml, mc).unwrap_or("<none>".into());
+    println!("  hover fromMillis @7 -> {}", hm.replace('\n', " ⏎ "));
+    let (pl, pc) = at(&index_src, 18, "pasteTally");
+    let hp = hover_value(&mut client, &index_uri, pl, pc).unwrap_or("<none>".into());
+    println!("  hover pasteTally(def) @18 -> {}", hp.replace('\n', " ⏎ "));
+
+    let itoks = semantic_tokens_full(&mut client, &index_uri);
+    println!("  semanticTokens/full: {} tokens (pre-RFC-0049: 0 — owner-less)", itoks.len());
+    for (label, line, name) in [("format", 7usize, "format"), ("fromMillis", 7, "fromMillis"), ("pasteTally", 18, "pasteTally"), ("recent", 14, "recent")] {
+        let (l, c) = at(&index_src, line, name);
+        println!("  token {label:>11} @{line} -> {:?}", kind_at(&itoks, l, c));
+    }
+
+    let (dl, dc) = at(&index_src, 42, "format");
+    let idef = definition_target(&mut client, &index_uri, dl, dc).unwrap_or("<none>".into());
+    println!("  definition format@42 -> {}", idef);
+
+    let (icl, icc) = pos_after(&index_src, "class=\"");
+    let ilabels = completion_labels(&mut client, &index_uri, icl, icc);
+    let ip: Vec<&String> = ilabels.iter().filter(|s| s.starts_with("p-")).take(4).collect();
+    println!("  class-completion at class=\"| -> {:?} (of {} labels)", ip, ilabels.len());
+    println!("  HOVER LATENCY: cold {cold_ms} ms, warm {warm_ms} ms (§2 synth cache)");
+
+    // ---- COMPONENT: open ONLY widgets/CreateForm.vyx (client.vyrn not opened) --
+    did_open(&mut client, &form_uri, "vyx", &form_src);
+    println!("[COMPONENT] widgets/CreateForm.vyx (owner client.vyrn via componentsThemed; NOT opened)");
+    let (cl, cc) = at(&form_src, 3, "tBinCreate");
+    let hc0 = hover_value(&mut client, &form_uri, cl, cc).unwrap_or("<none>".into());
+    println!("  hover tBinCreate @3 -> {}", hc0.replace('\n', " ⏎ "));
+    let (sl, sc) = at(&form_src, 3, "tBinSave");
+    let hs = hover_value(&mut client, &form_uri, sl, sc).unwrap_or("<none>".into());
+    println!("  hover tBinSave @3 -> {}", hs.replace('\n', " ⏎ "));
+    let ftoks = semantic_tokens_full(&mut client, &form_uri);
+    println!("  semanticTokens/full: {} tokens", ftoks.len());
+    let (tl, tc) = at(&form_src, 3, "tBinCreate");
+    println!("  token tBinCreate @3 -> {:?}", kind_at(&ftoks, tl, tc));
+    let (fcl, fcc) = pos_after(&form_src, "class=\"");
+    let flabels = completion_labels(&mut client, &form_uri, fcl, fcc);
+    let fp: Vec<&String> = flabels.iter().filter(|s| s.starts_with("p-")).take(4).collect();
+    println!("  class-completion at class=\"| -> {:?} (of {} labels)", fp, flabels.len());
+    println!("=========================================================================\n");
+
+    // ---- Headline assertions (guard the user's exact scenario) ----------------
+    assert!(hf.contains("format"), "page: hover on format resolves: {hf}");
+    assert!(!itoks.is_empty(), "page: standalone .vyx has semantic tokens");
+    let (l, c) = at(&index_src, 7, "format");
+    assert_eq!(kind_at(&itoks, l, c), Some("function"), "page: format → function (not variable)");
+    let (l, c) = at(&index_src, 18, "pasteTally");
+    assert_eq!(kind_at(&itoks, l, c), Some("function"), "page: pasteTally def → function");
+    assert!(idef.contains("time"), "page: definition on format → std/time: {idef}");
+    assert!(ilabels.iter().any(|s| s.starts_with("p-")), "page: Tw class completion fires");
+
+    assert!(hc0.contains("tBinCreate"), "component: hover on tBinCreate resolves: {hc0}");
+    assert!(!ftoks.is_empty(), "component: standalone .vyx has semantic tokens");
+    assert_eq!(kind_at(&ftoks, tl, tc), Some("function"), "component: tBinCreate → function");
+    assert!(flabels.iter().any(|s| s.starts_with("p-")), "component: Tw class completion fires");
+    // Warm hover must not be dramatically slower than cold — the cache holds.
+    assert!(warm_ms <= cold_ms + 50, "warm hover ({warm_ms}ms) ≤ cold ({cold_ms}ms)+slack");
 }

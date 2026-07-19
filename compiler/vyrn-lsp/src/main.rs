@@ -21,7 +21,10 @@
 //! `textDocument/publishDiagnostics` whenever a document changes; hover/def/
 //! completion are answered synchronously to each request.
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 mod templates;
 
@@ -254,6 +257,8 @@ fn main() {
                 docs: HashMap::new(),
                 analyses: HashMap::new(),
                 vyx_owner: HashMap::new(),
+                vyx_ownerless: HashSet::new(),
+                synth_cache: RefCell::new(HashMap::new()),
             };
             // `initialize` is a special handshake: read it, reply with
             // capabilities, then enter the main loop. EOF here just means the
@@ -285,8 +290,43 @@ struct Server {
     /// RFC-0033: a generator input file (slash path) → the Vyrn document whose
     /// analysis synthesized a module from it. Lets a `.vyx` request resolve which
     /// root to map through, and a `.vyx` edit know which root to re-analyze.
-    /// Populated whenever a Vyrn document with generator imports is analyzed.
+    /// Populated whenever a Vyrn document with generator imports is analyzed, and
+    /// by RFC-0049 owner discovery when a `.vyx` is opened without its owner.
     vyx_owner: HashMap<String, Url>,
+    /// RFC-0049 §1: `.vyx` files (slash path) for which owner discovery ran and
+    /// found no consuming root (a scratch file). Cached so discovery — which
+    /// analyzes candidate roots — does not re-run on every keystroke/hover. Cleared
+    /// wholesale whenever a `.vyrn` is opened/changed (the project may have gained
+    /// an owner) and per-file on a `.vyx` (re)open (an explicit retry).
+    vyx_ownerless: HashSet<String>,
+    /// RFC-0049 §2: the synthesized-module analysis cache, per owner root. Keyed by
+    /// a content signature (owner text + open inputs under its dir); hover / tokens
+    /// / definition / completion for a `.vyx` reuse it instead of re-running the
+    /// owner's generators and re-analyzing the synthesized module on every request.
+    /// `RefCell` because request handlers hold `&Server` (the server is
+    /// single-threaded, so a borrow never races).
+    synth_cache: RefCell<HashMap<Url, OwnerSynth>>,
+}
+
+/// RFC-0049 §2: one owner root's cached generation + per-module analyses.
+struct OwnerSynth {
+    /// Content signature of the inputs this generation was produced from. A
+    /// mismatch (owner edit, `.vyx`/theme edit) invalidates the whole entry.
+    sig: u64,
+    /// Every synthesized module reachable from the owner, `(banner, gen_source)`
+    /// — the result of one `generated_modules` run, reused across requests.
+    gen_modules: Vec<(String, String)>,
+    /// Per generated-module banner: its analyzed synthesized module + classified
+    /// tokens, filled lazily the first time a request touches that module.
+    analyzed: HashMap<String, Rc<AnalyzedSynth>>,
+}
+
+/// A synthesized module analyzed once and shared (RFC-0049 §2): the source, its
+/// [`Analysis`] (for hover/def/completion) and its semantic tokens.
+struct AnalyzedSynth {
+    gen_source: String,
+    analysis: Analysis,
+    tokens: Vec<vyrn_frontend::SemToken>,
 }
 
 fn handle_initialize(connection: &Connection) -> Result<(), ()> {
@@ -358,7 +398,17 @@ fn main_loop(connection: &Connection, server: &mut Server) {
 /// Dispatch a request to a hover/definition/completion handler, or the
 /// method-not-found fallback. Always produces a `Response` (never leaves the
 /// client waiting on a reply).
-fn handle_request(server: &Server, req: Request) -> Response {
+fn handle_request(server: &mut Server, req: Request) -> Response {
+    // RFC-0049 §1: a `.vyx` request whose owner is not wired yet triggers owner
+    // discovery here too — not only on didOpen — so the first interaction works
+    // even if a request somehow precedes the open's discovery. This path never
+    // publishes diagnostics (no `Connection`); the didOpen path does.
+    if let Some(uri) = request_uri(&req) {
+        if !is_vyrn_uri(&uri) {
+            ensure_vyx_owner(server, &uri);
+        }
+    }
+    let server: &Server = server;
     match req.method.as_str() {
         // `Response::new_ok(id, Option<T>)` is the correct shape for "maybe a
         // result": serde serializes `Some(x)` as the object and `None` as `null`.
@@ -412,9 +462,9 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
         }
     } else {
         let fwd = vyx_forward(server, uri, line, col)?;
-        match resolve(&fwd.synth, fwd.line, fwd.col) {
+        match resolve(&fwd.synth.analysis, fwd.line, fwd.col) {
             Some(r) => r.hover,
-            None => class_token_hover(&fwd.synth, &fwd.gen_source, fwd.line, fwd.col)?,
+            None => class_token_hover(&fwd.synth.analysis, &fwd.synth.gen_source, fwd.line, fwd.col)?,
         }
     };
     Some(Hover {
@@ -438,8 +488,14 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
         let (analysis, u) = lookup(server, uri)?;
         (resolve(analysis, line, col)?, Some(u))
     } else {
+        // RFC-0049 §3: a component tag `<CreateForm>` jumps to the sibling
+        // `CreateForm.vyx` — resolved structurally, before the forward map (the tag
+        // is not an identifier inside the synthesized module).
+        if let Some(loc) = component_tag_definition(server, uri, line, col) {
+            return Some(loc);
+        }
         let fwd = vyx_forward(server, uri, line, col)?;
-        (resolve(&fwd.synth, fwd.line, fwd.col)?, None)
+        (resolve(&fwd.synth.analysis, fwd.line, fwd.col)?, None)
     };
     // A built-in method (e.g. `push`, `info`) resolves for hover but has no source
     // declaration to jump to — return "no definition" rather than a bogus location.
@@ -458,6 +514,67 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
     Some(GotoDefinitionResponse::Scalar(Location {
         uri: target_uri,
         range: lsp_range(r.target_line, r.target_col, r.target_end_col),
+    }))
+}
+
+/// RFC-0049 §3: if the `.vyx` cursor sits on a component tag (`<CreateForm …>` or
+/// `</CreateForm>`), a `GotoDefinition` to the sibling `CreateForm.vyx`. Returns
+/// `None` when the cursor is not on a PascalCase tag or no sibling file exists.
+fn component_tag_definition(
+    server: &Server,
+    uri: &Url,
+    line: usize,
+    col: usize,
+) -> Option<GotoDefinitionResponse> {
+    let raw = server
+        .docs
+        .get(uri)
+        .cloned()
+        .or_else(|| uri_path(uri).and_then(|p| std::fs::read_to_string(p).ok()))?;
+    let text = raw.lines().nth(line.saturating_sub(1))?;
+    let chars: Vec<char> = text.chars().collect();
+    // 0-based cursor index within the line.
+    let cur = col.saturating_sub(1).min(chars.len());
+    // Walk left to the start of the identifier under the cursor.
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut start = cur;
+    while start > 0 && chars.get(start - 1).is_some_and(|&c| is_ident(c)) {
+        start -= 1;
+    }
+    let mut end = cur;
+    while end < chars.len() && chars.get(end).is_some_and(|&c| is_ident(c)) {
+        end += 1;
+    }
+    if start >= end {
+        return None;
+    }
+    // The token must be a PascalCase tag opened by `<` or `</` (skipping a `/`).
+    let before = {
+        let mut i = start;
+        while i > 0 && chars[i - 1] == '/' {
+            i -= 1;
+        }
+        i.checked_sub(1).and_then(|j| chars.get(j)).copied()
+    };
+    if before != Some('<') {
+        return None;
+    }
+    let name: String = chars[start..end].iter().collect();
+    if !name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
+    let (dir, _self_name) = vyx_dir_and_name(uri)?;
+    let sibling = dir.join(format!("{name}.vyx"));
+    if !sibling.is_file() {
+        return None;
+    }
+    let target = Url::from_file_path(&sibling).ok()?;
+    Some(GotoDefinitionResponse::Scalar(Location {
+        uri: target,
+        range: Range {
+            start: Position { line: 0, character: 0 },
+            end: Position { line: 0, character: 0 },
+        },
     }))
 }
 
@@ -529,30 +646,30 @@ fn vyx_completion(server: &Server, uri: &Url, line: usize, col: usize) -> Option
             // The Tw alphabet comes from the synthesized (themed) module via the
             // forward map; a non-themed `.vyx` has no domain and gets nothing.
             let fwd = vyx_forward(server, uri, line, col)?;
-            let cls = class_completions(&fwd.synth, &fwd.gen_source, fwd.line, fwd.col)?;
+            let cls =
+                class_completions(&fwd.synth.analysis, &fwd.synth.gen_source, fwd.line, fwd.col)?;
             Some(class_token_response(&raw, line, start_col, col, cls))
         }
         VyxCursor::Other => {
             let fwd = vyx_forward(server, uri, line, col)?;
+            let gen = &fwd.synth.gen_source;
             // A string literal in the generated code → finite keys or `Tw` classes.
-            if is_string_literal_context(Some(&fwd.gen_source), fwd.line, fwd.col) {
-                if let Some(cls) =
-                    class_completions(&fwd.synth, &fwd.gen_source, fwd.line, fwd.col)
-                {
+            if is_string_literal_context(Some(gen), fwd.line, fwd.col) {
+                if let Some(cls) = class_completions(&fwd.synth.analysis, gen, fwd.line, fwd.col) {
                     // A generated class string reached via `{{ }}` is rare, but map
                     // the token in the .vyx line if present.
                     return Some(class_completion_response(&raw, line, col, cls));
                 }
-                let items = string_literal_completions(&fwd.synth, &fwd.gen_source, fwd.line, fwd.col)
+                let items = string_literal_completions(&fwd.synth.analysis, gen, fwd.line, fwd.col)
                     .into_iter()
                     .map(to_completion_item)
                     .collect();
                 return Some(CompletionResponse::Array(items));
             }
-            let items = if is_member_context(Some(&fwd.gen_source), fwd.line, fwd.col) {
-                member_completions(&fwd.synth, fwd.line, fwd.col)
+            let items = if is_member_context(Some(gen), fwd.line, fwd.col) {
+                member_completions(&fwd.synth.analysis, fwd.line, fwd.col)
             } else {
-                completions(&fwd.synth)
+                completions(&fwd.synth.analysis)
             };
             Some(CompletionResponse::Array(items.into_iter().map(to_completion_item).collect()))
         }
@@ -755,10 +872,9 @@ fn to_completion_item(c: vyrn_frontend::Completion) -> CompletionItem {
 /// The synthesized-module analysis and the generated position an RFC-0033
 /// forward request maps to.
 struct VyxFwd {
-    /// Analysis of the synthesized module (linked under the owner's directory).
-    synth: Analysis,
-    /// The synthesized module's source (for member/string completion context).
-    gen_source: String,
+    /// The cached analyzed synthesized module (RFC-0049 §2): analysis + source +
+    /// tokens, shared across requests until the owner or an input changes.
+    synth: Rc<AnalyzedSynth>,
     /// 1-based generated line/column the input cursor maps to.
     line: usize,
     col: usize,
@@ -789,20 +905,8 @@ fn vyx_forward(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Optio
     }
     let region = region?;
 
-    let overlays = overlays_of(server);
-    let (opts, resolver, owner_path) = load_context(&owner, &overlays)?;
-    let owner_text = server
-        .docs
-        .get(&owner)
-        .cloned()
-        .or_else(|| std::fs::read_to_string(&owner_path).ok())?;
-    // Re-obtain the synthesized module's source (cheap — the gen cache carries
-    // it); find the one this region belongs to.
-    let gen_source = vyrn_frontend::loader::generated_modules(&owner_text, &owner_path, &opts, &resolver)
-        .ok()?
-        .into_iter()
-        .find(|(banner, _)| *banner == region.gen_module)
-        .map(|(_, src)| src)?;
+    // The synthesized module for this region — analyzed once and reused (§2).
+    let synth = synth_for(server, &owner, &region.gen_module)?;
 
     let vyx_text = server
         .docs
@@ -810,15 +914,81 @@ fn vyx_forward(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Optio
         .cloned()
         .or_else(|| std::fs::read_to_string(&vyx_path).ok())?;
     let vyx_line = vyx_text.lines().nth(line.saturating_sub(1))?;
-    let gen_line = gen_source.lines().nth(region.gen_start_line.saturating_sub(1)).unwrap_or("");
+    let gen_line =
+        synth.gen_source.lines().nth(region.gen_start_line.saturating_sub(1)).unwrap_or("");
     let (gline, gcol) = map_into_region(vyx_line, region.origin.col, col, gen_line, region.gen_start_line);
+    Some(VyxFwd { synth, line: gline, col: gcol })
+}
 
+/// The analyzed synthesized module (RFC-0049 §2) for `owner`'s generated module
+/// `banner`, from the cache when the owner's input signature is unchanged, else
+/// generated + analyzed and cached. Returns `None` if the owner can't be read or
+/// the banner isn't among its generated modules.
+fn synth_for(server: &Server, owner: &Url, banner: &str) -> Option<Rc<AnalyzedSynth>> {
+    let overlays = overlays_of(server);
+    let (opts, resolver, owner_path) = load_context(owner, &overlays)?;
+    let owner_text = server
+        .docs
+        .get(owner)
+        .cloned()
+        .or_else(|| std::fs::read_to_string(&owner_path).ok())?;
+    let sig = owner_sig(&owner_text, &owner_path, &overlays);
+
+    let mut cache = server.synth_cache.borrow_mut();
+    let entry = match cache.get(owner) {
+        Some(e) if e.sig == sig => cache.get_mut(owner).unwrap(),
+        _ => {
+            // (Re)generate: the owner or an input changed (or first touch).
+            let gen_modules =
+                vyrn_frontend::loader::generated_modules(&owner_text, &owner_path, &opts, &resolver)
+                    .ok()?;
+            cache.insert(
+                owner.clone(),
+                OwnerSynth { sig, gen_modules, analyzed: HashMap::new() },
+            );
+            cache.get_mut(owner).unwrap()
+        }
+    };
+
+    if let Some(a) = entry.analyzed.get(banner) {
+        return Some(a.clone());
+    }
+    let gen_source =
+        entry.gen_modules.iter().find(|(b, _)| b == banner).map(|(_, s)| s.clone())?;
     // Analyze the synthesized module as a linked root under the owner's dir, so
     // its imports (std/html, rebased relatives) resolve. Its own diagnostics
-    // (e.g. "no main") are ignored — only the symbol index is queried.
+    // (e.g. "no main") are ignored — only the symbol index / tokens are queried.
     let synth_path = synth_path_for(&owner_path);
-    let synth = vyrn_frontend::analyze_linked(&gen_source, &synth_path, &opts, &resolver);
-    Some(VyxFwd { synth, gen_source, line: gline, col: gcol })
+    let analysis = vyrn_frontend::analyze_linked(&gen_source, &synth_path, &opts, &resolver);
+    let tokens = vyrn_frontend::semantic_tokens(&analysis);
+    let a = Rc::new(AnalyzedSynth { gen_source, analysis, tokens });
+    entry.analyzed.insert(banner.to_string(), a.clone());
+    Some(a)
+}
+
+/// A content signature for an owner's generation inputs: the owner's own text
+/// plus every open buffer under its directory (the `.vyx`/theme inputs a
+/// generator reads). Any edit to one changes the signature, invalidating the
+/// cached generation (RFC-0049 §2). Files not open are read from disk at
+/// generation time; the editor only tracks open buffers, so this captures every
+/// input it can influence.
+fn owner_sig(owner_text: &str, owner_path: &str, overlays: &HashMap<String, String>) -> u64 {
+    let dir = match owner_path.rfind('/') {
+        Some(i) => &owner_path[..=i], // keep the trailing slash
+        None => "",
+    };
+    let mut under: Vec<(&String, &String)> = overlays
+        .iter()
+        .filter(|(p, _)| p.as_str() != owner_path && (dir.is_empty() || p.starts_with(dir)))
+        .collect();
+    under.sort_by(|a, b| a.0.cmp(b.0));
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    owner_text.hash(&mut h);
+    for (p, t) in under {
+        p.hash(&mut h);
+        t.hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Map an input-file cursor into a generated line's verbatim text. `origin_col`
@@ -1066,16 +1236,6 @@ fn vyx_semantic_tokens(server: &Server, vyx_uri: &Url) -> Vec<vyrn_frontend::Sem
         return out;
     }
 
-    let overlays = overlays_of(server);
-    let Some((opts, resolver, owner_path)) = load_context(&owner, &overlays) else { return out };
-    let Some(owner_text) = server
-        .docs
-        .get(&owner)
-        .cloned()
-        .or_else(|| std::fs::read_to_string(&owner_path).ok())
-    else {
-        return out;
-    };
     let Some(vyx_text) = server
         .docs
         .get(vyx_uri)
@@ -1085,27 +1245,15 @@ fn vyx_semantic_tokens(server: &Server, vyx_uri: &Url) -> Vec<vyrn_frontend::Sem
         return out;
     };
 
-    let gen_modules =
-        vyrn_frontend::loader::generated_modules(&owner_text, &owner_path, &opts, &resolver)
-            .unwrap_or_default();
-    let synth_path = synth_path_for(&owner_path);
-
-    // (gen_source, its semantic tokens) cached per generated module banner, so a
-    // module is analyzed and classified at most once regardless of region count.
-    let mut synth_cache: HashMap<String, (String, Vec<vyrn_frontend::SemToken>)> = HashMap::new();
-
+    // Each region's synthesized module is fetched from the shared §2 cache, so a
+    // module is generated + analyzed + classified at most once per owner state,
+    // reused across regions AND across hover/def/completion requests.
     for region in &regions {
-        let (gen_source, synth_toks) =
-            synth_cache.entry(region.gen_module.clone()).or_insert_with(|| {
-                let gen_source = gen_modules
-                    .iter()
-                    .find(|(b, _)| *b == region.gen_module)
-                    .map(|(_, s)| s.clone())
-                    .unwrap_or_default();
-                let synth = vyrn_frontend::analyze_linked(&gen_source, &synth_path, &opts, &resolver);
-                let toks = vyrn_frontend::semantic_tokens(&synth);
-                (gen_source, toks)
-            });
+        let Some(synth) = synth_for(server, &owner, &region.gen_module) else {
+            continue;
+        };
+        let gen_source = &synth.gen_source;
+        let synth_toks = &synth.tokens;
 
         let Some(vyx_line) = vyx_text.lines().nth(region.origin.line.saturating_sub(1)) else {
             continue;
@@ -1303,6 +1451,14 @@ fn uri_path(uri: &Url) -> Option<String> {
     Some(uri.to_file_path().ok()?.to_string_lossy().replace('\\', "/"))
 }
 
+/// The document URI a `textDocument/*` request targets (all such requests carry
+/// `textDocument.uri`). Used to trigger lazy `.vyx` owner discovery before the
+/// request is answered (RFC-0049 §1).
+fn request_uri(req: &Request) -> Option<Url> {
+    let s = req.params.pointer("/textDocument/uri")?.as_str()?;
+    Url::parse(s).ok()
+}
+
 /// Every open buffer as `slash-path → text` — the overlay set that makes
 /// generation see unsaved edits (RFC-0033).
 fn overlays_of(server: &Server) -> HashMap<String, String> {
@@ -1326,14 +1482,270 @@ fn reanalyze_root(connection: &Connection, server: &mut Server, root_uri: &Url) 
     };
     let overlays = overlays_of(server);
     let analysis = analyze_doc(root_uri, &text, &overlays);
-    publish(connection, root_uri, &text, &analysis.diagnostics);
-    // Record which inputs this root synthesizes from, and surface each input's
-    // remapped diagnostics inside that input's buffer.
+    install_root(Some(connection), server, root_uri, &text, analysis);
+}
+
+/// Wire an owner root's freshly built `analysis` into the server: record the
+/// ownership of every generator input it reads, cache the analysis, and — when a
+/// `Connection` is given — publish the root's and inputs' diagnostics. Discovery
+/// (RFC-0049) reuses this with `None` to wire an owner without publishing (it did
+/// not originate from an open/change of that root).
+fn install_root(
+    connection: Option<&Connection>,
+    server: &mut Server,
+    root_uri: &Url,
+    text: &str,
+    analysis: Analysis,
+) {
+    if let Some(c) = connection {
+        publish(c, root_uri, text, &analysis.diagnostics);
+    }
+    // Record which inputs this root synthesizes from; a discovered owner clears the
+    // negative cache for its inputs (they are owned after all).
     for f in analysis.origins.input_files() {
+        server.vyx_ownerless.remove(&f);
         server.vyx_owner.insert(f, root_uri.clone());
     }
-    publish_remapped(connection, &analysis);
+    if let Some(c) = connection {
+        publish_remapped(c, &analysis);
+    }
+    // A re-analysis of this owner invalidates any cached generation for it.
+    server.synth_cache.borrow_mut().remove(root_uri);
     server.analyses.insert(root_uri.clone(), analysis);
+}
+
+// ---------------------------------------------------------------------------
+// RFC-0049 §1 — `.vyx` owner discovery.
+//
+// A `.vyx` opened directly (the normal user action) has no `vyx_owner` entry
+// until its owning `.vyrn` is analyzed. Discovery finds that owner from the
+// `.vyx`'s path: locate the app root, rank the `.vyrn` files under it
+// (generator-importing, directory-referencing ones first), analyze them
+// nearest-first within a bound, and the owner is the one whose synthesized
+// origins claim this `.vyx`. A genuine scratch `.vyx` is remembered as
+// owner-less so discovery does not re-run per keystroke.
+// ---------------------------------------------------------------------------
+
+/// The most `.vyrn` roots discovery will analyze for one `.vyx` (a sane cap so a
+/// large repo never triggers an unbounded scan).
+const MAX_OWNER_CANDIDATES: usize = 48;
+/// The most directory levels discovery walks up looking for an app root.
+const MAX_WALK_UP: usize = 8;
+
+/// Ensure `vyx_uri`'s owner is wired, discovering it if needed (no publishing —
+/// the request path). A `.vyx` already owned, or already known owner-less, is a
+/// cheap no-op.
+fn ensure_vyx_owner(server: &mut Server, vyx_uri: &Url) {
+    let Some(path) = uri_path(vyx_uri) else { return };
+    if !path.ends_with(".vyx") {
+        return;
+    }
+    if server.vyx_owner.contains_key(&path) || server.vyx_ownerless.contains(&path) {
+        return;
+    }
+    match probe_owner(server, &path) {
+        Some((owner, analysis)) => install_root(None, server, &owner, "", analysis),
+        None => {
+            server.vyx_ownerless.insert(path);
+        }
+    }
+}
+
+/// Discover and wire `vyx_uri`'s owner *with* diagnostics published (the didOpen
+/// path). Returns whether an owner was found. A genuine scratch `.vyx` is cached
+/// owner-less so a subsequent keystroke does not re-scan.
+fn discover_vyx_owner(connection: &Connection, server: &mut Server, vyx_uri: &Url) -> bool {
+    let Some(path) = uri_path(vyx_uri) else { return false };
+    if server.vyx_owner.contains_key(&path) {
+        return true;
+    }
+    if server.vyx_ownerless.contains(&path) {
+        return false;
+    }
+    match probe_owner(server, &path) {
+        Some((owner, analysis)) => {
+            // Reuse the analysis probe_owner already built — publish its and the
+            // inputs' diagnostics and wire ownership without generating a second
+            // time (owner generation is the expensive step).
+            let text = server
+                .docs
+                .get(&owner)
+                .cloned()
+                .or_else(|| uri_path(&owner).and_then(|p| std::fs::read_to_string(p).ok()))
+                .unwrap_or_default();
+            install_root(Some(connection), server, &owner, &text, analysis);
+            server.vyx_owner.contains_key(&path)
+        }
+        None => {
+            server.vyx_ownerless.insert(path);
+            false
+        }
+    }
+}
+
+/// Analyze candidate `.vyrn` roots for `vyx_path` (ranked, bounded) and return
+/// the first whose synthesized origins claim it, with its analysis. Pure: it
+/// mutates nothing on the server (the caller wires the winner).
+fn probe_owner(server: &Server, vyx_path: &str) -> Option<(Url, Analysis)> {
+    let overlays = overlays_of(server);
+    for cand in candidate_owners(vyx_path) {
+        let text = match server
+            .docs
+            .get(&cand)
+            .cloned()
+            .or_else(|| uri_path(&cand).and_then(|p| std::fs::read_to_string(p).ok()))
+        {
+            Some(t) => t,
+            None => continue,
+        };
+        let analysis = analyze_doc(&cand, &text, &overlays);
+        if analysis.origins.input_files().iter().any(|f| f == vyx_path) {
+            return Some((cand, analysis));
+        }
+    }
+    None
+}
+
+/// The `.vyrn` roots to try as owners of `vyx_path`, most-likely first. Finds the
+/// app root (nearest ancestor with `vyrn.json`, else the nearest ancestor holding
+/// a generator-importing `.vyrn`, else the `.vyx`'s own directory), collects the
+/// `.vyrn` files under it (bounded), and ranks them: a root that imports a page/
+/// component generator AND names this `.vyx`'s directory first, then any
+/// generator-importing root, then by path proximity.
+fn candidate_owners(vyx_path: &str) -> Vec<Url> {
+    let vyx = std::path::Path::new(vyx_path);
+    let Some(vyx_dir) = vyx.parent() else { return Vec::new() };
+    let dir_name = vyx_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let app_root = app_root_for(vyx_dir);
+
+    let mut files = Vec::new();
+    collect_vyrn(&app_root, &app_root, 0, &mut files);
+
+    // Score each candidate from a cheap textual read (no analysis yet).
+    let mut scored: Vec<(i32, usize, std::path::PathBuf)> = files
+        .into_iter()
+        .map(|p| {
+            let src = std::fs::read_to_string(&p).unwrap_or_default();
+            let generator = has_generator_import(&src);
+            let names_dir = !dir_name.is_empty() && src.contains(&dir_name);
+            let mut score = 0;
+            if generator {
+                score += 2;
+            }
+            if generator && names_dir {
+                score += 4;
+            }
+            // Proximity: prefer a root in the `.vyx`'s directory or a near ancestor.
+            let proximity = path_distance(&p, vyx_dir);
+            (score, proximity, p)
+        })
+        .collect();
+    // Higher score first; then nearer (smaller distance) first.
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    scored
+        .into_iter()
+        .take(MAX_OWNER_CANDIDATES)
+        .filter_map(|(_, _, p)| Url::from_file_path(p).ok())
+        .collect()
+}
+
+/// The app root for a `.vyx`'s directory: the nearest ancestor (within
+/// [`MAX_WALK_UP`]) containing `vyrn.json`, else the nearest ancestor that holds
+/// a generator-importing `.vyrn`, else `vyx_dir` itself.
+fn app_root_for(vyx_dir: &std::path::Path) -> std::path::PathBuf {
+    let mut fallback: Option<std::path::PathBuf> = None;
+    let mut dir = vyx_dir.to_path_buf();
+    for _ in 0..MAX_WALK_UP {
+        if dir.join("vyrn.json").is_file() {
+            return dir;
+        }
+        if fallback.is_none() && dir_has_generator_root(&dir) {
+            fallback = Some(dir.clone());
+        }
+        match dir.parent() {
+            Some(p) => dir = p.to_path_buf(),
+            None => break,
+        }
+    }
+    fallback.unwrap_or_else(|| vyx_dir.to_path_buf())
+}
+
+/// Whether `dir` directly contains a `.vyrn` file importing a page/component
+/// generator — the "app root" signal when there is no `vyrn.json`.
+fn dir_has_generator_root(dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) == Some("vyrn") {
+            if let Ok(src) = std::fs::read_to_string(&p) {
+                if has_generator_import(&src) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Whether a `.vyrn` source imports one of the directory-consuming generators
+/// (`pages`/`pagesThemed`/`components`/`componentsThemed`) — the roots that own
+/// `.vyx` files.
+fn has_generator_import(src: &str) -> bool {
+    src.contains("pagesThemed")
+        || src.contains("componentsThemed")
+        || src.contains("pages(")
+        || src.contains("components(")
+        || src.contains("pages ")
+        || src.contains("components ")
+}
+
+/// Recursively collect `.vyrn` files under `root` (skipping vendored/hidden and
+/// build dirs), stopping once [`MAX_OWNER_CANDIDATES`] are gathered.
+fn collect_vyrn(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    depth: usize,
+    out: &mut Vec<std::path::PathBuf>,
+) {
+    if out.len() >= MAX_OWNER_CANDIDATES || depth > MAX_WALK_UP {
+        return;
+    }
+    let _ = root;
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut subdirs = Vec::new();
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            // Skip noise that never holds an owner root.
+            if name.starts_with('.')
+                || name == "vyrn_vendor"
+                || name == "target"
+                || name == "node_modules"
+                || name == "public"
+            {
+                continue;
+            }
+            subdirs.push(p);
+        } else if p.extension().and_then(|x| x.to_str()) == Some("vyrn") {
+            out.push(p);
+        }
+    }
+    for sub in subdirs {
+        collect_vyrn(root, &sub, depth + 1, out);
+        if out.len() >= MAX_OWNER_CANDIDATES {
+            return;
+        }
+    }
+}
+
+/// A rough directory distance between a candidate `.vyrn` and the `.vyx`'s dir:
+/// the number of path components not in their common prefix (nearer = smaller).
+fn path_distance(cand: &std::path::Path, vyx_dir: &std::path::Path) -> usize {
+    let a: Vec<_> = cand.parent().unwrap_or(cand).components().collect();
+    let b: Vec<_> = vyx_dir.components().collect();
+    let common = a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count();
+    (a.len() - common) + (b.len() - common)
 }
 
 /// Publish origin-remapped diagnostics (RFC-0033) grouped by input file, so a
@@ -1360,13 +1772,19 @@ fn publish_remapped(connection: &Connection, analysis: &Analysis) {
 
 /// React to an open/change of `uri`: a Vyrn document re-analyzes itself; a
 /// generator input buffer (`.vyx`, …) re-analyzes its owning Vyrn document (so
-/// its remapped diagnostics refresh from the edited input). An input with no
-/// known owner yet is simply stored — opening its consuming `.vyrn` wires it up.
+/// its remapped diagnostics refresh from the edited input). RFC-0049: a `.vyx`
+/// with no known owner triggers owner discovery (opening it standalone is the
+/// normal action) rather than being silently stored.
 fn refresh_document(connection: &Connection, server: &mut Server, uri: &Url) {
     if is_vyrn_uri(uri) {
+        // A `.vyrn` open/change may have introduced (or fixed) an owner — allow a
+        // previously owner-less `.vyx` to be re-discovered.
+        server.vyx_ownerless.clear();
         reanalyze_root(connection, server, uri);
     } else if let Some(owner) = uri_path(uri).and_then(|p| server.vyx_owner.get(&p)).cloned() {
         reanalyze_root(connection, server, &owner);
+    } else {
+        discover_vyx_owner(connection, server, uri);
     }
 }
 
@@ -1378,6 +1796,11 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             let uri = params.text_document.uri.clone();
             let text = params.text_document.text;
             server.docs.insert(uri.clone(), text.clone());
+            // An explicit (re)open of a `.vyx` retries owner discovery even if a
+            // prior attempt cached it owner-less (RFC-0049 §1).
+            if let Some(p) = uri_path(&uri) {
+                server.vyx_ownerless.remove(&p);
+            }
             refresh_document(connection, server, &uri);
         }
     } else if DidChangeTextDocument::METHOD == notif.method {
