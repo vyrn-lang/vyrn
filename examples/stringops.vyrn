@@ -5,9 +5,9 @@
 /// Everything runs identically in the interpreter and native.
 ///
 ///   s.length        the byte length
-///   s[i]            the byte at index i (an Int64; traps if out of bounds)
+///   s[i]            the byte at index i (a UInt8; traps if out of bounds)
 ///   'a'             a character literal — the byte value 97 (like Rust's b'a')
-///   for b in s      iterate the bytes as Ints
+///   for b in s      iterate the bytes as UInt8
 ///   s.contains(x) / s.startsWith(x) / s.endsWith(x)   -> Bool  (also free fns)
 ///
 /// Conversions are checked — "no unchecked casts" (RFC-0001):

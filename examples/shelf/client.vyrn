@@ -336,7 +336,7 @@ export extern fn setDraftTags(arg: String) {
 /// trapping, unlike constructing `AddBookReq` directly). Valid => fire the typed
 /// stub (a real server round trip); Invalid => surface the Issues in the UI.
 export extern fn submitAdd(arg: String) {
-    let raw = RawAdd { title: draftTitle, url: draftUrl, tags: splitTrim(draftTags, 44) }
+    let raw = RawAdd { title: draftTitle, url: draftUrl, tags: splitTrim(draftTags, ",") }
     match fromJson(api.AddBookReq, toJson(raw)) {
         Valid(req) => api.addBook(req, onAddBook),
         Invalid(iss) => setIssues(renderIssues(iss)),
@@ -417,7 +417,7 @@ fn main() -> Int64 {
 }
 
 test "splitTrim parses a comma tag string, trimming and dropping empties" {
-    let r = splitTrim("fiction, web ,, reference ", 44)
+    let r = splitTrim("fiction, web ,, reference ", ",")
     assertEq(r.length, 3)
     assertEq(r[0], "fiction")
     assertEq(r[1], "web")

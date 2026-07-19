@@ -4,6 +4,7 @@
 import { PasteId, Paste, Created, CreateReq, IdReq, PasteList, PasteResult, StoreFile } from "./wire"
 import { fullDigest } from "./util"
 import { now, toMillis } from "std/time"
+import { substring } from "std/strings"
 import * as persist from "./persist"
 
 /// The single source of truth: the paste array + the monotonic counter, loaded
@@ -35,19 +36,16 @@ fn idTaken(id: String) -> Bool {
     return false
 }
 
-/// The first `n` bytes of `s` as a String.
+/// The first `n` bytes of `s` (clamped to `s.length`) as a String — the `slice`
+/// builtin via `std/strings.substring` (RFC-0046), replacing a `bytes()` +
+/// `stringFromBytes` round-trip.
 fn prefixOf(s: String, n: Int64) -> String {
-    let sb = bytes(s)
-    let mut out: Array<UInt8> = []
-    let mut i = 0
-    while i < n && i < sb.length {
-        out.push(sb[i])
-        i = i + 1
+    let end = if n < s.length {
+        n
+    } else {
+        s.length
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(e) => s,
-    }
+    return substring(s, 0, end)
 }
 
 /// Content-addressed id: the shortest 6..14-char prefix of the content digest
