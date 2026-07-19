@@ -2213,6 +2213,57 @@ fn vyxScriptLoadRet(script: String) -> String {
     return ""
 }
 
+/// The loaded-data type spelling carried by a loader's return type (RFC-0041 §3):
+/// the inner type of `Validation<T>` or the FIRST type argument of
+/// `Result<T, PageError>`. "" when there is no loader. This is the type the page's
+/// `data` prop takes — so a page may load straight into a wire type (`Result<Paste,
+/// PageError>`) with no `type Data` alias (record aliases are illegal in Vyrn).
+fn vyxLoaderDataType(loadRet: String) -> String {
+    if loadRet.length == 0 {
+        return ""
+    }
+    let ba = bytes(loadRet)
+    let open = vyxFind(ba, bytes("<"), 0)
+    if open < 0 {
+        return "Data"
+    }
+    // The matching `>` at generic depth 0.
+    let mut depth = 0
+    let mut i = open
+    let mut close = ba.length
+    while i < ba.length {
+        if ba[i] == 60 {
+            depth = depth + 1
+        } else if ba[i] == 62 {
+            depth = depth - 1
+            if depth == 0 {
+                close = i
+                i = ba.length
+            }
+        }
+        i = i + 1
+    }
+    let inner = vyxSlice(ba, open + 1, close)
+    // For `Result<T, E>` keep only the first argument (top-level comma split).
+    let ib = bytes(inner)
+    let mut d2 = 0
+    let mut j = 0
+    let mut cut = ib.length
+    while j < ib.length {
+        let b = ib[j]
+        if b == 60 {
+            d2 = d2 + 1
+        } else if b == 62 {
+            d2 = d2 - 1
+        } else if b == 44 && d2 == 0 {
+            cut = j
+            j = ib.length
+        }
+        j = j + 1
+    }
+    return vyxTrim(vyxSlice(ib, 0, cut))
+}
+
 /// Whether the page opts out of the layout with a statement-leading
 /// `layout="none"` directive in its `<script>` (RFC-0041 §1). Spaces around the
 /// `=` are tolerated; the value must be the string `none`.
@@ -2463,12 +2514,16 @@ export fn vyxBuildPageModule(source: String, dir: String, themed: Bool, theme: S
     }
     restScript = hs.rest
     let hasLoad = vyxScriptHasLoad(script)
+    // The `data` prop's type is the loader's data type — the inner of
+    // `Validation<Data>` or the first arg of `Result<T, PageError>` (RFC-0041 §3),
+    // so a page can load straight into a wire type with no `type Data` alias.
+    let dataType = vyxLoaderDataType(vyxScriptLoadRet(script))
     let restExported = vyxAutoExportPageDecls(restScript)
 
-    // The synthetic component: a `props` block of the params (+ a `data: Data`
+    // The synthetic component: a `props` block of the params (+ a `data: <T>`
     // param when there is a loader) drives the compiled view fn's parameters.
     let dataField = if hasLoad {
-        if paramFields.length > 0 { ", data: Data" } else { "data: Data" }
+        if paramFields.length > 0 { ", data: " + dataType } else { "data: " + dataType }
     } else {
         ""
     }
@@ -2521,7 +2576,7 @@ export fn vyxBuildPageModule(source: String, dir: String, themed: Bool, theme: S
     // loaded Data when there is a loader) into the compiled body.
     if hasLoad {
         let args = if paramNames.length > 0 { vyxPageArgs(paramNames) + ", d" } else { "d" }
-        out = out + "export fn page(p: Params, d: Data) -> Html {\n    return uiPageBody(" + args + ")\n}\n"
+        out = out + "export fn page(p: Params, d: " + dataType + ") -> Html {\n    return uiPageBody(" + args + ")\n}\n"
     } else if paramNames.length > 0 {
         out = out + "export fn page(p: Params) -> Html {\n    return uiPageBody(" + vyxPageArgs(paramNames) + ")\n}\n"
     } else {
@@ -2530,7 +2585,7 @@ export fn vyxBuildPageModule(source: String, dir: String, themed: Bool, theme: S
     // The `head()`/`headTitle()` pair (RFC-0041 §2), taking the same shape as
     // `page` so a dynamic head can read the params/loaded data. `std/ui` threads
     // the result into `document(title, head, body)`.
-    let sig = if hasLoad { "p: Params, d: Data" } else { if paramNames.length > 0 { "p: Params" } else { "" } }
+    let sig = if hasLoad { "p: Params, d: " + dataType } else { if paramNames.length > 0 { "p: Params" } else { "" } }
     let mut prelude = ""
     for n in paramNames {
         prelude = prelude + "    let " + n + " = p." + n + "\n"
