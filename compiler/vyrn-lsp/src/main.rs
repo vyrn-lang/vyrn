@@ -37,7 +37,8 @@ use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
     CompletionTextEdit, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, Diagnostic as LspDiagnostic, DiagnosticSeverity,
-    DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
+    DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     InitializeParams, InitializeResult, Location, MarkupContent, MarkupKind, OneOf, Position,
     PublishDiagnosticsParams, Range, SemanticToken, SemanticTokenModifier, SemanticTokenType,
@@ -48,8 +49,9 @@ use lsp_types::{
 };
 
 use vyrn_frontend::{
-    analyze, class_completions, class_token_hover, completions, member_completions, resolve,
-    string_literal_completions, Analysis, Completion, SemKind, SemMods, SymbolKind,
+    analyze, class_completions, class_token_hover, completions, member_completions, references,
+    resolve, string_literal_completions, Analysis, Completion, RefRange, SemKind, SemMods,
+    SymbolKind,
 };
 
 use templates::VyxCursor;
@@ -349,6 +351,11 @@ fn handle_initialize(connection: &Connection) -> Result<(), ()> {
             ..Default::default()
         }),
         document_symbol_provider: Some(OneOf::Left(true)),
+        // Scope-aware highlight (RFC-0050 §1): the handler resolves the binding
+        // under the cursor and returns its ACTUAL references (not a word-match),
+        // so registering this overrides VS Code's dumb textual occurrence
+        // highlighting — comments and out-of-scope same-named bindings are excluded.
+        document_highlight_provider: Some(OneOf::Left(true)),
         // Whole-document formatting (RFC-0017): the handler runs `vyrn_frontend::fmt`
         // and returns one full-range replace. VS Code format-on-save then works.
         document_formatting_provider: Some(OneOf::Left(true)),
@@ -423,6 +430,9 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
         "textDocument/documentSymbol" => {
             Response::new_ok(req.id, handle_document_symbol(server, req.params))
         }
+        "textDocument/documentHighlight" => {
+            Response::new_ok(req.id, handle_document_highlight(server, req.params))
+        }
         "textDocument/formatting" => Response::new_ok(req.id, handle_formatting(server, req.params)),
         "textDocument/semanticTokens/full" => {
             Response::new_ok(req.id, handle_semantic_tokens_full(server, req.params))
@@ -484,6 +494,14 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
     // synthesized module. Only an IMPORTED declaration (with a real source file)
     // is a useful jump target — a binding local to the synthesized module has no
     // on-disk location, so it yields no definition (v1).
+    // RFC-0050 §2: a cursor inside an import SOURCE STRING (a plain spec like
+    // `"./store"` / `"std/time"`, or a generator-call argument) jumps to the
+    // resolved file, resolved through the very loader the linker uses.
+    if is_vyrn_uri(uri) {
+        if let Some(loc) = import_path_definition(server, uri, line, col) {
+            return Some(loc);
+        }
+    }
     let (r, home_uri) = if is_vyrn_uri(uri) {
         let (analysis, u) = lookup(server, uri)?;
         (resolve(analysis, line, col)?, Some(u))
@@ -576,6 +594,179 @@ fn component_tag_definition(
             end: Position { line: 0, character: 0 },
         },
     }))
+}
+
+/// RFC-0050 §2: resolve a `GotoDefinition` on the import SOURCE STRING under the
+/// cursor to the imported file's `Location` (top of file). The specifier is
+/// identified by the frontend ([`vyrn_frontend::import_spec_at`]) and resolved by
+/// the very loader the linker uses ([`vyrn_frontend::loader::resolve_spec`]) —
+/// no second copy of the path logic. Remote/uncached specifiers yield nothing,
+/// quietly.
+fn import_path_definition(
+    server: &Server,
+    uri: &Url,
+    line: usize,
+    col: usize,
+) -> Option<GotoDefinitionResponse> {
+    let src = server
+        .docs
+        .get(uri)
+        .cloned()
+        .or_else(|| uri_path(uri).and_then(|p| std::fs::read_to_string(p).ok()))?;
+    let spec = vyrn_frontend::import_spec_at(&src, line, col)?;
+    // A remote specifier is not a jumpable local file.
+    if vyrn_frontend::loader::is_remote(&spec) {
+        return None;
+    }
+    let overlays = overlays_of(server);
+    let (opts, _resolver, importer) = load_context(uri, &overlays)?;
+    let target = import_target_file(&spec, &importer, &opts)?;
+    let url = Url::from_file_path(target.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?;
+    Some(GotoDefinitionResponse::Scalar(Location {
+        uri: url,
+        range: Range {
+            start: Position { line: 0, character: 0 },
+            end: Position { line: 0, character: 0 },
+        },
+    }))
+}
+
+/// The local file a resolved import specifier names. A plain spec resolves to a
+/// `.vyrn`/`.json` file directly; a generator DIRECTORY argument (`"./widgets"`)
+/// resolves to the `.vyrn` guess that doesn't exist, so it falls back to the
+/// directory the spec names — an entry file inside it, else the directory itself
+/// (RFC-0050 §2). `None` when nothing on disk matches.
+fn import_target_file(spec: &str, importer: &str, opts: &vyrn_frontend::loader::LoadOptions) -> Option<String> {
+    let resolved = vyrn_frontend::loader::resolve_spec(spec, importer, opts).ok()?;
+    if std::path::Path::new(&resolved).is_file() {
+        return Some(resolved);
+    }
+    // The extension-less `.vyrn` guess didn't exist: the spec may name a
+    // directory a generator consumes.
+    let dir = resolved.strip_suffix(".vyrn").unwrap_or(&resolved);
+    dir_target(dir)
+}
+
+/// A jump target for a directory a generator consumes: a same-named or `index`
+/// entry file, else the first `.vyx`/`.vyrn` inside, else the directory itself.
+/// `None` when `dir` is not a directory.
+fn dir_target(dir: &str) -> Option<String> {
+    let p = std::path::Path::new(dir);
+    if !p.is_dir() {
+        return None;
+    }
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    for cand in [format!("{name}.vyx"), format!("{name}.vyrn"), "index.vyx".into(), "index.vyrn".into()] {
+        let f = p.join(&cand);
+        if f.is_file() {
+            return Some(f.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    if let Ok(rd) = std::fs::read_dir(p) {
+        let mut names: Vec<String> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().to_string_lossy().replace('\\', "/"))
+            .filter(|s| s.ends_with(".vyx") || s.ends_with(".vyrn"))
+            .collect();
+        names.sort();
+        if let Some(f) = names.into_iter().next() {
+            return Some(f);
+        }
+    }
+    Some(dir.to_string())
+}
+
+/// RFC-0050 §1: `textDocument/documentHighlight`. Resolves the binding under the
+/// cursor and returns its ACTUAL references (scope-aware) — not a textual
+/// word-match. The defining occurrence is `Write`, uses are `Read`. Always
+/// returns `Some` (possibly empty) for an open document so VS Code does not fall
+/// back to word-matching; a `.vyx` maps the synthesized module's references back
+/// through the origin map.
+fn handle_document_highlight(
+    server: &Server,
+    params: serde_json::Value,
+) -> Option<Vec<DocumentHighlight>> {
+    let p: DocumentHighlightParams = serde_json::from_value(params).ok()?;
+    let uri = &p.text_document_position_params.text_document.uri;
+    let (line, col) = to_frontend(&p.text_document_position_params.position);
+    let refs = if is_vyrn_uri(uri) {
+        let (analysis, _) = lookup(server, uri)?;
+        references(analysis, line, col)
+    } else {
+        vyx_highlights(server, uri, line, col)
+    };
+    Some(
+        refs.into_iter()
+            .map(|r| DocumentHighlight {
+                range: lsp_range(r.line, r.col, r.end_col),
+                kind: Some(if r.write {
+                    DocumentHighlightKind::WRITE
+                } else {
+                    DocumentHighlightKind::READ
+                }),
+            })
+            .collect(),
+    )
+}
+
+/// RFC-0050 §1 in a `.vyx`: forward the cursor into the synthesized module,
+/// compute references there, and map each back into the input buffer's
+/// coordinates through the verbatim origin regions (the inverse of
+/// [`vyx_semantic_tokens`]). Best-effort: only references inside a verbatim
+/// region map cleanly.
+fn vyx_highlights(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Vec<RefRange> {
+    let Some(fwd) = vyx_forward(server, vyx_uri, line, col) else {
+        return Vec::new();
+    };
+    let refs = references(&fwd.synth.analysis, fwd.line, fwd.col);
+    let Some(vyx_path) = uri_path(vyx_uri) else {
+        return Vec::new();
+    };
+    let Some(owner) = server.vyx_owner.get(&vyx_path).cloned() else {
+        return Vec::new();
+    };
+    let Some(owner_analysis) = server.analyses.get(&owner) else {
+        return Vec::new();
+    };
+    let Some(vyx_text) = server
+        .docs
+        .get(vyx_uri)
+        .cloned()
+        .or_else(|| std::fs::read_to_string(&vyx_path).ok())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for region in owner_analysis.origins.regions_for(&vyx_path) {
+        let Some(vyx_line) = vyx_text.lines().nth(region.origin.line.saturating_sub(1)) else {
+            continue;
+        };
+        let Some(gen_line) =
+            fwd.synth.gen_source.lines().nth(region.gen_start_line.saturating_sub(1))
+        else {
+            continue;
+        };
+        let Some((gcol, span_len)) = align_expr_span(vyx_line, region.origin.col, gen_line) else {
+            continue;
+        };
+        for r in &refs {
+            if r.line != region.gen_start_line || r.col < gcol {
+                continue;
+            }
+            if r.end_col > gcol + span_len {
+                continue;
+            }
+            out.push(RefRange {
+                line: region.origin.line,
+                col: region.origin.col + (r.col - gcol),
+                end_col: region.origin.col + (r.end_col - gcol),
+                write: r.write,
+            });
+        }
+    }
+    out.sort_by_key(|r| (r.line, r.col));
+    out.dedup_by_key(|r| (r.line, r.col));
+    out
 }
 
 fn handle_completion(server: &Server, params: serde_json::Value) -> Option<CompletionResponse> {
