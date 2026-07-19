@@ -2032,3 +2032,112 @@ fn rfc51_class_hover_and_completion_agree_on_the_token_under_the_cursor() {
 
     let _ = client.child.kill();
 }
+
+// ===========================================================================
+// RFC-0052 — a safelisted class hovers with the app's OWN CSS.
+// ===========================================================================
+
+/// Theme with two safelisted names: `book-card` (the app styles it) and
+/// `no-style` (it doesn't).
+const RFC52_THEME: &str = "{ \"colors\": { \"brand\": { \"500\": \"#4f46e5\" } },\n\
+  \"spacing\": { \"2\": \"0.5rem\" },\n\
+  \"safelist\": [\"book-card\", \"no-style\"] }";
+
+const RFC52_APP: &str = "import { componentsThemed } from \"std/vyx\"\n\
+    import { widget } from componentsThemed(\"./comp\", \"./theme.json\")\n\
+    fn main() -> Int64 { return 0 }\n";
+
+const RFC52_VYX: &str = "<script>\n\
+    props { x: String }\n\
+    </script>\n\
+    <template>\n\
+    <div class=\"book-card\"><span class=\"no-style\">{{ x }}</span><p class=\"bg-brand-500\">{{ x }}</p></div>\n\
+    </template>\n";
+
+/// A layout declaring the app's stylesheet (RFC-0041 `head`). Only its
+/// `stylesheet "…"` text matters to discovery.
+const RFC52_LAYOUT: &str = "<script>\nhead {\n    stylesheet \"/app.css\"\n}\n</script>\n\
+    <template>\n<div><slot/></div>\n</template>\n";
+
+/// The declared stylesheet. `.book-card-x` / `.book-cards` must NOT match
+/// `book-card` (whole-token rule); the descendant and `:hover` rules must.
+const RFC52_CSS: &str = ".book-card-x { color: red; }\n\
+.book-cards { color: blue; }\n\
+li.list .book-card {\n  padding: 2px;\n}\n\
+.book-card:hover { color: green; }\n";
+
+/// A second stylesheet nobody declares — it must be ignored while a declared one
+/// exists (discovery order), so its marker never shows up in a hover.
+const RFC52_DECOY_CSS: &str = ".book-card { content: \"DECOYRULE\"; }\n";
+
+fn rfc52_scratch() -> std::path::PathBuf {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_rfc52_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("comp")).unwrap();
+    std::fs::create_dir_all(dir.join("public")).unwrap();
+    std::fs::create_dir_all(dir.join("routes")).unwrap();
+    std::fs::write(dir.join("comp/Widget.vyx"), RFC52_VYX).unwrap();
+    std::fs::write(dir.join("routes/layout.vyx"), RFC52_LAYOUT).unwrap();
+    std::fs::write(dir.join("app.vyrn"), RFC52_APP).unwrap();
+    std::fs::write(dir.join("theme.json"), RFC52_THEME).unwrap();
+    std::fs::write(dir.join("public/app.css"), RFC52_CSS).unwrap();
+    std::fs::write(dir.join("public/decoy.css"), RFC52_DECOY_CSS).unwrap();
+    dir
+}
+
+fn rfc52_open() -> (LspClient, String) {
+    let dir = rfc52_scratch();
+    let mut client = rfc33_client();
+    let app_uri = file_uri(&dir.join("app.vyrn"));
+    did_open(&mut client, &app_uri, "vyrn", RFC52_APP);
+    let _ = read_diags_for(&mut client, "Widget.vyx"); // ownership wired
+    let vyx_uri = file_uri(&dir.join("comp/Widget.vyx"));
+    did_open(&mut client, &vyx_uri, "vyx", RFC52_VYX);
+    (client, vyx_uri)
+}
+
+/// A safelisted class with app CSS: the honest "safelisted (app-styled)" line
+/// STAYS and the app's own rule(s) are appended with `file:line`. The whole-token
+/// rule keeps `.book-card-x` / `.book-cards` out, and the undeclared decoy
+/// stylesheet is not consulted while a declared one exists.
+#[test]
+fn rfc52_safelisted_hover_shows_the_apps_own_css() {
+    let (mut client, uri) = rfc52_open();
+    let (l, c) = pos_after(RFC52_VYX, "book-car");
+    let v = hover_value(&mut client, &uri, l, c).expect("hover on safelisted class");
+    assert!(v.contains("safelisted (app-styled)"), "keeps the safelisted line: {v}");
+    assert!(v.contains("li.list .book-card"), "descendant rule shown: {v}");
+    assert!(v.contains("padding: 2px"), "rule body verbatim: {v}");
+    assert!(v.contains(".book-card:hover"), "the :hover rule too: {v}");
+    assert!(v.contains("public/app.css:3"), "declared sheet + 1-based line: {v}");
+    // Whole-token matching: neither the longer class nor the plural one match.
+    assert!(!v.contains("book-card-x"), "`.book-card-x` must not match: {v}");
+    assert!(!v.contains("book-cards"), "`.book-cards` must not match: {v}");
+    // Discovery order: the declared sheet wins; the undeclared decoy is unused.
+    assert!(!v.contains("DECOYRULE"), "undeclared stylesheet not consulted: {v}");
+    let _ = client.child.kill();
+}
+
+/// A safelisted class the app never styles: today's text, unchanged.
+#[test]
+fn rfc52_safelisted_without_a_rule_is_unchanged() {
+    let (mut client, uri) = rfc52_open();
+    let (l, c) = pos_after(RFC52_VYX, "no-sty");
+    let v = hover_value(&mut client, &uri, l, c).expect("hover on safelisted class");
+    assert_eq!(v, "**`no-style`** — safelisted (app-styled)", "unchanged: {v}");
+    let _ = client.child.kill();
+}
+
+/// No regression: a utility class still hovers with its GENERATED rule and gains
+/// no app-CSS block.
+#[test]
+fn rfc52_utility_hover_is_unchanged() {
+    let (mut client, uri) = rfc52_open();
+    let (l, c) = pos_after(RFC52_VYX, "bg-brand-5");
+    let v = hover_value(&mut client, &uri, l, c).expect("hover on utility class");
+    assert!(v.contains("`Tw` utility class"), "utility hover: {v}");
+    assert!(v.contains("background-color:#4f46e5"), "generated CSS: {v}");
+    assert!(!v.contains("app.css"), "no app-CSS block appended: {v}");
+    let _ = client.child.kill();
+}

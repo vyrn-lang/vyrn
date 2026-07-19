@@ -1,6 +1,6 @@
 # RFC-0052 — Safelisted Class Hover Shows the App's Own CSS
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented
 - **Depends on:** RFC-0032/0036 (`std/tw`, the theme `safelist`), RFC-0042
   (class hover — utility classes already show their generated rule),
   RFC-0041 (`head { stylesheet … }` — how an app declares its CSS)
@@ -90,3 +90,59 @@ A real CSS parser / cascade resolution (which rule actually wins),
 `<style>` blocks (none exist), authoring features (completion of
 safelisted names already works), and hovering classes in plain `.css`
 files.
+
+---
+
+## As landed
+
+Editor-only: everything lives in `compiler/vyrn-lsp/src/main.rs` (the excluded
+crate). No frontend, compiler, emitted-code or parity change — `class_token_hover`
+is untouched; `handle_hover` post-processes its result through `with_app_css`.
+
+**Trigger.** `with_app_css` fires only when the hover text ends with
+`— safelisted (app-styled)` (the class name is read back from the
+`` **`…`** `` prefix). A utility hover, or any non-class hover, is returned
+byte-identical — that is what keeps the no-regression guarantee cheap.
+
+**Discovery order** (from `app_root_for(dir of the hovered file)`, the RFC-0049
+walk):
+
+1. **Declared** — every `.vyx` under the app root (recursive, skipping
+   hidden/`vyrn_vendor`/`target`/`node_modules`/`public`, ≤64 files) is scanned
+   textually for `stylesheet "…"` lines; each URL maps `<root>/public/<url>`,
+   falling back to `<root>/<url>`. Files in that order, deduplicated.
+2. **Fallback** — only when step 1 yields nothing that exists: every `*.css`
+   directly under `<root>/public/`, then `<root>/`, name-sorted.
+
+**Cache key.** One entry per app root, holding the read files. Its signature is a
+hash of `(path, len, mtime)` for each cached stylesheet plus the `stat` of the app
+root and `<root>/public/` directories — so an edit to a sheet *and* the addition
+or removal of one both invalidate it, while a hover costs a handful of `stat`s and
+no reads or directory walks.
+
+**Matching heuristic.** Brace- and `/* … */`-aware block scanning, no CSS parser.
+A block is kept when its selector contains `.<class>` not followed by a class-name
+character (`[A-Za-z0-9_-]`): `li.paste .plang`, `.plang:hover`, `a.plang` match;
+`.plangs` and `.plang-x` do not. At-rule bodies (`@media { … }`) are descended into
+so inner rules are found. Deliberately **not** done: cascade/specificity ("which
+rule wins"), showing the enclosing at-rule condition, `@import` following,
+preprocessor sources, or classes composed at runtime. Rules are shown verbatim in
+file order, capped at 3 rules / 40 lines.
+
+**Before/after** (deployed `vyrn-lsp.exe`, VS Code URI form
+`file:///n%3A/lang/examples/bin/…`):
+
+| probe | before | after |
+| --- | --- | --- |
+| `plang` in `routes/index.vyx` (safelisted, styled) | `**`plang`** — safelisted (app-styled)` | same line **+** the `li.paste .plang { … }` block **+** `— public/style.css:24` |
+| `backlink` (safelisted, unstyled — unsaved buffer edit) | `**`backlink`** — safelisted (app-styled)` | unchanged |
+| `mr-2` in `routes/p/[id].vyx` (utility) | `.mr-2 {margin-right:0.5rem}` | unchanged |
+| `hover:text-brand-600` (variant utility) | `.hover\:text-brand-600:hover {color:#1d4ed8}` | unchanged |
+
+**Tests.** Three LSP e2e tests (`rfc52_safelisted_hover_shows_the_apps_own_css`,
+`…_without_a_rule_is_unchanged`, `rfc52_utility_hover_is_unchanged`) cover the
+rule append with `file:line`, whole-token rejection of `.book-card-x` /
+`.book-cards`, discovery order (an undeclared decoy stylesheet is never
+consulted), the unchanged no-match text, and the unchanged utility hover.
+926 workspace + 35 LSP tests (1 ignored) green; parity green; rebuilt and
+hash-verified redeploy.
