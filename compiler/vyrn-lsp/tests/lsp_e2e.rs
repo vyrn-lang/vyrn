@@ -1278,3 +1278,186 @@ fn semantic_tokens_in_vyx_template() {
     // `.title` — the `title` member at char 12.
     assert_eq!(kind_at(&toks, 5, 12), Some("property"), "template `title` field → property: {toks:?}");
 }
+
+// ===========================================================================
+// RFC-0048 — complete `.vyx` origins: script sections + real-file pages.
+// The `<script>` section now carries `//@origin` for its import + helper lines,
+// and pages/layouts/errors compile against the REAL route file, so the LSP lights
+// up import-specifier hover/classification in a `.vyx` script AND semantic tokens
+// + class completion on a real `routes/*.vyx` (both were dead pre-RFC-0048).
+// ===========================================================================
+
+/// A component whose `<script>` imports std/time (selective + namespace) and
+/// declares helper fns — the RFC-0048 §1 surface.
+const RFC48_APP: &str = "import { components } from \"std/vyx\"\n\
+    import { widget } from components(\"./comp\")\n\
+    fn main() -> Int64 { return 0 }\n";
+const RFC48_VYX: &str = "<script>\n\
+    import { format, fromMillis } from \"std/time\"\n\
+    import * as clk from \"std/time\"\n\
+    fn shown() -> String { return format(fromMillis(0)) }\n\
+    fn now() -> String { return clk.format(clk.fromMillis(0)) }\n\
+    props { x: String }\n\
+    </script>\n\
+    <template>\n\
+    <li>{{ shown() }} {{ x }} {{ now() }}</li>\n\
+    </template>\n";
+
+/// RFC-0048 §1: a `.vyx` `<script>` import specifier hovers with its signature
+/// and classifies by kind — `format`/`fromMillis`→function, `clk`→namespace — and
+/// a pass-through helper `fn` classifies too, all via the new script-region
+/// `//@origin` directives (dead before this RFC).
+#[test]
+fn rfc48_vyx_script_import_hover_and_classification() {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_rfc48c_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("comp")).unwrap();
+    std::fs::write(dir.join("comp/Widget.vyx"), RFC48_VYX).unwrap();
+    std::fs::write(dir.join("app.vyrn"), RFC48_APP).unwrap();
+    let mut client = rfc33_client();
+    let app_uri = file_uri(&dir.join("app.vyrn"));
+    let vyx_uri = file_uri(&dir.join("comp/Widget.vyx"));
+    did_open(&mut client, &app_uri, "vyrn", RFC48_APP);
+    let _ = read_diags_for(&mut client, "Widget.vyx"); // ownership wired
+    did_open(&mut client, &vyx_uri, "vyx", RFC48_VYX);
+
+    // Hover the import specifier `format` → its std/time signature.
+    let (hl, hc) = at(RFC48_VYX, 2, "format");
+    let v = hover_value(&mut client, &vyx_uri, hl, hc)
+        .expect("hover on `.vyx` script import specifier `format`");
+    assert!(v.contains("format"), "import-specifier hover shows the signature: {v}");
+
+    let toks = semantic_tokens_full(&mut client, &vyx_uri);
+    let (fl, fc) = at(RFC48_VYX, 2, "format");
+    assert_eq!(kind_at(&toks, fl, fc), Some("function"), "import `format` → function: {toks:?}");
+    let (ml, mc) = at(RFC48_VYX, 2, "fromMillis");
+    assert_eq!(kind_at(&toks, ml, mc), Some("function"), "import `fromMillis` → function: {toks:?}");
+    let (cl, cc) = at(RFC48_VYX, 3, "clk");
+    assert_eq!(kind_at(&toks, cl, cc), Some("namespace"), "`import * as clk` → namespace: {toks:?}");
+    let (sl, sc) = at(RFC48_VYX, 4, "shown");
+    assert_eq!(kind_at(&toks, sl, sc), Some("function"), "helper `shown` def → function: {toks:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `pagesThemed` app + a single themed route file (`routes/index.vyx`).
+const RFC48_PAGE_APP: &str = "import { pagesThemed } from \"std/ui\"\n\
+    import { route } from pagesThemed(\"./routes\", \"./theme.json\")\n\
+    fn handle(req: Request) -> Response { return route(req) }\n";
+const RFC48_INDEX: &str = "<script>\n\
+    import { format, fromMillis } from \"std/time\"\n\
+    fn shown() -> String { return format(fromMillis(0)) }\n\
+    </script>\n\
+    <template>\n\
+    <main class=\"flex p-4\"><p>{{ shown() }}</p></main>\n\
+    </template>\n";
+
+/// RFC-0048 §2: a real `routes/*.vyx` page (compiled through `pagesThemed`) now
+/// has semantic tokens (was ZERO — origins pointed at the synthetic
+/// `UiPageBody.vyx`) and offers `Tw` class completion in its template, exactly as
+/// a `componentsThemed` component does.
+#[test]
+fn rfc48_page_semantic_tokens_and_class_completion() {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_rfc48p_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("routes")).unwrap();
+    std::fs::write(dir.join("routes/index.vyx"), RFC48_INDEX).unwrap();
+    std::fs::write(dir.join("app.vyrn"), RFC48_PAGE_APP).unwrap();
+    std::fs::write(dir.join("theme.json"), RFC42_THEME).unwrap();
+    let mut client = rfc33_client();
+    let app_uri = file_uri(&dir.join("app.vyrn"));
+    let index_uri = file_uri(&dir.join("routes/index.vyx"));
+    did_open(&mut client, &app_uri, "vyrn", RFC48_PAGE_APP);
+    let _ = read_diags_for(&mut client, "index.vyx"); // page ownership wired to the real file
+    did_open(&mut client, &index_uri, "vyx", RFC48_INDEX);
+
+    // Semantic tokens now exist on the page route file, and an import specifier
+    // classifies by kind.
+    let toks = semantic_tokens_full(&mut client, &index_uri);
+    assert!(!toks.is_empty(), "the page route file now has semantic tokens (was 0)");
+    let (fl, fc) = at(RFC48_INDEX, 2, "format");
+    assert_eq!(kind_at(&toks, fl, fc), Some("function"), "page import `format` → function: {toks:?}");
+
+    // Tw class completion fires in the page template (RFC-0042 reachable in pages).
+    let (l, c) = pos_after(RFC48_INDEX, "flex p");
+    let labels = completion_labels(&mut client, &index_uri, l, c);
+    assert!(labels.contains(&"p-4".to_string()), "Tw class completion on the page: {labels:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RFC-0048 LIVE TRANSCRIPT (ignored; run explicitly with `--nocapture`): drives
+/// the real `examples/bin` route files at the user's exact money-shot positions,
+/// printing hover text + semantic-token kinds + class completion so the fix can
+/// be eyeballed end-to-end.
+#[test]
+#[ignore]
+fn rfc48_live_transcript_examples_bin() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/bin");
+    let root = root.canonicalize().unwrap();
+    let server = root.join("server.vyrn");
+    let index = root.join("routes/index.vyx");
+    let layout = root.join("routes/layout.vyx");
+    let server_uri = file_uri(&server);
+    let index_uri = file_uri(&index);
+    let layout_uri = file_uri(&layout);
+    let index_txt = std::fs::read_to_string(&index).unwrap();
+    let layout_txt = std::fs::read_to_string(&layout).unwrap();
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &server_uri, "vyrn", &std::fs::read_to_string(&server).unwrap());
+    let _ = read_diags_for(&mut client, "index.vyx");
+    did_open(&mut client, &index_uri, "vyx", &index_txt);
+    did_open(&mut client, &layout_uri, "vyx", &layout_txt);
+
+    let line_of = |txt: &str, needle: &str| -> u32 {
+        txt.lines().position(|l| l.contains(needle)).unwrap() as u32
+    };
+    let col_of = |txt: &str, lineno: u32, name: &str| -> u32 {
+        txt.lines().nth(lineno as usize).unwrap().find(name).unwrap() as u32
+    };
+
+    println!("\n========== RFC-0048 LIVE TRANSCRIPT (examples/bin) ==========");
+
+    // --- index.vyx <script> import-specifier hovers ---
+    for (label, needle) in [
+        ("listPastes", "import { listPastes }"),
+        ("format", "import { format, fromMillis }"),
+        ("fromMillis", "import { format, fromMillis }"),
+        ("i18n", "import { i18n }"),
+    ] {
+        let ln = line_of(&index_txt, needle);
+        let col = col_of(&index_txt, ln, label);
+        let h = hover_value(&mut client, &index_uri, ln, col).unwrap_or("<none>".into());
+        println!("index.vyx  hover {label:>11} @{}:{} -> {}", ln + 1, col + 1, h.replace('\n', " ⏎ "));
+    }
+
+    // --- semantic tokens on index.vyx (was 0 pre-RFC-0048) ---
+    let itoks = semantic_tokens_full(&mut client, &index_uri);
+    println!("index.vyx  semanticTokens/full: {} tokens (pre-RFC-0048: 0)", itoks.len());
+    for (label, needle) in [("format", "import { format, fromMillis }"), ("t (ns)", "import * as t"), ("shownTitle", "fn shownTitle"), ("listPastes(call)", "return listPastes().pastes")] {
+        let name = label.split_whitespace().next().unwrap();
+        let ln = line_of(&index_txt, needle);
+        let col = col_of(&index_txt, ln, name);
+        println!("index.vyx  token {label:>16} @{}:{} -> {:?}", ln + 1, col + 1, kind_at(&itoks, ln, col));
+    }
+
+    // --- layout.vyx namespace + Tw class completion + CSS hover ---
+    let lns = line_of(&layout_txt, "import * as t");
+    let lcol = col_of(&layout_txt, lns, "t");
+    let ltoks = semantic_tokens_full(&mut client, &layout_uri);
+    println!("layout.vyx token {:>16} @{}:{} -> {:?}", "t (ns)", lns + 1, lcol + 1, kind_at(&ltoks, lns, lcol));
+    let cln = line_of(&layout_txt, "hover:text-brand-600");
+    // cursor after `mr-` in class="mr-2 hover:text-brand-600"
+    let ccol = layout_txt.lines().nth(cln as usize).unwrap().find("mr-").unwrap() as u32 + 3;
+    let labels = completion_labels(&mut client, &layout_uri, cln, ccol);
+    let shown: Vec<&String> = labels.iter().filter(|s| s.starts_with("mr-") || s.starts_with("hover:")).take(6).collect();
+    println!("layout.vyx class-completion @{}:{} (in \"mr-2 hover:text-brand-600\") -> {:?}", cln + 1, ccol + 1, shown);
+    // CSS hover on the `hover:text-brand-600` token
+    let hcol = layout_txt.lines().nth(cln as usize).unwrap().find("hover:text-brand-600").unwrap() as u32 + 5;
+    let css = hover_value(&mut client, &layout_uri, cln, hcol).unwrap_or("<none>".into());
+    println!("layout.vyx class-hover @{}:{} (hover:text-brand-600) -> {}", cln + 1, hcol + 1, css.replace('\n', " ⏎ "));
+    println!("=============================================================\n");
+}
