@@ -170,6 +170,16 @@ undecided.
 
 ### Durability caveats (the std/storage evidence)
 
+> **RESOLVED (RFC-0044, Implemented).** The crash-mid-write corruption window
+> below is closed: `std/storage` shipped `writeAtomic` (temp-then-`renameFile`)
+> plus typed `save`/`load`/`loadOr`, and bin adopted them — `saveStore` is now
+> `writeAtomic(path, toJson(snapshot))`, `loadStore` is `load(StoreFile, path)`
+> matching `Missing`/`Corrupt`/`Loaded`. A crash can no longer tear the store.
+> The remaining two caveats stand as designed: whole-file rewrite per mutation
+> (out of scope — append/segment logs are a later story) and no fsync by DEFAULT
+> (`fsyncFile` is provided as the opt-in power-durability upgrade). The original
+> analysis is kept below for the record.
+
 `writeFile` (RFC-0014) is truncate-then-write with **no atomic rename and no
 fsync**. Honest consequences, all reported, none worked around (there's no way
 to at the language level):
@@ -350,7 +360,7 @@ but surprising: for a serve app, `main` is a startup hook, not dead code. Either
 | # | Candidate | Evidence in bin | Scope | Kind |
 |---|-----------|-----------------|-------|------|
 | ~~**P0 (bug)**~~ **FIXED `6a9010f`** | ~~Fix `.push`/method-mutation on a global record-field (silently mutates a copy)~~ — done: push write-back now covers record-field & array-element places; deeper chains are a named parse error | "paste vanished after create"; counter persisted, data didn't | small–medium | compiler |
-| **P1** | **`std/storage` — durable writes** (atomic temp+rename, fsync/durability signal, maybe append log) | whole-file rewrite per mutation; crash-mid-write loses the store; no fsync | large | library + runtime |
+| ~~**P1**~~ **DONE (RFC-0044)** | ~~**`std/storage` — durable writes** (atomic temp+rename, fsync/durability signal, maybe append log)~~ — shipped `writeAtomic`/`save`/`load`/`loadOr` + `renameFile`/`fsyncFile`; bin adopted (crash can no longer tear the store). Append log still deferred | whole-file rewrite per mutation; crash-mid-write loses the store; no fsync | large | library + runtime |
 | **P1** | **Time as a boundary effect** (host-injected `now()` via `extern`/capability, excluded from `where`/parity) | `created` is a counter, not a timestamp — a pastebin's core field is fake | medium | language + runtime |
 | **P2** | **`std/ui`: String/validated-string route params + loader Response content-type control** | `/p/<id>`, `/raw/<id>` can't be pages (Int64-only, text/html-only) | medium | generator |
 | **P2** | **Randomness / entropy source** (seeded, capability, or store-persisted) for non-content ids | content addressing works but can't mint an unguessable/opaque id | medium | language + runtime |
