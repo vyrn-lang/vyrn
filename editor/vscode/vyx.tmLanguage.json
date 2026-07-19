@@ -23,6 +23,9 @@
       },
       "patterns": [
         { "match": "^\\s*(props|params)\\b", "captures": { "1": { "name": "keyword.control.props.vyx" } } },
+        { "comment": "RFC-0041 head block: `head { module \"…\" | stylesheet \"…\" | title: expr }`. `head` before its `{`, and the entry keywords before their argument, matched contextually so a plain `module`/`title`/`stylesheet` identifier elsewhere is not mis-coloured.", "match": "\\bhead\\b(?=\\s*\\{)", "name": "keyword.control.head.vyx" },
+        { "match": "^\\s*(module|stylesheet)\\b(?=\\s+[\"'])", "captures": { "1": { "name": "keyword.control.head.vyx" } } },
+        { "match": "^\\s*(title)\\b(?=\\s*:)", "captures": { "1": { "name": "keyword.control.head.vyx" } } },
         { "include": "source.vyrn" }
       ]
     },

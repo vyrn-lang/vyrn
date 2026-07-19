@@ -9,6 +9,7 @@
     { "include": "#strings" },
     { "include": "#capabilities" },
     { "include": "#test-keyword" },
+    { "include": "#contextual-keywords" },
     { "include": "#keywords" },
     { "include": "#types" },
     { "include": "#function-calls" },
@@ -109,6 +110,13 @@
       "comment": "`test` (RFC-0015) is a CONTEXTUAL starter, not a reserved word: the parser treats it as a test declaration only when a string literal follows (`test \"name\" { .. }`), so `let test = 1` stays an ordinary binding. Match it as a keyword only directly before a `\"`, mirroring how the parser recognizes it. Placed before #keywords/#function-calls/#identifiers so it wins that position.",
       "name": "keyword.control.vyrn",
       "match": "\\btest\\b(?=\\s+\")"
+    },
+    "contextual-keywords": {
+      "comment": "`as` (import aliasing: `{ x as y }`, `* as ns`), `gen fn`, and `extern fn` are CONTEXTUAL — the lexer emits them as plain identifiers and the parser recognizes them only in position (so `let as = 1` / `let gen = 1` stay ordinary bindings, per the parser tests). Match them contextually — `as` only when a name follows it, `gen`/`extern` only directly before `fn` — so a binding named `as`/`gen`/`extern` is never mis-coloured. Placed before #keywords/#function-calls/#identifiers so they win the position.",
+      "patterns": [
+        { "match": "\\bas\\b(?=\\s+[A-Za-z_])", "name": "keyword.control.vyrn" },
+        { "match": "\\b(gen|extern)\\b(?=\\s+fn\\b)", "name": "keyword.control.vyrn" }
+      ]
     },
     "keywords": {
       "name": "keyword.control.vyrn",
