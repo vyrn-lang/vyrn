@@ -1,6 +1,6 @@
 # RFC-0041 — Layouts, Error Pages, and Head Ownership (the Nuxt shape)
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented (see "As landed" at the end)
 - **Depends on:** RFC-0039 (`.vyx` pages + `pagesThemed`), RFC-0036
   (themed class checking), RFC-0031 (interface closure), RFC-0027
   (`import * as` — the i18n access polish)
@@ -150,3 +150,76 @@ Named layouts / per-page layout selection beyond `layout="none"`
 outlets, transition/animation on layout change, per-component scoped
 `<style>`, streaming, and the **template editor completion** (attributes,
 Tw classes, component props) — that is RFC-0042, the companion DX round.
+
+## As landed (2026-07-19)
+
+Zero compiler changes, as designed — everything below is `std/vyx` +
+`std/ui` + `std/i18n` + the two dogfood apps.
+
+**§1 layouts.** A `layout.vyx` is a `.vyx` component with a required
+`<slot/>` (a slot-less layout is `VYX_LAYOUT_NO_SLOT` naming the dir);
+`std/vyx` gains `vyxBuildLayoutModule` + `vyxLayout`/`vyxLayoutThemed`
+(exporting `layout(children)` + `head()`/`headTitle()`). The scanner
+(`uiScanAll`) collects `layout.vyx`/`error.vyx` as chrome, NOT routes;
+each page resolves its layout chain by directory prefix (every ancestor,
+composed outermost-last via nested `layout([…])` calls) and the router
+wraps the page body before `document()`. `layout="none"` in a page
+`<script>` opts out. `.vyrn` `page` pages are wrapped too; `respond`
+pages are not (they own the whole `Response`).
+
+**§2 head blocks.** A page/layout `<script>` may declare `head { title:
+<expr>, stylesheet <expr>, module <expr>, script <expr> }`; it compiles
+to `head() -> Array<Html>` + `headTitle() -> String`. Script includes use
+the `module`/`script` KEYWORD forms (not literal `<script>…</script>`
+tags) so the enclosing `<script>` section stays scannable — a `</script>`
+inside the head block would otherwise truncate it. A page's head/headTitle
+take the page signature (`p: Params, d: Data`) so a dynamic title can read
+the loaded data (bin's `/p/[id]` title is the paste title). The router
+threads `document(uiFirst(pageTitle, …layoutTitles…, routePattern),
+layoutHeads ++ pageHead, layoutWrap(body))`. bin's stylesheet `<link>`s +
+nav-runtime `<script>` moved into the layout's head; the `/app.js` boot
+moved into the home page's head block (the `#app` mount div stays in the
+page); the emitted tags are the same set, now single-sourced into `<head>`
+(they were in `<body>` before).
+
+**§3 error pages.** `PageError { status, message }` + `notFound`/
+`pageError`/`badRequest` are exported from `std/ui`. `load` may return
+`Result<Data, PageError>` (an `Err` renders the nearest `error.vyx` at the
+carried status) OR the existing `Validation<Data>` (an `Invalid` folds
+into a 422 `PageError` — issues joined into the message). `error.vyx` is a
+themed `.vyx` with an injected `error: PageError` prop, rendered inside the
+same layout. `respond()` stays for raw non-HTML. The `.vyx` loader keeps
+the RFC-0039 `load(p: Params)` convention (not the flat `load(id: String)`
+the design sketch showed); its data type is DERIVED from the loader return
+(inner of `Validation<T>` / first arg of `Result<T, PageError>`), so a page
+loads straight into a wire type (`Result<Paste, PageError>`) with no
+`type Data` alias — Vyrn forbids record aliases anyway.
+
+**§4 i18n namespace.** The generated i18n module now exports each key
+un-prefixed (`appTitle` beside `tAppTitle`), delegating to the prefixed
+dispatcher; `import * as t from i18n("…")` reads `t.appTitle()`. Flat
+imports and `setLocale`/`locale`/`Locale`/`TransKey` are unchanged. bin's
+layout + index + paste pages use namespace access (index's 9-key list
+collapsed to one line); about/shelf keep flat imports where the mixed
+`setLocale`/enum surface doesn't shorten.
+
+**Byte-identity gate.** The head/error runtime helpers and the `PageError`
+import are gated on "any page threads a head" / "any page uses an error
+page", so a router with no layouts/loaders (e.g. `pagesdemo`) stays
+byte-identical. `.vyrn` page + no layout keeps the old
+`document(title, [], body)` form.
+
+**Migration + proof.** bin: `view.vyrn` was already gone (RFC-0039);
+`routes/layout.vyx` + `routes/error.vyx` added; `index.vyx`/`about.vyx`
+dropped to their `<main>` bodies (the layout's `<slot/>` splices the
+page's `<main>` after the header, so `div#root > header + main` is
+structurally identical); `p/[id].vyrn → p/[id].vyx` with a failing
+`Result` loader (the `missing()`/`found()` hyperscript deleted);
+`widgets/PasteView.vyx` deleted. shelf: `view.vyrn`'s `shell()` removed
+(its bodies now return `<main>` directly), `routes/layout.vyx` +
+`routes/error.vyx` added; the `/books/999` + `/books/-5` `Validation`
+failures now render the themed 422 error page. Both browser-verified via
+`vyrn dev`: identical SSR shell single-sourced into `<head>`, themed
+404/422 error pages wrapped in the layout, dynamic `<title>`, `/raw/[id]`
+byte-exact `text/plain`, and the `#app` island boot chain (app.js →
+client.wasm) served unchanged.
