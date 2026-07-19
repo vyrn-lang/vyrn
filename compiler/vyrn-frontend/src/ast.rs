@@ -576,6 +576,16 @@ pub enum BinOp {
     /// `=~` — regular-expression full match: `String =~ "pattern"`. The pattern
     /// must be a string literal (compiled to a DFA at compile time).
     Match,
+    // Bitwise operators (RFC-0045). Defined on the sized integer types (and the
+    // literal `Int`); operands share one integer type. `Shl`/`Shr` take a
+    // same-typed shift amount; `Shr` is arithmetic on a signed operand and
+    // logical on an unsigned one. An out-of-range shift traps at runtime (or is
+    // a compile error for a constant amount).
+    BitAnd, // &
+    BitOr,  // |
+    BitXor, // ^
+    Shl,    // <<
+    Shr,    // >>
 }
 
 /// Unary operators.
@@ -583,6 +593,8 @@ pub enum BinOp {
 pub enum UnOp {
     Neg,
     Not,
+    /// `~` — bitwise complement within the operand's width (RFC-0045).
+    BitNot,
 }
 
 /// An expression.

@@ -1295,6 +1295,13 @@ pub fn emit(program: &Program) -> Result<String, String> {
         "@.trap.divovf = private unnamed_addr constant [37 x i8] \
          c\"error: integer overflow in division\\0A\\00\"\n",
     );
+    // Shift-amount-out-of-range trap (RFC-0045): a shift by `>= bitwidth` (or a
+    // negative amount) traps with this canonical wording, byte-identical to the
+    // interpreter's `shift amount out of range` as the CLI renders it.
+    out.push_str(
+        "@.trap.shift = private unnamed_addr constant [34 x i8] \
+         c\"error: shift amount out of range\\0A\\00\"\n",
+    );
     // NaN renders as `NaN` (the interpreter's Rust formatting); UCRT's %f
     // would print `-nan(ind)`.
     out.push_str("@.fmt.nan = private unnamed_addr constant [5 x i8] c\"NaN\\0A\\00\"\n");
@@ -3089,6 +3096,14 @@ impl<'a> Gen<'a> {
                     }
                     UnOp::Neg => self.emit(format!("{t} = sub i64 0, {v}")),
                     UnOp::Not => self.emit(format!("{t} = xor i1 {v}, true")),
+                    // `~v` = `xor v, -1` at the operand width (RFC-0045): all
+                    // ones of the type, so it complements within the width (a
+                    // sized integer's `iN`, or `i64` for the literal `Int`).
+                    UnOp::BitNot if matches!(self.resolve(&ty), Type::IntN { .. }) => {
+                        let w = self.llt(&ty);
+                        self.emit(format!("{t} = xor {w} {v}, -1"))
+                    }
+                    UnOp::BitNot => self.emit(format!("{t} = xor i64 {v}, -1")),
                 }
                 Ok((t, ty))
             }
@@ -3913,8 +3928,16 @@ impl<'a> Gen<'a> {
                 BinOp::GtEq => format!("{t} = fcmp oge {f} {l}, {r}"),
                 BinOp::Eq => format!("{t} = fcmp oeq {f} {l}, {r}"),
                 BinOp::NotEq => format!("{t} = fcmp one {f} {l}, {r}"),
-                BinOp::Rem | BinOp::And | BinOp::Or | BinOp::Match => {
-                    return Err("`%`/`&&`/`||`/`=~` are not valid on Float64".into())
+                BinOp::Rem
+                | BinOp::And
+                | BinOp::Or
+                | BinOp::Match
+                | BinOp::BitAnd
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::Shl
+                | BinOp::Shr => {
+                    return Err("`%`/`&&`/`||`/`=~`/bitwise ops are not valid on floats".into())
                 }
             }
         } else {
@@ -3945,6 +3968,19 @@ impl<'a> Gen<'a> {
                     self.trap_if(&both, "@.trap.divovf", "div.ovf");
                 }
             }
+            // Shift-amount range check (RFC-0045): a shift by `>= bitwidth`, or a
+            // negative amount, traps. One UNSIGNED `>=` test covers both — a
+            // negative amount reads as a huge unsigned, so it also fails `< bits`
+            // (this exactly mirrors the interpreter's `y < 0 || y >= bits`).
+            if matches!(op, BinOp::Shl | BinOp::Shr) {
+                let bits: u32 = match numty {
+                    Type::IntN { bits, .. } => bits.into(),
+                    _ => 64,
+                };
+                let oor = self.fresh_tmp();
+                self.emit(format!("{oor} = icmp uge {ll} {r}, {bits}"));
+                self.trap_if(&oor, "@.trap.shift", "shift.oor");
+            }
             match op {
                 BinOp::Add => format!("{t} = add {ll} {l}, {r}"),
                 BinOp::Sub => format!("{t} = sub {ll} {l}, {r}"),
@@ -3963,13 +3999,33 @@ impl<'a> Gen<'a> {
                 BinOp::GtEq => format!("{t} = icmp sge {ll} {l}, {r}"),
                 BinOp::Eq => format!("{t} = icmp eq {ll} {l}, {r}"),
                 BinOp::NotEq => format!("{t} = icmp ne {ll} {l}, {r}"),
+                // Bitwise (RFC-0045): and/or/xor directly; `<<` = `shl`; `>>` is
+                // `lshr` (logical) on an unsigned operand and `ashr`
+                // (arithmetic, sign-extending) on a signed one. The range trap
+                // above has already fired for an out-of-range amount.
+                BinOp::BitAnd => format!("{t} = and {ll} {l}, {r}"),
+                BinOp::BitOr => format!("{t} = or {ll} {l}, {r}"),
+                BinOp::BitXor => format!("{t} = xor {ll} {l}, {r}"),
+                BinOp::Shl => format!("{t} = shl {ll} {l}, {r}"),
+                BinOp::Shr if unsigned => format!("{t} = lshr {ll} {l}, {r}"),
+                BinOp::Shr => format!("{t} = ashr {ll} {l}, {r}"),
                 BinOp::And | BinOp::Or | BinOp::Match => unreachable!("handled above"),
             }
         };
         self.emit(instr);
         let result_ty = match op {
-            // Arithmetic keeps the operand's numeric type (Int, Float, or IntN).
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => numty,
+            // Arithmetic and bitwise keep the operand's integer type (Int or
+            // IntN); arithmetic also covers Float.
+            BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Div
+            | BinOp::Rem
+            | BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::BitXor
+            | BinOp::Shl
+            | BinOp::Shr => numty,
             _ => Type::Bool,
         };
         Ok((t, result_ty))

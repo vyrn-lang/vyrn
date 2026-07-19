@@ -2155,10 +2155,17 @@ impl<'a> Checker<'a> {
                         Ok(t)
                     }
                     UnOp::Not if t == Type::Bool => Ok(Type::Bool),
+                    // `~x` complements within the operand's integer width
+                    // (RFC-0045): a sized integer, or the literal `Int`. Not
+                    // Bool (use `!`), not a float.
+                    UnOp::BitNot if matches!(t, Type::Int | Type::IntN { .. }) => Ok(t),
                     UnOp::Neg => Err(format!(
                         "line {line}: unary `-` needs a numeric type, found {t}"
                     )),
                     UnOp::Not => Err(format!("line {line}: unary `!` needs Bool, found {t}")),
+                    UnOp::BitNot => Err(format!(
+                        "line {line}: unary `~` needs an integer type, found {t}"
+                    )),
                 }
             }
             Expr::Binary { op, lhs, rhs, line } => {
@@ -2216,6 +2223,25 @@ impl<'a> Checker<'a> {
                         _ => return Err(format!(
                             "line {line}: the right side of `=~` must be a string-literal pattern"
                         )),
+                    }
+                }
+                // A shift by a COMPILE-TIME-CONSTANT amount out of range is a
+                // compile error, not a runtime trap (RFC-0045): the width comes
+                // from the (already literal-adapted) shifted operand's type.
+                if matches!(op, BinOp::Shl | BinOp::Shr) {
+                    let bits: i64 = match &l {
+                        Type::IntN { bits, .. } => (*bits).into(),
+                        _ => 64, // the literal `Int` shifts at 64 bits
+                    };
+                    if let Some(crate::consteval::ConstVal::Int(amt)) =
+                        crate::consteval::eval(rhs, &std::collections::HashMap::new())
+                    {
+                        if amt < 0 || amt >= bits {
+                            return Err(format!(
+                                "line {line}: shift amount {amt} is out of range for a \
+                                 {bits}-bit value (valid range is 0..{bits})"
+                            ));
+                        }
                     }
                 }
                 self.binop_type(*op, l, r, *line)
@@ -2831,6 +2857,11 @@ impl<'a> Checker<'a> {
                 Match => Err(format!(
                     "line {line}: `=~` needs a String operand, not `{t}`"
                 )),
+                // Bitwise ops (RFC-0045) need a concrete integer type; there is
+                // no protocol bound that grants them on a type parameter.
+                BitAnd | BitOr | BitXor | Shl | Shr => Err(format!(
+                    "line {line}: bitwise operators need a concrete integer type, not `{t}`"
+                )),
             };
         }
         let numeric = |t: &Type| {
@@ -2902,6 +2933,26 @@ impl<'a> Checker<'a> {
             // `=~` matches a String against a regex literal → Bool (the literal
             // requirement and pattern validity are checked at the `Expr::Binary`
             // site, which has the syntax).
+            // Bitwise ops (RFC-0045): both operands the same integer type (a
+            // sized integer, or the literal `Int`) — no implicit widening, the
+            // same discipline `+` uses. A shift amount is the same integer type
+            // as the shifted value. Result is that integer type. NOT Bool (use
+            // `&&`/`||`/`!`), NOT a float.
+            BitAnd | BitOr | BitXor | Shl | Shr => {
+                let integral = |t: &Type| matches!(t, Type::Int | Type::IntN { .. });
+                if l == r && integral(&l) {
+                    Ok(l)
+                } else if integral(&l) && integral(&r) {
+                    Err(format!(
+                        "line {line}: bitwise operators need matching integer operands, \
+                         found {l} and {r}"
+                    ))
+                } else {
+                    Err(format!(
+                        "line {line}: bitwise operators need integer operands, found {l} and {r}"
+                    ))
+                }
+            }
             Match => {
                 if l == Type::Str && r == Type::Str {
                     Ok(Type::Bool)
@@ -5094,6 +5145,7 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
             match op {
                 UnOp::Neg => format!("-{s}"),
                 UnOp::Not => format!("!{s}"),
+                UnOp::BitNot => format!("~{s}"),
             }
         }
         Expr::Binary { op, lhs, rhs, .. } => {
@@ -5112,6 +5164,11 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
                 BinOp::And => "&&",
                 BinOp::Or => "||",
                 BinOp::Match => "=~",
+                BinOp::BitAnd => "&",
+                BinOp::BitOr => "|",
+                BinOp::BitXor => "^",
+                BinOp::Shl => "<<",
+                BinOp::Shr => ">>",
             };
             format!("{} {o} {}", pred_summary(lhs), pred_summary(rhs))
         }

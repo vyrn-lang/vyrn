@@ -1847,6 +1847,15 @@ impl<'a> Interp<'a> {
                     (UnOp::Neg, Val::Float(x)) => Ok(Val::Float(-x)),
                     (UnOp::Neg, Val::Float32(x)) => Ok(Val::Float32(-x)),
                     (UnOp::Not, Val::Bool(b)) => Ok(Val::Bool(!b)),
+                    // `~n` complements within the operand's width (RFC-0045):
+                    // the literal `Int` at 64 bits, a sized integer at its own
+                    // width (re-wrapped so an unsigned complement stays in range).
+                    (UnOp::BitNot, Val::Int(n)) => Ok(Val::Int(!n)),
+                    (UnOp::BitNot, Val::IntN { v, bits, signed }) => Ok(Val::IntN {
+                        v: wrap_intn(!v, bits, signed),
+                        bits,
+                        signed,
+                    }),
                     _ => Err("type error in unary op (should have been caught)".into()),
                 }
             }
@@ -2887,7 +2896,7 @@ impl<'a> Interp<'a> {
                 GtEq => Val::Bool(a >= b),
                 Eq => Val::Bool(a == b),
                 NotEq => Val::Bool(a != b),
-                Rem | And | Or | Match => {
+                Rem | And | Or | Match | BitAnd | BitOr | BitXor | Shl | Shr => {
                     return Err("type error in float binop (should have been caught)".into())
                 }
             });
@@ -2978,6 +2987,33 @@ impl<'a> Interp<'a> {
                 }),
                 Eq => Val::Bool(x == y),
                 NotEq => Val::Bool(x != y),
+                // Bitwise (RFC-0045): and/or/xor on the wrapped operands;
+                // shifts trap when the amount is out of range (`>= bits`, or
+                // negative on a signed amount — both caught by the unsigned
+                // `>= bits` test since a negative reads as a huge unsigned).
+                BitAnd => mk(x & y),
+                BitOr => mk(x | y),
+                BitXor => mk(x ^ y),
+                Shl => {
+                    if y < 0 || y >= i64::from(bits) {
+                        return Err("shift amount out of range".into());
+                    }
+                    mk(x.wrapping_shl(y as u32))
+                }
+                Shr => {
+                    if y < 0 || y >= i64::from(bits) {
+                        return Err("shift amount out of range".into());
+                    }
+                    // Signed `>>` is arithmetic (sign-extends); unsigned is
+                    // logical (zero-fills). `x`/`y` are already width-wrapped:
+                    // for an unsigned operand `x` is zero-extended into the i64,
+                    // so `(x as u64) >> y` is the logical shift.
+                    mk(if signed {
+                        x >> y
+                    } else {
+                        ((x as u64) >> y) as i64
+                    })
+                }
                 And | Or | Match => return Err("`&&`/`||` need Bool operands".into()),
             });
         }
@@ -3013,6 +3049,23 @@ impl<'a> Interp<'a> {
                 GtEq => Val::Bool(a >= b),
                 Eq => Val::Bool(a == b),
                 NotEq => Val::Bool(a != b),
+                // Bitwise on the literal `Int` (64-bit, signed): `>>` is
+                // arithmetic. An amount outside 0..64 traps (RFC-0045).
+                BitAnd => Val::Int(a & b),
+                BitOr => Val::Int(a | b),
+                BitXor => Val::Int(a ^ b),
+                Shl => {
+                    if b < 0 || b >= 64 {
+                        return Err("shift amount out of range".into());
+                    }
+                    Val::Int(a.wrapping_shl(b as u32))
+                }
+                Shr => {
+                    if b < 0 || b >= 64 {
+                        return Err("shift amount out of range".into());
+                    }
+                    Val::Int(a >> b)
+                }
                 And | Or | Match => unreachable!("handled above"),
             }),
             (Val::Float(a), Val::Float(b)) => Ok(match op {
@@ -3026,7 +3079,7 @@ impl<'a> Interp<'a> {
                 GtEq => Val::Bool(a >= b),
                 Eq => Val::Bool(a == b),
                 NotEq => Val::Bool(a != b),
-                Rem | And | Or | Match => {
+                Rem | And | Or | Match | BitAnd | BitOr | BitXor | Shl | Shr => {
                     return Err("type error in float binop (should have been caught)".into())
                 }
             }),

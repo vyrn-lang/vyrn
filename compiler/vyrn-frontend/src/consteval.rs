@@ -105,6 +105,18 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
                     BinOp::GtEq => ConstVal::Bool(a >= b),
                     BinOp::Eq => ConstVal::Bool(a == b),
                     BinOp::NotEq => ConstVal::Bool(a != b),
+                    // Bitwise and/or/xor fold on the i64 representation — the
+                    // result is width-independent for the stored value, so it
+                    // agrees with every backend (RFC-0045).
+                    BinOp::BitAnd => ConstVal::Int(a & b),
+                    BinOp::BitOr => ConstVal::Int(a | b),
+                    BinOp::BitXor => ConstVal::Int(a ^ b),
+                    // Shifts and complement are width-dependent (arithmetic vs
+                    // logical `>>`, complement mask), and consteval is
+                    // type-unaware — leave them unfolded (the checker still
+                    // const-rejects an out-of-range shift *amount*, which is a
+                    // plain foldable number).
+                    BinOp::Shl | BinOp::Shr => return None,
                     BinOp::And | BinOp::Or | BinOp::Match => return None,
                 }),
                 // IEEE f64 arithmetic — bit-identical in consteval, the

@@ -149,17 +149,33 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
             }
             Tok::Gt => {
                 // The closing `>` is tight against a type name (`Int64>`), a nested
-                // close (`>>`), or a const-generic integer size (`Array<Int64, 3>`).
-                // It is generic ONLY while a generic `<` is open — a lone tight `>`
-                // whose left side is an operand (`x>0`) is a comparison.
+                // close (`>>` = a `Shr` then a `>`), or a const-generic integer size
+                // (`Array<Int64, 3>`). It is generic ONLY while a generic `<` is
+                // open — a lone tight `>` whose left side is an operand (`x>0`) is a
+                // comparison.
                 let tight_before = !items[idx].space_before;
                 let prev_ok = matches!(
                     prev,
-                    Some(Tok::Ident(_)) | Some(Tok::Gt) | Some(Tok::Int(_))
+                    Some(Tok::Ident(_)) | Some(Tok::Gt) | Some(Tok::Shr) | Some(Tok::Int(_))
                 );
                 if generic_depth > 0 && tight_before && prev_ok {
                     roles[idx].generic_angle = true;
                     generic_depth -= 1;
+                }
+            }
+            // A `>>` (RFC-0045 shift token) closes TWO nested generics when a
+            // generic is open (`Array<Array<T>>`); otherwise it is a shift
+            // operator, spaced like any binary op. Source-tightness plus the
+            // open-`<` depth disambiguate, exactly as for a lone `>`.
+            Tok::Shr => {
+                let tight_before = !items[idx].space_before;
+                let prev_ok = matches!(
+                    prev,
+                    Some(Tok::Ident(_)) | Some(Tok::Gt) | Some(Tok::Shr) | Some(Tok::Int(_))
+                );
+                if generic_depth >= 2 && tight_before && prev_ok {
+                    roles[idx].generic_angle = true;
+                    generic_depth -= 2;
                 }
             }
             Tok::Minus => {
@@ -234,21 +250,22 @@ fn wants_space(
     if matches!(next, Comma | Semi | Colon | Question) {
         return false;
     }
-    // Generic angle brackets are tight: no space *before* a generic `<`/`>`, and
-    // no space *after* a generic `<`. (Space *after* a generic `>` follows the
-    // normal rules below — so `Box<T> =` keeps its space and never fuses to `>=`.)
-    if matches!(next, Lt | Gt) && next_generic {
+    // Generic angle brackets are tight: no space *before* a generic `<`/`>` (or a
+    // generic-closing `>>`), and no space *after* a generic `<`. (Space *after* a
+    // generic `>`/`>>` follows the normal rules below — so `Box<T> =` keeps its
+    // space and never fuses to `>=`.)
+    if matches!(next, Lt | Gt | Shr) && next_generic {
         return false;
     }
     if matches!(prev, Lt) && prev_generic {
         return false;
     }
     // Call / index: `foo(`, `arr[`, `f()[`, `x?(` attach with no space. A generic
-    // close `>` also attaches (`fn id<T>(x)`, `foo<Int64>()`). A function-value
-    // type's `fn(` (RFC-0023) attaches too.
+    // close `>` (or `>>`) also attaches (`fn id<T>(x)`, `foo<Int64>()`,
+    // `f<Array<T>>()`). A function-value type's `fn(` (RFC-0023) attaches too.
     if matches!(next, LParen | LBracket)
         && (matches!(prev, Ident(_) | RParen | RBracket | Question | Fn)
-            || (matches!(prev, Gt) && prev_generic))
+            || (matches!(prev, Gt | Shr) && prev_generic))
     {
         return false;
     }
@@ -261,6 +278,10 @@ fn wants_space(
         return false;
     }
     if matches!(prev, Bang) {
+        return false;
+    }
+    // `~` (bitwise complement, RFC-0045) hugs its operand like unary `-`/`!`.
+    if matches!(prev, Tilde) {
         return false;
     }
     // Everything else — words, binary operators, `=`/`->`/`=>`, one space before
@@ -534,6 +555,38 @@ mod tests {
         assert_eq!(
             f("let m: Map<String, Int64> = x\nlet b = i>0\n"),
             "let m: Map<String, Int64> = x\nlet b = i > 0\n"
+        );
+    }
+
+    #[test]
+    fn bitwise_ops_are_spaced_and_tilde_hugs(/* RFC-0045 */) {
+        // Binary bitwise ops are spaced like other binaries; `~` hugs its operand.
+        assert_eq!(f("let x=a&b\n"), "let x = a & b\n");
+        assert_eq!(f("let x=a|b\n"), "let x = a | b\n");
+        assert_eq!(f("let x=a^b\n"), "let x = a ^ b\n");
+        assert_eq!(f("let x=a<<b\n"), "let x = a << b\n");
+        assert_eq!(f("let x=a>>b\n"), "let x = a >> b\n");
+        assert_eq!(f("let x = ~ a\n"), "let x = ~a\n");
+        // `~` hugs even after another binary op (`= ~a` needs the space so it is
+        // not the `=~` regex-match token, but `& ~a` is unambiguous).
+        assert_eq!(f("let x = b & ~a\n"), "let x = b & ~a\n");
+        assert_eq!(f("return ~a & b\n"), "return ~a & b\n");
+        // A masked-flags comparison keeps the RFC precedence readable.
+        assert_eq!(f("let b = x&mask==0\n"), "let b = x & mask == 0\n");
+    }
+
+    #[test]
+    fn shift_and_generic_close_coexist(/* RFC-0045 */) {
+        // A shift `>>` and a generic-closing `>>` in the SAME program: the shift
+        // stays spaced, the generic close stays tight.
+        assert_eq!(
+            f("fn f(a: Array<Array<Int64>>) -> Int64 { return n >> 2 }\n"),
+            "fn f(a: Array<Array<Int64>>) -> Int64 { return n >> 2 }\n"
+        );
+        // Triple-nested generic close (`>>>` = `Shr` then `>`).
+        assert_eq!(
+            f("let a: Array<Array<Array<Int64>>> = x\n"),
+            "let a: Array<Array<Array<Int64>>> = x\n"
         );
     }
 

@@ -81,6 +81,14 @@ pub enum Tok {
     Question,   // ?
     Pipe,       // |
     Amp,        // &
+    Caret,      // ^  (bitwise xor, RFC-0045)
+    Tilde,      // ~  (bitwise complement, RFC-0045)
+    // Shift tokens (RFC-0045). Lexed greedily from `<<`/`>>` in every position;
+    // in *type* position a `>>` is split back into two `>` by the parser's
+    // generic-closing `eat` (mirroring the `>=` split) — so `Array<Array<T>>`
+    // still parses while `a >> b` shifts.
+    Shl, // <<
+    Shr, // >>
 
     Eof,
 }
@@ -173,6 +181,8 @@ fn two_char_op(a: char, b: char) -> Option<Tok> {
         ('>', '=') => Some(Tok::GtEq),
         ('&', '&') => Some(Tok::AndAnd),
         ('|', '|') => Some(Tok::OrOr),
+        ('<', '<') => Some(Tok::Shl),
+        ('>', '>') => Some(Tok::Shr),
         _ => None,
     }
 }
@@ -202,6 +212,8 @@ fn single_char_op(c: char) -> Option<Tok> {
         '?' => Tok::Question,
         '|' => Tok::Pipe,
         '&' => Tok::Amp,
+        '^' => Tok::Caret,
+        '~' => Tok::Tilde,
         _ => return None,
     })
 }
@@ -957,6 +969,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                 ('>', '=') => Some(Tok::GtEq),
                 ('&', '&') => Some(Tok::AndAnd),
                 ('|', '|') => Some(Tok::OrOr),
+                ('<', '<') => Some(Tok::Shl),
+                ('>', '>') => Some(Tok::Shr),
                 _ => None,
             }
         } else {
@@ -991,6 +1005,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
             '?' => Tok::Question,
             '|' => Tok::Pipe,
             '&' => Tok::Amp,
+            '^' => Tok::Caret,
+            '~' => Tok::Tilde,
             other => {
                 return Err(Diagnostic::error(
                     line,
@@ -1042,6 +1058,35 @@ mod tests {
                 Tok::Int(2),
                 Tok::Semi,
                 Tok::RBrace,
+                Tok::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_bitwise_and_shift_tokens() {
+        // RFC-0045: `& | ^ ~ << >>` are all tokens; `<<`/`>>` are greedy shift
+        // tokens (the type parser splits a `>>` when closing generics).
+        let kinds: Vec<Tok> = lex("a & b | c ^ ~d << e >> f")
+            .unwrap()
+            .into_iter()
+            .map(|t| t.tok)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                Tok::Ident("a".into()),
+                Tok::Amp,
+                Tok::Ident("b".into()),
+                Tok::Pipe,
+                Tok::Ident("c".into()),
+                Tok::Caret,
+                Tok::Tilde,
+                Tok::Ident("d".into()),
+                Tok::Shl,
+                Tok::Ident("e".into()),
+                Tok::Shr,
+                Tok::Ident("f".into()),
                 Tok::Eof,
             ]
         );

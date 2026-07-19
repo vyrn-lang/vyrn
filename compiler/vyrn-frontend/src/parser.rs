@@ -518,6 +518,16 @@ impl Parser {
             self.tokens[self.pos].tok = Tok::Eq;
             self.tokens[self.pos].col += 1;
             Ok(())
+        } else if *expected == Tok::Gt && *self.peek() == Tok::Shr {
+            // `Array<Array<T>>` — the lexer max-munches `>>` into one shift
+            // token (RFC-0045). Closing a generic argument list consumes ONE
+            // `>` and leaves a single `>` for the enclosing generic's `eat`
+            // (mirroring the `>=` split above). This is the whole `<<`/`>>`
+            // type-vs-expression disambiguation: a shift only survives where the
+            // expression parser (never the type parser) consumes it.
+            self.tokens[self.pos].tok = Tok::Gt;
+            self.tokens[self.pos].col += 1;
+            Ok(())
         } else {
             Err(Diagnostic::error(
                 self.line(),
@@ -2359,6 +2369,12 @@ impl Parser {
     }
 
     /// Binding powers: higher binds tighter.
+    ///
+    /// The bitwise family (RFC-0045) sits *between* comparison and the
+    /// additive/multiplicative tiers, so `x & mask == 0` is `(x & mask) == 0`
+    /// (the C footgun is designed out) and `a + b << c` is `(a + b) << c`.
+    /// Within the family, tightest-to-loosest: `~` (unary, in [`unary`]) >
+    /// `<< >>` > `&` > `^` > `|`.
     fn binop(tok: &Tok) -> Option<(BinOp, u8)> {
         Some(match tok {
             Tok::OrOr => (BinOp::Or, 1),
@@ -2370,11 +2386,16 @@ impl Parser {
             Tok::LtEq => (BinOp::LtEq, 4),
             Tok::Gt => (BinOp::Gt, 4),
             Tok::GtEq => (BinOp::GtEq, 4),
-            Tok::Plus => (BinOp::Add, 5),
-            Tok::Minus => (BinOp::Sub, 5),
-            Tok::Star => (BinOp::Mul, 6),
-            Tok::Slash => (BinOp::Div, 6),
-            Tok::Percent => (BinOp::Rem, 6),
+            Tok::Pipe => (BinOp::BitOr, 5),
+            Tok::Caret => (BinOp::BitXor, 6),
+            Tok::Amp => (BinOp::BitAnd, 7),
+            Tok::Shl => (BinOp::Shl, 8),
+            Tok::Shr => (BinOp::Shr, 8),
+            Tok::Plus => (BinOp::Add, 9),
+            Tok::Minus => (BinOp::Sub, 9),
+            Tok::Star => (BinOp::Mul, 10),
+            Tok::Slash => (BinOp::Div, 10),
+            Tok::Percent => (BinOp::Rem, 10),
             _ => return None,
         })
     }
@@ -2414,6 +2435,16 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Unary {
                     op: UnOp::Not,
+                    expr: Box::new(self.unary()?),
+                    line,
+                })
+            }
+            // `~x` — bitwise complement (RFC-0045), binding like the other unary
+            // prefixes (tighter than every binary operator).
+            Tok::Tilde => {
+                self.advance();
+                Ok(Expr::Unary {
+                    op: UnOp::BitNot,
                     expr: Box::new(self.unary()?),
                     line,
                 })
@@ -3693,6 +3724,49 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn bitwise_precedence_and_shift_generic_disambiguation() {
+        // RFC-0045: `x & mask == 0` is `(x & mask) == 0` (bitwise tighter than
+        // comparison — the C footgun designed out).
+        let p = parse_src("fn main() -> Int64 { let b = x & mask == 0; return 0; }");
+        let f = &p.functions[0];
+        match &f.body.stmts[0] {
+            Stmt::Let { value: Expr::Binary { op: BinOp::Eq, lhs, .. }, .. } => {
+                assert!(
+                    matches!(**lhs, Expr::Binary { op: BinOp::BitAnd, .. }),
+                    "`x & mask == 0` must be `(x & mask) == 0`, got {lhs:?}"
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // `a + b << c` is `(a + b) << c` (shift looser than additive).
+        let p = parse_src("fn main() -> Int64 { let s = a + b << c; return 0; }");
+        match &p.functions[0].body.stmts[0] {
+            Stmt::Let { value: Expr::Binary { op: BinOp::Shl, lhs, .. }, .. } => {
+                assert!(matches!(**lhs, Expr::Binary { op: BinOp::Add, .. }));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // The crux: a two-generic type AND a `>>` shift in the same program both
+        // parse (the `>>` closes two generics in type position, shifts in an
+        // expression).
+        let p = parse_src(
+            "fn f(m: Array<Array<Int64>>) -> Int64 { return m.length >> 1; }\n\
+             fn main() -> Int64 { return 0; }",
+        );
+        let f = p.functions.iter().find(|f| f.name == "f").unwrap();
+        assert!(
+            matches!(f.params[0].ty, Type::Array(_)),
+            "nested generic must parse as Array"
+        );
+        assert!(matches!(
+            f.body.stmts[0],
+            Stmt::Return { value: Some(Expr::Binary { op: BinOp::Shr, .. }), .. }
+        ));
     }
 
     #[test]
