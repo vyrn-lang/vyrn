@@ -1,6 +1,6 @@
 # RFC-0043 — Time and Randomness at the Host Boundary
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented (see "As landed" below)
 - **Depends on:** RFC-0014 (input I/O — the host-boundary model this
   extends; canonical error/effect discipline), RFC-0012 (extern — the
   mechanism), RFC-0004 (effects/purity — time/random are effects), the
@@ -132,3 +132,85 @@ only), a global ambient `random()`, cryptographic randomness guarantees
 beyond "the host CSPRNG seeds it", `Duration` arithmetic types (millis
 Int64 math for v1), leap seconds, parsing arbitrary date strings
 (formatting only; a parser is a later `std/time` addition).
+
+---
+
+## As landed
+
+**`Instant` newtype.** `std/time` exports `type Instant = Int64 where value >= 0`
+(epoch millis, UTC), with `toMillis`/`fromMillis` bridges. Since the extern ABI
+domain is scalar-only, `now()` is a thin wrapper: the module-private extern
+`hostNowMillis() -> Int64` returns raw millis and `now()` wraps them into
+`Instant`. The UTC breakdown (`civil`/`year`/`month`/`day`/`hour`/`minute`/
+`second`, via Howard Hinnant's `civil_from_days`) and `format`/`formatIso` are
+PURE Vyrn with all constants inlined (no module-level `let`, which would count as
+module state and forbid them in `gen`/comptime) — so the formatting is a full
+parity citizen, usable anywhere including generators. `monotonic()` wraps
+`hostMonotonicNanos()` (nanoseconds).
+
+**`Rng` / draws: record, not tuple.** Vyrn has no tuples, so a draw returns a
+record: `type Draw = { value: Int64, rng: Rng }`, threaded explicitly
+(`let d = nextInt(rng); use(d.value); rng = d.rng`). `Rng = { state: Int64 }`.
+
+**PRNG algorithm deviation (real wall).** SplitMix64/PCG (named in §2) require
+bitwise XOR/shift, and **Vyrn has no bitwise operators** (`^ & | << >>` don't
+exist — only `+ - * / %`). So the generator is a multiplicative-congruential
+**Lehmer / MINSTD** PRNG: `state' = state * 48271 mod (2^31 - 1)`. It delivers
+the same contract (pure value type, deterministic, seed-threaded) with pure
+arithmetic; products stay `< 2^47`, far under `Int64`, so there is no overflow
+and no interp/native divergence. `seededRng` folds any `Int64` (incl. negatives)
+into the valid state range without `abs` overflow. Not cryptographic —
+documented in-module.
+
+**Extern lowering across the 3 backends.** `hostNowMillis`/`hostMonotonicNanos`/
+`hostRandomSeed` are declared as `extern fn` in source (so the EXISTING purity
+analysis treats them as host effects — no new machinery), but they are NOT
+ordinary RFC-0012 `vyrn`-namespace imports. A new `host_boundary_extern(name)`
+map in codegen routes them to plain C-shim symbols (`__vyrn_now_millis` etc.)
+instead of a `vyrn` wasm import, and they get no native trap stub. The shim
+implements them on EVERY target: `timespec_get(TIME_UTC)` for the wall clock
+(portable across UCRT / glibc / wasi-libc), `clock_gettime(CLOCK_MONOTONIC)` /
+`timespec_get` fallback for monotonic, and a CSPRNG seed (`rand_s` on Windows,
+`getentropy` on POSIX/wasi). Because these lower to WASI `clock_time_get` /
+`random_get` via wasi-libc — NOT the `vyrn` host page — a clock/random program is
+a full three-way parity citizen under wasmtime (which supplies WASI clocks/
+random natively). The interpreter special-cases the same three extern names.
+
+**Harness injection mechanics.** The C shim, the interpreter, and (for the
+browser) `web/wasi-min.js` all honor `VYRN_FIXED_TIME` / `VYRN_FIXED_SEED`:
+`now()` returns exactly the injected millis, `randomSeed()` the injected seed,
+and `monotonic()` a fixed base + deterministic per-call increment
+(`1e9 + n*1e6`, mirrored bit-for-bit in shim and interp). The parity harness sets
+both env vars on every backend process (`FIXED_TIME = 1700000000000`,
+`FIXED_SEED = 424242`) and additionally forwards them into the wasm guest via
+`wasmtime --env` (wasmtime does not inherit host env). Result: `examples/clock.vyrn`
+is byte-identical interp == native == wasm (verified: `ok clock.vyrn`, 69 checked
+0 failed with the wasm column active). `web/wasi-min.js` gained
+`clock_time_get`/`random_get` backed by `Date.now()`/`performance.now()`/
+`crypto.getRandomValues`, with optional `hooks.fixedTime`/`hooks.fixedSeed` for
+reproducible browser demos.
+
+**Effects/comptime/workers pins.** The three externs are rejected in `gen`/
+comptime by the existing extern rule (pinned:
+`rfc0043_host_clock_extern_is_rejected_in_a_generator`), and the pure PRNG
+arithmetic is accepted in a generator (`rfc0043_pure_prng_is_comptime_usable`).
+**Spawn note / RFC-prose correction:** §"Effects, comptime, workers" claims a
+task calling `now()` is "permitted (like print/file I/O)". In the actual
+isolation analysis, host I/O — `print`, file I/O, and any `extern` — is NOT
+isolated, so spawning a function that calls it is REJECTED (see
+`parallel.vyrn`'s "no I/O" contract). `now()`/`randomSeed()` are treated
+identically and consistently — forbidden in a task exactly as `print` is
+(pinned: `rfc0043_spawned_task_calling_the_clock_is_rejected`). The prose's
+"permitted" was inaccurate; the landed behavior is the consistent one.
+
+**bin adoption.** `Paste.created` is now a real wall-clock stamp
+(`toMillis(now())` at create), rendered `format(fromMillis(created))` →
+"created 2023-11-14 22:13:20 UTC". Kept the field typed `Created`
+(`Int64 where value >= 0`, re-documented as epoch millis) rather than importing
+`Instant` into `wire.vyrn`, so the RPC/OpenAPI type-closure reflection and the
+JSON codec are untouched — the timestamp round-trips as a plain `Int64`.
+`findByCreated` (which assumed `created` was unique) was replaced with a
+last-appended-element lookup, since two pastes can now share a millisecond.
+Content-addressed ids unchanged. Verified end-to-end via `vyrn serve`: create →
+`created:1700000000000` persisted → restart (fresh process) → timestamp and id
+survive, home + paste views render the formatted UTC string.
