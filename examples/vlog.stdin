@@ -1,0 +1,9 @@
+{"ts":1700000000000,"level":"info","msg":"server started","fields":{"port":8080}}
+{"ts":1700000001500,"level":"debug","msg":"cache warm","fields":{"keys":42}}
+{"ts":1700000003200,"level":"warn","msg":"slow query","fields":{"ms":210}}
+
+{"ts":1700000004000,"level":"error","msg":"db connection refused"}
+this line is not json at all
+{"ts":1700000007800,"level":"info","msg":"retrying db connection"}
+{"ts":1700000012000,"level":"error","msg":"db connection refused again"}
+{"ts":1700000015500,"level":"info","msg":"request handled"}

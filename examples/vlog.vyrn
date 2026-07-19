@@ -1,0 +1,691 @@
+/// vlog — a structured-log (NDJSON) CLI, and a dogfood of the text-processing /
+/// stdin axis (no server, no UI). Each stdin line is one JSON log object
+/// `{"ts":<epoch-millis>,"level":"info","msg":"...", ...}`; unknown fields are
+/// ignored by the codec. Subcommands (via `args()`):
+///
+///   vlog                      overview: fmt + count + stats over stdin
+///   vlog count                tally lines by level (a Map histogram)
+///   vlog filter --level error pass only matching lines (also --contains <sub>)
+///   vlog tail -n N            the last N lines
+///   vlog fmt                  pretty `HH:MM:SS LEVEL msg` per line (std/time)
+///   vlog stats               min/max ts, span, and an FNV content fingerprint
+///
+/// A malformed line is reported to stderr with its line number and SKIPPED, not
+/// crashed (per-line `fromJson` never traps). Input arrives on stdin or, if the
+/// last argument is a path that exists, from that file.
+///
+/// PARITY: run with no arguments it reads `examples/vlog.stdin` and prints the
+/// overview — so the harness exercises the whole pipeline (parse, malformed-skip
+/// on stderr, Map tally, time formatting, stats, FNV) as a three-way citizen.
+/// No `now()` is called (timestamps come from the data), so it needs no fixed
+/// clock. Real subcommand dispatch is driven by `args()`, which the harness
+/// leaves empty.
+///
+/// FRICTION NOTE (see rfcs/NOTES-dogfood-vlog.md): `sliceStr`, `indexOfByte`,
+/// `trim`, `toLowerAscii`, `toUpperAscii`, `toHex`, and `padTwo` below are all
+/// hand-rolled — std/strings has only `repeat`/`joinWith`, so substring, case,
+/// trim, and integer-to-hex do not exist. Every substring must round-trip
+/// through `bytes()` + `stringFromBytes` because a byte (`s[i]`, an `Int64`) has
+/// no one-character-`String` form.
+
+import { fromMillis, hour, minute, second, format, Instant } from "std/time"
+import { fnv1aStr } from "std/hash"
+import { joinWith } from "std/strings"
+
+logging { level: warn, sink: stderr }
+
+// ---------------------------------------------------------------------------
+// Model
+// ---------------------------------------------------------------------------
+
+/// Epoch milliseconds, validated non-negative — a negative `ts` makes a line
+/// malformed at decode (an Issue), so `fromMillis` downstream never traps.
+type Millis = Int64 where value >= 0
+
+/// One decoded log record. `fields` and any other keys are ignored (the codec
+/// drops unknown fields); `level` stays a free String because real logs are
+/// lowercase (`"error"`) while the codec decodes an enum from its capitalized
+/// variant name — a mismatch called out in NOTES.
+type LogLine = { ts: Millis, level: String, msg: String }
+
+/// A kept record plus the exact bytes it decoded from (for `filter`/`tail`).
+type Rec = { raw: String, line: LogLine }
+
+/// The finite set of levels, used to VALIDATE the `--level` CLI argument (a bad
+/// `--level wizard` is rejected). Log lines themselves carry raw strings.
+type Level = | Trace | Debug | Info | Warn | Error
+
+/// One stdin read: `eof` or a line. A bool-tagged record because `match` arms
+/// are expression-only (no statement blocks) and there is no `while let`, so
+/// branching-with-side-effects wraps the `Option` in a record. (NOTES.)
+type Read = { eof: Bool, line: String }
+
+/// One decode attempt, same bool-tagged-record shape as `Read` and for the same
+/// reason: to branch on a `Validation` with ordinary statements afterwards.
+type Decoded = { ok: Bool, line: LogLine, err: String }
+
+/// A parsed `--flag value` / `--flag=value` lookup result.
+type Flag = { found: Bool, value: String }
+
+// ---------------------------------------------------------------------------
+// Hand-rolled string helpers (WORKAROUND: no std/strings substring/case/trim)
+// ---------------------------------------------------------------------------
+
+/// The substring `s[start..end]` (byte indices). WORKAROUND: there is no
+/// `substring`, and a byte has no one-char String form, so this rebuilds through
+/// `bytes()` + `stringFromBytes`.
+fn sliceStr(s: String, start: Int64, end: Int64) -> String {
+    let b = bytes(s)
+    let mut buf: Array<UInt8> = []
+    let mut i = start
+    while i < end {
+        buf.push(b[i])
+        i = i + 1
+    }
+    return match stringFromBytes(buf) {
+        Ok(x) => x,
+        Err(e) => "",
+    }
+}
+
+/// The first index of byte `needle` in `s`, or -1. WORKAROUND: no `indexOf`.
+/// (`s[i]` is a `UInt8` byte — the stringops docs still say `Int64`, a drift.)
+fn indexOfByte(s: String, needle: UInt8) -> Int64 {
+    let mut i = 0
+    while i < s.length {
+        if s[i] == needle {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+/// Whitespace bytes: space, tab, CR, LF.
+fn isSpace(c: UInt8) -> Bool {
+    return c == 32 || c == 9 || c == 13 || c == 10
+}
+
+/// `s` with leading and trailing ASCII whitespace removed. WORKAROUND: no `trim`.
+fn trim(s: String) -> String {
+    let mut start = 0
+    let mut end = s.length
+    while start < end && isSpace(s[start]) {
+        start = start + 1
+    }
+    while end > start && isSpace(s[end - 1]) {
+        end = end - 1
+    }
+    return sliceStr(s, start, end)
+}
+
+/// `s` lowercased over ASCII A–Z. WORKAROUND: no `toLowerCase`. Bytes iterate as
+/// `UInt8`; the numeric bounds could equally be char literals (`'A'`/`'Z'`, which
+/// coerce to `UInt8`), kept numeric here only for the +32 arithmetic alongside.
+fn toLowerAscii(s: String) -> String {
+    let b = bytes(s)
+    let mut buf: Array<UInt8> = []
+    for c in b {
+        if c >= 65 && c <= 90 {
+            buf.push(c + 32)
+        } else {
+            buf.push(c)
+        }
+    }
+    return match stringFromBytes(buf) {
+        Ok(x) => x,
+        Err(e) => s,
+    }
+}
+
+/// `s` uppercased over ASCII a–z. WORKAROUND: no `toUpperCase`.
+fn toUpperAscii(s: String) -> String {
+    let b = bytes(s)
+    let mut buf: Array<UInt8> = []
+    for c in b {
+        if c >= 97 && c <= 122 {
+            buf.push(c - 32)
+        } else {
+            buf.push(c)
+        }
+    }
+    return match stringFromBytes(buf) {
+        Ok(x) => x,
+        Err(e) => s,
+    }
+}
+
+/// The lowercase 16-digit hex of a `UInt64` (a content fingerprint). WORKAROUND:
+/// integer `toString` is decimal-only, so hex is nibble-by-nibble via bitwise
+/// ops (RFC-0045) into a byte buffer.
+fn toHex(n: UInt64) -> String {
+    let db = bytes("0123456789abcdef")
+    let mut buf: Array<UInt8> = []
+    let mut sh: UInt64 = 60
+    let mut going = true
+    while going {
+        let nib = (n >> sh) & 15
+        buf.push(db[Int64(nib)])
+        if sh == 0 {
+            going = false
+        } else {
+            sh = sh - 4
+        }
+    }
+    return match stringFromBytes(buf) {
+        Ok(x) => x,
+        Err(e) => "",
+    }
+}
+
+/// Two-digit zero-padded decimal. WORKAROUND: `std/time`'s `padTwo` is private, so
+/// the `HH:MM:SS` formatter re-rolls it.
+fn padTwo(n: Int64) -> String {
+    if n < 10 {
+        return "0\{n}"
+    }
+    return "\{n}"
+}
+
+// ---------------------------------------------------------------------------
+// Levels
+// ---------------------------------------------------------------------------
+
+/// Parse a `--level` argument (case-insensitive) into the finite `Level`, or
+/// `None` for an unknown level.
+fn parseLevel(s: String) -> Option<Level> {
+    let x = toLowerAscii(s)
+    if x == "trace" {
+        return Some(Trace)
+    }
+    if x == "debug" {
+        return Some(Debug)
+    }
+    if x == "info" {
+        return Some(Info)
+    }
+    if x == "warn" {
+        return Some(Warn)
+    }
+    if x == "error" {
+        return Some(Error)
+    }
+    return None
+}
+
+/// The canonical lowercase name of a `Level`.
+fn levelName(l: Level) -> String {
+    return match l {
+        Trace => "trace",
+        Debug => "debug",
+        Info => "info",
+        Warn => "warn",
+        Error => "error",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Time formatting
+// ---------------------------------------------------------------------------
+
+/// `HH:MM:SS` (UTC) for epoch millis — the time-of-day slice of a timestamp.
+/// WORKAROUND: `std/time.format` yields the full `YYYY-MM-DD HH:MM:SS` and there
+/// is no `substring` to take chars 11..19, so this recomputes from the exported
+/// `hour`/`minute`/`second` fields.
+fn hms(ts: Int64) -> String {
+    let i: Instant = fromMillis(ts)
+    return "\{padTwo(hour(i))}:\{padTwo(minute(i))}:\{padTwo(second(i))}"
+}
+
+/// A rough human duration for a millisecond span (`0ms`, `3s`, `1m 2s`, ...).
+fn humanizeDuration(ms: Int64) -> String {
+    if ms == 0 {
+        return "0ms"
+    }
+    let msPart = ms % 1000
+    let totalSec = ms / 1000
+    let sec = totalSec % 60
+    let totalMin = totalSec / 60
+    let min = totalMin % 60
+    let totalHour = totalMin / 60
+    let hr = totalHour % 24
+    let day = totalHour / 24
+    let mut out = ""
+    if day > 0 {
+        out = out + "\{day}d "
+    }
+    if hr > 0 {
+        out = out + "\{hr}h "
+    }
+    if min > 0 {
+        out = out + "\{min}m "
+    }
+    if sec > 0 {
+        out = out + "\{sec}s "
+    }
+    if msPart > 0 {
+        out = out + "\{msPart}ms"
+    }
+    return trim(out)
+}
+
+// ---------------------------------------------------------------------------
+// Reading & decoding
+// ---------------------------------------------------------------------------
+
+/// One stdin line, wrapped so the caller can branch with statements.
+fn readOne() -> Read {
+    return match readLine() {
+        Some(s) => Read { eof: false, line: s },
+        None => Read { eof: true, line: "" },
+    }
+}
+
+/// Decode one line, wrapping the `Validation` in a bool-tagged record.
+fn decodeLine(raw: String) -> Decoded {
+    return match fromJson(LogLine, raw) {
+        Valid(l) => Decoded { ok: true, line: l, err: "" },
+        Invalid(issues) => Decoded {
+            ok: false,
+            line: LogLine { ts: 0, level: "", msg: "" },
+            err: issues[0].message,
+        },
+    }
+}
+
+/// All stdin lines, buffered. The NATURAL surface: `readLine()` already strips
+/// `\r?\n`, so this streaming loop needs no manual line splitting. (NOTES: this
+/// is the ergonomic path; the file path below is the awkward one.)
+fn readStdinLines() -> Array<String> {
+    let mut lines: Array<String> = []
+    let mut going = true
+    while going {
+        let r = readOne()
+        if r.eof {
+            going = false
+        } else {
+            lines.push(r.line)
+        }
+    }
+    return lines
+}
+
+/// Split a whole-file String on `\n`. WORKAROUND (the headline friction): there
+/// is no `split`, and `readFile` returns one String, so a file source has to be
+/// diced by hand through `bytes()` + `sliceStr`. A trailing `\r` survives here
+/// and is removed later by `trim` — `readLine()` did both for free.
+fn splitLines(s: String) -> Array<String> {
+    let mut out: Array<String> = []
+    let b = bytes(s)
+    let mut start = 0
+    let mut i = 0
+    while i < b.length {
+        if b[i] == 10 {
+            out.push(sliceStr(s, start, i))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start < b.length {
+        out.push(sliceStr(s, start, b.length))
+    }
+    return out
+}
+
+/// Decode a buffer of raw lines into records. Blank lines are skipped silently;
+/// malformed lines are logged to stderr with their 1-based line number and
+/// skipped (per-line `fromJson` never traps).
+fn recordsFrom(lines: Array<String>) -> Array<Rec> {
+    let log = logger("vlog")
+    let mut recs: Array<Rec> = []
+    let mut lineNo = 0
+    for raw in lines {
+        lineNo = lineNo + 1
+        let t = trim(raw)
+        if t.length > 0 {
+            let d = decodeLine(t)
+            if d.ok {
+                recs.push(Rec { raw: t, line: d.line })
+            } else {
+                log.warn("line \{lineNo}: \{d.err}")
+            }
+        }
+    }
+    return recs
+}
+
+// ---------------------------------------------------------------------------
+// Pure logic (exercised by the `test` blocks below)
+// ---------------------------------------------------------------------------
+
+/// Tally a list of level strings into an insertion-ordered histogram.
+fn tallyLevels(levels: Array<String>) -> Map<String, Int64> {
+    let mut m: Map<String, Int64> = [:]
+    for lv in levels {
+        m[lv] = match m[lv] {
+            Some(c) => c + 1,
+            None => 1,
+        }
+    }
+    return m
+}
+
+/// Honest `Map` lookup with a 0 default (for a level tally).
+fn countOf(m: Map<String, Int64>, k: String) -> Int64 {
+    return match m[k] {
+        Some(v) => v,
+        None => 0,
+    }
+}
+
+/// The lowercased levels of every record — the histogram input.
+fn levelsOf(recs: Array<Rec>) -> Array<String> {
+    let mut out: Array<String> = []
+    for r in recs {
+        out.push(toLowerAscii(r.line.level))
+    }
+    return out
+}
+
+/// Whether a record's level matches (case-insensitively).
+fn matchesLevel(r: Rec, wantLower: String) -> Bool {
+    return toLowerAscii(r.line.level) == wantLower
+}
+
+// ---------------------------------------------------------------------------
+// Argument parsing (WORKAROUND: hand-rolled — there is no std/args)
+// ---------------------------------------------------------------------------
+
+/// Look up `--name value` or `--name=value` in `a`. Returns the first hit.
+fn getFlag(a: Array<String>, name: String) -> Flag {
+    let mut i = 0
+    while i < a.length {
+        let tok = a[i]
+        let eq = indexOfByte(tok, 61) // '='
+        if eq >= 0 {
+            if sliceStr(tok, 0, eq) == name {
+                return Flag { found: true, value: sliceStr(tok, eq + 1, tok.length) }
+            }
+        } else {
+            if tok == name {
+                if i + 1 < a.length {
+                    return Flag { found: true, value: a[i + 1] }
+                }
+                return Flag { found: true, value: "" }
+            }
+        }
+        i = i + 1
+    }
+    return Flag { found: false, value: "" }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommands
+// ---------------------------------------------------------------------------
+
+/// `count` — print the level histogram (insertion order).
+fn cmdCount(recs: Array<Rec>) -> Int64 {
+    let m = tallyLevels(levelsOf(recs))
+    for k in m.keys() {
+        print("\{k}: \{countOf(m, k)}")
+    }
+    return 0
+}
+
+/// `fmt` — one `HH:MM:SS LEVEL msg` line per record.
+fn cmdFmt(recs: Array<Rec>) -> Int64 {
+    for r in recs {
+        print("\{hms(r.line.ts)} \{toUpperAscii(r.line.level)} \{r.line.msg}")
+    }
+    return 0
+}
+
+/// `tail -n N` — the last `n` records, as their original bytes.
+fn cmdTail(recs: Array<Rec>, n: Int64) -> Int64 {
+    let start = if recs.length > n {
+        recs.length - n
+    } else {
+        0
+    }
+    let mut i = start
+    while i < recs.length {
+        print(recs[i].raw)
+        i = i + 1
+    }
+    return 0
+}
+
+/// `filter` — pass records matching an optional `--level` and/or `--contains`.
+/// A bad `--level` is rejected (finite `Level`) with exit 2.
+fn cmdFilter(recs: Array<Rec>, a: Array<String>) -> Int64 {
+    let log = logger("vlog")
+    let levelFlag = getFlag(a, "--level")
+    let containsFlag = getFlag(a, "--contains")
+
+    let mut wantLower = ""
+    if levelFlag.found {
+        wantLower = match parseLevel(levelFlag.value) {
+            Some(l) => levelName(l),
+            None => "?",
+        }
+        if wantLower == "?" {
+            log.error("unknown level `\{levelFlag.value}` (want trace|debug|info|warn|error)")
+            return 2
+        }
+    }
+
+    for r in recs {
+        let levelOk = if levelFlag.found {
+            matchesLevel(r, wantLower)
+        } else {
+            true
+        }
+        let containsOk = if containsFlag.found {
+            r.line.msg.contains(containsFlag.value)
+        } else {
+            true
+        }
+        if levelOk && containsOk {
+            print(r.raw)
+        }
+    }
+    return 0
+}
+
+/// `stats` — count, ts min/max, span, and an FNV fingerprint of the corpus.
+fn cmdStats(recs: Array<Rec>) -> Int64 {
+    print("lines: \{recs.length}")
+    if recs.length == 0 {
+        return 0
+    }
+    let mut minTs = recs[0].line.ts
+    let mut maxTs = recs[0].line.ts
+    let mut raws: Array<String> = []
+    for r in recs {
+        if r.line.ts < minTs {
+            minTs = r.line.ts
+        }
+        if r.line.ts > maxTs {
+            maxTs = r.line.ts
+        }
+        raws.push(r.raw)
+    }
+    print("first: \{format(fromMillis(minTs))}")
+    print("last:  \{format(fromMillis(maxTs))}")
+    print("span:  \{humanizeDuration(maxTs - minTs)}")
+    let corpus = joinWith(raws, "\n")
+    print("fingerprint: \{toHex(fnv1aStr(corpus))}")
+    return 0
+}
+
+/// The no-subcommand overview: fmt, then count, then stats. This is the path the
+/// parity harness runs (empty `args()`, `vlog.stdin` piped).
+fn cmdOverview(recs: Array<Rec>) -> Int64 {
+    print("== fmt ==")
+    let f = cmdFmt(recs)
+    print("== count ==")
+    let c = cmdCount(recs)
+    print("== stats ==")
+    let s = cmdStats(recs)
+    return 0
+}
+
+fn usage() -> Int64 {
+    let log = logger("vlog")
+    log.error("usage: vlog [count|filter|tail|fmt|stats] [--file <path>] < log.ndjson")
+    log.error("  filter --level <lvl> [--contains <sub>] | tail -n <N>")
+    return 2
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+/// A resolved input source: its lines, and whether reading succeeded (a `--file`
+/// that could not be read fails with `ok: false`). Same bool-tagged-record shape
+/// used for `Read`/`Decoded`, because a `match` arm cannot assign to `lines`.
+type Source = { ok: Bool, lines: Array<String> }
+
+/// Choose the input source: `--file <path>` (readFile + hand-rolled split) else
+/// stdin (readLine loop). Read once; shared by the subcommand.
+fn loadLines(a: Array<String>) -> Source {
+    let fileFlag = getFlag(a, "--file")
+    if !fileFlag.found {
+        return Source { ok: true, lines: readStdinLines() }
+    }
+    return match readFile(fileFlag.value) {
+        Ok(content) => Source { ok: true, lines: splitLines(content) },
+        Err(e) => Source { ok: false, lines: [] },
+    }
+}
+
+fn main() -> Int64 {
+    let a = args()
+    let log = logger("vlog")
+
+    let src = loadLines(a)
+    if !src.ok {
+        log.error("cannot read `\{getFlag(a, "--file").value}`")
+        return 3
+    }
+    let recs = recordsFrom(src.lines)
+
+    // The subcommand is the first NON-flag argument; a bare `--file ...` (or no
+    // args) runs the overview.
+    let hasCmd = a.length > 0 && !a[0].startsWith("-")
+    if !hasCmd {
+        return cmdOverview(recs)
+    }
+
+    let cmd = a[0]
+    if cmd == "count" {
+        return cmdCount(recs)
+    }
+    if cmd == "fmt" {
+        return cmdFmt(recs)
+    }
+    if cmd == "stats" {
+        return cmdStats(recs)
+    }
+    if cmd == "filter" {
+        return cmdFilter(recs, a)
+    }
+    if cmd == "tail" {
+        let nFlag = getFlag(a, "-n")
+        let n = if nFlag.found {
+            match parse(nFlag.value) {
+                Some(v) => v,
+                None => 10,
+            }
+        } else {
+            10
+        }
+        return cmdTail(recs, n)
+    }
+    if cmd == "help" || cmd == "--help" {
+        return usage()
+    }
+    let log = logger("vlog")
+    log.error("unknown subcommand `\{cmd}`")
+    return usage()
+}
+
+// ---------------------------------------------------------------------------
+// Tests (RFC-0015) — `vyrn test examples/vlog.vyrn`. Stripped from run/build.
+// ---------------------------------------------------------------------------
+
+test "sliceStr takes a byte range" {
+    assertEq(sliceStr("hello world", 0, 5), "hello")
+    assertEq(sliceStr("hello world", 6, 11), "world")
+    assertEq(sliceStr("abc", 1, 1), "")
+}
+
+test "indexOfByte finds and misses" {
+    assertEq(indexOfByte("a=b", 61), 1) // '='
+    assertEq(indexOfByte("abc", 61), 0 - 1)
+    assertEq(indexOfByte("", 61), 0 - 1)
+}
+
+test "trim strips surrounding whitespace" {
+    assertEq(trim("  hi \t"), "hi")
+    assertEq(trim("nospace"), "nospace")
+    assertEq(trim("   "), "")
+}
+
+test "case folds over ASCII only" {
+    assertEq(toLowerAscii("ERROR"), "error")
+    assertEq(toUpperAscii("info"), "INFO")
+    assertEq(toLowerAscii("Mixed123"), "mixed123")
+}
+
+test "toHex is 16 lowercase nibbles" {
+    assertEq(toHex(255), "00000000000000ff")
+    assertEq(toHex(0), "0000000000000000")
+}
+
+test "padTwo zero-pads below ten" {
+    assertEq(padTwo(3), "03")
+    assertEq(padTwo(42), "42")
+}
+
+test "hms slices the time of day" {
+    // 1970-01-01T01:02:03Z = 3723 seconds.
+    assertEq(hms(3723000), "01:02:03")
+}
+
+test "parseLevel is case-insensitive and finite" {
+    assert(match parseLevel("ERROR") { Some(l) => levelName(l) == "error", None => false })
+    assert(match parseLevel("wizard") { Some(l) => false, None => true })
+}
+
+test "tallyLevels counts by key in insertion order" {
+    let levels: Array<String> = ["info", "error", "info", "warn", "info"]
+    let m = tallyLevels(levels)
+    assertEq(countOf(m, "info"), 3)
+    assertEq(countOf(m, "error"), 1)
+    assertEq(countOf(m, "warn"), 1)
+    assertEq(countOf(m, "missing"), 0)
+    let keys = m.keys()
+    assertEq(keys[0], "info")
+    assertEq(keys[1], "error")
+    assertEq(keys[2], "warn")
+}
+
+test "getFlag reads space and equals forms" {
+    let a: Array<String> = ["filter", "--level", "error", "--contains=boom"]
+    let lvl = getFlag(a, "--level")
+    assert(lvl.found)
+    assertEq(lvl.value, "error")
+    let sub = getFlag(a, "--contains")
+    assert(sub.found)
+    assertEq(sub.value, "boom")
+    let missing = getFlag(a, "-n")
+    assert(!missing.found)
+}
+
+test "humanizeDuration renders spans" {
+    assertEq(humanizeDuration(0), "0ms")
+    assertEq(humanizeDuration(5000), "5s")
+    assertEq(humanizeDuration(62000), "1m 2s")
+    assertEq(humanizeDuration(500), "500ms")
+}
