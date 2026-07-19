@@ -115,6 +115,8 @@ fn check_accum_full(
         "readLine",
         "readFile",
         "writeFile",
+        "renameFile",
+        "fsyncFile",
         "readFileBytes",
         "stringFromBytes",
         "listDir",
@@ -3243,6 +3245,49 @@ impl<'a> Checker<'a> {
             }
             return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
         }
+        // RFC-0044: atomically move `from` over `to` (the host primitive behind
+        // `writeAtomic`). Same error shape as `writeFile` — `Result<Bool, String>`
+        // with canonical `@.io.*` wording.
+        if name == "renameFile" {
+            if args.len() != 2 {
+                return Err(format!(
+                    "line {line}: `renameFile` takes 2 arguments (from, to), got {}",
+                    args.len()
+                ));
+            }
+            for a in args {
+                let t = self.base(&self.expr(a, scope, Some(&Type::Str), fn_ret)?);
+                if matches!(t, Type::Err) {
+                    return Ok(Type::Err);
+                }
+                if t != Type::Str {
+                    return Err(format!(
+                        "line {line}: `renameFile` needs String arguments, found {t}"
+                    ));
+                }
+            }
+            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
+        }
+        // RFC-0044: flush a file's contents to stable storage (the optional
+        // power-durability upgrade over `writeAtomic`'s crash-consistency).
+        if name == "fsyncFile" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `fsyncFile` takes 1 argument (a path), got {}",
+                    args.len()
+                ));
+            }
+            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
+            if matches!(t, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if t != Type::Str {
+                return Err(format!(
+                    "line {line}: `fsyncFile` needs a String path, found {t}"
+                ));
+            }
+            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
+        }
         // RFC-0014 M2 (bytes): binary read + the byte<->String bridge.
         if name == "readFileBytes" {
             if args.len() != 1 {
@@ -5170,6 +5215,8 @@ const SPAWN_FORBIDDEN: &[&str] = &[
     "readLine",
     "readFile",
     "writeFile",
+    "renameFile",
+    "fsyncFile",
     "readFileBytes",
     "stringFromBytes",
     "listDir",
@@ -5274,6 +5321,8 @@ fn contains_spawn(b: &Block) -> bool {
 /// recorded as cache inputs. Logging sinks (`trace`..`error`) are here too.
 const COMPTIME_FORBIDDEN: &[&str] = &[
     "writeFile",
+    "renameFile",
+    "fsyncFile",
     "readLine",
     "args",
     "readFileBytes",
@@ -6544,6 +6593,57 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("isolated (pure)"), "{e}");
+    }
+
+    // ---- RFC-0044 storage host effects (renameFile / fsyncFile) ------------
+
+    #[test]
+    fn rfc0044_rename_and_fsync_have_the_io_signatures() {
+        let src = "fn main() -> Int64 { \
+                       let r: Result<Bool, String> = renameFile(\"a\", \"b\") \
+                       let s: Result<Bool, String> = fsyncFile(\"a\") \
+                       return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+        let e = check_src("fn main() -> Int64 { let r = renameFile(\"a\"); return 0 }").unwrap_err();
+        assert!(e.contains("`renameFile` takes 2 arguments"), "{e}");
+        let e = check_src("fn main() -> Int64 { let r = fsyncFile(1); return 0 }").unwrap_err();
+        assert!(e.contains("`fsyncFile` needs a String path"), "{e}");
+    }
+
+    #[test]
+    fn rfc0044_rename_and_fsync_are_rejected_in_a_generator() {
+        for io in ["renameFile(\"a\", \"b\")", "fsyncFile(\"a\")"] {
+            let src = format!(
+                "gen fn g() -> String {{ let w = {io} return \"\" }} \
+                 fn main() -> Int64 {{ return 0 }}"
+            );
+            let e = check_src(&src).unwrap_err();
+            assert!(e.contains("not comptime-pure"), "{io}: {e}");
+        }
+    }
+
+    #[test]
+    fn rfc0044_rename_and_fsync_are_effects_not_tasks() {
+        for io in ["renameFile(\"a\", \"b\")", "fsyncFile(\"a\")"] {
+            let src = format!(
+                "fn eff(n: Int64) -> Int64 {{ let w = {io} return n }} \
+                 fn main() -> Int64 {{ let t = spawn eff(5); return t.join() }}"
+            );
+            let e = check_src(&src).unwrap_err();
+            assert!(e.contains("isolated (pure)"), "{io}: {e}");
+        }
+    }
+
+    #[test]
+    fn rfc0044_load_result_prelude_enum_is_matchable() {
+        // `load` is a call-site desugar; the injected `LoadResult<T>` enum lets a
+        // caller match all three outcomes without importing anything.
+        let src = "type Rec = { n: Int64 } \
+                   fn describe(r: LoadResult<Rec>) -> Int64 { \
+                       return match r { \
+                           Missing => 1, Corrupt(iss) => 2, Loaded(x) => x.n } } \
+                   fn main() -> Int64 { return describe(load(Rec, \"p\")) }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
     #[test]

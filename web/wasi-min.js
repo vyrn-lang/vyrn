@@ -257,6 +257,13 @@ export async function runVyrn(wasmBytes, hooks = {}) {
     // No filesystem: every open fails, so `readFile`/`writeFile` return their
     // canonical `Err` payloads in-page (never a crash).
     path_open: () => ERRNO_NOENT,
+    // RFC-0044: a module using `renameFile`/`writeAtomic`/`fsyncFile` pulls in
+    // path_rename / fd_sync. With no filesystem in a page, rename fails (NOENT →
+    // canonical `Err`); fsync never reaches an open fd (the fopen already
+    // failed), so its stub is a harmless success. Provided so the module still
+    // instantiates and degrades gracefully rather than failing to link.
+    path_rename: () => ERRNO_NOENT,
+    fd_sync: () => ERRNO_SUCCESS,
   };
 
   // Build the `vyrn` import namespace (RFC-0012) from the host's extern hooks.

@@ -879,6 +879,18 @@ const RUNTIME_SHIM: &str = r#"
 #include <unistd.h>
 #include <sys/random.h>
 #endif
+#if defined(_WIN32)
+/* _commit / _fileno for fsync (RFC-0044). MoveFileExA gives the atomic overwrite
+   the C `rename` refuses on Windows (it fails when the target exists); declared
+   here (not via the heavy <windows.h>, which would leak min/max macros into the
+   codec below) and satisfied from kernel32. */
+#include <io.h>
+__declspec(dllimport) int __stdcall MoveFileExA(const char*, const char*, unsigned long);
+__declspec(dllimport) unsigned long __stdcall GetLastError(void);
+#pragma comment(lib, "kernel32")
+#define VYRN_MOVEFILE_REPLACE_EXISTING 0x1u
+#define VYRN_ERROR_NOT_SAME_DEVICE 17u
+#endif
 
 void* __vyrn_stderr(void) { return stderr; }
 void* __vyrn_stdout(void) { return stdout; }
@@ -1059,6 +1071,39 @@ int __vyrn_write_file(const char* path, const char* contents) {
     int bad = (wrote != n);
     if (fclose(f) != 0) bad = 1;
     return bad ? 1 : 0;
+}
+
+/* renameFile: atomically move `from` over `to` (RFC-0044). Status 0 ok / 1 io /
+   2 cross-device. POSIX/wasi `rename` replaces atomically and reports EXDEV;
+   Windows C `rename` refuses an existing target, so MoveFileExA(REPLACE_EXISTING)
+   is used and ERROR_NOT_SAME_DEVICE maps to the cross-device status. */
+int __vyrn_rename_file(const char* from, const char* to) {
+#if defined(_WIN32)
+    if (MoveFileExA(from, to, VYRN_MOVEFILE_REPLACE_EXISTING) != 0) return 0;
+    return GetLastError() == VYRN_ERROR_NOT_SAME_DEVICE ? 2 : 1;
+#else
+    if (rename(from, to) == 0) return 0;
+    return errno == EXDEV ? 2 : 1;
+#endif
+}
+
+/* fsyncFile: flush a file's data to stable storage (RFC-0044, the optional
+   power-durability step). Open, sync the descriptor, close. Status 0 ok / 1 io.
+   wasi-libc lowers fsync to fd_sync. */
+int __vyrn_fsync_file(const char* path) {
+    /* read+write (not "rb"): flushing buffers needs write access on Windows
+       (_commit → FlushFileBuffers); "rb+" opens an existing file without
+       truncating it. */
+    FILE* f = fopen(path, "rb+");
+    if (f == 0) return 1;
+    int rc = 0;
+#if defined(_WIN32)
+    if (_commit(_fileno(f)) != 0) rc = 1;
+#else
+    if (fsync(fileno(f)) != 0) rc = 1;
+#endif
+    fclose(f);
+    return rc;
 }
 
 /* ---- time & randomness at the host boundary (RFC-0043) ------------------ */

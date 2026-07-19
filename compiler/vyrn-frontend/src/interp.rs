@@ -25,6 +25,19 @@ fn fixed_env_i64(key: &str) -> Option<i64> {
     }
 }
 
+/// Whether an `std::fs::rename` failure is a cross-device (`EXDEV`) rename —
+/// surfaced as a distinct `IoError` per RFC-0044 rather than the generic write
+/// error. `EXDEV` is 18 on Unix/wasi; Windows reports `ERROR_NOT_SAME_DEVICE`
+/// (17). `writeAtomic` keeps its temp beside the target, so it never hits this;
+/// a bare `renameFile` across mounts can.
+fn is_cross_device(e: &std::io::Error) -> bool {
+    match e.raw_os_error() {
+        Some(code) if cfg!(windows) => code == 17,
+        Some(code) => code == 18,
+        None => false,
+    }
+}
+
 /// A runtime value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Val {
@@ -2325,6 +2338,60 @@ impl<'a> Interp<'a> {
                             )),
                         }
                     }
+                    // RFC-0044: atomic overwrite. On success `Ok(true)`; on failure
+                    // the canonical `@.io.*` wording (reusing `cannot write` for the
+                    // common not-found/permission case, a distinct message for a
+                    // cross-device rename). Wording is byte-identical to the native
+                    // shim + wasm shims so a storage program is a parity citizen.
+                    "renameFile" => {
+                        let from = match &vals[0] {
+                            Val::Str(s) => s.clone(),
+                            other => {
+                                return Err(format!("renameFile of non-String {other:?}").into())
+                            }
+                        };
+                        let to = match &vals[1] {
+                            Val::Str(s) => s.clone(),
+                            other => {
+                                return Err(format!("renameFile of non-String {other:?}").into())
+                            }
+                        };
+                        match std::fs::rename(&from, &to) {
+                            Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
+                            Err(e) => {
+                                let msg = if is_cross_device(&e) {
+                                    format!("cannot rename `{to}` across devices")
+                                } else {
+                                    format!("cannot write `{to}`")
+                                };
+                                Ok(Val::Result(false, Box::new(Val::Str(msg))))
+                            }
+                        }
+                    }
+                    // RFC-0044: flush a file to stable storage (open + sync_all).
+                    "fsyncFile" => {
+                        let path = match &vals[0] {
+                            Val::Str(s) => s.clone(),
+                            other => {
+                                return Err(format!("fsyncFile of non-String {other:?}").into())
+                            }
+                        };
+                        // Open read+write (not read-only): flushing a file's
+                        // buffers needs write access on Windows (FlushFileBuffers),
+                        // and `write(true)` without `truncate` leaves the contents
+                        // intact. A missing file is an error (`cannot write`).
+                        let synced = std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(&path)
+                            .and_then(|f| f.sync_all());
+                        match synced {
+                            Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
+                            Err(_) => Ok(Val::Result(
+                                false,
+                                Box::new(Val::Str(format!("cannot write `{path}`"))),
+                            )),
+                        }
+                    }
                     // RFC-0014 M2 (bytes): binary read + the byte<->String bridge.
                     "readFileBytes" => {
                         let path = match &vals[0] {
@@ -3891,6 +3958,153 @@ mod tests {
                            return 1 } \
                        return 0 }";
         assert_eq!(run(src).unwrap(), 1);
+    }
+
+    // ---- crash-safe persistence (RFC-0044) --------------------------------
+
+    /// `renameFile` atomically overwrites an existing target and consumes the
+    /// source — after it, the target holds the new content and no source (or
+    /// `.tmp`) remains.
+    #[test]
+    fn rfc0044_rename_file_over_existing_replaces() {
+        let dst = temp_path("rn-dst");
+        let src_path = temp_path("rn-src");
+        std::fs::write(&dst, "OLDOLD").unwrap();
+        std::fs::write(&src_path, "NEW").unwrap();
+        let src = format!(
+            "fn main() -> Int64 {{ \
+                 return match renameFile(\"{src_path}\", \"{dst}\") {{ \
+                     Ok(b) => 1, Err(e) => 0 }} }}"
+        );
+        assert_eq!(run(&src).unwrap(), 1);
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "NEW");
+        assert!(!std::path::Path::new(&src_path).exists());
+        let _ = std::fs::remove_file(&dst);
+    }
+
+    /// The atomic-write algorithm (`writeAtomic` = `std/storage`): write `<path>.tmp`
+    /// then rename it over `path`. A successful write replaces the target and
+    /// leaves NO `.tmp` sibling. Uses the same body the std module ships.
+    #[test]
+    fn rfc0044_write_atomic_replaces_and_leaves_no_tmp() {
+        let path = temp_path("wa-ok");
+        std::fs::write(&path, "OLD").unwrap();
+        let src = format!(
+            "fn writeAtomic(path: String, content: String) -> Result<Bool, String> {{ \
+                 let tmp = \"\\{{path}}.tmp\" \
+                 return match writeFile(tmp, content) {{ \
+                     Ok(d) => renameFile(tmp, path), Err(w) => Err(w) }} }} \
+             fn main() -> Int64 {{ \
+                 return match writeAtomic(\"{path}\", \"BRANDNEW\") {{ \
+                     Ok(b) => 1, Err(e) => 0 }} }}"
+        );
+        assert_eq!(run(&src).unwrap(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "BRANDNEW");
+        assert!(!std::path::Path::new(&format!("{path}.tmp")).exists());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// THE atomicity proof: when the temp write FAILS, `writeAtomic` never touches
+    /// `path`, so the original target is byte-for-byte unchanged (the tear a bare
+    /// `writeFile` would cause is gone). The temp write is forced to fail by making
+    /// `<path>.tmp` a directory — `writeFile` cannot open it as a file.
+    #[test]
+    fn rfc0044_write_atomic_failed_temp_leaves_target_unchanged() {
+        let path = temp_path("wa-tear");
+        let tmp = format!("{path}.tmp");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::write(&path, "ORIGINAL").unwrap();
+        std::fs::create_dir(&tmp).unwrap(); // writeFile("<path>.tmp") now fails
+        let src = format!(
+            "fn writeAtomic(path: String, content: String) -> Result<Bool, String> {{ \
+                 let tmp = \"\\{{path}}.tmp\" \
+                 return match writeFile(tmp, content) {{ \
+                     Ok(d) => renameFile(tmp, path), Err(w) => Err(w) }} }} \
+             fn main() -> Int64 {{ \
+                 return match writeAtomic(\"{path}\", \"CLOBBERED\") {{ \
+                     Ok(b) => 1, Err(e) => 0 }} }}"
+        );
+        // The write reports failure...
+        assert_eq!(run(&src).unwrap(), 0);
+        // ...and — the point — the original target is untouched.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ORIGINAL");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `load(TypeName, path)` distinguishes the three honest outcomes: a missing
+    /// file is `Missing`, a garbage file is `Corrupt`, a good file is `Loaded`.
+    /// Encoded as 1 / 2 / 100+value so one run proves all three.
+    #[test]
+    fn rfc0044_load_three_outcomes() {
+        let good = temp_path("ld-good");
+        let bad = temp_path("ld-bad");
+        std::fs::write(&good, "{\"n\": 41}").unwrap();
+        std::fs::write(&bad, "{ not json ]").unwrap();
+        let missing = temp_path("ld-missing");
+        let _ = std::fs::remove_file(&missing);
+        let outcome = |p: &str| {
+            format!(
+                "match load(Rec, \"{p}\") {{ \
+                     Missing => 1, Corrupt(iss) => 2, Loaded(r) => 100 + r.n }}"
+            )
+        };
+        let src = format!(
+            "type Rec = {{ n: Int64 }} \
+             fn main() -> Int64 {{ \
+                 let m = {} \
+                 let c = {} \
+                 let g = {} \
+                 return m * 1000000 + c * 1000 + g }}",
+            outcome(&missing),
+            outcome(&bad),
+            outcome(&good),
+        );
+        // Missing=1, Corrupt=2, Loaded(41)=141.
+        assert_eq!(run(&src).unwrap(), 1_002_141);
+        let _ = std::fs::remove_file(&good);
+        let _ = std::fs::remove_file(&bad);
+    }
+
+    /// `loadOr(TypeName, path, default)` returns the default for a missing OR a
+    /// corrupt file, and the decoded value for a good one.
+    #[test]
+    fn rfc0044_load_or_defaults() {
+        let good = temp_path("lo-good");
+        let bad = temp_path("lo-bad");
+        let missing = temp_path("lo-missing");
+        std::fs::write(&good, "{\"n\": 7}").unwrap();
+        std::fs::write(&bad, "nonsense").unwrap();
+        let _ = std::fs::remove_file(&missing);
+        let src = format!(
+            "type Rec = {{ n: Int64 }} \
+             fn main() -> Int64 {{ \
+                 let d = Rec {{ n: 9 }} \
+                 let g = loadOr(Rec, \"{good}\", d).n \
+                 let m = loadOr(Rec, \"{missing}\", d).n \
+                 let c = loadOr(Rec, \"{bad}\", d).n \
+                 return g * 100 + m * 10 + c }}"
+        );
+        // good=7, missing=9(default), corrupt=9(default) -> 799.
+        assert_eq!(run(&src).unwrap(), 799);
+        let _ = std::fs::remove_file(&good);
+        let _ = std::fs::remove_file(&bad);
+    }
+
+    /// `fsyncFile` succeeds on an existing file and errors (canonically) on a
+    /// missing one — the durability step never silently no-ops a bad path.
+    #[test]
+    fn rfc0044_fsync_file_ok_and_missing() {
+        let path = temp_path("fs-ok");
+        std::fs::write(&path, "durable").unwrap();
+        let src = format!(
+            "fn main() -> Int64 {{ \
+                 let a = match fsyncFile(\"{path}\") {{ Ok(b) => 1, Err(e) => 0 }} \
+                 let b = match fsyncFile(\"{path}-nope\") {{ Ok(x) => 0, Err(e) => 1 }} \
+                 return a * 10 + b }}"
+        );
+        assert_eq!(run(&src).unwrap(), 11);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

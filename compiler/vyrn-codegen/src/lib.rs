@@ -938,6 +938,17 @@ entry:
   ret ptr %buf
 }
 
+define ptr @__vyrn_rename_err(ptr %to, i32 %status) {
+entry:
+  %isx = icmp eq i32 %status, 2
+  %fmt = select i1 %isx, ptr @.io.xdeverr, ptr @.io.writeerr
+  %plen = call i64 @__vyrn_strlen(ptr %to)
+  %bsz = add i64 %plen, 40
+  %buf = call ptr @__vyrn_malloc(i64 %bsz)
+  call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr %buf, i64 %bsz, ptr %fmt, ptr %to)
+  ret ptr %buf
+}
+
 define ptr @__vyrn_bytes_dup(ptr %data, i64 %len) {
 entry:
   %bsz = add i64 %len, 1
@@ -1106,6 +1117,11 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare i32 @__vyrn_read_file(ptr, ptr, ptr)\n");
     out.push_str("declare i32 @__vyrn_read_file_bytes(ptr, ptr, ptr)\n");
     out.push_str("declare i32 @__vyrn_write_file(ptr, ptr)\n");
+    // RFC-0044: atomic rename + fsync host primitives (implemented in the C shim
+    // on every target, like the RFC-0043 clock — wasi lowers to path_rename /
+    // fd_sync, so a storage program is a three-way parity citizen).
+    out.push_str("declare i32 @__vyrn_rename_file(ptr, ptr)\n");
+    out.push_str("declare i32 @__vyrn_fsync_file(ptr)\n");
     // JSON codec runtime (RFC-0018): the DOM builders/accessors, the parser,
     // the canonical encoder, and the decode-side issue accumulator live in the
     // C shim; the per-type encode/decode logic is generated as IR below.
@@ -1293,6 +1309,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
         ("@.io.writeerr", "cannot write `%s`"),
         ("@.io.utf8err", "`%s` is not valid UTF-8"),
         ("@.io.nulerr", "`%s` contains a NUL byte"),
+        // RFC-0044: a cross-device (`EXDEV`) rename — surfaced distinctly instead
+        // of silently degrading to copy. Ordinary not-found/permission rename
+        // failures reuse `@.io.writeerr` (rewriting the destination).
+        ("@.io.xdeverr", "cannot rename `%s` across devices"),
         // Byte-bridge errors (M2, no path): fixed payloads for `stringFromBytes`.
         ("@.io.bnul", "bytes contain a NUL byte"),
         ("@.io.butf8", "bytes are not valid UTF-8"),
@@ -5365,6 +5385,81 @@ impl<'a> Gen<'a> {
             self.emit_label(&end_l);
             let r = self.fresh_tmp();
             // Ok(true): tag 1, payload word0 = 1 (Bool true zext).
+            self.emit(format!(
+                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], \
+                 [ {{ i1 1, i64 1, i64 0 }}, %{ok_l} ]"
+            ));
+            return Ok((r, Type::Result(Box::new(Type::Bool), Box::new(Type::Str))));
+        }
+        // RFC-0044: atomic overwrite (`__vyrn_rename_file`, status 0 ok / 1 io /
+        // 2 cross-device). The message is rendered by `@__vyrn_rename_err` from
+        // `to` + status, reusing the canonical `@.io.*` wording (a distinct
+        // `@.io.xdeverr` for the cross-device case), so it is byte-identical to
+        // the interpreter's.
+        if name == "renameFile" {
+            let (from, _) = self.gen_expr(&args[0])?;
+            let (to, _) = self.gen_expr(&args[1])?;
+            let st = self.fresh_tmp();
+            self.emit(format!(
+                "{st} = call i32 @__vyrn_rename_file(ptr {from}, ptr {to})"
+            ));
+            let isok = self.fresh_tmp();
+            self.emit(format!("{isok} = icmp eq i32 {st}, 0"));
+            let ok_l = self.fresh_label("rn.ok");
+            let err_l = self.fresh_label("rn.err");
+            let end_l = self.fresh_label("rn.end");
+            self.emit_term(format!("br i1 {isok}, label %{ok_l}, label %{err_l}"));
+            self.emit_label(&err_l);
+            let msg = self.fresh_tmp();
+            self.emit(format!("{msg} = call ptr @__vyrn_rename_err(ptr {to}, i32 {st})"));
+            let ew = self.fresh_tmp();
+            let e0 = self.fresh_tmp();
+            let e1 = self.fresh_tmp();
+            let e2 = self.fresh_tmp();
+            self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
+            self.emit(format!("{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"));
+            self.emit(format!("{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"));
+            self.emit(format!("{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"));
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&ok_l);
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&end_l);
+            let r = self.fresh_tmp();
+            self.emit(format!(
+                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], \
+                 [ {{ i1 1, i64 1, i64 0 }}, %{ok_l} ]"
+            ));
+            return Ok((r, Type::Result(Box::new(Type::Bool), Box::new(Type::Str))));
+        }
+        // RFC-0044: flush a file to stable storage (`__vyrn_fsync_file`, 0 ok /
+        // 1 io). The error reuses the write-error renderer (fsync is a durability
+        // step of writing).
+        if name == "fsyncFile" {
+            let (path, _) = self.gen_expr(&args[0])?;
+            let st = self.fresh_tmp();
+            self.emit(format!("{st} = call i32 @__vyrn_fsync_file(ptr {path})"));
+            let isok = self.fresh_tmp();
+            self.emit(format!("{isok} = icmp eq i32 {st}, 0"));
+            let ok_l = self.fresh_label("fs.ok");
+            let err_l = self.fresh_label("fs.err");
+            let end_l = self.fresh_label("fs.end");
+            self.emit_term(format!("br i1 {isok}, label %{ok_l}, label %{err_l}"));
+            self.emit_label(&err_l);
+            let msg = self.fresh_tmp();
+            self.emit(format!("{msg} = call ptr @__vyrn_write_err(ptr {path})"));
+            let ew = self.fresh_tmp();
+            let e0 = self.fresh_tmp();
+            let e1 = self.fresh_tmp();
+            let e2 = self.fresh_tmp();
+            self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
+            self.emit(format!("{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"));
+            self.emit(format!("{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"));
+            self.emit(format!("{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"));
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&ok_l);
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&end_l);
+            let r = self.fresh_tmp();
             self.emit(format!(
                 "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], \
                  [ {{ i1 1, i64 1, i64 0 }}, %{ok_l} ]"

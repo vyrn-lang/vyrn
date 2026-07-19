@@ -131,6 +131,35 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         predicate: None,
         line: 0,
     });
+    // Persistence outcome (RFC-0044): the three honest results of `load`ing a
+    // typed value from a file — the file is absent (`Missing`), present but not
+    // decodable (`Corrupt` with the accumulated `Issue`s), or decoded (`Loaded`).
+    // A missing file is deliberately NOT the same as a corrupt one. Injected like
+    // `Validation` so `load(TypeName, path)` (a call-site desugar) can name its
+    // variants without an import.
+    program.type_decls.push(TypeDecl {
+        name: "LoadResult".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: vec!["T".to_string()],
+        base: Type::Enum(vec![
+            EnumVariant {
+                name: "Missing".to_string(),
+                payload: vec![],
+            },
+            EnumVariant {
+                name: "Corrupt".to_string(),
+                payload: vec![Type::Array(Box::new(Type::Named("Issue".to_string())))],
+            },
+            EnumVariant {
+                name: "Loaded".to_string(),
+                payload: vec![Type::Param("T".to_string())],
+            },
+        ]),
+        predicate: None,
+        line: 0,
+    });
     // `Schema` (RFC-0003 reflection): the extractable shape of a validated type,
     // produced by `schemaOf(TypeName)` — its name, base spelling, `///` doc,
     // and everything its `where` predicate implies (numeric bounds, multipleOf,
@@ -2692,6 +2721,11 @@ impl Parser {
                     }
                     self.no_struct = saved;
                     self.eat(&Tok::RParen)?;
+                    if !fallible {
+                        if let Some(e) = Self::storage_desugar(&name, &args, line) {
+                            return Ok(e);
+                        }
+                    }
                     Ok(if fallible {
                         Expr::TryConstruct { name, args, line }
                     } else {
@@ -2880,6 +2914,108 @@ impl Parser {
             arms,
             line,
         })
+    }
+
+    /// Call-site desugar for the `std/storage` typed helpers (RFC-0044). These
+    /// cannot be ordinary generic functions: they thread the codec, which is
+    /// type-name-directed (`toJson(value)` / `fromJson(TypeName, s)` need a
+    /// CONCRETE type at the call site, not an abstract `T`). So — like the codec
+    /// builtins they wrap — they are expanded here, where the arguments are
+    /// concrete, into plain `match`/`readFile`/`fromJson`/`toJson`/`writeAtomic`
+    /// AST that the checker/interp/codegen already handle. `LoadResult`'s variants
+    /// resolve via the injected prelude enum. Returns `None` (a normal call, which
+    /// the checker then reports) unless the name AND arity match exactly.
+    ///
+    ///   save(path, value)         -> writeAtomic(path, toJson(value))
+    ///   load(TypeName, path)      -> match readFile(path) {
+    ///                                  Ok(t)  => match fromJson(TypeName, t) {
+    ///                                    Valid(v)   => Loaded(v),
+    ///                                    Invalid(i) => Corrupt(i) },
+    ///                                  Err(e) => Missing }
+    ///   loadOr(TypeName, path, d) -> ... Valid(v) => v, Invalid(i) => d, Err => d
+    ///
+    /// `save` desugars to `writeAtomic`, so a module using `save` must
+    /// `import { writeAtomic } from "std/storage"` (the storage primitive); the
+    /// read helpers are self-contained (`readFile` is a global builtin). Binding
+    /// names are `@`-prefixed so they can never collide with a user identifier.
+    fn storage_desugar(name: &str, args: &[Expr], line: usize) -> Option<Expr> {
+        let call = |n: &str, a: Vec<Expr>| Expr::Call {
+            name: n.to_string(),
+            args: a,
+            line,
+        };
+        let var = |n: &str| Expr::Var {
+            name: n.to_string(),
+            line,
+        };
+        match (name, args.len()) {
+            ("save", 2) => Some(call(
+                "writeAtomic",
+                vec![args[0].clone(), call("toJson", vec![args[1].clone()])],
+            )),
+            ("load", 2) => {
+                let decoded = Expr::Match {
+                    scrutinee: Box::new(call("fromJson", vec![args[0].clone(), var("@t")])),
+                    arms: vec![
+                        MatchArm {
+                            pattern: Pattern::Variant("Valid".to_string(), vec!["@v".to_string()]),
+                            body: call("Loaded", vec![var("@v")]),
+                        },
+                        MatchArm {
+                            pattern: Pattern::Variant("Invalid".to_string(), vec!["@i".to_string()]),
+                            body: call("Corrupt", vec![var("@i")]),
+                        },
+                    ],
+                    line,
+                };
+                Some(Expr::Match {
+                    scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
+                    arms: vec![
+                        MatchArm {
+                            pattern: Pattern::Ok("@t".to_string()),
+                            body: decoded,
+                        },
+                        MatchArm {
+                            pattern: Pattern::Err("@e".to_string()),
+                            body: var("Missing"),
+                        },
+                    ],
+                    line,
+                })
+            }
+            ("loadOr", 3) => {
+                let default = args[2].clone();
+                let decoded = Expr::Match {
+                    scrutinee: Box::new(call("fromJson", vec![args[0].clone(), var("@t")])),
+                    arms: vec![
+                        MatchArm {
+                            pattern: Pattern::Variant("Valid".to_string(), vec!["@v".to_string()]),
+                            body: var("@v"),
+                        },
+                        MatchArm {
+                            pattern: Pattern::Variant("Invalid".to_string(), vec!["@i".to_string()]),
+                            body: default.clone(),
+                        },
+                    ],
+                    line,
+                };
+                Some(Expr::Match {
+                    scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
+                    arms: vec![
+                        MatchArm {
+                            pattern: Pattern::Ok("@t".to_string()),
+                            body: decoded,
+                        },
+                        MatchArm {
+                            pattern: Pattern::Err("@e".to_string()),
+                            body: default,
+                        },
+                    ],
+                    line,
+                })
+            }
+            _ => None,
+        }
     }
 
     /// `if cond { expr } else if cond { expr } else { expr }` in expression
