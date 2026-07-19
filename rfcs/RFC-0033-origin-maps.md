@@ -148,3 +148,10 @@ still deferred, though this RFC builds the road it will use).
 - **Cache.** Gen cache keys are unaffected by directive presence except that
   `std/vyx` and `std/ui`'s own sources changed once (they now emit directives),
   so modules they synthesize rekey once and self-heal.
+- **Scope of the remap — LIFTED by RFC-0053.** As this RFC landed, only
+  **check/movecheck** diagnostics were remapped. `lex`/`parse`/`load` errors
+  inside a synthesized module were never lost, but never *mapped* either: the map
+  was built as a post-pass over the finished module list, which a module that
+  failed to lex never reached. RFC-0053 moves the (parse-free) directive scan to
+  the moment a synthesized module is entered, so those diagnostics take this same
+  `remap` and report at their `.vyx` line:col.
