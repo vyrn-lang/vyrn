@@ -21,16 +21,27 @@
 /// clock. Real subcommand dispatch is driven by `args()`, which the harness
 /// leaves empty.
 ///
-/// FRICTION NOTE (see rfcs/NOTES-dogfood-vlog.md): `sliceStr`, `indexOfByte`,
-/// `trim`, `toLowerAscii`, `toUpperAscii`, `toHex`, and `padTwo` below are all
-/// hand-rolled — std/strings has only `repeat`/`joinWith`, so substring, case,
-/// trim, and integer-to-hex do not exist. Every substring must round-trip
-/// through `bytes()` + `stringFromBytes` because a byte (`s[i]`, an `Int64`) has
-/// no one-character-`String` form.
+/// RESOLVED (RFC-0046): the six hand-rolled string ops this app used to carry
+/// (`sliceStr`, `indexOfByte`, `trim`, `toLowerAscii`/`toUpperAscii`, `toHex`)
+/// plus `padTwo` now come from `std/strings` — substring is the `slice` builtin
+/// (O(1), no `bytes()` + `stringFromBytes` round-trip), and case/trim/split/pad/
+/// hex are library functions. `std/time`'s private `pad2` no longer collides
+/// with a local name either (the name-privacy fix), so `padStart` is used
+/// directly. This app is the proof the string-processing pain is gone.
 
 import { fromMillis, hour, minute, second, format, Instant } from "std/time"
 import { fnv1aStr } from "std/hash"
-import { joinWith } from "std/strings"
+import {
+    joinWith,
+    trim,
+    toLower,
+    toUpper,
+    substring,
+    indexOf,
+    lines,
+    padStart,
+    toHex,
+} from "std/strings"
 
 logging { level: warn, sink: stderr }
 
@@ -68,133 +79,13 @@ type Decoded = { ok: Bool, line: LogLine, err: String }
 type Flag = { found: Bool, value: String }
 
 // ---------------------------------------------------------------------------
-// Hand-rolled string helpers (WORKAROUND: no std/strings substring/case/trim)
-// ---------------------------------------------------------------------------
-
-/// The substring `s[start..end]` (byte indices). WORKAROUND: there is no
-/// `substring`, and a byte has no one-char String form, so this rebuilds through
-/// `bytes()` + `stringFromBytes`.
-fn sliceStr(s: String, start: Int64, end: Int64) -> String {
-    let b = bytes(s)
-    let mut buf: Array<UInt8> = []
-    let mut i = start
-    while i < end {
-        buf.push(b[i])
-        i = i + 1
-    }
-    return match stringFromBytes(buf) {
-        Ok(x) => x,
-        Err(e) => "",
-    }
-}
-
-/// The first index of byte `needle` in `s`, or -1. WORKAROUND: no `indexOf`.
-/// (`s[i]` is a `UInt8` byte — the stringops docs still say `Int64`, a drift.)
-fn indexOfByte(s: String, needle: UInt8) -> Int64 {
-    let mut i = 0
-    while i < s.length {
-        if s[i] == needle {
-            return i
-        }
-        i = i + 1
-    }
-    return 0 - 1
-}
-
-/// Whitespace bytes: space, tab, CR, LF.
-fn isSpace(c: UInt8) -> Bool {
-    return c == 32 || c == 9 || c == 13 || c == 10
-}
-
-/// `s` with leading and trailing ASCII whitespace removed. WORKAROUND: no `trim`.
-fn trim(s: String) -> String {
-    let mut start = 0
-    let mut end = s.length
-    while start < end && isSpace(s[start]) {
-        start = start + 1
-    }
-    while end > start && isSpace(s[end - 1]) {
-        end = end - 1
-    }
-    return sliceStr(s, start, end)
-}
-
-/// `s` lowercased over ASCII A–Z. WORKAROUND: no `toLowerCase`. Bytes iterate as
-/// `UInt8`; the numeric bounds could equally be char literals (`'A'`/`'Z'`, which
-/// coerce to `UInt8`), kept numeric here only for the +32 arithmetic alongside.
-fn toLowerAscii(s: String) -> String {
-    let b = bytes(s)
-    let mut buf: Array<UInt8> = []
-    for c in b {
-        if c >= 65 && c <= 90 {
-            buf.push(c + 32)
-        } else {
-            buf.push(c)
-        }
-    }
-    return match stringFromBytes(buf) {
-        Ok(x) => x,
-        Err(e) => s,
-    }
-}
-
-/// `s` uppercased over ASCII a–z. WORKAROUND: no `toUpperCase`.
-fn toUpperAscii(s: String) -> String {
-    let b = bytes(s)
-    let mut buf: Array<UInt8> = []
-    for c in b {
-        if c >= 97 && c <= 122 {
-            buf.push(c - 32)
-        } else {
-            buf.push(c)
-        }
-    }
-    return match stringFromBytes(buf) {
-        Ok(x) => x,
-        Err(e) => s,
-    }
-}
-
-/// The lowercase 16-digit hex of a `UInt64` (a content fingerprint). WORKAROUND:
-/// integer `toString` is decimal-only, so hex is nibble-by-nibble via bitwise
-/// ops (RFC-0045) into a byte buffer.
-fn toHex(n: UInt64) -> String {
-    let db = bytes("0123456789abcdef")
-    let mut buf: Array<UInt8> = []
-    let mut sh: UInt64 = 60
-    let mut going = true
-    while going {
-        let nib = (n >> sh) & 15
-        buf.push(db[Int64(nib)])
-        if sh == 0 {
-            going = false
-        } else {
-            sh = sh - 4
-        }
-    }
-    return match stringFromBytes(buf) {
-        Ok(x) => x,
-        Err(e) => "",
-    }
-}
-
-/// Two-digit zero-padded decimal. WORKAROUND: `std/time`'s `padTwo` is private, so
-/// the `HH:MM:SS` formatter re-rolls it.
-fn padTwo(n: Int64) -> String {
-    if n < 10 {
-        return "0\{n}"
-    }
-    return "\{n}"
-}
-
-// ---------------------------------------------------------------------------
 // Levels
 // ---------------------------------------------------------------------------
 
 /// Parse a `--level` argument (case-insensitive) into the finite `Level`, or
 /// `None` for an unknown level.
 fn parseLevel(s: String) -> Option<Level> {
-    let x = toLowerAscii(s)
+    let x = toLower(s)
     if x == "trace" {
         return Some(Trace)
     }
@@ -228,13 +119,16 @@ fn levelName(l: Level) -> String {
 // Time formatting
 // ---------------------------------------------------------------------------
 
-/// `HH:MM:SS` (UTC) for epoch millis — the time-of-day slice of a timestamp.
-/// WORKAROUND: `std/time.format` yields the full `YYYY-MM-DD HH:MM:SS` and there
-/// is no `substring` to take chars 11..19, so this recomputes from the exported
-/// `hour`/`minute`/`second` fields.
+/// `HH:MM:SS` (UTC) for epoch millis. `std/time.format` yields the full
+/// `YYYY-MM-DD HH:MM:SS`; `substring(format(i), 11, 19)` would take the
+/// time-of-day slice directly, but recomputing from `hour`/`minute`/`second`
+/// (zero-padded via `std/strings.padStart`) keeps it independent of that layout.
 fn hms(ts: Int64) -> String {
     let i: Instant = fromMillis(ts)
-    return "\{padTwo(hour(i))}:\{padTwo(minute(i))}:\{padTwo(second(i))}"
+    let hh = padStart("\{hour(i)}", 2, "0")
+    let mm = padStart("\{minute(i)}", 2, "0")
+    let ss = padStart("\{second(i)}", 2, "0")
+    return "\{hh}:\{mm}:\{ss}"
 }
 
 /// A rough human duration for a millisecond span (`0ms`, `3s`, `1m 2s`, ...).
@@ -310,28 +204,6 @@ fn readStdinLines() -> Array<String> {
     return lines
 }
 
-/// Split a whole-file String on `\n`. WORKAROUND (the headline friction): there
-/// is no `split`, and `readFile` returns one String, so a file source has to be
-/// diced by hand through `bytes()` + `sliceStr`. A trailing `\r` survives here
-/// and is removed later by `trim` — `readLine()` did both for free.
-fn splitLines(s: String) -> Array<String> {
-    let mut out: Array<String> = []
-    let b = bytes(s)
-    let mut start = 0
-    let mut i = 0
-    while i < b.length {
-        if b[i] == 10 {
-            out.push(sliceStr(s, start, i))
-            start = i + 1
-        }
-        i = i + 1
-    }
-    if start < b.length {
-        out.push(sliceStr(s, start, b.length))
-    }
-    return out
-}
-
 /// Decode a buffer of raw lines into records. Blank lines are skipped silently;
 /// malformed lines are logged to stderr with their 1-based line number and
 /// skipped (per-line `fromJson` never traps).
@@ -382,14 +254,14 @@ fn countOf(m: Map<String, Int64>, k: String) -> Int64 {
 fn levelsOf(recs: Array<Rec>) -> Array<String> {
     let mut out: Array<String> = []
     for r in recs {
-        out.push(toLowerAscii(r.line.level))
+        out.push(toLower(r.line.level))
     }
     return out
 }
 
 /// Whether a record's level matches (case-insensitively).
 fn matchesLevel(r: Rec, wantLower: String) -> Bool {
-    return toLowerAscii(r.line.level) == wantLower
+    return toLower(r.line.level) == wantLower
 }
 
 // ---------------------------------------------------------------------------
@@ -401,10 +273,20 @@ fn getFlag(a: Array<String>, name: String) -> Flag {
     let mut i = 0
     while i < a.length {
         let tok = a[i]
-        let eq = indexOfByte(tok, 61) // '='
-        if eq >= 0 {
-            if sliceStr(tok, 0, eq) == name {
-                return Flag { found: true, value: sliceStr(tok, eq + 1, tok.length) }
+        // `indexOf` is the honest `Option`; unpack it into a has/value pair so the
+        // two forms (`--name=value` vs `--name value`) branch with statements.
+        let eqOpt = indexOf(tok, "=")
+        let hasEq = match eqOpt {
+            Some(e) => true,
+            None => false,
+        }
+        let eq = match eqOpt {
+            Some(e) => e,
+            None => 0,
+        }
+        if hasEq {
+            if substring(tok, 0, eq) == name {
+                return Flag { found: true, value: substring(tok, eq + 1, tok.length) }
             }
         } else {
             if tok == name {
@@ -435,7 +317,7 @@ fn cmdCount(recs: Array<Rec>) -> Int64 {
 /// `fmt` — one `HH:MM:SS LEVEL msg` line per record.
 fn cmdFmt(recs: Array<Rec>) -> Int64 {
     for r in recs {
-        print("\{hms(r.line.ts)} \{toUpperAscii(r.line.level)} \{r.line.msg}")
+        print("\{hms(r.line.ts)} \{toUpper(r.line.level)} \{r.line.msg}")
     }
     return 0
 }
@@ -546,15 +428,16 @@ fn usage() -> Int64 {
 /// used for `Read`/`Decoded`, because a `match` arm cannot assign to `lines`.
 type Source = { ok: Bool, lines: Array<String> }
 
-/// Choose the input source: `--file <path>` (readFile + hand-rolled split) else
-/// stdin (readLine loop). Read once; shared by the subcommand.
+/// Choose the input source: `--file <path>` (readFile + `std/strings.lines`,
+/// which strips `\r?\n` exactly like `readLine()`) else stdin (readLine loop).
+/// Read once; shared by the subcommand.
 fn loadLines(a: Array<String>) -> Source {
     let fileFlag = getFlag(a, "--file")
     if !fileFlag.found {
         return Source { ok: true, lines: readStdinLines() }
     }
     return match readFile(fileFlag.value) {
-        Ok(content) => Source { ok: true, lines: splitLines(content) },
+        Ok(content) => Source { ok: true, lines: lines(content) },
         Err(e) => Source { ok: false, lines: [] },
     }
 }
@@ -614,16 +497,20 @@ fn main() -> Int64 {
 // Tests (RFC-0015) — `vyrn test examples/vlog.vyrn`. Stripped from run/build.
 // ---------------------------------------------------------------------------
 
-test "sliceStr takes a byte range" {
-    assertEq(sliceStr("hello world", 0, 5), "hello")
-    assertEq(sliceStr("hello world", 6, 11), "world")
-    assertEq(sliceStr("abc", 1, 1), "")
+// The string ops now come from std/strings (RFC-0046); these pin the exact
+// behaviors vlog depends on (substring byte-range, indexOf as Option, ASCII
+// case/trim, hex, and padStart in place of the old private `padTwo`).
+
+test "substring takes a byte range" {
+    assertEq(substring("hello world", 0, 5), "hello")
+    assertEq(substring("hello world", 6, 11), "world")
+    assertEq(substring("abc", 1, 1), "")
 }
 
-test "indexOfByte finds and misses" {
-    assertEq(indexOfByte("a=b", 61), 1) // '='
-    assertEq(indexOfByte("abc", 61), 0 - 1)
-    assertEq(indexOfByte("", 61), 0 - 1)
+test "indexOf finds and misses (Option)" {
+    assert(match indexOf("a=b", "=") { Some(i) => i == 1, None => false })
+    assert(match indexOf("abc", "=") { Some(i) => false, None => true })
+    assert(match indexOf("", "=") { Some(i) => false, None => true })
 }
 
 test "trim strips surrounding whitespace" {
@@ -633,9 +520,9 @@ test "trim strips surrounding whitespace" {
 }
 
 test "case folds over ASCII only" {
-    assertEq(toLowerAscii("ERROR"), "error")
-    assertEq(toUpperAscii("info"), "INFO")
-    assertEq(toLowerAscii("Mixed123"), "mixed123")
+    assertEq(toLower("ERROR"), "error")
+    assertEq(toUpper("info"), "INFO")
+    assertEq(toLower("Mixed123"), "mixed123")
 }
 
 test "toHex is 16 lowercase nibbles" {
@@ -643,9 +530,9 @@ test "toHex is 16 lowercase nibbles" {
     assertEq(toHex(0), "0000000000000000")
 }
 
-test "padTwo zero-pads below ten" {
-    assertEq(padTwo(3), "03")
-    assertEq(padTwo(42), "42")
+test "padStart zero-pads below width" {
+    assertEq(padStart("3", 2, "0"), "03")
+    assertEq(padStart("42", 2, "0"), "42")
 }
 
 test "hms slices the time of day" {
