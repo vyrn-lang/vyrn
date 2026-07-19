@@ -1,6 +1,6 @@
 # RFC-0042 — Template Editor Intelligence: Class, Attribute, and Component Completion
 
-- **Status:** Draft (design locked)
+- **Status:** Implemented. See the as-landed notes at the end.
 - **Depends on:** RFC-0033 (origin maps — the `.vyx`→generated forward
   mapping this rides), RFC-0032/0036 (`Tw`/`TwClass` finite type + themed
   class attrs with column-exact origins), RFC-0020 M1 (finite-string
@@ -130,3 +130,96 @@ inside templates, completion for arbitrary-value Tailwind (there is none
 — the vocabulary is closed), non-themed `.vyx` class completion (no
 domain to offer — plain strings), CSS-language features inside `<style>`
 (no scoped styles yet).
+
+---
+
+## As landed
+
+Editor-only work — **zero change to compilation semantics or emitted code**. The
+frontend additions are read-only analysis queries; everything else lives in the
+excluded `vyrn-lsp` crate. Workspace 903 → **905** (+2 frontend unit tests), LSP
+e2e 11 → **17** (+6, one per surface), full three-way parity green, zero warnings.
+`editor/vscode/server/vyrn-lsp.exe` rebuilt + redeployed.
+
+### Phase 0 — the diagnosis (the actual why)
+
+Two independent gaps, both from the RFC's candidate list:
+
+1. **The `.vyx` completion path never reached string-literal completion at all**
+   (candidate 2). `handle_completion`'s generator-input branch only routed to
+   `member_completions` (after `item.`) or top-level `completions` — so a class
+   value *and* a `{{ t("…") }}` key never even attempted a finite/sequence domain.
+2. **`Tw` is not a finite type** (candidate 3). A static `class="flex gap-2"`
+   emits `vyxTheme.cls("flex gap-2")`, whose argument type is `Tw =
+   token( token)*` — infinite via the `( token)*` loop, so it is absent from
+   `finite_string_types` and enumeration never applied. Token-in-sequence
+   completion needs the **alphabet** (`TwClass`), not the whole-string domain.
+
+A third, smaller gap surfaced while wiring it: the checked bridge is named `cls`
+in both `std/html` (plain `cls(String)`) and `std/tw` (`cls(Tw)`), and a **linked**
+module lowers the `Tw` alias to its `String` base in the parameter type — so
+matching the expected type by the callee's declared parameter is unreliable.
+The fix gates on the `cls(…)` **call context** (the stable public bridge name),
+not the lowered parameter type.
+
+### The alphabet, from the same DFA the compiler checks against
+
+`Dfa::enumerate_without(exclude, cap)` enumerates every accepted string that
+contains no separator byte; `finite::enumerate_alphabet(decl, cap)` applies it to
+an *infinite* pure-regex string type, yielding its single-token alphabet
+(`L(Tw)`'s space-free members `= L(TwClass)`). One enumeration, no drift — the
+alphabet is derived straight from `Tw`, not re-listed. `Analysis` gained
+`sequence_string_types` (name → alphabet, cap 8192) alongside the existing
+`finite_string_types`, and `tw_css` (the `css()` baked constant, captured only
+when a sequence type is present) for hover.
+
+### Phase A — `Tw` class completion (wired + new)
+
+`class_completions` / `class_token_hover` (frontend queries) gate on the `cls(…)`
+argument context and offer the first sequence type's alphabet / CSS. Reached two
+ways: in a themed `.vyx`, the RFC-0033 origin map forward-maps a `class="…"`
+cursor into the generated `vyxTheme.cls("…")` string (verbatim region, column
+exact — RFC-0036 already emits the per-class `//@origin`); in `.vyrn`,
+`theme.cls("…")` routes through the existing string-literal branch. The LSP
+computes the whitespace-delimited token in the *buffer* line and returns each item
+as a `textEdit` replacing only that token, so `md:hover:bg-…` never duplicates the
+typed prefix. Hover extracts the exact rule from `css()` (`css_rule_for` handles
+base *and* escaped variant selectors, with a prefix-collision guard so `.p-2` is
+not satisfied by `.p-20`) or reports "safelisted (app-styled)".
+
+### Phase B — attributes / directives / events (new)
+
+A `.vyx` cursor classifier (`templates.rs`) scans the raw template — tracking
+`<script>`, `{{ }}`, and quote-aware tag boundaries (so a `>` inside
+`v-if="a > b"` doesn't close the tag) — and classifies the cursor as
+`TagName | AttrName | EventName | ClassValue | Other`. At an attribute-name
+position it offers global + per-element HTML attributes and the `v-*` directive
+set; after `@`, the DOM event vocabulary. Discovery only — nothing new is
+validated.
+
+### Phase C — component tags + props (new)
+
+At `<Cap…` the classifier offers sibling PascalCase `.vyx` basenames
+(`sibling_components`); inside a component tag, an attribute position offers that
+component's declared props (name + type, plus the `:prop` dynamic form) parsed
+from the sibling's `props { … }` block (`component_props`).
+
+### Phase D — expression completion under the new surfaces (wired)
+
+The single `.vyx` string-literal routing fix (Phase 0 gap 1) also makes
+`{{ t("cart.rem|") }}` complete the `TransKey` finite domain: the forward map
+lands in the generated `t("…")` string, `class_completions` declines (not a `cls`
+call), and `string_literal_completions` supplies the keys — the same fix class as
+`Tw`, verified for a `.vyx` template.
+
+### Verification
+
+Six LSP e2e tests (class-token incl. safelist + `md:hover:` variant, class hover
+CSS/safelisted, TransKey-in-`{{}}`, component tag, component prop, attribute +
+event), each driven through a scratch fixture and the origin-map forward mapping;
+two frontend unit tests (alphabet enumeration + `css_rule_for`). Manual smoke
+against the real `examples/bin`, `examples/shelf`, and `examples/twdemo`: a
+themed `.vyx` `class="iss|"` offers `issues`; hover on `bg-brand-500` shows
+`.bg-brand-500 {background-color:#4f46e5}` and on `md:hover:bg-brand-600` the
+escaped `:hover` variant rule; `.vyrn` `theme.cls("…bg-b|")` offers
+`bg-brand-500`/`bg-brand-600`.
