@@ -7,10 +7,12 @@
 /// A `String` is UTF-8 bytes; all offsets are BYTE offsets (like `std/strings`).
 /// The scanner is a plain record advanced through `modify` cursor functions, so
 /// `line`/`col` stay in sync. Comment markers, quote bytes, and the escape byte
-/// are configurable; `-1` disables a byte-valued setting and `""` a line-comment
-/// marker. The quote/comment awareness is the whole point: `until`, `untilStr`,
-/// and `balanced` skip OVER quoted strings and line comments, so a delimiter
-/// hiding inside one never ends the scan early.
+/// are configurable; `-1` disables a byte-valued setting and `""` a line- or
+/// block-comment marker. The quote/comment awareness is the whole point: `until`,
+/// `untilStr`, and `balanced` skip OVER quoted strings, line comments, AND
+/// `/* */`-style block comments, so a delimiter hiding inside one never ends the
+/// scan early. Block comments are non-nesting (the CSS/C rule: the first
+/// `blockClose` after a `blockOpen` closes it), which is exactly what CSS needs.
 
 /// A cursor over `src`, with 1-based `line`/`col` and its lexical config.
 export type Scanner = {
@@ -18,8 +20,12 @@ export type Scanner = {
     pos: Int64,
     line: Int64,
     col: Int64,
-    // The line-comment marker ("//", "#", …); "" disables comments.
+    // The line-comment marker ("//", "#", …); "" disables line comments.
     lineComment: String,
+    // The block-comment open/close markers ("/*" and "*/" for CSS); "" for
+    // `blockOpen` disables block comments. Non-nesting.
+    blockOpen: String,
+    blockClose: String,
     // Primary/secondary quote bytes (e.g. 34 for ", 39 for '); -1 disables.
     quote1: Int64,
     quote2: Int64,
@@ -27,7 +33,8 @@ export type Scanner = {
     escape: Int64,
 }
 
-/// A Vyrn-flavored scanner: `//` line comments, `"`/`'` strings, `\` escape.
+/// A Vyrn-flavored scanner: `//` line comments, `"`/`'` strings, `\` escape. Vyrn
+/// has no block comments, so `blockOpen`/`blockClose` are disabled.
 export fn newScanner(src: String) -> Scanner {
     return Scanner {
         src: src,
@@ -35,17 +42,38 @@ export fn newScanner(src: String) -> Scanner {
         line: 1,
         col: 1,
         lineComment: "//",
+        blockOpen: "",
+        blockClose: "",
         quote1: 34,
         quote2: 39,
         escape: 92,
     }
 }
 
-/// A fully configured scanner (for CSS `/* */`-free text, ICU messages, …).
-/// Pass `""` for `lineComment` and `-1` for any disabled byte.
+/// A CSS-flavored scanner: no line comments, `/* */` block comments, `"`/`'`
+/// strings, `\` escape. The shared cursor for the `std/tw` CSS handling.
+export fn cssScanner(src: String) -> Scanner {
+    return Scanner {
+        src: src,
+        pos: 0,
+        line: 1,
+        col: 1,
+        lineComment: "",
+        blockOpen: "/*",
+        blockClose: "*/",
+        quote1: 34,
+        quote2: 39,
+        escape: 92,
+    }
+}
+
+/// A fully configured scanner. Pass `""` for `lineComment`/`blockOpen` to disable
+/// that comment kind and `-1` for any disabled byte.
 export fn scanner(
     src: String,
     lineComment: String,
+    blockOpen: String,
+    blockClose: String,
     quote1: Int64,
     quote2: Int64,
     escape: Int64,
@@ -56,6 +84,8 @@ export fn scanner(
         line: 1,
         col: 1,
         lineComment: lineComment,
+        blockOpen: blockOpen,
+        blockClose: blockClose,
         quote1: quote1,
         quote2: quote2,
         escape: escape,
@@ -123,8 +153,33 @@ export fn advance(sc: modify Scanner) -> Unit {
     }
 }
 
-/// Skip ASCII whitespace AND line comments (through end of line). Comment-aware
-/// so `until`/`balanced` never mistake comment text for structure.
+/// If the cursor is at a `blockOpen`, consume through the matching `blockClose`
+/// (non-nesting) and return `true`; otherwise leave the cursor and return `false`.
+/// An unterminated block comment consumes to end of input (generators scan
+/// work-in-progress text).
+fn skipBlockComment(sc: modify Scanner) -> Bool {
+    if sc.blockOpen.length == 0 || looksAt(sc, sc.blockOpen) == false {
+        return false
+    }
+    let mut n = 0
+    while n < sc.blockOpen.length {
+        advance(sc)
+        n = n + 1
+    }
+    while !atEnd(sc) && looksAt(sc, sc.blockClose) == false {
+        advance(sc)
+    }
+    let mut m = 0
+    while m < sc.blockClose.length && !atEnd(sc) {
+        advance(sc)
+        m = m + 1
+    }
+    return true
+}
+
+/// Skip ASCII whitespace AND comments (line comments through end of line, block
+/// comments through their close). Comment-aware so `until`/`balanced` never
+/// mistake comment text for structure.
 export fn skipWs(sc: modify Scanner) -> Unit {
     let mut going = true
     while going {
@@ -137,6 +192,9 @@ export fn skipWs(sc: modify Scanner) -> Unit {
             while !atEnd(sc) && peek(sc) != 10 {
                 advance(sc)
             }
+            going = true
+        }
+        if skipBlockComment(sc) {
             going = true
         }
     }
@@ -192,6 +250,9 @@ fn skipUnit(sc: modify Scanner) -> Unit {
         let _ = quotedString(sc)
         return
     }
+    if skipBlockComment(sc) {
+        return
+    }
     if sc.lineComment.length > 0 && looksAt(sc, sc.lineComment) {
         while !atEnd(sc) && peek(sc) != 10 {
             advance(sc)
@@ -244,6 +305,8 @@ export fn balanced(sc: modify Scanner, open: Int64, close: Int64) -> String {
         let b = peek(sc)
         if isQuoteByte(sc, b) {
             let _ = quotedString(sc)
+        } else if skipBlockComment(sc) {
+            // block comment consumed; a delimiter inside it is not structure
         } else if sc.lineComment.length > 0 && looksAt(sc, sc.lineComment) {
             while !atEnd(sc) && peek(sc) != 10 {
                 advance(sc)
@@ -264,4 +327,53 @@ export fn balanced(sc: modify Scanner, open: Int64, close: Int64) -> String {
         }
     }
     return slice(sc.src, start, sc.pos)
+}
+
+// ===========================================================================
+// Tests — the cursor operations, covered by feeding source strings directly.
+// ===========================================================================
+
+test "until is string- and line-comment aware" {
+    // A comma inside a quoted string is not a delimiter.
+    let mut a = newScanner("\"a, b\", tail")
+    assertEq(until(a, 44), "\"a, b\"")
+    // A stop byte inside a line comment is skipped.
+    let mut b = newScanner("head // ; not a stop\nreal ; here")
+    assertEq(until(b, 59), "head // ; not a stop\nreal ")
+}
+
+test "balanced is nesting- and string-aware" {
+    let mut a = newScanner("call(\"x, y\", (z))")
+    let _ = ident(a)
+    assertEq(balanced(a, 40, 41), "\"x, y\", (z)")
+}
+
+test "cssScanner: a block comment hides a delimiter from until" {
+    // The `;` inside the `/* */` comment is not the stop.
+    let mut a = cssScanner("color: red /* ; hidden */ ; tail")
+    assertEq(until(a, 59), "color: red /* ; hidden */ ")
+}
+
+test "cssScanner: balanced reads through a brace inside a block comment" {
+    let mut a = cssScanner(".a { color: red /* } not a close */ }")
+    let _ = until(a, 123)
+    assertEq(balanced(a, 123, 125), " color: red /* } not a close */ ")
+}
+
+test "cssScanner: skipWs consumes block comments" {
+    let mut a = cssScanner("  /* lead */ x")
+    skipWs(a)
+    assertEq(peek(a), 120) // 'x'
+}
+
+test "cssScanner: an unterminated block comment consumes to end of input" {
+    let mut a = cssScanner("a /* no close")
+    assertEq(until(a, 44), "a /* no close")
+    assert(atEnd(a))
+}
+
+test "a disabled block-comment marker leaves /* as ordinary bytes" {
+    // newScanner has no block comments, so `*` inside is scanned normally.
+    let mut a = newScanner("a /* b */ c")
+    assertEq(until(a, 98), "a /* ") // stops at 'b' = 98
 }

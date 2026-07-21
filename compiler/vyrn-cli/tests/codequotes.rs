@@ -210,4 +210,25 @@ fn scan_example_runs_with_string_and_comment_awareness() {
     assert!(stdout.contains("ident: hello"), "{stdout}");
     // The comma inside the quoted string was not treated as a delimiter.
     assert!(stdout.contains("first: \"a, b\""), "string-aware `until`:\n{stdout}");
+    // RFC-0054 M4a: `/* */` block-comment awareness (needed by std/tw's CSS). A
+    // `}` hiding inside a CSS block comment is not a structural brace, and a `;`
+    // inside one is not a stop.
+    assert!(
+        stdout.contains("cssInner:  color: red /* } not a close */ "),
+        "block-comment-aware `balanced`:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("beforeSemi: color: red /* ; hidden */ "),
+        "block-comment-aware `until`:\n{stdout}"
+    );
+}
+
+#[test]
+fn std_scan_unit_tests_run_green() {
+    let module = repo_file("std/scan.vyrn");
+    let out = vyrn().arg("test").arg(&module).output().expect("vyrn test");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "std/scan unit tests failed:\n{combined}");
+    assert!(combined.contains("7 passed, 0 failed"), "expected 7 green tests:\n{combined}");
 }

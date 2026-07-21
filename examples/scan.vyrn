@@ -7,6 +7,7 @@
 import {
     newScanner,
     scanner,
+    cssScanner,
     skipWs,
     ident,
     until,
@@ -44,9 +45,19 @@ fn main() -> Int64 {
     let mut f = newScanner("prefix \"}}\" }} end")
     print("untilClose: \{untilStr(f, "}}")}") // prefix "}}"  (the one in the string skipped)
 
-    // a custom scanner: `#` line comments, single-quote strings only.
-    let mut g = scanner("id # ' comment\nx", "#", 39, -1, -1)
+    // a custom scanner: `#` line comments, single-quote strings only, no block.
+    let mut g = scanner("id # ' comment\nx", "#", "", "", 39, -1, -1)
     print("beforeHash: \{until(g, 120)}") // id # ' comment\n  (stops before 'x'=120)
+
+    // a CSS scanner: a `}` hiding inside a `/* */` block comment is not structure,
+    // so `balanced` reads through it to the real closing brace.
+    let mut h = cssScanner(".a { color: red /* } not a close */ }")
+    let _ = until(h, 123) // advance onto the `{`
+    print("cssInner: \{balanced(h, 123, 125)}") // " color: red /* } not a close */ "
+
+    // block-comment-aware `until`: the `;` inside the comment is skipped.
+    let mut i = cssScanner("color: red /* ; hidden */ ; tail")
+    print("beforeSemi: \{until(i, 59)}") // color: red /* ; hidden */   (comment ; skipped)
 
     return 0
 }
