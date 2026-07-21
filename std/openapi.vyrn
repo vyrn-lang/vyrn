@@ -21,31 +21,31 @@
 ///     each the type's `jsonSchema()` (RFC-0003) with an injected `$id` so its
 ///     self-contained `#/$defs/..` references resolve within that component.
 ///
-/// DETERMINISM / the baking boundary (RFC-0038 as-landed): the document ENVELOPE
-/// — `openapi`/`info`/`paths`/the `$ref`s/the `422` shape — is baked as a
-/// constant here at generation time. The schema BODIES are emitted as runtime
-/// `jsonSchema()` calls (the `rpcSchema()` precedent), NOT baked, because the full
-/// recursive JSON Schema of a type is not available from `moduleInterface`
-/// reflection: `ParamInfo.schema`/`retSchema` carry only a scalar's shallow bounds
-/// (`Schema` = name/base/doc/min/max/…), never a record's fields or an enum's
-/// variants. Each `jsonSchema()` is itself a compile-time constant string, so the
-/// whole document is deterministic and byte-stable. (Gap recorded in RFC-0038.)
+/// WRITER (RFC-0059): the emitted `openapiJson()` no longer hand-CONCATENATES the
+/// JSON document (the old `acc = acc + "…"` writer-by-concat with a private
+/// `oaEscBody` escaper). It now builds a `std/json` `Json` TREE and `emitPretty`s
+/// it — the canonical writer owns escaping and layout. The document envelope
+/// (`openapi`/`info`/`paths`/the `$ref`s/the `422` shape) is baked as compact JSON
+/// constants and `parseJson`d into the tree; the schema BODIES stay runtime
+/// `jsonSchema()` calls (the `rpcSchema()` precedent), because the full recursive
+/// JSON Schema of a type is not available from `moduleInterface` reflection
+/// (`ParamInfo.schema` carries only a scalar's shallow bounds — gap recorded in
+/// RFC-0038). Each `jsonSchema()` is a compile-time constant string, so the whole
+/// document is deterministic and byte-stable. The document is now PRETTY-PRINTED
+/// (2-space indent) rather than compact — a deliberate, documented change from the
+/// old concat document (RFC-0059 As-landed); it remains a valid, semantically
+/// identical OpenAPI 3.1 spec (the exports parse-back test pins the structure).
 ///
 /// Scope: a DOCUMENT, not a runtime. No callbacks/webhooks/auth schemes.
 ///
 /// Inspect the synthesized module with:  vyrn emit-gen <file>
 
-// ---- comptime-pure helpers -------------------------------------------------
+// Shared helpers (RFC-0059): the private `oaListContains` copy is now `includes`;
+// the infallible `stringFromBytes` fallbacks route through `fromBytesOr`.
+import { includes } from "std/arrays"
+import { fromBytesOr } from "std/strings"
 
-/// Whether `items` already contains `needle`.
-fn oaListContains(items: Array<String>, needle: String) -> Bool {
-    for it in items {
-        if it == needle {
-            return true
-        }
-    }
-    return false
-}
+// ---- comptime-pure helpers -------------------------------------------------
 
 /// The module base name of a specifier, for `info.title` (`"./contract"` =>
 /// `contract`, `"std/shelf.vyrn"` => `shelf`).
@@ -54,7 +54,7 @@ fn oaBaseName(spec: String) -> String {
     let mut start = 0
     let mut i = 0
     while i < ba.length {
-        if ba[i] == 47 {
+        if ba[i] == '/' {
             start = i + 1
         }
         i = i + 1
@@ -65,10 +65,7 @@ fn oaBaseName(spec: String) -> String {
         seg.push(ba[j])
         j = j + 1
     }
-    let name = match stringFromBytes(seg) {
-        Ok(v) => v,
-        Err(e) => spec,
-    }
+    let name = fromBytesOr(seg, spec)
     if name.endsWith(".vyrn") {
         let nb = bytes(name)
         let mut trimmed: Array<UInt8> = []
@@ -77,41 +74,29 @@ fn oaBaseName(spec: String) -> String {
             trimmed.push(nb[k])
             k = k + 1
         }
-        return match stringFromBytes(trimmed) {
-            Ok(v) => v,
-            Err(e) => name,
-        }
+        return fromBytesOr(trimmed, name)
     }
     return name
 }
 
-/// `raw` escaped as the BODY of a Vyrn string literal (no surrounding quotes) —
-/// so a chunk of raw JSON can be baked into the emitted `openapiJson()` as a
-/// literal `acc = acc + "…"` append.
+/// `raw` escaped as the BODY of a Vyrn string literal (no surrounding quotes) — so
+/// a chunk of compact JSON can be baked into the generated source as a `"…"` literal
+/// (later `parseJson`d back into the document tree at runtime).
 fn oaEscBody(raw: String) -> String {
     let ba = bytes(raw)
     let mut out: Array<UInt8> = []
     for b in ba {
-        if b == 92 {
-            out.push(92)
-            out.push(92)
-        } else if b == 34 {
-            out.push(92)
-            out.push(34)
+        if b == '\\' {
+            out.push('\\')
+            out.push('\\')
+        } else if b == '"' {
+            out.push('\\')
+            out.push('"')
         } else {
             out.push(b)
         }
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(e) => "",
-    }
-}
-
-/// The emitted-source line `    acc = acc + "<escaped raw>"` — appends a chunk of
-/// baked JSON to the accumulator in the generated `openapiJson()`.
-fn oaAppendLit(raw: String) -> String {
-    return "    acc = acc + \"" + oaEscBody(raw) + "\"\n"
+    return fromBytesOr(out, "")
 }
 
 /// A sorted copy of `names` (insertion sort; the closure is small). SORTED
@@ -153,7 +138,7 @@ fn oaIsNamedType(spelling: String, iface: ModuleInterface) -> Bool {
 fn oaImportBlock(iface: ModuleInterface) -> String {
     let mut specs: Array<String> = []
     for t in iface.types {
-        if oaListContains(specs, t.module) == false {
+        if includes(specs, t.module) == false {
             specs.push(t.module)
         }
     }
@@ -202,11 +187,11 @@ fn oaResponseSchema(f: FnInfo, iface: ModuleInterface) -> String {
     return "{}"
 }
 
-/// One procedure's baked `paths` entry (raw JSON): `POST /rpc/<proc>` with a
-/// `requestBody` `$ref` (for a 1-param procedure), a `200` `$ref`, and the `422`
-/// Issues shape. `lead` is "" for the first entry, "," thereafter.
-fn oaPathEntry(f: FnInfo, iface: ModuleInterface, lead: String) -> String {
-    let mut body = lead + "\"/rpc/" + f.name + "\":{\"post\":{\"operationId\":\"" + f.name + "\","
+/// One procedure's baked `paths` VALUE (compact JSON, no key): the `{"post":{…}}`
+/// object with a `requestBody` `$ref` (for a 1-param procedure), a `200` `$ref`,
+/// and the `422` Issues shape. Parsed into the document tree at runtime.
+fn oaPathValue(f: FnInfo, iface: ModuleInterface) -> String {
+    let mut body = "{\"post\":{\"operationId\":\"" + f.name + "\","
     if f.params.length == 1 {
         body = body + "\"requestBody\":{\"required\":true,\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/" + f.params[0].spelling + "\"}}}},"
     }
@@ -215,6 +200,15 @@ fn oaPathEntry(f: FnInfo, iface: ModuleInterface, lead: String) -> String {
     body = body + "\"422\":{\"description\":\"request validation failed\",\"content\":{\"application/json\":{\"schema\":" + oaIssuesSchema() + "}}}"
     body = body + "}}}"
     return body
+}
+
+/// The closure's type names (for sorting into `components/schemas`).
+fn oaTypeNames(iface: ModuleInterface) -> Array<String> {
+    let mut out: Array<String> = []
+    for t in iface.types {
+        out.push(t.name)
+    }
+    return out
 }
 
 // ---- the generator ---------------------------------------------------------
@@ -226,58 +220,62 @@ export gen fn openapi(contract: String) -> String {
     let title = oaBaseName(contract)
     let mut out = "/// Generated by std/openapi `openapi` (RFC-0038) — do not edit.\n"
     out = out + oaImportBlock(iface)
+    out = out + "import { Json, JsonField, parseJson, emitPretty } from \"std/json\"\n"
 
-    // The runtime helper that scopes a self-contained `jsonSchema()` under its
-    // own `$id`, so its `#/$defs/..` back-references resolve inside the component
-    // (JSON Schema 2020-12: `$id` establishes the base URI for `#`).
-    out = out + "fn oaEmbed(id: String, schema: String) -> String {\n"
-    out = out + "    let ba = bytes(schema)\n"
-    out = out + "    let mut rest: Array<UInt8> = []\n"
-    out = out + "    let mut i = 1\n"
-    out = out + "    while i < ba.length {\n"
-    out = out + "        rest.push(ba[i])\n"
-    out = out + "        i = i + 1\n"
+    // Runtime helpers in the generated module: parse a known-valid JSON constant
+    // into a node, and inject a component's `$id` as its first field so its
+    // self-contained `#/$defs/..` references resolve (JSON Schema 2020-12).
+    out = out + "\n"
+    out = out + "fn oaNode(s: String) -> Json {\n"
+    out = out + "    return match parseJson(s) {\n"
+    out = out + "        Ok(j) => j,\n"
+    out = out + "        Err(e) => JObj([]),\n"
     out = out + "    }\n"
-    out = out + "    let tail = match stringFromBytes(rest) {\n"
-    out = out + "        Ok(v) => v,\n"
-    out = out + "        Err(e) => \"\",\n"
+    out = out + "}\n"
+    out = out + "fn oaObjWithId(id: String, fs: Array<JsonField>) -> Json {\n"
+    out = out + "    let mut ordered: Array<JsonField> = []\n"
+    out = out + "    ordered.push(JsonField { key: \"$id\", value: JStr(id) })\n"
+    out = out + "    for f in fs {\n"
+    out = out + "        ordered.push(f)\n"
     out = out + "    }\n"
-    out = out + "    return \"{\\\"$id\\\":\\\"\" + id + \"\\\",\" + tail\n"
+    out = out + "    return JObj(ordered)\n"
+    out = out + "}\n"
+    out = out + "fn oaWithId(id: String, j: Json) -> Json {\n"
+    out = out + "    return match j {\n"
+    out = out + "        JObj(fs) => oaObjWithId(id, fs),\n"
+    out = out + "        JNull => j,\n"
+    out = out + "        JBool(b) => j,\n"
+    out = out + "        JNum(n) => j,\n"
+    out = out + "        JStr(s) => j,\n"
+    out = out + "        JArr(a) => j,\n"
+    out = out + "    }\n"
+    out = out + "}\n"
+    out = out + "fn oaSchema(id: String, schema: String) -> Json {\n"
+    out = out + "    return oaWithId(id, oaNode(schema))\n"
     out = out + "}\n"
 
     out = out + "/// The OpenAPI 3.1 document for this contract (deterministic, byte-stable).\n"
     out = out + "export fn openapiJson() -> String {\n"
-    out = out + "    let mut acc = \"\"\n"
-    // Envelope + paths open.
-    out = out + oaAppendLit("{\"openapi\":\"3.1.0\",\"info\":{\"title\":\"" + title + "\",\"version\":\"0.0.0\"},\"paths\":{")
-    let mut i = 0
+    // paths — one entry per procedure in declaration order.
+    out = out + "    let mut paths: Array<JsonField> = []\n"
     for f in iface.functions {
-        let lead = if i > 0 { "," } else { "" }
-        out = out + oaAppendLit(oaPathEntry(f, iface, lead))
-        i = i + 1
+        out = out + "    paths.push(JsonField { key: \"/rpc/" + f.name + "\", value: oaNode(\"" + oaEscBody(oaPathValue(f, iface)) + "\") })\n"
     }
-    // Paths close, components open.
-    out = out + oaAppendLit("},\"components\":{\"schemas\":{")
+    // components/schemas — one entry per closure type, sorted, each `$id`-scoped.
+    out = out + "    let mut schemas: Array<JsonField> = []\n"
     let names = oaSorted(oaTypeNames(iface))
-    let mut j = 0
     for name in names {
-        let lead = if j > 0 { "," } else { "" }
-        out = out + oaAppendLit(lead + "\"" + name + "\":")
-        out = out + "    acc = acc + oaEmbed(\"" + name + "\", jsonSchema(" + name + "))\n"
-        j = j + 1
+        out = out + "    schemas.push(JsonField { key: \"" + name + "\", value: oaSchema(\"" + name + "\", jsonSchema(" + name + ")) })\n"
     }
-    // Components + document close.
-    out = out + oaAppendLit("}}}")
-    out = out + "    return acc\n}\n"
-    return out
-}
-
-/// The closure's type names (for sorting into `components/schemas`).
-fn oaTypeNames(iface: ModuleInterface) -> Array<String> {
-    let mut out: Array<String> = []
-    for t in iface.types {
-        out.push(t.name)
-    }
+    // The document envelope, assembled as a tree and pretty-printed.
+    out = out + "    let doc = JObj([\n"
+    out = out + "        JsonField { key: \"openapi\", value: JStr(\"3.1.0\") },\n"
+    out = out + "        JsonField { key: \"info\", value: JObj([JsonField { key: \"title\", value: JStr(\"" + oaEscBody(title) + "\") }, JsonField { key: \"version\", value: JStr(\"0.0.0\") }]) },\n"
+    out = out + "        JsonField { key: \"paths\", value: JObj(paths) },\n"
+    out = out + "        JsonField { key: \"components\", value: JObj([JsonField { key: \"schemas\", value: JObj(schemas) }]) },\n"
+    out = out + "    ])\n"
+    out = out + "    return emitPretty(doc, 2)\n"
+    out = out + "}\n"
     return out
 }
 
