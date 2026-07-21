@@ -1,6 +1,6 @@
 # RFC-0054 — Code Quotes: Structured Emission and Real Scanning for Generators
 
-- **Status:** Locked design
+- **Status:** Implemented — see the As landed section below.
 - **Depends on:** RFC-0007 (tagged templates — the mechanism this rides),
   RFC-0021 (`gen fn` + comptime interpreter + gen cache), RFC-0033 (origin
   maps — quotes now *emit* the directives it consumes), RFC-0053 (lex/parse
@@ -168,3 +168,147 @@ outside gen context, quoting *patterns*/hygiene/macro-expansion semantics
 (quotes are templates, not macros), attributing skeleton text to the
 generator's own source lines in origin maps, and any change to how the
 gen cache keys content (RFC-0053 §2 proved it correct).
+
+---
+
+## As landed
+
+### M1 — the `Code` type and `vyrn"…"` quotes (where it moved)
+
+- **Lexer** (`lexer.rs`): `"""…"""` triple-quoted strings were added to BOTH the
+  value lexer (`lex`) and the trivia lexer (`lex_with_trivia`, so `fmt` is
+  unaffected). Inside a triple quote a lone `"`/`""` is literal; `\{…}`
+  interpolation and every escape work exactly as in a plain string, only the
+  terminator differs. A source **CRLF is normalized to LF inside string/template
+  literals** so a `vyrn"""…"""` skeleton (and any multi-line string) carries
+  byte-identical bytes on a CRLF or LF checkout — three-way parity never depends
+  on the OS (a latent cross-platform bug this fixed). `token_name_and_text` maps a
+  `Tok` to the `(kind, text)` pair `lex()` returns.
+- **Parser** (`parser.rs`): `vyrn` is the second compiler-recognized template tag
+  (after `template`). `code_quote` builds the skeleton (holes → `__vyrn_holeN`),
+  validates it parses in one of four modes (decl-list → stmt-list → expr → type)
+  via fresh sub-parsers, and classifies each hole (`hole_context` → `0` expression,
+  `1` identifier fragment by textual adjacency, `2` standalone identifier/type by a
+  string-literal substitution probe). The quote lowers to a
+  `@codeText(part) + @codeSplice(hole, ctx) + …` chain. A hole-less `vyrn"…"` is
+  the one tag whose plain-string form is meaningful. A skeleton that parses in no
+  mode is an ordinary parse diagnostic in the generator's file, mapped to the
+  literal's line via the wrapped-body error line.
+- **Interp** (`interp.rs`): `Val::Code(Vec<CodePiece>)` — `Text` or origin-carrying
+  pieces. `code_splice` applies the RFC-0054 table (String→escaped literal in expr
+  position via `escape_string_literal`, String→validated bare identifier in ident
+  position via `is_bare_identifier` — the real lexer decides non-keyword-ness,
+  Code verbatim, numbers/bools literals); `render_code` inserts `//@origin`
+  brackets around origin pieces (RFC-0033 format, zero loader/OriginMaps changes);
+  `lex_tokens` runs the real lexer non-fatally (an `error` kind token, never a
+  trap). `Code + Code` in `binop`. A `gen fn` returning `Code` is rendered by
+  `generate`.
+- **Checker** (`checker.rs`): an `in_gen` flag (set per function AND for signature
+  validation) gates `Code`/`Token`/`render`/`rawAt`/`raw`/`lex`/`vyrn"…"` to
+  generation context — **using them outside generation is a compile error**, which
+  is what keeps them out of every backend (a `gen fn` body is never emitted). The
+  surface names (`render`/`rawAt`/`raw`/`lex`) are common words, so they are NOT
+  reserved: a same-named user function or binding shadows the builtin (in checker
+  and interp).
+- **`Code`/`Token` are magic, not injected** (`types.rs`): `resolve` maps
+  `Named("Code")` to itself (opaque) and `Named("Token")` to its record shape
+  `{kind,text,line,col}`, **only when the user has not declared that name** — a
+  user `type Code`/`type Token` wins. This is the fix for two real collisions
+  three-way parity caught: an unknown `Named` used to resolve to `Unit` (so `Code`
+  silently became `Unit`), and an injected line-0 `Token` decl collided with
+  `examples/consume.vyrn`'s `type Token` ("defined twice").
+
+### Locked-design deviations (with justification)
+
+1. **The interpreter does not trap Code builtins at runtime.** The RFC framed
+   gen-only "same as `moduleInterface`", whose interp arm traps a runtime call.
+   As landed, gen-only is enforced **only by the checker** (`in_gen`); the interp
+   runs `render`/`raw`/`lex`/quotes anywhere. Justification: those operations are
+   *pure* (unlike `moduleInterface`, which needs the generation resolver), the
+   checker already keeps them out of non-gen source (and thus out of backends),
+   and RFC-0021 promises a `gen fn` is "callable at runtime … for testing" — a
+   runtime trap would make a `gen fn` emission helper (e.g. `std/i18n`'s `strLit`)
+   untestable by its own `test` blocks. This is strictly sounder, not a loosening
+   of the compile-time guarantee.
+2. **`std/i18n` emission migrated via `gen fn` on the whole module, not just the
+   escape helper.** The RFC's picture is "emission through quotes". A code quote
+   is legal only in a generation context, so the escape choke point `strLit`
+   became `gen fn strLit(raw) = render(vyrn"\{raw}")`. But a `gen fn` body is not
+   emitted into a linked binary, so a plain-fn caller of `strLit` (emitted as dead
+   code) left an undefined `@vyrn_strLit` at native link (three-way parity caught
+   this). Since the entire `std/i18n` module is generation-only, every helper was
+   marked `gen fn` — nothing is emitted, no dangling reference, and the emission
+   still runs interpreted at generation and in the runtime `test` blocks.
+3. **`std/graphql` and `std/i18n` do not route their foreign-text scanning through
+   `std/scan`.** `std/scan` (a comment/string-aware **whitespace cursor**) does
+   not model GraphQL's need to split on top-level commas while nested inside
+   *four* bracket kinds (`<>()[]{}`) simultaneously, nor ICU's apostrophe-quoting
+   (`'` quotes the next special char, `''` is a literal apostrophe) and `#`-in-
+   plural rules. Forcing either onto the shared cursor would regress escaping bugs
+   these generators had **already fixed and tested** (graphql's `"""`-description
+   escaping in 28dfcc9; i18n's apostrophe/parameter handling in `icuApostrophe`).
+   The sound choice was to migrate the actual bug surface — the hand-rolled Vyrn-
+   string escaping (`gqlEscBody`, `strLit`/`escSecond`) — to compiler-guaranteed
+   code-quote escaping, and leave each generator's audited, dialect-specific
+   scanner where its tests live. `std/scan` ships, is tested, and is exercised by
+   `examples/scan.vyrn`; it is the shared cursor for foreign text that DOES fit
+   its model (and for the M4 generators).
+
+### The graphql SDL-escaping bug — before / after
+
+The RFC cites `std/graphql` "emitting invalid SDL (unescaped `"""` descriptions)".
+That **SDL-level** bug was already fixed before this RFC (commit 28dfcc9:
+`gqlEscTripleQuote`/`gqlDescBlock`, pinned by
+`graphql_sdl_escapes_descriptions_and_splits_string_aware`), and it stays green
+under the new emission. What RFC-0054 changed is the **Vyrn-level** baking: the
+final SDL string was hand-escaped into a `sdlText()` literal by the `gqlEscBody`
+byte loop —
+
+```
+// BEFORE
+out = out + "    return \"" + gqlEscBody(doc) + "\"\n}\n"
+
+// AFTER
+return render(vyrn"""… export fn sdlText() -> String {
+    return \{doc}
+}
+""")
+```
+
+The `\{doc}` splice is in expression position, so the compiler's own escaping bakes
+`doc` as a string literal — a mis-escape corrupting the baked SDL is
+unrepresentable, and `gqlEscBody` is deleted. `emit-gen` output is **byte-identical**
+(verified by stashed old-vs-new diff on a graphql fixture; the escaping sets match
+exactly). `std/i18n`'s `strLit`/`escSecond` byte loop was replaced the same way
+(`i18n_translation_with_quotes_and_backslashes_bakes_losslessly`), also
+byte-identical `emit-gen`.
+
+### `render` auto-origins
+
+No pilot uses `rawAt` (it is the M4 `std/vyx` story), so no example's directives
+changed — `emit-gen` goldens are byte-identical, nothing silent. The auto-origin
+round-trip is proven directly by `rawat_origin_maps_a_check_error_back_to_the_source`
+(a check error inside `rawAt` text maps to the recorded `path:line:col` through
+`OriginMaps`).
+
+### Tests / verification
+
+- **Frontend**: splice-rule unit tests incl. injection (`ev"; …"` in expr → inert
+  literal; `a b`/`fn` in ident → error), `render` origin brackets, `lex()`
+  agreement on the audit reproducers (a comment with `props`, `</script>` in a
+  string, literal `{ a }`) and non-fatal `error` tokens.
+- **CLI** (`codequotes.rs`): emit-gen escaping, injection→inert, skeleton error in
+  the generator's file, bad-identifier splice naming the generator, `rawAt`
+  origin round-trip, the `std/scan` example, and a lossless i18n bake.
+- **LSP** (`lsp_e2e.rs`): a broken skeleton publishes in the generator's `.vyrn`
+  over stdio in the VS Code URI form `file:///c%3A/…`; semantic tokens do not
+  crash on the `vyrn"…"` tag.
+- **Counts**: 946 workspace tests (5 ignored), 39 vyrn-lsp tests (1 ignored),
+  0 clippy warnings, `vyrn fmt --check` clean; three-way parity green (5 suites,
+  76-example corpus incl. the new `examples/scan.vyrn`) — the change moves WHERE a
+  diagnostic is reported and adds gen-only emission, never any example's runtime
+  output.
+- **LSP redeploy (hash-verified)**: the fresh
+  `compiler/vyrn-lsp/target/release/vyrn-lsp.exe` and the deployed
+  `editor/vscode/server/vyrn-lsp.exe` are both SHA-256
+  `f3799261f7df428e934c0c32738141b9f513c9fda6b9b58047f635da5f7daa3f`.
