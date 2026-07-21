@@ -831,6 +831,40 @@ fn rfc33_vyx_type_error_publishes_into_the_vyx_buffer() {
     assert_eq!(d0.pointer("/range/start/character").and_then(|c| c.as_i64()), Some(7), "col: {note}");
 }
 
+/// A `.vyx` whose DYNAMIC attribute expression mistypes `title` as `titel`. The
+/// emitter hoists a `:attr` value onto its own origin-governed `let … = A("href",
+/// item.titel)` line (RFC-0039 §1); after RFC-0054 M4b that hoist is emitted
+/// through `rawAt` (not a hand-written `//@origin`), so this pins that the
+/// hoisted-region origins stay column-exact through the migration.
+const RFC33_VYX_ATTR_BAD: &str = "<script>\n\
+    type Row = { title: String }\n\
+    props { item: Row }\n\
+    </script>\n\
+    <template>\n\
+    <a :href=\"item.titel\">x</a>\n\
+    </template>\n";
+
+/// RFC-0054 M4b: a CHECK (type) error inside a HOISTED `:attr` expression is
+/// published into the `.vyx` buffer at the expression's exact line/column — the
+/// `rawAt`-emitted origin of the hoisted `let` binding round-trips through
+/// `OriginMaps` exactly as the former hand-concatenated directive did. `<a :href="`
+/// is 10 chars, so `item.titel` starts at column 11 (0-based char 10) of line 6.
+#[test]
+fn rfc54_m4b_vyx_dyn_attr_check_error_maps_column_exact() {
+    let dir = rfc33_scratch("attr", RFC33_VYX_ATTR_BAD);
+    let mut client = rfc33_client();
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", RFC33_APP);
+
+    let note = read_nonempty_diags_for(&mut client, "Widget.vyx");
+    let diags = note.pointer("/params/diagnostics").and_then(|d| d.as_array()).expect("diags array");
+    let d0 = &diags[0];
+    let msg = d0.get("message").and_then(|m| m.as_str()).unwrap_or("");
+    assert!(msg.contains("titel"), "carries the checker message: {msg}");
+    assert!(msg.contains("in generated code"), "keeps the generated breadcrumb: {msg}");
+    assert_eq!(d0.pointer("/range/start/line").and_then(|l| l.as_i64()), Some(5), "line: {note}");
+    assert_eq!(d0.pointer("/range/start/character").and_then(|c| c.as_i64()), Some(10), "col: {note}");
+}
+
 // ---- RFC-0053: lex errors in generated code reach the `.vyx` buffer -------
 
 /// A `.vyx` whose template expression carries a stray `\` — the character the
