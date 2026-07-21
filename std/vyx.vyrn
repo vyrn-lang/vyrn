@@ -1051,54 +1051,78 @@ fn vyxRebaseImport(line: String, dir: String) -> String {
 /// `{` (valid only when found and not malformed). RFC-0039 §2.
 type VyxProps = { found: Bool, malformed: Bool, kwAt: Int64, braceAt: Int64 }
 
-/// Whether only whitespace lies between the byte before `at` and the previous LF
-/// (so `props` is the first token on its line, distinguishing a statement-leading
-/// `props {` block from a helper identifier `let props = …`).
-fn vyxLineLeading(ba: Array<UInt8>, at: Int64) -> Bool {
-    let mut i = at
-    while i > 0 && ba[i - 1] != 10 {
-        if vyxIsWs(ba[i - 1]) == false {
-            return false
-        }
-        i = i - 1
+/// The byte offset at which 1-based `targetLine` begins in `ba` (0 for line 1,
+/// the length when past the end). The inverse of `vyxLineAt`, used to turn a
+/// `lex()` token's line back into a byte offset without any column arithmetic —
+/// so CRLF vs LF and any multi-byte content earlier on the line are irrelevant.
+fn vyxLineStartOffset(ba: Array<UInt8>, targetLine: Int64) -> Int64 {
+    if targetLine <= 1 {
+        return 0
     }
-    return true
+    let mut line = 1
+    let mut i = 0
+    while i < ba.length {
+        if ba[i] == 10 {
+            line = line + 1
+            if line == targetLine {
+                return i + 1
+            }
+        }
+        i = i + 1
+    }
+    return ba.length
 }
 
-fn vyxFindPropsBlock(ba: Array<UInt8>) -> VyxProps {
-    return vyxFindKwBlock(ba, "props")
-}
-
-/// The generalized statement-leading `<kw> { … }` block finder (see
-/// `vyxFindPropsBlock`) — used for `props` in components and `params` in `.vyx`
-/// pages (RFC-0039 §4).
-fn vyxFindKwBlock(ba: Array<UInt8>, kwStr: String) -> VyxProps {
-    let kw = bytes(kwStr)
-    let mut from = 0
-    let mut searching = true
-    while searching {
-        let at = vyxScanFindCode(ba, kw, from, true)
-        if at < 0 {
-            searching = false
-        } else {
-            let afterAt = at + kw.length
+/// Locate a statement-leading `<kwStr> { … }` block in the script text `ba` using
+/// the compiler's REAL lexer (RFC-0054 M4b). The keyword must appear as an `ident`
+/// token that is the FIRST token on its line and is followed (after only
+/// whitespace) by `{`. Because `lex` never emits a token for a `//`/`/* */`
+/// comment and folds a whole string literal into ONE `string` token, a `props`
+/// spelled inside a comment or a helper string — or a helper identifier
+/// `let props = …` (never line-leading) — can no longer be mistaken for the block:
+/// the three audit miscompiles become structurally impossible rather than
+/// hand-guarded. Returns sub-relative byte offsets (the keyword offset is the first
+/// non-whitespace byte of its line, exact because the token leads the line), so
+/// every downstream slice stays byte-identical to the former byte scanner.
+gen fn vyxLexKwBlock(ba: Array<UInt8>, kwStr: String) -> VyxProps {
+    let toks = lex(vyxSlice(ba, 0, ba.length))
+    let kwLen = bytes(kwStr).length
+    let mut i = 0
+    while i < toks.length {
+        let t = toks[i]
+        let leading = i == 0 || toks[i - 1].line < t.line
+        if leading && t.kind == "ident" && t.text == kwStr {
+            let lineStart = vyxLineStartOffset(ba, t.line)
+            let kwAt = vyxFirstNonWs(ba, lineStart, ba.length)
+            let afterAt = kwAt + kwLen
             let boundary = afterAt >= ba.length || vyxIsWs(ba[afterAt]) || ba[afterAt] == 123
-            if boundary && vyxLineLeading(ba, at) {
-                // A statement-leading `props` token: its block if followed by `{`,
-                // else a malformed props block.
+            if boundary {
+                // A statement-leading keyword token: its block if followed by `{`,
+                // else a malformed block.
                 let mut m = afterAt
                 while m < ba.length && vyxIsWs(ba[m]) {
                     m = m + 1
                 }
                 if m < ba.length && ba[m] == 123 {
-                    return VyxProps { found: true, malformed: false, kwAt: at, braceAt: m }
+                    return VyxProps { found: true, malformed: false, kwAt: kwAt, braceAt: m }
                 }
-                return VyxProps { found: true, malformed: true, kwAt: at, braceAt: 0 - 1 }
+                return VyxProps { found: true, malformed: true, kwAt: kwAt, braceAt: 0 - 1 }
             }
-            from = at + 1
         }
+        i = i + 1
     }
     return VyxProps { found: false, malformed: false, kwAt: 0 - 1, braceAt: 0 - 1 }
+}
+
+gen fn vyxFindPropsBlock(ba: Array<UInt8>) -> VyxProps {
+    return vyxFindKwBlock(ba, "props")
+}
+
+/// The generalized statement-leading `<kw> { … }` block finder (see
+/// `vyxFindPropsBlock`) — used for `props` in components and `params` in `.vyx`
+/// pages (RFC-0039 §4). Driven by the real lexer (RFC-0054 M4b) via `vyxLexKwBlock`.
+gen fn vyxFindKwBlock(ba: Array<UInt8>, kwStr: String) -> VyxProps {
+    return vyxLexKwBlock(ba, kwStr)
 }
 
 /// The index just past the `}` matching the `{` at `open` (brace-depth match,
@@ -1132,31 +1156,16 @@ fn vyxMatchCurly(ba: Array<UInt8>, open: Int64) -> Int64 {
 /// imports-first rule (RFC-0040 §3). Returns 0 when no such block exists or every
 /// import correctly precedes it. Offsets are whole-file, so the line names the
 /// `.vyx` source directly.
-fn vyxImportsFirstViolation(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, kwStr: String) -> Int64 {
-    let kw = bytes(kwStr)
-    // Find the statement-leading block keyword inside the section (code-aware, so a
-    // match in a comment/string/helper identifier never counts).
-    let mut kwAt = 0 - 1
-    let mut from = sStart
-    let mut scanning = true
-    while scanning {
-        let at = vyxScanFindCode(ba, kw, from, true)
-        if at < 0 || at >= sEnd {
-            scanning = false
-        } else {
-            let afterAt = at + kw.length
-            let boundary = afterAt >= ba.length || vyxIsWs(ba[afterAt]) || ba[afterAt] == 123
-            if boundary && vyxLineLeading(ba, at) {
-                kwAt = at
-                scanning = false
-            } else {
-                from = at + 1
-            }
-        }
-    }
-    if kwAt < 0 {
+gen fn vyxImportsFirstViolation(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, kwStr: String) -> Int64 {
+    // Find the statement-leading block keyword inside the section with the real
+    // lexer (RFC-0054 M4b), so a match in a comment/string/helper identifier never
+    // counts. Offsets from `vyxLexKwBlock` are relative to the section slice.
+    let sub = bytes(vyxSlice(ba, sStart, sEnd))
+    let blk = vyxLexKwBlock(sub, kwStr)
+    if blk.found == false {
         return 0
     }
+    let kwAt = sStart + blk.kwAt
     // Any `import` line whose first byte lies after the block keyword is misordered.
     let mut lineStart = sStart
     let mut i = sStart
@@ -1187,7 +1196,7 @@ fn vyxFirstNonWs(ba: Array<UInt8>, s: Int64, e: Int64) -> Int64 {
 
 /// Parse the `<script>` section text (a standalone string, positions relative to
 /// its own start) — the string wrapper kept for the pure unit tests.
-fn vyxParseScript(script: String, dir: String, fileId: String) -> VyxScript {
+gen fn vyxParseScript(script: String, dir: String, fileId: String) -> VyxScript {
     let ba = bytes(script)
     return vyxParseScriptAt(ba, 0, ba.length, dir, fileId)
 }
@@ -1199,7 +1208,7 @@ fn vyxParseScript(script: String, dir: String, fileId: String) -> VyxScript {
 /// `//@origin` directives back onto the copied script region. Positions are
 /// whole-file (computed against `ba`), so an import specifier or a helper `fn`
 /// maps to its exact `.vyx` line:col.
-fn vyxParseScriptAt(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, dir: String, fileId: String) -> VyxScript {
+gen fn vyxParseScriptAt(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, dir: String, fileId: String) -> VyxScript {
     // props detection works on the section substring (relative offsets); a
     // relative offset `r` is whole-file offset `sStart + r`.
     let sub = bytes(vyxSlice(ba, sStart, sEnd))
@@ -1292,7 +1301,7 @@ fn vyxParseScriptAt(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, dir: String, f
 }
 
 /// A `props` block search starting at `from` (for the second-block check).
-fn vyxFindPropsBlockFrom(ba: Array<UInt8>, from: Int64) -> VyxProps {
+gen fn vyxFindPropsBlockFrom(ba: Array<UInt8>, from: Int64) -> VyxProps {
     let mut sub: Array<UInt8> = []
     let mut i = from
     while i < ba.length {
@@ -1415,7 +1424,7 @@ fn vyxIfUsesChildren(bodies: Array<VyxBody>, els: VyxBody, has: Bool) -> Bool {
 /// resolution happens later, once every sibling name is known). `compName` is the
 /// file stem; `dir` rebases relative imports. EXPORTED so `std/ui`'s `pages` can
 /// reuse it for `.vyx` pages.
-export fn vyxCompileComponent(compName: String, source: String, dir: String) -> VyxComp {
+export gen fn vyxCompileComponent(compName: String, source: String, dir: String) -> VyxComp {
     let ba = bytes(source)
     let fileId = vyxIdentOf(compName + ".vyx")
     let fnName = vyxLowerFirst(compName)
@@ -1653,7 +1662,7 @@ fn vyxNormHelper(line: String) -> String {
 /// The template AST is line-shifted; import and helper origins are taken from the
 /// real file (matched by identity/order), so a generator-synthesized import (the
 /// error page's injected `PageError`) or an unmatched line is emitted origin-less.
-fn vyxRelocateComp(comp: VyxComp, realBa: Array<UInt8>, sStart: Int64, sEnd: Int64, sFound: Bool, dLine: Int64, realSrc: String, dir: String, fileId: String) -> VyxComp {
+gen fn vyxRelocateComp(comp: VyxComp, realBa: Array<UInt8>, sStart: Int64, sEnd: Int64, sFound: Bool, dLine: Int64, realSrc: String, dir: String, fileId: String) -> VyxComp {
     // Default every script origin to "unknown" (0) → emitted bare.
     let mut importLines: Array<Int64> = []
     let mut importCols: Array<Int64> = []
@@ -2641,7 +2650,7 @@ fn vyxIsLayoutLine(line: String) -> Bool {
 /// Reflect a `.vyx` page's `<script>` — its `params` fields and loader presence.
 /// EXPORTED so `std/ui` learns the page's routing shape without duplicating the
 /// scanner. (`err` is set on a malformed `params` block.)
-export fn vyxPageShape(source: String) -> VyxPageShape {
+export gen fn vyxPageShape(source: String) -> VyxPageShape {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     if scriptSec.found == false {
@@ -2774,7 +2783,7 @@ type VyxHeadSplit = { rest: String, head: VyxHead }
 
 /// Locate + remove a statement-leading `head { … }` block from `script`,
 /// returning the remaining script and the parsed head (found=false when absent).
-fn vyxStripHead(script: String, fileId: String) -> VyxHeadSplit {
+gen fn vyxStripHead(script: String, fileId: String) -> VyxHeadSplit {
     let sb = bytes(script)
     let hb = vyxFindKwBlock(sb, "head")
     if hb.found == false || hb.malformed {
@@ -2824,7 +2833,7 @@ fn vyxEmitHeadFns(head: VyxHead, sig: String, prelude: String) -> String {
 /// gen fn synthesizes it from a nested `vyxPage(…)` import. This is the wrapper
 /// carrying the pre-RFC-0048 synthetic `UiPageBody.vyx` origins (still used by the
 /// pure unit tests, which assert on the generated code, not on origins).
-export fn vyxBuildPageModule(source: String, dir: String, themed: Bool, theme: String) -> String {
+export gen fn vyxBuildPageModule(source: String, dir: String, themed: Bool, theme: String) -> String {
     return vyxBuildPageModuleAt(source, "", dir, themed, theme)
 }
 
@@ -2834,7 +2843,7 @@ export fn vyxBuildPageModule(source: String, dir: String, themed: Bool, theme: S
 /// line-shift + import/helper origin matching), instead of the synthetic
 /// `UiPageBody.vyx`. The generated page/`respond` code is byte-identical either
 /// way — only the origin comments differ.
-export fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
+export gen fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
@@ -3011,12 +3020,12 @@ fn vyxDirOf(path: String) -> String {
 /// the compiled template (which must contain `<slot/>`), plus `head()`/
 /// `headTitle()` from its head block. EXPORTED so `std/ui`'s router synthesizes it
 /// from a nested `vyxLayout(…)` import.
-export fn vyxBuildLayoutModule(source: String, dir: String, themed: Bool, theme: String) -> String {
+export gen fn vyxBuildLayoutModule(source: String, dir: String, themed: Bool, theme: String) -> String {
     return vyxBuildLayoutModuleAt(source, "", dir, themed, theme)
 }
 
 /// `vyxBuildLayoutModule` threading the real `layout.vyx` path (RFC-0048 §2).
-export fn vyxBuildLayoutModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
+export gen fn vyxBuildLayoutModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
@@ -3087,14 +3096,14 @@ export gen fn vyxLayoutThemed(vyxPath: String, theme: String) -> String {
 /// Build a `.vyx`-ERROR module: `errorPage(e: PageError) -> Html` around the
 /// compiled template, with an injected `error: PageError` prop. EXPORTED so
 /// `std/ui`'s router synthesizes it from a nested `vyxError(…)` import.
-export fn vyxBuildErrorModule(source: String, dir: String, themed: Bool, theme: String) -> String {
+export gen fn vyxBuildErrorModule(source: String, dir: String, themed: Bool, theme: String) -> String {
     return vyxBuildErrorModuleAt(source, "", dir, themed, theme)
 }
 
 /// `vyxBuildErrorModule` threading the real `error.vyx` path (RFC-0048 §2). The
 /// injected `PageError` import is generator-synthesized (not in the user file), so
 /// it stays origin-less; the template + any user script map to the real file.
-export fn vyxBuildErrorModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
+export gen fn vyxBuildErrorModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)

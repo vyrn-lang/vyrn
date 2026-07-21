@@ -420,3 +420,100 @@ fn demo_tests_run_green() {
     assert!(out.status.success(), "demo tests failed:\n{combined}");
     assert!(combined.contains("1 passed, 0 failed"), "expected 1 green test:\n{combined}");
 }
+
+// ---- std/vyx's own unit suite runs in CI -----------------------------------
+
+/// The `std/vyx` module carries an inline `test` suite pinning the scanner
+/// (including all six RFC-0039 audit reproducers, now driven by the RFC-0054 M4b
+/// `lex()`-based keyword finder) and the emitters. Run it through the real binary
+/// so a scanner/emitter regression fails `cargo test`, not only a manual
+/// `vyrn test std/vyx.vyrn`.
+#[test]
+fn std_vyx_unit_tests_run_green() {
+    let module = repo_file("std/vyx.vyrn");
+    let out = vyrn().arg("test").arg(&module).output().expect("vyrn test");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "std/vyx unit tests failed:\n{combined}");
+    assert!(combined.contains("40 passed, 0 failed"), "expected 40 green tests:\n{combined}");
+}
+
+// ---- RFC-0054 M4b: the six audit reproducers, end-to-end through the binary --
+// The `lex()`-based script scanner makes each historical miscompile structurally
+// impossible. These drive the FULL `components` pipeline (not just the inline
+// unit fns) so a regression in the real generator — the interpreter running
+// `lex()` over a script section — is caught.
+
+/// A comment (or string) mentioning `props` before the real block never conjures
+/// a phantom props block: the emitted view fn takes exactly the declared prop.
+#[test]
+fn audit_comment_mentioning_props_is_ignored() {
+    let dir = scratch("audit_comment_props");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<script>\n// the props for this widget's template are below\nprops { title: String }\n</script>\n<template><li>{{ title }}</li></template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let src = String::from_utf8_lossy(&out.stdout);
+    assert!(src.contains("export fn widget(title: String) -> Html"), "one prop only:\n{src}");
+}
+
+/// A helper identifier named `props` (`let props = …`) is not a props block —
+/// the view fn takes no parameters and the helper passes through verbatim.
+#[test]
+fn audit_helper_named_props_is_not_a_block() {
+    let dir = scratch("audit_ident_props");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<script>\nfn f() -> Int64 {\nlet props = 5\nreturn props\n}\n</script>\n<template><li>{{ f() }}</li></template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let src = String::from_utf8_lossy(&out.stdout);
+    assert!(src.contains("export fn widget() -> Html"), "no phantom props:\n{src}");
+    assert!(src.contains("let props = 5"), "helper passes through:\n{src}");
+}
+
+/// A `</script>` inside a helper string does not truncate the section — the
+/// helper (and everything after the string) reaches the synthesized module.
+#[test]
+fn audit_close_script_in_string_does_not_truncate() {
+    let dir = scratch("audit_closescript");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<script>\nfn tag() -> String { return \"</script>\" }\nprops { n: Int64 }\n</script>\n<template><li>{{ n }}{{ tag() }}</li></template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let src = String::from_utf8_lossy(&out.stdout);
+    // The `props` AFTER the string was reached (section not truncated at the string).
+    assert!(src.contains("export fn widget(n: Int64) -> Html"), "section not truncated:\n{src}");
+    assert!(src.contains("fn tag() -> String"), "helper survived:\n{src}");
+}
+
+/// A literal `{ a }` in template TEXT stays literal (it is not a `{{ … }}`
+/// interpolation) — the text node carries the braces verbatim.
+#[test]
+fn audit_literal_brace_in_text_stays_literal() {
+    let dir = scratch("audit_brace");
+    write(&dir.join("comp/Widget.vyx"), "<template><li>a { b } c</li></template>\n");
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let src = String::from_utf8_lossy(&out.stdout);
+    assert!(src.contains("a { b } c"), "braces stay literal:\n{src}");
+}
+
+/// An HTML comment inside the template is stripped, not parsed as a bad tag.
+#[test]
+fn audit_html_comment_in_template_is_stripped() {
+    let dir = scratch("audit_htmlcomment");
+    write(&dir.join("comp/Widget.vyx"), "<template><ul><!-- note --><li>x</li></ul></template>\n");
+    write(&dir.join("app.vyrn"), APP);
+    let (ok, err) = run_app(&dir);
+    assert!(ok, "an HTML comment must not break the template:\n{err}");
+}
