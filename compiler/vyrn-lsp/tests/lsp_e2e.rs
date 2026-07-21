@@ -16,14 +16,68 @@
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
+/// How long `read()` waits for the next server message before failing the
+/// test WITH EVIDENCE. A pipe read has no portable timeout, so frames are
+/// parsed on a reader thread and handed over a channel; without this, a
+/// message that never arrives hangs the test forever (observed on the first
+/// Linux CI run of the `.vyx` suite — cargo's "over 60 seconds" notes with
+/// zero diagnostics). Generous: CI runs debug builds on few cores.
+const READ_TIMEOUT_SECS: u64 = 120;
+
 /// One framed JSON-RPC message read from the server's stdout.
 struct Message {
     json: serde_json::Value,
 }
 
+/// Read one framed message (headers → Content-Length → body). `None` on EOF.
+/// Runs on the reader thread, where blocking is fine.
+fn read_frame(stdout: &mut impl Read) -> Option<serde_json::Value> {
+    // Read headers byte-by-byte until the blank `\r\n` separator. Headers
+    // are tiny, so this is fine.
+    let mut headers = Vec::new();
+    loop {
+        let mut byte = [0u8; 1];
+        match stdout.read(&mut byte) {
+            Ok(0) => return None,
+            Ok(_) => {
+                headers.push(byte[0]);
+                // End of headers: `\r\n\r\n`.
+                if headers.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    let header_str = String::from_utf8_lossy(&headers);
+    let mut content_length: Option<usize> = None;
+    for line in header_str.split("\r\n") {
+        if let Some(rest) = line.strip_prefix("Content-Length:") {
+            content_length = Some(rest.trim().parse().unwrap());
+        }
+    }
+    let len = content_length.expect("Content-Length header present");
+    let mut body = vec![0u8; len];
+    stdout.read_exact(&mut body).ok()?;
+    Some(serde_json::from_slice(&body).unwrap())
+}
+
+/// One line per message for the timeout dump: id/method plus the URI (for
+/// publishDiagnostics) so a missing-publish hang names what DID arrive.
+fn summarize(json: &serde_json::Value) -> String {
+    let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let id = json.get("id").map(|i| i.to_string()).unwrap_or_default();
+    let uri = json.pointer("/params/uri").and_then(|u| u.as_str()).unwrap_or("");
+    format!("  id={id} method={method} uri={uri}")
+}
+
 /// A tiny blocking LSP client over a child process's stdin/stdout.
 struct LspClient {
     child: std::process::Child,
+    /// Frames parsed by the reader thread; `None` is pushed once on EOF.
+    rx: std::sync::mpsc::Receiver<serde_json::Value>,
+    /// One-line summaries of everything received, for the timeout dump.
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl LspClient {
@@ -31,7 +85,7 @@ impl LspClient {
         // `CARGO_BIN_EXE_vyrn-lsp` points at the built server binary (the
         // `[[bin]] name = "vyrn-lsp"` in Cargo.toml).
         let bin = env!("CARGO_BIN_EXE_vyrn-lsp");
-        let child = Command::new(bin)
+        let mut child = Command::new(bin)
             // Disable the shared generator cache so RFC-0033 fixtures never hit a
             // stale synthesized module from another run.
             .env("VYRN_NO_GEN_CACHE", "1")
@@ -39,7 +93,19 @@ impl LspClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?;
-        Ok(LspClient { child })
+        let mut stdout = child.stdout.take().expect("stdout piped");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_w = seen.clone();
+        std::thread::spawn(move || {
+            while let Some(json) = read_frame(&mut stdout) {
+                seen_w.lock().unwrap().push(summarize(&json));
+                if tx.send(json).is_err() {
+                    break; // client dropped
+                }
+            }
+        });
+        Ok(LspClient { child, rx, seen })
     }
 
     /// Serialize `v` and write one Content-Length-framed message to stdin.
@@ -52,39 +118,22 @@ impl LspClient {
         stdin.flush().unwrap();
     }
 
-    /// Read one framed message (headers → Content-Length → body) from stdout.
-    /// Returns `None` on EOF.
+    /// Next framed message from the reader thread. Returns `None` on EOF.
+    /// Panics after `READ_TIMEOUT_SECS` with a dump of every message received
+    /// so far — a missing message must fail with evidence, never hang.
     fn read(&mut self) -> Option<Message> {
-        let stdout = self.child.stdout.as_mut().expect("stdout open");
-        // Read headers byte-by-byte until the blank `\r\n` separator. Headers
-        // are tiny, so this is fine.
-        let mut headers = Vec::new();
-        loop {
-            let mut byte = [0u8; 1];
-            match stdout.read(&mut byte) {
-                Ok(0) => return None,
-                Ok(_) => {
-                    headers.push(byte[0]);
-                    // End of headers: `\r\n\r\n`.
-                    if headers.ends_with(b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                Err(_) => return None,
+        match self.rx.recv_timeout(std::time::Duration::from_secs(READ_TIMEOUT_SECS)) {
+            Ok(json) => Some(Message { json }),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let seen = self.seen.lock().unwrap();
+                panic!(
+                    "no server message within {READ_TIMEOUT_SECS}s; {} received so far:\n{}",
+                    seen.len(),
+                    seen.join("\n")
+                );
             }
         }
-        let header_str = String::from_utf8_lossy(&headers);
-        let mut content_length: Option<usize> = None;
-        for line in header_str.split("\r\n") {
-            if let Some(rest) = line.strip_prefix("Content-Length:") {
-                content_length = Some(rest.trim().parse().unwrap());
-            }
-        }
-        let len = content_length.expect("Content-Length header present");
-        let mut body = vec![0u8; len];
-        stdout.read_exact(&mut body).ok()?;
-        let json = serde_json::from_slice(&body).unwrap();
-        Some(Message { json })
     }
 
     /// Read messages until one with the given JSON-RPC `id` arrives (a response
@@ -1819,10 +1868,12 @@ fn rfc49_live_transcript_examples_bin() {
 // ---------------------------------------------------------------------------
 
 /// One `textDocument/documentHighlight` occurrence: 1-based line, 0-based start
-/// char, and the LSP `DocumentHighlightKind` (2 = Read, 3 = Write).
+/// char, and the LSP `DocumentHighlightKind` (2 = Read, 3 = Write). `ch` is
+/// asserted by no test yet but stays in the Debug dumps assertions print.
 #[derive(Debug)]
 struct Highlight {
     line: u32,
+    #[allow(dead_code)]
     ch: u32,
     kind: u64,
 }
