@@ -170,6 +170,34 @@ fn rawat_origin_maps_a_check_error_back_to_the_source() {
 }
 
 #[test]
+fn i18n_translation_with_quotes_and_backslashes_bakes_losslessly() {
+    // The i18n generator bakes each translation string into the synthesized module
+    // via the `strLit` code quote (RFC-0054). A value carrying a double-quote and a
+    // backslash must round-trip byte-for-byte — a mis-escape (the class of bug a
+    // hand-rolled escaper risks) is now unrepresentable.
+    let dir = scratch("i18n_esc");
+    std::fs::create_dir_all(dir.join("locales")).unwrap();
+    write(
+        &dir.join("locales/en.json"),
+        r#"{ "quote.msg": "say \"hi\" \\ ok" }"#,
+    );
+    let app = "import { i18n } from \"std/i18n\"\n\
+               import { tQuoteMsg } from i18n(\"./locales\")\n\
+               fn main() -> Int64 { print(tQuoteMsg()) return 0 }\n";
+    write(&dir.join("app.vyrn"), app);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().unwrap();
+    assert!(
+        out.status.success(),
+        "run failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // The decoded JSON value: say "hi" \ ok  — printed intact through the baked
+    // Vyrn string literal.
+    assert!(stdout.contains(r#"say "hi" \ ok"#), "lossless bake:\n{stdout}");
+}
+
+#[test]
 fn scan_example_runs_with_string_and_comment_awareness() {
     let ex = repo_file("examples/scan.vyrn");
     let out = vyrn().arg("run").arg(&ex).output().unwrap();

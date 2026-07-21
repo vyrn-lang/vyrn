@@ -2390,40 +2390,29 @@ impl<'a> Interp<'a> {
                     },
                     // RFC-0054 code quotes. `@codeText`/`@codeSplice` are the
                     // internal desugar of `vyrn"…"`; `render`/`rawAt`/`raw`/`lex`
-                    // are the surface builtins. All are generation-only — a runtime
-                    // call traps, mirroring `moduleInterface`'s wording.
-                    "@codeText" => {
-                        if self.gen.is_none() {
-                            return Err("code quotes are only available during generation".into());
-                        }
-                        match &vals[0] {
-                            Val::Str(s) => Ok(Val::Code(vec![CodePiece::Text(s.clone())])),
-                            _ => Err("@codeText of non-String".into()),
-                        }
-                    }
+                    // are the surface builtins. Gen-only is enforced by the CHECKER
+                    // (`in_gen`), which is what keeps them out of every backend (a
+                    // `gen fn` body is never emitted); the operations themselves are
+                    // pure, so the interpreter runs them anywhere a checked program
+                    // reaches — in particular so a `gen fn` emission helper stays
+                    // unit-testable at runtime (RFC-0021: a `gen fn` is callable for
+                    // testing).
+                    "@codeText" => match &vals[0] {
+                        Val::Str(s) => Ok(Val::Code(vec![CodePiece::Text(s.clone())])),
+                        _ => Err("@codeText of non-String".into()),
+                    },
                     "@codeSplice" => {
-                        if self.gen.is_none() {
-                            return Err("code quotes are only available during generation".into());
-                        }
                         let ctx = match &vals[1] {
                             Val::Int(n) => *n,
                             _ => return Err("@codeSplice context flag must be Int".into()),
                         };
                         Ok(Val::Code(code_splice(&vals[0], ctx)?))
                     }
-                    "raw" if !shadowed => {
-                        if self.gen.is_none() {
-                            return Err("`raw` is only available during generation".into());
-                        }
-                        match &vals[0] {
-                            Val::Str(s) => Ok(Val::Code(vec![CodePiece::Text(s.clone())])),
-                            _ => Err("`raw` of non-String".into()),
-                        }
-                    }
+                    "raw" if !shadowed => match &vals[0] {
+                        Val::Str(s) => Ok(Val::Code(vec![CodePiece::Text(s.clone())])),
+                        _ => Err("`raw` of non-String".into()),
+                    },
                     "rawAt" if !shadowed => {
-                        if self.gen.is_none() {
-                            return Err("`rawAt` is only available during generation".into());
-                        }
                         let text = match &vals[0] {
                             Val::Str(s) => s.clone(),
                             _ => return Err("`rawAt` text must be a String".into()),
@@ -2447,24 +2436,14 @@ impl<'a> Interp<'a> {
                             text,
                         }]))
                     }
-                    "render" if !shadowed => {
-                        if self.gen.is_none() {
-                            return Err("`render` is only available during generation".into());
-                        }
-                        match &vals[0] {
-                            Val::Code(pieces) => Ok(Val::Str(render_code(pieces))),
-                            _ => Err("`render` of non-Code".into()),
-                        }
-                    }
-                    "lex" if !shadowed => {
-                        if self.gen.is_none() {
-                            return Err("`lex` is only available during generation".into());
-                        }
-                        match &vals[0] {
-                            Val::Str(s) => Ok(Val::Array(lex_tokens(s))),
-                            _ => Err("`lex` of non-String".into()),
-                        }
-                    }
+                    "render" if !shadowed => match &vals[0] {
+                        Val::Code(pieces) => Ok(Val::Str(render_code(pieces))),
+                        _ => Err("`render` of non-Code".into()),
+                    },
+                    "lex" if !shadowed => match &vals[0] {
+                        Val::Str(s) => Ok(Val::Array(lex_tokens(s))),
+                        _ => Err("`lex` of non-String".into()),
+                    },
                     "contains" => match (&vals[0], &vals[1]) {
                         (Val::Str(a), Val::Str(b)) => Ok(Val::Bool(a.contains(b.as_str()))),
                         _ => Err("contains of non-Strings".into()),

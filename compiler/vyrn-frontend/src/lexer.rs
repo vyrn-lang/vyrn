@@ -742,6 +742,15 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                     i += 1; // closing quote
                     break;
                 }
+                // Normalize a source CRLF to a single LF inside a string/template
+                // literal (RFC-0054): a multi-line string — and especially a
+                // `vyrn"""…"""` code skeleton — must carry byte-identical bytes
+                // whether the file is checked out with LF or CRLF endings, so the
+                // emitted code (and three-way parity) never depends on the OS.
+                if ch == '\r' && i + 1 < chars.len() && chars[i + 1] == '\n' {
+                    i += 1; // drop the CR; the LF is handled next iteration
+                    continue;
+                }
                 // Multi-line strings (RFC-0007): a raw newline is part of the
                 // string. Track the line so later diagnostics stay accurate.
                 if ch == '\n' {

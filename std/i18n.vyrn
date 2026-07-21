@@ -190,47 +190,15 @@ fn lowerFirst(s: String) -> String {
 // Emitting Vyrn source — escape a raw string as a Vyrn `"…"` literal.
 // ===========================================================================
 
-/// The second byte of a Vyrn string-literal escape for `b` (`\n`, `\"`, …), or 0
-/// when `b` needs no escaping.
-fn escSecond(b: UInt8) -> UInt8 {
-    if b == 92 {
-        return 92
-    }
-    if b == 34 {
-        return 34
-    }
-    if b == 10 {
-        return 110
-    }
-    if b == 13 {
-        return 114
-    }
-    if b == 9 {
-        return 116
-    }
-    return 0
-}
-
-/// `raw` wrapped and escaped as a Vyrn string literal (quotes included). UTF-8
-/// bytes pass through untouched, so translated text is embedded verbatim.
-fn strLit(raw: String) -> String {
-    let ba = bytes(raw)
-    let mut out: Array<UInt8> = []
-    out.push(34)
-    for b in ba {
-        let s = escSecond(b)
-        if s == 0 {
-            out.push(b)
-        } else {
-            out.push(92)
-            out.push(s)
-        }
-    }
-    out.push(34)
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => "\"\"",
-    }
+/// `raw` wrapped and escaped as a Vyrn string literal (quotes included), through
+/// an RFC-0054 code quote: `\{raw}` sits in EXPRESSION position, so the compiler's
+/// own escaping bakes it as a string LITERAL — data, never code. This replaces the
+/// hand-rolled `escSecond` byte loop with a compiler-guaranteed escape, so a
+/// mis-escape corrupting the emitted translations is unrepresentable. UTF-8 bytes
+/// pass through untouched, so translated text is embedded verbatim. `gen fn` so
+/// the quote is in a generation context (it is only ever called from `i18n`).
+gen fn strLit(raw: String) -> String {
+    return render(vyrn"\{raw}")
 }
 
 /// A regex-safe rendering of `key` for a `value =~ "…"` alternative: every regex
