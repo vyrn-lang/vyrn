@@ -207,7 +207,7 @@ fn std_tw_unit_tests_run_green() {
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "std/tw unit tests failed:\n{combined}");
-    assert!(combined.contains("17 passed, 0 failed"), "expected 17 green tests:\n{combined}");
+    assert!(combined.contains("18 passed, 0 failed"), "expected 18 green tests:\n{combined}");
 }
 
 // ---- soundness: a breakpoint key cannot forge the token grammar ------------

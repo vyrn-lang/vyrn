@@ -48,6 +48,11 @@
 /// own small `tw*`-prefixed reader. Keeping the generator self-contained beats
 /// widening i18n's export surface for one caller.
 
+// The shared comment/string-aware cursor (RFC-0054): the CSS value choke point
+// scans each leaf value with a `/* */`-aware CSS cursor, so a comment or a second
+// token can never smuggle structure into a rule body past the character grammar.
+import { Scanner, cssScanner, skipWs, peek, atEnd, advance, looksAt } from "std/scan"
+
 // ===========================================================================
 // Byte / string helpers — comptime-pure, so legal in a `gen fn` and its callees.
 // ===========================================================================
@@ -214,48 +219,63 @@ fn twValueSafe(v: String) -> Bool {
     return false
 }
 
-// ---- emitting Vyrn source: escape a raw string as a `"…"` literal -----------
-
-/// The second byte of a Vyrn string-literal escape for `b`, or 0 when `b` needs no
-/// escaping.
-fn twEscSecond(b: UInt8) -> UInt8 {
-    if b == 92 {
-        return 92
+/// Whether `v` is a SINGLE CSS token — no leading/trailing/embedded whitespace and
+/// no `/* */` comment — verified through the shared `std/scan` CSS cursor (RFC-0054,
+/// block-comment aware). This is the scanning half of the value choke point: a
+/// comment or a second token can never ride into a rule body, independent of the
+/// character grammar `twValueSafe` enforces. Every value `twValueSafe` accepts is
+/// inherently a lone token, so pairing the two does not narrow the accepted set —
+/// it makes the "no comment, no second token" property structural rather than an
+/// artifact of the grammar forbidding `/` and `*`.
+fn twCssSingleToken(v: String) -> Bool {
+    let mut sc = cssScanner(v)
+    skipWs(sc)
+    if sc.pos != 0 {
+        // A leading space or comment: not a lone token.
+        return false
     }
-    if b == 34 {
-        return 34
+    // Consume one run of non-space bytes, rejecting any embedded comment open.
+    while atEnd(sc) == false {
+        let b = peek(sc)
+        if b == 32 || b == 9 || b == 10 || b == 13 {
+            // The token ended at whitespace: only ws/comments may follow.
+            return twCssNothingAfter(sc)
+        }
+        if looksAt(sc, "/*") {
+            return false
+        }
+        advance(sc)
     }
-    if b == 10 {
-        return 110
-    }
-    if b == 13 {
-        return 114
-    }
-    if b == 9 {
-        return 116
-    }
-    return 0
+    return true
 }
 
-/// `raw` escaped as the BODY of a Vyrn string literal (no surrounding quotes).
-/// Applied per-rule while baking `css()`, so each call is O(rule length) — the
-/// whole sheet is never escaped in one O(n) pass over a growing buffer.
-fn twEscBody(raw: String) -> String {
-    let ba = bytes(raw)
-    let mut out: Array<UInt8> = []
-    for b in ba {
-        let s = twEscSecond(b)
-        if s == 0 {
-            out.push(b)
-        } else {
-            out.push(92)
-            out.push(s)
-        }
-    }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => "",
-    }
+/// Whether only whitespace/comments remain (the token was the whole value).
+fn twCssNothingAfter(sc: Scanner) -> Bool {
+    let mut s = sc
+    skipWs(s)
+    return atEnd(s)
+}
+
+/// The CSS-value choke point: a leaf value is safe iff it is a lone, comment-free
+/// token (`twCssSingleToken`, via std/scan) AND matches the narrow hex/length/ident
+/// grammar (`twValueSafe`). Every CSS-emitting value flows through here before it
+/// can reach a rule body or a `@media` query.
+fn twCssValueSafe(v: String) -> Bool {
+    return twCssSingleToken(v) && twValueSafe(v)
+}
+
+// ---- emitting Vyrn source: bake a raw string as a `"…"` literal (RFC-0054) ---
+
+/// `raw` baked as a complete Vyrn string literal (surrounding quotes included),
+/// through an RFC-0054 code quote: `\{raw}` sits in EXPRESSION position, so the
+/// compiler's OWN string escaping produces the literal — data, never code. This is
+/// the single Vyrn-emission escape choke point for this module; it replaces the
+/// hand-rolled `twEscSecond`/`twEscBody` byte loop, so a mis-escape corrupting the
+/// baked stylesheet (or injecting Vyrn code through a leaf value) is
+/// unrepresentable. UTF-8 bytes pass through untouched. `gen fn` so the quote sits
+/// in a generation context (it is only ever reached from `tw`).
+gen fn twStrLit(raw: String) -> String {
+    return render(vyrn"\{raw}")
 }
 
 // ===========================================================================
@@ -818,7 +838,7 @@ fn twUnsafeValueErrors(theme: TwTheme) -> String {
     let mut i = 0
     while i < theme.keys.length {
         if twContains(families, twHeadOf(theme.keys[i])) {
-            if twValueSafe(theme.vals[i]) == false {
+            if twCssValueSafe(theme.vals[i]) == false {
                 out = out + "TW_UNSAFE_VALUE__" + twIdentOf(theme.keys[i]) + "\n"
             }
         }
@@ -879,39 +899,38 @@ fn twRuleFlat(vocab: TwVocab, prefix: String, j: Int64) -> String {
 /// DIVIDE-AND-CONQUER: split the range in half and concatenate the two halves. The
 /// comptime interpreter's `+` copies its operands (O(len)), so a left-leaning fold
 /// of N rules is O(N²); a balanced tree makes it O(total · log N), which keeps a
-/// ~10³-rule sheet well under a second. When `esc`, each leaf rule is escaped as a
-/// Vyrn string-literal fragment (for baking into `css()`); otherwise it is raw.
-fn twBlockLit(vocab: TwVocab, prefix: String, lo: Int64, hi: Int64, esc: Bool) -> String {
+/// ~10³-rule sheet well under a second. The sheet is built RAW; a single
+/// code-quote (`twStrLit`) bakes the whole string into `css()`, so no per-rule
+/// escaping is needed (RFC-0054 removed the hand-rolled escaper).
+fn twBlockLit(vocab: TwVocab, prefix: String, lo: Int64, hi: Int64) -> String {
     if hi - lo <= 1 {
-        let raw = twRuleFlat(vocab, prefix, lo)
-        return if esc { twEscBody(raw) } else { raw }
+        return twRuleFlat(vocab, prefix, lo)
     }
     let mid = lo + (hi - lo) / 2
-    return twBlockLit(vocab, prefix, lo, mid, esc) + twBlockLit(vocab, prefix, mid, hi, esc)
+    return twBlockLit(vocab, prefix, lo, mid) + twBlockLit(vocab, prefix, mid, hi)
 }
 
-/// The whole stylesheet: base block, then one `@media (min-width: …)` block per
-/// breakpoint (theme order), each carrying the same base + state rules under the
-/// breakpoint's class-name prefix. `esc` bakes it as an escaped string-literal
-/// fragment; the sheet is byte-stable by construction. Only the ≤10 SECTION strings
-/// are concatenated linearly here — each section is itself balanced (`twBlockLit`).
-fn twCssBody(vocab: TwVocab, breakpoints: TwAxis, esc: Bool) -> String {
+/// The whole (raw) stylesheet: base block, then one `@media (min-width: …)` block
+/// per breakpoint (theme order), each carrying the same base + state rules under
+/// the breakpoint's class-name prefix. Byte-stable by construction. Only the ≤10
+/// SECTION strings are concatenated linearly here — each section is itself balanced
+/// (`twBlockLit`). `css()` bakes this through the single `twStrLit` code-quote.
+fn twCssBody(vocab: TwVocab, breakpoints: TwAxis) -> String {
     let n = vocab.names.length * 3
-    let mut body = twBlockLit(vocab, "", 0, n, esc)
+    let mut body = twBlockLit(vocab, "", 0, n)
     let mut i = 0
     while i < breakpoints.tokens.length {
-        let open = "@media (min-width:" + breakpoints.values[i] + ") {\n"
-        body = body + (if esc { twEscBody(open) } else { open })
-        body = body + twBlockLit(vocab, breakpoints.tokens[i] + ":", 0, n, esc)
-        body = body + (if esc { twEscBody("}\n") } else { "}\n" })
+        body = body + "@media (min-width:" + breakpoints.values[i] + ") {\n"
+        body = body + twBlockLit(vocab, breakpoints.tokens[i] + ":", 0, n)
+        body = body + "}\n"
         i = i + 1
     }
     return body
 }
 
-/// The RAW stylesheet (unescaped) — used by tests and for inspection.
+/// The RAW stylesheet — used by tests, for inspection, and baked into `css()`.
 fn twBuildCss(vocab: TwVocab, breakpoints: TwAxis) -> String {
-    return twCssBody(vocab, breakpoints, false)
+    return twCssBody(vocab, breakpoints)
 }
 
 // ===========================================================================
@@ -950,11 +969,42 @@ fn twTokenRegex(vocab: TwVocab, breakpoints: TwAxis, safelist: Array<String>) ->
 // The generated module.
 // ===========================================================================
 
-/// Assemble the synthesized module: the two types, `cls`, and `css()`.
-fn twBuildModule(vocab: TwVocab, breakpoints: TwAxis, safelist: Array<String>) -> String {
+/// The SINGLE CSS safety gate (RFC-0054 M4a): every leaf VALUE baked into a rule
+/// body or `@media` query, every class NAME, every safelisted name, and every
+/// BREAKPOINT key that becomes a regex/selector prefix must pass validation before
+/// any CSS or token grammar is emitted. `twBuildModule` — the sole producer of the
+/// stylesheet AND the token types — runs this first and refuses to emit on any
+/// violation, so there is NO path to CSS that skips validation. This makes the two
+/// audited soundness holes structurally impossible: an unvalidated leaf value can
+/// no longer inject a `}…{` block (was the CSS-injection bug), and an unvalidated
+/// breakpoint key can no longer forge the token grammar so a bogus `evbg-white`
+/// compiles (was the breakpoint soundness hole). One diagnostic line per offense.
+fn twSheetSafetyErrors(theme: TwTheme, vocab: TwVocab, breakpoints: TwAxis, safelist: Array<String>) -> String {
+    let mut out = ""
+    // Leaf CSS values (comment-/token-checked via std/scan, then grammar-bounded).
+    out = out + twUnsafeValueErrors(theme)
+    // Derived class names + safelisted names.
+    out = out + twUnsafeNameErrors(vocab)
+    out = out + twUnsafeSafelistErrors(safelist)
+    // Breakpoint keys (regex AND selector prefixes).
+    out = out + twUnsafeBreakpointErrors(breakpoints)
+    return out
+}
+
+/// Assemble the synthesized module: the two types, `cls`, and `css()`. The CSS
+/// safety gate runs FIRST (structural — see `twSheetSafetyErrors`); on any
+/// violation the module is not emitted and the diagnostic is returned instead.
+/// A `gen fn` (it renders the baked stylesheet through the `twStrLit` code-quote,
+/// so it must sit in a generation context — RFC-0054 risk 2).
+gen fn twBuildModule(theme: TwTheme, vocab: TwVocab, breakpoints: TwAxis, safelist: Array<String>) -> String {
+    let gate = twSheetSafetyErrors(theme, vocab, breakpoints, safelist)
+    if gate != "" {
+        return gate
+    }
     let token = twTokenRegex(vocab, breakpoints, safelist)
-    // The stylesheet is baked as one escaped literal (balanced comptime assembly).
-    let cssLit = twCssBody(vocab, breakpoints, true)
+    // The stylesheet is assembled RAW (balanced comptime concat), then baked as one
+    // Vyrn string literal through the code-quote choke point (`twStrLit`).
+    let rawCss = twCssBody(vocab, breakpoints)
     let mut out = "/// Generated by std/tw `tw` (RFC-0032) — do not edit.\n"
     out = out + "import { Attr } from \"std/html\"\n"
 
@@ -972,10 +1022,24 @@ fn twBuildModule(vocab: TwVocab, breakpoints: TwAxis, safelist: Array<String>) -
     out = out + "export fn cls(c: Tw) -> Attr {\n    return Cls(c)\n}\n"
 
     // css() — the whole stylesheet, baked into a deterministic constant (so it is
-    // O(1) at runtime; only comptime generation touched the ~10³ rules).
-    out = out + "/// The theme's full utility stylesheet (deterministic, byte-stable).\n"
-    out = out + "export fn css() -> String {\n    return \"" + cssLit + "\"\n}\n"
+    // O(1) at runtime; only comptime generation touched the ~10³ rules). The `\{}`
+    // splice sits in expression position, so the compiler bakes `rawCss` as a
+    // string LITERAL — a mis-escape or injection through a leaf value is
+    // unrepresentable (RFC-0054).
+    out = out + twEmitCss(rawCss)
     return out
+}
+
+/// Emit the `css()` accessor by baking the raw stylesheet through a code quote:
+/// `\{rawCss}` is in expression position, so the compiler escapes it as the return
+/// string literal (the graphql `sdlText` pattern). Byte-identical to the former
+/// hand-escaped `return "…"`, with the escaping now compiler-guaranteed.
+gen fn twEmitCss(rawCss: String) -> String {
+    return render(vyrn"""/// The theme's full utility stylesheet (deterministic, byte-stable).
+export fn css() -> String {
+    return \{rawCss}
+}
+""")
 }
 
 /// `tw(theme)` — read the flat `theme.json`, derive the utility vocabulary, and
@@ -995,33 +1059,14 @@ export gen fn tw(theme: String) -> String {
     if unknown != "" {
         return unknown
     }
-    // A leaf value is baked verbatim into the CSS — validate every CSS-emitting
-    // value before it can inject structure into the served stylesheet.
-    let unsafeValue = twUnsafeValueErrors(parsed)
-    if unsafeValue != "" {
-        return unsafeValue
-    }
     let vocab = twBuildVocab(parsed)
     if vocab.names.length == 0 {
         return "TW_ERROR__theme_yielded_no_classes\n"
     }
-    let unsafe = twUnsafeNameErrors(vocab)
-    if unsafe != "" {
-        return unsafe
-    }
-    let safelist = twSafelist(parsed)
-    let unsafeSafelist = twUnsafeSafelistErrors(safelist)
-    if unsafeSafelist != "" {
-        return unsafeSafelist
-    }
-    let breakpoints = twAxisOf(parsed, "breakpoints")
-    // A breakpoint key becomes a regex prefix AND a CSS selector prefix — validate
-    // it through the same class-name rule so it cannot forge the token grammar.
-    let unsafeBreakpoint = twUnsafeBreakpointErrors(breakpoints)
-    if unsafeBreakpoint != "" {
-        return unsafeBreakpoint
-    }
-    return twBuildModule(vocab, breakpoints, safelist)
+    // Every CSS-safety check now lives behind ONE gate inside `twBuildModule` (the
+    // sole CSS producer), so injection and breakpoint-forgery are structurally
+    // impossible rather than prevented by remembering to call each pass here.
+    return twBuildModule(parsed, vocab, twAxisOf(parsed, "breakpoints"), twSafelist(parsed))
 }
 
 // ===========================================================================
@@ -1168,6 +1213,24 @@ test "twValueSafe accepts hex/length/ident and rejects injection" {
     assertEq(twValueSafe("rgb(0,0,0)"), false)
     assertEq(twValueSafe("0 1px 2px"), false)
     assertEq(twValueSafe(""), false)
+}
+
+test "twCssValueSafe routes values through the std/scan single-token gate" {
+    // The scan half rejects a comment or a second token; the grammar half bounds
+    // the token's characters. Together they are the CSS value choke point.
+    assert(twCssSingleToken("#4f46e5"))
+    assert(twCssSingleToken("0.25rem"))
+    // An EMBEDDED `/* */` comment (a classic CSS injection vector) is rejected.
+    assertEq(twCssSingleToken("red/*}*/blue"), false)
+    assertEq(twCssSingleToken("url(/*x*/)"), false)
+    // A second real token after the first is rejected (comments count as trivia).
+    assertEq(twCssSingleToken("red /* } */ blue"), false)
+    assertEq(twCssSingleToken("0 1px 2px"), false)
+    // The combined choke point accepts exactly the safe values and nothing else.
+    assert(twCssValueSafe("#fff"))
+    assert(twCssValueSafe("100%"))
+    assertEq(twCssValueSafe("red} body{display:none"), false)
+    assertEq(twCssValueSafe("url(/*x*/)"), false)
 }
 
 test "twUnsafeValueErrors names a CSS-injecting leaf value by key" {
