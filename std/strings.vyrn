@@ -13,6 +13,22 @@
 /// `indexOf`/`lastIndexOf` return an honest `Option<Int64>` (the house idiom —
 /// no `-1` sentinel), `None` when the needle is absent.
 
+/// `stringFromBytes(b)` where the bytes are KNOWN to be valid UTF-8 — an ASCII
+/// transform of, or an ASCII-boundary slice/rebuild of, already-valid text — so
+/// the `Err` arm is provably unreachable and `fallback` is returned only to make
+/// the total function total. This is the ONE shared home for that pattern: the
+/// generators (`tw`, `i18n`, `vyx`, `ui`, `graphql`) used to scatter six copies of
+/// `match stringFromBytes(..) { Ok(v) => v, Err(_) => "" }`, which hid whether the
+/// failure was truly impossible or a swallowed real error. Call this ONLY when the
+/// bytes cannot be invalid UTF-8; decode a genuinely fallible byte source with
+/// `stringFromBytes` and handle the `Err`.
+export fn fromBytesOr(b: Array<UInt8>, fallback: String) -> String {
+    return match stringFromBytes(b) {
+        Ok(v) => v,
+        Err(e) => fallback,
+    }
+}
+
 /// `s` repeated `n` times ("" for n <= 0).
 export fn repeat(s: String, n: Int64) -> String {
     let mut out = ""
@@ -221,10 +237,7 @@ export fn toLower(s: String) -> String {
             out.push(c)
         }
     }
-    return match stringFromBytes(out) {
-        Ok(x) => x,
-        Err(e) => s,
-    }
+    return fromBytesOr(out, s)
 }
 
 /// `s` uppercased over ASCII `a`–`z`. Non-ASCII bytes pass through unchanged.
@@ -238,10 +251,7 @@ export fn toUpper(s: String) -> String {
             out.push(c)
         }
     }
-    return match stringFromBytes(out) {
-        Ok(x) => x,
-        Err(e) => s,
-    }
+    return fromBytesOr(out, s)
 }
 
 /// Every non-overlapping occurrence of `from` in `s` replaced with `to`. An empty
@@ -316,8 +326,5 @@ export fn toHex(n: UInt64) -> String {
             sh = sh - 4
         }
     }
-    return match stringFromBytes(out) {
-        Ok(x) => x,
-        Err(e) => "",
-    }
+    return fromBytesOr(out, "")
 }

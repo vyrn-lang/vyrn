@@ -52,6 +52,21 @@ export fn all<T>(xs: Array<T>, pred: fn(T) -> Bool) -> Bool {
     return true
 }
 
+/// Whether `xs` contains the string `x`. The shared replacement for the
+/// `twContains`/`i18n`/`vyx`/`ui` private copies several generators used to carry
+/// (the string builtin `s.contains` is substring search WITHIN a String; this is
+/// membership in an `Array<String>`). Concrete `String` on purpose — every private
+/// copy it replaces was `Array<String>`, and a concrete parameter also accepts a
+/// fixed-size array literal, which a generic `Array<T>` parameter does not.
+export fn includes(xs: Array<String>, x: String) -> Bool {
+    for e in xs {
+        if e == x {
+            return true
+        }
+    }
+    return false
+}
+
 /// A stably sorted copy, ascending by an `Int64` key (insertion sort). The key
 /// extractor is an ordinary `fn` parameter, so a lambda, a named function, or
 /// a STORED function value (RFC-0037) all flow in.
