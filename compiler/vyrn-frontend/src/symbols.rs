@@ -1533,6 +1533,23 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
         });
     }
 
+    // Benches (RFC-0055): show each `bench "name"` block in the outline, exactly
+    // like tests — anchored on the `bench` keyword, kind Method, detail carrying
+    // the full `bench "name"` form.
+    for b in &program.benches {
+        let (col, end_col) = name_col_on_line(tok_info, "bench", b.line);
+        out.push(Symbol {
+            name: b.name.clone(),
+            kind: SymbolKind::Method,
+            line: b.line,
+            col,
+            end_col,
+            detail: format!("bench {:?}", b.name),
+            doc: b.doc.clone(),
+            file: None,
+        });
+    }
+
     out
 }
 
@@ -2856,6 +2873,24 @@ mod tests {
         assert_eq!(t.detail, "test \"adds up\"");
         assert_eq!(t.line, 1);
         assert!(t.col > 0, "anchored at the `test` keyword for go-to");
+    }
+
+    #[test]
+    fn benches_appear_in_the_symbol_index() {
+        // RFC-0055: each `bench "name"` block is in the outline as a Method with a
+        // `bench "name"` detail, anchored on its declaration line (like tests).
+        let src = "bench \"hot path\" { blackBox(1) }\n\
+                   fn main() -> Int64 { return 0 }";
+        let a = analyze(src);
+        let b = a
+            .symbols
+            .iter()
+            .find(|s| s.name == "hot path")
+            .expect("bench symbol");
+        assert_eq!(b.kind, SymbolKind::Method);
+        assert_eq!(b.detail, "bench \"hot path\"");
+        assert_eq!(b.line, 1);
+        assert!(b.col > 0, "anchored at the `bench` keyword for go-to");
     }
 
     #[test]

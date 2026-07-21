@@ -33,6 +33,31 @@ pub struct Program {
     /// skip them by construction. Checked as Unit-returning function bodies;
     /// executed only by `vyrn test`.
     pub tests: Vec<TestDecl>,
+    /// `bench "name" { body }` declarations (RFC-0055). A separate field, exactly
+    /// like [`Program::tests`]: `run`/`build`/`emit-ir` walk only `functions`, so a
+    /// shipped binary contains no benches and the string pool / regex collection
+    /// skip them by construction. Checked as Unit-returning function bodies
+    /// (`blackBox` legal inside); executed only by `vyrn bench` (which lowers them
+    /// to ordinary functions + a synthesized harness `main` before the backends).
+    pub benches: Vec<BenchDecl>,
+}
+
+/// A `bench "name" { body }` declaration (RFC-0055): a named block checked exactly
+/// like a Unit-returning function body under a synthetic name (`bench@<index>`) so
+/// movecheck/ownership/spawn analyses apply unchanged. Structurally identical to
+/// [`TestDecl`]; `vyrn bench` runs only the *root* module's (`None`-module) benches.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BenchDecl {
+    /// The bench's display name (the string literal after `bench`).
+    pub name: String,
+    /// The block body — timed under `vyrn bench`, run once under `--check`.
+    pub body: Block,
+    /// `///` documentation (markdown), attached by the parser; `None` if absent.
+    pub doc: Option<String>,
+    /// The module (file) this bench came from; `None` for the root. Set by the
+    /// loader. `vyrn bench` runs only `None`-module (root) benches.
+    pub module: Option<String>,
+    pub line: usize,
 }
 
 /// A `test "name" { body }` declaration (RFC-0015): a named block checked exactly

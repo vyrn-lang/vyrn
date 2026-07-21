@@ -138,6 +138,7 @@ fn check_accum_full(
         "swapRemove",
         "assert",
         "assertEq",
+        "blackBox",
         "Int",
         "Int64",
         "Int32",
@@ -395,6 +396,7 @@ fn check_accum_full(
         errors: RefCell::new(Vec::new()),
         globals: RefCell::new(HashMap::new()),
         in_test: RefCell::new(false),
+        in_bench: RefCell::new(false),
         in_gen: RefCell::new(false),
         extern_fns: &extern_fns,
         gen_fns: &gen_fns,
@@ -438,6 +440,7 @@ fn check_accum_full(
         || program.type_decls.iter().any(|t| t.exported)
         || program.protocols.iter().any(|p| p.exported)
         || !program.tests.is_empty()
+        || !program.benches.is_empty()
         || has_served_handle;
     match sigs.get("main") {
         None if !is_library => out.push(Diagnostic::from_rendered(
@@ -538,6 +541,12 @@ fn check_accum_full(
     //    are rejected here (a better message than a parse error).
     check_tests(&checker, program, &mut out);
 
+    // 6b. Check bench bodies (RFC-0055). Identical treatment to tests: each is a
+    //     Unit-returning function body under a synthetic `bench@<index>` name, with
+    //     `in_bench` set so `blackBox` is legal. Benches are never registered in
+    //     `sigs`, so user code cannot call one; duplicate names per file are caught.
+    check_benches(&checker, program, &mut out);
+
     // 7. Comptime-purity (RFC-0021): every `gen fn` and its transitive callees
     //    must be pure enough to run in the compiler's interpreter at generation
     //    time. Reported after the ordinary body checks so a broken generator's
@@ -637,6 +646,59 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
     *checker.in_test.borrow_mut() = false;
 }
 
+/// Check every `bench` body (RFC-0055). Structurally identical to [`check_tests`]:
+/// duplicate names per module are reported; each body is checked as a Unit-
+/// returning function under a synthetic `bench@<index>` name with `in_bench` set so
+/// `blackBox` is legal.
+fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
+    let mut seen: HashMap<(Option<String>, String), usize> = HashMap::new();
+    for b in &program.benches {
+        let key = (b.module.clone(), b.name.clone());
+        if let Some(prev) = seen.get(&key) {
+            let mut d = Diagnostic::from_rendered(
+                format!(
+                    "line {}: duplicate bench name {:?} (already declared on line {prev})",
+                    b.line, b.name
+                ),
+                "check",
+            );
+            d.file = b.module.clone();
+            out.push(d);
+        } else {
+            seen.insert(key, b.line);
+        }
+    }
+    *checker.in_bench.borrow_mut() = true;
+    for (i, b) in program.benches.iter().enumerate() {
+        let synthetic = Function {
+            name: format!("bench@{i}"),
+            exported: false,
+            module: b.module.clone(),
+            doc: None,
+            type_params: Vec::new(),
+            type_bounds: Default::default(),
+            params: Vec::new(),
+            ret: Type::Unit,
+            body: b.body.clone(),
+            line: b.line,
+            is_extern: false,
+            is_export_extern: false,
+            is_gen: false,
+        };
+        if let Err(s) = checker.function(&synthetic) {
+            let mut d = Diagnostic::from_rendered(s, "check");
+            d.file = b.module.clone();
+            out.push(d);
+        }
+        for s in checker.errors.borrow_mut().drain(..) {
+            let mut d = Diagnostic::from_rendered(s, "check");
+            d.file = b.module.clone();
+            out.push(d);
+        }
+    }
+    *checker.in_bench.borrow_mut() = false;
+}
+
 /// Type-check the program, returning **all** problems found across functions
 /// and types as structured [`Diagnostic`]s. Thin shim over
 /// [`check_accum_with_let_types`] that drops the inferred-`let`-type table (the
@@ -704,6 +766,10 @@ struct Checker<'a> {
     /// only when this is set; in ordinary code they are a checker error pointing
     /// at validated types / `Result`.
     in_test: RefCell<bool>,
+    /// True while checking a `bench` body (RFC-0055). `blackBox` is legal only
+    /// inside a `test` or `bench` body (`in_test || in_bench`); `assert`/`assertEq`
+    /// stay `test`-only. Set for the duration of [`check_benches`].
+    in_bench: RefCell<bool>,
     /// True while checking a `gen fn` body (RFC-0021/0054). The `Code` type and the
     /// code-quote builtins (`vyrn"…"`, `render`, `rawAt`, `raw`, `lex`) are legal
     /// only when this is set — using them outside generation is a compile error,
@@ -3146,6 +3212,28 @@ impl<'a> Checker<'a> {
                 ));
             }
             return Ok(Type::Unit);
+        }
+
+        // Benchmark builtin (RFC-0055): `blackBox<T>(v: T) -> T` — identity with an
+        // optimizer-opacity guarantee, so the work producing `v` can't be deleted
+        // and its result can't be constant-folded. Legal ONLY inside a `bench` or a
+        // `test` body (same steering rule/wording style as `assert`).
+        if name == "blackBox" {
+            if !*self.in_test.borrow() && !*self.in_bench.borrow() {
+                return Err(format!(
+                    "line {line}: `blackBox` is only available inside a `bench` or `test` block — \
+                     it exists to defeat the optimizer while measuring, not for ordinary code"
+                ));
+            }
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `blackBox` takes 1 argument, got {}",
+                    args.len()
+                ));
+            }
+            // Identity: the argument's own type flows straight out (generic in T).
+            let t = self.expr(&args[0], scope, expected, fn_ret)?;
+            return Ok(t);
         }
 
         // built-in: print(Int|Bool) -> Unit

@@ -124,6 +124,22 @@ pub fn analyze(program: &Program) -> Ownership {
             .droppable,
         );
     }
+    // Bench bodies (RFC-0055) get the same block-exit drop analysis, keyed by the
+    // synthetic `bench@<index>` name the interpreter (`--check`) walks.
+    for (i, b) in program.benches.iter().enumerate() {
+        droppable.insert(
+            format!("bench@{i}"),
+            analyze_body(
+                &[],
+                &b.body,
+                &Type::Unit,
+                &owned,
+                &string_fns,
+                &string_types,
+            )
+            .droppable,
+        );
+    }
     Ownership {
         owned_fns: owned,
         droppable,

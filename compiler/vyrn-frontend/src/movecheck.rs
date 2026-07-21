@@ -81,6 +81,32 @@ pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
             out.push(d);
         }
     }
+    // Bench bodies (RFC-0055) move-check identically, under a synthetic `bench@`
+    // name.
+    for (i, b) in program.benches.iter().enumerate() {
+        let synthetic = Function {
+            name: format!("bench@{i}"),
+            exported: false,
+            module: b.module.clone(),
+            doc: None,
+            type_params: Vec::new(),
+            type_bounds: Default::default(),
+            params: Vec::new(),
+            ret: Type::Unit,
+            body: b.body.clone(),
+            line: b.line,
+            is_extern: false,
+            is_export_extern: false,
+            is_gen: false,
+        };
+        mc.errors.borrow_mut().clear();
+        mc.function(&synthetic);
+        for s in mc.errors.borrow_mut().drain(..) {
+            let mut d = Diagnostic::from_rendered(s, "movecheck");
+            d.file = b.module.clone();
+            out.push(d);
+        }
+    }
     out
 }
 

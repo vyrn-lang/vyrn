@@ -564,6 +564,7 @@ impl Parser {
         let mut impls = Vec::new();
         let mut globals = Vec::new();
         let mut tests = Vec::new();
+        let mut benches = Vec::new();
         let mut log_level = DEFAULT_LOG_LEVEL;
         let mut log_sink = LogSink::Stderr;
         let mut saw_logging = false;
@@ -736,6 +737,24 @@ impl Parser {
                         }
                     }
                 }
+                // `bench "name" { body }` — a benchmark declaration (RFC-0055).
+                // `bench` is a contextual starter (a plain identifier elsewhere);
+                // recognize it only when a string literal follows, exactly like
+                // `test`, so a variable named `bench` is unharmed.
+                Tok::Ident(name)
+                    if name == "bench" && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
+                {
+                    match self.bench_decl() {
+                        Ok(mut b) => {
+                            b.doc = doc;
+                            benches.push(b);
+                        }
+                        Err(d) => {
+                            errors.push(d);
+                            self.sync_to_decl();
+                        }
+                    }
+                }
                 // `logging { level: <name> }` — the RFC-0008 config block.
                 Tok::Ident(name) if name == "logging" => {
                     let line = self.line();
@@ -791,6 +810,7 @@ impl Parser {
                 impls,
                 globals,
                 tests,
+                benches,
                 log_level,
                 log_sink,
             },
@@ -847,9 +867,10 @@ impl Parser {
                     return
                 }
                 // `test "name" { .. }` is a top-level starter (RFC-0015).
+                // `bench "name" { .. }` likewise (RFC-0055).
                 Tok::Ident(name)
                     if depth == 0
-                        && name == "test"
+                        && (name == "test" || name == "bench")
                         && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
                 {
                     return
@@ -1511,6 +1532,39 @@ impl Parser {
         let body = self.block()?;
         self.type_params.clear();
         Ok(TestDecl {
+            name,
+            body,
+            doc: None,
+            module: None,
+            line,
+        })
+    }
+
+    /// `bench "name" { body }` — a benchmark declaration (RFC-0055). `bench` is a
+    /// contextual starter (a plain identifier elsewhere); the caller has already
+    /// confirmed the `bench` / string-literal lookahead. Structurally identical to
+    /// [`Parser::test_decl`]; the body parses like any function block, and
+    /// `blackBox` becomes legal inside it (enforced by the checker, which knows it
+    /// is in a bench).
+    fn bench_decl(&mut self) -> Result<BenchDecl, Diagnostic> {
+        let line = self.line();
+        self.advance(); // `bench` (a contextual Ident)
+        let name = match self.advance() {
+            Tok::Str(s) => s,
+            other => {
+                return Err(Diagnostic::error(
+                    self.line(),
+                    self.col(),
+                    "parse",
+                    format!("expected a bench name string, found {other:?}"),
+                ))
+            }
+        };
+        // A bench body sees no generic parameters (a bench is monomorphic).
+        self.type_params.clear();
+        let body = self.block()?;
+        self.type_params.clear();
+        Ok(BenchDecl {
             name,
             body,
             doc: None,
@@ -3783,6 +3837,39 @@ mod tests {
             p.functions.iter().any(|f| f.name == "main"),
             "recovered to `main`"
         );
+    }
+
+    // ---- RFC-0055 benches ----------------------------------------------
+
+    #[test]
+    fn parses_bench_declaration() {
+        let src = "bench \"push\" {\n\
+                   let mut xs: Array<Int64> = []\n\
+                   blackBox(xs.length)\n\
+                   }";
+        let p = parse_src(src);
+        assert_eq!(p.benches.len(), 1);
+        assert_eq!(p.benches[0].name, "push");
+        assert_eq!(p.benches[0].body.stmts.len(), 2);
+        assert_eq!(p.benches[0].line, 1);
+        assert!(p.tests.is_empty());
+    }
+
+    #[test]
+    fn bench_is_only_contextual_before_a_string() {
+        // `bench` as an ordinary identifier (not followed by a string) stays a
+        // plain variable — it must not steal the keyword slot.
+        let src = "fn main() -> Int64 { let bench = 5 return bench }";
+        let p = parse_src(src);
+        assert!(p.benches.is_empty());
+        assert_eq!(p.functions[0].body.stmts.len(), 2);
+    }
+
+    #[test]
+    fn bench_doc_comment_attaches() {
+        let src = "/// times the hot path\nbench \"hot\" { blackBox(1) }";
+        let p = parse_src(src);
+        assert_eq!(p.benches[0].doc.as_deref(), Some("times the hot path"));
     }
 
     #[test]

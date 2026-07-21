@@ -773,6 +773,72 @@ where
     Ok((passed, failed))
 }
 
+/// Run the ROOT module's `bench` blocks (RFC-0055) **once each** under the
+/// interpreter, in declaration order — the `vyrn bench --check` face. This is the
+/// deterministic, byte-pinnable path (no timing): each body runs a single time to
+/// prove it executes without trapping. Root-only and `filter`-aware exactly like
+/// [`run_tests`]. `on_result` reports `Ok(())` (ran clean) or `Err(message)` (a
+/// trap — a failed `assert`, an out-of-bounds index, etc.); the runner continues
+/// to the next bench and the caller exits nonzero if any failed. Returns
+/// `(ok, failed)`, or a harness error string if module-state init fails.
+pub fn run_benches<F>(
+    program: &Program,
+    filter: Option<&str>,
+    on_result: F,
+) -> Result<(usize, usize), String>
+where
+    F: FnMut(&str, &Result<(), String>) + Send,
+{
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn_scoped(s, || run_benches_inner(program, filter, on_result))
+            .expect("failed to spawn interpreter thread")
+            .join()
+            .unwrap_or_else(|_| Err("interpreter thread panicked (likely stack overflow)".into()))
+    })
+}
+
+fn run_benches_inner<F>(
+    program: &Program,
+    filter: Option<&str>,
+    mut on_result: F,
+) -> Result<(usize, usize), String>
+where
+    F: FnMut(&str, &Result<(), String>),
+{
+    let interp = new_interp(program, &[])?;
+    if let Err(Ctrl::Err(s)) = interp.init_globals(program) {
+        return Err(s);
+    }
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+    for b in &program.benches {
+        // Root-only: an imported module's benches are not run here (RFC-0055).
+        if b.module.is_some() {
+            continue;
+        }
+        if let Some(sub) = filter {
+            if !b.name.contains(sub) {
+                continue;
+            }
+        }
+        let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+        let result: Result<(), String> = match interp.block(&b.body, &mut scope) {
+            Ok(_) => Ok(()),
+            Err(Ctrl::Return(_)) => Ok(()),
+            Err(Ctrl::Err(s)) => Err(s),
+        };
+        if result.is_ok() {
+            ok += 1;
+        } else {
+            failed += 1;
+        }
+        on_result(&b.name, &result);
+    }
+    Ok((ok, failed))
+}
+
 /// One HTTP request handed to a served `handle` (RFC-0016). The host (`vyrn
 /// serve`) fills these from the wire; the interpreter turns each into a
 /// `Request` record before calling `handle`.
@@ -2107,6 +2173,13 @@ impl<'a> Interp<'a> {
                         }
                         other => return Err(format!("assert of non-Bool {other:?}").into()),
                     }
+                }
+                // `blackBox(v)` (RFC-0055): identity in the interpreter (which does
+                // not optimize, so there is nothing to defeat). The optimizer-opacity
+                // guarantee is a native/wasm codegen property; here the value simply
+                // flows straight through.
+                if name == "blackBox" {
+                    return self.expr(&args[0], scope);
                 }
                 if name == "assertEq" {
                     let a = self.expr(&args[0], scope)?;

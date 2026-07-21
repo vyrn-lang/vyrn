@@ -595,6 +595,7 @@ fn load_modules(
                     impls: Vec::new(),
                     globals: Vec::new(),
                     tests: Vec::new(),
+                    benches: Vec::new(),
                     log_level: DEFAULT_LOG_LEVEL,
                     log_sink: LogSink::Stderr,
                 },
@@ -664,6 +665,11 @@ fn load_modules(
             // but `vyrn test <root>` runs only the root's (`None`-module) tests.
             for t in &mut program.tests {
                 t.module = Some(key.to_string());
+            }
+            // Tag benches with their module too (RFC-0055): they still type-check,
+            // but `vyrn bench <root>` runs only the root's (`None`-module) benches.
+            for b in &mut program.benches {
+                b.module = Some(key.to_string());
             }
         }
 
@@ -1586,6 +1592,10 @@ impl NsResolver<'_> {
             let mut locals = HashSet::new();
             self.walk_block(&mut t.body, &mut locals);
         }
+        for b in &mut p.benches {
+            let mut locals = HashSet::new();
+            self.walk_block(&mut b.body, &mut locals);
+        }
     }
 
     /// Rewrite namespace-qualified types in a function's signature (params, return,
@@ -2181,6 +2191,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     let mut extra_protocols = Vec::new();
     let mut extra_impls = Vec::new();
     let mut extra_tests = Vec::new();
+    let mut extra_benches = Vec::new();
     // Any module may reach here with globals (RFC-0029). Every module's state
     // joins the linked program and initializes before `main` in LINKER ORDER —
     // post-order over the import graph, dependencies first (see below).
@@ -2198,6 +2209,8 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             // Imported tests keep their `module` tag: they type-check but do not
             // run under `vyrn test <root>` (RFC-0015).
             extra_tests.extend(p.tests);
+            // Imported benches likewise (RFC-0055).
+            extra_benches.extend(p.benches);
         }
     }
     let mut program = merged.expect("root module was loaded");
@@ -2216,6 +2229,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     ordered.append(&mut program.globals);
     program.globals = ordered;
     program.tests.extend(extra_tests);
+    program.benches.extend(extra_benches);
     program.imports.clear(); // consumed
     Ok(program)
 }
@@ -2875,6 +2889,9 @@ fn rewrite_module_refs(p: &mut Program, map: &HashMap<String, String>, ns: &Hash
     for t in &mut p.tests {
         rewrite_block(&mut t.body, map, ns);
     }
+    for b in &mut p.benches {
+        rewrite_block(&mut b.body, map, ns);
+    }
 }
 
 /// Every reference name (types and expression callees/variables/variants) used
@@ -2920,6 +2937,9 @@ fn program_ref_names(p: &Program) -> HashSet<String> {
     }
     for t in &p.tests {
         add_block(&t.body, &mut out);
+    }
+    for b in &p.benches {
+        add_block(&b.body, &mut out);
     }
     out
 }
