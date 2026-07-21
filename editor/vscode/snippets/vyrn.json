@@ -84,5 +84,14 @@
       "}"
     ],
     "description": "A test block (RFC-0015): assert / assertEq, run with `vyrn test`"
+  },
+  "bench": {
+    "prefix": "bench",
+    "body": [
+      "bench \"${1:name}\" {",
+      "    ${0:blackBox($2)}",
+      "}"
+    ],
+    "description": "A bench block (RFC-0055): blackBox the work, run with `vyrn bench`"
   }
 }

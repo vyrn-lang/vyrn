@@ -159,6 +159,35 @@ function registerRun(context, vsc) {
         );
         if (testRe.lastIndex === t.index) testRe.lastIndex++;
       }
+
+      // `bench "name"` blocks (RFC-0055): "▶ Run bench" over each, "▶ Run all
+      // benches" over the first. Same contextual shape as `test`.
+      const benchRe = /^[ \t]*bench\s+"((?:[^"\\]|\\.)*)"/gm;
+      let firstBench = true;
+      let b;
+      while ((b = benchRe.exec(text)) !== null) {
+        const pos = document.positionAt(b.index);
+        const range = new vsc.Range(pos, pos);
+        const name = b[1];
+        if (firstBench) {
+          lenses.push(
+            new vsc.CodeLens(range, {
+              title: "▶ Run all benches",
+              command: "vyrn.benchAll",
+              arguments: [document.uri],
+            })
+          );
+          firstBench = false;
+        }
+        lenses.push(
+          new vsc.CodeLens(range, {
+            title: "▶ Run bench",
+            command: "vyrn.bench",
+            arguments: [document.uri, name],
+          })
+        );
+        if (benchRe.lastIndex === b.index) benchRe.lastIndex++;
+      }
       return lenses;
     },
   };
@@ -176,6 +205,14 @@ function registerRun(context, vsc) {
     // unescape it so `vyrn test --name` matches the runtime test name.
     vsc.commands.registerCommand("vyrn.test", (uri, name) =>
       runVyrn(vsc, uri, (file) => ["test", file, "--name", unescapeTestName(name)])
+    ),
+    // Benches (RFC-0055): `vyrn bench` compiles native and times; a single-bench
+    // lens filters with `--name` exactly like `vyrn.test`.
+    vsc.commands.registerCommand("vyrn.benchAll", (uri) =>
+      runVyrn(vsc, uri, (file) => ["bench", file])
+    ),
+    vsc.commands.registerCommand("vyrn.bench", (uri, name) =>
+      runVyrn(vsc, uri, (file) => ["bench", file, "--name", unescapeTestName(name)])
     )
   );
 }
