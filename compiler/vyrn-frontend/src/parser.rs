@@ -2594,6 +2594,10 @@ impl Parser {
                         let name = match name.as_str() {
                             "toString" => "@str".to_string(),
                             "join" => "@join".to_string(),
+                            // `s.charCount()` (RFC-0058) — Unicode scalar count.
+                            // Method-only, so a free `charCount(s)` never reaches
+                            // here (and can still be a user function name).
+                            "charCount" => "@charCount".to_string(),
                             // In-place array mutation (RFC-0011): method-only, so
                             // they map to unspellable internal names — a free
                             // `pop(a)` / `swapRemove(a, i)` never reaches here and
@@ -2706,6 +2710,7 @@ impl Parser {
         }
         match self.advance() {
             Tok::Int(v) => Ok(Expr::Int(v)),
+            Tok::Byte(v) => Ok(Expr::Byte(v)),
             Tok::Float(v) => Ok(Expr::Float(v)),
             Tok::Str(s) => Ok(Expr::Str(s)),
             // `self` — the receiver inside an `impl` method; an ordinary binding.
@@ -3749,7 +3754,7 @@ mod tests {
 
     #[test]
     fn inline_field_where_desugars_to_synthetic_validated_type() {
-        let src = "type User = { name: String where value.length >= 3, age: Int64 } \
+        let src = "type User = { name: String where value.byteLength >= 3, age: Int64 } \
                    fn main() -> Int64 { return 0 }";
         let p = parse_src(src);
         // The synthetic `User.name` decl carries the predicate…

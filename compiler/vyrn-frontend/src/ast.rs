@@ -642,6 +642,11 @@ pub enum UnOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Int(i64),
+    /// A byte literal `'c'` (RFC-0057) — one ASCII byte. Semantically an integer
+    /// literal whose value is the byte; the checker defaults it to `UInt8` and it
+    /// coerces from there exactly as an integer literal does. Backends treat it
+    /// identically to [`Expr::Int`] with the same value.
+    Byte(u8),
     /// A floating-point literal, e.g. `1.5` (`Float64`).
     Float(f64),
     Bool(bool),
@@ -784,7 +789,7 @@ impl Expr {
     /// The source line this expression starts on (best effort).
     pub fn line(&self) -> usize {
         match self {
-            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => 0,
+            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => 0,
             Expr::Var { line, .. }
             | Expr::Unary { line, .. }
             | Expr::Binary { line, .. }

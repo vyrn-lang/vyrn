@@ -7,6 +7,7 @@
     { "include": "#regex-string" },
     { "include": "#template-tag" },
     { "include": "#strings" },
+    { "include": "#byte-literal" },
     { "include": "#capabilities" },
     { "include": "#test-bench-keyword" },
     { "include": "#contextual-keywords" },
@@ -97,6 +98,7 @@
       "endCaptures": { "0": { "name": "punctuation.definition.template-expression.end.vyrn" } },
       "patterns": [
         { "include": "#strings" },
+        { "include": "#byte-literal" },
         { "include": "#keywords" },
         { "include": "#types" },
         { "include": "#function-calls" },
@@ -135,6 +137,14 @@
     "numbers": {
       "name": "constant.numeric.integer.vyrn",
       "match": "\\b\\d+\\b"
+    },
+    "byte-literal": {
+      "comment": "A byte literal (RFC-0057): '`c`' is one ASCII byte (UInt8), or an escape '\\n' '\\t' '\\r' '\\'' '\\\\' '\\0' '\\xNN'. Scoped constant.character with the escape inside highlighted. Placed after #strings (which owns `\"`) so a lone `'` inside a string stays plain text.",
+      "name": "constant.character.vyrn",
+      "match": "'(?:(\\\\(?:x[0-9A-Fa-f]{2}|[ntr0'\\\\]))|[^'\\\\\\n])'",
+      "captures": {
+        "1": { "name": "constant.character.escape.vyrn" }
+      }
     },
     "operators": {
       "comment": "Multi-char operators listed first so >= is not split into > then =. Order in the alternation matters: oniguruma picks the first alternative that matches at the position.",

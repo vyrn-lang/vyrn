@@ -365,12 +365,12 @@ mod tests {
     #[test]
     fn renders_record_folding_inline_refinements() {
         let (d, t) = decl(
-            "export type User = { name: String where value.length >= 3, age: Int64 }\n",
+            "export type User = { name: String where value.byteLength >= 3, age: Int64 }\n",
             "User",
         );
         assert_eq!(
             render_type_decl(&d, &t),
-            "export type User = { name: String where value.length >= 3, age: Int64 }"
+            "export type User = { name: String where value.byteLength >= 3, age: Int64 }"
         );
     }
 

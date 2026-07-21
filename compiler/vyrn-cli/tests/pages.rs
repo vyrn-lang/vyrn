@@ -178,7 +178,7 @@ fn string_segment_and_respond_route_end_to_end() {
          fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, body: \"\" }) }\n\
          fn main() -> Int64 {\n\
          let a = h(\"/p/deadbeef\")\n\
-         print(\"P:\\{a.status}:\\{a.body.length}\")\n\
+         print(\"P:\\{a.status}:\\{a.body.byteLength}\")\n\
          let b = h(\"/raw/cafe\")\n\
          print(\"R:\\{b.status}:\\{b.contentType}:\\{b.body}\")\n\
          return 0\n\

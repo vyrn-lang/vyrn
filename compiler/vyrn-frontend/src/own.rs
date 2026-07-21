@@ -466,13 +466,15 @@ impl Analysis<'_> {
     /// Walk an expression, escaping any candidate used outside a safe read.
     fn visit(&mut self, e: &Expr) {
         match e {
-            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
+            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
             Expr::Var { name, .. } => self.escape(name),
             Expr::Unary { expr, .. } | Expr::Try { expr, .. } => self.visit(expr),
-            // `x.length` reads the length header only — a safe read of a candidate
-            // (matches `s.length` replacing `len(s)`). Any other field access is a
-            // conservative escape.
-            Expr::Field { expr, field, .. } if field == "length" => self.operand(expr),
+            // `x.length` / `s.byteLength` read the length header only — a safe read
+            // of a candidate (RFC-0058 renamed a String's byte length). Any other
+            // field access is a conservative escape.
+            Expr::Field { expr, field, .. } if field == "length" || field == "byteLength" => {
+                self.operand(expr)
+            }
             Expr::Field { expr, .. } => self.visit(expr),
             Expr::Binary { lhs, rhs, .. } => {
                 // `==`/`!=` and string `+` only *read* their operands (concat

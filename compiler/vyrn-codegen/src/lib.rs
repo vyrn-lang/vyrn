@@ -1099,6 +1099,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // Heap + string runtime (dynamic strings). Allocations are not yet freed —
     // the reclamation strategy is RFC-0004's open question.
     out.push_str("declare i64 @__vyrn_strlen(ptr)\n");
+    out.push_str("declare i64 @__vyrn_charcount(ptr)\n");
     out.push_str("declare ptr @__vyrn_malloc(i64)\n");
     out.push_str("declare ptr @__vyrn_realloc(ptr, i64)\n");
     out.push_str("declare void @free(ptr)\n");
@@ -3332,6 +3333,10 @@ impl<'a> Gen<'a> {
     fn gen_expr(&mut self, expr: &Expr) -> Result<(String, Type), String> {
         match expr {
             Expr::Int(n) => Ok((n.to_string(), Type::Int)),
+            // A byte literal (RFC-0057) is an integer literal at the IR level; its
+            // value flows through unchanged. The checker has already fixed its
+            // type, so the surrounding coercion emits any needed truncation.
+            Expr::Byte(b) => Ok((b.to_string(), Type::Int)),
             // LLVM double literals: the hex form encodes the exact bit pattern,
             // avoiding any decimal round-trip mismatch.
             Expr::Float(x) => Ok((format!("0x{:016X}", x.to_bits()), Type::Float)),
@@ -3425,6 +3430,15 @@ impl<'a> Gen<'a> {
             Expr::StructLit { name, fields, .. } => self.gen_struct_lit(name, fields),
             Expr::Field { expr, field, .. } => {
                 let (v, ety) = self.gen_expr(expr)?;
+                // `str.byteLength` is the O(1) byte length via `strlen` (RFC-0058;
+                // `.length` on a String is rejected by the checker).
+                if field == "byteLength" {
+                    if let Type::Str = self.resolve(&ety) {
+                        let len = self.fresh_tmp();
+                        self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {v})"));
+                        return Ok((len, Type::Int));
+                    }
+                }
                 // `arr.length` is the element count (sugar for `alen`): a constant
                 // for a fixed array, field 1 of the `{ptr,len,cap}` triple otherwise.
                 if field == "length" {
@@ -3449,12 +3463,6 @@ impl<'a> Gen<'a> {
                             self.emit(format!(
                                 "{len} = extractvalue {{ ptr, ptr, i64, i64 }} {v}, 2"
                             ));
-                            return Ok((len, Type::Int));
-                        }
-                        // `str.length` is the byte length via `strlen`.
-                        Type::Str => {
-                            let len = self.fresh_tmp();
-                            self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {v})"));
                             return Ok((len, Type::Int));
                         }
                         _ => {}
@@ -6013,6 +6021,15 @@ impl<'a> Gen<'a> {
                 "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], [ {o2}, %{ok_l} ]"
             ));
             return Ok((r, Type::Result(Box::new(Type::Str), Box::new(Type::Str))));
+        }
+        // `@charCount` (from `s.charCount()`, RFC-0058): the number of Unicode
+        // scalar values = the count of non-continuation bytes, via the runtime
+        // shim `__vyrn_charcount` (byte-identical to the interpreter).
+        if name == "@charCount" {
+            let (s, _) = self.gen_expr(&args[0])?;
+            let n = self.fresh_tmp();
+            self.emit(format!("{n} = call i64 @__vyrn_charcount(ptr {s})"));
+            return Ok((n, Type::Int));
         }
         // contains(a, b): strstr(a, b) != null.
         if name == "contains" {
@@ -9105,7 +9122,12 @@ fn collect_regex_expr(e: &Expr, out: &mut Vec<String>) {
             LambdaBody::Expr(e2) => collect_regex_expr(e2, out),
             LambdaBody::Block(b) => collect_regex_block(b, out),
         },
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Var { .. } => {}
+        Expr::Int(_)
+        | Expr::Byte(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Str(_)
+        | Expr::Var { .. } => {}
     }
 }
 
@@ -9159,7 +9181,7 @@ fn collect_strings_expr(e: &Expr, out: &mut Vec<String>, types: &HashMap<String,
                 out.push(s.clone());
             }
         }
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Var { .. } => {}
+        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Var { .. } => {}
         Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
             collect_strings_expr(expr, out, types)
         }
@@ -9781,7 +9803,7 @@ mod tests {
     fn read_file_lowers_to_shim_call_with_canonical_messages() {
         let src = "fn main() -> Int64 { \
                        let r = readFile(\"cfg.txt\") \
-                       return match r { Ok(s) => s.length, Err(e) => e.length } }";
+                       return match r { Ok(s) => s.byteLength, Err(e) => e.byteLength } }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // The shim primitive plus the single-source canonical error strings.
         assert!(ir.contains("call i32 @__vyrn_read_file(ptr"), "{ir}");
@@ -9797,7 +9819,7 @@ mod tests {
     fn write_file_lowers_to_shim_call_with_canonical_message() {
         let src = "fn main() -> Int64 { \
                        let w = writeFile(\"o.txt\", \"x\") \
-                       return match w { Ok(b) => 0, Err(e) => e.length } }";
+                       return match w { Ok(b) => 0, Err(e) => e.byteLength } }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("call i32 @__vyrn_write_file(ptr"), "{ir}");
         assert!(ir.contains("c\"cannot write `%s`\\00\""), "{ir}");
@@ -9808,7 +9830,7 @@ mod tests {
         let src = "fn main() -> Int64 { \
                        let a = args() \
                        let l = readLine() \
-                       let n = match l { Some(s) => s.length, None => 0 } \
+                       let n = match l { Some(s) => s.byteLength, None => 0 } \
                        return a.length + n }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("call { ptr, i64, i64 } @__vyrn_args()"), "{ir}");
@@ -9832,7 +9854,7 @@ mod tests {
     fn string_from_bytes_validates_and_pins_error_strings() {
         let src = "fn main() -> Int64 { \
                        let r = stringFromBytes(bytes(\"hi\")) \
-                       return match r { Ok(s) => s.length, Err(e) => e.length } }";
+                       return match r { Ok(s) => s.byteLength, Err(e) => e.byteLength } }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("call ptr @__vyrn_bytes_dup(ptr"), "{ir}");
         assert!(ir.contains("c\"bytes contain a NUL byte\\00\""), "{ir}");
@@ -9999,7 +10021,7 @@ mod tests {
         // `"n=\{n}"` desugars to `concat("n=", str(n))`; `str(Bool)` selects the
         // no-newline global and copies it into a fresh buffer.
         let src = "fn main() -> Int64 { let n = 7; let ok = true; \
-                   let s = \"n=\\{n} ok=\\{ok}\"; return s.length; }";
+                   let s = \"n=\\{n} ok=\\{ok}\"; return s.byteLength; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("@__vyrn_snprintf"), "str(Int64) -> snprintf: {ir}");
         assert!(ir.contains("select i1"), "str(Bool) -> select true/false: {ir}");
@@ -10011,7 +10033,7 @@ mod tests {
     fn string_plus_lowers_to_concat_runtime() {
         // `a + b` on Strings emits the same strlen/strcpy/strcat sequence `concat`
         // used, and `x.toString()` renders via snprintf.
-        let src = "fn main() -> Int64 { let a = \"x\"; let n = (5).toString() + a; return n.length; }";
+        let src = "fn main() -> Int64 { let a = \"x\"; let n = (5).toString() + a; return n.byteLength; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("@__vyrn_strlen"), "concat length: {ir}");
         assert!(ir.contains("@strcpy") && ir.contains("@strcat"), "concat copy: {ir}");
@@ -10161,7 +10183,7 @@ mod tests {
     #[test]
     fn non_escaping_temporary_is_freed() {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                   let s = a + b; let n = s.length; return n; }";
+                   let s = a + b; let n = s.byteLength; return n; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
             free_calls(&ir) > RUNTIME_FREES,
@@ -10173,7 +10195,7 @@ mod tests {
     fn escaping_temporary_is_not_freed() {
         // `s` is aliased into `t`, so it must not be auto-freed (would dangle).
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                   let s = a + b; let t = s; return t.length; }";
+                   let s = a + b; let t = s; return t.byteLength; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert_eq!(
             free_calls(&ir),
@@ -10209,7 +10231,7 @@ mod tests {
         // receives, but `make` must NOT free what it moves out.
         let src = "fn make(a: String, b: String) -> String { return a + b; } \
                    fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
-                       let g = make(a, b); return g.length; }";
+                       let g = make(a, b); return g.byteLength; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         // The runtime frees + exactly one auto-free (in `main`, for `g`).
         assert_eq!(
@@ -10223,7 +10245,7 @@ mod tests {
     fn region_brackets_body_with_enter_and_exit() {
         let src = "fn main() -> Int64 { \
                        let a = \"x\"; let b = \"y\"; let mut n = 0; \
-                       region { let s = a + b; n = s.length; } \
+                       region { let s = a + b; n = s.byteLength; } \
                        return n; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(ir.contains("call void @__vyrn_region_enter()"), "{ir}");
@@ -10267,10 +10289,20 @@ mod tests {
     }
 
     #[test]
-    fn string_length_lowers_to_strlen() {
-        let src = "fn main() -> Int64 { let s = \"hi\"; return s.length; }";
+    fn string_byte_length_lowers_to_strlen() {
+        let src = "fn main() -> Int64 { let s = \"hi\"; return s.byteLength; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("call i64 @__vyrn_strlen"), "str .length → strlen: {ir}");
+        assert!(ir.contains("call i64 @__vyrn_strlen"), "str .byteLength → strlen: {ir}");
+    }
+
+    #[test]
+    fn string_char_count_lowers_to_charcount_shim() {
+        let src = "fn main() -> Int64 { let s = \"hi\"; return s.charCount(); }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(
+            ir.contains("call i64 @__vyrn_charcount"),
+            "str .charCount() → charcount shim: {ir}"
+        );
     }
 
     #[test]
@@ -10334,9 +10366,9 @@ mod tests {
 
     #[test]
     fn validated_string_runtime_check_uses_strlen() {
-        // A non-constant String construction checks `value.length` via strlen and
-        // traps through the same validation-error path.
-        let src = "type Name = String where value.length >= 3; \
+        // A non-constant String construction checks `value.byteLength` via strlen
+        // and traps through the same validation-error path.
+        let src = "type Name = String where value.byteLength >= 3; \
                    fn mk(s: String) -> Name { return Name(s); } \
                    fn main() -> Int64 { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
@@ -10512,7 +10544,7 @@ mod tests {
                    fn g() -> Result<Int64, Int64> { \
                        let s = \"a\" + \"b\"; \
                        let x = f()?; \
-                       let n = s.length; \
+                       let n = s.byteLength; \
                        return Ok(x + n); } \
                    fn main() -> Int64 { return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();

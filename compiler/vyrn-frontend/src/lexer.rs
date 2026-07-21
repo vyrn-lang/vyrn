@@ -7,6 +7,11 @@ use crate::diagnostics::Diagnostic;
 pub enum Tok {
     // literals & identifiers
     Int(i64),
+    /// A byte literal `'c'` (RFC-0057) — one ASCII byte, `UInt8` by default. It
+    /// is a plain integer literal at runtime (the payload is its byte value); the
+    /// only difference from [`Tok::Int`] is that the checker defaults it to
+    /// `UInt8` and it coerces like an integer literal from there.
+    Byte(u8),
     /// A floating-point literal, e.g. `1.5` (`Float64`).
     Float(f64),
     /// A string literal, already decoded (escapes resolved).
@@ -110,6 +115,9 @@ pub fn token_name_and_text(tok: &Tok) -> (String, String) {
     let p = |s: &str| ("punct".to_string(), s.to_string());
     match tok {
         Tok::Int(n) => ("int".to_string(), n.to_string()),
+        // A byte literal is an integer literal for `lex()`'s purposes — its text
+        // is the decoded byte value, exactly as the equivalent `Tok::Int` would be.
+        Tok::Byte(n) => ("int".to_string(), n.to_string()),
         Tok::Float(f) => ("float".to_string(), format!("{f:?}")),
         Tok::Str(s) => ("string".to_string(), s.clone()),
         Tok::TemplateStr { parts, .. } => ("template".to_string(), parts.join("")),
@@ -497,37 +505,16 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
             continue;
         }
 
-        // character literal `'a'` / `'\n'` / `'\u{HEX}'` — a single Int token.
+        // byte literal `'a'` / `'\n'` / `'\x1b'` (RFC-0057) — a single token. Its
+        // boundaries come from the same [`lex_byte_literal`] helper `lex` uses, so
+        // the raw slice fmt prints round-trips (the safety invariant).
         if c == '\'' {
-            i += 1;
-            if i < chars.len() && chars[i] == '\\' {
-                if i + 1 < chars.len() && chars[i + 1] == 'u' {
-                    i += 2;
-                    while i < chars.len() && chars[i] != '}' && chars[i] != '\n' {
-                        i += 1;
-                    }
-                    if i < chars.len() && chars[i] == '}' {
-                        i += 1;
-                    }
-                } else {
-                    i += 2; // `\x`
-                }
-            } else if i < chars.len() && chars[i] != '\n' {
-                i += 1; // any single scalar
-            }
-            if i < chars.len() && chars[i] == '\'' {
-                i += 1;
-            } else {
-                return Err(Diagnostic::error(
-                    start_line,
-                    0,
-                    "lex",
-                    "unterminated character literal".into(),
-                ));
-            }
+            let (_, next) = lex_byte_literal(&chars, i, start_line, 0)?;
+            let text: String = chars[start..next].iter().collect();
+            i = next;
             out.push(Triv {
-                kind: TrivKind::Tok(Tok::Int(0)),
-                text: chars[start..i].iter().collect(),
+                kind: TrivKind::Tok(Tok::Byte(0)),
+                text,
                 start_line,
                 end_line: line,
                 space_before,
@@ -646,6 +633,80 @@ fn parse_unicode_escape(
     let cp = u32::from_str_radix(hex.trim(), 16).map_err(|_| err("`\\u{}` needs hex digits"))?;
     let ch = char::from_u32(cp).ok_or_else(|| err("invalid Unicode scalar in `\\u{}`"))?;
     Ok((ch, j + 1)) // past the closing `}`
+}
+
+/// Lex a byte literal `'…'` (RFC-0057) whose opening quote is at `chars[start]`.
+/// Returns the decoded byte value and the index just past the closing quote.
+///
+/// The content is exactly one byte: a printable ASCII char (`0x20..=0x7E`, and
+/// `'`/`\` must be escaped), or an escape `\n \t \r \' \\ \0 \xNN`. A multi-byte
+/// (non-ASCII) character, or more than one byte between the quotes, is an error —
+/// this is a byte literal, not a `Char`/`Rune` type, and single-quoted strings
+/// are not a thing. Shared by [`lex`] and [`lex_with_trivia`] so their token
+/// boundaries agree exactly (the fmt safety invariant depends on it).
+fn lex_byte_literal(
+    chars: &[char],
+    start: usize,
+    line: usize,
+    col: usize,
+) -> Result<(u8, usize), Diagnostic> {
+    let err = |m: &str| Diagnostic::error(line, col, "lex", m.to_string());
+    let i = start + 1; // first char of the content (past the opening `'`)
+    if i >= chars.len() {
+        return Err(err("unterminated byte literal"));
+    }
+    let (val, after): (u8, usize) = if chars[i] == '\'' {
+        return Err(err(
+            "empty byte literal; a byte literal holds exactly one byte, e.g. 'a' or '\\x0a'",
+        ));
+    } else if chars[i] == '\\' {
+        if i + 1 >= chars.len() {
+            return Err(err("unterminated byte escape"));
+        }
+        match chars[i + 1] {
+            'n' => (0x0A, i + 2),
+            't' => (0x09, i + 2),
+            'r' => (0x0D, i + 2),
+            '0' => (0x00, i + 2),
+            '\\' => (0x5C, i + 2),
+            '\'' => (0x27, i + 2),
+            'x' => {
+                if i + 3 >= chars.len() {
+                    return Err(err("`\\x` needs two hex digits"));
+                }
+                match (chars[i + 2].to_digit(16), chars[i + 3].to_digit(16)) {
+                    (Some(h), Some(l)) => ((h * 16 + l) as u8, i + 4),
+                    _ => return Err(err("`\\x` needs two hex digits")),
+                }
+            }
+            other => return Err(err(&format!("unknown byte escape `\\{other}`"))),
+        }
+    } else {
+        let ch = chars[i];
+        if ch == '\n' {
+            return Err(err("raw newline in byte literal; write '\\n'"));
+        }
+        let cp = ch as u32;
+        if !(0x20..=0x7E).contains(&cp) {
+            // A non-ASCII scalar (e.g. `'é'`) or a raw control byte: this is a
+            // byte literal, so spell the UTF-8 bytes out explicitly instead.
+            return Err(err(
+                "byte literal must be a single ASCII byte; write the UTF-8 bytes explicitly",
+            ));
+        }
+        (cp as u8, i + 1)
+    };
+    if after >= chars.len() {
+        return Err(err("unterminated byte literal"));
+    }
+    if chars[after] != '\'' {
+        // Two-plus bytes between the quotes (`'ab'`): single-quoted strings do not
+        // exist — a byte literal is one byte, a string uses double quotes.
+        return Err(err(
+            "single-quoted strings are not allowed: '…' is a single byte (e.g. 'a', '\\n', '\\x41'); use \"…\" for text",
+        ));
+    }
+    Ok((val, after + 1))
 }
 
 /// Tokenize `src`. Returns an error [`Diagnostic`] on the first illegal
@@ -911,78 +972,18 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
             continue;
         }
 
-        // character literal: `'a'` / `'é'` / `'\u{1F600}'` is the Unicode scalar
-        // value (code point) as an Int — Vyrn has no distinct char type.
-        // Escapes: `\n \t \r \0 \\ \'` and `\u{HEX}`.
+        // byte literal (RFC-0057): `'a'` / `'\n'` / `'\x1b'` is one ASCII byte as
+        // a `UInt8`-defaulting integer literal — Vyrn has no `Char`/`Rune` type
+        // and single-quoted strings do not exist. See [`lex_byte_literal`].
         if c == '\'' {
             let start_col = col;
-            if i + 1 >= chars.len() {
-                return Err(Diagnostic::error(
-                    line,
-                    start_col,
-                    "lex",
-                    "unterminated character literal".into(),
-                ));
-            }
-            let (cp, consumed) = if chars[i + 1] == '\\' {
-                if i + 2 >= chars.len() {
-                    return Err(Diagnostic::error(
-                        line,
-                        start_col,
-                        "lex",
-                        "unterminated character escape".into(),
-                    ));
-                }
-                if chars[i + 2] == 'u' {
-                    // `'\u{HEX}'` — a Unicode scalar by code point.
-                    let (ch, next) = parse_unicode_escape(&chars, i + 1, line, start_col)?;
-                    (ch as u32, next - i) // `next` is past `}`; consumed chars after `'`
-                } else {
-                    let e: u32 = match chars[i + 2] {
-                        'n' => u32::from('\n'),
-                        't' => u32::from('\t'),
-                        'r' => u32::from('\r'),
-                        '0' => 0,
-                        '\\' => u32::from('\\'),
-                        '\'' => u32::from('\''),
-                        other => {
-                            return Err(Diagnostic::error(
-                                line,
-                                start_col,
-                                "lex",
-                                format!("unknown character escape `\\{other}`"),
-                            ))
-                        }
-                    };
-                    (e, 3) // '\x'
-                }
-            } else {
-                // A raw newline is almost certainly a typo (and would silently
-                // desync line counting) — require the `'\n'` escape.
-                if chars[i + 1] == '\n' {
-                    return Err(Diagnostic::error(
-                        line,
-                        start_col,
-                        "lex",
-                        "raw newline in character literal; write '\\n'".into(),
-                    ));
-                }
-                (chars[i + 1] as u32, 2) // 'x' — any Unicode scalar
-            };
-            if i + consumed >= chars.len() || chars[i + consumed] != '\'' {
-                return Err(Diagnostic::error(
-                    line,
-                    start_col,
-                    "lex",
-                    "unterminated character literal".into(),
-                ));
-            }
+            let (val, next) = lex_byte_literal(&chars, i, line, start_col)?;
             out.push(Token {
-                tok: Tok::Int(cp as i64),
+                tok: Tok::Byte(val),
                 line,
                 col: start_col,
             });
-            i += consumed + 1; // include closing quote
+            i = next; // past the closing quote
             continue;
         }
 
@@ -1248,8 +1249,82 @@ mod tests {
     }
 
     #[test]
-    fn raw_newline_in_char_literal_is_rejected() {
+    fn raw_newline_in_byte_literal_is_rejected() {
         let e = lex("'\n'").unwrap_err();
         assert!(e.message.contains("raw newline"), "{}", e.message);
+    }
+
+    // ---- RFC-0057 byte literals -------------------------------------------
+
+    fn byte_of(src: &str) -> u8 {
+        match lex(src).unwrap()[0].tok {
+            Tok::Byte(b) => b,
+            ref other => panic!("expected a byte literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn byte_literal_printable_ascii_and_escapes() {
+        assert_eq!(byte_of("'a'"), 97);
+        assert_eq!(byte_of("'{'"), 123);
+        assert_eq!(byte_of("'0'"), 48);
+        assert_eq!(byte_of("' '"), 32); // space is printable ASCII
+        assert_eq!(byte_of("'~'"), 126); // top of the printable range
+        assert_eq!(byte_of("'\\n'"), 0x0A);
+        assert_eq!(byte_of("'\\t'"), 0x09);
+        assert_eq!(byte_of("'\\r'"), 0x0D);
+        assert_eq!(byte_of("'\\0'"), 0x00);
+        assert_eq!(byte_of("'\\''"), 0x27);
+        assert_eq!(byte_of("'\\\\'"), 0x5C);
+        assert_eq!(byte_of("'\\x41'"), 0x41);
+        assert_eq!(byte_of("'\\xff'"), 0xFF);
+        assert_eq!(byte_of("'\\x00'"), 0x00);
+    }
+
+    #[test]
+    fn byte_literal_error_cases_have_pinned_wording() {
+        // Empty.
+        assert!(lex("''").unwrap_err().message.contains("empty byte literal"));
+        // Two bytes → single-quoted strings are not a thing.
+        let e = lex("'ab'").unwrap_err();
+        assert!(
+            e.message.contains("single-quoted strings are not allowed"),
+            "{}",
+            e.message
+        );
+        // A multi-byte (non-ASCII) character.
+        let e = lex("'é'").unwrap_err();
+        assert!(
+            e.message
+                .contains("byte literal must be a single ASCII byte; write the UTF-8 bytes explicitly"),
+            "{}",
+            e.message
+        );
+        // Unterminated.
+        assert!(lex("'a").unwrap_err().message.contains("unterminated byte literal"));
+        assert!(lex("'").unwrap_err().message.contains("unterminated byte literal"));
+        // Unknown escape (`\u` is gone — this is a byte literal, not a char type).
+        assert!(lex("'\\u{41}'")
+            .unwrap_err()
+            .message
+            .contains("unknown byte escape"));
+        // A bad `\x`.
+        assert!(lex("'\\xzz'").unwrap_err().message.contains("two hex digits"));
+    }
+
+    #[test]
+    fn quote_inside_string_and_template_stays_plain_text() {
+        // A `'` inside a normal string is an ordinary character.
+        assert_eq!(lex("\"it's\"").unwrap()[0].tok, Tok::Str("it's".into()));
+        // A `'` inside a triple-quoted (RFC-0054) string is literal too.
+        assert_eq!(
+            lex("\"\"\"a'b\"\"\"").unwrap()[0].tok,
+            Tok::Str("a'b".into())
+        );
+        // A `'` inside a template's literal part is literal.
+        assert!(matches!(
+            &lex("\"x's \\{y}\"").unwrap()[0].tok,
+            Tok::TemplateStr { parts, .. } if parts[0] == "x's "
+        ));
     }
 }

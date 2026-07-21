@@ -2071,6 +2071,10 @@ impl<'a> Interp<'a> {
     fn expr(&self, expr: &Expr, scope: &mut Vec<HashMap<String, Slot>>) -> Result<Val, Ctrl> {
         match expr {
             Expr::Int(n) => Ok(Val::Int(*n)),
+            // A byte literal (RFC-0057) is an integer value at runtime — the
+            // checker has already given it its `UInt8`/coerced type; the raw
+            // value flows through as a plain `Int` exactly like `Expr::Int`.
+            Expr::Byte(b) => Ok(Val::Int(*b as i64)),
             Expr::Float(x) => Ok(Val::Float(*x)),
             Expr::Bool(b) => Ok(Val::Bool(*b)),
             Expr::Str(s) => Ok(Val::Str(s.clone())),
@@ -2862,6 +2866,15 @@ impl<'a> Interp<'a> {
                         | Val::Str(_) => Ok(Val::Str(scalar_to_string(&vals[0]))),
                         other => Err(format!("str of unsupported value {other:?}").into()),
                     },
+                    // `@charCount` (from `s.charCount()`, RFC-0058): the number of
+                    // Unicode scalar values = the count of non-continuation bytes
+                    // (`b & 0xC0 != 0x80`) of the validated UTF-8 string.
+                    "@charCount" => match &vals[0] {
+                        Val::Str(s) => Ok(Val::Int(
+                            s.as_bytes().iter().filter(|b| (*b & 0xC0) != 0x80).count() as i64,
+                        )),
+                        other => Err(format!("charCount of non-String {other:?}").into()),
+                    },
                     "parse" => match &vals[0] {
                         Val::Str(s) => Ok(Val::Option(parse_int(s).map(|n| Box::new(Val::Int(n))))),
                         other => Err(format!("parse of non-String {other:?}").into()),
@@ -3117,8 +3130,9 @@ impl<'a> Interp<'a> {
                     Val::Array(items) if field == "length" => Ok(Val::Int(items.len() as i64)),
                     // `map.length` is the entry count (RFC-0028).
                     Val::Map(pairs) if field == "length" => Ok(Val::Int(pairs.len() as i64)),
-                    // `str.length` is the byte length (matches `strlen`).
-                    Val::Str(s) if field == "length" => Ok(Val::Int(s.len() as i64)),
+                    // `str.byteLength` is the O(1) byte length (RFC-0058; matches
+                    // `strlen`). `.length` on a String is rejected by the checker.
+                    Val::Str(s) if field == "byteLength" => Ok(Val::Int(s.len() as i64)),
                     Val::Record(map) => map
                         .get(field)
                         .cloned()
@@ -4375,7 +4389,7 @@ mod tests {
                  if ok == false {{ return 1 }} \
                  let r = readFile(\"{path}\") \
                  return match r {{ \
-                     Ok(s) => s.length, \
+                     Ok(s) => s.byteLength, \
                      Err(e) => 2, \
                  }} }}"
         );
@@ -4732,8 +4746,8 @@ mod tests {
                 return Ok(cell(k * 10));
             }
             fn main() -> Int64 {
-                let a = match lookup(5) { Ok(r) => get(r), Err(e) => 0 - e.length };
-                let b = match lookup(0) { Ok(r) => get(r), Err(e) => 0 - e.length };
+                let a = match lookup(5) { Ok(r) => get(r), Err(e) => 0 - e.byteLength };
+                let b = match lookup(0) { Ok(r) => get(r), Err(e) => 0 - e.byteLength };
                 return a + b;  // 50 + (-4)
             }
         ";
@@ -4865,7 +4879,7 @@ mod tests {
         // `\{ }` holes render Int/Bool/String; literal braces are untouched. The
         // program returns the interpolated string's length so we can assert it.
         let src = "fn main() -> Int64 { let n = 42; let ok = true; \
-                   let s = \"n=\\{n} ok=\\{ok} {lit}\"; return s.length; }";
+                   let s = \"n=\\{n} ok=\\{ok} {lit}\"; return s.byteLength; }";
         // "n=42 ok=true {lit}" -> 18 characters
         assert_eq!(run(src).unwrap(), 18);
     }
@@ -4873,13 +4887,13 @@ mod tests {
     #[test]
     fn interpolation_evaluates_hole_expressions() {
         let src = "fn main() -> Int64 { let a = 3; let b = 4; \
-                   let s = \"\\{a * b}\"; return s.length; }"; // "12" -> len 2
+                   let s = \"\\{a * b}\"; return s.byteLength; }"; // "12" -> len 2
         assert_eq!(run(src).unwrap(), 2);
     }
 
     #[test]
     fn str_renders_bool_and_string() {
-        let src = "fn main() -> Int64 { let s = false.toString(); return s.length; }"; // "false" -> 5
+        let src = "fn main() -> Int64 { let s = false.toString(); return s.byteLength; }"; // "false" -> 5
         assert_eq!(run(src).unwrap(), 5);
     }
 
@@ -4887,7 +4901,7 @@ mod tests {
     fn str_renders_sized_int() {
         // A signed Int32 renders by value; an unsigned UInt8 renders its magnitude.
         let s = "fn main() -> Int64 { let a: Int32 = 42; let b: UInt8 = 200; \
-                 let s = \"\\{a}/\\{b + b}\"; return s.length; }"; // "42/144" -> 6
+                 let s = \"\\{a}/\\{b + b}\"; return s.byteLength; }"; // "42/144" -> 6
         assert_eq!(run(s).unwrap(), 6);
     }
 
@@ -4895,13 +4909,13 @@ mod tests {
     fn str_renders_uint64_above_i64_max() {
         // The full 64-bit magnitude renders (not a signed reinterpretation).
         let s = "fn main() -> Int64 { let n: UInt64 = 10000000000000000000; \
-                 let s = n.toString(); return s.length; }"; // 20 digits
+                 let s = n.toString(); return s.byteLength; }"; // 20 digits
         assert_eq!(run(s).unwrap(), 20);
     }
 
     #[test]
     fn str_renders_float_to_six_decimals() {
-        let s = "fn main() -> Int64 { let s = (3.14159).toString(); return s.length; }"; // "3.141590" -> 8
+        let s = "fn main() -> Int64 { let s = (3.14159).toString(); return s.byteLength; }"; // "3.141590" -> 8
         assert_eq!(run(s).unwrap(), 8);
     }
 
@@ -5088,7 +5102,7 @@ mod tests {
     fn tagged_template_values_are_matchable_and_typed() {
         // The boxed values decode back to their original scalars via `match`.
         let src = "fn sql(parts: Array<String>, values: Array<Value>) -> Int64 { \
-                       return match values[0] { IntVal(n) => n, BoolVal(b) => 0, StrVal(s) => s.length }; } \
+                       return match values[0] { IntVal(n) => n, BoolVal(b) => 0, StrVal(s) => s.byteLength }; } \
                    fn main() -> Int64 { let x = 41; return sql\"n=\\{x}\"; }";
         assert_eq!(run(src).unwrap(), 41);
     }
@@ -5252,7 +5266,7 @@ mod tests {
     #[test]
     fn schema_of_enriched_fields() {
         let src = "/// A lowercase handle.\n\
-                   type Username = String where value.length >= 3 && value.length <= 16 && value =~ \"[a-z]+\"\n\
+                   type Username = String where value.byteLength >= 3 && value.byteLength <= 16 && value =~ \"[a-z]+\"\n\
                    type Even = Int64 where value % 2 == 0\n\
                    type Byte = UInt8\n\
                    fn optOr(o: Option<Int64>, d: Int64) -> Int64 {\n\
@@ -5293,7 +5307,7 @@ mod tests {
 
     #[test]
     fn string_length_field() {
-        let src = "fn main() -> Int64 { let s = \"hello\"; return s.length; }";
+        let src = "fn main() -> Int64 { let s = \"hello\"; return s.byteLength; }";
         assert_eq!(run(src).unwrap(), 5);
     }
 
@@ -5350,7 +5364,7 @@ mod tests {
     #[test]
     fn code_point_iteration_and_emoji() {
         // A 4-byte emoji is a single code point.
-        let len = "fn main() -> Int64 { return \"\\u{1F600}\".length; }"; // 4 bytes
+        let len = "fn main() -> Int64 { return \"\\u{1F600}\".byteLength; }"; // 4 bytes
         assert_eq!(run(len).unwrap(), 4);
         let one = "fn main() -> Int64 { return chars(\"\\u{1F600}\").length; }"; // 1 char
         assert_eq!(run(one).unwrap(), 1);
@@ -5359,10 +5373,18 @@ mod tests {
     }
 
     #[test]
-    fn unicode_char_literal() {
-        // A non-ASCII char literal is its Unicode scalar value.
-        let src = "fn main() -> Int64 { return '\\u{e9}'; }";
-        assert_eq!(run(src).unwrap(), 233);
+    fn byte_literal_is_its_byte_value() {
+        // A byte literal (RFC-0057) evaluates to its byte, as an integer value.
+        assert_eq!(run("fn main() -> Int64 { return 'a' }").unwrap(), 97);
+        assert_eq!(run("fn main() -> Int64 { return '{' }").unwrap(), 123);
+        assert_eq!(run("fn main() -> Int64 { return '\\n' }").unwrap(), 10);
+        assert_eq!(run("fn main() -> Int64 { return '\\xff' }").unwrap(), 255);
+        // It coerces against a byte from `bytes(..)` (both `UInt8`).
+        assert_eq!(
+            run("fn main() -> Int64 { if bytes(\"{\")[0] == '{' { return 1 } return 0 }")
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -5397,7 +5419,7 @@ mod tests {
         // Exercised end-to-end (checker + interp) with an Option result.
         let src = "fn main() -> Int64 { \
                    let d = base64Decode(base64Encode(\"hey\")); \
-                   return match d { Some(s) => s.length, None => 0 }; }";
+                   return match d { Some(s) => s.byteLength, None => 0 }; }";
         assert_eq!(run(src).unwrap(), 3);
     }
 
@@ -5424,28 +5446,28 @@ mod tests {
 
     #[test]
     fn indexing_in_refinement_predicate() {
-        let ok = "type G = String where value.length >= 1 && value[0] == 'H'; \
+        let ok = "type G = String where value.byteLength >= 1 && value[0] == 'H'; \
                   fn mk(s: String) -> G { return G(s); } \
-                  fn main() -> Int64 { let g = mk(\"Hi\"); return g.length; }";
+                  fn main() -> Int64 { let g = mk(\"Hi\"); return g.byteLength; }";
         assert_eq!(run(ok).unwrap(), 2);
         // A provably-wrong constant is rejected at compile time (via consteval).
-        let bad = "type G = String where value.length >= 1 && value[0] == 'H'; \
+        let bad = "type G = String where value.byteLength >= 1 && value[0] == 'H'; \
                    fn main() -> Int64 { let g = G(\"bye\"); return 0; }";
         assert!(run(bad).unwrap_err().contains("does not satisfy `G`"));
     }
 
     #[test]
     fn validated_string_accepts_valid_value() {
-        let src = "type Name = String where value.length >= 3; \
+        let src = "type Name = String where value.byteLength >= 3; \
                    fn mk(s: String) -> Name { return Name(s); } \
-                   fn main() -> Int64 { let n = mk(\"bob\"); return n.length; }";
+                   fn main() -> Int64 { let n = mk(\"bob\"); return n.byteLength; }";
         assert_eq!(run(src).unwrap(), 3);
     }
 
     #[test]
     fn validated_string_traps_on_too_short() {
         // Runtime construction of an invalid string aborts (matches native exit 1).
-        let src = "type Name = String where value.length >= 3; \
+        let src = "type Name = String where value.byteLength >= 3; \
                    fn mk(s: String) -> Name { return Name(s); } \
                    fn main() -> Int64 { let n = mk(\"x\"); return 0; }";
         assert!(run(src)
@@ -5459,7 +5481,7 @@ mod tests {
         // runs identically (the interp validation is a no-op on a proven value).
         let src = "type TransKey = String where value =~ \"nav\\\\.(home|about)\\\\.label\"\n\
                    type Section = String where value =~ \"home|about\"\n\
-                   fn t(key: TransKey) -> Int64 { return key.length }\n\
+                   fn t(key: TransKey) -> Int64 { return key.byteLength }\n\
                    fn main() -> Int64 { let s: Section = \"home\"  return t(\"nav.\\{s}.label\") }";
         // "nav.home.label" is 14 bytes.
         assert_eq!(run(src).unwrap(), 14);
@@ -5570,7 +5592,7 @@ mod tests {
     #[test]
     fn inline_field_refinements_validate_like_named_types() {
         // Zod/ArkType-style inline `where` on fields: valid values flow through…
-        let ok = "type User = { name: String where value.length >= 3, \
+        let ok = "type User = { name: String where value.byteLength >= 3, \
                                 age: Int64 where value >= 18 } \
                   fn mk(n: Int64) -> User { return User { name: \"ada\", age: n } } \
                   fn main() -> Int64 { let u = mk(33) return u.age }";
@@ -5727,7 +5749,7 @@ mod tests {
     #[test]
     fn multiline_string_includes_the_newline() {
         // A raw newline inside "..." is part of the string (RFC-0007).
-        let src = "fn main() -> Int64 { let s = \"ab\ncd\"; return s.length; }"; // 'a','b','\n','c','d' = 5
+        let src = "fn main() -> Int64 { let s = \"ab\ncd\"; return s.byteLength; }"; // 'a','b','\n','c','d' = 5
         assert_eq!(run(src).unwrap(), 5);
     }
 
@@ -5751,7 +5773,7 @@ mod tests {
     fn value_boxes_string_and_int_distinctly() {
         let src = "fn main() -> Int64 { \
                    let a = match value(7) { IntVal(n) => n, BoolVal(b) => 0, StrVal(s) => 0 - 1 }; \
-                   let b = match value(\"hey\") { IntVal(n) => 0, BoolVal(x) => 0, StrVal(s) => s.length }; \
+                   let b = match value(\"hey\") { IntVal(n) => 0, BoolVal(x) => 0, StrVal(s) => s.byteLength }; \
                    return a + b; }"; // 7 + 3
         assert_eq!(run(src).unwrap(), 10);
     }
@@ -5875,7 +5897,7 @@ mod tests {
         // A Ref<String> mutated in place, then measured.
         let src = "fn main() -> Int64 { let s = cell(\"ab\"); \
                        set(s, get(s) + \"cd\"); \
-                       let n = get(s).length; release(s); return n; }";
+                       let n = get(s).byteLength; release(s); return n; }";
         assert_eq!(run(src).unwrap(), 4);
     }
 
@@ -5955,7 +5977,7 @@ mod tests {
     #[test]
     fn dynamic_string_concat_and_len() {
         let src = "fn g(n: String) -> String { return \"Hi, \" + n + \"!\"; } \
-                   fn main() -> Int64 { return g(\"Vyrn\").length; }";
+                   fn main() -> Int64 { return g(\"Vyrn\").byteLength; }";
         assert_eq!(run(src).unwrap(), 9); // "Hi, Vyrn!" = 9 bytes
     }
 
@@ -5963,7 +5985,7 @@ mod tests {
     fn to_string_method_renders() {
         // `x.toString()` renders scalars, then `+` concatenates: "42/true" = 7.
         let src = "fn main() -> Int64 { let s = (42).toString() + \"/\" + true.toString(); \
-                   return s.length; }";
+                   return s.byteLength; }";
         assert_eq!(run(src).unwrap(), 7);
     }
 
@@ -6157,7 +6179,7 @@ mod tests {
     #[test]
     fn string_global_reads_back() {
         let src = "let banner = \"vyrn\" \
-                   fn f() -> Int64 { return banner.length } \
+                   fn f() -> Int64 { return banner.byteLength } \
                    fn main() -> Int64 { return f() }";
         assert_eq!(run(src).unwrap(), 4);
     }
@@ -6224,7 +6246,7 @@ mod tests {
                        let u = User { name: \"Ada\", age: 36, nick: Some(\"A\") } \
                        let s = toJson(u) \
                        return match fromJson(User, s) { \
-                           Valid(u2) => u2.age + u2.name.length, \
+                           Valid(u2) => u2.age + u2.name.byteLength, \
                            Invalid(iss) => 0 - iss.length, \
                        }; }";
         // age 36 + name length 3 = 39.
@@ -6282,7 +6304,7 @@ mod tests {
     fn decode_validation_issue_accumulates_all() {
         // Two failing `where` clauses -> two `validate` issues, both reported.
         let src = "type Age = Int64 where value >= 0 && value <= 130 \
-                   type Name = String where value.length >= 1 \
+                   type Name = String where value.byteLength >= 1 \
                    type U = { name: Name, age: Age } \
                    fn main() -> Int64 { \
                        return match fromJson(U, \"{\\\"name\\\":\\\"\\\",\\\"age\\\":999}\") { \

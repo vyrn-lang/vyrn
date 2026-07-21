@@ -142,7 +142,7 @@ fn bench_bodies_are_stripped_from_emitted_ir() {
     let file = dir.join("b.vyrn");
     std::fs::write(
         &file,
-        "bench \"UNIQUE_BENCH_MARKER\" { let s = \"SECRET_IN_BENCH_BODY\" blackBox(s.length) }\n\
+        "bench \"UNIQUE_BENCH_MARKER\" { let s = \"SECRET_IN_BENCH_BODY\" blackBox(s.byteLength) }\n\
          fn main() -> Int64 { print(1) return 0 }\n",
     )
     .unwrap();

@@ -86,10 +86,13 @@ pub fn predicate_bounds(pred: &Expr) -> (Option<i64>, Option<i64>) {
             let (r0, r1) = predicate_bounds(rhs);
             return (l0.or(r0), l1.or(r1));
         }
-        // `value OP n` or `n OP value` → normalize to `value OP n`.
+        // `value OP n` or `n OP value` → normalize to `value OP n`. `n` may be a
+        // byte literal (RFC-0057), e.g. `type Digit = UInt8 where value >= '0'`.
         let (normalized, n) = match (&**lhs, &**rhs) {
-            (Expr::Var { name, .. }, Expr::Int(n)) if name == "value" => (*op, *n),
-            (Expr::Int(n), Expr::Var { name, .. }) if name == "value" => (flip(*op), *n),
+            (l, Expr::Int(n)) if is_value(l) => (*op, *n),
+            (l, Expr::Byte(b)) if is_value(l) => (*op, *b as i64),
+            (Expr::Int(n), r) if is_value(r) => (flip(*op), *n),
+            (Expr::Byte(b), r) if is_value(r) => (flip(*op), *b as i64),
             _ => return (None, None),
         };
         return match normalized {
@@ -143,7 +146,7 @@ pub fn predicate_multiple_of(pred: &Expr) -> Option<i64> {
 }
 
 /// The inclusive `(minLength, maxLength)` a predicate implies via
-/// `value.length OP N` comparisons (exclusive bounds are floored/ceiled to
+/// `value.byteLength OP N` comparisons (exclusive bounds are floored/ceiled to
 /// inclusive, exactly like the JSON Schema emitter).
 pub fn predicate_length_bounds(pred: &Expr) -> (Option<i64>, Option<i64>) {
     if let Expr::Binary { op, lhs, rhs, .. } = pred {
@@ -547,12 +550,12 @@ fn named_schema(decl: &TypeDecl, cx: &mut SchemaCx) -> String {
 }
 
 /// `{"type":"string", <length constraints>}` — a `String` refinement expresses
-/// bounds via `value.length OP N` (→ `minLength`/`maxLength`) and `value =~ "…"`
+/// bounds via `value.byteLength OP N` (→ `minLength`/`maxLength`) and `value =~ "…"`
 /// (→ `pattern`). Two or more patterns are combined with `allOf` (a JSON object
 /// has at most one `pattern`). A form the model can't capture is documented in a
 /// `$comment` (as for scalars).
 ///
-/// Length semantics (decided): Vyrn's `value.length` counts **bytes** (native
+/// Length semantics (decided): Vyrn's `value.byteLength` counts **bytes** (native
 /// `strlen`, interp `str::len`), while JSON Schema's `minLength`/`maxLength`
 /// count Unicode code points. The two agree exactly on ASCII — which is what
 /// length refinements are used for in practice (usernames, codes, keys). For
@@ -596,7 +599,7 @@ fn string_with_constraints(pred: Option<&Expr>) -> String {
     format!("{{{}}}", parts.join(","))
 }
 
-/// Collect `minLength`/`maxLength` from a `String` predicate over `value.length`,
+/// Collect `minLength`/`maxLength` from a `String` predicate over `value.byteLength`,
 /// returning whether it was captured in full.
 fn collect_string_constraints(pred: &Expr, out: &mut Vec<(String, String)>) -> bool {
     let Expr::Binary { op, lhs, rhs, .. } = pred else {
@@ -621,7 +624,7 @@ fn collect_string_constraints(pred: &Expr, out: &mut Vec<(String, String)>) -> b
         }
         return false;
     }
-    // `value.length OP N` or `N OP value.length`. `>` and `>=` both floor the
+    // `value.byteLength OP N` or `N OP value.byteLength`. `>` and `>=` both floor the
     // length (JSON Schema minLength is inclusive), so `> N` becomes `N + 1`.
     let (norm, lit) = match (&**lhs, &**rhs) {
         (l, r) if is_length_of_value(l) => (*op, int_lit(r)),
@@ -637,21 +640,24 @@ fn collect_string_constraints(pred: &Expr, out: &mut Vec<(String, String)>) -> b
     }
 }
 
-/// True if `e` is `value.length`.
+/// True if `e` is `value.byteLength` (RFC-0058 renamed it from `value.byteLength`).
 fn is_length_of_value(e: &Expr) -> bool {
-    matches!(e, Expr::Field { expr, field, .. } if field == "length" && is_value(expr))
+    matches!(e, Expr::Field { expr, field, .. } if field == "byteLength" && is_value(expr))
 }
 
-/// An integer literal (possibly negated) as an `i64`, or `None`.
+/// An integer literal (possibly negated) as an `i64`, or `None`. A byte literal
+/// (RFC-0057) counts too — it is an integer literal.
 fn int_lit(e: &Expr) -> Option<i64> {
     match e {
         Expr::Int(n) => Some(*n),
+        Expr::Byte(b) => Some(*b as i64),
         Expr::Unary {
             op: UnOp::Neg,
             expr,
             ..
         } => match &**expr {
             Expr::Int(n) => Some(-n),
+            Expr::Byte(b) => Some(-(*b as i64)),
             _ => None,
         },
         _ => None,
@@ -1095,16 +1101,16 @@ mod json_schema_tests {
     #[test]
     fn string_length_maps_to_min_max_length() {
         assert_eq!(
-            schema_of("type Username = String where value.length >= 3 && value.length <= 16", "Username"),
+            schema_of("type Username = String where value.byteLength >= 3 && value.byteLength <= 16", "Username"),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"string\",\"minLength\":3,\"maxLength\":16}"
         );
     }
 
     #[test]
     fn string_exclusive_length_floors_to_inclusive() {
-        // `value.length > 2` ⇒ minLength 3 (JSON Schema minLength is inclusive).
+        // `value.byteLength > 2` ⇒ minLength 3 (JSON Schema minLength is inclusive).
         assert_eq!(
-            schema_of("type S = String where value.length > 2", "S"),
+            schema_of("type S = String where value.byteLength > 2", "S"),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"string\",\"minLength\":3}"
         );
     }
@@ -1166,7 +1172,7 @@ mod json_schema_tests {
         // Size + two regex clauses: length maps directly, the patterns go in `allOf`
         // (a JSON object permits only one `pattern`).
         let s = schema_of(
-            "type W = String where value.length >= 4 && value =~ \"[a-z]+\" && value =~ \"(.a)*\"",
+            "type W = String where value.byteLength >= 4 && value =~ \"[a-z]+\" && value =~ \"(.a)*\"",
             "W",
         );
         assert!(s.contains("\"minLength\":4"), "length maps: {s}");
@@ -1226,7 +1232,7 @@ mod json_schema_tests {
         // Zod-style inline `where` on fields lands in the field's schema, and
         // the record-level cross-field `where` keeps its `$comment`.
         let s = schema_of(
-            "type User = { name: String where value.length >= 3, \
+            "type User = { name: String where value.byteLength >= 3, \
                            age: Int64 where value >= 18 } where age < 150",
             "User",
         );

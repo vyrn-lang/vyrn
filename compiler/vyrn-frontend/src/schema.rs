@@ -805,7 +805,7 @@ fn len_cmp(op: BinOp, n: i64) -> Expr {
         op,
         lhs: Box::new(Expr::Field {
             expr: Box::new(value_var()),
-            field: "length".to_string(),
+            field: "byteLength".to_string(),
             line: 1,
         }),
         rhs: Box::new(Expr::Int(n)),
@@ -897,7 +897,7 @@ mod tests {
         let decls =
             synth(r#"{"title": "Slug", "type": "string", "minLength": 1, "pattern": "^[a-z]+$"}"#);
         let pred = crate::checker::pred_summary(decls[0].predicate.as_ref().unwrap());
-        assert_eq!(pred, "value.length >= 1 && value =~ \"[a-z]+\"");
+        assert_eq!(pred, "value.byteLength >= 1 && value =~ \"[a-z]+\"");
     }
 
     #[test]
@@ -974,7 +974,7 @@ mod tests {
     #[test]
     fn round_trips_with_the_jsonschema_emitter() {
         // Emit a schema from Vyrn types, import it back, re-emit: byte-equal.
-        let src = "type Username = String where value.length >= 3 && value.length <= 16 \
+        let src = "type Username = String where value.byteLength >= 3 && value.byteLength <= 16 \
                    type Age = Int64 where value >= 18 && value <= 130 \
                    type User = { name: Username, age: Age, nick: Option<String> } \
                    fn main() -> Int64 { return 0 }";

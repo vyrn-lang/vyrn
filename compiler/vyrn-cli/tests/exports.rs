@@ -73,7 +73,7 @@ fn run(root: &Path) -> String {
 const WIRE: &str = r#"/// A user id (positive).
 export type UserId = Int64 where value >= 1
 /// A bounded display name.
-export type UserName = String where value.length >= 1 && value.length <= 40
+export type UserName = String where value.byteLength >= 1 && value.byteLength <= 40
 /// A shape with payload and nullary variants.
 export type Shape = | Circle(Int64) | Rect(Int64, Int64) | Dot
 /// A nullary-only colour.

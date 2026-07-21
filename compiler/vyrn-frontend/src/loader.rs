@@ -1954,7 +1954,7 @@ impl NsResolver<'_> {
                     LambdaBody::Block(b2) => self.walk_block(b2, &mut inner),
                 }
             }
-            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
+            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
         }
     }
 }
@@ -2377,7 +2377,7 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
                 LambdaBody::Expr(e2) => expr(e2, *line, out),
                 LambdaBody::Block(b2) => block(b2, out),
             },
-            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
+            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
         }
     }
     block(b, &mut out);
@@ -2576,7 +2576,7 @@ fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(St
                 LambdaBody::Block(b2) => scope_block(b2, &mut inner, out),
             }
         }
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
+        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
     }
 }
 
@@ -2785,7 +2785,7 @@ fn rewrite_expr(e: &mut Expr, map: &HashMap<String, String>, ns: &HashSet<String
             LambdaBody::Expr(e2) => rewrite_expr(e2, map, ns),
             LambdaBody::Block(b2) => rewrite_block(b2, map, ns),
         },
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
+        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
     }
 }
 
@@ -3986,7 +3986,7 @@ mod gen_tests {
                        let iface = moduleInterface(path) \
                        let mut src = \"\" \
                        for t in iface.types { src = src + t.source } \
-                       return \"export fn shape() -> Int64 { return \" + \"\\{src.length}\" + \" }\\n\" }";
+                       return \"export fn shape() -> Int64 { return \" + \"\\{src.byteLength}\" + \" }\\n\" }";
         let root = "import { refl } from \"./gen\" \
                     import { shape } from refl(\"./contract\") \
                     fn main() -> Int64 { return shape() }";

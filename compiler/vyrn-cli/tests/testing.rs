@@ -128,7 +128,7 @@ fn test_bodies_are_stripped_from_emitted_ir() {
     let file = dir.join("t.vyrn");
     std::fs::write(
         &file,
-        "test \"UNIQUE_TEST_MARKER\" { let s = \"SECRET_IN_TEST_BODY\" print(s.length) }\n\
+        "test \"UNIQUE_TEST_MARKER\" { let s = \"SECRET_IN_TEST_BODY\" print(s.byteLength) }\n\
          fn main() -> Int64 { print(1) return 0 }\n",
     )
     .unwrap();

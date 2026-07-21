@@ -1443,7 +1443,7 @@ impl<'a> Checker<'a> {
                 t.line, t.name
             ));
         }
-        // `String` refinements are allowed (e.g. `value.length >= 3`); like all
+        // `String` refinements are allowed (e.g. `value.byteLength >= 3`); like all
         // predicates they must be call-free and const-analyzable (checked below).
         if let Some(pred) = &t.predicate {
             if consteval::contains_call(pred) {
@@ -2217,6 +2217,32 @@ impl<'a> Checker<'a> {
                     }
                 }
             },
+            // A byte literal (RFC-0057) is an integer literal whose value is a
+            // single byte; it defaults to `UInt8` but coerces to an expected
+            // integer type exactly as `Expr::Int` does (so `let x: Int64 = 'a'`
+            // behaves as `97`). Its 0..255 value always fits `UInt8`.
+            Expr::Byte(b) => {
+                let v = *b as i64;
+                match expected.map(|t| self.base(t)) {
+                    Some(Type::Int) => Ok(Type::Int),
+                    Some(t @ Type::IntN { bits, signed }) => {
+                        if int_literal_fits(v, bits, signed) {
+                            Ok(t)
+                        } else {
+                            Err(format!(
+                                "byte literal {} does not fit {} (its range is {})",
+                                render_int_literal(v),
+                                intn_name(bits, signed),
+                                intn_range(bits, signed),
+                            ))
+                        }
+                    }
+                    _ => Ok(Type::IntN {
+                        bits: 8,
+                        signed: false,
+                    }),
+                }
+            }
             // A float literal takes the expected float type (`let x: Float32 = 1.5`),
             // otherwise the default `Float` (f64).
             Expr::Float(_) => Ok(match expected.map(|t| self.base(t)) {
@@ -2344,6 +2370,38 @@ impl<'a> Checker<'a> {
                         r = l.clone();
                     }
                 }
+                // A byte literal (default `UInt8`, RFC-0057) also adapts to an
+                // integer sibling of another width, exactly like an int literal —
+                // its 0..255 value must fit the sibling. This lets `chars(s)[i] ==
+                // '\xe9'` (Int64 vs a byte) type-check.
+                if let Expr::Byte(b) = &**lhs {
+                    let adapt = match &r {
+                        Type::Int => Some(Type::Int),
+                        Type::IntN { bits, signed }
+                            if int_literal_fits(*b as i64, *bits, *signed) =>
+                        {
+                            Some(r.clone())
+                        }
+                        _ => None,
+                    };
+                    if let Some(t) = adapt {
+                        l = t;
+                    }
+                }
+                if let Expr::Byte(b) = &**rhs {
+                    let adapt = match &l {
+                        Type::Int => Some(Type::Int),
+                        Type::IntN { bits, signed }
+                            if int_literal_fits(*b as i64, *bits, *signed) =>
+                        {
+                            Some(l.clone())
+                        }
+                        _ => None,
+                    };
+                    if let Some(t) = adapt {
+                        r = t;
+                    }
+                }
                 // Likewise a plain float literal adapts to a `Float32` sibling.
                 if l == Type::Float && r == Type::Float32 && matches!(**lhs, Expr::Float(_)) {
                     l = Type::Float32;
@@ -2429,8 +2487,15 @@ impl<'a> Checker<'a> {
                     }
                     // `map.length` is the entry count (RFC-0028).
                     Type::Map(..) if field == "length" => Ok(Type::Int),
-                    // `str.length` is the byte length (matches `strlen`/`Str::len`).
-                    Type::Str if field == "length" => Ok(Type::Int),
+                    // `str.byteLength` is the O(1) UTF-8 byte count (matches
+                    // `strlen`/`Str::len`). RFC-0058 renamed it from `.length`.
+                    Type::Str if field == "byteLength" => Ok(Type::Int),
+                    // `String` has no `.length`: the name promised characters but
+                    // delivered bytes. Refuse it with a targeted hint (RFC-0058).
+                    Type::Str if field == "length" => Err(format!(
+                        "line {line}: String has no `length`: use `byteLength` for bytes \
+                         or `charCount()` for Unicode scalars"
+                    )),
                     Type::Record(rfields) => rfields
                         .iter()
                         .find(|f| &f.name == field)
@@ -3205,7 +3270,7 @@ impl<'a> Checker<'a> {
             }
             "len" => {
                 return Err(format!(
-                    "line {line}: `len(s)` was removed; a String's byte length is `s.length`"
+                    "line {line}: `len(s)` was removed; a String's byte length is `s.byteLength`"
                 ))
             }
             "list" => {
@@ -3883,6 +3948,24 @@ impl<'a> Checker<'a> {
                 ));
             }
             return Ok(Type::Str);
+        }
+        // `@charCount` — the internal spelling of `s.charCount()` (RFC-0058):
+        // the number of Unicode scalar values in a String. O(n): counts the
+        // non-continuation bytes (`b & 0xC0 != 0x80`) of validated UTF-8.
+        if name == "@charCount" {
+            if args.len() != 1 {
+                return Err(format!("line {line}: `charCount` takes no arguments"));
+            }
+            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
+            if matches!(t, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if t != Type::Str {
+                return Err(format!(
+                    "line {line}: `charCount` counts the Unicode scalars of a String, found {t}"
+                ));
+            }
+            return Ok(Type::Int);
         }
         if name == "parse" {
             if args.len() != 1 {
@@ -5518,6 +5601,7 @@ impl<'a> Checker<'a> {
 pub(crate) fn pred_summary(expr: &Expr) -> String {
     match expr {
         Expr::Int(n) => n.to_string(),
+        Expr::Byte(b) => b.to_string(),
         Expr::Float(x) => x.to_string(),
         Expr::Bool(b) => b.to_string(),
         Expr::Str(s) => format!("{s:?}"),
@@ -6288,7 +6372,7 @@ fn global_ref_expr(
     let is_global = |n: &str| globals.contains(n) && !local.contains(n);
     match e {
         Expr::Var { name, .. } => is_global(name),
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => false,
+        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => false,
         Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
             global_ref_expr(expr, globals, local)
         }
@@ -6380,7 +6464,7 @@ fn init_restrictions(
             }
             Ok(())
         }
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
+        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
         Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => recur(expr),
         Expr::Binary { lhs, rhs, .. } => {
             recur(lhs)?;
@@ -6518,7 +6602,8 @@ fn calls_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
 }
 fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
     match e {
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Var { .. } => {}
+        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_)
+        | Expr::Var { .. } => {}
         Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
             calls_expr(expr, out)
         }
@@ -6882,7 +6967,7 @@ mod tests {
     fn cell_is_generic_over_element_type() {
         // A cell can hold any type; `get` returns exactly that type.
         let src = "fn main() -> Int64 { let c = cell(\"hi\"); \
-                   let n = get(c).length; release(c); return n; }";
+                   let n = get(c).byteLength; release(c); return n; }";
         assert!(check_src(src).is_ok());
     }
 
@@ -6932,7 +7017,7 @@ mod tests {
     fn slice_builtin_signature() {
         // slice(String, Int64, Int64) -> String (RFC-0046).
         assert!(check_src(
-            "fn main() -> Int64 { let x: String = slice(\"hello\", 1, 3) return x.length }"
+            "fn main() -> Int64 { let x: String = slice(\"hello\", 1, 3) return x.byteLength }"
         )
         .is_ok());
         let e = check_src("fn main() -> Int64 { let x = slice(\"hi\") return 0 }").unwrap_err();
@@ -7536,7 +7621,7 @@ mod tests {
         // A heap temporary lives and dies inside the region; only an Int escapes.
         let src = "fn main() -> Int64 { \
                        let a = \"x\"; let b = \"y\"; let mut n = 0; \
-                       region { let s = a + b; n = s.length; } \
+                       region { let s = a + b; n = s.byteLength; } \
                        return n; }";
         assert!(check_src(src).is_ok());
     }
@@ -8118,7 +8203,7 @@ mod tests {
     #[test]
     fn string_plus_is_concatenation() {
         // `+` on two Strings concatenates (replacing `concat`); its length is 3.
-        let src = "fn main() -> Int64 { let x = \"a\" + \"bc\"; return x.length; }";
+        let src = "fn main() -> Int64 { let x = \"a\" + \"bc\"; return x.byteLength; }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
@@ -8180,7 +8265,7 @@ mod tests {
         let src = "fn main() -> Int64 { \
                        let a = (42).toString(); let b: Int8 = 3; let c = b.toString(); \
                        let d = (1.5).toString(); let e = true.toString(); let f = \"hi\".toString(); \
-                       return a.length + c.length + d.length + e.length + f.length; }";
+                       return a.byteLength + c.byteLength + d.byteLength + e.byteLength + f.byteLength; }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
@@ -8367,12 +8452,12 @@ mod tests {
 
     #[test]
     fn string_length_refinement() {
-        // A `String where value.length ..` type-checks and const-validates.
-        let ok = "type Name = String where value.length >= 3; \
+        // A `String where value.byteLength ..` type-checks and const-validates.
+        let ok = "type Name = String where value.byteLength >= 3; \
                   fn main() -> Int64 { let n = Name(\"bob\"); return 0; }";
         assert!(check_src(ok).is_ok());
         // A provably-too-short constant is rejected at compile time.
-        let bad = "type Name = String where value.length >= 3; \
+        let bad = "type Name = String where value.byteLength >= 3; \
                    fn main() -> Int64 { let n = Name(\"ab\"); return 0; }";
         assert!(
             check_src(bad)
@@ -8384,8 +8469,49 @@ mod tests {
 
     #[test]
     fn string_length_is_int() {
-        let src = "fn main() -> Int64 { let s = \"hi\"; return s.length; }";
+        let src = "fn main() -> Int64 { let s = \"hi\"; return s.byteLength; }";
         assert!(check_src(src).is_ok());
+    }
+
+    #[test]
+    fn string_dot_length_is_rejected_with_hint() {
+        // RFC-0058: `.length` on a String is a targeted error, not the generic
+        // unknown-member diagnostic.
+        let e = check_src("fn main() -> Int64 { let s = \"hi\"; return s.length; }").unwrap_err();
+        assert!(
+            e.contains(
+                "String has no `length`: use `byteLength` for bytes or `charCount()` \
+                 for Unicode scalars"
+            ),
+            "{e}"
+        );
+        // Arrays and SmallArrays keep `.length`.
+        assert!(check_src(
+            "fn main() -> Int64 { let a: Array<Int64> = [1, 2] return a.length }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn char_count_is_int() {
+        assert!(check_src("fn main() -> Int64 { return \"héllo\".charCount() }").is_ok());
+        // A user function may still be named `charCount` (the builtin is a method).
+        let src = "fn charCount(s: String) -> Int64 { return 0 } \
+                   fn main() -> Int64 { return charCount(\"x\") }";
+        assert!(check_src(src).is_ok());
+    }
+
+    #[test]
+    fn byte_literal_defaults_to_uint8_and_coerces() {
+        // Default (unconstrained) type is `UInt8`.
+        assert!(check_src("fn main() -> Int64 { let b = 'a' return 0 }").is_ok());
+        // It coerces to an annotated integer type exactly like `97` does.
+        assert!(check_src("fn main() -> Int64 { let x: Int64 = 'a' return x }").is_ok());
+        // It compares against a byte from `bytes(..)` (both UInt8).
+        assert!(check_src(
+            "fn main() -> Int64 { if bytes(\"{\")[0] == '{' { return 1 } return 0 }"
+        )
+        .is_ok());
     }
 
     #[test]
@@ -8673,7 +8799,7 @@ mod tests {
         // The target mixes a length clause with a regex clause → not a pure
         // regex language → containment does not apply, no error even though the
         // interpolation could exceed the length at runtime.
-        let src = "type Key = String where value =~ \"[a-z]+\" && value.length < 3\n\
+        let src = "type Key = String where value =~ \"[a-z]+\" && value.byteLength < 3\n\
              type Section = String where value =~ \"home|about\"\n\
              fn t(k: Key) -> Int64 { return 0 }\n\
              fn main() -> Int64 { let s: Section = \"home\"  return t(\"\\{s}\") }";
@@ -8957,7 +9083,7 @@ mod tests {
     #[test]
     fn map_allows_validated_string_key() {
         // A validated string type resolves to `String`, so it is a legal key.
-        let src = "type Name = String where value.length >= 1\n\
+        let src = "type Name = String where value.byteLength >= 1\n\
                    fn f(m: Map<Name, Int64>) -> Int64 { return 0 }\n\
                    fn main() -> Int64 { return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));

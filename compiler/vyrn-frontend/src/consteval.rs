@@ -18,7 +18,7 @@ pub enum ConstVal {
     /// `Float`/`Float64` base with exact IEEE `f64` semantics (identical to
     /// both runtimes, so a compile-time proof never disagrees with them).
     Float(f64),
-    /// A string constant — supports `value.length` and equality in refinement
+    /// A string constant — supports `value.byteLength` and equality in refinement
     /// predicates over a `String` base (RFC-0003). Not `Copy` (owns its bytes).
     Str(String),
 }
@@ -52,6 +52,9 @@ impl ConstVal {
 pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
     match expr {
         Expr::Int(n) => Some(ConstVal::Int(*n)),
+        // A byte literal (RFC-0057) folds to its integer value, so refinement
+        // predicates can inspect individual bytes (`value[0] == 'H'`).
+        Expr::Byte(b) => Some(ConstVal::Int(*b as i64)),
         Expr::Bool(b) => Some(ConstVal::Bool(*b)),
         // String and float constants participate (for `String where` /
         // `Float where` refinements).
@@ -155,7 +158,7 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
         // `s.length` on a string constant folds to its byte length (matching the
         // native `strlen` and the interpreter's `Str::len`). Any other field access
         // is not a compile-time constant.
-        Expr::Field { expr, field, .. } if field == "length" => match eval(expr, env)? {
+        Expr::Field { expr, field, .. } if field == "byteLength" => match eval(expr, env)? {
             ConstVal::Str(s) => Some(ConstVal::Int(s.len() as i64)),
             _ => None,
         },
@@ -191,7 +194,12 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
 /// predicates, keeping them purely const-analyzable in v0.1).
 pub fn contains_call(expr: &Expr) -> bool {
     match expr {
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Var { .. } => false,
+        Expr::Int(_)
+        | Expr::Byte(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Str(_)
+        | Expr::Var { .. } => false,
         Expr::Unary { expr, .. } => contains_call(expr),
         Expr::Binary { lhs, rhs, .. } => contains_call(lhs) || contains_call(rhs),
         // Indexing (`s[i]` = `at(s, i)`) is a pure, const-foldable builtin, so it

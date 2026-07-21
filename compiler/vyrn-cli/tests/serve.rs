@@ -318,7 +318,7 @@ fn workers_survive_a_trap_and_keep_serving() {
         r#"
 fn handle(req: Request) -> Response {
     if req.path == "/boom" {
-        let n = req.body.length
+        let n = req.body.byteLength
         let z = n - n
         return Response { status: 200, contentType: "text/plain", body: (n / z).toString() }
     }

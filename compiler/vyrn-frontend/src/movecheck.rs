@@ -277,7 +277,7 @@ impl MoveCheck<'_> {
         scope: &mut Vec<HashSet<String>>,
     ) -> Result<(), String> {
         match e {
-            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
+            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
             Expr::Var { name, line } => {
                 if let Some((cline, consumer)) = consumed.get(name) {
                     return Err(format!(

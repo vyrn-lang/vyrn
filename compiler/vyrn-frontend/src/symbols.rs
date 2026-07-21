@@ -955,6 +955,16 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
             doc: None,
         });
     }
+    // `str.byteLength` is the UTF-8 byte count field (RFC-0058); `.charCount()`
+    // (a method) answers the Unicode-scalar question. `String` has no `.length`.
+    if matches!(ty, Type::Str) {
+        out.push(Completion {
+            label: "byteLength".to_string(),
+            kind: SymbolKind::Field,
+            detail: "byteLength: Int64 — UTF-8 byte count (O(1), read-only)".to_string(),
+            doc: None,
+        });
+    }
     // Record fields: a named record receiver offers its declaration's fields;
     // an inline structural receiver offers its own.
     match &ty {
@@ -2078,6 +2088,11 @@ fn global_detail(g: &GlobalDecl) -> String {
 fn infer_literal_type(e: &Expr) -> Option<Type> {
     match e {
         Expr::Int(_) => Some(Type::Int),
+        // A byte literal (RFC-0057) defaults to `UInt8` — hover shows that.
+        Expr::Byte(_) => Some(Type::IntN {
+            bits: 8,
+            signed: false,
+        }),
         Expr::Float(_) => Some(Type::Float),
         Expr::Bool(_) => Some(Type::Bool),
         Expr::Str(_) => Some(Type::Str),
@@ -2704,6 +2719,7 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "release", detail: "release(ref) -> Unit — release a generational reference" },
     BuiltinMethod { name: "toArray", detail: "smallArray.toArray() -> Array<T> — copy a SmallArray's elements out to a growable Array (RFC-0056)" },
     BuiltinMethod { name: "toString", detail: "x.toString() -> String — render a number, Bool, or String" },
+    BuiltinMethod { name: "charCount", detail: "s.charCount() -> Int64 — number of Unicode scalar values (O(n); counts non-continuation bytes)" },
     BuiltinMethod { name: "join", detail: "task.join() -> T — await a spawned task's result" },
     BuiltinMethod { name: "trace", detail: "trace(logger, message) -> Unit — log at trace level" },
     BuiltinMethod { name: "debug", detail: "debug(logger, message) -> Unit — log at debug level" },
@@ -2772,9 +2788,13 @@ fn builtin_methods_for(ty: &Type) -> Vec<BuiltinMethod> {
             .into_iter()
             .flatten()
             .collect(),
-        // `String` renders with `.toString()` (its byte length is the `.length`
-        // field, surfaced by record/field completion, not here).
-        Type::Str | Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool => {
+        // `String` offers `.toString()` and `.charCount()` (RFC-0058); its
+        // `.byteLength` field is surfaced by field completion, not here.
+        Type::Str => vec![by_name("toString"), by_name("charCount")]
+            .into_iter()
+            .flatten()
+            .collect(),
+        Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool => {
             vec![by_name("toString")].into_iter().flatten().collect()
         }
         Type::Logger => vec![

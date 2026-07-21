@@ -906,6 +906,18 @@ void* __vyrn_stdout(void) { return stdout; }
    adapt on ILP32 targets (wasm32) and are transparent on LP64/LLP64. */
 unsigned long long __vyrn_strlen(const char* s) { return (unsigned long long)strlen(s); }
 
+/* charCount (RFC-0058): the number of Unicode scalar values in a validated UTF-8
+   string = the count of non-continuation bytes (those where (b & 0xC0) != 0x80).
+   Byte-identical to the interpreter's loop. Strings are NUL-terminated (interior
+   NUL is rejected at construction), so `strlen`-style iteration is exact. */
+unsigned long long __vyrn_charcount(const char* s) {
+    unsigned long long n = 0;
+    for (const unsigned char* p = (const unsigned char*)s; *p; p++) {
+        if ((*p & 0xC0) != 0x80) n++;
+    }
+    return n;
+}
+
 /* Allocation failure is a trap, not a null dereference: the emitted IR never
    null-checks (every alloc site would need a branch), so the single choke
    point checks instead. The size guard matters on ILP32 (wasm32): without it
