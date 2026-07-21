@@ -1,6 +1,6 @@
 # RFC-0056 — `SmallArray<T, N>`: Small-Buffer Collections
 
-- **Status:** Locked design
+- **Status:** Implemented
 - **Depends on:** RFC-0011 (Array element ops — the API contract this
   clones), RFC-0055 (benchmarking — the measurement rail; the win must be
   *shown*, not asserted), the leak/race hardening arc (drop discipline),
@@ -119,3 +119,99 @@ Array/SmallArray protocol, transparent SBO on `Array<T>` itself
 (rejected: ABI ripple through wasm/extern/drop hardening for an
 invisible, uncontrollable change), and integer-argument *inference*
 (`SmallArray<Int64, _>`).
+
+## As landed
+
+Shipped as specified — the locked representation
+`{ i64 len, i64 cap, ptr data, [N x T] inline }` with `cap` the state
+discriminant, `1 <= N <= 64`, spill at `len == cap == N` to `2N` (never
+un-spills), and byte-identical interp/native/wasm output including traps.
+
+### What moved where
+
+- **`ast.rs`** — two new `Type` arms: `SmallArray(Box<Type>, usize)` (the
+  builtin) and `ConstInt(u64)` (an integer literal used as a type argument).
+  Both display (`SmallArray<Int64, 8>`, `8`) and derive `Eq`.
+- **`parser.rs`** — `type_()` now accepts a non-negative integer literal as a
+  type argument (→ `ConstInt`), so a stray one on any constructor reaches the
+  checker rather than being a parse error; a dedicated `SmallArray<T, N>` arm
+  reads the capacity literal directly. `.toArray()` maps to the method-only
+  internal name `@toArray` (a free `toArray(x)` stays an unknown call).
+- **`types.rs`** — `substitute` recurses into `SmallArray`'s element.
+- **`checker.rs`** — integer-argument rule (`type X does not take an integer
+  argument`, checked before arity so the diagnostic is precise), the `1..=64`
+  bound (`smallArray capacity must be between 1 and 64`), oversized-literal
+  rejection, and `SmallArray` threaded through covariance/`assignable`,
+  `contains_fn`/`contains_heap`/`has_nested_wrap`, `ensure_type_exists`,
+  `.length`, `push` (returns the same kind), `at`, `alen`, `for`-in,
+  index-set, `mut_array_receiver` (`pop`/`swapRemove`), `unify`, and the new
+  `@toArray`. Contract-boundary use is a named error via `codec::encodable`/
+  `decodable` (`SmallArray` falls through to the "not codable" reject).
+- **`interp.rs`** — a `SmallArray` is a `Val::Array` (the spill is invisible at
+  the value level), so ops, `for`-in, literals, and traps reuse Array's paths;
+  `@toArray` is the identity; element/coerce boundaries accept `SmallArray`.
+- **`own.rs`** — new `DropKind::FreeSmallArr`; a `SmallArray` binding is tracked
+  as owned (free `data`, null while inline) and escape analysis un-tracks a
+  returned/aliased/`drop`-ed one, so it is freed exactly once.
+- **`codegen (vyrn-codegen)`** — `llt` (the inline-aggregate struct), the
+  `array_n_to_smallarray` / empty-`[]` literal lowerings, `gen_smallarray_push`
+  (the full spill state machine), slot-based `pop`/`swapRemove`/index-set,
+  value-based `at`/`for`-in/`toArray`, `.length`/`alen`, and the
+  `FreeSmallArr` drop (frees the `data` pointer at byte offset 16 —
+  `free(null)` is the inline no-op). Helpers `sa_ll`/`sa_slot_base`/
+  `sa_value_base_len` factor the base-pointer state branch.
+- **`loader.rs`/`symbols.rs`/`schema_reflect.rs`** — namespace rewrite +
+  reachable-type walks recurse into `SmallArray`; LSP hover shows the full type
+  incl. `N`, member completion offers Array's set plus `toArray`, `.length` is
+  offered.
+
+### Deviations
+
+1. **`memcpy` → `llvm.memcpy` intrinsic.** libc `memcpy` has an i32 `size_t` on
+   wasm32 but i64 on x86-64; declaring `@memcpy(ptr, ptr, i64)` tripped
+   wasmtime's signature check. Switched the two copies (spill-from-inline,
+   `toArray`) to the target-independent `@llvm.memcpy.p0.p0.i64` intrinsic,
+   which lowers correctly on both targets (a `memory.copy` on wasm). SmallArray
+   never crosses `extern`, so keeping the copy internal to generated code is
+   sound — exactly the escape hatch the RFC anticipated.
+2. **`xs[i]` on a plain variable reads through the binding slot**, not a spilled
+   copy of the value. The value-based read (any other receiver, `for`-in,
+   `toArray`) still spills the aggregate to a temp to address the inline buffer;
+   for a `Var` receiver that copy is pure overhead, so the common indexed-read
+   loop pays only the state branch. Purely an optimization — same observable
+   result; without it the "losing" bench was ~20x (a 144-byte struct copy per
+   access) instead of the ~10% the branch actually costs.
+
+No silent redesigns; the representation, bounds, wording, and boundary rules
+are exactly as locked.
+
+### Benches (native, `vyrn bench examples/smallarray.vyrn`) — win AND loss
+
+Divan-style honesty, both shapes shown (min times):
+
+| workload                          | SmallArray<Int64,16> | Array<Int64> | result |
+|-----------------------------------|----------------------|--------------|--------|
+| push 16 (fill; no realloc)        | **57 ns**            | 94 ns        | SmallArray ~1.65x faster — the inline buffer skips the allocator (Array mallocs + grows 0→4→8→16) |
+| indexed sum (1024 reads)          | 106 ns               | **96 ns**    | SmallArray ~10% slower — every `xs[i]` pays the `cap == N ?` state branch to pick the base pointer |
+
+The win is allocation avoidance; the loss is the per-access branch — exactly the
+smallvec trade-off, measured not asserted.
+
+### Verification
+
+- Spill-boundary matrix (fill-to-N, push N+1, pop-below-N-stays-spilled, index
+  traps in both states, drop/leak in both states, move + use-after-move,
+  nested `SmallArray<SmallArray<Int64,2>,2>`, `SmallArray` in a record and an
+  enum) — three-way byte-identical, exercised by `examples/smallarray.vyrn`.
+- Checker rejections pinned (int-arg on non-SmallArray, N=0, N=65, oversized
+  literal, contract-boundary use, coexisting `N=4`+`N=8`, nested) — 8 tests.
+- Leak accounting balanced in both states / explicit + auto-drop / two
+  coexisting capacities — 5 codegen `free`-count tests.
+- Suites: workspace `cargo test --workspace` green (all crates); `vyrn-lsp`
+  40 tests green; three-way parity `cargo test -p vyrn-cli --test parity --
+  --ignored` green (77 examples incl. `smallarray.vyrn`); `vyrn fmt --check`
+  clean on the example (the int type argument round-trips); 0 new clippy
+  warnings.
+- `vyrn-lsp.exe` rebuilt (release) and redeployed to
+  `editor/vscode/server/vyrn-lsp.exe`; SHA-256 verified equal:
+  `04A702F4EFEC771F33BC7402DBB6A5BF69818331A975DC19446E891DDFB10633`.

@@ -1,0 +1,175 @@
+// SmallArray — a small-buffer collection (RFC-0056), like Rust's `smallvec`.
+//
+// `SmallArray<T, N>` is API-identical to the growable `Array<T>` — `push`,
+// `pop`, `swapRemove`, `a[i]`, `a[i] = v`, `.length`, `for x in xs`, contextual
+// `[]`/`[a, b, c]` literals, `drop`, and the same bounds-check trap wording —
+// but its first `N` elements live INLINE, inside the value itself, with no heap
+// allocation. It spills to the heap only when a push grows it past `N`:
+//
+//   { len: i64, cap: i64, data: ptr, inline: [N x T] }
+//
+// `cap` is the state discriminant: `cap == N` is inline (`data` is null and
+// never read); `cap > N` is spilled (elements live at `data`). A push at
+// `len == cap == N` allocates `2N`, copies the inline slots out, and the array
+// never un-spills (a `pop` below `N` stays on the heap — smallvec semantics).
+// Every element access branches on the state to pick the base pointer; that
+// branch is the well-known small-buffer trade-off (see the benches below).
+//
+// `N` is an integer type argument — a scoped addition (only `SmallArray` takes
+// one; `1 <= N <= 64`), NOT general const generics.
+//
+// This file is a three-way parity citizen (interp == native == wasm, byte for
+// byte). It also carries `bench` blocks (RFC-0055): run `vyrn bench
+// examples/smallarray.vyrn` to time SmallArray against Array — the win (inline
+// avoids the allocator) and the loss (the per-access branch) are both shown.
+
+// A record and an enum that each hold a SmallArray inline (no boxing needed).
+type Histogram = { name: String, counts: SmallArray<Int64, 4> }
+
+type Bucket =
+    | Empty
+    | Filled(SmallArray<Int64, 3>)
+
+/// Sum a SmallArray by iterating it (exercises `for`-in over both states).
+fn sumSmall(xs: SmallArray<Int64, 4>) -> Int64 {
+    let mut total = 0
+    for x in xs {
+        total = total + x
+    }
+    return total
+}
+
+fn main() -> Int64 {
+    // ---- fill to exactly N, then push past it (the spill boundary) ----------
+    let mut xs: SmallArray<Int64, 4> = []
+    let mut i = 0
+    while i < 4 {
+        xs.push(i * 10) // stays inline: cap == 4, data null
+        i = i + 1
+    }
+    print(xs.length) // 4 — full but still inline
+    print(sumSmall(xs)) // 0 + 10 + 20 + 30 = 60
+
+    xs.push(40) // len == cap == 4 → spill: allocate 8, copy the inline slots
+    xs.push(50)
+    print(xs.length) // 6 — now spilled
+    print(sumSmall(xs)) // 150
+
+    // ---- indexing reads/writes work identically in both states --------------
+    print(xs[3]) // 30
+    xs[3] = 999 // in-place store into the (now heap) buffer
+    print(xs[3]) // 999
+
+    // ---- pop below N stays spilled (never re-copies) ------------------------
+    let popped = match xs.pop() { Some(v) => v, None => 0 - 1 }
+    print(popped) // 50
+    let removed = xs.swapRemove(0) // last (40) moves into slot 0
+    print(removed) // 0
+    print(xs.length) // 4 — below N again, but still on the heap
+    print(xs[0]) // 40
+
+    // ---- toArray: the one explicit copy-out to a growable Array<T> ----------
+    let out = xs.toArray()
+    print(out.length) // 4
+    print(out[0]) // 40
+    drop out
+    drop xs
+
+    // ---- a SmallArray that never spills (pure inline, zero allocation) ------
+    let mut small: SmallArray<Int64, 8> = [1, 2, 3]
+    small.push(4)
+    print(small.length) // 4 — inline, cap stays 8
+    print(small[2]) // 3
+    drop small
+
+    // ---- nested: SmallArray<SmallArray<Int64, 2>, 2> (inline within inline) --
+    let a: SmallArray<Int64, 2> = [1, 2]
+    let b: SmallArray<Int64, 2> = [3, 4]
+    let mut grid: SmallArray<SmallArray<Int64, 2>, 2> = []
+    grid.push(a)
+    grid.push(b)
+    let row = grid[1]
+    print(row[0]) // 3
+    print(grid.length) // 2
+    drop grid
+
+    // ---- a SmallArray inside a record and an enum ---------------------------
+    let h = Histogram { name: "h", counts: [7, 8] }
+    print(h.counts[1]) // 8
+    print(h.counts.length) // 2
+
+    let bucket = Filled([5, 6, 7])
+    let bsum = match bucket {
+        Empty => 0,
+        Filled(vals) => vals[0] + vals[2],
+    }
+    print(bsum) // 12
+
+    return 0
+}
+
+// --- benchmarks (RFC-0055): SmallArray vs Array, honest both ways ------------
+
+// WIN: a SmallArray<Int64, 16> filled to 16 stays inline — zero allocator
+// calls — while the Array<Int64> must malloc and grow its buffer 0→4→8→16.
+bench "smallarray push16 (inline, no alloc)" {
+    let mut xs: SmallArray<Int64, 16> = []
+    let mut i = 0
+    while i < 16 {
+        xs.push(i)
+        i = i + 1
+    }
+    blackBox(xs.length)
+}
+
+bench "array push16 (heap, grows)" {
+    let mut xs: Array<Int64> = []
+    let mut i = 0
+    while i < 16 {
+        xs.push(i)
+        i = i + 1
+    }
+    blackBox(xs.length)
+}
+
+// LOSS: a read-heavy workload pays the per-access state branch on every `xs[j]`.
+// The Array indexes its buffer directly, so it wins the tight read loop.
+bench "smallarray indexed sum (branch/access)" {
+    let mut xs: SmallArray<Int64, 16> = []
+    let mut i = 0
+    while i < 16 {
+        xs.push(i)
+        i = i + 1
+    }
+    let mut total = 0
+    let mut r = 0
+    while r < 64 {
+        let mut j = 0
+        while j < 16 {
+            total = total + xs[j]
+            j = j + 1
+        }
+        r = r + 1
+    }
+    blackBox(total)
+}
+
+bench "array indexed sum (direct)" {
+    let mut xs: Array<Int64> = []
+    let mut i = 0
+    while i < 16 {
+        xs.push(i)
+        i = i + 1
+    }
+    let mut total = 0
+    let mut r = 0
+    while r < 64 {
+        let mut j = 0
+        while j < 16 {
+            total = total + xs[j]
+            j = j + 1
+        }
+        r = r + 1
+    }
+    blackBox(total)
+}
