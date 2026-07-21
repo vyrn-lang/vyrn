@@ -1,0 +1,60 @@
+/// Byte literals (RFC-0057) and the honest String length split (RFC-0058).
+///
+/// A byte literal `'c'` is one ASCII byte, typed `UInt8` — the working unit of
+/// every scanner, so `b == '{'` reads instead of `b == 123`. A String answers
+/// two different length questions: `byteLength` (O(1) UTF-8 bytes) and
+/// `charCount()` (O(n) Unicode scalar values). They agree on ASCII and diverge
+/// on everything else, which is exactly why `.length` was removed.
+
+/// Count the decimal digits in `s`, scanning its bytes with byte literals.
+fn countDigits(s: String) -> Int64 {
+    let mut n = 0
+    for b in s {
+        if b >= '0' && b <= '9' {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+/// The deepest `{ }` nesting in `s` — a scanner-shaped byte walk.
+fn maxBraceDepth(s: String) -> Int64 {
+    let mut depth = 0
+    let mut best = 0
+    for b in s {
+        if b == '{' {
+            depth = depth + 1
+            if depth > best {
+                best = depth
+            }
+        } else if b == '}' {
+            depth = depth - 1
+        }
+    }
+    return best
+}
+
+/// Print a string with both of its length answers.
+fn show(s: String) {
+    print("\{s}  bytes=\{s.byteLength}  chars=\{s.charCount()}")
+}
+
+fn main() -> Int64 {
+    // byteLength vs charCount across scripts.
+    show("") // 0 / 0
+    show("hello") // 5 / 5   (ASCII: they agree)
+    show("héllo") // 6 / 5   (é is 2 bytes, 1 scalar)
+    show("☕") // 3 / 1
+    show("😀") // 4 / 1   (a 4-byte emoji, one scalar)
+
+    // Byte literals in scanner-shaped code.
+    print("digits in a1b2c3: \{countDigits("a1b2c3")}") // 3
+    print("brace depth of {a{b}}: \{maxBraceDepth("{a{b}}")}") // 2
+
+    // A byte literal is a plain UInt8 integer that coerces like any literal.
+    let brace: UInt8 = '{'
+    print("'{' is the byte \{brace}") // 123
+    print(bytes("{")[0] == '{') // true
+
+    return 0
+}
