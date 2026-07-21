@@ -90,8 +90,8 @@ fn main() -> Int64 {
     let badConn = handle(Request { method: "POST", path: "/contract.addBook", body: "{\"title\":\"\",\"url\":\"nope\",\"tags\":[]}" })
     print("connect addBook(bad) -> \{badConn.status}: \{badConn.body}")
     let oa = handle(Request { method: "GET", path: "/openapi.json", body: "" })
-    print("/openapi.json -> \{oa.status} (\{oa.body.length} bytes)")
+    print("/openapi.json -> \{oa.status} (\{oa.body.byteLength} bytes)")
     let gql = handle(Request { method: "GET", path: "/schema.graphql", body: "" })
-    print("/schema.graphql -> \{gql.status} (\{gql.body.length} bytes)")
+    print("/schema.graphql -> \{gql.status} (\{gql.body.byteLength} bytes)")
     return 0
 }

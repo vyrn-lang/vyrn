@@ -10,7 +10,7 @@ export fn splitTrim(s: String, sep: String) -> Array<String> {
     let mut parts: Array<String> = []
     for piece in split(s, sep) {
         let t = trim(piece)
-        if t.length > 0 {
+        if t.byteLength > 0 {
             parts.push(t)
         }
     }

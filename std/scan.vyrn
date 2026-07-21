@@ -94,12 +94,12 @@ export fn scanner(
 
 /// Whether the cursor is at end of input.
 export fn atEnd(sc: Scanner) -> Bool {
-    return sc.pos >= sc.src.length
+    return sc.pos >= sc.src.byteLength
 }
 
 /// The current byte, or `-1` at end of input.
 export fn peek(sc: Scanner) -> Int64 {
-    if sc.pos >= sc.src.length {
+    if sc.pos >= sc.src.byteLength {
         return -1
     }
     return Int64(sc.src[sc.pos])
@@ -108,7 +108,7 @@ export fn peek(sc: Scanner) -> Int64 {
 /// The byte `n` ahead, or `-1` past the end.
 export fn peekAt(sc: Scanner, n: Int64) -> Int64 {
     let i = sc.pos + n
-    if i < 0 || i >= sc.src.length {
+    if i < 0 || i >= sc.src.byteLength {
         return -1
     }
     return Int64(sc.src[i])
@@ -116,8 +116,8 @@ export fn peekAt(sc: Scanner, n: Int64) -> Int64 {
 
 /// Whether the input at the cursor begins with `s`.
 export fn looksAt(sc: Scanner, s: String) -> Bool {
-    let n = s.length
-    if sc.pos + n > sc.src.length {
+    let n = s.byteLength
+    if sc.pos + n > sc.src.byteLength {
         return false
     }
     let mut j = 0
@@ -140,7 +140,7 @@ fn isWordByte(b: Int64) -> Bool {
 
 /// Advance one byte, keeping `line`/`col` in sync (an LF starts a new line).
 export fn advance(sc: modify Scanner) -> Unit {
-    if sc.pos >= sc.src.length {
+    if sc.pos >= sc.src.byteLength {
         return
     }
     let b = Int64(sc.src[sc.pos])
@@ -158,11 +158,11 @@ export fn advance(sc: modify Scanner) -> Unit {
 /// An unterminated block comment consumes to end of input (generators scan
 /// work-in-progress text).
 fn skipBlockComment(sc: modify Scanner) -> Bool {
-    if sc.blockOpen.length == 0 || looksAt(sc, sc.blockOpen) == false {
+    if sc.blockOpen.byteLength == 0 || looksAt(sc, sc.blockOpen) == false {
         return false
     }
     let mut n = 0
-    while n < sc.blockOpen.length {
+    while n < sc.blockOpen.byteLength {
         advance(sc)
         n = n + 1
     }
@@ -170,7 +170,7 @@ fn skipBlockComment(sc: modify Scanner) -> Bool {
         advance(sc)
     }
     let mut m = 0
-    while m < sc.blockClose.length && !atEnd(sc) {
+    while m < sc.blockClose.byteLength && !atEnd(sc) {
         advance(sc)
         m = m + 1
     }
@@ -188,7 +188,7 @@ export fn skipWs(sc: modify Scanner) -> Unit {
             advance(sc)
             going = true
         }
-        if sc.lineComment.length > 0 && looksAt(sc, sc.lineComment) {
+        if sc.lineComment.byteLength > 0 && looksAt(sc, sc.lineComment) {
             while !atEnd(sc) && peek(sc) != 10 {
                 advance(sc)
             }
@@ -253,7 +253,7 @@ fn skipUnit(sc: modify Scanner) -> Unit {
     if skipBlockComment(sc) {
         return
     }
-    if sc.lineComment.length > 0 && looksAt(sc, sc.lineComment) {
+    if sc.lineComment.byteLength > 0 && looksAt(sc, sc.lineComment) {
         while !atEnd(sc) && peek(sc) != 10 {
             advance(sc)
         }
@@ -307,7 +307,7 @@ export fn balanced(sc: modify Scanner, open: Int64, close: Int64) -> String {
             let _ = quotedString(sc)
         } else if skipBlockComment(sc) {
             // block comment consumed; a delimiter inside it is not structure
-        } else if sc.lineComment.length > 0 && looksAt(sc, sc.lineComment) {
+        } else if sc.lineComment.byteLength > 0 && looksAt(sc, sc.lineComment) {
             while !atEnd(sc) && peek(sc) != 10 {
                 advance(sc)
             }

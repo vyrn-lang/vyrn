@@ -2,7 +2,7 @@
 props { issueLine: String }
 
 fn issueClass(line: String) -> String {
-    if line.length > 0 {
+    if line.byteLength > 0 {
         return "out issues has-issues"
     }
     return "out issues"
@@ -11,7 +11,7 @@ fn issueClass(line: String) -> String {
 
 <template>
 <p id="issueOut" :class="issueClass(issueLine)">
-    <span v-if="issueLine.length > 0">{{ issueLine }}</span>
+    <span v-if="issueLine.byteLength > 0">{{ issueLine }}</span>
     <span v-else class="ok">no issues</span>
 </p>
 </template>

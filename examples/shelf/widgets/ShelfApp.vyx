@@ -20,7 +20,7 @@ props {
         <span class="count">{{ count }}</span>
         <button class="lang" @click="toggleLang">{{ langLabel }}</button>
     </div>
-    <p v-if="issues.length > 0" class="issues">{{ issues }}</p>
+    <p v-if="issues.byteLength > 0" class="issues">{{ issues }}</p>
     <span v-else class="noissues"></span>
     <div class="cols">
         <div class="col-main">

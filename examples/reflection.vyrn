@@ -11,7 +11,7 @@
 /// Age of an adult account holder.
 type Age = Int64 where value >= 18
 type Port = Int64 where value >= 1 && value <= 65535
-type Username = String where value.length >= 3 && value.length <= 16 && value =~ "[a-z]+"
+type Username = String where value.byteLength >= 3 && value.byteLength <= 16 && value =~ "[a-z]+"
 
 fn has(o: Option<Int64>) -> Bool {
     return match o { Some(n) => true, None => false }

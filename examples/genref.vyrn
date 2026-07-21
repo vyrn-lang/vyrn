@@ -19,7 +19,7 @@ fn bump(r: Ref<Int64>) -> Int64 {
 // References compose across function boundaries: this takes a Ref<String> and
 // returns a fresh Ref<Int64> (ownership of the new cell transfers to the caller).
 fn measure(s: Ref<String>) -> Ref<Int64> {
-    return cell(get(s).length)
+    return cell(get(s).byteLength)
 }
 
 fn main() -> Int64 {

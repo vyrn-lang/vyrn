@@ -12,7 +12,7 @@
 export type Age = Int64 where value >= 0 && value <= 130
 
 /// A non-empty, bounded display name.
-export type Username = String where value.length >= 1 && value.length <= 20
+export type Username = String where value.byteLength >= 1 && value.byteLength <= 20
 
 export type GetUserReq = { id: Int64 }
 export type CreateUserReq = { name: Username, age: Age }

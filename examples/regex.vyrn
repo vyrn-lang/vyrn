@@ -1,6 +1,6 @@
 /// String refinements — length bounds and regular expressions.
 ///
-/// A `String` base may carry a `where` over `value.length` (the byte length,
+/// A `String` base may carry a `where` over `value.byteLength` (the byte length,
 /// same as `strlen`) and/or `value =~ "pattern"`, which full-matches against a
 /// regex. Patterns are string literals compiled to a DFA at compile time and
 /// run identically by the interpreter and native backend (the code generator
@@ -12,12 +12,12 @@
 /// `\D \W \S`), alternation `a|b`, grouping `(…)`, and the quantifiers `* + ?`.
 /// A literal backslash is written `\\` (e.g. `\\.` for a literal dot).
 
-type Username = String where value.length >= 3 && value.length <= 16
+type Username = String where value.byteLength >= 3 && value.byteLength <= 16
 type Email = String where value =~ "[a-z0-9_.]+@[a-z0-9]+\\.[a-z]+"
 
 /// Several checks compose in one refinement: a size bound, a general regex, and
 /// "every 2nd character is 'a'" — the last expressed as the group pattern `(.a)*`.
-type EveryOther = String where value.length >= 2 && value =~ "[a-z]+" && value =~ "(.a)*"
+type EveryOther = String where value.byteLength >= 2 && value =~ "[a-z]+" && value =~ "(.a)*"
 
 fn register(name: String) -> Username {
     // Checked at runtime because `name` is not a compile-time constant.
@@ -36,7 +36,7 @@ fn main() -> Int64 {
     // Length-refined strings.
     let u = Username("alice") // valid at compile time — no runtime check
     print(u) // alice
-    print(u.length) // 5
+    print(u.byteLength) // 5
     print(register("bob")) // bob — validated at runtime
 
     // Regex-refined strings run the same matcher.

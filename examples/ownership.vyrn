@@ -11,7 +11,7 @@
 
 fn greetingLen(a: String, b: String) -> Int64 {
     let g = a + b // a heap temporary…
-    return g.length // …freed automatically before this return
+    return g.byteLength // …freed automatically before this return
 }
 
 fn fullName(first: String, last: String) -> String {
@@ -34,7 +34,7 @@ fn main() -> Int64 {
     i = 0
     while i < 1000000 {
         let name = fullName("Ada", "Lovelace") // owned result — freed each turn
-        n = name.length
+        n = name.byteLength
         i = i + 1
     }
     print(n) // 12  ("Ada Lovelace")

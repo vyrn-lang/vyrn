@@ -99,7 +99,7 @@ export fn formatDuration(ns: Int64) -> String {
 /// only variable-width field, and the column widths are computed the same way).
 export fn padRight(s: String, width: Int64) -> String {
     let mut out = s
-    let mut i = s.length
+    let mut i = s.byteLength
     while i < width {
         out = out + " "
         i = i + 1

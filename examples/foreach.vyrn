@@ -28,7 +28,7 @@ fn countLongWords() -> Int64 {
     let mut long = 0
     for w in words {
         print(w)
-        if w.length > 2 {
+        if w.byteLength > 2 {
             long = long + 1
         }
     }

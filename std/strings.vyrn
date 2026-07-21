@@ -56,15 +56,15 @@ fn isAsciiSpace(b: UInt8) -> Bool {
 /// `s`'s), so it is UTF-8-safe: a match only ever lands on a codepoint boundary
 /// because `needle` is itself valid UTF-8.
 export fn indexOf(s: String, needle: String) -> Option<Int64> {
-    let nl = needle.length
+    let nl = needle.byteLength
     if nl == 0 {
         return Some(0)
     }
-    if nl > s.length {
+    if nl > s.byteLength {
         return None
     }
     let mut i = 0
-    while i + nl <= s.length {
+    while i + nl <= s.byteLength {
         let mut j = 0
         while j < nl && s[i + j] == needle[j] {
             j = j + 1
@@ -80,14 +80,14 @@ export fn indexOf(s: String, needle: String) -> Option<Int64> {
 /// The byte offset of the LAST occurrence of `needle` in `s`, or `None`. An empty
 /// needle matches at `s.length`.
 export fn lastIndexOf(s: String, needle: String) -> Option<Int64> {
-    let nl = needle.length
+    let nl = needle.byteLength
     if nl == 0 {
-        return Some(s.length)
+        return Some(s.byteLength)
     }
-    if nl > s.length {
+    if nl > s.byteLength {
         return None
     }
-    let mut i = s.length - nl
+    let mut i = s.byteLength - nl
     while i >= 0 {
         let mut j = 0
         while j < nl && s[i + j] == needle[j] {
@@ -107,7 +107,7 @@ export fn lastIndexOf(s: String, needle: String) -> Option<Int64> {
 /// trap), so it is deliberately not done — iterate codepoints another way if you
 /// need them.
 export fn split(s: String, sep: String) -> Array<String> {
-    let sl = sep.length
+    let sl = sep.byteLength
     let mut out: Array<String> = []
     if sl == 0 {
         out.push(s)
@@ -115,7 +115,7 @@ export fn split(s: String, sep: String) -> Array<String> {
     }
     let mut start = 0
     let mut i = 0
-    while i + sl <= s.length {
+    while i + sl <= s.byteLength {
         let mut j = 0
         while j < sl && s[i + j] == sep[j] {
             j = j + 1
@@ -128,7 +128,7 @@ export fn split(s: String, sep: String) -> Array<String> {
             i = i + 1
         }
     }
-    out.push(slice(s, start, s.length))
+    out.push(slice(s, start, s.byteLength))
     return out
 }
 
@@ -140,7 +140,7 @@ export fn lines(s: String) -> Array<String> {
     let mut out: Array<String> = []
     let mut start = 0
     let mut i = 0
-    while i < s.length {
+    while i < s.byteLength {
         if s[i] == 10 {
             let mut end = i
             if end > start && s[end - 1] == 13 {
@@ -151,8 +151,8 @@ export fn lines(s: String) -> Array<String> {
         }
         i = i + 1
     }
-    if start < s.length {
-        out.push(slice(s, start, s.length))
+    if start < s.byteLength {
+        out.push(slice(s, start, s.byteLength))
     }
     return out
 }
@@ -161,7 +161,7 @@ export fn lines(s: String) -> Array<String> {
 /// trailing, and repeated whitespace produce no empty elements).
 export fn splitWhitespace(s: String) -> Array<String> {
     let mut out: Array<String> = []
-    let n = s.length
+    let n = s.byteLength
     let mut i = 0
     while i < n {
         while i < n && isAsciiSpace(s[i]) {
@@ -181,15 +181,15 @@ export fn splitWhitespace(s: String) -> Array<String> {
 /// `s` with leading ASCII whitespace removed.
 export fn trimStart(s: String) -> String {
     let mut a = 0
-    while a < s.length && isAsciiSpace(s[a]) {
+    while a < s.byteLength && isAsciiSpace(s[a]) {
         a = a + 1
     }
-    return slice(s, a, s.length)
+    return slice(s, a, s.byteLength)
 }
 
 /// `s` with trailing ASCII whitespace removed.
 export fn trimEnd(s: String) -> String {
-    let mut b = s.length
+    let mut b = s.byteLength
     while b > 0 && isAsciiSpace(s[b - 1]) {
         b = b - 1
     }
@@ -199,7 +199,7 @@ export fn trimEnd(s: String) -> String {
 /// `s` with leading AND trailing ASCII whitespace removed.
 export fn trim(s: String) -> String {
     let mut a = 0
-    let mut b = s.length
+    let mut b = s.byteLength
     while a < b && isAsciiSpace(s[a]) {
         a = a + 1
     }
@@ -247,14 +247,14 @@ export fn toUpper(s: String) -> String {
 /// Every non-overlapping occurrence of `from` in `s` replaced with `to`. An empty
 /// `from` returns `s` unchanged.
 export fn replace(s: String, from: String, to: String) -> String {
-    let fl = from.length
+    let fl = from.byteLength
     if fl == 0 {
         return s
     }
     let mut out = ""
     let mut start = 0
     let mut i = 0
-    while i + fl <= s.length {
+    while i + fl <= s.byteLength {
         let mut j = 0
         while j < fl && s[i + j] == from[j] {
             j = j + 1
@@ -267,7 +267,7 @@ export fn replace(s: String, from: String, to: String) -> String {
             i = i + 1
         }
     }
-    out = out + slice(s, start, s.length)
+    out = out + slice(s, start, s.byteLength)
     return out
 }
 
@@ -276,27 +276,27 @@ export fn replace(s: String, from: String, to: String) -> String {
 /// that does not tile the padding width evenly traps on a codepoint boundary.
 /// A `s` already `len` bytes or longer is returned unchanged.
 export fn padStart(s: String, len: Int64, fill: String) -> String {
-    if s.length >= len || fill.length == 0 {
+    if s.byteLength >= len || fill.byteLength == 0 {
         return s
     }
     let mut pad = ""
-    while pad.length < len - s.length {
+    while pad.byteLength < len - s.byteLength {
         pad = pad + fill
     }
-    return slice(pad, 0, len - s.length) + s
+    return slice(pad, 0, len - s.byteLength) + s
 }
 
 /// `s` right-padded with `fill` to at least `len` BYTES (see `padStart` for the
 /// ASCII `fill` note).
 export fn padEnd(s: String, len: Int64, fill: String) -> String {
-    if s.length >= len || fill.length == 0 {
+    if s.byteLength >= len || fill.byteLength == 0 {
         return s
     }
     let mut pad = ""
-    while pad.length < len - s.length {
+    while pad.byteLength < len - s.byteLength {
         pad = pad + fill
     }
-    return s + slice(pad, 0, len - s.length)
+    return s + slice(pad, 0, len - s.byteLength)
 }
 
 /// The lowercase 16-digit hex of a `UInt64` (e.g. a hash fingerprint). Integer

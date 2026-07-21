@@ -2,8 +2,8 @@
 /// URL) over their bytes.
 ///
 /// Text level:
-///   "\u{1F600}"   a Unicode-scalar escape (also `'\u{e9}'` in a char literal)
-///   s.length      byte length         bytes(s) -> Array<Int64>  (UTF-8 bytes)
+///   "\u{1F600}"   a Unicode-scalar escape in a string
+///   s.byteLength  byte length         bytes(s) -> Array<Int64>  (UTF-8 bytes)
 ///   chars(s)      -> Array<Int64>     the Unicode code points (scalar values)
 ///
 /// Data level: each `Encode` takes a String (its UTF-8 bytes) and returns
@@ -26,12 +26,12 @@ fn show(o: Option<String>) -> String {
 fn main() -> Int64 {
     // ---- UTF-8 text ------------------------------------------------------
     let s = "café" // 'é' (U+00E9) is 2 UTF-8 bytes
-    print(s.length) // 5   — byte length
+    print(s.byteLength) // 5   — byte length
     print(charCount(s)) // 4   — code points: c, a, f, é
-    print(chars(s)[3] == '\u{e9}') // true
+    print(chars(s)[3] == '\xe9') // true  (é's code point 233 == byte 0xe9)
 
     let grin = "\u{1F600}" // an emoji: one code point, four bytes
-    print(grin.length) // 4
+    print(grin.byteLength) // 4
     print(charCount(grin)) // 1
 
     // ---- hex ---------------------------------------------------------------

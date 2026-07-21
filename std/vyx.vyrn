@@ -507,7 +507,7 @@ fn vyxReadTagName(ba: Array<UInt8>, i: Int64, e: Int64) -> VyxTag {
         j = j + 1
     }
     let name = vyxSlice(ba, i, j)
-    let isComp = name.length > 0 && bytes(name)[0] >= 65 && bytes(name)[0] <= 90
+    let isComp = name.byteLength > 0 && bytes(name)[0] >= 65 && bytes(name)[0] <= 90
     return VyxTag { name: name, isComp: isComp, next: j }
 }
 
@@ -619,7 +619,7 @@ fn vyxParseNodes(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxPar
             }
             let exprAt = vyxSkipWs(ba, j + 2, close - 2)
             let expr = vyxTrim(vyxSlice(ba, j + 2, close - 2))
-            if expr.length == 0 {
+            if expr.byteLength == 0 {
                 return VyxParse { nodes: nodes, next: j, stop: "", err: vyxErr("VYX_EMPTY_INTERP", fileId, vyxLineAt(ba, j)) }
             }
             nodes.push(VNInterp(expr, vyxLineAt(ba, exprAt), vyxColAt(ba, exprAt)))
@@ -635,8 +635,8 @@ fn vyxParseNodes(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxPar
             // spans a newline is insignificant indentation and is dropped; a
             // same-line whitespace run is one significant inline space; any other
             // run has its whitespace collapsed to single spaces.
-            if vyxTrim(raw).length == 0 {
-                if vyxHasNewline(raw) == false && raw.length > 0 {
+            if vyxTrim(raw).byteLength == 0 {
+                if vyxHasNewline(raw) == false && raw.byteLength > 0 {
                     nodes.push(VNText(" "))
                 }
             } else {
@@ -656,7 +656,7 @@ type VyxNodeR = { node: VyxNode, next: Int64, err: String }
 fn vyxParseElem(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxNodeR {
     let line = vyxLineAt(ba, i)
     let tag = vyxReadTagName(ba, i + 1, e)
-    if tag.name.length == 0 {
+    if tag.name.byteLength == 0 {
         return VyxNodeR { node: VNText(""), next: e, err: vyxErr("VYX_BAD_TAG", fileId, line) }
     }
     let pa = vyxParseAttrs(ba, tag.next, e, fileId)
@@ -755,7 +755,7 @@ fn vyxParseForHead(header: String, fileId: String, line: Int64) -> VyxForHdr {
         return VyxForHdr { var: "", iter: "", err: vyxErr("VYX_BAD_FOR_HEADER", fileId, line) }
     }
     let iter = vyxTrim(vyxSlice(ba, i + 2, ba.length))
-    if varName.length == 0 || iter.length == 0 {
+    if varName.byteLength == 0 || iter.byteLength == 0 {
         return VyxForHdr { var: varName, iter: iter, err: vyxErr("VYX_BAD_FOR_HEADER", fileId, line) }
     }
     return VyxForHdr { var: varName, iter: iter, err: "" }
@@ -771,7 +771,7 @@ type VyxOne = { node: VyxNode, err: String }
 /// `v-if`/`v-else-if`/`v-else` siblings without breaking the chain).
 fn vyxIsWsText(n: VyxNode) -> Bool {
     return match n {
-        VNText(s) => vyxTrim(s).length == 0,
+        VNText(s) => vyxTrim(s).byteLength == 0,
         VNInterp(x, l, c) => false,
         VNRaw(x, l, c) => false,
         VNChildren => false,
@@ -966,7 +966,7 @@ fn vyxSectionAvoid(ba: Array<UInt8>, name: String, codeMode: Bool, avoidS: Int64
     if openAt < 0 {
         return VyxSection { found: false, start: 0, end: 0 }
     }
-    let contentStart = openAt + name.length + 2
+    let contentStart = openAt + name.byteLength + 2
     let closeAt = vyxScanFindCode(ba, bytes("</" + name + ">"), contentStart, codeMode)
     if closeAt < 0 {
         return VyxSection { found: false, start: 0, end: 0 }
@@ -1231,7 +1231,7 @@ gen fn vyxParseScriptAt(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, dir: Strin
         let fields = vyxSplitFields(vyxSlice(sub, bodyStart + 1, bodyEnd - 1))
         for part in fields {
             let trimmed = vyxTrim(part)
-            if trimmed.length > 0 {
+            if trimmed.byteLength > 0 {
                 let pb = bytes(trimmed)
                 let mut colon = 0 - 1
                 let mut k = 0
@@ -1275,7 +1275,7 @@ gen fn vyxParseScriptAt(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, dir: Strin
                     imports.push(vyxRebaseImport(t, dir))
                     importLines.push(vyxLineAt(ba, fnwAbs))
                     importCols.push(vyxColAt(ba, fnwAbs))
-                } else if t.length > 0 {
+                } else if t.byteLength > 0 {
                     helpers = helpers + lineText + "\n"
                     helperTexts.push(lineText)
                     helperLines.push(vyxLineAt(ba, fnwAbs))
@@ -1863,7 +1863,7 @@ gen fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, lin
             err = err + vyxErrDetail("VYX_UNKNOWN_PROP", fileId, a.line, tag + "_" + a.name)
         }
     }
-    let hasKids = vyxTrim(vyxChildText(kids)).length > 0 || kids.length > 0
+    let hasKids = vyxTrim(vyxChildText(kids)).byteLength > 0 || kids.length > 0
     if comp.takesChildren {
         let kacc = "k" + path
         let kids2 = vyxEmitChildren(kids, kacc, path, reg, fileId, src)
@@ -2049,7 +2049,7 @@ fn vyxEmitEvent(a: VyxAttr, fileId: String) -> VyxEventEmit {
     }
     let closeParen = vyxFindLast(sb, bytes(")"), paren)
     let argExpr = vyxTrim(vyxSlice(sb, paren + 1, closeParen))
-    if argExpr.length == 0 {
+    if argExpr.byteLength == 0 {
         return VyxEventEmit { code: "On(" + vyxStrLit(a.name) + ", " + vyxStrLit(handler) + ", \"\")", err: "", hasArg: false, argLine: a.line, argCol: a.col }
     }
     // At most one scalar argument: a top-level comma means more than one.
@@ -2137,7 +2137,7 @@ fn vyxParseImport(line: String) -> VyxImport {
     let mut names: Array<String> = []
     for part in vyxSplitFields(inner) {
         let t = vyxTrim(part)
-        if t.length > 0 {
+        if t.byteLength > 0 {
             names.push(t)
         }
     }
@@ -2397,7 +2397,7 @@ import * as vyxTheme from tw(\{theme})
     // `//@origin` directive so a helper `fn`/`type`/`let` identifier maps back to
     // the `.vyx` — the helper CODE is unchanged, only origin comments are added.
     for c in comps {
-        if vyxTrim(c.helpers).length > 0 {
+        if vyxTrim(c.helpers).byteLength > 0 {
             out = out + vyxHelperBlock(c)
         }
     }
@@ -2583,7 +2583,7 @@ fn vyxScriptLoadRet(script: String) -> String {
 /// `data` prop takes — so a page may load straight into a wire type (`Result<Paste,
 /// PageError>`) with no `type Data` alias (record aliases are illegal in Vyrn).
 fn vyxLoaderDataType(loadRet: String) -> String {
-    if loadRet.length == 0 {
+    if loadRet.byteLength == 0 {
         return ""
     }
     let ba = bytes(loadRet)
@@ -2685,7 +2685,7 @@ export gen fn vyxPageShape(source: String) -> VyxPageShape {
         let end = vyxMatchCurly(sb, pb.braceAt)
         for part in vyxSplitFields(vyxSlice(sb, pb.braceAt + 1, end - 1)) {
             let trimmed = vyxTrim(part)
-            if trimmed.length > 0 {
+            if trimmed.byteLength > 0 {
                 let pbf = bytes(trimmed)
                 let mut colon = 0 - 1
                 let mut k = 0
@@ -2771,7 +2771,7 @@ fn vyxParseHead(body: String, fileId: String) -> VyxHead {
     let mut items: Array<VyxHeadItem> = []
     for line in vyxLines(body) {
         let t = vyxTrim(line)
-        if t.length == 0 || t.startsWith("//") {
+        if t.byteLength == 0 || t.startsWith("//") {
             // blank / comment
         } else if t.startsWith("title:") {
             hasTitle = true
@@ -2899,13 +2899,13 @@ export gen fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String,
     // The synthetic component: a `props` block of the params (+ a `data: <T>`
     // param when there is a loader) drives the compiled view fn's parameters.
     let dataField = if hasLoad {
-        if paramFields.length > 0 { ", data: " + dataType } else { "data: " + dataType }
+        if paramFields.byteLength > 0 { ", data: " + dataType } else { "data: " + dataType }
     } else {
         ""
     }
     let propsInner = paramFields + dataField
     let mut synthScript = restExported
-    if propsInner.length > 0 {
+    if propsInner.byteLength > 0 {
         // The synthetic component's `props` block trails the page's own imports so
         // it satisfies the imports-first rule (RFC-0040 §3); the emitted module is
         // order-independent (imports and helpers are collected separately).
@@ -2932,10 +2932,10 @@ export gen fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String,
 
     // Parse the param field NAMES (for the Params type + the page's forwarding).
     let mut paramNames: Array<String> = []
-    if paramFields.length > 0 {
+    if paramFields.byteLength > 0 {
         for part in vyxSplitFields(paramFields) {
             let t = vyxTrim(part)
-            if t.length > 0 {
+            if t.byteLength > 0 {
                 let pbf = bytes(t)
                 let mut colon = 0 - 1
                 let mut k = 0
@@ -2953,7 +2953,7 @@ export gen fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String,
     }
 
     let mut out = moduleStr
-    if paramFields.length > 0 {
+    if paramFields.byteLength > 0 {
         out = out + "export type Params = { " + paramFields + " }\n"
     }
     // The page entry the router calls, forwarding the Params fields (and the

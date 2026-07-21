@@ -31,7 +31,7 @@ fn main() -> Int64 {
     let sheet = theme.css()
     // The stylesheet is a deterministic baked constant, so its length and content
     // are byte-identical under every backend.
-    print("css bytes: \{sheet.length}")
+    print("css bytes: \{sheet.byteLength}")
     print("has base rule: \{sheet.contains(".bg-brand-500 {background-color:#4f46e5}")}")
     print("has hover rule: \{sheet.contains(".hover\\:bg-brand-500:hover {background-color:#4f46e5}")}")
     print("has media block: \{sheet.contains("@media (min-width:768px) {")}")
@@ -42,7 +42,7 @@ fn main() -> Int64 {
 
 test "css() is a deterministic baked constant" {
     assertEq(theme.css(), theme.css())
-    assert(theme.css().length > 0)
+    assert(theme.css().byteLength > 0)
 }
 
 test "css() carries base, state, and responsive rules" {

@@ -15,7 +15,7 @@
 type Age = Int64 where value >= 0 && value <= 130
 
 /// A validated non-empty username.
-type Username = String where value.length >= 1
+type Username = String where value.byteLength >= 1
 
 /// A payload-less enum encodes to / decodes from a JSON string.
 type Role = | Guest | Member | Admin

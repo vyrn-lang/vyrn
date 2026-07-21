@@ -2,13 +2,13 @@
 /// and define the persisted-file shape. Pure data — no state, no behavior.
 
 /// A paste id: a short content-addressed base36 string.
-export type PasteId = String where value.length >= 1 && value.length <= 16
+export type PasteId = String where value.byteLength >= 1 && value.byteLength <= 16
 
 /// A paste title. May be empty (rendered as "untitled").
-export type Title = String where value.length <= 80
+export type Title = String where value.byteLength <= 80
 
 /// The paste body: non-empty, capped so a runaway paste can't bloat the store.
-export type Body = String where value.length >= 1 && value.length <= 100000
+export type Body = String where value.byteLength >= 1 && value.byteLength <= 100000
 
 /// The syntax label — a small finite set; anything else fails validation.
 export type Lang = String where value == "vyrn" || value == "text" || value == "json" || value == "rust" || value == "js" || value == "html"

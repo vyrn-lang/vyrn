@@ -20,7 +20,7 @@ fn pasteTally() -> Int64 {
 }
 
 fn shownTitle(p: Paste) -> String {
-    if p.title.length == 0 {
+    if p.title.byteLength == 0 {
         return t.binUntitled()
     }
     return p.title

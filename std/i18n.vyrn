@@ -864,7 +864,7 @@ gen fn compileBody(msg: String, tag: String, ind: String, pluralVar: String) -> 
     let mut i = 0
     while i < e {
         let lit = readLiteral(ba, i, e, pluralVar != "")
-        if lit.text.length > 0 {
+        if lit.text.byteLength > 0 {
             code = code + ind + "acc = acc + " + strLit(lit.text) + "\n"
         }
         i = lit.next
@@ -1475,7 +1475,7 @@ test "parseLocaleJson rejects a non-string value" {
 test "parseLocaleJson decodes escapes" {
     let d = parseLocaleJson("{ \"k\": \"a\\nb\" }")
     assert(d.ok)
-    assertEq(d.vals[0].length, 3)
+    assertEq(d.vals[0].byteLength, 3)
 }
 
 test "scanArgs finds a plain string arg" {
@@ -1528,7 +1528,7 @@ test "regexEscapeKey doubles the backslash for dots" {
     // `home.title` -> `home\\.title` (four chars home, two backslashes, dot...)
     let r = regexEscapeKey("a.b")
     // a \\ . b  == 5 bytes
-    assertEq(r.length, 5)
+    assertEq(r.byteLength, 5)
 }
 
 test "readLiteral keeps a lone apostrophe and does not swallow the placeholder" {

@@ -214,7 +214,7 @@ fn recordsFrom(lines: Array<String>) -> Array<Rec> {
     for raw in lines {
         lineNo = lineNo + 1
         let t = trim(raw)
-        if t.length > 0 {
+        if t.byteLength > 0 {
             let d = decodeLine(t)
             if d.ok {
                 recs.push(Rec { raw: t, line: d.line })
@@ -286,7 +286,7 @@ fn getFlag(a: Array<String>, name: String) -> Flag {
         }
         if hasEq {
             if substring(tok, 0, eq) == name {
-                return Flag { found: true, value: substring(tok, eq + 1, tok.length) }
+                return Flag { found: true, value: substring(tok, eq + 1, tok.byteLength) }
             }
         } else {
             if tok == name {

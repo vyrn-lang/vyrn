@@ -110,7 +110,7 @@ fn labels() -> Labels {
 fn bookViews() -> Array<BookView> {
     let mut out: Array<BookView> = []
     for b in books {
-        let mut show = filter.length == 0
+        let mut show = filter.byteLength == 0
         if show == false {
             for t in b.tags {
                 if t == filter {

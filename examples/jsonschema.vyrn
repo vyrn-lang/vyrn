@@ -12,7 +12,7 @@ type Age = Int64 where value >= 18
 type Port = Int64 where value >= 1 && value <= 65535
 type Even = Int64 where value % 2 == 0
 type Ratio = Float64 where value > 0.0 && value <= 1.0
-type Username = String where value.length >= 3 && value.length <= 16
+type Username = String where value.byteLength >= 3 && value.byteLength <= 16
 
 /// A user record: `age` reuses the validated `Age` and `handle` the validated
 /// `Username` — named types render as `$ref`s into a `$defs` section, keeping

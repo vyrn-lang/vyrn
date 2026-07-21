@@ -151,7 +151,7 @@ fn gqlSplitTop(s: String, sep: UInt8) -> Array<String> {
             i = i + 1
         } else if b == sep && depth == 0 {
             let part = gqlTrim(gqlSlice(ba, start, i))
-            if part.length > 0 {
+            if part.byteLength > 0 {
                 out.push(part)
             }
             start = i + 1
@@ -161,7 +161,7 @@ fn gqlSplitTop(s: String, sep: UInt8) -> Array<String> {
         }
     }
     let last = gqlTrim(gqlSlice(ba, start, ba.length))
-    if last.length > 0 {
+    if last.byteLength > 0 {
         out.push(last)
     }
     return out
@@ -650,7 +650,7 @@ test "gqlSplitDecl splits name and rhs" {
 test "gqlBetweenAngles and gqlStripWhere" {
     assertEq(gqlBetweenAngles("Array<Tag>"), "Tag")
     assertEq(gqlBetweenAngles("Map<String, Int64>"), "String, Int64")
-    assertEq(gqlStripWhere("String where value.length >= 1"), "String")
+    assertEq(gqlStripWhere("String where value.byteLength >= 1"), "String")
 }
 
 test "gqlSplitTop respects angle and paren nesting" {

@@ -67,6 +67,6 @@ fn main() -> Int64 {
     let rawMiss = handle(Request { method: "GET", path: "/raw/deadbeef", body: "" })
     print("/raw/deadbeef -> \{rawMiss.status}")
     let oa = handle(Request { method: "GET", path: "/openapi.json", body: "" })
-    print("/openapi.json -> \{oa.status} (\{oa.body.length} bytes)")
+    print("/openapi.json -> \{oa.status} (\{oa.body.byteLength} bytes)")
     return 0
 }

@@ -41,7 +41,7 @@ fn main() -> Int64 {
     // `stringFromBytes` is the validated inverse — the round-trip is exact.
     let smile = "café ☕"
     let raw = bytes(smile)
-    print("\{smile} is \{raw.length} bytes (\{smile.length} via .length)")
+    print("\{smile} is \{raw.length} bytes (\{smile.byteLength} via .byteLength)")
     let back = match stringFromBytes(raw) {
         Ok(s) => s,
         Err(e) => e,

@@ -14,13 +14,13 @@ export type Rating = Int64 where value >= 1 && value <= 5
 export type Stars = Int64 where value >= 0 && value <= 5
 
 /// A non-empty, bounded title.
-export type Title = String where value.length >= 1 && value.length <= 80
+export type Title = String where value.byteLength >= 1 && value.byteLength <= 80
 
 /// A URL: must look like http(s)://…  A bad URL fails validation => a 422.
 export type Url = String where value =~ "https?://.+"
 
 /// A short tag label.
-export type Tag = String where value.length >= 1 && value.length <= 20
+export type Tag = String where value.byteLength >= 1 && value.byteLength <= 20
 
 /// A stored book. Every field is validated on every decode boundary.
 export type Book = { id: BookId, title: Title, url: Url, tags: Array<Tag>, rating: Stars }

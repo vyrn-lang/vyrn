@@ -4,7 +4,7 @@ props { title: String, url: String, rating: String, tagsText: String, status: St
 
 <template>
 <div class="card">
-    <p v-if="status.length > 0" class="issues">{{ status }}</p>
+    <p v-if="status.byteLength > 0" class="issues">{{ status }}</p>
     <div v-else class="cardbody"><h3><a :href="url">{{ title }}</a></h3><p class="rating">{{ rating }}</p><p class="tags">{{ tagsText }}</p></div>
 </div>
 </template>

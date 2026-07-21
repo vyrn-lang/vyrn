@@ -36,14 +36,14 @@ fn idTaken(id: String) -> Bool {
     return false
 }
 
-/// The first `n` bytes of `s` (clamped to `s.length`) as a String — the `slice`
+/// The first `n` bytes of `s` (clamped to `s.byteLength`) as a String — the `slice`
 /// builtin via `std/strings.substring` (RFC-0046), replacing a `bytes()` +
 /// `stringFromBytes` round-trip.
 fn prefixOf(s: String, n: Int64) -> String {
-    let end = if n < s.length {
+    let end = if n < s.byteLength {
         n
     } else {
-        s.length
+        s.byteLength
     }
     return substring(s, 0, end)
 }
@@ -118,7 +118,7 @@ test "deriveId is stable and content-addressed (same content => same prefix)" {
     let a = fullDigest("hello world", "greeting")
     let b = fullDigest("hello world", "greeting")
     assertEq(a, b)
-    assertEq(a.length, 14)
+    assertEq(a.byteLength, 14)
     let c = fullDigest("hello worlds", "greeting")
     assert(a != c)
 }

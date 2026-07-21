@@ -7,7 +7,7 @@
 /// the constraints up field by field.
 
 type User = {
-    name: String where value.length >= 3,
+    name: String where value.byteLength >= 3,
     age: Int64 where value >= 18,
 } where age < 150
 

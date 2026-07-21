@@ -18,7 +18,7 @@ fn main() -> Int64 {
         let mut i = 0
         while i < 1000 {
             let greeting = hello + world
-            total = greeting.length
+            total = greeting.byteLength
             i = i + 1
         }
     }

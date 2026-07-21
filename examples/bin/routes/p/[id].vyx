@@ -22,7 +22,7 @@ fn load(p: Params) -> Result<Paste, PageError> {
 }
 
 fn pasteTitle(p: Paste) -> String {
-    if p.title.length == 0 {
+    if p.title.byteLength == 0 {
         return t.binUntitled()
     }
     return p.title

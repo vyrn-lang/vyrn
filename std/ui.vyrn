@@ -437,7 +437,7 @@ gen fn uiParseFields(source: String) -> UiFields {
     let mut types: Array<String> = []
     for part in uiSplitFields(body) {
         let trimmed = uiTrimStr(part)
-        if trimmed.length > 0 {
+        if trimmed.byteLength > 0 {
             let pb = bytes(trimmed)
             let mut colon = 0 - 1
             let mut i = 0
@@ -638,7 +638,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
             let mut di = 0
             while di < dyns.length {
                 let t = uiFieldType(f, dyns[di])
-                if t.length > 0 {
+                if t.byteLength > 0 {
                     dynTypes[di] = t
                 }
                 di = di + 1
@@ -1067,7 +1067,7 @@ fn uiRouteDecode(s: String) -> String {
 /// threads a head: `uiFirst` (title precedence) and `uiHeadJoin2` (head concat).
 gen fn uiHeadRuntime() -> String {
     return render(vyrn"""fn uiFirst(a: String, b: String) -> String {
-    if a.length > 0 {
+    if a.byteLength > 0 {
         return a
     }
     return b
@@ -1241,7 +1241,7 @@ gen fn uiWrapLayout(bodyExpr: String, layoutIdxs: Array<Int64>) -> String {
 /// The `Array<Html>` head expression: layout heads outer→inner, then the page
 /// head (`pageHeadCall`, "" for a `.vyrn` page or the error path). "[]" for none.
 gen fn uiHeadExpr(layoutIdxs: Array<Int64>, pageHeadCall: String) -> String {
-    let mut out = if pageHeadCall.length > 0 { pageHeadCall } else { "[]" }
+    let mut out = if pageHeadCall.byteLength > 0 { pageHeadCall } else { "[]" }
     let mut i = layoutIdxs.length - 1
     while i >= 0 {
         out = "uiHeadJoin2(uiLay" + layoutIdxs[i].toString() + ".head(), " + out + ")"
@@ -1259,7 +1259,7 @@ gen fn uiTitleExpr(layoutIdxs: Array<Int64>, pageTitleCall: String, dflt: String
         out = "uiFirst(uiLay" + layoutIdxs[i].toString() + ".headTitle(), " + out + ")"
         i = i + 1
     }
-    if pageTitleCall.length > 0 {
+    if pageTitleCall.byteLength > 0 {
         out = "uiFirst(" + pageTitleCall + ", " + out + ")"
     }
     return out

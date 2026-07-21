@@ -34,7 +34,7 @@ fn everyEvenIsA(s: String) -> Bool {
 
 /// Indexing works inside a refinement predicate too (it is pure and const-foldable):
 /// a command must be non-empty and start with an uppercase 'H'.
-type Greeting = String where value.length >= 1 && value[0] == 'H'
+type Greeting = String where value.byteLength >= 1 && value[0] == 'H'
 
 fn toInt(s: String) -> Int64 {
     return match parse(s) {
@@ -45,7 +45,7 @@ fn toInt(s: String) -> Int64 {
 
 fn main() -> Int64 {
     let s = "banana"
-    print(s.length) // 6
+    print(s.byteLength) // 6
     print(s[0]) // 98  ('b')
     print(s[0] == 'b') // true
 
