@@ -3,10 +3,29 @@ name: CI
 on:
   push:
     branches: [main]
+    # Docs-only commits (RFCs, notes, README) don't need a build.
+    paths-ignore:
+      - 'rfcs/**'
+      - '**.md'
+      - 'web/**'
+      - 'editor/**'
   pull_request:
+    paths-ignore:
+      - 'rfcs/**'
+      - '**.md'
+      - 'web/**'
+      - 'editor/**'
+
+# Stacked pushes cancel the superseded run — only the newest commit's
+# verdict matters on a branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  # Incremental artifacts bloat the cache and don't help clean CI builds.
+  CARGO_INCREMENTAL: 0
 
 jobs:
   test:
@@ -15,14 +34,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Rust cache
-        uses: actions/cache@v4
+        # Unlike actions/cache with a lockfile key (which never re-uploads
+        # after the first hit, so every run rebuilt all vyrn-* crates from a
+        # stale target), rust-cache refreshes the saved target dir per run
+        # and prunes stale artifacts.
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            compiler/target
-            compiler/vyrn-lsp/target
-          key: rust-${{ runner.os }}-${{ hashFiles('compiler/Cargo.lock', 'compiler/vyrn-lsp/Cargo.lock') }}
+          workspaces: |
+            compiler
+            compiler/vyrn-lsp
       - name: Workspace tests
         working-directory: compiler
         run: cargo test --quiet
@@ -36,13 +56,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Rust cache
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            compiler/target
-          key: rust-parity-${{ runner.os }}-${{ hashFiles('compiler/Cargo.lock') }}
+          workspaces: compiler
+          # Separate cache from the test job — different build graph (only
+          # vyrn-cli's parity test) and keeps both under the size cap.
+          prefix-key: parity
       - name: wasm toolchain cache
         id: wasm-tools
         uses: actions/cache@v4
