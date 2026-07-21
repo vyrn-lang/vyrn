@@ -312,3 +312,111 @@ round-trip is proven directly by `rawat_origin_maps_a_check_error_back_to_the_so
   `compiler/vyrn-lsp/target/release/vyrn-lsp.exe` and the deployed
   `editor/vscode/server/vyrn-lsp.exe` are both SHA-256
   `f3799261f7df428e934c0c32738141b9f513c9fda6b9b58047f635da5f7daa3f`.
+
+### M4a — `std/scan` block comments, `std/tw`, `std/ui`
+
+The M4 dispatch, part a (`std/vyx` is the separate part b). No compiler code
+changed — this is entirely `std/` + tests, riding the M1–M3 machinery.
+
+**`std/scan` — `/* */` block comments.** `Scanner` gained `blockOpen`/`blockClose`
+(non-nesting, the CSS/C rule; `blockOpen == ""` disables), honored by `skipWs`,
+`skipUnit` (so `balanced`/`until`/`untilStr` inherit it), and `balanced` directly:
+a delimiter hiding inside a `/* */` comment never ends a scan early. A
+`cssScanner(src)` convenience presets `/* */` + `"`/`'` strings; the full `scanner`
+constructor gained the two markers (its one caller, `examples/scan.vyrn`, updated).
+The example — a three-way parity citizen — was extended with two CSS block-comment
+cases, and `std/scan` gained 7 inline tests plus a CLI runner
+(`std_scan_unit_tests_run_green`).
+
+**`std/tw` — emission onto quotes + ONE CSS choke point.**
+- The hand-rolled Vyrn escaper (`twEscSecond`/`twEscBody`) is deleted; `css()` is
+  baked through a `vyrn"""…"""` code quote (`twEmitCss`, the graphql `sdlText`
+  pattern — `\{rawCss}` in expression position, compiler-escaped), and `twStrLit =
+  render(vyrn"\{raw}")` is the single Vyrn-emission escape choke point. The stylesheet
+  is now assembled raw (the per-fragment `esc` path is gone) and baked once.
+- ALL CSS safety flows through ONE gate, `twSheetSafetyErrors`, run as the FIRST act
+  of `twBuildModule` — the sole producer of both the stylesheet and the `TwClass`/`Tw`
+  token grammar. There is no path to CSS that skips validation, so the two audited
+  holes are **structurally** impossible rather than prevented by remembering to call
+  four separate passes in `tw()` (which now only parses + rejects unknown keys).
+- The value half of the choke point scans each leaf through the new `std/scan`
+  `cssScanner` (`twCssSingleToken`): an embedded `/* */` comment or a second token can
+  never ride into a rule body, independent of the character grammar.
+- Emission subtree marked `gen fn` (`twStrLit`/`twEmitCss`/`twBuildModule`) per risk 2.
+
+**`std/ui` — emission onto quotes.**
+- `uiEscSecond` + byte loop → `uiStrLit = render(vyrn"\{raw}")` (the escape choke
+  point: a page path / url pattern / static segment spliced as a Vyrn string can no
+  longer inject code).
+- The three static runtime blocks (`uiFixedRuntime`, `uiHeadRuntime`,
+  `uiErrorRuntime`) — pure emitted Vyrn — became hole-less `vyrn"""…"""` quotes, so the
+  router glue is validated as Vyrn when `std/ui` is compiled, not re-lexed at
+  generation time.
+- The whole emission subtree (64 helpers) is marked `gen fn` (risk 2: a plain-fn
+  caller of a quote-bearing helper dangles an `@vyrn_*` symbol at native link — the
+  i18n lesson); only the runtime `PageError` constructors stay plain `fn`.
+
+#### The two `std/tw` bugs — before / after
+
+Both were already fixed by explicit validation passes (commit `1683e32`) and pinned
+by `a_forging_breakpoint_key_fails_generation` / `a_css_injecting_value_fails_generation`
+in `tw.rs`. M4a re-homes that safety into the structural choke point above and keeps
+the pins. Demonstrated before/after against the genuinely-buggy pre-validation code
+(`594e3ef`, which lacks the validators):
+
+- **BEFORE** (`594e3ef` `std/tw.vyrn` swapped in): both pins FAIL — a `"red} body
+  {display:none"` leaf value generated a stylesheet with the injected block (CSS
+  injection), and an `"ev|xhack"` breakpoint key made `theme.cls("evbg-white")`
+  COMPILE (the token-grammar forgery / soundness hole).
+- **AFTER** (M4a): both pins PASS — `twSheetSafetyErrors`, the mandatory gate of the
+  sole CSS producer, returns `TW_UNSAFE_VALUE__colors_evil` / `TW_UNSAFE_BREAKPOINT__ev_xhack`
+  and no module is emitted. Injection and forgery are now unreachable, not merely
+  unshipped.
+
+#### Golden-diff review
+
+`vyrn emit-gen` before (base `e3ddcaa`) vs after, for every example using `tw`/`ui`:
+`twdemo`, `pagesdemo`, `shelf/server`, `shelf/view`, `bin/server`, `fullstack/server`
+— all **byte-identical** (the head + error runtime blocks are exercised by
+`bin`/`shelf`, so the static-block quote conversion is validated, not merely
+plausible). The escape choke points reproduce the former hand-escaping exactly (the
+M1 i18n/graphql result), and no example uses `rawAt`, so no origin directive moved.
+Nothing silent — there is nothing to describe because there is no diff.
+
+#### Deviations (with justification)
+
+1. **The type/regex scaffold stays string concatenation, not quotes.** `std/tw`'s
+   `export type Tw = String where value =~ "(…)"` and `std/ui`'s `RoutePath` are still
+   built with `+`, exactly as `std/i18n`'s `TransKey` is (M1 shipped it that way). A
+   code-quote hole in `value =~ __vyrn_holeN` position is not a valid skeleton parse,
+   and the RFC's injection-safety property is delivered in full by the **escape choke
+   point** (a String is baked as data, never code) — the scaffold carries only
+   compiler-validated regex fragments, never untrusted text. This mirrors M1
+   deviation 2's shape: migrate the actual bug surface (escaping), leave the audited
+   structural scaffold where its bytes are proven.
+2. **`std/tw`'s "one CSS choke point" is a mandatory gate in the sole emitter**, not a
+   value-threading sheet builder. Threading a `{text, err}` accumulator through the
+   divide-and-conquer CSS assembly would have churned `css()`'s bytes; a gate that the
+   only CSS producer runs first gives the same structural guarantee (no CSS without
+   validation) while keeping every golden byte-identical.
+3. **`std/ui` does not use `rawAt`.** `rawAt` carries the origin of *user-authored*
+   text spliced as code (the `std/vyx`/M4b story). `std/ui` splices no user text as
+   code — its router glue is entirely derived, and the region-level RFC-0033 origin
+   exists only to attribute a check error to the page file, so column-exact origins
+   (risk 1) would be meaningless. Kept deliberately and documented in `uiEmitRoute`.
+
+#### Tests / verification
+
+- **Counts**: 947 workspace tests (5 ignored), 39 vyrn-lsp tests (1 ignored),
+  three-way parity green (5 suites, incl. the extended `examples/scan.vyrn`), `vyrn
+  fmt --check` clean on every touched `.vyrn`. Unit tests: `std/scan` 7, `std/tw` 18
+  (+1 pinning the scan-based value gate), `std/ui` 6.
+- **clippy**: 0 warnings introduced. (The workspace shows 52 warnings under the
+  current clippy 1.95 toolchain, byte-for-byte identical on the base `e3ddcaa` —
+  pre-existing toolchain drift in compiler source, none in any file M4a touched.)
+- **LSP redeploy — NOT needed (std- and test-only change).** No `compiler/` source
+  changed (only `compiler/vyrn-cli/tests/*.rs` test files, which do not build into the
+  LSP); the frontend and the LSP binary are untouched, so the deployed
+  `editor/vscode/server/vyrn-lsp.exe` still hashes
+  `f3799261f7df428e934c0c32738141b9f513c9fda6b9b58047f635da5f7daa3f`. `std/` ships with
+  the repo and the LSP picks it up live.
