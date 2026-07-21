@@ -5171,6 +5171,41 @@ impl<'a> Gen<'a> {
                 return self.gen_numeric_conv(v, &sty, &target);
             }
         }
+        // `blackBox(v)` (RFC-0055): identity with an optimizer-opacity guarantee.
+        // The *semantics* — the value is used and its result is unknowable, so the
+        // work producing it survives and can't be constant-folded — are what matter;
+        // the instruction sequence is free. For a register-class value an identity
+        // inline-asm ties the output to the input (`"=r,0"`), the classic
+        // divan/criterion `black_box`. For an aggregate (record/array/Ref/…) that a
+        // single register can't express, we round-trip through an entry-block slot
+        // with a `~{memory}` clobber: the store (the work) can't be dead and the
+        // reload can't be folded. Only valid inside `bench`/`test` bodies (the
+        // checker enforces placement); by then benches are lifted to ordinary
+        // functions, so this lowers like any other call.
+        if name == "blackBox" {
+            let (v, ty) = self.gen_expr(&args[0])?;
+            let llty = self.llt(&ty);
+            if llty == "void" {
+                // Unit: no value to hold; a bare memory clobber keeps ordering.
+                self.emit("call void asm sideeffect \"\", \"~{memory}\"()".to_string());
+                return Ok((String::new(), Type::Unit));
+            }
+            if llty.starts_with('{') || llty.starts_with('[') {
+                let slot = self.fresh_alloca(&llty);
+                self.emit(format!("store {llty} {v}, ptr {slot}"));
+                self.emit(format!(
+                    "call void asm sideeffect \"\", \"r,~{{memory}}\"(ptr {slot})"
+                ));
+                let out = self.fresh_tmp();
+                self.emit(format!("{out} = load {llty}, ptr {slot}"));
+                return Ok((out, ty));
+            }
+            let out = self.fresh_tmp();
+            self.emit(format!(
+                "{out} = call {llty} asm sideeffect \"\", \"=r,0\"({llty} {v})"
+            ));
+            return Ok((out, ty));
+        }
         if name == "print" {
             let (v, ty) = self.gen_expr(&args[0])?;
             match self.resolve(&ty) {
@@ -8949,6 +8984,38 @@ fn sanitize(name: &str) -> String {
 mod tests {
     use super::*;
     use vyrn_frontend::check;
+
+    // ---- blackBox / benchmarking barrier (RFC-0055) ---------------------
+
+    #[test]
+    fn black_box_lowers_to_an_optimizer_barrier_that_survives_in_ir() {
+        // `blackBox` is checker-gated to bench/test bodies, but codegen (which
+        // never re-checks the bench-transformed program) lowers it unconditionally.
+        // Parse-without-check so we can put it in an ordinary function, then assert
+        // the emitted IR retains the barrier — the deterministic form of "the
+        // benched work is not deleted" (RFC-0055 §Verification 3).
+        let src = "fn work(n: Int64) -> Int64 { return blackBox(n) }\n\
+                   fn main() -> Int64 { return work(5) }";
+        let toks = vyrn_frontend::lexer::lex(src).unwrap();
+        let program = vyrn_frontend::parser::parse(toks).unwrap();
+        let ir = emit(&program).unwrap();
+        assert!(ir.contains("asm sideeffect"), "blackBox must emit a barrier:\n{ir}");
+        // A register-class value uses the identity-asm tie (`"=r,0"`), so the
+        // optimizer treats the result as an unknown function of the input.
+        assert!(ir.contains("\"=r,0\""), "register-class blackBox tie missing:\n{ir}");
+    }
+
+    #[test]
+    fn black_box_on_an_aggregate_uses_a_memory_clobber() {
+        // A value a single register can't hold (an array) round-trips through a
+        // slot with a `~{memory}` clobber instead of the `=r,0` tie.
+        let src = "fn work(xs: Array<Int64>) -> Array<Int64> { return blackBox(xs) }\n\
+                   fn main() -> Int64 { let a = work([1, 2, 3]) return 0 }";
+        let toks = vyrn_frontend::lexer::lex(src).unwrap();
+        let program = vyrn_frontend::parser::parse(toks).unwrap();
+        let ir = emit(&program).unwrap();
+        assert!(ir.contains("~{memory}"), "aggregate blackBox needs a memory clobber:\n{ir}");
+    }
 
     #[test]
     fn emits_module_with_main_wrapper() {
