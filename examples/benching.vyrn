@@ -1,0 +1,60 @@
+// Benchmarking (RFC-0055) — `bench` blocks, `blackBox`, and `vyrn bench`.
+//
+// A file may hold BOTH a `main` (an ordinary runnable program) AND `bench`
+// blocks. `vyrn run` / `build` / `emit-ir` ignore the benches entirely — they
+// are checked, then stripped — so this stays a normal three-way parity citizen
+// (interp == native == wasm), exactly like `examples/testing.vyrn`.
+//
+// To time the benches instead of running `main`, use `vyrn bench` (native,
+// optimized — timing the interpreter would be a lie):
+//
+//   $ vyrn bench examples/benching.vyrn
+//   bench "hash to 1000"   min 1.35 µs   median 1.38 µs   mean 1.41 µs   (373 samples × 512 iters)
+//   bench "push 1000"      min 2.01 µs   median 2.30 µs   mean 2.38 µs   (409 samples × 512 iters)
+//
+//   2 benches
+//
+// The CI-friendly `--check` runs each body once under the interpreter (no
+// timing, deterministic output):
+//
+//   $ vyrn bench examples/benching.vyrn --check
+//   bench "hash to 1000" ... ok
+//   bench "push 1000" ... ok
+//
+//   2 ok, 0 failed
+
+/// A rolling polynomial hash over 0..n — a data-dependent recurrence the
+/// optimizer cannot reduce to a closed form (unlike a plain arithmetic sum,
+/// which LLVM's scalar evolution would compute in O(1)), so there is real,
+/// iteration-count-proportional work to measure.
+fn hashTo(n: Int64) -> Int64 {
+    let mut h = 0
+    let mut i = 0
+    while i < n {
+        h = (h * 31 + i) % 1000000007
+        i = i + 1
+    }
+    return h
+}
+
+bench "hash to 1000" {
+    // `blackBox` on the INPUT hides the constant `1000` from the optimizer, so it
+    // cannot precompute the hash at compile time; `blackBox` on the OUTPUT keeps
+    // the result live. Both together force the loop to actually run each sample.
+    blackBox(hashTo(blackBox(1000)))
+}
+
+bench "push 1000" {
+    let mut xs: Array<Int64> = []
+    let mut i = 0
+    while i < 1000 {
+        xs.push(i)
+        i = i + 1
+    }
+    blackBox(xs.length)
+}
+
+fn main() -> Int64 {
+    print(hashTo(1000))
+    return 0
+}

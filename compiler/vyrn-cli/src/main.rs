@@ -9,6 +9,10 @@
 //!                                        Compile to a native executable (or wasm) via clang.
 //!   vyrn test    [file.vyrn] [--name <substring>]
 //!                                        Run the root file's `test` blocks under the interpreter.
+//!   vyrn bench   [file.vyrn] [--name <substring>] [--check]
+//!                                        Compile the root file's `bench` blocks NATIVE and time them
+//!                                        (divan-simplified). `--check` runs each once under the
+//!                                        interpreter (deterministic, no timing) — the CI face.
 //!   vyrn serve   [file.vyrn] [--port N] [--workers N]
 //!                                        Run `fn handle(req: Request) -> Response` as an HTTP host.
 //!                                        `--workers N` (RFC-0025) serves in parallel — refused when
@@ -28,7 +32,7 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check]   (native timing; --check runs each once under the interpreter)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
@@ -110,6 +114,9 @@ fn real_main() -> ExitCode {
     if cmd == "test" {
         return test_cmd(&path, rest);
     }
+    if cmd == "bench" {
+        return bench_cmd(&path, rest);
+    }
     if cmd == "serve" {
         return serve_cmd(&path, rest);
     }
@@ -172,7 +179,7 @@ fn real_main() -> ExitCode {
         }
         "emit-gen" => emit_gen(path, &source),
         other => {
-            eprintln!("unknown command `{other}` (expected run, check, emit-ir, emit-gen, build, test, or serve)");
+            eprintln!("unknown command `{other}` (expected run, check, emit-ir, emit-gen, build, test, bench, or serve)");
             ExitCode::from(2)
         }
     }
@@ -1812,6 +1819,327 @@ fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `vyrn bench [file] [--name <substring>] [--check]` (RFC-0055) — benchmark the
+/// root file's `bench` blocks. Two modes:
+///
+/// - **default (native):** a program transform lowers each selected bench body to
+///   an ordinary function and synthesizes a `main` harness (warmup / auto-scale /
+///   sample / stats / print — plain Vyrn over `std/bench` + `std/time`), then
+///   compiles it NATIVE via clang (same discovery/errors as `vyrn build`) and runs
+///   it. Timing the interpreter would be a lie; divan-class numbers mean optimized
+///   machine code. Report is min/median/mean per iteration with human units.
+/// - **`--check`:** run each selected body ONCE under the interpreter and print
+///   `bench "name" ... ok` / a trap message — deterministic, byte-pinnable, no
+///   timing. Exit 1 if any trapped. This is the CI face.
+///
+/// Root-file benches only, declaration order (the RFC-0015 rules verbatim);
+/// `--name` filters by substring; manifest-aware like every other command.
+fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
+    let mut filter: Option<String> = None;
+    let mut check = false;
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i] == "--name" && i + 1 < rest.len() {
+            filter = Some(rest[i + 1].clone());
+            i += 2;
+        } else if rest[i] == "--check" {
+            check = true;
+            i += 1;
+        } else {
+            eprintln!("bench: unexpected argument `{}`", rest[i]);
+            return ExitCode::from(2);
+        }
+    }
+
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {path}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let program = match load_program(path, &source) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+
+    // Root-file benches only (RFC-0055), in declaration order, name-filtered.
+    let matches = |name: &str| filter.as_deref().is_none_or(|sub| name.contains(sub));
+    let has_selected = program
+        .benches
+        .iter()
+        .any(|b| b.module.is_none() && matches(&b.name));
+    if !has_selected {
+        println!("no benches");
+        return ExitCode::SUCCESS;
+    }
+
+    if check {
+        return bench_check(&program, filter.as_deref());
+    }
+    bench_native(path, program, filter.as_deref())
+}
+
+/// `--check`: run each selected bench body once under the interpreter and pin the
+/// output byte-for-byte (declaration order, trap continuation, exit codes).
+fn bench_check(program: &vyrn_frontend::ast::Program, filter: Option<&str>) -> ExitCode {
+    use std::io::Write;
+    let on_result = |name: &str, result: &Result<(), String>| {
+        let mut stdout = std::io::stdout();
+        match result {
+            Ok(()) => {
+                let _ = writeln!(stdout, "bench {name:?} ... ok");
+            }
+            Err(msg) => {
+                let _ = writeln!(stdout, "bench {name:?} ... FAILED: {msg}");
+            }
+        }
+        let _ = stdout.flush();
+    };
+    match vyrn_frontend::interp::run_benches(program, filter, on_result) {
+        Ok((ok, failed)) => {
+            println!("\n{ok} ok, {failed} failed");
+            if failed > 0 {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Default mode: transform the loaded program (lift bench bodies to ordinary
+/// functions + synthesize the harness `main`, linking `std/bench`), compile it
+/// NATIVE via clang, and run it so it prints real timings.
+fn bench_native(path: &str, mut program: vyrn_frontend::ast::Program, filter: Option<&str>) -> ExitCode {
+    use vyrn_frontend::ast::{Block, Expr, Function, Stmt, Type};
+
+    // 1. Pull in the harness runtime (`std/bench` + its transitive `std/time`) by
+    //    loading a synthetic root that imports it, then merge every module decl it
+    //    brought (module-tagged, so the synthetic root's own dummy `main` is left
+    //    out) into the user's program — skipping any name the program already has.
+    let runtime_src = "import { benchOne } from \"std/bench\"\nfn main() -> Int64 { return 0 }\n";
+    let rt = match load_program(path, runtime_src) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let have_fn: std::collections::HashSet<String> =
+        program.functions.iter().map(|f| f.name.clone()).collect();
+    for f in rt.functions {
+        if f.module.is_some() && !have_fn.contains(&f.name) {
+            program.functions.push(f);
+        }
+    }
+    let have_ty: std::collections::HashSet<String> =
+        program.type_decls.iter().map(|t| t.name.clone()).collect();
+    for t in rt.type_decls {
+        if t.module.is_some() && !have_ty.contains(&t.name) {
+            program.type_decls.push(t);
+        }
+    }
+    let have_pr: std::collections::HashSet<String> =
+        program.protocols.iter().map(|p| p.name.clone()).collect();
+    for pr in rt.protocols {
+        if pr.module.is_some() && !have_pr.contains(&pr.name) {
+            program.protocols.push(pr);
+        }
+    }
+    // Impls carry no module tag; dedup by (protocol, implementing type). In
+    // practice the harness runtime defines none, so this loop is empty.
+    let have_im: std::collections::HashSet<(String, String)> = program
+        .impls
+        .iter()
+        .map(|im| (im.protocol.clone(), im.ty.to_string()))
+        .collect();
+    for im in rt.impls {
+        if !have_im.contains(&(im.protocol.clone(), im.ty.to_string())) {
+            program.impls.push(im);
+        }
+    }
+    let have_g: std::collections::HashSet<String> =
+        program.globals.iter().map(|g| g.name.clone()).collect();
+    for g in rt.globals {
+        if g.module.is_some() && !have_g.contains(&g.name) {
+            program.globals.push(g);
+        }
+    }
+
+    // 2. Lift each selected root bench body into an ordinary Unit function
+    //    `__vyrn_bench_body_<slot>` (declaration order). `blackBox` inside is fine:
+    //    the program is already checked, and codegen — which we go to next without
+    //    re-checking — lowers `blackBox` directly.
+    let selected: Vec<vyrn_frontend::ast::BenchDecl> = program
+        .benches
+        .iter()
+        .filter(|b| b.module.is_none() && filter.is_none_or(|sub| b.name.contains(sub)))
+        .cloned()
+        .collect();
+    let mut harness_stmts: Vec<Stmt> = Vec::new();
+    let mut width = 0i64;
+    for b in &selected {
+        // label is `bench "<name>"` → 7 for `bench "` + name + 1 for `"`.
+        let w = (b.name.len() + 8) as i64;
+        if w > width {
+            width = w;
+        }
+    }
+    for (slot, b) in selected.iter().enumerate() {
+        program.functions.push(Function {
+            name: format!("__vyrn_bench_body_{slot}"),
+            exported: false,
+            module: None,
+            doc: None,
+            type_params: Vec::new(),
+            type_bounds: Default::default(),
+            params: Vec::new(),
+            ret: Type::Unit,
+            body: b.body.clone(),
+            line: b.line,
+            is_extern: false,
+            is_export_extern: false,
+            is_gen: false,
+        });
+        harness_stmts.push(Stmt::Expr(Expr::Call {
+            name: "benchOne".to_string(),
+            args: vec![
+                Expr::Str(b.name.clone()),
+                Expr::Int(width),
+                Expr::Var {
+                    name: format!("__vyrn_bench_body_{slot}"),
+                    line: 0,
+                },
+            ],
+            line: 0,
+        }));
+    }
+    // Footer: a blank line, then the count (mirrors `vyrn test`'s summary shape).
+    harness_stmts.push(Stmt::Expr(Expr::Call {
+        name: "print".to_string(),
+        args: vec![Expr::Str(String::new())],
+        line: 0,
+    }));
+    harness_stmts.push(Stmt::Expr(Expr::Call {
+        name: "print".to_string(),
+        args: vec![Expr::Str(format!("{} benches", selected.len()))],
+        line: 0,
+    }));
+    harness_stmts.push(Stmt::Return {
+        value: Some(Expr::Int(0)),
+        line: 0,
+    });
+
+    // 3. Replace the user's `main` (bench mode ignores it) with the harness.
+    program.functions.retain(|f| f.name != "main");
+    program.functions.push(Function {
+        name: "main".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        type_bounds: Default::default(),
+        params: Vec::new(),
+        ret: Type::Int,
+        body: Block {
+            stmts: harness_stmts,
+        },
+        line: 0,
+        is_extern: false,
+        is_export_extern: false,
+        is_gen: false,
+    });
+    // Benches/tests are now either lifted or irrelevant — drop them so nothing
+    // downstream mistakes them for live code.
+    program.benches.clear();
+    program.tests.clear();
+
+    // 4. Emit IR + shim, compile native via clang into a temp dir, and run it.
+    let ir = match vyrn_codegen::emit(&program) {
+        Ok(ir) => ir,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("bench");
+    let dir = std::env::temp_dir().join(format!(
+        "vyrn-bench-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("error: cannot create temp dir {}: {e}", dir.display());
+        return ExitCode::FAILURE;
+    }
+    let exe_name = if cfg!(windows) {
+        format!("{stem}.exe")
+    } else {
+        stem.to_string()
+    };
+    let out_path = dir.join(&exe_name);
+    let ll_path = out_path.with_extension("ll");
+    let shim_path = out_path.with_extension("shim.c");
+    if let Err(e) = std::fs::write(&ll_path, ir) {
+        eprintln!("error: cannot write {}: {e}", ll_path.display());
+        return ExitCode::FAILURE;
+    }
+    let mut shim = RUNTIME_SHIM.to_string();
+    shim.push_str(&extern_trap_stubs(&program));
+    if let Err(e) = std::fs::write(&shim_path, &shim) {
+        eprintln!("error: cannot write {}: {e}", shim_path.display());
+        return ExitCode::FAILURE;
+    }
+    let clang = match find_clang() {
+        Some(c) => c,
+        None => {
+            eprintln!(
+                "error: could not find `clang`. Install LLVM and put clang on PATH, \
+                 or set the CLANG environment variable to its full path."
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut cmd = Command::new(&clang);
+    cmd.arg(&ll_path)
+        .arg(&shim_path)
+        .arg("-O2")
+        .arg("-o")
+        .arg(&out_path)
+        .arg("-Wno-override-module");
+    if !cfg!(windows) {
+        cmd.arg("-pthread");
+    }
+    match cmd.status() {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            eprintln!("error: clang exited with {s}");
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("error: failed to run clang ({}): {e}", clang.display());
+            return ExitCode::FAILURE;
+        }
+    }
+    // Run the compiled harness; its stdout/stderr stream straight through.
+    let run = Command::new(&out_path).status();
+    let code = match run {
+        Ok(s) => (s.code().unwrap_or(1) & 0xff) as u8,
+        Err(e) => {
+            eprintln!("error: failed to run bench binary ({}): {e}", out_path.display());
+            let _ = std::fs::remove_dir_all(&dir);
+            return ExitCode::FAILURE;
+        }
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    ExitCode::from(code)
 }
 
 /// `vyrn serve [file] [--port N]` (RFC-0016) — a hand-rolled HTTP/1.1 host on
