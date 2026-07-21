@@ -903,6 +903,12 @@ fn resolve_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Type
         return Type::Unit;
     }
     match ty {
+        // `Code` (RFC-0054) is a builtin *opaque* type with no declaration — it
+        // resolves to itself, not to `Unit` (the unknown-named fallback). A user
+        // `type Code` (if any) wins, so pre-existing programs are unaffected.
+        Type::Named(n) if n == "Code" && !types.contains_key("Code") => {
+            Type::Named("Code".to_string())
+        }
         Type::Named(n) => match types.get(n) {
             Some(d) => resolve_d(&d.base, types, depth + 1),
             None => Type::Unit,

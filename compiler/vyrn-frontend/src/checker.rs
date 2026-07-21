@@ -395,6 +395,7 @@ fn check_accum_full(
         errors: RefCell::new(Vec::new()),
         globals: RefCell::new(HashMap::new()),
         in_test: RefCell::new(false),
+        in_gen: RefCell::new(false),
         extern_fns: &extern_fns,
         gen_fns: &gen_fns,
         cur_fn: RefCell::new(String::new()),
@@ -462,6 +463,9 @@ fn check_accum_full(
     //    (preserving the historical single-error `check()` surface) and leaves
     //    the rest in the sink, which we drain here.
     for f in &program.functions {
+        // Signature validation (params/return) runs outside `function()`, so make
+        // it gen-aware here too — a `Code` type in a `gen fn` signature is legal.
+        *checker.in_gen.borrow_mut() = f.is_gen;
         let r = (|| -> Result<(), String> {
             for p in &f.params {
                 // A function-value type is legal only on an ordinary function
@@ -700,6 +704,12 @@ struct Checker<'a> {
     /// only when this is set; in ordinary code they are a checker error pointing
     /// at validated types / `Result`.
     in_test: RefCell<bool>,
+    /// True while checking a `gen fn` body (RFC-0021/0054). The `Code` type and the
+    /// code-quote builtins (`vyrn"…"`, `render`, `rawAt`, `raw`, `lex`) are legal
+    /// only when this is set — using them outside generation is a compile error,
+    /// which is also what keeps them out of any backend (gen fn bodies are never
+    /// emitted).
+    in_gen: RefCell<bool>,
     /// Names of `extern` (host-provided) functions — not usable as function
     /// values (RFC-0037: closures do not cross the host boundary).
     extern_fns: &'a std::collections::HashSet<String>,
@@ -999,6 +1009,18 @@ impl<'a> Checker<'a> {
 
     fn ensure_type_exists(&self, ty: &Type, line: usize) -> Result<(), String> {
         match ty {
+            // `Code` (RFC-0054) is a builtin opaque type, legal only in a
+            // generation context — using it elsewhere is a compile error (which
+            // also keeps it out of every backend: a `gen fn` body is never
+            // emitted). It has no fields and no declaration.
+            Type::Named(n) if n == "Code" && !self.types.contains_key("Code") => {
+                if !*self.in_gen.borrow() {
+                    return Err(format!(
+                        "line {line}: the `Code` type is only available during generation"
+                    ));
+                }
+                return Ok(());
+            }
             Type::Named(n) => match self.types.get(n) {
                 None => return Err(format!("line {line}: unknown type `{n}`")),
                 Some(d) if !d.type_params.is_empty() => {
@@ -1522,6 +1544,7 @@ impl<'a> Checker<'a> {
     fn function(&self, f: &Function) -> Result<(), String> {
         *self.cur_bounds.borrow_mut() = f.type_bounds.clone();
         *self.cur_fn.borrow_mut() = f.name.clone();
+        *self.in_gen.borrow_mut() = f.is_gen;
         self.errors.borrow_mut().clear();
         // Frame 0 is the module-state bindings (RFC-0013) — the outermost scope,
         // below the parameters; a local (param/let/for) with the same name
@@ -2871,7 +2894,11 @@ impl<'a> Checker<'a> {
                 Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
             )
         };
+        let code = Type::Named("Code".to_string());
         match op {
+            // `Code + Code` concatenates fragments (RFC-0054), origins carried.
+            // Gen-only, so this is only reachable inside a `gen fn` anyway.
+            Add if l == code && r == code => Ok(code.clone()),
             // `+` on two Strings is concatenation (replacing the old `concat`
             // builtin); it lowers to the same heap allocation and drop analysis.
             Add if l == Type::Str && r == Type::Str => Ok(Type::Str),
@@ -3276,6 +3303,118 @@ impl<'a> Checker<'a> {
                 ));
             }
             return Ok(Type::Named("ModuleInterface".to_string()));
+        }
+        // RFC-0054 code quotes. All are generation-only; a use outside a `gen fn`
+        // is a compile error (mirroring `Code`), which also keeps them out of
+        // every backend. `@codeText`/`@codeSplice` are the internal desugar of a
+        // `vyrn"…"` literal (never written by hand); `render`/`rawAt`/`raw`/`lex`
+        // are the surface builtins.
+        // The surface builtins (`render`/`rawAt`/`raw`/`lex`) are common words, so
+        // they are NOT reserved: a user function or binding of the same name wins
+        // (resolved below), and the builtin only applies when nothing shadows it.
+        // The `@`-prefixed desugar names are unspellable, so always intercepted.
+        let is_surface_builtin = matches!(name, "render" | "rawAt" | "raw" | "lex")
+            && self.sigs.get(name).is_none()
+            && self.lookup(scope, name).is_none();
+        if matches!(name, "@codeText" | "@codeSplice") || is_surface_builtin {
+            if !*self.in_gen.borrow() {
+                let surface = match name {
+                    "render" => "`render` is",
+                    "rawAt" => "`rawAt` is",
+                    "raw" => "`raw` is",
+                    "lex" => "`lex` is",
+                    _ => "`vyrn\"…\"` code quotes are",
+                };
+                return Err(format!(
+                    "line {line}: {surface} only available during generation"
+                ));
+            }
+            let code = || Type::Named("Code".to_string());
+            match name {
+                // Internal: a literal skeleton fragment -> Code.
+                "@codeText" => {
+                    self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?;
+                    return Ok(code());
+                }
+                // Internal: splice a value into a hole -> Code. The value must be a
+                // scalar (String/number/Bool) or already `Code`; a String is data
+                // and can never become code (it is escaped or validated at
+                // generation time by the hole's context).
+                "@codeSplice" => {
+                    let t = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
+                    self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?;
+                    let ok = matches!(
+                        t,
+                        Type::Str
+                            | Type::Int
+                            | Type::IntN { .. }
+                            | Type::Float
+                            | Type::Float32
+                            | Type::Bool
+                            | Type::Err
+                    ) || t == code();
+                    if !ok {
+                        return Err(format!(
+                            "line {line}: cannot splice {t} into a code quote \
+                             (expected String, number, Bool, or Code)"
+                        ));
+                    }
+                    return Ok(code());
+                }
+                // `render(Code) -> String`.
+                "render" => {
+                    if args.len() != 1 {
+                        return Err(format!(
+                            "line {line}: `render` takes 1 argument, got {}",
+                            args.len()
+                        ));
+                    }
+                    let t = self.base(&self.expr(&args[0], scope, Some(&code()), fn_ret)?);
+                    if !matches!(t, Type::Err) && t != code() {
+                        return Err(format!("line {line}: `render` needs a Code value, found {t}"));
+                    }
+                    return Ok(Type::Str);
+                }
+                // `rawAt(text, path, line, col) -> Code` — spliced user text with an
+                // origin, so `render` maps diagnostics inside it back (RFC-0033).
+                "rawAt" => {
+                    if args.len() != 4 {
+                        return Err(format!(
+                            "line {line}: `rawAt` takes 4 arguments (text, path, line, col), got {}",
+                            args.len()
+                        ));
+                    }
+                    self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?;
+                    self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?;
+                    self.expr(&args[2], scope, Some(&Type::Int), fn_ret)?;
+                    self.expr(&args[3], scope, Some(&Type::Int), fn_ret)?;
+                    return Ok(code());
+                }
+                // `raw(text) -> Code` — origin-less verbatim splice (a migration
+                // escape hatch; new code should use `vyrn"…"` quotes instead).
+                "raw" => {
+                    if args.len() != 1 {
+                        return Err(format!(
+                            "line {line}: `raw` takes 1 argument, got {}",
+                            args.len()
+                        ));
+                    }
+                    self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?;
+                    return Ok(code());
+                }
+                // `lex(source) -> Array<Token>` — the compiler's real lexer.
+                "lex" => {
+                    if args.len() != 1 {
+                        return Err(format!(
+                            "line {line}: `lex` takes 1 argument, got {}",
+                            args.len()
+                        ));
+                    }
+                    self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?;
+                    return Ok(Type::Array(Box::new(Type::Named("Token".to_string()))));
+                }
+                _ => unreachable!(),
+            }
         }
         if name == "writeFile" {
             if args.len() != 2 {

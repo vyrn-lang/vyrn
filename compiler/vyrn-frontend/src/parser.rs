@@ -85,6 +85,36 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         predicate: None,
         line: 0,
     });
+    // The built-in `Token` record (RFC-0054): one token from the `lex()` builtin —
+    // a `kind` category string, its source `text`, and 1-based `line`/`col`. Any
+    // gen code can name `Array<Token>` and read the fields.
+    program.type_decls.push(TypeDecl {
+        name: "Token".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        base: Type::Record(vec![
+            Field {
+                name: "kind".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "text".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "line".to_string(),
+                ty: Type::Int,
+            },
+            Field {
+                name: "col".to_string(),
+                ty: Type::Int,
+            },
+        ]),
+        predicate: None,
+        line: 0,
+    });
     // The error model (RFC-0009): a structured `Issue` (with an i18n `key`) and a
     // generic `Validation<T>` = `Valid(T) | Invalid([Issue])`. A validator
     // accumulates all failing checks into an issue array and returns `Invalid`,
@@ -2720,6 +2750,15 @@ impl Parser {
                     }
                 }
                 if string_adjacent && matches!(self.peek(), Tok::Str(_)) {
+                    // The `vyrn` code-quote tag (RFC-0054) is the one tag whose
+                    // hole-less form is meaningful: `vyrn"type Query {}"` is a
+                    // whole skeleton with no splices. Every other tag needs ≥1
+                    // interpolation (a hole-less tag is a plain string).
+                    if name == "vyrn" {
+                        if let Tok::Str(s) = self.advance() {
+                            return self.code_quote(vec![s], Vec::new(), line, col);
+                        }
+                    }
                     return Err(Diagnostic::error(
                         line,
                         col,
@@ -2879,6 +2918,13 @@ impl Parser {
         line: usize,
         col: usize,
     ) -> Result<Expr, Diagnostic> {
+        // `vyrn"…"` (RFC-0054) is a code quote, not an ordinary tagged template:
+        // the literal parts are a Vyrn *skeleton* validated here (at the
+        // generator's compile time) and the holes are structural splices, not
+        // boxed `Value`s.
+        if tag == "vyrn" {
+            return self.code_quote(parts, exprs, line, col);
+        }
         let parts_lit = Expr::ArrayLit {
             elems: parts.into_iter().map(Expr::Str).collect(),
             line,
@@ -2920,6 +2966,196 @@ impl Parser {
             args: vec![wrap(parts_lit), wrap(values_lit)],
             line,
         })
+    }
+
+    /// Desugar a `vyrn"…"` code quote (RFC-0054) into a `Code`-valued expression.
+    ///
+    /// The literal `parts` form a Vyrn **skeleton** (each hole substituted with a
+    /// synthetic `__vyrn_holeN` placeholder). The skeleton is validated *here*, at
+    /// the generator's compile time — it must parse in one of four modes tried in
+    /// order (declaration list → statement list → expression → type); failure is an
+    /// ordinary parse diagnostic in the generator's file at the literal's line/col.
+    ///
+    /// Each hole's grammatical context is then classified (RFC-0054 splice table):
+    /// a hole textually adjacent to a word character is an identifier *fragment*;
+    /// otherwise a hole where substituting a string literal keeps the skeleton
+    /// parsing is an *expression* position, and one where it does not is an
+    /// identifier/type position. The classification is encoded as a flag argument
+    /// to the internal `@codeSplice` builtin (`0` = expression, `1` = identifier),
+    /// which applies the actual splice rule at generation time by the value's type.
+    /// The quote lowers to a `@codeText(part) + @codeSplice(hole, flag) + …` chain.
+    fn code_quote(
+        &self,
+        parts: Vec<String>,
+        exprs: Vec<String>,
+        line: usize,
+        col: usize,
+    ) -> Result<Expr, Diagnostic> {
+        // Build the base skeleton: literal parts with `__vyrn_holeN` placeholders.
+        let mut skel = String::new();
+        for (i, part) in parts.iter().enumerate() {
+            skel.push_str(part);
+            if i < exprs.len() {
+                skel.push_str(&format!("__vyrn_hole{i}"));
+            }
+        }
+        if !self.skeleton_parses_any(&skel) {
+            let (msg, skel_line, skel_col) = self.skeleton_error_detail(&skel);
+            let rline = line + skel_line.saturating_sub(1);
+            let rcol = if skel_line <= 1 { col } else { skel_col };
+            return Err(Diagnostic::error(rline, rcol, "parse", msg));
+        }
+        // Classify each hole and fold the desugar chain.
+        let mut acc: Option<Expr> = None;
+        let add = |acc: &mut Option<Expr>, e: Expr| {
+            *acc = Some(match acc.take() {
+                None => e,
+                Some(prev) => Expr::Binary {
+                    op: BinOp::Add,
+                    lhs: Box::new(prev),
+                    rhs: Box::new(e),
+                    line,
+                },
+            });
+        };
+        let code_text = |s: &str| Expr::Call {
+            name: "@codeText".to_string(),
+            args: vec![Expr::Str(s.to_string())],
+            line,
+        };
+        for (i, part) in parts.iter().enumerate() {
+            if !part.is_empty() {
+                add(&mut acc, code_text(part));
+            }
+            if i < exprs.len() {
+                let ctx = self.hole_context(&parts, &exprs, i);
+                let value = self.parse_hole(&exprs[i], line, col)?;
+                let splice = Expr::Call {
+                    name: "@codeSplice".to_string(),
+                    args: vec![value, Expr::Int(ctx)],
+                    line,
+                };
+                add(&mut acc, splice);
+            }
+        }
+        // A quote is never empty of parts (the lexer always yields at least one
+        // fragment), but an all-empty skeleton still needs a valid `Code` value.
+        Ok(acc.unwrap_or_else(|| code_text("")))
+    }
+
+    /// The grammatical context of hole `i` in a code quote, encoded for the
+    /// `@codeSplice` builtin (RFC-0054 splice table):
+    ///   * `1` — identifier **fragment**: the hole is textually adjacent to a word
+    ///     character (`route_\{name}`) and merges into one identifier.
+    ///   * `2` — standalone identifier / type position: substituting a string
+    ///     literal for the placeholder makes the skeleton fail to parse (a string
+    ///     literal is valid wherever an expression is, so a position that rejects
+    ///     one is not an expression).
+    ///   * `0` — expression position (a `String` there becomes an escaped literal).
+    fn hole_context(&self, parts: &[String], exprs: &[String], i: usize) -> i64 {
+        let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let before = parts[i].chars().next_back().is_some_and(word);
+        let after = parts
+            .get(i + 1)
+            .and_then(|p| p.chars().next())
+            .is_some_and(word);
+        if before || after {
+            return 1; // identifier fragment
+        }
+        // Substitute a string literal for hole `i`, placeholders for the rest.
+        let mut probe = String::new();
+        for (j, part) in parts.iter().enumerate() {
+            probe.push_str(part);
+            if j < exprs.len() {
+                if j == i {
+                    probe.push_str("\"__vyrn_probe__\"");
+                } else {
+                    probe.push_str(&format!("__vyrn_hole{j}"));
+                }
+            }
+        }
+        if self.skeleton_parses_any(&probe) {
+            0 // expression position
+        } else {
+            2 // standalone identifier / type position
+        }
+    }
+
+    /// A fresh sub-parser over `src`, sharing the enclosing generic params (so a
+    /// skeleton mentioning `T` inside a generic `gen fn` still parses).
+    fn sub_parser(&self, src: &str) -> Option<Parser> {
+        let toks = crate::lexer::lex(src).ok()?;
+        Some(Parser {
+            tokens: toks,
+            pos: 0,
+            no_struct: false,
+            type_params: self.type_params.clone(),
+            field_preds: None,
+            extra_stmts: Vec::new(),
+            errors: Vec::new(),
+        })
+    }
+
+    /// Whether `src` parses cleanly as any of the four skeleton modes.
+    fn skeleton_parses_any(&self, src: &str) -> bool {
+        self.parses_as_decls(src)
+            || self.parses_as_stmts(src)
+            || self.parses_as_expr(src)
+            || self.parses_as_type(src)
+    }
+
+    /// Declaration-list mode: `src` is a sequence of top-level declarations.
+    fn parses_as_decls(&self, src: &str) -> bool {
+        let Some(mut p) = self.sub_parser(src) else {
+            return false;
+        };
+        let (_prog, errs) = p.program_accum();
+        errs.is_empty() && *p.peek() == Tok::Eof
+    }
+
+    /// Statement-list mode: `src` is a function body (wrapped so `program_accum`
+    /// parses it as one).
+    fn parses_as_stmts(&self, src: &str) -> bool {
+        self.parses_as_decls(&format!("fn __vyrn_probe__() {{\n{src}\n}}"))
+    }
+
+    /// Expression mode: `src` is a single expression consuming the whole stream.
+    fn parses_as_expr(&self, src: &str) -> bool {
+        let Some(mut p) = self.sub_parser(src) else {
+            return false;
+        };
+        p.expr().is_ok() && *p.peek() == Tok::Eof
+    }
+
+    /// Type mode: `src` is a single type spelling consuming the whole stream.
+    fn parses_as_type(&self, src: &str) -> bool {
+        let Some(mut p) = self.sub_parser(src) else {
+            return false;
+        };
+        p.type_().is_ok() && *p.peek() == Tok::Eof
+    }
+
+    /// The best available message + skeleton-relative line/col for a skeleton that
+    /// parses in no mode. Prefers the statement-mode error (the common case is a
+    /// declaration or statement skeleton).
+    fn skeleton_error_detail(&self, skel: &str) -> (String, usize, usize) {
+        let wrapped = format!("fn __vyrn_probe__() {{\n{skel}\n}}");
+        if let Some(mut p) = self.sub_parser(&wrapped) {
+            let (_prog, errs) = p.program_accum();
+            if let Some(d) = errs.into_iter().next() {
+                let sl = d.line.saturating_sub(1).max(1); // undo the wrapper line
+                return (
+                    format!("`vyrn\"…\"` skeleton does not parse: {}", d.message),
+                    sl,
+                    d.col,
+                );
+            }
+        }
+        (
+            "`vyrn\"…\"` skeleton does not parse as Vyrn code".to_string(),
+            1,
+            1,
+        )
     }
 
     /// `match scrutinee { pattern => expr, ... }` (the `match` keyword is already

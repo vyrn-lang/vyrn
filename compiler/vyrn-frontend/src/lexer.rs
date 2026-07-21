@@ -101,6 +101,81 @@ pub struct Token {
     pub col: usize,
 }
 
+/// The canonical `(kind, text)` pair for a token, exposed to generators through
+/// the `lex()` builtin (RFC-0054). `kind` is a stable category name; `text` is
+/// the token's source spelling (a literal's decoded value, a keyword/punct's
+/// spelling). `Eof` is included for completeness but callers filter it out.
+pub fn token_name_and_text(tok: &Tok) -> (String, String) {
+    let kw = |s: &str| ("keyword".to_string(), s.to_string());
+    let p = |s: &str| ("punct".to_string(), s.to_string());
+    match tok {
+        Tok::Int(n) => ("int".to_string(), n.to_string()),
+        Tok::Float(f) => ("float".to_string(), format!("{f:?}")),
+        Tok::Str(s) => ("string".to_string(), s.clone()),
+        Tok::TemplateStr { parts, .. } => ("template".to_string(), parts.join("")),
+        Tok::Doc(s) => ("doc".to_string(), s.clone()),
+        Tok::Ident(s) => ("ident".to_string(), s.clone()),
+        Tok::Fn => kw("fn"),
+        Tok::Let => kw("let"),
+        Tok::Mut => kw("mut"),
+        Tok::If => kw("if"),
+        Tok::Else => kw("else"),
+        Tok::While => kw("while"),
+        Tok::For => kw("for"),
+        Tok::In => kw("in"),
+        Tok::Drop => kw("drop"),
+        Tok::Protocol => kw("protocol"),
+        Tok::Import => kw("import"),
+        Tok::Export => kw("export"),
+        Tok::Impl => kw("impl"),
+        Tok::Vself => kw("self"),
+        Tok::Return => kw("return"),
+        Tok::True => kw("true"),
+        Tok::False => kw("false"),
+        Tok::Type => kw("type"),
+        Tok::Where => kw("where"),
+        Tok::Match => kw("match"),
+        Tok::Region => kw("region"),
+        Tok::Spawn => kw("spawn"),
+        Tok::LParen => p("("),
+        Tok::RParen => p(")"),
+        Tok::LBrace => p("{"),
+        Tok::RBrace => p("}"),
+        Tok::LBracket => p("["),
+        Tok::RBracket => p("]"),
+        Tok::Comma => p(","),
+        Tok::Semi => p(";"),
+        Tok::Colon => p(":"),
+        Tok::Dot => p("."),
+        Tok::Arrow => p("->"),
+        Tok::FatArrow => p("=>"),
+        Tok::Plus => p("+"),
+        Tok::Minus => p("-"),
+        Tok::Star => p("*"),
+        Tok::Slash => p("/"),
+        Tok::Percent => p("%"),
+        Tok::Eq => p("="),
+        Tok::EqEq => p("=="),
+        Tok::TildeMatch => p("=~"),
+        Tok::NotEq => p("!="),
+        Tok::Lt => p("<"),
+        Tok::LtEq => p("<="),
+        Tok::Gt => p(">"),
+        Tok::GtEq => p(">="),
+        Tok::AndAnd => p("&&"),
+        Tok::OrOr => p("||"),
+        Tok::Bang => p("!"),
+        Tok::Question => p("?"),
+        Tok::Pipe => p("|"),
+        Tok::Amp => p("&"),
+        Tok::Caret => p("^"),
+        Tok::Tilde => p("~"),
+        Tok::Shl => p("<<"),
+        Tok::Shr => p(">>"),
+        Tok::Eof => ("eof".to_string(), String::new()),
+    }
+}
+
 /// A lexical *item* for the formatter (RFC-0017): a token or a comment, carrying
 /// its **raw source text** (verbatim) and the source lines it spans. This is the
 /// additive, comment-preserving view of the token stream that [`lex_with_trivia`]
@@ -620,7 +695,13 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
         if c == '"' {
             let start_col = col; // column of the opening quote
             let start_line = line; // a multi-line string is anchored at its start
-            i += 1; // opening quote
+            // A `"""…"""` triple-quoted string (RFC-0054): inside it a single `"`
+            // and `""` are ordinary characters, so emitted Vyrn code carrying
+            // string literals needs no `\"` escaping. `\{` interpolation and every
+            // other escape work exactly as in a plain string; only the terminator
+            // differs (`"""` instead of `"`).
+            let triple = i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"';
+            i += if triple { 3 } else { 1 }; // opening quote(s)
             let mut parts: Vec<String> = Vec::new();
             let mut exprs: Vec<String> = Vec::new();
             let mut cur = String::new();
@@ -635,6 +716,17 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                 }
                 let ch = chars[i];
                 if ch == '"' {
+                    if triple {
+                        // Only a run of three closes a triple-quoted string; a lone
+                        // `"` or `""` is literal text.
+                        if i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"' {
+                            i += 3; // closing `"""`
+                            break;
+                        }
+                        cur.push('"');
+                        i += 1;
+                        continue;
+                    }
                     i += 1; // closing quote
                     break;
                 }

@@ -80,6 +80,11 @@ pub enum Val {
     /// appends. The `Vec` (not a `HashMap`) is what makes iteration/encoding
     /// order deterministic and parity-stable.
     Map(Vec<(String, Val)>),
+    /// An opaque `Code` fragment (RFC-0054): a sequence of rendered text pieces,
+    /// some carrying an origin span. Produced only inside a generation context by
+    /// `vyrn"…"` quotes / `raw` / `rawAt`, concatenated by `+`, and consumed by
+    /// `render`. Never reaches a backend (gen-only).
+    Code(Vec<CodePiece>),
     /// A function value (RFC-0023) — an internal, non-observable value produced
     /// when a lambda literal or a named function is passed to a `fn`-typed
     /// parameter. The checker guarantees it is never stored, returned, printed, or
@@ -88,6 +93,205 @@ pub enum Val {
     /// away entirely — this variant is the interpreter's dynamic stand-in, kept
     /// semantically identical by materializing captures at the outer call site.
     Fn(Box<FnVal>),
+}
+
+/// One piece of a [`Val::Code`] fragment (RFC-0054). Either plain rendered text
+/// (from a quote skeleton, a splice, or `raw`) or an origin-carrying region (from
+/// `rawAt`) that `render` wraps in `//@origin path:line:col` … `//@origin end`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CodePiece {
+    /// Verbatim rendered source text (no origin attribution).
+    Text(String),
+    /// A region derived from input at `path:line:col` — `render` brackets it with
+    /// the RFC-0033 origin directives so a diagnostic inside it maps back.
+    Origin {
+        path: String,
+        line: i64,
+        col: i64,
+        text: String,
+    },
+}
+
+/// Render a `Code` piece list to final source text (RFC-0054 `render`). Origin
+/// pieces are bracketed by `//@origin` directives, each on its own line (the
+/// directive governs the lines that follow — RFC-0033), so a check/parse error
+/// inside the region maps back to its recorded `path:line:col`.
+pub fn render_code(pieces: &[CodePiece]) -> String {
+    let mut out = String::new();
+    let ensure_nl = |out: &mut String| {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+    };
+    for p in pieces {
+        match p {
+            CodePiece::Text(t) => out.push_str(t),
+            CodePiece::Origin {
+                path,
+                line,
+                col,
+                text,
+            } => {
+                ensure_nl(&mut out);
+                out.push_str(&format!("//@origin {path}:{line}:{col}\n"));
+                out.push_str(text);
+                ensure_nl(&mut out);
+                out.push_str("//@origin end\n");
+            }
+        }
+    }
+    out
+}
+
+/// Apply the RFC-0054 splice rule for a value in a hole of grammatical context
+/// `ctx` (`0` expression, `1` identifier fragment, `2` standalone identifier /
+/// type), yielding the code pieces to splice. A `String` is DATA, never code:
+/// in expression position it becomes an escaped string *literal*; in an
+/// identifier position it is a validated bare-identifier fragment (there is
+/// deliberately no way to splice a `String` as code).
+fn code_splice(val: &Val, ctx: i64) -> Result<Vec<CodePiece>, Ctrl> {
+    // A `Code` value splices verbatim in every context (already-validated code).
+    if let Val::Code(pieces) = val {
+        return Ok(pieces.clone());
+    }
+    let text = |s: String| Ok(vec![CodePiece::Text(s)]);
+    match ctx {
+        // Expression position.
+        0 => match val {
+            Val::Str(s) => text(escape_string_literal(s)),
+            Val::Int(n) => text(n.to_string()),
+            Val::IntN { v, signed, .. } => text(if *signed {
+                v.to_string()
+            } else {
+                (*v as u64).to_string()
+            }),
+            Val::Float(f) => text(format!("{f:?}")),
+            Val::Float32(f) => text(format!("{f:?}")),
+            Val::Bool(b) => text(b.to_string()),
+            other => Err(format!(
+                "cannot splice {} into a code quote (expected String, number, Bool, or Code)",
+                val_kind(other)
+            )
+            .into()),
+        },
+        // Identifier fragment: `[A-Za-z0-9_]+`, non-empty (it merges with adjacent
+        // word characters, so a leading digit is fine).
+        1 => match val {
+            Val::Str(s) => {
+                if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    text(s.clone())
+                } else {
+                    Err(format!(
+                        "cannot splice {s:?} as an identifier fragment: not `[A-Za-z0-9_]+`"
+                    )
+                    .into())
+                }
+            }
+            other => Err(format!(
+                "cannot splice {} in identifier position (only String or Code)",
+                val_kind(other)
+            )
+            .into()),
+        },
+        // Standalone identifier / type position: a valid, non-keyword identifier.
+        _ => match val {
+            Val::Str(s) => {
+                if is_bare_identifier(s) {
+                    text(s.clone())
+                } else {
+                    Err(format!(
+                        "cannot splice {s:?} as an identifier: not a valid non-keyword identifier"
+                    )
+                    .into())
+                }
+            }
+            other => Err(format!(
+                "cannot splice {} in identifier position (only String or Code)",
+                val_kind(other)
+            )
+            .into()),
+        },
+    }
+}
+
+/// A short kind name for a `Val`, for splice diagnostics.
+fn val_kind(v: &Val) -> &'static str {
+    match v {
+        Val::Int(_) | Val::IntN { .. } => "a number",
+        Val::Float(_) | Val::Float32(_) => "a number",
+        Val::Bool(_) => "a Bool",
+        Val::Str(_) => "a String",
+        Val::Code(_) => "Code",
+        _ => "a value",
+    }
+}
+
+/// Escape a `String` value into a Vyrn source string literal, quotes included —
+/// the mechanism by which a spliced String is data, never code (RFC-0054). Uses
+/// the same escapes the lexer decodes (`\n \t \r \" \\` and `\{` so an emitted
+/// literal cannot itself open an interpolation).
+fn escape_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            // A literal `{` that follows a `\` in the OUTPUT would open a hole; the
+            // backslash is already doubled above, so a lone `{` is safe. Emit it
+            // verbatim (braces are ordinary characters in Vyrn strings).
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Whether `s` is a single, non-keyword Vyrn identifier — decided by the real
+/// lexer, so `fn`/`if`/… (keywords) and `a b`/`1x`/… (non-identifiers) are all
+/// rejected in one place (RFC-0054 identifier splice).
+fn is_bare_identifier(s: &str) -> bool {
+    match crate::lexer::lex(s) {
+        Ok(toks) => {
+            matches!(toks.first().map(|t| &t.tok), Some(crate::lexer::Tok::Ident(n)) if n == s)
+                && toks.len() == 2 // the ident plus EOF
+        }
+        Err(_) => false,
+    }
+}
+
+/// Run the compiler's real lexer over `source` non-fatally and return an
+/// `Array<Token>` (RFC-0054 `lex`). Unlexable bytes never trap: on a lex error
+/// the remainder is emitted as a single `error`-kind token (generators scan
+/// work-in-progress text). Every other token carries the canonical token-name
+/// string plus its 1-based line/col.
+fn lex_tokens(source: &str) -> Vec<Val> {
+    let token_val = |kind: &str, text: &str, line: usize, col: usize| {
+        let mut r = HashMap::new();
+        r.insert("kind".to_string(), Val::Str(kind.to_string()));
+        r.insert("text".to_string(), Val::Str(text.to_string()));
+        r.insert("line".to_string(), Val::Int(line as i64));
+        r.insert("col".to_string(), Val::Int(col as i64));
+        Val::Record(r)
+    };
+    match crate::lexer::lex(source) {
+        Ok(toks) => toks
+            .iter()
+            .filter(|t| !matches!(t.tok, crate::lexer::Tok::Eof))
+            .map(|t| {
+                let (kind, text) = crate::lexer::token_name_and_text(&t.tok);
+                token_val(&kind, &text, t.line, t.col)
+            })
+            .collect(),
+        Err(d) => {
+            // Non-fatal: attribute the unlexable input as one `error` token at the
+            // diagnostic's position.
+            vec![token_val("error", &d.message, d.line, d.col)]
+        }
+    }
 }
 
 /// The two shapes a [`Val::Fn`] can take (RFC-0023).
@@ -119,6 +323,7 @@ struct CellSlot {
 }
 
 /// A control signal carried in the error channel.
+#[derive(Debug)]
 pub enum Ctrl {
     /// A genuine runtime error.
     Err(String),
@@ -834,6 +1039,8 @@ pub fn generate(
         .collect();
     let source = match interp.call(fn_name, &vals) {
         Ok(Val::Str(s)) => s,
+        // A `gen fn` may return `Code` directly (RFC-0054); render it here.
+        Ok(Val::Code(pieces)) => render_code(&pieces),
         Ok(other) => {
             return Err(format!(
                 "generator `{fn_name}` returned {other:?}, expected a String of module source"
@@ -2118,6 +2325,11 @@ impl<'a> Interp<'a> {
                         return Ok(convert_val(vals.remove(0), &target));
                     }
                 }
+                // A user function shadows the gen-only surface builtins
+                // (`render`/`rawAt`/`raw`/`lex`) — they are common words and not
+                // reserved, so a same-named user function wins (RFC-0054).
+                let shadowed = matches!(name.as_str(), "render" | "rawAt" | "raw" | "lex")
+                    && self.funcs.contains_key(name.as_str());
                 match name.as_str() {
                     "print" => {
                         match &vals[0] {
@@ -2176,6 +2388,83 @@ impl<'a> Interp<'a> {
                         (Val::Str(a), Val::Str(b)) => Ok(Val::Str(format!("{a}{b}"))),
                         _ => Err("@concat of non-Strings".into()),
                     },
+                    // RFC-0054 code quotes. `@codeText`/`@codeSplice` are the
+                    // internal desugar of `vyrn"…"`; `render`/`rawAt`/`raw`/`lex`
+                    // are the surface builtins. All are generation-only — a runtime
+                    // call traps, mirroring `moduleInterface`'s wording.
+                    "@codeText" => {
+                        if self.gen.is_none() {
+                            return Err("code quotes are only available during generation".into());
+                        }
+                        match &vals[0] {
+                            Val::Str(s) => Ok(Val::Code(vec![CodePiece::Text(s.clone())])),
+                            _ => Err("@codeText of non-String".into()),
+                        }
+                    }
+                    "@codeSplice" => {
+                        if self.gen.is_none() {
+                            return Err("code quotes are only available during generation".into());
+                        }
+                        let ctx = match &vals[1] {
+                            Val::Int(n) => *n,
+                            _ => return Err("@codeSplice context flag must be Int".into()),
+                        };
+                        Ok(Val::Code(code_splice(&vals[0], ctx)?))
+                    }
+                    "raw" if !shadowed => {
+                        if self.gen.is_none() {
+                            return Err("`raw` is only available during generation".into());
+                        }
+                        match &vals[0] {
+                            Val::Str(s) => Ok(Val::Code(vec![CodePiece::Text(s.clone())])),
+                            _ => Err("`raw` of non-String".into()),
+                        }
+                    }
+                    "rawAt" if !shadowed => {
+                        if self.gen.is_none() {
+                            return Err("`rawAt` is only available during generation".into());
+                        }
+                        let text = match &vals[0] {
+                            Val::Str(s) => s.clone(),
+                            _ => return Err("`rawAt` text must be a String".into()),
+                        };
+                        let path = match &vals[1] {
+                            Val::Str(s) => s.clone(),
+                            _ => return Err("`rawAt` path must be a String".into()),
+                        };
+                        let line = match &vals[2] {
+                            Val::Int(n) => *n,
+                            _ => return Err("`rawAt` line must be an Int64".into()),
+                        };
+                        let col = match &vals[3] {
+                            Val::Int(n) => *n,
+                            _ => return Err("`rawAt` col must be an Int64".into()),
+                        };
+                        Ok(Val::Code(vec![CodePiece::Origin {
+                            path,
+                            line,
+                            col,
+                            text,
+                        }]))
+                    }
+                    "render" if !shadowed => {
+                        if self.gen.is_none() {
+                            return Err("`render` is only available during generation".into());
+                        }
+                        match &vals[0] {
+                            Val::Code(pieces) => Ok(Val::Str(render_code(pieces))),
+                            _ => Err("`render` of non-Code".into()),
+                        }
+                    }
+                    "lex" if !shadowed => {
+                        if self.gen.is_none() {
+                            return Err("`lex` is only available during generation".into());
+                        }
+                        match &vals[0] {
+                            Val::Str(s) => Ok(Val::Array(lex_tokens(s))),
+                            _ => Err("`lex` of non-String".into()),
+                        }
+                    }
                     "contains" => match (&vals[0], &vals[1]) {
                         (Val::Str(a), Val::Str(b)) => Ok(Val::Bool(a.contains(b.as_str()))),
                         _ => Err("contains of non-Strings".into()),
@@ -3109,6 +3398,14 @@ impl<'a> Interp<'a> {
                 NotEq => Ok(Val::Bool(a != b)),
                 _ => Err("type error in bool binop (should have been caught)".into()),
             },
+            // `Code + Code` concatenates fragments, origins carried (RFC-0054).
+            (Val::Code(mut a), Val::Code(b)) => match op {
+                Add => {
+                    a.extend(b);
+                    Ok(Val::Code(a))
+                }
+                _ => Err("type error in Code binop (should have been caught)".into()),
+            },
             (Val::Str(a), Val::Str(b)) => match op {
                 // `a + b` concatenates (replacing `concat`) — a fresh String.
                 Add => Ok(Val::Str(format!("{a}{b}"))),
@@ -3915,6 +4212,7 @@ impl<'a> Interp<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::{code_splice, lex_tokens, render_code, CodePiece, Ctrl, Val};
     use crate::run;
 
     #[test]
@@ -4730,6 +5028,149 @@ mod tests {
                        return match values[0] { IntVal(n) => n, BoolVal(b) => 0, StrVal(s) => s.length }; } \
                    fn main() -> Int64 { let x = 41; return sql\"n=\\{x}\"; }";
         assert_eq!(run(src).unwrap(), 41);
+    }
+
+    // ---- RFC-0054 code quotes ------------------------------------------------
+
+    #[test]
+    fn splice_string_in_expression_position_is_an_inert_literal() {
+        // An injection attempt: a String value carrying Vyrn syntax becomes an
+        // escaped string LITERAL, never code (splice-rule safety by construction).
+        let evil = "ev\"; dropTables(); \"";
+        let pieces = code_splice(&Val::Str(evil.to_string()), 0).unwrap();
+        assert_eq!(pieces.len(), 1);
+        match &pieces[0] {
+            CodePiece::Text(t) => {
+                // Starts/ends with a quote and re-lexes to a single string token
+                // whose value is the original text — pure data.
+                assert!(t.starts_with('"') && t.ends_with('"'));
+                let toks = crate::lexer::lex(t).unwrap();
+                assert!(matches!(&toks[0].tok, crate::lexer::Tok::Str(s) if s == evil));
+                assert_eq!(toks.len(), 2); // string + EOF: one token, no injection
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn splice_numbers_and_bools_are_literals() {
+        assert_eq!(
+            code_splice(&Val::Int(42), 0).unwrap(),
+            vec![CodePiece::Text("42".to_string())]
+        );
+        assert_eq!(
+            code_splice(&Val::Bool(true), 0).unwrap(),
+            vec![CodePiece::Text("true".to_string())]
+        );
+    }
+
+    #[test]
+    fn splice_bad_identifier_names_the_problem() {
+        // `a b` (a space) in identifier position is a comptime error.
+        let err = code_splice(&Val::Str("a b".to_string()), 2).unwrap_err();
+        let msg = match err {
+            Ctrl::Err(s) => s,
+            _ => panic!("expected Err"),
+        };
+        assert!(msg.contains("\"a b\""), "message: {msg}");
+        assert!(msg.contains("identifier"), "message: {msg}");
+    }
+
+    #[test]
+    fn splice_keyword_is_rejected_in_identifier_position() {
+        // A keyword is not a valid standalone identifier.
+        assert!(code_splice(&Val::Str("fn".to_string()), 2).is_err());
+        // A valid identifier is accepted verbatim.
+        assert_eq!(
+            code_splice(&Val::Str("greet".to_string()), 2).unwrap(),
+            vec![CodePiece::Text("greet".to_string())]
+        );
+    }
+
+    #[test]
+    fn splice_fragment_allows_leading_digit_but_not_symbols() {
+        // A fragment (ctx 1) merges with adjacent word chars, so a leading digit
+        // is fine; a space or symbol is not.
+        assert_eq!(
+            code_splice(&Val::Str("123".to_string()), 1).unwrap(),
+            vec![CodePiece::Text("123".to_string())]
+        );
+        assert!(code_splice(&Val::Str("a-b".to_string()), 1).is_err());
+    }
+
+    #[test]
+    fn code_values_splice_verbatim_in_every_context() {
+        let c = Val::Code(vec![CodePiece::Text("foo()".to_string())]);
+        for ctx in [0, 1, 2] {
+            assert_eq!(
+                code_splice(&c, ctx).unwrap(),
+                vec![CodePiece::Text("foo()".to_string())]
+            );
+        }
+    }
+
+    #[test]
+    fn render_inserts_origin_directives_around_rawat_regions() {
+        let pieces = vec![
+            CodePiece::Text("push(x)\n".to_string()),
+            CodePiece::Origin {
+                path: "comp/Item.vyx".to_string(),
+                line: 14,
+                col: 9,
+                text: "item.title".to_string(),
+            },
+        ];
+        let out = render_code(&pieces);
+        assert!(out.contains("//@origin comp/Item.vyx:14:9\n"));
+        assert!(out.contains("item.title"));
+        assert!(out.contains("//@origin end\n"));
+        // The directive precedes the origin text (RFC-0033: governs the next line).
+        let d = out.find("//@origin comp").unwrap();
+        let t = out.find("item.title").unwrap();
+        assert!(d < t);
+    }
+
+    #[test]
+    fn lex_tokens_agrees_with_the_lexer_on_the_audit_reproducers() {
+        // A comment containing `props` yields no `props` token (comment is trivia).
+        let toks = lex_tokens("// props here\nlet x = 1");
+        assert!(
+            !toks.iter().any(|t| matches!(t, Val::Record(r)
+                if matches!(r.get("text"), Some(Val::Str(s)) if s == "props"))),
+            "a comment's words must not leak as tokens"
+        );
+        // `</script>` inside a string is one string token, not markup.
+        let toks = lex_tokens("\"</script>\"");
+        assert_eq!(toks.len(), 1);
+        match &toks[0] {
+            Val::Record(r) => {
+                assert_eq!(r.get("kind"), Some(&Val::Str("string".to_string())));
+                assert_eq!(r.get("text"), Some(&Val::Str("</script>".to_string())));
+            }
+            other => panic!("expected a record token, got {other:?}"),
+        }
+        // Literal `{ a }` text lexes as braces + ident, never interpolation.
+        let toks = lex_tokens("{ a }");
+        let kinds: Vec<String> = toks
+            .iter()
+            .filter_map(|t| match t {
+                Val::Record(r) => match r.get("text") {
+                    Some(Val::Str(s)) => Some(s.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, vec!["{", "a", "}"]);
+    }
+
+    #[test]
+    fn lex_never_traps_on_unlexable_bytes() {
+        // A stray backslash is unlexable; `lex` returns an `error` token, not a trap.
+        let toks = lex_tokens("let x = \\");
+        assert!(toks
+            .iter()
+            .any(|t| matches!(t, Val::Record(r) if r.get("kind") == Some(&Val::Str("error".to_string())))));
     }
 
     #[test]
