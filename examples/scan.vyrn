@@ -1,0 +1,52 @@
+/// std/scan (RFC-0054) — the shared comment/string-aware cursor, exercised as a
+/// three-way parity citizen. Every op runs identically under interp, native, and
+/// wasm. The point is the awareness: a delimiter inside a quoted string or a line
+/// comment never ends a scan early — the class of bug the hand-rolled generator
+/// scanners kept shipping.
+
+import {
+    newScanner,
+    scanner,
+    skipWs,
+    ident,
+    until,
+    untilStr,
+    balanced,
+    quotedString,
+    peek,
+} from "std/scan"
+
+fn main() -> Int64 {
+    // ident after whitespace.
+    let mut a = newScanner("   hello(world)")
+    skipWs(a)
+    print("ident: \{ident(a)}") // hello
+
+    // balanced parens, string-aware: the comma inside "x, y" is not structure.
+    let mut b = newScanner("call(\"x, y\", z)")
+    let name = ident(b)
+    print("inner: \{balanced(b, 40, 41)}") // "x, y", z
+
+    // until a top-level comma: the comma inside the string is skipped.
+    let mut c = newScanner("\"a, b\", tail")
+    print("first: \{until(c, 44)}") // "a, b"
+
+    // a line comment hides a delimiter from `until`.
+    let mut d = newScanner("head // ; not a stop\nreal ; here")
+    print("beforeSemi: \{until(d, 59)}") // head // ; not a stop\nreal (comment ; skipped)
+
+    // quotedString respects the escape byte.
+    let mut e = newScanner("\"a\\\"b\" rest")
+    let q = quotedString(e)
+    print("quoted: \{match q { Some(s) => s, None => "<none>" }}") // a\"b
+
+    // untilStr stops at a multi-byte marker, string-aware.
+    let mut f = newScanner("prefix \"}}\" }} end")
+    print("untilClose: \{untilStr(f, "}}")}") // prefix "}}"  (the one in the string skipped)
+
+    // a custom scanner: `#` line comments, single-quote strings only.
+    let mut g = scanner("id # ' comment\nx", "#", 39, -1, -1)
+    print("beforeHash: \{until(g, 120)}") // id # ' comment\n  (stops before 'x'=120)
+
+    return 0
+}

@@ -1,0 +1,267 @@
+/// std/scan (RFC-0054) — one shared, comment- and string-aware cursor over
+/// foreign text (CSS, ICU messages, HTML templates, SDL). Every generator that
+/// walks text used to hand-roll this and got it wrong: a delimiter inside a
+/// string or comment was miscounted (the `std/vyx` scanner bugs), an apostrophe
+/// inside an ICU message swallowed a parameter. Written once, tested once.
+///
+/// A `String` is UTF-8 bytes; all offsets are BYTE offsets (like `std/strings`).
+/// The scanner is a plain record advanced through `modify` cursor functions, so
+/// `line`/`col` stay in sync. Comment markers, quote bytes, and the escape byte
+/// are configurable; `-1` disables a byte-valued setting and `""` a line-comment
+/// marker. The quote/comment awareness is the whole point: `until`, `untilStr`,
+/// and `balanced` skip OVER quoted strings and line comments, so a delimiter
+/// hiding inside one never ends the scan early.
+
+/// A cursor over `src`, with 1-based `line`/`col` and its lexical config.
+export type Scanner = {
+    src: String,
+    pos: Int64,
+    line: Int64,
+    col: Int64,
+    // The line-comment marker ("//", "#", …); "" disables comments.
+    lineComment: String,
+    // Primary/secondary quote bytes (e.g. 34 for ", 39 for '); -1 disables.
+    quote1: Int64,
+    quote2: Int64,
+    // The escape byte inside a quoted string (e.g. 92 for backslash); -1 disables.
+    escape: Int64,
+}
+
+/// A Vyrn-flavored scanner: `//` line comments, `"`/`'` strings, `\` escape.
+export fn newScanner(src: String) -> Scanner {
+    return Scanner {
+        src: src,
+        pos: 0,
+        line: 1,
+        col: 1,
+        lineComment: "//",
+        quote1: 34,
+        quote2: 39,
+        escape: 92,
+    }
+}
+
+/// A fully configured scanner (for CSS `/* */`-free text, ICU messages, …).
+/// Pass `""` for `lineComment` and `-1` for any disabled byte.
+export fn scanner(
+    src: String,
+    lineComment: String,
+    quote1: Int64,
+    quote2: Int64,
+    escape: Int64,
+) -> Scanner {
+    return Scanner {
+        src: src,
+        pos: 0,
+        line: 1,
+        col: 1,
+        lineComment: lineComment,
+        quote1: quote1,
+        quote2: quote2,
+        escape: escape,
+    }
+}
+
+/// Whether the cursor is at end of input.
+export fn atEnd(sc: Scanner) -> Bool {
+    return sc.pos >= sc.src.length
+}
+
+/// The current byte, or `-1` at end of input.
+export fn peek(sc: Scanner) -> Int64 {
+    if sc.pos >= sc.src.length {
+        return -1
+    }
+    return Int64(sc.src[sc.pos])
+}
+
+/// The byte `n` ahead, or `-1` past the end.
+export fn peekAt(sc: Scanner, n: Int64) -> Int64 {
+    let i = sc.pos + n
+    if i < 0 || i >= sc.src.length {
+        return -1
+    }
+    return Int64(sc.src[i])
+}
+
+/// Whether the input at the cursor begins with `s`.
+export fn looksAt(sc: Scanner, s: String) -> Bool {
+    let n = s.length
+    if sc.pos + n > sc.src.length {
+        return false
+    }
+    let mut j = 0
+    while j < n {
+        if sc.src[sc.pos + j] != s[j] {
+            return false
+        }
+        j = j + 1
+    }
+    return true
+}
+
+fn isSpaceByte(b: Int64) -> Bool {
+    return b == 32 || b == 9 || b == 10 || b == 13
+}
+
+fn isWordByte(b: Int64) -> Bool {
+    return (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b == 95
+}
+
+/// Advance one byte, keeping `line`/`col` in sync (an LF starts a new line).
+export fn advance(sc: modify Scanner) -> Unit {
+    if sc.pos >= sc.src.length {
+        return
+    }
+    let b = Int64(sc.src[sc.pos])
+    sc.pos = sc.pos + 1
+    if b == 10 {
+        sc.line = sc.line + 1
+        sc.col = 1
+    } else {
+        sc.col = sc.col + 1
+    }
+}
+
+/// Skip ASCII whitespace AND line comments (through end of line). Comment-aware
+/// so `until`/`balanced` never mistake comment text for structure.
+export fn skipWs(sc: modify Scanner) -> Unit {
+    let mut going = true
+    while going {
+        going = false
+        while !atEnd(sc) && isSpaceByte(peek(sc)) {
+            advance(sc)
+            going = true
+        }
+        if sc.lineComment.length > 0 && looksAt(sc, sc.lineComment) {
+            while !atEnd(sc) && peek(sc) != 10 {
+                advance(sc)
+            }
+            going = true
+        }
+    }
+}
+
+/// Consume a `[A-Za-z0-9_]+` run and return it (empty string if none here).
+export fn ident(sc: modify Scanner) -> String {
+    let start = sc.pos
+    while !atEnd(sc) && isWordByte(peek(sc)) {
+        advance(sc)
+    }
+    return slice(sc.src, start, sc.pos)
+}
+
+fn isQuoteByte(sc: Scanner, b: Int64) -> Bool {
+    return (sc.quote1 >= 0 && b == sc.quote1) || (sc.quote2 >= 0 && b == sc.quote2)
+}
+
+/// If the cursor is at a quote, consume the whole quoted run (respecting the
+/// escape byte) and return its INNER text (quotes stripped, escapes left as
+/// written — the caller decodes per its own dialect). `None` if not at a quote.
+export fn quotedString(sc: modify Scanner) -> Option<String> {
+    let open = peek(sc)
+    if !isQuoteByte(sc, open) {
+        return None
+    }
+    advance(sc) // opening quote
+    let start = sc.pos
+    while !atEnd(sc) {
+        let b = peek(sc)
+        if sc.escape >= 0 && b == sc.escape {
+            advance(sc)
+            if !atEnd(sc) {
+                advance(sc) // the escaped byte, whatever it is
+            }
+        } else if b == open {
+            let inner = slice(sc.src, start, sc.pos)
+            advance(sc) // closing quote
+            return Some(inner)
+        } else {
+            advance(sc)
+        }
+    }
+    // Unterminated: return what we have (generators scan work-in-progress text).
+    return Some(slice(sc.src, start, sc.pos))
+}
+
+/// Skip one lexical unit: a quoted string (whole), a line comment (to EOL), or a
+/// single byte. The primitive `until`/`balanced` step by, so a delimiter inside
+/// a string or comment is transparently skipped.
+fn skipUnit(sc: modify Scanner) -> Unit {
+    if isQuoteByte(sc, peek(sc)) {
+        let _ = quotedString(sc)
+        return
+    }
+    if sc.lineComment.length > 0 && looksAt(sc, sc.lineComment) {
+        while !atEnd(sc) && peek(sc) != 10 {
+            advance(sc)
+        }
+        return
+    }
+    advance(sc)
+}
+
+/// Consume up to (but NOT including) the first top-level occurrence of byte
+/// `stop`, skipping over quoted strings and comments, and return the consumed
+/// text. Stops at end of input if `stop` never appears at the top level.
+export fn until(sc: modify Scanner, stop: Int64) -> String {
+    let start = sc.pos
+    while !atEnd(sc) {
+        let b = peek(sc)
+        if b == stop && !isQuoteByte(sc, b) {
+            return slice(sc.src, start, sc.pos)
+        }
+        skipUnit(sc)
+    }
+    return slice(sc.src, start, sc.pos)
+}
+
+/// Like `until`, but stops at the first top-level occurrence of the multi-byte
+/// string `stop` (string/comment aware). The cursor is left ON `stop`.
+export fn untilStr(sc: modify Scanner, stop: String) -> String {
+    let start = sc.pos
+    while !atEnd(sc) {
+        if looksAt(sc, stop) {
+            return slice(sc.src, start, sc.pos)
+        }
+        skipUnit(sc)
+    }
+    return slice(sc.src, start, sc.pos)
+}
+
+/// Assuming the cursor is at byte `open`, consume the balanced region through the
+/// matching `close` (nesting-aware, string/comment aware) and return the INNER
+/// text (between the outermost `open`/`close`). If `open`/`close` never balances,
+/// returns everything to end of input. A no-op (empty string) if not at `open`.
+export fn balanced(sc: modify Scanner, open: Int64, close: Int64) -> String {
+    if peek(sc) != open {
+        return ""
+    }
+    advance(sc) // outermost open
+    let start = sc.pos
+    let mut depth = 1
+    while !atEnd(sc) {
+        let b = peek(sc)
+        if isQuoteByte(sc, b) {
+            let _ = quotedString(sc)
+        } else if sc.lineComment.length > 0 && looksAt(sc, sc.lineComment) {
+            while !atEnd(sc) && peek(sc) != 10 {
+                advance(sc)
+            }
+        } else if b == open {
+            depth = depth + 1
+            advance(sc)
+        } else if b == close {
+            depth = depth - 1
+            if depth == 0 {
+                let inner = slice(sc.src, start, sc.pos)
+                advance(sc) // outermost close
+                return inner
+            }
+            advance(sc)
+        } else {
+            advance(sc)
+        }
+    }
+    return slice(sc.src, start, sc.pos)
+}

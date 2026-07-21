@@ -361,8 +361,12 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
         }
 
         // string / interpolated string — one item spanning any internal newlines.
+        // A `"""…"""` triple-quoted string (RFC-0054) is one item too; inside it a
+        // lone `"`/`""` is literal, only `"""` closes. The raw text is captured
+        // verbatim (fmt never re-escapes a literal), so we only need the bounds.
         if c == '"' {
-            i += 1;
+            let triple = i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"';
+            i += if triple { 3 } else { 1 };
             loop {
                 if i >= chars.len() {
                     return Err(Diagnostic::error(
@@ -374,6 +378,14 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
                 }
                 let ch = chars[i];
                 if ch == '"' {
+                    if triple {
+                        if i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"' {
+                            i += 3;
+                            break;
+                        }
+                        i += 1;
+                        continue;
+                    }
                     i += 1;
                     break;
                 }

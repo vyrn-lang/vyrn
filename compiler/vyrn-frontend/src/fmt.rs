@@ -669,6 +669,24 @@ mod tests {
     }
 
     #[test]
+    fn vyrn_code_quote_survives_formatting() {
+        // A `vyrn"…"` code quote (RFC-0054) is an ordinary tagged-template token to
+        // fmt — the tag stays tight against the string and the raw text (incl. its
+        // `\{…}` holes) is preserved verbatim, so the safety invariant holds.
+        assert_eq!(
+            f("let c = vyrn\"fn f() { \\{x} }\"\n"),
+            "let c = vyrn\"fn f() { \\{x} }\"\n"
+        );
+        // A `"""…"""` triple-quoted skeleton (inner `\"` and newlines) round-trips
+        // byte-for-byte; only leading indentation is normalized.
+        let src = "fn g() -> Int64 {\nlet c = vyrn\"\"\"fn f() -> String {\n  return \"hi\"\n}\"\"\"\nreturn 0\n}\n";
+        let out = f(src);
+        assert!(out.contains("vyrn\"\"\"fn f() -> String {\n  return \"hi\"\n}\"\"\""));
+        // Idempotent: re-formatting the output is a no-op (re-lex equality).
+        assert_eq!(f(&out), out);
+    }
+
+    #[test]
     fn sized_array_const_generic() {
         assert_eq!(
             f("let fixed: Array<Int64, 5> = x\n"),
