@@ -2225,3 +2225,84 @@ fn rfc52_utility_hover_is_unchanged() {
     assert!(!v.contains("app.css"), "no app-CSS block appended: {v}");
     let _ = client.child.kill();
 }
+
+// ---- RFC-0054: code quotes in the editor -----------------------------------
+
+/// A broken `vyrn"…"` skeleton is an ordinary parse diagnostic IN THE GENERATOR'S
+/// FILE at the literal's line — published against the `.vyrn` URI opened over
+/// stdio in the VS Code URI form (`file:///c%3A/…`, drive lower-cased and
+/// percent-encoded). It never becomes a runtime "unexpected character in
+/// generated code".
+#[test]
+fn rfc54_broken_skeleton_publishes_in_the_generator_file() {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_rfc54_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Line 2 of the literal is `type Query {` — GraphQL, not Vyrn, so the skeleton
+    // parses in no mode.
+    let gen = "export gen fn mk(name: String) -> String {\n\
+               let body = vyrn\"\"\"\n\
+               type Query {\n\
+               }\"\"\"\n\
+               return render(body)\n\
+               }\n";
+    let gen_path = dir.join("gen.vyrn");
+    std::fs::write(&gen_path, gen).unwrap();
+
+    // Build the VS Code percent-encoded URI form: lower-case drive + `%3A`.
+    let raw = gen_path.to_string_lossy().replace('\\', "/");
+    let uri = if raw.len() > 2 && raw.as_bytes()[1] == b':' {
+        let drive = raw[..1].to_lowercase();
+        format!("file:///{drive}%3A{}", &raw[2..])
+    } else {
+        format!("file://{raw}")
+    };
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", gen);
+    let note = read_nonempty_diags_for(&mut client, "gen.vyrn");
+    let diags = note.pointer("/params/diagnostics").and_then(|d| d.as_array()).expect("diags");
+    let msg = diags[0].get("message").and_then(|m| m.as_str()).unwrap_or("");
+    assert!(msg.contains("skeleton does not parse"), "skeleton message: {msg}");
+    // The literal opens on line 2 (`vyrn"""`); its content starts on line 3
+    // (`type Query {`), 1-based → LSP line 2 (0-based).
+    let line = diags[0].pointer("/range/start/line").and_then(|l| l.as_i64());
+    assert_eq!(line, Some(2), "reported at the literal's line: {note}");
+    let _ = client.child.kill();
+}
+
+/// Semantic tokens must not crash on the new `vyrn"…"` / `vyrn"""…"""` tag — it is
+/// classified like any tagged template (the tag ident + the string token).
+#[test]
+fn rfc54_semantic_tokens_do_not_crash_on_a_code_quote() {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_rfc54sem_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "export gen fn mk(name: String) -> String {\n\
+               let body = vyrn\"\"\"export fn greet\\{name}() -> String {\n\
+               return \"hi\"\n\
+               }\"\"\"\n\
+               return render(body)\n\
+               }\n";
+    let path = dir.join("q.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let uri = file_uri(&path);
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", src);
+
+    let req_id = serde_json::json!(700);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": req_id, "method": "textDocument/semanticTokens/full",
+        "params": { "textDocument": { "uri": uri } }
+    }));
+    let resp = client.read_response(&req_id);
+    // A valid (non-error) response with a data array — proves no panic on the tag.
+    assert!(resp.get("error").is_none(), "semantic tokens errored: {resp}");
+    assert!(
+        resp.pointer("/result/data").and_then(|d| d.as_array()).is_some(),
+        "semantic tokens returned data: {resp}"
+    );
+    let _ = client.child.kill();
+}
