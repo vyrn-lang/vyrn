@@ -1,0 +1,194 @@
+/// std/bench — the benchmarking harness helpers (RFC-0055).
+///
+/// This module is the runtime the `vyrn bench` transform links against: the
+/// per-bench timing loop (`benchOne`) plus the pure statistics and formatting it
+/// prints. It is never part of a `run`/`build`/`emit-ir` compile — only the
+/// synthesized bench `main` imports it — so its host-effectful clock use is fine.
+///
+/// The *pure* helpers (`minOf`/`median`/`mean`/`formatDuration`/`padRight`) do no
+/// I/O and touch no clock, so they are ordinary Vyrn computed from their inputs:
+/// unit-testable in Vyrn itself (see the `test` blocks below, run with
+/// `vyrn test std/bench.vyrn`).
+
+import { monotonic } from "std/time"
+
+/// The minimum of a non-empty sample array (per-iteration nanoseconds).
+export fn minOf(xs: Array<Int64>) -> Int64 {
+    let mut m = xs[0]
+    for v in xs {
+        if v < m {
+            m = v
+        }
+    }
+    return m
+}
+
+/// The arithmetic mean (integer, truncating) of a non-empty sample array.
+export fn mean(xs: Array<Int64>) -> Int64 {
+    let mut sum: Int64 = 0
+    for v in xs {
+        sum = sum + v
+    }
+    return sum / xs.length
+}
+
+/// A sorted copy of `xs` (insertion sort) — leaves the caller's array untouched,
+/// so `median` stays pure.
+fn sortedCopy(xs: Array<Int64>) -> Array<Int64> {
+    let mut c: Array<Int64> = []
+    for v in xs {
+        c.push(v)
+    }
+    let mut i: Int64 = 1
+    while i < c.length {
+        let key = c[i]
+        let mut j = i - 1
+        let mut placed = false
+        while j >= 0 && placed == false {
+            if c[j] > key {
+                c[j + 1] = c[j]
+                j = j - 1
+            } else {
+                placed = true
+            }
+        }
+        c[j + 1] = key
+        i = i + 1
+    }
+    return c
+}
+
+/// The median (upper-middle element) of a non-empty sample array.
+export fn median(xs: Array<Int64>) -> Int64 {
+    let sorted = sortedCopy(xs)
+    return sorted[sorted.length / 2]
+}
+
+/// Two-digit zero-padded decimal (for a 0..99 fractional part).
+fn pad2(n: Int64) -> String {
+    if n < 10 {
+        return "0\{n}"
+    }
+    return "\{n}"
+}
+
+/// `value/unit` rendered with two fractional digits, e.g. `41.20` for
+/// (41205, 1000). Integer-only so both backends agree byte-for-byte.
+fn twoDecimals(value: Int64, unit: Int64) -> String {
+    let whole = value / unit
+    let frac = value % unit * 100 / unit
+    return "\{whole}.\{pad2(frac)}"
+}
+
+/// A nanosecond duration in human units: `ns` below 1 µs, then `µs`/`ms`/`s`
+/// with two fractional digits. Pure — used for min/median/mean rendering.
+export fn formatDuration(ns: Int64) -> String {
+    if ns < 1000 {
+        return "\{ns} ns"
+    }
+    if ns < 1000000 {
+        return "\{twoDecimals(ns, 1000)} µs"
+    }
+    if ns < 1000000000 {
+        return "\{twoDecimals(ns, 1000000)} ms"
+    }
+    return "\{twoDecimals(ns, 1000000000)} s"
+}
+
+/// Right-pad `s` with spaces to `width` (measured in bytes — bench names are the
+/// only variable-width field, and the column widths are computed the same way).
+export fn padRight(s: String, width: Int64) -> String {
+    let mut out = s
+    let mut i = s.length
+    while i < width {
+        out = out + " "
+        i = i + 1
+    }
+    return out
+}
+
+/// Time one bench body and print its result line (RFC-0055 §Harness). `width` is
+/// the label column width the caller pre-computed from every bench name so the
+/// columns align. The divan-simplified loop:
+///
+///   1. warm up ~50 ms of iterations (discarded);
+///   2. auto-scale the per-sample iteration count until one sample takes ≥ 1 ms;
+///   3. collect samples until ≥ 31 of them AND ≥ 500 ms elapsed (cap: 2 s);
+///   4. report min / median / mean per-iteration time in human units.
+///
+/// `body` is called through a monomorphized function value (RFC-0023), and the
+/// benched work is kept alive by `blackBox` inside the body, so the compiler
+/// cannot delete it between iterations.
+export fn benchOne(name: String, width: Int64, body: fn() -> Unit) {
+    // 1. warmup (~50 ms), results discarded.
+    let warmStart = monotonic()
+    while monotonic() - warmStart < 50000000 {
+        body()
+    }
+
+    // 2. auto-scale: grow `iters` until a single sample takes at least 1 ms.
+    let mut iters: Int64 = 1
+    let mut scaled = false
+    while scaled == false {
+        let start = monotonic()
+        let mut k: Int64 = 0
+        while k < iters {
+            body()
+            k = k + 1
+        }
+        let dt = monotonic() - start
+        if dt >= 1000000 || iters >= 1000000000 {
+            scaled = true
+        } else {
+            iters = iters * 2
+        }
+    }
+
+    // 3. collect samples: at least 31 AND at least 500 ms, capped at 2 s.
+    let mut samples: Array<Int64> = []
+    let collectStart = monotonic()
+    let mut sampling = true
+    while sampling {
+        let start = monotonic()
+        let mut k: Int64 = 0
+        while k < iters {
+            body()
+            k = k + 1
+        }
+        let dt = monotonic() - start
+        samples.push(dt / iters)
+        let elapsed = monotonic() - collectStart
+        if samples.length >= 31 && elapsed >= 500000000 {
+            sampling = false
+        }
+        if elapsed >= 2000000000 {
+            sampling = false
+        }
+    }
+
+    // 4. stats + aligned report line.
+    let mn = minOf(samples)
+    let md = median(samples)
+    let mnAvg = mean(samples)
+    let label = padRight("bench \"\{name}\"", width)
+    print("\{label}   min \{formatDuration(mn)}   median \{formatDuration(md)}   mean \{formatDuration(mnAvg)}   (\{samples.length} samples × \{iters} iters)")
+}
+
+test "formatDuration picks human units" {
+    assertEq(formatDuration(512), "512 ns")
+    assertEq(formatDuration(41205), "41.20 µs")
+    assertEq(formatDuration(1290000), "1.29 ms")
+    assertEq(formatDuration(2500000000), "2.50 s")
+}
+
+test "median and mean over a small sample" {
+    let xs: Array<Int64> = [30, 10, 20, 50, 40]
+    assertEq(minOf(xs), 10)
+    assertEq(median(xs), 30)
+    assertEq(mean(xs), 30)
+}
+
+test "padRight fills to width and never truncates" {
+    assertEq(padRight("ab", 5), "ab   ")
+    assertEq(padRight("abcdef", 3), "abcdef")
+}
