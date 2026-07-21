@@ -38,7 +38,7 @@
 
 /// The bytes `ba[s..e)` as a String ("" if not valid UTF-8, which cannot happen
 /// for a slice of validated input).
-fn sliceStr(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
+gen fn sliceStr(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
     let mut out: Array<UInt8> = []
     let mut i = s
     while i < e {
@@ -52,12 +52,12 @@ fn sliceStr(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
 }
 
 /// True for an ASCII space, tab, CR, or LF.
-fn isWs(b: UInt8) -> Bool {
+gen fn isWs(b: UInt8) -> Bool {
     return b == 32 || b == 9 || b == 10 || b == 13
 }
 
 /// The first non-whitespace index at or after `i`.
-fn skipWs(ba: Array<UInt8>, i: Int64, e: Int64) -> Int64 {
+gen fn skipWs(ba: Array<UInt8>, i: Int64, e: Int64) -> Int64 {
     let mut j = i
     while j < e {
         if isWs(ba[j]) {
@@ -70,7 +70,7 @@ fn skipWs(ba: Array<UInt8>, i: Int64, e: Int64) -> Int64 {
 }
 
 /// `s` with leading and trailing ASCII whitespace removed.
-fn trimStr(s: String) -> String {
+gen fn trimStr(s: String) -> String {
     let ba = bytes(s)
     let mut a = 0
     let mut b = ba.length
@@ -109,7 +109,7 @@ fn trimStr(s: String) -> String {
 }
 
 /// Uppercase the first ASCII byte of `s`.
-fn upperFirst(s: String) -> String {
+gen fn upperFirst(s: String) -> String {
     let ba = bytes(s)
     let mut out: Array<UInt8> = []
     let mut i = 0
@@ -128,7 +128,7 @@ fn upperFirst(s: String) -> String {
 }
 
 /// Split a dotted key into its segments (`"nav.home.label"` → nav, home, label).
-fn splitDot(s: String) -> Array<String> {
+gen fn splitDot(s: String) -> Array<String> {
     let ba = bytes(s)
     let mut parts: Array<String> = []
     let mut start = 0
@@ -145,7 +145,7 @@ fn splitDot(s: String) -> Array<String> {
 }
 
 /// The PascalCase type-name base of a dotted key: `cart.items` → `CartItems`.
-fn keyTypeBase(key: String) -> String {
+gen fn keyTypeBase(key: String) -> String {
     let segs = splitDot(key)
     let mut out = ""
     for seg in segs {
@@ -155,7 +155,7 @@ fn keyTypeBase(key: String) -> String {
 }
 
 /// The per-key function name: `cart.items` → `tCartItems`.
-fn keyFnName(key: String) -> String {
+gen fn keyFnName(key: String) -> String {
     return "t" + keyTypeBase(key)
 }
 
@@ -163,12 +163,12 @@ fn keyFnName(key: String) -> String {
 /// `cart.items` → `cartItems`, so `import * as t from i18n("…")` reads
 /// `t.cartItems()` (the `t` prefix is redundant under a namespace). Emitted
 /// ALONGSIDE the `t`-prefixed name, which flat imports keep using.
-fn keyPlainName(key: String) -> String {
+gen fn keyPlainName(key: String) -> String {
     return lowerFirst(keyTypeBase(key))
 }
 
 /// Lowercase the first ASCII byte of `s` (`AppTitle` → `appTitle`).
-fn lowerFirst(s: String) -> String {
+gen fn lowerFirst(s: String) -> String {
     let ba = bytes(s)
     let mut out: Array<UInt8> = []
     let mut i = 0
@@ -205,7 +205,7 @@ gen fn strLit(raw: String) -> String {
 /// metacharacter is prefixed with a backslash. Because the result is emitted INTO
 /// a Vyrn string literal (which the compiler re-lexes), a single output backslash
 /// must appear as two: `home.title` → `home\\.title` in the generated source.
-fn regexEscapeKey(key: String) -> String {
+gen fn regexEscapeKey(key: String) -> String {
     let ba = bytes(key)
     let mut out: Array<UInt8> = []
     for b in ba {
@@ -235,7 +235,7 @@ type ScanStr = { ok: Bool, value: String, next: Int64 }
 
 /// The byte a JSON escape `\c` decodes to, or 0 for an unknown escape (which is
 /// passed through literally).
-fn unescByte(c: UInt8) -> UInt8 {
+gen fn unescByte(c: UInt8) -> UInt8 {
     if c == 110 {
         return 10
     }
@@ -259,7 +259,7 @@ fn unescByte(c: UInt8) -> UInt8 {
 
 /// Read a JSON string starting at `ba[i] == '"'`. Handles the standard escapes;
 /// `\u` is rejected (write locale files in raw UTF-8).
-fn scanString(ba: Array<UInt8>, i: Int64, e: Int64) -> ScanStr {
+gen fn scanString(ba: Array<UInt8>, i: Int64, e: Int64) -> ScanStr {
     let mut out: Array<UInt8> = []
     let mut j = i + 1
     while j < e {
@@ -300,13 +300,13 @@ fn scanString(ba: Array<UInt8>, i: Int64, e: Int64) -> ScanStr {
 /// A flattened locale: parallel key/value arrays, or `ok = false` with a reason.
 type LocaleData = { ok: Bool, error: String, keys: Array<String>, vals: Array<String> }
 
-fn dataError(msg: String) -> LocaleData {
+gen fn dataError(msg: String) -> LocaleData {
     return LocaleData { ok: false, error: msg, keys: [], vals: [] }
 }
 
 /// Parse one locale JSON document into flattened `home.title` → value entries.
 /// Object-only; a non-string, non-object value fails with a clear reason.
-fn parseLocaleJson(src: String) -> LocaleData {
+gen fn parseLocaleJson(src: String) -> LocaleData {
     let ba = bytes(src)
     let e = ba.length
     let mut keys: Array<String> = []
@@ -399,7 +399,7 @@ type IcuQuote = { emit: Bool, quoted: Bool, advance: Int64 }
 ///     is lenient, so an apostrophe not before a syntax char neither quotes nor is
 ///     deleted.
 /// This is the single source of the rule for every quote-aware scanner below.
-fn icuApostrophe(ba: Array<UInt8>, j: Int64, e: Int64, quoted: Bool) -> IcuQuote {
+gen fn icuApostrophe(ba: Array<UInt8>, j: Int64, e: Int64, quoted: Bool) -> IcuQuote {
     if j + 1 < e && ba[j + 1] == 39 {
         return IcuQuote { emit: true, quoted: quoted, advance: 2 }
     }
@@ -418,7 +418,7 @@ type LitRead = { text: String, next: Int64, hash: Bool }
 
 /// Read a literal text run over `ba[i..e)`, resolving apostrophe quoting, and
 /// stopping before an unquoted `{`, `}`, or (when `stopHash`) `#`.
-fn readLiteral(ba: Array<UInt8>, i: Int64, e: Int64, stopHash: Bool) -> LitRead {
+gen fn readLiteral(ba: Array<UInt8>, i: Int64, e: Int64, stopHash: Bool) -> LitRead {
     let mut out: Array<UInt8> = []
     let mut j = i
     let mut quoted = false
@@ -461,7 +461,7 @@ fn readLiteral(ba: Array<UInt8>, i: Int64, e: Int64, stopHash: Bool) -> LitRead 
 }
 
 /// The index just past the `}` matching the `{` at `open`, quote-aware.
-fn matchBrace(ba: Array<UInt8>, open: Int64, e: Int64) -> Int64 {
+gen fn matchBrace(ba: Array<UInt8>, open: Int64, e: Int64) -> Int64 {
     let mut depth = 0
     let mut i = open
     let mut quoted = false
@@ -491,7 +491,7 @@ fn matchBrace(ba: Array<UInt8>, open: Int64, e: Int64) -> Int64 {
 
 /// Split `ba[s..e)` on commas at brace depth 0 (quote-aware). Each part is
 /// returned trimmed.
-fn splitTopCommas(ba: Array<UInt8>, s: Int64, e: Int64) -> Array<String> {
+gen fn splitTopCommas(ba: Array<UInt8>, s: Int64, e: Int64) -> Array<String> {
     let mut parts: Array<String> = []
     let mut depth = 0
     let mut quoted = false
@@ -527,7 +527,7 @@ fn splitTopCommas(ba: Array<UInt8>, s: Int64, e: Int64) -> Array<String> {
 /// {…}`).
 type Branches = { selectors: Array<String>, texts: Array<String> }
 
-fn parseBranches(blob: String) -> Branches {
+gen fn parseBranches(blob: String) -> Branches {
     let ba = bytes(blob)
     let e = ba.length
     let mut selectors: Array<String> = []
@@ -554,7 +554,7 @@ fn parseBranches(blob: String) -> Branches {
 }
 
 /// The text of the branch named `sel`, falling back to `other`.
-fn branchText(br: Branches, sel: String) -> String {
+gen fn branchText(br: Branches, sel: String) -> String {
     let mut i = 0
     while i < br.selectors.length {
         if br.selectors[i] == sel {
@@ -572,7 +572,7 @@ fn branchText(br: Branches, sel: String) -> String {
     return ""
 }
 
-fn hasBranch(br: Branches, sel: String) -> Bool {
+gen fn hasBranch(br: Branches, sel: String) -> Bool {
     let mut i = 0
     while i < br.selectors.length {
         if br.selectors[i] == sel {
@@ -599,12 +599,12 @@ type ArgScan = {
     branches: Array<String>,
 }
 
-fn argError(msg: String) -> ArgScan {
+gen fn argError(msg: String) -> ArgScan {
     return ArgScan { ok: false, error: msg, names: [], kinds: [], branches: [] }
 }
 
 /// Sorted, comma-joined selector names (so the signature is order-independent).
-fn joinSortedSelectors(br: Branches) -> String {
+gen fn joinSortedSelectors(br: Branches) -> String {
     let mut names: Array<String> = []
     for s in br.selectors {
         names.push(s)
@@ -635,7 +635,7 @@ fn joinSortedSelectors(br: Branches) -> String {
 
 /// Scan a message's arguments. Recurses one level into plural/select branch text
 /// to pick up simple `{name}` args; a nested plural/select is unsupported.
-fn scanArgs(msg: String) -> ArgScan {
+gen fn scanArgs(msg: String) -> ArgScan {
     let ba = bytes(msg)
     let e = ba.length
     let mut names: Array<String> = []
@@ -702,7 +702,7 @@ fn scanArgs(msg: String) -> ArgScan {
 
 /// The raw branch-blob substring: skip the leading `name, kw,` (two top-level
 /// commas) and return the remainder of `ba[s..e)`.
-fn branchBlob(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
+gen fn branchBlob(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
     let mut depth = 0
     let mut quoted = false
     let mut commas = 0
@@ -736,7 +736,7 @@ fn branchBlob(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
 
 /// Drop duplicate arg names (an arg can appear in several branches), keeping the
 /// first kind/branches seen.
-fn dedupeArgs(names: Array<String>, kinds: Array<String>, branches: Array<String>) -> ArgScan {
+gen fn dedupeArgs(names: Array<String>, kinds: Array<String>, branches: Array<String>) -> ArgScan {
     let mut on: Array<String> = []
     let mut ok2: Array<String> = []
     let mut ob: Array<String> = []
@@ -761,7 +761,7 @@ fn dedupeArgs(names: Array<String>, kinds: Array<String>, branches: Array<String
 }
 
 /// A canonical, order-independent signature of an arg set (for drift equality).
-fn argSignature(sc: ArgScan) -> String {
+gen fn argSignature(sc: ArgScan) -> String {
     let mut items: Array<String> = []
     let mut i = 0
     while i < sc.names.length {
@@ -797,7 +797,7 @@ fn argSignature(sc: ArgScan) -> String {
 // ===========================================================================
 
 /// The ordered non-`other` categories a locale uses (empty = only `other`).
-fn pluralCategories(tag: String) -> Array<String> {
+gen fn pluralCategories(tag: String) -> Array<String> {
     if tag == "en" || tag == "de" || tag == "es" || tag == "it" || tag == "fr" || tag == "pt" {
         return ["one"]
     }
@@ -810,7 +810,7 @@ fn pluralCategories(tag: String) -> Array<String> {
     return ["__unsupported__"]
 }
 
-fn pluralSupported(tag: String) -> Bool {
+gen fn pluralSupported(tag: String) -> Bool {
     let cats = pluralCategories(tag)
     if cats.length == 1 {
         if cats[0] == "__unsupported__" {
@@ -822,7 +822,7 @@ fn pluralSupported(tag: String) -> Bool {
 
 /// The Vyrn boolean condition selecting category `cat` for `tag`, over variable
 /// `v`. Mirrors the CLDR cardinal rules for the covered locales.
-fn pluralCondition(tag: String, cat: String, v: String) -> String {
+gen fn pluralCondition(tag: String, cat: String, v: String) -> String {
     if tag == "en" || tag == "de" || tag == "es" || tag == "it" {
         return v + " == 1"
     }
@@ -857,7 +857,7 @@ fn pluralCondition(tag: String, cat: String, v: String) -> String {
 /// The compiled statements building `acc` for `msg`, at indentation `ind`.
 /// `pluralVar` names the number arg when compiling inside a plural branch (so `#`
 /// resolves); it is "" at the top level and inside select branches.
-fn compileBody(msg: String, tag: String, ind: String, pluralVar: String) -> String {
+gen fn compileBody(msg: String, tag: String, ind: String, pluralVar: String) -> String {
     let ba = bytes(msg)
     let e = ba.length
     let mut code = ""
@@ -904,7 +904,7 @@ fn compileBody(msg: String, tag: String, ind: String, pluralVar: String) -> Stri
 
 /// Compile a plural placeholder into an `if`/`else if`/`else` chain over the
 /// locale's categories, each branch recompiled with `#` bound to `argName`.
-fn compilePlural(br: Branches, tag: String, ind: String, argName: String) -> String {
+gen fn compilePlural(br: Branches, tag: String, ind: String, argName: String) -> String {
     let cats = pluralCategories(tag)
     let inner = ind + "    "
     let mut code = ""
@@ -931,7 +931,7 @@ fn compilePlural(br: Branches, tag: String, ind: String, argName: String) -> Str
 }
 
 /// Compile a select placeholder into an equality chain over the branch names.
-fn compileSelect(br: Branches, tag: String, ind: String, argName: String) -> String {
+gen fn compileSelect(br: Branches, tag: String, ind: String, argName: String) -> String {
     let inner = ind + "    "
     let mut clauses: Array<String> = []
     let mut bodies: Array<String> = []
@@ -949,7 +949,7 @@ fn compileSelect(br: Branches, tag: String, ind: String, argName: String) -> Str
 
 /// Assemble a flat `if … else if … else { … }` chain (RFC-0022). With no
 /// clauses, the else body is emitted bare (a locale with only `other`).
-fn emitChain(clauses: Array<String>, bodies: Array<String>, otherBody: String, ind: String) -> String {
+gen fn emitChain(clauses: Array<String>, bodies: Array<String>, otherBody: String, ind: String) -> String {
     if clauses.length == 0 {
         return otherBody
     }
@@ -976,7 +976,7 @@ fn emitChain(clauses: Array<String>, bodies: Array<String>, otherBody: String, i
 
 /// A key with every non-identifier byte turned into `_`, so it is a legal
 /// identifier fragment inside a drift-error name.
-fn identKey(key: String) -> String {
+gen fn identKey(key: String) -> String {
     let ba = bytes(key)
     let mut out: Array<UInt8> = []
     for b in ba {
@@ -993,7 +993,7 @@ fn identKey(key: String) -> String {
 }
 
 /// Whether `arr` contains `x`.
-fn listContains(arr: Array<String>, x: String) -> Bool {
+gen fn listContains(arr: Array<String>, x: String) -> Bool {
     for s in arr {
         if s == x {
             return true
@@ -1006,7 +1006,7 @@ fn listContains(arr: Array<String>, x: String) -> Bool {
 /// `}` — quote-aware (a `'{'`/`'}'` is a quoted literal, not a delimiter). An
 /// unbalanced brace otherwise fabricates a phantom `{sale` param or drops text
 /// silently; this makes it a loud GENERATION diagnostic instead.
-fn icuBadBrace(msg: String) -> Bool {
+gen fn icuBadBrace(msg: String) -> Bool {
     let ba = bytes(msg)
     let e = ba.length
     let mut depth = 0
@@ -1043,7 +1043,7 @@ fn icuBadBrace(msg: String) -> Bool {
 ///     same `a.b` — `I18N_DUP_KEY__<key>`;
 ///   - two distinct keys whose PascalCase concatenation collides (`home.title` and
 ///     `homeTitle` both make `tHomeTitle`) — `I18N_KEY_COLLISION__<a>__<b>`.
-fn keyCollisionErrors(base: LocaleData) -> String {
+gen fn keyCollisionErrors(base: LocaleData) -> String {
     let keys = base.keys
     let mut out = ""
     let mut i = 0
@@ -1204,7 +1204,7 @@ export gen fn i18n(dir: String) -> String {
 }
 
 /// Index of `x` in `arr`, or -1.
-fn indexOf(arr: Array<String>, x: String) -> Int64 {
+gen fn indexOf(arr: Array<String>, x: String) -> Int64 {
     let mut i = 0
     while i < arr.length {
         if arr[i] == x {
@@ -1217,7 +1217,7 @@ fn indexOf(arr: Array<String>, x: String) -> Int64 {
 
 /// Assemble the whole synthesized module: Locale enum + state, TransKey, select
 /// types, per-key functions (each locale a private helper), and `t()`.
-fn buildModule(tags: Array<String>, datas: Array<LocaleData>) -> String {
+gen fn buildModule(tags: Array<String>, datas: Array<LocaleData>) -> String {
     let base = datas[0]
     let baseTag = tags[0]
     let mut out = "/// Generated by std/i18n `i18n` (RFC-0020 M2) — do not edit.\n"
@@ -1290,7 +1290,7 @@ fn buildModule(tags: Array<String>, datas: Array<LocaleData>) -> String {
 /// use. `Some(k)` yields a validated `TransKey` ready to feed to `t(k)`; an
 /// unknown key yields `None`. The domain is finite, so this is a plain if-chain
 /// over the known keys — the runtime complement of the compile-time key checking.
-fn buildTransKey(base: LocaleData) -> String {
+gen fn buildTransKey(base: LocaleData) -> String {
     let mut out = "export fn transKey(s: String) -> Option<TransKey> {\n"
     let mut k = 0
     while k < base.keys.length {
@@ -1302,7 +1302,7 @@ fn buildTransKey(base: LocaleData) -> String {
 }
 
 /// Split a comma-joined string (no quoting) into parts.
-fn splitCsv(s: String) -> Array<String> {
+gen fn splitCsv(s: String) -> Array<String> {
     let ba = bytes(s)
     let mut parts: Array<String> = []
     let mut start = 0
@@ -1322,7 +1322,7 @@ fn splitCsv(s: String) -> Array<String> {
 
 /// The parameter list `(count: Int64, name: String)` for a key's arg set, and
 /// the argument-forwarding list `(count, name)` for the dispatcher.
-fn paramList(key: String, sc: ArgScan) -> String {
+gen fn paramList(key: String, sc: ArgScan) -> String {
     let mut out = "("
     let mut i = 0
     while i < sc.names.length {
@@ -1335,7 +1335,7 @@ fn paramList(key: String, sc: ArgScan) -> String {
     return out + ")"
 }
 
-fn argList(sc: ArgScan) -> String {
+gen fn argList(sc: ArgScan) -> String {
     let mut out = "("
     let mut i = 0
     while i < sc.names.length {
@@ -1348,7 +1348,7 @@ fn argList(sc: ArgScan) -> String {
     return out + ")"
 }
 
-fn argType(key: String, name: String, kind: String) -> String {
+gen fn argType(key: String, name: String, kind: String) -> String {
     if kind == "plural" {
         return "Int64"
     }
@@ -1361,7 +1361,7 @@ fn argType(key: String, name: String, kind: String) -> String {
 /// All functions for one key: a private per-locale helper (its body the compiled
 /// message) and the exported dispatcher matching `currentLocale`. The exported
 /// function's `///` doc is the source-locale message, so hover shows it.
-fn buildKeyFns(key: String, baseVal: String, tags: Array<String>, datas: Array<LocaleData>) -> String {
+gen fn buildKeyFns(key: String, baseVal: String, tags: Array<String>, datas: Array<LocaleData>) -> String {
     let sc = scanArgs(baseVal)
     let fnName = keyFnName(key)
     let params = paramList(key, sc)
@@ -1404,7 +1404,7 @@ fn buildKeyFns(key: String, baseVal: String, tags: Array<String>, datas: Array<L
 }
 
 /// A one-line doc rendering of a message (newlines collapsed to spaces).
-fn docComment(msg: String) -> String {
+gen fn docComment(msg: String) -> String {
     let ba = bytes(msg)
     let mut out: Array<UInt8> = []
     for b in ba {
@@ -1423,7 +1423,7 @@ fn docComment(msg: String) -> String {
 /// `t(key)` — argument-less lookup. An arg-less key returns the current locale's
 /// literal; a key that takes args (reached only dynamically) returns its raw
 /// source pattern.
-fn buildT(tags: Array<String>, datas: Array<LocaleData>) -> String {
+gen fn buildT(tags: Array<String>, datas: Array<LocaleData>) -> String {
     let base = datas[0]
     let mut out = "export fn t(key: TransKey) -> String {\n"
     let mut k = 0

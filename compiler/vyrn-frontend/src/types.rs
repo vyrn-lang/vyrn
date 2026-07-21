@@ -909,6 +909,27 @@ fn resolve_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Type
         Type::Named(n) if n == "Code" && !types.contains_key("Code") => {
             Type::Named("Code".to_string())
         }
+        // `Token` (RFC-0054) is the builtin record `lex()` returns — a magic type
+        // (not an injected decl, so it never collides with a user `type Token`,
+        // which wins). It resolves to its record shape so `.kind`/`.text`/… work.
+        Type::Named(n) if n == "Token" && !types.contains_key("Token") => Type::Record(vec![
+            Field {
+                name: "kind".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "text".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "line".to_string(),
+                ty: Type::Int,
+            },
+            Field {
+                name: "col".to_string(),
+                ty: Type::Int,
+            },
+        ]),
         Type::Named(n) => match types.get(n) {
             Some(d) => resolve_d(&d.base, types, depth + 1),
             None => Type::Unit,

@@ -1021,6 +1021,17 @@ impl<'a> Checker<'a> {
                 }
                 return Ok(());
             }
+            // `Token` (RFC-0054) — the `lex()` record. Gen-only (its only source is
+            // the gen-only `lex()`), so it never reaches a backend; a user
+            // `type Token` wins and is validated normally.
+            Type::Named(n) if n == "Token" && !self.types.contains_key("Token") => {
+                if !*self.in_gen.borrow() {
+                    return Err(format!(
+                        "line {line}: the `Token` type is only available during generation"
+                    ));
+                }
+                return Ok(());
+            }
             Type::Named(n) => match self.types.get(n) {
                 None => return Err(format!("line {line}: unknown type `{n}`")),
                 Some(d) if !d.type_params.is_empty() => {

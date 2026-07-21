@@ -85,36 +85,6 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         predicate: None,
         line: 0,
     });
-    // The built-in `Token` record (RFC-0054): one token from the `lex()` builtin —
-    // a `kind` category string, its source `text`, and 1-based `line`/`col`. Any
-    // gen code can name `Array<Token>` and read the fields.
-    program.type_decls.push(TypeDecl {
-        name: "Token".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        base: Type::Record(vec![
-            Field {
-                name: "kind".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "text".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "line".to_string(),
-                ty: Type::Int,
-            },
-            Field {
-                name: "col".to_string(),
-                ty: Type::Int,
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
     // The error model (RFC-0009): a structured `Issue` (with an i18n `key`) and a
     // generic `Validation<T>` = `Valid(T) | Invalid([Issue])`. A validator
     // accumulates all failing checks into an issue array and returns `Invalid`,
