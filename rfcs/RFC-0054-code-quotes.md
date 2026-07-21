@@ -420,3 +420,178 @@ Nothing silent — there is nothing to describe because there is no diff.
   `editor/vscode/server/vyrn-lsp.exe` still hashes
   `f3799261f7df428e934c0c32738141b9f513c9fda6b9b58047f635da5f7daa3f`. `std/` ships with
   the repo and the LSP picks it up live.
+
+### M4b — `std/vyx` (the `.vyx` component compiler)
+
+The final, hardest migration: the 3,500-line `.vyx` generator with the six
+audited scanner miscompiles and all the hand-written `//@origin` plumbing. Two
+independent halves, committed separately. **No `compiler/` source changed — this
+is entirely `std/vyx.vyrn` + tests, riding the M1–M3 machinery.**
+
+#### HALF 1 — input: script-section scanning via `lex()`
+
+The `.vyx` script scanner's statement-leading keyword-block detection — the
+`props {…}` block (components), `params {…}` and `head {…}` (pages/layouts), and
+the imports-first ordering check — is rebuilt on the compiler's REAL lexer via the
+RFC-0054 `lex()` builtin (`vyxLexKwBlock`). This is the actual bug surface: three
+of the six RFC-0039 audit miscompiles were a `props` matched inside a `//`
+comment, inside a helper string, or as a helper identifier (`let props = …`).
+Because `lex` **emits no token for a `//`/`/* */` comment** and **folds a whole
+string literal into ONE `string` token**, those three classes become
+*structurally* impossible rather than hand-guarded: a keyword block is now an
+`ident` token whose text matches, that is the FIRST token on its line, followed
+(after only whitespace) by `{`. The former private byte-walker
+(`vyxScanFindCode` + `vyxLineLeading`, now deleted from that path) is gone for
+keyword finding.
+
+- **Byte-identity kept by construction.** `vyxLexKwBlock` returns *sub-relative
+  byte offsets* (not token columns): the keyword offset is the first
+  non-whitespace byte of the token's line (`vyxLineStartOffset` + `vyxFirstNonWs`),
+  exact because the token leads its line — so no column arithmetic, and CRLF/LF and
+  any earlier multi-byte content are irrelevant. Every downstream slice
+  (`vyxMatchCurly`, `vyxSplitFields`, the helper/import line walk) is unchanged, so
+  the emitted module is identical.
+- The six audit reproducers are **pinned in CI** for the first time: a
+  `std_vyx_unit_tests_run_green` runner (the 40 inline `test`s were previously run
+  only by a manual `vyrn test std/vyx.vyrn`) plus five end-to-end reproducers in
+  `vyx.rs` driving the full `components` pipeline through the binary
+  (comment-mentioning-props, helper-named-props, `</script>`-in-a-string,
+  literal-`{ a }`-in-text, HTML-comment-in-template).
+
+#### HALF 2 — output: emission via `rawAt` (+ quotes for the static shell)
+
+Every hand-concatenated `//@origin path:line:col` / `//@origin end` pair — the
+single most error-prone convention in the generator, at 14 call sites — is
+replaced by `render(rawAt(text, src, line, col))` (`vyxRegion`). The former
+`vyxOrigin`/`vyxOriginEnd` string builders are **deleted**. Every `.vyx`
+user-text pass-through — `{{ … }}` interpolations, `:attr` / `v-if` /
+`v-else-if` / `v-for` / `@event` expressions, themed/dynamic classes, merged
+imports and verbatim helper lines — now rides through `rawAt`, carrying its
+`.vyx` origin; the directive format can no longer be mistyped. The static module
+banner + `std/html` import and the themed `import * as vyxTheme from tw(<theme>)`
+line became hole-less / single-splice `vyrn"""…"""` quotes, so the fixed preamble
+is validated as Vyrn when `std/vyx` compiles and the theme path is spliced in
+expression position (injection-safe, replacing `vyxStrLit`).
+
+#### Origin-precision decisions (the key design point)
+
+`rawAt` origins are LINE-based, and `OriginMaps::remap` maps a diagnostic
+*anywhere* on a governed generated line to the directive's recorded **column**.
+The pre-M4b emitter already exploited exactly this: each user expression sits on
+ONE generated line (interpolations inline in `.push(text(( … )))`, and `:attr` /
+`@event` / dynamic-and-themed classes already **hoisted** by RFC-0039 §1 onto
+their own `let … = …` line), bracketed by a directive whose column is the
+expression's `.vyx` start. M4b keeps that shape exactly: **`vyxRegion` emits the
+whole generated line as one `rawAt` region**, recording the same column, so every
+origin stays **column-exact** — the LSP forward map (`.vyx` hover/completion) and
+the RFC-0053 error remap depend on this and are byte-for-byte preserved.
+
+This is a deliberate deviation from "splice the user text into a `vyrn"…"`
+skeleton" (constraint 1's line-exact ideal): splicing a `rawAt`/`Code` piece
+*inside* a quote makes `render` bracket it on its **own** line (the `Origin`
+piece forces newlines), which would split the `.push(text(( … )))` / `let … = …`
+wrapper across lines — changing the emitted bytes and the region shape. Keeping
+the user text as interior code with the **whole line** carrying the origin
+delivers the same column-exact precision the current code has (proven by a new
+LSP e2e test on a hoisted `:attr` check error, below) while staying
+byte-identical. Documented at `vyxRegion`.
+
+#### The `gen fn` carve (risk 2)
+
+`lex`/`render`/`rawAt`/quotes are gen-context-only, so the scanning subtree
+(`vyxLexKwBlock`, `vyxFindPropsBlock`/`vyxFindKwBlock`, `vyxImportsFirstViolation`,
+`vyxParseScript`/`At`, `vyxCompileComponent`, `vyxRelocateComp`, `vyxPageShape`,
+the page/layout/error builders) and the whole emission subtree
+(`vyxEmit*`, `vyxMergeImports`, `vyxImportLine`, `vyxHelperBlock`, `vyxBuildModule`,
+`vyxFinish`) are marked `gen fn`. These are reached **only** from the `gen fn`
+entry points (`components`, `vyxPage`/`vyxLayout`/`vyxError` + themed) and the
+interpreted `test` suite — never emitted into a binary (the i18n/M4a dangling
+`@vyrn_*` lesson). Pure leaf utilities (`vyxSlice`, `vyxTrim`, `vyxMatchCurly`,
+`vyxSplitFields`, template parsing, …) stay plain `fn`; a `gen fn` calling them is
+fine. `vyxPageShape` is `gen fn` and the ui↔vyx boundary stays runtime-safe
+because its sole external caller, `std/ui`'s `uiInspectVyxPage`, is itself a
+`gen fn` (verified below by native-building the parity examples with no dangling
+symbol).
+
+#### Golden-diff review
+
+`vyrn emit-gen` before (base `c948806`) vs after, for **every** example using a
+`.vyx` generator — `bin/server`, `bin/client`, `fullstack/server`,
+`fullstack/client`, `shelf/server`, `shelf/client`, `pagesdemo`, `vyxdemo` — is
+**byte-identical**, after both halves. The `lex()` keyword finder reproduces the
+former offsets exactly; `render(rawAt(…))` reproduces the former hand-concatenated
+directives exactly (text ends in `\n`, so `render`'s `ensure_nl` is a no-op); the
+static-shell quotes reproduce the former literals. **No origin directive moved** —
+because M4b preserves the region shape (see above), even the `//@origin` lines are
+unchanged. Nothing silent: there is no diff to describe.
+
+#### Deviations (with justification)
+
+1. **User-text pass-throughs are emitted as whole-LINE `rawAt` regions, not as
+   splices into a `vyrn"…"` skeleton.** As above: `render` brackets an inline
+   `Origin` piece onto its own line, so a skeleton splice would split the wrapper
+   and move bytes. The whole-line region gives identical column-exact precision
+   (constraint 1's "kept region-level … Do NOT lose origin precision" branch, taken
+   deliberately and documented). The generator skeleton is thus not compiler-parsed
+   per user-text line — but those wrappers are trivial fixed boilerplate
+   (`.push(text(( … )))`, `let … : Attr = …`), and the injection-safety property is
+   irrelevant here (the user text is `.vyx` CODE spliced as code with an origin, by
+   design, exactly as before).
+2. **HALF 1 migrated the keyword-block finding (the audit surface), not the section
+   boundary or every fragment scanner.** `<script>`/`</template>` boundary finding
+   (`vyxSection`/`vyxScanFindCode`), record-field/comma splitting (`vyxSplitFields`,
+   `vyxHasTopComma`), import-LINE classification (`startsWith("import ")`), and
+   `load`/`layout` detection remain the RFC-0039 string/comment-aware byte/line
+   walkers. `lex()` is genuinely **unsuitable for the `</script>` boundary**: the
+   close tag can hide inside a `//` line comment, which `lex` discards without
+   emitting any positional token, so a candidate-validation scan could not
+   distinguish it — the byte walker (already string- and comment-aware, and passing
+   the `</script>`-in-a-string audit case) is the correct tool there. The remaining
+   fragment scanners already pass all six audit reproducers; converting them buys no
+   correctness and risks the byte-identity the goldens guarantee. Migrating them (and
+   routing the section boundary through a `std/scan` Vyrn-comment cursor) is left as a
+   mechanical follow-up — see below.
+
+#### Origin fidelity — LSP proof
+
+Driven over stdio against the real `vyrn-lsp` (the existing RFC-0053 e2e suite,
+unchanged and green): a template `{{ … }}` **type** error and a **lex** error
+(stray `\`) each still publish INTO the `.vyx` buffer at the exact line:col, a
+`didChange` overlay still re-generates and squiggles the `.vyx`, and hover /
+completion inside a `{{ … }}` still resolve. Added
+`rfc54_m4b_vyx_dyn_attr_check_error_maps_column_exact`: a CHECK error inside a
+**hoisted `:attr`** expression (the path M4b restructured onto `rawAt`) maps
+column-exact to `.vyx` line 6, col 11 (0-based char 10) — proving the
+`rawAt`-emitted hoist origins round-trip through `OriginMaps` exactly as the former
+hand-concatenated directives did.
+
+#### Tests / verification
+
+- **Counts**: 953 workspace tests (5 ignored) — up 6 from the new `vyx.rs`
+  reproducers + runner; 40 vyrn-lsp tests (1 ignored) — up 1 from the hoisted-attr
+  fidelity test; three-way parity green (5 suites); `std/vyx` inline suite 40
+  passed; `vyrn fmt --check` clean on `std/vyx.vyrn`.
+- **clippy**: 0 errors, 52 warnings — byte-for-byte the base `c948806` count; no new
+  warnings (only test `.rs` + `.vyrn` changed).
+- **Native / dangling-symbol check**: every top-level parity example that uses a
+  `.vyx` generator (`vyxdemo`, `pagesdemo`) native-builds cleanly, confirming the
+  `gen fn` carve leaves no `@vyrn_*` dangling. (`examples/*/server.vyrn` fail to
+  native-build identically on the base `c948806` — a pre-existing, unrelated IR
+  issue; those subdir files are not in the non-recursive parity corpus.)
+- **LSP redeploy — NOT needed (std- and test-only change).** No `compiler/` source
+  changed (only `compiler/vyrn-cli/tests/vyx.rs` and
+  `compiler/vyrn-lsp/tests/lsp_e2e.rs`, which do not build into the LSP), so the
+  deployed `editor/vscode/server/vyrn-lsp.exe` still hashes
+  `f3799261f7df428e934c0c32738141b9f513c9fda6b9b58047f635da5f7daa3f` (verified).
+
+#### Left for a follow-up
+
+A sound, mechanical continuation with no design questions open: route the
+`<script>`/`</template>` boundary and the residual fragment scanners
+(`vyxSplitFields`, import-line classification, `load`/`layout`/`head` detection)
+through a shared cursor — the section boundary via a `std/scan` Vyrn-comment
+variant (`//` + `/* */` + `"…"`), the fragment scanners via `lex()` where a full
+token view helps — folding the last private byte-walkers into the two shared,
+tested scanners. All are already RFC-0039 string/comment-aware and pass the audit,
+so this is deduplication, not a correctness fix; it was deferred to keep the
+goldens provably byte-identical in this pass.
