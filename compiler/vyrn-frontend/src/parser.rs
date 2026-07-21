@@ -1719,6 +1719,19 @@ impl Parser {
             };
             return Ok(Type::Fn(params, Box::new(ret)));
         }
+        // A non-negative integer literal used as a type argument (RFC-0056),
+        // e.g. the `8` in `SmallArray<Int64, 8>`. Carried as `Type::ConstInt`;
+        // only `SmallArray` consumes it (that branch reads the literal directly),
+        // so any other constructor carrying one reaches the checker as an
+        // integer argument and is rejected there — a checker error, not a parse
+        // error.
+        if let Tok::Int(n) = self.peek() {
+            if *n >= 0 {
+                let v = *n as u64;
+                self.advance();
+                return Ok(Type::ConstInt(v));
+            }
+        }
         let name = self.expect_ident()?;
         // Namespace-qualified type `ns.User` / `ns.Box<T>` (RFC-0027): the dotted
         // name rides `Type::Named`/`Type::App`; the loader verifies `ns` is an
@@ -1846,6 +1859,39 @@ impl Parser {
                     self.eat(&Tok::Gt)?;
                     Type::Array(Box::new(inner))
                 }
+            }
+            // `SmallArray<T, N>` (RFC-0056) — a small-buffer array: `N` inline
+            // elements, spilling to the heap only past `N`. The size is a
+            // non-negative integer literal type argument (the checker enforces
+            // `1 <= N <= 64`); a missing or non-integer size is a parse error.
+            "SmallArray" => {
+                self.eat(&Tok::Lt)?;
+                let inner = self.type_()?;
+                if *self.peek() != Tok::Comma {
+                    return Err(Diagnostic::error(
+                        self.line(),
+                        self.col(),
+                        "parse",
+                        "`SmallArray<T, N>` needs an inline capacity, e.g. \
+                         `SmallArray<Int64, 16>`"
+                            .to_string(),
+                    ));
+                }
+                self.advance();
+                let n = match self.peek() {
+                    Tok::Int(n) if *n >= 0 => *n as usize,
+                    _ => {
+                        return Err(Diagnostic::error(
+                            self.line(),
+                            self.col(),
+                            "parse",
+                            "`SmallArray<T, N>` needs a non-negative integer capacity".to_string(),
+                        ))
+                    }
+                };
+                self.advance();
+                self.eat(&Tok::Gt)?;
+                Type::SmallArray(Box::new(inner), n)
             }
             // `Map<String, V>` (RFC-0028) — a growable insertion-ordered
             // dictionary. Both type arguments are parsed; the checker enforces
@@ -2554,6 +2600,11 @@ impl Parser {
                             // the checker reports it as an unknown call.
                             "pop" => "@pop".to_string(),
                             "swapRemove" => "@swapRemove".to_string(),
+                            // `xs.toArray()` (RFC-0056) — copy a SmallArray out
+                            // to a growable Array. Method-only, so a free
+                            // `toArray(xs)` never reaches here and the checker
+                            // reports it as an unknown call.
+                            "toArray" => "@toArray".to_string(),
                             // Map methods (RFC-0028): method-only, unspellable
                             // internal names so a free `has(m, k)` never reaches
                             // here and the checker reports it as an unknown call.

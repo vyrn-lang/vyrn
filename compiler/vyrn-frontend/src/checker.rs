@@ -837,6 +837,7 @@ impl<'a> Checker<'a> {
                 Type::Option(i)
                 | Type::Array(i)
                 | Type::ArrayN(i, _)
+                | Type::SmallArray(i, _)
                 | Type::Ref(i)
                 | Type::Task(i)
                 | Type::Partial(i) => walk(i, types, seen),
@@ -937,6 +938,11 @@ impl<'a> Checker<'a> {
         }
         if let (Type::Array(a), Type::Array(b)) = (from, to) {
             return self.assignable(a, b);
+        }
+        // A `SmallArray<T, N>` (RFC-0056) is covariant in `T` and invariant in
+        // `N` (the capacity is part of the type — no widening/narrowing).
+        if let (Type::SmallArray(a, na), Type::SmallArray(b, nb)) = (from, to) {
+            return na == nb && self.assignable(a, b);
         }
         // `assignable` is the STRICT relation: a predicated named type admits
         // only itself here. Value boundaries use `coercible`, which adds the
@@ -1108,6 +1114,14 @@ impl<'a> Checker<'a> {
                 _ => {}
             },
             Type::App(name, args) => {
+                // RFC-0056: only `SmallArray` consumes an integer type argument.
+                // A user generic carrying one (`Box<3>`) is a checker error —
+                // checked before arity so the diagnostic names the real problem.
+                if args.iter().any(|a| matches!(a, Type::ConstInt(_))) {
+                    return Err(format!(
+                        "line {line}: type {name} does not take an integer argument"
+                    ));
+                }
                 let d = self
                     .types
                     .get(name)
@@ -1170,6 +1184,25 @@ impl<'a> Checker<'a> {
             }
             // Container types recurse so their element types are validated.
             Type::Array(inner) | Type::ArrayN(inner, _) => self.ensure_type_exists(inner, line)?,
+            // `SmallArray<T, N>` (RFC-0056): the inline capacity is bounded
+            // `1 <= N <= 64` (keeps the worst-case stack/inline footprint sane),
+            // and the element type must be a real type (not a stray integer).
+            Type::SmallArray(inner, n) => {
+                if *n < 1 || *n > 64 {
+                    return Err(format!(
+                        "line {line}: smallArray capacity must be between 1 and 64"
+                    ));
+                }
+                self.ensure_type_exists(inner, line)?;
+            }
+            // A bare integer type argument reached a position no constructor
+            // consumes it (only `SmallArray<T, N>` takes one) — reject it.
+            Type::ConstInt(_) => {
+                return Err(format!(
+                    "line {line}: an integer is not a type; only `SmallArray<T, N>` \
+                     takes an integer argument"
+                ))
+            }
             // A `Ref`/`Task` cannot hold a function value (RFC-0037 defers it):
             // a cell would make the closure's capture snapshot mutable-by-alias,
             // and a task result slot has no dispatcher to receive one yet.
@@ -1894,7 +1927,9 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
                 let elem = match self.base(&b.ty) {
-                    Type::Array(inner) | Type::ArrayN(inner, _) => (*inner).clone(),
+                    Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
+                        (*inner).clone()
+                    }
                     Type::Err => return Ok(false),
                     other => {
                         return Err(format!(
@@ -1989,7 +2024,9 @@ impl<'a> Checker<'a> {
             } => {
                 let ity = self.expr(iter, scope, None, Some(ret))?;
                 let elem = match self.base(&ity) {
-                    Type::Array(inner) | Type::ArrayN(inner, _) => (*inner).clone(),
+                    Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
+                        (*inner).clone()
+                    }
                     // Iterating a String yields each byte as an Int.
                     Type::Str => Type::Int,
                     other => {
@@ -2033,7 +2070,8 @@ impl<'a> Checker<'a> {
                     .lookup(scope, name)
                     .ok_or_else(|| format!("line {line}: `drop` of unbound variable `{name}`"))?;
                 match self.base(&b.ty) {
-                    Type::Str | Type::Array(_) | Type::Ref(_) | Type::Map(..) => Ok(false),
+                    Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Ref(_)
+                    | Type::Map(..) => Ok(false),
                     other => Err(format!(
                         "line {line}: `drop` needs a heap value (String, Array, Map, or Ref), \
                          but `{name}` is {other}"
@@ -2068,7 +2106,9 @@ impl<'a> Checker<'a> {
             Type::Str => true,
             // Array buffers and the cell slab are always malloc'd (never in the
             // region arena), so only their *contents* can dangle.
-            Type::Array(inner) | Type::ArrayN(inner, _) => self.contains_heap(&inner),
+            Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
+                self.contains_heap(&inner)
+            }
             // A Map's buffers are malloc'd; its keys are always heap (String) and
             // its values may be — either way it carries heap (RFC-0028).
             Type::Map(..) => true,
@@ -2382,7 +2422,11 @@ impl<'a> Checker<'a> {
                     // `arr.length` is the element count (like TS). Sugar for the
                     // `alen` builtin, resolved here so it doesn't shadow record
                     // fields (a `.length` on a record still reads its field).
-                    Type::Array(_) | Type::ArrayN(..) if field == "length" => Ok(Type::Int),
+                    Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)
+                        if field == "length" =>
+                    {
+                        Ok(Type::Int)
+                    }
                     // `map.length` is the entry count (RFC-0028).
                     Type::Map(..) if field == "length" => Ok(Type::Int),
                     // `str.length` is the byte length (matches `strlen`/`Str::len`).
@@ -2476,6 +2520,11 @@ impl<'a> Checker<'a> {
                 if elems.is_empty() {
                     return match expected {
                         Some(Type::Array(t)) => Ok(Type::Array(t.clone())),
+                        // An empty `[]` against a `SmallArray<T, N>` slot is the
+                        // empty small-buffer array (RFC-0056), inline state.
+                        Some(Type::SmallArray(t, n)) => {
+                            Ok(Type::SmallArray(t.clone(), *n))
+                        }
                         _ => Err(format!(
                             "line {line}: cannot infer the element type of `[]`; annotate it, \
                              e.g. `let a: Array<Int64> = [];`"
@@ -2488,9 +2537,27 @@ impl<'a> Checker<'a> {
                 // The `Array<T>` route is restricted to literal expressions here,
                 // so a stack-allocated `ArrayN` value can never silently alias
                 // into a heap array (the codegen copies element-wise).
+                // A `SmallArray<T, N>` slot (RFC-0056): the literal supplies the
+                // inline elements. The capacity is known, so a literal LONGER
+                // than `N` is a checker error (pushing past `N` at runtime spills
+                // — that is the feature, but a literal cannot exceed it).
+                let small_cap = match expected {
+                    Some(Type::SmallArray(_, n)) => Some(*n),
+                    _ => None,
+                };
+                if let Some(n) = small_cap {
+                    if elems.len() > n {
+                        return Err(format!(
+                            "line {line}: this literal has {} elements but the slot is \
+                             SmallArray<_, {n}>",
+                            elems.len()
+                        ));
+                    }
+                }
                 let (elem_expected, growable) = match expected {
                     Some(Type::ArrayN(t, _)) => (Some((**t).clone()), false),
                     Some(Type::Array(t)) => (Some((**t).clone()), true),
+                    Some(Type::SmallArray(t, _)) => (Some((**t).clone()), false),
                     _ => (None, false),
                 };
                 let first = self.expr(&elems[0], scope, elem_expected.as_ref(), fn_ret)?;
@@ -2514,7 +2581,9 @@ impl<'a> Checker<'a> {
                     self.prove_coercion(e, &elem_ty, *line)?;
                     self.prove_string_interpolation(e, &elem_ty, scope, fn_ret, *line)?;
                 }
-                if growable {
+                if let Some(n) = small_cap {
+                    Ok(Type::SmallArray(Box::new(elem_ty), n))
+                } else if growable {
                     Ok(Type::Array(Box::new(elem_ty)))
                 } else {
                     Ok(Type::ArrayN(Box::new(elem_ty), elems.len()))
@@ -3949,8 +4018,17 @@ impl<'a> Checker<'a> {
                 ));
             }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let elem = match self.base(&at) {
-                Type::Array(inner) => (*inner).clone(),
+            // `push` returns the SAME collection kind it received, so
+            // `xs = xs.push(v)` keeps a `SmallArray<T, N>` binding (RFC-0056).
+            let (elem, rebuild): (Type, Box<dyn Fn(Type) -> Type>) = match self.base(&at) {
+                Type::Array(inner) => (
+                    (*inner).clone(),
+                    Box::new(|e| Type::Array(Box::new(e))),
+                ),
+                Type::SmallArray(inner, n) => (
+                    (*inner).clone(),
+                    Box::new(move |e| Type::SmallArray(Box::new(e), n)),
+                ),
                 Type::Err => return Ok(Type::Err),
                 other => {
                     return Err(format!(
@@ -3973,7 +4051,7 @@ impl<'a> Checker<'a> {
             if let Expr::Var { name: aname, .. } = &args[0] {
                 self.region_store_guard(aname, &elem, scope, line)?;
             }
-            return Ok(Type::Array(Box::new(elem)));
+            return Ok(rebuild(elem));
         }
         if name == "at" {
             if args.len() != 2 {
@@ -3998,7 +4076,9 @@ impl<'a> Checker<'a> {
                 return Ok(Type::Option(val));
             }
             let elem = match self.base(&at) {
-                Type::Array(inner) | Type::ArrayN(inner, _) => (*inner).clone(),
+                Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
+                    (*inner).clone()
+                }
                 // `s[i]` on a String yields the byte at that index as a `UInt8`
                 // (RFC-0022 — consistent with `bytes(s): Array<UInt8>` and
                 // `s.length` counting bytes; mixed arithmetic needs an explicit
@@ -4037,7 +4117,7 @@ impl<'a> Checker<'a> {
             if matches!(at, Type::Err) {
                 return Ok(Type::Err);
             }
-            if !matches!(at, Type::Array(_) | Type::ArrayN(..)) {
+            if !matches!(at, Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)) {
                 return Err(format!("line {line}: `alen` needs an Array, found {at}"));
             }
             return Ok(Type::Int);
@@ -4092,6 +4172,27 @@ impl<'a> Checker<'a> {
                 ));
             }
             return Ok(elem);
+        }
+        // `xs.toArray()` (RFC-0056) — copy a `SmallArray<T, N>` out to a
+        // growable `Array<T>`. Method-only (`@toArray`); the one explicit
+        // conversion (no implicit coercion either direction). A plain `Array<T>`
+        // receiver is also accepted (a defensive copy) so the method reads
+        // uniformly, but its primary use is on a SmallArray.
+        if name == "@toArray" {
+            if args.len() != 1 {
+                return Err(format!("line {line}: `toArray` takes no arguments"));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            let elem = match self.base(&at) {
+                Type::SmallArray(inner, _) | Type::Array(inner) => (*inner).clone(),
+                Type::Err => return Ok(Type::Err),
+                other => {
+                    return Err(format!(
+                        "line {line}: `toArray` needs a SmallArray, found {other}"
+                    ))
+                }
+            };
+            return Ok(Type::Array(Box::new(elem)));
         }
         // Map methods (RFC-0028), all method-only (unspellable `@` names). `has`
         // and `keys` are read-only; `remove` mutates and requires a `mut` binding.
@@ -5276,6 +5377,12 @@ impl<'a> Checker<'a> {
                 Type::ArrayN(a, m) if m == n => self.unify(inner, a, subst, line),
                 _ => Err(format!("line {line}: expected {pty}, found {aty}")),
             },
+            // A generic `SmallArray<T, N>` binds `T` from the element type; `N`
+            // must match exactly (RFC-0056 — integer arguments do not infer).
+            Type::SmallArray(inner, n) => match crate::types::resolve(aty, self.types) {
+                Type::SmallArray(a, m) if m == *n => self.unify(inner, &a, subst, line),
+                _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+            },
             Type::Ref(inner) => match aty {
                 Type::Ref(a) => self.unify(inner, a, subst, line),
                 _ => Err(format!("line {line}: expected {pty}, found {aty}")),
@@ -5393,6 +5500,8 @@ impl<'a> Checker<'a> {
         }
         match self.base(&b.ty) {
             Type::Array(inner) => Ok((*inner).clone()),
+            // A `SmallArray<T, N>` (RFC-0056) can shrink like a growable Array.
+            Type::SmallArray(inner, _) => Ok((*inner).clone()),
             Type::Err => Ok(Type::Err),
             Type::ArrayN(..) => Err(format!(
                 "line {line}: `{op}` is not available on a fixed-size array \
@@ -5470,7 +5579,8 @@ fn has_nested_wrap(ty: &Type) -> bool {
     match ty {
         Type::Option(t) => wrapped(t) || has_nested_wrap(t),
         Type::Result(a, b) => wrapped(a) || wrapped(b) || has_nested_wrap(a) || has_nested_wrap(b),
-        Type::Array(t) | Type::ArrayN(t, _) | Type::Ref(t) | Type::Task(t) => has_nested_wrap(t),
+        Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) | Type::Ref(t)
+        | Type::Task(t) => has_nested_wrap(t),
         Type::Map(k, v) => has_nested_wrap(k) || has_nested_wrap(v),
         Type::Record(fs) => fs.iter().any(|f| has_nested_wrap(&f.ty)),
         _ => false,
@@ -8961,6 +9071,106 @@ mod tests {
              let mut x = 0\n\
              if true { x = 1 }\n\
              return x }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    // ---- SmallArray<T, N> (RFC-0056) --------------------------------------
+
+    #[test]
+    fn smallarray_basic_surface_type_checks() {
+        let src = "fn main() -> Int64 {\n\
+             let mut xs: SmallArray<Int64, 4> = []\n\
+             xs.push(1)\n\
+             xs.push(2)\n\
+             xs[0] = 9\n\
+             let a = xs.toArray()\n\
+             let p = match xs.pop() { Some(v) => v, None => 0 }\n\
+             let r = xs.swapRemove(0)\n\
+             drop a\n\
+             drop xs\n\
+             return xs.length + p + r }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn integer_argument_on_a_non_smallarray_is_rejected() {
+        // Only `SmallArray` consumes an integer type argument in v1.
+        let src = "type Box = { v: Int64 }\n\
+             fn main() -> Int64 { let b: Box<3> = Box { v: 1 }  return b.v }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("does not take an integer argument"), "{e}");
+    }
+
+    #[test]
+    fn smallarray_capacity_below_one_is_rejected() {
+        let src = "fn main() -> Int64 { let xs: SmallArray<Int64, 0> = []  return xs.length }";
+        let e = check_src(src).unwrap_err();
+        assert!(
+            e.contains("smallArray capacity must be between 1 and 64"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn smallarray_capacity_above_64_is_rejected() {
+        let src = "fn main() -> Int64 { let xs: SmallArray<Int64, 65> = []  return xs.length }";
+        let e = check_src(src).unwrap_err();
+        assert!(
+            e.contains("smallArray capacity must be between 1 and 64"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn smallarray_literal_longer_than_capacity_is_rejected() {
+        // The capacity is known, so a literal exceeding it cannot fit inline.
+        let src = "fn main() -> Int64 {\n\
+             let xs: SmallArray<Int64, 2> = [1, 2, 3]\n\
+             return xs.length }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("SmallArray<_, 2>"), "{e}");
+    }
+
+    #[test]
+    fn smallarray_at_a_contract_boundary_is_a_named_error() {
+        // `SmallArray` is not part of the JSON codec closure; using it where a
+        // contract type is expected is a named checker error, not a silent hole.
+        let src = "fn main() -> Int64 {\n\
+             let xs: SmallArray<Int64, 4> = [1, 2]\n\
+             let s = toJson(xs)\n\
+             return xs.length }";
+        let e = check_src(src).unwrap_err();
+        assert!(
+            e.contains("SmallArray") && e.contains("codable"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn coexisting_smallarray_monomorphizations_type_check() {
+        // Two different `N`s coexist as distinct types.
+        let src = "fn main() -> Int64 {\n\
+             let mut a: SmallArray<Int64, 4> = []\n\
+             let mut b: SmallArray<Int64, 8> = []\n\
+             a.push(1)\n\
+             b.push(2)\n\
+             let n = a.length + b.length\n\
+             drop a\n\
+             drop b\n\
+             return n }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn nested_smallarray_type_checks() {
+        let src = "fn main() -> Int64 {\n\
+             let row: SmallArray<Int64, 2> = [1, 2]\n\
+             let mut grid: SmallArray<SmallArray<Int64, 2>, 2> = []\n\
+             grid.push(row)\n\
+             let got = grid[0]\n\
+             let n = got[1]\n\
+             drop grid\n\
+             return n }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 }

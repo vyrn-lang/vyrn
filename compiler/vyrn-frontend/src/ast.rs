@@ -412,6 +412,20 @@ pub enum Type {
     /// A fixed-size array `Array<T, N>` (const generic). Lowers to the value
     /// aggregate `[N x T]` — stack-allocated, no heap.
     ArrayN(Box<Type>, usize),
+    /// A small-buffer array `SmallArray<T, N>` (RFC-0056): API-identical to
+    /// `Array<T>` but its first `N` elements live inline (no heap allocation),
+    /// spilling to the heap only past `N`. Lowers to
+    /// `{ i64 len, i64 cap, ptr data, [N x T] inline }` with `cap` as the state
+    /// discriminant (`cap == N` inline, `cap > N` spilled). `N` is a
+    /// [`Type::ConstInt`] literal in the source, extracted here to a `usize`.
+    SmallArray(Box<Type>, usize),
+    /// A non-negative integer literal used as a *type argument* (RFC-0056), e.g.
+    /// the `8` in `SmallArray<Int64, 8>`. This is a scoped grammar addition, not
+    /// general const generics: it may only appear as a type argument, and only
+    /// `SmallArray` consumes it — any other type constructor carrying one is a
+    /// checker error. It has no runtime lowering of its own (`llt` never sees a
+    /// bare `ConstInt`).
+    ConstInt(u64),
     /// A growable, insertion-ordered dictionary `Map<String, V>` (RFC-0028). The
     /// two boxes are the key and value types; keys are `String` in v1 (the
     /// checker rejects a non-`String` key spelling with a named diagnostic).
@@ -488,6 +502,8 @@ impl std::fmt::Display for Type {
             Type::Ref(t) => write!(f, "Ref<{t}>"),
             Type::Array(t) => write!(f, "Array<{t}>"),
             Type::ArrayN(t, n) => write!(f, "Array<{t}, {n}>"),
+            Type::SmallArray(t, n) => write!(f, "SmallArray<{t}, {n}>"),
+            Type::ConstInt(n) => write!(f, "{n}"),
             Type::Map(k, v) => write!(f, "Map<{k}, {v}>"),
             Type::Task(t) => write!(f, "Task<{t}>"),
             Type::Logger => write!(f, "Logger"),

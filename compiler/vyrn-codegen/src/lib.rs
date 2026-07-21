@@ -1104,6 +1104,13 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare void @free(ptr)\n");
     out.push_str("declare ptr @strcpy(ptr, ptr)\n");
     out.push_str("declare ptr @strcat(ptr, ptr)\n");
+    // `llvm.memcpy` — used by `SmallArray` (RFC-0056) to move its inline slots
+    // to the heap on spill and to copy elements out in `toArray`. The
+    // target-independent intrinsic (always an i64 length) lowers correctly on
+    // both native and wasm — unlike libc `memcpy`, whose `size_t` is i32 on
+    // wasm32 and i64 on x86-64 (an ABI clash). SmallArray never crosses
+    // `extern`, so keeping the copy internal to generated code is sound.
+    out.push_str("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
     // Worker threads (RFC-0025): `spawn f(args)` packs its evaluated arguments
     // into a heap frame and hands the shim a per-spawn-site thunk SYMBOL plus
     // that frame; the shim runs the thunk on a real OS thread natively (Win32 /
@@ -2161,6 +2168,13 @@ impl<'a> Gen<'a> {
             Type::Map(..) => "{ ptr, ptr, i64, i64 }".into(),
             // A fixed-size array lowers to the LLVM value aggregate [N x T].
             Type::ArrayN(inner, n) => format!("[{n} x {}]", self.llt(&inner)),
+            // A small-buffer array (RFC-0056) lowers to
+            // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — `cap` is the
+            // state discriminant (`cap == N` inline; `cap > N` spilled onto
+            // `data`). Every element access branches on it to pick the base.
+            Type::SmallArray(inner, n) => {
+                format!("{{ i64, i64, ptr, [{n} x {}] }}", self.llt(&inner))
+            }
             // A task handle (RFC-0025) is an opaque `ptr` to the shim's task
             // record (thread handle + heap frame); `t.join()` blocks on it and
             // loads the result from the frame's leading slot.
@@ -2180,6 +2194,9 @@ impl<'a> Gen<'a> {
             // Unreachable after `resolve` (Named/App/transformers/params reduced away).
             Type::Named(_) | Type::App(..) | Type::Omit(..) | Type::Pick(..) | Type::Merge(..)
             | Type::Partial(..) | Type::Param(_) => "void".into(),
+            // A bare integer type argument (RFC-0056) never stands alone as a
+            // runtime type — `SmallArray` consumes it before lowering.
+            Type::ConstInt(_) => "void".into(),
             // A stored function value (RFC-0037) is a synthesized closed enum:
             // `{ i64 tag, i64 payload }` — tag selects the source (one variant
             // per named function / lifted lambda), payload is 0 or a pointer to
@@ -2334,6 +2351,14 @@ impl<'a> Gen<'a> {
                     return Ok((triple, to.clone()));
                 }
             }
+            // A contextual array literal `[..]` (a fixed `[len x T]`) flowing
+            // into a `SmallArray<T, N>` slot (RFC-0056): lift the elements into
+            // the inline buffer (the checker proved `len <= N`).
+            if let (Type::ArrayN(_, len), Type::SmallArray(ti, n)) = (&rf, &rt) {
+                let inner = (**ti).clone();
+                let (sa, _) = self.array_n_to_smallarray(&op, &inner, *len, *n)?;
+                return Ok((sa, to.clone()));
+            }
         }
         // A plain integer flowing into a sized-integer slot truncates to `iN`
         // (matching the interpreter's `wrap_intn`). Same-width is a no-op.
@@ -2481,6 +2506,214 @@ impl<'a> Gen<'a> {
         self.emit(format!("{b} = insertvalue {{ ptr, i64, i64 }} {a}, i64 {n}, 1"));
         self.emit(format!("{c} = insertvalue {{ ptr, i64, i64 }} {b}, i64 {n}, 2"));
         Ok((c, Type::Array(Box::new(inner.clone()))))
+    }
+
+    /// The LLVM struct type of a `SmallArray<T, N>` (RFC-0056):
+    /// `{ i64 len, i64 cap, ptr data, [N x T] inline }`.
+    fn sa_ll(&self, inner: &Type, n: usize) -> String {
+        format!("{{ i64, i64, ptr, [{n} x {}] }}", self.llt(inner))
+    }
+
+    /// Copy a fixed `[len x T]` aggregate value `v` into a fresh `SmallArray<T,
+    /// N>` value (RFC-0056), inline state: `len` real elements in the inline
+    /// buffer, `cap == N`, `data` null. The lowering behind a contextual array
+    /// literal `[..]` in a `SmallArray` position (the checker proved `len <= N`).
+    fn array_n_to_smallarray(
+        &mut self,
+        v: &str,
+        inner: &Type,
+        len: usize,
+        n: usize,
+    ) -> Result<(String, Type), String> {
+        let ell = self.llt(inner);
+        let src = format!("[{len} x {ell}]");
+        let inl_ty = format!("[{n} x {ell}]");
+        let sa_ll = self.sa_ll(inner, n);
+        // Build the inline `[N x T]` by lifting each of the `len` elements out of
+        // the source aggregate (constant indices) into it; slots `len..N` stay
+        // `undef` (dead — `len` bounds every read).
+        let mut inl = "undef".to_string();
+        for i in 0..len {
+            let e = self.fresh_tmp();
+            self.emit(format!("{e} = extractvalue {src} {v}, {i}"));
+            let next = self.fresh_tmp();
+            self.emit(format!("{next} = insertvalue {inl_ty} {inl}, {ell} {e}, {i}"));
+            inl = next;
+        }
+        let a = self.fresh_tmp();
+        let b = self.fresh_tmp();
+        let c = self.fresh_tmp();
+        let d = self.fresh_tmp();
+        self.emit(format!("{a} = insertvalue {sa_ll} undef, i64 {len}, 0"));
+        self.emit(format!("{b} = insertvalue {sa_ll} {a}, i64 {n}, 1"));
+        self.emit(format!("{c} = insertvalue {sa_ll} {b}, ptr null, 2"));
+        self.emit(format!("{d} = insertvalue {sa_ll} {c}, {inl_ty} {inl}, 3"));
+        Ok((d, Type::SmallArray(Box::new(inner.clone()), n)))
+    }
+
+    /// Given a `SmallArray<T, N>` SSA value `av`, spill it to a temp slot and
+    /// return `(base_ptr, len)` where `base_ptr` points at element 0 in whichever
+    /// buffer is live (inline while `cap == N`, else the heap `data`). RFC-0056:
+    /// every element access branches on the state to pick this base.
+    fn sa_value_base_len(&mut self, av: &str, inner: &Type, n: usize) -> (String, String) {
+        let sa_ll = self.sa_ll(inner, n);
+        let slot = self.fresh_alloca(&sa_ll);
+        self.emit(format!("store {sa_ll} {av}, ptr {slot}"));
+        let (base, len, _cap, _data) = self.sa_slot_base(&slot, inner, n);
+        (base, len)
+    }
+
+    /// Given a `SmallArray<T, N>` binding slot, load its header and return
+    /// `(base_ptr, len, cap, data)`. `base_ptr` is the inline field pointer while
+    /// `cap == N`, else the heap `data` pointer (RFC-0056).
+    fn sa_slot_base(
+        &mut self,
+        slot: &str,
+        inner: &Type,
+        n: usize,
+    ) -> (String, String, String, String) {
+        let sa_ll = self.sa_ll(inner, n);
+        let hdr = self.fresh_tmp();
+        let len = self.fresh_tmp();
+        let cap = self.fresh_tmp();
+        let data = self.fresh_tmp();
+        self.emit(format!("{hdr} = load {sa_ll}, ptr {slot}"));
+        self.emit(format!("{len} = extractvalue {sa_ll} {hdr}, 0"));
+        self.emit(format!("{cap} = extractvalue {sa_ll} {hdr}, 1"));
+        self.emit(format!("{data} = extractvalue {sa_ll} {hdr}, 2"));
+        let inl = self.fresh_tmp();
+        self.emit(format!(
+            "{inl} = getelementptr {sa_ll}, ptr {slot}, i64 0, i32 3, i64 0"
+        ));
+        let is_inline = self.fresh_tmp();
+        self.emit(format!("{is_inline} = icmp eq i64 {cap}, {n}"));
+        let base = self.fresh_tmp();
+        self.emit(format!(
+            "{base} = select i1 {is_inline}, ptr {inl}, ptr {data}"
+        ));
+        (base, len, cap, data)
+    }
+
+    /// Lower `SmallArray<T, N>.push(v)` (RFC-0056). Value-threaded: takes the
+    /// current SmallArray value `av`, returns the new one. Grows on a push at
+    /// `len == cap` — from the inline state it allocates `2N` on the heap and
+    /// copies the inline slots out; from the spilled state it reallocs to
+    /// `cap*2`. It never un-spills.
+    fn gen_smallarray_push(
+        &mut self,
+        av: &str,
+        inner: &Type,
+        n: usize,
+        val_expr: &Expr,
+    ) -> Result<(String, Type), String> {
+        let ell = self.llt(inner);
+        let sa_ll = self.sa_ll(inner, n);
+        // Evaluate + coerce the element (validated element types trap inline).
+        self.expect.push(inner.clone());
+        let r = self.gen_expr(val_expr);
+        self.expect.pop();
+        let (v, vty) = r?;
+        let (v, _) = self.coerce(v, &vty, inner)?;
+        // Spill to a slot so the inline buffer is addressable.
+        let slot = self.fresh_alloca(&sa_ll);
+        self.emit(format!("store {sa_ll} {av}, ptr {slot}"));
+        let hdr = self.fresh_tmp();
+        let len = self.fresh_tmp();
+        let cap = self.fresh_tmp();
+        let data = self.fresh_tmp();
+        self.emit(format!("{hdr} = load {sa_ll}, ptr {slot}"));
+        self.emit(format!("{len} = extractvalue {sa_ll} {hdr}, 0"));
+        self.emit(format!("{cap} = extractvalue {sa_ll} {hdr}, 1"));
+        self.emit(format!("{data} = extractvalue {sa_ll} {hdr}, 2"));
+        let inl = self.fresh_tmp();
+        self.emit(format!(
+            "{inl} = getelementptr {sa_ll}, ptr {slot}, i64 0, i32 3, i64 0"
+        ));
+        let is_inline = self.fresh_tmp();
+        self.emit(format!("{is_inline} = icmp eq i64 {cap}, {n}"));
+        let esz = self.fresh_tmp();
+        self.emit(format!(
+            "{esz} = ptrtoint ptr getelementptr ({ell}, ptr null, i64 1) to i64"
+        ));
+        let full = self.fresh_tmp();
+        self.emit(format!("{full} = icmp eq i64 {len}, {cap}"));
+        let grow_l = self.fresh_label("sapush.grow");
+        let nogrow_l = self.fresh_label("sapush.nogrow");
+        let store_l = self.fresh_label("sapush.store");
+        self.emit_term(format!(
+            "br i1 {full}, label %{grow_l}, label %{nogrow_l}"
+        ));
+        // grow: newcap = cap*2 (inline → 2N, spilled → cap*2).
+        self.emit_label(&grow_l);
+        let newcap = self.fresh_tmp();
+        self.emit(format!("{newcap} = mul i64 {cap}, 2"));
+        let nb = self.fresh_tmp();
+        self.emit(format!("{nb} = mul i64 {newcap}, {esz}"));
+        let grow_in_l = self.fresh_label("sapush.grow.inline");
+        let grow_sp_l = self.fresh_label("sapush.grow.spill");
+        let grow_done_l = self.fresh_label("sapush.grow.done");
+        self.emit_term(format!(
+            "br i1 {is_inline}, label %{grow_in_l}, label %{grow_sp_l}"
+        ));
+        // from inline: fresh heap buffer, copy the N inline elements into it.
+        self.emit_label(&grow_in_l);
+        let ndi = self.fresh_tmp();
+        self.emit(format!("{ndi} = call ptr @__vyrn_malloc(i64 {nb})"));
+        let cpb = self.fresh_tmp();
+        self.emit(format!("{cpb} = mul i64 {len}, {esz}"));
+        self.emit(format!(
+            "call void @llvm.memcpy.p0.p0.i64(ptr {ndi}, ptr {inl}, i64 {cpb}, i1 false)"
+        ));
+        self.emit_term(format!("br label %{grow_done_l}"));
+        // from spilled: realloc the existing buffer.
+        self.emit_label(&grow_sp_l);
+        let nds = self.fresh_tmp();
+        self.emit(format!(
+            "{nds} = call ptr @__vyrn_realloc(ptr {data}, i64 {nb})"
+        ));
+        self.emit_term(format!("br label %{grow_done_l}"));
+        self.emit_label(&grow_done_l);
+        let gnd = self.fresh_tmp();
+        self.emit(format!(
+            "{gnd} = phi ptr [ {ndi}, %{grow_in_l} ], [ {nds}, %{grow_sp_l} ]"
+        ));
+        self.emit_term(format!("br label %{store_l}"));
+        // nogrow: base is the live buffer; cap/data unchanged.
+        self.emit_label(&nogrow_l);
+        let ng_base = self.fresh_tmp();
+        self.emit(format!(
+            "{ng_base} = select i1 {is_inline}, ptr {inl}, ptr {data}"
+        ));
+        self.emit_term(format!("br label %{store_l}"));
+        // store: choose base/cap/data, write the element, bump len, rebuild.
+        self.emit_label(&store_l);
+        let base = self.fresh_tmp();
+        self.emit(format!(
+            "{base} = phi ptr [ {gnd}, %{grow_done_l} ], [ {ng_base}, %{nogrow_l} ]"
+        ));
+        let ncap = self.fresh_tmp();
+        self.emit(format!(
+            "{ncap} = phi i64 [ {newcap}, %{grow_done_l} ], [ {cap}, %{nogrow_l} ]"
+        ));
+        let ndata = self.fresh_tmp();
+        self.emit(format!(
+            "{ndata} = phi ptr [ {gnd}, %{grow_done_l} ], [ {data}, %{nogrow_l} ]"
+        ));
+        let ep = self.fresh_tmp();
+        self.emit(format!("{ep} = getelementptr {ell}, ptr {base}, i64 {len}"));
+        self.emit(format!("store {ell} {v}, ptr {ep}"));
+        let nl = self.fresh_tmp();
+        self.emit(format!("{nl} = add i64 {len}, 1"));
+        // Reload (the inline path mutated `slot`) and overwrite the header.
+        let cur = self.fresh_tmp();
+        self.emit(format!("{cur} = load {sa_ll}, ptr {slot}"));
+        let a0 = self.fresh_tmp();
+        let a1 = self.fresh_tmp();
+        let a2 = self.fresh_tmp();
+        self.emit(format!("{a0} = insertvalue {sa_ll} {cur}, i64 {nl}, 0"));
+        self.emit(format!("{a1} = insertvalue {sa_ll} {a0}, i64 {ncap}, 1"));
+        self.emit(format!("{a2} = insertvalue {sa_ll} {a1}, ptr {ndata}, 2"));
+        Ok((a2, Type::SmallArray(Box::new(inner.clone()), n)))
     }
 
     /// Emit a conditional runtime trap: if `cond` (an i1) is true, print the
@@ -2691,6 +2924,20 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{d} = extractvalue {{ ptr, i64, i64 }} {a}, 0"));
                 self.emit(format!("call void @free(ptr {d})"));
             }
+            DropKind::FreeSmallArr => {
+                // A `SmallArray<T, N>` (RFC-0056) is `{ i64 len, i64 cap, ptr
+                // data, [N x T] inline }`. Its `data` pointer sits at byte
+                // offset 16 (two i64 header words), independent of `N`/`T`. It is
+                // null while inline and heap once spilled, so `free(data)` frees
+                // iff spilled — `free(null)` is a well-defined no-op. The inline
+                // slots need no reclamation (their elements are a safe leak,
+                // exactly as for `Array`).
+                let p = self.fresh_tmp();
+                let d = self.fresh_tmp();
+                self.emit(format!("{p} = getelementptr i8, ptr {slot}, i64 16"));
+                self.emit(format!("{d} = load ptr, ptr {p}"));
+                self.emit(format!("call void @free(ptr {d})"));
+            }
             DropKind::FreeMap => {
                 // Free both of the map's final backing buffers (keys, values);
                 // elements are a safe leak, exactly as for arrays (RFC-0028).
@@ -2808,6 +3055,28 @@ impl<'a> Gen<'a> {
                         self.emit_label(&ok_l);
                         let ep = self.fresh_tmp();
                         self.emit(format!("{ep} = getelementptr {ell}, ptr {data}, i64 {iv}"));
+                        self.emit(format!("store {ell} {v}, ptr {ep}"));
+                        Ok(())
+                    }
+                    // `sa[i] = v` (RFC-0056): store into the live buffer (inline
+                    // while `cap == N`, else heap); the header is unchanged.
+                    Type::SmallArray(inner, n) => {
+                        let elem = *inner;
+                        let ell = self.llt(&elem);
+                        let (base, len, _cap, _data) = self.sa_slot_base(&slot, &elem, n);
+                        let (iv, _) = self.gen_expr(index)?;
+                        self.expect.push(elem.clone());
+                        let r = self.gen_expr(value);
+                        self.expect.pop();
+                        let (v, vty) = r?;
+                        let (v, _) = self.coerce(v, &vty, &elem)?;
+                        let oob = self.fresh_tmp();
+                        self.emit(format!("{oob} = icmp uge i64 {iv}, {len}"));
+                        self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
+                        self.emit_array_oob_trap(&bad_l, &iv);
+                        self.emit_label(&ok_l);
+                        let ep = self.fresh_tmp();
+                        self.emit(format!("{ep} = getelementptr {ell}, ptr {base}, i64 {iv}"));
                         self.emit(format!("store {ell} {v}, ptr {ep}"));
                         Ok(())
                     }
@@ -2929,7 +3198,9 @@ impl<'a> Gen<'a> {
                 // zero-extended); arrays load their element type directly.
                 let byte_elem = resolved == Type::Str;
                 let elem = match &resolved {
-                    Type::Array(inner) | Type::ArrayN(inner, _) => (**inner).clone(),
+                    Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
+                        (**inner).clone()
+                    }
                     Type::Str => Type::Int,
                     other => return Err(format!("for-loop needs an Array or String, found {other:?}")),
                 };
@@ -2940,6 +3211,8 @@ impl<'a> Gen<'a> {
                         self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {av})"));
                         (av.clone(), len)
                     }
+                    // A SmallArray (RFC-0056): pick the live base + its length.
+                    Type::SmallArray(inner, n) => self.sa_value_base_len(&av, inner, *n),
                     Type::ArrayN(_, n) => {
                         // Fixed array is a value aggregate; spill to the stack and
                         // take a pointer to element 0. Length is the constant N.
@@ -3025,6 +3298,7 @@ impl<'a> Gen<'a> {
                 let kind = match self.resolve(&ty) {
                     Type::Str => DropKind::FreeStr,
                     Type::Array(_) => DropKind::AfreeArr,
+                    Type::SmallArray(..) => DropKind::FreeSmallArr,
                     Type::Map(..) => DropKind::FreeMap,
                     Type::Ref(_) => DropKind::ReleaseRef,
                     other => return Err(format!("cannot drop non-heap value of type {other:?}")),
@@ -3161,6 +3435,14 @@ impl<'a> Gen<'a> {
                             self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {v}, 1"));
                             return Ok((len, Type::Int));
                         }
+                        // `smallArray.length` is field 0 of the SmallArray header
+                        // (RFC-0056), the same in the inline and spilled states.
+                        Type::SmallArray(inner, n) => {
+                            let sa_ll = self.sa_ll(&inner, n);
+                            let len = self.fresh_tmp();
+                            self.emit(format!("{len} = extractvalue {sa_ll} {v}, 0"));
+                            return Ok((len, Type::Int));
+                        }
                         // `map.length` is the entry count (field 2 of the header).
                         Type::Map(..) => {
                             let len = self.fresh_tmp();
@@ -3202,6 +3484,20 @@ impl<'a> Gen<'a> {
                 // triple `array()` produces (the element type is placeholder; the
                 // representation is type-independent and the annotation fixes it).
                 if elems.is_empty() {
+                    // An empty `[]` against a `SmallArray<T, N>` slot (RFC-0056)
+                    // is the empty small-buffer array in the inline state:
+                    // `len 0`, `cap N`, `data null`, inline slots dead.
+                    if let Some(t) = self.expect.last().cloned() {
+                        if let Type::SmallArray(inner, n) = self.resolve(&t) {
+                            let ell = self.llt(&inner);
+                            return Ok((
+                                format!(
+                                    "{{ i64 0, i64 {n}, ptr null, [{n} x {ell}] undef }}"
+                                ),
+                                Type::SmallArray(inner, n),
+                            ));
+                        }
+                    }
                     return Ok((
                         "{ ptr null, i64 0, i64 0 }".into(),
                         Type::Array(Box::new(Type::Int)),
@@ -3212,7 +3508,7 @@ impl<'a> Gen<'a> {
                 // literal element knows its signature.
                 let elem_expect: Option<Type> = self.expect.last().and_then(|t| {
                     match self.resolve(t) {
-                        Type::Array(i) | Type::ArrayN(i, _) => Some(*i),
+                        Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => Some(*i),
                         _ => None,
                     }
                 });
@@ -6089,6 +6385,14 @@ impl<'a> Gen<'a> {
         }
         if name == "push" {
             let (av, aty) = self.gen_expr(&args[0])?;
+            // `SmallArray<T, N>.push(v)` (RFC-0056): store into the live buffer
+            // (inline while `cap == N`, else heap). A push at `len == cap`
+            // grows — from inline it allocates `2N` and copies the inline slots
+            // out; from a spilled buffer it reallocs to `cap*2`. It never
+            // un-spills. Returns the whole (possibly reshaped) SmallArray value.
+            if let Type::SmallArray(inner, n) = self.resolve(&aty) {
+                return self.gen_smallarray_push(&av, &inner, n, &args[1]);
+            }
             let elem = match self.resolve(&aty) {
                 Type::Array(inner) => *inner,
                 _ => return Err("push on a non-Array value".into()),
@@ -6183,6 +6487,34 @@ impl<'a> Gen<'a> {
                     self.emit(format!("{v} = load {ell}, ptr {ep}"));
                     return Ok((v, elem));
                 }
+                // `SmallArray<T, N>[i]` (RFC-0056): pick the live base (inline
+                // while `cap == N`, else heap), bounds-check against `len`, load.
+                Type::SmallArray(inner, n) => {
+                    let elem = *inner;
+                    let ell = self.llt(&elem);
+                    // Read straight from the binding's slot when the receiver is
+                    // a plain variable — no need to spill the whole value (incl.
+                    // the inline buffer) to a temp on every access, so a
+                    // read-heavy `xs[i]` loop pays only the state branch.
+                    let (base, len) = match &args[0] {
+                        Expr::Var { name, .. } if self.lookup(name).is_some() => {
+                            let (slot, _) = self.lookup(name).unwrap();
+                            let (base, len, _c, _d) = self.sa_slot_base(&slot, &elem, n);
+                            (base, len)
+                        }
+                        _ => self.sa_value_base_len(&av, &elem, n),
+                    };
+                    let oob = self.fresh_tmp();
+                    self.emit(format!("{oob} = icmp uge i64 {iv}, {len}"));
+                    self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
+                    emit_trap(self, "@.trap.aoob");
+                    self.emit_label(&ok_l);
+                    let ep = self.fresh_tmp();
+                    let v = self.fresh_tmp();
+                    self.emit(format!("{ep} = getelementptr {ell}, ptr {base}, i64 {iv}"));
+                    self.emit(format!("{v} = load {ell}, ptr {ep}"));
+                    return Ok((v, elem));
+                }
                 Type::ArrayN(inner, n) => {
                     // Fixed array: store the value aggregate to the stack, then
                     // index it. Bounds are the constant N.
@@ -6272,6 +6604,13 @@ impl<'a> Gen<'a> {
             match self.resolve(&aty) {
                 // Fixed array: the length is the constant N.
                 Type::ArrayN(_, n) => return Ok((format!("{n}"), Type::Int)),
+                // SmallArray (RFC-0056): the length is header field 0.
+                Type::SmallArray(inner, n) => {
+                    let sa_ll = self.sa_ll(&inner, n);
+                    let len = self.fresh_tmp();
+                    self.emit(format!("{len} = extractvalue {sa_ll} {av}, 0"));
+                    return Ok((len, Type::Int));
+                }
                 _ => {
                     let len = self.fresh_tmp();
                     self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {av}, 1"));
@@ -6297,6 +6636,50 @@ impl<'a> Gen<'a> {
                 _ => return Err("`pop` needs a plain array variable".into()),
             };
             let (slot, aty) = self.lookup(&recv).ok_or_else(|| format!("unbound `{recv}`"))?;
+            // `SmallArray<T, N>.pop()` (RFC-0056): slot-based. Never un-spills —
+            // just decrement `len` (field 0); the base is the live buffer.
+            if let Type::SmallArray(inner, n) = self.resolve(&aty) {
+                let elem = *inner;
+                let ell = self.llt(&elem);
+                let sa_ll = self.sa_ll(&elem, n);
+                let (base, len, _cap, _data) = self.sa_slot_base(&slot, &elem, n);
+                let empty = self.fresh_tmp();
+                self.emit(format!("{empty} = icmp eq i64 {len}, 0"));
+                let none_l = self.fresh_label("sapop.none");
+                let some_l = self.fresh_label("sapop.some");
+                let end_l = self.fresh_label("sapop.end");
+                self.emit_term(format!("br i1 {empty}, label %{none_l}, label %{some_l}"));
+                self.emit_label(&none_l);
+                self.emit_term(format!("br label %{end_l}"));
+                self.emit_label(&some_l);
+                let nl = self.fresh_tmp();
+                self.emit(format!("{nl} = sub i64 {len}, 1"));
+                let ep = self.fresh_tmp();
+                let v = self.fresh_tmp();
+                self.emit(format!("{ep} = getelementptr {ell}, ptr {base}, i64 {nl}"));
+                self.emit(format!("{v} = load {ell}, ptr {ep}"));
+                let lenp = self.fresh_tmp();
+                self.emit(format!(
+                    "{lenp} = getelementptr {sa_ll}, ptr {slot}, i64 0, i32 0"
+                ));
+                self.emit(format!("store i64 {nl}, ptr {lenp}"));
+                let (w0, w1) = self.encode_payload(&v, &elem);
+                let s0 = self.fresh_tmp();
+                let s1 = self.fresh_tmp();
+                let s2 = self.fresh_tmp();
+                self.emit(format!("{s0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"));
+                self.emit(format!("{s1} = insertvalue {{ i1, i64, i64 }} {s0}, i64 {w0}, 1"));
+                self.emit(format!("{s2} = insertvalue {{ i1, i64, i64 }} {s1}, i64 {w1}, 2"));
+                let some_end = self.cur_block.clone();
+                self.emit_term(format!("br label %{end_l}"));
+                self.emit_label(&end_l);
+                let r = self.fresh_tmp();
+                self.emit(format!(
+                    "{r} = phi {{ i1, i64, i64 }} [ {{ i1 0, i64 0, i64 0 }}, %{none_l} ], \
+                     [ {s2}, %{some_end} ]"
+                ));
+                return Ok((r, Type::Option(Box::new(elem))));
+            }
             let elem = match self.resolve(&aty) {
                 Type::Array(inner) => *inner,
                 other => return Err(format!("`pop` needs an Array, found {other:?}")),
@@ -6356,6 +6739,39 @@ impl<'a> Gen<'a> {
                 _ => return Err("`swapRemove` needs a plain array variable".into()),
             };
             let (slot, aty) = self.lookup(&recv).ok_or_else(|| format!("unbound `{recv}`"))?;
+            // `SmallArray<T, N>.swapRemove(i)` (RFC-0056): slot-based, on the
+            // live buffer; move the last element into slot `i`, shrink `len`.
+            if let Type::SmallArray(inner, n) = self.resolve(&aty) {
+                let elem = *inner;
+                let ell = self.llt(&elem);
+                let sa_ll = self.sa_ll(&elem, n);
+                let (base, len, _cap, _data) = self.sa_slot_base(&slot, &elem, n);
+                let (iv, _) = self.gen_expr(&args[1])?;
+                let bad_l = self.fresh_label("saswap.oob");
+                let ok_l = self.fresh_label("saswap.ok");
+                let oob = self.fresh_tmp();
+                self.emit(format!("{oob} = icmp uge i64 {iv}, {len}"));
+                self.emit_term(format!("br i1 {oob}, label %{bad_l}, label %{ok_l}"));
+                self.emit_array_oob_trap(&bad_l, &iv);
+                self.emit_label(&ok_l);
+                let nl = self.fresh_tmp();
+                self.emit(format!("{nl} = sub i64 {len}, 1"));
+                let ip = self.fresh_tmp();
+                let v = self.fresh_tmp();
+                self.emit(format!("{ip} = getelementptr {ell}, ptr {base}, i64 {iv}"));
+                self.emit(format!("{v} = load {ell}, ptr {ip}"));
+                let lp = self.fresh_tmp();
+                let last = self.fresh_tmp();
+                self.emit(format!("{lp} = getelementptr {ell}, ptr {base}, i64 {nl}"));
+                self.emit(format!("{last} = load {ell}, ptr {lp}"));
+                self.emit(format!("store {ell} {last}, ptr {ip}"));
+                let lenp = self.fresh_tmp();
+                self.emit(format!(
+                    "{lenp} = getelementptr {sa_ll}, ptr {slot}, i64 0, i32 0"
+                ));
+                self.emit(format!("store i64 {nl}, ptr {lenp}"));
+                return Ok((v, elem));
+            }
             let elem = match self.resolve(&aty) {
                 Type::Array(inner) => *inner,
                 other => return Err(format!("`swapRemove` needs an Array, found {other:?}")),
@@ -6390,6 +6806,46 @@ impl<'a> Gen<'a> {
             self.emit(format!("{nh} = insertvalue {{ ptr, i64, i64 }} {hdr}, i64 {nl}, 1"));
             self.emit(format!("store {{ ptr, i64, i64 }} {nh}, ptr {slot}"));
             return Ok((v, elem));
+        }
+        // `xs.toArray()` (RFC-0056) — copy a `SmallArray<T, N>`'s live elements
+        // into a fresh heap buffer and wrap it in the growable `{ptr,len,cap}`
+        // triple. The one explicit conversion; the interpreter's copy is the
+        // identity (both share `Val::Array`).
+        if name == "@toArray" {
+            let (av, aty) = self.gen_expr(&args[0])?;
+            let inner = match self.resolve(&aty) {
+                Type::SmallArray(inner, _) => *inner,
+                // A plain `Array<T>` receiver is a defensive copy-out too.
+                Type::Array(inner) => {
+                    // Already a growable triple — hand it straight back.
+                    return Ok((av, Type::Array(inner)));
+                }
+                other => return Err(format!("`toArray` needs a SmallArray, found {other:?}")),
+            };
+            let n = match self.resolve(&aty) {
+                Type::SmallArray(_, n) => n,
+                _ => unreachable!(),
+            };
+            let ell = self.llt(&inner);
+            let (base, len) = self.sa_value_base_len(&av, &inner, n);
+            let esz = self.fresh_tmp();
+            self.emit(format!(
+                "{esz} = ptrtoint ptr getelementptr ({ell}, ptr null, i64 1) to i64"
+            ));
+            let nb = self.fresh_tmp();
+            self.emit(format!("{nb} = mul i64 {len}, {esz}"));
+            let buf = self.fresh_tmp();
+            self.emit(format!("{buf} = call ptr @__vyrn_malloc(i64 {nb})"));
+            self.emit(format!(
+                "call void @llvm.memcpy.p0.p0.i64(ptr {buf}, ptr {base}, i64 {nb}, i1 false)"
+            ));
+            let a = self.fresh_tmp();
+            let b = self.fresh_tmp();
+            let c = self.fresh_tmp();
+            self.emit(format!("{a} = insertvalue {{ ptr, i64, i64 }} undef, ptr {buf}, 0"));
+            self.emit(format!("{b} = insertvalue {{ ptr, i64, i64 }} {a}, i64 {len}, 1"));
+            self.emit(format!("{c} = insertvalue {{ ptr, i64, i64 }} {b}, i64 {len}, 2"));
+            return Ok((c, Type::Array(Box::new(inner))));
         }
         // `m.has(k)` (RFC-0028) — membership test → i1. Read-only; the receiver
         // is any Map-typed expression (an SSA aggregate).
@@ -8810,6 +9266,7 @@ fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
         // element type parameter from the concrete argument.
         (Type::Array(p), Type::Array(a)) => solve_param(p, a, subst),
         (Type::ArrayN(p, _), Type::ArrayN(a, _)) => solve_param(p, a, subst),
+        (Type::SmallArray(p, _), Type::SmallArray(a, _)) => solve_param(p, a, subst),
         (Type::Map(pk, pv), Type::Map(ak, av)) => {
             solve_param(pk, ak, subst);
             solve_param(pv, av, subst);
@@ -8856,6 +9313,11 @@ fn mangle_ty(t: &Type) -> String {
         Type::Ref(inner) => format!("Ref{}", mangle_ty(inner)),
         Type::Array(inner) => format!("Arr{}", mangle_ty(inner)),
         Type::ArrayN(inner, n) => format!("Arr{n}{}", mangle_ty(inner)),
+        // RFC-0056: key on BOTH the element type and the inline capacity, so
+        // `SmallArray<Int64, 4>` and `SmallArray<Int64, 8>` are distinct
+        // monomorphizations.
+        Type::SmallArray(inner, n) => format!("SmArr{n}{}", mangle_ty(inner)),
+        Type::ConstInt(n) => format!("N{n}"),
         Type::Map(k, v) => format!("Map{}{}", mangle_ty(k), mangle_ty(v)),
         Type::Task(inner) => format!("Task{}", mangle_ty(inner)),
         Type::Logger => "Logger".into(),
@@ -10311,5 +10773,82 @@ mod tests {
                    fn main() -> Int64 { let n: Narrow = \"a\" return want(n) }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(!ir.contains("@.trap.verr.Wide, ptr"), "contained finite var needs no check: {ir}");
+    }
+
+    // ---- SmallArray<T, N> (RFC-0056) --------------------------------------
+
+    #[test]
+    fn smallarray_lowers_to_inline_struct() {
+        // The type lowers to `{ i64 len, i64 cap, ptr data, [N x T] inline }`.
+        let src = "fn main() -> Int64 { let mut xs: SmallArray<Int64, 4> = []  \
+                   xs.push(1)  return xs.length }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(
+            ir.contains("{ i64, i64, ptr, [4 x i64] }"),
+            "SmallArray struct layout: {ir}"
+        );
+    }
+
+    #[test]
+    fn smallarray_push_has_the_spill_path() {
+        // A push must branch on fullness and, from the inline state, allocate a
+        // fresh heap buffer and `memcpy` the inline slots into it.
+        let src = "fn main() -> Int64 { let mut xs: SmallArray<Int64, 4> = []  \
+                   xs.push(1)  return xs.length }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("sapush.grow"), "spill/grow branch: {ir}");
+        assert!(ir.contains("call ptr @__vyrn_malloc"), "inline spill allocates: {ir}");
+        assert!(ir.contains("@llvm.memcpy.p0.p0.i64"), "spill copies inline slots: {ir}");
+        assert!(ir.contains("call ptr @__vyrn_realloc"), "spilled grow reallocs: {ir}");
+    }
+
+    #[test]
+    fn smallarray_drop_frees_the_data_field_once() {
+        // `drop xs` frees the SmallArray's `data` pointer (byte offset 16),
+        // which is null while inline (a no-op) and heap once spilled — exactly
+        // one auto-free beyond the runtime baseline, in either state.
+        let src = "fn main() -> Int64 { let mut xs: SmallArray<Int64, 4> = []  \
+                   xs.push(1)  let n = xs.length  drop xs  return n }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert_eq!(
+            free_calls(&ir),
+            RUNTIME_FREES + 1,
+            "a SmallArray drop frees its data field exactly once: {ir}"
+        );
+        assert!(
+            ir.contains("getelementptr i8, ptr %xs"),
+            "drop addresses the data field by byte offset: {ir}"
+        );
+    }
+
+    #[test]
+    fn smallarray_auto_drop_at_scope_end_balances() {
+        // No explicit `drop`: a SmallArray received from an owned-returning
+        // function is reclaimed once at scope end (ownership schedules
+        // `FreeSmallArr`) — the same discipline as an owned `Array`.
+        let src = "fn make() -> SmallArray<Int64, 4> { \
+                     let mut xs: SmallArray<Int64, 4> = []  xs.push(1)  return xs } \
+                   fn main() -> Int64 { let xs = make()  return xs.length }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert_eq!(
+            free_calls(&ir),
+            RUNTIME_FREES + 1,
+            "auto-drop frees the SmallArray data once: {ir}"
+        );
+    }
+
+    #[test]
+    fn coexisting_smallarray_capacities_lower_distinctly() {
+        // `SmallArray<Int64, 4>` and `SmallArray<Int64, 8>` are separate types,
+        // so both inline aggregate shapes appear in the module.
+        let src = "fn main() -> Int64 { \
+                   let mut a: SmallArray<Int64, 4> = []  a.push(1)  \
+                   let mut b: SmallArray<Int64, 8> = []  b.push(2)  \
+                   let n = a.length + b.length  drop a  drop b  return n }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("[4 x i64]"), "N=4 inline buffer: {ir}");
+        assert!(ir.contains("[8 x i64]"), "N=8 inline buffer: {ir}");
+        // Two SmallArray drops → two auto-frees beyond the runtime baseline.
+        assert_eq!(free_calls(&ir), RUNTIME_FREES + 2, "two drops, two frees: {ir}");
     }
 }

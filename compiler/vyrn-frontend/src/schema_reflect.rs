@@ -134,6 +134,7 @@ fn collect_type_names(ty: &Type, out: &mut Vec<String>) {
         | Type::Task(a)
         | Type::Partial(a)
         | Type::ArrayN(a, _)
+        | Type::SmallArray(a, _)
         | Type::Omit(a, _)
         | Type::Pick(a, _) => collect_type_names(a, out),
         Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {

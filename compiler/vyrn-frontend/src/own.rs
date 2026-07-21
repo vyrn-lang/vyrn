@@ -42,6 +42,10 @@ pub enum DropKind {
     ReleaseRef,
     /// A growable array — `afree` the backing buffer.
     AfreeArr,
+    /// A `SmallArray<T, N>` (RFC-0056) — free its `data` buffer, which is null
+    /// while inline (so `free(null)` is a harmless no-op) and heap once spilled.
+    /// Frees iff spilled; the drop site is identical either way.
+    FreeSmallArr,
     /// A `Map<String, V>` (RFC-0028) — free both parallel backing buffers
     /// (keys and values). Elements are a safe leak, exactly as for arrays.
     FreeMap,
@@ -163,6 +167,7 @@ fn returns_owned_kind(ty: &Type) -> Option<DropKind> {
         Type::Str => Some(DropKind::FreeStr),
         Type::Ref(_) => Some(DropKind::ReleaseRef),
         Type::Array(_) => Some(DropKind::AfreeArr),
+        Type::SmallArray(..) => Some(DropKind::FreeSmallArr),
         Type::Map(..) => Some(DropKind::FreeMap),
         _ => None,
     }
@@ -261,6 +266,7 @@ impl Analysis<'_> {
                 name,
                 mutable,
                 value,
+                ty,
                 ..
             } => {
                 // Account for uses in the initializer *before* the new binding
@@ -272,7 +278,20 @@ impl Analysis<'_> {
                 if self.expr_is_string(value) {
                     self.str_vars.last_mut().unwrap().insert(name.clone());
                 }
-                if let Some(kind) = self.owner_producing(value) {
+                // A `SmallArray<T, N>` binding (RFC-0056) owns its `data` buffer,
+                // which is null while inline (so `free` is a no-op) and heap once
+                // spilled. Unlike a growable `Array`, its only producers are the
+                // `[]`/`[..]` literals (there is no `array()`-style call), so
+                // track it whenever the slot is a `SmallArray` — reclaim at scope
+                // end via `FreeSmallArr` (escape analysis un-tracks a returned or
+                // aliased one, exactly as for `Array`, so it is freed once).
+                let produced = self.owner_producing(value);
+                let owner_kind = if matches!(ty, Some(Type::SmallArray(..))) {
+                    Some(DropKind::FreeSmallArr)
+                } else {
+                    produced
+                };
+                if let Some(kind) = owner_kind {
                     // A dynamic string inside a region is owned by the arena, so
                     // skip it. A cell (`ReleaseRef`) lives in the separate slab,
                     // which the region does not touch, so release it regardless.
@@ -282,8 +301,10 @@ impl Analysis<'_> {
                     // single-assignment to be tracked.
                     // A `mut` Map is mutated in place (`m[k] = v`) and keeps its
                     // identity, so — like an array — it can still own its buffers.
-                    let assignable_ok =
-                        !*mutable || kind == DropKind::AfreeArr || kind == DropKind::FreeMap;
+                    let assignable_ok = !*mutable
+                        || kind == DropKind::AfreeArr
+                        || kind == DropKind::FreeSmallArr
+                        || kind == DropKind::FreeMap;
                     if assignable_ok && !region_owns {
                         let key = id(s);
                         self.live.last_mut().unwrap().insert(name.clone(), key);

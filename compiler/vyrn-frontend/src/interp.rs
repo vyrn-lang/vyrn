@@ -1936,7 +1936,9 @@ impl<'a> Interp<'a> {
                 // type (validated element types validate here, exactly like a
                 // `push` argument or an annotated `let`).
                 let elem_of = |s: &Slot| match &s.ty {
-                    Some(Type::Array(t)) | Some(Type::ArrayN(t, _)) => Some((**t).clone()),
+                    Some(Type::Array(t))
+                    | Some(Type::ArrayN(t, _))
+                    | Some(Type::SmallArray(t, _)) => Some((**t).clone()),
                     _ => None,
                 };
                 let elem_ty = scope
@@ -2956,6 +2958,14 @@ impl<'a> Interp<'a> {
                         Val::Array(_) => Ok(vals.remove(0)),
                         other => Err(format!("@list of non-Array {other:?}").into()),
                     },
+                    // `xs.toArray()` (RFC-0056) — a `SmallArray<T, N>` and an
+                    // `Array<T>` share the `Val::Array` representation here, so
+                    // the copy-out is the identity (the native/wasm backends copy
+                    // the inline/spilled buffer into a fresh heap triple).
+                    "@toArray" => match &vals[0] {
+                        Val::Array(_) => Ok(vals.remove(0)),
+                        other => Err(format!("@toArray of non-Array {other:?}").into()),
+                    },
                     // `@join` (`t.join()`) awaits a task; eager tasks are in hand.
                     "@join" => Ok(vals.remove(0)),
                     "Some" => Ok(Val::Option(Some(Box::new(vals.remove(0))))),
@@ -3584,7 +3594,8 @@ impl<'a> Interp<'a> {
                 Ok(Val::Result(is_ok, Box::new(self.coerce(*p, inner)?)))
             }
             (Type::Array(inner), Val::Array(items))
-            | (Type::ArrayN(inner, _), Val::Array(items)) => {
+            | (Type::ArrayN(inner, _), Val::Array(items))
+            | (Type::SmallArray(inner, _), Val::Array(items)) => {
                 let mut out = Vec::with_capacity(items.len());
                 for it in items {
                     out.push(self.coerce(it, inner)?);
@@ -3672,7 +3683,7 @@ impl<'a> Interp<'a> {
                 if name == "at" && args.len() == 2 {
                     let at = self.type_of(&args[0], scope)?;
                     return match crate::types::resolve(&at, &self.type_map) {
-                        Type::Array(i) | Type::ArrayN(i, _) => Some(*i),
+                        Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => Some(*i),
                         _ => None,
                     };
                 }

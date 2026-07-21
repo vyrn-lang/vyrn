@@ -938,7 +938,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
         .collect();
     // `arr.length` is the element-count field sugar — a read-only field on
     // arrays, surfaced as a member alongside the array methods.
-    if matches!(ty, Type::Array(_) | Type::ArrayN(..)) {
+    if matches!(ty, Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)) {
         out.push(Completion {
             label: "length".to_string(),
             kind: SymbolKind::Field,
@@ -1977,6 +1977,7 @@ fn structural_name(ty: &Type) -> Option<&str> {
         Type::Named(n) => Some(n.as_str()),
         Type::Array(inner) => structural_name(inner),
         Type::ArrayN(inner, _) => structural_name(inner),
+        Type::SmallArray(inner, _) => structural_name(inner),
         Type::Map(_, v) => structural_name(v),
         _ => None,
     }
@@ -2701,6 +2702,7 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "get", detail: "get(ref) -> T — read through a generational reference" },
     BuiltinMethod { name: "set", detail: "set(ref, value) -> Unit — write through a generational reference" },
     BuiltinMethod { name: "release", detail: "release(ref) -> Unit — release a generational reference" },
+    BuiltinMethod { name: "toArray", detail: "smallArray.toArray() -> Array<T> — copy a SmallArray's elements out to a growable Array (RFC-0056)" },
     BuiltinMethod { name: "toString", detail: "x.toString() -> String — render a number, Bool, or String" },
     BuiltinMethod { name: "join", detail: "task.join() -> T — await a spawned task's result" },
     BuiltinMethod { name: "trace", detail: "trace(logger, message) -> Unit — log at trace level" },
@@ -2742,6 +2744,20 @@ fn builtin_methods_for(ty: &Type) -> Vec<BuiltinMethod> {
             by_name("at"),
             by_name("alen"),
             by_name("afree"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        // A `SmallArray<T, N>` (RFC-0056) is API-identical to a growable
+        // `Array<T>` — the full mutation surface — plus `toArray` (copy-out).
+        Type::SmallArray(..) => vec![
+            by_name("push"),
+            by_name("at"),
+            by_name("alen"),
+            by_name("afree"),
+            by_name("pop"),
+            by_name("swapRemove"),
+            by_name("toArray"),
         ]
         .into_iter()
         .flatten()

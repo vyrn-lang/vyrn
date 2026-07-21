@@ -499,6 +499,18 @@ mod tests {
     }
 
     #[test]
+    fn rejects_smallarray_use_after_drop() {
+        // RFC-0056: a moved-from `SmallArray` is dead (move copies the whole
+        // struct incl. inline slots, but movecheck semantics are unchanged) —
+        // using it after `drop` is rejected, exactly like any owned value.
+        let src = "fn main() -> Int64 { \
+                   let mut xs: SmallArray<Int64, 4> = []  xs.push(1)  \
+                   drop xs  return xs.length }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("consumed") || e.contains("drop"), "{e}");
+    }
+
+    #[test]
     fn allows_read_reuse() {
         let src = "type T = { id: Int64 }; \
                    fn peek(t: read T) -> Int64 { return t.id; } \
