@@ -1,10 +1,10 @@
 /// std/i18n — typed translations as a library (RFC-0020 M2), built entirely on
 /// RFC-0021 generator imports. One `gen fn`, `i18n(dir)`, reads a directory of
 /// `<locale>.json` files at compile time (sandboxed, deterministic, cached),
-/// parses them with a JSON reader written in Vyrn, checks cross-locale drift,
-/// compiles each ICU message into an ordinary Vyrn function body, and RETURNS
-/// the synthesized module as source text. The compiler knows nothing about i18n,
-/// ICU, or CLDR — everything below is plain Vyrn.
+/// parses them with the shared strict `std/json` reader, checks cross-locale
+/// drift, compiles each ICU message into an ordinary Vyrn function body, and
+/// RETURNS the synthesized module as source text. The compiler knows nothing about
+/// i18n, ICU, or CLDR — everything below is plain Vyrn.
 ///
 ///   import { i18n } from "std/i18n"
 ///   import { t, setLocale, locale, Locale, TransKey, tCartItems } from i18n("./locales")
@@ -32,8 +32,17 @@
 /// braces. Numbers/bools/null in a locale file, and nested plural/select inside a
 /// branch, are unsupported and fail generation with a load diagnostic.
 
+// The shared strict JSON reader (RFC-0059) — this module's former private reader.
+import { parseJson, Json, JsonField } from "std/json"
+// Shared string / array helpers (RFC-0046/0059) — the former private trimStr,
+// listContains, and manual-join copies now live once in std.
+import { joinWith, substring, fromBytesOr, trim } from "std/strings"
+import { includes } from "std/arrays"
+
 // ===========================================================================
 // Byte helpers — all parsing runs over Array<UInt8> so element math stays UInt8.
+// The ICU message scanners below still work directly on byte arrays (they thread
+// byte indices), so `sliceStr`/`isWs`/`skipWs` remain module-local (RFC-0059).
 // ===========================================================================
 
 /// The bytes `ba[s..e)` as a String ("" if not valid UTF-8, which cannot happen
@@ -45,15 +54,12 @@ gen fn sliceStr(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
         out.push(ba[i])
         i = i + 1
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => "",
-    }
+    return fromBytesOr(out, "")
 }
 
 /// True for an ASCII space, tab, CR, or LF.
 gen fn isWs(b: UInt8) -> Bool {
-    return b == 32 || b == 9 || b == 10 || b == 13
+    return b == ' ' || b == '\t' || b == '\n' || b == '\r'
 }
 
 /// The first non-whitespace index at or after `i`.
@@ -69,62 +75,20 @@ gen fn skipWs(ba: Array<UInt8>, i: Int64, e: Int64) -> Int64 {
     return j
 }
 
-/// `s` with leading and trailing ASCII whitespace removed.
-gen fn trimStr(s: String) -> String {
-    let ba = bytes(s)
-    let mut a = 0
-    let mut b = ba.length
-    while a < b {
-        if isWs(ba[a]) {
-            a = a + 1
-        } else {
-            a = b + b
-        }
-    }
-    // `a` overshot to (b+b) to break; recover the real start.
-    let mut start = 0
-    let mut i = 0
-    let mut foundStart = false
-    while i < ba.length && foundStart == false {
-        if isWs(ba[i]) {
-            i = i + 1
-        } else {
-            start = i
-            foundStart = true
-        }
-    }
-    if foundStart == false {
-        return ""
-    }
-    let mut end = ba.length
-    let mut moving = true
-    while moving {
-        if end > start && isWs(ba[end - 1]) {
-            end = end - 1
-        } else {
-            moving = false
-        }
-    }
-    return sliceStr(ba, start, end)
-}
-
 /// Uppercase the first ASCII byte of `s`.
 gen fn upperFirst(s: String) -> String {
     let ba = bytes(s)
     let mut out: Array<UInt8> = []
     let mut i = 0
     for b in ba {
-        if i == 0 && b >= 97 && b <= 122 {
+        if i == 0 && b >= 'a' && b <= 'z' {
             out.push(b - 32)
         } else {
             out.push(b)
         }
         i = i + 1
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => s,
-    }
+    return fromBytesOr(out, s)
 }
 
 /// Split a dotted key into its segments (`"nav.home.label"` → nav, home, label).
@@ -134,7 +98,7 @@ gen fn splitDot(s: String) -> Array<String> {
     let mut start = 0
     let mut i = 0
     while i < ba.length {
-        if ba[i] == 46 {
+        if ba[i] == '.' {
             parts.push(sliceStr(ba, start, i))
             start = i + 1
         }
@@ -173,17 +137,14 @@ gen fn lowerFirst(s: String) -> String {
     let mut out: Array<UInt8> = []
     let mut i = 0
     for b in ba {
-        if i == 0 && b >= 65 && b <= 90 {
+        if i == 0 && b >= 'A' && b <= 'Z' {
             out.push(b + 32)
         } else {
             out.push(b)
         }
         i = i + 1
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => s,
-    }
+    return fromBytesOr(out, s)
 }
 
 // ===========================================================================
@@ -209,176 +170,127 @@ gen fn regexEscapeKey(key: String) -> String {
     let ba = bytes(key)
     let mut out: Array<UInt8> = []
     for b in ba {
-        if b == 46 || b == 92 || b == 40 || b == 41 || b == 91 || b == 93
-        || b == 123 || b == 125 || b == 124 || b == 42 || b == 43 || b == 63
-        || b == 94 || b == 36 {
-            out.push(92)
-            out.push(92)
+        if b == '.' || b == '\\' || b == '(' || b == ')' || b == '[' || b == ']'
+        || b == '{' || b == '}' || b == '|' || b == '*' || b == '+' || b == '?'
+        || b == '^' || b == '$' {
+            out.push('\\')
+            out.push('\\')
             out.push(b)
         } else {
             out.push(b)
         }
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => key,
-    }
+    return fromBytesOr(out, key)
 }
 
 // ===========================================================================
-// JSON reader — locale files are {String: String | Object}. Flattens nested
-// keys with dots. Numbers/bools/null/arrays are an "unsupported value" error.
+// Locale reader — the strict `std/json` reader parses each `<locale>.json` into a
+// `Json` tree; this small ADAPTER flattens it into `home.title` → value entries
+// (nested keys joined with dots). Object-only, strings-only leaves; a non-string,
+// non-object leaf fails with a clear reason. Replaces the ~150-line hand-rolled
+// reader this module used to carry — and the strict reader now rejects duplicate
+// keys and trailing commas the old lenient reader silently accepted (RFC-0059).
 // ===========================================================================
 
-/// A decoded JSON string plus the index just past it.
-type ScanStr = { ok: Bool, value: String, next: Int64 }
+/// One flattened `home.title` → `value` locale entry (records, not the old
+/// parallel key/value arrays).
+type LocaleEntry = { key: String, value: String }
 
-/// The byte a JSON escape `\c` decodes to, or 0 for an unknown escape (which is
-/// passed through literally).
-gen fn unescByte(c: UInt8) -> UInt8 {
-    if c == 110 {
-        return 10
-    }
-    if c == 116 {
-        return 9
-    }
-    if c == 114 {
-        return 13
-    }
-    if c == 34 {
-        return 34
-    }
-    if c == 92 {
-        return 92
-    }
-    if c == 47 {
-        return 47
-    }
-    return 0
+/// A flattened locale in source order, or `ok = false` with a reason.
+type LocaleData = { ok: Bool, error: String, entries: Array<LocaleEntry> }
+
+fn dataError(msg: String) -> LocaleData {
+    return LocaleData { ok: false, error: msg, entries: [] }
 }
 
-/// Read a JSON string starting at `ba[i] == '"'`. Handles the standard escapes;
-/// `\u` is rejected (write locale files in raw UTF-8).
-gen fn scanString(ba: Array<UInt8>, i: Int64, e: Int64) -> ScanStr {
-    let mut out: Array<UInt8> = []
-    let mut j = i + 1
-    while j < e {
-        let b = ba[j]
-        if b == 34 {
-            let v = match stringFromBytes(out) {
-                Ok(v) => v,
-                Err(err) => "",
-            }
-            return ScanStr { ok: true, value: v, next: j + 1 }
-        }
-        if b == 92 {
-            j = j + 1
-            if j >= e {
-                return ScanStr { ok: false, value: "", next: j }
-            }
-            let c = ba[j]
-            if c == 117 {
-                // `\u` escapes are not supported — write locale files in raw UTF-8.
-                return ScanStr { ok: false, value: "", next: j }
-            } else {
-                let u = unescByte(c)
-                if u == 0 {
-                    out.push(c)
-                } else {
-                    out.push(u)
-                }
-            }
-            j = j + 1
-        } else {
-            out.push(b)
-            j = j + 1
-        }
-    }
-    return ScanStr { ok: false, value: "", next: j }
+/// The leaf-kind error for a value that is neither a string nor a nested object.
+fn i18nUnsupported() -> String {
+    return "unsupported value (only strings and nested objects are allowed)"
 }
 
-/// A flattened locale: parallel key/value arrays, or `ok = false` with a reason.
-type LocaleData = { ok: Bool, error: String, keys: Array<String>, vals: Array<String> }
+/// Append one `key` → `value` entry (helper so a `match` arm stays a single
+/// expression — the language has no multi-statement arm).
+fn addEntry(entries: modify Array<LocaleEntry>, key: String, value: String) -> String {
+    entries.push(LocaleEntry { key: key, value: value })
+    return ""
+}
 
-gen fn dataError(msg: String) -> LocaleData {
-    return LocaleData { ok: false, error: msg, keys: [], vals: [] }
+/// Flatten an object's fields at `prefix`, recursing into nested objects and
+/// dot-joining keys. Returns "" or the first leaf error.
+fn flattenObj(prefix: String, fields: Array<JsonField>, entries: modify Array<LocaleEntry>) -> String {
+    for f in fields {
+        let key = if prefix == "" { f.key } else { prefix + "." + f.key }
+        let e = flattenValue(key, f.value, entries)
+        if e != "" {
+            return e
+        }
+    }
+    return ""
+}
+
+/// Flatten one JSON value at `prefix` into `entries`, returning "" or an error.
+/// Only strings and nested objects are allowed (no arrays — i18n has no safelist).
+fn flattenValue(prefix: String, j: Json, entries: modify Array<LocaleEntry>) -> String {
+    return match j {
+        JObj(fields) => flattenObj(prefix, fields, entries),
+        JStr(s) => addEntry(entries, prefix, s),
+        JNull => i18nUnsupported(),
+        JBool(b) => i18nUnsupported(),
+        JNum(n) => i18nUnsupported(),
+        JArr(a) => i18nUnsupported(),
+    }
+}
+
+/// The top-level document must be a JSON object.
+fn localeFromObj(fields: Array<JsonField>) -> LocaleData {
+    let mut entries: Array<LocaleEntry> = []
+    let e = flattenObj("", fields, entries)
+    if e != "" {
+        return dataError(e)
+    }
+    return LocaleData { ok: true, error: "", entries: entries }
+}
+
+fn localeFromJson(j: Json) -> LocaleData {
+    return match j {
+        JObj(fields) => localeFromObj(fields),
+        JNull => dataError("expected a JSON object at the top level"),
+        JBool(b) => dataError("expected a JSON object at the top level"),
+        JNum(n) => dataError("expected a JSON object at the top level"),
+        JStr(s) => dataError("expected a JSON object at the top level"),
+        JArr(a) => dataError("expected a JSON object at the top level"),
+    }
 }
 
 /// Parse one locale JSON document into flattened `home.title` → value entries.
 /// Object-only; a non-string, non-object value fails with a clear reason.
-gen fn parseLocaleJson(src: String) -> LocaleData {
-    let ba = bytes(src)
-    let e = ba.length
-    let mut keys: Array<String> = []
-    let mut vals: Array<String> = []
-    let mut prefix: Array<String> = []
-    let mut i = skipWs(ba, 0, e)
-    if i >= e || ba[i] != 123 {
-        return dataError("expected a JSON object at the top level")
+fn parseLocaleJson(src: String) -> LocaleData {
+    return match parseJson(src) {
+        Ok(j) => localeFromJson(j),
+        Err(e) => dataError(e),
     }
-    i = i + 1
-    while true {
-        i = skipWs(ba, i, e)
-        if i >= e {
-            return dataError("unexpected end of input inside an object")
-        }
-        let b = ba[i]
-        if b == 125 {
-            i = i + 1
-            if prefix.length == 0 {
-                i = skipWs(ba, i, e)
-                if i < e {
-                    return dataError("trailing content after the top-level object")
-                }
-                return LocaleData { ok: true, error: "", keys: keys, vals: vals }
-            }
-            prefix.pop()
-            i = skipWs(ba, i, e)
-            if i < e && ba[i] == 44 {
-                i = i + 1
-            }
-        } else {
-            if b != 34 {
-                return dataError("expected a string key")
-            }
-            let ks = scanString(ba, i, e)
-            if ks.ok == false {
-                return dataError("malformed key string")
-            }
-            i = skipWs(ba, ks.next, e)
-            if i >= e || ba[i] != 58 {
-                return dataError("expected ':' after a key")
-            }
-            i = skipWs(ba, i + 1, e)
-            if i >= e {
-                return dataError("unexpected end of input after ':'")
-            }
-            let c = ba[i]
-            if c == 34 {
-                let vs = scanString(ba, i, e)
-                if vs.ok == false {
-                    return dataError("malformed string value")
-                }
-                let mut full = ""
-                for p in prefix {
-                    full = full + p + "."
-                }
-                full = full + ks.value
-                keys.push(full)
-                vals.push(vs.value)
-                i = skipWs(ba, vs.next, e)
-                if i < e && ba[i] == 44 {
-                    i = i + 1
-                }
-            } else if c == 123 {
-                prefix.push(ks.value)
-                i = i + 1
-            } else {
-                return dataError("unsupported value (only strings and nested objects are allowed)")
-            }
-        }
+}
+
+/// The flattened keys of a locale in source order, as a plain `Array<String>` (for
+/// the membership and collision checks that want to reuse `std/arrays.includes`).
+gen fn localeKeys(d: LocaleData) -> Array<String> {
+    let mut out: Array<String> = []
+    for e in d.entries {
+        out.push(e.key)
     }
-    return dataError("parser did not terminate")
+    return out
+}
+
+/// The index of `key` in locale `d`, or -1.
+gen fn entryIndex(d: LocaleData, key: String) -> Int64 {
+    let mut i = 0
+    while i < d.entries.length {
+        if d.entries[i].key == key {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
 }
 
 // ===========================================================================
@@ -400,13 +312,13 @@ type IcuQuote = { emit: Bool, quoted: Bool, advance: Int64 }
 ///     deleted.
 /// This is the single source of the rule for every quote-aware scanner below.
 gen fn icuApostrophe(ba: Array<UInt8>, j: Int64, e: Int64, quoted: Bool) -> IcuQuote {
-    if j + 1 < e && ba[j + 1] == 39 {
+    if j + 1 < e && ba[j + 1] == '\x27' {
         return IcuQuote { emit: true, quoted: quoted, advance: 2 }
     }
     if quoted {
         return IcuQuote { emit: false, quoted: false, advance: 1 }
     }
-    if j + 1 < e && (ba[j + 1] == 123 || ba[j + 1] == 125 || ba[j + 1] == 35) {
+    if j + 1 < e && (ba[j + 1] == '{' || ba[j + 1] == '}' || ba[j + 1] == '#') {
         return IcuQuote { emit: false, quoted: true, advance: 1 }
     }
     return IcuQuote { emit: true, quoted: false, advance: 1 }
@@ -424,10 +336,10 @@ gen fn readLiteral(ba: Array<UInt8>, i: Int64, e: Int64, stopHash: Bool) -> LitR
     let mut quoted = false
     while j < e {
         let b = ba[j]
-        if b == 39 {
+        if b == '\x27' {
             let q = icuApostrophe(ba, j, e, quoted)
             if q.emit {
-                out.push(39)
+                out.push('\x27')
             }
             quoted = q.quoted
             j = j + q.advance
@@ -435,29 +347,17 @@ gen fn readLiteral(ba: Array<UInt8>, i: Int64, e: Int64, stopHash: Bool) -> LitR
             out.push(b)
             j = j + 1
         } else {
-            if b == 123 || b == 125 {
-                let v = match stringFromBytes(out) {
-                    Ok(v) => v,
-                    Err(err) => "",
-                }
-                return LitRead { text: v, next: j, hash: false }
+            if b == '{' || b == '}' {
+                return LitRead { text: fromBytesOr(out, ""), next: j, hash: false }
             }
-            if stopHash && b == 35 {
-                let v = match stringFromBytes(out) {
-                    Ok(v) => v,
-                    Err(err) => "",
-                }
-                return LitRead { text: v, next: j, hash: true }
+            if stopHash && b == '#' {
+                return LitRead { text: fromBytesOr(out, ""), next: j, hash: true }
             }
             out.push(b)
             j = j + 1
         }
     }
-    let v = match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => "",
-    }
-    return LitRead { text: v, next: j, hash: false }
+    return LitRead { text: fromBytesOr(out, ""), next: j, hash: false }
 }
 
 /// The index just past the `}` matching the `{` at `open`, quote-aware.
@@ -467,16 +367,16 @@ gen fn matchBrace(ba: Array<UInt8>, open: Int64, e: Int64) -> Int64 {
     let mut quoted = false
     while i < e {
         let b = ba[i]
-        if b == 39 {
+        if b == '\x27' {
             let q = icuApostrophe(ba, i, e, quoted)
             quoted = q.quoted
             i = i + q.advance
         } else if quoted {
             i = i + 1
-        } else if b == 123 {
+        } else if b == '{' {
             depth = depth + 1
             i = i + 1
-        } else if b == 125 {
+        } else if b == '}' {
             depth = depth - 1
             i = i + 1
             if depth == 0 {
@@ -499,86 +399,82 @@ gen fn splitTopCommas(ba: Array<UInt8>, s: Int64, e: Int64) -> Array<String> {
     let mut i = s
     while i < e {
         let b = ba[i]
-        if b == 39 {
+        if b == '\x27' {
             let q = icuApostrophe(ba, i, e, quoted)
             quoted = q.quoted
             i = i + q.advance
         } else if quoted {
             i = i + 1
-        } else if b == 123 {
+        } else if b == '{' {
             depth = depth + 1
             i = i + 1
-        } else if b == 125 {
+        } else if b == '}' {
             depth = depth - 1
             i = i + 1
-        } else if b == 44 && depth == 0 {
-            parts.push(trimStr(sliceStr(ba, segStart, i)))
+        } else if b == ',' && depth == 0 {
+            parts.push(trim(sliceStr(ba, segStart, i)))
             i = i + 1
             segStart = i
         } else {
             i = i + 1
         }
     }
-    parts.push(trimStr(sliceStr(ba, segStart, e)))
+    parts.push(trim(sliceStr(ba, segStart, e)))
     return parts
 }
 
-/// The parsed selector/text pairs of a plural or select body (`one {…} other
+/// One parsed selector/text pair of a plural or select body (`one {…}`), a record
+/// (not the old index-coupled `selectors`/`texts` arrays).
+type Branch = { selector: String, text: String }
+
+/// The parsed selector/text branches of a plural or select body (`one {…} other
 /// {…}`).
-type Branches = { selectors: Array<String>, texts: Array<String> }
+type Branches = { branches: Array<Branch> }
 
 gen fn parseBranches(blob: String) -> Branches {
     let ba = bytes(blob)
     let e = ba.length
-    let mut selectors: Array<String> = []
-    let mut texts: Array<String> = []
+    let mut items: Array<Branch> = []
     let mut i = skipWs(ba, 0, e)
     while i < e {
         // Read the selector token (up to whitespace or `{`).
         let mut selEnd = i
-        while selEnd < e && isWs(ba[selEnd]) == false && ba[selEnd] != 123 {
+        while selEnd < e && isWs(ba[selEnd]) == false && ba[selEnd] != '{' {
             selEnd = selEnd + 1
         }
         let sel = sliceStr(ba, i, selEnd)
         let braceAt = skipWs(ba, selEnd, e)
-        if braceAt >= e || ba[braceAt] != 123 {
-            return Branches { selectors: selectors, texts: texts }
+        if braceAt >= e || ba[braceAt] != '{' {
+            return Branches { branches: items }
         }
         let close = matchBrace(ba, braceAt, e)
         let inner = sliceStr(ba, braceAt + 1, close - 1)
-        selectors.push(sel)
-        texts.push(inner)
+        items.push(Branch { selector: sel, text: inner })
         i = skipWs(ba, close, e)
     }
-    return Branches { selectors: selectors, texts: texts }
+    return Branches { branches: items }
 }
 
 /// The text of the branch named `sel`, falling back to `other`.
 gen fn branchText(br: Branches, sel: String) -> String {
-    let mut i = 0
-    while i < br.selectors.length {
-        if br.selectors[i] == sel {
-            return br.texts[i]
+    for b in br.branches {
+        if b.selector == sel {
+            return b.text
         }
-        i = i + 1
     }
-    i = 0
-    while i < br.selectors.length {
-        if br.selectors[i] == "other" {
-            return br.texts[i]
+    for b in br.branches {
+        if b.selector == "other" {
+            return b.text
         }
-        i = i + 1
     }
     return ""
 }
 
 gen fn hasBranch(br: Branches, sel: String) -> Bool {
-    let mut i = 0
-    while i < br.selectors.length {
-        if br.selectors[i] == sel {
+    for b in br.branches {
+        if b.selector == sel {
             return true
         }
-        i = i + 1
     }
     return false
 }
@@ -606,8 +502,8 @@ gen fn argError(msg: String) -> ArgScan {
 /// Sorted, comma-joined selector names (so the signature is order-independent).
 gen fn joinSortedSelectors(br: Branches) -> String {
     let mut names: Array<String> = []
-    for s in br.selectors {
-        names.push(s)
+    for b in br.branches {
+        names.push(b.selector)
     }
     // insertion sort (selector lists are tiny)
     let mut i = 1
@@ -621,16 +517,7 @@ gen fn joinSortedSelectors(br: Branches) -> String {
         }
         i = i + 1
     }
-    let mut out = ""
-    let mut k = 0
-    for n in names {
-        if k > 0 {
-            out = out + ","
-        }
-        out = out + n
-        k = k + 1
-    }
-    return out
+    return joinWith(names, ",")
 }
 
 /// Scan a message's arguments. Recurses one level into plural/select branch text
@@ -647,9 +534,9 @@ gen fn scanArgs(msg: String) -> ArgScan {
         i = lit.next
         if i >= e {
             i = e
-        } else if ba[i] == 125 {
+        } else if ba[i] == '}' {
             i = i + 1
-        } else if ba[i] == 123 {
+        } else if ba[i] == '{' {
             let close = matchBrace(ba, i, e)
             let parts = splitTopCommas(ba, i + 1, close - 1)
             if parts.length == 1 {
@@ -672,8 +559,8 @@ gen fn scanArgs(msg: String) -> ArgScan {
                         branches.push(joinSortedSelectors(br))
                     }
                     // Recurse into branch texts for simple args.
-                    for txt in br.texts {
-                        let sub = scanArgs(txt)
+                    for b in br.branches {
+                        let sub = scanArgs(b.text)
                         if sub.ok == false {
                             return sub
                         }
@@ -709,19 +596,19 @@ gen fn branchBlob(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
     let mut i = s
     while i < e {
         let b = ba[i]
-        if b == 39 {
+        if b == '\x27' {
             let q = icuApostrophe(ba, i, e, quoted)
             quoted = q.quoted
             i = i + q.advance
         } else if quoted {
             i = i + 1
-        } else if b == 123 {
+        } else if b == '{' {
             depth = depth + 1
             i = i + 1
-        } else if b == 125 {
+        } else if b == '}' {
             depth = depth - 1
             i = i + 1
-        } else if b == 44 && depth == 0 {
+        } else if b == ',' && depth == 0 {
             commas = commas + 1
             i = i + 1
             if commas == 2 {
@@ -779,16 +666,7 @@ gen fn argSignature(sc: ArgScan) -> String {
         }
         a = a + 1
     }
-    let mut out = ""
-    let mut k = 0
-    for it in items {
-        if k > 0 {
-            out = out + ";"
-        }
-        out = out + it
-        k = k + 1
-    }
-    return out
+    return joinWith(items, ";")
 }
 
 // ===========================================================================
@@ -872,12 +750,12 @@ gen fn compileBody(msg: String, tag: String, ind: String, pluralVar: String) -> 
             i = e
         } else {
             let b = ba[i]
-            if b == 35 && pluralVar != "" {
+            if b == '#' && pluralVar != "" {
                 code = code + ind + "acc = acc + " + pluralVar + ".toString()\n"
                 i = i + 1
-            } else if b == 125 {
+            } else if b == '}' {
                 i = i + 1
-            } else if b == 123 {
+            } else if b == '{' {
                 let close = matchBrace(ba, i, e)
                 let parts = splitTopCommas(ba, i + 1, close - 1)
                 if parts.length == 1 {
@@ -912,12 +790,12 @@ gen fn compilePlural(br: Branches, tag: String, ind: String, argName: String) ->
     let mut clauses: Array<String> = []
     let mut bodies: Array<String> = []
     let mut i = 0
-    while i < br.selectors.length {
-        let sel = br.selectors[i]
-        if bytes(sel).length >= 1 && bytes(sel)[0] == 61 {
-            let n = sliceStr(bytes(sel), 1, bytes(sel).length)
+    while i < br.branches.length {
+        let sel = br.branches[i].selector
+        if sel.byteLength >= 1 && bytes(sel)[0] == '=' {
+            let n = substring(sel, 1, sel.byteLength)
             clauses.push(argName + " == " + n)
-            bodies.push(compileBody(br.texts[i], tag, inner, argName))
+            bodies.push(compileBody(br.branches[i].text, tag, inner, argName))
         }
         i = i + 1
     }
@@ -936,10 +814,10 @@ gen fn compileSelect(br: Branches, tag: String, ind: String, argName: String) ->
     let mut clauses: Array<String> = []
     let mut bodies: Array<String> = []
     let mut i = 0
-    while i < br.selectors.length {
-        if br.selectors[i] != "other" {
-            clauses.push(argName + " == " + strLit(br.selectors[i]))
-            bodies.push(compileBody(br.texts[i], tag, inner, ""))
+    while i < br.branches.length {
+        if br.branches[i].selector != "other" {
+            clauses.push(argName + " == " + strLit(br.branches[i].selector))
+            bodies.push(compileBody(br.branches[i].text, tag, inner, ""))
         }
         i = i + 1
     }
@@ -980,26 +858,13 @@ gen fn identKey(key: String) -> String {
     let ba = bytes(key)
     let mut out: Array<UInt8> = []
     for b in ba {
-        if (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) {
+        if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
             out.push(b)
         } else {
-            out.push(95)
+            out.push('_')
         }
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => "key",
-    }
-}
-
-/// Whether `arr` contains `x`.
-gen fn listContains(arr: Array<String>, x: String) -> Bool {
-    for s in arr {
-        if s == x {
-            return true
-        }
-    }
-    return false
+    return fromBytesOr(out, "key")
 }
 
 /// Whether a message has a malformed brace: a `{` with no matching `}`, or a stray
@@ -1014,16 +879,16 @@ gen fn icuBadBrace(msg: String) -> Bool {
     let mut i = 0
     while i < e {
         let b = ba[i]
-        if b == 39 {
+        if b == '\x27' {
             let q = icuApostrophe(ba, i, e, quoted)
             quoted = q.quoted
             i = i + q.advance
         } else if quoted {
             i = i + 1
-        } else if b == 123 {
+        } else if b == '{' {
             depth = depth + 1
             i = i + 1
-        } else if b == 125 {
+        } else if b == '}' {
             if depth == 0 {
                 return true
             }
@@ -1044,7 +909,7 @@ gen fn icuBadBrace(msg: String) -> Bool {
 ///   - two distinct keys whose PascalCase concatenation collides (`home.title` and
 ///     `homeTitle` both make `tHomeTitle`) — `I18N_KEY_COLLISION__<a>__<b>`.
 gen fn keyCollisionErrors(base: LocaleData) -> String {
-    let keys = base.keys
+    let keys = localeKeys(base)
     let mut out = ""
     let mut i = 0
     while i < keys.length {
@@ -1077,8 +942,7 @@ export gen fn i18n(dir: String) -> String {
     let mut datas: Array<LocaleData> = []
     for name in files {
         if name.endsWith(".json") {
-            let nb = bytes(name)
-            let tag = sliceStr(nb, 0, nb.length - 5)
+            let tag = substring(name, 0, name.byteLength - 5)
             let src = match readFile(dir + "/" + name) {
                 Ok(v) => v,
                 Err(err) => "",
@@ -1110,9 +974,9 @@ export gen fn i18n(dir: String) -> String {
     while bi < tags.length {
         let bd = datas[bi]
         let mut bk = 0
-        while bk < bd.keys.length {
-            if icuBadBrace(bd.vals[bk]) {
-                braceErr = braceErr + "I18N_BAD_BRACES__locale_" + tags[bi] + "__" + identKey(bd.keys[bk]) + "\n"
+        while bk < bd.entries.length {
+            if icuBadBrace(bd.entries[bk].value) {
+                braceErr = braceErr + "I18N_BAD_BRACES__locale_" + tags[bi] + "__" + identKey(bd.entries[bk].key) + "\n"
             }
             bk = bk + 1
         }
@@ -1127,24 +991,26 @@ export gen fn i18n(dir: String) -> String {
     // baseline and the source of docs, signatures, and generated types.
     let base = datas[0]
     let baseTag = tags[0]
+    let baseKeys = localeKeys(base)
     let mut drift = ""
     let mut li = 0
     while li < tags.length {
         let d = datas[li]
         let tag = tags[li]
+        let dKeys = localeKeys(d)
         // keys missing from this locale
         let mut ki = 0
-        while ki < base.keys.length {
-            if listContains(d.keys, base.keys[ki]) == false {
-                drift = drift + "I18N_DRIFT__locale_" + tag + "__missing__" + identKey(base.keys[ki]) + "\n"
+        while ki < base.entries.length {
+            if includes(dKeys, base.entries[ki].key) == false {
+                drift = drift + "I18N_DRIFT__locale_" + tag + "__missing__" + identKey(base.entries[ki].key) + "\n"
             }
             ki = ki + 1
         }
         // extra keys in this locale
         ki = 0
-        while ki < d.keys.length {
-            if listContains(base.keys, d.keys[ki]) == false {
-                drift = drift + "I18N_DRIFT__locale_" + tag + "__extra__" + identKey(d.keys[ki]) + "\n"
+        while ki < d.entries.length {
+            if includes(baseKeys, d.entries[ki].key) == false {
+                drift = drift + "I18N_DRIFT__locale_" + tag + "__extra__" + identKey(d.entries[ki].key) + "\n"
             }
             ki = ki + 1
         }
@@ -1152,15 +1018,15 @@ export gen fn i18n(dir: String) -> String {
     }
     // per-key argument-signature agreement across locales
     let mut ki = 0
-    while ki < base.keys.length {
-        let key = base.keys[ki]
-        let baseSig = argSignature(scanArgs(base.vals[ki]))
+    while ki < base.entries.length {
+        let key = base.entries[ki].key
+        let baseSig = argSignature(scanArgs(base.entries[ki].value))
         let mut lj = 1
         while lj < tags.length {
             let d = datas[lj]
-            let vi = indexOf(d.keys, key)
+            let vi = entryIndex(d, key)
             if vi >= 0 {
-                let sc = scanArgs(d.vals[vi])
+                let sc = scanArgs(d.entries[vi].value)
                 if sc.ok == false {
                     return "I18N_UNSUPPORTED__locale_" + tags[lj] + "__" + identKey(key) + "\n"
                 }
@@ -1178,10 +1044,10 @@ export gen fn i18n(dir: String) -> String {
 
     // ---- validate the baseline's ICU and plural-rule coverage up front.
     ki = 0
-    while ki < base.keys.length {
-        let sc = scanArgs(base.vals[ki])
+    while ki < base.entries.length {
+        let sc = scanArgs(base.entries[ki].value)
         if sc.ok == false {
-            return "I18N_UNSUPPORTED__locale_" + baseTag + "__" + identKey(base.keys[ki]) + "\n"
+            return "I18N_UNSUPPORTED__locale_" + baseTag + "__" + identKey(base.entries[ki].key) + "\n"
         }
         // a plural arg requires a covered plural rule in EVERY locale
         let mut ai = 0
@@ -1201,18 +1067,6 @@ export gen fn i18n(dir: String) -> String {
     }
 
     return buildModule(tags, datas)
-}
-
-/// Index of `x` in `arr`, or -1.
-gen fn indexOf(arr: Array<String>, x: String) -> Int64 {
-    let mut i = 0
-    while i < arr.length {
-        if arr[i] == x {
-            return i
-        }
-        i = i + 1
-    }
-    return 0 - 1
 }
 
 /// Assemble the whole synthesized module: Locale enum + state, TransKey, select
@@ -1236,23 +1090,23 @@ gen fn buildModule(tags: Array<String>, datas: Array<LocaleData>) -> String {
     // ---- TransKey: the finite validated type of every key -----------------
     out = out + "export type TransKey = String where value =~ \"("
     let mut k = 0
-    while k < base.keys.length {
+    while k < base.entries.length {
         if k > 0 {
             out = out + "|"
         }
-        out = out + regexEscapeKey(base.keys[k])
+        out = out + regexEscapeKey(base.entries[k].key)
         k = k + 1
     }
     out = out + ")\"\n"
 
     // ---- select argument types (finite string types of the branch names) --
     k = 0
-    while k < base.keys.length {
-        let sc = scanArgs(base.vals[k])
+    while k < base.entries.length {
+        let sc = scanArgs(base.entries[k].value)
         let mut ai = 0
         while ai < sc.names.length {
             if sc.kinds[ai] == "select" {
-                let typeName = "T" + keyTypeBase(base.keys[k]) + upperFirst(sc.names[ai])
+                let typeName = "T" + keyTypeBase(base.entries[k].key) + upperFirst(sc.names[ai])
                 out = out + "export type " + typeName + " = String where value =~ \"("
                 let sels = splitCsv(sc.branches[ai])
                 let mut si = 0
@@ -1272,8 +1126,8 @@ gen fn buildModule(tags: Array<String>, datas: Array<LocaleData>) -> String {
 
     // ---- per-key functions ------------------------------------------------
     k = 0
-    while k < base.keys.length {
-        out = out + buildKeyFns(base.keys[k], base.vals[k], tags, datas)
+    while k < base.entries.length {
+        out = out + buildKeyFns(base.entries[k].key, base.entries[k].value, tags, datas)
         k = k + 1
     }
 
@@ -1293,8 +1147,8 @@ gen fn buildModule(tags: Array<String>, datas: Array<LocaleData>) -> String {
 gen fn buildTransKey(base: LocaleData) -> String {
     let mut out = "export fn transKey(s: String) -> Option<TransKey> {\n"
     let mut k = 0
-    while k < base.keys.length {
-        out = out + "    if s == " + strLit(base.keys[k]) + " {\n        return Some(s)\n    }\n"
+    while k < base.entries.length {
+        out = out + "    if s == " + strLit(base.entries[k].key) + " {\n        return Some(s)\n    }\n"
         k = k + 1
     }
     out = out + "    return None\n}\n"
@@ -1308,7 +1162,7 @@ gen fn splitCsv(s: String) -> Array<String> {
     let mut start = 0
     let mut i = 0
     while i < ba.length {
-        if ba[i] == 44 {
+        if ba[i] == ',' {
             parts.push(sliceStr(ba, start, i))
             start = i + 1
         }
@@ -1373,8 +1227,8 @@ gen fn buildKeyFns(key: String, baseVal: String, tags: Array<String>, datas: Arr
     while li < tags.length {
         let tag = tags[li]
         let d = datas[li]
-        let vi = indexOf(d.keys, key)
-        let msg = d.vals[vi]
+        let vi = entryIndex(d, key)
+        let msg = d.entries[vi].value
         out = out + "fn " + fnName + "__" + upperFirst(tag) + params + " -> String {\n"
         out = out + "    let mut acc = \"\"\n"
         out = out + compileBody(msg, tag, "    ", "")
@@ -1408,16 +1262,13 @@ gen fn docComment(msg: String) -> String {
     let ba = bytes(msg)
     let mut out: Array<UInt8> = []
     for b in ba {
-        if b == 10 || b == 13 {
-            out.push(32)
+        if b == '\n' || b == '\r' {
+            out.push(' ')
         } else {
             out.push(b)
         }
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => msg,
-    }
+    return fromBytesOr(out, msg)
 }
 
 /// `t(key)` — argument-less lookup. An arg-less key returns the current locale's
@@ -1427,23 +1278,23 @@ gen fn buildT(tags: Array<String>, datas: Array<LocaleData>) -> String {
     let base = datas[0]
     let mut out = "export fn t(key: TransKey) -> String {\n"
     let mut k = 0
-    while k < base.keys.length {
-        let key = base.keys[k]
-        let sc = scanArgs(base.vals[k])
+    while k < base.entries.length {
+        let key = base.entries[k].key
+        let sc = scanArgs(base.entries[k].value)
         out = out + "    if key == " + strLit(key) + " {\n"
         if sc.names.length == 0 {
             out = out + "        return match currentLocale {\n"
             let mut li = 0
             while li < tags.length {
                 let d = datas[li]
-                let vi = indexOf(d.keys, key)
-                let lit = readLiteral(bytes(d.vals[vi]), 0, bytes(d.vals[vi]).length, false)
+                let vi = entryIndex(d, key)
+                let lit = readLiteral(bytes(d.entries[vi].value), 0, bytes(d.entries[vi].value).length, false)
                 out = out + "            " + upperFirst(tags[li]) + " => " + strLit(lit.text) + ",\n"
                 li = li + 1
             }
             out = out + "        }\n"
         } else {
-            out = out + "        return " + strLit(base.vals[k]) + "\n"
+            out = out + "        return " + strLit(base.entries[k].value) + "\n"
         }
         out = out + "    }\n"
         k = k + 1
@@ -1461,10 +1312,10 @@ test "parseLocaleJson flattens nested keys with dots" {
     let src = "{ \"home\": { \"title\": \"Hi\" }, \"greeting\": \"Yo\" }"
     let d = parseLocaleJson(src)
     assert(d.ok)
-    assertEq(d.keys.length, 2)
-    assertEq(d.keys[0], "home.title")
-    assertEq(d.vals[0], "Hi")
-    assertEq(d.keys[1], "greeting")
+    assertEq(d.entries.length, 2)
+    assertEq(d.entries[0].key, "home.title")
+    assertEq(d.entries[0].value, "Hi")
+    assertEq(d.entries[1].key, "greeting")
 }
 
 test "parseLocaleJson rejects a non-string value" {
@@ -1475,7 +1326,7 @@ test "parseLocaleJson rejects a non-string value" {
 test "parseLocaleJson decodes escapes" {
     let d = parseLocaleJson("{ \"k\": \"a\\nb\" }")
     assert(d.ok)
-    assertEq(d.vals[0].byteLength, 3)
+    assertEq(d.entries[0].value.byteLength, 3)
 }
 
 test "scanArgs finds a plain string arg" {
@@ -1563,12 +1414,12 @@ test "icuBadBrace flags an unmatched or stray brace, quote-aware" {
 
 test "keyCollisionErrors names both collision classes" {
     // Dotted vs nested flatten to the same `a.b`.
-    let dup = LocaleData { ok: true, error: "", keys: ["a.b", "a.b"], vals: ["x", "y"] }
+    let dup = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "a.b", value: "x" }, LocaleEntry { key: "a.b", value: "y" }] }
     assert(keyCollisionErrors(dup).contains("I18N_DUP_KEY__a_b"))
     // home.title and homeTitle both make tHomeTitle.
-    let clash = LocaleData { ok: true, error: "", keys: ["home.title", "homeTitle"], vals: ["A", "B"] }
+    let clash = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "home.title", value: "A" }, LocaleEntry { key: "homeTitle", value: "B" }] }
     assert(keyCollisionErrors(clash).contains("I18N_KEY_COLLISION__home_title__homeTitle"))
     // A clean key set collides with nothing.
-    let ok = LocaleData { ok: true, error: "", keys: ["home.title", "cart.items"], vals: ["A", "B"] }
+    let ok = LocaleData { ok: true, error: "", entries: [LocaleEntry { key: "home.title", value: "A" }, LocaleEntry { key: "cart.items", value: "B" }] }
     assertEq(keyCollisionErrors(ok), "")
 }
