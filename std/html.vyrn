@@ -20,6 +20,11 @@
 /// This module is comptime-pure (plain string building over `bytes`/
 /// `stringFromBytes`), so it is equally usable from a `gen fn` and its callees.
 
+// The shared infallible-decode home (RFC-0059): every buffer decoded here is an
+// ASCII escape of already-valid UTF-8, so the `Err` arm is unreachable — routed
+// through the one shared `fromBytesOr` rather than a private swallow copy.
+import { fromBytesOr } from "std/strings"
+
 // ===========================================================================
 // The tree
 // ===========================================================================
@@ -148,33 +153,24 @@ fn appendBytes(dst: Array<UInt8>, src: Array<UInt8>) -> Array<UInt8> {
     return out
 }
 
-/// Decode a built byte buffer back to a `String` (the input is always valid
-/// UTF-8 by construction, so the `Err` arm is unreachable).
-fn bytesToStr(buf: Array<UInt8>) -> String {
-    return match stringFromBytes(buf) {
-        Ok(v) => v,
-        Err(e) => "",
-    }
-}
-
 /// Escape a text node's content: `&` `<` `>` `"`.
 fn escapeText(s: String) -> String {
     let raw = bytes(s)
     let mut out: Array<UInt8> = []
     for b in raw {
-        if b == 38 {
+        if b == '&' {
             out = appendBytes(out, bytes("&amp;"))
-        } else if b == 60 {
+        } else if b == '<' {
             out = appendBytes(out, bytes("&lt;"))
-        } else if b == 62 {
+        } else if b == '>' {
             out = appendBytes(out, bytes("&gt;"))
-        } else if b == 34 {
+        } else if b == '"' {
             out = appendBytes(out, bytes("&quot;"))
         } else {
             out.push(b)
         }
     }
-    return bytesToStr(out)
+    return fromBytesOr(out, "")
 }
 
 /// Escape an attribute value: `&` `"` (the two characters that can break out of
@@ -183,15 +179,15 @@ fn escapeAttr(s: String) -> String {
     let raw = bytes(s)
     let mut out: Array<UInt8> = []
     for b in raw {
-        if b == 38 {
+        if b == '&' {
             out = appendBytes(out, bytes("&amp;"))
-        } else if b == 34 {
+        } else if b == '"' {
             out = appendBytes(out, bytes("&quot;"))
         } else {
             out.push(b)
         }
     }
-    return bytesToStr(out)
+    return fromBytesOr(out, "")
 }
 
 // ===========================================================================

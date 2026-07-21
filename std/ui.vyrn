@@ -47,6 +47,11 @@
 // router imports each `.vyx` page through a nested `vyxPage(…)` generator import.
 // (std↔std pure-fn imports are legal — verified; the loader does not fight them.)
 import { vyxPageShape } from "std/vyx"
+// Shared string / array helpers (RFC-0046/0059) — the former private uiJoinList,
+// uiContainsStr, uiTrimStr copies now live once in std; the infallible-decode
+// swallows route through the shared `fromBytesOr`.
+import { joinWith, trim, fromBytesOr } from "std/strings"
+import { includes } from "std/arrays"
 
 // ===========================================================================
 // PageError (RFC-0041 §3) — the failure a page's `load` may return. `load ->
@@ -88,44 +93,7 @@ gen fn uiSliceStr(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
         out.push(ba[i])
         i = i + 1
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => "",
-    }
-}
-
-/// True for an ASCII space, tab, CR, or LF.
-gen fn uiIsWs(b: UInt8) -> Bool {
-    return b == 32 || b == 9 || b == 10 || b == 13
-}
-
-/// `s` with leading and trailing ASCII whitespace removed.
-gen fn uiTrimStr(s: String) -> String {
-    let ba = bytes(s)
-    let mut start = 0
-    let mut foundStart = false
-    let mut i = 0
-    while i < ba.length && foundStart == false {
-        if uiIsWs(ba[i]) {
-            i = i + 1
-        } else {
-            start = i
-            foundStart = true
-        }
-    }
-    if foundStart == false {
-        return ""
-    }
-    let mut end = ba.length
-    let mut moving = true
-    while moving {
-        if end > start && uiIsWs(ba[end - 1]) {
-            end = end - 1
-        } else {
-            moving = false
-        }
-    }
-    return uiSliceStr(ba, start, end)
+    return fromBytesOr(out, "")
 }
 
 /// Uppercase the first ASCII byte of `s`.
@@ -134,48 +102,25 @@ gen fn uiUpperFirst(s: String) -> String {
     let mut out: Array<UInt8> = []
     let mut i = 0
     for b in ba {
-        if i == 0 && b >= 97 && b <= 122 {
+        if i == 0 && b >= 'a' && b <= 'z' {
             out.push(b - 32)
         } else {
             out.push(b)
         }
         i = i + 1
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => s,
-    }
+    return fromBytesOr(out, s)
 }
 
-/// Join `parts` with `sep` between them.
-gen fn uiJoinList(parts: Array<String>, sep: String) -> String {
-    let mut out = ""
-    let mut i = 0
-    for p in parts {
-        if i > 0 {
-            out = out + sep
-        }
-        out = out + p
-        i = i + 1
-    }
-    return out
-}
-
-/// `arr` with `s` appended (value semantics — the input is unchanged).
+/// `arr` with `s` appended (value semantics — the input is unchanged). Kept as a
+/// private helper: it is a COPY-append (siblings in `uiScanAll`'s recursion keep
+/// the original prefix), and Vyrn has no byte-identical single-expression copy-
+/// append idiom (`arr + [s]` is not array concatenation), so a bare in-place
+/// `arr.push(s)` would wrongly mutate the shared prefix.
 gen fn uiAppendStr(arr: Array<String>, s: String) -> Array<String> {
     let mut out = arr
     out.push(s)
     return out
-}
-
-/// Whether `arr` contains `x`.
-gen fn uiContainsStr(arr: Array<String>, x: String) -> Bool {
-    for s in arr {
-        if s == x {
-            return true
-        }
-    }
-    return false
 }
 
 /// The interpolation-hole source fragment for `name` — the two chars `\` `{`,
@@ -191,16 +136,13 @@ gen fn uiIdentOf(key: String) -> String {
     let ba = bytes(key)
     let mut out: Array<UInt8> = []
     for b in ba {
-        if (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) {
+        if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
             out.push(b)
         } else {
-            out.push(95)
+            out.push('_')
         }
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => "id",
-    }
+    return fromBytesOr(out, "id")
 }
 
 // ---- emitting Vyrn source: bake a raw string as a `"…"` literal (RFC-0054) ---
@@ -224,20 +166,17 @@ gen fn uiRegexEscapeLit(seg: String) -> String {
     let ba = bytes(seg)
     let mut out: Array<UInt8> = []
     for b in ba {
-        if b == 46 || b == 92 || b == 40 || b == 41 || b == 91 || b == 93
-        || b == 123 || b == 125 || b == 124 || b == 42 || b == 43 || b == 63
-        || b == 94 || b == 36 {
-            out.push(92)
-            out.push(92)
+        if b == '.' || b == '\\' || b == '(' || b == ')' || b == '[' || b == ']'
+        || b == '{' || b == '}' || b == '|' || b == '*' || b == '+' || b == '?'
+        || b == '^' || b == '$' {
+            out.push('\\')
+            out.push('\\')
             out.push(b)
         } else {
             out.push(b)
         }
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => seg,
-    }
+    return fromBytesOr(out, seg)
 }
 
 // ===========================================================================
@@ -293,7 +232,7 @@ gen fn uiCollisionKey(segs: Array<String>) -> String {
             parts.push(s)
         }
     }
-    return "/" + uiJoinList(parts, "/")
+    return "/" + joinWith(parts, "/")
 }
 
 /// The human display pattern (`/users/:id`) used for titles and diagnostics.
@@ -309,7 +248,7 @@ gen fn uiUrlPatternOf(segs: Array<String>) -> String {
             parts.push(s)
         }
     }
-    return "/" + uiJoinList(parts, "/")
+    return "/" + joinWith(parts, "/")
 }
 
 /// The regex branch for a route (static tokens literal; an `Int64` param as its
@@ -329,7 +268,7 @@ gen fn uiRoutePathBranch(segs: Array<String>, dynTypes: Array<String>) -> String
             parts.push(uiRegexEscapeLit(s))
         }
     }
-    return "/" + uiJoinList(parts, "/")
+    return "/" + joinWith(parts, "/")
 }
 
 /// The camelCase name of a static route's typed-URL helper (`/items/sub` →
@@ -374,7 +313,7 @@ gen fn uiDynHelperBody(segs: Array<String>) -> String {
             parts.push(s)
         }
     }
-    return "\"/" + uiJoinList(parts, "/") + "\""
+    return "\"/" + joinWith(parts, "/") + "\""
 }
 
 // ===========================================================================
@@ -392,10 +331,10 @@ gen fn uiRecordBody(source: String) -> String {
     let mut close = 0 - 1
     let mut i = 0
     while i < ba.length {
-        if ba[i] == 123 && open < 0 {
+        if ba[i] == '{' && open < 0 {
             open = i
         }
-        if ba[i] == 125 {
+        if ba[i] == '}' {
             close = i
         }
         i = i + 1
@@ -416,11 +355,11 @@ gen fn uiSplitFields(body: String) -> Array<String> {
     let mut i = 0
     while i < ba.length {
         let b = ba[i]
-        if b == 60 || b == 123 {
+        if b == '<' || b == '{' {
             depth = depth + 1
-        } else if b == 62 || b == 125 {
+        } else if b == '>' || b == '}' {
             depth = depth - 1
-        } else if b == 44 && depth == 0 {
+        } else if b == ',' && depth == 0 {
             parts.push(uiSliceStr(ba, start, i))
             start = i + 1
         }
@@ -436,20 +375,20 @@ gen fn uiParseFields(source: String) -> UiFields {
     let mut names: Array<String> = []
     let mut types: Array<String> = []
     for part in uiSplitFields(body) {
-        let trimmed = uiTrimStr(part)
+        let trimmed = trim(part)
         if trimmed.byteLength > 0 {
             let pb = bytes(trimmed)
             let mut colon = 0 - 1
             let mut i = 0
             while i < pb.length && colon < 0 {
-                if pb[i] == 58 {
+                if pb[i] == ':' {
                     colon = i
                 }
                 i = i + 1
             }
             if colon >= 0 {
-                names.push(uiTrimStr(uiSliceStr(pb, 0, colon)))
-                types.push(uiTrimStr(uiSliceStr(pb, colon + 1, pb.length)))
+                names.push(trim(uiSliceStr(pb, 0, colon)))
+                types.push(trim(uiSliceStr(pb, colon + 1, pb.length)))
             }
         }
     }
@@ -630,7 +569,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
         } else {
             let f = uiParseFields(uiTypeSource(iface, "Params"))
             for d in dyns {
-                if uiContainsStr(f.names, d) == false {
+                if includes(f.names, d) == false {
                     err = err + uiErrLine("PAGES_PARAM_MISMATCH", fid + "__segment_" + d + "_absent_from_Params")
                 }
             }
@@ -646,7 +585,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
             let mut i = 0
             while i < f.names.length {
                 let fn2 = f.names[i]
-                if uiContainsStr(dyns, fn2) == false {
+                if includes(dyns, fn2) == false {
                     err = err + uiErrLine("PAGES_PARAM_MISMATCH", fid + "__Params_field_" + fn2 + "_has_no_segment")
                 }
                 if uiSupportedParamType(f.types[i]) == false {
@@ -765,7 +704,7 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
     let needParams = dyns.length > 0 || hasLoad
     if needParams {
         for d in dyns {
-            if uiContainsStr(shape.paramNames, d) == false {
+            if includes(shape.paramNames, d) == false {
                 err = err + uiErrLine("PAGES_PARAM_MISMATCH", fid + "__segment_" + d + "_absent_from_params")
             }
         }
@@ -783,7 +722,7 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
         let mut i = 0
         while i < shape.paramNames.length {
             let nm = shape.paramNames[i]
-            if uiContainsStr(dyns, nm) == false {
+            if includes(dyns, nm) == false {
                 err = err + uiErrLine("PAGES_PARAM_MISMATCH", fid + "__params_field_" + nm + "_has_no_segment")
             }
             if uiSupportedParamType(shape.paramTypes[i]) == false {
@@ -1157,7 +1096,7 @@ gen fn uiEmitRoute(p: UiPageInfo, n: Int64, layoutIdxs: Array<Int64>, errorIdx: 
 /// bound as `let v<k>` in `uiTry`, so they are skipped here.
 gen fn uiEmitDynMatch(p: UiPageInfo, k: Int64, idx: String) -> String {
     if k >= p.dynNames.length {
-        return "Some(uiRender" + idx + "(" + uiJoinList(uiDynArgs(p.dynNames), ", ") + "))"
+        return "Some(uiRender" + idx + "(" + joinWith(uiDynArgs(p.dynNames), ", ") + "))"
     }
     if p.dynTypes[k] == "String" {
         // Already bound in uiTry; move on.
@@ -1309,7 +1248,7 @@ gen fn uiEmitRender(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorI
         params.push("v" + ai.toString() + ": " + p.dynTypes[ai])
         ai = ai + 1
     }
-    let mut out = "fn uiRender" + idx + "(" + uiJoinList(params, ", ") + ") -> Response {\n"
+    let mut out = "fn uiRender" + idx + "(" + joinWith(params, ", ") + ") -> Response {\n"
 
     // Static page (no dynamic segments, no loader): render or respond directly.
     if p.dynNames.length == 0 && p.hasLoad == false {
@@ -1364,7 +1303,7 @@ gen fn uiParamFieldInits(segs: Array<String>) -> String {
             k = k + 1
         }
     }
-    return uiJoinList(parts, ", ")
+    return joinWith(parts, ", ")
 }
 
 /// The import line for one page: a namespace import (RFC-0027) binding `p<idx>`.
@@ -1404,7 +1343,7 @@ gen fn uiEmitTypedUrl(p: UiPageInfo) -> String {
                 k = k + 1
             }
         }
-        return "export fn " + uiDynHelperName(p.segs) + "(" + uiJoinList(params, ", ") + ") -> RoutePath {\n    return " + uiDynHelperBody(p.segs) + "\n}\n"
+        return "export fn " + uiDynHelperName(p.segs) + "(" + joinWith(params, ", ") + ") -> RoutePath {\n    return " + uiDynHelperBody(p.segs) + "\n}\n"
     }
     return "export fn " + uiStaticHelperName(p.segs) + "() -> RoutePath {\n    return " + uiStrLit(uiUrlPatternOf(p.segs)) + "\n}\n"
 }
@@ -1437,7 +1376,7 @@ gen fn uiVyxGenImports(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, error
     if gens.length == 0 {
         return ""
     }
-    return "import { " + uiJoinList(gens, ", ") + " } from \"std/vyx\"\n"
+    return "import { " + joinWith(gens, ", ") + " } from \"std/vyx\"\n"
 }
 
 /// The nested chrome import for one layout/error `.vyx` (bound `uiLay<n>` /

@@ -35,7 +35,10 @@
 // ---- shared pure helpers ---------------------------------------------------
 // Comptime-pure (plain string building), so legal in a `gen fn` and its callees.
 // The `connect`-prefixed duplicates of `std/rpc`'s helpers keep this generator
-// self-contained (the std-generator convention — std/rpc stays untouched).
+// self-contained (the std-generator convention — std/rpc stays untouched); the
+// infallible-decode swallows now route through the one shared `fromBytesOr`
+// (RFC-0059).
+import { fromBytesOr } from "std/strings"
 
 /// Uppercase the first byte of `s` (ASCII), leaving the rest untouched — the
 /// procedure `getBook` derives `onGetBook` / `connectDoneGetBook` this way.
@@ -44,17 +47,14 @@ fn connectCapFirst(s: String) -> String {
     let mut out: Array<UInt8> = []
     let mut i = 0
     for b in raw {
-        if i == 0 && b >= 97 && b <= 122 {
+        if i == 0 && b >= 'a' && b <= 'z' {
             out.push(b - 32)
         } else {
             out.push(b)
         }
         i = i + 1
     }
-    return match stringFromBytes(out) {
-        Ok(t) => t,
-        Err(e) => s,
-    }
+    return fromBytesOr(out, s)
 }
 
 /// Join `parts` with `sep` between them.
@@ -100,7 +100,7 @@ fn connectServiceName(contract: String) -> String {
     let mut start = 0
     let mut i = 0
     while i < ba.length {
-        if ba[i] == 47 {
+        if ba[i] == '/' {
             start = i + 1
         }
         i = i + 1
@@ -111,10 +111,7 @@ fn connectServiceName(contract: String) -> String {
         seg.push(ba[j])
         j = j + 1
     }
-    let name = match stringFromBytes(seg) {
-        Ok(v) => v,
-        Err(e) => contract,
-    }
+    let name = fromBytesOr(seg, contract)
     if name.endsWith(".vyrn") {
         let nb = bytes(name)
         let mut trimmed: Array<UInt8> = []
@@ -123,10 +120,7 @@ fn connectServiceName(contract: String) -> String {
             trimmed.push(nb[k])
             k = k + 1
         }
-        return match stringFromBytes(trimmed) {
-            Ok(v) => v,
-            Err(e) => name,
-        }
+        return fromBytesOr(trimmed, name)
     }
     return name
 }

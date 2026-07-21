@@ -16,6 +16,10 @@
 // (Everything here is comptime-pure — plain string building — so it is legal in
 // a `gen fn` and its transitive callees.)
 
+// The shared infallible-decode home (RFC-0059): an ASCII transform of already-valid
+// UTF-8, so the `Err` arm is unreachable — routed through the one shared helper.
+import { fromBytesOr } from "std/strings"
+
 /// Uppercase the first byte of `s` (ASCII), leaving the rest untouched — the
 /// procedure `getUser` derives `vyrnRpcDoneGetUser` / `rpcPendingGetUser` this way.
 fn capFirst(s: String) -> String {
@@ -23,17 +27,14 @@ fn capFirst(s: String) -> String {
     let mut out: Array<UInt8> = []
     let mut i = 0
     for b in raw {
-        if i == 0 && b >= 97 && b <= 122 {
+        if i == 0 && b >= 'a' && b <= 'z' {
             out.push(b - 32)
         } else {
             out.push(b)
         }
         i = i + 1
     }
-    return match stringFromBytes(out) {
-        Ok(t) => t,
-        Err(e) => s,
-    }
+    return fromBytesOr(out, s)
 }
 
 /// Join `parts` with `sep` between them.

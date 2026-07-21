@@ -55,6 +55,13 @@
 /// `.vyx` file and line (the std/ui / std/rpc convention). Inspect the whole
 /// synthesized module with:  vyrn emit-gen <file>
 
+// Shared string / array helpers (RFC-0046/0059) — the former private vyxJoin,
+// vyxContains, vyxTrim copies now live once in std; the infallible-decode swallows
+// route through the shared `fromBytesOr`. `vyxSlice` stays private: it slices a
+// byte ARRAY (not a String), so `substring` is not a drop-in.
+import { joinWith, trim, fromBytesOr } from "std/strings"
+import { includes } from "std/arrays"
+
 // ===========================================================================
 // Byte / string helpers — all comptime-pure, legal in a `gen fn` and its callees.
 // ===========================================================================
@@ -67,49 +74,17 @@ fn vyxSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
         out.push(ba[i])
         i = i + 1
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => "",
-    }
+    return fromBytesOr(out, "")
 }
 
 /// True for an ASCII space, tab, CR, or LF.
 fn vyxIsWs(b: UInt8) -> Bool {
-    return b == 32 || b == 9 || b == 10 || b == 13
+    return b == ' ' || b == '\t' || b == '\n' || b == '\r'
 }
 
 /// True for an ASCII letter, digit, or `_` (identifier bytes).
 fn vyxIsIdent(b: UInt8) -> Bool {
-    return (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) || b == 95
-}
-
-/// `s` with leading and trailing ASCII whitespace removed.
-fn vyxTrim(s: String) -> String {
-    let ba = bytes(s)
-    let mut start = 0
-    let mut found = false
-    let mut i = 0
-    while i < ba.length && found == false {
-        if vyxIsWs(ba[i]) {
-            i = i + 1
-        } else {
-            start = i
-            found = true
-        }
-    }
-    if found == false {
-        return ""
-    }
-    let mut end = ba.length
-    let mut moving = true
-    while moving {
-        if end > start && vyxIsWs(ba[end - 1]) {
-            end = end - 1
-        } else {
-            moving = false
-        }
-    }
-    return vyxSlice(ba, start, end)
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
 }
 
 /// Lowercase the first ASCII byte of `s` (`ItemRow` → `itemRow`).
@@ -118,17 +93,14 @@ fn vyxLowerFirst(s: String) -> String {
     let mut out: Array<UInt8> = []
     let mut i = 0
     for b in ba {
-        if i == 0 && b >= 65 && b <= 90 {
+        if i == 0 && b >= 'A' && b <= 'Z' {
             out.push(b + 32)
         } else {
             out.push(b)
         }
         i = i + 1
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => s,
-    }
+    return fromBytesOr(out, s)
 }
 
 /// `key` with every non-identifier byte turned into `_`, so a file path is a
@@ -140,43 +112,17 @@ fn vyxIdentOf(key: String) -> String {
         if vyxIsIdent(b) {
             out.push(b)
         } else {
-            out.push(95)
+            out.push('_')
         }
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => "id",
-    }
+    return fromBytesOr(out, "id")
 }
 
-/// Whether `arr` contains `x`.
-fn vyxContains(arr: Array<String>, x: String) -> Bool {
-    for s in arr {
-        if s == x {
-            return true
-        }
-    }
-    return false
-}
-
-/// `arr` with `s` appended (value semantics — the input is unchanged).
+/// `arr` with `s` appended (value semantics — the input is unchanged). Unused by
+/// the compiler today; kept for the page/component builders' historical API.
 fn vyxAppend(arr: Array<String>, s: String) -> Array<String> {
     let mut out = arr
     out.push(s)
-    return out
-}
-
-/// Join `parts` with `sep` between them.
-fn vyxJoin(parts: Array<String>, sep: String) -> String {
-    let mut out = ""
-    let mut i = 0
-    for p in parts {
-        if i > 0 {
-            out = out + sep
-        }
-        out = out + p
-        i = i + 1
-    }
     return out
 }
 
@@ -185,7 +131,7 @@ fn vyxLineAt(ba: Array<UInt8>, off: Int64) -> Int64 {
     let mut line = 1
     let mut i = 0
     while i < off && i < ba.length {
-        if ba[i] == 10 {
+        if ba[i] == '\n' {
             line = line + 1
         }
         i = i + 1
@@ -199,7 +145,7 @@ fn vyxLineAt(ba: Array<UInt8>, off: Int64) -> Int64 {
 fn vyxColAt(ba: Array<UInt8>, off: Int64) -> Int64 {
     let mut col = 1
     let mut i = off
-    while i > 0 && ba[i - 1] != 10 {
+    while i > 0 && ba[i - 1] != '\n' {
         col = col + 1
         i = i - 1
     }
@@ -221,20 +167,20 @@ fn vyxSkipWs(ba: Array<UInt8>, from: Int64, e: Int64) -> Int64 {
 /// The second byte of a Vyrn string-literal escape for `b`, or 0 when `b` needs
 /// no escaping.
 fn vyxEscSecond(b: UInt8) -> UInt8 {
-    if b == 92 {
-        return 92
+    if b == '\\' {
+        return '\\'
     }
-    if b == 34 {
-        return 34
+    if b == '"' {
+        return '"'
     }
-    if b == 10 {
-        return 110
+    if b == '\n' {
+        return 'n'
     }
-    if b == 13 {
-        return 114
+    if b == '\r' {
+        return 'r'
     }
-    if b == 9 {
-        return 116
+    if b == '\t' {
+        return 't'
     }
     return 0
 }
@@ -244,21 +190,18 @@ fn vyxEscSecond(b: UInt8) -> UInt8 {
 fn vyxStrLit(raw: String) -> String {
     let ba = bytes(raw)
     let mut out: Array<UInt8> = []
-    out.push(34)
+    out.push('"')
     for b in ba {
         let s = vyxEscSecond(b)
         if s == 0 {
             out.push(b)
         } else {
-            out.push(92)
+            out.push('\\')
             out.push(s)
         }
     }
-    out.push(34)
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => "\"\"",
-    }
+    out.push('"')
+    return fromBytesOr(out, "\"\"")
 }
 
 // ---- substring search + slicing over the raw file bytes ---------------------
@@ -301,7 +244,7 @@ fn vyxFindLast(ba: Array<UInt8>, needle: Array<UInt8>, from: Int64) -> Int64 {
 /// Whether `s` contains an ASCII newline (LF).
 fn vyxHasNewline(s: String) -> Bool {
     for b in bytes(s) {
-        if b == 10 {
+        if b == '\n' {
             return true
         }
     }
@@ -318,7 +261,7 @@ fn vyxCollapseWs(s: String) -> String {
     for b in ba {
         if vyxIsWs(b) {
             if inWs == false {
-                out.push(32)
+                out.push(' ')
                 inWs = true
             }
         } else {
@@ -326,10 +269,7 @@ fn vyxCollapseWs(s: String) -> String {
             inWs = false
         }
     }
-    return match stringFromBytes(out) {
-        Ok(v) => v,
-        Err(err) => s,
-    }
+    return fromBytesOr(out, s)
 }
 
 // ===========================================================================
@@ -351,26 +291,26 @@ fn vyxScanFindCode(ba: Array<UInt8>, needle: Array<UInt8>, from: Int64, codeMode
     let n = needle.length
     while i < ba.length {
         let b = ba[i]
-        if b == 34 {
+        if b == '"' {
             // A `"…"` string literal: skip to the unescaped closing quote.
             i = i + 1
-            while i < ba.length && ba[i] != 34 {
-                if ba[i] == 92 {
+            while i < ba.length && ba[i] != '"' {
+                if ba[i] == '\\' {
                     i = i + 1
                 }
                 i = i + 1
             }
             i = i + 1
-        } else if codeMode && b == 47 && i + 1 < ba.length && ba[i + 1] == 47 {
+        } else if codeMode && b == '/' && i + 1 < ba.length && ba[i + 1] == '/' {
             // A `//` line comment: skip to the next LF.
             i = i + 2
-            while i < ba.length && ba[i] != 10 {
+            while i < ba.length && ba[i] != '\n' {
                 i = i + 1
             }
-        } else if codeMode && b == 47 && i + 1 < ba.length && ba[i + 1] == 42 {
+        } else if codeMode && b == '/' && i + 1 < ba.length && ba[i + 1] == '*' {
             // A `/* … */` block comment: skip to the closing `*/`.
             i = i + 2
-            while i + 1 < ba.length && !(ba[i] == 42 && ba[i + 1] == 47) {
+            while i + 1 < ba.length && !(ba[i] == '*' && ba[i + 1] == '/') {
                 i = i + 1
             }
             i = i + 2
@@ -437,16 +377,16 @@ fn vyxMatchInterp(ba: Array<UInt8>, open: Int64, e: Int64) -> Int64 {
     let mut i = open + 2
     while i < e {
         let b = ba[i]
-        if b == 34 {
+        if b == '"' {
             i = i + 1
-            while i < e && ba[i] != 34 {
-                if ba[i] == 92 {
+            while i < e && ba[i] != '"' {
+                if ba[i] == '\\' {
                     i = i + 1
                 }
                 i = i + 1
             }
             i = i + 1
-        } else if b == 125 && i + 1 < e && ba[i + 1] == 125 {
+        } else if b == '}' && i + 1 < e && ba[i + 1] == '}' {
             return i + 2
         } else {
             i = i + 1
@@ -458,8 +398,8 @@ fn vyxMatchInterp(ba: Array<UInt8>, open: Int64, e: Int64) -> Int64 {
 /// The index just past the `"` closing the string literal whose `"` is at `q`.
 fn vyxScanQuote(ba: Array<UInt8>, q: Int64, e: Int64) -> Int64 {
     let mut i = q + 1
-    while i < e && ba[i] != 34 {
-        if ba[i] == 92 {
+    while i < e && ba[i] != '"' {
+        if ba[i] == '\\' {
             i = i + 1
         }
         i = i + 1
@@ -475,7 +415,7 @@ fn vyxScanAttrValue(ba: Array<UInt8>, q: Int64, e: Int64) -> Int64 {
     let delim = ba[q]
     let mut i = q + 1
     while i < e && ba[i] != delim {
-        if ba[i] == 92 {
+        if ba[i] == '\\' {
             i = i + 1
         }
         i = i + 1
@@ -503,11 +443,11 @@ type VyxTag = { name: String, isComp: Bool, next: Int64 }
 /// Read a tag name starting at `i` (just past `<`).
 fn vyxReadTagName(ba: Array<UInt8>, i: Int64, e: Int64) -> VyxTag {
     let mut j = i
-    while j < e && (vyxIsIdent(ba[j]) || ba[j] == 45) {
+    while j < e && (vyxIsIdent(ba[j]) || ba[j] == '-') {
         j = j + 1
     }
     let name = vyxSlice(ba, i, j)
-    let isComp = name.byteLength > 0 && bytes(name)[0] >= 65 && bytes(name)[0] <= 90
+    let isComp = name.byteLength > 0 && bytes(name)[0] >= 'A' && bytes(name)[0] <= 'Z'
     return VyxTag { name: name, isComp: isComp, next: j }
 }
 
@@ -536,21 +476,21 @@ fn vyxParseAttrs(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxAtt
         if j >= e {
             return VyxAttrs { attrs: attrs, next: j, selfClose: false, err: vyxErr("VYX_UNCLOSED_TAG", fileId, vyxLineAt(ba, i)) }
         }
-        if ba[j] == 62 {
+        if ba[j] == '>' {
             return VyxAttrs { attrs: attrs, next: j + 1, selfClose: false, err: "" }
         }
-        if ba[j] == 47 {
-            if j + 1 < e && ba[j + 1] == 62 {
+        if ba[j] == '/' {
+            if j + 1 < e && ba[j + 1] == '>' {
                 return VyxAttrs { attrs: attrs, next: j + 2, selfClose: true, err: "" }
             }
             j = j + 1
         } else {
             let attrLine = vyxLineAt(ba, j)
-            let evt = ba[j] == 64
-            let dynMark = ba[j] == 58
+            let evt = ba[j] == '@'
+            let dynMark = ba[j] == ':'
             let nameStart = if evt || dynMark { j + 1 } else { j }
             let mut k = nameStart
-            while k < e && (vyxIsIdent(ba[k]) || ba[k] == 45) {
+            while k < e && (vyxIsIdent(ba[k]) || ba[k] == '-') {
                 k = k + 1
             }
             let name = vyxSlice(ba, nameStart, k)
@@ -559,17 +499,17 @@ fn vyxParseAttrs(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxAtt
             while m < e && vyxIsWs(ba[m]) {
                 m = m + 1
             }
-            if m < e && ba[m] == 61 {
+            if m < e && ba[m] == '=' {
                 m = m + 1
                 while m < e && vyxIsWs(ba[m]) {
                     m = m + 1
                 }
-                if m < e && (ba[m] == 34 || ba[m] == 39) {
+                if m < e && (ba[m] == '"' || ba[m] == '\x27') {
                     // `"…"` or `'…'` — single quotes (the Vue convention) let the
                     // value expression carry Vyrn `"…"` string literals.
                     let vEnd = vyxScanAttrValue(ba, m, e)
                     let valStart = vyxSkipWs(ba, m + 1, vEnd - 1)
-                    attrs.push(VyxAttr { name: name, value: vyxTrim(vyxSlice(ba, m + 1, vEnd - 1)), dyn: dynMark, evt: evt, line: vyxLineAt(ba, valStart), col: vyxColAt(ba, valStart) })
+                    attrs.push(VyxAttr { name: name, value: trim(vyxSlice(ba, m + 1, vEnd - 1)), dyn: dynMark, evt: evt, line: vyxLineAt(ba, valStart), col: vyxColAt(ba, valStart) })
                     j = vEnd
                 } else {
                     return VyxAttrs { attrs: attrs, next: m, selfClose: false, err: vyxErr("VYX_BAD_ATTR_VALUE", fileId, attrLine) }
@@ -591,16 +531,16 @@ fn vyxParseNodes(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxPar
     let mut j = i
     while j < e {
         let b = ba[j]
-        if b == 60 {
+        if b == '<' {
             // `<!-- … -->` comment: inert, produces no node.
-            if j + 3 < e && ba[j + 1] == 33 && ba[j + 2] == 45 && ba[j + 3] == 45 {
+            if j + 3 < e && ba[j + 1] == '!' && ba[j + 2] == '-' && ba[j + 3] == '-' {
                 let close = vyxFind(ba, bytes("-->"), j + 4)
                 if close < 0 {
                     j = e
                 } else {
                     j = close + 3
                 }
-            } else if j + 1 < e && ba[j + 1] == 47 {
+            } else if j + 1 < e && ba[j + 1] == '/' {
                 // A closing `</…>` belongs to the caller.
                 return VyxParse { nodes: nodes, next: j, stop: "close", err: "" }
             } else {
@@ -611,14 +551,14 @@ fn vyxParseNodes(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxPar
                 nodes.push(er.node)
                 j = er.next
             }
-        } else if b == 123 && j + 1 < e && ba[j + 1] == 123 {
+        } else if b == '{' && j + 1 < e && ba[j + 1] == '{' {
             // `{{ expr }}` interpolation.
             let close = vyxMatchInterp(ba, j, e)
-            if close > e || (close == e && (e < 2 || ba[e - 1] != 125 || ba[e - 2] != 125)) {
+            if close > e || (close == e && (e < 2 || ba[e - 1] != '}' || ba[e - 2] != '}')) {
                 return VyxParse { nodes: nodes, next: j, stop: "", err: vyxErr("VYX_UNTERMINATED_INTERP", fileId, vyxLineAt(ba, j)) }
             }
             let exprAt = vyxSkipWs(ba, j + 2, close - 2)
-            let expr = vyxTrim(vyxSlice(ba, j + 2, close - 2))
+            let expr = trim(vyxSlice(ba, j + 2, close - 2))
             if expr.byteLength == 0 {
                 return VyxParse { nodes: nodes, next: j, stop: "", err: vyxErr("VYX_EMPTY_INTERP", fileId, vyxLineAt(ba, j)) }
             }
@@ -627,7 +567,7 @@ fn vyxParseNodes(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxPar
         } else {
             // A literal text run up to the next `<` or `{{`. A lone `{` is text.
             let mut k = j
-            while k < e && ba[k] != 60 && !(ba[k] == 123 && k + 1 < e && ba[k + 1] == 123) {
+            while k < e && ba[k] != '<' && !(ba[k] == '{' && k + 1 < e && ba[k + 1] == '{') {
                 k = k + 1
             }
             let raw = vyxSlice(ba, j, k)
@@ -635,7 +575,7 @@ fn vyxParseNodes(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxPar
             // spans a newline is insignificant indentation and is dropped; a
             // same-line whitespace run is one significant inline space; any other
             // run has its whitespace collapsed to single spaces.
-            if vyxTrim(raw).byteLength == 0 {
+            if trim(raw).byteLength == 0 {
                 if vyxHasNewline(raw) == false && raw.byteLength > 0 {
                     nodes.push(VNText(" "))
                 }
@@ -684,7 +624,7 @@ fn vyxParseElem(ba: Array<UInt8>, i: Int64, e: Int64, fileId: String) -> VyxNode
         return VyxNodeR { node: VNText(""), next: kids.next, err: vyxErrDetail("VYX_MISMATCHED_TAG", fileId, line, tag.name + "_vs_" + ct.name) }
     }
     let mut m = ct.next
-    while m < e && ba[m] != 62 {
+    while m < e && ba[m] != '>' {
         m = m + 1
     }
     if isSlot {
@@ -748,13 +688,13 @@ fn vyxParseForHead(header: String, fileId: String, line: Int64) -> VyxForHdr {
         i = i + 1
     }
     // Expect the `in` keyword as a standalone token.
-    if i + 1 >= ba.length || ba[i] != 105 || ba[i + 1] != 110 {
+    if i + 1 >= ba.length || ba[i] != 'i' || ba[i + 1] != 'n' {
         return VyxForHdr { var: "", iter: "", err: vyxErr("VYX_BAD_FOR_HEADER", fileId, line) }
     }
     if i + 2 < ba.length && vyxIsWs(ba[i + 2]) == false {
         return VyxForHdr { var: "", iter: "", err: vyxErr("VYX_BAD_FOR_HEADER", fileId, line) }
     }
-    let iter = vyxTrim(vyxSlice(ba, i + 2, ba.length))
+    let iter = trim(vyxSlice(ba, i + 2, ba.length))
     if varName.byteLength == 0 || iter.byteLength == 0 {
         return VyxForHdr { var: varName, iter: iter, err: vyxErr("VYX_BAD_FOR_HEADER", fileId, line) }
     }
@@ -771,7 +711,7 @@ type VyxOne = { node: VyxNode, err: String }
 /// `v-if`/`v-else-if`/`v-else` siblings without breaking the chain).
 fn vyxIsWsText(n: VyxNode) -> Bool {
     return match n {
-        VNText(s) => vyxTrim(s).byteLength == 0,
+        VNText(s) => trim(s).byteLength == 0,
         VNInterp(x, l, c) => false,
         VNRaw(x, l, c) => false,
         VNChildren => false,
@@ -1002,11 +942,11 @@ fn vyxSplitFields(body: String) -> Array<String> {
     let mut i = 0
     while i < ba.length {
         let b = ba[i]
-        if b == 60 {
+        if b == '<' {
             depth = depth + 1
-        } else if b == 62 {
+        } else if b == '>' {
             depth = depth - 1
-        } else if b == 44 && depth == 0 {
+        } else if b == ',' && depth == 0 {
             parts.push(vyxSlice(ba, start, i))
             start = i + 1
         }
@@ -1062,7 +1002,7 @@ fn vyxLineStartOffset(ba: Array<UInt8>, targetLine: Int64) -> Int64 {
     let mut line = 1
     let mut i = 0
     while i < ba.length {
-        if ba[i] == 10 {
+        if ba[i] == '\n' {
             line = line + 1
             if line == targetLine {
                 return i + 1
@@ -1095,7 +1035,7 @@ gen fn vyxLexKwBlock(ba: Array<UInt8>, kwStr: String) -> VyxProps {
             let lineStart = vyxLineStartOffset(ba, t.line)
             let kwAt = vyxFirstNonWs(ba, lineStart, ba.length)
             let afterAt = kwAt + kwLen
-            let boundary = afterAt >= ba.length || vyxIsWs(ba[afterAt]) || ba[afterAt] == 123
+            let boundary = afterAt >= ba.length || vyxIsWs(ba[afterAt]) || ba[afterAt] == '{'
             if boundary {
                 // A statement-leading keyword token: its block if followed by `{`,
                 // else a malformed block.
@@ -1103,7 +1043,7 @@ gen fn vyxLexKwBlock(ba: Array<UInt8>, kwStr: String) -> VyxProps {
                 while m < ba.length && vyxIsWs(ba[m]) {
                     m = m + 1
                 }
-                if m < ba.length && ba[m] == 123 {
+                if m < ba.length && ba[m] == '{' {
                     return VyxProps { found: true, malformed: false, kwAt: kwAt, braceAt: m }
                 }
                 return VyxProps { found: true, malformed: true, kwAt: kwAt, braceAt: 0 - 1 }
@@ -1132,12 +1072,12 @@ fn vyxMatchCurly(ba: Array<UInt8>, open: Int64) -> Int64 {
     let mut i = open
     while i < ba.length {
         let b = ba[i]
-        if b == 34 {
+        if b == '"' {
             i = vyxScanQuote(ba, i, ba.length)
-        } else if b == 123 {
+        } else if b == '{' {
             depth = depth + 1
             i = i + 1
-        } else if b == 125 {
+        } else if b == '}' {
             depth = depth - 1
             i = i + 1
             if depth == 0 {
@@ -1170,9 +1110,9 @@ gen fn vyxImportsFirstViolation(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, kw
     let mut lineStart = sStart
     let mut i = sStart
     while i <= sEnd {
-        if i == sEnd || ba[i] == 10 {
+        if i == sEnd || ba[i] == '\n' {
             if lineStart > kwAt {
-                let t = vyxTrim(vyxSlice(ba, lineStart, i))
+                let t = trim(vyxSlice(ba, lineStart, i))
                 if t.startsWith("import ") {
                     return vyxLineAt(ba, lineStart)
                 }
@@ -1230,13 +1170,13 @@ gen fn vyxParseScriptAt(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, dir: Strin
         }
         let fields = vyxSplitFields(vyxSlice(sub, bodyStart + 1, bodyEnd - 1))
         for part in fields {
-            let trimmed = vyxTrim(part)
+            let trimmed = trim(part)
             if trimmed.byteLength > 0 {
                 let pb = bytes(trimmed)
                 let mut colon = 0 - 1
                 let mut k = 0
                 while k < pb.length && colon < 0 {
-                    if pb[k] == 58 {
+                    if pb[k] == ':' {
                         colon = k
                     }
                     k = k + 1
@@ -1244,8 +1184,8 @@ gen fn vyxParseScriptAt(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, dir: Strin
                 if colon < 0 {
                     return vyxScriptErr(vyxErr("VYX_BAD_PROPS", fileId, 0))
                 }
-                propNames.push(vyxTrim(vyxSlice(pb, 0, colon)))
-                propTypes.push(vyxTrim(vyxSlice(pb, colon + 1, pb.length)))
+                propNames.push(trim(vyxSlice(pb, 0, colon)))
+                propTypes.push(trim(vyxSlice(pb, colon + 1, pb.length)))
             }
         }
     }
@@ -1262,14 +1202,14 @@ gen fn vyxParseScriptAt(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, dir: Strin
     let mut lineStart = 0
     let mut i = 0
     while i <= sub.length {
-        if i == sub.length || sub[i] == 10 {
-            let lineEnd = if i > lineStart && sub[i - 1] == 13 { i - 1 } else { i }
+        if i == sub.length || sub[i] == '\n' {
+            let lineEnd = if i > lineStart && sub[i - 1] == '\r' { i - 1 } else { i }
             let lineText = vyxSlice(sub, lineStart, lineEnd)
             // Skip a line that overlaps the props block (its bytes were sliced out
             // in the pre-RFC-0048 pipeline; whole-line props is the norm).
             let inProps = bodyStart >= 0 && lineStart < bodyEnd && lineEnd > props.kwAt
             if inProps == false {
-                let t = vyxTrim(lineText)
+                let t = trim(lineText)
                 let fnwAbs = sStart + vyxFirstNonWs(sub, lineStart, lineEnd)
                 if t.startsWith("import ") {
                     imports.push(vyxRebaseImport(t, dir))
@@ -1339,9 +1279,9 @@ fn vyxLines(s: String) -> Array<String> {
     let mut start = 0
     let mut i = 0
     while i < ba.length {
-        if ba[i] == 10 {
+        if ba[i] == '\n' {
             let mut end = i
-            if end > start && ba[end - 1] == 13 {
+            if end > start && ba[end - 1] == '\r' {
                 end = end - 1
             }
             lines.push(vyxSlice(ba, start, end))
@@ -1653,7 +1593,7 @@ fn vyxShiftIf(conds: Array<String>, condLines: Array<Int64>, condCols: Array<Int
 fn vyxCountNewlines(s: String) -> Int64 {
     let mut n = 0
     for b in bytes(s) {
-        if b == 10 {
+        if b == '\n' {
             n = n + 1
         }
     }
@@ -1665,9 +1605,9 @@ fn vyxCountNewlines(s: String) -> Int64 {
 /// user-exported helper), so the same code matches whether or not it was
 /// re-exported when copied into the synthesized page module.
 fn vyxNormHelper(line: String) -> String {
-    let t = vyxTrim(line)
+    let t = trim(line)
     if t.startsWith("export ") {
-        return vyxTrim(vyxSlice(bytes(t), 7, bytes(t).length))
+        return trim(vyxSlice(bytes(t), 7, bytes(t).length))
     }
     return t
 }
@@ -1859,11 +1799,11 @@ gen fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, lin
     for a in attrs {
         if a.evt {
             err = err + vyxErrDetail("VYX_EVENT_ON_COMPONENT", fileId, a.line, tag + "_" + a.name)
-        } else if vyxContains(comp.propNames, a.name) == false {
+        } else if includes(comp.propNames, a.name) == false {
             err = err + vyxErrDetail("VYX_UNKNOWN_PROP", fileId, a.line, tag + "_" + a.name)
         }
     }
-    let hasKids = vyxTrim(vyxChildText(kids)).byteLength > 0 || kids.length > 0
+    let hasKids = trim(vyxChildText(kids)).byteLength > 0 || kids.length > 0
     if comp.takesChildren {
         let kacc = "k" + path
         let kids2 = vyxEmitChildren(kids, kacc, path, reg, fileId, src)
@@ -1888,7 +1828,7 @@ fn vyxJoinArgs(args: Array<String>) -> String {
 
 /// The complete argument list `a, b` for a childless call.
 fn vyxJoinArgsClose(args: Array<String>) -> String {
-    return vyxJoin(args, ", ")
+    return joinWith(args, ", ")
 }
 
 /// Whether the paired children hold any non-whitespace content (text only — a
@@ -2022,7 +1962,7 @@ gen fn vyxEmitAttrs(attrs: Array<VyxAttr>, reg: VyxRegistry, fileId: String, src
         }
         ai = ai + 1
     }
-    return VyxAttrsEmit { list: vyxJoin(parts, ", "), pre: pre, err: err }
+    return VyxAttrsEmit { list: joinWith(parts, ", "), pre: pre, err: err }
 }
 
 /// One emitted `@event` binding, with the column of its scalar-arg expression (for
@@ -2033,7 +1973,7 @@ type VyxEventEmit = { code: String, err: String, hasArg: Bool, argLine: Int64, a
 /// payload)`. Exactly one handler name plus at most one scalar argument (the v1
 /// restriction — module state is root-only, handlers are root-exported externs).
 fn vyxEmitEvent(a: VyxAttr, fileId: String) -> VyxEventEmit {
-    let spec = vyxTrim(a.value)
+    let spec = trim(a.value)
     let sb = bytes(spec)
     // Split the handler name from an optional `(arg)`.
     let paren = vyxFind(sb, bytes("("), 0)
@@ -2043,12 +1983,12 @@ fn vyxEmitEvent(a: VyxAttr, fileId: String) -> VyxEventEmit {
         }
         return VyxEventEmit { code: "On(" + vyxStrLit(a.name) + ", " + vyxStrLit(spec) + ", \"\")", err: "", hasArg: false, argLine: a.line, argCol: a.col }
     }
-    let handler = vyxTrim(vyxSlice(sb, 0, paren))
+    let handler = trim(vyxSlice(sb, 0, paren))
     if vyxIsIdentifier(handler) == false {
         return VyxEventEmit { code: "On(" + vyxStrLit(a.name) + ", \"\", \"\")", err: vyxErrDetail("VYX_BAD_EVENT_HANDLER", fileId, a.line, a.name), hasArg: false, argLine: a.line, argCol: a.col }
     }
     let closeParen = vyxFindLast(sb, bytes(")"), paren)
-    let argExpr = vyxTrim(vyxSlice(sb, paren + 1, closeParen))
+    let argExpr = trim(vyxSlice(sb, paren + 1, closeParen))
     if argExpr.byteLength == 0 {
         return VyxEventEmit { code: "On(" + vyxStrLit(a.name) + ", " + vyxStrLit(handler) + ", \"\")", err: "", hasArg: false, argLine: a.line, argCol: a.col }
     }
@@ -2069,7 +2009,7 @@ fn vyxIsIdentifier(s: String) -> Bool {
     if ba.length == 0 {
         return false
     }
-    if ba[0] >= 48 && ba[0] <= 57 {
+    if ba[0] >= '0' && ba[0] <= '9' {
         return false
     }
     for b in ba {
@@ -2086,13 +2026,13 @@ fn vyxHasTopComma(ba: Array<UInt8>) -> Bool {
     let mut i = 0
     while i < ba.length {
         let b = ba[i]
-        if b == 40 || b == 91 || b == 60 {
+        if b == '(' || b == '[' || b == '<' {
             depth = depth + 1
-        } else if b == 41 || b == 93 || b == 62 {
+        } else if b == ')' || b == ']' || b == '>' {
             depth = depth - 1
-        } else if b == 34 {
+        } else if b == '"' {
             i = vyxScanQuote(ba, i, ba.length) - 1
-        } else if b == 44 && depth == 0 {
+        } else if b == ',' && depth == 0 {
             return true
         }
         i = i + 1
@@ -2122,10 +2062,10 @@ fn vyxParseImport(line: String) -> VyxImport {
     if fromAt < 0 {
         return VyxImport { ns: false, ok: false, names: [], alias: "", spec: "" }
     }
-    let spec = vyxTrim(vyxSlice(ba, fromAt + 6, ba.length))
-    let head = vyxTrim(vyxSlice(ba, 0, fromAt))
+    let spec = trim(vyxSlice(ba, fromAt + 6, ba.length))
+    let head = trim(vyxSlice(ba, 0, fromAt))
     if head.startsWith("import * as ") {
-        let alias = vyxTrim(vyxSlice(bytes(head), 12, bytes(head).length))
+        let alias = trim(vyxSlice(bytes(head), 12, bytes(head).length))
         return VyxImport { ns: true, ok: true, names: [], alias: alias, spec: spec }
     }
     let braceOpen = vyxFind(bytes(head), bytes("{"), 0)
@@ -2136,7 +2076,7 @@ fn vyxParseImport(line: String) -> VyxImport {
     let inner = vyxSlice(bytes(head), braceOpen + 1, braceClose)
     let mut names: Array<String> = []
     for part in vyxSplitFields(inner) {
-        let t = vyxTrim(part)
+        let t = trim(part)
         if t.byteLength > 0 {
             names.push(t)
         }
@@ -2185,7 +2125,7 @@ gen fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
             let oC = if li < c.importCols.length { c.importCols[li] } else { 0 }
             let imp = vyxParseImport(line)
             if imp.ok == false {
-                if vyxContains(rawLines, line) == false {
+                if includes(rawLines, line) == false {
                     rawLines.push(line)
                     rawSrc.push(c.srcPath)
                     rawLine.push(oL)
@@ -2252,7 +2192,7 @@ gen fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
                 } else {
                     let mut cur = selNames[si]
                     for nm in imp.names {
-                        if vyxContains(cur, nm) == false {
+                        if includes(cur, nm) == false {
                             cur.push(nm)
                         }
                     }
@@ -2267,7 +2207,7 @@ gen fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
     let mut out = ""
     let mut i = 0
     while i < selSpecs.length {
-        let line = "import { " + vyxJoin(selNames[i], ", ") + " } from " + selSpecs[i]
+        let line = "import { " + joinWith(selNames[i], ", ") + " } from " + selSpecs[i]
         // A single-source bucket is a verbatim copy → column-exact origin; a
         // unioned bucket (two `.vyx` sources) is derived → no origin.
         let hasOrigin = selCount[i] == 1
@@ -2316,7 +2256,7 @@ fn vyxEmitSignature(comp: VyxComp) -> String {
     if comp.takesChildren {
         params.push("children: Array<Html>")
     }
-    return "export fn " + comp.fnName + "(" + vyxJoin(params, ", ") + ") -> Html {\n"
+    return "export fn " + comp.fnName + "(" + joinWith(params, ", ") + ") -> Html {\n"
 }
 
 /// Emit one component's view function. The single root is returned directly (its
@@ -2397,7 +2337,7 @@ import * as vyxTheme from tw(\{theme})
     // `//@origin` directive so a helper `fn`/`type`/`let` identifier maps back to
     // the `.vyx` — the helper CODE is unchanged, only origin comments are added.
     for c in comps {
-        if vyxTrim(c.helpers).byteLength > 0 {
+        if trim(c.helpers).byteLength > 0 {
             out = out + vyxHelperBlock(c)
         }
     }
@@ -2549,7 +2489,7 @@ type VyxPageShape = { paramNames: Array<String>, paramTypes: Array<String>, hasL
 /// `export fn load`) — the page's optional loader.
 fn vyxScriptHasLoad(script: String) -> Bool {
     for line in vyxLines(script) {
-        let t = vyxTrim(line)
+        let t = trim(line)
         if t.startsWith("fn load") || t.startsWith("export fn load") {
             return true
         }
@@ -2562,7 +2502,7 @@ fn vyxScriptHasLoad(script: String) -> Bool {
 /// `Result<Data, PageError>`). "" when there is no loader.
 fn vyxScriptLoadRet(script: String) -> String {
     for line in vyxLines(script) {
-        let t = vyxTrim(line)
+        let t = trim(line)
         if t.startsWith("fn load") || t.startsWith("export fn load") {
             let tb = bytes(t)
             let arrow = vyxFind(tb, bytes("->"), 0)
@@ -2571,7 +2511,7 @@ fn vyxScriptLoadRet(script: String) -> String {
             }
             let brace = vyxFind(tb, bytes("{"), arrow)
             let end = if brace < 0 { tb.length } else { brace }
-            return vyxTrim(vyxSlice(tb, arrow + 2, end))
+            return trim(vyxSlice(tb, arrow + 2, end))
         }
     }
     return ""
@@ -2596,9 +2536,9 @@ fn vyxLoaderDataType(loadRet: String) -> String {
     let mut i = open
     let mut close = ba.length
     while i < ba.length {
-        if ba[i] == 60 {
+        if ba[i] == '<' {
             depth = depth + 1
-        } else if ba[i] == 62 {
+        } else if ba[i] == '>' {
             depth = depth - 1
             if depth == 0 {
                 close = i
@@ -2615,17 +2555,17 @@ fn vyxLoaderDataType(loadRet: String) -> String {
     let mut cut = ib.length
     while j < ib.length {
         let b = ib[j]
-        if b == 60 {
+        if b == '<' {
             d2 = d2 + 1
-        } else if b == 62 {
+        } else if b == '>' {
             d2 = d2 - 1
-        } else if b == 44 && d2 == 0 {
+        } else if b == ',' && d2 == 0 {
             cut = j
             j = ib.length
         }
         j = j + 1
     }
-    return vyxTrim(vyxSlice(ib, 0, cut))
+    return trim(vyxSlice(ib, 0, cut))
 }
 
 /// Whether the page opts out of the layout with a statement-leading
@@ -2633,11 +2573,11 @@ fn vyxLoaderDataType(loadRet: String) -> String {
 /// `=` are tolerated; the value must be the string `none`.
 fn vyxScriptLayoutNone(script: String) -> Bool {
     for line in vyxLines(script) {
-        let t = vyxTrim(line)
+        let t = trim(line)
         if t.startsWith("layout") {
-            let rest = vyxTrim(vyxSlice(bytes(t), 6, bytes(t).length))
+            let rest = trim(vyxSlice(bytes(t), 6, bytes(t).length))
             if rest.startsWith("=") {
-                let val = vyxTrim(vyxSlice(bytes(rest), 1, bytes(rest).length))
+                let val = trim(vyxSlice(bytes(rest), 1, bytes(rest).length))
                 if val == "\"none\"" || val == "'none'" || val == "none" {
                     return true
                 }
@@ -2650,11 +2590,11 @@ fn vyxScriptLayoutNone(script: String) -> Bool {
 /// Whether a script line is the `layout="none"` directive (dropped from the
 /// pass-through script — it is not valid Vyrn).
 fn vyxIsLayoutLine(line: String) -> Bool {
-    let t = vyxTrim(line)
+    let t = trim(line)
     if t.startsWith("layout") == false {
         return false
     }
-    let rest = vyxTrim(vyxSlice(bytes(t), 6, bytes(t).length))
+    let rest = trim(vyxSlice(bytes(t), 6, bytes(t).length))
     return rest.startsWith("=")
 }
 
@@ -2684,13 +2624,13 @@ export gen fn vyxPageShape(source: String) -> VyxPageShape {
         }
         let end = vyxMatchCurly(sb, pb.braceAt)
         for part in vyxSplitFields(vyxSlice(sb, pb.braceAt + 1, end - 1)) {
-            let trimmed = vyxTrim(part)
+            let trimmed = trim(part)
             if trimmed.byteLength > 0 {
                 let pbf = bytes(trimmed)
                 let mut colon = 0 - 1
                 let mut k = 0
                 while k < pbf.length && colon < 0 {
-                    if pbf[k] == 58 {
+                    if pbf[k] == ':' {
                         colon = k
                     }
                     k = k + 1
@@ -2698,8 +2638,8 @@ export gen fn vyxPageShape(source: String) -> VyxPageShape {
                 if colon < 0 {
                     return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadRet: "", layoutNone: false, err: "VYX_BAD_PARAMS\n" }
                 }
-                names.push(vyxTrim(vyxSlice(pbf, 0, colon)))
-                types.push(vyxTrim(vyxSlice(pbf, colon + 1, pbf.length)))
+                names.push(trim(vyxSlice(pbf, 0, colon)))
+                types.push(trim(vyxSlice(pbf, colon + 1, pbf.length)))
             }
         }
     }
@@ -2712,7 +2652,7 @@ export gen fn vyxPageShape(source: String) -> VyxPageShape {
 fn vyxAutoExportPageDecls(script: String) -> String {
     let mut out = ""
     for line in vyxLines(script) {
-        let t = vyxTrim(line)
+        let t = trim(line)
         if vyxIsLayoutLine(line) {
             // The `layout="none"` opt-out directive is consumed by the router
             // shape; it is not valid Vyrn, so it never reaches the module.
@@ -2732,7 +2672,7 @@ fn vyxPageArgs(names: Array<String>) -> String {
     for n in names {
         parts.push("p." + n)
     }
-    return vyxJoin(parts, ", ")
+    return joinWith(parts, ", ")
 }
 
 // ===========================================================================
@@ -2770,18 +2710,18 @@ fn vyxParseHead(body: String, fileId: String) -> VyxHead {
     let mut titleExpr = ""
     let mut items: Array<VyxHeadItem> = []
     for line in vyxLines(body) {
-        let t = vyxTrim(line)
+        let t = trim(line)
         if t.byteLength == 0 || t.startsWith("//") {
             // blank / comment
         } else if t.startsWith("title:") {
             hasTitle = true
-            titleExpr = vyxTrim(vyxSlice(bytes(t), 6, bytes(t).length))
+            titleExpr = trim(vyxSlice(bytes(t), 6, bytes(t).length))
         } else if t.startsWith("stylesheet ") {
-            items.push(VyxHeadItem { kind: "stylesheet", expr: vyxTrim(vyxSlice(bytes(t), 11, bytes(t).length)) })
+            items.push(VyxHeadItem { kind: "stylesheet", expr: trim(vyxSlice(bytes(t), 11, bytes(t).length)) })
         } else if t.startsWith("module ") {
-            items.push(VyxHeadItem { kind: "module", expr: vyxTrim(vyxSlice(bytes(t), 7, bytes(t).length)) })
+            items.push(VyxHeadItem { kind: "module", expr: trim(vyxSlice(bytes(t), 7, bytes(t).length)) })
         } else if t.startsWith("script ") {
-            items.push(VyxHeadItem { kind: "script", expr: vyxTrim(vyxSlice(bytes(t), 7, bytes(t).length)) })
+            items.push(VyxHeadItem { kind: "script", expr: trim(vyxSlice(bytes(t), 7, bytes(t).length)) })
         } else {
             return VyxHead { found: true, hasTitle: hasTitle, titleExpr: titleExpr, items: items, err: vyxErrDetail("VYX_BAD_HEAD_ENTRY", fileId, 0, t) }
         }
@@ -2878,7 +2818,7 @@ export gen fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String,
     let mut restScript = script
     if pb.found && pb.malformed == false {
         let end = vyxMatchCurly(sb, pb.braceAt)
-        paramFields = vyxTrim(vyxSlice(sb, pb.braceAt + 1, end - 1))
+        paramFields = trim(vyxSlice(sb, pb.braceAt + 1, end - 1))
         restScript = vyxSlice(sb, 0, pb.kwAt) + vyxSlice(sb, end, sb.length)
     }
     // Pull the `head { … }` block (RFC-0041 §2) out of the remaining script — its
@@ -2934,19 +2874,19 @@ export gen fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String,
     let mut paramNames: Array<String> = []
     if paramFields.byteLength > 0 {
         for part in vyxSplitFields(paramFields) {
-            let t = vyxTrim(part)
+            let t = trim(part)
             if t.byteLength > 0 {
                 let pbf = bytes(t)
                 let mut colon = 0 - 1
                 let mut k = 0
                 while k < pbf.length && colon < 0 {
-                    if pbf[k] == 58 {
+                    if pbf[k] == ':' {
                         colon = k
                     }
                     k = k + 1
                 }
                 if colon >= 0 {
-                    paramNames.push(vyxTrim(vyxSlice(pbf, 0, colon)))
+                    paramNames.push(trim(vyxSlice(pbf, 0, colon)))
                 }
             }
         }
