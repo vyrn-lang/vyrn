@@ -1,6 +1,6 @@
 # RFC-0059 — `std/json` + the std Cleanliness Sweep
 
-- **Status:** Locked design
+- **Status:** Implemented
 - **Depends on:** RFC-0057 (byte literals — the sweep adopts them),
   RFC-0058 (`byteLength` — already migrated by then), RFC-0046
   (`std/strings`), RFC-0054 (`std/scan`, code quotes), RFC-0026 (enum
@@ -127,3 +127,156 @@ behavior change outside the documented strict-JSON errors.**
 A runtime JSON-to-user-types decoder (the wire codec RFC-0028/0031 story
 already covers typed boundaries), streaming/SAX parsing, JSON5/comments,
 and float semantics for `JNum`.
+
+---
+
+## As landed
+
+Both parts shipped. `std/json` is a new 752-line module; the three JSON
+hand-rollers are gone; the sweep landed across nine std modules. `vyrn emit-gen`
+is **byte-identical repo-wide** except the one deliberate, documented `openapi`
+document change. Workspace **990** passing (was 989 + the new `std/json` runner),
+`vyrn-lsp` **40** passing, three-way parity **5** suites green, `vyrn fmt
+--check` clean, **0 new** clippy warnings.
+
+### §1 `std/json` — what shipped
+
+The `Json` tree (`JNull | JBool(Bool) | JNum(String raw) | JStr(String) |
+JArr(Array<Json>) | JObj(Array<JsonField>)`, `JsonField = {key, value}`), a
+strict recursive-descent reader, a canonical writer (`emit` compact +
+`emitPretty`), and structural equality. 15 inline tests + a Rust runner
+(`compiler/vyrn-cli/tests/json.rs`) pin: the full escape set including `\uXXXX`
+surrogate pairs to UTF-8, every strictness rejection with pinned `line N, col M`
+wording (trailing comma, missing comma, duplicate key named, lone high/low
+surrogate, bad number), field-order preservation, and the round-trip law.
+
+**Locked-point deviations (both forced by the language, implemented as the
+closest sound thing and documented in the module header):**
+
+1. **The reader is `parseJson`, not `parse`.** `parse` is a reserved language
+   builtin (`parse(String) -> Option<Int64>`), so a user module cannot define
+   it. `emit`/`emitPretty` land as locked.
+2. **`jsonEq` is canonical-emit equality**, not a hand-written recursive
+   comparator. The locked law `parse(emit(j)) == Ok(j)` cannot be written
+   literally: `==` is scalar-only (the checker restricts it to matching
+   numeric/Bool/String), and there is no wildcard `_` pattern, so a structural
+   comparator would need every variant pair spelled out. `emit` is injective
+   over `Json` (distinct kinds carry distinct delimiters, object field order and
+   raw number text are preserved), so `emit(a) == emit(b)` **is** exact
+   structural equality; the round-trip test pins it via `jsonEq` plus the
+   independent `emit(parse(emit(j))) == emit(j)` idempotence assertion.
+
+Two further language facts shaped every migration: `match` arms and
+`if`-expression branches must each be a **single expression** (no
+multi-statement blocks, no `{ return ... }` arms — Result early-return uses the
+`?` operator; loop-bearing arms are extracted to helper fns), and enum `match`
+must be **exhaustive** (no `_`). This is why the readers/writers are factored
+into many small single-expression helpers.
+
+### §1 migrations — what moved
+
+- **`std/tw`** (1255 -> 1048): the ~120-line private reader
+  (`twScanString`/`twParseTheme`/`twUnescByte`/`TwScanStr`) deleted -> `parseJson`
+  + a recursive flatten adapter (`twFlatten...`, dotted keys, `safelist.N` array
+  projection). Byte-identical emit-gen for every theme.
+- **`std/i18n`** (1574 -> 1425): the ~150-line private reader
+  (`ScanStr`/`unescByte`/`scanString`/`parseLocaleJson` hand-parse) deleted ->
+  the same `parseJson` + flatten-adapter shape (strings + nested objects only).
+  Byte-identical for every locale.
+- **`std/openapi`** (300 -> 298): the generated `openapiJson()` no longer
+  hand-concatenates the document (the old `acc = acc + "..."` writer + private
+  `oaEscBody` JSON escaper). It builds a `std/json` `Json` tree — envelope/paths/
+  422 baked as compact JSON constants and `parseJson`d in, schema bodies still
+  runtime `jsonSchema()` calls — and returns `emitPretty(doc, 2)`.
+
+Both readers are now **strict**: duplicate keys and trailing commas the old
+lenient readers silently accepted are rejected with named errors (the intended
+behavior change; all in-repo themes/locales are valid JSON, so nothing in-repo
+regressed).
+
+### openapi byte-diff verdict
+
+The document is now **pretty-printed (2-space indent)** instead of compact, and
+the generated module source changed (concat -> tree). It remains a **valid,
+semantically identical OpenAPI 3.1 spec**: the `exports.rs` parse-back golden
+(`openapi 3.1.0`, `info`, paths in declaration order, `$ref`s, the 422 Issues
+shape, sorted `components/schemas`, `$id` scoping, a validated `minimum`, a
+`Result -> oneOf`, a `Map -> additionalProperties`, byte-stable across two runs)
+passes **unchanged**. This is the RFC's one allowed exception: only
+`examples/bin/server.vyrn` and `examples/shelf/server.vyrn` emit-gen differ, and
+both diffs are **openapi-only** (verified: zero i18n/tw/vyx/ui/graphql generated
+markers).
+
+### §2 sweep
+
+- **Byte literals** replace bare character-byte comparisons across the scanners
+  (tw 31, i18n ~46, vyx ~60, graphql ~25, ui ~14, html 6, connect 2, rpc 1).
+  HTTP status codes / lengths / counts stayed numeric.
+- **`std/strings`/`std/arrays` adoption**: private `join`/`slice`/`contains`/
+  `trim`/whitespace copies (`twJoin`/`twContains`/`twSliceStr`, `vyxJoin`/
+  `vyxContains`/`vyxTrim`, `uiJoinList`/`uiContainsStr`/`uiTrimStr`, i18n's
+  `listContains`/`trimStr`/`indexOf`, openapi's `oaListContains`, html's
+  `bytesToStr`) deleted in favor of `joinWith`/`substring`/`includes`/`trim`.
+  The Array-contains helper is **`includes`** in `std/arrays` (concrete
+  `Array<String>` — `contains` is reserved, and a concrete parameter also
+  accepts fixed-size array literals a generic `Array<T>` does not). Byte-array
+  slicers (`vyxSlice`/`uiSliceStr`) were kept — `substring` is String-only.
+- **Records over parallel arrays**: `TwVocab`->`Array<TwClassDef>`,
+  `TwAxis`->`Array<TwPair>`, `TwTheme` keys/vals->`entries: Array<TwEntry>`;
+  i18n `LocaleData` keys/vals->`entries: Array<LocaleEntry>` and
+  `Branches` selectors/texts->`branches: Array<Branch>`.
+- **tw specifics**: dead `twStrLit` deleted + the five stale comments that cited
+  it fixed (the choke point is `twEmitCss`); `twBlockLit` now guards the empty
+  range (`hi <= lo -> ""`, killing the latent `j / 0`); the O(N^2)
+  value-semantics `twPush` replaced with direct `modify`-array building.
+- **Err-swallows**: the provably-infallible `stringFromBytes` sites (ASCII
+  transforms, ASCII-boundary slices/rebuilds of already-valid UTF-8) route
+  through one shared documented `fromBytesOr(bytes, fallback)` in `std/strings`.
+  Genuinely-fallible `readFile`/`listDir` swallows and emitted-code (`vyrn"""`)
+  swallows were correctly left as-is.
+
+### Deferred / not done (with reason)
+
+- **`uiAppendStr` fossil left in place.** It is a COPY-append (returns a new
+  array; the source stays unchanged) used in `uiScanAll`'s recursion so sibling
+  branches keep the original prefix. A bare `arr.push(s)` would wrongly mutate
+  the shared prefix, and Vyrn has no byte-identical single-expression
+  copy-append idiom (`arr + [s]` is not array concat — it errors). Preserving
+  byte-identity won over deleting it; documented here rather than risk a silent
+  regression.
+- **Pre-existing native-backend bug unrelated to this RFC**: the subdir server
+  examples (`examples/bin/server`, `examples/shelf/server`) fail the NATIVE
+  backend build (`alloca void` / struct `insertvalue` mismatch); this reproduces
+  identically on the base commit `e8cb43d` (verified) and is already
+  chip-filed — not a regression from this work. Three-way parity (which excludes
+  those subdir servers) is green.
+
+### LSP
+
+**No LSP redeploy.** No compiler CRATE source changed — the only change under
+`compiler/` is the new integration test `compiler/vyrn-cli/tests/json.rs`, which
+does not enter the release/LSP binary. `std/` ships with the repo (loaded from
+disk), so the migrations need no rebuild. The deployed
+`editor/vscode/server/vyrn-lsp.exe` hash is unchanged and verified:
+`349340C826D71BE9631F5623E7D15CF2102C6A3DD608BEEB8A8DF8AD3E562633`.
+
+### Line-count deltas
+
+| module | before | after | delta |
+| --- | ---: | ---: | ---: |
+| `json` (new) | 0 | 752 | +752 |
+| `tw` | 1255 | 1048 | -207 |
+| `i18n` | 1574 | 1425 | -149 |
+| `ui` | 1676 | 1615 | -61 |
+| `vyx` | 3520 | 3460 | -60 |
+| `connect` | 366 | 360 | -6 |
+| `graphql` | 693 | 689 | -4 |
+| `html` | 723 | 719 | -4 |
+| `openapi` | 300 | 298 | -2 |
+| `rpc` | 422 | 423 | +1 |
+| `strings` | 323 | 330 | +7 |
+| `arrays` | 79 | 94 | +15 |
+
+Net across `std/`: **+1633 / -1351**. Removing the three hand-rollers and the
+five-way-duplicated helpers pays for the shared reader/writer and then some
+everywhere except the new module itself.
