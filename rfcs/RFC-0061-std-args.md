@@ -1,6 +1,6 @@
 # RFC-0061 — `std/args`: CLI Argument Parsing
 
-- **Status:** Locked design
+- **Status:** Implemented
 - **Depends on:** RFC-0014 (`args()` — the raw argv), RFC-0046
   (`std/strings`), RFC-0060 (`if let`/`break` — the examples read better
   with them, and vlog's migration uses them)
@@ -85,3 +85,37 @@ comment shows this idiom instead of widening the API.
 Spec-driven parsing, generated `--help`, unknown-flag errors, short-flag
 bundling, subcommand routing, and typed option decoding beyond the
 `parse` idiom.
+
+## As landed
+
+`std/args.vyrn` is a pure-Vyrn library — **zero compiler changes**. It exports
+`Args`, `cli`/`cliOf`, and `flag`/`opt`/`positionals`/`rest`, over `args()`.
+
+- `opt` handles `--name=value` (everything after the first `=`, empty allowed)
+  and `--name value` (the next token, NOT consumed when it starts with `-`), with
+  first-occurrence-wins duplicates. `flag` is exact-name presence before `--`.
+- **`positionals` heuristic (documented):** with no spec it cannot know which
+  flags take a value, so it uses the rule consistent with `opt` — a `-`-token
+  greedily consumes its immediately-following non-`-` token as a value. So put
+  free positionals BEFORE flags, or after a `--`. Everything after a literal `--`
+  is positional verbatim; `rest(a, "--")` returns just that tail.
+- 8 inline tests over `cliOf([...])` cover every rule (exact-name, `--name=`,
+  `--name -x` not consumed, first-wins duplicates, `--` semantics, `rest`, empty
+  argv).
+
+**Migration & harness.** `examples/vlog.vyrn` dropped its hand-rolled
+`getFlag`/`Flag` for `std/args` (`cli`/`opt`/`positionals`/`flag`), reading the
+`--file`/`--level`/`--contains` options via `if let` and taking the subcommand
+from the first positional; its parity with `vlog.stdin` is byte-identical
+(interp == native after the documented CRLF normalization). A new
+`examples/argsdemo.vyrn` (+ `argsdemo.args`) exercises every rule and is a
+three-way parity citizen.
+
+The parity harness gained the **`.args` fixture convention**: `examples/<name>.args`
+holds one argv token per line, forwarded byte-identically to all three backends —
+`vyrn run <file> <args>`, the native `<exe> <args>`, and `wasmtime run … <module>
+<args>` (guest argv after the module path); absent fixture ⇒ empty argv. This
+touched `compiler/vyrn-cli/tests/parity.rs`, so it is exercised by the same
+full-suite run; no compiler/frontend code changed, so **the LSP binary is
+unchanged** by this RFC (RFC-0060's rebuild covers the shared parser/checker; its
+hash is `b14410c13de9daab3ef81da0fdc8d139f2f2489430a66cf826db087a058b9aba`).
