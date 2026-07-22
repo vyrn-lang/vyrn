@@ -42,6 +42,30 @@
         "path": "./vyx.tmLanguage.json"
       }
     ],
+    "semanticTokenScopes": [
+      {
+        "language": "vyrn",
+        "scopes": {
+          "enumMember": ["variable.other.enummember"],
+          "namespace": ["entity.name.namespace"],
+          "type": ["entity.name.type"],
+          "parameter": ["variable.parameter"],
+          "macro": ["entity.name.function.macro"],
+          "method": ["entity.name.function.member"]
+        }
+      },
+      {
+        "language": "vyx",
+        "scopes": {
+          "enumMember": ["variable.other.enummember"],
+          "namespace": ["entity.name.namespace"],
+          "type": ["entity.name.type"],
+          "parameter": ["variable.parameter"],
+          "macro": ["entity.name.function.macro"],
+          "method": ["entity.name.function.member"]
+        }
+      }
+    ],
     "snippets": [
       {
         "language": "vyrn",
