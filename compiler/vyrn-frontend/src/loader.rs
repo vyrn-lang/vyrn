@@ -294,6 +294,21 @@ fn normalize_remote(key: &str) -> String {
     format!("{base}/{}", normalize(rest))
 }
 
+/// RFC-0062: the two std modules whose ONLY job is to name the ambient builtins
+/// (`Ok`/`Err`/`Result`, `Some`/`None`/`Option`). Importing one is a validated
+/// no-op — the loader recognizes the specifier before any file resolution,
+/// checks the imported names against this fixed export list, and binds nothing
+/// (the names keep resolving to the builtins they already were). Returns the
+/// module's fixed export list, or `None` for any other specifier. Public so the
+/// editor can offer completion/hover for these names.
+pub fn builtin_alias_exports(spec: &str) -> Option<&'static [&'static str]> {
+    match spec {
+        "std/result" => Some(&["Result", "Ok", "Err"]),
+        "std/option" => Some(&["Option", "Some", "None"]),
+        _ => None,
+    }
+}
+
 /// Resolve an import specifier written inside `importer` to a module key.
 ///
 /// Public so the editor can reuse the loader's exact resolution for
@@ -671,6 +686,50 @@ fn load_modules(
             for b in &mut program.benches {
                 b.module = Some(key.to_string());
             }
+        }
+
+        // RFC-0062: `std/result` / `std/option` are validated NO-OP imports —
+        // their only job is to spell the ambient builtins (`Ok`/`Err`/`Result`,
+        // `Some`/`None`/`Option`) as explicit imports. Recognize the specifier
+        // BEFORE any file resolution (the `std/` root never holds real files for
+        // these, so the builtins can never be shadowed or diverge), validate the
+        // imported names against the fixed export list, reject `import * as`
+        // (namespacing a builtin would create a second spelling — `r.Ok`), then
+        // DROP the import so nothing is loaded or linked. The names stay the
+        // builtins they already were; ambient use without the import is unaffected.
+        let mut idx = 0;
+        while idx < program.imports.len() {
+            let hit = {
+                let imp = &program.imports[idx];
+                match &imp.source {
+                    ImportSource::Path(spec) => builtin_alias_exports(spec)
+                        .map(|exports| (spec.clone(), imp.namespace.is_some(), imp.names.clone(), imp.line, exports)),
+                    _ => None,
+                }
+            };
+            let Some((spec, is_namespace, names, line, exports)) = hit else {
+                idx += 1;
+                continue;
+            };
+            let load_err = |msg: String| -> Vec<Diagnostic> {
+                let mut d = Diagnostic::error(line, 0, "load", msg);
+                if !is_root {
+                    d.file = Some(key.to_string());
+                }
+                vec![d]
+            };
+            if is_namespace {
+                return Err(load_err(format!(
+                    "`{spec}` cannot be imported as a namespace (`import * as`) — its names \
+                     are builtins; import them by name or use them directly"
+                )));
+            }
+            for n in &names {
+                if !exports.contains(&n.original.as_str()) {
+                    return Err(load_err(format!("{spec} has no export `{}`", n.original)));
+                }
+            }
+            program.imports.remove(idx);
         }
 
         // Resolve and load imports depth-first. `ImportSource::Path` resolves +
@@ -3177,6 +3236,65 @@ mod tests {
                     fn main() -> Int64 { return wanted() + helper() }";
         let e = load_err(root, &[("lib.vyrn", lib)]);
         assert!(e.contains("not imported here"), "{e}");
+    }
+
+    #[test]
+    fn std_result_and_option_imports_are_validated_noops() {
+        // RFC-0062: importing the ambient builtins by name from `std/result` /
+        // `std/option` is a no-op — no file is loaded, the names keep resolving
+        // to the builtins, and the program runs exactly as it would ambiently.
+        let root = "import { Result, Ok, Err } from \"std/result\" \
+                    import { Option, Some, None } from \"std/option\" \
+                    fn find(x: Int64) -> Result<Int64, String> { \
+                        if x > 0 { return Ok(x) } return Err(\"neg\") } \
+                    fn opt(x: Bool) -> Option<Int64> { \
+                        if x { return Some(7) } return None } \
+                    fn main() -> Int64 { \
+                        let r = match find(5) { Ok(v) => v, Err(e) => 0 } \
+                        let o = match opt(true) { Some(n) => n, None => 0 } \
+                        return r + o }";
+        assert_eq!(run_multi(root, &[]).unwrap(), 12);
+    }
+
+    #[test]
+    fn std_result_ambient_use_without_the_import_still_works() {
+        // The import is opt-in style, not a requirement: the same program runs
+        // without importing the names (they were always ambient).
+        let root = "fn find(x: Int64) -> Result<Int64, String> { \
+                        if x > 0 { return Ok(x) } return Err(\"neg\") } \
+                    fn main() -> Int64 { return match find(5) { Ok(v) => v, Err(e) => 0 } }";
+        assert_eq!(run_multi(root, &[]).unwrap(), 5);
+    }
+
+    #[test]
+    fn std_result_unknown_export_is_rejected() {
+        let root = "import { Result, Foo } from \"std/result\" \
+                    fn main() -> Int64 { return 0 }";
+        let e = load_err(root, &[]);
+        assert!(e.contains("std/result has no export `Foo`"), "{e}");
+    }
+
+    #[test]
+    fn std_option_rejects_a_result_only_export() {
+        // Each module's export list is fixed and distinct — `Result` is not an
+        // export of `std/option`.
+        let root = "import { Option, Result } from \"std/option\" \
+                    fn main() -> Int64 { return 0 }";
+        let e = load_err(root, &[]);
+        assert!(e.contains("std/option has no export `Result`"), "{e}");
+    }
+
+    #[test]
+    fn std_result_namespace_import_is_rejected() {
+        // `import * as r from "std/result"` would create a second spelling
+        // (`r.Ok`) for a builtin — rejected.
+        let root = "import * as r from \"std/result\" \
+                    fn main() -> Int64 { return 0 }";
+        let e = load_err(root, &[]);
+        assert!(
+            e.contains("cannot be imported as a namespace"),
+            "{e}"
+        );
     }
 
     #[test]
