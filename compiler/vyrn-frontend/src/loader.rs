@@ -1747,7 +1747,7 @@ impl NsResolver<'_> {
                 inner.insert(var.clone());
                 self.walk_block(body, &mut inner);
             }
-            Stmt::Drop { .. } => {}
+            Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::Expr(e) => self.walk_expr(e, locals),
             Stmt::Region { body, .. } => {
                 let mut inner = locals.clone();
@@ -2295,7 +2295,7 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
                 expr(iter, *line, out);
                 block(body, out);
             }
-            Stmt::Drop { .. } => {}
+            Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::Expr(e) => expr(e, 0, out),
             Stmt::Region { body, .. } => block(body, out),
         }
@@ -2470,7 +2470,7 @@ fn scope_stmt(s: &Stmt, locals: &mut HashSet<String>, out: &mut Vec<(String, usi
             inner.insert(var.clone());
             scope_block(body, &mut inner, out);
         }
-        Stmt::Drop { .. } => {}
+        Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
         Stmt::Expr(e) => scope_expr(e, 0, locals, out),
         Stmt::Region { body, .. } => {
             let mut inner = locals.clone();
@@ -2830,7 +2830,7 @@ fn rewrite_stmt(s: &mut Stmt, map: &HashMap<String, String>, ns: &HashSet<String
             rewrite_expr(iter, map, ns);
             rewrite_block(body, map, ns);
         }
-        Stmt::Drop { .. } => {}
+        Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
         Stmt::Expr(e) => rewrite_expr(e, map, ns),
         Stmt::Region { body, .. } => rewrite_block(body, map, ns),
     }

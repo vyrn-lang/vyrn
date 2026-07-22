@@ -392,6 +392,7 @@ fn check_accum_full(
         impls: &impls,
         cur_bounds: RefCell::new(HashMap::new()),
         region_floor: RefCell::new(Vec::new()),
+        in_loop: RefCell::new(false),
         let_types: RefCell::new(HashMap::new()),
         errors: RefCell::new(Vec::new()),
         globals: RefCell::new(HashMap::new()),
@@ -776,6 +777,12 @@ struct Checker<'a> {
     /// which is also what keeps them out of any backend (gen fn bodies are never
     /// emitted).
     in_gen: RefCell<bool>,
+    /// True while checking the body of a `for`/`while`/`while let` loop
+    /// (RFC-0060). `break`/`continue` are legal only when this is set; elsewhere
+    /// they are a checker error. Saved/restored around each loop body and reset
+    /// to `false` when descending into a lambda body (a loop does not extend
+    /// across a function boundary).
+    in_loop: RefCell<bool>,
     /// Names of `extern` (host-provided) functions — not usable as function
     /// values (RFC-0037: closures do not cross the host boundary).
     extern_fns: &'a std::collections::HashSet<String>,
@@ -2006,6 +2013,20 @@ impl<'a> Checker<'a> {
                     None => Ok(false),
                 }
             }
+            Stmt::Break { line } => {
+                if !*self.in_loop.borrow() {
+                    return Err(format!("line {line}: `break` outside a loop"));
+                }
+                // `break` diverges but does not return — it never satisfies the
+                // "returns on all paths" obligation.
+                Ok(false)
+            }
+            Stmt::Continue { line } => {
+                if !*self.in_loop.borrow() {
+                    return Err(format!("line {line}: `continue` outside a loop"));
+                }
+                Ok(false)
+            }
             Stmt::While { cond, body, line } => {
                 let cty = self.expr(cond, scope, None, Some(ret))?;
                 if self.base(&cty) != Type::Bool {
@@ -2013,7 +2034,9 @@ impl<'a> Checker<'a> {
                         "line {line}: `while` condition must be Bool, found {cty}"
                     ));
                 }
+                let prev = self.in_loop.replace(true);
                 self.block(body, ret, scope);
+                self.in_loop.replace(prev);
                 Ok(false)
             }
             Stmt::ForIn {
@@ -2049,7 +2072,9 @@ impl<'a> Checker<'a> {
                         mutable: false,
                     },
                 );
+                let prev = self.in_loop.replace(true);
                 self.block(body, ret, scope);
+                self.in_loop.replace(prev);
                 scope.pop();
                 // A `for` may run zero times, so it never guarantees a return.
                 Ok(false)
@@ -4867,7 +4892,12 @@ impl<'a> Checker<'a> {
                                  use an expression body `|..| expr`"
                             ));
                         }
+                        // A lambda is a function boundary: an enclosing loop does
+                        // not extend into it (`break`/`continue` inside would be a
+                        // checker error), so reset the in-loop flag (RFC-0060).
+                        let prev_loop = self.in_loop.replace(false);
                         let returns = self.block(b, &ret, &mut inner);
+                        self.in_loop.replace(prev_loop);
                         if ret != Type::Unit && !returns {
                             return Err(format!(
                                 "line {lline}: this lambda must return {ret} on all paths"
@@ -5031,7 +5061,10 @@ impl<'a> Checker<'a> {
                 }
             }
             LambdaBody::Block(b) => {
+                // Function boundary — reset the in-loop flag (RFC-0060).
+                let prev_loop = self.in_loop.replace(false);
                 let returns = self.block(b, &ret, &mut inner);
+                self.in_loop.replace(prev_loop);
                 if ret != Type::Unit && !returns {
                     return Err(format!(
                         "line {line}: this lambda must return {ret} on all paths"
@@ -5248,7 +5281,7 @@ impl<'a> Checker<'a> {
                 Ok(())
             }
             Stmt::Return { value: Some(e), .. } => self.captures_expr(e, outer, locals),
-            Stmt::Return { value: None, .. } => Ok(()),
+            Stmt::Return { value: None, .. } | Stmt::Break { .. } | Stmt::Continue { .. } => Ok(()),
             Stmt::Expr(e) => self.captures_expr(e, outer, locals),
             Stmt::If {
                 cond,
@@ -5844,7 +5877,7 @@ fn contains_spawn(b: &Block) -> bool {
             Stmt::While { cond, body, .. } => expr_contains_spawn(cond) || contains_spawn(body),
             Stmt::ForIn { iter, body, .. } => expr_contains_spawn(iter) || contains_spawn(body),
             Stmt::Region { body, .. } => contains_spawn(body),
-            Stmt::Drop { .. } => false,
+            Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => false,
         }
     }
     b.stmts.iter().any(stmt)
@@ -6373,6 +6406,7 @@ fn global_ref_block(
         }
         Stmt::Drop { name, .. } => is_global(name),
         Stmt::Region { body, .. } => global_ref_block(body, globals, local),
+        Stmt::Break { .. } | Stmt::Continue { .. } => false,
     })
 }
 
@@ -6609,7 +6643,7 @@ fn calls_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
             calls_expr(value, out);
         }
         Stmt::Region { body, .. } => calls_block(body, out),
-        Stmt::Drop { .. } => {}
+        Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
     }
 }
 fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
@@ -6694,6 +6728,37 @@ mod tests {
     #[test]
     fn accepts_valid_program() {
         assert!(check_src("fn main() -> Int64 { let x = 2 + 3; print(x); return x; }").is_ok());
+    }
+
+    #[test]
+    fn break_continue_only_inside_loops() {
+        // Legal inside `for`/`while` bodies.
+        assert!(check_src(
+            "fn main() -> Int64 { for x in [1, 2] { if x == 2 { break } continue } return 0 }"
+        )
+        .is_ok());
+        // `break` at a function's top level is an error.
+        let b = check_src("fn main() -> Int64 { break return 0 }").unwrap_err();
+        assert!(b.contains("`break` outside a loop"), "{b}");
+        // `continue` outside a loop is an error.
+        let c = check_src("fn main() -> Int64 { continue return 0 }").unwrap_err();
+        assert!(c.contains("`continue` outside a loop"), "{c}");
+        // A loop does not extend into a lambda — a `break` inside is an error.
+        let l = check_src(
+            "fn ap(f: fn(Int64) -> Int64) -> Int64 { return f(1) } \
+             fn main() -> Int64 { while true { let r = ap(|x| { break }) } return 0 }",
+        )
+        .unwrap_err();
+        assert!(l.contains("`break` outside a loop"), "{l}");
+    }
+
+    #[test]
+    fn remainder_on_floats_gets_the_integer_only_hint() {
+        let e = check_src("fn main() -> Int64 { let a = 1.5 % 2.0 return 0 }").unwrap_err();
+        assert!(
+            e.contains("no `%` on Float64") && e.contains("integer remainder only"),
+            "{e}"
+        );
     }
 
     // ---- module_state_use (RFC-0025, the `--workers` gate) ----------------

@@ -141,55 +141,74 @@ impl MoveCheck<'_> {
         self.block(&f.body, &mut consumed, &mut scope);
     }
 
-    fn block(&self, b: &Block, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) {
+    /// Returns whether this block **diverges** — every path out of it leaves via
+    /// `return`/`break`/`continue` (RFC-0060). A statement after a diverging one
+    /// is unreachable, so it is not checked (use-after-move there is not an
+    /// error), and its consumptions never flow to the block's exit.
+    fn block(&self, b: &Block, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) -> bool {
         scope.push(HashSet::new());
+        let mut diverged = false;
         for s in &b.stmts {
-            if let Err(msg) = self.stmt(s, consumed, scope) {
-                self.errors.borrow_mut().push(msg);
-                // Keep going: the statement's sub-expression check ran before any
-                // mutation, so `consumed`/`scope` are still consistent for the
-                // next statement.
+            if diverged {
+                // Unreachable after a `return`/`break`/`continue`: skip it
+                // (the `return` precedent — code after it is unreachable-clean).
+                break;
+            }
+            match self.stmt(s, consumed, scope) {
+                Ok(d) => diverged = d,
+                Err(msg) => {
+                    self.errors.borrow_mut().push(msg);
+                    // Keep going: the statement's sub-expression check ran before
+                    // any mutation, so state is consistent for the next statement.
+                }
             }
         }
         scope.pop();
+        diverged
     }
 
     fn in_scope(scope: &[HashSet<String>], name: &str) -> bool {
         scope.iter().any(|f| f.contains(name))
     }
 
+    /// Returns whether this statement **diverges** (leaves via
+    /// `return`/`break`/`continue` on every path) — see [`MoveCheck::block`].
     fn stmt(
         &self,
         s: &Stmt,
         consumed: &mut Consumed,
         scope: &mut Vec<HashSet<String>>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         match s {
             Stmt::Let { name, value, .. } => {
                 self.expr(value, consumed, scope)?;
                 consumed.remove(name); // a fresh binding is alive again
                 scope.last_mut().unwrap().insert(name.clone());
-                Ok(())
+                Ok(false)
             }
             Stmt::Assign { name, value, .. } => {
                 self.expr(value, consumed, scope)?;
                 consumed.remove(name); // reassignment revives it
-                Ok(())
+                Ok(false)
             }
-            Stmt::SetField { value, .. } => self.expr(value, consumed, scope),
+            Stmt::SetField { value, .. } => self.expr(value, consumed, scope).map(|_| false),
             // `a[i] = v` — the stored value is consumed like a `push` argument
             // (neither `push` nor the store marks it consumed, since no user
             // `consume` capability is involved), so just check both sub-exprs.
             Stmt::IndexSet { index, value, .. } => {
                 self.expr(index, consumed, scope)?;
-                self.expr(value, consumed, scope)
+                self.expr(value, consumed, scope)?;
+                Ok(false)
             }
             Stmt::Return { value, .. } => {
                 if let Some(e) = value {
                     self.expr(e, consumed, scope)?;
                 }
-                Ok(())
+                Ok(true)
             }
+            // `break`/`continue` (RFC-0060) consume nothing but terminate the
+            // path — code after them in the same block is unreachable.
+            Stmt::Break { .. } | Stmt::Continue { .. } => Ok(true),
             Stmt::If {
                 cond,
                 then_block,
@@ -198,16 +217,27 @@ impl MoveCheck<'_> {
             } => {
                 self.expr(cond, consumed, scope)?;
                 let mut then_c = consumed.clone();
-                self.block(then_block, &mut then_c, scope);
+                let then_div = self.block(then_block, &mut then_c, scope);
                 let mut else_c = consumed.clone();
-                if let Some(eb) = else_block {
-                    self.block(eb, &mut else_c, scope);
+                let else_div = match else_block {
+                    Some(eb) => self.block(eb, &mut else_c, scope),
+                    None => false,
+                };
+                // may-consume, but a branch that DIVERGES (break/continue/return)
+                // carries its consumptions out the exit path, not to the code
+                // after the `if` — so a value moved only on a break-path is not
+                // considered moved on the fall-through (RFC-0060).
+                if !then_div {
+                    for (k, v) in then_c {
+                        consumed.entry(k).or_insert(v);
+                    }
                 }
-                // may-consume: consumed on either path ⇒ consumed afterward
-                for (k, v) in then_c.into_iter().chain(else_c) {
-                    consumed.entry(k).or_insert(v);
+                if !else_div {
+                    for (k, v) in else_c {
+                        consumed.entry(k).or_insert(v);
+                    }
                 }
-                Ok(())
+                Ok(then_div && else_div)
             }
             Stmt::While { cond, body, .. } => {
                 // The condition re-runs on every iteration, so consumption in it
@@ -216,45 +246,29 @@ impl MoveCheck<'_> {
                 // in-loop map and run the same next-iteration check.
                 let mut body_c = consumed.clone();
                 self.expr(cond, &mut body_c, scope)?;
-                self.block(body, &mut body_c, scope);
-                for (k, (line, consumer)) in &body_c {
-                    if !consumed.contains_key(k) && Self::in_scope(scope, k) {
-                        return Err(format!(
-                            "line {line}: `{k}` is consumed by {consumer} inside a loop, \
-                             so it would be used again on the next iteration"
-                        ));
-                    }
-                }
+                let body_div = self.block(body, &mut body_c, scope);
+                self.check_loop_reuse(consumed, &body_c, scope, body_div)?;
                 for (k, v) in body_c {
                     consumed.entry(k).or_insert(v);
                 }
-                Ok(())
+                Ok(false)
             }
             // A `for` loop consumes like a `while`: the iterable is read once,
             // and consuming an outer binding in the body is a use-again error.
             Stmt::ForIn { iter, body, .. } => {
                 self.expr(iter, consumed, scope)?;
                 let mut body_c = consumed.clone();
-                self.block(body, &mut body_c, scope);
-                for (k, (line, consumer)) in &body_c {
-                    if !consumed.contains_key(k) && Self::in_scope(scope, k) {
-                        return Err(format!(
-                            "line {line}: `{k}` is consumed by {consumer} inside a loop, \
-                             so it would be used again on the next iteration"
-                        ));
-                    }
-                }
+                let body_div = self.block(body, &mut body_c, scope);
+                self.check_loop_reuse(consumed, &body_c, scope, body_div)?;
                 for (k, v) in body_c {
                     consumed.entry(k).or_insert(v);
                 }
-                Ok(())
+                Ok(false)
             }
-            Stmt::Expr(e) => self.expr(e, consumed, scope),
-            // A `region` is an ordinary nested block for move checking.
-            Stmt::Region { body, .. } => {
-                self.block(body, consumed, scope);
-                Ok(())
-            }
+            Stmt::Expr(e) => self.expr(e, consumed, scope).map(|_| false),
+            // A `region` is an ordinary nested block for move checking; it
+            // diverges iff its body does (a `break` inside it exits the loop).
+            Stmt::Region { body, .. } => Ok(self.block(body, consumed, scope)),
             // `drop name;` consumes the binding: using it afterward is a
             // use-after-drop, caught by the same machinery as `consume`.
             Stmt::Drop { name, line } => {
@@ -265,9 +279,35 @@ impl MoveCheck<'_> {
                     ));
                 }
                 consumed.insert(name.clone(), (*line, "`drop`".to_string()));
-                Ok(())
+                Ok(false)
             }
         }
+    }
+
+    /// The loop-body reuse check: a variable consumed in the body (`body_c`) that
+    /// was live before the loop would be consumed *again* on the next iteration.
+    /// Skipped when the body **diverges unconditionally** (`body_div`) — it then
+    /// runs at most once (a straight-line `consume(x); break`), so the
+    /// consumption is legal and flows out to the enclosing scope instead.
+    fn check_loop_reuse(
+        &self,
+        consumed: &Consumed,
+        body_c: &Consumed,
+        scope: &[HashSet<String>],
+        body_div: bool,
+    ) -> Result<(), String> {
+        if body_div {
+            return Ok(());
+        }
+        for (k, (line, consumer)) in body_c {
+            if !consumed.contains_key(k) && Self::in_scope(scope, k) {
+                return Err(format!(
+                    "line {line}: `{k}` is consumed by {consumer} inside a loop, \
+                     so it would be used again on the next iteration"
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn expr(
@@ -580,6 +620,45 @@ mod tests {
                    fn take(t: consume T) -> Int64 { return t.id; } \
                    fn use_it() -> Int64 { let g = T { id: 2 } return take(g); } \
                    fn main() -> Int64 { return 0; }";
+        assert!(run(src).is_ok(), "{:?}", run(src));
+    }
+
+    #[test]
+    fn break_path_consume_rejected_after_loop() {
+        // Consumed on the way out of the loop, then used after it — rejected.
+        let src = "type T = { id: Int64 }; \
+                   fn take(t: consume T) -> Int64 { return t.id; } \
+                   fn main() -> Int64 { let x = T { id: 1 }; \
+                       for i in [0, 1] { let a = take(x); break } \
+                       return take(x); }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains("already consumed"), "{e}");
+    }
+
+    #[test]
+    fn consume_on_break_branch_not_moved_on_fall_through() {
+        // `x` is consumed only on the branch that breaks; the fall-through path
+        // never consumed it, so a later read in the same body is fine (RFC-0060).
+        let src = "type T = { id: Int64 }; \
+                   fn take(t: consume T) -> Int64 { return t.id; } \
+                   fn peek(t: read T) -> Int64 { return t.id; } \
+                   fn main() -> Int64 { let x = T { id: 1 }; let mut s = 0; \
+                       for i in [0, 1, 2] { \
+                           if i == 2 { let a = take(x); break } \
+                           s = s + peek(x) } \
+                       return s; }";
+        assert!(run(src).is_ok(), "{:?}", run(src));
+    }
+
+    #[test]
+    fn use_after_break_is_unreachable_clean() {
+        // The second `take(x)` is after an unconditional `break` — unreachable, so
+        // it is not a use-after-consume (RFC-0060: code after break is dead).
+        let src = "type T = { id: Int64 }; \
+                   fn take(t: consume T) -> Int64 { return t.id; } \
+                   fn main() -> Int64 { let x = T { id: 1 }; \
+                       while true { break let a = take(x); let b = take(x); } \
+                       return 0; }";
         assert!(run(src).is_ok(), "{:?}", run(src));
     }
 

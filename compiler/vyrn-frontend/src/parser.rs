@@ -2192,6 +2192,16 @@ impl Parser {
                 self.eat_semi();
                 Ok(Stmt::Return { value, line })
             }
+            Tok::Break => {
+                self.advance();
+                self.eat_semi();
+                Ok(Stmt::Break { line })
+            }
+            Tok::Continue => {
+                self.advance();
+                self.eat_semi();
+                Ok(Stmt::Continue { line })
+            }
             Tok::If => self.if_stmt(line),
             Tok::While => {
                 self.advance();
@@ -3410,7 +3420,14 @@ impl Parser {
         // give the targeted message before `expr()` produces a generic one.
         if matches!(
             self.peek(),
-            Tok::Let | Tok::Return | Tok::While | Tok::For | Tok::Region | Tok::Drop
+            Tok::Let
+                | Tok::Return
+                | Tok::While
+                | Tok::For
+                | Tok::Region
+                | Tok::Drop
+                | Tok::Break
+                | Tok::Continue
         ) {
             return Err(Diagnostic::error(
                 self.line(),

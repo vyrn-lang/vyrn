@@ -1922,6 +1922,26 @@ pub fn emit(program: &Program) -> Result<String, String> {
     Ok(out)
 }
 
+/// One active loop's `break`/`continue` targets (RFC-0060). Captured when a
+/// loop body begins emitting; a `break`/`continue` inside reclaims every scope
+/// pushed since (drops for `drop_stack[drop_boundary..]`, plus a `region_exit`
+/// for each region opened past `region_depth`) before branching.
+#[derive(Clone)]
+struct LoopCtx {
+    /// Label to branch to on `break` (the loop's exit block).
+    break_label: String,
+    /// Label to branch to on `continue` (the condition test, or a `for`'s latch
+    /// block that steps the index then re-tests).
+    continue_label: String,
+    /// `drop_stack` depth at loop-body entry: frames at/above this index are the
+    /// body's own scopes, reclaimed on break/continue.
+    drop_boundary: usize,
+    /// `region_depth` at loop-body entry: regions opened past this are exited on
+    /// break/continue (the interpreter decrements its region depth on the same
+    /// paths, so native must too — keeping the fixed region stack balanced).
+    region_depth: usize,
+}
+
 /// Per-function code generator.
 struct Gen<'a> {
     tmp: usize,
@@ -1964,6 +1984,10 @@ struct Gen<'a> {
     droppable_map: &'a HashMap<String, HashMap<usize, DropKind>>,
     /// Per-block stack of (slot register, kind) to reclaim when the block exits.
     drop_stack: Vec<Vec<(String, DropKind)>>,
+    /// Active loop targets for `break`/`continue` (RFC-0060), innermost last.
+    /// A break/continue reclaims every scope pushed since loop-body entry (drops
+    /// + region exits) before branching to the loop's exit / continue target.
+    loop_ctx: Vec<LoopCtx>,
     /// The logging threshold ordinal (RFC-0008); calls below it emit no output.
     log_level: usize,
     /// Where log records are written (RFC-0008).
@@ -2106,6 +2130,7 @@ impl<'a> Gen<'a> {
             droppable: HashMap::new(),
             droppable_map,
             drop_stack: Vec::new(),
+            loop_ctx: Vec::new(),
             log_level: DEFAULT_LOG_LEVEL,
             log_sink: LogSink::Stderr,
             protocol_methods: HashMap::new(),
@@ -2935,6 +2960,31 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Reclaim the innermost `drop_stack[boundary..]` frames (innermost first)
+    /// WITHOUT popping them — the drop half of a `break`/`continue` exit
+    /// (RFC-0060). The frames stay in place so the unwinding `gen_block`s see
+    /// `terminated` and skip their own fall-through frees (no double free), just
+    /// like `emit_all_drops` does for `return`.
+    fn emit_drops_above(&mut self, boundary: usize) {
+        let frames: Vec<Vec<(String, DropKind)>> =
+            self.drop_stack[boundary..].iter().rev().cloned().collect();
+        for frame in frames {
+            for (slot, kind) in frame.iter().rev() {
+                self.emit_drop(slot, *kind);
+            }
+        }
+    }
+
+    /// The full `break`/`continue` scope cleanup for the innermost loop: drop the
+    /// body's owned temporaries, then exit every region opened inside the body
+    /// (RFC-0060). Emits nothing structural — the caller adds the branch.
+    fn emit_loop_exit_cleanup(&mut self, ctx: &LoopCtx) {
+        self.emit_drops_above(ctx.drop_boundary);
+        for _ in ctx.region_depth..self.region_depth {
+            self.emit("call void @__vyrn_region_exit()".into());
+        }
+    }
+
     /// Copy each `modify` parameter's current value back through its incoming
     /// pointer, so mutations are visible to the caller (call-by-value-result).
     /// Emitted before every function exit.
@@ -3234,12 +3284,43 @@ impl<'a> Gen<'a> {
                 self.emit_term(format!("br i1 {c}, label %{body_l}, label %{end_l}"));
 
                 self.emit_label(&body_l);
+                self.loop_ctx.push(LoopCtx {
+                    break_label: end_l.clone(),
+                    continue_label: cond_l.clone(),
+                    drop_boundary: self.drop_stack.len(),
+                    region_depth: self.region_depth,
+                });
                 self.gen_block(body)?;
+                self.loop_ctx.pop();
                 if !self.terminated {
                     self.emit_term(format!("br label %{cond_l}"));
                 }
 
                 self.emit_label(&end_l);
+                Ok(())
+            }
+            // `break`/`continue` (RFC-0060): reclaim the body scopes exactly as a
+            // normal iteration end would (drops + region exits), then branch to
+            // the innermost loop's exit / continue target. The checker guarantees
+            // a live loop context.
+            Stmt::Break { .. } => {
+                let ctx = self
+                    .loop_ctx
+                    .last()
+                    .cloned()
+                    .ok_or("`break` outside a loop reached codegen")?;
+                self.emit_loop_exit_cleanup(&ctx);
+                self.emit_term(format!("br label %{}", ctx.break_label));
+                Ok(())
+            }
+            Stmt::Continue { .. } => {
+                let ctx = self
+                    .loop_ctx
+                    .last()
+                    .cloned()
+                    .ok_or("`continue` outside a loop reached codegen")?;
+                self.emit_loop_exit_cleanup(&ctx);
+                self.emit_term(format!("br label %{}", ctx.continue_label));
                 Ok(())
             }
             Stmt::ForIn { var, iter, body, .. } => {
@@ -3293,6 +3374,9 @@ impl<'a> Gen<'a> {
                 self.emit(format!("store i64 0, ptr {idx}"));
                 let cond_l = self.fresh_label("fcond");
                 let body_l = self.fresh_label("fbody");
+                // `continue` targets the latch (steps the index, then re-tests),
+                // so it re-evaluates the loop as a normal iteration end would.
+                let latch_l = self.fresh_label("flatch");
                 let end_l = self.fresh_label("fend");
                 self.emit_term(format!("br label %{cond_l}"));
 
@@ -3327,17 +3411,33 @@ impl<'a> Gen<'a> {
                 self.drop_stack.push(Vec::new());
                 let vslot = self.declare(var, &elem);
                 self.emit(format!("store {ell} {ev}, ptr {vslot}"));
+                // The loop-var frame is already on the stack; `drop_boundary` is
+                // the body's own frame (pushed next by `gen_block`), so a
+                // break/continue drops the body scopes but not the borrowed
+                // (empty) loop-var frame.
+                self.loop_ctx.push(LoopCtx {
+                    break_label: end_l.clone(),
+                    continue_label: latch_l.clone(),
+                    drop_boundary: self.drop_stack.len(),
+                    region_depth: self.region_depth,
+                });
                 self.gen_block(body)?;
+                self.loop_ctx.pop();
                 self.drop_stack.pop();
                 self.scope.pop();
                 if !self.terminated {
-                    let i2 = self.fresh_tmp();
-                    let inext = self.fresh_tmp();
-                    self.emit(format!("{i2} = load i64, ptr {idx}"));
-                    self.emit(format!("{inext} = add i64 {i2}, 1"));
-                    self.emit(format!("store i64 {inext}, ptr {idx}"));
-                    self.emit_term(format!("br label %{cond_l}"));
+                    self.emit_term(format!("br label %{latch_l}"));
                 }
+
+                // latch: step the index and re-test (fall-through and `continue`
+                // both land here).
+                self.emit_label(&latch_l);
+                let i2 = self.fresh_tmp();
+                let inext = self.fresh_tmp();
+                self.emit(format!("{i2} = load i64, ptr {idx}"));
+                self.emit(format!("{inext} = add i64 {i2}, 1"));
+                self.emit(format!("store i64 {inext}, ptr {idx}"));
+                self.emit_term(format!("br label %{cond_l}"));
 
                 self.emit_label(&end_l);
                 Ok(())
@@ -4806,7 +4906,10 @@ impl<'a> Gen<'a> {
                 Stmt::Region { body, .. } => {
                     self.captures_of_block(body, &mut locals.clone(), out, seen)
                 }
-                Stmt::Return { value: None, .. } | Stmt::Drop { .. } => {}
+                Stmt::Return { value: None, .. }
+                | Stmt::Drop { .. }
+                | Stmt::Break { .. }
+                | Stmt::Continue { .. } => {}
             }
         }
     }
@@ -9139,7 +9242,7 @@ fn collect_regex_stmt(s: &Stmt, out: &mut Vec<String>) {
             collect_regex_expr(index, out);
             collect_regex_expr(value, out);
         }
-        Stmt::Drop { .. } => {}
+        Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
         Stmt::Expr(e) => collect_regex_expr(e, out),
         Stmt::Region { body, .. } => collect_regex_block(body, out),
     }
@@ -9250,7 +9353,7 @@ fn collect_strings_stmt(s: &Stmt, out: &mut Vec<String>, types: &HashMap<String,
             collect_strings_expr(index, out, types);
             collect_strings_expr(value, out, types);
         }
-        Stmt::Drop { .. } => {}
+        Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
         Stmt::Expr(e) => collect_strings_expr(e, out, types),
         Stmt::Region { body, .. } => collect_strings_block(body, out, types),
     }
@@ -10003,6 +10106,47 @@ mod tests {
             !rem_ir.contains("-9223372036854775808"),
             "`%` emits no MIN overflow compare: {rem_ir}"
         );
+    }
+
+    #[test]
+    fn break_and_continue_run_scope_drops_before_branching() {
+        // A loop body that owns a heap string (`"x" + "y"`) drops it on EVERY
+        // exit path (RFC-0060): the fall-through, the `continue`, and the final
+        // loop exit each free it — so the free count exceeds the single
+        // fall-through free a drop-less break/continue would emit.
+        let cont = check(
+            "fn main() -> Int64 { let mut i = 0 \
+             while i < 3 { let s = \"x\" + \"y\" i = i + 1 if i == 1 { continue } } return 0 }",
+        )
+        .unwrap();
+        let ir = emit(&cont).unwrap();
+        let frees = ir.matches("call void @free(").count();
+        assert!(frees >= 2, "continue path must also drop `s`: {frees} frees");
+
+        // A `break` past an owned local drops it on the break edge too.
+        let brk = check(
+            "fn main() -> Int64 { \
+             while true { let s = \"a\" + \"b\" break } return 0 }",
+        )
+        .unwrap();
+        let bir = emit(&brk).unwrap();
+        assert!(
+            bir.contains("call void @free("),
+            "break must drop the body's owned string: {bir}"
+        );
+    }
+
+    #[test]
+    fn continue_in_a_for_targets_a_latch_that_steps_the_index() {
+        // `continue` in a `for` branches to the latch block (which increments the
+        // index and re-tests) — not straight back to the condition (RFC-0060).
+        let p = check(
+            "fn main() -> Int64 { let mut n = 0 \
+             for i in [0, 1, 2] { if i == 1 { continue } n = n + 1 } return n }",
+        )
+        .unwrap();
+        let ir = emit(&p).unwrap();
+        assert!(ir.contains("flatch"), "for-loop emits a latch block: {ir}");
     }
 
     #[test]

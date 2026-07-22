@@ -562,6 +562,12 @@ pub enum Stmt {
     },
     /// `return [expr];`
     Return { value: Option<Expr>, line: usize },
+    /// `break` — exit the innermost enclosing `for`/`while` loop (RFC-0060).
+    /// A checker error outside a loop. Unlabeled only.
+    Break { line: usize },
+    /// `continue` — skip to the innermost enclosing loop's next iteration
+    /// (RFC-0060). A checker error outside a loop. Unlabeled only.
+    Continue { line: usize },
     /// `if cond { .. } [else { .. }]`
     If {
         cond: Expr,

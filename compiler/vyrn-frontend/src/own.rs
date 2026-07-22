@@ -348,6 +348,9 @@ impl Analysis<'_> {
                 self.visit(value);
             }
             Stmt::Return { value, .. } => self.ret(value.as_ref()),
+            // `break`/`continue` (RFC-0060) touch no bindings — nothing escapes.
+            // Drop emission for the exited scopes is handled by codegen/interp.
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::If {
                 cond,
                 then_block,

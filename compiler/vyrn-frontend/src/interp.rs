@@ -346,6 +346,11 @@ impl From<&str> for Ctrl {
 enum Flow {
     Normal,
     Return(Val),
+    /// `break` — exit the innermost loop (RFC-0060). Propagates up through
+    /// nested blocks/regions (running their drops) until a loop catches it.
+    Break,
+    /// `continue` — skip to the innermost loop's next iteration (RFC-0060).
+    Continue,
 }
 
 /// Render a scalar value with the canonical `toString`/`print` formatting:
@@ -1645,6 +1650,11 @@ impl<'a> Interp<'a> {
                     LambdaBody::Block(b) => match self.block(b, &mut scope) {
                         Ok(Flow::Return(v)) => v,
                         Ok(Flow::Normal) => Val::Unit,
+                        // `break`/`continue` outside a loop are a checker error,
+                        // so they never legitimately reach a body top level.
+                        Ok(Flow::Break | Flow::Continue) => {
+                            return Err("internal: `break`/`continue` escaped a body".into())
+                        }
                         Err(Ctrl::Return(v)) => v,
                         Err(e) => return Err(e),
                     },
@@ -1693,6 +1703,10 @@ impl<'a> Interp<'a> {
         let ret = match self.block(&f.body, &mut scope) {
             Ok(Flow::Return(v)) => v,
             Ok(Flow::Normal) => Val::Unit,
+            // `break`/`continue` outside a loop are a checker error.
+            Ok(Flow::Break | Flow::Continue) => {
+                return Err("internal: `break`/`continue` escaped a body".into())
+            }
             Err(Ctrl::Return(v)) => v,
             Err(e) => return Err(e),
         };
@@ -1733,10 +1747,14 @@ impl<'a> Interp<'a> {
         for stmt in &block.stmts {
             let flow = self.stmt(stmt, scope);
             match flow {
-                Ok(Flow::Return(v)) => {
+                // Any early exit — `return`, `break`, or `continue` — runs this
+                // frame's drops on the way out, exactly as a normal frame exit
+                // does (RFC-0060: break/continue drop what a normal iteration
+                // end would). The signal then propagates to the enclosing loop.
+                Ok(flow @ (Flow::Return(_) | Flow::Break | Flow::Continue)) => {
                     self.run_drops(&drops)?;
                     scope.pop();
-                    return Ok(Flow::Return(v));
+                    return Ok(flow);
                 }
                 Ok(Flow::Normal) => {
                     if let Stmt::Let { name, .. } = stmt {
@@ -1996,10 +2014,16 @@ impl<'a> Interp<'a> {
                     Ok(Flow::Normal)
                 }
             }
+            Stmt::Break { .. } => Ok(Flow::Break),
+            Stmt::Continue { .. } => Ok(Flow::Continue),
             Stmt::While { cond, body, .. } => {
                 while self.as_bool(self.expr(cond, scope)?)? {
-                    if let Flow::Return(v) = self.block(body, scope)? {
-                        return Ok(Flow::Return(v));
+                    match self.block(body, scope)? {
+                        Flow::Return(v) => return Ok(Flow::Return(v)),
+                        Flow::Break => break,
+                        // `continue` re-tests the condition; `Normal` falls
+                        // through to the same place.
+                        Flow::Continue | Flow::Normal => {}
                     }
                 }
                 Ok(Flow::Normal)
@@ -2023,8 +2047,10 @@ impl<'a> Interp<'a> {
                         .insert(var.clone(), Slot::untyped(item));
                     let flow = self.block(body, scope);
                     scope.pop();
-                    if let Flow::Return(v) = flow? {
-                        return Ok(Flow::Return(v));
+                    match flow? {
+                        Flow::Return(v) => return Ok(Flow::Return(v)),
+                        Flow::Break => break,
+                        Flow::Continue | Flow::Normal => {}
                     }
                 }
                 Ok(Flow::Normal)
@@ -5733,6 +5759,52 @@ mod tests {
                  let zero: Int8 = 0 let d = zero - 1 \
                  let r = min % d return Int64(r) }";
         assert_eq!(run(s).unwrap(), 0);
+    }
+
+    #[test]
+    fn break_exits_the_innermost_loop() {
+        // Sum 0..10 but stop at 5: 0+1+2+3+4 = 10.
+        let src = "fn main() -> Int64 { \
+                   let mut s = 0 let mut i = 0 \
+                   while i < 10 { if i == 5 { break } s = s + i i = i + 1 } \
+                   return s }";
+        assert_eq!(run(src).unwrap(), 10);
+    }
+
+    #[test]
+    fn continue_skips_to_the_next_iteration() {
+        // Sum only the even numbers in 0..6: 0+2+4 = 6.
+        let src = "fn main() -> Int64 { \
+                   let mut s = 0 \
+                   for i in [0, 1, 2, 3, 4, 5] { if i % 2 == 1 { continue } s = s + i } \
+                   return s }";
+        assert_eq!(run(src).unwrap(), 6);
+    }
+
+    #[test]
+    fn break_exits_only_the_inner_of_nested_loops() {
+        // Inner breaks immediately; outer runs 3 times adding 1 each → 3.
+        let src = "fn main() -> Int64 { \
+                   let mut n = 0 \
+                   for a in [0, 1, 2] { \
+                       for b in [0, 1, 2] { break n = n + 100 } \
+                       n = n + 1 } \
+                   return n }";
+        assert_eq!(run(src).unwrap(), 3);
+    }
+
+    #[test]
+    fn continue_under_a_region_still_frees_the_region() {
+        // A region inside the loop body, exited early by `continue` every other
+        // iteration — the interpreter decrements its region depth on that path
+        // (so 100 iterations never exceed the 64-region cap). Just must not trap.
+        let src = "fn main() -> Int64 { \
+                   let mut n = 0 let mut i = 0 \
+                   while i < 100 { \
+                       i = i + 1 \
+                       region { if i % 2 == 0 { continue } n = n + 1 } } \
+                   return n }";
+        assert_eq!(run(src).unwrap(), 50);
     }
 
     #[test]

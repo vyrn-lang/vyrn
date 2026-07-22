@@ -1071,6 +1071,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                 "match" => Tok::Match,
                 "region" => Tok::Region,
                 "spawn" => Tok::Spawn,
+                "break" => Tok::Break,
+                "continue" => Tok::Continue,
                 _ => Tok::Ident(text),
             };
             out.push(Token { tok, line, col });
