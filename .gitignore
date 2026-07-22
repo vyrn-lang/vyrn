@@ -13,8 +13,11 @@ examples/data/*.tmp.txt
 examples/data/*.store.json
 examples/data/*.store.json.tmp
 # Runtime store written by the `examples/bin` pastebin (persistence dogfood) —
-# it is app data, not source; recreated on demand by the running server
-examples/bin/data/
+# app data, not source. The DIRECTORY must exist in a fresh clone (`writeFile`
+# does not create parents, and the language has no mkdir yet), so .gitkeep is
+# tracked while the store files stay ignored.
+examples/bin/data/*
+!examples/bin/data/.gitkeep
 # Browser-demo modules (regenerable via web/build.ps1)
 web/*.wasm
 web/*.shim.c
