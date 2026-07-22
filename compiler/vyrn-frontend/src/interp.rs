@@ -3342,9 +3342,8 @@ impl<'a> Interp<'a> {
                     if y == 0 {
                         return Err("remainder by zero".into());
                     }
-                    if signed && x == min_n && y == -1 {
-                        return Err("integer overflow in division".into());
-                    }
+                    // `MIN % -1 == 0` (RFC-0060): NO trap, unlike `MIN / -1`.
+                    // `wrapping_rem` yields 0 there; raw `%` would panic.
                     mk(if signed {
                         x.wrapping_rem(y)
                     } else {
@@ -3424,10 +3423,9 @@ impl<'a> Interp<'a> {
                     if b == 0 {
                         return Err("remainder by zero".into());
                     }
-                    if a == i64::MIN && b == -1 {
-                        return Err("integer overflow in division".into());
-                    }
-                    Val::Int(a % b)
+                    // `MIN % -1 == 0` (RFC-0060): NO trap, unlike `MIN / -1`.
+                    // `wrapping_rem` yields 0 there; raw `%` would panic on overflow.
+                    Val::Int(a.wrapping_rem(b))
                 }
                 Lt => Val::Bool(a < b),
                 LtEq => Val::Bool(a <= b),
@@ -5688,6 +5686,53 @@ mod tests {
                        let mut d = 0 - 1 \
                        return m / d }";
         assert_eq!(run(ovf).unwrap_err(), "integer overflow in division");
+    }
+
+    #[test]
+    fn remainder_min_neg_one_is_zero_not_a_trap() {
+        // `MIN % -1 == 0` — NO trap (RFC-0060), unlike `MIN / -1`.
+        let src = "fn main() -> Int64 { \
+                       let m = -9223372036854775808 \
+                       let mut d = 0 - 1 \
+                       return m % d }";
+        assert_eq!(run(src).unwrap(), 0);
+    }
+
+    #[test]
+    fn remainder_sign_of_dividend_and_the_division_law() {
+        // Truncated remainder takes the sign of the dividend (C/Rust/LLVM srem).
+        let cases: &[(i64, i64, i64)] = &[
+            (7, 3, 1),
+            (-7, 3, -1),
+            (7, -3, 1),
+            (-7, -3, -1),
+            (0, 5, 0),
+            (9223372036854775807, 2, 1),
+        ];
+        for (a, b, want) in cases {
+            let src = format!("fn main() -> Int64 {{ let a = {a} let b = {b} return a % b }}");
+            assert_eq!(run(&src).unwrap(), *want, "{a} % {b}");
+            // The law: `a == (a / b) * b + a % b` for every non-zero b.
+            let law = format!(
+                "fn main() -> Int64 {{ let a = {a} let b = {b} \
+                 if (a / b) * b + a % b == a {{ return 1 }} return 0 }}"
+            );
+            assert_eq!(run(&law).unwrap(), 1, "law for {a} % {b}");
+        }
+    }
+
+    #[test]
+    fn remainder_on_sized_ints_wraps_and_upholds_the_law() {
+        // UInt8 / Int8: remainder computed at width, sign of dividend for signed.
+        let u = "fn main() -> Int64 { let a: UInt8 = 200 let b: UInt8 = 7 \
+                 let r = a % b return Int64(r) }";
+        assert_eq!(run(u).unwrap(), 200 % 7);
+        // Int8 MIN % -1 == 0, no trap. Build MIN (-128) and -1 by wrapping at width.
+        let s = "fn main() -> Int64 { \
+                 let hi: Int8 = 127 let min = hi + 1 \
+                 let zero: Int8 = 0 let d = zero - 1 \
+                 let r = min % d return Int64(r) }";
+        assert_eq!(run(s).unwrap(), 0);
     }
 
     #[test]

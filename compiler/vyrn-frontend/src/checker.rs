@@ -3132,6 +3132,18 @@ impl<'a> Checker<'a> {
             Rem => {
                 if l == r && matches!(l, Type::Int | Type::IntN { .. }) {
                     Ok(l)
+                } else if matches!(l, Type::Float | Type::Float32)
+                    || matches!(r, Type::Float | Type::Float32)
+                {
+                    // `%` is integer remainder only (RFC-0060); no float modulo.
+                    let f = if matches!(l, Type::Float | Type::Float32) {
+                        &l
+                    } else {
+                        &r
+                    };
+                    Err(format!(
+                        "line {line}: no `%` on {f}; integer remainder only"
+                    ))
                 } else {
                     Err(format!(
                         "line {line}: `%` needs matching integer operands, found {l} and {r}"

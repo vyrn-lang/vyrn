@@ -4356,7 +4356,10 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{z} = icmp eq {ll} {r}, 0"));
                 let msg = if op == BinOp::Div { "@.trap.div0" } else { "@.trap.rem0" };
                 self.trap_if(&z, msg, "div.z");
-                if !unsigned {
+                // Signed `MIN / -1` overflows (no representable quotient) and TRAPS.
+                // `MIN % -1 == 0` does NOT trap (RFC-0060) — its `-1`-divisor guard
+                // below rewrites the divisor so raw `srem MIN, -1` (UB) never runs.
+                if !unsigned && op == BinOp::Div {
                     let bits: u32 = match numty {
                         Type::IntN { bits, .. } => bits.into(),
                         _ => 64,
@@ -4391,7 +4394,18 @@ impl<'a> Gen<'a> {
                 BinOp::Div if unsigned => format!("{t} = udiv {ll} {l}, {r}"),
                 BinOp::Div => format!("{t} = sdiv {ll} {l}, {r}"),
                 BinOp::Rem if unsigned => format!("{t} = urem {ll} {l}, {r}"),
-                BinOp::Rem => format!("{t} = srem {ll} {l}, {r}"),
+                BinOp::Rem => {
+                    // Signed remainder: `x % -1 == 0` for every `x`, and raw
+                    // `srem x, -1` is UB at `x == MIN`. Rewrite a `-1` divisor to
+                    // `1` (whose remainder is always 0) so the result is correct
+                    // everywhere and never UB — `MIN % -1` yields 0, no trap
+                    // (RFC-0060). The zero-divisor trap above still fires first.
+                    let isneg1 = self.fresh_tmp();
+                    let safe = self.fresh_tmp();
+                    self.emit(format!("{isneg1} = icmp eq {ll} {r}, -1"));
+                    self.emit(format!("{safe} = select i1 {isneg1}, {ll} 1, {ll} {r}"));
+                    format!("{t} = srem {ll} {l}, {safe}")
+                }
                 BinOp::Lt if unsigned => format!("{t} = icmp ult {ll} {l}, {r}"),
                 BinOp::Lt => format!("{t} = icmp slt {ll} {l}, {r}"),
                 BinOp::LtEq if unsigned => format!("{t} = icmp ule {ll} {l}, {r}"),
@@ -9964,6 +9978,31 @@ mod tests {
         assert!(ir.contains("@.trap.divovf"), "MIN/-1 guard: {ir}");
         assert!(ir.contains("icmp eq i64"), "guard compare: {ir}");
         assert!(ir.contains("@fputs"), "stderr write: {ir}");
+    }
+
+    #[test]
+    fn remainder_guards_zero_but_not_min_overflow() {
+        // `%` guards divisor-zero (its own `rem0` message) and rewrites a `-1`
+        // divisor via `select` so `MIN % -1` yields 0 with NO trap (RFC-0060) —
+        // it must NOT emit the div-overflow trap that `/` does.
+        let rem = check("fn main() -> Int64 { let mut d = 3; return 10 % d; }").unwrap();
+        let rem_ir = emit(&rem).unwrap();
+        // `%` uses its own zero-trap message and the `select`-based `-1` guard.
+        assert!(rem_ir.contains("br i1 %"), "zero guard branch: {rem_ir}");
+        assert!(rem_ir.contains("select i1"), "-1 divisor guard: {rem_ir}");
+        assert!(rem_ir.contains("srem i64"), "signed remainder: {rem_ir}");
+        // Unlike `/`, `%` never branches to the div-overflow trap. `/` compares
+        // the DIVIDEND to i64::MIN; `%` never emits that MIN compare.
+        let div = check("fn main() -> Int64 { let mut d = 3; return 10 / d; }").unwrap();
+        let div_ir = emit(&div).unwrap();
+        assert!(
+            div_ir.contains("-9223372036854775808"),
+            "`/` compares dividend to MIN: {div_ir}"
+        );
+        assert!(
+            !rem_ir.contains("-9223372036854775808"),
+            "`%` emits no MIN overflow compare: {rem_ir}"
+        );
     }
 
     #[test]

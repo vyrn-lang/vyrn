@@ -101,6 +101,9 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
                     BinOp::Sub => ConstVal::Int(a.wrapping_sub(b)),
                     BinOp::Mul => ConstVal::Int(a.wrapping_mul(b)),
                     BinOp::Div => ConstVal::Int(a.checked_div(b)?),
+                    // `MIN % -1 == 0` (RFC-0060): provable (unlike `MIN / -1`,
+                    // which traps). `%0` stays unprovable via `checked_rem`.
+                    BinOp::Rem if b == -1 => ConstVal::Int(0),
                     BinOp::Rem => ConstVal::Int(a.checked_rem(b)?),
                     BinOp::Lt => ConstVal::Bool(a < b),
                     BinOp::LtEq => ConstVal::Bool(a <= b),

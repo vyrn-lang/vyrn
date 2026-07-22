@@ -53,6 +53,8 @@ pub enum Tok {
     Match,
     Region,
     Spawn,
+    Break,
+    Continue,
 
     // punctuation & operators
     LParen,
@@ -145,6 +147,8 @@ pub fn token_name_and_text(tok: &Tok) -> (String, String) {
         Tok::Match => kw("match"),
         Tok::Region => kw("region"),
         Tok::Spawn => kw("spawn"),
+        Tok::Break => kw("break"),
+        Tok::Continue => kw("continue"),
         Tok::LParen => p("("),
         Tok::RParen => p(")"),
         Tok::LBrace => p("{"),
@@ -248,6 +252,8 @@ fn keyword_or_ident(text: &str) -> Tok {
         "match" => Tok::Match,
         "region" => Tok::Region,
         "spawn" => Tok::Spawn,
+        "break" => Tok::Break,
+        "continue" => Tok::Continue,
         _ => Tok::Ident(text.to_string()),
     }
 }
