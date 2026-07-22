@@ -1521,6 +1521,114 @@ fn rfc48_vyx_script_import_hover_and_classification() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// RFC-0062 §1: `Ok`/`Err`/`Some`/`None` — and user-defined enum variant
+/// constructors — classify as `enumMember` in EVERY position: call (`Ok(x)`),
+/// pattern (`Ok(v) =>`), bare (`None`), and nested (`Some(Ok(x))`). The headline
+/// is the CALL-SITE `return Ok(...)` shape from `examples/bin/store.vyrn` that
+/// drove the RFC — earlier semantic-token coverage only pinned patterns.
+#[test]
+fn semantic_tokens_classify_constructors_as_enum_member() {
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-ctor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let main_src = "type Shape = | Circle(Int64) | Dot\n\
+fn make(n: Int64) -> Shape {\n\
+    return Circle(n)\n\
+}\n\
+fn find(x: Int64) -> Result<Int64, String> {\n\
+    if x > 0 {\n\
+        return Ok(x)\n\
+    }\n\
+    return Err(\"neg\")\n\
+}\n\
+fn opt(x: Bool) -> Option<Result<Int64, String>> {\n\
+    if x {\n\
+        return Some(Ok(1))\n\
+    }\n\
+    return None\n\
+}\n\
+fn classify(s: Shape) -> Int64 {\n\
+    return match s {\n\
+        Circle(r) => r,\n\
+        Dot => 0,\n\
+    }\n\
+}\n\
+fn main() -> Int64 { return 0 }\n";
+    let root_path = dir.join("main.vyrn");
+    std::fs::write(&root_path, main_src).unwrap();
+    let uri = file_uri(&root_path);
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &uri, "vyrn", main_src);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let toks = semantic_tokens_full(&mut client, &uri);
+    let expect = |name: &str, line: usize| {
+        let (l, c) = at(main_src, line, name);
+        assert_eq!(
+            kind_at(&toks, l, c),
+            Some("enumMember"),
+            "`{name}` on line {line} → enumMember: {toks:?}"
+        );
+    };
+    // User-defined variant, call position (the RFC's "verify + pin" clause).
+    expect("Circle", 3);
+    // Builtin constructors, call position — THE headline (`return Ok(...)`).
+    expect("Ok", 7);
+    expect("Err", 9);
+    // Nested: `Some(Ok(1))` — both the outer and inner constructor.
+    expect("Some", 13);
+    expect("Ok", 13);
+    // Bare (no call): `None`.
+    expect("None", 15);
+    // Match patterns still classify (regression guard).
+    expect("Circle", 19);
+    expect("Dot", 20);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `.vyx` component whose `<script>` helper returns a `Result` built with the
+/// ambient `Ok` constructor — RFC-0062 §1 must classify it `enumMember` through
+/// the RFC-0048 forward map, exactly as in a plain `.vyrn`.
+const RFC62_APP: &str = "import { components } from \"std/vyx\"\n\
+    import { widget } from components(\"./comp\")\n\
+    fn main() -> Int64 { return 0 }\n";
+const RFC62_VYX: &str = "<script>\n\
+    fn wrap(n: Int64) -> Result<Int64, String> { return Ok(n) }\n\
+    props { x: String }\n\
+    </script>\n\
+    <template>\n\
+    <li>{{ x }}</li>\n\
+    </template>\n";
+
+#[test]
+fn semantic_tokens_classify_constructor_in_vyx_script() {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_rfc62_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("comp")).unwrap();
+    std::fs::write(dir.join("comp/Widget.vyx"), RFC62_VYX).unwrap();
+    std::fs::write(dir.join("app.vyrn"), RFC62_APP).unwrap();
+    let mut client = rfc33_client();
+    let app_uri = file_uri(&dir.join("app.vyrn"));
+    let vyx_uri = file_uri(&dir.join("comp/Widget.vyx"));
+    did_open(&mut client, &app_uri, "vyrn", RFC62_APP);
+    let _ = read_diags_for(&mut client, "Widget.vyx"); // ownership wired
+    did_open(&mut client, &vyx_uri, "vyx", RFC62_VYX);
+
+    let toks = semantic_tokens_full(&mut client, &vyx_uri);
+    // `Ok` inside the script helper body on `.vyx` line 2 (1-based).
+    let (l, c) = at(RFC62_VYX, 2, "Ok(n)");
+    assert_eq!(
+        kind_at(&toks, l, c),
+        Some("enumMember"),
+        "`.vyx` script `Ok` → enumMember: {toks:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A `pagesThemed` app + a single themed route file (`routes/index.vyx`).
 const RFC48_PAGE_APP: &str = "import { pagesThemed } from \"std/ui\"\n\
     import { route } from pagesThemed(\"./routes\", \"./theme.json\")\n\
