@@ -122,7 +122,7 @@
     },
     "keywords": {
       "name": "keyword.control.vyrn",
-      "match": "\\b(fn|let|mut|if|else|while|for|in|drop|protocol|impl|self|return|true|false|type|where|match|region|spawn|import|export|from|logging)\\b"
+      "match": "\\b(fn|let|mut|if|else|while|for|in|drop|protocol|impl|self|return|break|continue|true|false|type|where|match|region|spawn|import|export|from|logging)\\b"
     },
     "function-calls": {
       "comment": "A lowerCamelCase identifier directly before `(` is a function/method call (or the name in `fn name(...)`) — entity.name.function → yellow in Dark+, distinct from plain variables. PascalCase constructors (Circle(1), Some(x)) are NOT matched here: #types is included earlier and wins, keeping variants teal. Keywords are also included earlier, so `if (...)` stays a keyword.",
