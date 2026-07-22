@@ -23,7 +23,7 @@ type IntArg = Int64
 /// The wire shape of a server 422 (`{"issues":[…]}`) — mirrored here for the
 /// raw-payload demo: app.js POSTs a body no typed stub could build and hands the
 /// server's reply to `showServerIssues` for rendering.
-type IssueBag = { issues: Array<Issue> }
+type IssueBag = { issues: Array<api.RpcIssue> }
 
 // ---- client view state (module state; the locale lives in the i18n module) --
 
@@ -71,7 +71,7 @@ fn tagsText(tags: Array<api.Tag>) -> String {
 }
 
 /// Render an accumulated issue list as "path: message; …".
-fn renderIssues(iss: Array<Issue>) -> String {
+fn renderIssues(iss: Array<api.RpcIssue>) -> String {
     let mut out = ""
     let mut i = 0
     for issue in iss {
@@ -208,10 +208,11 @@ fn view() -> Html {
 
 // ---- RPC completion callbacks (passed at each call site) --------------------
 
-fn onListBooks(res: Validation<api.BookList>) {
+fn onListBooks(res: api.RpcReply<api.BookList>) {
     match res {
-        Valid(l) => setBooks(l),
-        Invalid(iss) => setIssues(renderIssues(iss)),
+        Done(l) => setBooks(l),
+        Rejected(iss) => setIssues(renderIssues(iss)),
+        Failed(why) => setIssues(why),
     }
 }
 fn setBooks(l: api.BookList) {
@@ -222,10 +223,11 @@ fn setBooks(l: api.BookList) {
 /// `histogram`/`tagViews`), so the client never calls `tagCounts` — with callbacks
 /// passed at the call site, that procedure simply needs no handler here (the server
 /// proc + its Map round-trip stay exercised by the contract's own tests).
-fn onGetBook(res: Validation<api.BookResult>) {
+fn onGetBook(res: api.RpcReply<api.BookResult>) {
     match res {
-        Valid(r) => showDetail(r),
-        Invalid(iss) => setDetailStatus(renderIssues(iss)),
+        Done(r) => showDetail(r),
+        Rejected(iss) => setDetailStatus(renderIssues(iss)),
+        Failed(why) => setDetailStatus(why),
     }
 }
 fn showDetail(r: api.BookResult) {
@@ -245,10 +247,11 @@ fn setDetailStatus(s: String) {
     detailStatus = s
 }
 
-fn onAddBook(res: Validation<api.BookResult>) {
+fn onAddBook(res: api.RpcReply<api.BookResult>) {
     match res {
-        Valid(r) => afterAdd(r),
-        Invalid(iss) => setIssues(renderIssues(iss)),
+        Done(r) => afterAdd(r),
+        Rejected(iss) => setIssues(renderIssues(iss)),
+        Failed(why) => setIssues(why),
     }
 }
 fn afterAdd(r: api.BookResult) {
@@ -265,10 +268,11 @@ fn addSucceeded() {
     refetch()
 }
 
-fn onDeleteBook(res: Validation<api.DeleteResult>) {
+fn onDeleteBook(res: api.RpcReply<api.DeleteResult>) {
     match res {
-        Valid(r) => afterDelete(r),
-        Invalid(iss) => setIssues(renderIssues(iss)),
+        Done(r) => afterDelete(r),
+        Rejected(iss) => setIssues(renderIssues(iss)),
+        Failed(why) => setIssues(why),
     }
 }
 fn afterDelete(r: api.DeleteResult) {
@@ -283,10 +287,11 @@ fn refetchClear() {
     refetch()
 }
 
-fn onRateBook(res: Validation<api.BookResult>) {
+fn onRateBook(res: api.RpcReply<api.BookResult>) {
     match res {
-        Valid(r) => afterRate(r),
-        Invalid(iss) => setIssues(renderIssues(iss)),
+        Done(r) => afterRate(r),
+        Rejected(iss) => setIssues(renderIssues(iss)),
+        Failed(why) => setIssues(why),
     }
 }
 fn afterRate(r: api.BookResult) {
@@ -339,7 +344,7 @@ export extern fn submitAdd(arg: String) {
     let raw = RawAdd { title: draftTitle, url: draftUrl, tags: splitTrim(draftTags, ",") }
     match fromJson(api.AddBookReq, toJson(raw)) {
         Valid(req) => api.addBook(req, onAddBook),
-        Invalid(iss) => setIssues(renderIssues(iss)),
+        Invalid(iss) => setIssues(renderIssues(api.rpcIssuesFrom(iss))),
     }
 }
 
@@ -379,7 +384,7 @@ fn nextRating(id: Int64) -> Int64 {
 export extern fn showServerIssues(arg: String) {
     match fromJson(IssueBag, arg) {
         Valid(bag) => setIssues(renderIssues(bag.issues)),
-        Invalid(iss) => setIssues(renderIssues(iss)),
+        Invalid(iss) => setIssues(renderIssues(api.rpcIssuesFrom(iss))),
     }
 }
 

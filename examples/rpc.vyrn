@@ -12,38 +12,41 @@
 ///
 /// Inspect the synthesized dispatch module with:  vyrn emit-gen examples/rpc.vyrn
 import { rpcInProcess } from "std/rpc"
-import { getUser, createUser, deleteUser } from rpcInProcess("./fullstack/api")
+import { getUser, createUser, deleteUser, RpcReply } from rpcInProcess("./fullstack/api")
 import { GetUserReq, CreateUserReq, User, DeleteReq, DeleteResult } from "./fullstack/api"
 
 // Module state: the last dispatch result, filled by the callbacks below.
 let mut line: String = "(none)"
 
-/// The completion callback for `getUser` — in-process, always `Valid`.
-fn onGetUser(res: Validation<User>) {
+/// The completion callback for `getUser` — in-process, always `Done`.
+fn onGetUser(res: RpcReply<User>) {
     line = match res {
-        Valid(u) => "getUser -> \{u.name} (age \{u.age})",
-        Invalid(issues) => "getUser failed",
+        Done(u) => "getUser -> \{u.name} (age \{u.age})",
+        Rejected(issues) => "getUser failed",
+        Failed(why) => "getUser failed",
     }
 }
 
 /// The completion callback for `createUser`.
-fn onCreateUser(res: Validation<User>) {
+fn onCreateUser(res: RpcReply<User>) {
     line = match res {
-        Valid(u) => "createUser -> id \{u.id} \{u.name}",
-        Invalid(issues) => "createUser failed",
+        Done(u) => "createUser -> id \{u.id} \{u.name}",
+        Rejected(issues) => "createUser failed",
+        Failed(why) => "createUser failed",
     }
 }
 
 /// The completion callback for `deleteUser` — a `Result` procedure (RFC-0024). An
-/// application-level `Err` is a `Valid(Err(..))` here, distinct from the wire's
-/// decode failures (`Invalid`).
-fn onDeleteUser(res: Validation<DeleteResult>) {
+/// application-level `Err` is a `Done(Err(..))` here, distinct from the wire's
+/// decode failures (`Rejected`) and transport faults (`Failed`).
+fn onDeleteUser(res: RpcReply<DeleteResult>) {
     line = match res {
-        Valid(r) => match r {
+        Done(r) => match r {
             Ok(done) => "deleteUser -> ok",
             Err(why) => "deleteUser -> refused: \{why}",
         },
-        Invalid(issues) => "deleteUser failed",
+        Rejected(issues) => "deleteUser failed",
+        Failed(why) => "deleteUser failed",
     }
 }
 

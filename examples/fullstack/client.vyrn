@@ -12,7 +12,7 @@
 /// typed round trips. When a reply lands, the dispatcher updates module state
 /// and the host re-renders (the page re-invokes `vyrnView()` after each
 /// completion). Server behavior and the wire protocol are identical.
-import { getUser, createUser, deleteUser, GetUserReq, CreateUserReq, User, DeleteReq, DeleteResult } from rpcClient("./api")
+import { getUser, createUser, deleteUser, GetUserReq, CreateUserReq, User, DeleteReq, DeleteResult, RpcReply, RpcIssue, rpcIssuesFrom } from rpcClient("./api")
 import { rpcClient } from "std/rpc"
 import { toHtmlString, Html } from "std/html"
 import { components } from "std/vyx"
@@ -26,7 +26,7 @@ type IntId = Int64
 /// The wire shape of a server 422 (`{"issues":[…]}`) — mirrored here for the
 /// raw-payload demo: app.js POSTs a body no typed stub could build and hands the
 /// server's reply to `showServerIssues` for rendering.
-type IssueBag = { issues: Array<Issue> }
+type IssueBag = { issues: Array<RpcIssue> }
 
 // ---- module state (root-only): what the view reads -------------------------
 let mut userLine: String = "(none yet)"
@@ -48,7 +48,7 @@ fn setIssues(s: String) {
 }
 
 /// Render an accumulated issue list as `path: message; ...` for the view.
-fn renderIssues(issues: Array<Issue>) -> String {
+fn renderIssues(issues: Array<RpcIssue>) -> String {
     let mut out = ""
     let mut i = 0
     for issue in issues {
@@ -69,33 +69,37 @@ fn showCreated(u: User) {
 
 // ---- RPC completion handlers (unchanged logic) -----------------------------
 
-/// The completion callback for `getUser` — a decoded `Validation<User>`.
-fn onGetUser(res: Validation<User>) {
+/// The completion callback for `getUser` — a decoded `RpcReply<User>`.
+fn onGetUser(res: RpcReply<User>) {
     match res {
-        Valid(u) => setUser("id=\{u.id} name=\{u.name} age=\{u.age}"),
-        Invalid(issues) => setIssues(renderIssues(issues)),
+        Done(u) => setUser("id=\{u.id} name=\{u.name} age=\{u.age}"),
+        Rejected(issues) => setIssues(renderIssues(issues)),
+        Failed(why) => setIssues(why),
     }
 }
 
 /// The completion callback for `createUser`. A bad `age` on the wire arrives here
-/// as `Invalid` carrying the SERVER's own accumulated issues.
-fn onCreateUser(res: Validation<User>) {
+/// as `Rejected` carrying the SERVER's own accumulated issues.
+fn onCreateUser(res: RpcReply<User>) {
     match res {
-        Valid(u) => showCreated(u),
-        Invalid(issues) => setIssues(renderIssues(issues)),
+        Done(u) => showCreated(u),
+        Rejected(issues) => setIssues(renderIssues(issues)),
+        Failed(why) => setIssues(why),
     }
 }
 
 /// The completion callback for `deleteUser` — a `Result` procedure (RFC-0024). A
-/// well-formed request the app refuses arrives as `Valid(Err(..))` (a 200 on the
-/// wire), distinct from a decode failure (`Invalid`, a 422).
-fn onDeleteUser(res: Validation<DeleteResult>) {
+/// well-formed request the app refuses arrives as `Done(Err(..))` (a 200 on the
+/// wire), distinct from a decode failure (`Rejected`, a 422) or a transport fault
+/// (`Failed`).
+fn onDeleteUser(res: RpcReply<DeleteResult>) {
     match res {
-        Valid(r) => match r {
+        Done(r) => match r {
             Ok(done) => setUser("deleted"),
             Err(why) => setUser("refused: \{why}"),
         },
-        Invalid(issues) => setIssues(renderIssues(issues)),
+        Rejected(issues) => setIssues(renderIssues(issues)),
+        Failed(why) => setIssues(why),
     }
 }
 
@@ -135,7 +139,7 @@ export extern fn removeUser(arg: String) {
 export extern fn showServerIssues(arg: String) {
     match fromJson(IssueBag, arg) {
         Valid(bag) => setIssues(renderIssues(bag.issues)),
-        Invalid(issues) => setIssues(renderIssues(issues)),
+        Invalid(issues) => setIssues(renderIssues(rpcIssuesFrom(issues))),
     }
 }
 

@@ -139,6 +139,35 @@ fn rpcListContains(items: Array<String>, needle: String) -> Bool {
     return false
 }
 
+/// The structured-reply surface every client-flavor module exports (RFC-0068):
+/// `RpcIssue` (the wire issue shape, so field-attached errors survive the 422),
+/// `RpcReply<T>` (a 2xx `Done`, a 422 `Rejected` carrying parsed issues, or a
+/// transport/other `Failed`), and `rpcIssuesFrom` (map the prelude `Issue`s a
+/// client-side `fromJson` prevalidation yields into the SAME `RpcIssue` shape, so
+/// an app renders one shape whichever side rejected). The wire client and the
+/// in-process mirror emit this identically, so a same-named stub stays drop-in.
+///
+/// DEVIATION (RFC-0068 §1): the RFC spells the 422 arm `Invalid(...)`, but enum
+/// variants share ONE global constructor table and the prelude `Validation` already
+/// owns `Invalid` — a second `Invalid` is a hard "defined twice" error. The arm is
+/// `Rejected` instead; every other detail is as specified.
+fn rpcReplyTypes() -> String {
+    let mut out = "export type RpcIssue = { key: String, path: String, message: String }\n"
+    out = out + "export type RpcReply<T> =\n"
+    out = out + "    | Done(T)\n"
+    out = out + "    | Rejected(Array<RpcIssue>)\n"
+    out = out + "    | Failed(String)\n"
+    out = out + "/// Map RFC-0009 `Issue`s (a client-side `fromJson` prevalidation) into the\n"
+    out = out + "/// same `RpcIssue` shape a server 422 yields, so both rejection sides render one shape.\n"
+    out = out + "export fn rpcIssuesFrom(from: Array<Issue>) -> Array<RpcIssue> {\n"
+    out = out + "    let mut out: Array<RpcIssue> = []\n"
+    out = out + "    for i in from {\n"
+    out = out + "        out.push(RpcIssue { key: i.key, path: i.path, message: i.message })\n"
+    out = out + "    }\n"
+    out = out + "    return out\n}\n"
+    return out
+}
+
 // ---- rpcServer -------------------------------------------------------------
 
 /// One per-procedure handler function: decode the body with `fromJson`, call the
@@ -256,41 +285,47 @@ export gen fn rpcServer(contract: String) -> String {
 
 // ---- rpcClient -------------------------------------------------------------
 
-/// The per-procedure result unifier (locked, RFC-0019): 200 ⇒ decode the body;
-/// 2xx-with-no-body (204) on a `Unit` procedure ⇒ `Valid(true)`; 422 ⇒ the
-/// server's own issues; a transport / other status ⇒ a single `rpc.transport`
-/// `Issue` (status 0 = unreachable).
+/// The per-procedure result unifier (RFC-0068): 200 ⇒ decode the body into `Done`
+/// (a 2xx body that will not decode is a `Failed`, not a field-issue `Rejected`);
+/// 2xx-with-no-body (204) on a `Unit` procedure ⇒ `Done(true)`; 422 ⇒ the server's
+/// own parsed issues as `Rejected` (an unparseable 422 body ⇒ `Failed`); a
+/// transport / other status ⇒ `Failed` (status 0 = unreachable).
 fn clientUnifyFn(f: FnInfo) -> String {
     let cap = capFirst(f.name)
     let unify = "rpcUnify" + cap
     let retUnit = f.ret == ""
     let mut out = ""
     if retUnit {
-        out = out + "fn " + unify + "(status: Int64, body: String) -> Validation<Bool> {\n"
-        out = out + "    if status == 200 { return Valid(true) }\n"
-        out = out + "    if status == 204 { return Valid(true) }\n"
+        out = out + "fn " + unify + "(status: Int64, body: String) -> RpcReply<Bool> {\n"
+        out = out + "    if status == 200 { return Done(true) }\n"
+        out = out + "    if status == 204 { return Done(true) }\n"
     } else {
-        out = out + "fn " + unify + "(status: Int64, body: String) -> Validation<" + f.ret + "> {\n"
-        out = out + "    if status == 200 { return fromJson(" + f.ret + ", body) }\n"
+        out = out + "fn " + unify + "(status: Int64, body: String) -> RpcReply<" + f.ret + "> {\n"
+        out = out + "    if status == 200 {\n"
+        out = out + "        return match fromJson(" + f.ret + ", body) {\n"
+        out = out + "            Valid(v) => Done(v),\n"
+        out = out + "            Invalid(iss) => Failed(\"procedure `" + f.name + "` returned a malformed reply\"),\n"
+        out = out + "        }\n"
+        out = out + "    }\n"
     }
     out = out + "    if status == 422 {\n"
     out = out + "        return match fromJson(RpcIssues, body) {\n"
-    out = out + "            Valid(bag) => Invalid(bag.issues),\n"
-    out = out + "            Invalid(issues) => Invalid(issues),\n"
+    out = out + "            Valid(bag) => Rejected(bag.issues),\n"
+    out = out + "            Invalid(iss) => Failed(\"procedure `" + f.name + "` sent an unparseable 422 body\"),\n"
     out = out + "        }\n"
     out = out + "    }\n"
     out = out + "    if status == 0 {\n"
-    out = out + "        return Invalid([Issue { key: \"rpc.transport\", path: \"\", message: \"procedure `" + f.name + "` is unreachable\" }])\n"
+    out = out + "        return Failed(\"procedure `" + f.name + "` is unreachable\")\n"
     out = out + "    }\n"
-    out = out + "    return Invalid([Issue { key: \"rpc.transport\", path: \"\", message: \"procedure `" + f.name + "` failed with status \" + status.toString() }])\n}\n"
+    out = out + "    return Failed(\"procedure `" + f.name + "` failed with status \" + status.toString())\n}\n"
     return out
 }
 
-/// The Vyrn spelling of a procedure's callback type: `fn(Validation<Ret>)`, with
-/// a `Unit` return modeled as `Validation<Bool>` (the unifier's `Valid(true)`).
+/// The Vyrn spelling of a procedure's callback type: `fn(RpcReply<Ret>)`, with a
+/// `Unit` return modeled as `RpcReply<Bool>` (the unifier's `Done(true)`).
 fn cbType(f: FnInfo) -> String {
     let ret = if f.ret == "" { "Bool" } else { f.ret }
-    return "fn(Validation<" + ret + ">)"
+    return "fn(RpcReply<" + ret + ">)"
 }
 
 /// One procedure's client surface (RFC-0040 §2): a per-procedure pending-callback
@@ -319,7 +354,7 @@ fn clientProcFns(f: FnInfo) -> String {
     out = out + "    rpcPending" + cap + "[id.toString()] = cb\n}\n"
     // The deliver helper: drop the pending callback, then invoke it (RFC-0037:
     // a fetched callback is bound to the `cb` param before it is called).
-    out = out + "fn rpcDeliver" + cap + "(key: String, cb: " + cb + ", res: Validation<" + ret + ">) {\n"
+    out = out + "fn rpcDeliver" + cap + "(key: String, cb: " + cb + ", res: RpcReply<" + ret + ">) {\n"
     out = out + "    rpcPending" + cap + ".remove(key)\n"
     out = out + "    cb(res)\n}\n"
     // The completion dispatcher: unify the reply, route it to the pending callback
@@ -350,7 +385,9 @@ export gen fn rpcClient(contract: String) -> String {
     for t in iface.types {
         out = out + t.source + "\n"
     }
-    out = out + "type RpcIssues = { issues: Array<Issue> }\n"
+    // The structured-reply surface (RFC-0068), then the private 422-body shape.
+    out = out + rpcReplyTypes()
+    out = out + "type RpcIssues = { issues: Array<RpcIssue> }\n"
     // The single shared transport, declared once.
     out = out + "extern fn vyrnRpcCall(name: String, body: String) -> Int64\n"
     // A reply with no pending callback is ignored (dispatcher `None` arm — match
@@ -366,12 +403,12 @@ export gen fn rpcClient(contract: String) -> String {
 
 /// One in-process dispatcher (RFC-0040 §2): a **same-named** stub `(req, cb)` that
 /// calls the real (aliased) procedure directly and invokes the caller's `cb`
-/// synchronously with `Valid(..)` before returning. The real procedure is reached
+/// synchronously with `Done(..)` before returning. The real procedure is reached
 /// through its `__real` import alias (RFC-0022); the stub therefore takes the wire
 /// name, so callers use the exact procedure name the client flavor exposes.
 /// Validated types cannot be constructed invalid in-process, so the deterministic
-/// flavor only ever produces `Valid` — the `Invalid` paths are a wire concern
-/// (`fromJson` of an untrusted payload). `cb` is a param, so it is called by name.
+/// flavor only ever produces `Done` — the `Rejected`/`Failed` paths are a wire
+/// concern (`fromJson` of an untrusted payload). `cb` is a param, so it is called by name.
 fn inProcStub(f: FnInfo) -> String {
     let cb = cbType(f)
     let real = f.name + "__real"
@@ -381,17 +418,17 @@ fn inProcStub(f: FnInfo) -> String {
         out = out + "export fn " + f.name + "(req: " + f.params[0].spelling + ", cb: " + cb + ") {\n"
         if retUnit {
             out = out + "    " + real + "(req)\n"
-            out = out + "    cb(Valid(true))\n}\n"
+            out = out + "    cb(Done(true))\n}\n"
         } else {
-            out = out + "    cb(Valid(" + real + "(req)))\n}\n"
+            out = out + "    cb(Done(" + real + "(req)))\n}\n"
         }
     } else {
         out = out + "export fn " + f.name + "(cb: " + cb + ") {\n"
         if retUnit {
             out = out + "    " + real + "()\n"
-            out = out + "    cb(Valid(true))\n}\n"
+            out = out + "    cb(Done(true))\n}\n"
         } else {
-            out = out + "    cb(Valid(" + real + "()))\n}\n"
+            out = out + "    cb(Done(" + real + "()))\n}\n"
         }
     }
     return out
@@ -416,6 +453,11 @@ export gen fn rpcInProcess(contract: String) -> String {
     }
     let mut out = "/// Generated by std/rpc `rpcInProcess` (RFC-0019) — do not edit.\n"
     out = out + typeImportBlock(iface, contract, true)
+    // The same structured-reply surface the wire client emits (RFC-0068), so the
+    // same-named stubs stay a drop-in mirror. In-process never rejects or fails —
+    // validated types cannot be built invalid without the wire's `fromJson` — so
+    // only `Done` is ever produced, but the type is shared for callback parity.
+    out = out + rpcReplyTypes()
     for f in iface.functions {
         out = out + inProcStub(f)
     }

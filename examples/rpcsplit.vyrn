@@ -8,21 +8,22 @@
 ///
 /// Inspect the synthesized dispatch module with:  vyrn emit-gen examples/rpcsplit.vyrn
 import { rpcInProcess } from "std/rpc"
-import { getItem } from rpcInProcess("./rpcsplit/contract")
+import { getItem, RpcReply } from rpcInProcess("./rpcsplit/contract")
 import { Id, Item, GetReq, ItemResult } from "./rpcsplit/wire"
 
 // Module state: the last dispatch result, filled by the callback below.
 let mut line: String = "(none)"
 
-/// The completion callback for `getItem` — in-process, always `Valid` (validated
+/// The completion callback for `getItem` — in-process, always `Done` (validated
 /// types cannot be constructed invalid without the wire's `fromJson`).
-fn onGetItem(res: Validation<ItemResult>) {
+fn onGetItem(res: RpcReply<ItemResult>) {
     line = match res {
-        Valid(r) => match r {
+        Done(r) => match r {
             Ok(it) => "getItem -> \{it.label}",
             Err(why) => "getItem -> \{why}",
         },
-        Invalid(issues) => "getItem failed",
+        Rejected(issues) => "getItem failed",
+        Failed(why) => "getItem failed",
     }
 }
 

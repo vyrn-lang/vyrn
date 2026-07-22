@@ -239,14 +239,23 @@ fn emit_gen_client_shows_stubs_and_dispatchers() {
     let src = String::from_utf8_lossy(&out.stdout);
     // The single shared transport, declared once.
     assert!(src.contains("extern fn vyrnRpcCall(name: String, body: String) -> Int64"), "{src}");
-    // Each stub takes (req, cb) and records the callback under the call id
-    // (RFC-0040 §2); the completion dispatcher routes the reply to it.
+    // The RFC-0068 structured-reply surface: the wire issue shape and the reply
+    // enum (a `Rejected` arm, since the prelude `Validation` already owns `Invalid`).
     assert!(
-        src.contains("export fn getUser(req: GetUserReq, cb: fn(Validation<User>))"),
+        src.contains("export type RpcIssue = { key: String, path: String, message: String }"),
+        "RpcIssue type:\n{src}"
+    );
+    assert!(src.contains("export type RpcReply<T> ="), "RpcReply type:\n{src}");
+    assert!(src.contains("| Rejected(Array<RpcIssue>)"), "RpcReply Rejected arm:\n{src}");
+    assert!(src.contains("export fn rpcIssuesFrom(from: Array<Issue>) -> Array<RpcIssue>"), "issue mapper:\n{src}");
+    // Each stub takes (req, cb: fn(RpcReply<Ret>)) and records the callback under
+    // the call id (RFC-0040 §2); the completion dispatcher routes the reply to it.
+    assert!(
+        src.contains("export fn getUser(req: GetUserReq, cb: fn(RpcReply<User>))"),
         "getUser stub:\n{src}"
     );
     assert!(
-        src.contains("let mut rpcPendingGetUser: Map<String, fn(Validation<User>)> = [:]"),
+        src.contains("let mut rpcPendingGetUser: Map<String, fn(RpcReply<User>)> = [:]"),
         "getUser pending map:\n{src}"
     );
     assert!(
@@ -257,13 +266,19 @@ fn emit_gen_client_shows_stubs_and_dispatchers() {
         src.contains("Some(cb) => rpcDeliverGetUser(key, cb, rpcUnifyGetUser(status, body))"),
         "getUser dispatch routes to the pending callback:\n{src}"
     );
+    // 2xx decodes to `Done`; 422 parses issues to `Rejected`; a decode/transport
+    // fault is `Failed` — the locked transport wording rides the `Failed` arm.
+    assert!(src.contains("Valid(v) => Done(v),"), "2xx -> Done:\n{src}");
+    assert!(src.contains("Valid(bag) => Rejected(bag.issues),"), "422 -> Rejected:\n{src}");
+    assert!(
+        src.contains("Failed(\"procedure `getUser` is unreachable\")"),
+        "unreachable wording on the Failed arm:\n{src}"
+    );
     // No `on<Proc>` convention survives (clean break).
     assert!(!src.contains("onGetUser"), "no on<Proc> emission:\n{src}");
     assert!(src.contains("export extern fn vyrnRpcDoneCreateUser("), "createUser dispatcher");
     // The contract types are re-emitted verbatim (not imported).
     assert!(src.contains("export type User = { id: Int64, name: Username, age: Age }"), "{src}");
-    // The locked transport wording.
-    assert!(src.contains("procedure `getUser` is unreachable"), "unreachable wording");
 }
 
 // ---- the in-process flavor under `vyrn test` -------------------------------
