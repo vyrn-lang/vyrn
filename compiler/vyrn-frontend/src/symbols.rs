@@ -2298,6 +2298,134 @@ fn type_to_string(ty: &Type) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// doc model (RFC-0065: `vyrn doc`)
+// ---------------------------------------------------------------------------
+
+/// One exported declaration to document (RFC-0065): its rendered signature line
+/// (the same typed view hover shows) and its `///` block verbatim.
+#[derive(Debug, Clone)]
+pub struct DocExport {
+    pub name: String,
+    pub kind: SymbolKind,
+    /// 1-based declaration line — the sort key for declaration order.
+    pub line: usize,
+    /// The rendered signature: `fn route(req: Request) -> Response`,
+    /// `type Paste = { .. }`, `protocol Show { fn show(self) -> String }`.
+    pub signature: String,
+    /// The declaration's `///` documentation (markdown), verbatim; `None` when it
+    /// carries no doc comment.
+    pub doc: Option<String>,
+}
+
+/// A module's documentation model for `vyrn doc` (RFC-0065): the detached
+/// file-header `///` block, then every EXPORT in declaration order. Private
+/// declarations, tests, and benches are omitted. Built from the parse alone (no
+/// checker/linker), so a module documents even with unresolved imports — the
+/// signatures are exactly the declared types the parser recorded.
+#[derive(Debug, Clone)]
+pub struct ModuleDoc {
+    /// The leading, detached `///` block that belongs to the file (not to the
+    /// first declaration), per the established detached-block rule.
+    pub header_doc: Option<String>,
+    pub exports: Vec<DocExport>,
+}
+
+/// The module-header doc: the first maximal run of `///` lines at the top of the
+/// file, but ONLY when it is DETACHED from what follows (a blank-line gap, or the
+/// file has no declarations). A `///` block sitting directly above a declaration
+/// belongs to that declaration — never to the module — so it is not a header.
+/// Mirrors the parser's `take_docs` detachment rule so the two never disagree.
+fn module_header_doc(tokens: &[lexer::Token]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut last_line = 0usize;
+    for t in tokens {
+        match &t.tok {
+            lexer::Tok::Doc(s) => {
+                // A gap inside the leading run closes the first block: it is
+                // detached from everything after it, so it is the header.
+                if !lines.is_empty() && t.line > last_line + 1 {
+                    return Some(lines.join("\n"));
+                }
+                lines.push(s.clone());
+                last_line = t.line;
+            }
+            lexer::Tok::Eof => break,
+            _ => {
+                if lines.is_empty() {
+                    return None; // code (or an import) leads the file — no header
+                }
+                // The block is the header only if a blank line detaches it from
+                // this first real token; otherwise it attaches to the declaration.
+                return if t.line > last_line + 1 {
+                    Some(lines.join("\n"))
+                } else {
+                    None
+                };
+            }
+        }
+    }
+    // The file is nothing but a leading `///` block (and EOF): it is the header.
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+/// Build the documentation model for one module's source (RFC-0065). Parses the
+/// text (recovery-tolerant, like the LSP) and collects every exported function,
+/// protocol, and type — each with the signature hover renders and its `///` block
+/// verbatim — sorted by declaration line so output is stable and reads top-down.
+pub fn module_doc(source: &str) -> ModuleDoc {
+    let Ok(tokens) = lexer::lex(source) else {
+        return ModuleDoc { header_doc: None, exports: Vec::new() };
+    };
+    let header_doc = module_header_doc(&tokens);
+    let (program, _errs) = parser::parse_accum(tokens);
+    let mut exports: Vec<DocExport> = Vec::new();
+    for f in &program.functions {
+        if f.exported {
+            exports.push(DocExport {
+                name: f.name.clone(),
+                kind: SymbolKind::Function,
+                line: f.line,
+                signature: function_detail(f),
+                doc: f.doc.clone(),
+            });
+        }
+    }
+    for p in &program.protocols {
+        if p.exported {
+            exports.push(DocExport {
+                name: p.name.clone(),
+                kind: SymbolKind::Type,
+                line: p.line,
+                signature: protocol_detail(p),
+                doc: p.doc.clone(),
+            });
+        }
+    }
+    for t in &program.type_decls {
+        // Skip synthetic decls: `schemaOf`-produced records (line 0) and the
+        // dotted inline-refinement field types — neither is a real export.
+        if t.line == 0 || t.name.contains('.') || !t.exported {
+            continue;
+        }
+        exports.push(DocExport {
+            name: t.name.clone(),
+            kind: SymbolKind::Type,
+            line: t.line,
+            signature: type_decl_detail(t, &program.type_decls),
+            doc: t.doc.clone(),
+        });
+    }
+    // Declaration order: sort by source line (stable across runs). Ties (two
+    // decls on one line — synthetic only) fall back to name for determinism.
+    exports.sort_by(|a, b| a.line.cmp(&b.line).then_with(|| a.name.cmp(&b.name)));
+    ModuleDoc { header_doc, exports }
+}
+
+// ---------------------------------------------------------------------------
 // semantic tokens (RFC-0047 §1)
 // ---------------------------------------------------------------------------
 
@@ -3229,5 +3357,70 @@ mod tests {
              fn main() -> Int64 {{ return g(\"\") }}"
         );
         assert!(string_literal_completions(&analyze(&src), &src, 3, 32).is_empty());
+    }
+
+    // RFC-0065: `module_doc` — the doc model behind `vyrn doc`.
+
+    #[test]
+    fn module_doc_lists_only_exports_in_declaration_order() {
+        let src = "export fn b() -> Int64 { return 0 }\n\
+                   fn priv() -> Int64 { return 0 }\n\
+                   export type A = { x: Int64 }\n";
+        let d = module_doc(src);
+        let names: Vec<&str> = d.exports.iter().map(|e| e.name.as_str()).collect();
+        // `priv` omitted (not exported); order follows source lines.
+        assert_eq!(names, ["b", "A"]);
+        assert_eq!(d.exports[0].signature, "fn b() -> Int64");
+        assert_eq!(d.exports[1].signature, "type A = { x: Int64 }");
+    }
+
+    #[test]
+    fn module_doc_attaches_a_declaration_doc_but_not_a_detached_one() {
+        // A `///` directly above a decl attaches; one split off by a blank line
+        // does not (the established detach rule) — so `area` carries no doc.
+        let src = "/// attaches to foo\n\
+                   export fn foo() -> Int64 { return 0 }\n\
+                   \n\
+                   /// detached from area by a blank line\n\
+                   \n\
+                   export fn area() -> Int64 { return 0 }\n";
+        let d = module_doc(src);
+        assert_eq!(d.exports[0].doc.as_deref(), Some("attaches to foo"));
+        assert_eq!(d.exports[1].doc, None);
+    }
+
+    #[test]
+    fn module_doc_header_is_the_detached_leading_block() {
+        // A leading block split from the first decl by a blank line is the file
+        // header; without the gap it belongs to the declaration instead.
+        let detached = "/// file header\n\
+                        /// second line\n\
+                        \n\
+                        export fn f() -> Int64 { return 0 }\n";
+        let d = module_doc(detached);
+        assert_eq!(d.header_doc.as_deref(), Some("file header\nsecond line"));
+        assert_eq!(d.exports[0].doc, None);
+
+        let attached = "/// belongs to f\n\
+                        export fn f() -> Int64 { return 0 }\n";
+        let d = module_doc(attached);
+        assert_eq!(d.header_doc, None);
+        assert_eq!(d.exports[0].doc.as_deref(), Some("belongs to f"));
+    }
+
+    #[test]
+    fn module_doc_preserves_a_fenced_block_verbatim() {
+        let src = "/// A diagram.\n\
+                   ///\n\
+                   /// ```mermaid\n\
+                   /// flowchart LR\n\
+                   ///   a --> b\n\
+                   /// ```\n\
+                   export fn f() -> Int64 { return 0 }\n";
+        let d = module_doc(src);
+        assert_eq!(
+            d.exports[0].doc.as_deref(),
+            Some("A diagram.\n\n```mermaid\nflowchart LR\n  a --> b\n```")
+        );
     }
 }

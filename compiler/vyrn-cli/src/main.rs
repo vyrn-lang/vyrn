@@ -23,6 +23,10 @@
 //!   vyrn dev     [--port N] [--workers N]
 //!                                        Fullstack (RFC-0019): build the client to wasm, serve the
 //!                                        server root + static assets + the browser runtimes.
+//!   vyrn doc     [file|dir] [-o <dir>] [--std] [--verify]
+//!                                        Generate GitHub-flavored Markdown API docs (RFC-0065):
+//!                                        one `.md` per module + `index.md` (default `docs/api/`).
+//!                                        `--std` documents the std library; `--verify` exits 1 on drift.
 //!   vyrn new     <name>                 Scaffold a project (vyrn.json + src/main.vyrn).
 //!   vyrn deps                           Print the resolved module graph.
 //!
@@ -35,7 +39,7 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
@@ -92,6 +96,9 @@ fn real_main() -> ExitCode {
     }
     if cmd == "fmt" {
         return fmt_cmd(&args[2..]);
+    }
+    if cmd == "doc" {
+        return doc_cmd(&args[2..]);
     }
     if cmd == "dev" {
         return dev_cmd(&args[2..]);
@@ -571,6 +578,381 @@ fn fmt_project_files() -> Result<Vec<String>, ExitCode> {
                 }
             }
             Ok(vec![root_key])
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `vyrn doc` (RFC-0065) — Markdown API docs
+// ---------------------------------------------------------------------------
+
+/// A module to document: its stable name (`std/json`, `store`, `routes/home`)
+/// and its source text. The name is both the page heading and, with `.md`, the
+/// output file path (so `/` becomes a subdirectory).
+struct DocModule {
+    name: String,
+    source: String,
+}
+
+/// `vyrn doc [file|dir] [-o <dir>] [--std] [--verify]` (RFC-0065) — emit
+/// GitHub-flavored Markdown API docs: one `.md` per module plus `index.md`. The
+/// `///` blocks pass through verbatim, so a ` ```mermaid ` fence renders natively
+/// on GitHub with zero bundled JavaScript. Output is deterministic and byte-stable
+/// (every list is sorted, newlines are LF) so generated docs diff cleanly in git.
+///
+/// `--verify` writes nothing: it regenerates in memory and exits 1 if the output
+/// directory differs from what would be generated (the CI drift gate).
+fn doc_cmd(rest: &[String]) -> ExitCode {
+    let with_std = rest.iter().any(|a| a == "--std");
+    let verify = rest.iter().any(|a| a == "--verify");
+    let out_dir = match rest.iter().position(|a| a == "-o") {
+        Some(i) => match rest.get(i + 1) {
+            Some(d) => d.clone(),
+            None => {
+                eprintln!("error: -o needs a directory");
+                return ExitCode::from(2);
+            }
+        },
+        None => "docs/api".to_string(),
+    };
+    // The one positional (a file or directory); flags and the `-o` value excluded.
+    let target = rest
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| {
+            !a.starts_with('-')
+                && !(*i > 0 && rest[*i - 1] == "-o")
+        })
+        .map(|(_, a)| a.clone())
+        .next();
+
+    let modules = match discover_doc_modules(target.as_deref(), with_std) {
+        Ok(m) => m,
+        Err(code) => return code,
+    };
+    if modules.is_empty() {
+        eprintln!("error: no modules to document");
+        return ExitCode::from(2);
+    }
+
+    // Render every page into a (relative path -> content) set, deterministically.
+    let mut files: Vec<(String, String)> = Vec::new();
+    files.push(("index.md".to_string(), render_doc_index(&modules)));
+    for m in &modules {
+        let doc = vyrn_frontend::module_doc(&m.source);
+        files.push((format!("{}.md", m.name), render_doc_page(&m.name, &doc)));
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if verify {
+        return verify_doc_dir(&out_dir, &files);
+    }
+    write_doc_dir(&out_dir, &files)
+}
+
+/// Resolve the set of modules to document (RFC-0065):
+/// - a **file** argument → that file's local-import closure (`--std` adds the
+///   std modules it reaches);
+/// - a **directory** argument → every `.vyrn` under it, named relative to it;
+/// - **no argument** with a `vyrn.json` main → the project's local-import closure
+///   (`--std` adds reached std modules);
+/// - **no argument** with `--std` → the whole std library.
+fn discover_doc_modules(
+    target: Option<&str>,
+    with_std: bool,
+) -> Result<Vec<DocModule>, ExitCode> {
+    match target {
+        Some(t) if Path::new(t).is_dir() => scan_doc_dir(t, ""),
+        Some(t) => closure_doc_modules(t, with_std),
+        None => {
+            if let Some(main) = manifest_main() {
+                closure_doc_modules(&main, with_std)
+            } else if with_std {
+                match std_root() {
+                    Some(root) => scan_doc_dir(&root, "std/"),
+                    None => {
+                        eprintln!("error: --std given but no std library found (set VYRN_STD)");
+                        Err(ExitCode::FAILURE)
+                    }
+                }
+            } else {
+                eprintln!("error: no input file or directory, and no vyrn.json with a `main` found");
+                eprintln!("{USAGE}");
+                Err(ExitCode::from(2))
+            }
+        }
+    }
+}
+
+/// Every `.vyrn` file under `dir` (recursively), each a module named `<prefix>`
+/// plus its path relative to `dir` (no extension, `/`-separated). Sorted by name.
+fn scan_doc_dir(dir: &str, prefix: &str) -> Result<Vec<DocModule>, ExitCode> {
+    let base = normalize_slashes(dir);
+    let mut paths: Vec<String> = Vec::new();
+    collect_vyrn_files(Path::new(dir), &mut paths);
+    let mut out = Vec::new();
+    for p in paths {
+        let rel = rel_name(&p, &base);
+        let source = match std::fs::read_to_string(&p) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: cannot read {p}: {e}");
+                return Err(ExitCode::FAILURE);
+            }
+        };
+        out.push(DocModule { name: format!("{prefix}{rel}"), source });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// Recursively collect `.vyrn` files under `dir` into `out` (unsorted; the caller
+/// sorts by module name). Directories are visited in a stable, sorted order.
+fn collect_vyrn_files(dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut items: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    items.sort();
+    for path in items {
+        if path.is_dir() {
+            collect_vyrn_files(&path, out);
+        } else if path.extension().and_then(|s| s.to_str()) == Some("vyrn") {
+            out.push(normalize_slashes(&path.to_string_lossy()));
+        }
+    }
+}
+
+/// The modules of `root_file`'s local-import closure (RFC-0010 module graph):
+/// every LOCAL module reached, named relative to the project. `with_std` also
+/// keeps the std modules the closure reaches (named `std/<rel>`). Remote and
+/// generated modules are never documented.
+fn closure_doc_modules(root_file: &str, with_std: bool) -> Result<Vec<DocModule>, ExitCode> {
+    let source = match std::fs::read_to_string(root_file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {root_file}: {e}");
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    let root_key = normalize_slashes(root_file);
+    let opts = load_options(&root_key);
+    let resolver = make_resolver(&root_key);
+    let std_root = opts.std_root.as_deref().map(normalize_slashes);
+    // The project base for local module names: the manifest dir, else the root
+    // file's own directory.
+    let base = find_manifest(Path::new(&root_key).parent().unwrap_or(Path::new(".")))
+        .map(|m| m.dir)
+        .unwrap_or_else(|| {
+            root_key
+                .rsplit_once('/')
+                .map(|(d, _)| d.to_string())
+                .unwrap_or_default()
+        });
+
+    let graph =
+        match vyrn_frontend::loader::module_graph_with_sources(&source, &root_key, &opts, &resolver)
+        {
+            Ok(g) => g,
+            Err(diags) => {
+                for d in &diags {
+                    let file = d.file.as_deref().unwrap_or(&root_key);
+                    eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
+                }
+                return Err(ExitCode::FAILURE);
+            }
+        };
+    let _ = save_lock(&resolver);
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (key, _imports, gen_source) in graph {
+        if gen_source.is_some() || vyrn_frontend::loader::is_remote(&key) {
+            continue; // generated + remote modules are out of scope
+        }
+        let is_std = std_root
+            .as_deref()
+            .is_some_and(|r| key.starts_with(&format!("{r}/")));
+        let name = if is_std {
+            if !with_std {
+                continue;
+            }
+            format!("std/{}", rel_name(&key, std_root.as_deref().unwrap_or("")))
+        } else {
+            rel_name(&key, &base)
+        };
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let source = match std::fs::read_to_string(&key) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: cannot read {key}: {e}");
+                return Err(ExitCode::FAILURE);
+            }
+        };
+        out.push(DocModule { name, source });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// A slash-normalized path with the Windows verbatim prefix stripped.
+fn normalize_slashes(p: &str) -> String {
+    p.trim_start_matches(r"\\?\").replace('\\', "/")
+}
+
+/// A module path relative to `base`, without its `.vyrn` extension — the module
+/// name. Falls back to the file stem when `path` is not under `base`.
+fn rel_name(path: &str, base: &str) -> String {
+    let path = normalize_slashes(path);
+    let stripped = if base.is_empty() {
+        path.as_str()
+    } else {
+        path.strip_prefix(&format!("{}/", base.trim_end_matches('/')))
+            .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(&path))
+    };
+    stripped.strip_suffix(".vyrn").unwrap_or(stripped).to_string()
+}
+
+/// Render `index.md`: a title and a sorted list of modules, each linking to its
+/// page with the first line of its header doc as a one-line description.
+fn render_doc_index(modules: &[DocModule]) -> String {
+    let mut lines = vec!["# API Reference".to_string(), String::new()];
+    for m in modules {
+        let doc = vyrn_frontend::module_doc(&m.source);
+        let summary = doc
+            .header_doc
+            .as_deref()
+            .and_then(|h| h.lines().next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match summary {
+            Some(s) => lines.push(format!("- [{}]({}.md) — {}", m.name, m.name, s)),
+            None => lines.push(format!("- [{}]({}.md)", m.name, m.name)),
+        }
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+/// Render one module page (RFC-0065): the `# name` title, the header doc block,
+/// then every export as a `## name` heading, a ` ```vyrn ` signature fence, and
+/// its `///` block verbatim. Blocks are separated by a single blank line; the
+/// page ends in exactly one newline.
+fn render_doc_page(name: &str, doc: &vyrn_frontend::ModuleDoc) -> String {
+    let mut blocks: Vec<String> = vec![format!("# {name}")];
+    if let Some(h) = &doc.header_doc {
+        blocks.push(h.clone());
+    }
+    if doc.exports.is_empty() {
+        blocks.push("_No exported declarations._".to_string());
+    }
+    for e in &doc.exports {
+        let mut parts = vec![
+            format!("## {}", e.name),
+            format!("```vyrn\n{}\n```", e.signature),
+        ];
+        if let Some(d) = &e.doc {
+            parts.push(d.clone());
+        }
+        blocks.push(parts.join("\n\n"));
+    }
+    let mut page = blocks.join("\n\n");
+    page.push('\n');
+    page
+}
+
+/// Write the rendered `files` under `out_dir` (creating subdirectories), then
+/// prune any stale `.md` files not in the set — so a regenerate always converges
+/// with `--verify`. Every file is written with LF newlines.
+fn write_doc_dir(out_dir: &str, files: &[(String, String)]) -> ExitCode {
+    let wanted: std::collections::HashSet<String> = files.iter().map(|(p, _)| p.clone()).collect();
+    for (rel, content) in files {
+        let path = Path::new(out_dir).join(rel);
+        if let Some(dir) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!("error: cannot create {}: {e}", dir.display());
+                return ExitCode::FAILURE;
+            }
+        }
+        if let Err(e) = std::fs::write(&path, content) {
+            eprintln!("error: cannot write {}: {e}", path.display());
+            return ExitCode::FAILURE;
+        }
+    }
+    for existing in existing_md_files(out_dir) {
+        if !wanted.contains(&existing) {
+            let _ = std::fs::remove_file(Path::new(out_dir).join(&existing));
+        }
+    }
+    println!("wrote {} file{} to {out_dir}", files.len(), if files.len() == 1 { "" } else { "s" });
+    ExitCode::SUCCESS
+}
+
+/// `--verify`: exit 1 if `out_dir`'s `.md` files differ in any way (missing,
+/// extra, or content) from the freshly generated `files`. The CI drift gate.
+fn verify_doc_dir(out_dir: &str, files: &[(String, String)]) -> ExitCode {
+    let wanted: std::collections::HashSet<String> = files.iter().map(|(p, _)| p.clone()).collect();
+    let existing: std::collections::HashSet<String> =
+        existing_md_files(out_dir).into_iter().collect();
+    // A stale page on disk that we no longer generate is drift.
+    let mut extra: Vec<String> = existing.difference(&wanted).cloned().collect();
+    extra.sort();
+    if let Some(f) = extra.first() {
+        eprintln!("doc drift: {out_dir}/{f} is not generated (stale) — run `vyrn doc` to update");
+        return ExitCode::FAILURE;
+    }
+    for (rel, content) in files {
+        let path = Path::new(out_dir).join(rel);
+        match std::fs::read_to_string(&path) {
+            Ok(on_disk) if normalize_slashes_content(&on_disk) == *content => {}
+            Ok(_) => {
+                eprintln!("doc drift: {out_dir}/{rel} is out of date — run `vyrn doc` to update");
+                return ExitCode::FAILURE;
+            }
+            Err(_) => {
+                eprintln!("doc drift: {out_dir}/{rel} is missing — run `vyrn doc` to update");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    println!("docs up to date ({} files)", files.len());
+    ExitCode::SUCCESS
+}
+
+/// Normalize a file's newlines to LF before comparison, so a CRLF checkout of a
+/// generated doc is not reported as drift (the tool always emits LF).
+fn normalize_slashes_content(s: &str) -> String {
+    s.replace("\r\n", "\n")
+}
+
+/// Every `.md` file under `dir` (recursively), as paths relative to `dir` with
+/// `/` separators — the set `--verify` compares and `write` prunes against.
+fn existing_md_files(dir: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_md_files(Path::new(dir), dir, &mut out);
+    out.sort();
+    out
+}
+
+fn collect_md_files(dir: &Path, base: &str, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut items: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    items.sort();
+    for path in items {
+        if path.is_dir() {
+            collect_md_files(&path, base, out);
+        } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
+            let full = normalize_slashes(&path.to_string_lossy());
+            let base = normalize_slashes(base);
+            let rel = full
+                .strip_prefix(&format!("{}/", base.trim_end_matches('/')))
+                .unwrap_or(&full)
+                .to_string();
+            out.push(rel);
         }
     }
 }

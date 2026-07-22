@@ -37,9 +37,9 @@ pub mod types;
 // pipeline lives in one place.
 pub use symbols::{
     analyze, analyze_linked, class_completions, class_token_hover, classify_at, completions,
-    import_spec_at, member_completions, references, resolve, semantic_tokens,
-    string_literal_completions, Analysis, Completion, LocalBinding, LocalKind, RefRange, Resolution,
-    SemKind, SemMods, SemToken, Symbol, SymbolKind, TokenInfo,
+    import_spec_at, member_completions, module_doc, references, resolve, semantic_tokens,
+    string_literal_completions, Analysis, Completion, DocExport, LocalBinding, LocalKind, ModuleDoc,
+    RefRange, Resolution, SemKind, SemMods, SemToken, Symbol, SymbolKind, TokenInfo,
 };
 
 // The canonical formatter (RFC-0017). `fmt` the module and `fmt` the function
