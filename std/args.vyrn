@@ -1,0 +1,225 @@
+/// std/args — CLI argument parsing over `args()` (RFC-0061). A pure-Vyrn library,
+/// zero compiler support. It replaces hand-rolled argv index arithmetic with four
+/// probes: `flag` (boolean presence), `opt` (`--name value` / `--name=value`),
+/// `positionals` (the non-flag tokens), and `rest` (a `--` passthrough tail).
+///
+/// Deliberately the smallest library that deletes the hand-rolling, NOT clap:
+/// there is no spec/schema, no generated `--help`, and no unknown-flag rejection —
+/// the caller validates what it cares about. Flag/option NAMES are matched
+/// verbatim (the caller writes the dashes), so `-v` works exactly like
+/// `--verbose`; short-flag bundling (`-abc`) is out of scope.
+///
+/// A token starting with `-` (single or double dash) before a literal `--`
+/// terminator is a flag/option token; a `--` ends flag parsing and everything
+/// after it is positional/`rest` verbatim (including `-x` tokens).
+
+import { indexOf, substring } from "std/strings"
+
+/// A snapshot of the command-line arguments — argv AFTER the program name, the
+/// same slice every backend's `args()` returns. Build it with `cli()` (the live
+/// args) or `cliOf(list)` (any token list — what the tests use).
+export type Args = { argv: Array<String> }
+
+/// The live arguments as an `Args` snapshot. `cli()` is exactly `cliOf(args())`.
+export fn cli() -> Args {
+    return Args { argv: args() }
+}
+
+/// An `Args` over an explicit token list — the constructor tests and callers that
+/// already hold a token slice use.
+export fn cliOf(list: Array<String>) -> Args {
+    return Args { argv: list }
+}
+
+/// The index of the first `--` terminator in `a.argv`, or the argv length when
+/// there is none. Flag parsing (`flag`/`opt`/`positionals`) only looks below it.
+fn terminatorAt(a: Args) -> Int64 {
+    let mut i = 0
+    while i < a.argv.length {
+        if a.argv[i] == "--" {
+            return i
+        }
+        i = i + 1
+    }
+    return a.argv.length
+}
+
+/// Whether `name` is present anywhere before the `--` terminator, spelled exactly
+/// (e.g. `flag(a, "--verbose")` or `flag(a, "-v")`).
+export fn flag(a: Args, name: String) -> Bool {
+    let end = terminatorAt(a)
+    let mut i = 0
+    while i < end {
+        if a.argv[i] == name {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// The value of option `name`, or `None`. Two forms, before the `--` terminator:
+/// - `--name=value` — everything after the first `=` (may be empty);
+/// - `--name value` — the NEXT token, but ONLY if it does not itself start with
+///   `-` (a `-`-prefixed following token is NOT consumed, so the option is
+///   valueless → `None`).
+///
+/// The FIRST occurrence wins; later duplicates are ignored (deterministic).
+///
+/// There is no `intOpt` — `parse` composes:
+///   `match opt(a, "--port") { Some(s) => parse(s), None => None }`.
+export fn opt(a: Args, name: String) -> Option<String> {
+    let end = terminatorAt(a)
+    let mut i = 0
+    while i < end {
+        let tok = a.argv[i]
+        if let Some(eq) = indexOf(tok, "=") {
+            // `--name=value` — the whole value is this one token.
+            if substring(tok, 0, eq) == name {
+                return Some(substring(tok, eq + 1, tok.byteLength))
+            }
+        } else {
+            // `--name value` — the following token, unless it is itself an option.
+            if tok == name {
+                if i + 1 < end {
+                    let next = a.argv[i + 1]
+                    if !next.startsWith("-") {
+                        return Some(next)
+                    }
+                }
+                return None
+            }
+        }
+        i = i + 1
+    }
+    return None
+}
+
+/// Every token that is neither a flag/option token nor consumed as an option
+/// value, in order. A `-`-prefixed token is a flag/option token; its immediately
+/// following non-`-` token (the `--name value` form) is treated as its value and
+/// skipped too — so put free positionals BEFORE flags, or after a `--`. A literal
+/// `--` ends flag parsing: every token after it is positional verbatim, including
+/// `-x` tokens.
+export fn positionals(a: Args) -> Array<String> {
+    let end = terminatorAt(a)
+    let mut out: Array<String> = []
+    let mut i = 0
+    while i < end {
+        let tok = a.argv[i]
+        if tok.startsWith("-") {
+            // A flag/option token. The `--name value` form (no `=`, a following
+            // non-option token) consumes that value — skip both.
+            if !tok.contains("=") && i + 1 < end && !a.argv[i + 1].startsWith("-") {
+                i = i + 2
+            } else {
+                i = i + 1
+            }
+        } else {
+            out.push(tok)
+            i = i + 1
+        }
+    }
+    // Everything after the `--` terminator is positional verbatim.
+    let mut j = end + 1
+    while j < a.argv.length {
+        out.push(a.argv[j])
+        j = j + 1
+    }
+    return out
+}
+
+/// The tokens strictly after the first `terminator` (`"--"`), for
+/// `tool -- passthrough args` shapes. Empty when the terminator is absent.
+export fn rest(a: Args, terminator: String) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut seen = false
+    let mut i = 0
+    while i < a.argv.length {
+        if seen {
+            out.push(a.argv[i])
+        } else {
+            if a.argv[i] == terminator {
+                seen = true
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// Tests (RFC-0015) — `vyrn test std/args.vyrn`. Every RFC-0061 rule, over
+// `cliOf([...])` so no real argv is needed.
+// ---------------------------------------------------------------------------
+
+test "flag is exact-name presence before the terminator" {
+    let a = cliOf(["--verbose", "build", "-v"])
+    assert(flag(a, "--verbose"))
+    assert(flag(a, "-v"))
+    assert(!flag(a, "--quiet"))
+    // A flag after `--` is not seen (it is positional there).
+    let b = cliOf(["--", "--verbose"])
+    assert(!flag(b, "--verbose"))
+}
+
+test "opt reads the space form and the equals form" {
+    let a = cliOf(["--name", "app", "--tag=rc1", "--empty="])
+    assert(match opt(a, "--name") { Some(v) => v == "app", None => false })
+    assert(match opt(a, "--tag") { Some(v) => v == "rc1", None => false })
+    // `--name=` — an explicit empty value (still Some).
+    assert(match opt(a, "--empty") { Some(v) => v == "", None => false })
+    // A missing option is None.
+    assert(match opt(a, "--missing") { Some(v) => false, None => true })
+}
+
+test "opt does NOT consume a following option-looking token" {
+    // `--name -x` — `-x` starts with `-`, so it is not the value; None.
+    let a = cliOf(["--name", "-x", "positional"])
+    assert(match opt(a, "--name") { Some(v) => false, None => true })
+    // The `=` form is unaffected — its value is part of the one token.
+    let b = cliOf(["--name=-x"])
+    assert(match opt(b, "--name") { Some(v) => v == "-x", None => false })
+}
+
+test "opt first occurrence wins, later duplicates ignored" {
+    let a = cliOf(["--name", "first", "--name", "second"])
+    assert(match opt(a, "--name") { Some(v) => v == "first", None => false })
+    // A valueless first occurrence wins even over a later valued one.
+    let b = cliOf(["--name", "--name=later"])
+    assert(match opt(b, "--name") { Some(v) => false, None => true })
+}
+
+test "positionals skip flags, option values, and honor the terminator" {
+    let a = cliOf(["build", "--name", "app", "src", "--", "-x", "y"])
+    let p = positionals(a)
+    // "app" is consumed as --name's value; "build"/"src" are positionals, and
+    // everything after `--` is positional verbatim (including `-x`).
+    assertEq(p.length, 4)
+    assertEq(p[0], "build")
+    assertEq(p[1], "src")
+    assertEq(p[2], "-x")
+    assertEq(p[3], "y")
+}
+
+test "positionals over an empty argv is empty" {
+    let p = positionals(cliOf([]))
+    assertEq(p.length, 0)
+}
+
+test "rest returns only the tokens after the terminator" {
+    let a = cliOf(["run", "--flag", "--", "passthrough", "-x"])
+    let r = rest(a, "--")
+    assertEq(r.length, 2)
+    assertEq(r[0], "passthrough")
+    assertEq(r[1], "-x")
+    // No terminator → empty rest.
+    assertEq(rest(cliOf(["a", "b"]), "--").length, 0)
+}
+
+test "cliOf and cli agree in shape" {
+    // `cliOf` wraps a list; `flag`/`opt` read it the same way `cli()` would read
+    // real argv.
+    let a = cliOf(["-n", "5"])
+    assert(match opt(a, "-n") { Some(v) => v == "5", None => false })
+}

@@ -1,0 +1,13 @@
+build
+--verbose
+--name
+app
+--miss
+-x
+--dup=one
+--dup=two
+--count
+5
+--
+-raw
+tail

@@ -78,6 +78,19 @@ fn run_io(mut cmd: Command, dir: &Path, stdin_fixture: &Path) -> std::process::O
     cmd.output().expect("run backend")
 }
 
+/// Program arguments for an example (RFC-0061): the tokens in `examples/<name>.args`,
+/// ONE per line (so a token may contain spaces), trailing newline ignored. These
+/// are forwarded identically to all three backends — `vyrn run <file> <args>`,
+/// the native `<exe> <args>`, and `wasmtime run ... <module> <args>` — so an argv
+/// example is a byte-identical parity citizen. No fixture ⇒ empty argv.
+fn read_args(args_fixture: &Path) -> Vec<String> {
+    if !args_fixture.exists() {
+        return Vec::new();
+    }
+    let text = std::fs::read_to_string(args_fixture).expect("read args fixture");
+    text.lines().map(|l| l.to_string()).collect()
+}
+
 /// The wasm toolchain, when present: the wasi-libc sysroot (for `vyrn build
 /// --target wasm`) and a wasmtime executable to run the module. Discovered
 /// from `$WASI_SYSROOT` / `$VYRN_WASMTIME`, falling back to the repo's
@@ -145,9 +158,13 @@ fn examples_interp_native_parity() {
         // backends; every run's cwd is `examples/` so relative file paths in
         // the example resolve identically everywhere.
         let stdin_fixture = path.with_extension("stdin");
+        // RFC-0061: `examples/<name>.args` forwards program arguments (argv[1..])
+        // to all three backends byte-identically. No fixture ⇒ empty argv.
+        let prog_args = read_args(&path.with_extension("args"));
 
         let mut interp_cmd = vyrn();
         interp_cmd.arg("run").arg(path);
+        interp_cmd.args(&prog_args);
         let interp = run_io(interp_cmd, &dir, &stdin_fixture);
 
         let exe = out_dir.join(format!("{name}.exe"));
@@ -160,7 +177,9 @@ fn examples_interp_native_parity() {
             ));
             continue;
         }
-        let native = run_io(Command::new(&exe), &dir, &stdin_fixture);
+        let mut native_cmd = Command::new(&exe);
+        native_cmd.args(&prog_args);
+        let native = run_io(native_cmd, &dir, &stdin_fixture);
 
         let (i_out, n_out) = (norm(&interp.stdout), norm(&native.stdout));
         let (i_err, n_err) = (norm(&interp.stderr), norm(&native.stderr));
@@ -208,6 +227,8 @@ fn examples_interp_native_parity() {
             wasm_cmd.arg("--env").arg(format!("VYRN_FIXED_TIME={FIXED_TIME}"));
             wasm_cmd.arg("--env").arg(format!("VYRN_FIXED_SEED={FIXED_SEED}"));
             wasm_cmd.arg(&module);
+            // wasmtime forwards guest argv AFTER the module path (RFC-0061).
+            wasm_cmd.args(&prog_args);
             let w = run_io(wasm_cmd, &dir, &stdin_fixture);
             let (w_out, w_err) = (norm(&w.stdout), norm(&w.stderr));
             let w_code = w.status.code();

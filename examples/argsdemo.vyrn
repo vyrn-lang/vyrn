@@ -1,0 +1,72 @@
+/// argsdemo — every rule of std/args (RFC-0061), printed deterministically so it
+/// is a byte-identical three-way parity citizen. The argv it reads is fixed in
+/// `argsdemo.args` (one token per line), forwarded identically to interp, native,
+/// and wasmtime by the parity harness.
+///
+/// Reads better with `if let` (RFC-0060): an option probe is an `Option<String>`,
+/// so `if let Some(v) = ...` unpacks it without a full `match`.
+
+import { cli, flag, opt, positionals, rest } from "std/args"
+
+/// Print `name=value` for an option, or `name=none` when it is absent/valueless.
+fn showOpt(name: String, v: Option<String>) -> Int64 {
+    if let Some(s) = v {
+        print("\{name}=\{s}")
+    } else {
+        print("\{name}=none")
+    }
+    return 0
+}
+
+fn main() -> Int64 {
+    let a = cli()
+
+    // Flags: exact-name presence before the `--` terminator.
+    print("verbose=\{flag(a, "--verbose")}")
+    print("quiet=\{flag(a, "--quiet")}")
+
+    // Options: the space form (`--name app`), a valueless option whose next token
+    // is `-x` (NOT consumed → none), and the `=` form with first-wins duplicates.
+    showOpt("name", opt(a, "--name"))
+    showOpt("miss", opt(a, "--miss"))
+    showOpt("dup", opt(a, "--dup"))
+
+    // The `parse` idiom for a numeric option (no `intOpt` in the API).
+    let count = match opt(a, "--count") {
+        Some(s) => match parse(s) {
+            Some(n) => n,
+            None => 0,
+        },
+        None => 0,
+    }
+    print("count=\{count}")
+
+    // Positionals: flags and their consumed values are skipped; everything after
+    // `--` is positional verbatim (including `-raw`).
+    print("positionals:")
+    for p in positionals(a) {
+        print("- \{p}")
+    }
+
+    // rest: only the tokens after the `--` terminator.
+    print("rest:")
+    for r in rest(a, "--") {
+        print("- \{r}")
+    }
+
+    // A `break` demo driven by the parsed count (RFC-0060): count down, but stop
+    // early once we have printed two lines.
+    print("countdown:")
+    let mut c = count
+    let mut printed = 0
+    while c > 0 {
+        if printed == 2 {
+            break
+        }
+        print("\{c}")
+        c = c - 1
+        printed = printed + 1
+    }
+
+    return 0
+}
