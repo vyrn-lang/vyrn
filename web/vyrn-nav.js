@@ -150,6 +150,22 @@ function isPageOwnedHead(el) {
   return true;
 }
 
+// Import a head element so it WORKS in this document. A <script> from a
+// DOMParser document is permanently inert — the spec's "already started" flag
+// survives importNode, so the node lands in <head> but never fetches or runs
+// (observed live: soft-nav /about → / never loaded the home page's /app.js
+// island module, leaving the create form dead until a hard reload). Rebuild
+// scripts with createElement so insertion executes them; everything else
+// imports as-is. A module script re-added with a previously-seen src is a
+// no-op by ES module caching, so this stays idempotent.
+function executableImport(el) {
+  if (el.tagName !== "SCRIPT") return document.importNode(el, true);
+  const s = document.createElement("script");
+  for (const a of el.attributes) s.setAttribute(a.name, a.value);
+  s.textContent = el.textContent;
+  return s;
+}
+
 function swapHead(newDoc) {
   const newTitle = newDoc.querySelector("title");
   if (newTitle) document.title = newTitle.textContent;
@@ -159,7 +175,7 @@ function swapHead(newDoc) {
   for (const el of document.head.children) if (isKeptAsset(el)) have.add(assetKey(el));
   for (const el of newDoc.head.children) {
     if (isKeptAsset(el) && !have.has(assetKey(el))) {
-      document.head.appendChild(document.importNode(el, true));
+      document.head.appendChild(executableImport(el));
       have.add(assetKey(el));
     }
   }
@@ -169,7 +185,7 @@ function swapHead(newDoc) {
     if (isPageOwnedHead(el)) el.remove();
   }
   for (const el of newDoc.head.children) {
-    if (isPageOwnedHead(el)) document.head.appendChild(document.importNode(el, true));
+    if (isPageOwnedHead(el)) document.head.appendChild(executableImport(el));
   }
 }
 
