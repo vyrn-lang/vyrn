@@ -6,6 +6,12 @@
             "runtimeExecutable": "python",
             "runtimeArgs": ["-m", "http.server", "8734", "--directory", "web"],
             "port": 8734
+        },
+        {
+            "name": "bin-dev",
+            "runtimeExecutable": "cmd",
+            "runtimeArgs": ["/c", "cd /d N:\\lang\\examples\\bin && N:\\lang\\compiler\\target\\release\\vyrn.exe dev --port 8080"],
+            "port": 8080
         }
     ]
 }

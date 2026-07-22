@@ -42,6 +42,11 @@ input, select, textarea {
 }
 textarea { min-height: 9rem; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 select { width: auto; }
+/* The native dropdown popup does not reliably inherit the page's scheme when
+   the control is author-styled (`color: inherit` rode into a light popup as
+   white-on-white). Canvas/CanvasText resolve per the ACTUAL scheme, so the
+   list is readable in both light and dark. */
+select option { background: Canvas; color: CanvasText; }
 button {
   font: inherit; padding: 0.4rem 0.9rem; margin: 0.3rem 0.2rem 0 0;
   border-radius: 7px; border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
