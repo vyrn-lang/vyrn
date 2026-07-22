@@ -2499,3 +2499,67 @@ fn rfc54_semantic_tokens_do_not_crash_on_a_code_quote() {
     );
     let _ = client.child.kill();
 }
+
+// ===========================================================================
+// RFC-0064: the `vyrn/isDevEntry` predicate — is a document a dev-server entry
+// (imports std/rpc AND has an rpcServer(...) call site)? The extension queries
+// this to render the "▶ Run dev server" CodeLens.
+// ===========================================================================
+
+/// Send `vyrn/isDevEntry` for `uri` and return the boolean result.
+fn query_is_dev_entry(client: &mut LspClient, uri: &str, id: u64) -> bool {
+    let req_id = serde_json::json!(id);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": req_id, "method": "vyrn/isDevEntry",
+        "params": { "textDocument": { "uri": uri } }
+    }));
+    let resp = client.read_response(&req_id);
+    assert!(resp.get("error").is_none(), "isDevEntry errored: {resp}");
+    resp.get("result").and_then(|r| r.as_bool()).expect("isDevEntry result is a bool")
+}
+
+#[test]
+fn is_dev_entry_positive_and_negative() {
+    let mut client = rfc33_client();
+
+    // --- integration via an open buffer (didOpen → server.docs → predicate) ---
+    // A minimal serve-calling root: imports std/rpc AND an rpcServer(...) call site.
+    let server_src = "import { rpcServer } from \"std/rpc\"\n\
+        import { rpcHandle } from rpcServer(\"./contract\")\n\
+        fn handle(req: Request) -> Response { return rpcHandle(req) }\n";
+    let server_uri = "file:///n%3A/lang/scratch/server.vyrn";
+    did_open(&mut client, server_uri, "vyrn", server_src);
+    assert!(query_is_dev_entry(&mut client, server_uri, 900), "a serve-calling root is a dev entry");
+
+    // An rpc CLIENT: imports std/rpc but calls rpcClient(, not a server — excluded.
+    let client_src = "import { rpcClient } from \"std/rpc\"\n\
+        import * as api from rpcClient(\"./contract\")\n\
+        fn main() -> Int64 { return 0 }\n";
+    let client_uri = "file:///n%3A/lang/scratch/client.vyrn";
+    did_open(&mut client, client_uri, "vyrn", client_src);
+    assert!(!query_is_dev_entry(&mut client, client_uri, 901), "an rpc client is NOT a dev entry");
+
+    // A plain library / CLI module: no std/rpc at all.
+    let lib_src = "fn main() -> Int64 { print(\"hi\") return 0 }\n";
+    let lib_uri = "file:///n%3A/lang/scratch/lib.vyrn";
+    did_open(&mut client, lib_uri, "vyrn", lib_src);
+    assert!(!query_is_dev_entry(&mut client, lib_uri, 902), "a plain module is NOT a dev entry");
+
+    // --- the exact files the RFC names, resolved from DISK (the handler's
+    //     no-buffer fallback; no heavy didOpen analysis needed). ----------------
+    for (rel, expect) in [
+        ("bin/server.vyrn", true),
+        ("shelf/server.vyrn", true),
+        ("vlog.vyrn", false),
+        ("bin/client.vyrn", false),
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples")
+            .join(rel);
+        let uri = file_uri(&path);
+        let got = query_is_dev_entry(&mut client, &uri, 910);
+        assert_eq!(got, expect, "isDevEntry({rel}) should be {expect}");
+    }
+
+    let _ = client.child.kill();
+}

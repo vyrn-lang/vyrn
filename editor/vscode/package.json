@@ -87,6 +87,11 @@
         "command": "vyrn.testAll",
         "title": "Vyrn: Run All Tests",
         "category": "Vyrn"
+      },
+      {
+        "command": "vyrn.dev",
+        "title": "Vyrn: Run Dev Server",
+        "category": "Vyrn"
       }
     ],
     "configuration": {

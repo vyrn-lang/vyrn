@@ -16,10 +16,17 @@ const { LanguageClient, TransportKind } = require("vscode-languageclient");
 function activate(context) {
   const vsc = require("vscode");
 
-  // A "▶ Run" CodeLens above `fn main` + the command it invokes. Independent of
-  // the language server: it works purely from the document text and a terminal,
-  // so it is registered even if the server binary is missing (below).
-  registerRun(context, vsc);
+  // Shared handle to the started language client, so the CodeLens provider can
+  // query the server's `vyrn/isDevEntry` predicate (RFC-0064) for the
+  // "▶ Run dev server" lens. Stays null until (and unless) the server starts.
+  const lspState = { client: null };
+
+  // A "▶ Run" CodeLens above `fn main` + the command it invokes. Mostly
+  // independent of the language server (the Run/test/bench lenses work purely
+  // from the document text and a terminal, so they register even if the server
+  // binary is missing below); the "▶ Run dev server" lens additionally consults
+  // `lspState.client` and simply stays hidden until the server is up.
+  registerRun(context, vsc, lspState);
 
   const cfg = vsc.workspace.getConfiguration("vyrn");
   let serverPath = cfg.get("serverPath", "");
@@ -89,11 +96,18 @@ function activate(context) {
   // rejection that would crash the Extension Development Host.
   const started = client.start();
   context.subscriptions.push(started);
-  started.catch((err) => {
-    vsc.window.showErrorMessage(
-      `Vyrn: failed to start language server "${serverPath}": ${err.message}`
-    );
-  });
+  started
+    .then(() => {
+      // The server is up: expose it to the CodeLens provider and nudge VS Code
+      // to recompute lenses now that "▶ Run dev server" can be answered.
+      lspState.client = client;
+      vsc.commands.executeCommand("vyrn._refreshDevLens");
+    })
+    .catch((err) => {
+      vsc.window.showErrorMessage(
+        `Vyrn: failed to start language server "${serverPath}": ${err.message}`
+      );
+    });
 }
 
 /**
@@ -103,14 +117,21 @@ function activate(context) {
  *
  * @param {import("vscode").ExtensionContext} context
  * @param {typeof import("vscode")} vsc
+ * @param {{ client: import("vscode-languageclient").LanguageClient | null }} lspState
  */
-function registerRun(context, vsc) {
+function registerRun(context, vsc, lspState) {
+  // Fired to make VS Code re-request CodeLenses — used once the language server
+  // finishes starting, so the async "▶ Run dev server" lens (RFC-0064) can
+  // appear without the user having to edit the file first.
+  const onDidChangeCodeLenses = new vsc.EventEmitter();
+
   // CodeLenses: "▶ Run" over each `fn main`, and — for tests (RFC-0015) — a
   // "▶ Run test" over each `test "name" { .. }` plus a "▶ Run all tests" over
   // the first one. A fresh regex per pass (the `g` flag makes `lastIndex`
   // stateful — never share it across calls).
   const provider = {
-    provideCodeLenses(document) {
+    onDidChangeCodeLenses: onDidChangeCodeLenses.event,
+    async provideCodeLenses(document) {
       const lenses = [];
       const text = document.getText();
       const mainRe = /^[ \t]*fn\s+main\s*\(/gm;
@@ -188,12 +209,43 @@ function registerRun(context, vsc) {
         );
         if (benchRe.lastIndex === b.index) benchRe.lastIndex++;
       }
+
+      // "▶ Run dev server" (RFC-0064): shown ONLY on a dev-server entry — a root
+      // that imports `std/rpc` and has an `rpcServer(...)` call site. That
+      // predicate is semantic, so the language server answers it (`vyrn/isDevEntry`)
+      // rather than a brittle client-side regex. The lens sits above `fn main`
+      // (or line 1 if there is none), alongside the "▶ Run" lens.
+      if (lspState.client) {
+        let isDev = false;
+        try {
+          isDev = await lspState.client.sendRequest("vyrn/isDevEntry", {
+            textDocument: { uri: document.uri.toString() },
+          });
+        } catch (_e) {
+          isDev = false; // server down / not ready: no dev lens, no error noise.
+        }
+        if (isDev) {
+          const mainMatch = /^[ \t]*fn\s+main\s*\(/m.exec(text);
+          const pos = document.positionAt(mainMatch ? mainMatch.index : 0);
+          const range = new vsc.Range(pos, pos);
+          lenses.push(
+            new vsc.CodeLens(range, {
+              title: "▶ Run dev server",
+              command: "vyrn.dev",
+              arguments: [document.uri],
+            })
+          );
+        }
+      }
       return lenses;
     },
   };
 
   context.subscriptions.push(
-    vsc.languages.registerCodeLensProvider({ scheme: "file", language: "vyrn" }, provider)
+    vsc.languages.registerCodeLensProvider({ scheme: "file", language: "vyrn" }, provider),
+    // Internal: fire the lens-refresh event (used when the server finishes
+    // starting so the dev-server lens can appear without a manual edit).
+    vsc.commands.registerCommand("vyrn._refreshDevLens", () => onDidChangeCodeLenses.fire())
   );
 
   context.subscriptions.push(
@@ -213,7 +265,11 @@ function registerRun(context, vsc) {
     ),
     vsc.commands.registerCommand("vyrn.bench", (uri, name) =>
       runVyrn(vsc, uri, (file) => ["bench", file, "--name", unescapeTestName(name)])
-    )
+    ),
+    // "▶ Run dev server" (RFC-0064): `vyrn dev` is manifest-driven (it reads the
+    // project's `server`/`client` keys), so this runs it in the manifest
+    // directory, in a dedicated restartable terminal.
+    vsc.commands.registerCommand("vyrn.dev", (uri) => runDev(vsc, uri))
   );
 }
 
@@ -272,41 +328,7 @@ function runVyrn(vsc, uri, buildArgs) {
     return;
   }
   const file = target.fsPath;
-  const args = buildArgs(file);
-
-  const exe = process.platform === "win32" ? "vyrn.exe" : "vyrn";
-  const cfg = vsc.workspace.getConfiguration("vyrn");
-  const vyrnPath = cfg.get("path", "");
-  const repo = findRepoRoot(path.dirname(file));
-
-  let command;
-  if (vyrnPath) {
-    command = invoke(vyrnPath, args);
-  } else if (repo) {
-    const release = path.join(repo, "compiler", "target", "release", exe);
-    const debug = path.join(repo, "compiler", "target", "debug", exe);
-    if (fs.existsSync(release)) {
-      command = invoke(release, args);
-    } else if (fs.existsSync(debug)) {
-      command = invoke(debug, args);
-    } else {
-      const manifest = path.join(repo, "compiler", "Cargo.toml");
-      // `cargo` is a bare program name on PATH, so it runs in any shell without
-      // a call operator; only its arguments need quoting.
-      command = `cargo run -q --manifest-path ${quote(manifest)} -p vyrn-cli -- ${args
-        .map(quote)
-        .join(" ")}`;
-    }
-  } else {
-    // Not inside a Vyrn repo: assume an installed `vyrn` on PATH (and point
-    // at the setting if that guess is wrong).
-    command = `vyrn ${args.map(quote).join(" ")}`;
-    vsc.window.setStatusBarMessage(
-      'Vyrn: no compiler/ found above this file — using `vyrn` from PATH ' +
-        '(set "vyrn.path" if that is not what you want)',
-      8000
-    );
-  }
+  const command = resolveVyrnCommand(vsc, file, buildArgs(file));
 
   // Reuse a single named terminal rather than spawning one per click.
   const name = "vyrn";
@@ -314,6 +336,111 @@ function runVyrn(vsc, uri, buildArgs) {
   if (!terminal) {
     terminal = vsc.window.createTerminal(name);
   }
+  terminal.show(true);
+  terminal.sendText(command);
+}
+
+/**
+ * Resolve the terminal command that runs `vyrn <args>` for a file. Compiler
+ * resolution (first hit wins):
+ *   1. the `vyrn.path` setting, if set;
+ *   2. `<repo>/compiler/target/release/vyrn(.exe)`, if it exists;
+ *   3. `<repo>/compiler/target/debug/vyrn(.exe)`, if it exists;
+ *   4. `cargo run -q --manifest-path <repo>/compiler/Cargo.toml -p vyrn-cli -- <args>`;
+ *   5. no repo found at all: bare `vyrn <args>` (PATH install).
+ * `<repo>` is found by walking up from the file (see [findRepoRoot]).
+ *
+ * @param {typeof import("vscode")} vsc
+ * @param {string} file  the .vyrn file (used only to locate the repo)
+ * @param {string[]} args  the vyrn argument vector (e.g. `["run", file]`, `["dev"]`)
+ * @returns {string} the shell command line
+ */
+function resolveVyrnCommand(vsc, file, args) {
+  const exe = process.platform === "win32" ? "vyrn.exe" : "vyrn";
+  const cfg = vsc.workspace.getConfiguration("vyrn");
+  const vyrnPath = cfg.get("path", "");
+  const repo = findRepoRoot(path.dirname(file));
+
+  if (vyrnPath) {
+    return invoke(vyrnPath, args);
+  }
+  if (repo) {
+    const release = path.join(repo, "compiler", "target", "release", exe);
+    const debug = path.join(repo, "compiler", "target", "debug", exe);
+    if (fs.existsSync(release)) {
+      return invoke(release, args);
+    }
+    if (fs.existsSync(debug)) {
+      return invoke(debug, args);
+    }
+    const manifest = path.join(repo, "compiler", "Cargo.toml");
+    // `cargo` is a bare program name on PATH, so it runs in any shell without a
+    // call operator; only its arguments need quoting.
+    return `cargo run -q --manifest-path ${quote(manifest)} -p vyrn-cli -- ${args
+      .map(quote)
+      .join(" ")}`;
+  }
+  // Not inside a Vyrn repo: assume an installed `vyrn` on PATH (and point at the
+  // setting if that guess is wrong).
+  vsc.window.setStatusBarMessage(
+    'Vyrn: no compiler/ found above this file — using `vyrn` from PATH ' +
+      '(set "vyrn.path" if that is not what you want)',
+    8000
+  );
+  return `vyrn ${args.map(quote).join(" ")}`;
+}
+
+/**
+ * The nearest ancestor directory of `startDir` that contains a `vyrn.json`, or
+ * null. `vyrn dev` reads its `server`/`client` keys, so this is the directory
+ * the command must run in.
+ *
+ * @param {string} startDir
+ * @returns {string | null}
+ */
+function findManifestDir(startDir) {
+  let dir = startDir;
+  for (let i = 0; i < 20; i++) {
+    if (fs.existsSync(path.join(dir, "vyrn.json"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null; // filesystem root
+    dir = parent;
+  }
+  return null;
+}
+
+/**
+ * "▶ Run dev server" (RFC-0064). `vyrn dev` is manifest-driven — it reads the
+ * project's `server`/`client` keys from `vyrn.json` and takes NO file argument —
+ * so this runs `vyrn dev` in the project's manifest directory (the file's
+ * nearest `vyrn.json`; falling back to the file's own dir if none is found, so
+ * the CLI's own "needs a vyrn.json" error surfaces).
+ *
+ * The command runs in a DEDICATED terminal named `vyrn dev`, with restart
+ * semantics: an existing one is disposed and replaced on re-click, so two
+ * stacked dev servers never fight over the port.
+ *
+ * @param {typeof import("vscode")} vsc
+ * @param {import("vscode").Uri=} uri  the server file (defaults to the active editor)
+ */
+function runDev(vsc, uri) {
+  const target = uri || (vsc.window.activeTextEditor && vsc.window.activeTextEditor.document.uri);
+  if (!target || target.scheme !== "file") {
+    vsc.window.showWarningMessage("Vyrn: no file to run.");
+    return;
+  }
+  const file = target.fsPath;
+  const cwd = findManifestDir(path.dirname(file)) || path.dirname(file);
+  const command = resolveVyrnCommand(vsc, file, ["dev"]);
+
+  // Dedicated, restartable terminal: dispose an existing "vyrn dev" first so a
+  // re-click restarts the server rather than stacking a second one on the port.
+  const name = "vyrn dev";
+  const existing = vsc.window.terminals.find((t) => t.name === name);
+  if (existing) {
+    existing.dispose();
+  }
+  const terminal = vsc.window.createTerminal({ name, cwd });
   terminal.show(true);
   terminal.sendText(command);
 }

@@ -513,6 +513,10 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
         "textDocument/semanticTokens/range" => {
             Response::new_ok(req.id, handle_semantic_tokens_range(server, req.params))
         }
+        // RFC-0064: a cheap predicate the extension queries to decide whether to
+        // render the "▶ Run dev server" CodeLens. Always answers a bool (never
+        // leaves the client waiting).
+        "vyrn/isDevEntry" => Response::new_ok(req.id, Some(handle_is_dev_entry(server, req.params))),
         _ => Response {
             id: req.id,
             result: None,
@@ -523,6 +527,61 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
             }),
         },
     }
+}
+
+/// RFC-0064: `vyrn/isDevEntry` — is `params.textDocument.uri` a **dev-server
+/// entry**, i.e. the exact kind of file `vyrn dev` is meant for? Answers a plain
+/// bool. Reads the open buffer (else disk) and runs [`is_dev_entry`] on it.
+fn handle_is_dev_entry(server: &Server, params: serde_json::Value) -> bool {
+    let Some(uri) = params.pointer("/textDocument/uri").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let Ok(uri) = Url::parse(uri) else { return false };
+    if !is_vyrn_uri(&uri) {
+        return false;
+    }
+    let src = server
+        .docs
+        .get(&uri)
+        .cloned()
+        .or_else(|| uri_path(&uri).and_then(|p| std::fs::read_to_string(p).ok()));
+    match src {
+        Some(text) => is_dev_entry(&text),
+        None => false,
+    }
+}
+
+/// The dev-entry predicate (RFC-0064): the root module imports `std/rpc` **and**
+/// has an `rpcServer(…)` call site in it. That is precisely the set of server
+/// roots `vyrn dev` builds+serves — a client (`rpcClient`), an in-process module
+/// (`rpcInProcess`), a library, and a CLI example are all excluded.
+///
+/// Deviation from the RFC letter (documented in RFC-0064 "As landed"): the RFC
+/// wrote the predicate as "calls `serve(` from std/rpc", but `std/rpc` exposes no
+/// `serve` — a server root is composed by importing from the `rpcServer("…")`
+/// GENERATOR (`import { rpcHandle } from rpcServer("./contract")`). The generator
+/// import IS the "import present + call site" the RFC describes, so `rpcServer` is
+/// the real spelling of `serve`.
+///
+/// Cheap on purpose: a lex+parse of the ROOT source only (no linking, no
+/// generation), so `program.imports` is exactly the root module's imports.
+fn is_dev_entry(source: &str) -> bool {
+    use vyrn_frontend::ast::ImportSource;
+    let Ok(tokens) = vyrn_frontend::lexer::lex(source) else {
+        return false;
+    };
+    let Ok(program) = vyrn_frontend::parser::parse(tokens) else {
+        return false;
+    };
+    let imports_rpc = program
+        .imports
+        .iter()
+        .any(|i| matches!(&i.source, ImportSource::Path(p) if p == "std/rpc"));
+    let calls_server = program
+        .imports
+        .iter()
+        .any(|i| matches!(&i.source, ImportSource::Generator { name, .. } if name == "rpcServer"));
+    imports_rpc && calls_server
 }
 
 fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
