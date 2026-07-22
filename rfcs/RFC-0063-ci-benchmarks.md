@@ -1,6 +1,6 @@
 # RFC-0063 — Benchmarks in CI: `--json`, `--compare`, and the bench job
 
-- **Status:** Locked design
+- **Status:** Implemented
 - **Depends on:** RFC-0055 (`vyrn bench` — this ships its deferred "CI
   regression tracking" item), the CI workflow (public repo, free minutes)
 - **Evidence (user):** "what about some auto benchmarks for CI?"
@@ -74,3 +74,97 @@ Two additions to the existing workflow, push-to-main only:
 Cross-run trend dashboards, per-PR bench comments, criterion-style
 statistical tests, and any blocking timing gate (the noise makes it a
 false-positive machine).
+
+---
+
+## As landed
+
+Landed as specified. The JSON is built in Vyrn (the RFC's locked choice), the
+comparison core is pure Rust, and CI splits deterministic (blocking) from timing
+(informational) exactly as designed.
+
+### `--json` — the Vyrn harness builds the tree
+
+The report is emitted from Vyrn via `std/json`, not reconstructed on the Rust
+side from human text (which would be lossy — parsing `41.20 µs` back to ns).
+`std/bench` gained:
+
+- **`BenchResult`** — `{ name, minNs, medianNs, meanNs, samples, iters }`.
+- **`benchMeasure(name, body) -> BenchResult`** — the divan-simplified loop
+  (warmup / auto-scale / sample / stats), factored OUT of `benchOne`, which now
+  just calls it and prints the human line. One loop, two faces.
+- **`benchJson(results, backend, opt) -> String`** — builds a `JObj` tree
+  (`{ backend, opt, benches: [ … ] }`, every number a `JNum` integer, declaration
+  order) and `emit`s it compact.
+
+`bench_native` gained `json`/`capture` flags. In `--json` mode the synthesized
+harness `main` is a single `print(benchJson([benchMeasure("n0", body0), …],
+"native", "O2"))` — the array literal coerces to `Array<BenchResult>` from the
+parameter type, so no `let`/`push` synthesis is needed. `std/bench`'s
+`import { benchOne }` already pulls the whole module, so `benchMeasure`/`benchJson`
+and their transitive `std/json` are merged automatically.
+
+### `--compare` — pure verdict core
+
+`bench_compare` reads+parses the baseline first (a broken baseline is a fast
+usage error), runs the benches native with stdout captured (`bench_native(..,
+json=true, capture=true)`), parses the report, and delegates to a **pure**
+`bench_verdicts(run, baseline, threshold)`: run benches first in declaration
+order (`ok` / `REGRESSED xN.NN` where the factor is `min / baselineMin` / `new`),
+then baseline-only benches as `missing-from-run`; it returns the regressed count
+(exit 1 iff > 0). A regression is the strict `min > baselineMin * threshold`
+(default `1.5`); a zero/absent baseline min is `new`, never a division by zero.
+The purity is what lets the comparison be unit-tested against synthetic min
+tables with **no clang and no real timing**.
+
+`--check` is rejected alongside `--json`/`--compare` (deterministic vs timing).
+
+### Placeholder baseline
+
+`bench/baseline.json` ships a valid-schema placeholder: `placeholder: true`, an
+empty `benches`, and a `_readme` array documenting the CI-hardware refresh flow
+(JSON has no comments). `baseline_is_placeholder` (flag OR empty `benches`) makes
+`--compare` report every bench `new` and exit 0 — comparing real timings against
+an unseeded baseline is meaningless. The first REAL baseline is committed by a
+human from the `bench` job's `bench-json` artifact.
+
+### CI wiring
+
+- **Blocking** — a `Bench --check` step in the existing `test` job scans
+  `examples/*.vyrn` for `bench "`, runs `vyrn bench --check` over each
+  (interpreter-only, deterministic, no clang). The corpus today is exactly
+  `benching` + `smallarray`, pinned by an integration test so drift shows up.
+- **Informational** — a new `bench` job (`if: push && ref == main`,
+  `continue-on-error: true`): builds `vyrn`, runs `--json` (→ per-example
+  artifacts, always uploaded) and `--compare bench/baseline.json` over the corpus,
+  and `exit $regressed` so a gross regression is a job-failure annotation without
+  blocking the merge. Reuses the `Swatinem/rust-cache` pattern with its own
+  `prefix-key: bench`; clang is preinstalled on `ubuntu-latest`.
+
+### Deviations
+
+- **`serve`-less, so `min` re-run twice in CI.** `--json` (artifact) and
+  `--compare` (tripwire) each compile+run the benches, so the `bench` job runs
+  each corpus example native twice. Acceptable for an informational push-only
+  job; a single-run "emit AND compare" mode was not worth the surface.
+- **Comparison output shape.** One `bench "name" ... <verdict>` line per bench
+  (mirroring `--check`'s line shape) plus a trailing `N regressed` /
+  `no regressions (threshold xF)` summary — the RFC left the exact spelling open.
+- **Nothing else deviates.**
+
+### Verification
+
+- Workspace suite: **1033 passed**, 10 ignored (`cargo test --workspace`) — up
+  from 1027, +6 (the `bench_verdicts`/`bench_min_table`/placeholder unit tests, a
+  corpus-discovery test, `--json`/`--compare` native integration tests behind
+  `#[ignore]`, and a mutual-exclusion test).
+- `std/bench` Vyrn tests: **5 passed** (`vyrn test std/bench.vyrn`) incl. the
+  locked-schema + `parseJson` round-trip + stable-order tests.
+- Native `--json`/`--compare` (clang) integration tests pass
+  (`cargo test -p vyrn-cli --test benching -- --ignored`).
+- Three-way parity green (`examples/benching.vyrn` still byte-identical —
+  `std/bench` is bench-mode-only, never in a run/build compile).
+- `vyrn fmt --check` clean on `std/bench.vyrn` + examples; 0 new clippy warnings
+  (all pre-existing, in `vyrn-codegen`/`vyrn-frontend`, none in `vyrn-cli`).
+- No LSP change from RFC-0063 (CLI + std only) — the deployed `vyrn-lsp.exe` hash
+  is untouched by this RFC.
