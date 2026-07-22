@@ -955,7 +955,7 @@ fn uiRouteSegments(path: String) -> Array<String> {
     let mut i = 0
     let mut stop = ba.length
     while i < ba.length {
-        if ba[i] == 63 {
+        if ba[i] == '?' {
             stop = i
             i = ba.length
         } else {
@@ -964,7 +964,7 @@ fn uiRouteSegments(path: String) -> Array<String> {
     }
     i = 0
     while i < stop {
-        if ba[i] == 47 {
+        if ba[i] == '/' {
             if i > start {
                 segs.push(uiRouteSlice(ba, start, i))
             }
