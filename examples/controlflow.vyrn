@@ -1,0 +1,108 @@
+/// controlflow — the three RFC-0060 features together (`break`/`continue`,
+/// `if let`/`while let`, `%`), a byte-identical three-way parity citizen that also
+/// exercises the drop/leak matrix: owned locals freed on every loop exit path,
+/// a `break` inside an `if let`, a `continue` under a `region`, and a loop inside
+/// a spawned (pure) task.
+
+/// Module state drained by the `while let` below.
+let mut remaining: Int64 = 4
+
+/// The next countdown value, or `None` when drained. Side-effecting: proves the
+/// `while let` scrutinee is evaluated exactly once per iteration (no double-eval).
+fn nextDown() -> Option<Int64> {
+    if remaining == 0 {
+        return None
+    }
+    remaining = remaining - 1
+    return Some(remaining)
+}
+
+/// A pure function with its own loop + early `return` — run via `spawn` to cover
+/// the "spawn-body loop" row of the matrix. Returns the first multiple of `k` in
+/// `1..=limit`, or 0.
+fn firstMultiple(limit: Int64, k: Int64) -> Int64 {
+    let mut i = 1
+    while i <= limit {
+        if i % k == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+/// Wrap `x` as `Some` when positive, else `None` — a scrutinee for `if let`.
+fn positive(x: Int64) -> Option<Int64> {
+    if x > 0 {
+        return Some(x)
+    }
+    return None
+}
+
+fn main() -> Int64 {
+    // `%` — truncated remainder, sign of the dividend, and the law
+    // `a == (a / b) * b + a % b`.
+    print(7 % 3)
+    print((0 - 7) % 3)
+    print(7 % (0 - 3))
+    let a = 0 - 7
+    let b = 3
+    print((a / b) * b + a % b)
+
+    // `continue` skips odds; `break` stops at 8. Each iteration owns a heap string
+    // `tag` that must be freed on the continue, break, AND normal-exit paths.
+    let mut sum = 0
+    for i in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] {
+        let tag = "n=" + i.toString()
+        if i % 2 == 1 {
+            continue
+        }
+        if i == 8 {
+            break
+        }
+        sum = sum + tag.byteLength - tag.byteLength + i
+    }
+    print(sum)
+
+    // `if let` over an Option, with a `break` inside the if-let body (a nested
+    // scope of the loop) — the loop exits and its owned locals still drop.
+    let mut hits = 0
+    for x in [1, 2, 3, 4, 5] {
+        let note = "x" + x.toString()
+        if let Some(v) = positive(x) {
+            if v == 4 {
+                break
+            }
+            hits = hits + 1
+        }
+        sum = sum + note.byteLength - note.byteLength
+    }
+    print(hits)
+
+    // `while let` draining module state — terminates when `nextDown` returns None.
+    print("drain:")
+    while let Some(v) = nextDown() {
+        print(v)
+    }
+
+    // `continue` under a `region`: the arena must be freed on the continue edge
+    // (the interpreter balances its region depth, so native must too).
+    let mut acc = 0
+    let mut j = 0
+    while j < 6 {
+        j = j + 1
+        region {
+            if j % 2 == 0 {
+                continue
+            }
+            acc = acc + j
+        }
+    }
+    print(acc)
+
+    // A loop inside a spawned pure task.
+    let t = spawn firstMultiple(20, 7)
+    print(t.join())
+
+    return 0
+}

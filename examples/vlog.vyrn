@@ -42,6 +42,7 @@ import {
     padStart,
     toHex,
 } from "std/strings"
+import { cli, cliOf, flag, opt, positionals, Args } from "std/args"
 
 logging { level: warn, sink: stderr }
 
@@ -74,9 +75,6 @@ type Read = { eof: Bool, line: String }
 /// One decode attempt, same bool-tagged-record shape as `Read` and for the same
 /// reason: to branch on a `Validation` with ordinary statements afterwards.
 type Decoded = { ok: Bool, line: LogLine, err: String }
-
-/// A parsed `--flag value` / `--flag=value` lookup result.
-type Flag = { found: Bool, value: String }
 
 // ---------------------------------------------------------------------------
 // Levels
@@ -265,43 +263,6 @@ fn matchesLevel(r: Rec, wantLower: String) -> Bool {
 }
 
 // ---------------------------------------------------------------------------
-// Argument parsing (WORKAROUND: hand-rolled — there is no std/args)
-// ---------------------------------------------------------------------------
-
-/// Look up `--name value` or `--name=value` in `a`. Returns the first hit.
-fn getFlag(a: Array<String>, name: String) -> Flag {
-    let mut i = 0
-    while i < a.length {
-        let tok = a[i]
-        // `indexOf` is the honest `Option`; unpack it into a has/value pair so the
-        // two forms (`--name=value` vs `--name value`) branch with statements.
-        let eqOpt = indexOf(tok, "=")
-        let hasEq = match eqOpt {
-            Some(e) => true,
-            None => false,
-        }
-        let eq = match eqOpt {
-            Some(e) => e,
-            None => 0,
-        }
-        if hasEq {
-            if substring(tok, 0, eq) == name {
-                return Flag { found: true, value: substring(tok, eq + 1, tok.byteLength) }
-            }
-        } else {
-            if tok == name {
-                if i + 1 < a.length {
-                    return Flag { found: true, value: a[i + 1] }
-                }
-                return Flag { found: true, value: "" }
-            }
-        }
-        i = i + 1
-    }
-    return Flag { found: false, value: "" }
-}
-
-// ---------------------------------------------------------------------------
 // Subcommands
 // ---------------------------------------------------------------------------
 
@@ -339,31 +300,40 @@ fn cmdTail(recs: Array<Rec>, n: Int64) -> Int64 {
 
 /// `filter` — pass records matching an optional `--level` and/or `--contains`.
 /// A bad `--level` is rejected (finite `Level`) with exit 2.
-fn cmdFilter(recs: Array<Rec>, a: Array<String>) -> Int64 {
+fn cmdFilter(recs: Array<Rec>, a: Args) -> Int64 {
     let log = logger("vlog")
-    let levelFlag = getFlag(a, "--level")
-    let containsFlag = getFlag(a, "--contains")
 
+    // Resolve the optional `--level` to a lowercase name (`""` = no level filter);
+    // `if let` unpacks the `Option` from `opt` (RFC-0060).
     let mut wantLower = ""
-    if levelFlag.found {
-        wantLower = match parseLevel(levelFlag.value) {
+    if let Some(lvl) = opt(a, "--level") {
+        wantLower = match parseLevel(lvl) {
             Some(l) => levelName(l),
             None => "?",
         }
         if wantLower == "?" {
-            log.error("unknown level `\{levelFlag.value}` (want trace|debug|info|warn|error)")
+            log.error("unknown level `\{lvl}` (want trace|debug|info|warn|error)")
             return 2
         }
     }
 
+    // Resolve the optional `--contains` substring once (a bool tracks presence,
+    // since `--contains=` is a legitimate empty value).
+    let mut hasContains = false
+    let mut containsSub = ""
+    if let Some(sub) = opt(a, "--contains") {
+        hasContains = true
+        containsSub = sub
+    }
+
     for r in recs {
-        let levelOk = if levelFlag.found {
-            matchesLevel(r, wantLower)
-        } else {
+        let levelOk = if wantLower == "" {
             true
+        } else {
+            matchesLevel(r, wantLower)
         }
-        let containsOk = if containsFlag.found {
-            r.line.msg.contains(containsFlag.value)
+        let containsOk = if hasContains {
+            r.line.msg.contains(containsSub)
         } else {
             true
         }
@@ -431,36 +401,44 @@ type Source = { ok: Bool, lines: Array<String> }
 /// Choose the input source: `--file <path>` (readFile + `std/strings.lines`,
 /// which strips `\r?\n` exactly like `readLine()`) else stdin (readLine loop).
 /// Read once; shared by the subcommand.
-fn loadLines(a: Array<String>) -> Source {
-    let fileFlag = getFlag(a, "--file")
-    if !fileFlag.found {
-        return Source { ok: true, lines: readStdinLines() }
+fn loadLines(a: Args) -> Source {
+    if let Some(path) = opt(a, "--file") {
+        return match readFile(path) {
+            Ok(content) => Source { ok: true, lines: lines(content) },
+            Err(e) => Source { ok: false, lines: [] },
+        }
     }
-    return match readFile(fileFlag.value) {
-        Ok(content) => Source { ok: true, lines: lines(content) },
-        Err(e) => Source { ok: false, lines: [] },
-    }
+    return Source { ok: true, lines: readStdinLines() }
 }
 
 fn main() -> Int64 {
-    let a = args()
+    let a = cli()
     let log = logger("vlog")
 
     let src = loadLines(a)
     if !src.ok {
-        log.error("cannot read `\{getFlag(a, "--file").value}`")
+        let path = match opt(a, "--file") {
+            Some(p) => p,
+            None => "",
+        }
+        log.error("cannot read `\{path}`")
         return 3
     }
     let recs = recordsFrom(src.lines)
 
-    // The subcommand is the first NON-flag argument; a bare `--file ...` (or no
-    // args) runs the overview.
-    let hasCmd = a.length > 0 && !a[0].startsWith("-")
-    if !hasCmd {
+    // `--help` anywhere prints usage (std/args `flag`).
+    if flag(a, "--help") {
+        return usage()
+    }
+
+    // The subcommand is the first positional (non-flag) token; none runs the
+    // overview. `positionals` skips flags and their values (std/args, RFC-0061).
+    let pos = positionals(a)
+    if pos.length == 0 {
         return cmdOverview(recs)
     }
 
-    let cmd = a[0]
+    let cmd = pos[0]
     if cmd == "count" {
         return cmdCount(recs)
     }
@@ -474,18 +452,16 @@ fn main() -> Int64 {
         return cmdFilter(recs, a)
     }
     if cmd == "tail" {
-        let nFlag = getFlag(a, "-n")
-        let n = if nFlag.found {
-            match parse(nFlag.value) {
+        let n = match opt(a, "-n") {
+            Some(s) => match parse(s) {
                 Some(v) => v,
                 None => 10,
-            }
-        } else {
-            10
+            },
+            None => 10,
         }
         return cmdTail(recs, n)
     }
-    if cmd == "help" || cmd == "--help" {
+    if cmd == "help" {
         return usage()
     }
     let log = logger("vlog")
@@ -558,16 +534,16 @@ test "tallyLevels counts by key in insertion order" {
     assertEq(keys[2], "warn")
 }
 
-test "getFlag reads space and equals forms" {
-    let a: Array<String> = ["filter", "--level", "error", "--contains=boom"]
-    let lvl = getFlag(a, "--level")
-    assert(lvl.found)
-    assertEq(lvl.value, "error")
-    let sub = getFlag(a, "--contains")
-    assert(sub.found)
-    assertEq(sub.value, "boom")
-    let missing = getFlag(a, "-n")
-    assert(!missing.found)
+test "std/args opt reads the space and equals forms vlog uses" {
+    // vlog's flag handling now comes from std/args (RFC-0061); pin the forms it
+    // depends on over `cliOf`.
+    let a = cliOf(["filter", "--level", "error", "--contains=boom"])
+    assert(match opt(a, "--level") { Some(v) => v == "error", None => false })
+    assert(match opt(a, "--contains") { Some(v) => v == "boom", None => false })
+    assert(match opt(a, "-n") { Some(v) => false, None => true })
+    // The subcommand is the first positional.
+    let pos = positionals(a)
+    assertEq(pos[0], "filter")
 }
 
 test "humanizeDuration renders spans" {
