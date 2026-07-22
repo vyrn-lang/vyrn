@@ -3466,6 +3466,62 @@ fn write_response(stream: &mut std::net::TcpStream, status: i64, content_type: &
     let _ = stream.flush();
 }
 
+/// The dev-tree wasi sysroot, if one exists: the first `tools/wasi-sysroot-*`
+/// directory found walking up from `start` (sorted, so the pick is
+/// deterministic when several versions are unpacked side by side).
+fn tools_wasi_sysroot_from(start: &Path) -> Option<std::path::PathBuf> {
+    for dir in start.ancestors() {
+        let tools = dir.join("tools");
+        if !tools.is_dir() {
+            continue;
+        }
+        let mut hits: Vec<std::path::PathBuf> = std::fs::read_dir(&tools)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_dir()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("wasi-sysroot"))
+            })
+            .collect();
+        hits.sort();
+        if let Some(hit) = hits.into_iter().next() {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// Auto-discovered wasi sysroot for the running exe (see
+/// [`tools_wasi_sysroot_from`]); `None` when no `tools/` convention applies.
+fn discovered_wasi_sysroot() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    tools_wasi_sysroot_from(exe.parent()?)
+}
+
+/// `libclang_rt.builtins-wasm32.a` from a `libclang_rt.builtins-wasm32-wasi-*`
+/// directory next to the sysroot (the wasi-sdk release-artifact layout),
+/// version-agnostic and deterministic (sorted).
+fn builtins_near_sysroot(sysroot: &Path) -> Option<std::path::PathBuf> {
+    let parent = sysroot.parent()?;
+    let mut hits: Vec<std::path::PathBuf> = std::fs::read_dir(parent)
+        .ok()?
+        .flatten()
+        .map(|e| e.path().join("libclang_rt.builtins-wasm32.a"))
+        .filter(|p| {
+            p.exists()
+                && p.parent()
+                    .and_then(|d| d.file_name())
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("libclang_rt.builtins-wasm32"))
+        })
+        .collect();
+    hits.sort();
+    hits.into_iter().next()
+}
+
 fn build(path: &str, rest: &[String]) -> ExitCode {
     // parse optional `-o <out>` / `--target wasm`
     let mut out: Option<String> = None;
@@ -3569,34 +3625,47 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
     }
     if wasm {
         // wasm32-wasi: the same IR, compiled against wasi-libc. The sysroot
-        // comes from $WASI_SYSROOT (a wasi-sdk checkout's `share/wasi-sysroot`).
+        // comes from $WASI_SYSROOT (a wasi-sdk checkout's `share/wasi-sysroot`),
+        // else is auto-discovered from the dev-tree convention: a `tools/`
+        // directory holding `wasi-sysroot-*` in an ancestor of the running exe
+        // (`<repo>/tools/…` with vyrn.exe at `<repo>/compiler/target/<p>/`).
         let sysroot = match std::env::var("WASI_SYSROOT") {
             Ok(s) if Path::new(&s).exists() => s,
-            _ => {
-                eprintln!(
-                    "error: `--target wasm` needs the wasi-libc sysroot. Download                      wasi-sdk (github.com/WebAssembly/wasi-sdk, or just its                      wasi-sysroot artifact) and set WASI_SYSROOT to its                      wasi-sysroot directory."
-                );
-                return ExitCode::FAILURE;
-            }
+            _ => match discovered_wasi_sysroot() {
+                Some(p) => p.to_string_lossy().into_owned(),
+                None => {
+                    eprintln!(
+                        "error: `--target wasm` needs the wasi-libc sysroot. Download wasi-sdk \
+                         (github.com/WebAssembly/wasi-sdk, or just its wasi-sysroot artifact) \
+                         and set WASI_SYSROOT to its wasi-sysroot directory, or unpack it \
+                         under <repo>/tools/."
+                    );
+                    return ExitCode::FAILURE;
+                }
+            },
         };
         cmd.arg("--target=wasm32-wasip1").arg(format!("--sysroot={sysroot}"));
         // clang's own wasm32 compiler-rt builtins are not bundled with the
         // Windows LLVM installer; wasi-sdk ships them as a separate archive.
         // Accept it via $WASI_BUILTINS (path to libclang_rt.builtins-wasm32.a)
-        // or find it next to the sysroot.
-        let builtins = std::env::var("WASI_BUILTINS").ok().or_else(|| {
-            let near = Path::new(&sysroot)
-                .parent()
-                .map(|p| p.join("libclang_rt.builtins-wasm32-wasi-25.0/libclang_rt.builtins-wasm32.a"));
-            near.filter(|p| p.exists()).map(|p| p.to_string_lossy().into_owned())
-        });
+        // or find a `libclang_rt.builtins-wasm32-wasi-*` dir next to the sysroot.
+        let builtins = std::env::var("WASI_BUILTINS")
+            .ok()
+            .filter(|b| Path::new(b).exists())
+            .or_else(|| {
+                let near = builtins_near_sysroot(Path::new(&sysroot));
+                near.map(|p| p.to_string_lossy().into_owned())
+            });
         match builtins {
             Some(b) => {
                 cmd.arg("-nodefaultlibs").arg(&b).arg("-lc");
             }
             None => {
                 eprintln!(
-                    "error: wasm builtins not found — set WASI_BUILTINS to                      libclang_rt.builtins-wasm32.a (from the wasi-sdk release                      artifact libclang_rt.builtins-wasm32-wasi-*.tar.gz)."
+                    "error: wasm builtins not found — set WASI_BUILTINS to \
+                     libclang_rt.builtins-wasm32.a (from the wasi-sdk release artifact \
+                     libclang_rt.builtins-wasm32-wasi-*.tar.gz), or unpack that archive \
+                     next to the sysroot under <repo>/tools/."
                 );
                 return ExitCode::FAILURE;
             }
@@ -3783,5 +3852,34 @@ mod tests {
     fn min_table_rejects_a_non_report() {
         let doc = vyrn_frontend::schema::parse_json(r#"{"nope":1}"#).unwrap();
         assert!(bench_min_table(&doc).is_none());
+    }
+
+    /// The dev-tree toolchain discovery: `tools/wasi-sysroot-*` found from any
+    /// ancestor of the starting dir, builtins found version-agnostically next
+    /// to the sysroot, and both absent on a layout without the convention.
+    #[test]
+    fn wasi_toolchain_discovery_walks_the_tools_convention() {
+        let root = std::env::temp_dir()
+            .join(format!("vyrn_tools_probe_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sysroot = root.join("tools/wasi-sysroot-25.0");
+        let builtins_dir = root.join("tools/libclang_rt.builtins-wasm32-wasi-25.0");
+        let deep = root.join("compiler/target/release");
+        std::fs::create_dir_all(&sysroot).unwrap();
+        std::fs::create_dir_all(&builtins_dir).unwrap();
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(builtins_dir.join("libclang_rt.builtins-wasm32.a"), b"x").unwrap();
+
+        let found = tools_wasi_sysroot_from(&deep).expect("sysroot discovered from exe dir");
+        assert_eq!(found, sysroot);
+        let b = builtins_near_sysroot(&found).expect("builtins discovered next to sysroot");
+        assert!(b.ends_with("libclang_rt.builtins-wasm32.a"));
+
+        // No convention → no discovery (never invent a path).
+        let bare = root.join("elsewhere/deeper");
+        std::fs::create_dir_all(&bare).unwrap();
+        let _ = std::fs::remove_dir_all(root.join("tools"));
+        assert!(tools_wasi_sysroot_from(&bare).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
