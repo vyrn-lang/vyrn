@@ -5,6 +5,11 @@ import { PasteId, Paste, Created, CreateReq, IdReq, PasteList, PasteResult, Stor
 import { fullDigest } from "./util"
 import { now, toMillis } from "std/time"
 import { substring } from "std/strings"
+// The ambient `Result` builtins spelled as explicit imports (RFC-0062): this
+// module returns `PasteResult` (a `Result`) and builds it with `Ok`/`Err`.
+// Importing them is a validated no-op — the names still resolve to the same
+// builtins — so this is opt-in style, not a requirement.
+import { Result, Ok, Err } from "std/result"
 import * as persist from "./persist"
 
 /// The single source of truth: the paste array + the monotonic counter, loaded

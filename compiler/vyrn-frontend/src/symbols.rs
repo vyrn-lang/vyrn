@@ -829,19 +829,52 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         });
     }
 
-    // Last resort: a built-in method/function name (`push`, `info`, `len`, ...).
-    // These have hover text but no source declaration, so go-to-definition has
-    // nowhere to jump (`definition: false`).
-    builtin_method(&tok.text).map(|b| Resolution {
-        name: b.name.to_string(),
-        kind: SymbolKind::Method,
+    // A built-in method/function name (`push`, `info`, `len`, ...). These have
+    // hover text but no source declaration, so go-to-definition has nowhere to
+    // jump (`definition: false`).
+    if let Some(b) = builtin_method(&tok.text) {
+        return Some(Resolution {
+            name: b.name.to_string(),
+            kind: SymbolKind::Method,
+            target_line: 0,
+            target_col: 0,
+            target_end_col: 0,
+            target_file: None,
+            hover: b.detail.to_string(),
+            definition: false,
+        });
+    }
+
+    // Last resort: the ambient `Result`/`Option` builtins and their constructors
+    // (RFC-0062). Whether or not they were spelled as explicit `std/result` /
+    // `std/option` imports, hovering one shows what it is — like any other
+    // builtin, it has no source declaration to jump to.
+    builtin_type_or_ctor(&tok.text).map(|(kind, hover)| Resolution {
+        name: tok.text.clone(),
+        kind,
         target_line: 0,
         target_col: 0,
         target_end_col: 0,
         target_file: None,
-        hover: b.detail.to_string(),
+        hover,
         definition: false,
     })
+}
+
+/// Hover text + symbol kind for the ambient `Result`/`Option` builtins and their
+/// constructors — the names `std/result` / `std/option` spell explicitly
+/// (RFC-0062). `None` for anything else.
+fn builtin_type_or_ctor(name: &str) -> Option<(SymbolKind, String)> {
+    let (kind, detail) = match name {
+        "Result" => (SymbolKind::Type, "Result<T, E> — the builtin result type (`Ok(T)` | `Err(E)`). Spelled explicitly by `import { Result, Ok, Err } from \"std/result\"`."),
+        "Ok" => (SymbolKind::Variant, "Ok(value: T) -> Result<T, E> — the success variant of the builtin `Result`."),
+        "Err" => (SymbolKind::Variant, "Err(error: E) -> Result<T, E> — the failure variant of the builtin `Result`."),
+        "Option" => (SymbolKind::Type, "Option<T> — the builtin option type (`Some(T)` | `None`). Spelled explicitly by `import { Option, Some, None } from \"std/option\"`."),
+        "Some" => (SymbolKind::Variant, "Some(value: T) -> Option<T> — the present variant of the builtin `Option`."),
+        "None" => (SymbolKind::Variant, "None -> Option<T> — the absent variant of the builtin `Option`."),
+        _ => return None,
+    };
+    Some((kind, detail.to_string()))
 }
 
 /// The function whose line range contains `cursor_line`, if any. A function's
@@ -867,7 +900,7 @@ fn enclosing_fn_line(analysis: &Analysis, cursor_line: usize) -> Option<usize> {
 /// All top-level symbols as completion items. The client filters by the prefix
 /// the user typed; v1 does no scope-aware filtering.
 pub fn completions(analysis: &Analysis) -> Vec<Completion> {
-    analysis
+    let mut out: Vec<Completion> = analysis
         .symbols
         .iter()
         .map(|s| Completion {
@@ -876,7 +909,16 @@ pub fn completions(analysis: &Analysis) -> Vec<Completion> {
             detail: s.detail.clone(),
             doc: s.doc.clone(),
         })
-        .collect()
+        .collect();
+    // RFC-0062: the ambient `Result`/`Option` builtins and their constructors are
+    // always in scope — offer them alongside user symbols (they are exactly what
+    // `std/result` / `std/option` name explicitly), so `Ok`/`Some`/… complete.
+    for name in ["Result", "Ok", "Err", "Option", "Some", "None"] {
+        if let Some((kind, detail)) = builtin_type_or_ctor(name) {
+            out.push(Completion { label: name.to_string(), kind, detail, doc: None });
+        }
+    }
+    out
 }
 
 /// Context-aware completions for a `.foo` member access: given a cursor on (or
