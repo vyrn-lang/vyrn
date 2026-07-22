@@ -420,6 +420,57 @@ fn stored_fn_param_compiles_for_any_payload() {
     }
 }
 
+/// Coverage for a class the main parity loop structurally misses: the SUBDIRECTORY
+/// server examples. `examples_dir()` is scanned NON-recursively, so a multi-file
+/// app under `examples/<name>/` (`server.vyrn` + its `contract`/`wire`/`routes`
+/// modules and generators) is never native-built by any other test. That gap hid
+/// an invalid `alloca void` (an inline-constructed generic enum's payload binding
+/// stayed `Type::Param`, from the `std/storage` `load(...)` desugar) plus an
+/// `Array<fnAlias>` reshape bug (`middleware: Array<Middleware>`) — every server
+/// failed at the clang stage, unseen. This pins that each server root compiles all
+/// the way to a native object. Build only (the servers are long-running hosts, not
+/// run to completion); the reduced runtime behavior lives in `genericpayload.vyrn`,
+/// a normal three-way parity citizen. `#[ignore]`d like the rest — needs clang.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn subdir_server_examples_native_build() {
+    let dir = examples_dir();
+    let out_dir = std::env::temp_dir().join("vyrn-parity");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    // Every `examples/<subdir>/server.vyrn` entrypoint, discovered so a future
+    // server app is covered automatically.
+    let mut servers: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir())
+        .map(|p| p.join("server.vyrn"))
+        .filter(|p| p.exists())
+        .collect();
+    servers.sort();
+    assert!(
+        !servers.is_empty(),
+        "expected at least one examples/<subdir>/server.vyrn to build"
+    );
+
+    for path in &servers {
+        let label = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let exe = out_dir.join(format!("subdir_server_{label}.exe"));
+        let build =
+            vyrn().arg("build").arg(path).arg("-o").arg(&exe).output().expect("build server");
+        assert!(
+            build.status.success(),
+            "{label}/server.vyrn: native build must succeed, got:\n{}{}",
+            norm(&build.stdout),
+            norm(&build.stderr)
+        );
+    }
+}
+
 #[test]
 fn expected_check_failures_do_fail() {
     let dir = examples_dir();
