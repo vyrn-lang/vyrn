@@ -1943,6 +1943,34 @@ fn collect_lets(
                     collect_lets(eb, fn_line, tok_info, let_types, out);
                 }
             }
+            Stmt::IfLet {
+                pattern,
+                then_block,
+                else_block,
+                line,
+                ..
+            } => {
+                // `if let` binders are real locals scoped to the then-block
+                // (RFC-0060): surface each for hover / go-to-def / completion /
+                // highlight, typed from the checker's retained payload types.
+                for b in crate::movecheck::pattern_bindings(pattern) {
+                    let (col, end_col) = name_col_on_line(tok_info, b, *line);
+                    let ty = let_types.get(&(*line, b.to_string())).cloned();
+                    out.push(LocalBinding {
+                        name: b.to_string(),
+                        kind: LocalKind::Let { mutable: false },
+                        ty,
+                        line: *line,
+                        col,
+                        end_col,
+                        fn_line,
+                    });
+                }
+                collect_lets(then_block, fn_line, tok_info, let_types, out);
+                if let Some(eb) = else_block {
+                    collect_lets(eb, fn_line, tok_info, let_types, out);
+                }
+            }
             Stmt::While { body, .. } => collect_lets(body, fn_line, tok_info, let_types, out),
             // Assign/SetField/Return/Drop/Expr reference existing bindings; no new ones.
             _ => {}

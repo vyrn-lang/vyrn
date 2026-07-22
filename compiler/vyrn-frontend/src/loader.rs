@@ -1734,6 +1734,24 @@ impl NsResolver<'_> {
                     self.walk_block(eb, &mut inner2);
                 }
             }
+            Stmt::IfLet {
+                scrutinee,
+                then_block,
+                else_block,
+                pattern,
+                ..
+            } => {
+                self.walk_expr(scrutinee, locals);
+                let mut inner = locals.clone();
+                for b in crate::movecheck::pattern_bindings(pattern) {
+                    inner.insert(b.to_string());
+                }
+                self.walk_block(then_block, &mut inner);
+                if let Some(eb) = else_block {
+                    let mut inner2 = locals.clone();
+                    self.walk_block(eb, &mut inner2);
+                }
+            }
             Stmt::While { cond, body, .. } => {
                 self.walk_expr(cond, locals);
                 let mut inner = locals.clone();
@@ -2285,6 +2303,19 @@ fn fn_body_names(b: &Block) -> Vec<(String, usize)> {
                     block(eb, out);
                 }
             }
+            Stmt::IfLet {
+                scrutinee,
+                then_block,
+                else_block,
+                line,
+                ..
+            } => {
+                expr(scrutinee, *line, out);
+                block(then_block, out);
+                if let Some(eb) = else_block {
+                    block(eb, out);
+                }
+            }
             Stmt::While { cond, body, line } => {
                 expr(cond, *line, out);
                 block(body, out);
@@ -2448,6 +2479,24 @@ fn scope_stmt(s: &Stmt, locals: &mut HashSet<String>, out: &mut Vec<(String, usi
         } => {
             scope_expr(cond, *line, locals, out);
             let mut inner = locals.clone();
+            scope_block(then_block, &mut inner, out);
+            if let Some(eb) = else_block {
+                let mut inner2 = locals.clone();
+                scope_block(eb, &mut inner2, out);
+            }
+        }
+        Stmt::IfLet {
+            scrutinee,
+            then_block,
+            else_block,
+            pattern,
+            line,
+        } => {
+            scope_expr(scrutinee, *line, locals, out);
+            let mut inner = locals.clone();
+            for b in crate::movecheck::pattern_bindings(pattern) {
+                inner.insert(b.to_string());
+            }
             scope_block(then_block, &mut inner, out);
             if let Some(eb) = else_block {
                 let mut inner2 = locals.clone();
@@ -2817,6 +2866,18 @@ fn rewrite_stmt(s: &mut Stmt, map: &HashMap<String, String>, ns: &HashSet<String
             ..
         } => {
             rewrite_expr(cond, map, ns);
+            rewrite_block(then_block, map, ns);
+            if let Some(eb) = else_block {
+                rewrite_block(eb, map, ns);
+            }
+        }
+        Stmt::IfLet {
+            scrutinee,
+            then_block,
+            else_block,
+            ..
+        } => {
+            rewrite_expr(scrutinee, map, ns);
             rewrite_block(then_block, map, ns);
             if let Some(eb) = else_block {
                 rewrite_block(eb, map, ns);

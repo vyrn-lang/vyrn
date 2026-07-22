@@ -239,6 +239,42 @@ impl MoveCheck<'_> {
                 }
                 Ok(then_div && else_div)
             }
+            // `if let PAT = e { .. } else { .. }` (RFC-0060): the scrutinee is
+            // consumed eagerly (like a `match` scrutinee), the binders are fresh
+            // locals of the then-arm, and the two arms merge exactly like `if` —
+            // a branch that diverges carries its consumptions out, not through.
+            Stmt::IfLet {
+                pattern,
+                scrutinee,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.expr(scrutinee, consumed, scope)?;
+                let mut then_c = consumed.clone();
+                scope.push(HashSet::new());
+                for b in pattern_bindings(pattern) {
+                    scope.last_mut().unwrap().insert(b.to_string());
+                }
+                let then_div = self.block(then_block, &mut then_c, scope);
+                scope.pop();
+                let mut else_c = consumed.clone();
+                let else_div = match else_block {
+                    Some(eb) => self.block(eb, &mut else_c, scope),
+                    None => false,
+                };
+                if !then_div {
+                    for (k, v) in then_c {
+                        consumed.entry(k).or_insert(v);
+                    }
+                }
+                if !else_div {
+                    for (k, v) in else_c {
+                        consumed.entry(k).or_insert(v);
+                    }
+                }
+                Ok(then_div && else_div)
+            }
             Stmt::While { cond, body, .. } => {
                 // The condition re-runs on every iteration, so consumption in it
                 // is loop-consumption exactly like the body's (`while take(x)`

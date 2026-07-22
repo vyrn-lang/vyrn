@@ -3273,6 +3273,50 @@ impl<'a> Gen<'a> {
                 self.emit_label(&end_l);
                 Ok(())
             }
+            Stmt::IfLet {
+                pattern,
+                scrutinee,
+                then_block,
+                else_block,
+                ..
+            } => {
+                // Evaluate the scrutinee once, test the pattern, and branch to the
+                // then-arm (payload bound into fresh locals) or the else-arm
+                // (RFC-0060). No `phi` — the arms carry no value (statement form).
+                let (sv, sty) = self.gen_expr(scrutinee)?;
+                let sr = self.resolve(&sty);
+                let then_l = self.fresh_label("il.then");
+                let end_l = self.fresh_label("il.end");
+                let else_l = if else_block.is_some() {
+                    self.fresh_label("il.else")
+                } else {
+                    end_l.clone()
+                };
+                let cond = self.gen_pattern_test(&sv, &sr, pattern)?;
+                self.emit_term(format!("br i1 {cond}, label %{then_l}, label %{else_l}"));
+
+                self.emit_label(&then_l);
+                // A scope frame holds the pattern binders (payload borrows, never
+                // drop-tracked — like a `match` arm's), wrapping the then-block.
+                self.scope.push(Vec::new());
+                self.gen_pattern_binds(&sv, &sr, pattern)?;
+                self.gen_block(then_block)?;
+                self.scope.pop();
+                if !self.terminated {
+                    self.emit_term(format!("br label %{end_l}"));
+                }
+
+                if let Some(eb) = else_block {
+                    self.emit_label(&else_l);
+                    self.gen_block(eb)?;
+                    if !self.terminated {
+                        self.emit_term(format!("br label %{end_l}"));
+                    }
+                }
+
+                self.emit_label(&end_l);
+                Ok(())
+            }
             Stmt::While { cond, body, .. } => {
                 let cond_l = self.fresh_label("wcond");
                 let body_l = self.fresh_label("wbody");
@@ -4281,6 +4325,107 @@ impl<'a> Gen<'a> {
         Ok(out)
     }
 
+    /// Emit the `i1` "does `sv` (of resolved type `sr`) match `pattern`" test for
+    /// an `if let`/`while let` (RFC-0060). Shares the tag-extraction shape with
+    /// `gen_match`/`gen_match_enum`.
+    fn gen_pattern_test(&mut self, sv: &str, sr: &Type, pattern: &Pattern) -> Result<String, String> {
+        match sr {
+            Type::Enum(evs) => {
+                let arity = evs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
+                let ell = enum_ll(arity);
+                let vname = match pattern {
+                    Pattern::Variant(n, _) => n,
+                    _ => return Err("non-variant pattern on an enum scrutinee".into()),
+                };
+                let idx = evs
+                    .iter()
+                    .position(|v| &v.name == vname)
+                    .ok_or_else(|| format!("unknown variant `{vname}`"))?;
+                let tag = self.fresh_tmp();
+                self.emit(format!("{tag} = extractvalue {ell} {sv}, 0"));
+                let m = self.fresh_tmp();
+                self.emit(format!("{m} = icmp eq i64 {tag}, {idx}"));
+                Ok(m)
+            }
+            Type::Option(_) | Type::Result(..) => {
+                let tag = self.fresh_tmp();
+                self.emit(format!("{tag} = extractvalue {{ i1, i64, i64 }} {sv}, 0"));
+                // `Some`/`Ok` match tag 1; `None`/`Err` match tag 0.
+                if pattern_is_one(pattern) {
+                    Ok(tag)
+                } else {
+                    let n = self.fresh_tmp();
+                    self.emit(format!("{n} = xor i1 {tag}, true"));
+                    Ok(n)
+                }
+            }
+            other => Err(format!("if-let scrutinee is not an Option/Result/enum: {other:?}")),
+        }
+    }
+
+    /// After a successful `gen_pattern_test`, declare the pattern's binders in the
+    /// current scope, decoding each payload from `sv` (RFC-0060).
+    fn gen_pattern_binds(&mut self, sv: &str, sr: &Type, pattern: &Pattern) -> Result<(), String> {
+        match sr {
+            Type::Enum(evs) => {
+                if let Pattern::Variant(vname, binds) = pattern {
+                    let arity = evs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
+                    let ell = enum_ll(arity);
+                    let idx = evs
+                        .iter()
+                        .position(|v| &v.name == vname)
+                        .ok_or_else(|| format!("unknown variant `{vname}`"))?;
+                    let payload_tys = evs[idx].payload.clone();
+                    for (i, bind) in binds.iter().enumerate() {
+                        let pty = payload_tys.get(i).cloned().unwrap_or(Type::Int);
+                        let raw = self.fresh_tmp();
+                        self.emit(format!("{raw} = extractvalue {ell} {sv}, {}", i + 1));
+                        let v = self.unbox_payload(&raw, &pty);
+                        let ll = self.llt(&pty);
+                        let slot = self.declare(bind, &pty);
+                        self.emit(format!("store {ll} {v}, ptr {slot}"));
+                    }
+                }
+                Ok(())
+            }
+            Type::Option(inner) => {
+                if let Pattern::Some(bind) = pattern {
+                    let pty = (**inner).clone();
+                    self.bind_or_payload(sv, bind, &pty);
+                }
+                Ok(())
+            }
+            Type::Result(ok, err) => {
+                match pattern {
+                    Pattern::Ok(bind) => {
+                        let pty = (**ok).clone();
+                        self.bind_or_payload(sv, bind, &pty);
+                    }
+                    Pattern::Err(bind) => {
+                        let pty = (**err).clone();
+                        self.bind_or_payload(sv, bind, &pty);
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Decode an Option/Result payload from `sv`'s two words into a fresh binder
+    /// (the `if let` counterpart of a `match` arm's binding).
+    fn bind_or_payload(&mut self, sv: &str, bind: &str, pty: &Type) {
+        let w0 = self.fresh_tmp();
+        let w1 = self.fresh_tmp();
+        self.emit(format!("{w0} = extractvalue {{ i1, i64, i64 }} {sv}, 1"));
+        self.emit(format!("{w1} = extractvalue {{ i1, i64, i64 }} {sv}, 2"));
+        let v = self.decode_payload(&w0, &w1, pty);
+        let ll = self.llt(pty);
+        let slot = self.declare(bind, pty);
+        self.emit(format!("store {ll} {v}, ptr {slot}"));
+    }
+
     /// Lower `expr?`: on `None`/`Err` (tag 0) return the aggregate as the
     /// function's result; otherwise continue with the unwrapped i64 payload.
     fn gen_try(&mut self, expr: &Expr) -> Result<(String, Type), String> {
@@ -4889,6 +5034,17 @@ impl<'a> Gen<'a> {
                 Stmt::If { cond, then_block, else_block, .. } => {
                     self.captures_of_expr(cond, locals, out, seen);
                     self.captures_of_block(then_block, &mut locals.clone(), out, seen);
+                    if let Some(eb) = else_block {
+                        self.captures_of_block(eb, &mut locals.clone(), out, seen);
+                    }
+                }
+                Stmt::IfLet { pattern, scrutinee, then_block, else_block, .. } => {
+                    self.captures_of_expr(scrutinee, locals, out, seen);
+                    let mut inner = locals.clone();
+                    for b in vyrn_frontend::movecheck::pattern_bindings(pattern) {
+                        inner.insert(b.to_string());
+                    }
+                    self.captures_of_block(then_block, &mut inner, out, seen);
                     if let Some(eb) = else_block {
                         self.captures_of_block(eb, &mut locals.clone(), out, seen);
                     }
@@ -9230,6 +9386,13 @@ fn collect_regex_stmt(s: &Stmt, out: &mut Vec<String>) {
                 collect_regex_block(eb, out);
             }
         }
+        Stmt::IfLet { scrutinee, then_block, else_block, .. } => {
+            collect_regex_expr(scrutinee, out);
+            collect_regex_block(then_block, out);
+            if let Some(eb) = else_block {
+                collect_regex_block(eb, out);
+            }
+        }
         Stmt::While { cond, body, .. } => {
             collect_regex_expr(cond, out);
             collect_regex_block(body, out);
@@ -9336,6 +9499,13 @@ fn collect_strings_stmt(s: &Stmt, out: &mut Vec<String>, types: &HashMap<String,
         }
         Stmt::If { cond, then_block, else_block, .. } => {
             collect_strings_expr(cond, out, types);
+            collect_strings_block(then_block, out, types);
+            if let Some(eb) = else_block {
+                collect_strings_block(eb, out, types);
+            }
+        }
+        Stmt::IfLet { scrutinee, then_block, else_block, .. } => {
+            collect_strings_expr(scrutinee, out, types);
             collect_strings_block(then_block, out, types);
             if let Some(eb) = else_block {
                 collect_strings_block(eb, out, types);
@@ -10133,6 +10303,23 @@ mod tests {
         assert!(
             bir.contains("call void @free("),
             "break must drop the body's owned string: {bir}"
+        );
+    }
+
+    #[test]
+    fn if_let_lowers_to_a_tag_test_and_payload_bind_no_phi() {
+        // `if let Some(v) = e { .. }` extracts the tag, branches, and binds the
+        // payload — a statement form, so no `phi` merge (RFC-0060).
+        let p = check(
+            "fn f() -> Option<Int64> { return Some(3) } \
+             fn main() -> Int64 { if let Some(v) = f() { return v } return 0 }",
+        )
+        .unwrap();
+        let ir = emit(&p).unwrap();
+        assert!(ir.contains("il.then"), "if-let then block: {ir}");
+        assert!(
+            ir.contains("extractvalue { i1, i64, i64 }"),
+            "tag/payload extraction: {ir}"
         );
     }
 

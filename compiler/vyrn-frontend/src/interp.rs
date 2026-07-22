@@ -2000,6 +2000,32 @@ impl<'a> Interp<'a> {
                 };
                 Ok(Flow::Return(v))
             }
+            Stmt::IfLet {
+                pattern,
+                scrutinee,
+                then_block,
+                else_block,
+                ..
+            } => {
+                // Evaluate the scrutinee ONCE (no double-eval), test the pattern,
+                // and run the matching arm with the binders in scope (RFC-0060).
+                let sv = self.expr(scrutinee, scope)?;
+                match Self::match_pattern(pattern, &sv) {
+                    Some(binds) => {
+                        scope.push(HashMap::new());
+                        for (n, v) in binds {
+                            scope.last_mut().unwrap().insert(n, Slot::untyped(v));
+                        }
+                        let flow = self.block(then_block, scope);
+                        scope.pop();
+                        flow
+                    }
+                    None => match else_block {
+                        Some(eb) => self.block(eb, scope),
+                        None => Ok(Flow::Normal),
+                    },
+                }
+            }
             Stmt::If {
                 cond,
                 then_block,
@@ -3254,25 +3280,9 @@ impl<'a> Interp<'a> {
         scope: &mut Vec<HashMap<String, Slot>>,
     ) -> Result<Val, Ctrl> {
         for arm in arms {
-            // (does this arm match?, payload bindings)
-            let (matched, bindings): (bool, Vec<(String, Val)>) = match (&arm.pattern, &sv) {
-                (Pattern::Some(b), Val::Option(Some(v))) => {
-                    (true, vec![(b.clone(), (**v).clone())])
-                }
-                (Pattern::None, Val::Option(None)) => (true, vec![]),
-                (Pattern::Ok(b), Val::Result(true, v)) => (true, vec![(b.clone(), (**v).clone())]),
-                (Pattern::Err(b), Val::Result(false, v)) => {
-                    (true, vec![(b.clone(), (**v).clone())])
-                }
-                (Pattern::Variant(n, binds), Val::Enum(vn, payload)) if n == vn => {
-                    let bs = binds.iter().cloned().zip(payload.iter().cloned()).collect();
-                    (true, bs)
-                }
-                _ => (false, vec![]),
-            };
-            if !matched {
+            let Some(bindings) = Self::match_pattern(&arm.pattern, &sv) else {
                 continue;
-            }
+            };
             scope.push(HashMap::new());
             for (name, val) in bindings {
                 scope.last_mut().unwrap().insert(name, Slot::untyped(val));
@@ -3282,6 +3292,22 @@ impl<'a> Interp<'a> {
             return result;
         }
         Err("non-exhaustive match (should have been caught)".into())
+    }
+
+    /// Test a single refutable pattern against a value, returning its payload
+    /// bindings on a match or `None` otherwise (RFC-0060). Shared by `match`,
+    /// `if let`, and the `while let` desugar so all three bind identically.
+    fn match_pattern(pattern: &Pattern, sv: &Val) -> Option<Vec<(String, Val)>> {
+        match (pattern, sv) {
+            (Pattern::Some(b), Val::Option(Some(v))) => Some(vec![(b.clone(), (**v).clone())]),
+            (Pattern::None, Val::Option(None)) => Some(vec![]),
+            (Pattern::Ok(b), Val::Result(true, v)) => Some(vec![(b.clone(), (**v).clone())]),
+            (Pattern::Err(b), Val::Result(false, v)) => Some(vec![(b.clone(), (**v).clone())]),
+            (Pattern::Variant(n, binds), Val::Enum(vn, payload)) if n == vn => {
+                Some(binds.iter().cloned().zip(payload.iter().cloned()).collect())
+            }
+            _ => None,
+        }
     }
 
     fn binop(&self, op: BinOp, l: Val, r: Val) -> Result<Val, Ctrl> {
@@ -5790,6 +5816,51 @@ mod tests {
                        for b in [0, 1, 2] { break n = n + 100 } \
                        n = n + 1 } \
                    return n }";
+        assert_eq!(run(src).unwrap(), 3);
+    }
+
+    #[test]
+    fn if_let_binds_on_match_and_runs_else_otherwise() {
+        // Some binds `v`; None runs the else branch.
+        let hit = "fn f(b: Bool) -> Option<Int64> { if b { return Some(7) } return None } \
+                   fn main() -> Int64 { if let Some(v) = f(true) { return v } return 0 - 1 }";
+        assert_eq!(run(hit).unwrap(), 7);
+        let miss = "fn f(b: Bool) -> Option<Int64> { if b { return Some(7) } return None } \
+                    fn main() -> Int64 { if let Some(v) = f(false) { return v } return 0 - 1 }";
+        assert_eq!(run(miss).unwrap(), -1);
+    }
+
+    #[test]
+    fn if_let_over_result_and_user_enum() {
+        let ok = "fn f() -> Result<Int64, String> { return Ok(4) } \
+                  fn main() -> Int64 { if let Ok(n) = f() { return n } return 0 }";
+        assert_eq!(run(ok).unwrap(), 4);
+        let enm = "type Shape = | Circle(Int64) | Rect(Int64, Int64) | Empty \
+                   fn main() -> Int64 { let s = Rect(3, 4) \
+                       if let Rect(w, h) = s { return w * h } return 0 }";
+        assert_eq!(run(enm).unwrap(), 12);
+    }
+
+    #[test]
+    fn while_let_drains_without_double_evaluating_the_scrutinee() {
+        // The scrutinee `next()` decrements a global each call; if `while let`
+        // double-evaluated it, the count would be wrong. It must tick once per
+        // iteration (RFC-0060): 3 → prints 2,1,0 → 3 iterations, global ends at 0.
+        let src = "let mut n: Int64 = 3 \
+                   fn next() -> Option<Int64> { if n == 0 { return None } n = n - 1 return Some(n) } \
+                   fn main() -> Int64 { let mut count = 0 \
+                       while let Some(v) = next() { print(v) count = count + 1 } \
+                       return count }";
+        assert_eq!(run(src).unwrap(), 3);
+    }
+
+    #[test]
+    fn break_inside_if_let_exits_the_loop() {
+        // `break` inside an `if let` body targets the enclosing loop (RFC-0060).
+        let src = "fn main() -> Int64 { let mut s = 0 \
+                   for x in [1, 2, 3, 4] { \
+                       if let Some(v) = Some(x) { if v == 3 { break } s = s + v } } \
+                   return s }";
         assert_eq!(run(src).unwrap(), 3);
     }
 

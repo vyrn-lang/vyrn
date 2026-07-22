@@ -2127,24 +2127,68 @@ impl Parser {
     /// number (diagnostics point at the real `else if`, not the outer `if`).
     fn if_stmt(&mut self, line: usize) -> Result<Stmt, Diagnostic> {
         self.advance(); // `if`
+        // `if let PAT = e { .. }` (RFC-0060): the pattern-binding form.
+        if *self.peek() == Tok::Let {
+            return self.if_let_stmt(line);
+        }
         let cond = self.cond_expr()?;
         let then_block = self.block()?;
-        let else_block = if *self.peek() == Tok::Else {
-            self.advance();
-            if *self.peek() == Tok::If {
-                let else_line = self.line();
-                let nested = self.if_stmt(else_line)?;
-                Some(Block {
-                    stmts: vec![nested],
-                })
-            } else {
-                Some(self.block()?)
-            }
-        } else {
-            None
-        };
+        let else_block = self.else_tail()?;
         Ok(Stmt::If {
             cond,
+            then_block,
+            else_block,
+            line,
+        })
+    }
+
+    /// Parse the `else` tail shared by `if` and `if let` (RFC-0022/0060): an
+    /// optional `else`, chaining into `else if` / `else if let` (a one-statement
+    /// block holding the nested `if`) or a plain `else { .. }` block.
+    fn else_tail(&mut self) -> Result<Option<Block>, Diagnostic> {
+        if *self.peek() != Tok::Else {
+            return Ok(None);
+        }
+        self.advance(); // `else`
+        if *self.peek() == Tok::If {
+            let else_line = self.line();
+            self.advance(); // `if`
+            // `else if let` chains the pattern form; `else if` the ordinary one.
+            let nested = if *self.peek() == Tok::Let {
+                self.if_let_stmt(else_line)?
+            } else {
+                let cond = self.cond_expr()?;
+                let then_block = self.block()?;
+                let else_block = self.else_tail()?;
+                Stmt::If {
+                    cond,
+                    then_block,
+                    else_block,
+                    line: else_line,
+                }
+            };
+            Ok(Some(Block {
+                stmts: vec![nested],
+            }))
+        } else {
+            Ok(Some(self.block()?))
+        }
+    }
+
+    /// Parse `if let PAT = e { .. } [else ..]` (the `if`+`let` already peeked;
+    /// `if` consumed by the caller). RFC-0060.
+    fn if_let_stmt(&mut self, line: usize) -> Result<Stmt, Diagnostic> {
+        self.eat(&Tok::Let)?;
+        let pattern = self.pattern()?;
+        self.eat(&Tok::Eq)?;
+        // Parse the scrutinee in the no-struct context (like a condition) so a
+        // bare `{` opens the body, not a struct literal.
+        let scrutinee = self.cond_expr()?;
+        let then_block = self.block()?;
+        let else_block = self.else_tail()?;
+        Ok(Stmt::IfLet {
+            pattern,
+            scrutinee,
             then_block,
             else_block,
             line,
@@ -2205,6 +2249,33 @@ impl Parser {
             Tok::If => self.if_stmt(line),
             Tok::While => {
                 self.advance();
+                // `while let PAT = e { body }` (RFC-0060) desugars to
+                // `while true { if let PAT = e { body } else { break } }` — a
+                // pure parser rewrite, so only `if let` needs backend support and
+                // `break`/`continue` inside `body` target this loop naturally.
+                if *self.peek() == Tok::Let {
+                    self.eat(&Tok::Let)?;
+                    let pattern = self.pattern()?;
+                    self.eat(&Tok::Eq)?;
+                    let scrutinee = self.cond_expr()?;
+                    let body = self.block()?;
+                    let if_let = Stmt::IfLet {
+                        pattern,
+                        scrutinee,
+                        then_block: body,
+                        else_block: Some(Block {
+                            stmts: vec![Stmt::Break { line }],
+                        }),
+                        line,
+                    };
+                    return Ok(Stmt::While {
+                        cond: Expr::Bool(true),
+                        body: Block {
+                            stmts: vec![if_let],
+                        },
+                        line,
+                    });
+                }
                 let cond = self.cond_expr()?;
                 let body = self.block()?;
                 Ok(Stmt::While { cond, body, line })
@@ -3383,6 +3454,18 @@ impl Parser {
     /// ("`if` used as an expression needs an `else`"), so the diagnostic can name
     /// the totality rule rather than being a bare parse error.
     fn if_expr(&mut self, line: usize) -> Result<Expr, Diagnostic> {
+        // `if let` is a statement form only (RFC-0060) — reject it in an
+        // expression position with a hint to use `match`.
+        if *self.peek() == Tok::Let {
+            return Err(Diagnostic::error(
+                line,
+                self.col(),
+                "parse",
+                "`if let` is a statement, not an expression — use `match` to bind \
+                 a pattern in an expression position (RFC-0060)"
+                    .to_string(),
+            ));
+        }
         let cond = self.cond_expr()?;
         let then_branch = self.if_branch()?;
         let else_branch = if *self.peek() == Tok::Else {
@@ -3551,6 +3634,62 @@ mod tests {
 
     fn parse_src(s: &str) -> Program {
         parse(lex(s).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn if_let_parses_with_pattern_scrutinee_and_else() {
+        let src = "fn main() -> Int64 { \
+                   if let Some(v) = f() { return v } else { return 0 } }";
+        let p = parse_src(src);
+        let f = &p.functions[0];
+        assert!(matches!(
+            f.body.stmts[0],
+            Stmt::IfLet {
+                else_block: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn while_let_desugars_to_while_true_with_if_let_else_break() {
+        // `while let PAT = e { body }` becomes `while true { if let PAT = e { body }
+        // else { break } }` (RFC-0060) — a pure parser rewrite.
+        let src = "fn main() -> Int64 { while let Some(v) = f() { print(v) } return 0 }";
+        let p = parse_src(src);
+        let Stmt::While { cond, body, .. } = &p.functions[0].body.stmts[0] else {
+            panic!("expected a while loop");
+        };
+        assert_eq!(*cond, Expr::Bool(true));
+        let Stmt::IfLet { else_block: Some(eb), .. } = &body.stmts[0] else {
+            panic!("expected an if-let as the while body");
+        };
+        assert!(matches!(eb.stmts[0], Stmt::Break { .. }));
+    }
+
+    #[test]
+    fn if_let_as_expression_is_rejected_with_a_match_hint() {
+        let src = "fn main() -> Int64 { let x = if let Some(v) = f() { v } else { 0 } return x }";
+        let err = parse(lex(src).unwrap()).unwrap_err();
+        assert!(
+            err.render().contains("`if let` is a statement")
+                && err.render().contains("match"),
+            "{}",
+            err.render()
+        );
+    }
+
+    #[test]
+    fn else_if_let_chains() {
+        let src = "fn main() -> Int64 { \
+                   if let Some(a) = f() { return a } \
+                   else if let Ok(b) = g() { return b } \
+                   else { return 0 } }";
+        let p = parse_src(src);
+        let Stmt::IfLet { else_block: Some(eb), .. } = &p.functions[0].body.stmts[0] else {
+            panic!("expected an if-let");
+        };
+        assert!(matches!(eb.stmts[0], Stmt::IfLet { .. }));
     }
 
     #[test]

@@ -575,6 +575,21 @@ pub enum Stmt {
         else_block: Option<Block>,
         line: usize,
     },
+    /// `if let PAT = SCRUTINEE { .. } [else { .. }]` (RFC-0060) — a statement
+    /// form (not an expression in v1). `PAT` is a refutable `match`-arm pattern
+    /// (`Some(x)`, `Ok(v)`, `Err(e)`, a user enum variant, incl. multi-payload):
+    /// its binders are in scope in `then_block` only. `else_block` chains via
+    /// `else if` / `else if let` exactly like `Stmt::If`. `while let` is a parser
+    /// desugar onto `while true { if let PAT = e { body } else { break } }`, so
+    /// only this node needs backend support; the scrutinee is evaluated once per
+    /// probe (no double-eval), and diagnostics use the source `line`.
+    IfLet {
+        pattern: Pattern,
+        scrutinee: Expr,
+        then_block: Block,
+        else_block: Option<Block>,
+        line: usize,
+    },
     /// `while cond { .. }`
     While {
         cond: Expr,

@@ -2013,6 +2013,42 @@ impl<'a> Checker<'a> {
                     None => Ok(false),
                 }
             }
+            Stmt::IfLet {
+                pattern,
+                scrutinee,
+                then_block,
+                else_block,
+                line,
+            } => {
+                let raw = self.expr(scrutinee, scope, None, Some(ret))?;
+                let sty = self.resolve_scrutinee(&raw);
+                let binders = self.pattern_binders(&sty, pattern, *line)?;
+                // The binders are in scope in `then_block` only, in a frame that
+                // wraps it (like a `for` loop variable). Retain their types for
+                // hover, exactly as `match` arm bindings would be.
+                scope.push(HashMap::new());
+                for (name, ty) in &binders {
+                    self.let_types
+                        .borrow_mut()
+                        .insert((*line, name.clone()), ty.clone());
+                    scope.last_mut().unwrap().insert(
+                        name.clone(),
+                        Binding {
+                            ty: ty.clone(),
+                            mutable: false,
+                        },
+                    );
+                }
+                let then_ret = self.block(then_block, ret, scope);
+                scope.pop();
+                match else_block {
+                    Some(eb) => {
+                        let else_ret = self.block(eb, ret, scope);
+                        Ok(then_ret && else_ret)
+                    }
+                    None => Ok(false),
+                }
+            }
             Stmt::Break { line } => {
                 if !*self.in_loop.borrow() {
                     return Err(format!("line {line}: `break` outside a loop"));
@@ -3082,6 +3118,90 @@ impl<'a> Checker<'a> {
             (Type::Result(t, _), "Ok") => (**t).clone(),
             (Type::Result(_, e), "Err") => (**e).clone(),
             _ => Type::Unit,
+        }
+    }
+
+    /// Resolve a scrutinee's type through a transparent Option/Result/enum alias
+    /// (RFC-0024) — shared by `match` and `if let`/`while let` so both dispatch
+    /// on the same underlying shape.
+    fn resolve_scrutinee(&self, raw: &Type) -> Type {
+        match raw {
+            Type::Named(n) => match self.types.get(n) {
+                Some(d)
+                    if d.predicate.is_none()
+                        && matches!(
+                            d.base,
+                            Type::Result(..) | Type::Option(..) | Type::Enum(..)
+                        ) =>
+                {
+                    crate::types::resolve(raw, self.types)
+                }
+                _ => raw.clone(),
+            },
+            _ => raw.clone(),
+        }
+    }
+
+    /// Validate a single refutable pattern against a scrutinee type and return
+    /// its binders (name, type) — the `if let`/`while let` counterpart of a
+    /// `match` arm's binding logic (RFC-0060). Reuses the same shape rules as
+    /// [`Checker::check_match`]/[`Checker::check_match_enum`].
+    fn pattern_binders(
+        &self,
+        sty: &Type,
+        pattern: &Pattern,
+        line: usize,
+    ) -> Result<Vec<(String, Type)>, String> {
+        if let Type::Enum(evs) = self.base(sty) {
+            let (vname, binds) = match pattern {
+                Pattern::Variant(n, b) => (n.clone(), b.clone()),
+                _ => {
+                    return Err(format!(
+                        "line {line}: pattern does not match scrutinee of type {sty}"
+                    ))
+                }
+            };
+            let ev = evs
+                .iter()
+                .find(|v| v.name == vname)
+                .ok_or_else(|| format!("line {line}: `{vname}` is not a variant of {sty}"))?;
+            if ev.payload.len() != binds.len() {
+                return Err(format!(
+                    "line {line}: variant `{vname}` has {} payload(s), but the pattern binds {}",
+                    ev.payload.len(),
+                    binds.len()
+                ));
+            }
+            return Ok(binds.into_iter().zip(ev.payload.iter().cloned()).collect());
+        }
+        let (tag, bind): (&str, Option<String>) = match pattern {
+            Pattern::Some(b) => ("Some", Some(b.clone())),
+            Pattern::None => ("None", None),
+            Pattern::Ok(b) => ("Ok", Some(b.clone())),
+            Pattern::Err(b) => ("Err", Some(b.clone())),
+            Pattern::Variant(n, _) => {
+                return Err(format!(
+                    "line {line}: pattern `{n}` does not match scrutinee of type {sty}"
+                ))
+            }
+        };
+        let want: [&str; 2] = match sty {
+            Type::Option(_) => ["Some", "None"],
+            Type::Result(_, _) => ["Ok", "Err"],
+            other => {
+                return Err(format!(
+                    "line {line}: `if let` scrutinee must be an Option, Result, or enum, found {other}"
+                ))
+            }
+        };
+        if !want.contains(&tag) {
+            return Err(format!(
+                "line {line}: pattern `{tag}` does not match scrutinee of type {sty}"
+            ));
+        }
+        match bind {
+            Some(name) => Ok(vec![(name, self.binding_type(sty, tag))]),
+            None => Ok(vec![]),
         }
     }
 
@@ -5296,6 +5416,24 @@ impl<'a> Checker<'a> {
                 }
                 Ok(())
             }
+            Stmt::IfLet {
+                pattern,
+                scrutinee,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.captures_expr(scrutinee, outer, locals)?;
+                let mut inner = locals.clone();
+                for b in crate::movecheck::pattern_bindings(pattern) {
+                    inner.insert(b.to_string());
+                }
+                self.captures_block(then_block, outer, &mut inner)?;
+                if let Some(eb) = else_block {
+                    self.captures_block(eb, outer, &mut locals.clone())?;
+                }
+                Ok(())
+            }
             Stmt::While { cond, body, .. } => {
                 self.captures_expr(cond, outer, locals)?;
                 self.captures_block(body, outer, &mut locals.clone())
@@ -5874,6 +6012,16 @@ fn contains_spawn(b: &Block) -> bool {
                     || contains_spawn(then_block)
                     || else_block.as_ref().is_some_and(contains_spawn)
             }
+            Stmt::IfLet {
+                scrutinee,
+                then_block,
+                else_block,
+                ..
+            } => {
+                expr_contains_spawn(scrutinee)
+                    || contains_spawn(then_block)
+                    || else_block.as_ref().is_some_and(contains_spawn)
+            }
             Stmt::While { cond, body, .. } => expr_contains_spawn(cond) || contains_spawn(body),
             Stmt::ForIn { iter, body, .. } => expr_contains_spawn(iter) || contains_spawn(body),
             Stmt::Region { body, .. } => contains_spawn(body),
@@ -6398,6 +6546,18 @@ fn global_ref_block(
                     .as_ref()
                     .is_some_and(|eb| global_ref_block(eb, globals, local))
         }
+        Stmt::IfLet {
+            scrutinee,
+            then_block,
+            else_block,
+            ..
+        } => {
+            global_ref_expr(scrutinee, globals, local)
+                || global_ref_block(then_block, globals, local)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|eb| global_ref_block(eb, globals, local))
+        }
         Stmt::While { cond, body, .. } => {
             global_ref_expr(cond, globals, local) || global_ref_block(body, globals, local)
         }
@@ -6630,6 +6790,18 @@ fn calls_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
                 calls_block(eb, out);
             }
         }
+        Stmt::IfLet {
+            scrutinee,
+            then_block,
+            else_block,
+            ..
+        } => {
+            calls_expr(scrutinee, out);
+            calls_block(then_block, out);
+            if let Some(eb) = else_block {
+                calls_block(eb, out);
+            }
+        }
         Stmt::While { cond, body, .. } => {
             calls_expr(cond, out);
             calls_block(body, out);
@@ -6750,6 +6922,30 @@ mod tests {
         )
         .unwrap_err();
         assert!(l.contains("`break` outside a loop"), "{l}");
+    }
+
+    #[test]
+    fn if_let_binds_the_payload_type_and_rejects_wrong_patterns() {
+        // The binder takes the Option payload type and is usable in the body.
+        assert!(check_src(
+            "fn f() -> Option<Int64> { return Some(1) } \
+             fn main() -> Int64 { if let Some(v) = f() { return v } return 0 }"
+        )
+        .is_ok());
+        // A binder is scoped to the then-block only — not visible after.
+        let scope = check_src(
+            "fn f() -> Option<Int64> { return Some(1) } \
+             fn main() -> Int64 { if let Some(v) = f() { } return v }",
+        )
+        .unwrap_err();
+        assert!(scope.contains("v"), "{scope}");
+        // Wrong pattern for the scrutinee shape.
+        let bad = check_src(
+            "fn f() -> Option<Int64> { return Some(1) } \
+             fn main() -> Int64 { if let Ok(v) = f() { return v } return 0 }",
+        )
+        .unwrap_err();
+        assert!(bad.contains("does not match scrutinee"), "{bad}");
     }
 
     #[test]

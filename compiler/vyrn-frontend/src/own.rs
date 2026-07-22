@@ -363,6 +363,21 @@ impl Analysis<'_> {
                     self.block(eb);
                 }
             }
+            // `if let` (RFC-0060): the scrutinee is visited like any expression;
+            // the binders are payload borrows (never auto-freed), so the blocks
+            // are walked exactly as an `if`'s are.
+            Stmt::IfLet {
+                scrutinee,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.visit(scrutinee);
+                self.block(then_block);
+                if let Some(eb) = else_block {
+                    self.block(eb);
+                }
+            }
             Stmt::While { cond, body, .. } => {
                 self.visit(cond);
                 self.block(body);
