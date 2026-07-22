@@ -49,6 +49,12 @@ jobs:
       - name: LSP tests (excluded crate)
         working-directory: compiler
         run: cargo test --quiet --manifest-path vyrn-lsp/Cargo.toml
+      - name: Docs drift gate (RFC-0065)
+        # The committed std API docs (docs/api/) must match what `vyrn doc`
+        # generates from std/ — regenerated in the same commit as any std doc
+        # change. Cheap (no clang): --verify writes nothing and exits 1 on drift.
+        working-directory: compiler
+        run: cargo run --quiet -p vyrn-cli -- doc --std -o ../docs/api --verify
       - name: Bench --check (deterministic, RFC-0063)
         # The BLOCKING half of bench-in-CI: `vyrn bench --check` runs each bench
         # body ONCE under the interpreter — deterministic, no clang, no timing —
