@@ -501,6 +501,39 @@ export async function mount(wasmBytes, mountEl, opts = {}) {
     syncSubs();
   }
 
+  // Re-attach this instance's view to a NEW mount element after a soft nav
+  // (RFC-0067). The wasm instance — and all of its module state — is untouched;
+  // only the per-mount DOM / effect / subscription / delegated-event state is
+  // reset and rebuilt against the fresh node. For the patch protocol we
+  // deliberately rebuild from the FULL `vyrnView()` rather than `vyrnPatch()`:
+  // the new mount node is empty, but wasm's retained `lastTree` still equals the
+  // current view (a navigation never changes module state), so a full paint
+  // restores the DOM↔`lastTree` invariant the op stream relies on — no need to
+  // reset wasm-side state we cannot reach from here. Subsequent `rerender()`s
+  // then patch from `rootDom` exactly as before.
+  function remount(newEl) {
+    if (destroyed) return;
+    // Tear down the OLD mount's DOM-bound state (its element is being discarded).
+    for (const [, teardown] of activeSubs) teardown();
+    activeSubs.clear();
+    for (const [dom, info] of activeEffects) {
+      if (typeof info.cleanup === "function") info.cleanup(dom);
+    }
+    activeEffects.clear();
+    wiredEvents.clear(); // delegated listeners re-attach to the new element
+    current = null;
+    rootDom = null;
+    // Rebuild from the full view against the new element.
+    mountEl = newEl;
+    mountEl.textContent = "";
+    current = readView();
+    const dom = createNode(current);
+    mountEl.appendChild(dom);
+    rootDom = dom; // the patch loop's nodeAt() resolves from here after re-mount
+    runEffects();
+    syncSubs();
+  }
+
   // initial mount
   mountEl.textContent = "";
   if (hasPatch) {
@@ -523,6 +556,9 @@ export async function mount(wasmBytes, mountEl, opts = {}) {
   return {
     exports,
     rerender,
+    // Re-attach the view to a new mount node across a soft nav, keeping this
+    // wasm instance (and its module state) alive — RFC-0067 island re-mount.
+    remount,
     // Register an imperative effect after mount (also settable via opts.effects).
     effect(name, fn) {
       effectRegistry[name] = fn;

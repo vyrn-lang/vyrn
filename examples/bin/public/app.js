@@ -1,4 +1,4 @@
-// Client boot for the pastebin create island (RFC-0026 M2 + RFC-0019 + RFC-0034
+// Client boot for the pastebin create island (RFC-0026 M2 + RFC-0019 + RFC-0067
 // + RFC-0035 patch loop). One wasm module renders the create form into `#app` on
 // the home page. The RPC transport supplies `vyrnRpcCall`; vyrn-dom owns the
 // instance and the render loop.
@@ -7,6 +7,11 @@
 // create the client stashes a `/p/<id>` target, and we hand it to
 // `window.vyrnNav.navigate` for a SOFT navigation (falling back to a hard
 // location change if vyrn-nav is absent).
+//
+// RFC-0067 island shape: `bootApp` INSTANTIATES the wasm module exactly once and
+// returns an instance whose `mount(el)` re-attaches the view to the `#app` a soft
+// nav brings back. The wasm instance — and the draft it holds in module state —
+// therefore survives navigating away and back; only the DOM view is re-mounted.
 import { mount } from "/vyrn-runtime/vyrn-dom.js";
 import { makeRpcTransport } from "/vyrn-runtime/vyrn-rpc.js";
 
@@ -57,6 +62,12 @@ async function bootApp(mountEl) {
   app.rerender();
 
   return {
+    // Re-attach the SAME wasm instance's view to the `#app` node a soft nav
+    // brought back (RFC-0067). Instantiation and the RPC binding above happened
+    // once; here we only repaint — the draft in module state is intact.
+    mount(el) {
+      app.remount(el);
+    },
     destroy() {
       app.destroy();
     },
@@ -69,7 +80,7 @@ function bootOrReport(mountEl) {
   });
 }
 
-// With vyrn-nav present, hand it the island so it owns boot / re-boot across soft
+// With vyrn-nav present, hand it the island so it owns boot / re-mount across soft
 // navigations; without it, boot directly.
 if (window.vyrnNav && typeof window.vyrnNav.registerIsland === "function") {
   window.vyrnNav.registerIsland("#app", bootOrReport);
