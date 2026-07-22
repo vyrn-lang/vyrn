@@ -1,0 +1,80 @@
+/// Regression (fix-alloca-void). Two codegen bugs the parity corpus never saw,
+/// because both only surface in the SUBDIRECTORY server examples (never native-
+/// built by the non-recursive harness) — reduced here to a top-level citizen.
+///
+/// 1. A generic enum matched on an INLINE construction must recover its concrete
+///    payload type. The `Held(s) => s` arm returns the payload bare; before the
+///    fix its binding lowered to an invalid `alloca void`, because the variant
+///    constructor reported the bare enum name without its type arguments, so the
+///    payload type stayed the unresolved `Type::Param<T>` (which lowers to
+///    `void`). This is exactly the shape the `std/storage` `load(...)` desugar
+///    produces for `LoadResult<StoreFile>` in the servers.
+///
+/// 2. An `Array<fnAlias>` literal — a lambda flowing into an aliased
+///    `fn(..) -> ..` element type — was stored at the wrong aggregate type
+///    (a fixed `[N x T]` value into a growable `{ptr,len,cap}` slot), because the
+///    reshape guard demanded exact type equality instead of matching layout.
+///    This is the `middleware: Array<Middleware>` module-state global.
+
+type Cargo = { weight: Int64, label: String }
+
+/// A generic sum type. `Held` carries the parameter; `Empty` does not.
+type Crate<T> = | Empty | Held(T)
+
+/// The scrutinee is an INLINE construction, so codegen must infer `T` from the
+/// payload rather than read it off an annotation. The `Held(s) => s` arm is the
+/// bare-binding trigger.
+fn unwrapInline() -> Cargo {
+    return match Held(Cargo { weight: 7, label: "seven" }) {
+        Empty => Cargo { weight: 0, label: "empty" },
+        Held(s) => s,
+    }
+}
+
+/// A plain tag enum feeding a nested match: the inner match builds `Held` in one
+/// arm and `Empty` in the other, then an outer match binds the payload. The
+/// concrete arm comes FIRST and the param-free `Empty` arm LAST, so a naive
+/// "last arm wins" reconciliation would forget `T` — the fix prefers the fully
+/// applied instantiation regardless of arm order.
+type Choice = | First | Second
+
+fn nested(p: Choice) -> Cargo {
+    let boxed = match p {
+        First => Held(Cargo { weight: 3, label: "three" }),
+        Second => Empty,
+    }
+    return match boxed {
+        Empty => Cargo { weight: 99, label: "fallback" },
+        Held(s) => s,
+    }
+}
+
+/// An aliased function type used as an `Array` element (the server's `Middleware`
+/// shape). The literal holds lambdas; it is module state, so it also exercises
+/// the same reshape in the globals initializer.
+type Op = fn(Int64) -> Int64
+
+let ops: Array<Op> = [
+        |x| { return x + 1 },
+        |x| { return x * 2 },
+        |x| { return x - 3 },
+]
+
+fn runOps(seed: Int64) -> Int64 {
+    let mut acc = seed
+    for op in ops {
+        acc = op(acc)
+    }
+    return acc
+}
+
+fn main() -> Int64 {
+    let a = unwrapInline()
+    print("inline: \{a.weight} \{a.label}")
+    let b = nested(First)
+    print("nested first: \{b.weight} \{b.label}")
+    let c = nested(Second)
+    print("nested second: \{c.weight} \{c.label}")
+    print("ops(10): \{runOps(10)}")
+    return 0
+}

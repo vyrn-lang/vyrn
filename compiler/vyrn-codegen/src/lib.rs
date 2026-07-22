@@ -2144,6 +2144,52 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The fully-applied type of a just-constructed enum variant. For a generic
+    /// enum (`enum E<T>`, the injected `LoadResult<T>`), the concrete type
+    /// arguments are inferred by unifying the variant's declared payload types
+    /// against the argument types that filled them — mirroring what the built-in
+    /// `fromJson` returns (`App("Validation", [target])`). A parameter the
+    /// variant does not mention stays `Unit`; a non-generic enum stays `Named`.
+    /// Carrying the arguments is load-bearing: a downstream `match` substitutes
+    /// them into the variant payloads, so a binding like `Loaded(s) => s`
+    /// recovers the concrete payload type instead of the bare `Type::Param`
+    /// (which lowers to an invalid `alloca void`).
+    fn applied_enum_type(&self, enum_name: &str, variant: &str, arg_tys: &[Type]) -> Type {
+        let Some(decl) = self.types.get(enum_name) else {
+            return Type::Named(enum_name.to_string());
+        };
+        if decl.type_params.is_empty() {
+            return Type::Named(enum_name.to_string());
+        }
+        let declared: Vec<Type> = match &decl.base {
+            Type::Enum(vs) => vs
+                .iter()
+                .find(|v| v.name == variant)
+                .map(|v| v.payload.clone())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let mut subst: HashMap<String, Type> = HashMap::new();
+        for (d, a) in declared.iter().zip(arg_tys) {
+            solve_param(d, a, &mut subst);
+        }
+        let args = decl
+            .type_params
+            .iter()
+            .map(|p| subst.get(p).cloned().unwrap_or(Type::Unit))
+            .collect();
+        Type::App(enum_name.to_string(), args)
+    }
+
+    /// Whether `t` is a generic enum instantiation whose type arguments are all
+    /// concretely known (no `Unit` placeholder, no unresolved `Param`). Used to
+    /// pick the most-informative arm type when reconciling a `match`.
+    fn ty_is_concrete_app(&self, t: &Type) -> bool {
+        matches!(t, Type::App(_, args)
+            if !args.is_empty()
+                && args.iter().all(|a| !matches!(self.resolve(a), Type::Unit | Type::Param(_))))
+    }
+
     /// The LLVM type string for `ty`. Records lower to a `{ .. }` literal struct.
     fn llt(&self, ty: &Type) -> String {
         match self.resolve(ty) {
@@ -2346,7 +2392,14 @@ impl<'a> Gen<'a> {
             let rf = self.resolve(from);
             let rt = self.resolve(to);
             if let (Type::ArrayN(fi, _), Type::Array(ti)) = (&rf, &rt) {
-                if fi == ti {
+                // The reshape reinterprets the fixed `[N x T]` buffer as a
+                // growable `{ptr,len,cap}` triple; it is sound whenever the
+                // element representation matches. Fall back to comparing the LLVM
+                // layout so an element whose static type is spelled differently
+                // but lowers identically still reshapes — e.g. a lambda literal
+                // (`fn(..) -> ..`) flowing into an `Array<AliasFn>`, where the
+                // element type is the closure value and `ti` is the fn-type alias.
+                if fi == ti || self.llt(fi) == self.llt(ti) {
                     let inner = (**fi).clone();
                     let (triple, _) = self.array_n_to_heap(&op, &inner, &rf)?;
                     return Ok((triple, to.clone()));
@@ -3906,7 +3959,19 @@ impl<'a> Gen<'a> {
                 }
             }
             let (v, t) = self.gen_expr(&arm.body)?;
-            ty = t;
+            // Reconcile the arms' reported type. All arms share one enum (the
+            // checker proved it), but different arms carry different knowledge of
+            // its type arguments: a payload-bearing arm that mentions the param
+            // (`Loaded(v)` → `LoadResult<StoreFile>`) is fully applied, while a
+            // nullary/param-free arm (`Missing`, `Corrupt([Issue])`) resolves the
+            // param to `Unit`. Prefer the fully-applied instantiation so a
+            // downstream `match` on this expression recovers the concrete payload
+            // type instead of the bare `Type::Param` (which lowers to an invalid
+            // `alloca void`). Every instantiation shares one LLVM layout, so this
+            // never disturbs the `phi` below — only the reported type.
+            if !(self.ty_is_concrete_app(&ty) && !self.ty_is_concrete_app(&t)) {
+                ty = t;
+            }
             self.scope.pop();
             let block = self.cur_block.clone();
             self.emit_term(format!("br label %{end_l}"));
@@ -7096,6 +7161,7 @@ impl<'a> Gen<'a> {
             // gen each payload, coercing to its declared type, boxing any wider
             // than a word.
             let mut payloads = Vec::new();
+            let mut arg_tys = Vec::new();
             for (i, a) in args.iter().enumerate() {
                 // RFC-0037: the declared payload type is the expected type for
                 // a lambda-literal payload.
@@ -7115,6 +7181,7 @@ impl<'a> Gen<'a> {
                     }
                     _ => (v, ty),
                 };
+                arg_tys.push(ty.clone());
                 payloads.push(self.box_payload(&v, &ty));
             }
             let mut cur = "undef".to_string();
@@ -7127,7 +7194,8 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{t} = insertvalue {ll} {cur}, i64 {val}, {slot}"));
                 cur = t;
             }
-            return Ok((cur, Type::Named(enum_name)));
+            let applied = self.applied_enum_type(&enum_name, name, &arg_tys);
+            return Ok((cur, applied));
         }
 
         // construction of a validated type: `Age(expr)`
