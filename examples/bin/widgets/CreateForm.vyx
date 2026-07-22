@@ -1,22 +1,69 @@
 <script>
 import { i18n } from "std/i18n"
-import { tBinCreate, tBinTitleField, tBinLangLabel, tBinBodyField, tBinSave } from i18n("../strings")
+import { tBinCreate, tBinTitleField, tBinLangLabel, tBinBodyField, tBinSave, tIssueTitleLong, tIssueLangUnknown, tIssueBodyEmpty } from i18n("../strings")
+import { rpcClient } from "std/rpc"
+import { RpcIssue } from rpcClient("../contract")
 props {
     draftTitle: String,
     draftLang: String,
     draftBody: String,
-    issues: String,
+    issues: Array<RpcIssue>,
+}
+
+/// The localized text for one issue, mapped through (key, path) with a FALLBACK to
+/// the wire message — so an unknown future issue still shows something (today's
+/// text), never nothing. The canonical wire wording itself is unchanged.
+fn issueText(iss: RpcIssue) -> String {
+    if iss.key == "validate" {
+        if iss.path == "title" {
+            return tIssueTitleLong()
+        }
+        if iss.path == "lang" {
+            return tIssueLangUnknown()
+        }
+        if iss.path == "body" {
+            return tIssueBodyEmpty()
+        }
+    }
+    return iss.message
+}
+
+/// The localized text of the FIRST issue at `path` ("" when clean), for the span
+/// under each field.
+fn issueFor(issues: Array<RpcIssue>, path: String) -> String {
+    for iss in issues {
+        if iss.path == path {
+            return issueText(iss)
+        }
+    }
+    return ""
+}
+
+/// Issues whose path matches NO field, joined for a single form-level line.
+fn formIssues(issues: Array<RpcIssue>) -> String {
+    let mut out = ""
+    for iss in issues {
+        if iss.path != "title" && iss.path != "lang" && iss.path != "body" {
+            if out.byteLength > 0 {
+                out = out + "; "
+            }
+            out = out + issueText(iss)
+        }
+    }
+    return out
 }
 </script>
 
 <template>
 <section class="create">
     <h2>{{ tBinCreate() }}</h2>
-    <p v-if="issues.byteLength > 0" class="issues">{{ issues }}</p>
-    <span v-else class="hint"></span>
     <label class="field">{{ tBinTitleField() }}<input type="text" :value="draftTitle" @input="setDraftTitle"/></label>
+    <span class="text-danger-600" v-if='issueFor(issues, "title").byteLength > 0'>{{ issueFor(issues, "title") }}</span>
     <label class="field">{{ tBinLangLabel() }}<select :value="draftLang" @change="setDraftLang"><option value="text">text</option><option value="vyrn">vyrn</option><option value="json">json</option><option value="rust">rust</option><option value="js">js</option><option value="html">html</option></select></label>
+    <span class="text-danger-600" v-if='issueFor(issues, "lang").byteLength > 0'>{{ issueFor(issues, "lang") }}</span>
     <label class="field">{{ tBinBodyField() }}<textarea :value="draftBody" @input="setDraftBody"></textarea></label>
+    <span class="text-danger-600" v-if='issueFor(issues, "body").byteLength > 0'>{{ issueFor(issues, "body") }}</span>
     <button class="save" @click="submitCreate">{{ tBinSave() }}</button>
+    <p class="text-danger-600" v-if="formIssues(issues).byteLength > 0">{{ formIssues(issues) }}</p>
 </section>
 </template>

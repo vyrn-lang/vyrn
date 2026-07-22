@@ -22,6 +22,11 @@
         "save": "Create paste",
         "recent": "Recent pastes"
     },
+    "issue": {
+        "titleLong": "Title is too long (max 80 characters).",
+        "langUnknown": "Choose a supported language.",
+        "bodyEmpty": "Body can't be empty."
+    },
     "lang": {
         "switch": "Мова: українська"
     }

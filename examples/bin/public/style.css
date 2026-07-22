@@ -54,9 +54,9 @@ button {
 }
 button.save { background: color-mix(in srgb, currentColor 16%, transparent); font-weight: 600; }
 button:hover { background: color-mix(in srgb, currentColor 20%, transparent); }
-.issues { color: #c0392b; font-size: 0.9rem; margin: 0.4rem 0; }
-@media (prefers-color-scheme: dark) { .issues { color: #ff8a80; } }
-.hint { display: none; }
+/* Validation issues are field-attached via theme `text-danger-600` utilities
+   (RFC-0068); the former bespoke `.issues` rule + its dark-mode patch are gone. */
+span.text-danger-600, p.text-danger-600 { display: block; font-size: 0.9rem; margin: 0.2rem 0 0; }
 
 /* paste view */
 p.pmeta { display: flex; align-items: center; gap: 0.8rem; font-size: 0.85rem; }

@@ -4,6 +4,10 @@
       "500": "#2563eb",
       "600": "#1d4ed8"
     },
+    "danger": {
+      "500": "#f87171",
+      "600": "#ef4444"
+    },
     "gray": {
       "200": "#e5e7eb",
       "500": "#6b7280",
@@ -43,7 +47,6 @@
     "bar",
     "lang",
     "empty",
-    "issues",
     "pastelist",
     "paste",
     "meta",
@@ -60,7 +63,6 @@
     "field",
     "save",
     "row",
-    "hint",
     "plurals"
   ]
 }

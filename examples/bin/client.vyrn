@@ -17,7 +17,11 @@ type RawCreate = { title: String, body: String, lang: String }
 let mut draftTitle: String = ""
 let mut draftBody: String = ""
 let mut draftLang: String = "text"
-let mut issues: String = ""
+
+/// The current rejection, structured so the form attaches each issue to its field
+/// (RFC-0068). A client-side prevalidation and a server 422 both land here as the
+/// SAME `Array<RpcIssue>`, so the form renders one shape whichever side rejected.
+let mut issues: Array<api.RpcIssue> = []
 
 /// The soft-nav target after a successful create, or "" for none. takeNav hands
 /// it to the host, which clears it.
@@ -28,18 +32,12 @@ let mut lastTree: Html = Empty
 
 // ---- helpers ---------------------------------------------------------------
 
-/// Render an accumulated issue list as "path: message; …".
-fn renderIssues(iss: Array<Issue>) -> String {
-    let mut out = ""
-    let mut i = 0
-    for issue in iss {
-        if i > 0 {
-            out = out + "; "
-        }
-        out = out + issue.path + ": " + issue.message
-        i = i + 1
-    }
-    return out
+/// Wrap a single non-field message (a transport `Failed`, or an app-level `Err`
+/// carried on a 200) as a form-level issue (empty path), so it renders through the
+/// SAME field-attached path — an empty path matches no field, so the form shows it
+/// on its form-level line.
+fn oneIssue(msg: String) -> Array<api.RpcIssue> {
+    return [api.RpcIssue { key: "app", path: "", message: msg }]
 }
 
 // ---- the view --------------------------------------------------------------
@@ -52,22 +50,23 @@ fn view() -> Html {
 
 /// Passed to api.createPaste at the call site. The home list and paste view are
 /// server-rendered, so listPastes/getPaste need no client callback.
-fn onCreatePaste(res: Validation<api.PasteResult>) {
+fn onCreatePaste(res: api.RpcReply<api.PasteResult>) {
     match res {
-        Valid(r) => afterCreate(r),
-        Invalid(iss) => setIssues(renderIssues(iss)),
+        Done(r) => afterCreate(r),
+        Rejected(iss) => setIssues(iss),
+        Failed(msg) => setIssues(oneIssue(msg)),
     }
 }
 fn afterCreate(r: api.PasteResult) {
     match r {
         Ok(p) => goToPaste(p),
-        Err(why) => setIssues(why),
+        Err(why) => setIssues(oneIssue(why)),
     }
 }
 fn goToPaste(p: api.Paste) {
     navTarget = "/p/\{p.id}"
 }
-fn setIssues(s: String) {
+fn setIssues(s: Array<api.RpcIssue>) {
     issues = s
 }
 
@@ -89,7 +88,7 @@ export extern fn submitCreate(arg: String) {
     let raw = RawCreate { title: draftTitle, body: draftBody, lang: draftLang }
     match fromJson(api.CreateReq, toJson(raw)) {
         Valid(req) => api.createPaste(req, onCreatePaste),
-        Invalid(iss) => setIssues(renderIssues(iss)),
+        Invalid(iss) => setIssues(api.rpcIssuesFrom(iss)),
     }
 }
 
@@ -135,8 +134,37 @@ test "a valid draft decodes to a CreateReq" {
 }
 
 test "createForm renders the heading and save button (a .vyx view snapshot)" {
-    let html = toHtmlString(createForm("", "text", "", ""))
+    let html = toHtmlString(createForm("", "text", "", []))
     // The labels resolve inside the widget (its own i18n import, default En).
     assert(html.contains("New paste"))
     assert(html.contains("Create paste"))
+}
+
+test "createForm attaches the localized body issue under its field, not the leaked type name" {
+    // A real prevalidation of an empty body, mapped to the one RpcIssue shape.
+    let raw = RawCreate { title: "t", body: "", lang: "text" }
+    let iss = match fromJson(api.CreateReq, toJson(raw)) {
+        Valid(req) => api.rpcIssuesFrom([]),
+        Invalid(is) => api.rpcIssuesFrom(is),
+    }
+    assert(iss.length >= 1)
+    let html = toHtmlString(createForm("t", "text", "", iss))
+    // Localized + field-attached (the widget's own i18n import, default En).
+    assert(html.contains("Body can't be empty"))
+    // The wire-canonical leaked type name never reaches the UI for a known path.
+    assert(html.contains("validation failed for `Body`") == false)
+}
+
+test "a bad lang value attaches its own localized message under the language field" {
+    let iss = api.rpcIssuesFrom([Issue { key: "validate", path: "lang", message: "validation failed for `Lang`" }])
+    let html = toHtmlString(createForm("t", "klingon", "b", iss))
+    assert(html.contains("Choose a supported language"))
+    assert(html.contains("validation failed for `Lang`") == false)
+}
+
+test "an issue at an unknown path falls back to its wire message (form-level, never nothing)" {
+    let iss = api.rpcIssuesFrom([Issue { key: "validate", path: "mystery", message: "unmapped problem" }])
+    let html = toHtmlString(createForm("t", "text", "b", iss))
+    // An unknown path is no field's span; it degrades to today's wire text.
+    assert(html.contains("unmapped problem"))
 }
