@@ -224,3 +224,136 @@ fn native_bench_reports_the_expected_shape() {
 fn regex_like<'a>(text: &'a str, needle: &str) -> Option<&'a str> {
     text.lines().find(|l| l.starts_with(needle))
 }
+
+// ---- `--check` corpus discovery (RFC-0063 §3, verification 3) ----------------
+
+/// The repo's `examples/` directory, relative to this crate.
+fn examples_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("examples")
+}
+
+#[test]
+fn bench_corpus_is_exactly_the_bench_bearing_examples() {
+    // CI's blocking `--check` step scans `examples/*.vyrn` for `bench "`; this pins
+    // that the discovered set is exactly {benching, smallarray} today, so a new
+    // bench-bearing example (or a lost one) surfaces as a test change.
+    let mut found: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(examples_dir()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("vyrn") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).unwrap();
+        if src.contains("bench \"") {
+            found.push(path.file_stem().unwrap().to_string_lossy().into_owned());
+        }
+    }
+    found.sort();
+    assert_eq!(found, vec!["benching".to_string(), "smallarray".to_string()], "bench corpus drifted");
+}
+
+// ---- `--json` / `--compare` native paths (need clang) ------------------------
+
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test benching -- --ignored"]
+fn json_report_parses_and_is_stable_ordered() {
+    // `--json` compiles native + emits the machine-readable report. We assert the
+    // SCHEMA and declaration order — never the timing numbers.
+    let dir = scratch("json");
+    let file = dir.join("b.vyrn");
+    std::fs::write(
+        &file,
+        "bench \"zeta\" { blackBox(1 + 1) }\n\
+         bench \"alpha\" { blackBox(2 + 2) }\n\
+         fn main() -> Int64 { return 0 }\n",
+    )
+    .unwrap();
+    let out = vyrn().arg("bench").arg(&file).arg("--json").output().unwrap();
+    assert!(out.status.success(), "stderr:\n{}", norm(&out.stderr));
+    let stdout = norm(&out.stdout);
+    let doc = vyrn_frontend::schema::parse_json(stdout.trim()).expect("report is valid JSON");
+    assert!(matches!(doc.get("backend"), Some(vyrn_frontend::schema::Json::Str(s)) if s == "native"));
+    assert!(matches!(doc.get("opt"), Some(vyrn_frontend::schema::Json::Str(s)) if s == "O2"));
+    let benches = match doc.get("benches") {
+        Some(vyrn_frontend::schema::Json::Arr(a)) => a,
+        _ => panic!("no benches array in:\n{stdout}"),
+    };
+    // Declaration order preserved (zeta before alpha, as written).
+    let names: Vec<String> = benches
+        .iter()
+        .map(|b| match b.get("name") {
+            Some(vyrn_frontend::schema::Json::Str(s)) => s.clone(),
+            _ => panic!("bench entry has no name"),
+        })
+        .collect();
+    assert_eq!(names, vec!["zeta".to_string(), "alpha".to_string()]);
+    // Every numeric field is present and integer-valued.
+    for b in benches {
+        for key in ["minNs", "medianNs", "meanNs", "samples", "iters"] {
+            match b.get(key) {
+                Some(vyrn_frontend::schema::Json::Num(n)) => assert_eq!(n.fract(), 0.0, "{key} not integer"),
+                _ => panic!("bench entry missing {key}"),
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test benching -- --ignored"]
+fn compare_against_a_placeholder_baseline_is_all_new_exit_zero() {
+    // A placeholder baseline never regresses — every bench is `new`, exit 0.
+    let dir = scratch("compare-placeholder");
+    let file = dir.join("b.vyrn");
+    std::fs::write(
+        &file,
+        "bench \"a\" { blackBox(1 + 1) }\nfn main() -> Int64 { return 0 }\n",
+    )
+    .unwrap();
+    let baseline = dir.join("baseline.json");
+    std::fs::write(&baseline, "{\"placeholder\":true,\"benches\":[]}\n").unwrap();
+    let out = vyrn().arg("bench").arg(&file).args(["--compare"]).arg(&baseline).output().unwrap();
+    assert!(out.status.success(), "stderr:\n{}", norm(&out.stderr));
+    let stdout = norm(&out.stdout);
+    assert!(stdout.contains("bench \"a\" ... new"), "expected `new`, got:\n{stdout}");
+    assert!(stdout.contains("no regressions"), "got:\n{stdout}");
+}
+
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test benching -- --ignored"]
+fn compare_flags_a_regression_against_a_tiny_baseline() {
+    // A baseline min of 1 ns is impossibly fast, so any real run regresses (exit 1).
+    // We assert the VERDICT + exit code, not the factor magnitude.
+    let dir = scratch("compare-regress");
+    let file = dir.join("b.vyrn");
+    // Real, data-dependent work so the run's min is reliably > 1 ns (a trivial
+    // `blackBox(1+1)` folds to ~0 ns and would compare as `ok`).
+    std::fs::write(
+        &file,
+        "bench \"a\" { let mut xs: Array<Int64> = [] let mut i = 0 while i < 500 { xs.push(i) i = i + 1 } blackBox(xs.length) }\n\
+         fn main() -> Int64 { return 0 }\n",
+    )
+    .unwrap();
+    let baseline = dir.join("baseline.json");
+    std::fs::write(
+        &baseline,
+        "{\"backend\":\"native\",\"opt\":\"O2\",\"benches\":[{\"name\":\"a\",\"minNs\":1,\"medianNs\":1,\"meanNs\":1,\"samples\":1,\"iters\":1}]}\n",
+    )
+    .unwrap();
+    let out = vyrn().arg("bench").arg(&file).args(["--compare"]).arg(&baseline).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "stderr:\n{}", norm(&out.stderr));
+    let stdout = norm(&out.stdout);
+    assert!(stdout.contains("bench \"a\" ... REGRESSED x"), "got:\n{stdout}");
+    assert!(stdout.contains("1 regressed"), "got:\n{stdout}");
+}
+
+#[test]
+fn check_rejects_json_and_compare_flags() {
+    // `--check` (deterministic) is mutually exclusive with `--json`/`--compare`
+    // (timing). No clang needed — the guard fires before any compile.
+    let dir = scratch("mutex");
+    let file = dir.join("b.vyrn");
+    std::fs::write(&file, "bench \"a\" { blackBox(1) }\nfn main() -> Int64 { return 0 }\n").unwrap();
+    let out = vyrn().arg("bench").arg(&file).args(["--check", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(norm(&out.stderr).contains("--check cannot be combined with --json or --compare"));
+}

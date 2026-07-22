@@ -1,0 +1,26 @@
+{
+  "_readme": [
+    "RFC-0063 bench baseline — the reference min-times `vyrn bench --compare`",
+    "measures regressions against. JSON has no comments, so this doc lives in",
+    "the ignored `_readme`/`placeholder` fields (the comparator reads only",
+    "`benches`).",
+    "",
+    "THIS IS A PLACEHOLDER. `placeholder: true` (and the empty `benches`) makes",
+    "`--compare` report every bench as `new` and exit 0 — comparing real timings",
+    "against an unseeded baseline is meaningless, never a failure.",
+    "",
+    "To seed the REAL baseline, take it from a CI run (never a dev machine —",
+    "comparing across hardware is noise). The `bench` workflow job uploads a",
+    "`bench-json` artifact holding each example's `vyrn bench --json` output.",
+    "Download it, concatenate the per-example `benches` arrays into the `benches`",
+    "field here, drop `placeholder`/`_readme`, and commit. Refresh the same way",
+    "whenever the CI runner hardware changes.",
+    "",
+    "Local refresh on a quiet machine (dev use only, do NOT commit):",
+    "  vyrn bench examples/benching.vyrn --json > bench/baseline.json"
+  ],
+  "placeholder": true,
+  "backend": "native",
+  "opt": "O2",
+  "benches": []
+}

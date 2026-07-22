@@ -9,10 +9,13 @@
 //!                                        Compile to a native executable (or wasm) via clang.
 //!   vyrn test    [file.vyrn] [--name <substring>]
 //!                                        Run the root file's `test` blocks under the interpreter.
-//!   vyrn bench   [file.vyrn] [--name <substring>] [--check]
+//!   vyrn bench   [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]
 //!                                        Compile the root file's `bench` blocks NATIVE and time them
 //!                                        (divan-simplified). `--check` runs each once under the
 //!                                        interpreter (deterministic, no timing) — the CI face.
+//!                                        `--json` emits the machine-readable report (RFC-0063).
+//!                                        `--compare` runs, then flags regressions vs a baseline
+//!                                        (min > baselineMin * threshold, default 1.5; exit 1 on any).
 //!   vyrn serve   [file.vyrn] [--port N] [--workers N]
 //!                                        Run `fn handle(req: Request) -> Response` as an HTTP host.
 //!                                        `--workers N` (RFC-0025) serves in parallel — refused when
@@ -32,7 +35,7 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check]   (native timing; --check runs each once under the interpreter)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
@@ -1833,8 +1836,8 @@ fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
     }
 }
 
-/// `vyrn bench [file] [--name <substring>] [--check]` (RFC-0055) — benchmark the
-/// root file's `bench` blocks. Two modes:
+/// `vyrn bench [file] [--name <substring>] [--check | --json | --compare <b> [--threshold <f>]]`
+/// (RFC-0055 + RFC-0063) — benchmark the root file's `bench` blocks. Modes:
 ///
 /// - **default (native):** a program transform lowers each selected bench body to
 ///   an ordinary function and synthesizes a `main` harness (warmup / auto-scale /
@@ -1845,12 +1848,22 @@ fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
 /// - **`--check`:** run each selected body ONCE under the interpreter and print
 ///   `bench "name" ... ok` / a trap message — deterministic, byte-pinnable, no
 ///   timing. Exit 1 if any trapped. This is the CI face.
+/// - **`--json`** (RFC-0063): the machine-readable report, built by the Vyrn
+///   harness via `std/json` and printed to stdout. Composes with `--name`.
+/// - **`--compare <baseline.json>` `[--threshold <factor>]`** (RFC-0063): run,
+///   then compare each bench's MIN against the baseline of the same name —
+///   `ok` / `REGRESSED xN.NN` / `new` / `missing-from-run`, exit 1 iff any
+///   regressed (`min > baselineMin * threshold`, default `1.5`).
 ///
-/// Root-file benches only, declaration order (the RFC-0015 rules verbatim);
-/// `--name` filters by substring; manifest-aware like every other command.
+/// `--check` is mutually exclusive with `--json`/`--compare` (deterministic vs
+/// timing). Root-file benches only, declaration order (the RFC-0015 rules
+/// verbatim); `--name` filters by substring; manifest-aware like every command.
 fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
     let mut filter: Option<String> = None;
     let mut check = false;
+    let mut json = false;
+    let mut compare: Option<String> = None;
+    let mut threshold: f64 = 1.5;
     let mut i = 0;
     while i < rest.len() {
         if rest[i] == "--name" && i + 1 < rest.len() {
@@ -1859,10 +1872,32 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
         } else if rest[i] == "--check" {
             check = true;
             i += 1;
+        } else if rest[i] == "--json" {
+            json = true;
+            i += 1;
+        } else if rest[i] == "--compare" && i + 1 < rest.len() {
+            compare = Some(rest[i + 1].clone());
+            i += 2;
+        } else if rest[i] == "--threshold" && i + 1 < rest.len() {
+            match rest[i + 1].parse::<f64>() {
+                Ok(t) if t > 0.0 => threshold = t,
+                _ => {
+                    eprintln!("bench: --threshold needs a positive number");
+                    return ExitCode::from(2);
+                }
+            }
+            i += 2;
         } else {
             eprintln!("bench: unexpected argument `{}`", rest[i]);
             return ExitCode::from(2);
         }
+    }
+
+    // `--check` is the deterministic face; `--json`/`--compare` capture timings.
+    // They are mutually exclusive (RFC-0063 §1).
+    if check && (json || compare.is_some()) {
+        eprintln!("bench: --check cannot be combined with --json or --compare");
+        return ExitCode::from(2);
     }
 
     let source = match std::fs::read_to_string(path) {
@@ -1891,7 +1926,13 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
     if check {
         return bench_check(&program, filter.as_deref());
     }
-    bench_native(path, program, filter.as_deref())
+    if let Some(baseline) = compare {
+        return bench_compare(path, program, filter.as_deref(), &baseline, threshold);
+    }
+    // `--json` streams the machine-readable report; the default streams the human
+    // report. Neither captures the child's stdout.
+    let (code, _) = bench_native(path, program, filter.as_deref(), json, false);
+    code
 }
 
 /// `--check`: run each selected bench body once under the interpreter and pin the
@@ -1929,17 +1970,26 @@ fn bench_check(program: &vyrn_frontend::ast::Program, filter: Option<&str>) -> E
 /// Default mode: transform the loaded program (lift bench bodies to ordinary
 /// functions + synthesize the harness `main`, linking `std/bench`), compile it
 /// NATIVE via clang, and run it so it prints real timings.
-fn bench_native(path: &str, mut program: vyrn_frontend::ast::Program, filter: Option<&str>) -> ExitCode {
+fn bench_native(
+    path: &str,
+    mut program: vyrn_frontend::ast::Program,
+    filter: Option<&str>,
+    json: bool,
+    capture: bool,
+) -> (ExitCode, Option<String>) {
     use vyrn_frontend::ast::{Block, Expr, Function, Stmt, Type};
 
     // 1. Pull in the harness runtime (`std/bench` + its transitive `std/time`) by
     //    loading a synthetic root that imports it, then merge every module decl it
     //    brought (module-tagged, so the synthetic root's own dummy `main` is left
     //    out) into the user's program — skipping any name the program already has.
+    // Importing `benchOne` loads the whole `std/bench` module, so its `benchMeasure`
+    // / `benchJson` / `BenchResult` (and their transitive `std/time` + `std/json`)
+    // are merged too — the `--json` harness needs them.
     let runtime_src = "import { benchOne } from \"std/bench\"\nfn main() -> Int64 { return 0 }\n";
     let rt = match load_program(path, runtime_src) {
         Ok(p) => p,
-        Err(code) => return code,
+        Err(code) => return (code, None),
     };
     let have_fn: std::collections::HashSet<String> =
         program.functions.iter().map(|f| f.name.clone()).collect();
@@ -2001,6 +2051,9 @@ fn bench_native(path: &str, mut program: vyrn_frontend::ast::Program, filter: Op
             width = w;
         }
     }
+    // Lift each body; collect the per-bench `benchMeasure(...)` calls (for `--json`)
+    // in parallel with the human `benchOne(...)` statements.
+    let mut measure_calls: Vec<Expr> = Vec::new();
     for (slot, b) in selected.iter().enumerate() {
         program.functions.push(Function {
             name: format!("__vyrn_bench_body_{slot}"),
@@ -2017,30 +2070,52 @@ fn bench_native(path: &str, mut program: vyrn_frontend::ast::Program, filter: Op
             is_export_extern: false,
             is_gen: false,
         });
+        let body_ref = Expr::Var { name: format!("__vyrn_bench_body_{slot}"), line: 0 };
+        if json {
+            measure_calls.push(Expr::Call {
+                name: "benchMeasure".to_string(),
+                args: vec![Expr::Str(b.name.clone()), body_ref],
+                line: 0,
+            });
+        } else {
+            harness_stmts.push(Stmt::Expr(Expr::Call {
+                name: "benchOne".to_string(),
+                args: vec![Expr::Str(b.name.clone()), Expr::Int(width), body_ref],
+                line: 0,
+            }));
+        }
+    }
+    if json {
+        // `print(benchJson([benchMeasure(..), ..], "native", "O2"))` — the whole
+        // machine-readable report emitted from Vyrn via `std/json` (RFC-0063 §1).
+        // The array literal coerces to `Array<BenchResult>` from `benchJson`'s
+        // parameter type; declaration order is preserved.
         harness_stmts.push(Stmt::Expr(Expr::Call {
-            name: "benchOne".to_string(),
-            args: vec![
-                Expr::Str(b.name.clone()),
-                Expr::Int(width),
-                Expr::Var {
-                    name: format!("__vyrn_bench_body_{slot}"),
-                    line: 0,
-                },
-            ],
+            name: "print".to_string(),
+            args: vec![Expr::Call {
+                name: "benchJson".to_string(),
+                args: vec![
+                    Expr::ArrayLit { elems: measure_calls, line: 0 },
+                    Expr::Str("native".to_string()),
+                    Expr::Str("O2".to_string()),
+                ],
+                line: 0,
+            }],
+            line: 0,
+        }));
+    } else {
+        // Footer: a blank line, then the count (mirrors `vyrn test`'s summary shape).
+        harness_stmts.push(Stmt::Expr(Expr::Call {
+            name: "print".to_string(),
+            args: vec![Expr::Str(String::new())],
+            line: 0,
+        }));
+        harness_stmts.push(Stmt::Expr(Expr::Call {
+            name: "print".to_string(),
+            args: vec![Expr::Str(format!("{} benches", selected.len()))],
             line: 0,
         }));
     }
-    // Footer: a blank line, then the count (mirrors `vyrn test`'s summary shape).
-    harness_stmts.push(Stmt::Expr(Expr::Call {
-        name: "print".to_string(),
-        args: vec![Expr::Str(String::new())],
-        line: 0,
-    }));
-    harness_stmts.push(Stmt::Expr(Expr::Call {
-        name: "print".to_string(),
-        args: vec![Expr::Str(format!("{} benches", selected.len()))],
-        line: 0,
-    }));
     harness_stmts.push(Stmt::Return {
         value: Some(Expr::Int(0)),
         line: 0,
@@ -2075,7 +2150,7 @@ fn bench_native(path: &str, mut program: vyrn_frontend::ast::Program, filter: Op
         Ok(ir) => ir,
         Err(e) => {
             eprintln!("error: {e}");
-            return ExitCode::FAILURE;
+            return (ExitCode::FAILURE, None);
         }
     };
     let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("bench");
@@ -2089,7 +2164,7 @@ fn bench_native(path: &str, mut program: vyrn_frontend::ast::Program, filter: Op
     ));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("error: cannot create temp dir {}: {e}", dir.display());
-        return ExitCode::FAILURE;
+        return (ExitCode::FAILURE, None);
     }
     let exe_name = if cfg!(windows) {
         format!("{stem}.exe")
@@ -2101,13 +2176,13 @@ fn bench_native(path: &str, mut program: vyrn_frontend::ast::Program, filter: Op
     let shim_path = out_path.with_extension("shim.c");
     if let Err(e) = std::fs::write(&ll_path, ir) {
         eprintln!("error: cannot write {}: {e}", ll_path.display());
-        return ExitCode::FAILURE;
+        return (ExitCode::FAILURE, None);
     }
     let mut shim = RUNTIME_SHIM.to_string();
     shim.push_str(&extern_trap_stubs(&program));
     if let Err(e) = std::fs::write(&shim_path, &shim) {
         eprintln!("error: cannot write {}: {e}", shim_path.display());
-        return ExitCode::FAILURE;
+        return (ExitCode::FAILURE, None);
     }
     let clang = match find_clang() {
         Some(c) => c,
@@ -2116,7 +2191,7 @@ fn bench_native(path: &str, mut program: vyrn_frontend::ast::Program, filter: Op
                 "error: could not find `clang`. Install LLVM and put clang on PATH, \
                  or set the CLANG environment variable to its full path."
             );
-            return ExitCode::FAILURE;
+            return (ExitCode::FAILURE, None);
         }
     };
     let mut cmd = Command::new(&clang);
@@ -2133,25 +2208,229 @@ fn bench_native(path: &str, mut program: vyrn_frontend::ast::Program, filter: Op
         Ok(s) if s.success() => {}
         Ok(s) => {
             eprintln!("error: clang exited with {s}");
-            return ExitCode::FAILURE;
+            return (ExitCode::FAILURE, None);
         }
         Err(e) => {
             eprintln!("error: failed to run clang ({}): {e}", clang.display());
-            return ExitCode::FAILURE;
+            return (ExitCode::FAILURE, None);
         }
     }
-    // Run the compiled harness; its stdout/stderr stream straight through.
-    let run = Command::new(&out_path).status();
-    let code = match run {
-        Ok(s) => (s.code().unwrap_or(1) & 0xff) as u8,
-        Err(e) => {
-            eprintln!("error: failed to run bench binary ({}): {e}", out_path.display());
-            let _ = std::fs::remove_dir_all(&dir);
-            return ExitCode::FAILURE;
+    // Run the compiled harness. When `capture` is set (`--compare`), grab its
+    // stdout as the JSON report to feed the comparator; otherwise let stdout and
+    // stderr stream straight through (the `--json` and human paths both print live).
+    let (code, out) = if capture {
+        match Command::new(&out_path).output() {
+            Ok(o) => {
+                // stderr still surfaces (traps, diagnostics); only stdout is captured.
+                use std::io::Write;
+                let _ = std::io::stderr().write_all(&o.stderr);
+                (
+                    (o.status.code().unwrap_or(1) & 0xff) as u8,
+                    Some(String::from_utf8_lossy(&o.stdout).into_owned()),
+                )
+            }
+            Err(e) => {
+                eprintln!("error: failed to run bench binary ({}): {e}", out_path.display());
+                let _ = std::fs::remove_dir_all(&dir);
+                return (ExitCode::FAILURE, None);
+            }
+        }
+    } else {
+        match Command::new(&out_path).status() {
+            Ok(s) => ((s.code().unwrap_or(1) & 0xff) as u8, None),
+            Err(e) => {
+                eprintln!("error: failed to run bench binary ({}): {e}", out_path.display());
+                let _ = std::fs::remove_dir_all(&dir);
+                return (ExitCode::FAILURE, None);
+            }
         }
     };
     let _ = std::fs::remove_dir_all(&dir);
-    ExitCode::from(code)
+    (ExitCode::from(code), out)
+}
+
+/// The per-bench minimum times (name → minNs) extracted from a `--json` report or
+/// a `bench/baseline.json` baseline. Declaration order is preserved (a `Vec`, not a
+/// map) so the comparison prints in the run's order. Returns `None` if `doc` is not
+/// the expected `{ benches: [ { name, minNs } ] }` shape.
+fn bench_min_table(doc: &vyrn_frontend::schema::Json) -> Option<Vec<(String, f64)>> {
+    use vyrn_frontend::schema::Json;
+    let benches = match doc.get("benches") {
+        Some(Json::Arr(items)) => items,
+        _ => return None,
+    };
+    let mut out = Vec::new();
+    for b in benches {
+        let name = match b.get("name") {
+            Some(Json::Str(s)) => s.clone(),
+            _ => return None,
+        };
+        let min = match b.get("minNs") {
+            Some(Json::Num(n)) => *n,
+            _ => return None,
+        };
+        out.push((name, min));
+    }
+    Some(out)
+}
+
+/// A baseline is a "placeholder" (seed, not yet refreshed from real CI hardware)
+/// when it carries `"placeholder": true` OR has an empty `benches` array. `--compare`
+/// then treats every run bench as `new` and never regresses (RFC-0063 §2).
+fn baseline_is_placeholder(doc: &vyrn_frontend::schema::Json) -> bool {
+    use vyrn_frontend::schema::Json;
+    if let Some(Json::Bool(true)) = doc.get("placeholder") {
+        return true;
+    }
+    matches!(doc.get("benches"), Some(Json::Arr(items)) if items.is_empty())
+}
+
+/// `vyrn bench --compare <baseline.json> [--threshold <factor>]` (RFC-0063 §2) —
+/// run the benches (native, capturing the `--json` report), then compare each
+/// bench's MIN against the baseline entry of the same name:
+///
+/// - `ok` — `min <= baselineMin * threshold`;
+/// - `REGRESSED xN.NN` — `min > baselineMin * threshold` (the factor is `min /
+///   baselineMin`); the ONLY verdict that fails the command (exit 1);
+/// - `new` — in the run, absent from the baseline (informational);
+/// - `missing-from-run` — in the baseline, absent from the run (informational).
+///
+/// A placeholder/empty baseline makes every bench `new` (exit 0): comparing a real
+/// run against a not-yet-seeded baseline is meaningless, never a failure.
+fn bench_compare(
+    path: &str,
+    program: vyrn_frontend::ast::Program,
+    filter: Option<&str>,
+    baseline_path: &str,
+    threshold: f64,
+) -> ExitCode {
+    // Read + parse the baseline first — a broken baseline is a usage error, and
+    // failing before the (slow) native run gives quick feedback.
+    let baseline_text = match std::fs::read_to_string(baseline_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: cannot read baseline {baseline_path}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let baseline_doc = match vyrn_frontend::schema::parse_json(&baseline_text) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: {baseline_path} is not valid JSON: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let placeholder = baseline_is_placeholder(&baseline_doc);
+    let baseline = if placeholder {
+        Vec::new()
+    } else {
+        match bench_min_table(&baseline_doc) {
+            Some(t) => t,
+            None => {
+                eprintln!("error: {baseline_path} is not a bench report (expected `benches: [ {{ name, minNs }} ]`)");
+                return ExitCode::from(2);
+            }
+        }
+    };
+
+    // Run the benches native, capturing the machine-readable report.
+    let (run_code, captured) = bench_native(path, program, filter, true, true);
+    let run_json = match captured {
+        Some(j) => j,
+        None => return run_code, // the run failed; its error already printed
+    };
+    let run_doc = match vyrn_frontend::schema::parse_json(&run_json) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: bench --json output did not parse: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let run = match bench_min_table(&run_doc) {
+        Some(t) => t,
+        None => {
+            eprintln!("error: bench --json output was not the expected shape");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if placeholder {
+        eprintln!("note: {baseline_path} is a placeholder baseline — every bench reports `new` (refresh it from a CI --json artifact)");
+    }
+
+    let (verdicts, regressed) = bench_verdicts(&run, &baseline, threshold);
+    for (name, v) in &verdicts {
+        println!("bench {name:?} ... {}", v.render());
+    }
+    if regressed > 0 {
+        println!("\n{regressed} regressed (threshold x{threshold:.2})");
+        ExitCode::FAILURE
+    } else {
+        println!("\nno regressions (threshold x{threshold:.2})");
+        ExitCode::SUCCESS
+    }
+}
+
+/// One bench's comparison outcome (RFC-0063 §2).
+#[derive(Debug, PartialEq)]
+enum Verdict {
+    /// Within threshold.
+    Ok,
+    /// Slower than `baselineMin * threshold`; the factor is `min / baselineMin`.
+    Regressed(f64),
+    /// In the run, absent from the baseline (informational).
+    New,
+    /// In the baseline, absent from the run (informational).
+    MissingFromRun,
+}
+
+impl Verdict {
+    fn render(&self) -> String {
+        match self {
+            Verdict::Ok => "ok".to_string(),
+            Verdict::Regressed(f) => format!("REGRESSED x{f:.2}"),
+            Verdict::New => "new".to_string(),
+            Verdict::MissingFromRun => "missing-from-run".to_string(),
+        }
+    }
+}
+
+/// The pure comparison core (RFC-0063 §2), factored out so it is unit-testable
+/// against synthetic min tables with NO clang and NO real timing. Each run bench
+/// is compared by min against the same-named baseline entry; run benches come
+/// first in declaration order, then baseline-only benches as `missing-from-run`.
+/// Returns the per-bench verdicts and the count of REGRESSED (the exit-1 trigger).
+/// A regression is `min > baselineMin * threshold`; a zero/absent baseline min is
+/// `new` (can't scale, never a division by zero).
+fn bench_verdicts(
+    run: &[(String, f64)],
+    baseline: &[(String, f64)],
+    threshold: f64,
+) -> (Vec<(String, Verdict)>, usize) {
+    let lookup = |name: &str| baseline.iter().find(|(n, _)| n == name).map(|(_, m)| *m);
+    let mut out = Vec::new();
+    let mut regressed = 0usize;
+    for (name, min) in run {
+        let v = match lookup(name) {
+            Some(base) if base > 0.0 => {
+                let factor = min / base;
+                if *min > base * threshold {
+                    regressed += 1;
+                    Verdict::Regressed(factor)
+                } else {
+                    Verdict::Ok
+                }
+            }
+            _ => Verdict::New,
+        };
+        out.push((name.clone(), v));
+    }
+    for (name, _) in baseline {
+        if !run.iter().any(|(n, _)| n == name) {
+            out.push((name.clone(), Verdict::MissingFromRun));
+        }
+    }
+    (out, regressed)
 }
 
 /// `vyrn serve [file] [--port N]` (RFC-0016) — a hand-rolled HTTP/1.1 host on
@@ -2998,4 +3277,129 @@ fn find_clang() -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the `bench --compare` core (RFC-0063 §2). The comparison is
+    //! pure — synthetic min tables in, verdicts out — so these need no clang and
+    //! assert NO real timing numbers.
+    use super::*;
+
+    fn table(entries: &[(&str, f64)]) -> Vec<(String, f64)> {
+        entries.iter().map(|(n, m)| (n.to_string(), *m)).collect()
+    }
+
+    #[test]
+    fn within_threshold_is_ok() {
+        let run = table(&[("a", 100.0)]);
+        let base = table(&[("a", 100.0)]);
+        let (v, regressed) = bench_verdicts(&run, &base, 1.5);
+        assert_eq!(v, vec![("a".to_string(), Verdict::Ok)]);
+        assert_eq!(regressed, 0);
+    }
+
+    #[test]
+    fn exactly_at_threshold_is_ok_not_regressed() {
+        // min == baseline * threshold is NOT a regression (strict `>`).
+        let run = table(&[("a", 150.0)]);
+        let base = table(&[("a", 100.0)]);
+        let (v, regressed) = bench_verdicts(&run, &base, 1.5);
+        assert_eq!(v, vec![("a".to_string(), Verdict::Ok)]);
+        assert_eq!(regressed, 0);
+    }
+
+    #[test]
+    fn beyond_threshold_regresses_with_the_factor() {
+        let run = table(&[("a", 250.0)]);
+        let base = table(&[("a", 100.0)]);
+        let (v, regressed) = bench_verdicts(&run, &base, 1.5);
+        assert_eq!(v, vec![("a".to_string(), Verdict::Regressed(2.5))]);
+        assert_eq!(regressed, 1);
+    }
+
+    #[test]
+    fn threshold_arithmetic_uses_the_supplied_factor() {
+        // Same 2x slowdown: a regression at 1.5, ok at 3.0.
+        let run = table(&[("a", 200.0)]);
+        let base = table(&[("a", 100.0)]);
+        assert_eq!(bench_verdicts(&run, &base, 1.5).1, 1);
+        assert_eq!(bench_verdicts(&run, &base, 3.0).1, 0);
+    }
+
+    #[test]
+    fn a_run_bench_absent_from_baseline_is_new() {
+        let run = table(&[("a", 100.0)]);
+        let base = table(&[]);
+        let (v, regressed) = bench_verdicts(&run, &base, 1.5);
+        assert_eq!(v, vec![("a".to_string(), Verdict::New)]);
+        assert_eq!(regressed, 0);
+    }
+
+    #[test]
+    fn a_baseline_bench_absent_from_run_is_missing_from_run() {
+        let run = table(&[("a", 100.0)]);
+        let base = table(&[("a", 100.0), ("ghost", 100.0)]);
+        let (v, _) = bench_verdicts(&run, &base, 1.5);
+        assert_eq!(
+            v,
+            vec![
+                ("a".to_string(), Verdict::Ok),
+                ("ghost".to_string(), Verdict::MissingFromRun),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_verdicts_preserve_declaration_order() {
+        let run = table(&[("c", 100.0), ("a", 100.0), ("b", 100.0)]);
+        let base = table(&[("a", 100.0), ("b", 100.0), ("c", 100.0)]);
+        let (v, _) = bench_verdicts(&run, &base, 1.5);
+        let names: Vec<&str> = v.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn zero_baseline_min_is_new_not_a_division_by_zero() {
+        let run = table(&[("a", 100.0)]);
+        let base = table(&[("a", 0.0)]);
+        let (v, regressed) = bench_verdicts(&run, &base, 1.5);
+        assert_eq!(v, vec![("a".to_string(), Verdict::New)]);
+        assert_eq!(regressed, 0);
+    }
+
+    #[test]
+    fn placeholder_baseline_is_detected() {
+        let flagged = vyrn_frontend::schema::parse_json(
+            r#"{"placeholder":true,"benches":[]}"#,
+        )
+        .unwrap();
+        assert!(baseline_is_placeholder(&flagged));
+        let empty = vyrn_frontend::schema::parse_json(r#"{"benches":[]}"#).unwrap();
+        assert!(baseline_is_placeholder(&empty));
+        let real = vyrn_frontend::schema::parse_json(
+            r#"{"benches":[{"name":"a","minNs":10}]}"#,
+        )
+        .unwrap();
+        assert!(!baseline_is_placeholder(&real));
+    }
+
+    #[test]
+    fn min_table_extracts_name_and_min_in_order() {
+        let doc = vyrn_frontend::schema::parse_json(
+            r#"{"backend":"native","opt":"O2","benches":[
+                {"name":"a","minNs":10,"medianNs":11,"meanNs":12,"samples":31,"iters":64},
+                {"name":"b","minNs":20,"medianNs":21,"meanNs":22,"samples":31,"iters":64}
+            ]}"#,
+        )
+        .unwrap();
+        let t = bench_min_table(&doc).unwrap();
+        assert_eq!(t, vec![("a".to_string(), 10.0), ("b".to_string(), 20.0)]);
+    }
+
+    #[test]
+    fn min_table_rejects_a_non_report() {
+        let doc = vyrn_frontend::schema::parse_json(r#"{"nope":1}"#).unwrap();
+        assert!(bench_min_table(&doc).is_none());
+    }
 }

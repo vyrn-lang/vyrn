@@ -11,6 +11,7 @@
 /// `vyrn test std/bench.vyrn`).
 
 import { monotonic } from "std/time"
+import { Json, JsonField, emit, parseJson } from "std/json"
 
 /// The minimum of a non-empty sample array (per-iteration nanoseconds).
 export fn minOf(xs: Array<Int64>) -> Int64 {
@@ -107,19 +108,31 @@ export fn padRight(s: String, width: Int64) -> String {
     return out
 }
 
-/// Time one bench body and print its result line (RFC-0055 §Harness). `width` is
-/// the label column width the caller pre-computed from every bench name so the
-/// columns align. The divan-simplified loop:
+/// One bench's measured statistics (RFC-0063): per-iteration nanosecond
+/// aggregates plus the sample × iteration counts the loop settled on. The stable
+/// statistic for regression comparison is `minNs` — the least noise-perturbed.
+export type BenchResult = {
+    name: String,
+    minNs: Int64,
+    medianNs: Int64,
+    meanNs: Int64,
+    samples: Int64,
+    iters: Int64,
+}
+
+/// Time one bench body and RETURN its statistics (RFC-0055 §Harness, factored out
+/// by RFC-0063 so both the human report and the `--json` record share one loop).
+/// The divan-simplified loop:
 ///
 ///   1. warm up ~50 ms of iterations (discarded);
 ///   2. auto-scale the per-sample iteration count until one sample takes ≥ 1 ms;
 ///   3. collect samples until ≥ 31 of them AND ≥ 500 ms elapsed (cap: 2 s);
-///   4. report min / median / mean per-iteration time in human units.
+///   4. compute min / median / mean per-iteration time.
 ///
 /// `body` is called through a monomorphized function value (RFC-0023), and the
 /// benched work is kept alive by `blackBox` inside the body, so the compiler
 /// cannot delete it between iterations.
-export fn benchOne(name: String, width: Int64, body: fn() -> Unit) {
+export fn benchMeasure(name: String, body: fn() -> Unit) -> BenchResult {
     // 1. warmup (~50 ms), results discarded.
     let warmStart = monotonic()
     while monotonic() - warmStart < 50000000 {
@@ -166,12 +179,50 @@ export fn benchOne(name: String, width: Int64, body: fn() -> Unit) {
         }
     }
 
-    // 4. stats + aligned report line.
-    let mn = minOf(samples)
-    let md = median(samples)
-    let mnAvg = mean(samples)
+    // 4. stats.
+    return BenchResult {
+        name: name,
+        minNs: minOf(samples),
+        medianNs: median(samples),
+        meanNs: mean(samples),
+        samples: samples.length,
+        iters: iters,
+    }
+}
+
+/// Time one bench body and print its aligned human report line (RFC-0055). `width`
+/// is the label column width the caller pre-computed from every bench name so the
+/// columns align. Delegates the timing to `benchMeasure`.
+export fn benchOne(name: String, width: Int64, body: fn() -> Unit) {
+    let r = benchMeasure(name, body)
     let label = padRight("bench \"\{name}\"", width)
-    print("\{label}   min \{formatDuration(mn)}   median \{formatDuration(md)}   mean \{formatDuration(mnAvg)}   (\{samples.length} samples × \{iters} iters)")
+    print("\{label}   min \{formatDuration(r.minNs)}   median \{formatDuration(r.medianNs)}   mean \{formatDuration(r.meanNs)}   (\{r.samples} samples × \{r.iters} iters)")
+}
+
+/// The machine-readable bench report (RFC-0063 §1) — a `std/json` tree emitted
+/// compact to stdout. `backend`/`opt` are metadata (always `native`/`O2` today);
+/// `results` are in stable declaration order. The schema is
+/// `{ backend, opt, benches: [ { name, minNs, medianNs, meanNs, samples, iters } ] }`
+/// with every number an integer, so it round-trips through `parseJson`.
+export fn benchJson(results: Array<BenchResult>, backend: String, opt: String) -> String {
+    let mut benches: Array<Json> = []
+    for r in results {
+        let entry: Array<JsonField> = [
+            JsonField { key: "name", value: JStr(r.name) },
+            JsonField { key: "minNs", value: JNum("\{r.minNs}") },
+            JsonField { key: "medianNs", value: JNum("\{r.medianNs}") },
+            JsonField { key: "meanNs", value: JNum("\{r.meanNs}") },
+            JsonField { key: "samples", value: JNum("\{r.samples}") },
+            JsonField { key: "iters", value: JNum("\{r.iters}") },
+        ]
+        benches.push(JObj(entry))
+    }
+    let doc: Array<JsonField> = [
+        JsonField { key: "backend", value: JStr(backend) },
+        JsonField { key: "opt", value: JStr(opt) },
+        JsonField { key: "benches", value: JArr(benches) },
+    ]
+    return emit(JObj(doc))
 }
 
 test "formatDuration picks human units" {
@@ -191,4 +242,26 @@ test "median and mean over a small sample" {
 test "padRight fills to width and never truncates" {
     assertEq(padRight("ab", 5), "ab   ")
     assertEq(padRight("abcdef", 3), "abcdef")
+}
+
+test "benchJson emits the locked schema in stable order" {
+    let results: Array<BenchResult> = [
+        BenchResult { name: "push 1000", minNs: 2070, medianNs: 2500, meanNs: 2540, samples: 383, iters: 512 },
+        BenchResult { name: "hash 1000", minNs: 3100, medianNs: 3200, meanNs: 3250, samples: 300, iters: 256 },
+    ]
+    let out = benchJson(results, "native", "O2")
+    // Compact, declaration order, integers throughout (RFC-0063 §1).
+    assertEq(out, "{\"backend\":\"native\",\"opt\":\"O2\",\"benches\":[{\"name\":\"push 1000\",\"minNs\":2070,\"medianNs\":2500,\"meanNs\":2540,\"samples\":383,\"iters\":512},{\"name\":\"hash 1000\",\"minNs\":3100,\"medianNs\":3200,\"meanNs\":3250,\"samples\":300,\"iters\":256}]}")
+}
+
+test "benchJson output round-trips through parseJson" {
+    let results: Array<BenchResult> = [
+        BenchResult { name: "one", minNs: 10, medianNs: 11, meanNs: 12, samples: 31, iters: 64 },
+    ]
+    let out = benchJson(results, "native", "O2")
+    // The report must be parseable back into a Json tree (RFC-0063 verification 1).
+    match parseJson(out) {
+        Ok(tree) => assertEq(emit(tree), out),
+        Err(e) => assert(false),
+    }
 }

@@ -49,6 +49,21 @@ jobs:
       - name: LSP tests (excluded crate)
         working-directory: compiler
         run: cargo test --quiet --manifest-path vyrn-lsp/Cargo.toml
+      - name: Bench --check (deterministic, RFC-0063)
+        # The BLOCKING half of bench-in-CI: `vyrn bench --check` runs each bench
+        # body ONCE under the interpreter — deterministic, no clang, no timing —
+        # so a bench that stops compiling/running fails the build. The corpus is
+        # every example carrying `bench "` (benching, smallarray, and any future
+        # one), discovered here exactly as the RFC specifies.
+        working-directory: compiler
+        run: |
+          set -e
+          corpus=$(grep -rl 'bench "' ../examples --include='*.vyrn' | sort)
+          echo "bench corpus:"; echo "$corpus"
+          for f in $corpus; do
+            echo "== vyrn bench --check $f =="
+            cargo run --quiet -p vyrn-cli -- bench "$f" --check
+          done
 
   parity:
     name: three-way parity (interp == native == wasm)
@@ -86,3 +101,49 @@ jobs:
           echo "builtins: $WASI_BUILTINS"
           echo "wasmtime: $VYRN_WASMTIME"
           cargo test --quiet -p vyrn-cli --test parity -- --ignored --nocapture
+
+  bench:
+    name: benchmarks (informational)
+    # Push-to-main only: timing on shared PR runners is noise, and the trend
+    # record only makes sense against the main line.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # A gross regression shows as a job-failure annotation without blocking the
+    # merge — the noise on hosted runners makes a blocking timing gate a
+    # false-positive machine (RFC-0063 "Out of scope").
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compiler
+          # Separate cache slot (only vyrn-cli, and a distinct build graph).
+          prefix-key: bench
+      - name: Build vyrn
+        working-directory: compiler
+        # clang is preinstalled on ubuntu-latest (the parity job's native half
+        # relies on it too); `vyrn bench` finds it on PATH.
+        run: cargo build --quiet -p vyrn-cli
+      - name: Run benches + compare to baseline
+        working-directory: compiler
+        run: |
+          vyrn=target/debug/vyrn
+          corpus=$(grep -rl 'bench "' ../examples --include='*.vyrn' | sort)
+          mkdir -p ../bench/out
+          regressed=0
+          for f in $corpus; do
+            stem=$(basename "$f" .vyrn)
+            echo "== $stem =="
+            # The trend record (always produced, uploaded below).
+            "$vyrn" bench "$f" --json > "../bench/out/$stem.json"
+            # The tripwire — a nonzero exit here fails the (continue-on-error) job.
+            "$vyrn" bench "$f" --compare ../bench/baseline.json || regressed=1
+          done
+          exit $regressed
+      - name: Upload bench reports (the trend record)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-json
+          path: bench/out/*.json
