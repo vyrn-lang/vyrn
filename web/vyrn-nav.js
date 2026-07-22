@@ -385,19 +385,31 @@ function installProgressBar() {
   });
   document.documentElement.appendChild(bar);
 
+  // The bar only appears when a nav is actually SLOW (>150ms). A localhost
+  // swap completes in a few ms; flashing 0→80→100% on it reads exactly like a
+  // full page load — the opposite of what a soft nav should feel like.
   let done = null;
+  let arm = null;
+  let shown = false;
   document.addEventListener("vyrn:nav-start", () => {
     clearTimeout(done);
-    bar.style.transition = "none";
-    bar.style.width = "0";
-    bar.style.opacity = "1";
-    // next frame: animate to a plausible "most of the way there" width
-    requestAnimationFrame(() => {
-      bar.style.transition = "width .3s ease, opacity .3s ease";
-      bar.style.width = "80%";
-    });
+    clearTimeout(arm);
+    shown = false;
+    arm = setTimeout(() => {
+      shown = true;
+      bar.style.transition = "none";
+      bar.style.width = "0";
+      bar.style.opacity = "1";
+      // next frame: animate to a plausible "most of the way there" width
+      requestAnimationFrame(() => {
+        bar.style.transition = "width .3s ease, opacity .3s ease";
+        bar.style.width = "80%";
+      });
+    }, 150);
   });
   const finish = () => {
+    clearTimeout(arm);
+    if (!shown) return; // fast nav: the bar never appeared — keep it that way
     bar.style.width = "100%";
     done = setTimeout(() => {
       bar.style.opacity = "0";
