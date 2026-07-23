@@ -109,26 +109,126 @@ function parseAttrs(list) {
 // build is exactly right; the returned node replaces the live `<main>`.
 // ---------------------------------------------------------------------------
 function buildStatic(v) {
-  if (v.kind === "empty") return document.createComment("");
-  if (v.kind === "text") return document.createTextNode(v.text);
-  if (v.kind === "raw") {
-    const s = document.createElement("span");
-    s.style.display = "contents";
-    s.setAttribute("data-vyrn-raw", "");
-    s.innerHTML = v.html;
-    return s;
+  let dom;
+  if (v.kind === "empty") {
+    dom = document.createComment("");
+  } else if (v.kind === "text") {
+    dom = document.createTextNode(v.text);
+  } else if (v.kind === "raw") {
+    dom = document.createElement("span");
+    dom.style.display = "contents";
+    dom.setAttribute("data-vyrn-raw", "");
+    dom.innerHTML = v.html;
+  } else {
+    dom = document.createElement(v.tag);
+    for (const name of Object.keys(v.attrs)) dom.setAttribute(name, v.attrs[name]);
+    if (!VOID.has(v.tag)) {
+      for (const kid of v.kids) dom.appendChild(buildStatic(kid));
+    }
   }
-  const dom = document.createElement(v.tag);
-  for (const name of Object.keys(v.attrs)) dom.setAttribute(name, v.attrs[name]);
-  if (!VOID.has(v.tag)) {
-    for (const kid of v.kids) dom.appendChild(buildStatic(kid));
-  }
+  // Record the vnode↔DOM mapping so a later static patch (RFC-0070) can reuse the
+  // node in place — the difference from mount()'s createNode is only that this
+  // builder wires no events/effects (a page body is pure; any interactivity lives
+  // in an island, a static leaf here that is left untouched when unchanged).
+  v.dom = dom;
   return dom;
 }
 
 /// Parse a JSON `Html` tree (a `renderPage` result) into a detached DOM node.
 export function renderTree(json) {
   return buildStatic(parseHtml(json));
+}
+
+// ---------------------------------------------------------------------------
+// Static page-view patching (RFC-0070) — the lazy skeleton→data transition. A
+// lazy page first paints its `Loading` tree, then re-renders `Ready(props)` once
+// the payload arrives; diffing the two trees patches ONLY the region that changed
+// (the data region), leaving the shell — and the island mount inside it — exactly
+// where it was, so the form never repaints and the wasm instance is never touched.
+// No events/effects here: pages are pure (see buildStatic). The differ mirrors
+// mount()'s internal keyed reconciliation, but standalone over retained vnodes.
+// ---------------------------------------------------------------------------
+function sameStatic(a, b) {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "el") return a.tag === b.tag;
+  return true;
+}
+
+function setStaticAttrs(dom, oldAttrs, newAttrs) {
+  for (const name of Object.keys(oldAttrs)) if (!(name in newAttrs)) dom.removeAttribute(name);
+  for (const name of Object.keys(newAttrs)) if (oldAttrs[name] !== newAttrs[name]) dom.setAttribute(name, newAttrs[name]);
+}
+
+function patchStatic(oldV, newV) {
+  if (!sameStatic(oldV, newV)) {
+    const dom = buildStatic(newV);
+    if (oldV.dom && oldV.dom.parentNode) oldV.dom.parentNode.replaceChild(dom, oldV.dom);
+    return;
+  }
+  newV.dom = oldV.dom;
+  if (newV.kind === "text") {
+    if (oldV.text !== newV.text) newV.dom.textContent = newV.text;
+  } else if (newV.kind === "raw") {
+    if (oldV.html !== newV.html) newV.dom.innerHTML = newV.html;
+  } else if (newV.kind === "el") {
+    setStaticAttrs(newV.dom, oldV.attrs, newV.attrs);
+    if (!VOID.has(newV.tag)) patchStaticChildren(newV.dom, oldV.kids, newV.kids);
+  }
+  // empty: nothing to do
+}
+
+function patchStaticChildren(parent, oldK, newK) {
+  const keyed = oldK.some((v) => v.key != null) || newK.some((v) => v.key != null);
+  if (keyed) return patchStaticKeyed(parent, oldK, newK);
+  const common = Math.min(oldK.length, newK.length);
+  for (let i = 0; i < common; i++) patchStatic(oldK[i], newK[i]);
+  for (let i = oldK.length - 1; i >= common; i--) {
+    const v = oldK[i];
+    if (v.dom && v.dom.parentNode === parent) parent.removeChild(v.dom);
+  }
+  for (let i = common; i < newK.length; i++) parent.appendChild(buildStatic(newK[i]));
+}
+
+function patchStaticKeyed(parent, oldK, newK) {
+  const oldByKey = new Map();
+  for (const v of oldK) if (v.key != null) oldByKey.set(v.key, v);
+  const newDoms = [];
+  for (const nv of newK) {
+    const ov = nv.key != null ? oldByKey.get(nv.key) : null;
+    if (ov && sameStatic(ov, nv)) {
+      patchStatic(ov, nv);
+      oldByKey.delete(nv.key);
+    } else {
+      nv.dom = buildStatic(nv);
+    }
+    newDoms.push(nv.dom);
+  }
+  const keep = new Set(newDoms);
+  for (const v of oldK) {
+    if (v.dom && v.dom.parentNode === parent && !keep.has(v.dom)) parent.removeChild(v.dom);
+  }
+  for (let i = 0; i < newDoms.length; i++) {
+    const ref = parent.childNodes[i] || null;
+    if (ref !== newDoms[i]) parent.insertBefore(newDoms[i], ref);
+  }
+}
+
+/// Build a page view from a JSON `Html` tree, RETAINING the vnode so a later
+/// `patchPageView` can diff against it. Returns `{ vnode, dom }` — the caller puts
+/// `dom` in the document (e.g. as `<main>`), then hands the view back to patch.
+export function makePageView(json) {
+  const v = parseHtml(json);
+  return { vnode: v, dom: buildStatic(v) };
+}
+
+/// Patch a retained page view to a new JSON `Html` tree, in place — only the
+/// changed nodes touch the DOM. The view's root DOM node (already in the document)
+/// is reused; `view.vnode` is advanced to the new tree. Returns the same `view`.
+export function patchPageView(view, json) {
+  const next = parseHtml(json);
+  patchStatic(view.vnode, next);
+  view.vnode = next;
+  return view;
 }
 
 // ---------------------------------------------------------------------------

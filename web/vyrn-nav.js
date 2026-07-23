@@ -68,8 +68,15 @@
 // from null props (no fetch), a data page fetches its payload as before, an unknown
 // path falls through to the v2 HTML swap. An older bundle that hands over only the
 // renderer keeps the M3 fetch-every-nav behavior.
+//
+// WHAT RFC-0070 CHANGES: `resolvePage` also returns `lazy`. A resolved LAZY page
+// (`lazy fn load()`) renders its skeleton INSTANTLY from a `{"__loading__":true}`
+// payload — zero wait — then fetches the data marker and fills in `Ready(props)` by
+// PATCHING the retained skeleton view (vyrn-dom's static differ), so only the data
+// region repaints and the shell + island never move. A non-lazy data page still
+// blocks (fetch, then render) exactly as RFC-0069. Dataless/unknown are unchanged.
 
-import { renderTree } from "./vyrn-dom.js";
+import { renderTree, makePageView, patchPageView } from "./vyrn-dom.js";
 
 const CONFIG = Object.assign(
   {
@@ -345,6 +352,105 @@ function restorePopScroll() {
   apply();
 }
 
+// RFC-0070: a lazy page's soft nav. Paint the skeleton (the `Loading` view) at
+// once from a `{"__loading__":true}` payload — no wait — then fetch the data marker
+// and fill in `Ready(props)` by PATCHING the retained skeleton view (only the data
+// region changes; the shell + island are left in place). Any failure degrades to a
+// hard nav (fallback bias). A payload that comes back as a DIFFERENT page (an
+// `@error` for a failed lazy load) can't be patched into the skeleton, so it repaints
+// `<main>` wholesale. If the skeleton render itself fails (e.g. a dynamic lazy page
+// whose Params the host can't build), we skip the instant paint and just do the fill.
+async function navigateLazy(url, { push }, resolved) {
+  emit("nav-start", { url });
+
+  // 1) Instant skeleton paint (best-effort).
+  let view = null;
+  try {
+    const loadingTree = pageRenderer(JSON.stringify({ page: resolved.page, props: { __loading__: true }, params: null }));
+    if (loadingTree && loadingTree !== "__vyrn_fallback__") {
+      const liveMain = document.querySelector("main");
+      if (liveMain) {
+        if (push) pushEntry(url);
+        if (resolved.title) document.title = String(resolved.title);
+        view = makePageView(loadingTree);
+        liveMain.replaceWith(view.dom);
+        syncIslands(); // mount the island into the freshly-painted #app
+        if (push) window.scrollTo(0, 0);
+      }
+    }
+  } catch (_) {
+    view = null; // fall through to the blocking fill
+  }
+
+  // 2) Fetch the data payload.
+  const controller = new AbortController();
+  inflight = controller;
+  const timer = setTimeout(() => controller.abort(), CONFIG.timeoutMs);
+  let res;
+  try {
+    res = await fetch(withDataMarker(url), { headers: { "x-vyrn-nav": "data" }, signal: controller.signal });
+  } catch (err) {
+    clearTimeout(timer);
+    inflight = null;
+    emit("nav-error", { url, reason: "fetch-failed" });
+    hardNav(url);
+    return;
+  }
+  clearTimeout(timer);
+  inflight = null;
+  if (!res.ok) {
+    emit("nav-error", { url, reason: "non-2xx" });
+    hardNav(url);
+    return;
+  }
+  if (!(res.headers.get("content-type") || "").includes("application/json")) {
+    emit("nav-error", { url, reason: "non-json" });
+    hardNav(url);
+    return;
+  }
+  let payloadText;
+  try {
+    payloadText = await res.text();
+  } catch (err) {
+    emit("nav-error", { url, reason: "body-failed" });
+    hardNav(url);
+    return;
+  }
+
+  // 3) Fill in `Ready` (or repaint wholesale for an @error / page mismatch).
+  try {
+    const readyTree = pageRenderer(payloadText);
+    if (!readyTree || readyTree === "__vyrn_fallback__") {
+      throw new Error("client bundle cannot render this page");
+    }
+    let payload = null;
+    try {
+      payload = JSON.parse(payloadText);
+    } catch (_) {
+      /* title/page stay as-is if the envelope won't parse */
+    }
+    const samePage = payload && payload.page === resolved.page;
+    if (payload && payload.title != null) document.title = String(payload.title);
+    if (view && samePage) {
+      // The common path: patch the skeleton into the data view — only the data
+      // region repaints; the shell/#app island is untouched (no re-sync needed).
+      patchPageView(view, readyTree);
+    } else {
+      // No skeleton painted, or a different page (a failed lazy load's @error):
+      // repaint <main> wholesale. Push/scroll only if the skeleton step didn't.
+      if (!view && push) pushEntry(url);
+      paintMain(readyTree);
+      syncIslands();
+      if (!view && push) window.scrollTo(0, 0);
+    }
+    if (!push) restorePopScroll();
+    emit("nav-end", { url });
+  } catch (err) {
+    emit("nav-error", { url, reason: "render-failed" });
+    hardNav(url);
+  }
+}
+
 async function navigate(url, { push }) {
   if (inflight) {
     hardNav(url); // mid-flight second click → hard nav
@@ -355,6 +461,15 @@ async function navigate(url, { push }) {
   // (RFC-0069 M4), resolve the target against the bundle FIRST, no network.
   const dataMode = typeof pageRenderer === "function";
   const resolved = dataMode ? resolveTarget(url) : null;
+
+  // RFC-0070: a resolved LAZY page renders its skeleton INSTANTLY (zero wait), then
+  // fetches its data payload and fills in `Ready` — vyrn-dom patches only the data
+  // region, so the shell (and the island inside it) never repaints. A dynamic lazy
+  // page whose Params the host cannot build simply degrades to the blocking fill.
+  if (dataMode && resolved && resolved.found && resolved.lazy) {
+    await navigateLazy(url, { push }, resolved);
+    return;
+  }
 
   // A known page with NO data renders immediately from null props — ZERO fetch (the
   // Nuxt model: declaring load() is the declaration; a dataless page navigates with no
