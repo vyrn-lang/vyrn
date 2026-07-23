@@ -217,7 +217,12 @@ function patchStaticKeyed(parent, oldK, newK) {
 /// `patchPageView` can diff against it. Returns `{ vnode, dom }` — the caller puts
 /// `dom` in the document (e.g. as `<main>`), then hands the view back to patch.
 export function makePageView(json) {
-  const v = parseHtml(json);
+  // Callers pass a `renderPage` result STRING; parseHtml consumes a parsed tree
+  // (renderTree is handed `JSON.parse(...)`). Parse here so both entry points
+  // share one contract — a raw string otherwise fell through parseHtml to an
+  // empty comment node, and replaceWith then deleted the live `<main>`.
+  const tree = typeof json === "string" ? JSON.parse(json) : json;
+  const v = parseHtml(tree);
   return { vnode: v, dom: buildStatic(v) };
 }
 
@@ -225,7 +230,8 @@ export function makePageView(json) {
 /// changed nodes touch the DOM. The view's root DOM node (already in the document)
 /// is reused; `view.vnode` is advanced to the new tree. Returns the same `view`.
 export function patchPageView(view, json) {
-  const next = parseHtml(json);
+  const tree = typeof json === "string" ? JSON.parse(json) : json;
+  const next = parseHtml(tree);
   patchStatic(view.vnode, next);
   view.vnode = next;
   return view;
