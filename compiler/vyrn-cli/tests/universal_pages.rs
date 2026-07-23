@@ -22,7 +22,18 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 fn repo_file(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap()
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap();
+    // `std::fs::canonicalize` on Windows returns a `\\?\`-VERBATIM path. Feeding
+    // that to `vyrn serve` wedges the pages generator's relative-import path
+    // resolution (the home page hangs mid-render — a plain absolute path serves
+    // in ~45s, the verbatim one never reaches the `serving` banner). Strip the
+    // prefix so the harness passes the same shape a human ever would. (The
+    // deeper fix — make the loader tolerate `\\?\` — is filed separately.)
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(stripped) => PathBuf::from(stripped),
+        None => p,
+    }
 }
 
 fn vyrn() -> Command {
