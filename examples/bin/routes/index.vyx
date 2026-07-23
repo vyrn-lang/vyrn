@@ -3,6 +3,12 @@
 // recent-pastes list enters through a zero-parameter `load()` (RFC-0069 §0) so the
 // page is pure over its data and the CLIENT bundle can render it on a soft nav; the
 // browser create-island hydrates #app, booted by the /app.js head include.
+//
+// RFC-0070: the loader is `lazy`, so on a client soft nav the shell (create form +
+// headings) paints INSTANTLY and the list region shows a one-row spinner until the
+// data arrives — then vyrn-dom patches only that region in. The FIRST load is full
+// SSR: the server always has the data, so it renders `Ready` (the real list, no
+// skeleton). The view is over `PageData<Array<Paste>>` (`Loading | Ready(T)`).
 import { listPastes } from "../contract"
 import { Paste } from "../wire"
 import { format, fromMillis } from "std/time"
@@ -12,8 +18,26 @@ head {
     module "/app.js"
 }
 
-fn load() -> Array<Paste> {
+lazy fn load() -> Array<Paste> {
     return listPastes().pastes
+}
+
+/// Whether the recent-pastes list is still loading (client soft nav only — the
+/// server always renders `Ready`).
+fn isLoading(d: PageData<Array<Paste>>) -> Bool {
+    return match d {
+        Loading => true,
+        Ready(uiPs) => false,
+    }
+}
+
+/// The recent pastes once ready (an empty list while loading — the `Loading` arm of
+/// the view never reaches this).
+fn recentRows(d: PageData<Array<Paste>>) -> Array<Paste> {
+    return match d {
+        Loading => [],
+        Ready(uiPs) => uiPs,
+    }
 }
 
 fn shownTitle(p: Paste) -> String {
@@ -29,11 +53,14 @@ fn shownTitle(p: Paste) -> String {
     <p class="sub">{{ t.appTagline() }}</p>
     <div id="app"></div>
     <h2>{{ t.binRecent() }}</h2>
-    <p v-if="data.length == 0" class="empty">{{ t.binEmpty() }}</p>
+    <ul v-if="isLoading(data)" class="pastelist">
+        <li class="paste loading"><span class="spinner"></span><span class="pwhen">{{ t.binLoading() }}</span></li>
+    </ul>
+    <p v-else-if="recentRows(data).length == 0" class="empty">{{ t.binEmpty() }}</p>
     <div v-else>
-        <p class="count">{{ t.binCount(data.length) }}</p>
+        <p class="count">{{ t.binCount(recentRows(data).length) }}</p>
         <ul class="pastelist">
-            <li class="paste" v-for="p in data" :key="p.id">
+            <li class="paste" v-for="p in recentRows(data)" :key="p.id">
                 <a :href='"/p/" + p.id' data-nav="prefetch" class="ptitle">{{ shownTitle(p) }}</a>
                 <span class="plang">{{ p.lang }}</span>
                 <span class="pwhen">{{ t.binCreated(format(fromMillis(p.created))) }}</span>

@@ -2483,13 +2483,38 @@ export gen fn componentsThemed(dir: String, theme: String) -> String {
 /// spelling (`loadRet` — `Validation<…>` or `Result<…>`, RFC-0041 §3), and whether
 /// it opts out of the layout with `layout="none"` (RFC-0041 §1). `err` names a
 /// params fault.
-type VyxPageShape = { paramNames: Array<String>, paramTypes: Array<String>, hasLoad: Bool, loadHasParams: Bool, loadRet: String, layoutNone: Bool, err: String }
+type VyxPageShape = { paramNames: Array<String>, paramTypes: Array<String>, hasLoad: Bool, loadHasParams: Bool, loadLazy: Bool, loadRet: String, layoutNone: Bool, err: String }
 
-/// Whether the script text declares a statement-leading `fn load` (or
-/// `export fn load`) — the page's optional loader.
-fn vyxScriptHasLoad(script: String) -> Bool {
+/// Strip a leading `lazy ` marker (RFC-0070) from a trimmed line so the existing
+/// `fn load` / `export fn load` scanners match a `lazy fn load()` loader. The
+/// marker is not valid Vyrn — it records page laziness (`vyxScriptLoadIsLazy`) and
+/// is removed before the loader reaches the compiled module.
+fn vyxUnlazy(t: String) -> String {
+    if t.startsWith("lazy ") {
+        return trim(vyxSlice(bytes(t), 5, bytes(t).length))
+    }
+    return t
+}
+
+/// Whether the loader is marked `lazy` (RFC-0070): a statement-leading
+/// `lazy fn load` / `lazy export fn load`. A lazy page renders its shell + a
+/// skeleton instantly on a client soft nav, then fills in the data — the loaded
+/// value reaches the view wrapped as `PageData<T>` (`Loading | Ready(T)`).
+fn vyxScriptLoadIsLazy(script: String) -> Bool {
     for line in vyxLines(script) {
         let t = trim(line)
+        if t.startsWith("lazy fn load") || t.startsWith("lazy export fn load") {
+            return true
+        }
+    }
+    return false
+}
+
+/// Whether the script text declares a statement-leading `fn load` (or
+/// `export fn load`, optionally `lazy`-marked) — the page's optional loader.
+fn vyxScriptHasLoad(script: String) -> Bool {
+    for line in vyxLines(script) {
+        let t = vyxUnlazy(trim(line))
         if t.startsWith("fn load") || t.startsWith("export fn load") {
             return true
         }
@@ -2503,7 +2528,7 @@ fn vyxScriptHasLoad(script: String) -> Bool {
 /// is no loader.
 fn vyxScriptLoadHasParams(script: String) -> Bool {
     for line in vyxLines(script) {
-        let t = trim(line)
+        let t = vyxUnlazy(trim(line))
         if t.startsWith("fn load") || t.startsWith("export fn load") {
             let tb = bytes(t)
             let open = vyxFind(tb, bytes("("), 0)
@@ -2523,7 +2548,7 @@ fn vyxScriptLoadHasParams(script: String) -> Bool {
 /// loader.
 fn vyxScriptLoadRet(script: String) -> String {
     for line in vyxLines(script) {
-        let t = trim(line)
+        let t = vyxUnlazy(trim(line))
         if t.startsWith("fn load") || t.startsWith("export fn load") {
             let tb = bytes(t)
             let arrow = vyxFind(tb, bytes("->"), 0)
@@ -2631,11 +2656,11 @@ export gen fn vyxPageShape(source: String) -> VyxPageShape {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     if scriptSec.found == false {
-        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadRet: "", layoutNone: false, err: "" }
+        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadLazy: false, loadRet: "", layoutNone: false, err: "" }
     }
     let bad = vyxImportsFirstViolation(ba, scriptSec.start, scriptSec.end, "params")
     if bad > 0 {
-        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadRet: "", layoutNone: false, err: vyxErr("VYX_IMPORTS_FIRST", "vyx_page", bad) }
+        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadLazy: false, loadRet: "", layoutNone: false, err: vyxErr("VYX_IMPORTS_FIRST", "vyx_page", bad) }
     }
     let script = vyxSlice(ba, scriptSec.start, scriptSec.end)
     let sb = bytes(script)
@@ -2646,7 +2671,7 @@ export gen fn vyxPageShape(source: String) -> VyxPageShape {
     let mut types: Array<String> = []
     if pb.found {
         if pb.malformed {
-            return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadRet: "", layoutNone: false, err: "VYX_BAD_PARAMS\n" }
+            return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadLazy: false, loadRet: "", layoutNone: false, err: "VYX_BAD_PARAMS\n" }
         }
         let end = vyxMatchCurly(sb, pb.braceAt)
         for part in vyxSplitFields(vyxSlice(sb, pb.braceAt + 1, end - 1)) {
@@ -2662,14 +2687,14 @@ export gen fn vyxPageShape(source: String) -> VyxPageShape {
                     k = k + 1
                 }
                 if colon < 0 {
-                    return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadRet: "", layoutNone: false, err: "VYX_BAD_PARAMS\n" }
+                    return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadLazy: false, loadRet: "", layoutNone: false, err: "VYX_BAD_PARAMS\n" }
                 }
                 names.push(trim(vyxSlice(pbf, 0, colon)))
                 types.push(trim(vyxSlice(pbf, colon + 1, pbf.length)))
             }
         }
     }
-    return VyxPageShape { paramNames: names, paramTypes: types, hasLoad: vyxScriptHasLoad(script), loadHasParams: vyxScriptLoadHasParams(script), loadRet: loadRet, layoutNone: layoutNone, err: "" }
+    return VyxPageShape { paramNames: names, paramTypes: types, hasLoad: vyxScriptHasLoad(script), loadHasParams: vyxScriptLoadHasParams(script), loadLazy: vyxScriptLoadIsLazy(script), loadRet: loadRet, layoutNone: layoutNone, err: "" }
 }
 
 /// Prefix `export ` onto a statement-leading `fn load` / `type Data` line so the
@@ -2679,10 +2704,19 @@ fn vyxAutoExportPageDecls(script: String) -> String {
     let mut out = ""
     for line in vyxLines(script) {
         let t = trim(line)
+        let tl = vyxUnlazy(t)
         if vyxIsLayoutLine(line) {
             // The `layout="none"` opt-out directive is consumed by the router
             // shape; it is not valid Vyrn, so it never reaches the module.
-        } else if t.startsWith("fn load") || t.startsWith("type Data") {
+        } else if tl.startsWith("fn load") {
+            if t.startsWith("lazy ") {
+                // RFC-0070: drop the `lazy ` marker (not valid Vyrn — laziness is
+                // page metadata) and export the loader.
+                out = out + "export " + tl + "\n"
+            } else {
+                out = out + "export " + line + "\n"
+            }
+        } else if t.startsWith("type Data") {
             out = out + "export " + line + "\n"
         } else {
             out = out + line + "\n"
@@ -2869,7 +2903,7 @@ gen fn vyxStripLoadFn(script: String) -> String {
     let mut lineStart = 0
     while i <= n {
         if i == n || sb[i] == '\n' {
-            let line = trim(vyxSlice(sb, lineStart, i))
+            let line = vyxUnlazy(trim(vyxSlice(sb, lineStart, i)))
             if line.startsWith("fn load") || line.startsWith("export fn load") {
                 let brace = vyxFind(sb, bytes("{"), lineStart)
                 if brace >= 0 {
@@ -2895,7 +2929,7 @@ gen fn vyxLoadBody(script: String) -> String {
     let mut lineStart = 0
     while i <= n {
         if i == n || sb[i] == '\n' {
-            let line = trim(vyxSlice(sb, lineStart, i))
+            let line = vyxUnlazy(trim(vyxSlice(sb, lineStart, i)))
             if line.startsWith("fn load") || line.startsWith("export fn load") {
                 let brace = vyxFind(sb, bytes("{"), lineStart)
                 if brace >= 0 {
@@ -3144,6 +3178,34 @@ fn vyxEmitClientRender(hasLoad: Bool, paramNames: Array<String>, dataType: Strin
     return out
 }
 
+/// The lazy page's skeleton entry (RFC-0070): `pageLoading([p: Params]) -> Html`
+/// renders the view's `Loading` arm — the static shell plus the page's skeleton,
+/// with no data. `uiPageBody`'s `data` slot is `PageData<T>`, so the nullary
+/// `Loading` constructor infers `T` from the parameter.
+fn vyxEmitPageLoading(paramNames: Array<String>) -> String {
+    if paramNames.length > 0 {
+        return "export fn pageLoading(p: Params) -> Html {\n    return uiPageBody(" + vyxPageArgs(paramNames) + ", Loading)\n}\n"
+    }
+    return "export fn pageLoading() -> Html {\n    return uiPageBody(Loading)\n}\n"
+}
+
+/// The lazy page's loading host entry (RFC-0070): `clientRenderLoading(paramsJson)`
+/// renders the skeleton for a soft nav's INSTANT paint — no props are fetched yet.
+/// A dynamic route still decodes its `Params` (the host carries them); a static one
+/// ignores the argument. The dispatch calls this instead of `clientRender` when the
+/// payload's props is the `{"__loading__":true}` sentinel.
+fn vyxEmitClientRenderLoading(paramNames: Array<String>) -> String {
+    let fb = "\"__vyrn_fallback__\""
+    if paramNames.length > 0 {
+        let mut out = "export fn clientRenderLoading(paramsJson: String) -> String {\n"
+        out = out + "    return match fromJson(Params, paramsJson) {\n"
+        out = out + "        Valid(uiPrm) => toJson(pageLoading(uiPrm)),\n"
+        out = out + "        Invalid(uiI) => " + fb + ",\n    }\n}\n"
+        return out
+    }
+    return "export fn clientRenderLoading(paramsJson: String) -> String {\n    return toJson(pageLoading())\n}\n"
+}
+
 /// Build a full `.vyx`-PAGE module (RFC-0039 §4). The template compiles to a
 /// `uiPageBody(<params>[, data: Data])` view fn; the module exports `page`/`Params`
 /// (and passes through `load`/`Data` auto-exported). EXPORTED so `std/ui`'s `pages`
@@ -3214,6 +3276,16 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     // `Validation<Data>` or the first arg of `Result<T, PageError>` (RFC-0041 §3),
     // so a page can load straight into a wire type with no `type Data` alias.
     let dataType = vyxLoaderDataType(vyxScriptLoadRet(script))
+    // RFC-0070: a `lazy fn load()` page renders its shell + a skeleton instantly on a
+    // client soft nav, so its VIEW receives the loaded value wrapped as
+    // `PageData<T>` (`Loading | Ready(T)`). The view (template + helpers) matches on
+    // `data`; the loader still returns the raw `T`, and the `page` entry wraps
+    // `Ready(d)` for SSR (the server always has data, so the `Loading` arm never
+    // renders server-side — SSR bytes are byte-identical to a non-lazy page).
+    let lazy = hasLoad && vyxScriptLoadIsLazy(script)
+    // The `data` prop type as the view sees it: `PageData<T>` for a lazy page, the
+    // raw `T` otherwise.
+    let viewDataType = if lazy { "PageData<" + dataType + ">" } else { dataType }
     // RFC-0069 §1: the client bundle keeps the view only — strip `load` and the
     // imports it alone used (the template + generated page/Params types keep any
     // name they still reference alive). `dataType`/`hasLoad` were read above from
@@ -3235,7 +3307,7 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     // The synthetic component: a `props` block of the params (+ a `data: <T>`
     // param when there is a loader) drives the compiled view fn's parameters.
     let dataField = if hasLoad {
-        if paramFields.byteLength > 0 { ", data: " + dataType } else { "data: " + dataType }
+        if paramFields.byteLength > 0 { ", data: " + viewDataType } else { "data: " + viewDataType }
     } else {
         ""
     }
@@ -3288,19 +3360,27 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
         }
     }
 
-    let mut out = moduleStr
+    // RFC-0070: a lazy page's view is over `PageData<T>` — bring the shared enum
+    // (defined ONCE in std/ui, so `Loading`/`Ready` register in the global
+    // constructor table exactly once) into scope. Generated modules collect imports
+    // separately (order-independent), so prepending is safe.
+    let mut out = if lazy { "import { PageData } from \"std/ui\"\n" + moduleStr } else { moduleStr }
     if paramFields.byteLength > 0 {
         out = out + "export type Params = { " + paramFields + " }\n"
     }
     // The page entry the router calls, forwarding the Params fields (and the
-    // loaded Data when there is a loader) into the compiled body.
+    // loaded Data when there is a loader) into the compiled body. Its signature
+    // takes the RAW `T` (the load result) unchanged; a LAZY page wraps it as
+    // `Ready(d)` for the `PageData<T>` view (RFC-0070) — SSR always has data, so the
+    // server only ever renders the `Ready` arm.
+    let dataArg = if lazy { "Ready(d)" } else { "d" }
     if hasLoad {
         if paramNames.length > 0 {
-            out = out + "export fn page(p: Params, d: " + dataType + ") -> Html {\n    return uiPageBody(" + vyxPageArgs(paramNames) + ", d)\n}\n"
+            out = out + "export fn page(p: Params, d: " + dataType + ") -> Html {\n    return uiPageBody(" + vyxPageArgs(paramNames) + ", " + dataArg + ")\n}\n"
         } else {
             // A zero-parameter static loader (RFC-0069 §0): no `Params`, the body
             // takes only the loaded data.
-            out = out + "export fn page(d: " + dataType + ") -> Html {\n    return uiPageBody(d)\n}\n"
+            out = out + "export fn page(d: " + dataType + ") -> Html {\n    return uiPageBody(" + dataArg + ")\n}\n"
         }
     } else if paramNames.length > 0 {
         out = out + "export fn page(p: Params) -> Html {\n    return uiPageBody(" + vyxPageArgs(paramNames) + ")\n}\n"
@@ -3327,6 +3407,14 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     // place the client module exports `clientRender` (the host entry).
     if client {
         out = out + vyxEmitClientRender(hasLoad, paramNames, dataType)
+        // RFC-0070: a lazy page also exports `pageLoading` (the skeleton view — the
+        // `Loading` arm) and `clientRenderLoading` (the host entry the bundle's
+        // dispatch calls when the payload's props is the `{"__loading__":true}`
+        // sentinel), so a soft nav paints the shell + skeleton instantly, then fills
+        // in `Ready(props)` once the data arrives.
+        if lazy {
+            out = out + vyxEmitPageLoading(paramNames) + vyxEmitClientRenderLoading(paramNames)
+        }
         // RFC-0069 M4: a DATALESS page keeps its `headTitle` in the client bundle so
         // the host can resolve the page's title WITHOUT a network round-trip (a page
         // with no title block resolves to "", leaving document.title at the layout

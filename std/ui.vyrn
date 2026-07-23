@@ -80,6 +80,21 @@ export fn badRequest(message: String) -> PageError {
 }
 
 // ===========================================================================
+// PageData (RFC-0070) — the lazy-mode wrapper a `lazy fn load()` page's VIEW
+// receives. Defined ONCE here (the constructors `Loading`/`Ready` register in
+// the global constructor table exactly once — never redefined per page module,
+// which would collide) and imported by every generated lazy page module, server
+// and client alike. On a client soft nav a lazy page renders `Loading` instantly
+// (the shell + a skeleton), then re-renders `Ready(data)` once the payload
+// arrives. SSR always has data, so the server only ever renders `Ready` — the
+// `Loading` arm is a client-navigation-only state.
+// ===========================================================================
+
+/// The data a lazy page's view is rendered over: `Loading` before the data has
+/// arrived (client nav only), `Ready(T)` once it has (always, server-side).
+export type PageData<T> = | Loading | Ready(T)
+
+// ===========================================================================
 // The data-payload runtime (RFC-0069 §2) — RUNTIME helpers (not `gen`) the
 // synthesized router imports to answer a marked (`?__vyrn=data`) soft-nav request
 // with `{page, title, props[, params]}` JSON. Kept here as ordinary Vyrn (so the
@@ -582,6 +597,10 @@ type UiPageInfo = {
     // false for a zero-parameter static loader (`fn load()`, RFC-0069 §0) and for a
     // page with no loader.
     loadHasParams: Bool,
+    // loadLazy: the loader is marked `lazy` (RFC-0070) — the view is over
+    // `PageData<T>` and a client soft nav renders the skeleton instantly, then
+    // fills in the data. Only a `.vyx` page can be lazy; a `.vyrn` page is never.
+    loadLazy: Bool,
     // hasRespond: the page exports `fn respond(p: Params) -> Response` INSTEAD of
     // `page` — full content-type/status control, dispatched directly (RFC-0039 §5).
     hasRespond: Bool,
@@ -752,6 +771,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
         dynTypes: dynTypes,
         hasLoad: hasLoad,
         loadHasParams: loadHasParams,
+        loadLazy: false,
         hasRespond: hasRespond,
         isVyx: false,
         pageArity: arity,
@@ -777,6 +797,9 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
     let shape = vyxPageShape(src)
     let mut err = shape.err
     let hasLoad = shape.hasLoad
+    // RFC-0070: a `lazy fn load()` view is over `PageData<T>` and gets the instant-
+    // skeleton client nav. Only a loader page can be lazy.
+    let loadLazy = hasLoad && shape.loadLazy
     // RFC-0069 §0: a zero-parameter static `load()` needs no `params` block.
     let loadHasParams = hasLoad && shape.loadHasParams
     // Loader kind from the declared return-type spelling: "result", "validation"
@@ -844,6 +867,7 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
         dynTypes: dynTypes,
         hasLoad: hasLoad,
         loadHasParams: loadHasParams,
+        loadLazy: loadLazy,
         hasRespond: false,
         isVyx: true,
         pageArity: arity,
@@ -870,6 +894,7 @@ gen fn uiPageErr(modPath: String, fid: String, segs: Array<String>, dirPrefix: A
         dynTypes: dynTypes,
         hasLoad: false,
         loadHasParams: false,
+        loadLazy: false,
         hasRespond: false,
         isVyx: false,
         pageArity: 0,
@@ -1933,12 +1958,25 @@ fn uiClientSegments(path: String) -> Array<String> {
     }
     return segs
 }
-type UiResolved = { found: Bool, hasData: Bool, page: String, title: String }
-fn uiResolveHit(hasData: Bool, page: String, title: String) -> String {
-    return toJson(UiResolved { found: true, hasData: hasData, page: page, title: title })
+type UiResolved = { found: Bool, hasData: Bool, lazy: Bool, page: String, title: String }
+fn uiResolveHit(hasData: Bool, lazy: Bool, page: String, title: String) -> String {
+    return toJson(UiResolved { found: true, hasData: hasData, lazy: lazy, page: page, title: title })
 }
 fn uiResolveMiss() -> String {
-    return toJson(UiResolved { found: false, hasData: false, page: "", title: "" })
+    return toJson(UiResolved { found: false, hasData: false, lazy: false, page: "", title: "" })
+}
+fn uiClientBool(j: Json, key: String) -> Bool {
+    return match uiClientField(j, key) {
+        JBool(uiB) => uiB,
+        JNull => false,
+        JNum(uiN) => false,
+        JStr(uiS) => false,
+        JArr(uiA) => false,
+        JObj(uiO) => false,
+    }
+}
+fn uiClientIsLoading(uiJ: Json) -> Bool {
+    return uiClientBool(uiClientField(uiJ, "props"), "__loading__")
 }
 """)
 }
@@ -1997,7 +2035,10 @@ gen fn uiEmitResolvePage(pages: Array<UiPageInfo>) -> String {
         if uiClientRenderable(pages[i]) {
             let idx = i.toString()
             let hd = if pages[i].hasLoad { "true" } else { "false" }
-            out = out + "    if uiClientMatch" + idx + "(segs) {\n        return uiResolveHit(" + hd + ", " + uiStrLit(uiPageId(pages[i])) + ", " + uiResolveTitleExpr(pages[i], idx) + ")\n    }\n"
+            // RFC-0070: `lazy` tells the navigator to paint the skeleton instantly
+            // (then fetch + fill), vs a blocking data fetch for a non-lazy data page.
+            let lz = if pages[i].loadLazy { "true" } else { "false" }
+            out = out + "    if uiClientMatch" + idx + "(segs) {\n        return uiResolveHit(" + hd + ", " + lz + ", " + uiStrLit(uiPageId(pages[i])) + ", " + uiResolveTitleExpr(pages[i], idx) + ")\n    }\n"
         }
         i = i + 1
     }
@@ -2047,7 +2088,15 @@ gen fn uiBuildClientModule(pages: Array<UiPageInfo>, errors: Array<UiChrome>, th
     i = 0
     while i < pages.length {
         if uiClientRenderable(pages[i]) {
-            out = out + "    if uiPage == " + uiStrLit(uiPageId(pages[i])) + " {\n        return p" + i.toString() + ".clientRender(uiProps, uiPrms)\n    }\n"
+            let pidx = i.toString()
+            out = out + "    if uiPage == " + uiStrLit(uiPageId(pages[i])) + " {\n"
+            // RFC-0070: a lazy page's payload may carry the `{"__loading__":true}`
+            // props sentinel (the host's instant skeleton paint) — render the
+            // `Loading` view; a real props object renders `Ready(props)`.
+            if pages[i].loadLazy {
+                out = out + "        if uiClientIsLoading(uiJ) {\n            return p" + pidx + ".clientRenderLoading(uiPrms)\n        }\n"
+            }
+            out = out + "        return p" + pidx + ".clientRender(uiProps, uiPrms)\n    }\n"
         }
         i = i + 1
     }

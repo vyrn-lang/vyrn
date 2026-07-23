@@ -49,6 +49,8 @@
     "empty",
     "pastelist",
     "paste",
+    "loading",
+    "spinner",
     "meta",
     "ptitle",
     "plang",

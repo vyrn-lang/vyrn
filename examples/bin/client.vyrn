@@ -274,3 +274,36 @@ test "a dataless page renders from a null-props payload (zero-fetch dispatch)" {
     assert(out.contains("__vyrn_fallback__") == false)
     assert(out.contains("About"))
 }
+
+// ---- RFC-0070: lazy data — render the skeleton instantly, fill in on arrival -----
+
+test "renderPage paints the lazy home skeleton for the __loading__ sentinel" {
+    // The host's INSTANT paint: no props fetched yet. The props sentinel selects the
+    // `Loading` arm — the shell + the one-row spinner, NOT the (absent) list.
+    let out = renderPage("{\"page\":\"/\",\"props\":{\"__loading__\":true},\"params\":null}")
+    assert(out.contains("__vyrn_fallback__") == false)
+    // The static shell still renders (the create-island mount + the heading). The
+    // return is the std/html TREE as JSON, so the `#app` mount is `["id","app"]`.
+    assert(out.contains("[\"id\",\"app\"]"))
+    assert(out.contains("Recent pastes"))
+    // The localized loading row (default En) with its spinner.
+    assert(out.contains("Loading recent pastes"))
+    assert(out.contains("spinner"))
+}
+
+test "renderPage fills in the lazy home data view (Ready) once real props arrive" {
+    // The SAME page id, now with real props — the `Ready` arm renders the list and
+    // the skeleton is gone (vyrn-dom diffs the two trees; here we pin the render).
+    let payload = "{\"page\":\"/\",\"title\":\"x\",\"props\":[{\"id\":\"a\",\"title\":\"hi\",\"body\":\"b\",\"lang\":\"text\",\"created\":1}]}"
+    let out = renderPage(payload)
+    assert(out.contains("__vyrn_fallback__") == false)
+    assert(out.contains("hi"))
+    assert(out.contains("Loading recent pastes") == false)
+}
+
+test "resolvePage marks the lazy home page lazy, /about and /p/:id non-lazy" {
+    // The navigator reads `lazy` to choose instant-skeleton vs blocking nav.
+    assert(resolvePage("/").contains("\"lazy\":true"))
+    assert(resolvePage("/about").contains("\"lazy\":false"))
+    assert(resolvePage("/p/abc123").contains("\"lazy\":false"))
+}

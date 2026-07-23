@@ -28,6 +28,15 @@ li.paste .plang {
 }
 li.paste .pwhen { font-size: 0.8rem; opacity: 0.6; }
 
+/* lazy loading row (RFC-0070): a tasteful one-row skeleton until the list arrives */
+li.paste.loading { opacity: 0.65; }
+.spinner {
+  display: inline-block; width: 0.85rem; height: 0.85rem; border-radius: 50%;
+  border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor; animation: vyrn-spin 0.7s linear infinite;
+}
+@keyframes vyrn-spin { to { transform: rotate(360deg); } }
+
 /* create island */
 section.create {
   border: 1px solid color-mix(in srgb, currentColor 18%, transparent);

@@ -20,7 +20,8 @@
         "titleField": "Title (optional)",
         "bodyField": "Body",
         "save": "Create paste",
-        "recent": "Recent pastes"
+        "recent": "Recent pastes",
+        "loading": "Loading recent pastes…"
     },
     "issue": {
         "titleLong": "Title is too long (max 80 characters).",
