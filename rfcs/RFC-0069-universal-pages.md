@@ -127,10 +127,19 @@ splitting, scroll restoration beyond v2, and offline caching.
 
 ## As landed
 
-Shipped across four commits (M0–M3). Everything is in the generators
+Shipped across five commits (M0–M4). Everything is in the generators
 (`std/ui`, `std/vyx`), the runtimes (`web/vyrn-nav.js`, `web/vyrn-dom.js`), and
 `examples/bin` — **no Rust frontend/compiler source changed** (only a new Rust
 *test* file), so the deployed LSP binary is untouched (hash unchanged, below).
+
+**M4 (the Nuxt correctness fix)** closes the last gap: v3 as first shipped
+fetched the JSON payload on EVERY soft nav, including pages with no `load()`
+(`/about`'s payload was ~61 B of `props:null`). That is not the Nuxt model —
+Nuxt navigates a dataless page with ZERO network; the page's script decides, and
+declaring `load()` IS the declaration (exactly like `useAsyncData`). M4 makes
+navigation script-driven with no app-authored flags: the client bundle exports
+`resolvePage(path)` and the navigator resolves the target locally FIRST, so a
+dataless route transfers **0 B on the wire**.
 
 ### Transport verdict: query marker (not a header)
 
@@ -185,6 +194,28 @@ gates the data channel.
   else / any failure / the fallback sentinel → hard nav. Feature-detected once
   via `setPageRenderer` (the island boot hands the wasm's `renderPage` over);
   until set, v3 IS v2. popstate/scroll/progress-bar identical to v2.
+- **M4 — script-driven nav** (`std/ui`, `std/vyx`, `web/vyrn-nav.js`,
+  `bin/client.vyrn`, `bin/public/app.js`). The client bundle gains a second host
+  entry, `resolvePage(path) -> String` (`{found, hasData, page, title}` JSON),
+  synthesized from the SAME load-detection M0/M1 already carry (`hasData` is just
+  `UiPageInfo.hasLoad`; no hand-maintained table, no app flag). A per-page
+  `uiClientMatch<n>` mirrors the server's `uiTryData` routing — segment count plus
+  every literal segment; dynamic segments accept any non-empty value (a data page's
+  marker fetch re-runs the server's exact Int-parse routing, and a static dataless
+  page has no dynamic segment to disagree on, so no per-type parse is duplicated
+  client-side). `vyrn-nav` gains `setPageResolver`; on a soft nav it resolves the
+  target with NO network — a known dataless page renders immediately from
+  `{page, props:null, params:null}` through the existing `renderPage` (zero fetch),
+  a data page fetches its payload exactly as M3, an unmatched path falls through to
+  the v2 HTML swap. An older bundle that hands over only the renderer keeps the M3
+  fetch-every-nav behavior (feature-detected). **The title fix:** the client bundle
+  now KEEPS `headTitle` for a dataless page (a loader page's title depends on data
+  and still travels in the payload), so `resolvePage` reads the page's own compiled
+  title expression — `""` when it declares no `title{}`, in which case the
+  navigator leaves `document.title` at the layout default rather than overwriting it
+  with the url-pattern. This corrects the `title:"/about"` placeholder the user saw:
+  the server payload still carries `"/about"` (server unchanged), but the client no
+  longer FETCHES `/about`, so that placeholder never reaches the tab.
 
 ### Deviations (with justification)
 
@@ -219,17 +250,21 @@ gates the data channel.
    bundle; a nested error tree would need the payload to name which error page
    (out of scope — bin has one).
 
-### Payload sizes (bin, `application/json`)
+### Payload sizes (bin, `application/json`) — after M4
 
-| route | data payload | unmarked HTML |
-| --- | --- | --- |
-| `/` | 1498 B (props = full paste array) | 1285 B |
-| `/about` | 61 B | 1371 B |
-| `/p/<id>` | ~1354 B for a large paste; ~200 B for a small one | 1987 B |
-| `@error` (404) | ~100 B | 606 B |
+| route | has `load()` | on the wire per nav | server still answers marked |
+| --- | --- | --- | --- |
+| `/` | yes | 1498 B payload (props = full paste array) | yes |
+| `/about` | **no** | **0 B — the client never asks** | yes (~61 B, for direct callers) |
+| `/p/<id>` | yes | ~1354 B (large) / ~200 B (small) | yes |
+| `@error` (404) | — | ~100 B (rides a data page's marker fetch) | yes |
 
-A nav transfers only the JSON payload — no HTML document, no wasm/CSS/JS
-refetch.
+Before M4 every nav — including `/about` — fetched the JSON payload; after M4 a
+DATALESS route (`/about`) transfers nothing on the wire (the client resolves it
+locally and renders from null props). A DATA route still transfers only its JSON
+payload — no HTML document, no wasm/CSS/JS refetch. The server payload protocol is
+unchanged: `/about?__vyrn=data` still answers ~61 B for progressive-enhancement or
+direct callers; the client simply stops ASKING.
 
 ### emit-gen summary
 
@@ -239,7 +274,11 @@ has a client-renderable `.vyx` page, the marker check plus a per-client-page
 `document(...)` output are **unchanged** (unmarked HTML byte-identical, verified
 by diff and by the Rust integration tests). A `.vyrn`-only router
 (`examples/pagesdemo.vyrn`) emits the pre-RFC module byte-for-byte — confirmed
-green by the existing `pages` integration suite.
+green by the existing `pages` integration suite. M4 adds to the CLIENT bundle only:
+a per-page `uiClientMatch<n>`, a `resolvePage` export, and a kept `headTitle` on the
+dataless page (reviewed in `vyrn emit-gen bin/client.vyrn` — `/about` resolves to
+`hasData:false` + `headTitle()`, the two data pages to `hasData:true`); the server
+module is untouched.
 
 ### Verification
 
@@ -248,32 +287,45 @@ green by the existing `pages` integration suite.
   the exact static `/about` payload, the home-list payload, a `/p/[id]`
   props+params round-trip, the `@error` payload on a miss, and a non-client
   `/raw` route falling back to its real (non-JSON) response.
-- `vyrn test` on `bin/client.vyrn` (12 green): `renderPage` dispatch for `/`,
-  `/p/:id`, `/about`, and `@error`, unknown-page + malformed-JSON fallback, and
-  the create-island tests unchanged.
+- `vyrn test` on `bin/client.vyrn` (18 green): `renderPage` dispatch for `/`,
+  `/p/:id`, `/about`, and `@error`, unknown-page + malformed-JSON fallback, the
+  create-island tests unchanged, and (M4) `resolvePage` marking `/about` as
+  `hasData:false` with an empty title, `/` and `/p/:id` as `hasData:true`,
+  query-stripped matching, an unknown-path miss, and a dataless page rendering from
+  a null-props payload (the zero-fetch dispatch).
 - The inline-contract-call diagnostic pinned against a pre-migration
   (`recent()`→`listPastes()`) fixture.
 - `node --check` on all three runtimes; `vyrn dev` serves the v3 nav + vyrn-dom +
-  `app.js` + `client.wasm`; the client wasm exports `vyrnRenderPage`; zero real
-  `store` file-I/O is pulled into the client bundle (the boot trap the strip
-  exists to prevent).
+  `app.js` + `client.wasm`; the client wasm exports `vyrnRenderPage` and (M4)
+  `vyrnResolvePage`; zero real `store` file-I/O is pulled into the client bundle
+  (the boot trap the strip exists to prevent).
+- Server unchanged (M4 is client-side): `cargo test -p vyrn-cli --test
+  universal_pages -- --ignored` stays 7/7 green (unmarked HTML byte-identical, the
+  marked `/about` payload still the ~61 B `title:"/about"` shape — the client just
+  stops fetching it). One cold run (generation cache disabled, debug build) was
+  ~46 s wall.
 
 ### Browser click-path (post-merge proof — the in-repo pane is flaky)
 
-1. Hard-load `/`. The create island boots (`#app`) and registers the renderer.
-2. Click **About** → the Network log shows ONE request `/about?__vyrn=data`
-   (~61 B JSON, no HTML document, no `.wasm`/`.css`/`app.js` refetch); About
-   renders instantly; `document.title` updates. Back returns to `/`.
-3. Click a paste title → `/p/<id>?__vyrn=data` (~200 B JSON); the paste view
-   renders.
-4. Type a draft in the create form, navigate away and back → the draft persists
-   (the wasm instance survived).
-5. Visit an unknown `/p/<id>` → the `@error` payload renders the themed 404
-   client-side.
-6. A `/raw/<id>` link → hard nav (non-JSON), the raw text loads.
+1. Hard-load `/`. The create island boots (`#app`) and registers BOTH the renderer
+   and (M4) the resolver.
+2. Click **About** → the Network log shows **NO request at all** (the key M4 pin:
+   `resolvePage("/about")` returns `hasData:false`, so the client renders `/about`
+   from null props with zero network — no `?__vyrn=data`, no HTML document, no
+   `.wasm`/`.css`/`app.js` refetch); About renders instantly. Its `title{}` is empty,
+   so `document.title` stays at the layout default (no `"/about"` in the tab). Back
+   returns to `/`.
+3. Click a paste title → ONE request `/p/<id>?__vyrn=data` (~200 B JSON, a data
+   page); the paste view renders and `document.title` becomes the paste title.
+4. Type a draft in the create form, navigate away (to About — zero network) and
+   back → the draft persists (the wasm instance survived).
+5. Visit an unknown `/p/<id>` → ONE `/p/<id>?__vyrn=data` fetch returns the `@error`
+   payload, which renders the themed 404 client-side.
+6. A `/raw/<id>` link → `resolvePage` misses (not in the client bundle), so the
+   navigator takes the HTML channel and hard-navs (non-JSON), the raw text loads.
 
-Expected: on navs (2)/(3)/(5) the network log shows only JSON payloads — no HTML
-documents, no asset refetches — and the shell/header never flashes.
+Expected: nav (2) shows ZERO network requests; navs (3)/(5) show only their JSON
+payload — no HTML documents, no asset refetches — and the shell/header never flashes.
 
 ### State / hash
 

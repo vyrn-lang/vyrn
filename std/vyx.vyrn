@@ -2795,7 +2795,16 @@ fn vyxEmitHeadFns(head: VyxHead, sig: String, prelude: String) -> String {
         out = out + "    uiHd.push(" + vyxHeadItemExpr(it) + ")\n"
     }
     out = out + "    return uiHd\n}\n"
-    out = out + "export fn headTitle(" + sig + ") -> String {\n" + prelude
+    out = out + vyxEmitHeadTitleFn(head, sig, prelude)
+    return out
+}
+
+/// Emit just the `headTitle(<sig>) -> String` function — the title-only slice of
+/// `vyxEmitHeadFns`. The CLIENT bundle keeps this alone for a DATALESS page (RFC-0069
+/// M4) so the host can resolve a page's title with no network round-trip; the page's
+/// `head()` assets are not bundled (they ride v2's additive head machinery).
+fn vyxEmitHeadTitleFn(head: VyxHead, sig: String, prelude: String) -> String {
+    let mut out = "export fn headTitle(" + sig + ") -> String {\n" + prelude
     if head.hasTitle {
         out = out + "    return (" + head.titleExpr + ")\n}\n"
     } else {
@@ -3318,6 +3327,15 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     // place the client module exports `clientRender` (the host entry).
     if client {
         out = out + vyxEmitClientRender(hasLoad, paramNames, dataType)
+        // RFC-0069 M4: a DATALESS page keeps its `headTitle` in the client bundle so
+        // the host can resolve the page's title WITHOUT a network round-trip (a page
+        // with no title block resolves to "", leaving document.title at the layout
+        // default — never the url-pattern placeholder). A loader page's title depends
+        // on the loaded data and travels in the payload, so it stays omitted (keeping
+        // it could also un-prune a load-only head import).
+        if hasLoad == false {
+            out = out + vyxEmitHeadTitleFn(hs.head, sig, prelude)
+        }
     } else {
         out = out + vyxEmitHeadFns(hs.head, sig, prelude)
         // RFC-0069 §2: a loader page exports a TYPED props encoder so the server data

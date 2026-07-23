@@ -11,7 +11,7 @@ import { Html, toHtmlString, diff } from "std/html"
 // client, exporting renderPage(payloadJson) so a soft nav renders the next page
 // itself (vyrn-nav v3) instead of fetching HTML.
 import { pagesClientThemed } from "std/ui"
-import { renderPage } from pagesClientThemed("./routes", "./theme.json")
+import { renderPage, resolvePage } from pagesClientThemed("./routes", "./theme.json")
 
 /// An unvalidated mirror of CreateReq — constructing it never traps, so a bad
 /// draft can be encoded and run through fromJson to surface Issues instead.
@@ -126,6 +126,15 @@ export extern fn vyrnRenderPage(payloadJson: String) -> String {
     return renderPage(payloadJson)
 }
 
+/// The universal-page resolver (RFC-0069 M4): vyrn-nav v3 resolves a nav target
+/// against the bundle BEFORE any network. The return is `{found, hasData, page,
+/// title}` JSON — a known page with no `load()` navigates with ZERO fetch (the host
+/// renders it immediately with null props), a data page fetches its payload, an
+/// unknown path falls through to the v2 HTML swap.
+export extern fn vyrnResolvePage(path: String) -> String {
+    return resolvePage(path)
+}
+
 fn main() -> Int64 {
     return 0
 }
@@ -219,4 +228,49 @@ test "renderPage falls back on an unknown page id" {
 
 test "renderPage falls back on malformed payload JSON" {
     assertEq(renderPage("not json at all"), "__vyrn_fallback__")
+}
+
+// ---- RFC-0069 M4: resolvePage — script-driven, zero-fetch nav ------------------
+
+test "resolvePage marks the dataless /about page (hasData false, empty title)" {
+    let r = resolvePage("/about")
+    assert(r.contains("\"found\":true"))
+    assert(r.contains("\"hasData\":false"))
+    assert(r.contains("\"page\":\"/about\""))
+    // /about declares no title block, so it resolves to "" — the host keeps the
+    // layout default rather than overwriting document.title with "/about".
+    assert(r.contains("\"title\":\"\""))
+}
+
+test "resolvePage marks the home page as a data page (hasData true)" {
+    let r = resolvePage("/")
+    assert(r.contains("\"found\":true"))
+    assert(r.contains("\"hasData\":true"))
+    assert(r.contains("\"page\":\"/\""))
+}
+
+test "resolvePage matches a dynamic /p/:id path as a data page" {
+    let r = resolvePage("/p/abc123")
+    assert(r.contains("\"found\":true"))
+    assert(r.contains("\"hasData\":true"))
+    assert(r.contains("\"page\":\"/p/:id\""))
+}
+
+test "resolvePage strips the query before matching" {
+    let r = resolvePage("/about?__vyrn=data")
+    assert(r.contains("\"found\":true"))
+    assert(r.contains("\"page\":\"/about\""))
+}
+
+test "resolvePage reports a miss for an unknown path" {
+    let r = resolvePage("/nope/deeper")
+    assert(r.contains("\"found\":false"))
+    assert(r.contains("\"hasData\":false"))
+}
+
+test "a dataless page renders from a null-props payload (zero-fetch dispatch)" {
+    // The host builds this payload locally from resolvePage — no server round-trip.
+    let out = renderPage("{\"page\":\"/about\",\"props\":null,\"params\":null}")
+    assert(out.contains("__vyrn_fallback__") == false)
+    assert(out.contains("About"))
 }

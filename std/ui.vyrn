@@ -1892,7 +1892,117 @@ fn uiClientStr(j: Json, key: String) -> String {
         JObj(uiO) => "",
     }
 }
+fn uiClientSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> String {
+    let mut acc: Array<UInt8> = []
+    let mut i = s
+    while i < e {
+        acc.push(ba[i])
+        i = i + 1
+    }
+    return match stringFromBytes(acc) {
+        Ok(v) => v,
+        Err(err) => "",
+    }
+}
+fn uiClientSegments(path: String) -> Array<String> {
+    let ba = bytes(path)
+    let mut segs: Array<String> = []
+    let mut start = 0
+    let mut i = 0
+    let mut stop = ba.length
+    while i < ba.length {
+        if ba[i] == '?' {
+            stop = i
+            i = ba.length
+        } else {
+            i = i + 1
+        }
+    }
+    i = 0
+    while i < stop {
+        if ba[i] == '/' {
+            if i > start {
+                segs.push(uiClientSlice(ba, start, i))
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if stop > start {
+        segs.push(uiClientSlice(ba, start, stop))
+    }
+    return segs
+}
+type UiResolved = { found: Bool, hasData: Bool, page: String, title: String }
+fn uiResolveHit(hasData: Bool, page: String, title: String) -> String {
+    return toJson(UiResolved { found: true, hasData: hasData, page: page, title: title })
+}
+fn uiResolveMiss() -> String {
+    return toJson(UiResolved { found: false, hasData: false, page: "", title: "" })
+}
 """)
+}
+
+/// The per-page path matcher `uiClientMatch<idx>(segs) -> Bool` (RFC-0069 M4): the
+/// segment count plus every literal segment, mirroring the server's `uiTryData`
+/// routing. Dynamic segments accept any non-empty value (the client bundle only
+/// decides found/hasData; a data page's marker fetch re-runs the server's exact
+/// Int-parse routing, and a static dataless page has no dynamic segment to disagree
+/// on), so no per-type parse is duplicated here.
+gen fn uiClientMatchFn(p: UiPageInfo, idx: String) -> String {
+    let mut out = "fn uiClientMatch" + idx + "(segs: Array<String>) -> Bool {\n"
+    out = out + "    if segs.length != " + p.segs.length.toString() + " {\n        return false\n    }\n"
+    let mut i = 0
+    for s in p.segs {
+        if uiIsDynSeg(s) == false {
+            out = out + "    if segs[" + i.toString() + "] != " + uiStrLit(s) + " {\n        return false\n    }\n"
+        }
+        i = i + 1
+    }
+    out = out + "    return true\n}\n"
+    return out
+}
+
+/// The client-side title expression for `resolvePage` (RFC-0069 M4). A loader page's
+/// title depends on the loaded data and travels in the payload the client fetches, so
+/// it resolves to "" (unused). A STATIC dataless page reads its own `headTitle()` (""
+/// when it declares no title block, so the host keeps the layout default rather than
+/// the url-pattern placeholder). A dynamic dataless page would need its Params built
+/// from the path first, so it also resolves to "" (its render falls back if needed).
+gen fn uiResolveTitleExpr(p: UiPageInfo, idx: String) -> String {
+    if p.hasLoad == false && p.dynNames.length == 0 {
+        return "p" + idx + ".headTitle()"
+    }
+    return "\"\""
+}
+
+/// The `resolvePage(path) -> String` export (RFC-0069 M4): match `path` against the
+/// client route table WITHOUT a network round-trip, answering
+/// `{found, hasData, page, title}` JSON. The host uses `hasData` to decide the nav:
+/// a dataless page renders immediately (zero fetch), a data page fetches its payload,
+/// an unmatched path falls through to the v2 HTML swap.
+gen fn uiEmitResolvePage(pages: Array<UiPageInfo>) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < pages.length {
+        if uiClientRenderable(pages[i]) {
+            out = out + uiClientMatchFn(pages[i], i.toString())
+        }
+        i = i + 1
+    }
+    out = out + "export fn resolvePage(path: String) -> String {\n"
+    out = out + "    let segs = uiClientSegments(path)\n"
+    i = 0
+    while i < pages.length {
+        if uiClientRenderable(pages[i]) {
+            let idx = i.toString()
+            let hd = if pages[i].hasLoad { "true" } else { "false" }
+            out = out + "    if uiClientMatch" + idx + "(segs) {\n        return uiResolveHit(" + hd + ", " + uiStrLit(uiPageId(pages[i])) + ", " + uiResolveTitleExpr(pages[i], idx) + ")\n    }\n"
+        }
+        i = i + 1
+    }
+    out = out + "    return uiResolveMiss()\n}\n"
+    return out
 }
 
 /// Assemble the client bundle module from the scanned pages + error chrome.
@@ -1942,6 +2052,10 @@ gen fn uiBuildClientModule(pages: Array<UiPageInfo>, errors: Array<UiChrome>, th
         i = i + 1
     }
     out = out + "    return \"__vyrn_fallback__\"\n}\n"
+
+    // RFC-0069 M4: the host resolves a nav target against the bundle FIRST (found /
+    // hasData / title), so a dataless page navigates with ZERO fetch.
+    out = out + uiEmitResolvePage(pages)
     return out
 }
 

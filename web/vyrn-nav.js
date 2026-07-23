@@ -58,6 +58,16 @@
 // re-render. Fallbacks, in order: a route not in the client bundle (the server
 // answers non-JSON) → the v2 HTML swap; anything odd → v2's hard nav. If the bundle
 // is absent (no `renderPage` registered), v3 IS v2 — the data path never engages.
+//
+// WHAT M4 CHANGES (RFC-0069 M4): v3 as first shipped fetched the JSON payload on
+// EVERY soft nav, including pages with no `load()` (e.g. /about, ~61 B of props:null).
+// That is not the Nuxt model — Nuxt navigates a dataless page with ZERO network; the
+// page's script decides (declaring `load()` IS the declaration). So the bundle now
+// also exports `resolvePage(path) -> {found, hasData, page, title}`; a soft nav
+// resolves the target client-side FIRST — a known dataless page renders immediately
+// from null props (no fetch), a data page fetches its payload as before, an unknown
+// path falls through to the v2 HTML swap. An older bundle that hands over only the
+// renderer keeps the M3 fetch-every-nav behavior.
 
 import { renderTree } from "./vyrn-dom.js";
 
@@ -245,12 +255,33 @@ function applyDocument(newDoc) {
 // ---------------------------------------------------------------------------
 let pageRenderer = null;
 
+// The client page RESOLVER (RFC-0069 M4). The island's wasm also exports
+// `resolvePage(path) -> String` ({found, hasData, page, title} JSON); its boot hands
+// it here. With a resolver, a soft nav decides its channel WITHOUT a network round-
+// trip: a known dataless page renders immediately (zero fetch), a data page fetches
+// its payload, an unknown path falls through to the v2 HTML swap. When it is null (an
+// older bundle that registered only the renderer), the navigator keeps the M3
+// behavior — fetch the data marker on every nav.
+let pageResolver = null;
+
 // The data-marked variant of a URL — the same path, with `?__vyrn=data` added, so
 // the server answers with the page's JSON payload instead of its HTML document.
 function withDataMarker(url) {
   const u = new URL(url, location.href);
   u.searchParams.set("__vyrn", "data");
   return u.href;
+}
+
+// Resolve a nav target against the client bundle (RFC-0069 M4), returning the parsed
+// {found, hasData, page, title} descriptor, or null when there is no resolver / it
+// throws / its answer will not parse (the caller then behaves as M3).
+function resolveTarget(url) {
+  if (typeof pageResolver !== "function") return null;
+  try {
+    return JSON.parse(pageResolver(new URL(url, location.href).pathname));
+  } catch (_) {
+    return null;
+  }
 }
 
 // Paint a `renderPage` tree (a page body whose root is `<main>`) into the live
@@ -320,20 +351,55 @@ async function navigate(url, { push }) {
     return;
   }
 
+  // Feature-detect the client bundle once per nav. With a renderer AND a resolver
+  // (RFC-0069 M4), resolve the target against the bundle FIRST, no network.
+  const dataMode = typeof pageRenderer === "function";
+  const resolved = dataMode ? resolveTarget(url) : null;
+
+  // A known page with NO data renders immediately from null props — ZERO fetch (the
+  // Nuxt model: declaring load() is the declaration; a dataless page navigates with no
+  // network). The render is synchronous, so the in-flight guard above is enough — no
+  // AbortController is armed. Any failure degrades to a hard nav (fallback bias).
+  if (dataMode && resolved && resolved.found && resolved.hasData === false) {
+    emit("nav-start", { url });
+    try {
+      const treeJson = pageRenderer(JSON.stringify({ page: resolved.page, props: null, params: null }));
+      if (!treeJson || treeJson === "__vyrn_fallback__") {
+        throw new Error("client bundle cannot render this page");
+      }
+      if (push) pushEntry(url);
+      // An empty resolved title leaves document.title at the layout default (a page
+      // that declares no title{} must NOT overwrite it with the url-pattern).
+      if (resolved.title) document.title = String(resolved.title);
+      paintMain(treeJson);
+      syncIslands();
+      if (push) window.scrollTo(0, 0);
+      else restorePopScroll();
+      emit("nav-end", { url });
+    } catch (err) {
+      emit("nav-error", { url, reason: "resolve-render-failed" });
+      hardNav(url);
+    }
+    return;
+  }
+
   emit("nav-start", { url });
   const controller = new AbortController();
   inflight = controller;
   const timer = setTimeout(() => controller.abort(), CONFIG.timeoutMs);
 
-  // Feature-detect the client bundle once per nav: with a renderer, fetch the data
-  // marker (JSON payload); without, v2's HTML fetch. `x-vyrn-nav` stays a hint the
-  // server ignores (it keys off the query marker) — kept for observability.
-  const dataMode = typeof pageRenderer === "function";
-  const fetchUrl = dataMode ? withDataMarker(url) : url;
+  // Fetch the data marker (JSON payload) ONLY for a resolved DATA page; an unresolved
+  // path — not in the client bundle — takes the plain HTML channel (the v2 swap /
+  // hard-nav chain, unchanged). Without a resolver (an older bundle that registered
+  // only the renderer) keep the M3 behavior: the marker on every nav. `x-vyrn-nav`
+  // stays a hint the server ignores (it keys off the query marker), kept for
+  // observability.
+  const wantData = dataMode && (resolved ? resolved.found && resolved.hasData : true);
+  const fetchUrl = wantData ? withDataMarker(url) : url;
 
   let res;
   try {
-    res = await fetch(fetchUrl, { headers: { "x-vyrn-nav": dataMode ? "data" : "soft" }, signal: controller.signal });
+    res = await fetch(fetchUrl, { headers: { "x-vyrn-nav": wantData ? "data" : "soft" }, signal: controller.signal });
   } catch (err) {
     clearTimeout(timer);
     inflight = null;
@@ -355,7 +421,7 @@ async function navigate(url, { push }) {
   // title, render the page's tree via the wasm, paint it into <main>, and re-sync
   // islands (the create island re-mounts against its surviving instance). A
   // distinguished fallback sentinel — or any exception — degrades to a hard nav.
-  if (dataMode && ct.includes("application/json")) {
+  if (wantData && ct.includes("application/json")) {
     let payloadText;
     try {
       payloadText = await res.text();
@@ -544,6 +610,13 @@ export const vyrnNav = {
   // set (no bundle, still booting, a no-JS page), navigation stays pure v2.
   setPageRenderer(fn) {
     pageRenderer = typeof fn === "function" ? fn : null;
+  },
+  // The island boot hands its wasm `resolvePage` here (RFC-0069 M4). With it, a soft
+  // nav resolves the target against the bundle before any network — a dataless page
+  // then navigates with zero fetch. Until it is set, the navigator keeps the M3
+  // behavior (fetch the data marker on every nav).
+  setPageResolver(fn) {
+    pageResolver = typeof fn === "function" ? fn : null;
   },
   config: CONFIG,
 };

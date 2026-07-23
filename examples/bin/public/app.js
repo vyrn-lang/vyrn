@@ -31,7 +31,7 @@ async function bootApp(mountEl) {
     // `takeNav()` and `vyrnRenderPage()` return Strings; declare them so the
     // export glue DECODES the wasm pointer into a JS string (RFC-0012 String ABI
     // asymmetry — a raw export call otherwise hands back the pointer integer).
-    exportReturns: { takeNav: "string", vyrnRenderPage: "string" },
+    exportReturns: { takeNav: "string", vyrnRenderPage: "string", vyrnResolvePage: "string" },
   });
 
   // RFC-0069 §3: hand the universal-page renderer to vyrn-nav so a soft nav renders
@@ -39,6 +39,12 @@ async function bootApp(mountEl) {
   // navigations (RFC-0067), so once registered the renderer stays live.
   if (window.vyrnNav && typeof window.vyrnNav.setPageRenderer === "function" && typeof app.exports.vyrnRenderPage === "function") {
     window.vyrnNav.setPageRenderer((payloadJson) => app.exports.vyrnRenderPage(payloadJson));
+  }
+
+  // RFC-0069 M4: hand the resolver too, so a soft nav resolves the target against the
+  // bundle FIRST — a dataless page (e.g. /about) then renders with ZERO network.
+  if (window.vyrnNav && typeof window.vyrnNav.setPageResolver === "function" && typeof app.exports.vyrnResolvePage === "function") {
+    window.vyrnNav.setPageResolver((path) => app.exports.vyrnResolvePage(path));
   }
 
   // Drain any pending soft-nav target the client set during a handler.
