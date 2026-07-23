@@ -7,6 +7,11 @@ import * as api from rpcClient("./contract")
 import { componentsThemed } from "std/vyx"
 import { createForm } from componentsThemed("./widgets", "./theme.json")
 import { Html, toHtmlString, diff } from "std/html"
+// RFC-0069 §1: the universal page bundle — the same routes/ tree compiled for the
+// client, exporting renderPage(payloadJson) so a soft nav renders the next page
+// itself (vyrn-nav v3) instead of fetching HTML.
+import { pagesClientThemed } from "std/ui"
+import { renderPage } from pagesClientThemed("./routes", "./theme.json")
 
 /// An unvalidated mirror of CreateReq — constructing it never traps, so a bad
 /// draft can be encoded and run through fromJson to surface Issues instead.
@@ -113,6 +118,14 @@ export extern fn vyrnPatch() -> String {
     return toJson(ops)
 }
 
+/// The universal-page host entry (RFC-0069 §3): vyrn-nav v3 hands the JSON payload
+/// (`{page, title, props[, params]}`) here on a soft nav; the return is the next
+/// page's std/html tree as JSON for vyrn-dom to paint, or the sentinel
+/// "__vyrn_fallback__" telling the host to fall back to the v2 HTML swap.
+export extern fn vyrnRenderPage(payloadJson: String) -> String {
+    return renderPage(payloadJson)
+}
+
 fn main() -> Int64 {
     return 0
 }
@@ -167,4 +180,43 @@ test "an issue at an unknown path falls back to its wire message (form-level, ne
     let html = toHtmlString(createForm("t", "text", "b", iss))
     // An unknown path is no field's span; it degrades to today's wire text.
     assert(html.contains("unmapped problem"))
+}
+
+// ---- RFC-0069 §1/§3: the universal-page bundle's renderPage dispatch -----------
+
+test "renderPage dispatches the home page (/) from its Array<Paste> props" {
+    let payload = "{\"page\":\"/\",\"title\":\"x\",\"props\":[{\"id\":\"a\",\"title\":\"hi\",\"body\":\"b\",\"lang\":\"text\",\"created\":1}]}"
+    let out = renderPage(payload)
+    assert(out.contains("__vyrn_fallback__") == false)
+    // The rendered tree carries the paste title from the decoded props.
+    assert(out.contains("hi"))
+}
+
+test "renderPage dispatches /p/:id from its Paste props + route params" {
+    let payload = "{\"page\":\"/p/:id\",\"title\":\"t\",\"props\":{\"id\":\"a\",\"title\":\"deep\",\"body\":\"b\",\"lang\":\"text\",\"created\":1},\"params\":{\"id\":\"a\"}}"
+    let out = renderPage(payload)
+    assert(out.contains("__vyrn_fallback__") == false)
+    assert(out.contains("deep"))
+}
+
+test "renderPage dispatches the static /about page (empty props)" {
+    let out = renderPage("{\"page\":\"/about\",\"title\":\"About\",\"props\":null}")
+    assert(out.contains("__vyrn_fallback__") == false)
+    assert(out.contains("About"))
+}
+
+test "renderPage renders the @error payload client-side (themed 404)" {
+    let payload = "{\"page\":\"@error\",\"title\":\"Error\",\"props\":{\"status\":404,\"message\":\"no such paste\"}}"
+    let out = renderPage(payload)
+    assert(out.contains("__vyrn_fallback__") == false)
+    assert(out.contains("404"))
+    assert(out.contains("no such paste"))
+}
+
+test "renderPage falls back on an unknown page id" {
+    assertEq(renderPage("{\"page\":\"/nope\",\"title\":\"\",\"props\":null}"), "__vyrn_fallback__")
+}
+
+test "renderPage falls back on malformed payload JSON" {
+    assertEq(renderPage("not json at all"), "__vyrn_fallback__")
 }

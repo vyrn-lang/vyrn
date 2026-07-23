@@ -2804,6 +2804,337 @@ fn vyxEmitHeadFns(head: VyxHead, sig: String, prelude: String) -> String {
     return out
 }
 
+// ===========================================================================
+// Client-page compilation (RFC-0069 §1) — the same `.vyx` template compilation,
+// but emitted for the CLIENT bundle: the view fn only, with `load` (and any import
+// used solely by it) removed. The client renders a page from its props on a soft
+// nav; `load` runs server-side, and pulling its imports (a page's `../contract`
+// → `store` file I/O) into the client would initialize that module state at wasm
+// boot and trap. So the client build strips `load` and prunes its now-dead imports.
+// ===========================================================================
+
+/// Whether byte `b` may appear inside an identifier (so a word match is a real
+/// token boundary, not a substring of a longer name).
+fn vyxIsIdentByte(b: UInt8) -> Bool {
+    return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+/// Whether `name` occurs as a whole identifier token anywhere in `corpus`.
+fn vyxWordUsed(corpus: String, name: String) -> Bool {
+    let cb = bytes(corpus)
+    let nb = bytes(name)
+    if nb.length == 0 {
+        return false
+    }
+    let mut i = 0
+    while i + nb.length <= cb.length {
+        let mut hit = true
+        let mut j = 0
+        while j < nb.length {
+            if cb[i + j] != nb[j] {
+                hit = false
+                j = nb.length
+            } else {
+                j = j + 1
+            }
+        }
+        if hit {
+            let beforeOk = if i == 0 { true } else { vyxIsIdentByte(cb[i - 1]) == false }
+            let afterIdx = i + nb.length
+            let afterOk = if afterIdx >= cb.length { true } else { vyxIsIdentByte(cb[afterIdx]) == false }
+            if beforeOk && afterOk {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// `script` with the statement-leading `fn load(…) { … }` (or `export fn load`)
+/// removed, brace-matched. Unchanged when there is no loader.
+gen fn vyxStripLoadFn(script: String) -> String {
+    let sb = bytes(script)
+    let n = sb.length
+    let mut i = 0
+    let mut lineStart = 0
+    while i <= n {
+        if i == n || sb[i] == '\n' {
+            let line = trim(vyxSlice(sb, lineStart, i))
+            if line.startsWith("fn load") || line.startsWith("export fn load") {
+                let brace = vyxFind(sb, bytes("{"), lineStart)
+                if brace >= 0 {
+                    let end = vyxMatchCurly(sb, brace)
+                    return vyxSlice(sb, 0, lineStart) + vyxSlice(sb, end, n)
+                }
+            }
+            lineStart = i + 1
+        }
+        i = i + 1
+    }
+    return script
+}
+
+/// The source text of the statement-leading `fn load(…) { … }` block ("" when
+/// there is no loader) — the set of names it references decides which now-dead
+/// imports the client prune may drop (only load-only names, never a name the load
+/// never used, so an enum-variant import like `Locale` for `En`/`Uk` survives).
+gen fn vyxLoadBody(script: String) -> String {
+    let sb = bytes(script)
+    let n = sb.length
+    let mut i = 0
+    let mut lineStart = 0
+    while i <= n {
+        if i == n || sb[i] == '\n' {
+            let line = trim(vyxSlice(sb, lineStart, i))
+            if line.startsWith("fn load") || line.startsWith("export fn load") {
+                let brace = vyxFind(sb, bytes("{"), lineStart)
+                if brace >= 0 {
+                    let end = vyxMatchCurly(sb, brace)
+                    return vyxSlice(sb, lineStart, end)
+                }
+            }
+            lineStart = i + 1
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+/// Whether `name` is CALLED (`name(`) anywhere in `corpus`, as a whole token — the
+/// signal of an inline helper invocation (`listPastes()` mid-view).
+fn vyxCalledInCorpus(corpus: String, name: String) -> Bool {
+    let cb = bytes(corpus)
+    let nb = bytes(name)
+    if nb.length == 0 {
+        return false
+    }
+    let mut i = 0
+    while i + nb.length < cb.length {
+        let mut hit = true
+        let mut j = 0
+        while j < nb.length {
+            if cb[i + j] != nb[j] {
+                hit = false
+                j = nb.length
+            } else {
+                j = j + 1
+            }
+        }
+        if hit {
+            let beforeOk = if i == 0 { true } else { vyxIsIdentByte(cb[i - 1]) == false }
+            if beforeOk && cb[i + nb.length] == '(' {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// Whether an import line's specifier is a RELATIVE path (`./` or `../`) — a page's
+/// own app module (its contract, a helper module), as opposed to `std/…` or a
+/// generator import.
+fn vyxImportIsRelative(line: String) -> Bool {
+    let idx = vyxFind(bytes(line), bytes("from \""), 0)
+    if idx < 0 {
+        return false
+    }
+    let after = vyxSlice(bytes(line), idx + 6, bytes(line).length)
+    return after.startsWith("./") || after.startsWith("../")
+}
+
+/// The name of an inline helper call that cannot run client-side (RFC-0069 §0): a
+/// function imported from a relative app module and CALLED in the page's view (the
+/// canonical mistake — `bin/index.vyx`'s `recent()` calling `listPastes()` mid-view
+/// instead of loading the data in `load()`). "" when the page's view is pure over
+/// its props. Runs AFTER the load strip + import prune, so a relative import used
+/// only by `load` (already gone) never trips it.
+gen fn vyxClientHelperViolation(script: String, template: String) -> String {
+    let lines = vyxLines(script)
+    let mut corpus = ""
+    for line in lines {
+        if trim(line).startsWith("import ") == false {
+            corpus = corpus + line + " "
+        }
+    }
+    corpus = corpus + template
+    for line in lines {
+        let t = trim(line)
+        let lb = bytes(t)
+        let brace = vyxFind(lb, bytes("{"), 0)
+        if t.startsWith("import ") && brace >= 0 && vyxImportIsRelative(t) {
+            let close = vyxFind(lb, bytes("}"), brace)
+            for nm in vyxSplitFields(vyxSlice(lb, brace + 1, close)) {
+                let bound = vyxImportBoundName(trim(nm))
+                if bound.byteLength > 0 && vyxCalledInCorpus(corpus, bound) {
+                    return bound
+                }
+            }
+        }
+    }
+    return ""
+}
+
+/// The name an import binds (`X as Y` binds `Y`; a bare `X` binds `X`).
+fn vyxImportBoundName(spec: String) -> String {
+    let asIdx = vyxFind(bytes(spec), bytes(" as "), 0)
+    if asIdx < 0 {
+        return trim(spec)
+    }
+    return trim(vyxSlice(bytes(spec), asIdx + 4, bytes(spec).length))
+}
+
+/// The last identifier token of `s` — the bound name of an `import * as ns` /
+/// `import ns` head (`import * as t` → `t`).
+fn vyxLastIdent(s: String) -> String {
+    let sb = bytes(s)
+    let mut end = sb.length
+    while end > 0 && vyxIsIdentByte(sb[end - 1]) == false {
+        end = end - 1
+    }
+    let mut start = end
+    while start > 0 && vyxIsIdentByte(sb[start - 1]) {
+        start = start - 1
+    }
+    return vyxSlice(sb, start, end)
+}
+
+/// Whether an import binding `name` is dead in the client bundle: it must have been
+/// used by the (now-stripped) `load` AND be unused everywhere else. A name the load
+/// never referenced is NEVER dropped — the prune only removes what stripping `load`
+/// orphaned, so an import kept for a side effect the usage scan can't see (an enum
+/// variant imported via its type) always survives.
+fn vyxImportNameDead(name: String, corpus: String, loadBody: String) -> Bool {
+    return vyxWordUsed(loadBody, name) && vyxWordUsed(corpus, name) == false
+}
+
+/// One import line, pruned for the client: selective imports drop only the names the
+/// stripped `load` alone used (dropped entirely when none survive); a namespace/
+/// default import is dropped only when its bound name is load-only. Unrecognized
+/// shapes are kept as-is.
+gen fn vyxPruneOneImport(line: String, corpus: String, loadBody: String) -> String {
+    let lb = bytes(line)
+    let brace = vyxFind(lb, bytes("{"), 0)
+    if brace >= 0 {
+        let close = vyxFind(lb, bytes("}"), brace)
+        let mut kept: Array<String> = []
+        for nm in vyxSplitFields(vyxSlice(lb, brace + 1, close)) {
+            let t = trim(nm)
+            if t.byteLength > 0 && vyxImportNameDead(vyxImportBoundName(t), corpus, loadBody) == false {
+                kept.push(t)
+            }
+        }
+        if kept.length == 0 {
+            return ""
+        }
+        return "import { " + joinWith(kept, ", ") + " }" + vyxSlice(lb, close + 1, lb.length)
+    }
+    let fromIdx = vyxFind(lb, bytes(" from "), 0)
+    if fromIdx < 0 {
+        return line
+    }
+    if vyxImportNameDead(vyxLastIdent(vyxSlice(lb, 0, fromIdx)), corpus, loadBody) {
+        return ""
+    }
+    return line
+}
+
+/// `line` with any `//` line-comment removed, so a doc comment mentioning a type
+/// name (`// … Result<Paste, PageError>`) does not keep an otherwise-dead import
+/// alive — critical for the client prune, where a stray comment must never retain a
+/// file-I/O import and reintroduce the boot-time module-state trap it exists to avoid.
+fn vyxStripLineComment(line: String) -> String {
+    let lb = bytes(line)
+    let idx = vyxFind(lb, bytes("//"), 0)
+    if idx < 0 {
+        return line
+    }
+    return vyxSlice(lb, 0, idx)
+}
+
+/// The lines of `lines` except index `skip`, comment-stripped and space-joined —
+/// the usage corpus for pruning one import (an imported name may be used by ANOTHER
+/// import line, e.g. a generator import `import * as t from i18n("…")` uses `i18n`).
+fn vyxJoinExcept(lines: Array<String>, skip: Int64) -> String {
+    let mut out = ""
+    let mut k = 0
+    for line in lines {
+        if k != skip {
+            out = out + vyxStripLineComment(line) + " "
+        }
+        k = k + 1
+    }
+    return out
+}
+
+/// `script` (a page's `<script>` with `load` already stripped) with its now-dead
+/// imports pruned. `extra` is the extra usage corpus (the template + the generated
+/// page/`Params` types), so a name referenced only by the generated glue survives;
+/// `loadBody` is the stripped loader's source, so only load-only names are dropped.
+gen fn vyxPruneClientImports(script: String, extra: String, loadBody: String) -> String {
+    let lines = vyxLines(script)
+    let mut out = ""
+    let mut k = 0
+    for line in lines {
+        if trim(line).startsWith("import ") {
+            let kept = vyxPruneOneImport(trim(line), vyxJoinExcept(lines, k) + " " + extra, loadBody)
+            if kept.byteLength > 0 {
+                out = out + kept + "\n"
+            }
+        } else {
+            out = out + line + "\n"
+        }
+        k = k + 1
+    }
+    return out
+}
+
+/// The client page module's host entry (RFC-0069 §1): `clientRender(propsJson,
+/// paramsJson) -> String` decodes the payload's props (the loaded data) and params
+/// through the wire codec INSIDE the page module — where the page's own data/param
+/// types are in scope — calls the view fn, and returns the `std/html` tree as JSON
+/// for `vyrn-dom`. A decode miss returns the fallback sentinel so the host degrades
+/// to the v2 HTML swap. A generic data type (`Array<Paste>`) is aliased first, since
+/// `fromJson` takes a NAMED type; a plain record type is decoded directly (a record
+/// alias is illegal in Vyrn).
+fn vyxEmitClientRender(hasLoad: Bool, paramNames: Array<String>, dataType: String) -> String {
+    let fb = "\"__vyrn_fallback__\""
+    let hasParams = paramNames.length > 0
+    if hasLoad == false {
+        let mut out = "export fn clientRender(propsJson: String, paramsJson: String) -> String {\n"
+        if hasParams {
+            out = out + "    return match fromJson(Params, paramsJson) {\n"
+            out = out + "        Valid(uiPrm) => toJson(page(uiPrm)),\n"
+            out = out + "        Invalid(uiI) => " + fb + ",\n    }\n}\n"
+        } else {
+            out = out + "    return toJson(page())\n}\n"
+        }
+        return out
+    }
+    // A loader page: decode the data (aliasing a generic spelling) and, for a
+    // dynamic route, the params.
+    let generic = dataType.contains("<")
+    let dataName = if generic { "UiClientData" } else { dataType }
+    let mut out = ""
+    if generic {
+        out = "type UiClientData = " + dataType + "\n"
+    }
+    out = out + "export fn clientRender(propsJson: String, paramsJson: String) -> String {\n"
+    if hasParams {
+        out = out + "    return match fromJson(" + dataName + ", propsJson) {\n"
+        out = out + "        Valid(uiD) => match fromJson(Params, paramsJson) {\n"
+        out = out + "            Valid(uiPrm) => toJson(page(uiPrm, uiD)),\n"
+        out = out + "            Invalid(uiI) => " + fb + ",\n        },\n"
+        out = out + "        Invalid(uiI) => " + fb + ",\n    }\n}\n"
+    } else {
+        out = out + "    return match fromJson(" + dataName + ", propsJson) {\n"
+        out = out + "        Valid(uiD) => toJson(page(uiD)),\n"
+        out = out + "        Invalid(uiI) => " + fb + ",\n    }\n}\n"
+    }
+    return out
+}
+
 /// Build a full `.vyx`-PAGE module (RFC-0039 §4). The template compiles to a
 /// `uiPageBody(<params>[, data: Data])` view fn; the module exports `page`/`Params`
 /// (and passes through `load`/`Data` auto-exported). EXPORTED so `std/ui`'s `pages`
@@ -2814,6 +3145,14 @@ export gen fn vyxBuildPageModule(source: String, dir: String, themed: Bool, them
     return vyxBuildPageModuleAt(source, "", dir, themed, theme)
 }
 
+/// `vyxBuildPageModuleAt` for the CLIENT bundle (RFC-0069 §1): `load` and its now-
+/// dead imports are stripped, and `head`/`headTitle` are omitted (the title travels
+/// in the payload, head assets through v2's additive head machinery). The compiled
+/// view fn + `Params` + `page` are byte-for-byte what the server module produces.
+export gen fn vyxBuildPageClientModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
+    return vyxBuildPageModuleImpl(source, srcPath, dir, themed, theme, true)
+}
+
 /// `vyxBuildPageModule` threading the REAL route-file path (RFC-0048 §2): when
 /// `srcPath` is non-empty the compiled page's template AND script `//@origin`
 /// directives target the real `.vyx` at real coordinates (via a template
@@ -2821,6 +3160,12 @@ export gen fn vyxBuildPageModule(source: String, dir: String, themed: Bool, them
 /// `UiPageBody.vyx`. The generated page/`respond` code is byte-identical either
 /// way — only the origin comments differ.
 export gen fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String {
+    return vyxBuildPageModuleImpl(source, srcPath, dir, themed, theme, false)
+}
+
+/// The shared page-module builder. `client` (RFC-0069 §1) strips `load` + its dead
+/// imports and omits `head`/`headTitle`, producing the client-bundle view module.
+gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, themed: Bool, theme: String, client: Bool) -> String {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     let templateSec = vyxSectionAvoid(ba, "template", false, scriptSec.start, scriptSec.end)
@@ -2860,6 +3205,22 @@ export gen fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String,
     // `Validation<Data>` or the first arg of `Result<T, PageError>` (RFC-0041 §3),
     // so a page can load straight into a wire type with no `type Data` alias.
     let dataType = vyxLoaderDataType(vyxScriptLoadRet(script))
+    // RFC-0069 §1: the client bundle keeps the view only — strip `load` and the
+    // imports it alone used (the template + generated page/Params types keep any
+    // name they still reference alive). `dataType`/`hasLoad` were read above from
+    // the ORIGINAL script, so the client `page(d: Data)` signature stays correct.
+    if client {
+        let loadBody = vyxLoadBody(restScript)
+        restScript = vyxStripLoadFn(restScript)
+        restScript = vyxPruneClientImports(restScript, templateBody + " " + dataType + " " + paramFields, loadBody)
+        // A page still calling an app-module helper inline (a contract query mid-
+        // view) cannot render client-side — surface the actionable diagnostic
+        // (RFC-0069 §0) instead of the raw unknown-fn/boot-trap failure.
+        let viol = vyxClientHelperViolation(restScript, templateBody)
+        if viol.byteLength > 0 {
+            return "page_helpers_run_client_side__move_the_data_into_load__" + vyxIdentOf(viol) + "\n"
+        }
+    }
     let restExported = vyxAutoExportPageDecls(restScript)
 
     // The synthetic component: a `props` block of the params (+ a `data: <T>`
@@ -2952,7 +3313,14 @@ export gen fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String,
     if hasLoad {
         prelude = prelude + "    let data = d\n"
     }
-    out = out + vyxEmitHeadFns(hs.head, sig, prelude)
+    // The client bundle omits head/headTitle (RFC-0069 §1): the title travels in
+    // the payload and head assets go through v2's additive head machinery. In its
+    // place the client module exports `clientRender` (the host entry).
+    if client {
+        out = out + vyxEmitClientRender(hasLoad, paramNames, dataType)
+    } else {
+        out = out + vyxEmitHeadFns(hs.head, sig, prelude)
+    }
     return out
 }
 
@@ -2981,6 +3349,28 @@ export gen fn vyxPageThemed(vyxPath: String, theme: String) -> String {
     }
     let dir = vyxDirOf(vyxPath)
     return vyxBuildPageModuleAt(src, vyxPath, dir, true, theme)
+}
+
+/// `vyxPageClient(vyxPath)` — the CLIENT-bundle variant (RFC-0069 §1): the same
+/// page compilation with `load` (and its dead imports) stripped and no head/title,
+/// so `std/ui`'s `pagesClient` can render the page from its props on a soft nav.
+export gen fn vyxPageClient(vyxPath: String) -> String {
+    let src = match readFile(vyxPath) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    let dir = vyxDirOf(vyxPath)
+    return vyxBuildPageClientModuleAt(src, vyxPath, dir, false, "")
+}
+
+/// `vyxPageClientThemed(vyxPath, theme)` — the themed client variant (RFC-0069 §1).
+export gen fn vyxPageClientThemed(vyxPath: String, theme: String) -> String {
+    let src = match readFile(vyxPath) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    let dir = vyxDirOf(vyxPath)
+    return vyxBuildPageClientModuleAt(src, vyxPath, dir, true, theme)
 }
 
 /// The directory portion of `path` (everything before the last `/`), so relative
