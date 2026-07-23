@@ -199,6 +199,30 @@ fn unmarked_about_is_html() {
 
 #[test]
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
+fn unmarked_lazy_home_is_byte_identical_and_never_renders_the_skeleton() {
+    // RFC-0070: the home loader is now `lazy`, but the FIRST load is full SSR — the
+    // server always has the data, so it renders the `Ready` arm and the `Loading`
+    // skeleton NEVER appears server-side. The unmarked home HTML is therefore
+    // byte-identical to its pre-lazy shape.
+    let port = bin_port();
+    let (status, headers, body) = get(port, "/");
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(content_type(&headers), "text/html");
+    // The shell prefix (create-island mount + headings) is byte-for-byte unchanged —
+    // this holds whether or not the shared store has pastes by the time this runs.
+    assert!(
+        body.contains(
+            "<main><p class=\"sub\">Paste text, get a short link. Persisted to disk.</p><div id=\"app\"></div><h2>Recent pastes</h2>"
+        ),
+        "home shell changed:\n{body}"
+    );
+    // The lazy skeleton must not leak into SSR: no spinner, no loading label.
+    assert!(!body.contains("spinner"), "lazy skeleton leaked into SSR:\n{body}");
+    assert!(!body.contains("Loading recent pastes"), "lazy loading label leaked into SSR:\n{body}");
+}
+
+#[test]
+#[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn unmarked_missing_paste_is_404_html() {
     let port = bin_port();
     let (status, headers, _body) = get(port, "/p/nope404");
