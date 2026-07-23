@@ -58,14 +58,17 @@ fn drain_into<R: Read + Send + 'static>(mut r: R, acc: Arc<Mutex<String>>) {
     });
 }
 
-fn wait_for(acc: &Arc<Mutex<String>>, needle: &str, timeout: Duration) {
+fn wait_for_or(acc: &Arc<Mutex<String>>, needle: &str, timeout: Duration) -> Result<(), String> {
     let start = Instant::now();
     loop {
         if acc.lock().unwrap().contains(needle) {
-            return;
+            return Ok(());
         }
         if start.elapsed() > timeout {
-            panic!("timed out waiting for {needle:?}; got:\n{}", acc.lock().unwrap());
+            return Err(format!(
+                "timed out waiting for {needle:?}; got:\n{}",
+                acc.lock().unwrap()
+            ));
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -77,39 +80,54 @@ fn wait_for(acc: &Arc<Mutex<String>>, needle: &str, timeout: Duration) {
 /// dodges the readiness-timeout that N parallel generations would blow. The child is
 /// intentionally leaked — it lives until the test process exits.
 fn bin_port() -> u16 {
-    static PORT: OnceLock<u16> = OnceLock::new();
-    *PORT.get_or_init(|| {
-        let server = repo_file("examples/bin/server.vyrn");
-        let dir = std::env::temp_dir().join(format!("vyrn_upages_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("data")).unwrap();
-        let port = free_port();
-        let mut child = vyrn()
-            .arg("serve")
-            .arg(&server)
-            .arg("--port")
-            .arg(port.to_string())
-            .current_dir(&dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn vyrn serve");
-        // The `serving` banner goes to stdout, generation errors to stderr — combine
-        // both so the wait sees the banner and a failure surfaces its cause.
-        let out = Arc::new(Mutex::new(String::new()));
-        drain_into(child.stdout.take().unwrap(), out.clone());
-        drain_into(child.stderr.take().unwrap(), out.clone());
-        let s = Serve { child, port, stderr: out, _dir: dir };
-        wait_for(&s.stderr, "serving", Duration::from_secs(60));
-        std::mem::forget(s); // keep the server alive for the whole run
-        port
-    })
+    // Single-flight INCLUDING failure: if the server never comes up, every test
+    // must fail fast on the recorded cause — a per-test retry would regenerate
+    // the whole bin app each time (the cold debug-build generation takes
+    // minutes, which is also why this suite is #[ignore]d into the parity tier).
+    static PORT: OnceLock<Result<u16, String>> = OnceLock::new();
+    match PORT.get_or_init(spawn_bin_server) {
+        Ok(p) => *p,
+        Err(e) => panic!("shared bin server failed to start: {e}"),
+    }
+}
+
+fn spawn_bin_server() -> Result<u16, String> {
+    let server = repo_file("examples/bin/server.vyrn");
+    let dir = std::env::temp_dir().join(format!("vyrn_upages_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    let port = free_port();
+    let mut child = vyrn()
+        .arg("serve")
+        .arg(&server)
+        .arg("--port")
+        .arg(port.to_string())
+        .current_dir(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn vyrn serve: {e}"))?;
+    // The `serving` banner goes to stdout, generation errors to stderr — combine
+    // both so the wait sees the banner and a failure surfaces its cause.
+    let out = Arc::new(Mutex::new(String::new()));
+    drain_into(child.stdout.take().unwrap(), out.clone());
+    drain_into(child.stderr.take().unwrap(), out.clone());
+    let s = Serve { child, port, stderr: out, _dir: dir };
+    // Cold, cache-disabled generation of the WHOLE bin app in a debug build is
+    // minutes, not seconds — the old 60s wait panicked mid-generation and the
+    // per-test retries ground for an hour. 600s is the honest ceiling.
+    wait_for_or(&s.stderr, "serving", Duration::from_secs(600))?;
+    std::mem::forget(s); // keep the server alive for the whole run
+    Ok(port)
 }
 
 /// Send a raw request, read the whole `Connection: close` response, split into
 /// (status_line, headers, body).
 fn request(port: u16, raw: &str) -> (String, String, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    // A response path that fails to close the socket must FAIL the test, not
+    // hang the whole suite on an unbounded read_to_string.
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
     stream.write_all(raw.as_bytes()).expect("write");
     stream.flush().ok();
     let mut resp = String::new();
@@ -157,6 +175,7 @@ fn create_paste(port: u16, title: &str, body: &str, lang: &str) -> String {
 // ---- the document channel is unchanged -------------------------------------
 
 #[test]
+#[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn unmarked_about_is_html() {
     let port = bin_port();
     let (status, headers, body) = get(port, "/about");
@@ -168,6 +187,7 @@ fn unmarked_about_is_html() {
 }
 
 #[test]
+#[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn unmarked_missing_paste_is_404_html() {
     let port = bin_port();
     let (status, headers, _body) = get(port, "/p/nope404");
@@ -178,6 +198,7 @@ fn unmarked_missing_paste_is_404_html() {
 // ---- the data channel (RFC-0069 §2) ----------------------------------------
 
 #[test]
+#[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn marked_about_is_the_exact_static_payload() {
     let port = bin_port();
     let (status, headers, body) = get(port, "/about?__vyrn=data");
@@ -188,6 +209,7 @@ fn marked_about_is_the_exact_static_payload() {
 }
 
 #[test]
+#[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn marked_home_payload_carries_the_loaded_list() {
     let port = bin_port();
     let id = create_paste(port, "hello", "world", "text");
@@ -202,6 +224,7 @@ fn marked_home_payload_carries_the_loaded_list() {
 }
 
 #[test]
+#[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn marked_paste_props_round_trip_through_the_wire_codec() {
     let port = bin_port();
     let id = create_paste(port, "deep title", "the body text", "text");
@@ -218,6 +241,7 @@ fn marked_paste_props_round_trip_through_the_wire_codec() {
 }
 
 #[test]
+#[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn marked_missing_paste_is_the_error_payload() {
     let port = bin_port();
     let (status, headers, body) = get(port, "/p/ghost?__vyrn=data");
@@ -230,6 +254,7 @@ fn marked_missing_paste_is_the_error_payload() {
 }
 
 #[test]
+#[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn marked_non_client_route_falls_back_to_its_real_response() {
     let port = bin_port();
     let id = create_paste(port, "raw", "raw body content", "text");

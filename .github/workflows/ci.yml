@@ -107,6 +107,11 @@ jobs:
           echo "builtins: $WASI_BUILTINS"
           echo "wasmtime: $VYRN_WASMTIME"
           cargo test --quiet -p vyrn-cli --test parity -- --ignored --nocapture
+      - name: Universal-pages integration (RFC-0069)
+        # Ignored-tier like parity: spawning the bin server generates the whole
+        # app cold (minutes in a debug build) — too slow for the test job.
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test universal_pages -- --ignored
 
   bench:
     name: benchmarks (informational)
