@@ -127,9 +127,10 @@ export fn uiPayload(page: String, title: String, props: String, params: String) 
     return "{\"page\":" + toJson(page) + ",\"title\":" + toJson(title) + ",\"props\":" + props + ",\"params\":" + params + "}"
 }
 
-/// The `@error` data payload — the page the client renders on a load miss.
+/// The `@error` data payload — the page the client renders on a load miss. Carries
+/// a `title` so vyrn-nav v3 sets `document.title` on a client-rendered error.
 export fn uiErrorPayload(status: Int64, props: String) -> String {
-    return "{\"page\":\"@error\",\"status\":" + status.toString() + ",\"props\":" + props + "}"
+    return "{\"page\":\"@error\",\"status\":" + status.toString() + ",\"title\":\"Error\",\"props\":" + props + "}"
 }
 
 /// Wrap a payload body in a `200 application/json` `Response`. A marked request is a

@@ -48,6 +48,18 @@
 // Progressive enhancement: if this file is absent, nothing here ran, every <a>
 // is a normal link, and the app boot falls back to booting directly. `data-nav`
 // attributes are inert hints with no soft-nav present.
+//
+// WHAT v3 CHANGES over v2 (RFC-0069): v2 fetched full HTML on every nav — a real
+// server render each time, only the transition going soft. v3 goes the Nuxt route:
+// when the client page bundle is present (the island's wasm exposes `renderPage`),
+// a soft nav fetches ONLY a `{page, title, props}` JSON payload (the data marker
+// `?__vyrn=data`), renders the next page CLIENT-side through `renderPage`, and
+// paints the resulting tree into `<main>` via vyrn-dom — no HTML transfer, no shell
+// re-render. Fallbacks, in order: a route not in the client bundle (the server
+// answers non-JSON) → the v2 HTML swap; anything odd → v2's hard nav. If the bundle
+// is absent (no `renderPage` registered), v3 IS v2 — the data path never engages.
+
+import { renderTree } from "./vyrn-dom.js";
 
 const CONFIG = Object.assign(
   {
@@ -226,6 +238,31 @@ function applyDocument(newDoc) {
 }
 
 // ---------------------------------------------------------------------------
+// The client page renderer (RFC-0069 §3). The island's wasm bundle exports
+// `renderPage(payloadJson) -> String`; its boot hands it here. Feature-detected
+// once per nav: when it is a function, the navigator uses the data channel; when
+// it is null (no bundle, still booting, or a no-JS page), the navigator is v2.
+// ---------------------------------------------------------------------------
+let pageRenderer = null;
+
+// The data-marked variant of a URL — the same path, with `?__vyrn=data` added, so
+// the server answers with the page's JSON payload instead of its HTML document.
+function withDataMarker(url) {
+  const u = new URL(url, location.href);
+  u.searchParams.set("__vyrn", "data");
+  return u.href;
+}
+
+// Paint a `renderPage` tree (a page body whose root is `<main>`) into the live
+// document, replacing the current `<main>`. Throws if there is no `<main>` — the
+// caller turns that into a hard nav (fallback bias).
+function paintMain(treeJson) {
+  const liveMain = document.querySelector("main");
+  if (!liveMain) throw new Error("vyrn-nav: no <main> to paint into");
+  liveMain.replaceWith(renderTree(JSON.parse(treeJson)));
+}
+
+// ---------------------------------------------------------------------------
 // Navigation. One in-flight guard: a second click while a soft nav is running
 // falls back to a hard navigation (fallback bias).
 // ---------------------------------------------------------------------------
@@ -288,9 +325,15 @@ async function navigate(url, { push }) {
   inflight = controller;
   const timer = setTimeout(() => controller.abort(), CONFIG.timeoutMs);
 
+  // Feature-detect the client bundle once per nav: with a renderer, fetch the data
+  // marker (JSON payload); without, v2's HTML fetch. `x-vyrn-nav` stays a hint the
+  // server ignores (it keys off the query marker) — kept for observability.
+  const dataMode = typeof pageRenderer === "function";
+  const fetchUrl = dataMode ? withDataMarker(url) : url;
+
   let res;
   try {
-    res = await fetch(url, { headers: { "x-vyrn-nav": "soft" }, signal: controller.signal });
+    res = await fetch(fetchUrl, { headers: { "x-vyrn-nav": dataMode ? "data" : "soft" }, signal: controller.signal });
   } catch (err) {
     clearTimeout(timer);
     inflight = null;
@@ -301,37 +344,83 @@ async function navigate(url, { push }) {
   clearTimeout(timer);
   inflight = null;
 
+  if (!res.ok) {
+    emit("nav-error", { url, reason: "non-2xx" });
+    hardNav(url);
+    return;
+  }
   const ct = res.headers.get("content-type") || "";
-  // Fallback bias: a non-2xx response (incl. a 404 → the themed error page) OR a
-  // non-HTML body hands off to the browser. Only a 2xx HTML document is swapped.
-  if (!res.ok || !ct.includes("text/html")) {
-    emit("nav-error", { url, reason: res.ok ? "non-html" : "non-2xx" });
-    hardNav(url);
+
+  // Data channel (RFC-0069 §3): a JSON payload the client renders itself. Set the
+  // title, render the page's tree via the wasm, paint it into <main>, and re-sync
+  // islands (the create island re-mounts against its surviving instance). A
+  // distinguished fallback sentinel — or any exception — degrades to a hard nav.
+  if (dataMode && ct.includes("application/json")) {
+    let payloadText;
+    try {
+      payloadText = await res.text();
+    } catch (err) {
+      emit("nav-error", { url, reason: "body-failed" });
+      hardNav(url);
+      return;
+    }
+    try {
+      const treeJson = pageRenderer(payloadText);
+      if (!treeJson || treeJson === "__vyrn_fallback__") {
+        throw new Error("client bundle cannot render this page");
+      }
+      let payload = null;
+      try {
+        payload = JSON.parse(payloadText);
+      } catch (_) {
+        /* title stays as-is if the envelope won't parse */
+      }
+      if (push) pushEntry(url);
+      if (payload && payload.title != null) document.title = String(payload.title);
+      paintMain(treeJson);
+      syncIslands();
+      if (push) window.scrollTo(0, 0);
+      else restorePopScroll();
+      emit("nav-end", { url });
+    } catch (err) {
+      emit("nav-error", { url, reason: "render-failed" });
+      hardNav(url);
+    }
     return;
   }
 
-  let html;
-  try {
-    html = await res.text();
-  } catch (err) {
-    emit("nav-error", { url, reason: "body-failed" });
-    hardNav(url);
+  // HTML channel (v2): a full document — either pure-v2 mode, or a valid route not
+  // in the client bundle (a `.vyrn`/respond page whose marked request returned its
+  // real HTML). Swap it exactly as v2 does.
+  if (ct.includes("text/html")) {
+    let html;
+    try {
+      html = await res.text();
+    } catch (err) {
+      emit("nav-error", { url, reason: "body-failed" });
+      hardNav(url);
+      return;
+    }
+    try {
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      if (push) pushEntry(url);
+      applyDocument(doc);
+      if (push) window.scrollTo(0, 0);
+      else restorePopScroll();
+      emit("nav-end", { url });
+    } catch (err) {
+      // Any exception mid-swap: reload for real rather than leave a half-swapped
+      // page (hardNav discards whatever partial mutation happened).
+      emit("nav-error", { url, reason: "swap-failed" });
+      hardNav(url);
+    }
     return;
   }
 
-  try {
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    if (push) pushEntry(url);
-    applyDocument(doc);
-    if (push) window.scrollTo(0, 0);
-    else restorePopScroll();
-    emit("nav-end", { url });
-  } catch (err) {
-    // Any exception mid-swap: reload for real rather than leave a half-swapped
-    // page (hardNav discards whatever partial mutation happened).
-    emit("nav-error", { url, reason: "swap-failed" });
-    hardNav(url);
-  }
+  // Anything else — a non-client route answering non-JSON (e.g. `/raw` text/plain),
+  // or any other body — hands off to the browser.
+  emit("nav-error", { url, reason: "non-html" });
+  hardNav(url);
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +538,12 @@ export const vyrnNav = {
     islands.push(reg);
     syncIslands(); // boot now if the mount is already present
     return reg;
+  },
+  // The island boot hands its wasm `renderPage` here (RFC-0069 §3) once the client
+  // bundle is instantiated; a soft nav then renders pages client-side. Until it is
+  // set (no bundle, still booting, a no-JS page), navigation stays pure v2.
+  setPageRenderer(fn) {
+    pageRenderer = typeof fn === "function" ? fn : null;
   },
   config: CONFIG,
 };

@@ -28,11 +28,18 @@ async function bootApp(mountEl) {
   const rpc = makeRpcTransport({ baseUrl: "" });
   const app = await mount(wasmBytes, mountEl, {
     extern: { vyrnRpcCall: rpc.vyrnRpcCall },
-    // `takeNav()` returns a String; declare it so the export glue DECODES the
-    // wasm pointer into a JS string (RFC-0012 String ABI asymmetry — a raw
-    // export call otherwise hands back the pointer integer). See NOTES.
-    exportReturns: { takeNav: "string" },
+    // `takeNav()` and `vyrnRenderPage()` return Strings; declare them so the
+    // export glue DECODES the wasm pointer into a JS string (RFC-0012 String ABI
+    // asymmetry — a raw export call otherwise hands back the pointer integer).
+    exportReturns: { takeNav: "string", vyrnRenderPage: "string" },
   });
+
+  // RFC-0069 §3: hand the universal-page renderer to vyrn-nav so a soft nav renders
+  // the next page client-side from its JSON payload. The wasm instance survives
+  // navigations (RFC-0067), so once registered the renderer stays live.
+  if (window.vyrnNav && typeof window.vyrnNav.setPageRenderer === "function" && typeof app.exports.vyrnRenderPage === "function") {
+    window.vyrnNav.setPageRenderer((payloadJson) => app.exports.vyrnRenderPage(payloadJson));
+  }
 
   // Drain any pending soft-nav target the client set during a handler.
   function drainNav() {

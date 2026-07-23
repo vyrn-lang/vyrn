@@ -101,6 +101,37 @@ function parseAttrs(list) {
 }
 
 // ---------------------------------------------------------------------------
+// Static tree → DOM (RFC-0069 §3). Build a DOM subtree from a JSON `Html` tree
+// with NO event delegation or effect wiring — used by vyrn-nav v3 to paint a
+// soft-navigated PAGE body into `<main>`. Pages are pure over their props (any
+// interactivity lives in an island, which re-mounts itself, or in `<a href>`
+// links the navigator's document-level listener already intercepts), so a static
+// build is exactly right; the returned node replaces the live `<main>`.
+// ---------------------------------------------------------------------------
+function buildStatic(v) {
+  if (v.kind === "empty") return document.createComment("");
+  if (v.kind === "text") return document.createTextNode(v.text);
+  if (v.kind === "raw") {
+    const s = document.createElement("span");
+    s.style.display = "contents";
+    s.setAttribute("data-vyrn-raw", "");
+    s.innerHTML = v.html;
+    return s;
+  }
+  const dom = document.createElement(v.tag);
+  for (const name of Object.keys(v.attrs)) dom.setAttribute(name, v.attrs[name]);
+  if (!VOID.has(v.tag)) {
+    for (const kid of v.kids) dom.appendChild(buildStatic(kid));
+  }
+  return dom;
+}
+
+/// Parse a JSON `Html` tree (a `renderPage` result) into a detached DOM node.
+export function renderTree(json) {
+  return buildStatic(parseHtml(json));
+}
+
+// ---------------------------------------------------------------------------
 // The runtime instance.
 // ---------------------------------------------------------------------------
 export async function mount(wasmBytes, mountEl, opts = {}) {
