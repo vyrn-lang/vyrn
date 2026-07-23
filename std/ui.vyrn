@@ -80,6 +80,81 @@ export fn badRequest(message: String) -> PageError {
 }
 
 // ===========================================================================
+// The data-payload runtime (RFC-0069 §2) — RUNTIME helpers (not `gen`) the
+// synthesized router imports to answer a marked (`?__vyrn=data`) soft-nav request
+// with `{page, title, props[, params]}` JSON. Kept here as ordinary Vyrn (so the
+// JSON string building uses normal `"\""` literals, not a code quote) and shared by
+// every generated router rather than re-emitted per module.
+// ===========================================================================
+
+/// The data-request marker (RFC-0069 §2). The server `Request` exposes no headers,
+/// so the marker rides the query string; `uiRouteSegments` already strips the query
+/// from routing, so a marked request routes to the same page.
+export fn uiDataMarker() -> String {
+    return "__vyrn=data"
+}
+
+/// Whether `path`'s query carries the data marker.
+export fn uiIsDataRequest(path: String) -> Bool {
+    let ba = bytes(path)
+    let m = bytes(uiDataMarker())
+    if m.length > ba.length {
+        return false
+    }
+    let mut i = 0
+    while i + m.length <= ba.length {
+        let mut hit = true
+        let mut j = 0
+        while j < m.length {
+            if ba[i + j] != m[j] {
+                hit = false
+                j = m.length
+            } else {
+                j = j + 1
+            }
+        }
+        if hit {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// Assemble a page data payload. `props`/`params` are already JSON (a `toJson`
+/// result, or the literal `null`); `page`/`title` are JSON-encoded here.
+export fn uiPayload(page: String, title: String, props: String, params: String) -> String {
+    return "{\"page\":" + toJson(page) + ",\"title\":" + toJson(title) + ",\"props\":" + props + ",\"params\":" + params + "}"
+}
+
+/// The `@error` data payload — the page the client renders on a load miss.
+export fn uiErrorPayload(status: Int64, props: String) -> String {
+    return "{\"page\":\"@error\",\"status\":" + status.toString() + ",\"props\":" + props + "}"
+}
+
+/// Wrap a payload body in a `200 application/json` `Response`. A marked request is a
+/// DATA fetch: it always answers 200 (the payload's `page`/`status` describe what to
+/// render), while the UNMARKED document channel still returns a real 404 etc.
+export fn uiDataResponse(body: String) -> Response {
+    return Response { status: 200, contentType: "application/json", body: body }
+}
+
+/// The data response for a true miss (no route matched): the themed error page's
+/// payload at 404.
+export fn uiDataMiss() -> Response {
+    return uiDataResponse(uiErrorPayload(404, "{\"status\":404,\"message\":\"Not Found\"}"))
+}
+
+/// The `@error` data response for a load failure. Takes the `PageError` as a TYPED
+/// parameter so `toJson`/field access see its concrete type — a `PageError` bound
+/// directly from a `Result` match arm (`Err(e)`) otherwise loses its type for
+/// `toJson` (RFC-0069 §2), the same reason the loaded data goes through the page's
+/// own `encodeProps`.
+export fn uiErrorResponseOf(e: PageError) -> Response {
+    return uiDataResponse(uiErrorPayload(e.status, toJson(e)))
+}
+
+// ===========================================================================
 // Byte / string helpers — all comptime-pure (plain string building), so they are
 // legal in a `gen fn` and its transitive callees.
 // ===========================================================================
@@ -1088,10 +1163,34 @@ fn uiIssuesToError(issues: Array<Issue>) -> PageError {
 gen fn uiEmitRoute(p: UiPageInfo, n: Int64, layoutIdxs: Array<Int64>, errorIdx: Int64) -> String {
     let idx = n.toString()
     let mut out = "//@origin " + p.modPath + ".vyrn:1:1\n"
-    let segCount = p.segs.length.toString()
 
-    // uiTry<n>: structural match + dynamic-segment parse, returning Option<Response>.
-    out = out + "fn uiTry" + idx + "(segs: Array<String>) -> Option<Response> {\n"
+    // uiTry<n>: structural match + dynamic-segment parse → Some(uiRender<n>(args)).
+    out = out + uiEmitTryFn(p, idx, "uiTry", "uiRender")
+    // uiRender<n>: build Params, run load (if any), render through document().
+    out = out + uiEmitRender(p, idx, layoutIdxs, errorIdx)
+    out = out + "//@origin end\n"
+    return out
+}
+
+/// The data-channel counterpart of `uiEmitRoute` (RFC-0069 §2): `uiTryData<n>`
+/// (same structural match) → `uiRenderData<n>`, which runs `load` exactly as SSR
+/// would but answers with the `{page, title, props[, params]}` JSON payload. Emitted
+/// only for client-renderable `.vyx` pages.
+gen fn uiEmitDataRoute(p: UiPageInfo, n: Int64, layoutIdxs: Array<Int64>, errorIdx: Int64) -> String {
+    let idx = n.toString()
+    let mut out = "//@origin " + p.modPath + ".vyrn:1:1\n"
+    out = out + uiEmitTryFn(p, idx, "uiTryData", "uiRenderData")
+    out = out + uiEmitDataRender(p, idx, layoutIdxs, errorIdx)
+    out = out + "//@origin end\n"
+    return out
+}
+
+/// Emit a structural-match `try` fn named `<tryName><idx>` that, on a match, calls
+/// `<renderName><idx>(args)`. Shared by the HTML (`uiTry`/`uiRender`) and data
+/// (`uiTryData`/`uiRenderData`) channels — identical routing, different renderer.
+gen fn uiEmitTryFn(p: UiPageInfo, idx: String, tryName: String, renderName: String) -> String {
+    let segCount = p.segs.length.toString()
+    let mut out = "fn " + tryName + idx + "(segs: Array<String>) -> Option<Response> {\n"
     out = out + "    if segs.length != " + segCount + " {\n        return None\n    }\n"
     let mut i = 0
     for s in p.segs {
@@ -1111,30 +1210,26 @@ gen fn uiEmitRoute(p: UiPageInfo, n: Int64, layoutIdxs: Array<Int64>, errorIdx: 
         }
         k = k + 1
     }
-    out = out + "    return " + uiEmitDynMatch(p, 0, idx) + "\n}\n"
-
-    // uiRender<n>: build Params, run load (if any), render through document().
-    out = out + uiEmitRender(p, idx, layoutIdxs, errorIdx)
-    out = out + "//@origin end\n"
+    out = out + "    return " + uiEmitDynMatch(p, 0, idx, renderName) + "\n}\n"
     return out
 }
 
 /// The nested `fromJson` parse over the INTEGER dynamic segments (position `k` in
-/// `dynNames`), ending in `Some(uiRender<idx>(args))`. String segments are already
-/// bound as `let v<k>` in `uiTry`, so they are skipped here.
-gen fn uiEmitDynMatch(p: UiPageInfo, k: Int64, idx: String) -> String {
+/// `dynNames`), ending in `Some(<renderName><idx>(args))`. String segments are
+/// already bound as `let v<k>` in the try fn, so they are skipped here.
+gen fn uiEmitDynMatch(p: UiPageInfo, k: Int64, idx: String, renderName: String) -> String {
     if k >= p.dynNames.length {
-        return "Some(uiRender" + idx + "(" + joinWith(uiDynArgs(p.dynNames), ", ") + "))"
+        return "Some(" + renderName + idx + "(" + joinWith(uiDynArgs(p.dynNames), ", ") + "))"
     }
     if p.dynTypes[k] == "String" {
         // Already bound in uiTry; move on.
-        return uiEmitDynMatch(p, k + 1, idx)
+        return uiEmitDynMatch(p, k + 1, idx, renderName)
     }
     // Find the segment index of the k-th dynamic segment.
     let segIdx = uiDynSegIndex(p.segs, k)
     let vv = "v" + k.toString()
     let mut out = "match fromJson(UiRouteInt, segs[" + segIdx.toString() + "]) {\n"
-    out = out + "        Valid(" + vv + ") => " + uiEmitDynMatch(p, k + 1, idx) + ",\n"
+    out = out + "        Valid(" + vv + ") => " + uiEmitDynMatch(p, k + 1, idx, renderName) + ",\n"
     out = out + "        Invalid(issues) => None,\n"
     out = out + "    }"
     return out
@@ -1352,6 +1447,78 @@ gen fn uiEmitRender(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorI
     return out
 }
 
+// ---- RFC-0069 §2: the data-channel renderers -------------------------------
+
+/// The success data payload expression for a page: `uiDataResponse(uiPayload(id,
+/// title, props, params))`, where `title` is the SAME threaded title as SSR, `props`
+/// is `toJson(d)` (or `null` with no loader), and `params` is `toJson(p)` for a
+/// dynamic route (or `null`). `d`/`p` must be in scope where this is spliced.
+gen fn uiDataSuccessBody(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>) -> String {
+    let args = uiPageCallArgs(p)
+    let pageTitleCall = if p.isVyx { "p" + idx + ".headTitle(" + args + ")" } else { "" }
+    let titleE = uiTitleExpr(layoutIdxs, pageTitleCall, p.urlPattern)
+    // Props serialize through the page's typed `encodeProps` (RFC-0069 §2) so a
+    // match-bound loader result keeps its concrete type for `toJson`.
+    let propsE = if p.hasLoad { "p" + idx + ".encodeProps(d)" } else { "\"null\"" }
+    let paramsE = if p.dynNames.length > 0 { "toJson(p)" } else { "\"null\"" }
+    return "uiDataResponse(uiPayload(" + uiStrLit(uiPageId(p)) + ", " + titleE + ", " + propsE + ", " + paramsE + "))"
+}
+
+/// The data-channel loader dispatch: run `loadCall`, answer the success payload, and
+/// on failure answer the `@error` payload (a `Result` carries its status; a
+/// `Validation` folds to 422). A plain loader has no failure path (RFC-0069 §0).
+gen fn uiEmitDataLoadDispatch(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, loadCall: String) -> String {
+    if p.loadKind == "plain" {
+        return "    let d = " + loadCall + "\n    return " + uiDataSuccessBody(p, idx, layoutIdxs) + "\n}\n"
+    }
+    let okVar = if p.loadKind == "result" { "Ok" } else { "Valid" }
+    let mut out = "    return match " + loadCall + " {\n"
+    out = out + "        " + okVar + "(d) => " + uiDataSuccessBody(p, idx, layoutIdxs) + ",\n"
+    if p.loadKind == "result" {
+        out = out + "        Err(uiPe) => uiErrorResponseOf(uiPe),\n"
+    } else {
+        // A `Validation` failure folds to a self-contained 422 error payload (the
+        // detailed issue list stays on the SSR/document channel).
+        out = out + "        Invalid(issues) => uiDataResponse(uiErrorPayload(422, \"{\\\"status\\\":422,\\\"message\\\":\\\"Unable to load this page\\\"}\")),\n"
+    }
+    out = out + "    }\n}\n"
+    return out
+}
+
+/// The `uiRenderData<idx>` function (RFC-0069 §2): build `Params`, run `load` exactly
+/// as SSR would, and answer the `{page, title, props[, params]}` JSON payload.
+/// Emitted only for client-renderable `.vyx` pages (never a raw-`respond` page).
+gen fn uiEmitDataRender(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorIdx: Int64) -> String {
+    let mut params: Array<String> = []
+    let mut ai = 0
+    while ai < p.dynNames.length {
+        params.push("v" + ai.toString() + ": " + p.dynTypes[ai])
+        ai = ai + 1
+    }
+    let mut out = "fn uiRenderData" + idx + "(" + joinWith(params, ", ") + ") -> Response {\n"
+
+    // Static page, no loader: the payload carries an empty props.
+    if p.dynNames.length == 0 && p.hasLoad == false {
+        out = out + "    return " + uiDataSuccessBody(p, idx, layoutIdxs) + "\n}\n"
+        return out
+    }
+    // Static loader (zero-parameter `load()`, RFC-0069 §0).
+    if p.dynNames.length == 0 && p.hasLoad {
+        out = out + uiEmitDataLoadDispatch(p, idx, layoutIdxs, "p" + idx + ".load()")
+        return out
+    }
+    // Dynamic route: build the Params value (its fields the dynamic segments).
+    let paramsCtor = if p.paramsModule != "" { "uiParams" + idx } else { "p" + idx + ".Params" }
+    out = out + "    let p = " + paramsCtor + " { " + uiParamFieldInits(p.segs) + " }\n"
+    if p.hasLoad {
+        out = out + uiEmitDataLoadDispatch(p, idx, layoutIdxs, "p" + idx + ".load(p)")
+        return out
+    }
+    // Dynamic, no loader: the payload carries the params only.
+    out = out + "    return " + uiDataSuccessBody(p, idx, layoutIdxs) + "\n}\n"
+    return out
+}
+
 /// The Params record-literal field inits (`id: v0, slug: v1`) for a page's
 /// dynamic segments.
 gen fn uiParamFieldInits(segs: Array<String>) -> String {
@@ -1484,6 +1651,10 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
     // the `PageError` import so a router without them stays minimal).
     let mut anyThreading = false
     let mut anyErrDoc = false
+    // RFC-0069 §2: whether any page is client-renderable (a `.vyx` page), gating the
+    // whole data channel. A router of only `.vyrn`/`respond` pages emits exactly the
+    // pre-RFC module (byte-identical), so nothing without client pages is disturbed.
+    let mut anyClientPage = false
     i = 0
     while i < pages.length {
         let lidx = uiLayoutChain(pages[i], layouts)
@@ -1494,10 +1665,16 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
         if uiUsesErrDoc(pages[i], eidx) {
             anyErrDoc = true
         }
+        if uiClientRenderable(pages[i]) {
+            anyClientPage = true
+        }
         i = i + 1
     }
     if anyErrDoc {
         out = out + "import { PageError } from \"std/ui\"\n"
+    }
+    if anyClientPage {
+        out = out + "import { uiIsDataRequest, uiPayload, uiErrorPayload, uiDataResponse, uiDataMiss, uiErrorResponseOf } from \"std/ui\"\n"
     }
 
     // Segment parsing for `Int64` dynamic params.
@@ -1538,13 +1715,42 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
         out = out + uiEmitRoute(pages[i], i, lidx, eidx)
         i = i + 1
     }
+    // Data-channel try/render pairs (RFC-0069 §2), for client-renderable pages only.
+    if anyClientPage {
+        i = 0
+        while i < pages.length {
+            if uiClientRenderable(pages[i]) {
+                let lidx = uiLayoutChain(pages[i], layouts)
+                let eidx = uiErrorIndex(pages[i], errors)
+                out = out + uiEmitDataRoute(pages[i], i, lidx, eidx)
+            }
+            i = i + 1
+        }
+    }
 
-    // route(): static routes first, then dynamic, first hit wins.
+    // route(): static routes first, then dynamic, first hit wins. The normal HTML
+    // dispatch (`hit`) runs identically whether or not the request is marked; only a
+    // MARKED request (RFC-0069 §2) additionally consults the data channel and, when
+    // it renders a client page, answers JSON instead — the unmarked response is
+    // byte-identical to today.
     out = out + "export fn route(req: Request) -> Response {\n"
     out = out + "    let segs = uiRouteSegments(req.path)\n"
     out = out + "    let mut hit: Option<Response> = None\n"
     for order in uiDispatchOrder(pages) {
         out = out + "    if uiRouteNone(hit) {\n        hit = uiTry" + order.toString() + "(segs)\n    }\n"
+    }
+    if anyClientPage {
+        out = out + "    if uiIsDataRequest(req.path) {\n"
+        out = out + "        let mut dhit: Option<Response> = None\n"
+        for order in uiDispatchOrder(pages) {
+            if uiClientRenderable(pages[order]) {
+                out = out + "        if uiRouteNone(dhit) {\n            dhit = uiTryData" + order.toString() + "(segs)\n        }\n"
+            }
+        }
+        // A client page → JSON payload. A valid non-client route (a `.vyrn`/respond
+        // page) → its real Response (non-JSON, so the client hard-navs). A true miss
+        // → the `@error` payload (client renders the themed error page).
+        out = out + "        return match dhit {\n            Some(r) => r,\n            None => match hit {\n                Some(r) => r,\n                None => uiDataMiss(),\n            },\n        }\n    }\n"
     }
     out = out + "    return match hit {\n        Some(r) => r,\n        None => uiRouteNotFound(),\n    }\n}\n"
     return out

@@ -3320,6 +3320,13 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
         out = out + vyxEmitClientRender(hasLoad, paramNames, dataType)
     } else {
         out = out + vyxEmitHeadFns(hs.head, sig, prelude)
+        // RFC-0069 §2: a loader page exports a TYPED props encoder so the server data
+        // payload serializes the loaded data where its concrete type is in scope —
+        // `toJson` on a `Result`/`Validation` match-bound value cannot infer its type,
+        // but a parameter carries it (exactly as `page(p, d: Data)` does).
+        if hasLoad {
+            out = out + "export fn encodeProps(d: " + dataType + ") -> String {\n    return toJson(d)\n}\n"
+        }
     }
     return out
 }
