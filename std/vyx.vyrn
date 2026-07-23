@@ -2483,7 +2483,7 @@ export gen fn componentsThemed(dir: String, theme: String) -> String {
 /// spelling (`loadRet` — `Validation<…>` or `Result<…>`, RFC-0041 §3), and whether
 /// it opts out of the layout with `layout="none"` (RFC-0041 §1). `err` names a
 /// params fault.
-type VyxPageShape = { paramNames: Array<String>, paramTypes: Array<String>, hasLoad: Bool, loadRet: String, layoutNone: Bool, err: String }
+type VyxPageShape = { paramNames: Array<String>, paramTypes: Array<String>, hasLoad: Bool, loadHasParams: Bool, loadRet: String, layoutNone: Bool, err: String }
 
 /// Whether the script text declares a statement-leading `fn load` (or
 /// `export fn load`) — the page's optional loader.
@@ -2497,9 +2497,30 @@ fn vyxScriptHasLoad(script: String) -> Bool {
     return false
 }
 
+/// Whether the loader takes a `Params` argument (`fn load(p: Params)`) or is a
+/// zero-parameter static loader (`fn load()`, RFC-0069 §0). Scans the `(…)` of the
+/// `fn load` line: any non-blank content means it takes params. "false" when there
+/// is no loader.
+fn vyxScriptLoadHasParams(script: String) -> Bool {
+    for line in vyxLines(script) {
+        let t = trim(line)
+        if t.startsWith("fn load") || t.startsWith("export fn load") {
+            let tb = bytes(t)
+            let open = vyxFind(tb, bytes("("), 0)
+            let close = vyxFind(tb, bytes(")"), 0)
+            if open < 0 || close <= open {
+                return false
+            }
+            return trim(vyxSlice(tb, open + 1, close)).byteLength > 0
+        }
+    }
+    return false
+}
+
 /// The loader's declared return-type spelling — the text between `->` and the
 /// opening `{` of the `fn load(…)` line (RFC-0041 §3: `Validation<Data>` vs
-/// `Result<Data, PageError>`). "" when there is no loader.
+/// `Result<Data, PageError>`, or, RFC-0069 §0, a plain `T`). "" when there is no
+/// loader.
 fn vyxScriptLoadRet(script: String) -> String {
     for line in vyxLines(script) {
         let t = trim(line)
@@ -2525,6 +2546,11 @@ fn vyxScriptLoadRet(script: String) -> String {
 fn vyxLoaderDataType(loadRet: String) -> String {
     if loadRet.byteLength == 0 {
         return ""
+    }
+    // RFC-0069 §0: a plain loader (`fn load() -> Array<Paste>`) carries its data
+    // type directly — only the `Validation<…>`/`Result<…>` wrappers are unwrapped.
+    if loadRet.startsWith("Validation<") == false && loadRet.startsWith("Result<") == false {
+        return loadRet
     }
     let ba = bytes(loadRet)
     let open = vyxFind(ba, bytes("<"), 0)
@@ -2605,11 +2631,11 @@ export gen fn vyxPageShape(source: String) -> VyxPageShape {
     let ba = bytes(source)
     let scriptSec = vyxSection(ba, "script", true)
     if scriptSec.found == false {
-        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadRet: "", layoutNone: false, err: "" }
+        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadRet: "", layoutNone: false, err: "" }
     }
     let bad = vyxImportsFirstViolation(ba, scriptSec.start, scriptSec.end, "params")
     if bad > 0 {
-        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadRet: "", layoutNone: false, err: vyxErr("VYX_IMPORTS_FIRST", "vyx_page", bad) }
+        return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadRet: "", layoutNone: false, err: vyxErr("VYX_IMPORTS_FIRST", "vyx_page", bad) }
     }
     let script = vyxSlice(ba, scriptSec.start, scriptSec.end)
     let sb = bytes(script)
@@ -2620,7 +2646,7 @@ export gen fn vyxPageShape(source: String) -> VyxPageShape {
     let mut types: Array<String> = []
     if pb.found {
         if pb.malformed {
-            return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadRet: "", layoutNone: false, err: "VYX_BAD_PARAMS\n" }
+            return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadRet: "", layoutNone: false, err: "VYX_BAD_PARAMS\n" }
         }
         let end = vyxMatchCurly(sb, pb.braceAt)
         for part in vyxSplitFields(vyxSlice(sb, pb.braceAt + 1, end - 1)) {
@@ -2636,14 +2662,14 @@ export gen fn vyxPageShape(source: String) -> VyxPageShape {
                     k = k + 1
                 }
                 if colon < 0 {
-                    return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadRet: "", layoutNone: false, err: "VYX_BAD_PARAMS\n" }
+                    return VyxPageShape { paramNames: [], paramTypes: [], hasLoad: false, loadHasParams: false, loadRet: "", layoutNone: false, err: "VYX_BAD_PARAMS\n" }
                 }
                 names.push(trim(vyxSlice(pbf, 0, colon)))
                 types.push(trim(vyxSlice(pbf, colon + 1, pbf.length)))
             }
         }
     }
-    return VyxPageShape { paramNames: names, paramTypes: types, hasLoad: vyxScriptHasLoad(script), loadRet: loadRet, layoutNone: layoutNone, err: "" }
+    return VyxPageShape { paramNames: names, paramTypes: types, hasLoad: vyxScriptHasLoad(script), loadHasParams: vyxScriptLoadHasParams(script), loadRet: loadRet, layoutNone: layoutNone, err: "" }
 }
 
 /// Prefix `export ` onto a statement-leading `fn load` / `type Data` line so the
@@ -2899,8 +2925,13 @@ export gen fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String,
     // The page entry the router calls, forwarding the Params fields (and the
     // loaded Data when there is a loader) into the compiled body.
     if hasLoad {
-        let args = if paramNames.length > 0 { vyxPageArgs(paramNames) + ", d" } else { "d" }
-        out = out + "export fn page(p: Params, d: " + dataType + ") -> Html {\n    return uiPageBody(" + args + ")\n}\n"
+        if paramNames.length > 0 {
+            out = out + "export fn page(p: Params, d: " + dataType + ") -> Html {\n    return uiPageBody(" + vyxPageArgs(paramNames) + ", d)\n}\n"
+        } else {
+            // A zero-parameter static loader (RFC-0069 §0): no `Params`, the body
+            // takes only the loaded data.
+            out = out + "export fn page(d: " + dataType + ") -> Html {\n    return uiPageBody(d)\n}\n"
+        }
     } else if paramNames.length > 0 {
         out = out + "export fn page(p: Params) -> Html {\n    return uiPageBody(" + vyxPageArgs(paramNames) + ")\n}\n"
     } else {
@@ -2909,7 +2940,11 @@ export gen fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String,
     // The `head()`/`headTitle()` pair (RFC-0041 §2), taking the same shape as
     // `page` so a dynamic head can read the params/loaded data. `std/ui` threads
     // the result into `document(title, head, body)`.
-    let sig = if hasLoad { "p: Params, d: " + dataType } else { if paramNames.length > 0 { "p: Params" } else { "" } }
+    let sig = if hasLoad {
+        if paramNames.length > 0 { "p: Params, d: " + dataType } else { "d: " + dataType }
+    } else {
+        if paramNames.length > 0 { "p: Params" } else { "" }
+    }
     let mut prelude = ""
     for n in paramNames {
         prelude = prelude + "    let " + n + " = p." + n + "\n"

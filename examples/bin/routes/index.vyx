@@ -1,7 +1,8 @@
 <script>
-// GET / — the home page body (the shell now lives in routes/layout.vyx). Helpers
-// read the store through the contract accessors; the browser create-island
-// hydrates #app, booted by the /app.js head include (RFC-0041 §2).
+// GET / — the home page body (the shell now lives in routes/layout.vyx). The
+// recent-pastes list enters through a zero-parameter `load()` (RFC-0069 §0) so the
+// page is pure over its data and the CLIENT bundle can render it on a soft nav; the
+// browser create-island hydrates #app, booted by the /app.js head include.
 import { listPastes } from "../contract"
 import { Paste } from "../wire"
 import { format, fromMillis } from "std/time"
@@ -11,12 +12,8 @@ head {
     module "/app.js"
 }
 
-fn recent() -> Array<Paste> {
+fn load() -> Array<Paste> {
     return listPastes().pastes
-}
-
-fn pasteTally() -> Int64 {
-    return listPastes().pastes.length
 }
 
 fn shownTitle(p: Paste) -> String {
@@ -32,11 +29,11 @@ fn shownTitle(p: Paste) -> String {
     <p class="sub">{{ t.appTagline() }}</p>
     <div id="app"></div>
     <h2>{{ t.binRecent() }}</h2>
-    <p v-if="pasteTally() == 0" class="empty">{{ t.binEmpty() }}</p>
+    <p v-if="data.length == 0" class="empty">{{ t.binEmpty() }}</p>
     <div v-else>
-        <p class="count">{{ t.binCount(pasteTally()) }}</p>
+        <p class="count">{{ t.binCount(data.length) }}</p>
         <ul class="pastelist">
-            <li class="paste" v-for="p in recent()" :key="p.id">
+            <li class="paste" v-for="p in data" :key="p.id">
                 <a :href='"/p/" + p.id' data-nav="prefetch" class="ptitle">{{ shownTitle(p) }}</a>
                 <span class="plang">{{ p.lang }}</span>
                 <span class="pwhen">{{ t.binCreated(format(fromMillis(p.created))) }}</span>

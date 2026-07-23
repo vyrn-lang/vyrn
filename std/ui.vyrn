@@ -502,6 +502,10 @@ type UiPageInfo = {
     // dynNames (`Int64` or `String`, RFC-0039 §5).
     dynTypes: Array<String>,
     hasLoad: Bool,
+    // loadHasParams: the loader takes a `Params` argument (`fn load(p: Params)`) —
+    // false for a zero-parameter static loader (`fn load()`, RFC-0069 §0) and for a
+    // page with no loader.
+    loadHasParams: Bool,
     // hasRespond: the page exports `fn respond(p: Params) -> Response` INSTEAD of
     // `page` — full content-type/status control, dispatched directly (RFC-0039 §5).
     hasRespond: Bool,
@@ -519,7 +523,8 @@ type UiPageInfo = {
     // the scan), for matching the nearest-ancestor layout/error (RFC-0041 §1/§3).
     dirPrefix: Array<String>,
     // loadKind: "validation" (`load -> Validation<Data>`), "result"
-    // (`load -> Result<Data, PageError>`, RFC-0041 §3), or "" (no loader).
+    // (`load -> Result<Data, PageError>`, RFC-0041 §3), "plain" (`load -> T`, an
+    // unwrapped data type with no failure path, RFC-0069 §0), or "" (no loader).
     loadKind: String,
     // layoutNone: the page opted out of layout wrapping with `layout="none"`
     // (RFC-0041 §1); only `.vyx` pages can.
@@ -553,7 +558,11 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     let entry = if hasRespond { "respond" } else { "page" }
     let arity = uiFnArity(iface, entry)
     let hasLoad = uiHasFn(iface, "load")
-    let needParams = dyns.length > 0 || hasLoad
+    // RFC-0069 §0: a zero-parameter static loader (`fn load()`) needs no `Params`;
+    // a `load(p: Params)` (arity 1) does. A page with no loader relies on its
+    // dynamic segments alone.
+    let loadHasParams = hasLoad && uiFnArity(iface, "load") > 0
+    let needParams = dyns.length > 0 || loadHasParams
 
     // dynTypes: each dynamic segment's declared type, parallel to `dyns`.
     let mut dynTypes: Array<String> = []
@@ -613,21 +622,23 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
             err = err + uiErrLine("PAGES_RESPOND_SIGNATURE", fid + "__respond_must_return_Response")
         }
     } else if hasLoad {
-        if arity != 2 {
-            err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__loader_page_must_be_page_p_Params_d_Data")
+        // A `load(p: Params)` pairs with `page(p, d)` (arity 2); a zero-parameter
+        // static `load()` (RFC-0069 §0) pairs with `page(d)` (arity 1).
+        if loadHasParams {
+            if arity != 2 {
+                err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__loader_page_must_be_page_p_Params_d_Data")
+            }
+        } else {
+            if arity != 1 {
+                err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__static_loader_page_must_be_page_d_Data")
+            }
+            if dyns.length > 0 {
+                err = err + uiErrLine("PAGES_LOAD_SIGNATURE", fid + "__dynamic_route_load_must_take_a_Params_parameter")
+            }
         }
-        if uiFnArity(iface, "load") != 1 {
-            err = err + uiErrLine("PAGES_LOAD_SIGNATURE", fid + "__load_must_take_one_Params_parameter")
-        }
-        // A loader returns `Validation<Data>` (Invalid → 422 error page) or
-        // `Result<Data, PageError>` (Err → the carried-status error page, §3).
-        let lret = uiFnRet(iface, "load")
-        if lret.startsWith("Validation<") == false && lret.startsWith("Result<") == false {
-            err = err + uiErrLine("PAGES_LOAD_SIGNATURE", fid + "__load_must_return_Validation_Data_or_Result_Data_PageError")
-        }
-        if uiHasType(iface, "Data") == false {
-            err = err + uiErrLine("PAGES_MISSING_DATA_TYPE", fid)
-        }
+        // A loader returns `Validation<Data>` (Invalid → 422 error page),
+        // `Result<Data, PageError>` (Err → the carried-status error page, §3), or an
+        // unwrapped plain data type (RFC-0069 §0 — no failure path).
     } else {
         if dyns.length > 0 && arity != 1 {
             err = err + uiErrLine("PAGES_PAGE_SIGNATURE", fid + "__dynamic_page_must_be_page_p_Params")
@@ -648,10 +659,10 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
         }
     }
 
-    // Loader kind (RFC-0041 §3): "" (none), "result" (Result<Data, PageError>),
-    // or "validation" (Validation<Data>).
+    // Loader kind: "" (none), "result" (Result<Data, PageError>), "validation"
+    // (Validation<Data>), or "plain" (an unwrapped data type, RFC-0069 §0).
     let loadKind = if hasLoad {
-        if uiFnRet(iface, "load").startsWith("Result<") { "result" } else { "validation" }
+        if uiFnRet(iface, "load").startsWith("Result<") { "result" } else if uiFnRet(iface, "load").startsWith("Validation<") { "validation" } else { "plain" }
     } else {
         ""
     }
@@ -664,6 +675,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
         dynNames: dyns,
         dynTypes: dynTypes,
         hasLoad: hasLoad,
+        loadHasParams: loadHasParams,
         hasRespond: hasRespond,
         isVyx: false,
         pageArity: arity,
@@ -689,9 +701,12 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
     let shape = vyxPageShape(src)
     let mut err = shape.err
     let hasLoad = shape.hasLoad
-    // Loader kind (RFC-0041 §3) from the declared return-type spelling.
+    // RFC-0069 §0: a zero-parameter static `load()` needs no `params` block.
+    let loadHasParams = hasLoad && shape.loadHasParams
+    // Loader kind from the declared return-type spelling: "result", "validation"
+    // (RFC-0041 §3), or "plain" (an unwrapped data type, RFC-0069 §0).
     let loadKind = if hasLoad {
-        if shape.loadRet.startsWith("Result<") { "result" } else { "validation" }
+        if shape.loadRet.startsWith("Result<") { "result" } else if shape.loadRet.startsWith("Validation<") { "validation" } else { "plain" }
     } else {
         ""
     }
@@ -701,7 +716,12 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
     for d in dyns {
         dynTypes.push("Int64")
     }
-    let needParams = dyns.length > 0 || hasLoad
+    // A dynamic route whose loader takes no params is a mismatch (its segment has
+    // nowhere to bind, RFC-0069 §0).
+    if hasLoad && loadHasParams == false && dyns.length > 0 {
+        err = err + uiErrLine("PAGES_LOAD_SIGNATURE", fid + "__dynamic_route_load_must_take_a_Params_parameter")
+    }
+    let needParams = dyns.length > 0 || loadHasParams
     if needParams {
         for d in dyns {
             if includes(shape.paramNames, d) == false {
@@ -732,7 +752,13 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
         }
     }
 
-    let arity = if hasLoad { 2 } else { if dyns.length > 0 { 1 } else { 0 } }
+    // page arity: a param loader → page(p, d) = 2; a zero-param loader → page(d) =
+    // 1 (RFC-0069 §0); a params-only page → page(p) = 1; a static page → page() = 0.
+    let arity = if hasLoad {
+        if loadHasParams { 2 } else { 1 }
+    } else {
+        if dyns.length > 0 { 1 } else { 0 }
+    }
     return UiPageInfo {
         modPath: modPath,
         fileId: fid,
@@ -741,6 +767,7 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
         dynNames: dyns,
         dynTypes: dynTypes,
         hasLoad: hasLoad,
+        loadHasParams: loadHasParams,
         hasRespond: false,
         isVyx: true,
         pageArity: arity,
@@ -766,6 +793,7 @@ gen fn uiPageErr(modPath: String, fid: String, segs: Array<String>, dirPrefix: A
         dynNames: dyns,
         dynTypes: dynTypes,
         hasLoad: false,
+        loadHasParams: false,
         hasRespond: false,
         isVyx: false,
         pageArity: 0,
@@ -1145,7 +1173,12 @@ gen fn uiDynSegIndex(segs: Array<String>, k: Int64) -> Int64 {
 /// a loader page, "p" for a params-only page, "" for a static page.
 gen fn uiPageCallArgs(p: UiPageInfo) -> String {
     if p.hasLoad {
-        return "p, d"
+        // A zero-parameter static loader renders `page(d)`; a param loader
+        // `page(p, d)` (RFC-0069 §0).
+        if p.loadHasParams {
+            return "p, d"
+        }
+        return "d"
     }
     if p.dynNames.length > 0 {
         return "p"
@@ -1222,6 +1255,11 @@ gen fn uiSuccessResponse(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>) -
 /// Whether the page dispatches a failure through `uiErrDoc` (a `Result` loader, or
 /// a `Validation` loader with a nearest `error.vyx`).
 gen fn uiUsesErrDoc(p: UiPageInfo, errorIdx: Int64) -> Bool {
+    // A plain loader (RFC-0069 §0) has no failure path, so it never renders an
+    // error document.
+    if p.loadKind == "plain" {
+        return false
+    }
     return p.hasLoad && (p.loadKind == "result" || errorIdx >= 0)
 }
 
@@ -1235,6 +1273,28 @@ gen fn uiEmitErrDoc(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorI
     let titleE = uiTitleExpr(layoutIdxs, "", "Error")
     let mut out = "fn uiErrDoc" + idx + "(uiPe: PageError) -> Response {\n"
     out = out + "    return Response { status: uiPe.status, contentType: \"text/html\", body: document(" + titleE + ", " + headE + ", " + bodyExpr + ") }\n}\n"
+    return out
+}
+
+/// The loader dispatch for a page: run `loadCall` (`p<idx>.load()` or
+/// `.load(p)`) and render its outcome. A plain loader (RFC-0069 §0) binds the data
+/// and renders (no failure path); a `Result`/`Validation` loader matches its arms,
+/// routing a failure to the nearest error page (RFC-0041 §3).
+gen fn uiEmitLoadDispatch(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorIdx: Int64, loadCall: String) -> String {
+    if p.loadKind == "plain" {
+        return "    let d = " + loadCall + "\n    return " + uiSuccessResponse(p, idx, layoutIdxs) + "\n}\n"
+    }
+    let okVar = if p.loadKind == "result" { "Ok" } else { "Valid" }
+    let mut out = "    return match " + loadCall + " {\n"
+    out = out + "        " + okVar + "(d) => " + uiSuccessResponse(p, idx, layoutIdxs) + ",\n"
+    if p.loadKind == "result" {
+        out = out + "        Err(uiPe) => uiErrDoc" + idx + "(uiPe),\n"
+    } else if errorIdx >= 0 {
+        out = out + "        Invalid(issues) => uiErrDoc" + idx + "(uiIssuesToError(issues)),\n"
+    } else {
+        out = out + "        Invalid(issues) => Response { status: 422, contentType: \"text/html\", body: document(\"Error\", [], uiRouteError(issues)) },\n"
+    }
+    out = out + "    }\n}\n"
     return out
 }
 
@@ -1260,6 +1320,16 @@ gen fn uiEmitRender(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorI
         return out
     }
 
+    // Static loader page (no dynamic segments, a zero-parameter `load()`,
+    // RFC-0069 §0): no `Params`, dispatch the loader directly.
+    if p.dynNames.length == 0 && p.hasLoad {
+        out = out + uiEmitLoadDispatch(p, idx, layoutIdxs, errorIdx, "p" + idx + ".load()")
+        if uiUsesErrDoc(p, errorIdx) {
+            out = out + uiEmitErrDoc(p, idx, layoutIdxs, errorIdx)
+        }
+        return out
+    }
+
     // A Params value, its fields named by the dynamic segments. A foreign
     // `Params` (RFC-0031) is constructed through its `uiParams<idx>` import
     // alias; a page's own through the `p<idx>` namespace, exactly as before.
@@ -1271,17 +1341,7 @@ gen fn uiEmitRender(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorI
         return out
     }
     if p.hasLoad {
-        let okVar = if p.loadKind == "result" { "Ok" } else { "Valid" }
-        out = out + "    return match p" + idx + ".load(p) {\n"
-        out = out + "        " + okVar + "(d) => " + uiSuccessResponse(p, idx, layoutIdxs) + ",\n"
-        if p.loadKind == "result" {
-            out = out + "        Err(uiPe) => uiErrDoc" + idx + "(uiPe),\n"
-        } else if errorIdx >= 0 {
-            out = out + "        Invalid(issues) => uiErrDoc" + idx + "(uiIssuesToError(issues)),\n"
-        } else {
-            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"text/html\", body: document(\"Error\", [], uiRouteError(issues)) },\n"
-        }
-        out = out + "    }\n}\n"
+        out = out + uiEmitLoadDispatch(p, idx, layoutIdxs, errorIdx, "p" + idx + ".load(p)")
         if uiUsesErrDoc(p, errorIdx) {
             out = out + uiEmitErrDoc(p, idx, layoutIdxs, errorIdx)
         }
