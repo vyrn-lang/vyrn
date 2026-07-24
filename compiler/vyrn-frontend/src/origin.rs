@@ -242,6 +242,69 @@ impl OriginMaps {
     }
 }
 
+/// The `//@deprecated` directives in one synthesized module's source, as
+/// WARNING diagnostics (RFC-0071 M2b).
+///
+/// ```text
+/// //@deprecated ./routes/p/[id].vyx:13:1 the `head { … }` block — write `…` instead
+/// ```
+///
+/// A generator has no diagnostic channel of its own: its only reporting
+/// convention is an identifier line that fails to parse, which is fatal by
+/// construction and therefore the opposite of a deprecation notice. So the
+/// notice rides the generated text as a comment, and the loader lifts it here —
+/// inert to lexing, hashing, `fmt` and `emit-gen` exactly like `//@origin`.
+///
+/// The leading field is an origin position in the SAME notation `//@origin`
+/// uses, parsed by the same [`parse_origin_body`], so a deprecation points at
+/// the line the user wrote rather than at generated text they never see. A
+/// generator that has no position to give writes `-` there, and the notice is
+/// reported at the generated location instead — the never-lose rule the origin
+/// table already follows. A first field that is neither `-` nor a parseable
+/// position is kept as part of the message, because dropping text a user might
+/// have written is worse than a slightly odd first word.
+pub const NO_POSITION: &str = "-";
+
+pub fn deprecations(banner: &str, source: &str, importer_dir: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for (i, raw) in source.lines().enumerate() {
+        let Some(rest) = raw.trim_start().strip_prefix("//@deprecated") else {
+            continue;
+        };
+        let rest = rest.trim();
+        let (pos, message) = match rest.split_once(char::is_whitespace) {
+            // `-` is the explicit "no position" marker. It is consumed rather
+            // than kept, or every unpositioned warning would read `- the
+            // \`head { … }\` block is deprecated`.
+            Some((NO_POSITION, tail)) => (None, tail.trim()),
+            Some((head, tail)) => match parse_origin_body(head, importer_dir) {
+                Ok(origin) => (Some(origin), tail.trim()),
+                Err(_) => (None, rest),
+            },
+            None => (None, rest),
+        };
+        if message.is_empty() {
+            continue;
+        }
+        let mut d = Diagnostic::warning(i + 1, 0, "deprecated", message.to_string());
+        match pos {
+            Some(origin) => {
+                d.file = Some(origin.file);
+                d.line = origin.line;
+                d.col = origin.col;
+                d.from_generated = true;
+                d.note = Some(format!(
+                    "in generated code {banner}:{} (see `vyrn emit-gen`)",
+                    i + 1
+                ));
+            }
+            None => d.file = Some(banner.to_string()),
+        }
+        out.push(d);
+    }
+    out
+}
+
 /// Parse a `<path>:<line>:<col>` directive body and resolve `path` against
 /// `importer_dir`. The two trailing colon-separated fields are the position, so
 /// a path may itself contain colons only if they are not the last two — v1 input
@@ -413,5 +476,49 @@ mod tests {
         assert_eq!(regions[0].gen_start_line, 3);
         assert_eq!(regions[0].gen_end_line, 4); // up to the line before `end`
         assert_eq!(regions[0].origin.line, 5);
+    }
+
+    // ---- `//@deprecated` -> warnings (RFC-0071 M2b) -----------------------
+
+    #[test]
+    fn a_positioned_deprecation_points_at_the_input_file() {
+        let src = "//@deprecated ./routes/p/[id].vyx:13:1 the `head { … }` block is deprecated\nfn x() {}\n";
+        let ds = deprecations("b", src, "app");
+        assert_eq!(ds.len(), 1);
+        assert_eq!(ds[0].severity, crate::diagnostics::Severity::Warning);
+        assert_eq!(ds[0].file.as_deref(), Some("app/routes/p/[id].vyx"));
+        assert_eq!(ds[0].line, 13);
+        assert_eq!(ds[0].col, 1);
+        assert_eq!(ds[0].message, "the `head { … }` block is deprecated");
+        // The generated location is not lost, only demoted to a note.
+        assert!(ds[0].note.as_deref().unwrap().contains("generated code b:1"));
+        assert!(ds[0].from_generated);
+    }
+
+    #[test]
+    fn the_no_position_marker_is_consumed_not_spoken() {
+        // A generator with no source position to give writes `-`. It must not
+        // reach the user's screen as the first word of the message.
+        let src = "//@deprecated - `fn load` is deprecated\n";
+        let ds = deprecations("b", src, "app");
+        assert_eq!(ds.len(), 1);
+        assert_eq!(ds[0].message, "`fn load` is deprecated");
+        assert_eq!(ds[0].file.as_deref(), Some("b")); // reported where it was generated
+        assert!(!ds[0].from_generated);
+    }
+
+    #[test]
+    fn a_malformed_position_keeps_the_whole_line_as_the_message() {
+        // Never lose the notice: an unparseable first field is text, not a bug.
+        let src = "//@deprecated whoops this form is deprecated\n";
+        let ds = deprecations("b", src, "");
+        assert_eq!(ds.len(), 1);
+        assert_eq!(ds[0].message, "whoops this form is deprecated");
+        assert_eq!(ds[0].file.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn an_empty_directive_says_nothing() {
+        assert!(deprecations("b", "//@deprecated\n//@deprecated   \n", "").is_empty());
     }
 }

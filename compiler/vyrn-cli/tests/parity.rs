@@ -51,6 +51,36 @@ fn norm(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n")
 }
 
+/// A run's stderr with COMPILE-TIME diagnostics removed (RFC-0071 M2b).
+///
+/// `vyrn run` compiles and runs in one process, so a load WARNING lands on the
+/// same stream as the program's own output. The native and wasm columns execute
+/// an artifact that was already built — they never compile, so they never warn.
+/// That asymmetry is structural and it is not a parity failure: the invariant is
+/// that the *program* behaves identically on all three backends, and a warning is
+/// about the compile, not about the program.
+///
+/// Compile ERRORS need no such treatment: an example that fails to compile never
+/// reaches a comparison (it is in `EXPECTED_CHECK_FAILURE`), and a trap at
+/// runtime is program output, which is compared and must stay identical.
+fn runtime_err(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    let mut in_warning = false;
+    for line in norm(bytes).split_inclusive('\n') {
+        if line.contains(": warning: ") {
+            in_warning = true;
+            continue;
+        }
+        // A warning's `  note:` continuation belongs to it.
+        if in_warning && line.starts_with("  note: ") {
+            continue;
+        }
+        in_warning = false;
+        out.push_str(line);
+    }
+    out
+}
+
 /// The fixed clock and seed the harness injects (RFC-0043) so a time/random
 /// example is a byte-identical three-way parity citizen: `now()` returns exactly
 /// these epoch millis and `randomSeed()` this seed, in interp/native/wasm alike
@@ -182,7 +212,7 @@ fn examples_interp_native_parity() {
         let native = run_io(native_cmd, &dir, &stdin_fixture);
 
         let (i_out, n_out) = (norm(&interp.stdout), norm(&native.stdout));
-        let (i_err, n_err) = (norm(&interp.stderr), norm(&native.stderr));
+        let (i_err, n_err) = (runtime_err(&interp.stderr), runtime_err(&native.stderr));
         let (i_code, n_code) = (interp.status.code(), native.status.code());
 
         if i_out != n_out || i_err != n_err || i_code != n_code {
@@ -230,7 +260,7 @@ fn examples_interp_native_parity() {
             // wasmtime forwards guest argv AFTER the module path (RFC-0061).
             wasm_cmd.args(&prog_args);
             let w = run_io(wasm_cmd, &dir, &stdin_fixture);
-            let (w_out, w_err) = (norm(&w.stdout), norm(&w.stderr));
+            let (w_out, w_err) = (norm(&w.stdout), runtime_err(&w.stderr));
             let w_code = w.status.code();
             if i_out != w_out || i_err != w_err || i_code != w_code {
                 failures.push(format!(

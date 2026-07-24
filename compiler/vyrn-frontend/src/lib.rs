@@ -107,15 +107,38 @@ pub fn load(
     opts: &loader::LoadOptions,
     resolver: &dyn loader::ModuleResolver,
 ) -> Result<ast::Program, Vec<diagnostics::Diagnostic>> {
-    let (loaded, origins) = loader::load_with_origins(root_source, root_path, opts, resolver);
+    load_warned(root_source, root_path, opts, resolver).0
+}
+
+/// Like [`load`], but also returns the load's WARNINGS (RFC-0071 M2b) —
+/// diagnostics about a program that compiled.
+///
+/// This is the shape every tool wants: a warning is advice, so it accompanies
+/// the program rather than replacing it, and printing it must never change an
+/// exit code or a byte of the program's own output. `load` stays as the
+/// warning-oblivious entry point for callers that only care whether it built.
+pub fn load_warned(
+    root_source: &str,
+    root_path: &str,
+    opts: &loader::LoadOptions,
+    resolver: &dyn loader::ModuleResolver,
+) -> (
+    Result<ast::Program, Vec<diagnostics::Diagnostic>>,
+    loader::Warnings,
+) {
+    let (loaded, origins, warnings) =
+        loader::load_with_origins(root_source, root_path, opts, resolver);
     // RFC-0053: load/lex/parse diagnostics are already remapped by the loader.
-    let program = loaded?;
+    let program = match loaded {
+        Ok(p) => p,
+        Err(diags) => return (Err(diags), warnings),
+    };
     let mut diags = checker::check_accum(&program);
     if diags.is_empty() {
         diags.extend(movecheck::check_accum(&program));
     }
     if diags.is_empty() {
-        Ok(program)
+        (Ok(program), warnings)
     } else {
         // RFC-0033: a diagnostic in a synthesized generator module at an origin-
         // governed line is reported against its input file (`.vyx`, …) with the
@@ -126,6 +149,8 @@ pub fn load(
                 origins.remap(d);
             }
         }
-        Err(diags)
+        // A program that failed to compile gets errors, not advice: dropping the
+        // warnings here keeps the failure output about the failure.
+        (Err(diags), Vec::new())
     }
 }

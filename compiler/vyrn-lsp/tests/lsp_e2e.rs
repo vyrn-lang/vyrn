@@ -2563,3 +2563,57 @@ fn is_dev_entry_positive_and_negative() {
 
     let _ = client.child.kill();
 }
+
+// ===========================================================================
+// RFC-0071 M2b — the warning channel reaches the editor.
+//
+// A generator's deprecation notice rides its output as a `//@deprecated`
+// directive carrying an origin position. The loader lifts it into a
+// `Severity::Warning` on the SUCCESS path, and the LSP publishes it against the
+// file the position names, as `DiagnosticSeverity.Warning` (2) — a squiggle the
+// author can act on, in a buffer they actually have open, on a project that
+// compiles. Everything about that sentence is new in M2b, so it is worth one
+// end-to-end test over the wire.
+// ===========================================================================
+
+/// A generator emitting one deprecation positioned at `legacy.vyrn:2:1`.
+const WARN_GEN: &str = "export gen fn legacy(path: String) -> String {\n    \
+    return \"//@deprecated \" + path + \":2:1 `fn old` is deprecated — write `fn new` instead\n\" +\n        \
+    \"export fn greeting() -> String {\n    return \\\"hi\\\"\n}\n\"\n}\n";
+
+const WARN_LEGACY: &str = "// A module on the old form.\nfn old() -> Int64 {\n    return 1\n}\n";
+
+const WARN_APP: &str = "import { legacy } from \"./gen\"\n\
+    import { greeting } from legacy(\"./legacy.vyrn\")\n\
+    fn main() -> Int64 { print(greeting()) return 0 }\n";
+
+/// A deprecation warning is published INTO the buffer its origin position names,
+/// at that line/column, with WARNING severity — and the project still compiles,
+/// which is the whole difference between a warning and an error.
+#[test]
+fn rfc71_deprecation_publishes_a_warning_into_the_input_buffer() {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_rfc71_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("gen.vyrn"), WARN_GEN).unwrap();
+    std::fs::write(dir.join("legacy.vyrn"), WARN_LEGACY).unwrap();
+    std::fs::write(dir.join("app.vyrn"), WARN_APP).unwrap();
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", WARN_APP);
+
+    let note = read_diags_for(&mut client, "legacy.vyrn");
+    let diags = note.pointer("/params/diagnostics").and_then(|d| d.as_array()).expect("diags array");
+    assert_eq!(diags.len(), 1, "one deprecation: {note}");
+    let d0 = &diags[0];
+    // 2 == DiagnosticSeverity.Warning. An ERROR here would mean the editor is
+    // telling the author their working project is broken.
+    assert_eq!(d0.get("severity").and_then(|s| s.as_i64()), Some(2), "warning severity: {note}");
+    let msg = d0.get("message").and_then(|m| m.as_str()).unwrap_or("");
+    assert!(msg.contains("`fn old` is deprecated"), "carries the notice: {msg}");
+    // `legacy.vyrn` line 2 (0-based 1), column 1 (0-based 0).
+    assert_eq!(d0.pointer("/range/start/line").and_then(|l| l.as_i64()), Some(1), "line: {note}");
+
+    let _ = client.child.kill();
+}

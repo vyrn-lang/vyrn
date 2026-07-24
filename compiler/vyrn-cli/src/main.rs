@@ -30,6 +30,11 @@
 //!   vyrn new     <name>                 Scaffold a project (vyrn.json + src/main.vyrn).
 //!   vyrn deps                           Print the resolved module graph.
 //!
+//! `--deny-warnings` (or `VYRN_DENY_WARNINGS=1`) turns any load warning into a
+//! failure — the switch CI opts into so a deprecation window cannot quietly stay
+//! open. Without it warnings are printed and nothing else changes: never an exit
+//! code, never a byte of the program's own output.
+//!
 //! The file argument is optional whenever a `vyrn.json` manifest (found by
 //! walking up from the current directory) declares a `"main"`. The manifest's
 //! `"dependencies"` map bare import specifiers to real ones.
@@ -39,12 +44,23 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
 fn offline(args: &[String]) -> bool {
     args.iter().any(|a| a == "--offline") || std::env::var("VYRN_OFFLINE").is_ok()
+}
+
+/// `--deny-warnings` flag or `VYRN_DENY_WARNINGS=1` (RFC-0071 M2b): a load that
+/// produced warnings fails instead of proceeding — the switch CI opts into so a
+/// deprecation window cannot quietly stay open forever.
+///
+/// Spelled and stripped exactly like `--offline`: a global flag, normalized into
+/// the environment so every nested construction sees it, and removed from the
+/// argument vector before any command parses its own options.
+fn deny_warnings() -> bool {
+    std::env::var("VYRN_DENY_WARNINGS").is_ok()
 }
 
 fn main() -> ExitCode {
@@ -69,6 +85,10 @@ fn real_main() -> ExitCode {
         std::env::set_var("VYRN_OFFLINE", "1");
     }
     args.retain(|a| a != "--offline");
+    if args.iter().any(|a| a == "--deny-warnings") {
+        std::env::set_var("VYRN_DENY_WARNINGS", "1");
+    }
+    args.retain(|a| a != "--deny-warnings");
     if args.len() < 2 {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
@@ -997,18 +1017,46 @@ fn save_lock(resolver: &remote::RemoteResolver) -> Result<(), ExitCode> {
 }
 
 /// Load + check a root file through the module loader, printing diagnostics
-/// (with their originating file) on failure.
+/// (with their originating file) on failure and WARNINGS on success.
+///
+/// This is the toolchain's single load site — every command that *builds a
+/// program* arrives here (`check`, `run`, `emit-ir`, `build`, `test`, `bench`,
+/// `serve`, `dev`), so warnings need exactly one print site to reach all of
+/// them. The three that do not are the three that never call `load`: `fmt` is a
+/// token-stream rewriter, `doc` renders `module_doc` over sources, and
+/// `emit-gen` prints the generated text itself — where a `//@deprecated`
+/// directive is already visible verbatim.
+///
+/// They print BEFORE the caller does anything else, which puts them ahead of the
+/// `serving …` / `dev: serving …` banner and ahead of the program's own output.
+/// That is deliberate: a warning is about the compile, so it belongs with the
+/// compile, and printing it first means it can never interleave with a served
+/// request's log lines or be scrolled off by a long-running host. They go to
+/// stderr, so `vyrn run`'s stdout stays exactly the program's.
+///
+/// Stderr is a different matter and worth stating plainly: `vyrn run` compiles
+/// and runs in ONE process, so a warning shares the stream with the program's
+/// own stderr, while a native or wasm run executes an already-built artifact and
+/// never compiles. The parity harness therefore compares the program's stderr
+/// with compile-time diagnostics filtered out (`parity::runtime_err`) — the
+/// invariant is that the PROGRAM behaves identically on all three backends, and a
+/// warning is about the compile.
 fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program, ExitCode> {
     // Strip Windows' verbatim prefix (`\\?\C:\..`) — it survives neither the
     // slash normalization nor readable diagnostics.
     let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
-    let result = vyrn_frontend::load(source, &root_key, &opts, &resolver);
+    let (result, warnings) = vyrn_frontend::load_warned(source, &root_key, &opts, &resolver);
     // Pins are kept even when a later stage fails — fetched is pinned.
     save_lock(&resolver)?;
     match result {
-        Ok(p) => Ok(p),
+        Ok(p) => {
+            if print_warnings(&warnings, &root_key) {
+                return Err(ExitCode::FAILURE);
+            }
+            Ok(p)
+        }
         Err(diags) => {
             for d in &diags {
                 let file = d.file.as_deref().unwrap_or(&root_key);
@@ -1020,6 +1068,30 @@ fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program,
             Err(ExitCode::FAILURE)
         }
     }
+}
+
+/// Print a load's warnings to stderr, in the same `file:line:col:` shape errors
+/// use with a `warning: ` marker. Returns whether the run should FAIL — only
+/// under `--deny-warnings`, and never otherwise (RFC-0071 M2b).
+fn print_warnings(warnings: &[vyrn_frontend::diagnostics::Diagnostic], root_key: &str) -> bool {
+    if warnings.is_empty() {
+        return false;
+    }
+    for d in warnings {
+        let file = d.file.as_deref().unwrap_or(root_key);
+        eprintln!("{}:{}:{}: warning: {}", file, d.line, d.col, d.message);
+        if let Some(note) = &d.note {
+            eprintln!("  note: {note}");
+        }
+    }
+    if deny_warnings() {
+        eprintln!(
+            "error: {} warning(s) — refused by --deny-warnings",
+            warnings.len()
+        );
+        return true;
+    }
+    false
 }
 
 /// `vyrn add <specifier> [--name alias]` — fetch + pin a remote module and

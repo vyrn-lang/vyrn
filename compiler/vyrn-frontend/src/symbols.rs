@@ -344,12 +344,22 @@ fn analyze_inner(
     } else {
         match (&linker, program.imports.is_empty()) {
             (Some((root_path, opts, resolver)), false) => {
-                let (loaded, o) =
+                let (loaded, o, load_warnings) =
                     crate::loader::load_with_origins(source, root_path, opts, *resolver);
                 // RFC-0053: the maps come back even when the load FAILED (they
                 // need no successful parse), so a `.vyx` whose template stopped
                 // lexing still knows its owner and still gets its squiggle.
                 origins = o;
+                // RFC-0071 M2b: a warning is already positioned at the input file
+                // the generator named, so it routes exactly like a remapped error
+                // — published against that file's URI, at the line the user wrote.
+                for d in load_warnings {
+                    if d.from_generated {
+                        remapped.push(d);
+                    } else {
+                        diags.push(adopt_foreign(d));
+                    }
+                }
                 match loaded {
                     Ok(linked) => Some(linked),
                     Err(load_diags) => {
