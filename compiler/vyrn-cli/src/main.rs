@@ -46,7 +46,7 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n\
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn routes [file.vyrn]   (the resolved wire table: every derived and pinned path, with its source)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
@@ -128,6 +128,9 @@ fn real_main() -> ExitCode {
     }
     if cmd == "dev" {
         return dev_cmd(&args[2..]);
+    }
+    if cmd == "routes" {
+        return routes_cmd(args.get(2).map(|s| s.as_str()));
     }
 
     // The remaining commands take an optional file; without one, the manifest
@@ -573,6 +576,81 @@ fn why_cmd(args: &[String]) -> ExitCode {
         // — which is why a `.vyrn` page listing its router entry point here
         // (`page`/`respond`, which `Page` does not name) still builds today.
         println!("  — {objections} objection(s); the generator that consumes this module is the gate");
+    }
+    ExitCode::SUCCESS
+}
+
+/// `vyrn routes [file]` (RFC-0072 M3) — the resolved wire table, with where each
+/// path came from.
+///
+/// A derived path is not written down anywhere, which is the point and also the
+/// risk: a rule you cannot inspect is a rule you have to simulate in your head.
+/// So the generator that MOUNTS the surface also emits one `//@route` directive
+/// per route, and this command reads them back. There is exactly one producer of
+/// the table — the same division RFC-0071 M4 drew between the LSP and
+/// `vyrn_frontend::contracts` — so the printed table and the mounted router
+/// cannot disagree.
+///
+/// The `source` column reads `convention` or `override`, so drift shows up in
+/// review instead of in production.
+fn routes_cmd(file: Option<&str>) -> ExitCode {
+    let path = match file.map(|s| s.to_string()).or_else(manifest_main) {
+        Some(p) => p,
+        None => {
+            eprintln!("error: no input file, and no vyrn.json with a `main` found");
+            eprintln!("usage: vyrn routes [file]");
+            return ExitCode::from(2);
+        }
+    };
+    let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let source = match std::fs::read_to_string(&root_key) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {root_key}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let opts = load_options(&root_key);
+    let resolver = make_resolver(&root_key);
+    let result = vyrn_frontend::loader::generated_modules(&source, &root_key, &opts, &resolver);
+    let _ = save_lock(&resolver);
+    let mods = match result {
+        Ok(m) => m,
+        Err(diags) => {
+            for d in &diags {
+                let f = d.file.as_deref().unwrap_or(&root_key);
+                eprintln!("{}:{}:{}: {}", f, d.line, d.col, d.message);
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    // `(method, path, procedure, source)`, de-duplicated: a page or api
+    // directory reached through two roots generates the same table twice.
+    let mut rows: Vec<(String, String, String, String)> = Vec::new();
+    for (_, src) in &mods {
+        for line in src.lines() {
+            let Some(rest) = line.strip_prefix("//@route ") else { continue };
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            if f.len() < 4 {
+                continue;
+            }
+            let row = (f[0].to_string(), f[1].to_string(), f[2].to_string(), f[3].to_string());
+            if !rows.contains(&row) {
+                rows.push(row);
+            }
+        }
+    }
+    if rows.is_empty() {
+        println!("(no derived routes in {root_key})");
+        return ExitCode::SUCCESS;
+    }
+    rows.sort_by(|a, b| a.1.cmp(&b.1));
+    let w0 = rows.iter().map(|r| r.0.len()).max().unwrap_or(6).max("method".len());
+    let w1 = rows.iter().map(|r| r.1.len()).max().unwrap_or(4).max("path".len());
+    let w2 = rows.iter().map(|r| r.2.len()).max().unwrap_or(9).max("procedure".len());
+    println!("{:w0$}  {:w1$}  {:w2$}  source", "method", "path", "procedure");
+    for (method, path, proc, src) in &rows {
+        println!("{method:w0$}  {path:w1$}  {proc:w2$}  {src}");
     }
     ExitCode::SUCCESS
 }

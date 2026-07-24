@@ -284,7 +284,8 @@ mechanize a one-time move of code we own would cost more than the move.
 - **M2 — roles + `Api`.** `vyrn.json:roles`, attachment of RFC-0071 contracts by
   role, serializability checking on procedure signatures. **Landed** — see below.
 - **M3 — derived paths.** `rpc(dir)` and `client(dir)`; override forms
-  (`module.vyrn`-scope and `at()`); collision errors; `vyrn routes`.
+  (`module.vyrn`-scope and `at()`); collision errors; `vyrn routes`. **Landed** —
+  see below.
 - **M4 — the wire.** `Request.headers`, `Response.vary`, content negotiation in
   the page router, `vyrn-nav` sending `Accept`; `?__vyrn=data` deleted.
 - **M5 — the move.** Move all five fullstack examples; delete every
@@ -395,6 +396,72 @@ It uses a mismatch between `data`'s type and `page`'s parameter instead: a membe
 type parameters are open, so the contract genuinely cannot object, which makes it
 the honest example of an error that must survive into generated code to be caught
 at all.
+
+## M3 — as landed
+
+Seven places where the implementation is not what this document said, and why.
+
+**The overrides are `rpc.json`, not `module.vyrn` and `at()`.** Both forms this
+document proposes require a generator to *evaluate* a module — `fn rpc() -> Rpc`
+returns a record, `at(list, "/pastes/recent")` names a function value — and a
+generator can only REFLECT over a module through `moduleInterface`, which yields
+names and types. The only way to reach a call expression from a generator is to
+read the module's source and scan it for `at(`, which is precisely the technique
+RFC-0071 spent four milestones deleting, and it would have been reintroduced in
+the same repository in the same season. So the overrides are data a generator can
+actually read: an `rpc.json` beside the api directory, carrying the same
+`prefix`/`path` keys plus a `pin` object mapping `{module}/{name}` to an explicit
+path. Declaration-scope pinning is therefore directory-scope pinning of one
+declaration, which is a real loss of locality and the honest price of not owning
+a language change in this milestone.
+
+**The project-wide `rpc` key cannot live in `vyrn.json`.** RFC-0021 confines a
+generator's `readFile` to the constant path arguments it was handed, and walking
+up from `server/api` to the project root is exactly the escape that sandbox
+exists to refuse — the loader says so by name. The keys are unchanged and the
+`{"rpc": {…}}` wrapper is accepted verbatim; the file is one the generator is
+allowed to open. Teaching the loader to hand generators a project config is a
+language change, and a worthwhile one, but not this milestone's.
+
+**Procedure modules are reached through a NAMESPACE, not an import alias.** Two
+api modules both exporting `get` is not a mistake — it is the normal shape of a
+directory-derived API, and the whole reason `{module}` is in the template. But
+Vyrn's namespace is flat, so `import { get as pastesGet__real }` makes
+`pastes/get` and `orders/get` a "defined in both" error before the generator can
+say anything about either. RFC-0027's `import * as` is the one construct that
+keeps a module's exports out of the flat namespace, so each module binds as
+`rpcM0`, `rpcM1`, and handlers dispatch through it. Types stay named imports: a
+type reached across modules is one declaration and collides with nothing.
+
+**The client's procedures are flat qualified names, not nested namespaces.** This
+document writes `api.orders.refund.run`, which is a namespace inside a namespace;
+`import * as` binds exactly one level. The generated stub is `ordersRefundRun`,
+the module tree read left to right, so every procedure stays distinct in the flat
+namespace and the tree is still visible in the name. `api.pastes.list()` is a
+language feature away, not a generator away.
+
+**`client()` and `clientInProcess()` are two generators, not one dispatching on
+audience.** A generator receives its arguments and nothing else — not the
+audience of the module that imported it — so `client()` cannot choose its own
+backend without the loader passing audience into generation. The stubs are
+same-named across both, exactly as `rpcClient` and `rpcInProcess` already were,
+so a composition root swaps one import line. Everything this document says about
+in-process dispatch being free during SSR holds; what it costs is the import
+line, not the call site.
+
+**`vyrn routes` reads directives; it does not recompute.** The generator that
+mounts the surface emits one `//@route METHOD PATH PROCEDURE SOURCE` comment per
+route, and the command reads them back out of `emit-gen`'s output. Recomputing
+the table in Rust would have created a second implementation of the derivation
+rule that could disagree with the router actually serving traffic — the exact
+failure mode RFC-0071 M4 avoided by making the LSP a pure adapter over
+`vyrn_frontend::contracts`. One producer, one table.
+
+**`list` is a reserved name, so this document's own example cannot be written.**
+`server/api/pastes.vyrn :: list` is the illustration used throughout; `list` is
+reserved (the removed `list([..])` array form), so the tests spell it `recent`.
+Nothing about the derivation changes — it is worth recording only because the
+example reads as though it were runnable.
 
 ## Acceptance
 
