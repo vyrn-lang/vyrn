@@ -4860,6 +4860,22 @@ impl<'a> Gen<'a> {
         let mut capture_ops: Vec<String> = Vec::new();
         for (i, p) in callee.params.iter().enumerate() {
             let Type::Fn(dptys, dret) = &p.ty else { continue };
+            // RFC-0071 M2b/M2c: a type parameter may occur ONLY inside a `fn`
+            // parameter's own parameter list (`paramQuery(run: fn(P) -> T)`), with
+            // no ordinary argument to pin it in pass 1. Solve those from the
+            // target's declared parameters, exactly as the return is solved below
+            // — otherwise `P` survives as a `Type::Param` into the instance, and a
+            // `Type::Param` lowers to `void`: an `alloca void`, a `void` argument,
+            // and a dispatcher keyed on a signature no construction registers.
+            // The checker's `check_fn_arg` learned the same rule; this is its
+            // codegen half.
+            if generic {
+                if let Some(tptys) = self.fn_arg_param_types(&args[i]) {
+                    for (d, t) in dptys.iter().zip(&tptys) {
+                        solve_param(d, t, &mut call_subst);
+                    }
+                }
+            }
             // The parameter's `fn` type with type parameters filled in from pass 1.
             let ptys: Vec<Type> = dptys
                 .iter()
@@ -4914,6 +4930,26 @@ impl<'a> Gen<'a> {
             self.emit(format!("{t} = call {retll} @{sym}({})", arg_ops.join(", ")));
             Ok((t, ret_ty))
         }
+    }
+
+    /// The DECLARED parameter types of a `fn`-typed argument's target, when the
+    /// argument names one: a top-level function, a forwarded `fn` parameter, or a
+    /// stored function value. `None` for a lambda literal, whose parameters take
+    /// their types from the signature they flow into and so can solve nothing.
+    fn fn_arg_param_types(&self, arg: &Expr) -> Option<Vec<Type>> {
+        let Expr::Var { name, .. } = arg else {
+            return None;
+        };
+        if let Some(b) = self.fn_bindings.get(name) {
+            return Some(b.param_tys.clone());
+        }
+        if let Some((_, ty)) = self.lookup(name) {
+            if let Type::Fn(ptys, _) = self.normalize_sig(&ty) {
+                return Some(ptys);
+            }
+            return None;
+        }
+        self.param_types.get(name).cloned()
     }
 
     /// Resolve one `fn`-typed argument to a call target (RFC-0023), emitting any

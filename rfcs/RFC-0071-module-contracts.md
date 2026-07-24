@@ -136,21 +136,29 @@ export contract Page {
     fn head(p: P) -> Head
     fn head(p: P, d: T) -> Head
 
-    /// This page's data. The return TYPE decides the render strategy:
-    /// `Query` blocks until the data lands, `Lazy` renders then fills in.
-    fn data() -> Query<P, T> = noQuery()
-    fn data() -> Lazy<P, T>
+    /// This page's data. The return TYPE decides both the render strategy and
+    /// whether the deferred call sees the route parameters.
+    fn data() -> Query<T> = noQuery()
+    fn data() -> Lazy<T>
+    fn data() -> ParamQuery<P, T>
+    fn data() -> ParamLazy<P, T>
 }
 ```
 
 Two consequences worth stating plainly.
 
-`Query<P, T>` gains the params type as an open parameter. `Params` is declared
-**per page**, in the page's own module, which is exactly why `std/ui` could not
-name it — so it must be open, resolved at the use site like `T`. This is what
-lets `query(|p: Params| …)` typecheck.
+**Params-ness rides the NAME, not a type argument.** The obvious spelling is
+`Query<P, T>` — the params type as an open parameter, since `Params` is declared
+per page and `std/ui` therefore cannot name it. But that spelling forces *every*
+page to name a params type, including the ones that have none: a paramless
+`index.vyx` would have to invent a `Params` purely to satisfy a parameter it
+never uses, which is exactly the objection that made `Query<P, T>` wrong in the
+first place. So the fact goes where the laziness fact was already going — into
+the name. Four types, four alternatives, and a page names a params type only if
+it has one. `paramQuery(fetchPaste)` typechecks because `P` is solved from the
+named loader's own parameter.
 
-`Lazy<P, T>` being a distinct type rather than a flag moves the last scan onto
+`Lazy<T>` being a distinct type rather than a flag moves the last scan onto
 reflection. The generator asks what `data` returns instead of reading how its
 body was written, so `vyxScriptDataIsLazy` — the scan that replaced
 `vyxUnlazy` — is deleted rather than relocated.
@@ -302,8 +310,9 @@ export fn head() -> Head { return Head { modules: ["/app.js"] } }
 `Head` is a record in `std/ui`: `{ title: Option<String>, modules: Array<String>,
 stylesheets: Array<String>, meta: Array<Meta> }`. The head-emission path in
 `std/ui` (`document(title, head, body)`) is unchanged; only its input changes
-from a scanned structure to a reflected value. The scanner
-(`vyxParseHead` and friends) is deleted.
+from a scanned structure to a reflected value. The scanner is removed from the
+PAGE path. It survives for layouts and error pages, which have no contract to be
+a member of — see M2c below.
 
 **`fn load()` → `export fn data()`.** The name-matched loader becomes a `Query`
 value, which also absorbs RFC-0070's `lazy` marker:
@@ -316,10 +325,11 @@ lazy fn load() -> Array<Paste> { return listPastes().pastes }
 export fn data() -> Query<Array<Paste>> { return query(|p| api.pastes.list()).lazy() }
 ```
 
-`Query<T>` is a `std/ui` record describing a deferred call: the closure, and
-whether it is lazy. `vyxUnlazy` (the RFC-0070 scan-and-strip) is deleted.
-`UiPageInfo.hasLoad` becomes `hasData`, sourced from contract checking rather
-than name matching.
+`Query<T>` is a `std/ui` record describing a deferred call. `vyxUnlazy` (the
+RFC-0070 scan-and-strip) is deleted, along with every `fn load` scanner beside
+it. `UiPageInfo.hasData` is sourced from contract checking rather than name
+matching; `load` survives only as the name of the wrapper `std/vyx` GENERATES
+around a `.vyx` page's `data` accessor, which no author writes.
 
 The `params` argument moves from an ambient loader parameter to the query
 closure's declared parameter (`|p| … p.id`), which is what makes it typed — see
@@ -375,9 +385,9 @@ other type. Closing the contract cost nothing and bought total typo detection.
   - **Multi-shape members and `Lazy<P, T>`**, per the section above — without
     them, deleting `vyxParseHead` removes a capability, and the laziness scan
     only changes its name.
-- **M2c — one form, not two.** Migrate the remaining examples by hand (there are
-  four); delete `vyxParseHead`, `vyxUnlazy` and the deprecation machinery that
-  carried the old forms. One way to write a page.
+- **M2c — one form, not two.** Migrate the remaining examples by hand; delete
+  the page-path `head { … }` scanner, `vyxUnlazy` and the deprecation machinery
+  that carried the old forms. One way to write a page. **Landed** — see below.
 - **M3 — `Api`.** Declare the open contract; wire it in RFC-0072's `api` role.
   Serializability checking for procedure inputs and outputs. Note M2 already
   shipped the variadic open rule (`fn *(..)`) that `Api` needs, for `Component`.
@@ -521,17 +531,12 @@ constructible before — the record-literal path was the one inference site with
 
 Eight places where the implementation is not what this document said, and why.
 
-**`Query<P, T>` is four types, not two.** The spelling this document chose forces
-*every* page to name a params type, including the ones that have none — and
-inventing a params type for a paramless page is exactly the objection M2 raised
-against `Query<P, T>` in the first place. `index.vyx` has no route segments and
-therefore no `Params` to name; it would have had to invent one purely to satisfy
-a type parameter it never uses. So the params-ness went into the NAME, beside the
-laziness that was already going there: `Query<T>`, `Lazy<T>`, `ParamQuery<P, T>`,
-`ParamLazy<P, T>`. `data` is declared at all four, and both facts the router needs
-— blocks-or-fills, sees-params-or-not — are read off which alternative the page
-matched. The RFC's substantive claim (neither fact is scanned out of the body) is
-met; its spelling is not.
+**`Query<P, T>` is four types, not two.** The spelling this document originally
+chose forces *every* page to name a params type, including the ones that have
+none, so the params-ness went into the NAME instead: `Query<T>`, `Lazy<T>`,
+`ParamQuery<P, T>`, `ParamLazy<P, T>`. M2c folded that back into "Multi-shape
+members" above, so the document and the code now agree; the reasoning is recorded
+there rather than here.
 
 **`head`'s four alternatives are three shapes.** Under open member type
 parameters `fn head(d: T) -> Head` and `fn head(p: P) -> Head` are the same
@@ -583,6 +588,64 @@ one-print-site design holds for every command that BUILDS a program (`check`,
 rewriter, `doc` renders over sources, and `emit-gen` prints the generated text —
 where a `//@deprecated` directive is already visible verbatim. Three commands
 that never load cannot warn, and should not.
+
+## M2c — as landed
+
+Six places where the implementation is not what this document said, and why.
+
+**There were three examples to migrate, not four.** The M2c milestone said
+"there are four"; the compiler's own warnings named three page modules
+(`examples/pages/users/[id]`, `examples/fullstack/pages/users/[id]`,
+`examples/shelf/routes/books/[id]`), all `.vyrn`, all `fn load(p: Params) ->
+Validation<Data>`. `examples/rpc` and `examples/rpcsplit` have no pages at all —
+they are `rpcInProcess` dogfoods. Every migrated page's SSR output is
+byte-identical.
+
+**`vyxParseHead` is still not deleted, and this is the second time that entry has
+been wrong.** M2b already recorded why: `head { … }` is also a LAYOUT and ERROR
+page form (`vyxBuildLayoutModule`, `vyxBuildErrorModule`), and a layout has no
+contract — `Page` is about pages. Both `bin` and `shelf` have a layout with a
+head block. What M2c could delete, and did, is the block on the PAGE path: the
+`vyxStripHead` call in `vyxBuildPageModule`, the `VYX_HEAD_AND_HEAD_BLOCK`
+conflict it needed, and the deprecation notice. A `head { … }` in a page now
+reaches the compiled body as source and fails there. Deleting the parser outright
+needs a `Layout` contract, which is not in this RFC.
+
+**`load` did not disappear; it stopped being a name anyone writes.** A `.vyx`
+page is compiled into a module, and the router calls that module's `load()`.
+`vyxBuildPageModule` still emits one — a single runner call over the `data`
+accessor the page declared. So the deletion is of every SCANNER
+(`vyxUnlazy`, `vyxScriptHasLoad`, `vyxScriptLoadIsLazy`,
+`vyxScriptLoadHasParams`, `vyxScriptLoadRet`) and of `std/ui`'s
+`uiHasFn(iface, "load")` name match. `export fn load` in a `.vyx` page is now an
+unknown export against a closed contract, which is louder than the deprecation it
+replaced.
+
+**The `//@deprecated` directive was renamed, not deleted.** It is a generator's
+only way to say something non-fatal, and the milestone says to keep the warning
+channel. Deleting it would have left `Diagnostic::warning`, `load_warned`,
+`--deny-warnings` and the LSP's warning publication with no producer and no
+possible test — a capability that cannot be exercised is a capability that rots.
+It is `//@warning` now, which is what it always was; nothing about the mechanism
+was ever specific to deprecation. `origin::deprecations` is `origin::warnings`.
+
+**The migration exposed a native-only miscompile, and parity forced it to be
+fixed here.** `paramQuery(run: fn(P) -> T)` is the shape where a type parameter
+occurs ONLY inside a `fn` parameter's own parameter list. M2b fixed the CHECKER
+for it (`check_fn_arg` learned to unify parameter types); codegen's
+`gen_ho_call` still solved the callee's type parameters from the target's RETURN
+alone. So `P` survived monomorphization as a bare `Type::Param`, which lowers to
+`void` — an `alloca void`, a `void` argument, and a dispatcher keyed on a
+signature no construction registers ("internal: invalid function value"). The
+interpreter was unaffected, so it was invisible until a parity citizen
+(`pagesdemo.vyrn`) used the shape. `gen_ho_call` now solves from the target's
+declared parameters too; `examples/fnvalstore.vyrn` carries the regression.
+
+**One SSR byte changed, deliberately.** `examples/fullstack/pages/users/[id].vyrn`
+renders a sentence about itself that named `load` in a `<code>` element. Leaving
+it would have kept the migration byte-identical at the cost of shipping a page
+that describes a form that no longer exists. It says `data` now, and that single
+line is the only SSR difference across all four examples.
 
 ## Acceptance
 

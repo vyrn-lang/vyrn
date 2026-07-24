@@ -22,7 +22,8 @@
 ///   - `type Params = { id: Int64, … }` when it has `[bracket]` segments — the
 ///     field NAMES must match the segments exactly (checked via `moduleInterface`
 ///     at generation time). v1 supports `Int64` params only.
-///   - optionally `fn load(p: Params) -> Validation<Data>` and then
+///   - optionally `fn data() -> ParamQuery<Params, Validation<Data>>` (the `data`
+///     member of the `Page` contract below, RFC-0071) and then
 ///     `fn page(p: Params, d: Data) -> Html`. On `Invalid` the synthesized router
 ///     renders an error page (422) built with `std/html`, listing the issues.
 ///
@@ -58,12 +59,12 @@ import { includes } from "std/arrays"
 import { el, Html, Attr } from "std/html"
 // RFC-0071: a page's exports are checked against the `Page` contract declared
 // below, instead of hunted for by name.
-import { checkContract, suppliesMember, matchedMember } from "std/contract"
+import { checkContract, matchedMember } from "std/contract"
 
 // ===========================================================================
-// PageError (RFC-0041 §3) — the failure a page's `load` may return. `load ->
-// Result<Data, PageError>`: an `Err` renders the nearest `error.vyx` at the
-// carried status (a `Validation<Data>` loader's `Invalid` folds into a 422
+// PageError (RFC-0041 §3) — the failure a page's `data` may carry. `data ->
+// Query<Result<Data, PageError>>`: an `Err` renders the nearest `error.vyx` at
+// the carried status (a `Validation<Data>` query's `Invalid` folds into a 422
 // PageError instead). A page imports this to build its `Err(…)`.
 // ===========================================================================
 
@@ -87,7 +88,7 @@ export fn badRequest(message: String) -> PageError {
 }
 
 // ===========================================================================
-// PageData (RFC-0070) — the lazy-mode wrapper a `lazy fn load()` page's VIEW
+// PageData (RFC-0070) — the lazy-mode wrapper a `Lazy`/`ParamLazy` page's VIEW
 // receives. Defined ONCE here (the constructors `Loading`/`Ready` register in
 // the global constructor table exactly once — never redefined per page module,
 // which would collide) and imported by every generated lazy page module, server
@@ -862,11 +863,15 @@ type UiPageInfo = {
     // dynTypes: the declared type spelling of each dynamic segment, parallel to
     // dynNames (`Int64` or `String`, RFC-0039 §5).
     dynTypes: Array<String>,
+    // hasLoad: the page has data to load at all. For a `.vyrn` page this is
+    // exactly `hasData`; for a `.vyx` page it is the `data` accessor its
+    // `<script>` declared, which `vyxBuildPageModule` wraps into the `load()` the
+    // router calls.
     hasLoad: Bool,
-    // hasData: the page supplies the `data` member of the `std/ui:Page` contract
-    // (`export fn data() -> Query<T>`, RFC-0071) rather than the deprecated
-    // `fn load`. The router runs the query instead of calling the loader; every
-    // other field below is derived identically, so the two forms route the same.
+    // hasData: the page module itself supplies the `data` member of the
+    // `std/ui:Page` contract (`export fn data() -> Query<T>`, RFC-0071), so the
+    // router runs the query directly. False for a `.vyx` page, whose synthesized
+    // module presents the already-wrapped `load()` instead.
     hasData: Bool,
     // dataRunner: the `std/ui` runner that turns this page's declared query type
     // into the loaded value — `runQuery` / `runLazy` / `runParamQuery` /
@@ -874,11 +879,11 @@ type UiPageInfo = {
     // signatures the page matched, so laziness and params-ness are read from the
     // TYPE and never from the body. "" when the page has no `data`.
     dataRunner: String,
-    // loadHasParams: the loader takes a `Params` argument (`fn load(p: Params)`) —
-    // false for a zero-parameter static loader (`fn load()`, RFC-0069 §0) and for a
-    // page with no loader.
+    // loadHasParams: the deferred call takes a `Params` argument (a `ParamQuery`
+    // or `ParamLazy`) — false for a params-free `Query`/`Lazy` (RFC-0069 §0) and
+    // for a page with no `data`.
     loadHasParams: Bool,
-    // loadLazy: the loader is marked `lazy` (RFC-0070) — the view is over
+    // loadLazy: the query is lazy (RFC-0070) — the view is over
     // `PageData<T>` and a client soft nav renders the skeleton instantly, then
     // fills in the data. Only a `.vyx` page can be lazy; a `.vyrn` page is never.
     loadLazy: Bool,
@@ -913,26 +918,17 @@ gen fn uiErrLine(tag: String, detail: String) -> String {
     return tag + "__" + detail + "\n"
 }
 
-/// Whether a `checkContract` issue applies to a page during RFC-0071's
-/// deprecation window.
-///
-/// One exemption, and it expires with the window: `load` is the name the `data`
-/// member replaces, so a page still exporting it is deprecated, not wrong. Every
-/// other issue — a mistyped `head`, an export the contract does not name, a
-/// near-miss like `laod` — is reported.
-gen fn uiContractIssueApplies(iss: Issue) -> Bool {
-    return iss.path != "load"
-}
-
 /// The page's contract issues as load diagnostics. `checkContract` decides what
 /// is wrong (in `std/contract`, over the declaration in this module); this only
 /// decides how it reads on the way out.
+///
+/// Every issue applies. RFC-0071 M2c closed the window that exempted `load`, so
+/// a page still exporting it is now an unknown export like any other, not a
+/// deprecated one.
 gen fn uiContractErrs(iface: ModuleInterface, fid: String) -> String {
     let mut out = ""
     for iss in checkContract(iface, contractOf(Page)) {
-        if uiContractIssueApplies(iss) {
-            out = out + uiErrLine("PAGES_CONTRACT", fid + "__" + uiIdentOf(iss.key) + "__" + uiIdentOf(iss.path))
-        }
+        out = out + uiErrLine("PAGES_CONTRACT", fid + "__" + uiIdentOf(iss.key) + "__" + uiIdentOf(iss.path))
     }
     return out
 }
@@ -958,26 +954,22 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     let entry = if hasRespond { "respond" } else { "page" }
     let arity = uiFnArity(iface, entry)
     // RFC-0071: `data` is a declared member of the `Page` contract, so its
-    // presence is a contract question — `suppliesMember` answers it with the
+    // presence is a contract question — `matchedMember` answers it with the
     // member's shape behind it, where `uiHasFn(iface, "load")` was a bare string.
-    // A `.vyrn` page's own surface also carries the router's entry points
-    // (`page`/`respond`/`load`), which the contract does not name, so the CLOSED
-    // rule is not applied here; a `.vyx` page's `<script>` gets the full check.
+    // A `.vyrn` page's own surface also carries the router's entry point
+    // (`page`/`respond`), which the contract does not name, so the CLOSED rule is
+    // not applied here; a `.vyx` page's `<script>` gets the full check.
     let dataForm = matchedMember(iface, contractOf(Page), "data")
     let hasData = dataForm >= 0
-    let hasLoad = hasData || uiHasFn(iface, "load")
+    let hasLoad = hasData
     // RFC-0071 M2b: WHICH alternative the page matched decides how the router
     // runs it. `Param*` means the deferred call takes the route params, so the
     // router hands them over exactly as it would to a `fn load(p: Params)`.
     let dataRunner = if hasData { vyxDataRunner(dataForm) } else { "" }
-    // RFC-0069 §0: a zero-parameter static loader (`fn load()`) needs no `Params`;
-    // a `load(p: Params)` (arity 1) does. A page with no loader relies on its
-    // dynamic segments alone.
-    let loadHasParams = if hasData {
-        vyxDataFormHasParams(dataForm)
-    } else {
-        hasLoad && uiFnArity(iface, "load") > 0
-    }
+    // RFC-0069 §0: a zero-parameter `data` (`Query`/`Lazy`) needs no `Params`; a
+    // `ParamQuery`/`ParamLazy` does. A page with no `data` relies on its dynamic
+    // segments alone.
+    let loadHasParams = hasData && vyxDataFormHasParams(dataForm)
     // A `.vyrn` page's view is a plain `fn page(…) -> Html`, not a `PageData<T>`
     // match, so it has no `Loading` arm to render. Declaring a lazy query there
     // would render-then-fill into a view that cannot express "not yet" — so it is
@@ -1083,10 +1075,10 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     }
 
     // Loader kind: "" (none), "result" (Result<Data, PageError>), "validation"
-    // (Validation<Data>), or "plain" (an unwrapped data type, RFC-0069 §0).
-    // The loader's data type comes from `data`'s `Query<T>` on the new form and
-    // from `load`'s return on the old one; everything downstream reads only this.
-    let loadRet = if hasData { vyxQueryDataType(uiFnRet(iface, "data")) } else { uiFnRet(iface, "load") }
+    // (Validation<Data>), or "plain" (an unwrapped data type, RFC-0069 §0). The
+    // data type is the one `data`'s declared query type carries; everything
+    // downstream reads only this.
+    let loadRet = if hasData { vyxQueryDataType(uiFnRet(iface, "data")) } else { "" }
     let loadKind = if hasLoad {
         if loadRet.startsWith("Result<") { "result" } else if loadRet.startsWith("Validation<") { "validation" } else { "plain" }
     } else {
@@ -1744,12 +1736,14 @@ gen fn uiEmitErrDoc(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorI
 /// `.load(p)`) and render its outcome. A plain loader (RFC-0069 §0) binds the data
 /// and renders (no failure path); a `Result`/`Validation` loader matches its arms,
 /// routing a failure to the nearest error page (RFC-0041 §3).
-/// The call that produces a page's data: `<runner>(p<idx>.data()[, p])` on the
-/// RFC-0071 form, `p<idx>.load(…)` on the deprecated one. Both bind the same `d`.
+/// The call that produces a page's data: `<runner>(p<idx>.data()[, p])` for a
+/// `.vyrn` page, whose `data` member the router runs itself, and `p<idx>.load(…)`
+/// for a `.vyx` page, whose synthesized module already wrapped its `data`
+/// accessor in exactly that runner call. Both bind the same `d`.
 ///
 /// WHICH runner comes from `data`'s declared return type (RFC-0071 M2b) — the
 /// `dataRunner` the contract check resolved — and a `Param*` query is handed the
-/// route params, which is why the two forms route identically.
+/// route params, which is why both paths route identically.
 gen fn uiLoadCall(p: UiPageInfo, idx: String, args: String) -> String {
     if p.hasData {
         let extra = if p.loadHasParams { ", " + args } else { "" }
@@ -1999,34 +1993,11 @@ gen fn uiEmitChromeImport(alias: String, modPath: String, gen: String, themed: B
     return "import * as " + alias + " from " + gen + "(" + arg + ")\n"
 }
 
-/// `//@deprecated` directives for every routed `.vyrn` page still on `fn load`
-/// rather than the `Page` contract's `data` member (RFC-0071's deprecation
-/// window). The loader lifts these into real warnings on the SUCCESS path
-/// (RFC-0071 M2b), so the window is something a user is told about instead of
-/// something they would have to read generated output to discover.
-///
-/// The position field is `-`, the explicit "no position" marker: a reflected
-/// `FnInfo` carries no line, and inventing one by re-scanning the page's source
-/// would put back exactly the scanner this RFC removes. The message names the
-/// module instead, which is enough to act on. A `.vyx` page's notice comes from
-/// `std/vyx` with a real `.vyx` line, because there the generator is already
-/// holding the source.
-gen fn uiDeprecatedLoaders(pages: Array<UiPageInfo>) -> String {
-    let mut out = ""
-    for p in pages {
-        if p.isVyx == false && p.hasLoad && p.hasData == false {
-            out = out + "//@deprecated - `fn load` in `" + p.modPath + "` is deprecated (RFC-0071) — write `export fn data() -> Query<T>` instead\n"
-        }
-    }
-    return out
-}
-
 /// Assemble the whole synthesized router module from the collected pages and
 /// chrome (`layout.vyx`/`error.vyx`, RFC-0041). When `themed` (RFC-0036/0039 §4),
 /// `.vyx` pages/layouts/errors compile their classes against `theme`.
 gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors: Array<UiChrome>, themed: Bool, theme: String) -> String {
     let mut out = "/// Generated by std/ui `pages` (RFC-0026 M3, RFC-0039 §4, RFC-0041) — do not edit.\n"
-    out = out + uiDeprecatedLoaders(pages)
     out = out + "import { el, text, empty, document, toHtmlString, Html, Attr } from \"std/html\"\n"
     out = out + uiVyxGenImports(pages, layouts, errors, themed)
 
@@ -2061,9 +2032,9 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
     // whole data channel. A router of only `.vyrn`/`respond` pages emits exactly the
     // pre-RFC module (byte-identical), so nothing without client pages is disturbed.
     let mut anyClientPage = false
-    // RFC-0071: whether any page supplies the `data` member, so the router runs
-    // its query. A router of only `fn load` pages emits exactly the pre-RFC
-    // module (byte-identical) — nothing on the old form is disturbed.
+    // RFC-0071: whether any page supplies the `data` member directly, so the
+    // router runs its query. A router of only `.vyx` pages (whose modules present
+    // an already-wrapped `load()`) imports no runners at all.
     let mut anyQuery = false
     // The distinct runners the routed pages need, in first-use order — a router
     // imports exactly the ones its pages' declared query types name (RFC-0071 M2b).

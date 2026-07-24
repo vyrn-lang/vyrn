@@ -2567,18 +2567,20 @@ fn is_dev_entry_positive_and_negative() {
 // ===========================================================================
 // RFC-0071 M2b — the warning channel reaches the editor.
 //
-// A generator's deprecation notice rides its output as a `//@deprecated`
-// directive carrying an origin position. The loader lifts it into a
-// `Severity::Warning` on the SUCCESS path, and the LSP publishes it against the
-// file the position names, as `DiagnosticSeverity.Warning` (2) — a squiggle the
-// author can act on, in a buffer they actually have open, on a project that
-// compiles. Everything about that sentence is new in M2b, so it is worth one
-// end-to-end test over the wire.
+// A generator's non-fatal notice rides its output as a `//@warning` directive
+// carrying an origin position. The loader lifts it into a `Severity::Warning` on
+// the SUCCESS path, and the LSP publishes it against the file the position
+// names, as `DiagnosticSeverity.Warning` (2) — a squiggle the author can act on,
+// in a buffer they actually have open, on a project that compiles.
+//
+// M2c deleted the deprecation notices that were this channel's only real
+// producer, so the fixture is a synthetic generator: the channel is retained on
+// its own merits, and this is the proof it still reaches an editor.
 // ===========================================================================
 
-/// A generator emitting one deprecation positioned at `legacy.vyrn:2:1`.
+/// A generator emitting one warning positioned at `legacy.vyrn:2:1`.
 const WARN_GEN: &str = "export gen fn legacy(path: String) -> String {\n    \
-    return \"//@deprecated \" + path + \":2:1 `fn old` is deprecated — write `fn new` instead\n\" +\n        \
+    return \"//@warning \" + path + \":2:1 `fn old` is deprecated — write `fn new` instead\n\" +\n        \
     \"export fn greeting() -> String {\n    return \\\"hi\\\"\n}\n\"\n}\n";
 
 const WARN_LEGACY: &str = "// A module on the old form.\nfn old() -> Int64 {\n    return 1\n}\n";
@@ -2587,11 +2589,11 @@ const WARN_APP: &str = "import { legacy } from \"./gen\"\n\
     import { greeting } from legacy(\"./legacy.vyrn\")\n\
     fn main() -> Int64 { print(greeting()) return 0 }\n";
 
-/// A deprecation warning is published INTO the buffer its origin position names,
-/// at that line/column, with WARNING severity — and the project still compiles,
-/// which is the whole difference between a warning and an error.
+/// A warning is published INTO the buffer its origin position names, at that
+/// line/column, with WARNING severity — and the project still compiles, which is
+/// the whole difference between a warning and an error.
 #[test]
-fn rfc71_deprecation_publishes_a_warning_into_the_input_buffer() {
+fn rfc71_a_generator_warning_publishes_into_the_input_buffer() {
     let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("vyrn_lsp_rfc71_{}_{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

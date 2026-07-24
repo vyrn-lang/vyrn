@@ -5,17 +5,19 @@
 //! `load()` returns `Result<Program, Vec<Diagnostic>>`, so there was no
 //! success-path diagnostic at all, and a generator's only way to say anything
 //! was an identifier line that fails to parse — fatal by construction, which is
-//! the opposite of a deprecation notice.
+//! the opposite of a notice you are meant to read and keep going.
 //!
 //! The channel's whole contract is in the name: a warning rides a load that
 //! SUCCEEDED. So the assertions here are mostly about what must *not* change —
 //! the exit code, and every byte of the program's own output — plus the one
 //! switch that deliberately does change it (`--deny-warnings`), which is what
-//! keeps a deprecation window from staying open forever.
+//! lets CI refuse a build that compiled with something left to say.
 //!
-//! The fixture is a purpose-built generator rather than a real `.vyx` page, so
-//! these tests keep testing the channel after the pages that currently use it
-//! finish migrating.
+//! The fixture is a purpose-built generator rather than a real `.vyx` page, and
+//! that is why this file still passes: RFC-0071 M2c deleted the deprecation
+//! notices that were the channel's only real-world producer, and the channel is
+//! retained on its own merits — a compiler wants a way to say "this compiled,
+//! but". These tests are that capability's only proof.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -53,11 +55,11 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-/// A generator that emits a module carrying a `//@deprecated` directive whose
-/// leading field is an origin position — the exact shape `std/vyx` emits for a
-/// page still on the `head { … }` / `fn load` forms.
-const GEN_DEPRECATED: &str = r#"export gen fn legacy(path: String) -> String {
-    return "//@deprecated " + path + ":2:1 `fn old` is deprecated — write `fn new` instead\n" +
+/// A generator that emits a module carrying a `//@warning` directive whose
+/// leading field is an origin position — a generator saying something about an
+/// input file without failing the build.
+const GEN_WARNING: &str = r#"export gen fn legacy(path: String) -> String {
+    return "//@warning " + path + ":2:1 `fn old` is deprecated — write `fn new` instead\n" +
         "export fn greeting() -> String {\n    return \"hi\"\n}\n"
 }
 
@@ -68,7 +70,7 @@ export gen fn quiet(path: String) -> String {
 
 /// A generator with no source position to give writes `-` there.
 export gen fn unpositioned(path: String) -> String {
-    return "//@deprecated - `fn old` is deprecated\n" +
+    return "//@warning - `fn old` is deprecated\n" +
         "export fn greeting() -> String {\n    return \"hi\"\n}\n"
 }
 "#;
@@ -99,7 +101,7 @@ struct Run {
 /// Build the fixture and run `vyrn <cmd>` over it with `extra` flags.
 fn run(tag: &str, genfn: &str, cmd: &str, extra: &[&str], env: &[(&str, &str)]) -> Run {
     let dir = scratch(tag);
-    std::fs::write(dir.join("gen.vyrn"), GEN_DEPRECATED).unwrap();
+    std::fs::write(dir.join("gen.vyrn"), GEN_WARNING).unwrap();
     std::fs::write(dir.join("legacy.vyrn"), LEGACY).unwrap();
     std::fs::write(dir.join("app.vyrn"), app_for(genfn)).unwrap();
     let mut c = vyrn();
@@ -119,7 +121,7 @@ fn run(tag: &str, genfn: &str, cmd: &str, extra: &[&str], env: &[(&str, &str)]) 
 }
 
 #[test]
-fn a_deprecation_rides_a_successful_load() {
+fn a_warning_rides_a_successful_load() {
     let r = run("rides", "legacy", "run", &[], &[]);
     assert_eq!(r.code, 0, "the load SUCCEEDED:\n{}", r.stderr);
     assert_eq!(r.stdout, "hi\n", "the program ran and printed its own output");
@@ -172,7 +174,7 @@ fn an_unpositioned_warning_does_not_speak_its_placeholder() {
 #[test]
 fn warnings_change_neither_the_exit_code_nor_a_byte_of_program_output() {
     // The invariant the channel exists to protect. Two identical programs, one
-    // whose generator also emits a deprecation: same status, same stdout.
+    // whose generator also emits a warning: same status, same stdout.
     let warned = run("same_warned", "legacy", "run", &[], &[]);
     let quiet = run("same_quiet", "quiet", "run", &[], &[]);
     assert_eq!(warned.code, quiet.code, "same exit code");
@@ -230,10 +232,10 @@ fn every_command_that_builds_a_program_prints_the_warning() {
 
 #[test]
 fn a_failing_load_reports_the_failure_and_not_the_advice() {
-    // A program that did not compile gets errors, not deprecation notes: the
+    // A program that did not compile gets errors, not advisory notes: the
     // output stays about the thing that went wrong.
     let dir = scratch("failing");
-    std::fs::write(dir.join("gen.vyrn"), GEN_DEPRECATED).unwrap();
+    std::fs::write(dir.join("gen.vyrn"), GEN_WARNING).unwrap();
     std::fs::write(dir.join("legacy.vyrn"), LEGACY).unwrap();
     std::fs::write(
         dir.join("app.vyrn"),

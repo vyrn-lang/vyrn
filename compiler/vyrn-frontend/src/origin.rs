@@ -242,40 +242,45 @@ impl OriginMaps {
     }
 }
 
-/// The `//@deprecated` directives in one synthesized module's source, as
-/// WARNING diagnostics (RFC-0071 M2b).
+/// The `//@warning` directives in one synthesized module's source, as WARNING
+/// diagnostics (RFC-0071 M2b).
 ///
 /// ```text
-/// //@deprecated ./routes/p/[id].vyx:13:1 the `head { … }` block — write `…` instead
+/// //@warning ./routes/p/[id].vyx:13:1 `fn old` is deprecated — write `fn new` instead
 /// ```
 ///
-/// A generator has no diagnostic channel of its own: its only reporting
-/// convention is an identifier line that fails to parse, which is fatal by
-/// construction and therefore the opposite of a deprecation notice. So the
-/// notice rides the generated text as a comment, and the loader lifts it here —
-/// inert to lexing, hashing, `fmt` and `emit-gen` exactly like `//@origin`.
+/// This is a generator's ONLY way to say something non-fatal. Its other
+/// reporting convention is an identifier line that fails to parse, which is
+/// fatal by construction; so a notice that must not stop the build rides the
+/// generated text as a comment, and the loader lifts it here — inert to lexing,
+/// hashing, `fmt` and `emit-gen` exactly like `//@origin`.
+///
+/// The directive was `//@deprecated` when M2b built it, because RFC-0071's
+/// deprecation window was the one thing that needed it. M2c closed that window
+/// and deleted every emitter; the mechanism is spelled generically now, since
+/// nothing about it was ever specific to deprecation.
 ///
 /// The leading field is an origin position in the SAME notation `//@origin`
-/// uses, parsed by the same [`parse_origin_body`], so a deprecation points at
-/// the line the user wrote rather than at generated text they never see. A
-/// generator that has no position to give writes `-` there, and the notice is
-/// reported at the generated location instead — the never-lose rule the origin
-/// table already follows. A first field that is neither `-` nor a parseable
-/// position is kept as part of the message, because dropping text a user might
-/// have written is worse than a slightly odd first word.
+/// uses, parsed by the same [`parse_origin_body`], so a warning points at the
+/// line the user wrote rather than at generated text they never see. A generator
+/// that has no position to give writes `-` there, and the notice is reported at
+/// the generated location instead — the never-lose rule the origin table already
+/// follows. A first field that is neither `-` nor a parseable position is kept as
+/// part of the message, because dropping text a user might have written is worse
+/// than a slightly odd first word.
 pub const NO_POSITION: &str = "-";
 
-pub fn deprecations(banner: &str, source: &str, importer_dir: &str) -> Vec<Diagnostic> {
+pub fn warnings(banner: &str, source: &str, importer_dir: &str) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for (i, raw) in source.lines().enumerate() {
-        let Some(rest) = raw.trim_start().strip_prefix("//@deprecated") else {
+        let Some(rest) = raw.trim_start().strip_prefix("//@warning") else {
             continue;
         };
         let rest = rest.trim();
         let (pos, message) = match rest.split_once(char::is_whitespace) {
             // `-` is the explicit "no position" marker. It is consumed rather
-            // than kept, or every unpositioned warning would read `- the
-            // \`head { … }\` block is deprecated`.
+            // than kept, or every unpositioned warning would read `- \`fn old\`
+            // is deprecated`.
             Some((NO_POSITION, tail)) => (None, tail.trim()),
             Some((head, tail)) => match parse_origin_body(head, importer_dir) {
                 Ok(origin) => (Some(origin), tail.trim()),
@@ -286,7 +291,7 @@ pub fn deprecations(banner: &str, source: &str, importer_dir: &str) -> Vec<Diagn
         if message.is_empty() {
             continue;
         }
-        let mut d = Diagnostic::warning(i + 1, 0, "deprecated", message.to_string());
+        let mut d = Diagnostic::warning(i + 1, 0, "generated.warning", message.to_string());
         match pos {
             Some(origin) => {
                 d.file = Some(origin.file);
@@ -478,18 +483,20 @@ mod tests {
         assert_eq!(regions[0].origin.line, 5);
     }
 
-    // ---- `//@deprecated` -> warnings (RFC-0071 M2b) -----------------------
+    // ---- `//@warning` -> warnings (RFC-0071 M2b) --------------------------
 
     #[test]
-    fn a_positioned_deprecation_points_at_the_input_file() {
-        let src = "//@deprecated ./routes/p/[id].vyx:13:1 the `head { … }` block is deprecated\nfn x() {}\n";
-        let ds = deprecations("b", src, "app");
+    fn a_positioned_warning_points_at_the_input_file() {
+        let src = "//@warning ./routes/p/[id].vyx:13:1 `fn old` is deprecated
+fn x() {}
+";
+        let ds = warnings("b", src, "app");
         assert_eq!(ds.len(), 1);
         assert_eq!(ds[0].severity, crate::diagnostics::Severity::Warning);
         assert_eq!(ds[0].file.as_deref(), Some("app/routes/p/[id].vyx"));
         assert_eq!(ds[0].line, 13);
         assert_eq!(ds[0].col, 1);
-        assert_eq!(ds[0].message, "the `head { … }` block is deprecated");
+        assert_eq!(ds[0].message, "`fn old` is deprecated");
         // The generated location is not lost, only demoted to a note.
         assert!(ds[0].note.as_deref().unwrap().contains("generated code b:1"));
         assert!(ds[0].from_generated);
@@ -499,10 +506,11 @@ mod tests {
     fn the_no_position_marker_is_consumed_not_spoken() {
         // A generator with no source position to give writes `-`. It must not
         // reach the user's screen as the first word of the message.
-        let src = "//@deprecated - `fn load` is deprecated\n";
-        let ds = deprecations("b", src, "app");
+        let src = "//@warning - `fn old` is deprecated
+";
+        let ds = warnings("b", src, "app");
         assert_eq!(ds.len(), 1);
-        assert_eq!(ds[0].message, "`fn load` is deprecated");
+        assert_eq!(ds[0].message, "`fn old` is deprecated");
         assert_eq!(ds[0].file.as_deref(), Some("b")); // reported where it was generated
         assert!(!ds[0].from_generated);
     }
@@ -510,15 +518,18 @@ mod tests {
     #[test]
     fn a_malformed_position_keeps_the_whole_line_as_the_message() {
         // Never lose the notice: an unparseable first field is text, not a bug.
-        let src = "//@deprecated whoops this form is deprecated\n";
-        let ds = deprecations("b", src, "");
+        let src = "//@warning whoops something is off
+";
+        let ds = warnings("b", src, "");
         assert_eq!(ds.len(), 1);
-        assert_eq!(ds[0].message, "whoops this form is deprecated");
+        assert_eq!(ds[0].message, "whoops something is off");
         assert_eq!(ds[0].file.as_deref(), Some("b"));
     }
 
     #[test]
     fn an_empty_directive_says_nothing() {
-        assert!(deprecations("b", "//@deprecated\n//@deprecated   \n", "").is_empty());
+        assert!(warnings("b", "//@warning
+//@warning   
+", "").is_empty());
     }
 }

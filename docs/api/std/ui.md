@@ -24,7 +24,8 @@ A page module EXPORTS:
   - `type Params = { id: Int64, … }` when it has `[bracket]` segments — the
     field NAMES must match the segments exactly (checked via `moduleInterface`
     at generation time). v1 supports `Int64` params only.
-  - optionally `fn load(p: Params) -> Validation<Data>` and then
+  - optionally `fn data() -> ParamQuery<Params, Validation<Data>>` (the `data`
+    member of the `Page` contract below, RFC-0071) and then
     `fn page(p: Params, d: Data) -> Html`. On `Invalid` the synthesized router
     renders an error page (422) built with `std/html`, listing the issues.
 

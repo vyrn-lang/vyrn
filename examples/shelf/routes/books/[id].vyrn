@@ -1,15 +1,25 @@
-/// GET /books/:id — a dynamic route with a loader. The [id] segment is parsed as
-/// Int64 (a non-integer 404s first); the loader fetches the real book and the page
+/// GET /books/:id — a dynamic route with data. The [id] segment is parsed as
+/// Int64 (a non-integer 404s first); the query fetches the real book and the page
 /// server-renders it. A missing id (or the reserved 999) yields the router's 422.
+///
+/// RFC-0071: `data` is a declared member of the `std/ui:Page` contract; its
+/// `ParamQuery` return TYPE is what says the deferred call takes this route's
+/// `Params`.
 import { detailPage } from "../../view"
 import { getBook } from "../../contract"
 import { Book, IdReq } from "../../wire"
 import { Html } from "std/html"
+import { ParamQuery, paramQuery } from "std/ui"
 
 export type Params = { id: Int64 }
 export type Data = { found: Book }
 
-export fn load(p: Params) -> Validation<Data> {
+/// The book this route names.
+export fn data() -> ParamQuery<Params, Validation<Data>> {
+    return paramQuery(fetchBook)
+}
+
+fn fetchBook(p: Params) -> Validation<Data> {
     if p.id == 999 {
         return Invalid([Issue { key: "book.reserved", path: "id", message: "id 999 is reserved and cannot be shown" }])
     }

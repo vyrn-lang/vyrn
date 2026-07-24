@@ -12,6 +12,18 @@
             "runtimeExecutable": "cmd",
             "runtimeArgs": ["/c", "cd /d N:\\lang\\examples\\bin && N:\\lang\\compiler\\target\\release\\vyrn.exe dev --port 8080"],
             "port": 8080
+        },
+        {
+            "name": "shelf-dev",
+            "runtimeExecutable": "cmd",
+            "runtimeArgs": ["/c", "cd /d N:\\lang\\examples\\shelf && N:\\lang\\compiler\\target\\release\\vyrn.exe dev --port 8081"],
+            "port": 8081
+        },
+        {
+            "name": "fullstack-dev",
+            "runtimeExecutable": "cmd",
+            "runtimeArgs": ["/c", "cd /d N:\\lang\\examples\\fullstack && N:\\lang\\compiler\\target\\release\\vyrn.exe dev --port 8082"],
+            "port": 8082
         }
     ]
 }

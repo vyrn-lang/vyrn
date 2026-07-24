@@ -31,9 +31,9 @@
 //!   vyrn deps                           Print the resolved module graph.
 //!
 //! `--deny-warnings` (or `VYRN_DENY_WARNINGS=1`) turns any load warning into a
-//! failure — the switch CI opts into so a deprecation window cannot quietly stay
-//! open. Without it warnings are printed and nothing else changes: never an exit
-//! code, never a byte of the program's own output.
+//! failure — the switch CI opts into so a build that compiled with something
+//! left to say cannot quietly pass. Without it warnings are printed and nothing
+//! else changes: never an exit code, never a byte of the program's own output.
 //!
 //! The file argument is optional whenever a `vyrn.json` manifest (found by
 //! walking up from the current directory) declares a `"main"`. The manifest's
@@ -54,7 +54,7 @@ fn offline(args: &[String]) -> bool {
 
 /// `--deny-warnings` flag or `VYRN_DENY_WARNINGS=1` (RFC-0071 M2b): a load that
 /// produced warnings fails instead of proceeding — the switch CI opts into so a
-/// deprecation window cannot quietly stay open forever.
+/// build that compiled with something left to say cannot quietly pass.
 ///
 /// Spelled and stripped exactly like `--offline`: a global flag, normalized into
 /// the environment so every nested construction sees it, and removed from the
@@ -1024,8 +1024,8 @@ fn save_lock(resolver: &remote::RemoteResolver) -> Result<(), ExitCode> {
 /// `serve`, `dev`), so warnings need exactly one print site to reach all of
 /// them. The three that do not are the three that never call `load`: `fmt` is a
 /// token-stream rewriter, `doc` renders `module_doc` over sources, and
-/// `emit-gen` prints the generated text itself — where a `//@deprecated`
-/// directive is already visible verbatim.
+/// `emit-gen` prints the generated text itself — where a `//@warning` directive
+/// is already visible verbatim.
 ///
 /// They print BEFORE the caller does anything else, which puts them ahead of the
 /// `serving …` / `dev: serving …` banner and ahead of the program's own output.
