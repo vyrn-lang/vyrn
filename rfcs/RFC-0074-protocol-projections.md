@@ -67,11 +67,13 @@ and derives the base path so renaming the resource moves its URLs.
 import { Route, get, post } from "std/http"
 import { list, byId, create } from "./pastes"
 
-export let routes: Array<Route> = [
-    get("/",     list).cacheFor(60).etag(),
-    get("/{id}", byId).cacheFor(3600).etag().notFoundWhen(|e| e == "no such paste"),
-    post("/",    create).createdAt(|p| "/pastes/\{p.id}"),
-]
+export fn routes() -> Array<Route> {
+    return [
+        get("/",     list).cacheFor(60).etag(),
+        get("/{id}", byId).cacheFor(3600).etag().notFoundWhen(|e| e == "no such paste"),
+        post("/",    create).createdAt(|p| "/pastes/\{p.id}"),
+    ]
+}
 ```
 
 The critical property: **the chain is value-level, not type-level.** `Route` is
@@ -101,10 +103,12 @@ meaningless to one are absent from the other rather than ignored:
 import { sse, ws, Route } from "std/http"
 import { tail } from "./events"
 
-export let routes: Array<Route> = [
-    sse("/",       tail).retryAfter(3000).resumable(),
-    ws("/socket",  tail).heartbeat(30).closeCode(1001),
-]
+export fn routes() -> Array<Route> {
+    return [
+        sse("/",       tail).retryAfter(3000).resumable(),
+        ws("/socket",  tail).heartbeat(30).closeCode(1001),
+    ]
+}
 ```
 
 - `sse` — `retryAfter` (reconnect hint), `resumable` (Last-Event-ID replay,
@@ -126,9 +130,11 @@ import { create } from "./pastes"
 import { Paste } from "../../shared/wire/paste"
 import * as store from "../store"
 
-export let sdl = graphql("./pastes")
-    .mutations([create])
-    .lazy(|p: Paste| p.body, |p| store.loadBody(p.id))
+export fn sdl() -> Schema {
+    return graphql("./pastes")
+        .mutations([create])
+        .lazy(|p: Paste| p.body, |p| store.loadBody(p.id))
+}
 ```
 
 Two things reflection cannot know, both declared in real symbols rather than
@@ -167,9 +173,9 @@ import { sdl } from "./server/api/pastes.graphql"
 fn handle(req: Request) -> Response {
     return mount(req, [
         rpc("./server/api"),          // the derived surface
-        pastesHttp.routes,
-        eventsHttp.routes,
-        sdl.endpoint("/graphql"),
+        pastesHttp.routes(),
+        eventsHttp.routes(),
+        sdl().endpoint("/graphql"),
         route,                        // pages last: they own everything else
     ])
 }

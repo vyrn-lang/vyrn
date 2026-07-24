@@ -155,12 +155,12 @@ to hide.
 
 ```vyrn
 // server/api/module.vyrn — directory scope
-export let rpc = Rpc { prefix: "/internal", path: "{name}" }
+export fn rpc() -> Rpc { return Rpc { prefix: "/internal", path: "{name}" } }
 ```
 
 ```vyrn
 // server/api/pastes.vyrn — declaration scope, always wins
-export let listAt = at(list, "/pastes/recent")   // pinned; it is already published
+export fn listAt() -> Pin { return at(list, "/pastes/recent") }   // pinned; already published
 ```
 
 `vyrn routes` prints the resolved table with a `source` column reading

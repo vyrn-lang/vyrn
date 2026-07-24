@@ -46,13 +46,35 @@ code. Nothing in it is known to the compiler beyond the declaration form itself.
 /// std/ui — what a page module may export.
 export contract Page {
     /// Document head contributions for this page.
-    let head: Head = Head { }
+    fn head() -> Head = noHead()
 
     /// This page's data, resolved before render. `.lazy()` opts into
     /// render-then-fill; without it the page blocks until the data lands.
-    let data: Query<T> = noQuery()
+    fn data() -> Query<T> = noQuery()
 }
 ```
+
+Members are **functions**, not values. RFC-0029 makes every top-level `let`
+module-private in every module — `export let` is a named parse error
+(`parser.rs:766`), and cross-module access goes through accessors by design.
+That rule is right and this RFC does not reopen it:
+
+- A page satisfies the contract with `export fn head() -> Head { … }`, which is
+  the accessor pattern RFC-0029 prescribes, at a cost of one `return`.
+- `data` wants to be a function regardless. A module-level binding is evaluated
+  at module-init, and RFC-0069 already hit that hazard — the linker initializes
+  every reachable module global, which would trap on store file I/O at wasm
+  boot. Page data is per-request and must not run at load time.
+
+This does not reintroduce the "magic functions masked as ordinary functions"
+objection that motivated the whole arc. That objection was about *undeclared*
+names discovered by scanning. These are declared members of a readable contract:
+completed, hovered, type-checked, and loud on a typo. Declaring the convention
+is precisely the difference.
+
+The `let` member form stays in the grammar and is inert until `export let`
+exists — a module can only ever be reported as missing it. It is kept so the
+grammar does not need reopening if that rule ever changes.
 
 One declaration serves three consumers:
 
@@ -72,9 +94,9 @@ compiler checks (see RFC-0072, which deletes that file).
 
 ```
 contract-decl := "export"? "contract" Ident "{" member* "}"
-member        := doc? "let" Ident ":" Type ("=" Expr)?          // value member
-               | doc? "fn"  Ident "(" params ")" "->" Type       // function member
-               | doc? "fn"  "*"   "(" params ")" "->" Type       // open rule
+member        := doc? "let" Ident ":" Type ("=" Expr)?                   // value member (inert)
+               | doc? "fn"  Ident "(" params ")" "->" Type ("=" Expr)?   // function member
+               | doc? "fn"  "*"   "(" params ")" "->" Type               // open rule
 ```
 
 - A member with a default (`= Expr`) is **optional**; the default is used when
@@ -144,7 +166,7 @@ import { checkContract } from "std/contract"
 
 gen fn pages(dir: String) -> Module {
     let iface = moduleInterface(pageFile)
-    let issues = checkContract(iface, Page)      // Array<Issue>, RFC-0009 shape
+    let issues = checkContract(iface, contractOf(Page))   // Array<Issue>, RFC-0009 shape
     …
 }
 ```
@@ -186,7 +208,7 @@ head    Head        Document head contributions for this page.
 data    Query<T>    This page's data, resolved before render.
 ```
 
-Snippet body is the full declaration (`export let head = Head { $0 }`), so the
+Snippet body is the full declaration (`export fn head() -> Head { return $0 }`), so the
 type is right before the user types anything.
 
 **Hover.** Hovering `head` in a page shows its type, its `///` doc, and
@@ -206,7 +228,7 @@ the server.
 Both current conventions move onto declarations. This is a breaking surface
 change to `.vyx` pages, executed with a deprecation window.
 
-**`head { … }` → `export let head`.** The block form (`std/vyx.vyrn:2739`)
+**`head { … }` → `export fn head()`.** The block form (`std/vyx.vyrn:2739`)
 becomes a value:
 
 ```vyrn
@@ -216,7 +238,7 @@ head {
 }
 
 // after — an ordinary declaration with a type
-export let head = Head { modules: ["/app.js"] }
+export fn head() -> Head { return Head { modules: ["/app.js"] } }
 ```
 
 `Head` is a record in `std/ui`: `{ title: Option<String>, modules: Array<String>,
@@ -225,7 +247,7 @@ stylesheets: Array<String>, meta: Array<Meta> }`. The head-emission path in
 from a scanned structure to a reflected value. The scanner
 (`vyxParseHead` and friends) is deleted.
 
-**`fn load()` → `export let data`.** The name-matched loader becomes a `Query`
+**`fn load()` → `export fn data()`.** The name-matched loader becomes a `Query`
 value, which also absorbs RFC-0070's `lazy` marker:
 
 ```vyrn
@@ -233,7 +255,7 @@ value, which also absorbs RFC-0070's `lazy` marker:
 lazy fn load() -> Array<Paste> { return listPastes().pastes }
 
 // after — a declaration; `lazy` is a method on the value
-export let data = query(|p| api.pastes.list()).lazy()
+export fn data() -> Query<Array<Paste>> { return query(|p| api.pastes.list()).lazy() }
 ```
 
 `Query<T>` is a `std/ui` record describing a deferred call: the closure, and
@@ -256,10 +278,12 @@ A page with two independent fetches does not need two exports and does not need
 an open rule. One closure returning a record covers it:
 
 ```vyrn
-export let data = query(|p| HomeData {
-    pastes: api.pastes.list().pastes,
-    total:  api.pastes.count(),
-}).lazy()
+export fn data() -> Query<HomeData> {
+    return query(|p| HomeData {
+        pastes: api.pastes.list().pastes,
+        total:  api.pastes.count(),
+    }).lazy()
+}
 ```
 
 This is strictly better than two `Query` exports: it is one closure, therefore
@@ -350,7 +374,7 @@ generator's private copy of the program is prepared.
 ## Acceptance
 
 - `fn laod()` in a page is an **error** naming `data`, not a silent no-data page.
-- `export let head = "Title"` is a type error against `Head`.
+- `export fn head() -> String` is a type error against the contract's `Head`.
 - Typing at module scope in a `.vyx` `<script>` offers `head` and `data` with
   their docs.
 - Hover on `head` names contract `Page` and `std/ui`; go-to-def lands on it.

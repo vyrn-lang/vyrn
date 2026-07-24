@@ -100,7 +100,7 @@ app/routes/[org]/[repo].vyx  →  Params { org: String, repo: String }
 ```
 
 ```vyx
-export let data = query(|p| api.pastes.byId(IdReq { id: p.id }))
+export fn data() -> Query<Paste> { return query(|p| api.pastes.byId(IdReq { id: p.id })) }
 ```
 
 `p.` completes to exactly the declared segments. Renaming the file to
