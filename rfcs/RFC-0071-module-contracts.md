@@ -278,7 +278,13 @@ the server.
 ## Migration
 
 Both current conventions move onto declarations. This is a breaking surface
-change to `.vyx` pages, executed with a deprecation window.
+change to `.vyx` pages, made all at once.
+
+**There is no deprecation window and no migration tooling.** Vyrn is pre-1.0
+with no users and no third-party code: every page that exists lives in this
+repo. A compatibility window would exist to protect code that does not exist,
+and would cost two parallel implementations of every page form, kept alive and
+tested, for nobody. The old forms are migrated and deleted in the same change.
 
 **`head { … }` → `export fn head()`.** The block form (`std/vyx.vyrn:2739`)
 becomes a value:
@@ -319,11 +325,6 @@ The `params` argument moves from an ambient loader parameter to the query
 closure's declared parameter (`|p| … p.id`), which is what makes it typed — see
 RFC-0073 for the generated `Params` record and its rename behaviour.
 
-**Deprecation window.** For one release, `head { }` and `fn load()` continue to
-work and emit a hint diagnostic naming the replacement, with a quick-fix that
-performs the rewrite. `vyrn fmt` gains a `--migrate-contracts` pass that applies
-both rewrites across a tree. After the window, the scanner paths are removed.
-
 ## Multi-fetch, and why `Page` stays closed
 
 A page with two independent fetches does not need two exports and does not need
@@ -363,21 +364,20 @@ other type. Closing the contract cost nothing and bought total typo detection.
   the old forms alive behind a deprecation window.
 - **M2b — the two prerequisites.** Neither was visible when this document was
   written; both block finishing the migration.
-  - **A warning channel.** `Severity::Warning` exists as a variant
-    (`diagnostics.rs:16`) but nothing ever produces one: `load()` returns
-    `Result<Program, Vec<Diagnostic>>`, so there is no success-path diagnostic
-    at all. Deprecation notices are therefore emitted as `//@deprecated`
-    comments in generated output — visible in an artifact nobody reads. A real
-    warning must thread through the loader, the CLI's print sites, and the LSP
-    before any deprecation, quick-fix, or `fmt --migrate-contracts` can do its
-    job. This is prerequisite work, not polish, and it is generally useful well
-    beyond this RFC.
+  - **A warning channel.** `Severity::Warning` existed as a variant
+    (`diagnostics.rs:16`) but nothing ever produced one: `load()` returns
+    `Result<Program, Vec<Diagnostic>>`, so there was no success-path diagnostic
+    at all. Built in M2b Part A and threaded through the loader, the CLI print
+    sites and the LSP, with `--deny-warnings` for CI. Its only consumer was the
+    deprecation notice, which M2c deletes — so it is retained on its own merits
+    (a compiler with no way to say "this compiled, but"), not because this RFC
+    still needs it.
   - **Multi-shape members and `Lazy<P, T>`**, per the section above — without
     them, deleting `vyxParseHead` removes a capability, and the laziness scan
     only changes its name.
-- **M2c — finish the migration.** `fmt --migrate-contracts`; migrate the
-  remaining examples; delete `vyxParseHead` and `vyxScriptDataIsLazy`; close the
-  window.
+- **M2c — one form, not two.** Migrate the remaining examples by hand (there are
+  four); delete `vyxParseHead`, `vyxUnlazy` and the deprecation machinery that
+  carried the old forms. One way to write a page.
 - **M3 — `Api`.** Declare the open contract; wire it in RFC-0072's `api` role.
   Serializability checking for procedure inputs and outputs. Note M2 already
   shipped the variadic open rule (`fn *(..)`) that `Api` needs, for `Component`.

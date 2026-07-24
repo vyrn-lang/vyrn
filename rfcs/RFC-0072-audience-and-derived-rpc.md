@@ -260,8 +260,9 @@ is now a sibling under `server/`.
 `shelf`, `fullstack`, `rpc`, and `rpcsplit` migrate the same way; each is a
 mechanical move plus deleting its contract file.
 
-**`vyrn migrate --audience`** performs the move and rewrites import paths, so
-the diff is reviewable rather than hand-typed.
+The move is a `git mv` plus import-path rewrites, done by hand across five
+examples. No migration command: Vyrn is pre-1.0 with no users, so a tool to
+mechanize a one-time move of code we own would cost more than the move.
 
 ## Compatibility
 
@@ -271,9 +272,9 @@ the diff is reviewable rather than hand-typed.
 - `rpcServer` / `rpcClient` / `rpcInProcess` over a single module keep working;
   they are re-expressed on top of the directory forms.
 - The derived path shape (`/_/{module}/{name}`) differs from today's
-  `/rpc/{name}`. Existing deployments pin the old shape with
-  `{ "rpc": { "prefix": "/rpc", "path": "{name}" } }`, which reproduces current
-  URLs exactly — verified by the byte-identical wire pins in the rpc test suite.
+  `/rpc/{name}`. The `rpc` config exists so a project can choose its own URLs,
+  not as a compatibility shim — nothing is deployed against the old shape. The
+  repo's wire pins are updated to the new one in the same change.
 
 ## Milestones
 
@@ -286,8 +287,8 @@ the diff is reviewable rather than hand-typed.
   (`module.vyrn`-scope and `at()`); collision errors; `vyrn routes`.
 - **M4 — the wire.** `Request.headers`, `Response.vary`, content negotiation in
   the page router, `vyrn-nav` sending `Accept`; `?__vyrn=data` deleted.
-- **M5 — migration.** `vyrn migrate --audience`; move all five fullstack
-  examples; delete every `contract.vyrn`.
+- **M5 — the move.** Move all five fullstack examples; delete every
+  `contract.vyrn`.
 
 ## Acceptance
 
@@ -301,5 +302,4 @@ the diff is reviewable rather than hand-typed.
   with `Accept: text/html` returns SSR HTML byte-identical to today's.
 - No response anywhere contains the string `vyrn`.
 - Three-way parity (interp == native == wasm) green across all migrated
-  examples; the rpc wire pins reproduce byte-identically under the compatibility
-  `rpc` config.
+  examples; the rpc wire pins are updated to the derived shape and pinned there.
