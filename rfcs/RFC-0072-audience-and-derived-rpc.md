@@ -280,7 +280,7 @@ mechanize a one-time move of code we own would cost more than the move.
 
 - **M1 — audience.** `vyrn.json:audience`, path→audience resolution in the
   loader, the import-widening check with its diagnostic, `vyrn why`. No
-  generator changes.
+  generator changes. **Landed** — see below.
 - **M2 — roles + `Api`.** `vyrn.json:roles`, attachment of RFC-0071 contracts by
   role, serializability checking on procedure signatures.
 - **M3 — derived paths.** `rpc(dir)` and `client(dir)`; override forms
@@ -289,6 +289,56 @@ mechanize a one-time move of code we own would cost more than the move.
   the page router, `vyrn-nav` sending `Accept`; `?__vyrn=data` deleted.
 - **M5 — the move.** Move all five fullstack examples; delete every
   `contract.vyrn`.
+
+## M1 — as landed
+
+Five places where the implementation is not what this document said, and why.
+
+**A composition root needed a rule, and the manifest already had one.** This
+document's migration table leaves `server.vyrn` at the project root, "unchanged
+(composition root)" — and a root at the project root has no audience segment, so
+it is universal, so it may not import `server/`. The one module whose entire job
+is to name both sides would have been the first thing the rule rejected. Adding a
+segment for it would move a file the document says not to move; blessing the
+*name* `server.vyrn` would be exactly the hardcoding the `audience` key exists to
+avoid. So an entry point takes the audience of the `vyrn.json` key that NAMES it:
+`"server": "server.vyrn"` is server-only, `"client": "client.vyrn"` is
+client-only, `"main"` is server-only (a `main` runs on the machine it was built
+for). Those keys are already in every fullstack example's manifest, so nothing
+new is declared and `client.vyrn` reaching into `server/` is still an error —
+which is the leak worth catching.
+
+**A file named `server.vyrn` is not otherwise a server module.** Audience is read
+from DIRECTORY components only. Reading the filename too would have made every
+existing example's entry point server-only overnight, without anyone opting in,
+and "the nearest segment on its path" is a statement about directories in every
+example this document gives.
+
+**A generated module's audience comes from the generator's INPUT, not its call
+site.** A `.vyx` page compiles to a module whose key is a banner ending at the
+root that mounted it, so borrowing the calling module's audience would have given
+every page the audience of `server.vyrn` and quietly exempted the entire page
+tree — the exact case the rule exists for. The banner also carries the
+generator's own argument, so a generator with one input file (`vyxPage("./app/
+routes/index.vyx")`) lends its module that file's audience, and a generator
+pointed at a DIRECTORY (`pages("./app/routes")`) does not, because router glue
+has no single origin and inherits its caller.
+
+**The advice line is a note, not a second error line.** `Diagnostic` carries one
+message and one optional note; the sketch above renders as two `=` lines because
+that is how rustc prints, and Vyrn's printer has one. Both facts the sketch
+carries — the `vyrn.json` key that declared the audience, and what to do instead
+— are in the note, together with what decided the IMPORTER's audience, which the
+sketch omits and which is the other half of the question.
+
+**`vyrn why <file>` reads the tree, not a build.** Import chains come from a
+lex-and-parse scan of every `.vyrn`/`.vyx` under the project, resolved through
+the loader's own `resolve_spec` — no load, no generators, no link. The file whose
+audience you are asking about is quite often the one that does not compile, and a
+`why` that needed a successful build would be unavailable exactly when it is
+wanted. Generator imports contribute edges too (`pages("./routes")` reaches every
+page under it), because a chain that stopped at the generator call would omit the
+only edge anyone is asking about.
 
 ## Acceptance
 

@@ -11,6 +11,7 @@
 //! skeleton they will hang from.
 
 pub mod ast;
+pub mod audience;
 pub mod checker;
 pub mod codec;
 pub mod contracts;

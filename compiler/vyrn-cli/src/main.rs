@@ -325,6 +325,13 @@ struct Manifest {
     dir: String,
     main: Option<String>,
     dependencies: Vec<(String, String)>,
+    /// RFC-0072 M1: the declared audience vocabulary, or `None` when the
+    /// manifest has no `audience` key — which leaves every module universal and
+    /// every import legal, exactly as before this key existed.
+    audience: Option<vyrn_frontend::audience::AudienceMap>,
+    /// The raw manifest text, so a consumer that wants a key this struct does
+    /// not name (`roles`, `rpc`) can read it without a second file read.
+    text: String,
 }
 
 /// Find `vyrn.json` by walking up from `start` (a directory).
@@ -356,10 +363,14 @@ fn find_manifest(start: &Path) -> Option<Manifest> {
                     .collect(),
                 _ => Vec::new(),
             };
+            let slash_dir = dir.to_string_lossy().replace('\\', "/");
+            let audience = vyrn_frontend::audience::from_manifest(&text, &slash_dir);
             return Some(Manifest {
-                dir: dir.to_string_lossy().replace('\\', "/"),
+                dir: slash_dir,
                 main,
                 dependencies,
+                audience,
+                text,
             });
         }
         dir = dir.parent()?.to_path_buf();
@@ -386,6 +397,7 @@ fn load_options(root: &str) -> vyrn_frontend::loader::LoadOptions {
     if let Some(m) = start.and_then(|d| find_manifest(&d)) {
         opts.aliases = m.dependencies.into_iter().collect();
         opts.alias_base = m.dir;
+        opts.audience = m.audience;
     }
     opts
 }
@@ -438,25 +450,34 @@ fn scaffold(name: &str) -> ExitCode {
 /// asks; the CLI only prints. Exits 1 when the file is in no role — "no contract
 /// governs this" is a real answer, but not the one you asked for.
 fn why_cmd(args: &[String]) -> ExitCode {
+    const USAGE: &str = "usage: vyrn why <file> | vyrn why --contract <file>";
     let mut file: Option<String> = None;
+    let mut contract = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--contract" => {
-                file = args.get(i + 1).cloned();
-                i += 2;
+                contract = true;
+                i += 1;
+            }
+            other if !other.starts_with('-') => {
+                file = Some(other.to_string());
+                i += 1;
             }
             other => {
                 eprintln!("error: unknown `vyrn why` option `{other}`");
-                eprintln!("usage: vyrn why --contract <file>");
+                eprintln!("{USAGE}");
                 return ExitCode::from(2);
             }
         }
     }
     let Some(file) = file else {
-        eprintln!("usage: vyrn why --contract <file>");
+        eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
+    if !contract {
+        return why_audience(&file);
+    }
     let path = match Path::new(&file).canonicalize() {
         Ok(p) => p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/"),
         Err(e) => {
@@ -558,6 +579,199 @@ fn why_cmd(args: &[String]) -> ExitCode {
         println!("  — {objections} objection(s); the generator that consumes this module is the gate");
     }
     ExitCode::SUCCESS
+}
+
+/// `vyrn why <file>` (RFC-0072 M1) — the audience of a module, the path segment
+/// that decided it, and every import chain that reaches it.
+///
+/// "What is bundled where" is the question the audience rule exists to answer,
+/// and a rule you can only observe by building is a convention you have to
+/// trust. This is that answer at the shell, from the same
+/// `vyrn_frontend::audience` the loader enforces with — not a second reading of
+/// the tree that could drift from it.
+///
+/// It REPORTS; it does not gate (the RFC-0071 M4 convention). Exit 0 whenever it
+/// could answer, 2 only when the file cannot be read.
+fn why_audience(file: &str) -> ExitCode {
+    let path = match Path::new(file).canonicalize() {
+        Ok(p) => p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/"),
+        Err(e) => {
+            eprintln!("error: cannot read {file}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let Some(dir) = Path::new(&path).parent().map(|p| p.to_path_buf()) else {
+        eprintln!("error: {file} has no directory");
+        return ExitCode::from(2);
+    };
+    let manifest = find_manifest(&dir);
+    let app_dir = manifest
+        .as_ref()
+        .map(|m| PathBuf::from(&m.dir))
+        .unwrap_or_else(|| dir.clone());
+    let app_slash = app_dir.to_string_lossy().replace('\\', "/");
+    let map = manifest.as_ref().and_then(|m| m.audience.clone());
+
+    println!("{path}");
+    match &map {
+        Some(map) => {
+            let v = vyrn_frontend::audience::audience_of(&path, map);
+            println!("  audience: {} — {}", v.audience.phrase(), v.because());
+        }
+        None => {
+            println!(
+                "  audience: universal — this project declares no `audience` in vyrn.json, \
+                 so every module is universal and no import is rejected"
+            );
+        }
+    }
+
+    // The import graph, read straight off the sources: no load, no generators,
+    // no build. A file whose audience you are asking about may well be the one
+    // that does not compile.
+    let edges = project_imports(&app_dir);
+    let chains = import_chains(&path, &edges);
+    if chains.is_empty() {
+        println!("  imported by: nothing in this project reaches it");
+    } else {
+        println!("  imported by:");
+        for chain in &chains {
+            let pretty: Vec<String> = chain
+                .iter()
+                .map(|p| rel_to(p, &app_slash))
+                .collect();
+            println!("    {}", pretty.join(" -> "));
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// `path` relative to `base`, for printing.
+fn rel_to(path: &str, base: &str) -> String {
+    path.strip_prefix(base)
+        .map(|r| r.trim_start_matches('/').to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// Every `importer -> imported` edge in a project, resolved with the loader's
+/// own `resolve_spec`.
+///
+/// A GENERATOR import contributes edges too: `pages("./routes")` is how a page
+/// reaches the bundle, and a chain that stopped at the generator call would miss
+/// the only edge anybody is actually asking about. The generator's first string
+/// argument is resolved the same way an import path is, then read as a directory
+/// when it is one.
+fn project_imports(app_dir: &Path) -> Vec<(String, String)> {
+    let files = project_sources(app_dir);
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (path, source) in &files {
+        let opts = load_options(path);
+        let body = if path.ends_with(".vyx") {
+            vyx_script_body(source).unwrap_or_default()
+        } else {
+            source.clone()
+        };
+        let Ok(tokens) = vyrn_frontend::lexer::lex(&body) else { continue };
+        let (program, _) = vyrn_frontend::parser::parse_accum(tokens);
+        for imp in &program.imports {
+            use vyrn_frontend::ast::{Expr, ImportSource};
+            let spec = match &imp.source {
+                ImportSource::Path(s) => s.clone(),
+                ImportSource::Generator { args, .. } => match args.first() {
+                    Some(Expr::Str(s)) => s.clone(),
+                    _ => continue,
+                },
+            };
+            let Ok(resolved) = vyrn_frontend::loader::resolve_spec(&spec, path, &opts) else {
+                continue;
+            };
+            let stripped = resolved.strip_suffix(".vyrn").unwrap_or(&resolved).to_string();
+            if Path::new(&stripped).is_dir() {
+                // A generator pointed at a directory reaches every source in it.
+                for (kid, _) in &files {
+                    if kid.starts_with(&format!("{stripped}/")) {
+                        out.push((path.clone(), kid.clone()));
+                    }
+                }
+            } else {
+                out.push((path.clone(), resolved));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Every `.vyrn` / `.vyx` source under `app_dir`, as `(slash path, text)`.
+/// Build output and vendored trees are not the project.
+fn project_sources(app_dir: &Path) -> Vec<(String, String)> {
+    fn walk(dir: &Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.filter_map(|e| e.ok()) {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            if p.is_dir() {
+                if name.starts_with('.') || name == "vendor" || name == "node_modules" {
+                    continue;
+                }
+                walk(&p, out);
+            } else if matches!(p.extension().and_then(|x| x.to_str()), Some("vyrn") | Some("vyx")) {
+                if let Ok(text) = std::fs::read_to_string(&p) {
+                    let key = p.to_string_lossy().replace('\\', "/");
+                    let key = key.trim_start_matches("//?/").to_string();
+                    out.push((key, text));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(app_dir, &mut out);
+    out.sort();
+    out
+}
+
+/// Every import chain reaching `target`, each starting at a module nothing else
+/// imports (a composition root). Walks the edges BACKWARD from the target, so
+/// the answer is "how does anything get here", not "what does this reach".
+fn import_chains(target: &str, edges: &[(String, String)]) -> Vec<Vec<String>> {
+    const MAX_CHAINS: usize = 24;
+    const MAX_DEPTH: usize = 12;
+    let mut out: Vec<Vec<String>> = Vec::new();
+    // Depth-first backward walk, carrying the path built so far (target-last).
+    fn back(
+        node: &str,
+        edges: &[(String, String)],
+        seen: &mut Vec<String>,
+        out: &mut Vec<Vec<String>>,
+    ) {
+        if out.len() >= MAX_CHAINS || seen.len() >= MAX_DEPTH {
+            return;
+        }
+        let importers: Vec<&String> = edges
+            .iter()
+            .filter(|(_, to)| to == node)
+            .map(|(from, _)| from)
+            .filter(|from| !seen.iter().any(|s| s == *from))
+            .collect();
+        if importers.is_empty() {
+            let mut chain = seen.clone();
+            chain.reverse();
+            out.push(chain);
+            return;
+        }
+        for from in importers {
+            seen.push(from.clone());
+            back(from, edges, seen, out);
+            seen.pop();
+        }
+    }
+    let mut seen = vec![target.to_string()];
+    back(target, edges, &mut seen, &mut out);
+    // A target nothing imports yields the one-element chain of itself, which is
+    // not an answer to "imported by".
+    out.retain(|c| c.len() > 1);
+    out
 }
 
 /// The `.vyrn` modules role discovery reads: the manifest's entry points plus
