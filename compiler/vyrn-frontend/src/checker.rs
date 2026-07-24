@@ -130,6 +130,7 @@ fn check_accum_full(
         "value",
         "list",
         "schemaOf",
+        "contractOf",
         "jsonSchema",
         "toJson",
         "fromJson",
@@ -380,11 +381,21 @@ fn check_accum_full(
         .map(|f| f.name.clone())
         .collect();
 
+    // Contract registry (RFC-0071): name -> declaration. Contracts are
+    // comptime-only, so the checker's whole interest in them is (a) validating
+    // their member types and (b) typing `contractOf(Name)` as `ContractInfo`.
+    let contracts: HashMap<String, ContractDecl> = program
+        .contracts
+        .iter()
+        .map(|c| (c.name.clone(), c.clone()))
+        .collect();
+
     let checker = Checker {
         sigs: &sigs,
         caps: &caps,
         spawn_safe: &spawn_safe,
         types: &types,
+        contracts: &contracts,
         variants: &variants,
         generics: &generics,
         all_bounds: &all_bounds,
@@ -420,6 +431,18 @@ fn check_accum_full(
         }
     }
 
+    // 3b. Validate each contract decl (RFC-0071): every member type must name
+    //     something real, and a default must have the member's type. A contract
+    //     whose members are unchecked would be a second silent path — exactly
+    //     the failure mode the RFC exists to remove.
+    for c in &program.contracts {
+        for s in checker.check_contract_decl(c) {
+            let mut d = Diagnostic::from_rendered(s, "check");
+            d.file = c.module.clone();
+            out.push(d);
+        }
+    }
+
     // 4. main signature. A missing/wrong `main` is a whole-program error (line 0);
     // it does not stop function bodies from being checked below. A program with
     // no `main` but WITH exported declarations is a LIBRARY MODULE (RFC-0010) —
@@ -440,6 +463,7 @@ fn check_accum_full(
     let is_library = program.functions.iter().map(|f| f.exported).any(|e| e)
         || program.type_decls.iter().any(|t| t.exported)
         || program.protocols.iter().any(|p| p.exported)
+        || program.contracts.iter().any(|c| c.exported)
         || !program.tests.is_empty()
         || !program.benches.is_empty()
         || has_served_handle;
@@ -726,6 +750,9 @@ struct Checker<'a> {
     /// Functions that may be run as a concurrent task (`spawn`) — isolated/pure.
     spawn_safe: &'a std::collections::HashSet<String>,
     types: &'a HashMap<String, TypeDecl>,
+    /// Module contracts (RFC-0071): name -> declaration. Comptime-only — used to
+    /// validate member types and to resolve `contractOf(Name)`.
+    contracts: &'a HashMap<String, ContractDecl>,
     variants: &'a HashMap<String, VariantInfo>,
     /// Generic functions: name -> type-parameter names.
     generics: &'a HashMap<String, Vec<String>>,
@@ -1298,6 +1325,62 @@ impl<'a> Checker<'a> {
             }
             _ => self.ensure_type_exists(ty, line),
         }
+    }
+
+    /// Validate a module contract's members (RFC-0071). Returns every problem
+    /// found — contracts are declarations, so a mistake in one is reported the
+    /// same way a mistake in a `type` is, not swallowed.
+    ///
+    /// Three rules, all local to the declaration:
+    ///
+    /// * every member type must name something that exists (a member's implicit
+    ///   type parameters — `T` in `Query<T>` — already arrived as
+    ///   [`Type::Param`] from the parser, so a *typo* is still an unknown type);
+    /// * an optional member's default must actually have the member's type,
+    ///   because that default is what a module gets when it omits the export;
+    /// * the open rule may not be optional or valueless — it describes a shape
+    ///   for arbitrarily-named exports, so a default would have nothing to
+    ///   attach to.
+    fn check_contract_decl(&self, c: &ContractDecl) -> Vec<String> {
+        let mut errs = Vec::new();
+        for m in &c.members {
+            let where_ = format!("contract `{}` member `{}`", c.name, m.name);
+            match &m.kind {
+                ContractMemberKind::Value { ty, default } => {
+                    if let Err(e) = self.ensure_type_exists(ty, m.line) {
+                        errs.push(e);
+                        continue;
+                    }
+                    if let Some(d) = default {
+                        // The default is checked exactly like a module-state
+                        // initializer: an empty scope (a contract sees no
+                        // bindings) and the member type as the expected type.
+                        let scope: Vec<HashMap<String, Binding>> = vec![HashMap::new()];
+                        match self.expr(d, &scope, Some(ty), None) {
+                            Err(e) => errs.push(e),
+                            Ok(vty) if !self.coercible(&vty, ty) => errs.push(format!(
+                                "line {}: {where_} defaults to {vty}, but is declared `{ty}`",
+                                m.line
+                            )),
+                            Ok(_) => {}
+                        }
+                    }
+                }
+                ContractMemberKind::Fn { params, ret } => {
+                    for p in params {
+                        if let Err(e) = self.ensure_type_exists(p, m.line) {
+                            errs.push(e);
+                        }
+                    }
+                    if *ret != Type::Unit {
+                        if let Err(e) = self.ensure_type_exists(ret, m.line) {
+                            errs.push(e);
+                        }
+                    }
+                }
+            }
+        }
+        errs
     }
 
     fn check_type_decl(&self, t: &TypeDecl) -> Result<(), String> {
@@ -4527,6 +4610,30 @@ impl<'a> Checker<'a> {
                     ))
                 }
                 _ => return Err(format!("line {line}: `schemaOf` needs a type name")),
+            }
+        }
+        // built-in: contractOf(ContractName) -> ContractInfo — compile-time
+        // reflection of a module contract (RFC-0071). Shaped exactly like
+        // `schemaOf`: the argument is a *declaration name*, not a value, and the
+        // result is an ordinary record, so `std/contract:checkContract` can
+        // compare a contract against a `moduleInterface` in plain Vyrn code.
+        if name == "contractOf" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `contractOf` takes 1 argument (a contract name), got {}",
+                    args.len()
+                ));
+            }
+            match &args[0] {
+                Expr::Var { name: cn, .. } if self.contracts.contains_key(cn) => {
+                    return Ok(Type::Named("ContractInfo".to_string()))
+                }
+                Expr::Var { name: cn, .. } => {
+                    return Err(format!(
+                        "line {line}: `contractOf` needs a declared contract name;                          `{cn}` is not a contract"
+                    ))
+                }
+                _ => return Err(format!("line {line}: `contractOf` needs a contract name")),
             }
         }
         // built-in: jsonSchema(TypeName) -> String — compile-time rendering of a
@@ -9570,6 +9677,64 @@ mod tests {
              let n = got[1]\n\
              drop grid\n\
              return n }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    // ---- module contracts (RFC-0071) ---------------------------------------
+
+    #[test]
+    fn contract_members_may_name_declared_types_and_open_type_params() {
+        let src = "type Head = { title: String }\n\
+                   contract Page {\n\
+                   let head: Head = Head { title: \"\" }\n\
+                   let data: Array<T>\n\
+                   fn load(id: Int64) -> String\n\
+                   fn *(input: String) -> String\n\
+                   }\n\
+                   fn main() -> Int64 { return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn a_misspelled_member_type_is_an_error_not_a_type_parameter() {
+        // The whole point of the single-letter rule: `Haed` is still a type the
+        // checker must resolve, so a typo in a contract is caught like any other.
+        let src = "type Head = { title: String }\n\
+                   contract Page { let head: Haed }\n\
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("unknown type `Haed`"), "{e}");
+    }
+
+    #[test]
+    fn a_default_must_have_the_members_declared_type() {
+        let src = "type Head = { title: String }\n\
+                   contract Page { let head: Head = \"Title\" }\n\
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("head"), "{e}");
+    }
+
+    #[test]
+    fn contract_of_types_as_contract_info() {
+        let src = "contract Page { let head: String = \"\" }\n\
+                   fn main() -> Int64 { let c = contractOf(Page)  print(c.name)  return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn contract_of_rejects_a_name_that_is_not_a_contract() {
+        let src = "type Page = { a: Int64 }\n\
+                   fn main() -> Int64 { let c = contractOf(Page)  return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("is not a contract"), "{e}");
+    }
+
+    #[test]
+    fn a_module_that_only_exports_a_contract_is_a_library() {
+        // No `main` required — an exported contract is a public surface, exactly
+        // like an exported `type` or `protocol`.
+        let src = "export contract Page { let head: String = \"\" }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 }

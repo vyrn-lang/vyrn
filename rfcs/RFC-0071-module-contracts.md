@@ -292,6 +292,61 @@ other type. Closing the contract cost nothing and bought total typo detection.
   quick-fix. `vyrn why --contract <file>` prints the resolved contract and every
   export's status.
 
+## M1 — as landed
+
+Eight places where the implementation is not what this document said, and why.
+
+**`contract` is contextual, not reserved.** `std/rpc`, `std/connect`,
+`std/openapi` and `std/graphql` each take a parameter literally named `contract`
+(`gen fn rpcServer(contract: String)`), and applications name variables that way
+too. Reserving the word would have broken all four std modules on day one, for
+nothing. `contract` starts a declaration only in `contract <Ident> {` position —
+the same trick `gen fn` / `extern fn` / `test "…"` / `bench "…"` already use.
+
+**`checkContract(iface, contractOf(Page))`, not `checkContract(iface, Page)`.**
+A contract is comptime-only, so a bare declaration name evaluating to a value
+would need matching magic in the checker, the interpreter *and* the code
+generator, and could be silently shadowed by a local named `Page`.
+`contractOf(Name)` is the exact shape of `schemaOf(TypeName)`, which has carried
+compile-time reflection since RFC-0003. It also reads honestly: the reflection is
+visible at the call site.
+
+**Member type parameters are recognized by spelling.** The RFC leaves them
+undeclared and open per member, which means there is no list for the parser to
+consult. The rule is the corpus's own convention made load-bearing: a single
+uppercase ASCII letter, optionally followed by digits (`T`, `R`, `T1`). Anything
+longer is a named type the checker must resolve — so `Haed` is still an error,
+which is what keeps a typo in a *contract* as loud as a typo in a module.
+
+**Checking reads exported functions only.** `moduleInterface` reflects functions
+and types; `export let` does not exist yet (RFC-0029 makes module state
+module-private). So a `let` member can today only be reported *absent*, or
+type-mismatched against a same-named function. Every other rule is already live.
+M2's `export let` joins the same list and nothing in `std/contract` changes.
+
+**"module must export `data`", not "page must export `data`".** The role word
+comes from `vyrn.json` role attachment, which is M2/M3. The message otherwise
+matches the table, including the contract's declaring module.
+
+**There was no did-you-mean implementation to reuse.** This document says the
+`≤ 2` threshold is "the same threshold the existing hint diagnostics use"; the
+repo's hints are all exact-match, and no edit distance existed anywhere. One
+canonical `editDistance` (Damerau–Levenshtein, optimal-string-alignment) now
+lives in `std/strings`, so the next consumer has something to reuse.
+
+**`contractOf` has no native or wasm lowering.** Reaching it at runtime is a
+compile error naming the reason, exactly as `moduleInterface` already does.
+"Nothing about a contract survives into the emitted module" is enforced, not
+merely intended — and the comptime-only property is what keeps interp == native
+== wasm untouched.
+
+**`ContractInfo.module` is an import specifier.** A generator is re-loaded as its
+own root, so a contract declared *in* the generator (the normal case — `std/ui`
+will declare `Page` and `std/ui`'s generator will check it) would otherwise carry
+no module at all and every message would lose half its meaning. Contracts are
+restamped with the specifier a reader could type (`std/ui`, `./gen`) when the
+generator's private copy of the program is prepared.
+
 ## Acceptance
 
 - `fn laod()` in a page is an **error** naming `data`, not a silent no-data page.

@@ -67,6 +67,9 @@ struct Roles {
     /// A `|` that closes a lambda parameter list (RFC-0023): tight *before* it
     /// (`x|`), with the normal one space *after* it before the body.
     lambda_close: bool,
+    /// The `*` of a contract's open rule (RFC-0071), `fn *(..) -> ..`: tight
+    /// *after* it (`*(`), so it never prints as the binary multiply it lexes as.
+    open_rule_star: bool,
 }
 
 /// A token can be the *end* of an operand — i.e. a binary operator that follows
@@ -183,6 +186,16 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
                     roles[idx].unary_minus = true;
                 }
             }
+            // A contract's open rule (RFC-0071) is spelled `fn *(..)`. The `*`
+            // lexes as multiply, so without this it would print as `fn * (..)`
+            // — still legal, but not the declaration form anyone writes.
+            // Recognized positionally (`fn` before, `(` after), which is exactly
+            // where the grammar allows it and nowhere a multiply can appear.
+            Tok::Star => {
+                if matches!(prev, Some(Tok::Fn)) && matches!(next, Some(Tok::LParen)) {
+                    roles[idx].open_rule_star = true;
+                }
+            }
             // A `|` opening or closing a lambda parameter list. A lambda is a
             // call argument (RFC-0023: after `(`/`,`) or a storage-position
             // source (RFC-0037: after `=`, a record/map `:`, a match arm's
@@ -227,8 +240,13 @@ fn wants_space(
     prev_unary_minus: bool,
     prev_lambda_open: bool,
     next_lambda_close: bool,
+    prev_open_rule_star: bool,
 ) -> bool {
     use Tok::*;
+    // A contract's open rule is `fn *(..)`, never `fn * (..)`.
+    if prev_open_rule_star {
+        return false;
+    }
     // A lambda parameter list is tight inside (RFC-0023): no space after the
     // opening `|` and no space before the closing `|` (`|x|`, `|x, y|`). The one
     // space AFTER the closing `|` (before the body) follows the normal rules.
@@ -384,6 +402,7 @@ fn print(items: &[Triv]) -> String {
                                         roles[p].unary_minus,
                                         roles[p].lambda_open,
                                         roles[idx].lambda_close,
+                                        roles[p].open_rule_star,
                                     )
                                 }
                             }
@@ -722,5 +741,30 @@ mod tests {
         let src = "fn main() -> Int64 {\nlet x =\nreturn 0\n}\n";
         let out = fmt(src).expect("lexable input formats even if unparseable");
         assert!(out.contains("let x ="));
+    }
+
+    #[test]
+    fn contract_declarations_round_trip() {
+        // RFC-0071's declaration form must be canonical as written — including
+        // the open rule's `fn *(..)`, whose `*` lexes as a multiply and would
+        // otherwise print spaced.
+        let src = "export contract Page {\n\
+                   \x20   /// The page's data.\n\
+                   \x20   let data: Query<T>\n\
+                   \x20   let head: Head = Head {}\n\
+                   \x20   fn load(id: Int64) -> String\n\
+                   \x20   fn *(input: String) -> String\n\
+                   }\n";
+        assert_eq!(f(src), src);
+    }
+
+    #[test]
+    fn a_messy_contract_formats_to_the_canonical_form() {
+        // Line structure stays the author's (v1 never splits lines); spacing and
+        // the open rule's `*` are normalized.
+        assert_eq!(
+            f("contract P{fn * ( a : String )->String}\n"),
+            "contract P { fn *(a: String) -> String }\n"
+        );
     }
 }

@@ -128,6 +128,17 @@ gen fn synthesizes it from a nested `vyxPage(…)` import. This is the wrapper
 carrying the pre-RFC-0048 synthetic `UiPageBody.vyx` origins (still used by the
 pure unit tests, which assert on the generated code, not on origins).
 
+## vyxBuildPageClientModuleAt
+
+```vyrn
+fn vyxBuildPageClientModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String
+```
+
+`vyxBuildPageModuleAt` for the CLIENT bundle (RFC-0069 §1): `load` and its now-
+dead imports are stripped, and `head`/`headTitle` are omitted (the title travels
+in the payload, head assets through v2's additive head machinery). The compiled
+view fn + `Params` + `page` are byte-for-byte what the server module produces.
+
 ## vyxBuildPageModuleAt
 
 ```vyrn
@@ -162,6 +173,24 @@ fn vyxPageThemed(vyxPath: String, theme: String) -> String
 
 `vyxPageThemed(vyxPath, theme)` — the themed variant (RFC-0036): the page
 body's classes are compile-checked against `theme`.
+
+## vyxPageClient
+
+```vyrn
+fn vyxPageClient(vyxPath: String) -> String
+```
+
+`vyxPageClient(vyxPath)` — the CLIENT-bundle variant (RFC-0069 §1): the same
+page compilation with `load` (and its dead imports) stripped and no head/title,
+so `std/ui`'s `pagesClient` can render the page from its props on a soft nav.
+
+## vyxPageClientThemed
+
+```vyrn
+fn vyxPageClientThemed(vyxPath: String, theme: String) -> String
+```
+
+`vyxPageClientThemed(vyxPath, theme)` — the themed client variant (RFC-0069 §1).
 
 ## vyxBuildLayoutModule
 

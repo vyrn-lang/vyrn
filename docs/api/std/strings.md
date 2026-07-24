@@ -188,3 +188,20 @@ fn toHex(n: UInt64) -> String
 The lowercase 16-digit hex of a `UInt64` (e.g. a hash fingerprint). Integer
 `.toString()` is decimal-only, so hex is built nibble-by-nibble via the
 bitwise ops (RFC-0045).
+
+## editDistance
+
+```vyrn
+fn editDistance(a: String, b: String) -> Int64
+```
+
+The Damerau–Levenshtein edit distance between `a` and `b`, in BYTES —
+insertions, deletions, substitutions, and transpositions of *adjacent*
+characters, each costing 1. This is the optimal-string-alignment variant
+(a substring is edited at most once), which is the standard basis for a
+"did you mean" suggestion and is what RFC-0071's `≤ 2` threshold means.
+
+Byte-wise, like every other function here: for ASCII identifiers — the only
+thing anyone computes a did-you-mean over — that is exactly character-wise,
+and for multi-byte text it still orders near from far, it just counts UTF-8
+bytes rather than codepoints.

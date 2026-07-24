@@ -1163,6 +1163,12 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         .iter()
         .map(|t| (t.name.clone(), t.clone()))
         .collect();
+    // Module contracts (RFC-0071), for the `contractOf(Name)` reflection.
+    let contracts: HashMap<&str, &ContractDecl> = program
+        .contracts
+        .iter()
+        .map(|c| (c.name.as_str(), c))
+        .collect();
     // Enum variant names, so constructor uses (Var/Call) can be recognized.
     let mut variants: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for t in &program.type_decls {
@@ -1184,6 +1190,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
     let interp = Interp {
         funcs,
         types,
+        contracts,
         type_map,
         variants,
         droppable,
@@ -1218,6 +1225,9 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
 struct Interp<'a> {
     funcs: HashMap<&'a str, &'a Function>,
     types: HashMap<&'a str, &'a TypeDecl>,
+    /// Module contracts (RFC-0071), keyed by name — the source `contractOf`
+    /// reflects. Comptime-only, so this is read by exactly one builtin.
+    contracts: HashMap<&'a str, &'a ContractDecl>,
     /// Owned type map for `resolve`/codec (RFC-0018 JSON codec).
     type_map: HashMap<String, TypeDecl>,
     variants: std::collections::HashSet<&'a str>,
@@ -2274,6 +2284,19 @@ impl<'a> Interp<'a> {
                 // `jsonSchema(TypeName)` renders the declared type as a JSON Schema
                 // string at compile time — computed from the declaration, so both
                 // backends produce identical bytes.
+                // `contractOf(Name)` reflects a module contract at compile time
+                // (RFC-0071) — its argument is a contract name, not a value, so
+                // build and evaluate its `ContractInfo` literal exactly the way
+                // `schemaOf` builds a `Schema`.
+                if name == "contractOf" {
+                    if let Some(Expr::Var { name: cn, .. }) = args.first() {
+                        if let Some(decl) = self.contracts.get(cn.as_str()) {
+                            let cl = crate::schema_reflect::contract_info_lit(decl);
+                            return self.expr(&cl, scope);
+                        }
+                    }
+                    return Err("`contractOf` needs a declared contract name".into());
+                }
                 if name == "jsonSchema" {
                     if let Some(Expr::Var { name: tn, .. }) = args.first() {
                         if self.types.contains_key(tn.as_str()) {

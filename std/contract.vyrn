@@ -1,0 +1,427 @@
+/// std/contract — check a module against a module contract (RFC-0071).
+///
+/// A `contract` declaration states which exports a module may have, with their
+/// types, optionality and documentation. `checkContract` compares one against a
+/// module's `moduleInterface` reflection and returns RFC-0009 `Issue`s, so a
+/// generator replaces name-hunting and source-scanning with one call:
+///
+///     import { checkContract } from "std/contract"
+///
+///     gen fn pages(dir: String) -> String {
+///         let iface = moduleInterface(pageFile)
+///         let issues = checkContract(iface, contractOf(Page))
+///         ...
+///     }
+///
+/// Everything here is ordinary library code over two ordinary records. The
+/// compiler knows the *declaration form* and nothing else — which is what lets a
+/// third-party generator declare its own contract and get the same behaviour
+/// without a compiler change.
+///
+/// The five conditions RFC-0071 enumerates, all reported and none silent:
+///
+///   - required member absent            -> `contract.missing`
+///   - member type mismatch              -> `contract.type`
+///   - unknown export, close to a member -> `contract.unknown.didYouMean`
+///   - unknown export, not close         -> `contract.unknown`
+///   - open-rule shape mismatch          -> `contract.open`
+///
+/// **The export surface this reads.** `ModuleInterface` reflects a module's
+/// exported FUNCTIONS (RFC-0021 / RFC-0031); `export let` does not exist yet, so
+/// a value member (`let head: Head`) can today only be *absent*, or found under
+/// the name of a function — which is itself a type mismatch and is reported as
+/// one. When RFC-0071 M2 lands `export let`, the reflected values join
+/// `moduleExports` below and every rule here applies unchanged.
+
+import { editDistance } from "std/strings"
+
+/// The "did you mean" threshold: Damerau-Levenshtein distance <= 2, measured
+/// against every member name. This is what makes typo detection on a CLOSED
+/// contract total — if every legal name is enumerated, a near-miss is decidable.
+fn nearThreshold() -> Int64 {
+    return 2
+}
+
+// ---- type-spelling matching ------------------------------------------------
+
+/// `s` without leading or trailing ASCII spaces.
+fn trimSpaces(s: String) -> String {
+    let b = bytes(s)
+    let mut start = 0
+    while start < b.length && b[start] == ' ' {
+        start = start + 1
+    }
+    let mut end = b.length
+    while end > start && b[end - 1] == ' ' {
+        end = end - 1
+    }
+    return slice(s, start, end)
+}
+
+/// Whether `name` is a contract member's implicit TYPE PARAMETER: a single
+/// uppercase ASCII letter, optionally followed by digits (`T`, `R`, `T1`).
+///
+/// This mirrors the frontend rule exactly (`parser::is_member_type_param`).
+/// RFC-0071 leaves member type parameters undeclared and open per member, so
+/// `let data: Query<T>` admits any instantiation — and a multi-letter name is
+/// still a real type, which is what keeps a misspelling an error.
+fn isTypeParam(name: String) -> Bool {
+    let b = bytes(name)
+    if b.length == 0 {
+        return false
+    }
+    if b[0] < 'A' || b[0] > 'Z' {
+        return false
+    }
+    let mut i = 1
+    while i < b.length {
+        if b[i] < '0' || b[i] > '9' {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// The head name of a type spelling: `Query<T>` => `Query`, `Int64` => `Int64`.
+fn headOf(spelling: String) -> String {
+    let b = bytes(spelling)
+    let mut i = 0
+    while i < b.length {
+        if b[i] == '<' {
+            return trimSpaces(slice(spelling, 0, i))
+        }
+        i = i + 1
+    }
+    return trimSpaces(spelling)
+}
+
+/// The top-level generic arguments of a type spelling, split on depth-0 commas:
+/// `Map<String, Array<T>>` => `["String", "Array<T>"]`; `Int64` => `[]`.
+fn argsOf(spelling: String) -> Array<String> {
+    let b = bytes(spelling)
+    let mut out: Array<String> = []
+    let mut open = -1
+    let mut i = 0
+    while i < b.length {
+        if b[i] == '<' {
+            open = i
+            break
+        }
+        i = i + 1
+    }
+    if open < 0 {
+        return out
+    }
+    // Scan from just after the opening `<` to the matching `>`, cutting at
+    // depth-0 commas.
+    let mut depth = 1
+    let mut start = open + 1
+    let mut j = open + 1
+    while j < b.length && depth > 0 {
+        if b[j] == '<' {
+            depth = depth + 1
+        } else if b[j] == '>' {
+            depth = depth - 1
+            if depth == 0 {
+                out.push(trimSpaces(slice(spelling, start, j)))
+            }
+        } else if b[j] == ',' && depth == 1 {
+            out.push(trimSpaces(slice(spelling, start, j)))
+            start = j + 1
+        }
+        j = j + 1
+    }
+    return out
+}
+
+/// Whether the actual type spelling `actual` satisfies the contract's `pattern`.
+///
+/// Equality, except that a pattern head which is a member type parameter matches
+/// ANY type — `Query<T>` accepts `Query<Paste>` and `Query<Array<Book>>` alike,
+/// per RFC-0071's "type parameters in member types are open". An absent/Unit
+/// return spells `""` on both sides, so it compares equal without a special case.
+fn typeMatches(pattern: String, actual: String) -> Bool {
+    let ph = headOf(pattern)
+    if isTypeParam(ph) {
+        return true
+    }
+    if ph != headOf(actual) {
+        return false
+    }
+    let pa = argsOf(pattern)
+    let aa = argsOf(actual)
+    if pa.length != aa.length {
+        return false
+    }
+    let mut i = 0
+    while i < pa.length {
+        if typeMatches(pa[i], aa[i]) == false {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// A function signature spelled the way the compiler spells `Type::Fn` —
+/// `fn(A, B) -> R`, with a Unit return omitted. Both sides of every function
+/// comparison go through this, so a mismatch message never compares two
+/// different notations.
+fn sigSpelling(params: Array<String>, ret: String) -> String {
+    let mut out = "fn("
+    let mut i = 0
+    while i < params.length {
+        if i > 0 {
+            out = out + ", "
+        }
+        out = out + params[i]
+        i = i + 1
+    }
+    out = out + ")"
+    if ret != "" {
+        out = out + " -> " + ret
+    }
+    return out
+}
+
+// ---- the module's export surface -------------------------------------------
+
+/// One export of the reflected module, flattened to the shape a contract member
+/// is compared against: a name, a kind (`"fn"` / `"let"`), the parameter type
+/// spellings, and the return / value type spelling.
+type Export = {
+    name: String,
+    kind: String,
+    params: Array<String>,
+    ret: String,
+}
+
+/// The reflected module's exports. Today that is its exported functions; when
+/// `export let` lands (RFC-0071 M2) its values join this list and nothing below
+/// changes.
+fn moduleExports(iface: ModuleInterface) -> Array<Export> {
+    let mut out: Array<Export> = []
+    for f in iface.functions {
+        let mut ps: Array<String> = []
+        for p in f.params {
+            ps.push(p.spelling)
+        }
+        out.push(Export { name: f.name, kind: "fn", params: ps, ret: f.ret })
+    }
+    return out
+}
+
+/// How an export's type reads in a diagnostic: a function by its signature, a
+/// value by its type.
+fn exportSpelling(e: Export) -> String {
+    if e.kind == "fn" {
+        return sigSpelling(e.params, e.ret)
+    }
+    return e.ret
+}
+
+/// How a member's type reads in a diagnostic (same notation as `exportSpelling`).
+fn memberSpelling(m: MemberInfo) -> String {
+    if m.kind == "fn" {
+        return sigSpelling(m.params, m.ret)
+    }
+    return m.spelling
+}
+
+// ---- reporting -------------------------------------------------------------
+
+/// Where the rule came from, for the tail of every message: `contract \`Page\`,
+/// std/ui` — or just `contract \`Page\`` when the contract is declared in the
+/// module under check and there is no separate module to name.
+fn contractSite(c: ContractInfo) -> String {
+    if c.module == "" {
+        return "contract `\{c.name}`"
+    }
+    return "contract `\{c.name}`, \{c.module}"
+}
+
+fn issue(key: String, path: String, message: String) -> Issue {
+    return Issue { key: key, path: path, message: message }
+}
+
+/// The member name closest to `name` within `nearThreshold()`, or `None`. Ties
+/// go to the first member in declaration order — stable, and the order the
+/// contract's author chose.
+fn didYouMean(c: ContractInfo, name: String) -> Option<String> {
+    let mut best = ""
+    let mut bestD = nearThreshold() + 1
+    for m in c.members {
+        if m.name != "*" {
+            let d = editDistance(name, m.name)
+            if d < bestD {
+                bestD = d
+                best = m.name
+            }
+        }
+    }
+    if bestD <= nearThreshold() {
+        return Some(best)
+    }
+    return None
+}
+
+/// Whether `name` is one of the contract's named members.
+fn hasMember(c: ContractInfo, name: String) -> Bool {
+    for m in c.members {
+        if m.name == name {
+            return true
+        }
+    }
+    return false
+}
+
+/// The contract's open rule (`fn *(..) -> ..`), if it has one.
+fn openRule(c: ContractInfo) -> Option<MemberInfo> {
+    for m in c.members {
+        if m.name == "*" {
+            return Some(m)
+        }
+    }
+    return None
+}
+
+/// Whether export `e` satisfies function member `m`: same kind, same arity, and
+/// every parameter and the return type matching (member type parameters open).
+/// The open rule uses this too — it constrains SHAPE, and the name is
+/// deliberately free (that is the point of an open contract: `std/rpc`'s
+/// procedure names are the application's vocabulary, so there is nothing to
+/// enumerate and nothing to misspell).
+fn matchesSignature(m: MemberInfo, e: Export) -> Bool {
+    if e.kind != "fn" {
+        return false
+    }
+    if m.params.length != e.params.length {
+        return false
+    }
+    let mut i = 0
+    while i < m.params.length {
+        if typeMatches(m.params[i], e.params[i]) == false {
+            return false
+        }
+        i = i + 1
+    }
+    return typeMatches(m.ret, e.ret)
+}
+
+// ---- the check -------------------------------------------------------------
+
+/// Check `iface` (a module's reflected surface) against contract `c`, returning
+/// one RFC-0009 `Issue` per problem — in a fixed order: the contract's members
+/// in declaration order first, then the module's unrecognized exports in
+/// reflection order. Deterministic, because a generator bakes these into a
+/// diagnostic and byte-stability is the whole game.
+///
+/// An empty result means the module satisfies the contract.
+export fn checkContract(iface: ModuleInterface, c: ContractInfo) -> Array<Issue> {
+    let mut issues: Array<Issue> = []
+    let exports = moduleExports(iface)
+    let site = contractSite(c)
+
+    // 1. Every named member: present with the right type, or legitimately absent.
+    for m in c.members {
+        if m.name != "*" {
+            let mut found = false
+            for e in exports {
+                if e.name == m.name {
+                    found = true
+                    let ok = if m.kind == "fn" {
+                        matchesSignature(m, e)
+                    } else {
+                        e.kind == "let" && typeMatches(m.spelling, e.ret)
+                    }
+                    if ok == false {
+                        let want = memberSpelling(m)
+                        let got = exportSpelling(e)
+                        issues.push(issue(
+                                "contract.type",
+                                m.name,
+                                "`\{m.name}` must be `\{want}`, found `\{got}` (\{site})",
+                            ))
+                    }
+                }
+            }
+            if found == false && m.optional == false {
+                let want = memberSpelling(m)
+                issues.push(issue(
+                        "contract.missing",
+                        m.name,
+                        "module must export `\{m.name}`: `\{want}` (\{site})",
+                    ))
+            }
+        }
+    }
+
+    // 2. Every export the contract does not name. A CLOSED contract reports it —
+    //    with a did-you-mean when it is within the threshold of a member — and an
+    //    OPEN one checks it against the open rule's shape instead. Either way it
+    //    is reported, never ignored: silence is what makes a convention feel like
+    //    magic, and a contract has no silent path.
+    for e in exports {
+        if hasMember(c, e.name) == false {
+            if let Some(rule) = openRule(c) {
+                if matchesSignature(rule, e) == false {
+                    let want = memberSpelling(rule)
+                    let got = exportSpelling(e)
+                    issues.push(issue(
+                            "contract.open",
+                            e.name,
+                            "`\{e.name}` must match the open rule `\{want}`, found `\{got}` (\{site})",
+                        ))
+                }
+            } else {
+                if let Some(near) = didYouMean(c, e.name) {
+                    issues.push(issue(
+                            "contract.unknown.didYouMean",
+                            e.name,
+                            "unknown export `\{e.name}` — did you mean `\{near}`? (\{site})",
+                        ))
+                } else {
+                    issues.push(issue(
+                            "contract.unknown",
+                            e.name,
+                            "unknown export `\{e.name}` (\{site} is closed)",
+                        ))
+                }
+            }
+        }
+    }
+    return issues
+}
+
+test "type parameters are open, concrete types are not" {
+    assertEq(typeMatches("Query<T>", "Query<Paste>"), true)
+    assertEq(typeMatches("Query<T>", "Query<Array<Book>>"), true)
+    assertEq(typeMatches("Query<Paste>", "Query<Book>"), false)
+    assertEq(typeMatches("T", "anything at all"), true)
+    assertEq(typeMatches("Map<String, T>", "Map<String, Int64>"), true)
+    assertEq(typeMatches("Map<String, T>", "Map<Int64, Int64>"), false)
+    assertEq(typeMatches("Head", "Head"), true)
+    assertEq(typeMatches("Head", "String"), false)
+    assertEq(typeMatches("", ""), true)
+}
+
+test "spelling helpers agree with the compiler's notation" {
+    assertEq(headOf("Query<T>"), "Query")
+    assertEq(headOf("Int64"), "Int64")
+    assertEq(argsOf("Map<String, Array<T>>").length, 2)
+    assertEq(argsOf("Map<String, Array<T>>")[1], "Array<T>")
+    assertEq(argsOf("Int64").length, 0)
+    assertEq(sigSpelling(["Int64", "String"], "Bool"), "fn(Int64, String) -> Bool")
+    assertEq(sigSpelling([], ""), "fn()")
+}
+
+test "the type-parameter rule matches the frontend's" {
+    assertEq(isTypeParam("T"), true)
+    assertEq(isTypeParam("T1"), true)
+    assertEq(isTypeParam("R"), true)
+    assertEq(isTypeParam("Head"), false)
+    assertEq(isTypeParam("Ta"), false)
+    assertEq(isTypeParam("t"), false)
+    assertEq(isTypeParam(""), false)
+}

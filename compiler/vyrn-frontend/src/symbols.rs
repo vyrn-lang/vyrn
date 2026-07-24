@@ -2488,7 +2488,7 @@ static MACRO_BUILTINS: &[&str] = &[
     "print", "len", "concat", "slice", "bytes", "chars", "hexEncode", "hexDecode",
     "base64Encode", "base64Decode", "urlEncode", "urlDecode", "args", "readLine",
     "readFile", "writeFile", "renameFile", "fsyncFile", "readFileBytes",
-    "stringFromBytes", "listDir", "moduleInterface", "schemaOf", "jsonSchema",
+    "stringFromBytes", "listDir", "moduleInterface", "schemaOf", "contractOf", "jsonSchema",
     "toJson", "fromJson", "assert", "assertEq", "cell", "array", "parse", "str",
 ];
 

@@ -4,6 +4,7 @@
 - [std/arrays](std/arrays.md) — std/arrays — higher-order array helpers (RFC-0023), written in Vyrn itself.
 - [std/bench](std/bench.md) — std/bench — the benchmarking harness helpers (RFC-0055).
 - [std/connect](std/connect.md) — std/connect — Connect wire compatibility as a library (RFC-0038), built
+- [std/contract](std/contract.md) — std/contract — check a module against a module contract (RFC-0071).
 - [std/graphql](std/graphql.md) — std/graphql — the contract as a GraphQL SDL document (RFC-0038), a library
 - [std/hash](std/hash.md) — std/hash — non-cryptographic byte hashing (RFC-0045).
 - [std/html](std/html.md) — std/html — the view tree and the string renderer (RFC-0026 M1).

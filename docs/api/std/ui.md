@@ -77,6 +77,82 @@ fn badRequest(message: String) -> PageError
 
 A 400 `PageError`.
 
+## PageData
+
+```vyrn
+type PageData = Loading | Ready(T)
+```
+
+The data a lazy page's view is rendered over: `Loading` before the data has
+arrived (client nav only), `Ready(T)` once it has (always, server-side).
+
+## uiDataMarker
+
+```vyrn
+fn uiDataMarker() -> String
+```
+
+The data-request marker (RFC-0069 §2). The server `Request` exposes no headers,
+so the marker rides the query string; `uiRouteSegments` already strips the query
+from routing, so a marked request routes to the same page.
+
+## uiIsDataRequest
+
+```vyrn
+fn uiIsDataRequest(path: String) -> Bool
+```
+
+Whether `path`'s query carries the data marker.
+
+## uiPayload
+
+```vyrn
+fn uiPayload(page: String, title: String, props: String, params: String) -> String
+```
+
+Assemble a page data payload. `props`/`params` are already JSON (a `toJson`
+result, or the literal `null`); `page`/`title` are JSON-encoded here.
+
+## uiErrorPayload
+
+```vyrn
+fn uiErrorPayload(status: Int64, props: String) -> String
+```
+
+The `@error` data payload — the page the client renders on a load miss. Carries
+a `title` so vyrn-nav v3 sets `document.title` on a client-rendered error.
+
+## uiDataResponse
+
+```vyrn
+fn uiDataResponse(body: String) -> Response
+```
+
+Wrap a payload body in a `200 application/json` `Response`. A marked request is a
+DATA fetch: it always answers 200 (the payload's `page`/`status` describe what to
+render), while the UNMARKED document channel still returns a real 404 etc.
+
+## uiDataMiss
+
+```vyrn
+fn uiDataMiss() -> Response
+```
+
+The data response for a true miss (no route matched): the themed error page's
+payload at 404.
+
+## uiErrorResponseOf
+
+```vyrn
+fn uiErrorResponseOf(e: PageError) -> Response
+```
+
+The `@error` data response for a load failure. Takes the `PageError` as a TYPED
+parameter so `toJson`/field access see its concrete type — a `PageError` bound
+directly from a `Result` match arm (`Err(e)`) otherwise loses its type for
+`toJson` (RFC-0069 §2), the same reason the loaded data goes through the page's
+own `encodeProps`.
+
 ## pages
 
 ```vyrn
@@ -96,3 +172,20 @@ fn pagesThemed(dir: String, theme: String) -> String
 page in `dir` compiles its template classes against `theme` (a static class is
 proven `⊆ Tw` at compile time, a dynamic one coerces at runtime). `.vyrn` pages
 are unaffected. `theme` resolves relative to the importing module, like `dir`.
+
+## pagesClient
+
+```vyrn
+fn pagesClient(dir: String) -> String
+```
+
+`pagesClient(dir)` — synthesize the CLIENT page bundle from `dir` (RFC-0069 §1).
+
+## pagesClientThemed
+
+```vyrn
+fn pagesClientThemed(dir: String, theme: String) -> String
+```
+
+`pagesClientThemed(dir, theme)` — the themed client bundle (RFC-0069 §1); the
+server side uses `pagesThemed`, this its client counterpart.

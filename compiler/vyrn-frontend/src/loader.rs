@@ -607,6 +607,7 @@ fn load_modules(
                     type_decls: decls,
                     functions: Vec::new(),
                     protocols: Vec::new(),
+                    contracts: Vec::new(),
                     impls: Vec::new(),
                     globals: Vec::new(),
                     tests: Vec::new(),
@@ -670,6 +671,12 @@ fn load_modules(
             }
             for p in &mut program.protocols {
                 p.module = Some(key.to_string());
+            }
+            // Contracts (RFC-0071) carry their module too: `ContractInfo.module`
+            // is what lets a diagnostic say which library declared the contract
+            // (`contract `Page`, std/ui`).
+            for c in &mut program.contracts {
+                c.module = Some(key.to_string());
             }
             // Module state (RFC-0029) carries its owning module too, for
             // diagnostics and the same-module initializer-call rule.
@@ -965,13 +972,29 @@ fn run_generator(
             "cannot re-read generator module `{gen_mod_key}`: {e}"
         ))
     })?;
-    let gen_program = load(&gen_source, &gen_mod_key, opts, resolver)?;
+    let mut gen_program = load(&gen_source, &gen_mod_key, opts, resolver)?;
     let mut gdiags = crate::checker::check_accum(&gen_program);
     if gdiags.is_empty() {
         gdiags.extend(crate::movecheck::check_accum(&gen_program));
     }
     if !gdiags.is_empty() {
         return Err(gdiags);
+    }
+
+    // 4b. Contract provenance (RFC-0071). A generator is re-loaded as its OWN
+    //     root, so a contract declared *in* the generator (the normal case —
+    //     `std/ui` declares `Page` and `std/ui`'s generator checks against it)
+    //     would carry `module: None` and every diagnostic would lose the "which
+    //     library demanded this?" half of its message. Restamp each contract with
+    //     the IMPORT SPECIFIER of its declaring module (`std/ui`, `./contract`)
+    //     rather than a resolved absolute path, since that is what the reader can
+    //     actually type. Done after checking so ordinary diagnostics are
+    //     untouched, and only for the generator's private copy of the program.
+    let std_root = opts.std_root.as_deref();
+    let gen_dir = dir_of(&gen_mod_key).to_string();
+    for c in &mut gen_program.contracts {
+        let key = c.module.clone().unwrap_or_else(|| gen_mod_key.clone());
+        c.module = Some(import_specifier(&gen_dir, &key, std_root));
     }
 
     // 5. Content-addressed cache key: generator sources ++ args ++ inputs read.
@@ -1180,6 +1203,9 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         for p in &m.program.protocols {
             add(&p.name);
         }
+        for c in &m.program.contracts {
+            add(&c.name);
+        }
         for g in &m.program.globals {
             add(&g.name);
         }
@@ -1223,6 +1249,9 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         }
         for p in &m.program.protocols {
             ex(&p.name, p.exported);
+        }
+        for c in &m.program.contracts {
+            ex(&c.name, c.exported);
         }
         // Globals are never `export`ed (module state is module-private,
         // RFC-0029 — `export let` does not exist), so they are not
@@ -1456,6 +1485,11 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         for p in &m.program.protocols {
             if !exported.contains(&p.name) {
                 privates.push(p.name.clone());
+            }
+        }
+        for c in &m.program.contracts {
+            if !exported.contains(&c.name) {
+                privates.push(c.name.clone());
             }
         }
         for g in &m.program.globals {
@@ -2092,6 +2126,12 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 method_protocol.insert(sig.name.clone(), p.name.clone());
             }
         }
+        // Contracts (RFC-0071) join the same top-level namespace as protocols:
+        // a contract name is what `contractOf(Name)` resolves, so it must be
+        // program-wide unique and obey the ordinary export/import visibility.
+        for c in &m.program.contracts {
+            register(&c.name, &m.key, c.exported, c.line, &mut errors);
+        }
         // Module-state bindings (RFC-0013) join the top-level namespace: a
         // global may not share a name with any other top-level declaration.
         for g in &m.program.globals {
@@ -2267,6 +2307,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     let mut extra_types = Vec::new();
     let mut extra_fns = Vec::new();
     let mut extra_protocols = Vec::new();
+    let mut extra_contracts = Vec::new();
     let mut extra_impls = Vec::new();
     let mut extra_tests = Vec::new();
     let mut extra_benches = Vec::new();
@@ -2282,6 +2323,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             extra_types.extend(p.type_decls.into_iter().filter(|t| !is_injected(t)));
             extra_fns.extend(p.functions);
             extra_protocols.extend(p.protocols);
+            extra_contracts.extend(p.contracts);
             extra_impls.extend(p.impls);
             extra_globals.extend(p.globals);
             // Imported tests keep their `module` tag: they type-check but do not
@@ -2295,6 +2337,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     program.type_decls.extend(extra_types);
     program.functions.extend(extra_fns);
     program.protocols.extend(extra_protocols);
+    program.contracts.extend(extra_contracts);
     program.impls.extend(extra_impls);
     // Init order (RFC-0029): dependencies first, then the root's own state.
     // `modules` is built depth-first with each module pushed AFTER its imports
@@ -3009,6 +3052,26 @@ fn rewrite_module_refs(p: &mut Program, map: &HashMap<String, String>, ns: &Hash
             rewrite_type(&mut m.ret, map);
         }
     }
+    // A contract member's types name declarations too (RFC-0071), so an alias
+    // or a co-naming rename must reach them like any other signature.
+    for c in &mut p.contracts {
+        for m in &mut c.members {
+            match &mut m.kind {
+                crate::ast::ContractMemberKind::Value { ty, default } => {
+                    rewrite_type(ty, map);
+                    if let Some(d) = default {
+                        rewrite_expr(d, map, ns);
+                    }
+                }
+                crate::ast::ContractMemberKind::Fn { params, ret } => {
+                    for t in params {
+                        rewrite_type(t, map);
+                    }
+                    rewrite_type(ret, map);
+                }
+            }
+        }
+    }
     for t in &mut p.tests {
         rewrite_block(&mut t.body, map, ns);
     }
@@ -3084,6 +3147,11 @@ fn rename_decl_in_module(p: &mut Program, from: &str, to: &str, ns: &HashSet<Str
     for pr in &mut p.protocols {
         if pr.name == from {
             pr.name = to.to_string();
+        }
+    }
+    for c in &mut p.contracts {
+        if c.name == from {
+            c.name = to.to_string();
         }
     }
     for g in &mut p.globals {

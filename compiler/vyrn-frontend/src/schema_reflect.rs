@@ -17,6 +17,15 @@
 //! `TypeInfo.source` is the canonical `type` declaration text (for verbatim
 //! re-emission of contract types); the `Schema` values carry the RFC-0009
 //! reflection (bounds/pattern/length).
+//!
+//! RFC-0071 adds the mirror image: `contractOf(Name)` reflects a `contract`
+//! declaration — what a module is *expected* to export — into the same kind of
+//! plain record, so `std/contract:checkContract` can compare expectation against
+//! reality in ordinary Vyrn code:
+//! ```text
+//! MemberInfo   { name, kind, spelling, params: Array<String>, ret, optional, doc }
+//! ContractInfo { name, module, doc, open, members: Array<MemberInfo> }
+//! ```
 
 use std::collections::{HashMap, HashSet};
 
@@ -113,6 +122,68 @@ pub fn module_interface_lit(
         vec![
             ("functions", array_lit(fn_infos)),
             ("types", array_lit(type_infos)),
+        ],
+    )
+}
+
+/// Build the `ContractInfo` record literal for a contract declaration
+/// (RFC-0071) — the *expectation* side of module reflection, mirroring
+/// [`module_interface_lit`].
+///
+/// This is the whole of the compiler's contract knowledge: it turns a
+/// [`ContractDecl`] into a record of strings and booleans. Which exports a
+/// contract demands, how a near-miss is reported, whether a mismatch is fatal —
+/// none of that lives here. `std/contract:checkContract` decides it in ordinary
+/// Vyrn code, so a third-party generator can replace the policy without touching
+/// the compiler, which is the point of the RFC.
+///
+/// The default *expression* of an optional member is deliberately not reflected:
+/// a generator needs to know that a default exists (`optional`), not what it
+/// evaluates to — the module that omits the member gets the default by writing
+/// it, not by the generator materializing it.
+pub fn contract_info_lit(c: &ContractDecl) -> Expr {
+    let members: Vec<Expr> = c
+        .members
+        .iter()
+        .map(|m| {
+            let (kind, params, ret) = match &m.kind {
+                ContractMemberKind::Value { ty, .. } => ("let", Vec::new(), ty.to_string()),
+                ContractMemberKind::Fn { params, ret } => (
+                    "fn",
+                    params.iter().map(|p| p.to_string()).collect(),
+                    // A `Unit` return spells as `""`, matching `FnInfo.ret`.
+                    if *ret == Type::Unit {
+                        String::new()
+                    } else {
+                        ret.to_string()
+                    },
+                ),
+            };
+            struct_lit(
+                "MemberInfo",
+                vec![
+                    ("name", Expr::Str(m.name.clone())),
+                    ("kind", Expr::Str(kind.to_string())),
+                    ("spelling", Expr::Str(m.spelling())),
+                    (
+                        "params",
+                        array_lit(params.into_iter().map(Expr::Str).collect()),
+                    ),
+                    ("ret", Expr::Str(ret)),
+                    ("optional", Expr::Bool(m.optional())),
+                    ("doc", opt_str(m.doc.as_deref())),
+                ],
+            )
+        })
+        .collect();
+    struct_lit(
+        "ContractInfo",
+        vec![
+            ("name", Expr::Str(c.name.clone())),
+            ("module", Expr::Str(c.module.clone().unwrap_or_default())),
+            ("doc", opt_str(c.doc.as_deref())),
+            ("open", Expr::Bool(c.open_rule().is_some())),
+            ("members", array_lit(members)),
         ],
     )
 }
@@ -334,6 +405,18 @@ fn none() -> Expr {
     Expr::Var {
         name: "None".to_string(),
         line: 0,
+    }
+}
+
+/// `Some("..")` / `None` for an optional string field.
+fn opt_str(s: Option<&str>) -> Expr {
+    match s {
+        Some(v) => Expr::Call {
+            name: "Some".to_string(),
+            args: vec![Expr::Str(v.to_string())],
+            line: 0,
+        },
+        None => none(),
     }
 }
 

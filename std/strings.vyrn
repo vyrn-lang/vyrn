@@ -328,3 +328,73 @@ export fn toHex(n: UInt64) -> String {
     }
     return fromBytesOr(out, "")
 }
+
+/// The Damerau–Levenshtein edit distance between `a` and `b`, in BYTES —
+/// insertions, deletions, substitutions, and transpositions of *adjacent*
+/// characters, each costing 1. This is the optimal-string-alignment variant
+/// (a substring is edited at most once), which is the standard basis for a
+/// "did you mean" suggestion and is what RFC-0071's `≤ 2` threshold means.
+///
+/// Byte-wise, like every other function here: for ASCII identifiers — the only
+/// thing anyone computes a did-you-mean over — that is exactly character-wise,
+/// and for multi-byte text it still orders near from far, it just counts UTF-8
+/// bytes rather than codepoints.
+export fn editDistance(a: String, b: String) -> Int64 {
+    let x = bytes(a)
+    let y = bytes(b)
+    let n = x.length
+    let m = y.length
+    if n == 0 {
+        return m
+    }
+    if m == 0 {
+        return n
+    }
+    // The (n+1) x (m+1) matrix, row-major with row stride `w`.
+    let w = m + 1
+    let mut d: Array<Int64> = []
+    let mut k = 0
+    while k < (n + 1) * w {
+        d.push(0)
+        k = k + 1
+    }
+    let mut i = 0
+    while i <= n {
+        d[i * w] = i
+        i = i + 1
+    }
+    let mut j = 0
+    while j <= m {
+        d[j] = j
+        j = j + 1
+    }
+    let mut r = 1
+    while r <= n {
+        let mut c = 1
+        while c <= m {
+            let mut cost = 1
+            if x[r - 1] == y[c - 1] {
+                cost = 0
+            }
+            let mut best = d[(r - 1) * w + c] + 1
+            let ins = d[r * w + c - 1] + 1
+            if ins < best {
+                best = ins
+            }
+            let sub = d[(r - 1) * w + c - 1] + cost
+            if sub < best {
+                best = sub
+            }
+            if r > 1 && c > 1 && x[r - 1] == y[c - 2] && x[r - 2] == y[c - 1] {
+                let tr = d[(r - 2) * w + c - 2] + 1
+                if tr < best {
+                    best = tr
+                }
+            }
+            d[r * w + c] = best
+            c = c + 1
+        }
+        r = r + 1
+    }
+    return d[n * w + m]
+}

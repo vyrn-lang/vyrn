@@ -6058,6 +6058,16 @@ impl<'a> Gen<'a> {
                     .to_string(),
             );
         }
+        // `contractOf(Name)` is the same kind of thing on the *expectation* side
+        // (RFC-0071): a module contract is comptime-only and nothing about it
+        // survives into the emitted module, so there is nothing to lower.
+        if name == "contractOf" {
+            return Err(
+                "`contractOf` is compile-time reflection (RFC-0071) — a module contract is only \
+                 available during generation, never at runtime"
+                    .to_string(),
+            );
+        }
         if name == "readFile" {
             // status = __vyrn_read_file(path, &buf, &len): 0 ok / 1 io / 3 NUL,
             // then the shared UTF-8 DFA decides status 2. The Err payload is
