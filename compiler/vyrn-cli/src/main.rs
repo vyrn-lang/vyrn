@@ -29,6 +29,8 @@
 //!                                        `--std` documents the std library; `--verify` exits 1 on drift.
 //!   vyrn new     <name>                 Scaffold a project (vyrn.json + src/main.vyrn).
 //!   vyrn deps                           Print the resolved module graph.
+//!   vyrn why     --contract <file>      Print the contract governing a module (RFC-0071)
+//!                                        and every export's status against it.
 //!
 //! `--deny-warnings` (or `VYRN_DENY_WARNINGS=1`) turns any load warning into a
 //! failure — the switch CI opts into so a build that compiled with something
@@ -44,7 +46,8 @@ use std::process::{Command, ExitCode};
 
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n\
+       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
@@ -104,6 +107,9 @@ fn real_main() -> ExitCode {
     }
     if cmd == "deps" {
         return deps();
+    }
+    if cmd == "why" {
+        return why_cmd(&args[2..]);
     }
     if cmd == "add" {
         return add(&args[2..], is_offline);
@@ -417,6 +423,182 @@ fn scaffold(name: &str) -> ExitCode {
     }
     println!("created {name}/ (vyrn.json, src/main.vyrn) — try: cd {name} && vyrn run");
     ExitCode::SUCCESS
+}
+
+/// `vyrn why --contract <file>` (RFC-0071 M4) — which contract governs a module,
+/// and what it has to say about every one of that module's exports.
+///
+/// The point of a declared convention over a scanned one is that you can ask.
+/// This is that question at the command line: the role that attached the
+/// contract, the contract's own site, and one line per member and per export —
+/// satisfied (at which of the declared shapes), missing, defaulted, the wrong
+/// shape, or unknown with a did-you-mean.
+///
+/// Every answer comes from `vyrn_frontend::contracts`, the same module the LSP
+/// asks; the CLI only prints. Exits 1 when the file is in no role — "no contract
+/// governs this" is a real answer, but not the one you asked for.
+fn why_cmd(args: &[String]) -> ExitCode {
+    let mut file: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--contract" => {
+                file = args.get(i + 1).cloned();
+                i += 2;
+            }
+            other => {
+                eprintln!("error: unknown `vyrn why` option `{other}`");
+                eprintln!("usage: vyrn why --contract <file>");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(file) = file else {
+        eprintln!("usage: vyrn why --contract <file>");
+        return ExitCode::from(2);
+    };
+    let path = match Path::new(&file).canonicalize() {
+        Ok(p) => p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/"),
+        Err(e) => {
+            eprintln!("error: cannot read {file}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let Some(dir) = Path::new(&path).parent().map(|p| p.to_path_buf()) else {
+        eprintln!("error: {file} has no directory");
+        return ExitCode::from(2);
+    };
+    let opts = load_options(&path);
+
+    // The app root: the nearest `vyrn.json` upward, else the file's own
+    // directory. Roles hang off a project, so a loose file simply has none.
+    let app_dir = find_manifest(&dir)
+        .map(|m| PathBuf::from(m.dir))
+        .unwrap_or_else(|| dir.clone());
+    let roots = contract_roots(&app_dir);
+    let roles = match std::fs::read_to_string(app_dir.join("vyrn.json"))
+        .ok()
+        .map(|t| vyrn_frontend::contracts::roles_from_manifest(&t))
+        .filter(|r| !r.is_empty())
+    {
+        Some(declared) => declared,
+        None => vyrn_frontend::contracts::discovered_roles(&roots, &opts, &FsResolver),
+    };
+    let Some(role) = vyrn_frontend::contracts::role_for(&path, &roles) else {
+        println!("{path}");
+        println!("  no contract: this file is in no role");
+        if roles.is_empty() {
+            println!("  (the project declares no `roles` in vyrn.json, and no generator call site names a directory containing it)");
+        } else {
+            for r in &roles {
+                println!("  role: {} -> {}:{}", r.scope, r.module, r.contract);
+            }
+        }
+        return ExitCode::FAILURE;
+    };
+    let manifest = app_dir.join("vyrn.json").to_string_lossy().replace('\\', "/");
+    let Some(view) =
+        vyrn_frontend::contracts::load_role_contract(role, &manifest, &opts, &FsResolver)
+    else {
+        eprintln!("error: cannot resolve contract `{}:{}`", role.module, role.contract);
+        return ExitCode::FAILURE;
+    };
+
+    // A `.vyx` is not a module; its `<script>` is. Everything downstream is the
+    // same question over the same ordinary Vyrn.
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let source = if path.ends_with(".vyx") {
+        vyx_script_body(&raw).unwrap_or_default()
+    } else {
+        raw
+    };
+
+    println!("{path}");
+    println!("  role: {}", role.scope);
+    println!("  contract: {} ({})", view.name, view.module);
+    println!("  declared in: {}", view.file);
+    let mut objections = 0;
+    for e in vyrn_frontend::contracts::contract_status(&view, &source) {
+        use vyrn_frontend::contracts::MemberStatus::*;
+        let line = match &e.status {
+            Satisfied { shape } => {
+                let of = view.member(&e.name).map(|m| m.shapes.len()).unwrap_or(1);
+                format!("ok        {}: shape {} of {} — {}", e.name, shape + 1, of, e.want)
+            }
+            Defaulted => format!("default   {}: absent, optional — {}", e.name, e.want),
+            Missing => {
+                objections += 1;
+                format!("MISSING   {}: required — {}", e.name, e.want)
+            }
+            Mismatched { found } => {
+                objections += 1;
+                format!("MISMATCH  {}: wanted {}, found `{found}`", e.name, e.want)
+            }
+            Unknown { did_you_mean: Some(near) } => {
+                objections += 1;
+                format!("UNKNOWN   {}: not named by the contract — did you mean `{near}`?", e.name)
+            }
+            Unknown { did_you_mean: None } => {
+                objections += 1;
+                format!("UNKNOWN   {}: not named by the contract (it is closed)", e.name)
+            }
+            OpenMatched => format!("ok        {}: matches the open rule — {}", e.name, e.want),
+            OpenMismatched { found } => {
+                objections += 1;
+                format!("MISMATCH  {}: the open rule wants {}, found `{found}`", e.name, e.want)
+            }
+        };
+        println!("  {line}");
+    }
+    if objections > 0 {
+        // `why` answers a question; it is not a gate. The generator that
+        // consumes the module runs the same check at load time and FAILS on it
+        // — which is why a `.vyrn` page listing its router entry point here
+        // (`page`/`respond`, which `Page` does not name) still builds today.
+        println!("  — {objections} objection(s); the generator that consumes this module is the gate");
+    }
+    ExitCode::SUCCESS
+}
+
+/// The `.vyrn` modules role discovery reads: the manifest's entry points plus
+/// every `.vyrn` directly in the app directory. Generator imports live in an
+/// app's ROOT modules by construction, so this stays a shallow scan.
+fn contract_roots(app_dir: &Path) -> Vec<(String, String)> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(app_dir.join("vyrn.json")) {
+        if let Ok(doc) = vyrn_frontend::schema::parse_json(&text) {
+            for key in ["main", "server", "client"] {
+                if let Some(vyrn_frontend::schema::Json::Str(p)) = doc.get(key) {
+                    paths.push(app_dir.join(p));
+                }
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(app_dir) {
+        for e in entries.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) == Some("vyrn") {
+                paths.push(p);
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .filter_map(|p| {
+            let src = std::fs::read_to_string(&p).ok()?;
+            Some((p.to_string_lossy().replace('\\', "/"), src))
+        })
+        .collect()
+}
+
+/// The `<script> … </script>` body of a `.vyx`, which is ordinary Vyrn.
+fn vyx_script_body(text: &str) -> Option<String> {
+    let open = text.find("<script")?;
+    let start = text[open..].find('>')? + open + 1;
+    let close = text[start..].find("</script>")? + start;
+    Some(text[start..close].to_string())
 }
 
 /// `vyrn deps` — print the resolved module graph of the project's main.

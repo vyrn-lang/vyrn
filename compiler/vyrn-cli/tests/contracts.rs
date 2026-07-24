@@ -566,3 +566,109 @@ fn a_contract_still_has_at_most_one_open_rule() {
     assert!(!out.status.success(), "must be refused:\n{err}");
     assert!(err.contains("at most one"), "naming the reason:\n{err}");
 }
+
+// ===========================================================================
+// RFC-0071 M4 — `vyrn why --contract <file>`.
+//
+// The command that answers, at the shell, the question the whole RFC turns on:
+// which contract governs this module, and what does it say about every export?
+// Driven through the real binary, against the repo's own dogfood app, so the
+// answers are about real pages rather than a fixture that agrees with itself.
+// ===========================================================================
+
+/// The `routes/` role is discovered from the app's own generator call site —
+/// nothing in `examples/bin` declares a `roles` key — and the report names the
+/// contract, its declaring module, and WHICH declared shape each member matched.
+#[test]
+fn why_contract_reports_the_matched_shape_of_a_real_page() {
+    let page = repo_dir("examples/bin/routes/index.vyx");
+    let out = vyrn().arg("why").arg("--contract").arg(&page).output().expect("why");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "why must answer:\n{text}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        text.contains("role: directory") && text.contains("examples/bin/routes"),
+        "the role, discovered from the generator call site:\n{text}"
+    );
+    assert!(text.contains("contract: Page (std/ui)"), "the resolved contract:\n{text}");
+    assert!(text.contains("std/ui.vyrn"), "where it is declared:\n{text}");
+    // `export fn head() -> Head` is the first of `head`'s four shapes, and
+    // `Lazy<Array<Paste>>` is the second of `data`'s — laziness is a TYPE now
+    // (RFC-0071 M2b), so the report reads it off the declaration.
+    assert!(text.contains("ok        head: shape 1 of 4"), "head's shape:\n{text}");
+    assert!(text.contains("ok        data: shape 2 of 4"), "data's shape:\n{text}");
+    // Private helpers are outside the contract entirely.
+    assert!(!text.contains("isLoading"), "a helper is not part of the surface:\n{text}");
+}
+
+/// A layout is chrome, not a page: it is in no role, and `why` says so rather
+/// than checking it against a contract it was never meant to satisfy.
+#[test]
+fn why_contract_says_a_layout_is_in_no_role() {
+    let layout = repo_dir("examples/bin/routes/layout.vyx");
+    let out = vyrn().arg("why").arg("--contract").arg(&layout).output().expect("why");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("no contract: this file is in no role"), "{text}");
+    assert!(!out.status.success(), "and that is not the answer that was asked for");
+}
+
+/// The four statuses on a synthetic page: satisfied, defaulted, unknown with a
+/// did-you-mean, and unknown without one.
+#[test]
+fn why_contract_reports_every_status_class() {
+    let dir = scratch("why");
+    std::fs::create_dir_all(dir.join("pages")).unwrap();
+    std::fs::write(
+        dir.join("app.vyrn"),
+        "import { pages } from \"std/ui\"\n\
+         import { route } from pages(\"./pages\")\n\
+         fn main() -> Int64 { return 0 }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"why\", \"main\": \"app.vyrn\" }\n").unwrap();
+    std::fs::write(
+        dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Query, query } from \"std/ui\"\n\
+         export fn data() -> Query<Int64> {\n    return query(one)\n}\n\
+         export fn dta() -> Int64 {\n    return 1\n}\n\
+         export fn helper() -> Int64 {\n    return 2\n}\n\
+         fn one() -> Int64 {\n    return 1\n}\n\
+         </script>\n\
+         <template>\n<h1>hi</h1>\n</template>\n",
+    )
+    .unwrap();
+
+    let out = vyrn()
+        .arg("why")
+        .arg("--contract")
+        .arg(dir.join("pages/index.vyx"))
+        .output()
+        .expect("why");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("ok        data: shape 1 of 4"), "satisfied:\n{text}");
+    assert!(text.contains("default   head: absent, optional"), "defaulted:\n{text}");
+    assert!(
+        text.contains("UNKNOWN   dta: not named by the contract — did you mean `data`?"),
+        "the did-you-mean:\n{text}"
+    );
+    assert!(
+        text.contains("UNKNOWN   helper: not named by the contract (it is closed)"),
+        "the far miss, still reported and never silent:\n{text}"
+    );
+    assert!(
+        text.contains("objection(s); the generator that consumes this module is the gate"),
+        "`why` reports; the generator refuses:\n{text}"
+    );
+}
+
+/// An OPEN contract admits any NAME and still constrains SHAPE — the
+/// `std/vyx:Component` half of the mapping, on the repo's own widget.
+#[test]
+fn why_contract_resolves_the_open_component_contract() {
+    let widget = repo_dir("examples/bin/widgets/CreateForm.vyx");
+    let out = vyrn().arg("why").arg("--contract").arg(&widget).output().expect("why");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("contract: Component (std/vyx)"), "{text}");
+}
+

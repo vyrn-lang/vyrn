@@ -393,7 +393,7 @@ other type. Closing the contract cost nothing and bought total typo detection.
   shipped the variadic open rule (`fn *(..)`) that `Api` needs, for `Component`.
 - **M4 — LSP.** Role→contract resolution; completion, hover, go-to-def,
   quick-fix. `vyrn why --contract <file>` prints the resolved contract and every
-  export's status.
+  export's status. **Landed** — see below.
 
 ## M1 — as landed
 
@@ -646,6 +646,82 @@ renders a sentence about itself that named `load` in a `<code>` element. Leaving
 it would have kept the migration byte-identical at the cost of shipping a page
 that describes a form that no longer exists. It says `data` now, and that single
 line is the only SSR difference across all four examples.
+
+## M4 — as landed
+
+Seven places where the implementation is not what this document said, and why.
+
+**Role attachment falls back to the generator call site, because no project
+writes a `roles` key.** This document specifies `vyrn.json`'s `roles` map and
+RFC-0072 owns its general form; the key is read exactly as written here and wins
+whenever present. But not one project in the repo has one, so a fallback that
+did nothing would have shipped a milestone that never fires. The fallback asks
+the source the same question the generator does: a root module says `import {
+route } from pages("./routes")`, so `./routes` is the pages directory, and the
+contract is the one exported by the module the generator itself was imported
+from (`std/ui`). No blessed directory names and no table of generator names —
+the directory comes from the call and the contract comes from the import. A
+generator module exporting zero or several contracts is skipped, because then
+there is nothing unambiguous to resolve.
+
+**There is one blessed-name table, and it is the chrome stems.** A `routes/`
+directory holds pages and ALSO `layout.vyx` and `error.vyx`, which M2b and M2c
+both record are not pages — a layout has no contract to be a member of. Role
+attachment is by directory, so without an exception list the editor would offer
+`head` and `data` inside a layout, which is exactly the misfire this milestone
+exists to prevent. `Role::except` defaults to `["layout", "error"]`, mirroring
+`std/ui`'s own `uiScanAll` chrome test, and a project overrides it per role with
+the object form `{ "contract": "std/ui:Page", "except": [...] }`. A `Layout`
+contract — not in this RFC — deletes the table.
+
+**Completion offers one item per SHAPE, not one per member.** This document's
+completion sketch shows two rows, one per member, from before multi-shape
+members existed. `data` is declared at four shapes whose snippets differ in the
+return type, and that type is the entire decision the member encodes
+(`Query`/`Lazy` × params or not). Collapsing them would have made the completion
+list say less than the contract does. All four are offered, labelled `data` so
+the prefix matches, distinguished by `detail`, ordered required-first then
+declaration order.
+
+**A snippet's parameters are tabstops, including their types.** The document's
+example (`export fn head() -> Head { return $0 }`) is exactly what the
+zero-argument shape inserts. But a member's type parameters are open, and a real
+page writes `fn head(d: Array<Paste>)`, not `fn head(d: T)` — so a parameterised
+shape inserts `export fn head(${1:t}: ${2:T}) -> Head { return $0 }`, seeded with
+the contract's own spelling. The shape is right immediately and tabbing fills in
+what only the page knows.
+
+**Go-to-definition wins only at module scope, which is what makes it safe.**
+"Jumps to the member in the contract declaration" and "jumps to the page's own
+`fn head`" are both right answers, in different places. The rule that separates
+them is brace depth: on the declaration's own name the ordinary resolution is a
+self-jump (the cursor is already on what it resolves to), so the contract is
+strictly more useful; inside a body, `head()` is a call and keeps resolving to
+the page. The same gate governs hover's contract note and completion, and it is
+one lex with no parse — `vyrn_frontend::at_module_scope`.
+
+**The quick-fix is computed from the contract, not from a diagnostic message.**
+This document says the did-you-mean is "wired to a rename edit", which reads as
+parsing the diagnostic. A generator's diagnostic text is its own business —
+`std/ui` bakes issues into `PAGES_CONTRACT__<fid>__<key>__<path>` identifier
+lines — and reading that in the server would compile a generator into it. The
+action is instead derived from the same two facts the generator uses: an export
+the closed contract does not name, within the same Damerau-Levenshtein threshold.
+The client's diagnostics are attached by RANGE overlap, so the lightbulb still
+appears on the squiggle without the server understanding a word of it. It renames
+the declaration only; a page that calls its own misspelled accessor internally
+needs the second edit by hand.
+
+**`vyrn why --contract` reports; it does not gate.** A `.vyrn` page's own surface
+carries the router's entry point (`page`/`respond`), which `Page` does not name,
+so an unknown-export line is expected there today and RFC-0072 owns closing it.
+Exiting non-zero on that would make the command call every working `.vyrn` page
+broken. It exits 0 whenever it could answer, 1 when the file is in no role, and
+prints an objection count naming the generator as the actual gate. The status
+computation needed a Rust twin of `std/contract`'s `typeMatches`/`matchesSignature`
+and of `std/strings:editDistance`; the alternative was running the comptime
+interpreter on every keystroke, which is not an editor. The edit-distance twins
+are pinned together by a test that RUNS the Vyrn one and compares.
 
 ## Acceptance
 

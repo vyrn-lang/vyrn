@@ -13,6 +13,7 @@
 pub mod ast;
 pub mod checker;
 pub mod codec;
+pub mod contracts;
 pub mod consteval;
 pub mod diagnostics;
 pub mod finite;
@@ -36,10 +37,19 @@ pub mod types;
 // directly. `diagnostics` (below) delegates to `symbols::analyze`, so the whole
 // pipeline lives in one place.
 pub use symbols::{
-    analyze, analyze_linked, class_completions, class_token_hover, classify_at, completions,
-    import_spec_at, member_completions, module_doc, references, resolve, semantic_tokens,
+    analyze, analyze_linked, at_module_scope, class_completions, class_token_hover, classify_at,
+    completions, import_spec_at, member_completions, module_doc, references, resolve, semantic_tokens,
     string_literal_completions, Analysis, Completion, DocExport, LocalBinding, LocalKind, ModuleDoc,
     RefRange, Resolution, SemKind, SemMods, SemToken, Symbol, SymbolKind, TokenInfo,
+};
+
+// RFC-0071 M4: role → contract resolution and the editor queries over a
+// resolved contract. Spelled `vyrn_frontend::contracts::` by the LSP and the
+// CLI, so the contract knowledge stays in ONE place and both are adapters.
+pub use contracts::{
+    contract_completions, contract_fixes, contract_member_hover, contract_status, discovered_roles,
+    load_contract, load_role_contract, role_for, roles_from_manifest, ContractCompletion, ContractFix,
+    ContractMemberView, ContractShape, ContractView, MemberStatus, Role, RoleScope, StatusEntry,
 };
 
 // The canonical formatter (RFC-0017). `fmt` the module and `fmt` the function

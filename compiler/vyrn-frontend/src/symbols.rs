@@ -907,6 +907,35 @@ fn enclosing_fn_line(analysis: &Analysis, cursor_line: usize) -> Option<usize> {
         .then_some(seg_start)
 }
 
+/// Whether the 1-based `(line, col)` cursor sits at **module scope** in
+/// `source` — outside every brace-delimited body.
+///
+/// RFC-0071 M4 needs this: a contract member is a declaration a module makes, so
+/// `head`/`data` are offered where a declaration can go and nowhere else. The
+/// answer is the brace depth of the token stream before the cursor, which is
+/// exact (the lexer already knows a `{` inside a string is not a brace) and
+/// costs one lex — no parse, no check, so it is affordable per keystroke and
+/// works on a buffer that does not parse yet.
+pub fn at_module_scope(source: &str, line: usize, col: usize) -> bool {
+    let Ok(tokens) = lexer::lex(source) else {
+        // A buffer that does not lex has no reliable structure; the caller's
+        // fallback (offer nothing extra) is the safe answer.
+        return false;
+    };
+    let mut depth: i64 = 0;
+    for t in &tokens {
+        if (t.line, t.col) >= (line, col) {
+            break;
+        }
+        match t.tok {
+            Tok::LBrace => depth += 1,
+            Tok::RBrace => depth -= 1,
+            _ => {}
+        }
+    }
+    depth <= 0
+}
+
 /// All top-level symbols as completion items. The client filters by the prefix
 /// the user typed; v1 does no scope-aware filtering.
 pub fn completions(analysis: &Analysis) -> Vec<Completion> {

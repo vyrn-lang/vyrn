@@ -2619,3 +2619,582 @@ fn rfc71_a_generator_warning_publishes_into_the_input_buffer() {
 
     let _ = client.child.kill();
 }
+
+// ===========================================================================
+// RFC-0071 M4 — contract members in the editor.
+//
+// The milestone the whole RFC was justified by: `head` and `data` became
+// declarations in M1/M2 so the editor could SEE them. These drive the real
+// server over stdio against real page fixtures and assert on the payloads —
+// this repo has twice shipped editor behaviour that passed unit tests and did
+// nothing in the editor.
+// ===========================================================================
+
+/// A project whose `routes/` directory is consumed by `std/ui`'s pages
+/// generator. NOTHING here says "routes are pages": the LSP learns it from this
+/// import, the way the RFC's fallback describes.
+const M4_APP: &str = "import { pages } from \"std/ui\"\n\
+    import { components } from \"std/vyx\"\n\
+    import { route } from pages(\"./routes\")\n\
+    import { widget } from components(\"./widgets\")\n\
+    fn main() -> Int64 { return 0 }\n";
+
+const M4_MANIFEST: &str = "{ \"name\": \"m4\", \"main\": \"app.vyrn\" }\n";
+
+/// A page that declares `head` and is missing `data` — so completion has
+/// something to offer and something to have already dropped.
+const M4_PAGE: &str = "<script>\n\
+    import { Head, noHead } from \"std/ui\"\n\
+    export fn head() -> Head {\n    return noHead()\n}\n\
+    \n\
+    </script>\n\
+    <template>\n<h1>home</h1>\n</template>\n";
+
+/// A layout beside it. `head { … }` is a LAYOUT form (RFC-0071 M2b/M2c): a
+/// layout has no contract to be a member of, so the editor must offer it
+/// nothing.
+const M4_LAYOUT: &str = "<script>\n\
+    head {\n    stylesheet \"/s.css\"\n}\n\
+    \n\
+    </script>\n\
+    <template>\n<div><slot/></div>\n</template>\n";
+
+/// A `.vyrn` page with a near-miss export — the did-you-mean case.
+const M4_TYPO_PAGE: &str = "import { Query, query } from \"std/ui\"\n\
+    \n\
+    export fn dta() -> Query<Int64> {\n    return query(one)\n}\n\
+    \n\
+    fn one() -> Int64 {\n    return 1\n}\n";
+
+fn m4_scratch(tag: &str) -> std::path::PathBuf {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_m4_{tag}_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("routes")).unwrap();
+    std::fs::create_dir_all(dir.join("widgets")).unwrap();
+    std::fs::write(dir.join("vyrn.json"), M4_MANIFEST).unwrap();
+    std::fs::write(dir.join("app.vyrn"), M4_APP).unwrap();
+    std::fs::write(dir.join("routes/index.vyx"), M4_PAGE).unwrap();
+    std::fs::write(dir.join("routes/layout.vyx"), M4_LAYOUT).unwrap();
+    std::fs::write(dir.join("routes/typo.vyrn"), M4_TYPO_PAGE).unwrap();
+    dir
+}
+
+/// Every completion item at `(line, ch)`, as raw JSON, so an assertion can look
+/// at whatever field it needs (insertText, insertTextFormat, sortText, …).
+fn completion_items(
+    client: &mut LspClient,
+    uri: &str,
+    line: u32,
+    ch: u32,
+) -> Vec<serde_json::Value> {
+    let mut ids = Ids::new();
+    let id = ids.next();
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "textDocument/completion",
+        "params": {
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": ch }
+        }
+    }));
+    let resp = client.read_response(&id);
+    resp.get("result").and_then(|r| r.as_array()).cloned().unwrap_or_default()
+}
+
+fn code_actions(
+    client: &mut LspClient,
+    uri: &str,
+    line: u32,
+    start: u32,
+    end: u32,
+) -> Vec<serde_json::Value> {
+    let mut ids = Ids::new();
+    let id = ids.next();
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "textDocument/codeAction",
+        "params": {
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": line, "character": start },
+                "end": { "line": line, "character": end }
+            },
+            "context": { "diagnostics": [] }
+        }
+    }));
+    let resp = client.read_response(&id);
+    resp.get("result").and_then(|r| r.as_array()).cloned().unwrap_or_default()
+}
+
+/// The capability has to be advertised or VS Code never asks.
+#[test]
+fn m4_code_action_capability_is_advertised() {
+    let mut client = LspClient::spawn().expect("spawn");
+    let id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "initialize",
+        "params": { "capabilities": {}, "processId": null }
+    }));
+    let resp = client.read_response(&id);
+    let caps = resp.pointer("/result/capabilities").expect("capabilities");
+    assert_eq!(
+        caps.get("codeActionProvider"),
+        Some(&serde_json::json!(true)),
+        "codeActionProvider advertised: {caps}"
+    );
+    let _ = client.child.kill();
+}
+
+/// **Completion.** At module scope in a `.vyx` page, the contract's members are
+/// offered as snippets, each inserting the full declaration, each carrying the
+/// member's `///` doc — and the one the page already wrote is gone.
+#[test]
+fn m4_completion_offers_contract_members_in_a_vyx_page() {
+    let dir = m4_scratch("comp");
+    let mut client = rfc33_client();
+    let page_uri = file_uri(&dir.join("routes/index.vyx"));
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(&mut client, &page_uri, "vyx", M4_PAGE);
+
+    // 0-based line 5: the blank line after head's body, inside <script> — module
+    // scope.
+    let items = completion_items(&mut client, &page_uri, 5, 0);
+    let snippets: Vec<&str> =
+        items.iter().filter_map(|i| i.get("insertText").and_then(|t| t.as_str())).collect();
+    assert!(
+        snippets.contains(&"export fn data() -> Query<T> {\n    return $0\n}"),
+        "the blocking data shape inserts its whole declaration: {snippets:?}"
+    );
+    assert!(
+        snippets.contains(&"export fn data() -> Lazy<T> {\n    return $0\n}"),
+        "and so does the lazy one — a multi-shape member offers its shapes: {snippets:?}"
+    );
+    assert!(
+        snippets.iter().any(|s| s.contains("ParamQuery<P, T>"))
+            && snippets.iter().any(|s| s.contains("ParamLazy<P, T>")),
+        "all four `data` shapes: {snippets:?}"
+    );
+    assert!(
+        !snippets.iter().any(|s| s.starts_with("export fn head")),
+        "`head` is already written, so it is not offered again: {snippets:?}"
+    );
+
+    let data = items
+        .iter()
+        .find(|i| i.get("label").and_then(|l| l.as_str()) == Some("data"))
+        .expect("a `data` item");
+    // 2 == InsertTextFormat.Snippet. Without it VS Code inserts the tabstops as
+    // literal text.
+    assert_eq!(data.get("insertTextFormat").and_then(|f| f.as_i64()), Some(2));
+    let detail = data.get("detail").and_then(|d| d.as_str()).unwrap_or("");
+    assert!(detail.contains("contract `Page` (std/ui)"), "detail names the contract: {detail}");
+    let doc = data.pointer("/documentation/value").and_then(|d| d.as_str()).unwrap_or("");
+    assert!(doc.contains("data, resolved before render"), "the /// doc rides along: {doc:?}");
+
+    // Contract members sort above the document's own symbols.
+    let ordinary = items
+        .iter()
+        .find(|i| i.get("insertText").is_none())
+        .and_then(|i| i.get("sortText").and_then(|s| s.as_str()).map(|s| s.to_string()));
+    if let Some(o) = ordinary {
+        let s = data.get("sortText").and_then(|s| s.as_str()).unwrap_or("z");
+        assert!(s < o.as_str(), "contract members sort first: {s} vs {o}");
+    }
+    let _ = client.child.kill();
+}
+
+/// Completion must NOT offer page members inside a layout: `head { … }` is a
+/// layout form and a layout has no contract to be a member of.
+#[test]
+fn m4_completion_offers_nothing_in_a_layout() {
+    let dir = m4_scratch("layout");
+    let mut client = rfc33_client();
+    let layout_uri = file_uri(&dir.join("routes/layout.vyx"));
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(&mut client, &layout_uri, "vyx", M4_LAYOUT);
+
+    // 0-based line 4: the blank line after the head block, inside <script>.
+    let items = completion_items(&mut client, &layout_uri, 4, 0);
+    let labels: Vec<&str> =
+        items.iter().filter_map(|i| i.get("label").and_then(|l| l.as_str())).collect();
+    assert!(!labels.contains(&"data"), "a layout is not a page: {labels:?}");
+    assert!(
+        items.iter().all(|i| i.get("insertText").is_none()),
+        "no contract snippets in a layout: {items:?}"
+    );
+    let _ = client.child.kill();
+}
+
+/// Completion must not fire inside a function BODY — a contract member is a
+/// declaration, and `export fn` is not valid there.
+#[test]
+fn m4_completion_does_not_fire_inside_a_body() {
+    let dir = m4_scratch("body");
+    let mut client = rfc33_client();
+    let page_uri = file_uri(&dir.join("routes/index.vyx"));
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(&mut client, &page_uri, "vyx", M4_PAGE);
+
+    // 0-based line 3 = `    return noHead()` — inside head's body.
+    let items = completion_items(&mut client, &page_uri, 3, 4);
+    assert!(
+        items.iter().all(|i| i.get("insertText").is_none()),
+        "no declaration snippets inside a body: {items:?}"
+    );
+    let _ = client.child.kill();
+}
+
+/// **Hover.** Hovering the member's name in a page shows its shapes, its doc,
+/// and the contract it belongs to.
+#[test]
+fn m4_hover_names_the_contract() {
+    let dir = m4_scratch("hover");
+    let mut client = rfc33_client();
+    let page_uri = file_uri(&dir.join("routes/index.vyx"));
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(&mut client, &page_uri, "vyx", M4_PAGE);
+
+    // 0-based line 2 = `export fn head() -> Head {`; `head` starts at char 10.
+    let h = hover_value(&mut client, &page_uri, 2, 11).expect("hover on `head`");
+    assert!(h.contains("member of contract `Page` (std/ui)"), "names the contract:\n{h}");
+    assert!(h.contains("fn() -> Head"), "names the type:\n{h}");
+    assert!(h.contains("head takes what the view takes"), "carries the /// doc:\n{h}");
+    let _ = client.child.kill();
+}
+
+/// **Go-to-def.** From the member's name in a page, jump into the contract
+/// declaration in `std/ui.vyrn` — landing on the member, not the file top.
+#[test]
+fn m4_definition_jumps_into_the_contract() {
+    let dir = m4_scratch("def");
+    let mut client = rfc33_client();
+    let page_uri = file_uri(&dir.join("routes/index.vyx"));
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(&mut client, &page_uri, "vyx", M4_PAGE);
+
+    let mut ids = Ids::new();
+    let id = ids.next();
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": { "uri": page_uri },
+            "position": { "line": 2, "character": 11 }
+        }
+    }));
+    let resp = client.read_response(&id);
+    let loc = resp.get("result").expect("a definition");
+    let target = loc.get("uri").and_then(|u| u.as_str()).unwrap_or("");
+    assert!(target.ends_with("std/ui.vyrn"), "jumps into std/ui: {target}");
+
+    // The range must cover the literal member name in the real std/ui source.
+    let line = loc.pointer("/range/start/line").and_then(|l| l.as_i64()).unwrap() as usize;
+    let start = loc.pointer("/range/start/character").and_then(|c| c.as_i64()).unwrap() as usize;
+    let end = loc.pointer("/range/end/character").and_then(|c| c.as_i64()).unwrap() as usize;
+    let std_ui =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../std/ui.vyrn"))
+            .expect("std/ui.vyrn");
+    let text = std_ui.lines().nth(line).expect("the declaration line");
+    let name: String = text.chars().skip(start).take(end - start).collect();
+    assert_eq!(name, "head", "lands on the member name, on {text:?}");
+    let _ = client.child.kill();
+}
+
+/// **Quick-fix.** A near-miss export in a `.vyrn` page offers the rename, and
+/// the edit replaces exactly the misspelled name.
+#[test]
+fn m4_code_action_renames_a_near_miss() {
+    let dir = m4_scratch("fix");
+    let mut client = rfc33_client();
+    let typo_uri = file_uri(&dir.join("routes/typo.vyrn"));
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(&mut client, &typo_uri, "vyrn", M4_TYPO_PAGE);
+
+    // 0-based line 2 = `export fn dta() -> Query<Int64> {`; `dta` at chars 10-13.
+    let actions = code_actions(&mut client, &typo_uri, 2, 10, 13);
+    assert_eq!(actions.len(), 1, "one quick-fix: {actions:?}");
+    let a = &actions[0];
+    let title = a.get("title").and_then(|t| t.as_str()).unwrap_or("");
+    assert!(
+        title.contains("Rename `dta` to `data`") && title.contains("contract `Page` (std/ui)"),
+        "the title says what and why: {title}"
+    );
+    assert_eq!(a.get("kind").and_then(|k| k.as_str()), Some("quickfix"));
+    let edits = a
+        .pointer("/edit/changes")
+        .and_then(|c| c.get(&typo_uri))
+        .and_then(|e| e.as_array())
+        .expect("an edit for this document");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].get("newText").and_then(|t| t.as_str()), Some("data"));
+    assert_eq!(edits[0].pointer("/range/start/line").and_then(|l| l.as_i64()), Some(2));
+    assert_eq!(edits[0].pointer("/range/start/character").and_then(|c| c.as_i64()), Some(10));
+    assert_eq!(edits[0].pointer("/range/end/character").and_then(|c| c.as_i64()), Some(13));
+
+    // Away from the offending name, nothing is offered.
+    assert!(code_actions(&mut client, &typo_uri, 5, 0, 0).is_empty());
+    let _ = client.child.kill();
+}
+
+/// A `.vyrn` page behaves sanely: completion offers the members at module
+/// scope, and hover does not claim a non-member is one.
+#[test]
+fn m4_a_vyrn_page_completes_without_misfiring() {
+    let dir = m4_scratch("vyrnpage");
+    let mut client = rfc33_client();
+    let typo_uri = file_uri(&dir.join("routes/typo.vyrn"));
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(&mut client, &typo_uri, "vyrn", M4_TYPO_PAGE);
+
+    // 0-based line 1: the blank line after the import — module scope.
+    let items = completion_items(&mut client, &typo_uri, 1, 0);
+    let snippets: Vec<&str> =
+        items.iter().filter_map(|i| i.get("insertText").and_then(|t| t.as_str())).collect();
+    assert!(
+        snippets.iter().any(|s| s.starts_with("export fn head()")),
+        "head is offered in a .vyrn page too: {snippets:?}"
+    );
+    assert!(
+        snippets.iter().any(|s| s.starts_with("export fn data()")),
+        "and data — `dta` is not it: {snippets:?}"
+    );
+    // Hovering the misspelled export must NOT claim it is a contract member.
+    let h = hover_value(&mut client, &typo_uri, 2, 11).unwrap_or_default();
+    assert!(!h.contains("member of contract"), "`dta` is not a member: {h}");
+    let _ = client.child.kill();
+}
+
+/// A module in no role gets nothing — the whole feature is scoped by the role,
+/// so a store or a helper module is untouched.
+#[test]
+fn m4_a_module_outside_every_role_is_untouched() {
+    let dir = m4_scratch("outside");
+    let store = dir.join("store.vyrn");
+    let src = "fn helper() -> Int64 {\n    return 1\n}\n\n";
+    std::fs::write(&store, src).unwrap();
+    let mut client = rfc33_client();
+    let uri = file_uri(&store);
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(&mut client, &uri, "vyrn", src);
+
+    let items = completion_items(&mut client, &uri, 3, 0);
+    assert!(
+        items.iter().all(|i| i.get("insertText").is_none()),
+        "no contract snippets outside a role: {items:?}"
+    );
+    assert!(code_actions(&mut client, &uri, 0, 0, 10).is_empty());
+    let _ = client.child.kill();
+}
+
+/// The `vyrn.json` `roles` key wins over discovery — the form RFC-0071
+/// specifies and RFC-0072 inherits, proved by pointing a role at a directory
+/// the generator call sites do NOT name.
+#[test]
+fn m4_manifest_roles_override_discovery() {
+    let dir = m4_scratch("roles");
+    std::fs::create_dir_all(dir.join("screens")).unwrap();
+    std::fs::write(
+        dir.join("vyrn.json"),
+        "{ \"name\": \"m4\", \"main\": \"app.vyrn\",\n  \"roles\": { \"screens\": \"std/ui:Page\" } }\n",
+    )
+    .unwrap();
+    let src = "import { Query } from \"std/ui\"\n\n";
+    let screen = dir.join("screens/home.vyrn");
+    std::fs::write(&screen, src).unwrap();
+
+    let mut client = rfc33_client();
+    let uri = file_uri(&screen);
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", M4_APP);
+    did_open(&mut client, &uri, "vyrn", src);
+    let items = completion_items(&mut client, &uri, 1, 0);
+    let snippets: Vec<&str> =
+        items.iter().filter_map(|i| i.get("insertText").and_then(|t| t.as_str())).collect();
+    assert!(
+        snippets.iter().any(|s| s.starts_with("export fn data()")),
+        "the declared role governs `screens/`: {snippets:?}"
+    );
+
+    // …and `routes/`, which discovery WOULD have found, is now outside every
+    // declared role: an explicit `roles` key is the whole mapping.
+    let page_uri = file_uri(&dir.join("routes/index.vyx"));
+    did_open(&mut client, &page_uri, "vyx", M4_PAGE);
+    let items = completion_items(&mut client, &page_uri, 5, 0);
+    assert!(
+        items.iter().all(|i| i.get("insertText").is_none()),
+        "declared roles replace discovery entirely: {items:?}"
+    );
+    let _ = client.child.kill();
+}
+
+
+/// RFC-0071's headline claim, and the reason none of `Page`, `Component`,
+/// `head` or `data` appears anywhere in the server: **a user-authored generator
+/// with its own contract gets identical completion, hover, go-to-definition and
+/// quick-fix with zero LSP changes.**
+///
+/// Nothing in this fixture is std. The contract is declared in the app's own
+/// `gen.vyrn`, attached to `./screens` by the app's own generator call, and the
+/// editor treats it exactly like `std/ui:Page` — because it never knew the
+/// difference.
+#[test]
+fn m4_a_user_authored_contract_gets_the_same_editor_support() {
+    let n = RFC33_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_m4_user_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("screens")).unwrap();
+
+    let gen = "/// What a screen module may export.\n\
+        export contract Screen {\n\
+        \x20   /// The screen's title bar.\n\
+        \x20   fn title() -> String = untitled()\n\
+        \x20   /// The screen's pixel budget.\n\
+        \x20   fn budget() -> Int64\n\
+        }\n\
+        \n\
+        fn untitled() -> String {\n    return \"untitled\"\n}\n\
+        \n\
+        export gen fn screens(dir: String) -> String {\n\
+        \x20   return \"export fn mounted() -> Int64 {\\n    return 1\\n}\\n\"\n\
+        }\n";
+    let app = "import { screens } from \"./gen\"\n\
+        import { mounted } from screens(\"./screens\")\n\
+        fn main() -> Int64 { return mounted() }\n";
+    // A screen that wrote `titel` — one transposition from `title`.
+    let screen = "export fn titel() -> String {\n    return \"home\"\n}\n\n";
+
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"u\", \"main\": \"app.vyrn\" }\n").unwrap();
+    std::fs::write(dir.join("gen.vyrn"), gen).unwrap();
+    std::fs::write(dir.join("app.vyrn"), app).unwrap();
+    std::fs::write(dir.join("screens/home.vyrn"), screen).unwrap();
+
+    let mut client = rfc33_client();
+    let uri = file_uri(&dir.join("screens/home.vyrn"));
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", app);
+    did_open(&mut client, &uri, "vyrn", screen);
+
+    // Completion: both members, required first, each a full declaration.
+    let items = completion_items(&mut client, &uri, 3, 0);
+    let snippets: Vec<&str> =
+        items.iter().filter_map(|i| i.get("insertText").and_then(|t| t.as_str())).collect();
+    assert!(
+        snippets.contains(&"export fn budget() -> Int64 {\n    return $0\n}"),
+        "the required member: {snippets:?}"
+    );
+    assert!(
+        snippets.contains(&"export fn title() -> String {\n    return $0\n}"),
+        "the optional member: {snippets:?}"
+    );
+    let budget = items
+        .iter()
+        .find(|i| i.get("label").and_then(|l| l.as_str()) == Some("budget"))
+        .expect("budget");
+    let title = items
+        .iter()
+        .find(|i| i.get("label").and_then(|l| l.as_str()) == Some("title"))
+        .expect("title");
+    assert!(
+        budget.get("sortText").and_then(|s| s.as_str())
+            < title.get("sortText").and_then(|s| s.as_str()),
+        "required sorts before optional: {items:?}"
+    );
+    assert!(budget
+        .get("detail")
+        .and_then(|d| d.as_str())
+        .unwrap_or("")
+        .contains("contract `Screen` (./gen)"));
+
+    // Quick-fix: the near-miss rename, on a contract the server has never heard
+    // of.
+    let actions = code_actions(&mut client, &uri, 0, 10, 15);
+    assert_eq!(actions.len(), 1, "one quick-fix: {actions:?}");
+    let title_text = actions[0].get("title").and_then(|t| t.as_str()).unwrap_or("");
+    assert!(
+        title_text.contains("Rename `titel` to `title`"),
+        "the user's own did-you-mean: {title_text}"
+    );
+
+    // Hover + go-to-def on the member the screen DID get right, once renamed.
+    let fixed = "export fn title() -> String {\n    return \"home\"\n}\n\n";
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": uri, "version": 2 },
+            "contentChanges": [ { "text": fixed } ]
+        }
+    }));
+    let h = hover_value(&mut client, &uri, 0, 11).expect("hover on `title`");
+    assert!(h.contains("member of contract `Screen` (./gen)"), "names the user's contract:\n{h}");
+    assert!(h.contains("The screen's title bar."), "carries the user's /// doc:\n{h}");
+
+    let mut ids = Ids::new();
+    let id = ids.next();
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": 11 }
+        }
+    }));
+    let resp = client.read_response(&id);
+    let loc = resp.get("result").expect("a definition");
+    assert!(
+        loc.get("uri").and_then(|u| u.as_str()).unwrap_or("").ends_with("gen.vyrn"),
+        "jumps into the user's own module: {loc}"
+    );
+    // `fn title()` is on line 4 (1-based) of gen.vyrn → 0-based 3.
+    assert_eq!(loc.pointer("/range/start/line").and_then(|l| l.as_i64()), Some(3), "{loc}");
+
+    let _ = client.child.kill();
+}
+
+
+/// The repo's OWN page, opened the way an editor opens it — no fixture, no
+/// scratch directory, the real `examples/bin` with the real `vyrn.json` that has
+/// no `roles` key at all.
+///
+/// `#[ignore]`d because opening a real `.vyx` triggers owner discovery, which
+/// runs the themed pages+components generators over the whole app: correct, but
+/// seconds rather than milliseconds, and the fixture tests above already cover
+/// every assertion. Run it with `cargo test --release -- --ignored` when the
+/// resolution chain changes.
+#[test]
+#[ignore]
+fn m4_the_repos_own_page_gets_contract_completion() {
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let page = root.join("examples/bin/routes/index.vyx");
+    let server = root.join("examples/bin/server.vyrn");
+    let page_src = std::fs::read_to_string(&page).expect("the real page");
+    let server_src = std::fs::read_to_string(&server).expect("the real server root");
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &file_uri(&server), "vyrn", &server_src);
+    did_open(&mut client, &file_uri(&page), "vyx", &page_src);
+    let uri = file_uri(&page);
+
+    // The blank line just before `fn isLoading` — module scope in the real page.
+    let (line, _) = pos_after(&page_src, "fn isLoading");
+    let items = completion_items(&mut client, &uri, line - 1, 0);
+    let snippets: Vec<&str> =
+        items.iter().filter_map(|i| i.get("insertText").and_then(|t| t.as_str())).collect();
+    // `index.vyx` already exports `head` AND `data`, so neither is offered
+    // again — the contract has nothing left to add, which is itself the right
+    // answer and proves the resolution ran.
+    assert!(
+        snippets.is_empty(),
+        "a page that satisfies its contract is offered nothing more: {snippets:?}"
+    );
+
+    // Hover on the real `export fn data()` names the real contract.
+    let (dline, dcol) = pos_after(&page_src, "export fn data");
+    let h = hover_value(&mut client, &uri, dline, dcol - 2).expect("hover on `data`");
+    assert!(h.contains("member of contract `Page` (std/ui)"), "{h}");
+    let _ = client.child.kill();
+}
+
