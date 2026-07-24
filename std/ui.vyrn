@@ -46,7 +46,7 @@
 // learns a `.vyx` page's routing shape from `vyxPageShape`, and the synthesized
 // router imports each `.vyx` page through a nested `vyxPage(…)` generator import.
 // (std↔std pure-fn imports are legal — verified; the loader does not fight them.)
-import { vyxPageShape, vyxPageInterface, vyxQueryDataType } from "std/vyx"
+import { vyxPageShape, vyxPageInterface, vyxQueryDataType, vyxDataRunner, vyxDataFormHasParams, vyxDataFormIsLazy } from "std/vyx"
 // Shared string / array helpers (RFC-0046/0059) — the former private uiJoinList,
 // uiContainsStr, uiTrimStr copies now live once in std; the infallible-decode
 // swallows route through the shared `fromBytesOr`.
@@ -58,7 +58,7 @@ import { includes } from "std/arrays"
 import { el, Html, Attr } from "std/html"
 // RFC-0071: a page's exports are checked against the `Page` contract declared
 // below, instead of hunted for by name.
-import { checkContract, suppliesMember } from "std/contract"
+import { checkContract, suppliesMember, matchedMember } from "std/contract"
 
 // ===========================================================================
 // PageError (RFC-0041 §3) — the failure a page's `load` may return. `load ->
@@ -206,30 +206,90 @@ export fn headTitleOf(h: Head) -> String {
     }
 }
 
-/// A page's data: the call that produces it, deferred until the router asks, and
-/// whether the page renders LAZILY (RFC-0070 — the shell paints instantly on a
-/// client soft nav and the data region fills in when the payload lands).
+/// A page's data: the call that produces it, deferred until the router asks.
 ///
 ///     export fn data() -> Query<Array<Paste>> {
+///         return query(|| listPastes().pastes)
+///     }
+///
+/// The page BLOCKS on this — the document is not sent until the data lands. For
+/// render-then-fill, return a [`Lazy`] instead.
+export type Query<T> = { run: fn() -> T }
+
+/// A page's data when the page renders LAZILY (RFC-0070): the shell paints
+/// instantly on a client soft nav and the data region fills in when the payload
+/// lands.
+///
+///     export fn data() -> Lazy<Array<Paste>> {
 ///         return lazy(query(|| listPastes().pastes))
 ///     }
-export type Query<T> = { run: fn() -> T, lazy: Bool }
+///
+/// This is a DISTINCT TYPE rather than a flag on `Query`, and that is the whole
+/// point (RFC-0071 M2b). Laziness decides the *view's* type (`PageData<T>` versus
+/// `T`), so the generator has to know it at generation time; a runtime `lazy`
+/// field meant reading the `lazy(…)` call out of `data`'s body — a source scan,
+/// which is the practice this RFC exists to end. As a type it is reflection.
+export type Lazy<T> = { run: fn() -> T }
+
+/// A page's data when it depends on the route parameters: the deferred call
+/// receives the page's own `Params`.
+///
+///     export fn data() -> ParamQuery<Params, Result<Paste, PageError>> {
+///         return paramQuery(|p: Params| fetch(p.id))
+///     }
+///
+/// `Params` is declared per page, in the page's own module, which is exactly why
+/// `std/ui` cannot name it — so it is an open member type parameter, resolved at
+/// the use site (RFC-0071 M2b).
+export type ParamQuery<P, T> = { run: fn(P) -> T }
+
+/// [`ParamQuery`] rendered lazily — the params-taking counterpart of [`Lazy`].
+export type ParamLazy<P, T> = { run: fn(P) -> T }
 
 /// A query over `run`, resolved before the page renders.
 export fn query<T>(run: fn() -> T) -> Query<T> {
-    return Query { run: run, lazy: false }
+    return Query { run: run }
 }
 
 /// `q` marked lazy: the page renders its shell and a skeleton first, then fills
 /// the data region in. The server always has the data, so SSR is unaffected.
-export fn lazy<T>(q: Query<T>) -> Query<T> {
-    return Query { run: q.run, lazy: true }
+export fn lazy<T>(q: Query<T>) -> Lazy<T> {
+    return Lazy { run: q.run }
+}
+
+/// A query whose deferred call receives the page's route parameters.
+export fn paramQuery<P, T>(run: fn(P) -> T) -> ParamQuery<P, T> {
+    return ParamQuery { run: run }
+}
+
+/// `q` marked lazy — the params-taking counterpart of [`lazy`].
+export fn paramLazy<P, T>(q: ParamQuery<P, T>) -> ParamLazy<P, T> {
+    return ParamLazy { run: q.run }
 }
 
 /// Run a query, producing the page's data.
 export fn runQuery<T>(q: Query<T>) -> T {
     let f = q.run
     return f()
+}
+
+/// Run a lazy query. Identical to [`runQuery`] — laziness is about how the
+/// document is delivered, never about whether the data is fetched.
+export fn runLazy<T>(q: Lazy<T>) -> T {
+    let f = q.run
+    return f()
+}
+
+/// Run a params-taking query over this request's parameters.
+export fn runParamQuery<P, T>(q: ParamQuery<P, T>, p: P) -> T {
+    let f = q.run
+    return f(p)
+}
+
+/// Run a lazy params-taking query.
+export fn runParamLazy<P, T>(q: ParamLazy<P, T>, p: P) -> T {
+    let f = q.run
+    return f(p)
 }
 
 /// The absent query — the default for a page that declares no `data`, and the
@@ -253,13 +313,55 @@ fn uiNoData() -> Unit {
 /// A page needs local helpers; they are simply not exported, and the closed rule
 /// applies to the module's public surface only. Two independent fetches need one
 /// `data` returning a record, not two exports — one closure, one round trip.
+///
+/// Both members are declared at SEVERAL SHAPES (RFC-0071 M2b). Page shapes
+/// genuinely vary, and one signature per member left a real page — the one whose
+/// `<title>` is its loaded data's title — unable to write `head` at all.
 export contract Page {
     /// Document head contributions for this page.
+    ///
+    /// The house rule is that **head takes what the view takes**: nothing, the
+    /// loaded data, the route params, or both. `head { title: pasteTitle(data) }`
+    /// is a real capability of the block form this replaces, so the member has to
+    /// be declarable at the shape that expresses it.
     fn head() -> Head = noHead()
+    fn head(d: T) -> Head
+    fn head(p: P) -> Head
+    fn head(p: P, d: T) -> Head
 
-    /// This page's data, resolved before render. `lazy(…)` opts into
-    /// render-then-fill; without it the page blocks until the data lands.
+    /// This page's data, resolved before render.
+    ///
+    /// The return TYPE decides both questions the router needs answered:
+    /// `Query`/`Lazy` says whether the page blocks or renders-then-fills, and the
+    /// `Param*` pair says whether the deferred call sees the route parameters.
+    /// Neither is read out of the body.
     fn data() -> Query<T> = noQuery()
+    fn data() -> Lazy<T>
+    fn data() -> ParamQuery<P, T>
+    fn data() -> ParamLazy<P, T>
+}
+
+/// The `data` member's alternative-signature indices, as `matchedMember` reports
+/// them — named once here so the generator never spells a bare 2 (RFC-0071 M2b).
+/// Declaration order in `contract Page` is the contract; these four functions are
+/// the only thing that has to move if it changes.
+export fn uiDataQuery() -> Int64 {
+    return 0
+}
+
+/// `fn data() -> Lazy<T>` — no params, render-then-fill.
+export fn uiDataLazy() -> Int64 {
+    return 1
+}
+
+/// `fn data() -> ParamQuery<P, T>` — params, blocking.
+export fn uiDataParamQuery() -> Int64 {
+    return 2
+}
+
+/// `fn data() -> ParamLazy<P, T>` — params, render-then-fill.
+export fn uiDataParamLazy() -> Int64 {
+    return 3
 }
 
 // ===========================================================================
@@ -766,6 +868,12 @@ type UiPageInfo = {
     // `fn load`. The router runs the query instead of calling the loader; every
     // other field below is derived identically, so the two forms route the same.
     hasData: Bool,
+    // dataRunner: the `std/ui` runner that turns this page's declared query type
+    // into the loaded value — `runQuery` / `runLazy` / `runParamQuery` /
+    // `runParamLazy` (RFC-0071 M2b). Chosen by which of `data`'s four alternative
+    // signatures the page matched, so laziness and params-ness are read from the
+    // TYPE and never from the body. "" when the page has no `data`.
+    dataRunner: String,
     // loadHasParams: the loader takes a `Params` argument (`fn load(p: Params)`) —
     // false for a zero-parameter static loader (`fn load()`, RFC-0069 §0) and for a
     // page with no loader.
@@ -855,12 +963,28 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     // A `.vyrn` page's own surface also carries the router's entry points
     // (`page`/`respond`/`load`), which the contract does not name, so the CLOSED
     // rule is not applied here; a `.vyx` page's `<script>` gets the full check.
-    let hasData = suppliesMember(iface, contractOf(Page), "data")
+    let dataForm = matchedMember(iface, contractOf(Page), "data")
+    let hasData = dataForm >= 0
     let hasLoad = hasData || uiHasFn(iface, "load")
+    // RFC-0071 M2b: WHICH alternative the page matched decides how the router
+    // runs it. `Param*` means the deferred call takes the route params, so the
+    // router hands them over exactly as it would to a `fn load(p: Params)`.
+    let dataRunner = if hasData { vyxDataRunner(dataForm) } else { "" }
     // RFC-0069 §0: a zero-parameter static loader (`fn load()`) needs no `Params`;
     // a `load(p: Params)` (arity 1) does. A page with no loader relies on its
     // dynamic segments alone.
-    let loadHasParams = hasLoad && uiFnArity(iface, "load") > 0
+    let loadHasParams = if hasData {
+        vyxDataFormHasParams(dataForm)
+    } else {
+        hasLoad && uiFnArity(iface, "load") > 0
+    }
+    // A `.vyrn` page's view is a plain `fn page(…) -> Html`, not a `PageData<T>`
+    // match, so it has no `Loading` arm to render. Declaring a lazy query there
+    // would render-then-fill into a view that cannot express "not yet" — so it is
+    // named, not quietly downgraded to a blocking load.
+    if hasData && vyxDataFormIsLazy(dataForm) {
+        err = err + uiErrLine("PAGES_LAZY_NEEDS_VYX", fid + "__lazy_data_needs_a_vyx_page_view")
+    }
     let needParams = dyns.length > 0 || loadHasParams
 
     // dynTypes: each dynamic segment's declared type, parallel to `dyns`.
@@ -978,6 +1102,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
         dynTypes: dynTypes,
         hasLoad: hasLoad,
         hasData: hasData,
+        dataRunner: dataRunner,
         loadHasParams: loadHasParams,
         loadLazy: false,
         hasRespond: hasRespond,
@@ -1081,6 +1206,7 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
         dynTypes: dynTypes,
         hasLoad: hasLoad,
         hasData: false,
+        dataRunner: "",
         loadHasParams: loadHasParams,
         loadLazy: loadLazy,
         hasRespond: false,
@@ -1109,6 +1235,7 @@ gen fn uiPageErr(modPath: String, fid: String, segs: Array<String>, dirPrefix: A
         dynTypes: dynTypes,
         hasLoad: false,
         hasData: false,
+        dataRunner: "",
         loadHasParams: false,
         loadLazy: false,
         hasRespond: false,
@@ -1617,11 +1744,16 @@ gen fn uiEmitErrDoc(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorI
 /// `.load(p)`) and render its outcome. A plain loader (RFC-0069 §0) binds the data
 /// and renders (no failure path); a `Result`/`Validation` loader matches its arms,
 /// routing a failure to the nearest error page (RFC-0041 §3).
-/// The call that produces a page's data: `runQuery(p<idx>.data())` on the
+/// The call that produces a page's data: `<runner>(p<idx>.data()[, p])` on the
 /// RFC-0071 form, `p<idx>.load(…)` on the deprecated one. Both bind the same `d`.
+///
+/// WHICH runner comes from `data`'s declared return type (RFC-0071 M2b) — the
+/// `dataRunner` the contract check resolved — and a `Param*` query is handed the
+/// route params, which is why the two forms route identically.
 gen fn uiLoadCall(p: UiPageInfo, idx: String, args: String) -> String {
     if p.hasData {
-        return "runQuery(p" + idx + ".data())"
+        let extra = if p.loadHasParams { ", " + args } else { "" }
+        return p.dataRunner + "(p" + idx + ".data()" + extra + ")"
     }
     return "p" + idx + ".load(" + args + ")"
 }
@@ -1867,11 +1999,34 @@ gen fn uiEmitChromeImport(alias: String, modPath: String, gen: String, themed: B
     return "import * as " + alias + " from " + gen + "(" + arg + ")\n"
 }
 
+/// `//@deprecated` directives for every routed `.vyrn` page still on `fn load`
+/// rather than the `Page` contract's `data` member (RFC-0071's deprecation
+/// window). The loader lifts these into real warnings on the SUCCESS path
+/// (RFC-0071 M2b), so the window is something a user is told about instead of
+/// something they would have to read generated output to discover.
+///
+/// The position field is `-`, the explicit "no position" marker: a reflected
+/// `FnInfo` carries no line, and inventing one by re-scanning the page's source
+/// would put back exactly the scanner this RFC removes. The message names the
+/// module instead, which is enough to act on. A `.vyx` page's notice comes from
+/// `std/vyx` with a real `.vyx` line, because there the generator is already
+/// holding the source.
+gen fn uiDeprecatedLoaders(pages: Array<UiPageInfo>) -> String {
+    let mut out = ""
+    for p in pages {
+        if p.isVyx == false && p.hasLoad && p.hasData == false {
+            out = out + "//@deprecated - `fn load` in `" + p.modPath + "` is deprecated (RFC-0071) — write `export fn data() -> Query<T>` instead\n"
+        }
+    }
+    return out
+}
+
 /// Assemble the whole synthesized router module from the collected pages and
 /// chrome (`layout.vyx`/`error.vyx`, RFC-0041). When `themed` (RFC-0036/0039 §4),
 /// `.vyx` pages/layouts/errors compile their classes against `theme`.
 gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors: Array<UiChrome>, themed: Bool, theme: String) -> String {
     let mut out = "/// Generated by std/ui `pages` (RFC-0026 M3, RFC-0039 §4, RFC-0041) — do not edit.\n"
+    out = out + uiDeprecatedLoaders(pages)
     out = out + "import { el, text, empty, document, toHtmlString, Html, Attr } from \"std/html\"\n"
     out = out + uiVyxGenImports(pages, layouts, errors, themed)
 
@@ -1910,6 +2065,9 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
     // its query. A router of only `fn load` pages emits exactly the pre-RFC
     // module (byte-identical) — nothing on the old form is disturbed.
     let mut anyQuery = false
+    // The distinct runners the routed pages need, in first-use order — a router
+    // imports exactly the ones its pages' declared query types name (RFC-0071 M2b).
+    let mut runners: Array<String> = []
     i = 0
     while i < pages.length {
         let lidx = uiLayoutChain(pages[i], layouts)
@@ -1925,6 +2083,9 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
         }
         if pages[i].hasData {
             anyQuery = true
+            if includes(runners, pages[i].dataRunner) == false {
+                runners.push(pages[i].dataRunner)
+            }
         }
         i = i + 1
     }
@@ -1932,7 +2093,7 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
         out = out + "import { PageError } from \"std/ui\"\n"
     }
     if anyQuery {
-        out = out + "import { runQuery } from \"std/ui\"\n"
+        out = out + "import { " + joinWith(runners, ", ") + " } from \"std/ui\"\n"
     }
     if anyClientPage {
         out = out + "import { uiIsDataRequest, uiPayload, uiErrorPayload, uiDataResponse, uiDataMiss, uiErrorResponseOf } from \"std/ui\"\n"

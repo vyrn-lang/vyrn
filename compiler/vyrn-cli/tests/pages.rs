@@ -554,3 +554,244 @@ fn demo_tests_run_green() {
     assert!(out.status.success(), "demo tests failed:\n{combined}");
     assert!(combined.contains("5 passed, 0 failed"), "expected 5 green tests:\n{combined}");
 }
+
+// ===========================================================================
+// RFC-0071 M2b — multi-shape `head`, laziness in the type, and params in the
+// query. These are the two capabilities M2 shipped WITHOUT, and the reason
+// `bin/routes/p/[id].vyx` could not migrate: its <title> is its loaded data's
+// title, and its data depends on its route parameters.
+// ===========================================================================
+
+/// A page whose `head` reads the LOADED DATA — the shape the `head { … }` block
+/// could express and a zero-argument `fn head()` could not.
+#[test]
+fn head_can_take_the_pages_loaded_data() {
+    let dir = scratch("headdata");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Head, Query, noHead, withTitle, query } from \"std/ui\"\n\
+         export fn head(d: String) -> Head {\n    return withTitle(noHead(), d)\n}\n\
+         export fn data() -> Query<String> {\n    return query(title)\n}\n\
+         fn title() -> String {\n    return \"from the data\"\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ data }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let src = String::from_utf8_lossy(&out.stdout).to_string();
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "must generate:\n{err}");
+    // The wrapper's own signature is the router's, unchanged; what varies is
+    // what it FORWARDS to the accessor.
+    assert!(src.contains("return headHtml(uiPgHead(d))"), "head is handed the data:\n{src}");
+    assert!(src.contains("return headTitleOf(uiPgHead(d))"), "and so is headTitle:\n{src}");
+}
+
+/// A page whose `head` takes BOTH the params and the data — the fourth shape.
+#[test]
+fn head_can_take_params_and_data_together() {
+    let dir = scratch("headboth");
+    write(
+        &dir.join("pages/u/[id].vyx"),
+        "<script>\n\
+         import { Head, ParamQuery, noHead, withTitle, paramQuery } from \"std/ui\"\n\
+         params { id: Int64 }\n\
+         export fn head(p: Params, d: Int64) -> Head {\n    return withTitle(noHead(), d.toString())\n}\n\
+         export fn data() -> ParamQuery<Params, Int64> {\n    return paramQuery(twice)\n}\n\
+         fn twice(p: Params) -> Int64 {\n    return p.id * 2\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ data }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let src = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "must generate:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(src.contains("return headHtml(uiPgHead(p, d))"), "both are forwarded:\n{src}");
+}
+
+/// A `head` asking for what the page cannot give is an error, not an empty head.
+#[test]
+fn a_head_asking_for_data_a_dataless_page_lacks_is_reported() {
+    let dir = scratch("headnodata");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Head, noHead, withTitle } from \"std/ui\"\n\
+         export fn head(d: String) -> Head {\n    return withTitle(noHead(), d)\n}\n\
+         </script>\n\
+         <template>\n<h1>x</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "a head with nothing to read must be refused");
+    assert!(err.contains("VYX_HEAD_SIGNATURE"), "naming the offense:\n{err}");
+}
+
+/// Laziness is read off the RETURN TYPE, not out of `data`'s body — the last
+/// source scan in the page pipeline, deleted rather than renamed.
+#[test]
+fn laziness_comes_from_the_declared_type() {
+    let dir = scratch("lazytype");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Lazy, PageData, query, lazy } from \"std/ui\"\n\
+         export fn data() -> Lazy<Int64> {\n    return lazy(query(seven))\n}\n\
+         fn seven() -> Int64 {\n    return 7\n}\n\
+         fn shown(d: PageData<Int64>) -> String {\n\
+         return match d {\n        Loading => \"...\",\n        Ready(n) => n.toString(),\n    }\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ shown(data) }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let src = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "must generate:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(src.contains("runLazy(uiPgData())"), "the lazy runner:\n{src}");
+    // A lazy page's view is over `PageData<T>` and the server renders `Ready(d)`.
+    assert!(src.contains("Ready(d)"), "the view is wrapped for SSR:\n{src}");
+}
+
+/// The same shape declared `Query` is NOT lazy: nothing is read from the body,
+/// so the two differ only in the declaration.
+#[test]
+fn a_query_return_is_not_lazy_however_its_body_is_written() {
+    let dir = scratch("lazytypeno");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Query, query } from \"std/ui\"\n\
+         export fn data() -> Query<Int64> {\n    return query(seven)\n}\n\
+         fn seven() -> Int64 {\n    return 7\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ data }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let src = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "must generate:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(src.contains("runQuery(uiPgData())"), "the blocking runner:\n{src}");
+    assert!(!src.contains("runLazy"), "and not the lazy one:\n{src}");
+    assert!(!src.contains("PageData<"), "the view is over the raw type:\n{src}");
+}
+
+/// A `data` whose deferred call takes the page's own `Params` routes exactly as
+/// a `fn load(p: Params)` did — which is what makes migrating one free.
+#[test]
+fn a_param_query_routes_like_a_params_loader() {
+    let dir = scratch("paramquery");
+    write(
+        &dir.join("pages/u/[id].vyx"),
+        "<script>\n\
+         import { ParamQuery, paramQuery } from \"std/ui\"\n\
+         params { id: Int64 }\n\
+         export fn data() -> ParamQuery<Params, Int64> {\n    return paramQuery(twice)\n}\n\
+         fn twice(p: Params) -> Int64 {\n    return p.id * 2\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ data }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let src = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "must generate:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        src.contains("export fn load(p: Params) -> Int64"),
+        "the wrapper takes the params:\n{src}"
+    );
+    assert!(src.contains("runParamQuery(uiPgData(), p)"), "and hands them over:\n{src}");
+    assert!(src.contains(".load(p)"), "so the router calls it exactly as before:\n{src}");
+}
+
+/// `data` returning something that is not one of the four query types is named,
+/// not compiled into a call to a runner that does not exist.
+#[test]
+fn a_data_returning_a_non_query_is_reported() {
+    let dir = scratch("baddata");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         export fn data() -> Int64 {\n    return 7\n}\n\
+         </script>\n\
+         <template>\n<h1>x</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "must be refused");
+    assert!(err.contains("VYX_DATA_RETURN"), "naming the offense:\n{err}");
+}
+
+// ---- the deprecation window is now audible (RFC-0071 M2b, Part A) ----------
+
+/// A `.vyx` page still on `head { … }` / `fn load` WARNS, at the `.vyx` line
+/// that wrote it — and still compiles, which is what a window means.
+#[test]
+fn a_deprecated_vyx_page_warns_at_its_own_source_line() {
+    let dir = scratch("depvyx");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         head {\n    title: \"Old\"\n}\n\
+         \n\
+         fn load() -> Int64 {\n    return 7\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ data }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+    assert!(out.status.success(), "the window is open, so it still builds:\n{err}");
+    assert!(
+        err.contains("index.vyx:2:1: warning: the `head { … }` block is deprecated"),
+        "the head block warns at its own line:\n{err}"
+    );
+    assert!(
+        err.contains("index.vyx:6:1: warning: `fn load` is deprecated"),
+        "and so does the loader:\n{err}"
+    );
+}
+
+/// A `.vyrn` page still on `fn load` warns too. It has no line to point at — a
+/// reflected `FnInfo` carries none, and re-scanning the source to invent one
+/// would put back the scanner this RFC removes — so it names the module.
+#[test]
+fn a_deprecated_vyrn_page_warns_naming_the_module() {
+    let dir = scratch("depvyrn");
+    write(
+        &dir.join("pages/index.vyrn"),
+        "import { el, text, Html } from \"std/html\"\n\
+         export fn load() -> Int64 { return 7 }\n\
+         export fn page(d: Int64) -> Html { return el(\"main\", [], [text(d.toString())]) }\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+    assert!(out.status.success(), "still builds:\n{err}");
+    assert!(
+        err.contains("warning: `fn load` in `./pages/index` is deprecated"),
+        "the module is named:\n{err}"
+    );
+}
+
+/// The migrated page does NOT warn — the window is for pages that still need it.
+#[test]
+fn a_migrated_page_is_silent() {
+    let dir = scratch("nodep");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Head, Query, noHead, withTitle, query } from \"std/ui\"\n\
+         export fn head() -> Head {\n    return withTitle(noHead(), \"New\")\n}\n\
+         export fn data() -> Query<Int64> {\n    return query(seven)\n}\n\
+         fn seven() -> Int64 {\n    return 7\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ data }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+    assert!(out.status.success(), "must build:\n{err}");
+    assert!(!err.contains("warning:"), "nothing to say:\n{err}");
+}

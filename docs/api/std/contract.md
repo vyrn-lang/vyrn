@@ -40,6 +40,21 @@ the grammar needs no reopening if that rule ever changes.
 noHead()`), which makes it optional: the module may omit the export and the
 generator uses the default. A member without one is required.
 
+**Alternative signatures (RFC-0071 M2b).** A `fn` member NAME may be declared
+more than once; the repeats are alternatives, and the module satisfies the
+member by matching any ONE of them:
+
+    fn head() -> Head = noHead()
+    fn head(d: T) -> Head
+    fn head(p: P) -> Head
+    fn head(p: P, d: T) -> Head
+
+A name is optional when ANY of its alternatives carries a default, because
+optionality is a property of the export being absent and an absent export is
+absent at every shape. `matchedMember` reports WHICH alternative an export
+matched, so a generator reads a page's shape off the declaration instead of
+scanning its body — which is the whole point of the RFC.
+
 ## checkContract
 
 ```vyrn
@@ -68,3 +83,23 @@ used to ask `uiHasFn(iface, "load")` — a literal string with nothing behind
 it — and now asks whether the module supplies the `data` member of the
 contract it is checked against, which is the same question with a declaration
 standing behind every part of it.
+
+## matchedMember
+
+```vyrn
+fn matchedMember(iface: ModuleInterface, c: ContractInfo, name: String) -> Int64
+```
+
+WHICH alternative signature of member `name` the module supplies: the 0-based
+index among that member's alternatives in declaration order, or `0 - 1` when
+the module does not supply it at all (RFC-0071 M2b).
+
+This is how a generator reads a module's SHAPE off declarations. `std/ui` used
+to learn whether a page was lazy by scanning `data`'s body for a `lazy(…)`
+call and whether its head could see the data by parsing a `head { … }` block
+out of source text. Both are now questions about which declared signature the
+page chose, answered here — and a signature is a thing the checker checks, the
+LSP completes, and a typo breaks loudly.
+
+A member with one signature answers `0` (supplied) or `0 - 1` (not), so a
+caller that only wants presence should keep using `suppliesMember`.

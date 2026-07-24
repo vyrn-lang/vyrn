@@ -1166,26 +1166,59 @@ impl Parser {
                     ))
                 }
             };
-            // Duplicate names are rejected here rather than in the checker so the
-            // reflected `ContractInfo` can never hold two members of one name.
+            // RFC-0071 M2b: a NAME may repeat — the repeats are ALTERNATIVE
+            // SIGNATURES, and a module satisfies the member by matching any one
+            // of them. `head` needs this: a page's shape genuinely varies (data,
+            // params, both, neither), and one signature per member left a real
+            // page unable to write `head` at all.
+            //
+            // Two things are still rejected, because neither is an alternative:
+            // a second OPEN RULE (a contract has at most one total rule), and a
+            // name declared at both member forms (a `let` and a `fn` of one name
+            // are a contradiction, not a choice).
             if let Some(prev) = members.iter().find(|m| m.name == member.name) {
-                return Err(Diagnostic::error(
-                    member.line,
-                    self.col(),
-                    "parse",
-                    if member.is_open_rule() {
+                if member.is_open_rule() {
+                    return Err(Diagnostic::error(
+                        member.line,
+                        self.col(),
+                        "parse",
                         format!(
                             "contract `{name}` already has an open rule (line {}) — \
                              a contract has at most one",
                             prev.line
-                        )
-                    } else {
+                        ),
+                    ));
+                }
+                let same_form = matches!(
+                    (&prev.kind, &member.kind),
+                    (ContractMemberKind::Value { .. }, ContractMemberKind::Value { .. })
+                        | (ContractMemberKind::Fn { .. }, ContractMemberKind::Fn { .. })
+                );
+                if !same_form {
+                    return Err(Diagnostic::error(
+                        member.line,
+                        self.col(),
+                        "parse",
                         format!(
-                            "contract `{name}` already declares `{}` (line {})",
+                            "contract `{name}` declares `{}` as both a value and a function \
+                             (line {}) — alternative signatures are alternatives, not a \
+                             change of member form",
                             member.name, prev.line
-                        )
-                    },
-                ));
+                        ),
+                    ));
+                }
+                if matches!(member.kind, ContractMemberKind::Value { .. }) {
+                    return Err(Diagnostic::error(
+                        member.line,
+                        self.col(),
+                        "parse",
+                        format!(
+                            "contract `{name}` already declares `{}` (line {}) — only \
+                             `fn` members may have alternative signatures",
+                            member.name, prev.line
+                        ),
+                    ));
+                }
             }
             members.push(member);
         }

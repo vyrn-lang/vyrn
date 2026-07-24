@@ -1,20 +1,34 @@
 <script>
 // GET /p/[id] — the SSR paste view (RFC-0041 §3). A String segment binds the
-// content-addressed id; the loader returns Result<Paste, PageError>, so an unknown
+// content-addressed id; the query returns Result<Paste, PageError>, so an unknown
 // id renders the themed error.vyx at 404 instead of a hand-built hyperscript 404.
-// The <title> is the paste title, declared in the head block.
+//
+// RFC-0071 M2b: this is the page that could not migrate in M2, and both things
+// that blocked it are visible here. Its <title> IS its loaded data's title, so
+// `head` must be able to see the data — `fn head(d: Paste)` is one of the four
+// shapes the `Page` contract declares, under the house rule that head takes what
+// the view takes. And its data depends on the route parameters, so `data` returns
+// a `ParamQuery<Params, …>`: the deferred call receives `Params`, which is
+// declared per page and which std/ui therefore cannot name.
 import { getPaste } from "../../contract"
 import { IdReq, Paste } from "../../wire"
 import { format, fromMillis } from "std/time"
-import { PageError, notFound } from "std/ui"
+import { Head, PageError, ParamQuery, noHead, withTitle, paramQuery, notFound } from "std/ui"
 import { i18n } from "std/i18n"
 import * as t from i18n("../../strings")
 params { id: String }
-head {
-    title: pasteTitle(data)
+
+/// The document title: this paste's title.
+export fn head(d: Paste) -> Head {
+    return withTitle(noHead(), pasteTitle(d))
 }
 
-fn load(p: Params) -> Result<Paste, PageError> {
+/// The paste this route names, or a 404 through the themed error page.
+export fn data() -> ParamQuery<Params, Result<Paste, PageError>> {
+    return paramQuery(fetchPaste)
+}
+
+fn fetchPaste(p: Params) -> Result<Paste, PageError> {
     return match getPaste(IdReq { id: p.id }) {
         Ok(paste) => Ok(paste),
         Err(why) => Err(notFound(why)),

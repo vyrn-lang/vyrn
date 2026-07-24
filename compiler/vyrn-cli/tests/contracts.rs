@@ -430,3 +430,139 @@ fn contract_of_is_comptime_only_and_has_no_native_lowering() {
         "expected a comptime-only refusal, got:\n{all}"
     );
 }
+
+// ===========================================================================
+// RFC-0071 M2b — alternative signatures.
+//
+// A member NAME may be declared more than once; the repeats are alternatives,
+// and a module satisfies the member by matching any ONE of them. This is what
+// `head` needed: a page's shape genuinely varies (data, params, both, neither),
+// and one signature per member left a real page unable to write it at all.
+// ===========================================================================
+
+/// A generator whose `Shaped` contract declares `render` at three shapes and
+/// reports both the issues AND which alternative each module matched.
+const ALT_GEN: &str = r#"import { checkContract, matchedMember } from "std/contract"
+
+/// One name, three shapes.
+export contract Shaped {
+    /// Render this thing, taking whatever it needs.
+    fn render() -> String = ""
+    fn render(a: T) -> String
+    fn render(a: T, b: R) -> String
+}
+
+fn report(name: String, issues: Array<Issue>) -> String {
+    let mut out = "export fn " + name + "() -> Array<String> {\n    let mut xs: Array<String> = []\n"
+    for iss in issues {
+        out = out + "    xs.push(\"" + iss.key + ": " + iss.message + "\")\n"
+    }
+    return out + "    return xs\n}\n"
+}
+
+export gen fn shapedReport(path: String) -> String {
+    let iface = moduleInterface(path)
+    let mut out = report("shapedIssues", checkContract(iface, contractOf(Shaped)))
+    let m = matchedMember(iface, contractOf(Shaped), "render")
+    return out + "export fn shapedMatch() -> Int64 {\n    return " + m.toString() + "\n}\n"
+}
+"#;
+
+const ALT_APP: &str = r#"import { shapedReport } from "./gen"
+import { shapedIssues, shapedMatch } from shapedReport("./mod")
+
+fn main() -> Int64 {
+    for m in shapedIssues() {
+        print(m)
+    }
+    print("matched=" + shapedMatch().toString())
+    return 0
+}
+"#;
+
+fn run_alt(tag: &str, module: &str) -> String {
+    let dir = scratch(tag);
+    std::fs::write(dir.join("gen.vyrn"), ALT_GEN).unwrap();
+    std::fs::write(dir.join("app.vyrn"), ALT_APP).unwrap();
+    std::fs::write(dir.join("mod.vyrn"), module).unwrap();
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run vyrn");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"),
+        String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n")
+    )
+}
+
+#[test]
+fn any_one_alternative_satisfies_the_member() {
+    for (arity, module) in [
+        (0, "export fn render() -> String {\n    return \"\"\n}\n"),
+        (1, "export fn render(a: Int64) -> String {\n    return \"\"\n}\n"),
+        (2, "export fn render(a: Int64, b: String) -> String {\n    return \"\"\n}\n"),
+    ] {
+        let out = run_alt(&format!("alt{arity}"), module);
+        assert!(!out.contains("contract."), "shape {arity} must satisfy `render`:\n{out}");
+        assert!(
+            out.contains(&format!("matched={arity}")),
+            "the generator learns WHICH shape it got (expected {arity}):\n{out}"
+        );
+    }
+}
+
+#[test]
+fn an_export_matching_no_alternative_names_all_of_them() {
+    // Three shapes, none of them three-argument: one issue, not three.
+    let out = run_alt(
+        "altbad",
+        "export fn render(a: Int64, b: String, c: Bool) -> String {\n    return \"\"\n}\n",
+    );
+    let hits = out.matches("contract.type").count();
+    assert_eq!(hits, 1, "one issue for one member, not one per alternative:\n{out}");
+    assert!(out.contains("must be one of"), "the wording admits several shapes:\n{out}");
+    assert!(
+        out.contains("fn() -> String") && out.contains("fn(T, R) -> String"),
+        "every alternative is named:\n{out}"
+    );
+}
+
+#[test]
+fn a_default_on_any_alternative_makes_the_name_optional() {
+    // `render`'s FIRST alternative carries a default, so omitting the export
+    // entirely is legal — optionality is a property of the name, because an
+    // absent export is absent at every shape.
+    let out = run_alt("altmissing", "fn helper() -> String {\n    return \"\"\n}\n");
+    assert!(!out.contains("contract.missing"), "the member is optional:\n{out}");
+    assert!(out.contains("matched=-1"), "and reported as not supplied:\n{out}");
+}
+
+#[test]
+fn a_name_cannot_change_member_form_between_alternatives() {
+    // Alternatives are alternatives, not a change of kind: a `let` and a `fn` of
+    // one name is a contradiction and is refused where it is written.
+    let dir = scratch("altform");
+    std::fs::write(
+        dir.join("app.vyrn"),
+        "contract P {\n    fn head() -> String\n    let head: String\n}\n\
+         fn main() -> Int64 { return 0 }\n",
+    )
+    .unwrap();
+    let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("run vyrn");
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "must be refused:\n{err}");
+    assert!(err.contains("both a value and a function"), "naming the reason:\n{err}");
+}
+
+#[test]
+fn a_contract_still_has_at_most_one_open_rule() {
+    let dir = scratch("altopen");
+    std::fs::write(
+        dir.join("app.vyrn"),
+        "contract P {\n    fn *(..) -> String\n    fn *(..) -> Int64\n}\n\
+         fn main() -> Int64 { return 0 }\n",
+    )
+    .unwrap();
+    let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("run vyrn");
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "must be refused:\n{err}");
+    assert!(err.contains("at most one"), "naming the reason:\n{err}");
+}

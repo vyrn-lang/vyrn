@@ -184,16 +184,62 @@ A head's document title, or "" when it declares none — the spelling
 ## Query
 
 ```vyrn
-type Query = { run: fn() -> T, lazy: Bool }
+type Query = { run: fn() -> T }
 ```
 
-A page's data: the call that produces it, deferred until the router asks, and
-whether the page renders LAZILY (RFC-0070 — the shell paints instantly on a
-client soft nav and the data region fills in when the payload lands).
+A page's data: the call that produces it, deferred until the router asks.
 
     export fn data() -> Query<Array<Paste>> {
+        return query(|| listPastes().pastes)
+    }
+
+The page BLOCKS on this — the document is not sent until the data lands. For
+render-then-fill, return a [`Lazy`] instead.
+
+## Lazy
+
+```vyrn
+type Lazy = { run: fn() -> T }
+```
+
+A page's data when the page renders LAZILY (RFC-0070): the shell paints
+instantly on a client soft nav and the data region fills in when the payload
+lands.
+
+    export fn data() -> Lazy<Array<Paste>> {
         return lazy(query(|| listPastes().pastes))
     }
+
+This is a DISTINCT TYPE rather than a flag on `Query`, and that is the whole
+point (RFC-0071 M2b). Laziness decides the *view's* type (`PageData<T>` versus
+`T`), so the generator has to know it at generation time; a runtime `lazy`
+field meant reading the `lazy(…)` call out of `data`'s body — a source scan,
+which is the practice this RFC exists to end. As a type it is reflection.
+
+## ParamQuery
+
+```vyrn
+type ParamQuery = { run: fn(P) -> T }
+```
+
+A page's data when it depends on the route parameters: the deferred call
+receives the page's own `Params`.
+
+    export fn data() -> ParamQuery<Params, Result<Paste, PageError>> {
+        return paramQuery(|p: Params| fetch(p.id))
+    }
+
+`Params` is declared per page, in the page's own module, which is exactly why
+`std/ui` cannot name it — so it is an open member type parameter, resolved at
+the use site (RFC-0071 M2b).
+
+## ParamLazy
+
+```vyrn
+type ParamLazy = { run: fn(P) -> T }
+```
+
+[`ParamQuery`] rendered lazily — the params-taking counterpart of [`Lazy`].
 
 ## query
 
@@ -206,11 +252,27 @@ A query over `run`, resolved before the page renders.
 ## lazy
 
 ```vyrn
-fn lazy<T>(q: Query<T>) -> Query<T>
+fn lazy<T>(q: Query<T>) -> Lazy<T>
 ```
 
 `q` marked lazy: the page renders its shell and a skeleton first, then fills
 the data region in. The server always has the data, so SSR is unaffected.
+
+## paramQuery
+
+```vyrn
+fn paramQuery<P, T>(run: fn(P) -> T) -> ParamQuery<P, T>
+```
+
+A query whose deferred call receives the page's route parameters.
+
+## paramLazy
+
+```vyrn
+fn paramLazy<P, T>(q: ParamQuery<P, T>) -> ParamLazy<P, T>
+```
+
+`q` marked lazy — the params-taking counterpart of [`lazy`].
 
 ## runQuery
 
@@ -219,6 +281,31 @@ fn runQuery<T>(q: Query<T>) -> T
 ```
 
 Run a query, producing the page's data.
+
+## runLazy
+
+```vyrn
+fn runLazy<T>(q: Lazy<T>) -> T
+```
+
+Run a lazy query. Identical to [`runQuery`] — laziness is about how the
+document is delivered, never about whether the data is fetched.
+
+## runParamQuery
+
+```vyrn
+fn runParamQuery<P, T>(q: ParamQuery<P, T>, p: P) -> T
+```
+
+Run a params-taking query over this request's parameters.
+
+## runParamLazy
+
+```vyrn
+fn runParamLazy<P, T>(q: ParamLazy<P, T>, p: P) -> T
+```
+
+Run a lazy params-taking query.
 
 ## noQuery
 
@@ -229,6 +316,41 @@ fn noQuery() -> Query<Unit>
 The absent query — the default for a page that declares no `data`, and the
 value a generator substitutes when it finds none. A page with no data has
 nothing to produce, which is what `Query<Unit>` says.
+
+## uiDataQuery
+
+```vyrn
+fn uiDataQuery() -> Int64
+```
+
+The `data` member's alternative-signature indices, as `matchedMember` reports
+them — named once here so the generator never spells a bare 2 (RFC-0071 M2b).
+Declaration order in `contract Page` is the contract; these four functions are
+the only thing that has to move if it changes.
+
+## uiDataLazy
+
+```vyrn
+fn uiDataLazy() -> Int64
+```
+
+`fn data() -> Lazy<T>` — no params, render-then-fill.
+
+## uiDataParamQuery
+
+```vyrn
+fn uiDataParamQuery() -> Int64
+```
+
+`fn data() -> ParamQuery<P, T>` — params, blocking.
+
+## uiDataParamLazy
+
+```vyrn
+fn uiDataParamLazy() -> Int64
+```
+
+`fn data() -> ParamLazy<P, T>` — params, render-then-fill.
 
 ## uiDataMarker
 

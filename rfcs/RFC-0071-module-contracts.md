@@ -517,6 +517,73 @@ stored closure. Generic records with function-typed fields were simply not
 constructible before — the record-literal path was the one inference site with no
 `Type::Fn` arm.
 
+## M2b — as landed
+
+Eight places where the implementation is not what this document said, and why.
+
+**`Query<P, T>` is four types, not two.** The spelling this document chose forces
+*every* page to name a params type, including the ones that have none — and
+inventing a params type for a paramless page is exactly the objection M2 raised
+against `Query<P, T>` in the first place. `index.vyx` has no route segments and
+therefore no `Params` to name; it would have had to invent one purely to satisfy
+a type parameter it never uses. So the params-ness went into the NAME, beside the
+laziness that was already going there: `Query<T>`, `Lazy<T>`, `ParamQuery<P, T>`,
+`ParamLazy<P, T>`. `data` is declared at all four, and both facts the router needs
+— blocks-or-fills, sees-params-or-not — are read off which alternative the page
+matched. The RFC's substantive claim (neither fact is scanned out of the body) is
+met; its spelling is not.
+
+**`head`'s four alternatives are three shapes.** Under open member type
+parameters `fn head(d: T) -> Head` and `fn head(p: P) -> Head` are the same
+signature, so declaring both is documentation, not discrimination —
+`matchedMember` cannot tell them apart and always reports the earlier. Both are
+declared anyway, because the four-line block is the clearest statement of the
+house rule, and the generator distinguishes the one-argument case by the declared
+parameter TYPE: a page's route parameters are always its own `Params` and nothing
+else can be. That is still a question about a declaration, which is the whole
+distinction this RFC turns on.
+
+**A `fn` parameter could not solve a type parameter.** `paramQuery(run: fn(P) ->
+T)` is the first function in the corpus where a `fn` parameter is the ONLY place
+a type parameter occurs; every previous one (`map<T, U>(xs: Array<T>, f: fn(T) ->
+U)`) had an ordinary argument pinning it first, and `check_fn_arg` only ever
+unified the function value's RETURN. So the call could not typecheck at all —
+`P` stayed `P` and every comparison against it failed. `check_fn_arg` now unifies
+the parameter types too. This is a general inference fix, not a contracts one.
+
+**A closure cannot annotate its parameter, so `data` takes a named function.**
+`paramQuery(|p: Params| …)` is not Vyrn — a lambda's parameters are typed by the
+signature they flow into, never by the author. With the inference fix a bare
+`paramQuery(fetchPaste)` works and reads better, so the migrated page passes its
+loader by name. `query(|| …)` still works for the paramless forms, where nothing
+needs solving.
+
+**`vyxParseHead` is NOT deleted, and pairing it with `vyxScriptDataIsLazy` in the
+M2c list was a mistake.** `head { … }` is not only a page form: `layout.vyx` and
+`error.vyx` use it too, through `vyxBuildLayoutModule`, and a LAYOUT has no
+contract — `Page` is about pages. Both `bin` and `shelf` have a layout with a head
+block, and neither is deprecated. Deleting the parser needs a `Layout` contract
+to exist first, which is not in this RFC. `vyxScriptDataIsLazy` IS gone, and with
+it `vyxDeclBody`'s only caller on the page path — laziness is now a type.
+
+**A `.vyrn` page's deprecation warning has no line.** `ModuleInterface` reflects
+functions with no source position, so `std/ui` cannot say WHERE a page's `fn
+load` is; re-reading the page's source to find out would put back the scanner
+this RFC removes. The directive therefore carries `-` (the explicit "no position"
+marker) and the message names the module. A `.vyx` page gets a real file:line,
+because there the generator is already holding the source.
+
+**The `-` marker had to be taught to the loader.** The inherited M2b work emitted
+it and the directive parser kept it as the first word of the message, so an
+unpositioned warning read `- \`fn load\` is deprecated`. It is now consumed.
+
+**`doc` and `fmt` never reach `load_program`, so they print no warnings.** The
+one-print-site design holds for every command that BUILDS a program (`check`,
+`run`, `emit-ir`, `build`, `test`, `bench`, `serve`, `dev`). `fmt` is a token
+rewriter, `doc` renders over sources, and `emit-gen` prints the generated text —
+where a `//@deprecated` directive is already visible verbatim. Three commands
+that never load cannot warn, and should not.
+
 ## Acceptance
 
 - `fn laod()` in a page is an **error** naming `data`, not a silent no-data page.

@@ -37,8 +37,24 @@
 /// **Optionality.** Either member form may carry a default (`fn head() -> Head =
 /// noHead()`), which makes it optional: the module may omit the export and the
 /// generator uses the default. A member without one is required.
+///
+/// **Alternative signatures (RFC-0071 M2b).** A `fn` member NAME may be declared
+/// more than once; the repeats are alternatives, and the module satisfies the
+/// member by matching any ONE of them:
+///
+///     fn head() -> Head = noHead()
+///     fn head(d: T) -> Head
+///     fn head(p: P) -> Head
+///     fn head(p: P, d: T) -> Head
+///
+/// A name is optional when ANY of its alternatives carries a default, because
+/// optionality is a property of the export being absent and an absent export is
+/// absent at every shape. `matchedMember` reports WHICH alternative an export
+/// matched, so a generator reads a page's shape off the declaration instead of
+/// scanning its body — which is the whole point of the RFC.
 
 import { editDistance } from "std/strings"
+import { includes } from "std/arrays"
 
 /// The "did you mean" threshold: Damerau-Levenshtein distance <= 2, measured
 /// against every member name. This is what makes typo detection on a CLOSED
@@ -284,6 +300,95 @@ fn hasMember(c: ContractInfo, name: String) -> Bool {
     return false
 }
 
+/// Every alternative signature declared for `name`, in declaration order
+/// (RFC-0071 M2b). One entry for an ordinary member; several when the contract
+/// declares the name at more than one shape.
+fn alternatives(c: ContractInfo, name: String) -> Array<MemberInfo> {
+    let mut out: Array<MemberInfo> = []
+    for m in c.members {
+        if m.name == name {
+            out.push(m)
+        }
+    }
+    return out
+}
+
+/// The distinct named members of `c`, in declaration order — a name that repeats
+/// appears once, at its FIRST declaration. This is what makes the issue order
+/// deterministic and one-issue-per-name: a `head` declared at four shapes is one
+/// member with four alternatives, not four members.
+fn memberNames(c: ContractInfo) -> Array<String> {
+    let mut out: Array<String> = []
+    for m in c.members {
+        if m.name != "*" && includes(out, m.name) == false {
+            out.push(m.name)
+        }
+    }
+    return out
+}
+
+/// Whether the module may omit `name`: true when ANY alternative carries a
+/// default. An absent export is absent at every shape, so optionality cannot
+/// sensibly differ between alternatives of one name.
+fn nameOptional(alts: Array<MemberInfo>) -> Bool {
+    for m in alts {
+        if m.optional {
+            return true
+        }
+    }
+    return false
+}
+
+/// How a member reads in a diagnostic when it has alternatives: the single
+/// spelling when there is one, `\`a\` or \`b\`` when there are several. The
+/// one-alternative wording is byte-identical to what a single-signature member
+/// has always produced.
+fn altSpelling(alts: Array<MemberInfo>) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < alts.length {
+        if i > 0 {
+            out = out + if i == alts.length - 1 { "` or `" } else { "`, `" }
+        }
+        out = out + memberSpelling(alts[i])
+        i = i + 1
+    }
+    return out
+}
+
+/// The index, among `name`'s alternatives, of the one export `e` satisfies —
+/// or 0 - 1 when it satisfies none.
+fn matchIndex(alts: Array<MemberInfo>, e: Export) -> Int64 {
+    let mut i = 0
+    while i < alts.length {
+        let m = alts[i]
+        let ok = if m.kind == "fn" {
+            matchesSignature(m, e)
+        } else {
+            e.kind == "let" && typeMatches(m.spelling, e.ret)
+        }
+        if ok {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+/// The index of the export named `name`, or `0 - 1` when the module has none.
+/// An index rather than an `Option<Export>` because every caller wants to branch
+/// and then use the value, which is one `match` arm too many for a statement.
+fn exportIndex(exports: Array<Export>, name: String) -> Int64 {
+    let mut i = 0
+    while i < exports.length {
+        if exports[i].name == name {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
 /// The contract's open rule (`fn *(..) -> ..`), if it has one.
 fn openRule(c: ContractInfo) -> Option<MemberInfo> {
     for m in c.members {
@@ -338,35 +443,32 @@ export fn checkContract(iface: ModuleInterface, c: ContractInfo) -> Array<Issue>
     let exports = moduleExports(iface)
     let site = contractSite(c)
 
-    // 1. Every named member: present with the right type, or legitimately absent.
-    for m in c.members {
-        if m.name != "*" {
-            let mut found = false
-            for e in exports {
-                if e.name == m.name {
-                    found = true
-                    let ok = if m.kind == "fn" {
-                        matchesSignature(m, e)
-                    } else {
-                        e.kind == "let" && typeMatches(m.spelling, e.ret)
-                    }
-                    if ok == false {
-                        let want = memberSpelling(m)
-                        let got = exportSpelling(e)
-                        issues.push(issue(
-                                "contract.type",
-                                m.name,
-                                "`\{m.name}` must be `\{want}`, found `\{got}` (\{site})",
-                            ))
-                    }
-                }
-            }
-            if found == false && m.optional == false {
-                let want = memberSpelling(m)
+    // 1. Every named member: present at ONE OF its declared shapes, or
+    //    legitimately absent. A name declared more than once is one member with
+    //    alternative signatures (RFC-0071 M2b), so it produces at most one issue
+    //    — reporting a mismatch per alternative would say the same thing four
+    //    times and name three shapes the page never intended.
+    for name in memberNames(c) {
+        let alts = alternatives(c, name)
+        let want = altSpelling(alts)
+        let at = exportIndex(exports, name)
+        if at < 0 {
+            if nameOptional(alts) == false {
                 issues.push(issue(
                         "contract.missing",
-                        m.name,
-                        "module must export `\{m.name}`: `\{want}` (\{site})",
+                        name,
+                        "module must export `\{name}`: `\{want}` (\{site})",
+                    ))
+            }
+        } else {
+            let e = exports[at]
+            if matchIndex(alts, e) < 0 {
+                let got = exportSpelling(e)
+                let verb = if alts.length > 1 { "must be one of" } else { "must be" }
+                issues.push(issue(
+                        "contract.type",
+                        name,
+                        "`\{name}` \{verb} `\{want}`, found `\{got}` (\{site})",
                     ))
             }
         }
@@ -418,19 +520,33 @@ export fn checkContract(iface: ModuleInterface, c: ContractInfo) -> Array<Issue>
 /// contract it is checked against, which is the same question with a declaration
 /// standing behind every part of it.
 export fn suppliesMember(iface: ModuleInterface, c: ContractInfo, name: String) -> Bool {
-    for m in c.members {
-        if m.name == name {
-            for e in moduleExports(iface) {
-                if e.name == name {
-                    if m.kind == "fn" {
-                        return matchesSignature(m, e)
-                    }
-                    return e.kind == "let" && typeMatches(m.spelling, e.ret)
-                }
-            }
-        }
+    return matchedMember(iface, c, name) >= 0
+}
+
+/// WHICH alternative signature of member `name` the module supplies: the 0-based
+/// index among that member's alternatives in declaration order, or `0 - 1` when
+/// the module does not supply it at all (RFC-0071 M2b).
+///
+/// This is how a generator reads a module's SHAPE off declarations. `std/ui` used
+/// to learn whether a page was lazy by scanning `data`'s body for a `lazy(…)`
+/// call and whether its head could see the data by parsing a `head { … }` block
+/// out of source text. Both are now questions about which declared signature the
+/// page chose, answered here — and a signature is a thing the checker checks, the
+/// LSP completes, and a typo breaks loudly.
+///
+/// A member with one signature answers `0` (supplied) or `0 - 1` (not), so a
+/// caller that only wants presence should keep using `suppliesMember`.
+export fn matchedMember(iface: ModuleInterface, c: ContractInfo, name: String) -> Int64 {
+    let alts = alternatives(c, name)
+    if alts.length == 0 {
+        return 0 - 1
     }
-    return false
+    let exports = moduleExports(iface)
+    let at = exportIndex(exports, name)
+    if at < 0 {
+        return 0 - 1
+    }
+    return matchIndex(alts, exports[at])
 }
 
 test "type parameters are open, concrete types are not" {

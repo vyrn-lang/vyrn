@@ -5070,6 +5070,31 @@ impl<'a> Checker<'a> {
         Ok(ret.clone())
     }
 
+    /// Solve a `fn` parameter's own parameter type against the function value's,
+    /// then report what the caller will actually pass (RFC-0071 M2b).
+    ///
+    /// Pass 1 of the generic call binds every type parameter reachable from an
+    /// ordinary argument, which used to be enough because a `fn` parameter's
+    /// types were always pinned by something else first (`map<T, U>(xs: Array<T>,
+    /// f: fn(T) -> U)` learns `T` from `xs`). `paramQuery(run: fn(P) -> T)` has no
+    /// such argument: the function value it is handed is the ONLY place `P`
+    /// occurs, so without solving here the call cannot typecheck at all — the
+    /// parameter stays `P` and every comparison against it fails.
+    ///
+    /// A unification failure is deliberately swallowed: the assignability check
+    /// that follows produces the message a reader wants (two concrete types),
+    /// where `unify` would report a type-parameter conflict.
+    fn solve_fn_param(
+        &self,
+        want: &Type,
+        actual: &Type,
+        subst: &mut HashMap<String, Type>,
+        line: usize,
+    ) -> Type {
+        let _ = self.unify(want, actual, subst, line);
+        crate::types::substitute(want, subst)
+    }
+
     /// Check a `fn`-typed argument (RFC-0023): a lambda literal, a named
     /// top-level function, or a pass-through `fn`-typed parameter. `expected_fn`
     /// is the parameter's `fn(P..) -> R` type with its parameter types already
@@ -5196,6 +5221,7 @@ impl<'a> Checker<'a> {
                         ));
                     }
                     for (a, b) in vptys.iter().zip(&ptys) {
+                        let b = &self.solve_fn_param(b, a, subst, line);
                         if !self.assignable(a, b) && !self.assignable(b, a) {
                             return Err(format!(
                                 "line {line}: `{vn}` has parameter type {a}, but `{callee}` \
@@ -5231,6 +5257,7 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 for (a, b) in sig.0.iter().zip(&ptys) {
+                    let b = &self.solve_fn_param(b, a, subst, line);
                     if !self.assignable(b, a) {
                         return Err(format!(
                             "line {line}: `{vn}` expects a {a} argument, but `{callee}` will \

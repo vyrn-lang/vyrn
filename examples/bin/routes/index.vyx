@@ -15,7 +15,7 @@
 import { listPastes } from "../contract"
 import { Paste } from "../wire"
 import { format, fromMillis } from "std/time"
-import { Head, Query, noHead, withModule, query, lazy } from "std/ui"
+import { Head, Lazy, noHead, withModule, query, lazy } from "std/ui"
 import { i18n } from "std/i18n"
 import * as t from i18n("../strings")
 
@@ -24,8 +24,10 @@ export fn head() -> Head {
     return withModule(noHead(), "/app.js")
 }
 
-/// The recent pastes, filled in after the shell paints.
-export fn data() -> Query<Array<Paste>> {
+/// The recent pastes, filled in after the shell paints. The `Lazy` return TYPE
+/// is what tells the generator to render-then-fill (RFC-0071 M2b) — nothing is
+/// read out of this body.
+export fn data() -> Lazy<Array<Paste>> {
     return lazy(query(|| listPastes().pastes))
 }
 

@@ -105,17 +105,66 @@ error mapped to the `.vyx` line:col), a dynamic `:class="expr"` is coerced to
 `Tw` at runtime. `theme` resolves relative to the importing module, exactly
 like `dir`.
 
+## vyxDataForm
+
+```vyrn
+fn vyxDataForm(ret: String) -> Int64
+```
+
+Which alternative signature of the `std/ui:Page` contract's `data` member a
+return-type spelling names — the same 0..3 `matchedMember` reports, or
+`0 - 1` when the spelling is not a data type at all (RFC-0071 M2b):
+
+  0  `Query<T>`            blocking, no params
+  1  `Lazy<T>`             render-then-fill, no params
+  2  `ParamQuery<P, T>`    blocking, deferred call takes `Params`
+  3  `ParamLazy<P, T>`     render-then-fill, deferred call takes `Params`
+
+Both facts the router needs — laziness and params-ness — are now read from
+the DECLARED TYPE. Laziness used to be read from `data`'s body (the `lazy(…)`
+call), which was the last source scan in the page pipeline; the `.vyx` file is
+not a module, so this reads its declaration rather than a `moduleInterface`,
+but it reads a *declaration* either way and a misspelled type is an error.
+
+## vyxDataFormIsLazy
+
+```vyrn
+fn vyxDataFormIsLazy(form: Int64) -> Bool
+```
+
+Whether a `data` form renders lazily (RFC-0070).
+
+## vyxDataFormHasParams
+
+```vyrn
+fn vyxDataFormHasParams(form: Int64) -> Bool
+```
+
+Whether a `data` form's deferred call takes the page's `Params`.
+
+## vyxDataRunner
+
+```vyrn
+fn vyxDataRunner(form: Int64) -> String
+```
+
+The `std/ui` runner that turns a `data` form into the loaded value.
+
 ## vyxQueryDataType
 
 ```vyrn
 fn vyxQueryDataType(ret: String) -> String
 ```
 
-The data type a `Query<T>` spelling carries ("" when `ret` is not a `Query`).
-This is what the page's synthesized `load()` returns, so `Query<Result<Paste,
-PageError>>` still routes through the `Result` failure path unchanged.
-EXPORTED so `std/ui` reads a `.vyrn` page's `data` return the same way,
-rather than keeping a second copy of the rule.
+The DATA type a `data` return-type spelling carries ("" when `ret` is not one
+of the four). This is what the page's synthesized `load()` returns, so
+`Query<Result<Paste, PageError>>` still routes through the `Result` failure
+path unchanged, and `ParamQuery<Params, Result<Paste, PageError>>` routes
+identically — the data is the LAST type argument, because the params type
+comes first when there is one.
+
+EXPORTED so `std/ui` reads a `.vyrn` page's `data` return the same way, rather
+than keeping a second copy of the rule.
 
 ## vyxPageInterface
 
