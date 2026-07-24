@@ -32,6 +32,14 @@ pub enum RoleScope {
     /// A path SEGMENT, as `vyrn.json`'s `roles` map declares it: every module
     /// under a directory with this name is in the role. This is the form
     /// RFC-0071 specifies and RFC-0072 inherits.
+    ///
+    /// RFC-0072 M2 lets it be a RUN of segments (`"server/api"`), matched
+    /// consecutively. Audience introduced a second axis of path segments, and a
+    /// single-component scope can only pick one of the two: `api/` under
+    /// `server/` and `api/` under `client/` would be the same role, whatever a
+    /// project meant by them. A run composes the axes instead — the audience
+    /// segment and the role segment in one scope — and the plain one-segment
+    /// form is the degenerate case, unchanged.
     Segment(String),
     /// A resolved DIRECTORY. Produced by the fallback discovery below, which
     /// reads the directory a generator was actually pointed at
@@ -42,6 +50,9 @@ pub enum RoleScope {
 impl std::fmt::Display for RoleScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            RoleScope::Segment(s) if s.contains('/') => {
+                write!(f, "path segments `{s}` (vyrn.json `roles`)")
+            }
             RoleScope::Segment(s) => write!(f, "path segment `{s}` (vyrn.json `roles`)"),
             RoleScope::Dir(d) => write!(f, "directory {d} (from the generator call site)"),
         }
@@ -268,8 +279,15 @@ fn read_module(
 /// (`.vyrn` or a generator input like `.vyx`).
 ///
 /// A file is in a role when its directory is (or is under) the role's scope, and
-/// its stem is not one of the role's exceptions. Longest match wins, so a nested
-/// role beats an outer one.
+/// its stem is not one of the role's exceptions.
+///
+/// **Nearest wins**, scored by the index of the scope's LAST matched component —
+/// the same rule [`crate::audience`] applies to audience segments, deliberately.
+/// Audience is the outer path axis and role is the inner one, and two axes read
+/// off one path have to agree about what "more specific" means or a project gets
+/// to discover which one happened to win. A role scope is matched at its
+/// NEAREST occurrence too, so a scope that appears twice on a path resolves the
+/// way a reader would expect (the one closest to the file).
 pub fn role_for<'r>(path: &str, roles: &'r [Role]) -> Option<&'r Role> {
     let path = path.replace('\\', "/");
     let stem = path
@@ -281,19 +299,18 @@ pub fn role_for<'r>(path: &str, roles: &'r [Role]) -> Option<&'r Role> {
         Some((d, _)) => d.to_string(),
         None => String::new(),
     };
+    let comps: Vec<&str> = dir.split('/').filter(|c| !c.is_empty()).collect();
     let mut best: Option<(usize, &Role)> = None;
     for role in roles {
         let depth = match &role.scope {
-            RoleScope::Segment(seg) => {
-                match dir.split('/').position(|c| c == seg.as_str()) {
-                    Some(i) => i + 1,
-                    None => continue,
-                }
-            }
+            RoleScope::Segment(seg) => match last_run(&comps, seg) {
+                Some(end) => end,
+                None => continue,
+            },
             RoleScope::Dir(d) => {
                 let d = d.trim_end_matches('/');
                 if dir == d || dir.starts_with(&format!("{d}/")) {
-                    d.split('/').count()
+                    d.split('/').filter(|c| !c.is_empty()).count()
                 } else {
                     continue;
                 }
@@ -307,6 +324,21 @@ pub fn role_for<'r>(path: &str, roles: &'r [Role]) -> Option<&'r Role> {
         }
     }
     best.map(|(_, r)| r)
+}
+
+/// The 1-based index of the LAST component of the last consecutive run of
+/// `scope`'s segments inside `comps`, or `None` when the run does not occur.
+/// A one-segment scope is the ordinary case; `"server/api"` matches `server`
+/// immediately followed by `api`.
+fn last_run(comps: &[&str], scope: &str) -> Option<usize> {
+    let want: Vec<&str> = scope.split('/').filter(|c| !c.is_empty()).collect();
+    if want.is_empty() || want.len() > comps.len() {
+        return None;
+    }
+    (0..=comps.len() - want.len())
+        .filter(|&i| comps[i..i + want.len()] == want[..])
+        .next_back()
+        .map(|i| i + want.len())
 }
 
 // ---------------------------------------------------------------------------

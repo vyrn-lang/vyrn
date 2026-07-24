@@ -329,9 +329,6 @@ struct Manifest {
     /// manifest has no `audience` key — which leaves every module universal and
     /// every import legal, exactly as before this key existed.
     audience: Option<vyrn_frontend::audience::AudienceMap>,
-    /// The raw manifest text, so a consumer that wants a key this struct does
-    /// not name (`roles`, `rpc`) can read it without a second file read.
-    text: String,
 }
 
 /// Find `vyrn.json` by walking up from `start` (a directory).
@@ -370,7 +367,6 @@ fn find_manifest(start: &Path) -> Option<Manifest> {
                 main,
                 dependencies,
                 audience,
-                text,
             });
         }
         dir = dir.parent()?.to_path_buf();

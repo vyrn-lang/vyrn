@@ -318,6 +318,25 @@ The absent query — the default for a page that declares no `data`, and the
 value a generator substitutes when it finds none. A page with no data has
 nothing to produce, which is what `Query<Unit>` says.
 
+## uiNoView
+
+```vyrn
+fn uiNoView() -> Html
+```
+
+The absent view — the default that makes `page` an optional member. A page
+exports `page` or `respond`, never both and never neither, so neither default
+is ever substituted; they exist so that a page writing one is not reported
+for omitting the other.
+
+## uiNoRespond
+
+```vyrn
+fn uiNoRespond() -> Response
+```
+
+The absent raw response. See [`uiNoView`].
+
 ## uiDataQuery
 
 ```vyrn

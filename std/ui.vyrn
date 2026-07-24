@@ -56,7 +56,7 @@ import { includes } from "std/arrays"
 // The `Head` value a page's `head()` returns renders through `std/html` here
 // (RFC-0071 M2) rather than as generated source, because its includes are now
 // runtime arrays rather than literal block entries.
-import { el, Html, Attr } from "std/html"
+import { el, empty, Html, Attr } from "std/html"
 // RFC-0071: a page's exports are checked against the `Page` contract declared
 // below, instead of hunted for by name.
 import { checkContract, matchedMember } from "std/contract"
@@ -340,6 +340,41 @@ export contract Page {
     fn data() -> Lazy<T>
     fn data() -> ParamQuery<P, T>
     fn data() -> ParamLazy<P, T>
+
+    /// This page's view, rendered into the document.
+    ///
+    /// Takes what the page has: nothing, the loaded data, the route params, or
+    /// both — the same house rule `head` follows, because it is the same
+    /// question asked of the same page.
+    fn page() -> Html = uiNoView()
+    fn page(d: T) -> Html
+    fn page(p: P) -> Html
+    fn page(p: P, d: T) -> Html
+
+    /// This page's raw response, for the routes that are not documents.
+    ///
+    /// The alternative to `page`, not an addition to it: a page exports one or
+    /// the other, and `respond` gets full control of status and content type
+    /// (RFC-0039 §5). Which of the two a page must have is the ROUTER's rule and
+    /// stays in `uiInspectPage`; what a page MAY export is this contract's, and
+    /// that is why both are optional here.
+    fn respond() -> Response = uiNoRespond()
+    fn respond(d: T) -> Response
+    fn respond(p: P) -> Response
+    fn respond(p: P, d: T) -> Response
+}
+
+/// The absent view — the default that makes `page` an optional member. A page
+/// exports `page` or `respond`, never both and never neither, so neither default
+/// is ever substituted; they exist so that a page writing one is not reported
+/// for omitting the other.
+export fn uiNoView() -> Html {
+    return empty()
+}
+
+/// The absent raw response. See [`uiNoView`].
+export fn uiNoRespond() -> Response {
+    return Response { status: 404, contentType: "text/plain", body: "" }
 }
 
 /// The `data` member's alternative-signature indices, as `matchedMember` reports
@@ -956,9 +991,14 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     // RFC-0071: `data` is a declared member of the `Page` contract, so its
     // presence is a contract question — `matchedMember` answers it with the
     // member's shape behind it, where `uiHasFn(iface, "load")` was a bare string.
-    // A `.vyrn` page's own surface also carries the router's entry point
-    // (`page`/`respond`), which the contract does not name, so the CLOSED rule is
-    // not applied here; a `.vyx` page's `<script>` gets the full check.
+    //
+    // RFC-0072 M2: the CLOSED rule now applies here too. It could not before,
+    // because a `.vyrn` page's surface carries `page`/`respond` and the contract
+    // did not name them — an omission twice recorded as an open question and
+    // twice deferred. It names them now, so a typo in a `.vyrn` page's exports is
+    // as loud as a typo in a `.vyx` one, which was the point of declaring a
+    // contract at all.
+    err = err + uiContractErrs(iface, fid)
     let dataForm = matchedMember(iface, contractOf(Page), "data")
     let hasData = dataForm >= 0
     let hasLoad = hasData

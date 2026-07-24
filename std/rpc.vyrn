@@ -20,6 +20,38 @@
 // UTF-8, so the `Err` arm is unreachable — routed through the one shared helper.
 import { fromBytesOr } from "std/strings"
 
+// The contract checker (RFC-0071), so `Api` below is enforced the same way
+// `std/ui`'s `Page` and `std/vyx`'s `Component` are.
+import { checkContract } from "std/contract"
+
+// ---- the `Api` contract ----------------------------------------------------
+// RFC-0071 M3 / RFC-0072 M2. Until now "what is a procedure module" was a
+// paragraph of this file's doc comment and a hand-rolled scan in
+// `validateContract`. It is a declaration now, which is what lets a project
+// attach it by role (`vyrn.json`'s `roles`), what lets the editor answer
+// questions about it, and what lets `vyrn why --contract` report on a module
+// nobody has generated from yet.
+
+/// What a procedure module may export (RFC-0072).
+///
+/// OPEN, and deliberately so: the names here are the application's vocabulary —
+/// `listPastes`, `createPaste` — so there is nothing to enumerate and a
+/// near-miss is not a mistake. What the contract states is the SHAPE every
+/// export must have, which is the total rule this layer has always applied:
+/// every export of an `api` module is a procedure.
+///
+/// The open rule constrains the return type only, and a procedure's return is a
+/// member type parameter, so what remains — at most one parameter, and both ends
+/// serializable — is a property of the TYPES rather than of the signature shape
+/// and cannot be spelled in the contract grammar. It is checked by
+/// `rpcIsSerializable` below, against a rule stated once and named in every
+/// message it produces.
+export contract Api {
+    /// A procedure: at most one serializable parameter in, a serializable value
+    /// (or nothing) out.
+    fn *(..) -> R
+}
+
 /// Uppercase the first byte of `s` (ASCII), leaving the rest untouched — the
 /// procedure `getUser` derives `vyrnRpcDoneGetUser` / `rpcPendingGetUser` this way.
 fn capFirst(s: String) -> String {
@@ -72,21 +104,78 @@ fn contractError(detail: String) -> String {
     return "RPC_CONTRACT_ERROR__" + detail + "\n"
 }
 
-/// Reject any contract the RPC layer cannot model: an exported procedure with
-/// more than one parameter, or a single parameter that is not an exported named
-/// (codable) type. Returns "" when the contract is clean.
-fn validateContract(iface: ModuleInterface) -> String {
+/// THE serializability rule, stated once (RFC-0072 M2).
+///
+/// A value crosses the wire as JSON, and `fromJson` needs a declared type to
+/// validate the incoming bytes against — so both ends of a procedure must be a
+/// type the module's own reflection can name. `Unit` is serializable in the only
+/// sense that matters: nothing is sent, which is the 204 the server emits.
+///
+/// Named once so every message below can cite it, and so the rule the generator
+/// enforces is the rule this file documents rather than two things that drifted.
+fn rpcIsSerializable(spelling: String, iface: ModuleInterface) -> Bool {
+    if spelling == "" {
+        return true
+    }
+    return isNamedType(spelling, iface)
+}
+
+/// Reject any module the RPC layer cannot model. Returns "" when it is clean.
+///
+/// Two checks, in the order a reader would apply them. First the `Api` contract
+/// (RFC-0071): every export is a procedure, which is what the OPEN rule states.
+/// Then serializability, which the contract grammar cannot express because it is
+/// a property of the types rather than of the signature shape: at most one
+/// parameter, and both ends nameable by the module's own reflection.
+///
+/// A `gen fn`, because `contractOf` is compile-time reflection and has no
+/// runtime lowering by design (RFC-0071 M1) — the same reason `std/ui`'s
+/// `uiContractErrs` is one. Every caller is already a `gen fn`.
+gen fn validateContract(iface: ModuleInterface) -> String {
+    for iss in checkContract(iface, contractOf(Api)) {
+        return contractError(rpcIdentOf(iss.path) + "__" + rpcIdentOf(iss.key))
+    }
     for f in iface.functions {
         if f.params.length > 1 {
-            return contractError(f.name + "_must_take_at_most_one_parameter")
+            return contractError(
+                f.name + "__takes_" + f.params.length.toString() + "_parameters"
+                + "__a_procedure_takes_at_most_one"
+            )
         }
         if f.params.length == 1 {
-            if isNamedType(f.params[0].spelling, iface) == false {
-                return contractError(f.name + "_parameter_must_be_an_exported_named_codable_type")
+            if rpcIsSerializable(f.params[0].spelling, iface) == false {
+                return contractError(
+                    f.name + "__parameter_" + rpcIdentOf(f.params[0].spelling) + "_is_not_serializable"
+                    + "__a_procedure_parameter_must_be_an_exported_named_type"
+                )
             }
+        }
+        if rpcIsSerializable(f.ret, iface) == false {
+            return contractError(
+                f.name + "__return_" + rpcIdentOf(f.ret) + "_is_not_serializable"
+                + "__a_procedure_must_return_an_exported_named_type_or_nothing"
+            )
         }
     }
     return ""
+}
+
+/// `s` with every character an identifier cannot carry folded to `_`, so a type
+/// spelling (`Array<Paste>`) can ride the identifier a contract violation is
+/// reported through. The same transform `std/ui:uiIdentOf` applies, for the same
+/// reason: there is no message-carrying trap primitive.
+fn rpcIdentOf(s: String) -> String {
+    let raw = bytes(s)
+    let mut out: Array<UInt8> = []
+    for b in raw {
+        let ok = (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+        if ok {
+            out.push(b)
+        } else {
+            out.push('_')
+        }
+    }
+    return fromBytesOr(out, "x")
 }
 
 /// The import block a server / in-process module needs (RFC-0031): the contract's

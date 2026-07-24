@@ -117,23 +117,35 @@ fn params_segment_mismatch_fails_naming_the_file() {
     assert!(err.contains("users"), "diagnostic names the file:\n{err}");
 }
 
-/// RFC-0033 (second producer): a page whose `page` returns the wrong type
-/// passes generation-time inspection (which checks arity, not the return type),
-/// but the check error in the synthesized router's dispatch glue is reported
-/// against the PAGE module — proving origin maps aren't `.vyx`-shaped.
+/// RFC-0033 (second producer): a page whose view takes the wrong type passes
+/// generation-time inspection, but the check error in the synthesized router's
+/// dispatch glue is reported against the PAGE module — proving origin maps
+/// aren't `.vyx`-shaped.
+///
+/// The mismatch is between what `data` produces and what `page` accepts. A
+/// contract member's type parameters are OPEN (RFC-0071 M1), so `fn page(d: T)
+/// -> Html` admits any parameter type and the contract check cannot object —
+/// which is exactly the class of error that has to survive into the generated
+/// glue to be caught at all. (Before RFC-0072 M2 this test used a wrong RETURN
+/// type; `Page` now names `page`, so that one is caught at the declaration.)
 #[test]
 fn page_type_error_remaps_to_the_page_module() {
     let dir = scratch("uiremap");
-    // A static page whose `page()` returns `Int64` — `document(…, page())`
-    // requires `Html`, so the router fails to type-check.
-    write(&dir.join("pages/index.vyrn"), "export fn page() -> Int64 { return 0 }\n");
+    write(
+        &dir.join("pages/index.vyrn"),
+        "import { el, Html } from \"std/html\"\n\
+         import { query, Query } from \"std/ui\"\n\
+         export type Data = { n: Int64 }\n\
+         fn fetch() -> Data {\n    return Data { n: 1 }\n}\n\
+         export fn data() -> Query<Data> {\n    return query(fetch)\n}\n\
+         export fn page(d: String) -> Html {\n    return el(\"main\", [], [])\n}\n",
+    );
     write(&dir.join("app.vyrn"), APP);
     let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("check");
-    assert!(!out.status.success(), "a wrong page return type must fail to load");
+    assert!(!out.status.success(), "a wrong view parameter type must fail to load");
     let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     // Reported against the page module (region-level, line 1), not the router.
     assert!(err.contains("pages/index.vyrn:1:1:"), "remapped to the page file:\n{err}");
-    assert!(err.contains("expects Html"), "carries the checker message:\n{err}");
     assert!(err.contains("note: in generated code"), "keeps the generated note:\n{err}");
 }
 

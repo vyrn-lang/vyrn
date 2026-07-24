@@ -64,7 +64,11 @@ fn resolves_the_real_page_contract() {
     assert_eq!(v.module, "std/ui");
     assert!(v.file.ends_with("std/ui.vyrn"), "declaring file: {}", v.file);
     let names: Vec<&str> = v.members.iter().map(|m| m.name.as_str()).collect();
-    assert_eq!(names, vec!["head", "data"], "members in declaration order");
+    assert_eq!(
+        names,
+        vec!["head", "data", "page", "respond"],
+        "members in declaration order (RFC-0072 M2 added the two router entry points)"
+    );
 
     // `head` is declared at four shapes; three of them are distinct signatures
     // (RFC-0071 M2b records why `fn head(d: T)` and `fn head(p: P)` are the same
@@ -175,6 +179,51 @@ fn roles_come_from_the_manifest() {
     );
 }
 
+/// RFC-0072 M2: a role scope may be a RUN of segments, so the audience axis and
+/// the role axis compose in one scope instead of one of them silently winning.
+#[test]
+fn a_role_scope_may_span_the_audience_segment() {
+    let roles = roles_from_manifest(
+        r#"{ "roles": { "server/api": "std/rpc:Api", "client/api": "std/ui:Page" } }"#,
+    );
+    assert_eq!(
+        role_for("/app/server/api/pastes.vyrn", &roles).map(|r| r.contract.as_str()),
+        Some("Api")
+    );
+    assert_eq!(
+        role_for("/app/client/api/other.vyrn", &roles).map(|r| r.contract.as_str()),
+        Some("Page"),
+        "the same inner segment under a different audience is a different role"
+    );
+    assert!(
+        role_for("/app/api/loose.vyrn", &roles).is_none(),
+        "a run matches consecutively or not at all"
+    );
+    // Feature-outer layouts work for the same reason audience does.
+    assert_eq!(
+        role_for("/app/src/pastes/server/api/x.vyrn", &roles).map(|r| r.contract.as_str()),
+        Some("Api")
+    );
+}
+
+/// Nearest wins — the rule `crate::audience` applies to audience segments,
+/// applied to role scopes so the two axes agree about "more specific".
+#[test]
+fn the_nearest_scope_wins() {
+    let roles = roles_from_manifest(
+        r#"{ "roles": { "routes": "std/ui:Page", "widgets": "std/vyx:Component" } }"#,
+    );
+    assert_eq!(
+        role_for("/app/routes/admin/widgets/Panel.vyx", &roles).map(|r| r.contract.as_str()),
+        Some("Component"),
+        "the widgets directory is nearer the file than the routes directory above it"
+    );
+    assert_eq!(
+        role_for("/app/widgets/admin/routes/Page.vyx", &roles).map(|r| r.contract.as_str()),
+        Some("Page")
+    );
+}
+
 /// A project may override the chrome stems for its own layout.
 #[test]
 fn a_role_may_declare_its_own_exceptions() {
@@ -235,7 +284,7 @@ fn roles_fall_back_to_the_generator_call_site() {
 fn completion_offers_every_shape_with_a_full_declaration() {
     let v = page();
     let items = contract_completions(&v, &[]);
-    assert_eq!(items.len(), 8, "4 head shapes + 4 data shapes");
+    assert_eq!(items.len(), 16, "four members, four shapes each");
     let head0 = items.iter().find(|i| i.snippet.starts_with("export fn head()")).unwrap();
     assert_eq!(head0.label, "head");
     assert_eq!(
@@ -266,9 +315,9 @@ fn completion_offers_every_shape_with_a_full_declaration() {
 #[test]
 fn completion_drops_what_the_page_already_wrote() {
     let v = page();
-    let items = contract_completions(&v, &["data".to_string()]);
-    assert!(items.iter().all(|i| i.label == "head"), "only head is left");
-    assert_eq!(items.len(), 4);
+    let items = contract_completions(&v, &["data".to_string(), "page".to_string()]);
+    assert!(items.iter().all(|i| i.label == "head" || i.label == "respond"), "data and page are written");
+    assert_eq!(items.len(), 8);
 }
 
 /// Required members sort before optional ones. `Page`'s two are both optional,

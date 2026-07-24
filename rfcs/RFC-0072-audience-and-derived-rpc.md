@@ -282,7 +282,7 @@ mechanize a one-time move of code we own would cost more than the move.
   loader, the import-widening check with its diagnostic, `vyrn why`. No
   generator changes. **Landed** — see below.
 - **M2 — roles + `Api`.** `vyrn.json:roles`, attachment of RFC-0071 contracts by
-  role, serializability checking on procedure signatures.
+  role, serializability checking on procedure signatures. **Landed** — see below.
 - **M3 — derived paths.** `rpc(dir)` and `client(dir)`; override forms
   (`module.vyrn`-scope and `at()`); collision errors; `vyrn routes`.
 - **M4 — the wire.** `Request.headers`, `Response.vary`, content negotiation in
@@ -339,6 +339,62 @@ audience you are asking about is quite often the one that does not compile, and 
 wanted. Generator imports contribute edges too (`pages("./routes")` reaches every
 page under it), because a chain that stopped at the generator call would omit the
 only edge anyone is asking about.
+
+## M2 — as landed
+
+Five places where the implementation is not what this document said, and why.
+This milestone carries RFC-0071's deferred M3.
+
+**A role scope may be a RUN of segments, and that is how the two axes compose.**
+This document shows `"roles": { "api": "std/rpc:Api" }` — one segment — while the
+layout it proposes puts `api/` under both `server/` and, in principle, anywhere
+else. A one-segment scope cannot tell those apart, so whichever role matched
+first would silently govern both. `RoleScope::Segment` now holds a run
+(`"server/api"`), matched consecutively, and role scopes are scored by the index
+of their LAST matched component — the same "nearest wins" rule audience uses,
+deliberately, because two axes read off one path have to agree about what "more
+specific" means. The one-segment form is the degenerate case and is unchanged.
+
+**`Api` states the surface; the generator states the rule.** The open rule
+constrains the return type only, and a procedure's return is a member type
+parameter, so `contract Api { fn *(..) -> R }` is the most the contract grammar
+can say — every export of an `api` module is a procedure. Serializability is a
+property of the TYPES, not of the signature shape: "at most one parameter, both
+ends nameable by the module's own reflection" is unspellable in a contract and
+stays in `std/rpc`, where it now lives as one named predicate
+(`rpcIsSerializable`) that every message cites. What changed is that it is a rule
+with a name instead of an inline scan, and that it applies to the RETURN, which
+nothing checked before — a non-serializable return used to reach the wire as a
+`null` schema and a client-side decode failure at run time.
+
+**`validateContract` had to become a `gen fn`, and three-way parity is what said
+so.** `contractOf` is compile-time reflection with no runtime lowering by design
+(RFC-0071 M1), and `std/rpc`'s plain `fn` is linked into every binary that
+imports the module. The interpreter was unaffected, so it was invisible until the
+native leg of `examples/rpc.vyrn` refused to build. Same shape as `std/ui`'s
+`uiContractErrs`, same fix, and every caller was already a `gen fn`.
+
+**`Page` names `page` and `respond`, which closes the item deferred three
+times.** RFC-0071's M2b, M2c and M4 each recorded that a `.vyrn` page's own
+surface carries the router's entry point, which `Page` did not name, so the
+CLOSED rule could not be applied to `.vyrn` pages — leaving typo detection, the
+entire point of declaring the contract, working on `.vyx` pages only. The
+alternative was a role-aware surface filter, which is a scanner with better
+manners: it would hide `page` from the contract while the router went on
+requiring it, so the declaration would still not be the truth. Naming them is the
+truth — both at four shapes, following `head`'s own house rule that a member
+takes what the view takes, and both optional, because WHICH of the two a page
+must export is the router's rule (`uiInspectPage` still owns it) while what a page
+MAY export is the contract's. `fn hedd()` in a `.vyrn` page is now an error naming
+`head`.
+
+**One test changed meaning, correctly.** `page_type_error_remaps_to_the_page_module`
+proved RFC-0033 origin remapping using a page whose `page()` returned `Int64` —
+which the contract now rejects at the declaration, before any glue is generated.
+It uses a mismatch between `data`'s type and `page`'s parameter instead: a member's
+type parameters are open, so the contract genuinely cannot object, which makes it
+the honest example of an error that must survive into generated code to be caught
+at all.
 
 ## Acceptance
 
