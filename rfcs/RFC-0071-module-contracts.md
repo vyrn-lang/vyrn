@@ -105,6 +105,58 @@ member        := doc? "let" Ident ":" Type ("=" Expr)?                   // valu
   the contract and the member.
 - Type parameters appearing in member types (`Query<T>`) are open: the module
   may export any instantiation. `T` is bound per member, not per contract.
+- A member name may be declared **more than once**. The repeats are alternative
+  signatures: the module satisfies the member by matching any one of them, and
+  the generator learns which one it got from reflection.
+
+### Multi-shape members
+
+M2 established that one signature per member is not enough, in two places at
+once.
+
+**`head` needs the page's data.** `head { title: pasteTitle(data) }` is a real
+capability of the block form being replaced: the title of `/p/{id}` *is* the
+paste's title. A zero-argument `fn head() -> Head` cannot express it, and no
+single signature can, because page shapes genuinely vary — data, params, both,
+or neither. Removing the scanner while removing that capability would be a
+downgrade, not a migration.
+
+**`data` needs laziness in the type.** `Query<T>` carries a runtime `lazy` flag,
+but laziness decides the *view's type* (`PageData<T>` versus `T`), so the
+generator has to read the `lazy(…)` call out of the body — a scan, which is the
+practice this RFC exists to end.
+
+Alternative signatures answer both:
+
+```vyrn
+export contract Page {
+    /// Document head contributions. Takes whatever the page's view takes.
+    fn head() -> Head = noHead()
+    fn head(d: T) -> Head
+    fn head(p: P) -> Head
+    fn head(p: P, d: T) -> Head
+
+    /// This page's data. The return TYPE decides the render strategy:
+    /// `Query` blocks until the data lands, `Lazy` renders then fills in.
+    fn data() -> Query<P, T> = noQuery()
+    fn data() -> Lazy<P, T>
+}
+```
+
+Two consequences worth stating plainly.
+
+`Query<P, T>` gains the params type as an open parameter. `Params` is declared
+**per page**, in the page's own module, which is exactly why `std/ui` could not
+name it — so it must be open, resolved at the use site like `T`. This is what
+lets `query(|p: Params| …)` typecheck.
+
+`Lazy<P, T>` being a distinct type rather than a flag moves the last scan onto
+reflection. The generator asks what `data` returns instead of reading how its
+body was written, so `vyxScriptDataIsLazy` — the scan that replaced
+`vyxUnlazy` — is deleted rather than relocated.
+
+The house rule for `head`: **it takes what the view takes.** Four alternatives
+is the complete set, and enumerating them keeps the member closed.
 
 ### Closed and open contracts
 
@@ -307,11 +359,28 @@ other type. Closing the contract cost nothing and bought total typo detection.
   `moduleInterface`. Diagnostics with did-you-mean. No generator changes yet;
   a test-only contract exercises the path.
 - **M2 — `Page` and `Component`.** Declare both in std. Retrofit `std/ui` and
-  `std/vyx` to check against them. `head` and `data` land as declarations with
-  the deprecation window and `fmt --migrate-contracts`. Delete `vyxParseHead`
-  and `vyxUnlazy` behind the window.
+  `std/vyx` to check against them. `head` and `data` land as declarations, with
+  the old forms alive behind a deprecation window.
+- **M2b — the two prerequisites.** Neither was visible when this document was
+  written; both block finishing the migration.
+  - **A warning channel.** `Severity::Warning` exists as a variant
+    (`diagnostics.rs:16`) but nothing ever produces one: `load()` returns
+    `Result<Program, Vec<Diagnostic>>`, so there is no success-path diagnostic
+    at all. Deprecation notices are therefore emitted as `//@deprecated`
+    comments in generated output — visible in an artifact nobody reads. A real
+    warning must thread through the loader, the CLI's print sites, and the LSP
+    before any deprecation, quick-fix, or `fmt --migrate-contracts` can do its
+    job. This is prerequisite work, not polish, and it is generally useful well
+    beyond this RFC.
+  - **Multi-shape members and `Lazy<P, T>`**, per the section above — without
+    them, deleting `vyxParseHead` removes a capability, and the laziness scan
+    only changes its name.
+- **M2c — finish the migration.** `fmt --migrate-contracts`; migrate the
+  remaining examples; delete `vyxParseHead` and `vyxScriptDataIsLazy`; close the
+  window.
 - **M3 — `Api`.** Declare the open contract; wire it in RFC-0072's `api` role.
-  Serializability checking for procedure inputs and outputs.
+  Serializability checking for procedure inputs and outputs. Note M2 already
+  shipped the variadic open rule (`fn *(..)`) that `Api` needs, for `Component`.
 - **M4 — LSP.** Role→contract resolution; completion, hover, go-to-def,
   quick-fix. `vyrn why --contract <file>` prints the resolved contract and every
   export's status.
