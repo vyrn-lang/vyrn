@@ -421,6 +421,128 @@ fn a_layout_without_a_slot_is_a_diagnostic() {
     assert!(err.contains("VYX_LAYOUT_NO_SLOT"), "no-slot diagnostic:\n{err}");
 }
 
+// ---- RFC-0071: the `Page` contract's declaration forms ---------------------
+
+/// The `head`/`data` members of `std/ui:Page`, written as the declarations they
+/// now are, routed end to end — and the deprecated forms still working beside
+/// them, which is what a deprecation window means.
+#[test]
+fn the_page_contract_members_route_end_to_end() {
+    let dir = scratch("contractforms");
+    // A page on the new form: `head()` returns a `Head`, `data()` a `Query<T>`.
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Head, Query, noHead, withTitle, withStylesheet, query } from \"std/ui\"\n\
+         export fn head() -> Head {\n\
+         return withStylesheet(withTitle(noHead(), \"Home\"), \"/style.css\")\n}\n\
+         export fn data() -> Query<Array<String>> {\n\
+         return query(names)\n}\n\
+         fn names() -> Array<String> {\n    return [\"a\", \"b\"]\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ data.length }}</h1>\n</template>\n",
+    );
+    // A page still on the deprecated forms: both must keep compiling.
+    write(
+        &dir.join("pages/old.vyx"),
+        "<script>\n\
+         head {\n    title: \"Old\"\n}\n\
+         fn load() -> Array<String> {\n    return [\"x\"]\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ data.length }}</h1>\n</template>\n",
+    );
+    write(
+        &dir.join("app.vyrn"),
+        "import { pages } from \"std/ui\"\n\
+         import { route } from pages(\"./pages\")\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, body: \"\" }) }\n\
+         fn main() -> Int64 {\n\
+         let a = h(\"/\")\n\
+         print(\"new:\\{a.status}:\\{a.body.contains(\"<title>Home</title>\")}:\\{a.body.contains(\"/style.css\")}:\\{a.body.contains(\"<h1>2</h1>\")}\")\n\
+         let b = h(\"/old\")\n\
+         print(\"old:\\{b.status}:\\{b.body.contains(\"<title>Old</title>\")}:\\{b.body.contains(\"<h1>1</h1>\")}\")\n\
+         return 0\n\
+         }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "contract-form app must run:\n{combined}");
+    // The declared `head()` supplies both the title and the stylesheet, and the
+    // declared `data()` reaches the view as the `data` prop.
+    assert!(combined.contains("new:200:true:true:true"), "declaration forms:\n{combined}");
+    // The scanned forms still work — that is the deprecation window.
+    assert!(combined.contains("old:200:true:true"), "deprecated forms still work:\n{combined}");
+}
+
+/// THE acceptance criterion (RFC-0071): a misspelled member is an ERROR, where it
+/// used to be a page that compiled clean and silently rendered with no data.
+///
+/// `laod` is the RFC's own example and it lands in the *not close* row —
+/// Damerau-Levenshtein `laod`→`data` is 3, and `load` is no longer a member for
+/// it to be one transposition from. It is still reported, which is the whole
+/// point: a closed contract has no silent path.
+#[test]
+fn a_misspelled_page_export_is_an_error() {
+    let dir = scratch("laod");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Query, query } from \"std/ui\"\n\
+         export fn laod() -> Query<Array<String>> {\n\
+         return query(one)\n}\n\
+         fn one() -> Array<String> {\n    return [\"a\"]\n}\n\
+         </script>\n\
+         <template>\n<h1>home</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    assert!(!out.status.success(), "a misspelled member must fail the load");
+    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(err.contains("PAGES_CONTRACT"), "contract diagnostic:\n{err}");
+    assert!(err.contains("contract_unknown"), "unknown-export class:\n{err}");
+    assert!(err.contains("laod"), "names the offending export:\n{err}");
+}
+
+/// A near-miss within the did-you-mean threshold names the member it meant.
+#[test]
+fn a_near_miss_page_export_names_the_member_it_meant() {
+    let dir = scratch("dta");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Query, query } from \"std/ui\"\n\
+         export fn dta() -> Query<Array<String>> {\n\
+         return query(one)\n}\n\
+         fn one() -> Array<String> {\n    return [\"a\"]\n}\n\
+         </script>\n\
+         <template>\n<h1>home</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    assert!(!out.status.success(), "a near-miss member must fail the load");
+    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(err.contains("didYouMean"), "did-you-mean class:\n{err}");
+    assert!(err.contains("dta"), "names the offending export:\n{err}");
+}
+
+/// A private helper is outside the contract — a page needs local helpers, and the
+/// closed rule applies to its PUBLIC surface only.
+#[test]
+fn a_private_page_helper_is_outside_the_contract() {
+    let dir = scratch("privhelper");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         fn shown() -> String {\n    return \"home\"\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ shown() }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "a private helper must not trip the contract:\n{combined}");
+}
+
 // ---- the demo runs green ---------------------------------------------------
 
 #[test]

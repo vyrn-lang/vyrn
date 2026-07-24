@@ -371,6 +371,83 @@ no module at all and every message would lose half its meaning. Contracts are
 restamped with the specifier a reader could type (`std/ui`, `./gen`) when the
 generator's private copy of the program is prepared.
 
+## M2 — as landed
+
+Nine places where the implementation is not what this document said, and why.
+
+**`head` cannot see the page's data, so `head { title: … }` outlives the window
+for dynamic titles.** The block form is an expression context evaluated with the
+page's `params` and loaded `data` in scope (`vyxEmitHeadFns` binds them in a
+prelude). `fn head() -> Head` takes no arguments and therefore cannot. Giving it
+one does not help either: a page's shape varies — data, params, both, neither —
+and one closed member has one signature, so whichever arity is chosen leaves a
+real page unable to write `head` at all. `bin/routes/p/[id].vyx` is exactly that
+page and it keeps the block. Closing this needs the member to be declarable at
+more than one shape, which is a contract-grammar question, not a `std/ui` one.
+
+**`Query<T>`'s deferred call takes no argument.** `query(|p| …)` needs a `p`
+whose type is the page's own `Params`, and `Query` is declared in `std/ui`, which
+cannot name it. `Query<P, T>` would push the params type into every page's
+`data()` signature (and invent one for pages that have none), which is worse than
+the problem. So the deferred call is `fn() -> T`, and a page whose data depends
+on its route parameters keeps `fn load(p: Params)` for now. RFC-0073's generated
+`Params` is what makes the closure's parameter typeable.
+
+**`.lazy()` is `lazy(q)`.** Protocol impls are limited to scalars and enums
+(`impl P for Query<Int64>` is a named refusal), so there is no method to hang on
+a generic record. The combinator reads `lazy(query(|| …))`, which is the same
+value and the same evaluation order.
+
+**Laziness is still read from source.** `Query.lazy` is an ordinary runtime
+field, but whether a page is lazy decides its *view type* (`PageData<T>` vs `T`)
+and therefore must be known at generation time. The generator reads the `lazy(`
+call in `data`'s body — the same scan `lazy fn load()` needed, moved one line in.
+Making it type-level (`Query` vs a distinct lazy type) is the honest fix and is
+follow-up work.
+
+**`Head` carries `scripts` as well as `meta`.** The `head { … }` block can emit a
+classic `script "…"`; dropping it would have made the replacement strictly less
+expressive than the thing it deprecates. `meta` is additive and renders as
+`<meta name content>`.
+
+**A page builds a `Head` with combinators, not a partial record literal.**
+`Head { modules: ["/app.js"] }` is not valid Vyrn — a record literal names every
+field — so `noHead()` plus `withTitle`/`withStylesheet`/`withModule`/`withScript`/
+`withMeta` is the spelling. The full literal works too.
+
+**There is no non-fatal diagnostic channel from a generator, so the deprecation
+notice is a directive comment.** A generator reports by emitting an identifier
+line that fails to parse; that is fatal by construction, which is the opposite of
+a deprecation hint. `load()` returns `Result<Program, Vec<Diagnostic>>` with no
+success-path diagnostics, so a `Severity::Warning` would have to be threaded
+through the loader, five CLI call sites and the LSP. The generated module carries
+`//@deprecated RFC-0071: …` instead — greppable, and visible in `vyrn emit-gen`.
+Wiring warnings end to end is the prerequisite M2b inherits.
+
+**`laod` lands in the "not close" row.** This document's own example claims a
+did-you-mean; Damerau-Levenshtein `laod`→`data` is 3, and `load` is no longer a
+member for it to be one transposition from. It is still an error naming the
+export — which is the substantive claim — just under `contract.unknown` rather
+than `contract.unknown.didYouMean`. `dta` gets the suggestion.
+
+**`Component` had nothing to name, and the open rule had to grow `(..)`.** The
+components generator requires a `<template>` with exactly one root and nothing
+else; a `.vyx` component's `<script>` is entirely module-private, so a component
+has no hand-written export surface and there is no convention there to declare.
+The truthful contract is the total one — every export of a components module is a
+view returning `Html` — and views take zero, one or four props, which the open
+rule could not express, because `matchesSignature` compares arity. `fn *(..) -> R`
+now means "any parameters"; it is the notation this document already used in
+prose, and `std/rpc`'s `Api` (M3) needs it for the same reason. The check runs
+over the surface `components` is about to emit, since that surface exists nowhere
+else before it is text.
+
+Also landed, unplanned: `unify` learns function types when the pattern mentions a
+type parameter, so `type Query<T> = { run: fn() -> T, … }` infers `T` from the
+stored closure. Generic records with function-typed fields were simply not
+constructible before — the record-literal path was the one inference site with no
+`Type::Fn` arm.
+
 ## Acceptance
 
 - `fn laod()` in a page is an **error** naming `data`, not a silent no-data page.

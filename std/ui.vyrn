@@ -46,12 +46,19 @@
 // learns a `.vyx` page's routing shape from `vyxPageShape`, and the synthesized
 // router imports each `.vyx` page through a nested `vyxPage(…)` generator import.
 // (std↔std pure-fn imports are legal — verified; the loader does not fight them.)
-import { vyxPageShape } from "std/vyx"
+import { vyxPageShape, vyxPageInterface, vyxQueryDataType } from "std/vyx"
 // Shared string / array helpers (RFC-0046/0059) — the former private uiJoinList,
 // uiContainsStr, uiTrimStr copies now live once in std; the infallible-decode
 // swallows route through the shared `fromBytesOr`.
 import { joinWith, trim, fromBytesOr } from "std/strings"
 import { includes } from "std/arrays"
+// The `Head` value a page's `head()` returns renders through `std/html` here
+// (RFC-0071 M2) rather than as generated source, because its includes are now
+// runtime arrays rather than literal block entries.
+import { el, Html, Attr } from "std/html"
+// RFC-0071: a page's exports are checked against the `Page` contract declared
+// below, instead of hunted for by name.
+import { checkContract, suppliesMember } from "std/contract"
 
 // ===========================================================================
 // PageError (RFC-0041 §3) — the failure a page's `load` may return. `load ->
@@ -93,6 +100,167 @@ export fn badRequest(message: String) -> PageError {
 /// The data a lazy page's view is rendered over: `Loading` before the data has
 /// arrived (client nav only), `Ready(T)` once it has (always, server-side).
 export type PageData<T> = | Loading | Ready(T)
+
+// ===========================================================================
+// The `Page` contract (RFC-0071 M2) — the two exports a page module may have,
+// declared instead of scanned. `head { … }` was parsed out of a `.vyx`
+// `<script>` by reading source text, and `load` was found by matching the name
+// literally, so `fn laod()` compiled clean and rendered a page with no data.
+// Both are now members of a declaration: completed, hovered, type-checked, and
+// loud on a typo.
+//
+// Members are FUNCTIONS because RFC-0029 makes every top-level `let`
+// module-private — a page satisfies the contract with the accessor pattern that
+// rule already prescribes. `data` wants to be a function regardless: a
+// module-level binding runs at module-init, and page data is per-request.
+// ===========================================================================
+
+/// One `<meta name=… content=…>` a page contributes to the document head.
+export type Meta = { name: String, content: String }
+
+/// What a page contributes to the document head.
+///
+/// Exactly what the `head { … }` block could express — a title, stylesheet
+/// links, module and classic script includes — plus `meta`, which the block
+/// could not. Build one from `noHead()` and the `with*` combinators:
+///
+///     export fn head() -> Head {
+///         return withModule(noHead(), "/app.js")
+///     }
+///
+/// Elements are emitted stylesheets-then-modules-then-scripts-then-meta, each
+/// group in the order it was added.
+export type Head = {
+    title: Option<String>,
+    stylesheets: Array<String>,
+    modules: Array<String>,
+    scripts: Array<String>,
+    meta: Array<Meta>,
+}
+
+/// The empty head — no title, no includes. The default for a page that declares
+/// no `head`, and the base every `with*` combinator builds on.
+export fn noHead() -> Head {
+    return Head { title: None, stylesheets: [], modules: [], scripts: [], meta: [] }
+}
+
+/// `h` with the document title set. The page's title wins over its layouts'.
+export fn withTitle(h: Head, title: String) -> Head {
+    return Head { title: Some(title), stylesheets: h.stylesheets, modules: h.modules, scripts: h.scripts, meta: h.meta }
+}
+
+/// `h` with a `<link rel="stylesheet" href=…>` appended.
+export fn withStylesheet(h: Head, href: String) -> Head {
+    let mut ss = h.stylesheets
+    ss.push(href)
+    return Head { title: h.title, stylesheets: ss, modules: h.modules, scripts: h.scripts, meta: h.meta }
+}
+
+/// `h` with a `<script type="module" src=…>` appended.
+export fn withModule(h: Head, src: String) -> Head {
+    let mut ms = h.modules
+    ms.push(src)
+    return Head { title: h.title, stylesheets: h.stylesheets, modules: ms, scripts: h.scripts, meta: h.meta }
+}
+
+/// `h` with a classic `<script src=…>` appended.
+export fn withScript(h: Head, src: String) -> Head {
+    let mut sc = h.scripts
+    sc.push(src)
+    return Head { title: h.title, stylesheets: h.stylesheets, modules: h.modules, scripts: sc, meta: h.meta }
+}
+
+/// `h` with a `<meta name=… content=…>` appended.
+export fn withMeta(h: Head, name: String, content: String) -> Head {
+    let mut mt = h.meta
+    mt.push(Meta { name: name, content: content })
+    return Head { title: h.title, stylesheets: h.stylesheets, modules: h.modules, scripts: h.scripts, meta: mt }
+}
+
+/// A head's elements, in the document order `document(title, head, body)` emits.
+/// Byte-identical to what the `head { … }` block compiled to, element for
+/// element — which is what keeps a migrated page's SSR bytes unchanged.
+export fn headHtml(h: Head) -> Array<Html> {
+    let mut out: Array<Html> = []
+    for href in h.stylesheets {
+        out.push(el("link", [A("rel", "stylesheet"), A("href", href)], []))
+    }
+    for src in h.modules {
+        out.push(el("script", [A("type", "module"), A("src", src)], []))
+    }
+    for src in h.scripts {
+        out.push(el("script", [A("src", src)], []))
+    }
+    for m in h.meta {
+        out.push(el("meta", [A("name", m.name), A("content", m.content)], []))
+    }
+    return out
+}
+
+/// A head's document title, or "" when it declares none — the spelling
+/// `uiFirst` composes through the layout chain.
+export fn headTitleOf(h: Head) -> String {
+    return match h.title {
+        Some(t) => t,
+        None => "",
+    }
+}
+
+/// A page's data: the call that produces it, deferred until the router asks, and
+/// whether the page renders LAZILY (RFC-0070 — the shell paints instantly on a
+/// client soft nav and the data region fills in when the payload lands).
+///
+///     export fn data() -> Query<Array<Paste>> {
+///         return lazy(query(|| listPastes().pastes))
+///     }
+export type Query<T> = { run: fn() -> T, lazy: Bool }
+
+/// A query over `run`, resolved before the page renders.
+export fn query<T>(run: fn() -> T) -> Query<T> {
+    return Query { run: run, lazy: false }
+}
+
+/// `q` marked lazy: the page renders its shell and a skeleton first, then fills
+/// the data region in. The server always has the data, so SSR is unaffected.
+export fn lazy<T>(q: Query<T>) -> Query<T> {
+    return Query { run: q.run, lazy: true }
+}
+
+/// Run a query, producing the page's data.
+export fn runQuery<T>(q: Query<T>) -> T {
+    let f = q.run
+    return f()
+}
+
+/// The absent query — the default for a page that declares no `data`, and the
+/// value a generator substitutes when it finds none. A page with no data has
+/// nothing to produce, which is what `Query<Unit>` says.
+export fn noQuery() -> Query<Unit> {
+    return query(uiNoData)
+}
+
+/// The `noQuery()` call: a page with no `data` produces nothing.
+fn uiNoData() -> Unit {
+}
+
+/// What a page module may export (RFC-0071).
+///
+/// CLOSED — `head` and `data` are the only names, so any other export is
+/// reported and a near-miss gets a did-you-mean. That is what makes typo
+/// detection total: `fn laod()` is an error naming `data`, where it used to be a
+/// page that silently rendered with no data.
+///
+/// A page needs local helpers; they are simply not exported, and the closed rule
+/// applies to the module's public surface only. Two independent fetches need one
+/// `data` returning a record, not two exports — one closure, one round trip.
+export contract Page {
+    /// Document head contributions for this page.
+    fn head() -> Head = noHead()
+
+    /// This page's data, resolved before render. `lazy(…)` opts into
+    /// render-then-fill; without it the page blocks until the data lands.
+    fn data() -> Query<T> = noQuery()
+}
 
 // ===========================================================================
 // The data-payload runtime (RFC-0069 §2) — RUNTIME helpers (not `gen`) the
@@ -593,6 +761,11 @@ type UiPageInfo = {
     // dynNames (`Int64` or `String`, RFC-0039 §5).
     dynTypes: Array<String>,
     hasLoad: Bool,
+    // hasData: the page supplies the `data` member of the `std/ui:Page` contract
+    // (`export fn data() -> Query<T>`, RFC-0071) rather than the deprecated
+    // `fn load`. The router runs the query instead of calling the loader; every
+    // other field below is derived identically, so the two forms route the same.
+    hasData: Bool,
     // loadHasParams: the loader takes a `Params` argument (`fn load(p: Params)`) —
     // false for a zero-parameter static loader (`fn load()`, RFC-0069 §0) and for a
     // page with no loader.
@@ -632,6 +805,30 @@ gen fn uiErrLine(tag: String, detail: String) -> String {
     return tag + "__" + detail + "\n"
 }
 
+/// Whether a `checkContract` issue applies to a page during RFC-0071's
+/// deprecation window.
+///
+/// One exemption, and it expires with the window: `load` is the name the `data`
+/// member replaces, so a page still exporting it is deprecated, not wrong. Every
+/// other issue — a mistyped `head`, an export the contract does not name, a
+/// near-miss like `laod` — is reported.
+gen fn uiContractIssueApplies(iss: Issue) -> Bool {
+    return iss.path != "load"
+}
+
+/// The page's contract issues as load diagnostics. `checkContract` decides what
+/// is wrong (in `std/contract`, over the declaration in this module); this only
+/// decides how it reads on the way out.
+gen fn uiContractErrs(iface: ModuleInterface, fid: String) -> String {
+    let mut out = ""
+    for iss in checkContract(iface, contractOf(Page)) {
+        if uiContractIssueApplies(iss) {
+            out = out + uiErrLine("PAGES_CONTRACT", fid + "__" + uiIdentOf(iss.key) + "__" + uiIdentOf(iss.path))
+        }
+    }
+    return out
+}
+
 /// Reflect a page module and validate its exported surface against its route
 /// segments, returning the collected `UiPageInfo` (with `err` set on any violation).
 /// A `gen fn` because it calls `moduleInterface` (generation-only, RFC-0021), so
@@ -652,7 +849,14 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
     }
     let entry = if hasRespond { "respond" } else { "page" }
     let arity = uiFnArity(iface, entry)
-    let hasLoad = uiHasFn(iface, "load")
+    // RFC-0071: `data` is a declared member of the `Page` contract, so its
+    // presence is a contract question — `suppliesMember` answers it with the
+    // member's shape behind it, where `uiHasFn(iface, "load")` was a bare string.
+    // A `.vyrn` page's own surface also carries the router's entry points
+    // (`page`/`respond`/`load`), which the contract does not name, so the CLOSED
+    // rule is not applied here; a `.vyx` page's `<script>` gets the full check.
+    let hasData = suppliesMember(iface, contractOf(Page), "data")
+    let hasLoad = hasData || uiHasFn(iface, "load")
     // RFC-0069 §0: a zero-parameter static loader (`fn load()`) needs no `Params`;
     // a `load(p: Params)` (arity 1) does. A page with no loader relies on its
     // dynamic segments alone.
@@ -756,8 +960,11 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
 
     // Loader kind: "" (none), "result" (Result<Data, PageError>), "validation"
     // (Validation<Data>), or "plain" (an unwrapped data type, RFC-0069 §0).
+    // The loader's data type comes from `data`'s `Query<T>` on the new form and
+    // from `load`'s return on the old one; everything downstream reads only this.
+    let loadRet = if hasData { vyxQueryDataType(uiFnRet(iface, "data")) } else { uiFnRet(iface, "load") }
     let loadKind = if hasLoad {
-        if uiFnRet(iface, "load").startsWith("Result<") { "result" } else if uiFnRet(iface, "load").startsWith("Validation<") { "validation" } else { "plain" }
+        if loadRet.startsWith("Result<") { "result" } else if loadRet.startsWith("Validation<") { "validation" } else { "plain" }
     } else {
         ""
     }
@@ -770,6 +977,7 @@ gen fn uiInspectPage(modPath: String, segs: Array<String>, dirPrefix: Array<Stri
         dynNames: dyns,
         dynTypes: dynTypes,
         hasLoad: hasLoad,
+        hasData: hasData,
         loadHasParams: loadHasParams,
         loadLazy: false,
         hasRespond: hasRespond,
@@ -795,7 +1003,13 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
         Err(e) => "",
     }
     let shape = vyxPageShape(src)
-    let mut err = shape.err
+    // RFC-0071: the page's PUBLIC surface — its `export fn` declarations —
+    // checked against the `Page` contract. A `.vyx` file is not a module, so the
+    // surface is read from source (`vyxPageInterface`) rather than reflected;
+    // everything after that is the same `checkContract` every other consumer
+    // runs, over the same declaration. This is what turns `export fn laod()`
+    // from a page that silently rendered empty into an error naming `data`.
+    let mut err = shape.err + uiContractErrs(vyxPageInterface(src), fid)
     let hasLoad = shape.hasLoad
     // RFC-0070: a `lazy fn load()` view is over `PageData<T>` and gets the instant-
     // skeleton client nav. Only a loader page can be lazy.
@@ -866,6 +1080,7 @@ gen fn uiInspectVyxPage(modPath: String, segs: Array<String>, dirPrefix: Array<S
         dynNames: dyns,
         dynTypes: dynTypes,
         hasLoad: hasLoad,
+        hasData: false,
         loadHasParams: loadHasParams,
         loadLazy: loadLazy,
         hasRespond: false,
@@ -893,6 +1108,7 @@ gen fn uiPageErr(modPath: String, fid: String, segs: Array<String>, dirPrefix: A
         dynNames: dyns,
         dynTypes: dynTypes,
         hasLoad: false,
+        hasData: false,
         loadHasParams: false,
         loadLazy: false,
         hasRespond: false,
@@ -1401,6 +1617,15 @@ gen fn uiEmitErrDoc(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorI
 /// `.load(p)`) and render its outcome. A plain loader (RFC-0069 §0) binds the data
 /// and renders (no failure path); a `Result`/`Validation` loader matches its arms,
 /// routing a failure to the nearest error page (RFC-0041 §3).
+/// The call that produces a page's data: `runQuery(p<idx>.data())` on the
+/// RFC-0071 form, `p<idx>.load(…)` on the deprecated one. Both bind the same `d`.
+gen fn uiLoadCall(p: UiPageInfo, idx: String, args: String) -> String {
+    if p.hasData {
+        return "runQuery(p" + idx + ".data())"
+    }
+    return "p" + idx + ".load(" + args + ")"
+}
+
 gen fn uiEmitLoadDispatch(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorIdx: Int64, loadCall: String) -> String {
     if p.loadKind == "plain" {
         return "    let d = " + loadCall + "\n    return " + uiSuccessResponse(p, idx, layoutIdxs) + "\n}\n"
@@ -1444,7 +1669,7 @@ gen fn uiEmitRender(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorI
     // Static loader page (no dynamic segments, a zero-parameter `load()`,
     // RFC-0069 §0): no `Params`, dispatch the loader directly.
     if p.dynNames.length == 0 && p.hasLoad {
-        out = out + uiEmitLoadDispatch(p, idx, layoutIdxs, errorIdx, "p" + idx + ".load()")
+        out = out + uiEmitLoadDispatch(p, idx, layoutIdxs, errorIdx, uiLoadCall(p, idx, ""))
         if uiUsesErrDoc(p, errorIdx) {
             out = out + uiEmitErrDoc(p, idx, layoutIdxs, errorIdx)
         }
@@ -1462,7 +1687,7 @@ gen fn uiEmitRender(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorI
         return out
     }
     if p.hasLoad {
-        out = out + uiEmitLoadDispatch(p, idx, layoutIdxs, errorIdx, "p" + idx + ".load(p)")
+        out = out + uiEmitLoadDispatch(p, idx, layoutIdxs, errorIdx, uiLoadCall(p, idx, "p"))
         if uiUsesErrDoc(p, errorIdx) {
             out = out + uiEmitErrDoc(p, idx, layoutIdxs, errorIdx)
         }
@@ -1530,14 +1755,14 @@ gen fn uiEmitDataRender(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, er
     }
     // Static loader (zero-parameter `load()`, RFC-0069 §0).
     if p.dynNames.length == 0 && p.hasLoad {
-        out = out + uiEmitDataLoadDispatch(p, idx, layoutIdxs, "p" + idx + ".load()")
+        out = out + uiEmitDataLoadDispatch(p, idx, layoutIdxs, uiLoadCall(p, idx, ""))
         return out
     }
     // Dynamic route: build the Params value (its fields the dynamic segments).
     let paramsCtor = if p.paramsModule != "" { "uiParams" + idx } else { "p" + idx + ".Params" }
     out = out + "    let p = " + paramsCtor + " { " + uiParamFieldInits(p.segs) + " }\n"
     if p.hasLoad {
-        out = out + uiEmitDataLoadDispatch(p, idx, layoutIdxs, "p" + idx + ".load(p)")
+        out = out + uiEmitDataLoadDispatch(p, idx, layoutIdxs, uiLoadCall(p, idx, "p"))
         return out
     }
     // Dynamic, no loader: the payload carries the params only.
@@ -1681,6 +1906,10 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
     // whole data channel. A router of only `.vyrn`/`respond` pages emits exactly the
     // pre-RFC module (byte-identical), so nothing without client pages is disturbed.
     let mut anyClientPage = false
+    // RFC-0071: whether any page supplies the `data` member, so the router runs
+    // its query. A router of only `fn load` pages emits exactly the pre-RFC
+    // module (byte-identical) — nothing on the old form is disturbed.
+    let mut anyQuery = false
     i = 0
     while i < pages.length {
         let lidx = uiLayoutChain(pages[i], layouts)
@@ -1694,10 +1923,16 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
         if uiClientRenderable(pages[i]) {
             anyClientPage = true
         }
+        if pages[i].hasData {
+            anyQuery = true
+        }
         i = i + 1
     }
     if anyErrDoc {
         out = out + "import { PageError } from \"std/ui\"\n"
+    }
+    if anyQuery {
+        out = out + "import { runQuery } from \"std/ui\"\n"
     }
     if anyClientPage {
         out = out + "import { uiIsDataRequest, uiPayload, uiErrorPayload, uiDataResponse, uiDataMiss, uiErrorResponseOf } from \"std/ui\"\n"

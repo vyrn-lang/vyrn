@@ -323,14 +323,21 @@ impl ContractMember {
         self.name == OPEN_RULE_NAME
     }
     /// Whether the module may omit this export (it has a default).
-    pub fn optional(&self) -> bool {
-        matches!(
-            &self.kind,
-            ContractMemberKind::Value {
-                default: Some(_),
-                ..
+    ///
+    /// Both member forms carry one (RFC-0071 M2): a value member defaults to a
+    /// value, a function member to the value its call would have produced
+    /// (`fn head() -> Head = noHead()` reads "absent means `noHead()`"), which is
+    /// what a generator substitutes when the module says nothing.
+    pub fn default(&self) -> Option<&Expr> {
+        match &self.kind {
+            ContractMemberKind::Value { default, .. } | ContractMemberKind::Fn { default, .. } => {
+                default.as_deref()
             }
-        )
+        }
+    }
+    /// Whether the module may omit this export (it has a default).
+    pub fn optional(&self) -> bool {
+        self.default().is_some()
     }
     /// The member's type spelling, as `checkContract` compares it: a value
     /// member spells its type, a function member spells `fn(A, B) -> R`.
@@ -340,7 +347,16 @@ impl ContractMember {
             // Reuse the ordinary `Type::Fn` spelling (`fn(A, B) -> R`, with a
             // `Unit` return omitted) so a contract member and a stored function
             // value are described in exactly the same words.
-            ContractMemberKind::Fn { params, ret } => {
+            ContractMemberKind::Fn {
+                params,
+                ret,
+                variadic: true,
+                ..
+            } => {
+                let _ = params;
+                format!("fn(..){}", ret_suffix(ret))
+            }
+            ContractMemberKind::Fn { params, ret, .. } => {
                 Type::Fn(params.clone(), Box::new(ret.clone())).to_string()
             }
         }
@@ -354,7 +370,7 @@ impl ContractMember {
         let mut push = |t: &Type| collect_params(t, &mut out);
         match &self.kind {
             ContractMemberKind::Value { ty, .. } => push(ty),
-            ContractMemberKind::Fn { params, ret } => {
+            ContractMemberKind::Fn { params, ret, .. } => {
                 for p in params {
                     push(p);
                 }
@@ -411,6 +427,16 @@ fn collect_params(ty: &Type, out: &mut Vec<String>) {
     }
 }
 
+/// ` -> R` for a member's return type, or "" for `Unit` — the same elision
+/// `Type::Fn`'s own spelling uses, so both forms read alike in a diagnostic.
+fn ret_suffix(ret: &Type) -> String {
+    if *ret == Type::Unit {
+        String::new()
+    } else {
+        format!(" -> {ret}")
+    }
+}
+
 /// What a [`ContractMember`] declares.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContractMemberKind {
@@ -421,10 +447,26 @@ pub enum ContractMemberKind {
         ty: Type,
         default: Option<Box<Expr>>,
     },
-    /// `fn name(params) -> Ret` — a function export. Parameter *names* are not
-    /// part of the contract (only arity and types are), exactly as in
-    /// [`MethodSig`].
-    Fn { params: Vec<Type>, ret: Type },
+    /// `fn name(params) -> Ret [= default]` — a function export. Parameter
+    /// *names* are not part of the contract (only arity and types are), exactly
+    /// as in [`MethodSig`].
+    ///
+    /// The `default` is an expression of the member's RETURN type, not of its
+    /// function type: `fn head() -> Head = noHead()` reads "a module that does
+    /// not export `head` has `noHead()` for its head", which is the question a
+    /// generator actually asks. It makes the member **optional**.
+    Fn {
+        params: Vec<Type>,
+        ret: Type,
+        default: Option<Box<Expr>>,
+        /// `fn *(..) -> R` — the parameter list is `..`, so the member
+        /// constrains the RETURN type only and admits any arity. Legal on the
+        /// open rule alone: a named member's arity is part of what its name
+        /// promises, while an open rule describes a family of exports whose
+        /// shapes genuinely differ (a components module's views take 0, 1 or 4
+        /// props, and enumerating that would say nothing).
+        variadic: bool,
+    },
 }
 
 /// `impl P for T { fn m(self, ..) { .. } }` — the methods a type provides for a

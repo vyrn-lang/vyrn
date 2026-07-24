@@ -1337,10 +1337,12 @@ impl<'a> Checker<'a> {
     ///   type parameters — `T` in `Query<T>` — already arrived as
     ///   [`Type::Param`] from the parser, so a *typo* is still an unknown type);
     /// * an optional member's default must actually have the member's type,
-    ///   because that default is what a module gets when it omits the export;
+    ///   because that default is what a module gets when it omits the export —
+    ///   a `fn` member's default is checked against its RETURN type, which is
+    ///   what `fn head() -> Head = noHead()` says;
     /// * the open rule may not be optional or valueless — it describes a shape
     ///   for arbitrarily-named exports, so a default would have nothing to
-    ///   attach to.
+    ///   attach to (rejected in the parser, where the `=` is seen).
     fn check_contract_decl(&self, c: &ContractDecl) -> Vec<String> {
         let mut errs = Vec::new();
         for m in &c.members {
@@ -1351,22 +1353,14 @@ impl<'a> Checker<'a> {
                         errs.push(e);
                         continue;
                     }
-                    if let Some(d) = default {
-                        // The default is checked exactly like a module-state
-                        // initializer: an empty scope (a contract sees no
-                        // bindings) and the member type as the expected type.
-                        let scope: Vec<HashMap<String, Binding>> = vec![HashMap::new()];
-                        match self.expr(d, &scope, Some(ty), None) {
-                            Err(e) => errs.push(e),
-                            Ok(vty) if !self.coercible(&vty, ty) => errs.push(format!(
-                                "line {}: {where_} defaults to {vty}, but is declared `{ty}`",
-                                m.line
-                            )),
-                            Ok(_) => {}
-                        }
-                    }
+                    self.check_member_default(default.as_deref(), ty, &where_, m.line, &mut errs);
                 }
-                ContractMemberKind::Fn { params, ret } => {
+                ContractMemberKind::Fn {
+                    params,
+                    ret,
+                    default,
+                    ..
+                } => {
                     for p in params {
                         if let Err(e) = self.ensure_type_exists(p, m.line) {
                             errs.push(e);
@@ -1375,12 +1369,44 @@ impl<'a> Checker<'a> {
                     if *ret != Type::Unit {
                         if let Err(e) = self.ensure_type_exists(ret, m.line) {
                             errs.push(e);
+                            continue;
                         }
                     }
+                    self.check_member_default(default.as_deref(), ret, &where_, m.line, &mut errs);
                 }
             }
         }
         errs
+    }
+
+    /// Check a contract member's default against the type it stands in for.
+    ///
+    /// The default is checked exactly like a module-state initializer: an empty
+    /// scope (a contract sees no bindings) and the member type as the expected
+    /// type. The one exception is a member type that mentions an implicit type
+    /// parameter (`Query<T>`): the member admits *any* instantiation, so no
+    /// concrete default can equal it, and demanding one would make the whole
+    /// open-type-parameter rule unusable. The expression is still checked — an
+    /// undeclared `noQuurey()` is still an error — just not compared.
+    fn check_member_default(
+        &self,
+        default: Option<&Expr>,
+        ty: &Type,
+        where_: &str,
+        line: usize,
+        errs: &mut Vec<String>,
+    ) {
+        let Some(d) = default else { return };
+        let scope: Vec<HashMap<String, Binding>> = vec![HashMap::new()];
+        let open = type_mentions_param(ty);
+        let expected = if open { None } else { Some(ty) };
+        match self.expr(d, &scope, expected, None) {
+            Err(e) => errs.push(e),
+            Ok(vty) if !open && !self.coercible(&vty, ty) => errs.push(format!(
+                "line {line}: {where_} defaults to {vty}, but is declared `{ty}`"
+            )),
+            Ok(_) => {}
+        }
     }
 
     fn check_type_decl(&self, t: &TypeDecl) -> Result<(), String> {
@@ -5760,6 +5786,23 @@ impl<'a> Checker<'a> {
                 Type::Ref(a) => self.unify(inner, a, subst, line),
                 _ => Err(format!("line {line}: expected {pty}, found {aty}")),
             },
+            // A generic function type binds its parameters through the function
+            // value's own signature — `{ run: fn() -> T }` learns `T` from a
+            // `fn() -> Array<Paste>` exactly as `Array<T>` learns it from an
+            // element. Only engaged when the pattern actually mentions a type
+            // parameter: two concrete function types keep the assignability rule
+            // below, which is the one every stored-closure check already uses.
+            Type::Fn(pps, pr) if type_mentions_param(pty) => {
+                match crate::types::resolve(aty, self.types) {
+                    Type::Fn(aps, ar) if aps.len() == pps.len() => {
+                        for (p, a) in pps.iter().zip(&aps) {
+                            self.unify(p, a, subst, line)?;
+                        }
+                        self.unify(pr, &ar, subst, line)
+                    }
+                    _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+                }
+            }
             // A generic `Map<String, V>` binds `V` from the value type. A
             // transparent named alias to a map resolves first.
             Type::Map(pk, pv) => match crate::types::resolve(aty, self.types) {
@@ -5943,6 +5986,65 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
         Expr::MapLit { .. } => "[..:..]".to_string(),
         Expr::Spawn { name, .. } => format!("spawn {name}(..)"),
         Expr::Lambda { params, .. } => format!("|{}| ..", params.join(", ")),
+    }
+}
+
+/// Whether `ty` mentions a type parameter anywhere inside it.
+///
+/// A contract member's type parameters are implicit and open per member
+/// (RFC-0071), so a type that mentions one describes a *family* of types rather
+/// than one type — which is why a default cannot be compared against it.
+fn type_mentions_param(ty: &Type) -> bool {
+    let mut found = false;
+    walk_type(ty, &mut |t| {
+        if matches!(t, Type::Param(_)) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Apply `f` to `ty` and to every type nested inside it.
+fn walk_type(ty: &Type, f: &mut impl FnMut(&Type)) {
+    f(ty);
+    match ty {
+        Type::Option(a)
+        | Type::Ref(a)
+        | Type::Array(a)
+        | Type::Task(a)
+        | Type::Partial(a)
+        | Type::ArrayN(a, _)
+        | Type::SmallArray(a, _)
+        | Type::Omit(a, _)
+        | Type::Pick(a, _) => walk_type(a, f),
+        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+            walk_type(a, f);
+            walk_type(b, f);
+        }
+        Type::App(_, args) => {
+            for a in args {
+                walk_type(a, f);
+            }
+        }
+        Type::Record(fields) => {
+            for fl in fields {
+                walk_type(&fl.ty, f);
+            }
+        }
+        Type::Enum(variants) => {
+            for v in variants {
+                for p in &v.payload {
+                    walk_type(p, f);
+                }
+            }
+        }
+        Type::Fn(params, ret) => {
+            for p in params {
+                walk_type(p, f);
+            }
+            walk_type(ret, f);
+        }
+        _ => {}
     }
 }
 

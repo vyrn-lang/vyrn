@@ -146,9 +146,14 @@ pub fn contract_info_lit(c: &ContractDecl) -> Expr {
         .members
         .iter()
         .map(|m| {
-            let (kind, params, ret) = match &m.kind {
-                ContractMemberKind::Value { ty, .. } => ("let", Vec::new(), ty.to_string()),
-                ContractMemberKind::Fn { params, ret } => (
+            let (kind, params, ret, variadic) = match &m.kind {
+                ContractMemberKind::Value { ty, .. } => ("let", Vec::new(), ty.to_string(), false),
+                ContractMemberKind::Fn {
+                    params,
+                    ret,
+                    variadic,
+                    ..
+                } => (
                     "fn",
                     params.iter().map(|p| p.to_string()).collect(),
                     // A `Unit` return spells as `""`, matching `FnInfo.ret`.
@@ -157,6 +162,7 @@ pub fn contract_info_lit(c: &ContractDecl) -> Expr {
                     } else {
                         ret.to_string()
                     },
+                    *variadic,
                 ),
             };
             struct_lit(
@@ -171,6 +177,7 @@ pub fn contract_info_lit(c: &ContractDecl) -> Expr {
                     ),
                     ("ret", Expr::Str(ret)),
                     ("optional", Expr::Bool(m.optional())),
+                    ("variadic", Expr::Bool(variadic)),
                     ("doc", opt_str(m.doc.as_deref())),
                 ],
             )

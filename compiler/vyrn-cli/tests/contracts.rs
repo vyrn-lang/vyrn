@@ -51,7 +51,7 @@ fn scratch(tag: &str) -> PathBuf {
 /// The generator: a closed `Page` contract, an open `Api` contract, and a
 /// `gen fn` per contract that reflects a module and bakes `checkContract`'s
 /// issues into a function returning them.
-const GEN: &str = r#"import { checkContract } from "std/contract"
+const GEN: &str = r#"import { checkContract, suppliesMember } from "std/contract"
 
 /// What a page module may export.
 export contract Page {
@@ -72,6 +72,19 @@ export contract Api {
     fn *(input: String) -> String
 }
 
+/// A contract whose members are all optional, exercising the M2 `fn` default.
+export contract Widget {
+    /// The widget's label.
+    fn label() -> String = "untitled"
+}
+
+/// An open contract that constrains the RETURN type only — views legitimately
+/// differ in arity, so enumerating one would say nothing true.
+export contract Views {
+    /// A view.
+    fn *(..) -> String
+}
+
 fn report(name: String, issues: Array<Issue>) -> String {
     let mut out = "export fn " + name + "() -> Array<String> {\n"
     out = out + "    let mut out: Array<String> = []\n"
@@ -90,6 +103,14 @@ export gen fn pageReport(path: String) -> String {
 export gen fn apiReport(path: String) -> String {
     let iface = moduleInterface(path)
     return report("apiIssues", checkContract(iface, contractOf(Api)))
+}
+
+export gen fn widgetReport(path: String) -> String {
+    let iface = moduleInterface(path)
+    let mut out = report("widgetIssues", checkContract(iface, contractOf(Widget)))
+    out = out + report("viewIssues", checkContract(iface, contractOf(Views)))
+    let has = suppliesMember(iface, contractOf(Widget), "label")
+    return out + "export fn widgetHasLabel() -> Bool {\n    return " + has.toString() + "\n}\n"
 }
 "#;
 
@@ -264,6 +285,118 @@ fn std_contract_unit_tests_run_green() {
         combined.contains("3 passed, 0 failed"),
         "expected 3 green tests:\n{combined}"
     );
+}
+
+// ---- M2: optional `fn` members and the variadic open rule ------------------
+
+/// Build the M2 fixture tree and run it; returns stdout.
+fn run_widget_fixture(tag: &str, module: &str) -> String {
+    let dir = scratch(tag);
+    std::fs::write(dir.join("gen.vyrn"), GEN).unwrap();
+    std::fs::write(dir.join("page.vyrn"), CLEAN_PAGE).unwrap();
+    std::fs::write(dir.join("api.vyrn"), CLEAN_API).unwrap();
+    std::fs::write(dir.join("mod.vyrn"), module).unwrap();
+    std::fs::write(
+        dir.join("app.vyrn"),
+        r#"import { widgetReport } from "./gen"
+import { widgetIssues, viewIssues, widgetHasLabel } from widgetReport("./mod")
+
+fn main() -> Int64 {
+    print("supplies=\{widgetHasLabel()}")
+    for m in widgetIssues() {
+        print("widget " + m)
+    }
+    for m in viewIssues() {
+        print("view " + m)
+    }
+    return 0
+}
+"#,
+    )
+    .unwrap();
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run vyrn");
+    assert!(
+        out.status.success(),
+        "run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
+}
+
+#[test]
+fn an_fn_member_with_a_default_is_optional() {
+    // `fn label() -> String = "untitled"` — the module omits it, and its absence
+    // is silent, exactly as a `let` member's default already made it. Without the
+    // default the same module would be told it must export `label`.
+    let out = run_widget_fixture("optfn", "export fn view() -> String {\n    return \"v\"\n}\n");
+    assert!(!out.contains("widget contract.missing"), "{out}");
+    assert!(out.contains("supplies=false"), "{out}");
+}
+
+#[test]
+fn supplies_member_answers_the_question_a_name_hunt_used_to() {
+    let out = run_widget_fixture(
+        "supplies",
+        "export fn label() -> String {\n    return \"L\"\n}\n",
+    );
+    assert!(out.contains("supplies=true"), "{out}");
+}
+
+#[test]
+fn a_variadic_open_rule_constrains_the_return_type_only() {
+    // Views legitimately differ in arity — zero props, four props — so the open
+    // rule says the one thing that is true of all of them.
+    let out = run_widget_fixture(
+        "variadic",
+        "export fn a() -> String {\n    return \"a\"\n}\n\
+         export fn b(x: Int64, y: Bool) -> String {\n    return \"b\"\n}\n\
+         export fn c() -> Int64 {\n    return 0\n}\n",
+    );
+    let views: Vec<&str> = out.lines().filter(|l| l.starts_with("view ")).collect();
+    assert_eq!(views.len(), 1, "only `c` should fail:\n{out}");
+    assert_eq!(
+        views[0],
+        "view contract.open | `c` must match the open rule `fn(..) -> String`, \
+         found `fn() -> Int64` (contract `Views`, ./gen)"
+    );
+}
+
+#[test]
+fn a_named_member_may_not_leave_its_parameters_open() {
+    // `(..)` is the open rule's alone: a named member's arity is part of what the
+    // name promises, so accepting it there would weaken the very thing that makes
+    // a closed contract's typo detection total.
+    let dir = scratch("namedvariadic");
+    std::fs::write(
+        dir.join("app.vyrn"),
+        "contract P { fn head(..) -> String }\nfn main() -> Int64 { return 0 }\n",
+    )
+    .unwrap();
+    let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("run vyrn");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(all.contains("only the open rule"), "{all}");
+}
+
+#[test]
+fn the_open_rule_may_not_have_a_default() {
+    let dir = scratch("opendefault");
+    std::fs::write(
+        dir.join("app.vyrn"),
+        "contract P { fn *(a: String) -> String = \"\" }\nfn main() -> Int64 { return 0 }\n",
+    )
+    .unwrap();
+    let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("run vyrn");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(all.contains("open rule cannot have a default"), "{all}");
 }
 
 #[test]

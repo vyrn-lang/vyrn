@@ -759,6 +759,27 @@ mod tests {
     }
 
     #[test]
+    fn a_variadic_open_rule_round_trips() {
+        // `fn *(..)` is two `.` tokens after a `*` that lexes as multiply — the
+        // one shape in the contract grammar the token printer could get wrong in
+        // two places at once.
+        let src = "export contract Component {\n\
+                   \x20   /// A component's view function.\n\
+                   \x20   fn *(..) -> Html\n\
+                   }\n";
+        assert_eq!(f(src), src);
+    }
+
+    #[test]
+    fn an_optional_fn_member_round_trips() {
+        let src = "contract Page {\n\
+                   \x20   fn head() -> Head = noHead()\n\
+                   \x20   fn data() -> Query<T> = noQuery()\n\
+                   }\n";
+        assert_eq!(f(src), src);
+    }
+
+    #[test]
     fn a_messy_contract_formats_to_the_canonical_form() {
         // Line structure stays the author's (v1 never splits lines); spacing and
         // the open rule's `*` are normalized.

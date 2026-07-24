@@ -410,11 +410,13 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     // compares two ordinary records in ordinary Vyrn code and the compiler stays
     // ignorant of any particular contract. Injected like `ModuleInterface` so a
     // generator can name them without an import.
-    //   MemberInfo   { name, kind, spelling, params, ret, optional, doc }
+    //   MemberInfo   { name, kind, spelling, params, ret, optional, variadic, doc }
     //   ContractInfo { name, module, doc, open, members: Array<MemberInfo> }
     // `kind` is `"let"` or `"fn"`; `name` is `"*"` for the open rule; `spelling`
     // is the member's whole type (`Head`, or `fn(Int64) -> String`) so a
     // comparison against `FnInfo`/`TypeInfo` spellings is a string comparison.
+    // `variadic` marks an open rule written `fn *(..) -> R`, which constrains the
+    // return type only.
     program.type_decls.push(TypeDecl {
         name: "MemberInfo".to_string(),
         exported: false,
@@ -444,6 +446,10 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             },
             Field {
                 name: "optional".to_string(),
+                ty: Type::Bool,
+            },
+            Field {
+                name: "variadic".to_string(),
                 ty: Type::Bool,
             },
             Field {
@@ -1155,7 +1161,7 @@ impl Parser {
                         format!(
                             "expected `let` or `fn` in contract `{name}`, found {other:?} \
                              (a contract member is `let name: Type [= default]`, \
-                             `fn name(..) -> T`, or the open rule `fn *(..) -> T`)"
+                             `fn name(..) -> T [= default]`, or the open rule `fn *(..) -> T`)"
                         ),
                     ))
                 }
@@ -1231,9 +1237,14 @@ impl Parser {
         })
     }
 
-    /// `fn name(a: T, ..) -> R` — or the open rule `fn *(a: T, ..) -> R` — inside
-    /// a contract. Parameter names are parsed but not retained: a contract
-    /// constrains arity and types, never spelling (same rule as [`MethodSig`]).
+    /// `fn name(a: T, ..) -> R [= default]` — or the open rule
+    /// `fn *(a: T, ..) -> R` — inside a contract. Parameter names are parsed but
+    /// not retained: a contract constrains arity and types, never spelling (same
+    /// rule as [`MethodSig`]).
+    ///
+    /// The default (RFC-0071 M2) is an expression of the member's RETURN type, so
+    /// `fn head() -> Head = noHead()` reads as the sentence it looks like. It
+    /// makes the member optional, exactly as a `let` member's default does.
     fn contract_fn_member(
         &mut self,
         doc: Option<String>,
@@ -1247,8 +1258,28 @@ impl Parser {
             self.expect_ident()?
         };
         self.eat(&Tok::LParen)?;
+        // `fn *(..) -> R` — the open rule may leave its parameters open, so it
+        // constrains the return type only. `..` is two `.` tokens; there is no
+        // dedicated one, and nothing else can follow `(` in this position.
+        let variadic = *self.peek() == Tok::Dot && self.tokens.get(self.pos + 1).map(|t| &t.tok) == Some(&Tok::Dot);
+        if variadic {
+            if name != OPEN_RULE_NAME {
+                return Err(Diagnostic::error(
+                    self.line(),
+                    self.col(),
+                    "parse",
+                    format!(
+                        "contract member `{name}` cannot take `(..)` — only the open rule \
+                         `fn *(..)` may leave its parameters open, because a named member's \
+                         arity is part of what the name promises"
+                    ),
+                ));
+            }
+            self.advance();
+            self.advance();
+        }
         let mut params = Vec::new();
-        while *self.peek() != Tok::RParen {
+        while !variadic && *self.peek() != Tok::RParen {
             let _pname = self.expect_ident()?;
             self.eat(&Tok::Colon)?;
             params.push(self.contract_member_type()?);
@@ -1265,11 +1296,35 @@ impl Parser {
         } else {
             Type::Unit
         };
+        let default = if *self.peek() == Tok::Eq {
+            if name == OPEN_RULE_NAME {
+                // The open rule describes a SHAPE for arbitrarily-named exports;
+                // there is no name whose absence a default could stand in for.
+                return Err(Diagnostic::error(
+                    self.line(),
+                    self.col(),
+                    "parse",
+                    "a contract's open rule cannot have a default — it describes the shape of \
+                     exports whose names the contract does not know, so there is no absent \
+                     member for a default to supply"
+                        .to_string(),
+                ));
+            }
+            self.advance();
+            Some(Box::new(self.expr()?))
+        } else {
+            None
+        };
         self.eat_semi();
         Ok(ContractMember {
             name,
             doc,
-            kind: ContractMemberKind::Fn { params, ret },
+            kind: ContractMemberKind::Fn {
+                params,
+                ret,
+                default,
+                variadic,
+            },
             line,
         })
     }

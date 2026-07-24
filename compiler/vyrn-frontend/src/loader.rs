@@ -3063,11 +3063,19 @@ fn rewrite_module_refs(p: &mut Program, map: &HashMap<String, String>, ns: &Hash
                         rewrite_expr(d, map, ns);
                     }
                 }
-                crate::ast::ContractMemberKind::Fn { params, ret } => {
+                crate::ast::ContractMemberKind::Fn {
+                    params,
+                    ret,
+                    default,
+                    ..
+                } => {
                     for t in params {
                         rewrite_type(t, map);
                     }
                     rewrite_type(ret, map);
+                    if let Some(d) = default {
+                        rewrite_expr(d, map, ns);
+                    }
                 }
             }
         }

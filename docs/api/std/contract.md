@@ -29,11 +29,16 @@ The five conditions RFC-0071 enumerates, all reported and none silent:
   - open-rule shape mismatch          -> `contract.open`
 
 **The export surface this reads.** `ModuleInterface` reflects a module's
-exported FUNCTIONS (RFC-0021 / RFC-0031); `export let` does not exist yet, so
-a value member (`let head: Head`) can today only be *absent*, or found under
-the name of a function — which is itself a type mismatch and is reported as
-one. When RFC-0071 M2 lands `export let`, the reflected values join
-`moduleExports` below and every rule here applies unchanged.
+exported FUNCTIONS (RFC-0021 / RFC-0031). `export let` does not exist and is
+not coming: RFC-0029 makes every top-level `let` module-private, and a
+contract member is satisfied by the accessor function that rule already
+prescribes (`export fn head() -> Head`). The `let` member form stays in the
+grammar and is inert — a module can only ever be reported as missing it — so
+the grammar needs no reopening if that rule ever changes.
+
+**Optionality.** Either member form may carry a default (`fn head() -> Head =
+noHead()`), which makes it optional: the module may omit the export and the
+generator uses the default. A member without one is required.
 
 ## checkContract
 
@@ -48,3 +53,18 @@ reflection order. Deterministic, because a generator bakes these into a
 diagnostic and byte-stability is the whole game.
 
 An empty result means the module satisfies the contract.
+
+## suppliesMember
+
+```vyrn
+fn suppliesMember(iface: ModuleInterface, c: ContractInfo, name: String) -> Bool
+```
+
+Whether `iface` supplies contract member `name`: exported, and matching the
+member's declared shape.
+
+This is the contract-driven replacement for a generator's name hunt. `std/ui`
+used to ask `uiHasFn(iface, "load")` — a literal string with nothing behind
+it — and now asks whether the module supplies the `data` member of the
+contract it is checked against, which is the same question with a declaration
+standing behind every part of it.

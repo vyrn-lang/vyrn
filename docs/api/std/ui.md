@@ -86,6 +86,150 @@ type PageData = Loading | Ready(T)
 The data a lazy page's view is rendered over: `Loading` before the data has
 arrived (client nav only), `Ready(T)` once it has (always, server-side).
 
+## Meta
+
+```vyrn
+type Meta = { name: String, content: String }
+```
+
+One `<meta name=… content=…>` a page contributes to the document head.
+
+## Head
+
+```vyrn
+type Head = { title: Option<String>, stylesheets: Array<String>, modules: Array<String>, scripts: Array<String>, meta: Array<Meta> }
+```
+
+What a page contributes to the document head.
+
+Exactly what the `head { … }` block could express — a title, stylesheet
+links, module and classic script includes — plus `meta`, which the block
+could not. Build one from `noHead()` and the `with*` combinators:
+
+    export fn head() -> Head {
+        return withModule(noHead(), "/app.js")
+    }
+
+Elements are emitted stylesheets-then-modules-then-scripts-then-meta, each
+group in the order it was added.
+
+## noHead
+
+```vyrn
+fn noHead() -> Head
+```
+
+The empty head — no title, no includes. The default for a page that declares
+no `head`, and the base every `with*` combinator builds on.
+
+## withTitle
+
+```vyrn
+fn withTitle(h: Head, title: String) -> Head
+```
+
+`h` with the document title set. The page's title wins over its layouts'.
+
+## withStylesheet
+
+```vyrn
+fn withStylesheet(h: Head, href: String) -> Head
+```
+
+`h` with a `<link rel="stylesheet" href=…>` appended.
+
+## withModule
+
+```vyrn
+fn withModule(h: Head, src: String) -> Head
+```
+
+`h` with a `<script type="module" src=…>` appended.
+
+## withScript
+
+```vyrn
+fn withScript(h: Head, src: String) -> Head
+```
+
+`h` with a classic `<script src=…>` appended.
+
+## withMeta
+
+```vyrn
+fn withMeta(h: Head, name: String, content: String) -> Head
+```
+
+`h` with a `<meta name=… content=…>` appended.
+
+## headHtml
+
+```vyrn
+fn headHtml(h: Head) -> Array<Html>
+```
+
+A head's elements, in the document order `document(title, head, body)` emits.
+Byte-identical to what the `head { … }` block compiled to, element for
+element — which is what keeps a migrated page's SSR bytes unchanged.
+
+## headTitleOf
+
+```vyrn
+fn headTitleOf(h: Head) -> String
+```
+
+A head's document title, or "" when it declares none — the spelling
+`uiFirst` composes through the layout chain.
+
+## Query
+
+```vyrn
+type Query = { run: fn() -> T, lazy: Bool }
+```
+
+A page's data: the call that produces it, deferred until the router asks, and
+whether the page renders LAZILY (RFC-0070 — the shell paints instantly on a
+client soft nav and the data region fills in when the payload lands).
+
+    export fn data() -> Query<Array<Paste>> {
+        return lazy(query(|| listPastes().pastes))
+    }
+
+## query
+
+```vyrn
+fn query<T>(run: fn() -> T) -> Query<T>
+```
+
+A query over `run`, resolved before the page renders.
+
+## lazy
+
+```vyrn
+fn lazy<T>(q: Query<T>) -> Query<T>
+```
+
+`q` marked lazy: the page renders its shell and a skeleton first, then fills
+the data region in. The server always has the data, so SSR is unaffected.
+
+## runQuery
+
+```vyrn
+fn runQuery<T>(q: Query<T>) -> T
+```
+
+Run a query, producing the page's data.
+
+## noQuery
+
+```vyrn
+fn noQuery() -> Query<Unit>
+```
+
+The absent query — the default for a page that declares no `data`, and the
+value a generator substitutes when it finds none. A page with no data has
+nothing to produce, which is what `Query<Unit>` says.
+
 ## uiDataMarker
 
 ```vyrn

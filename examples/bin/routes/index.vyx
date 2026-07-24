@@ -4,22 +4,29 @@
 // page is pure over its data and the CLIENT bundle can render it on a soft nav; the
 // browser create-island hydrates #app, booted by the /app.js head include.
 //
-// RFC-0070: the loader is `lazy`, so on a client soft nav the shell (create form +
+// RFC-0070: the query is `lazy`, so on a client soft nav the shell (create form +
 // headings) paints INSTANTLY and the list region shows a one-row spinner until the
 // data arrives — then vyrn-dom patches only that region in. The FIRST load is full
 // SSR: the server always has the data, so it renders `Ready` (the real list, no
 // skeleton). The view is over `PageData<Array<Paste>>` (`Loading | Ready(T)`).
+//
+// RFC-0071: `head` and `data` are declared members of the `std/ui:Page` contract,
+// not names a scanner hunts for. Misspell either and the build says so.
 import { listPastes } from "../contract"
 import { Paste } from "../wire"
 import { format, fromMillis } from "std/time"
+import { Head, Query, noHead, withModule, query, lazy } from "std/ui"
 import { i18n } from "std/i18n"
 import * as t from i18n("../strings")
-head {
-    module "/app.js"
+
+/// The /app.js include that boots the browser create-island.
+export fn head() -> Head {
+    return withModule(noHead(), "/app.js")
 }
 
-lazy fn load() -> Array<Paste> {
-    return listPastes().pastes
+/// The recent pastes, filled in after the shell paints.
+export fn data() -> Query<Array<Paste>> {
+    return lazy(query(|| listPastes().pastes))
 }
 
 /// Whether the recent-pastes list is still loading (client soft nav only — the

@@ -105,6 +105,32 @@ error mapped to the `.vyx` line:col), a dynamic `:class="expr"` is coerced to
 `Tw` at runtime. `theme` resolves relative to the importing module, exactly
 like `dir`.
 
+## vyxQueryDataType
+
+```vyrn
+fn vyxQueryDataType(ret: String) -> String
+```
+
+The data type a `Query<T>` spelling carries ("" when `ret` is not a `Query`).
+This is what the page's synthesized `load()` returns, so `Query<Result<Paste,
+PageError>>` still routes through the `Result` failure path unchanged.
+EXPORTED so `std/ui` reads a `.vyrn` page's `data` return the same way,
+rather than keeping a second copy of the rule.
+
+## vyxPageInterface
+
+```vyrn
+fn vyxPageInterface(source: String) -> ModuleInterface
+```
+
+The PUBLIC surface a `.vyx` page's `<script>` declares — its statement-leading
+`export fn` declarations — as the reflection a contract check reads.
+
+A `.vyx` file is not a module (it is compiled INTO one), so there is no
+`moduleInterface` to ask; this is the equivalent, read from the source the
+author wrote. Everything NOT marked `export` is a private helper and is
+outside the contract entirely, which is exactly RFC-0071's rule.
+
 ## vyxPageShape
 
 ```vyrn
