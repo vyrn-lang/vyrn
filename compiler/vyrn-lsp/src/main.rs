@@ -94,10 +94,11 @@ fn load_context(
     let manifest_dir = std::path::Path::new(&path)
         .parent()
         .and_then(|d| find_manifest(d))
-        .map(|(dir, deps)| {
-            opts.aliases = deps.into_iter().collect();
-            opts.alias_base = dir.clone();
-            dir
+        .map(|m| {
+            opts.aliases = m.deps.into_iter().collect();
+            opts.alias_base = m.dir.clone();
+            opts.audience = m.audience;
+            m.dir
         });
     let resolver = EditorResolver { manifest_dir, overlays: overlays.clone() };
     Some((opts, resolver, path))
@@ -127,7 +128,7 @@ fn std_root() -> Option<String> {
 /// Find `vyrn.json` by walking up from `start`; returns the manifest's
 /// directory (slash-separated) and its `dependencies` import map. A compact
 /// duplicate of `vyrn`'s reader (the CLI is a binary crate, not linkable).
-fn find_manifest(start: &std::path::Path) -> Option<(String, Vec<(String, String)>)> {
+fn find_manifest(start: &std::path::Path) -> Option<Manifest> {
     use vyrn_frontend::schema::Json;
     let mut dir = start.to_path_buf();
     loop {
@@ -145,10 +146,22 @@ fn find_manifest(start: &std::path::Path) -> Option<(String, Vec<(String, String
                     .collect(),
                 _ => Vec::new(),
             };
-            return Some((dir.to_string_lossy().replace('\\', "/"), deps));
+            let slash = dir.to_string_lossy().replace('\\', "/");
+            let audience = vyrn_frontend::audience::from_manifest(&text, &slash);
+            return Some(Manifest { dir: slash, deps, audience });
         }
         dir = dir.parent()?.to_path_buf();
     }
+}
+
+/// The manifest facts a load needs: dependency aliases and, since RFC-0072, the
+/// declared audience vocabulary. Carried so the editor rejects an import that
+/// widens audience exactly where the compiler does — a rule you only discover at
+/// the shell is half a rule.
+struct Manifest {
+    dir: String,
+    deps: Vec<(String, String)>,
+    audience: Option<vyrn_frontend::audience::AudienceMap>,
 }
 
 /// Read-only module resolver for the editor: local paths from disk; remote

@@ -3198,3 +3198,58 @@ fn m4_the_repos_own_page_gets_contract_completion() {
     let _ = client.child.kill();
 }
 
+
+/// RFC-0072 M1: the audience rule reaches the EDITOR.
+///
+/// A rule you only discover at the shell is half a rule — the whole complaint
+/// against Nuxt's split is that a server import reaching a component is found
+/// later than it should be. The server carries the project's declared audience
+/// vocabulary into its load options, so a widening import squiggles as you type
+/// it, with the same message and the same note the compiler prints.
+#[test]
+fn a_widening_import_squiggles_in_the_editor() {
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-aud-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("server")).unwrap();
+    std::fs::create_dir_all(dir.join("app")).unwrap();
+    std::fs::write(
+        dir.join("vyrn.json"),
+        "{\n  \"name\": \"aud\",\n  \"main\": \"main.vyrn\",\n  \"audience\": { \"server\": [\"server\"], \"client\": [\"client\"], \"universal\": [\"app\"] }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("server/store.vyrn"),
+        "export fn secret() -> Int64 {\n    return 7\n}\n",
+    )
+    .unwrap();
+    let page = dir.join("app/view.vyrn");
+    let text = "import { secret } from \"../server/store\"\n\nexport fn view() -> Int64 {\n    return secret()\n}\n";
+    std::fs::write(&page, text).unwrap();
+    let uri = format!("file:///{}", page.to_string_lossy().replace('\\', "/"));
+
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+        "params": { "capabilities": {}, "processId": null }
+    }));
+    let _ = client.read_response(&init_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": { "textDocument": {
+            "uri": uri.clone(), "languageId": "vyrn", "version": 1, "text": text
+        } }
+    }));
+    let notif = client.read_notification("textDocument/publishDiagnostics");
+    let diags = notif["params"]["diagnostics"].as_array().unwrap();
+    let msg = diags
+        .iter()
+        .filter_map(|d| d["message"].as_str())
+        .find(|m| m.contains("cannot import"))
+        .unwrap_or_else(|| panic!("expected an audience diagnostic, got {diags:?}"));
+    assert!(msg.contains("app/view.vyrn` is universal"), "{msg}");
+    assert!(msg.contains("`server/store.vyrn`, which is server-only"), "{msg}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
