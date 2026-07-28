@@ -451,7 +451,29 @@ fn handle_initialize(connection: &Connection) -> Result<(), ()> {
 }
 
 fn main_loop(connection: &Connection, server: &mut Server) {
-    while let Ok(msg) = connection.receiver.recv() {
+    // URIs whose analysis is owed. Held only while more messages are already
+    // waiting — the moment the queue is empty they are analyzed, so nothing is
+    // delayed on an idle connection and no timer is involved.
+    let mut owed: Vec<Url> = Vec::new();
+    loop {
+        let msg = if owed.is_empty() {
+            match connection.receiver.recv() {
+                Ok(m) => m,
+                Err(_) => return,
+            }
+        } else {
+            // Something is owed: take whatever is ALREADY queued first, so a
+            // burst collapses. When nothing is left, settle the debt.
+            match connection.receiver.try_recv() {
+                Ok(m) => m,
+                Err(_) => {
+                    for uri in std::mem::take(&mut owed) {
+                        refresh_document(connection, server, &uri);
+                    }
+                    continue;
+                }
+            }
+        };
         match msg {
             Message::Request(req) => {
                 // `handle_shutdown` replies to `shutdown` and returns true; it
@@ -459,6 +481,10 @@ fn main_loop(connection: &Connection, server: &mut Server) {
                 // and the io threads can drain.
                 if connection.handle_shutdown(&req).unwrap_or(false) {
                     return;
+                }
+                // A request reads the analysis, so settle anything owed first.
+                for uri in std::mem::take(&mut owed) {
+                    refresh_document(connection, server, &uri);
                 }
                 let m = req.method.clone();
                 let u = request_uri(&req).map(|u| u.to_string()).unwrap_or_default();
@@ -491,7 +517,16 @@ fn main_loop(connection: &Connection, server: &mut Server) {
                         ))
                         .unwrap_or_default()
                 ));
-                handle_notification(connection, server, notif);
+                match handle_notification(connection, server, notif) {
+                    // Newest wins: one entry per document, refreshed once.
+                    Owed::Analyze(uri) => {
+                        owed.retain(|u| u != &uri);
+                        owed.push(uri);
+                    }
+                    // A close cancels the analysis it would have raced.
+                    Owed::Forget(uri) => owed.retain(|u| u != &uri),
+                    Owed::Nothing => {}
+                }
             }
             Message::Response(_) => {} // we sent no requests; ignore responses
         }
@@ -2438,7 +2473,18 @@ fn refresh_document(connection: &Connection, server: &mut Server, uri: &Url) {
     }
 }
 
-fn handle_notification(connection: &Connection, server: &mut Server, notif: Notification) {
+/// Apply a notification's effect on server state and return the URI that now
+/// OWES an analysis, if any. The analysis itself is the caller's business —
+/// `main_loop` defers it until the message queue is drained, so a burst of
+/// keystrokes costs one analysis of the newest text rather than one per
+/// character. That matters most where analysis is slowest: editing a `.vyx`
+/// re-runs its owner's generators, which is seconds, and five queued keystrokes
+/// used to mean five of them back to back.
+fn handle_notification(
+    connection: &Connection,
+    server: &mut Server,
+    notif: Notification,
+) -> Owed {
     // Dispatch on the notification method. `lsp-types` gives typed params per
     // known method; unknown notifications are ignored.
     if DidOpenTextDocument::METHOD == notif.method {
@@ -2451,7 +2497,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             if let Some(p) = uri_path(&uri) {
                 server.vyx_ownerless.remove(&p);
             }
-            refresh_document(connection, server, &uri);
+            return Owed::Analyze(uri);
         }
     } else if DidChangeTextDocument::METHOD == notif.method {
         if let Ok(params) = serde_json::from_value::<DidChangeTextDocumentParams>(notif.params) {
@@ -2459,7 +2505,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             // Full sync: the last change carries the entire document text.
             if let Some(change) = params.content_changes.into_iter().last() {
                 server.docs.insert(uri.clone(), change.text.clone());
-                refresh_document(connection, server, &uri);
+                return Owed::Analyze(uri);
             }
         }
     } else if DidCloseTextDocument::METHOD == notif.method {
@@ -2467,6 +2513,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             // Drop the document and clear its diagnostics.
             server.docs.remove(&params.text_document.uri);
             server.analyses.remove(&params.text_document.uri);
+            let closed = params.text_document.uri.clone();
             let _ = connection.sender.send(Message::Notification(Notification::new(
                 PublishDiagnostics::METHOD.to_string(),
                 PublishDiagnosticsParams {
@@ -2475,9 +2522,21 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
                     version: None,
                 },
             )));
+            return Owed::Forget(closed);
         }
     }
     // Other notifications (didSave, etc.) are ignored.
+    Owed::Nothing
+}
+
+/// What a notification leaves outstanding. A close must be able to CANCEL a
+/// pending analysis: `reanalyze_root` falls back to reading the file from disk
+/// when a document is not open, so an analysis still owed when the client closes
+/// the document would re-publish diagnostics the close just cleared.
+enum Owed {
+    Analyze(Url),
+    Forget(Url),
+    Nothing,
 }
 
 /// Push the frontend's diagnostics for `uri` to the client.
