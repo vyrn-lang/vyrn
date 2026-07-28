@@ -1164,6 +1164,28 @@ pub struct GenInputs<'a> {
     pub max_output: usize,
 }
 
+/// An alternative engine for running a generator (RFC-0076).
+///
+/// The frontend defines this seam and nothing more: compiling a generator to
+/// wasm needs codegen and clang, which only the driver has, so the driver
+/// installs an engine and the frontend stays free of external dependencies.
+///
+/// Returning `None` means "not served" — not an error. Every generator the wasm
+/// path cannot yet handle falls through to the interpreter, which stays the
+/// reference the alternative is checked against.
+pub type GenEngine =
+    dyn Fn(&Program, &str, &[crate::consteval::ConstVal], &GenInputs<'_>) -> Option<Result<GenOutput, String>>
+        + Send
+        + Sync;
+
+static GEN_ENGINE: std::sync::OnceLock<Box<GenEngine>> = std::sync::OnceLock::new();
+
+/// Install the alternative generation engine. Called once, by the driver, before
+/// any load. A second call is ignored rather than racing.
+pub fn set_gen_engine(engine: Box<GenEngine>) {
+    let _ = GEN_ENGINE.set(engine);
+}
+
 /// Run `fn_name` in `program` as a **generation target** (RFC-0021): under the
 /// capability-mediated sandbox in `inputs`, with `args` (compile-time constants)
 /// as its arguments. Returns the returned `String` (the synthesized module
@@ -1173,6 +1195,23 @@ pub struct GenInputs<'a> {
 /// ordinary Vyrn code — the ONLY differences from a normal call are the mediated
 /// `readFile`/`listDir`/`moduleInterface` and the step/size guardrails.
 pub fn generate(
+    program: &Program,
+    fn_name: &str,
+    args: &[crate::consteval::ConstVal],
+    inputs: GenInputs<'_>,
+) -> Result<GenOutput, String> {
+    // RFC-0076: an installed engine gets first refusal; `None` falls through.
+    if let Some(engine) = GEN_ENGINE.get() {
+        if let Some(out) = engine(program, fn_name, args, &inputs) {
+            return out;
+        }
+    }
+    generate_interpreted(program, fn_name, args, inputs)
+}
+
+/// The tree-walking generation path — the reference implementation, and the
+/// fallback whenever an installed engine declines.
+pub fn generate_interpreted(
     program: &Program,
     fn_name: &str,
     args: &[crate::consteval::ConstVal],
