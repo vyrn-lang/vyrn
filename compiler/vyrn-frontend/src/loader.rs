@@ -1103,15 +1103,7 @@ fn run_generator(
             }
         }
     }
-    let sources_hash = generator_sources_hash(
-        &gen_source,
-        &gen_mod_key,
-        opts,
-        resolver,
-        name,
-        &arg_repr,
-        &allowed,
-    )?;
+    let sources_hash = generator_cache_key(&gen_mod_key, name, &arg_repr, &allowed);
     let no_cache = std::env::var("VYRN_NO_GEN_CACHE").is_ok();
 
     // 5a. Cache hit: every recorded input still hashes as it did ⇒ reuse output.
@@ -1133,7 +1125,9 @@ fn run_generator(
     //     skip on a hit: an entry is only written after a successful run, which
     //     already passed this same check, and the generator's sources are part
     //     of the cache key — so any edit to it misses and re-checks here.
-    let mut gen_program = load(&gen_source, &gen_mod_key, opts, resolver)?;
+    let (loaded, _, _, gen_graph) =
+        load_with_origins(&gen_source, &gen_mod_key, opts, resolver);
+    let mut gen_program = loaded?;
     let mut gdiags = crate::checker::check_accum(&gen_program);
     if gdiags.is_empty() {
         gdiags.extend(crate::movecheck::check_accum(&gen_program));
@@ -1180,59 +1174,58 @@ fn run_generator(
     // 6. Cache the output keyed by its recorded inputs, for the next load / the
     //    LSP's per-keystroke re-analysis.
     if !no_cache {
-        let inputs: Vec<(String, String)> = out
+        let mut inputs: Vec<(String, String)> = out
             .reads
             .iter()
             .map(|(p, bytes)| (p.clone(), crate::hash::sha256_hex(bytes)))
             .collect();
-        resolver.gen_cache_put(&sources_hash, &render_cache_entry(&inputs, &out.source));
+        // The generator's OWN transitive sources join the recorded inputs. That is
+        // what lets the lookup key stay cheap: the entry now carries everything
+        // needed to decide whether it is still valid, instead of the key having to
+        // encode it (which meant discovering the closure, which meant parsing the
+        // whole generator graph, on every keystroke).
+        //
+        // `current_input_hash` must be able to re-read every recorded path. A
+        // generated module's key is a banner no resolver can read, so if the
+        // closure contains one, DO NOT write an entry: an unverifiable input is
+        // worse than a cache miss.
+        let mut describable = true;
+        for (key, _, _) in &gen_graph {
+            match current_input_hash(resolver, key) {
+                Some(h) => inputs.push((key.clone(), h)),
+                None => {
+                    describable = false;
+                    break;
+                }
+            }
+        }
+        if describable {
+            resolver.gen_cache_put(&sources_hash, &render_cache_entry(&inputs, &out.source));
+        }
     }
     Ok((gen_key, Some(out.source)))
 }
 
-/// `sha256(sorted generator module sources ++ name ++ args ++ resolved inputs)`
-/// — the stable part of the cache key (the generator's code + its call + WHERE
-/// its call resolves to). The exact bytes each input currently holds are verified
-/// separately at hit time; folding the RESOLVED input roots in here keys the
-/// entry on the importer's location too, so two modules in different directories
-/// calling the same generator with the same RELATIVE arg string (e.g. both
-/// `rpcClient("./api")`) never collide onto one entry — a relative specifier
-/// means different files in different importers.
-fn generator_sources_hash(
-    gen_source: &str,
-    gen_mod_key: &str,
-    opts: &LoadOptions,
-    resolver: &dyn ModuleResolver,
-    name: &str,
-    arg_repr: &str,
-    resolved_inputs: &[String],
-) -> Result<String, Vec<Diagnostic>> {
-    let graph = module_graph(gen_source, gen_mod_key, opts, resolver)?;
-    let mut keys: Vec<String> = graph.into_iter().map(|(k, _)| k).collect();
-    keys.sort();
+/// The cache LOOKUP key: `sha256(generator module ++ name ++ args ++ resolved
+/// input roots)`. Deliberately does NOT hash the generator's sources.
+///
+/// It used to. Encoding the generator's code in the key meant discovering its
+/// transitive module closure, which meant a full recursive parse-walk of that
+/// graph plus a re-read of every module — measured at 37 ms of a 94 ms keystroke,
+/// paid on every cache HIT, to compute a key whose only job was to find an entry
+/// that then validates itself anyway.
+///
+/// Validation moved to where it belongs: the entry records the generator's own
+/// sources among its inputs, so a hit re-hashes those files and misses if any
+/// changed. Same files checked, discovered from the entry instead of rediscovered
+/// by parsing. The trade is that two versions of a generator now collide on one
+/// key and take turns owning the entry, rather than each keeping their own.
+fn generator_cache_key(gen_mod_key: &str, name: &str, arg_repr: &str, resolved_inputs: &[String]) -> String {
     let mut blob: Vec<u8> = Vec::new();
-    for k in &keys {
-        let src = resolver.read(k).map_err(|e| {
-            vec![Diagnostic::error(
-                0,
-                0,
-                "load",
-                format!("cannot read `{k}`: {e}"),
-            )]
-        })?;
-        blob.extend_from_slice(k.as_bytes());
-        blob.push(0);
-        blob.extend_from_slice(src.as_bytes());
+    for part in [gen_mod_key, name, arg_repr] {
+        blob.extend_from_slice(part.as_bytes());
         blob.push(0);
     }
-    // The generator's own name — one module may export several `gen fn`s, and
-    // distinct generators over the same arguments must not share a cache entry.
-    blob.extend_from_slice(name.as_bytes());
-    blob.push(0);
-    blob.extend_from_slice(arg_repr.as_bytes());
-    blob.push(0);
-    // The resolved input roots (the arg paths rebased onto the importer's
-    // directory). Sorted + deduped so the key is stable regardless of arg order.
     let mut inputs: Vec<&String> = resolved_inputs.iter().collect();
     inputs.sort();
     inputs.dedup();
@@ -1240,7 +1233,7 @@ fn generator_sources_hash(
         blob.extend_from_slice(p.as_bytes());
         blob.push(0);
     }
-    Ok(crate::hash::sha256_hex(&blob))
+    crate::hash::sha256_hex(&blob)
 }
 
 /// The current hash of a recorded generation input — a file (`resolver.read`) or
@@ -4401,6 +4394,62 @@ mod gen_tests {
         );
         run_with(root, &r).unwrap();
         assert_eq!(gen_run_count(), before + 2, "closure type edited: re-run");
+    }
+
+    /// The generator's OWN sources — its module and everything that module
+    /// imports — must invalidate its cache entry.
+    ///
+    /// They used to be hashed into the lookup key, which meant discovering the
+    /// closure (a full parse-walk) on every hit just to find the entry. They are
+    /// now recorded among the entry's inputs and re-hashed on lookup instead, so
+    /// this is the test that the move kept the guarantee: edit the generator, or
+    /// anything it imports, and the next load must RE-RUN rather than serve a
+    /// stale expansion.
+    #[test]
+    fn editing_the_generator_or_its_imports_invalidates_the_cache() {
+        let helper = r#"export fn tag() -> String { return "one" }"#;
+        let gen = r#"import { tag } from "./helper"
+export gen fn emit(x: String) -> String { return "export fn shape() -> String { return \"" + tag() + "\" }" }"#;
+        let root = r#"import { emit } from "./gen"
+import { shape } from emit("./seed")
+fn main() -> Int64 { return shape().byteLength }"#;
+        let mut r = CachingResolver::new(&[
+            ("gen.vyrn", gen),
+            ("helper.vyrn", helper),
+            ("seed.vyrn", "export fn seed() -> Int64 { return 0 }"),
+        ]);
+
+        let before = gen_run_count();
+        assert_eq!(run_with(root, &r).unwrap(), 3, "cold: `one`");
+        assert_eq!(gen_run_count(), before + 1, "cold: one run");
+        assert_eq!(run_with(root, &r).unwrap(), 3);
+        assert_eq!(gen_run_count(), before + 1, "warm: cache hit, no re-run");
+
+        // Edit a module the GENERATOR imports — never an argument, never read by
+        // the sandbox, reachable only through the generator's own module graph.
+        r.files.insert(
+            "helper.vyrn".to_string(),
+            r#"export fn tag() -> String { return "three" }"#.to_string(),
+        );
+        assert_eq!(
+            run_with(root, &r).unwrap(),
+            5,
+            "generator's import edited: fresh output, not the stale `one`"
+        );
+        assert_eq!(
+            gen_run_count(),
+            before + 2,
+            "generator's import edited: re-run"
+        );
+
+        // Edit the generator module itself.
+        r.files.insert("gen.vyrn".to_string(), gen.replace("tag()", "tag() + \"!\""));
+        assert_eq!(
+            run_with(root, &r).unwrap(),
+            6,
+            "generator edited: fresh output (`three` + `!`)"
+        );
+        assert_eq!(gen_run_count(), before + 3, "generator edited: re-run");
     }
 
     #[test]
