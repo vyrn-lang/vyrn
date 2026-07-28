@@ -540,6 +540,30 @@ pub fn load_with_origins(
     Warnings,
     ModuleGraph,
 ) {
+    // A fresh epoch for the outermost load only — see `current_input_hash`.
+    let depth = LOAD_DEPTH.with(|d| {
+        d.set(d.get() + 1);
+        d.get()
+    });
+    if depth == 1 {
+        LOAD_EPOCH.with(|e| e.set(e.get().wrapping_add(1)));
+    }
+    let out = load_with_origins_inner(root_source, root_path, opts, resolver);
+    LOAD_DEPTH.with(|d| d.set(d.get() - 1));
+    out
+}
+
+fn load_with_origins_inner(
+    root_source: &str,
+    root_path: &str,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+) -> (
+    Result<Program, Vec<Diagnostic>>,
+    crate::origin::OriginMaps,
+    Warnings,
+    ModuleGraph,
+) {
     match load_modules(root_source, root_path, opts, resolver) {
         Err((diags, origins)) => (Err(diags), origins, Vec::new(), Vec::new()),
         Ok((modules, root_key, origins, warnings)) => {
@@ -727,24 +751,65 @@ fn load_modules(
             states.insert(key.to_string(), true);
             return Ok(());
         }
-        let tokens = lexer::lex(&text).map_err(|mut d| {
-            if !is_root {
-                d.file = Some(key.to_string());
-            }
-            vec![d]
-        })?;
-        let (mut program, errors) = parser::parse_accum(tokens);
-        if !errors.is_empty() {
-            return Err(errors
-                .into_iter()
-                .map(|mut d| {
+        // Lex + parse, memoized on the module's TEXT.
+        //
+        // A keystroke changes one module, but the loader re-parsed every module
+        // reachable from the root: 32 modules and 719 KB for examples/bin, all
+        // but one of them byte-identical to the previous keystroke. The text is
+        // the whole input to lexing and parsing, so its hash is the whole key.
+        //
+        // Cached BEFORE the per-module attribution below, which depends on `key`
+        // and `is_root` rather than on the text, and so must still run — the same
+        // source loaded under two keys yields two different modules from one
+        // parse.
+        //
+        // Only successes are cached. A parse error's diagnostics are rewritten
+        // with the module key on the way out, and a failed module is not worth
+        // remembering.
+        let mut program = {
+            // Cheap, non-cryptographic: this key never leaves the process.
+            let hash = {
+                let mut h: u64 = 0xcbf29ce484222325;
+                for b in text.as_bytes() {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+                format!("{h:x}:{}", text.len())
+            };
+            if let Some(hit) = PARSE_CACHE.with(|c| c.borrow().get(&hash).cloned()) {
+                hit
+            } else {
+                let tokens = lexer::lex(&text).map_err(|mut d| {
                     if !is_root {
                         d.file = Some(key.to_string());
                     }
-                    d
-                })
-                .collect());
-        }
+                    vec![d]
+                })?;
+                let (parsed, errors) = parser::parse_accum(tokens);
+                if !errors.is_empty() {
+                    return Err(errors
+                        .into_iter()
+                        .map(|mut d| {
+                            if !is_root {
+                                d.file = Some(key.to_string());
+                            }
+                            d
+                        })
+                        .collect());
+                }
+                PARSE_CACHE.with(|c| {
+                    let mut c = c.borrow_mut();
+                    // ponytail: a keystroke replaces one entry and leaves the old
+                    // text's behind. Bounded crudely so a long editing session
+                    // cannot grow without limit; a proper LRU if it ever matters.
+                    if c.len() > 512 {
+                        c.clear();
+                    }
+                    c.insert(hash, parsed.clone());
+                });
+                parsed
+            }
+        };
 
         // Only the root configures logging (defaults are indistinguishable
         // from "unset", which is fine — they are the same behavior).
@@ -964,6 +1029,22 @@ const GEN_MAX_OUTPUT: usize = 4 * 1024 * 1024;
 /// skips interpretation) → on a miss, run the generator in the mediated sandbox,
 /// then cache the result keyed by `sha256(generator sources ++ args ++ inputs)`.
 #[allow(clippy::too_many_arguments)]
+thread_local! {
+    /// Bumped once per outermost load; stamps [`HASH_MEMO`] entries.
+    static LOAD_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Re-entrancy depth: generators load modules of their own.
+    static LOAD_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// `path -> (epoch, hash)` for generator-cache validation.
+    static HASH_MEMO: std::cell::RefCell<HashMap<String, (u64, Option<String>)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+thread_local! {
+    /// Parsed modules by content hash — see the memo in `visit`.
+    static PARSE_CACHE: std::cell::RefCell<HashMap<String, Program>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
 fn run_generator(
     importer: &str,
     importer_is_root: bool,
@@ -1239,7 +1320,31 @@ fn generator_cache_key(gen_mod_key: &str, name: &str, arg_repr: &str, resolved_i
 /// The current hash of a recorded generation input — a file (`resolver.read`) or
 /// a directory listing (a `dir/` marker, `resolver.list`). `None` if it can no
 /// longer be read (a miss: the input vanished).
+/// Memoized for the duration of ONE outermost load. Validating a generator cache
+/// hit re-reads and re-hashes every recorded input, and a root that imports seven
+/// generators validates the same std modules seven times — 8.6 ms of a 20 ms load.
+/// Files cannot change while a load is running, so computing each hash once is
+/// the same answer for less work. The epoch is bumped by the OUTERMOST load only
+/// (`load_with_origins` at depth 0), because generators re-enter the loader and a
+/// nested bump would throw the memo away mid-use.
 fn current_input_hash(resolver: &dyn ModuleResolver, path: &str) -> Option<String> {
+    let epoch = LOAD_EPOCH.with(|e| e.get());
+    if let Some(hit) = HASH_MEMO.with(|m| {
+        m.borrow()
+            .get(path)
+            .filter(|(e, _)| *e == epoch)
+            .map(|(_, h)| h.clone())
+    }) {
+        return hit;
+    }
+    let out = current_input_hash_uncached(resolver, path);
+    HASH_MEMO.with(|m| {
+        m.borrow_mut().insert(path.to_string(), (epoch, out.clone()));
+    });
+    out
+}
+
+fn current_input_hash_uncached(resolver: &dyn ModuleResolver, path: &str) -> Option<String> {
     if let Some(dir) = path.strip_suffix('/') {
         let mut names = resolver.list(dir).ok()?;
         names.sort();
