@@ -6358,6 +6358,15 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
     const HINT: &str = "generators run at compile time — they may not use `extern`, `spawn`, \
                         module state, `writeFile`, `readLine`, `args`, `readFileBytes`, or logging \
                         sinks";
+    // Whether a function violates purity on its own, and the call edges out of
+    // it, computed ONCE per function and shared by every generator's search.
+    // Both are functions of the body alone — nothing about them depends on which
+    // generator reached it — but `seen` is per-generator, so overlapping call
+    // graphs (every std generator bottoms out in the same std helpers) re-walked
+    // the same bodies once per generator, and twice on each visit: once for
+    // `direct`, once to expand its edges.
+    let mut facts: HashMap<String, (Option<String>, Vec<String>)> = HashMap::new();
+
     for g in gen_fns {
         // BFS the call graph from this generator to the nearest direct violation.
         let mut queue: std::collections::VecDeque<Vec<&str>> =
@@ -6367,7 +6376,11 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
         while let Some(path) = queue.pop_front() {
             let cur = *path.last().unwrap();
             let Some(f) = fn_map.get(cur) else { continue };
-            if let Some(reason) = direct(f) {
+            if !facts.contains_key(cur) {
+                facts.insert(cur.to_string(), (direct(f), expand(fn_calls(&f.body))));
+            }
+            let (violation, edges) = &facts[cur];
+            if let Some(reason) = violation.clone() {
                 let msg = if path.len() == 1 {
                     format!(
                         "line {}: `gen fn {}` is not comptime-pure: it {reason} ({HINT})",
@@ -6386,7 +6399,7 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
                 out.push(d);
                 break;
             }
-            for callee in expand(fn_calls(&f.body)) {
+            for callee in edges.clone() {
                 if let Some(next) = fn_map.get(callee.as_str()) {
                     if seen.insert(next.name.as_str()) {
                         let mut np: Vec<&str> = path.clone();
