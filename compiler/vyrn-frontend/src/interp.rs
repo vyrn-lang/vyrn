@@ -55,7 +55,12 @@ pub enum Val {
     /// precision at each step, matching the native backend's `float` ops.
     Float32(f32),
     Bool(bool),
-    Str(String),
+    /// Copy-on-write, like [`Val::Array`]. Generators pass multi-KB source
+    /// buffers by value all day; cloning one per reference and per call is the
+    /// largest remaining copy in the interpreter. `Rc<String>` rather than
+    /// `Rc<str>` so `Rc::make_mut` can still append in place — the accumulator
+    /// fast path depends on growing a string without reallocating it.
+    Str(std::rc::Rc<String>),
     Unit,
     /// An optional (RFC-0005): `Some(v)` or `None`.
     Option(Option<Box<Val>>),
@@ -187,7 +192,7 @@ fn code_splice(val: &Val, ctx: i64) -> Result<Vec<CodePiece>, Ctrl> {
         1 => match val {
             Val::Str(s) => {
                 if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                    text(s.clone())
+                    text(s.to_string())
                 } else {
                     Err(format!(
                         "cannot splice {s:?} as an identifier fragment: not `[A-Za-z0-9_]+`"
@@ -205,7 +210,7 @@ fn code_splice(val: &Val, ctx: i64) -> Result<Vec<CodePiece>, Ctrl> {
         _ => match val {
             Val::Str(s) => {
                 if is_bare_identifier(s) {
-                    text(s.clone())
+                    text(s.to_string())
                 } else {
                     Err(format!(
                         "cannot splice {s:?} as an identifier: not a valid non-keyword identifier"
@@ -279,8 +284,8 @@ fn is_bare_identifier(s: &str) -> bool {
 fn lex_tokens(source: &str) -> Vec<Val> {
     let token_val = |kind: &str, text: &str, line: usize, col: usize| {
         let mut r = HashMap::new();
-        r.insert("kind".to_string(), Val::Str(kind.to_string()));
-        r.insert("text".to_string(), Val::Str(text.to_string()));
+        r.insert("kind".to_string(), Val::Str(std::rc::Rc::new(kind.to_string())));
+        r.insert("text".to_string(), Val::Str(std::rc::Rc::new(text.to_string())));
         r.insert("line".to_string(), Val::Int(line as i64));
         r.insert("col".to_string(), Val::Int(col as i64));
         Val::Record(r)
@@ -380,7 +385,7 @@ fn scalar_to_string(v: &Val) -> String {
         Val::Float(f) => format!("{f:.6}"),
         Val::Float32(f) => format!("{:.6}", *f as f64),
         Val::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-        Val::Str(s) => s.clone(),
+        Val::Str(s) => (**s).clone(),
         other => format!("{other:?}"),
     }
 }
@@ -934,14 +939,14 @@ fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeRespons
     let headers = Val::Map(
         req.headers
             .into_iter()
-            .map(|(k, v)| (k, Val::Str(v)))
+            .map(|(k, v)| (k, Val::Str(std::rc::Rc::new(v))))
             .collect(),
     );
     let request = Val::Record(HashMap::from([
-        ("method".to_string(), Val::Str(req.method)),
-        ("path".to_string(), Val::Str(req.path)),
+        ("method".to_string(), Val::Str(std::rc::Rc::new(req.method))),
+        ("path".to_string(), Val::Str(std::rc::Rc::new(req.path))),
         ("headers".to_string(), headers),
-        ("body".to_string(), Val::Str(req.body)),
+        ("body".to_string(), Val::Str(std::rc::Rc::new(req.body))),
     ]));
     match interp.call("handle", &[request]) {
         Ok(Val::Record(map)) => {
@@ -951,15 +956,15 @@ fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeRespons
                 _ => return Err("handle returned a Response without an Int64 `status`".into()),
             };
             let content_type = match map.get("contentType") {
-                Some(Val::Str(s)) => s.clone(),
+                Some(Val::Str(s)) => (**s).clone(),
                 _ => return Err("handle returned a Response without a String `contentType`".into()),
             };
             let body = match map.get("body") {
-                Some(Val::Str(s)) => s.clone(),
+                Some(Val::Str(s)) => (**s).clone(),
                 _ => return Err("handle returned a Response without a String `body`".into()),
             };
             let vary = match map.get("vary") {
-                Some(Val::Str(s)) => s.clone(),
+                Some(Val::Str(s)) => (**s).clone(),
                 _ => return Err("handle returned a Response without a String `vary`".into()),
             };
             Ok(ServeResponse {
@@ -1131,11 +1136,11 @@ pub fn generate(
             ConstVal::Int(n) => Val::Int(*n),
             ConstVal::Bool(b) => Val::Bool(*b),
             ConstVal::Float(f) => Val::Float(*f),
-            ConstVal::Str(s) => Val::Str(s.clone()),
+            ConstVal::Str(s) => Val::Str(std::rc::Rc::new(s.clone())),
         })
         .collect();
     let source = match interp.call(fn_name, &vals) {
-        Ok(Val::Str(s)) => s,
+        Ok(Val::Str(s)) => (*s).clone(),
         // A `gen fn` may return `Code` directly (RFC-0054); render it here.
         Ok(Val::Code(pieces)) => render_code(&pieces),
         Ok(other) => {
@@ -1410,14 +1415,14 @@ impl<'a> Interp<'a> {
                 if content.as_bytes().contains(&0) {
                     return Ok(Val::Result(
                         false,
-                        Box::new(Val::Str(format!("`{path}` contains a NUL byte"))),
+                        Box::new(Val::Str(std::rc::Rc::new(format!("`{path}` contains a NUL byte")))),
                     ));
                 }
-                Ok(Val::Result(true, Box::new(Val::Str(content))))
+                Ok(Val::Result(true, Box::new(Val::Str(std::rc::Rc::new(content)))))
             }
             Err(_) => Ok(Val::Result(
                 false,
-                Box::new(Val::Str(format!("cannot read `{path}`"))),
+                Box::new(Val::Str(std::rc::Rc::new(format!("cannot read `{path}`")))),
             )),
         }
     }
@@ -1437,12 +1442,12 @@ impl<'a> Interp<'a> {
                     .push((format!("{resolved}/"), names.join("\n").into_bytes()));
                 Ok(Val::Result(
                     true,
-                    Box::new(Val::Array(std::rc::Rc::new(names.into_iter().map(Val::Str).collect()))),
+                    Box::new(Val::Array(std::rc::Rc::new(names.into_iter().map(|n| Val::Str(std::rc::Rc::new(n))).collect()))),
                 ))
             }
             Err(_) => Ok(Val::Result(
                 false,
-                Box::new(Val::Str(format!("cannot list `{path}`"))),
+                Box::new(Val::Str(std::rc::Rc::new(format!("cannot list `{path}`")))),
             )),
         }
     }
@@ -1974,7 +1979,7 @@ impl<'a> Interp<'a> {
                         let mut parts: Vec<String> = Vec::with_capacity(spine.len());
                         for e in spine {
                             match self.expr(e, scope)? {
-                                Val::Str(t) => parts.push(t),
+                                Val::Str(t) => parts.push((*t).clone()),
                                 // Not a String after all — rebuild through the
                                 // general path rather than guess.
                                 _ => {
@@ -1987,6 +1992,10 @@ impl<'a> Interp<'a> {
                             for frame in scope.iter_mut().rev() {
                                 if let Some(slot) = frame.get_mut(name) {
                                     if let Val::Str(head) = &mut slot.v {
+                                        // Copy-on-write: grows in place while the
+                                        // accumulator is unshared, which is the
+                                        // whole point of `Rc<String>` over `Rc<str>`.
+                                        let head = std::rc::Rc::make_mut(head);
                                         for t in &parts {
                                             head.push_str(t);
                                         }
@@ -2096,7 +2105,7 @@ impl<'a> Interp<'a> {
                                 v: Val::Map(pairs), ..
                             }) = frame.get_mut(name)
                             {
-                                insert_pair(pairs, k, v);
+                                insert_pair(pairs, (*k).clone(), v);
                                 return Ok(Flow::Normal);
                             }
                         }
@@ -2104,7 +2113,7 @@ impl<'a> Interp<'a> {
                             v: Val::Map(pairs), ..
                         }) = self.globals.borrow_mut().get_mut(name)
                         {
-                            insert_pair(pairs, k, v);
+                            insert_pair(pairs, (*k).clone(), v);
                             return Ok(Flow::Normal);
                         }
                         return Err(format!("index-assignment to unbound map `{name}`").into());
@@ -2296,7 +2305,7 @@ impl<'a> Interp<'a> {
             Expr::Byte(b) => Ok(Val::Int(*b as i64)),
             Expr::Float(x) => Ok(Val::Float(*x)),
             Expr::Bool(b) => Ok(Val::Bool(*b)),
-            Expr::Str(s) => Ok(Val::Str(s.clone())),
+            Expr::Str(s) => Ok(Val::Str(std::rc::Rc::new(s.clone()))),
             // A lambda literal: a `fn`-typed call argument (RFC-0023) or a
             // storage-position source (RFC-0037). Captures snapshot HERE (the
             // evaluation site — the capture-timing lock); the parameter/return
@@ -2518,7 +2527,7 @@ impl<'a> Interp<'a> {
                                     .map(|(k, v)| (k.to_string(), (*v).clone()))
                                     .collect();
                             let js = crate::types::json_schema_string(&owned[tn.as_str()], &owned);
-                            return Ok(Val::Str(js));
+                            return Ok(Val::Str(std::rc::Rc::new(js)));
                         }
                     }
                     return Err("`jsonSchema` needs a declared type name".into());
@@ -2533,7 +2542,7 @@ impl<'a> Interp<'a> {
                         .ok_or("`toJson` could not determine the argument's type")?;
                     let mut out = String::new();
                     self.encode_val(&v, &ty, &mut out)?;
-                    return Ok(Val::Str(out));
+                    return Ok(Val::Str(std::rc::Rc::new(out)));
                 }
                 // `fromJson(TypeName, s)` (RFC-0018) — type-directed decode into
                 // `Validation<T>`. Never traps; every problem is an accumulated
@@ -2642,7 +2651,7 @@ impl<'a> Interp<'a> {
                         }
                     };
                     let remove_from = |pairs: &mut Vec<(String, Val)>| -> bool {
-                        if let Some(i) = pairs.iter().position(|(k, _)| k == &key) {
+                        if let Some(i) = pairs.iter().position(|(k, _)| k.as_str() == key.as_str()) {
                             pairs.remove(i);
                             true
                         } else {
@@ -2725,11 +2734,11 @@ impl<'a> Interp<'a> {
                         // Drop calls below the configured threshold (RFC-0008).
                         if log_level_ordinal(name).unwrap_or(0) >= self.log_level {
                             let lname = match &vals[0] {
-                                Val::Str(s) => s.clone(),
+                                Val::Str(s) => (**s).clone(),
                                 other => format!("{other:?}"),
                             };
                             let msg = match &vals[1] {
-                                Val::Str(s) => s.clone(),
+                                Val::Str(s) => (**s).clone(),
                                 other => format!("{other:?}"),
                             };
                             let line = format!("[{}] {lname}: {msg}", name.to_uppercase());
@@ -2748,7 +2757,7 @@ impl<'a> Interp<'a> {
                     // `@concat` — internal spelling produced by interpolation
                     // (the surface form is `a + b`, handled in `binop`).
                     "@concat" => match (&vals[0], &vals[1]) {
-                        (Val::Str(a), Val::Str(b)) => Ok(Val::Str(format!("{a}{b}"))),
+                        (Val::Str(a), Val::Str(b)) => Ok(Val::Str(std::rc::Rc::new(format!("{a}{b}")))),
                         _ => Err("@concat of non-Strings".into()),
                     },
                     // RFC-0054 code quotes. `@codeText`/`@codeSplice` are the
@@ -2761,7 +2770,7 @@ impl<'a> Interp<'a> {
                     // unit-testable at runtime (RFC-0021: a `gen fn` is callable for
                     // testing).
                     "@codeText" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Code(vec![CodePiece::Text(s.clone())])),
+                        Val::Str(s) => Ok(Val::Code(vec![CodePiece::Text((**s).clone())])),
                         _ => Err("@codeText of non-String".into()),
                     },
                     "@codeSplice" => {
@@ -2772,16 +2781,16 @@ impl<'a> Interp<'a> {
                         Ok(Val::Code(code_splice(&vals[0], ctx)?))
                     }
                     "raw" if !shadowed => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Code(vec![CodePiece::Text(s.clone())])),
+                        Val::Str(s) => Ok(Val::Code(vec![CodePiece::Text((**s).clone())])),
                         _ => Err("`raw` of non-String".into()),
                     },
                     "rawAt" if !shadowed => {
                         let text = match &vals[0] {
-                            Val::Str(s) => s.clone(),
+                            Val::Str(s) => (**s).clone(),
                             _ => return Err("`rawAt` text must be a String".into()),
                         };
                         let path = match &vals[1] {
-                            Val::Str(s) => s.clone(),
+                            Val::Str(s) => (**s).clone(),
                             _ => return Err("`rawAt` path must be a String".into()),
                         };
                         let line = match &vals[2] {
@@ -2800,7 +2809,7 @@ impl<'a> Interp<'a> {
                         }]))
                     }
                     "render" if !shadowed => match &vals[0] {
-                        Val::Code(pieces) => Ok(Val::Str(render_code(pieces))),
+                        Val::Code(pieces) => Ok(Val::Str(std::rc::Rc::new(render_code(pieces)))),
                         _ => Err("`render` of non-Code".into()),
                     },
                     "lex" if !shadowed => match &vals[0] {
@@ -2836,7 +2845,7 @@ impl<'a> Interp<'a> {
                             if !s.is_char_boundary(a) || !s.is_char_boundary(b) {
                                 return Err("slice splits a UTF-8 character".into());
                             }
-                            Ok(Val::Str(s[a..b].to_string()))
+                            Ok(Val::Str(std::rc::Rc::new(s[a..b].to_string())))
                         }
                         _ => Err("slice of non-String/Int".into()),
                     },
@@ -2864,7 +2873,7 @@ impl<'a> Interp<'a> {
                     // wording (never Rust `io::Error` text) — kept byte-identical
                     // to the codegen's format strings so all three backends agree.
                     "args" => Ok(Val::Array(
-                        self.args.iter().map(|s| Val::Str(s.clone())).collect::<Vec<_>>().into(),
+                        self.args.iter().map(|s| Val::Str(std::rc::Rc::new(s.clone()))).collect::<Vec<_>>().into(),
                     )),
                     "readLine" => {
                         use std::io::BufRead;
@@ -2894,7 +2903,7 @@ impl<'a> Interp<'a> {
                             return Ok(Val::Option(None));
                         }
                         match String::from_utf8(buf) {
-                            Ok(s) => Ok(Val::Option(Some(Box::new(Val::Str(s))))),
+                            Ok(s) => Ok(Val::Option(Some(Box::new(Val::Str(std::rc::Rc::new(s)))))),
                             // Not valid UTF-8: not representable as a String → None
                             // (native rejects the same way via the UTF-8 DFA).
                             Err(_) => Ok(Val::Option(None)),
@@ -2910,7 +2919,7 @@ impl<'a> Interp<'a> {
                         if self.gen.is_some() {
                             return self.gen_read_file(&path);
                         }
-                        match std::fs::read(&path) {
+                        match std::fs::read(path.as_str()) {
                             Ok(bytes) => {
                                 // NUL first: a NUL byte IS valid UTF-8, but cannot
                                 // survive in a NUL-terminated String, so it is
@@ -2919,20 +2928,20 @@ impl<'a> Interp<'a> {
                                 if bytes.contains(&0) {
                                     return Ok(Val::Result(
                                         false,
-                                        Box::new(Val::Str(format!("`{path}` contains a NUL byte"))),
+                                        Box::new(Val::Str(std::rc::Rc::new(format!("`{path}` contains a NUL byte")))),
                                     ));
                                 }
                                 match String::from_utf8(bytes) {
-                                    Ok(s) => Ok(Val::Result(true, Box::new(Val::Str(s)))),
+                                    Ok(s) => Ok(Val::Result(true, Box::new(Val::Str(std::rc::Rc::new(s))))),
                                     Err(_) => Ok(Val::Result(
                                         false,
-                                        Box::new(Val::Str(format!("`{path}` is not valid UTF-8"))),
+                                        Box::new(Val::Str(std::rc::Rc::new(format!("`{path}` is not valid UTF-8")))),
                                     )),
                                 }
                             }
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(format!("cannot read `{path}`"))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot read `{path}`")))),
                             )),
                         }
                     }
@@ -2946,7 +2955,7 @@ impl<'a> Interp<'a> {
                         if self.gen.is_some() {
                             return self.gen_list_dir(&path);
                         }
-                        match std::fs::read_dir(&path) {
+                        match std::fs::read_dir(path.as_str()) {
                             Ok(entries) => {
                                 let mut names: Vec<String> = entries
                                     .filter_map(|e| e.ok())
@@ -2955,12 +2964,12 @@ impl<'a> Interp<'a> {
                                 names.sort();
                                 Ok(Val::Result(
                                     true,
-                                    Box::new(Val::Array(std::rc::Rc::new(names.into_iter().map(Val::Str).collect()))),
+                                    Box::new(Val::Array(std::rc::Rc::new(names.into_iter().map(|n| Val::Str(std::rc::Rc::new(n))).collect()))),
                                 ))
                             }
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(format!("cannot list `{path}`"))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot list `{path}`")))),
                             )),
                         }
                     }
@@ -2991,11 +3000,11 @@ impl<'a> Interp<'a> {
                                 return Err(format!("writeFile of non-String {other:?}").into())
                             }
                         };
-                        match std::fs::write(&path, contents.as_bytes()) {
+                        match std::fs::write(path.as_str(), contents.as_bytes()) {
                             Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(format!("cannot write `{path}`"))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot write `{path}`")))),
                             )),
                         }
                     }
@@ -3017,7 +3026,7 @@ impl<'a> Interp<'a> {
                                 return Err(format!("renameFile of non-String {other:?}").into())
                             }
                         };
-                        match std::fs::rename(&from, &to) {
+                        match std::fs::rename(from.as_str(), to.as_str()) {
                             Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
                             Err(e) => {
                                 let msg = if is_cross_device(&e) {
@@ -3025,7 +3034,7 @@ impl<'a> Interp<'a> {
                                 } else {
                                     format!("cannot write `{to}`")
                                 };
-                                Ok(Val::Result(false, Box::new(Val::Str(msg))))
+                                Ok(Val::Result(false, Box::new(Val::Str(std::rc::Rc::new(msg)))))
                             }
                         }
                     }
@@ -3043,13 +3052,13 @@ impl<'a> Interp<'a> {
                         // intact. A missing file is an error (`cannot write`).
                         let synced = std::fs::OpenOptions::new()
                             .write(true)
-                            .open(&path)
+                            .open(path.as_str())
                             .and_then(|f| f.sync_all());
                         match synced {
                             Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(format!("cannot write `{path}`"))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot write `{path}`")))),
                             )),
                         }
                     }
@@ -3061,7 +3070,7 @@ impl<'a> Interp<'a> {
                                 return Err(format!("readFileBytes of non-String {other:?}").into())
                             }
                         };
-                        match std::fs::read(&path) {
+                        match std::fs::read(path.as_str()) {
                             Ok(bytes) => Ok(Val::Result(
                                 true,
                                 Box::new(Val::Array(
@@ -3077,7 +3086,7 @@ impl<'a> Interp<'a> {
                             )),
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(format!("cannot read `{path}`"))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot read `{path}`")))),
                             )),
                         }
                     }
@@ -3100,14 +3109,14 @@ impl<'a> Interp<'a> {
                             if bytes.contains(&0) {
                                 return Ok(Val::Result(
                                     false,
-                                    Box::new(Val::Str("bytes contain a NUL byte".to_string())),
+                                    Box::new(Val::Str(std::rc::Rc::new("bytes contain a NUL byte".to_string()))),
                                 ));
                             }
                             match String::from_utf8(bytes) {
-                                Ok(s) => Ok(Val::Result(true, Box::new(Val::Str(s)))),
+                                Ok(s) => Ok(Val::Result(true, Box::new(Val::Str(std::rc::Rc::new(s))))),
                                 Err(_) => Ok(Val::Result(
                                     false,
-                                    Box::new(Val::Str("bytes are not valid UTF-8".to_string())),
+                                    Box::new(Val::Str(std::rc::Rc::new("bytes are not valid UTF-8".to_string()))),
                                 )),
                             }
                         }
@@ -3116,15 +3125,15 @@ impl<'a> Interp<'a> {
                     // Text encodings: encoders return a String; decoders return
                     // `Option<String>` (None on malformed input or non-UTF-8 result).
                     "hexEncode" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Str(hex_encode(s))),
+                        Val::Str(s) => Ok(Val::Str(std::rc::Rc::new(hex_encode(s)))),
                         _ => Err("hexEncode of non-String".into()),
                     },
                     "base64Encode" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Str(base64_encode(s))),
+                        Val::Str(s) => Ok(Val::Str(std::rc::Rc::new(base64_encode(s)))),
                         _ => Err("base64Encode of non-String".into()),
                     },
                     "urlEncode" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Str(url_encode(s))),
+                        Val::Str(s) => Ok(Val::Str(std::rc::Rc::new(url_encode(s)))),
                         _ => Err("urlEncode of non-String".into()),
                     },
                     "hexDecode" | "base64Decode" | "urlDecode" => {
@@ -3136,7 +3145,7 @@ impl<'a> Interp<'a> {
                             },
                             _ => return Err(format!("{name} of non-String").into()),
                         };
-                        Ok(Val::Option(out.map(|s| Box::new(Val::Str(s)))))
+                        Ok(Val::Option(out.map(|s| Box::new(Val::Str(std::rc::Rc::new(s))))))
                     }
                     // `@str` (from `x.toString()` and interpolation) must render
                     // exactly as `print` does: signed IntN by value, unsigned as
@@ -3147,7 +3156,7 @@ impl<'a> Interp<'a> {
                         | Val::Float(_)
                         | Val::Float32(_)
                         | Val::Bool(_)
-                        | Val::Str(_) => Ok(Val::Str(scalar_to_string(&vals[0]))),
+                        | Val::Str(_) => Ok(Val::Str(std::rc::Rc::new(scalar_to_string(&vals[0])))),
                         other => Err(format!("str of unsupported value {other:?}").into()),
                     },
                     // `@charCount` (from `s.charCount()`, RFC-0058): the number of
@@ -3270,7 +3279,7 @@ impl<'a> Interp<'a> {
                         (Val::Map(pairs), Val::Str(k)) => Ok(Val::Option(
                             pairs
                                 .iter()
-                                .find(|(pk, _)| pk == k)
+                                .find(|(pk, _)| pk.as_str() == k.as_str())
                                 .map(|(_, v)| Box::new(v.clone())),
                         )),
                         _ => Err("at of non-Array/Int64".into()),
@@ -3278,7 +3287,7 @@ impl<'a> Interp<'a> {
                     // `m.has(k)` (RFC-0028) — membership test.
                     "@has" => match (&vals[0], &vals[1]) {
                         (Val::Map(pairs), Val::Str(k)) => {
-                            Ok(Val::Bool(pairs.iter().any(|(pk, _)| pk == k)))
+                            Ok(Val::Bool(pairs.iter().any(|(pk, _)| pk.as_str() == k.as_str())))
                         }
                         _ => Err("`has` needs a Map and a String key".into()),
                     },
@@ -3286,7 +3295,7 @@ impl<'a> Interp<'a> {
                     // insertion order (safe to mutate the map while iterating it).
                     "@keys" => match &vals[0] {
                         Val::Map(pairs) => Ok(Val::Array(
-                            pairs.iter().map(|(k, _)| Val::Str(k.clone())).collect::<Vec<_>>().into(),
+                            pairs.iter().map(|(k, _)| Val::Str(std::rc::Rc::new(k.clone()))).collect::<Vec<_>>().into(),
                         )),
                         other => Err(format!("`keys` needs a Map, found {other:?}").into()),
                     },
@@ -3545,10 +3554,10 @@ impl<'a> Interp<'a> {
                         }
                     };
                     let v = self.expr(ve, scope)?;
-                    if let Some(slot) = pairs.iter_mut().find(|(pk, _)| pk == &k) {
+                    if let Some(slot) = pairs.iter_mut().find(|(pk, _)| pk.as_str() == k.as_str()) {
                         slot.1 = v;
                     } else {
-                        pairs.push((k, v));
+                        pairs.push(((*k).clone(), v));
                     }
                 }
                 Ok(Val::Map(pairs))
@@ -3853,7 +3862,7 @@ impl<'a> Interp<'a> {
             },
             (Val::Str(a), Val::Str(b)) => match op {
                 // `a + b` concatenates (replacing `concat`) — a fresh String.
-                Add => Ok(Val::Str(format!("{a}{b}"))),
+                Add => Ok(Val::Str(std::rc::Rc::new(format!("{a}{b}")))),
                 Eq => Ok(Val::Bool(a == b)),
                 NotEq => Ok(Val::Bool(a != b)),
                 // Ordering is byte-wise lexicographic (UTF-8 byte order — Rust's
@@ -4441,7 +4450,7 @@ impl<'a> Interp<'a> {
                 }
             },
             Type::Str => match json {
-                JsonV::Str(s) => Some(Val::Str(s.clone())),
+                JsonV::Str(s) => Some(Val::Str(std::rc::Rc::new(s.clone()))),
                 _ => {
                     issues.push(self.type_issue(path, "string", json));
                     None
@@ -4574,9 +4583,9 @@ impl<'a> Interp<'a> {
     /// Build an `Issue { key, path, message }` record value.
     fn issue_val(&self, key: &str, path: &str, message: &str) -> Val {
         let mut m = HashMap::new();
-        m.insert("key".to_string(), Val::Str(key.to_string()));
-        m.insert("path".to_string(), Val::Str(path.to_string()));
-        m.insert("message".to_string(), Val::Str(message.to_string()));
+        m.insert("key".to_string(), Val::Str(std::rc::Rc::new(key.to_string())));
+        m.insert("path".to_string(), Val::Str(std::rc::Rc::new(path.to_string())));
+        m.insert("message".to_string(), Val::Str(std::rc::Rc::new(message.to_string())));
         Val::Record(m)
     }
 
@@ -4764,7 +4773,7 @@ mod tests {
         );
         // "alpha\nbeta" is 10 bytes.
         assert_eq!(run(&src).unwrap(), 10);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.as_str());
     }
 
     #[test]
@@ -4806,7 +4815,7 @@ mod tests {
     #[test]
     fn rfc0044_write_atomic_replaces_and_leaves_no_tmp() {
         let path = temp_path("wa-ok");
-        std::fs::write(&path, "OLD").unwrap();
+        std::fs::write(path.as_str(), "OLD").unwrap();
         let src = format!(
             "fn writeAtomic(path: String, content: String) -> Result<Bool, String> {{ \
                  let tmp = \"\\{{path}}.tmp\" \
@@ -4817,9 +4826,9 @@ mod tests {
                      Ok(b) => 1, Err(e) => 0 }} }}"
         );
         assert_eq!(run(&src).unwrap(), 1);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "BRANDNEW");
+        assert_eq!(std::fs::read_to_string(path.as_str()).unwrap(), "BRANDNEW");
         assert!(!std::path::Path::new(&format!("{path}.tmp")).exists());
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.as_str());
     }
 
     /// THE atomicity proof: when the temp write FAILS, `writeAtomic` never touches
@@ -4831,7 +4840,7 @@ mod tests {
         let path = temp_path("wa-tear");
         let tmp = format!("{path}.tmp");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::write(&path, "ORIGINAL").unwrap();
+        std::fs::write(path.as_str(), "ORIGINAL").unwrap();
         std::fs::create_dir(&tmp).unwrap(); // writeFile("<path>.tmp") now fails
         let src = format!(
             "fn writeAtomic(path: String, content: String) -> Result<Bool, String> {{ \
@@ -4845,9 +4854,9 @@ mod tests {
         // The write reports failure...
         assert_eq!(run(&src).unwrap(), 0);
         // ...and — the point — the original target is untouched.
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ORIGINAL");
+        assert_eq!(std::fs::read_to_string(path.as_str()).unwrap(), "ORIGINAL");
         let _ = std::fs::remove_dir_all(&tmp);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.as_str());
     }
 
     /// `load(TypeName, path)` distinguishes the three honest outcomes: a missing
@@ -4914,7 +4923,7 @@ mod tests {
     #[test]
     fn rfc0044_fsync_file_ok_and_missing() {
         let path = temp_path("fs-ok");
-        std::fs::write(&path, "durable").unwrap();
+        std::fs::write(path.as_str(), "durable").unwrap();
         let src = format!(
             "fn main() -> Int64 {{ \
                  let a = match fsyncFile(\"{path}\") {{ Ok(b) => 1, Err(e) => 0 }} \
@@ -4922,7 +4931,7 @@ mod tests {
                  return a * 10 + b }}"
         );
         assert_eq!(run(&src).unwrap(), 11);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.as_str());
     }
 
     #[test]
@@ -4984,7 +4993,7 @@ mod tests {
     #[test]
     fn read_file_bytes_reads_binary() {
         let path = temp_path("binary");
-        std::fs::write(&path, [0u8, 1, 2, 0xFF, 0]).unwrap();
+        std::fs::write(path.as_str(), [0u8, 1, 2, 0xFF, 0]).unwrap();
         let src = format!(
             "fn main() -> Int64 {{ \
                  return match readFileBytes(\"{path}\") {{ \
@@ -4994,7 +5003,7 @@ mod tests {
         );
         // Binary read: NUL and invalid-UTF-8 bytes are fine, all 5 come back.
         assert_eq!(run(&src).unwrap(), 5);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.as_str());
     }
 
     #[test]
@@ -5483,7 +5492,7 @@ mod tests {
         // An injection attempt: a String value carrying Vyrn syntax becomes an
         // escaped string LITERAL, never code (splice-rule safety by construction).
         let evil = "ev\"; dropTables(); \"";
-        let pieces = code_splice(&Val::Str(evil.to_string()), 0).unwrap();
+        let pieces = code_splice(&Val::Str(std::rc::Rc::new(evil.to_string())), 0).unwrap();
         assert_eq!(pieces.len(), 1);
         match &pieces[0] {
             CodePiece::Text(t) => {
@@ -5513,7 +5522,7 @@ mod tests {
     #[test]
     fn splice_bad_identifier_names_the_problem() {
         // `a b` (a space) in identifier position is a comptime error.
-        let err = code_splice(&Val::Str("a b".to_string()), 2).unwrap_err();
+        let err = code_splice(&Val::Str(std::rc::Rc::new("a b".to_string())), 2).unwrap_err();
         let msg = match err {
             Ctrl::Err(s) => s,
             _ => panic!("expected Err"),
@@ -5525,10 +5534,10 @@ mod tests {
     #[test]
     fn splice_keyword_is_rejected_in_identifier_position() {
         // A keyword is not a valid standalone identifier.
-        assert!(code_splice(&Val::Str("fn".to_string()), 2).is_err());
+        assert!(code_splice(&Val::Str(std::rc::Rc::new("fn".to_string())), 2).is_err());
         // A valid identifier is accepted verbatim.
         assert_eq!(
-            code_splice(&Val::Str("greet".to_string()), 2).unwrap(),
+            code_splice(&Val::Str(std::rc::Rc::new("greet".to_string())), 2).unwrap(),
             vec![CodePiece::Text("greet".to_string())]
         );
     }
@@ -5538,10 +5547,10 @@ mod tests {
         // A fragment (ctx 1) merges with adjacent word chars, so a leading digit
         // is fine; a space or symbol is not.
         assert_eq!(
-            code_splice(&Val::Str("123".to_string()), 1).unwrap(),
+            code_splice(&Val::Str(std::rc::Rc::new("123".to_string())), 1).unwrap(),
             vec![CodePiece::Text("123".to_string())]
         );
-        assert!(code_splice(&Val::Str("a-b".to_string()), 1).is_err());
+        assert!(code_splice(&Val::Str(std::rc::Rc::new("a-b".to_string())), 1).is_err());
     }
 
     #[test]
@@ -5582,7 +5591,7 @@ mod tests {
         let toks = lex_tokens("// props here\nlet x = 1");
         assert!(
             !toks.iter().any(|t| matches!(t, Val::Record(r)
-                if matches!(r.get("text"), Some(Val::Str(s)) if s == "props"))),
+                if matches!(r.get("text"), Some(Val::Str(s)) if s.as_str() == "props"))),
             "a comment's words must not leak as tokens"
         );
         // `</script>` inside a string is one string token, not markup.
@@ -5590,8 +5599,8 @@ mod tests {
         assert_eq!(toks.len(), 1);
         match &toks[0] {
             Val::Record(r) => {
-                assert_eq!(r.get("kind"), Some(&Val::Str("string".to_string())));
-                assert_eq!(r.get("text"), Some(&Val::Str("</script>".to_string())));
+                assert_eq!(r.get("kind"), Some(&Val::Str(std::rc::Rc::new("string".to_string()))));
+                assert_eq!(r.get("text"), Some(&Val::Str(std::rc::Rc::new("</script>".to_string()))));
             }
             other => panic!("expected a record token, got {other:?}"),
         }
@@ -5601,7 +5610,7 @@ mod tests {
             .iter()
             .filter_map(|t| match t {
                 Val::Record(r) => match r.get("text") {
-                    Some(Val::Str(s)) => Some(s.clone()),
+                    Some(Val::Str(s)) => Some((**s).clone()),
                     _ => None,
                 },
                 _ => None,
@@ -5616,7 +5625,7 @@ mod tests {
         let toks = lex_tokens("let x = \\");
         assert!(toks
             .iter()
-            .any(|t| matches!(t, Val::Record(r) if r.get("kind") == Some(&Val::Str("error".to_string())))));
+            .any(|t| matches!(t, Val::Record(r) if r.get("kind") == Some(&Val::Str(std::rc::Rc::new("error".to_string()))))));
     }
 
     #[test]
