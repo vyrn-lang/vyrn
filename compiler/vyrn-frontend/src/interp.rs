@@ -73,7 +73,15 @@ pub enum Val {
         gen: u64,
     },
     /// A growable array (`Vec`). Used linearly; `push` returns a new value.
-    Array(Vec<Val>),
+    /// Copy-on-write, and — just as importantly — an IDENTITY.
+    ///
+    /// Cloning is O(1), so passing an array to a function no longer copies it.
+    /// The pointer also gives builtins a cheap, exact key for per-buffer caches:
+    /// `lineAt`/`colAt` memoize a line-start table on it, which hashing the
+    /// contents per call could not do (that cost more than the scan it replaced).
+    /// A cache that stores the `Rc` keeps the allocation alive, so an address
+    /// cannot be recycled under a live cache entry.
+    Array(std::rc::Rc<Vec<Val>>),
     /// A growable, insertion-ordered dictionary (RFC-0028): a `Vec` of
     /// `(key, value)` pairs kept in first-insertion order — an update rewrites
     /// the pair in place, a remove shifts later pairs down, a fresh insert
@@ -1328,6 +1336,16 @@ impl Slot {
     }
 }
 
+thread_local! {
+    /// Line-start offsets per buffer, for `lineAt`/`colAt`.
+    /// `array pointer -> (the array, its line-start offsets)`. The array is held
+    /// so the address stays valid and unique for as long as the entry lives.
+    #[allow(clippy::type_complexity)]
+    static LINE_STARTS: std::cell::RefCell<
+        std::collections::HashMap<usize, (std::rc::Rc<Vec<Val>>, std::rc::Rc<Vec<usize>>)>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 impl<'a> Interp<'a> {
     /// Initialize module state (RFC-0013) once, in declaration order, before
     /// `main` (or, under `vyrn test`, before the first test). Each initializer
@@ -1419,7 +1437,7 @@ impl<'a> Interp<'a> {
                     .push((format!("{resolved}/"), names.join("\n").into_bytes()));
                 Ok(Val::Result(
                     true,
-                    Box::new(Val::Array(names.into_iter().map(Val::Str).collect())),
+                    Box::new(Val::Array(std::rc::Rc::new(names.into_iter().map(Val::Str).collect()))),
                 ))
             }
             Err(_) => Ok(Val::Result(
@@ -1906,7 +1924,7 @@ impl<'a> Interp<'a> {
                             for frame in scope.iter_mut().rev() {
                                 if let Some(slot) = frame.get_mut(name) {
                                     if let Val::Array(elems) = &mut slot.v {
-                                        elems.push(item);
+                                        std::rc::Rc::make_mut(elems).push(item);
                                         return Ok(Flow::Normal);
                                     }
                                     break;
@@ -2125,7 +2143,7 @@ impl<'a> Interp<'a> {
                         if idx < 0 || idx as usize >= items.len() {
                             return Err(format!("array index {idx} out of bounds").into());
                         }
-                        items[idx as usize] = v;
+                        std::rc::Rc::make_mut(items)[idx as usize] = v;
                         return Ok(Flow::Normal);
                     }
                 }
@@ -2137,7 +2155,7 @@ impl<'a> Interp<'a> {
                     if idx < 0 || idx as usize >= items.len() {
                         return Err(format!("array index {idx} out of bounds").into());
                     }
-                    items[idx as usize] = v;
+                    std::rc::Rc::make_mut(items)[idx as usize] = v;
                     return Ok(Flow::Normal);
                 }
                 Err(format!("index-assignment to unbound array `{name}`").into())
@@ -2209,17 +2227,17 @@ impl<'a> Interp<'a> {
                 let items = match self.expr(iter, scope)? {
                     Val::Array(items) => items,
                     // Iterating a String yields each byte as an Int.
-                    Val::Str(s) => s.as_bytes().iter().map(|b| Val::Int(*b as i64)).collect(),
+                    Val::Str(s) => s.as_bytes().iter().map(|b| Val::Int(*b as i64)).collect::<Vec<_>>().into(),
                     other => return Err(format!("`for` expected an array, found {other:?}").into()),
                 };
-                for item in items {
+                for item in items.iter() {
                     // Fresh frame per iteration holding the loop variable; the
                     // body's own inner frame nests inside it.
                     scope.push(HashMap::new());
                     scope
                         .last_mut()
                         .unwrap()
-                        .insert(var.clone(), Slot::untyped(item));
+                        .insert(var.clone(), Slot::untyped(item.clone()));
                     let flow = self.block(body, scope);
                     scope.pop();
                     match flow? {
@@ -2552,7 +2570,7 @@ impl<'a> Interp<'a> {
                                 ..
                             }) = frame.get_mut(recv)
                             {
-                                let popped = items.pop();
+                                let popped = std::rc::Rc::make_mut(items).pop();
                                 return Ok(Val::Option(popped.map(Box::new)));
                             }
                         }
@@ -2561,7 +2579,7 @@ impl<'a> Interp<'a> {
                             ..
                         }) = self.globals.borrow_mut().get_mut(recv)
                         {
-                            let popped = items.pop();
+                            let popped = std::rc::Rc::make_mut(items).pop();
                             return Ok(Val::Option(popped.map(Box::new)));
                         }
                     }
@@ -2592,7 +2610,7 @@ impl<'a> Interp<'a> {
                             if idx < 0 || idx as usize >= items.len() {
                                 return Err(format!("array index {idx} out of bounds").into());
                             }
-                            return Ok(items.swap_remove(idx as usize));
+                            return Ok(std::rc::Rc::make_mut(items).swap_remove(idx as usize));
                         }
                     }
                     if let Some(Slot {
@@ -2603,7 +2621,7 @@ impl<'a> Interp<'a> {
                         if idx < 0 || idx as usize >= items.len() {
                             return Err(format!("array index {idx} out of bounds").into());
                         }
-                        return Ok(items.swap_remove(idx as usize));
+                        return Ok(std::rc::Rc::make_mut(items).swap_remove(idx as usize));
                     }
                     return Err("`swapRemove` needs a mutable array binding".into());
                 }
@@ -2786,7 +2804,7 @@ impl<'a> Interp<'a> {
                         _ => Err("`render` of non-Code".into()),
                     },
                     "lex" if !shadowed => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Array(lex_tokens(s))),
+                        Val::Str(s) => Ok(Val::Array(std::rc::Rc::new(lex_tokens(s)))),
                         _ => Err("`lex` of non-String".into()),
                     },
                     "contains" => match (&vals[0], &vals[1]) {
@@ -2832,13 +2850,13 @@ impl<'a> Interp<'a> {
                                     bits: 8,
                                     signed: false,
                                 })
-                                .collect(),
+                                .collect::<Vec<_>>().into(),
                         )),
                         _ => Err("bytes of non-String".into()),
                     },
                     "chars" => match &vals[0] {
                         Val::Str(s) => {
-                            Ok(Val::Array(s.chars().map(|c| Val::Int(c as i64)).collect()))
+                            Ok(Val::Array(std::rc::Rc::new(s.chars().map(|c| Val::Int(c as i64)).collect())))
                         }
                         _ => Err("chars of non-String".into()),
                     },
@@ -2846,7 +2864,7 @@ impl<'a> Interp<'a> {
                     // wording (never Rust `io::Error` text) — kept byte-identical
                     // to the codegen's format strings so all three backends agree.
                     "args" => Ok(Val::Array(
-                        self.args.iter().map(|s| Val::Str(s.clone())).collect(),
+                        self.args.iter().map(|s| Val::Str(s.clone())).collect::<Vec<_>>().into(),
                     )),
                     "readLine" => {
                         use std::io::BufRead;
@@ -2937,7 +2955,7 @@ impl<'a> Interp<'a> {
                                 names.sort();
                                 Ok(Val::Result(
                                     true,
-                                    Box::new(Val::Array(names.into_iter().map(Val::Str).collect())),
+                                    Box::new(Val::Array(std::rc::Rc::new(names.into_iter().map(Val::Str).collect()))),
                                 ))
                             }
                             Err(_) => Ok(Val::Result(
@@ -3054,7 +3072,7 @@ impl<'a> Interp<'a> {
                                             bits: 8,
                                             signed: false,
                                         })
-                                        .collect(),
+                                        .collect::<Vec<_>>().into(),
                                 )),
                             )),
                             Err(_) => Ok(Val::Result(
@@ -3066,7 +3084,7 @@ impl<'a> Interp<'a> {
                     "stringFromBytes" => match &vals[0] {
                         Val::Array(elems) => {
                             let mut bytes = Vec::with_capacity(elems.len());
-                            for e in elems {
+                            for e in elems.iter() {
                                 match e {
                                     Val::IntN { v, .. } => bytes.push(*v as u8),
                                     Val::Int(v) => bytes.push(*v as u8),
@@ -3160,11 +3178,73 @@ impl<'a> Interp<'a> {
                         self.cell_release(slot, gen)?;
                         Ok(Val::Unit)
                     }
-                    "array" => Ok(Val::Array(Vec::new())),
+                    // `lineAt(bytes, off)` / `colAt(bytes, off)`, 1-based.
+                    //
+                    // Memoized on the buffer's contents: a scanner asks once per
+                    // node over the same buffer, and counting newlines from byte
+                    // 0 each time is quadratic. Hashing the buffer per call is
+                    // linear and ~1 us for a source file, against the ~0.7 ms a
+                    // rescan cost.
+                    "lineAt" | "colAt" => match (&vals[0], &vals[1]) {
+                        (Val::Array(elems), off) => {
+                            let off = match off {
+                                Val::Int(i) => *i,
+                                Val::IntN { v, .. } => *v,
+                                other => {
+                                    return Err(format!("offset must be an integer, found {other:?}").into())
+                                }
+                            }
+                            .max(0) as usize;
+                            let byte_of = |v: &Val| -> u8 {
+                                match v {
+                                    Val::Int(i) => *i as u8,
+                                    Val::IntN { v, .. } => *v as u8,
+                                    _ => 0,
+                                }
+                            };
+                            // Keyed by the array's IDENTITY, not its contents.
+                            // Hashing 3,000 elements per call cost more than the
+                            // scan this replaces; the pointer is O(1). The cache
+                            // holds the `Rc`, so the allocation stays alive and
+                            // its address cannot be recycled under a live entry.
+                            let key = std::rc::Rc::as_ptr(elems) as usize;
+                            let starts = LINE_STARTS.with(|c| {
+                                if let Some((_, hit)) = c.borrow().get(&key) {
+                                    return hit.clone();
+                                }
+                                let mut v: Vec<usize> = vec![0];
+                                for (i, e) in elems.iter().enumerate() {
+                                    if byte_of(e) == 10u8 {
+                                        v.push(i + 1);
+                                    }
+                                }
+                                let rc = std::rc::Rc::new(v);
+                                let mut m = c.borrow_mut();
+                                // ponytail: bounded crudely; a scanner touches a
+                                // handful of buffers, not thousands.
+                                if m.len() > 64 {
+                                    m.clear();
+                                }
+                                m.insert(key, (elems.clone(), rc.clone()));
+                                rc
+                            });
+                            // The last line start at or before `off`.
+                            let idx = starts.partition_point(|&s| s <= off).saturating_sub(1);
+                            Ok(Val::Int(if name == "lineAt" {
+                                idx as i64 + 1
+                            } else {
+                                (off.min(elems.len()) - starts[idx]) as i64 + 1
+                            }))
+                        }
+                        (other, _) => {
+                            Err(format!("{name} takes an Array<UInt8>, found {other:?}").into())
+                        }
+                    },
+                    "array" => Ok(Val::Array(std::rc::Rc::new(Vec::new()))),
                     "push" => match &vals[0] {
                         Val::Array(elems) => {
                             let mut next = elems.clone();
-                            next.push(vals[1].clone());
+                            std::rc::Rc::make_mut(&mut next).push(vals[1].clone());
                             Ok(Val::Array(next))
                         }
                         other => Err(format!("push of non-Array {other:?}").into()),
@@ -3206,7 +3286,7 @@ impl<'a> Interp<'a> {
                     // insertion order (safe to mutate the map while iterating it).
                     "@keys" => match &vals[0] {
                         Val::Map(pairs) => Ok(Val::Array(
-                            pairs.iter().map(|(k, _)| Val::Str(k.clone())).collect(),
+                            pairs.iter().map(|(k, _)| Val::Str(k.clone())).collect::<Vec<_>>().into(),
                         )),
                         other => Err(format!("`keys` needs a Map, found {other:?}").into()),
                     },
@@ -3449,7 +3529,7 @@ impl<'a> Interp<'a> {
                 for e in elems {
                     vals.push(self.expr(e, scope)?);
                 }
-                Ok(Val::Array(vals))
+                Ok(Val::Array(std::rc::Rc::new(vals)))
             }
             // A map literal (RFC-0028): evaluate entries in written order as
             // insertions — a repeated key updates in place (keeps its slot).
@@ -3900,10 +3980,10 @@ impl<'a> Interp<'a> {
             | (Type::ArrayN(inner, _), Val::Array(items))
             | (Type::SmallArray(inner, _), Val::Array(items)) => {
                 let mut out = Vec::with_capacity(items.len());
-                for it in items {
-                    out.push(self.coerce(it, inner)?);
+                for it in items.iter() {
+                    out.push(self.coerce(it.clone(), inner)?);
                 }
-                Ok(Val::Array(out))
+                Ok(Val::Array(std::rc::Rc::new(out)))
             }
             // A `Map<String, V>` coerces (and thus validates) every value into
             // `V` — the boundary re-validation for a predicated value type.
@@ -4183,7 +4263,7 @@ impl<'a> Interp<'a> {
             Ok(j) => j,
             Err(e) => {
                 let issue = self.issue_val("json.parse", "", &e.0);
-                return Val::Enum("Invalid".to_string(), vec![Val::Array(vec![issue])]);
+                return Val::Enum("Invalid".to_string(), vec![Val::Array(std::rc::Rc::new(vec![issue]))]);
             }
         };
         let mut issues = Vec::new();
@@ -4192,7 +4272,7 @@ impl<'a> Interp<'a> {
         if issues.is_empty() {
             Val::Enum("Valid".to_string(), vec![v.unwrap_or(Val::Unit)])
         } else {
-            Val::Enum("Invalid".to_string(), vec![Val::Array(issues)])
+            Val::Enum("Invalid".to_string(), vec![Val::Array(std::rc::Rc::new(issues))])
         }
     }
 
@@ -4283,7 +4363,7 @@ impl<'a> Interp<'a> {
                         out.push(ev);
                     }
                 }
-                Some(Val::Array(out))
+                Some(Val::Array(std::rc::Rc::new(out)))
             }
             // A `Map<String, V>` decodes any JSON object (RFC-0028): document
             // order becomes insertion order; each value is validated as `V` at

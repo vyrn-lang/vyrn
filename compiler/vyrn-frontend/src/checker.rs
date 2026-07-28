@@ -189,6 +189,8 @@ fn check_accum_inner(
         "readFileBytes",
         "stringFromBytes",
         "listDir",
+        "lineAt",
+        "colAt",
         "moduleInterface",
         "trace",
         "debug",
@@ -3861,6 +3863,40 @@ impl<'a> Checker<'a> {
         // through the loader's resolver and scoped to the generator's path args;
         // at runtime it lists the real filesystem. Canonical error `cannot list
         // \`p\``.
+        // `lineAt(bytes, off)` / `colAt(bytes, off)` — the 1-based line and
+        // column of a byte offset in a UTF-8 buffer (RFC-0033 origin directives
+        // are 1-based, and this is what feeds them).
+        //
+        // A builtin rather than a library loop because the obvious loop is
+        // quadratic: counting newlines from byte 0 on every call is O(offset),
+        // and a scanner asks once per node. `std/vyx` spent 122 ms of a 291 ms
+        // page compile in exactly that shape. The interpreter memoizes a
+        // line-start table per buffer, which a Vyrn library cannot do —
+        // generators may not touch module state (comptime purity), so the cache
+        // has to live below them. Any generator gets it, not just std.
+        if name == "lineAt" || name == "colAt" {
+            if args.len() != 2 {
+                return Err(format!(
+                    "line {line}: `{name}` takes 2 arguments (bytes, offset), got {}",
+                    args.len()
+                ));
+            }
+            let b = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
+            if !matches!(b, Type::Err)
+                && !matches!(b, Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..))
+            {
+                return Err(format!(
+                    "line {line}: `{name}` takes an `Array<UInt8>` as its first argument"
+                ));
+            }
+            let o = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
+            if !matches!(o, Type::Err | Type::Int) {
+                return Err(format!(
+                    "line {line}: `{name}`'s offset must be an `Int64`"
+                ));
+            }
+            return Ok(Type::Int);
+        }
         if name == "listDir" {
             if args.len() != 1 {
                 return Err(format!(
@@ -6263,6 +6299,8 @@ const SPAWN_FORBIDDEN: &[&str] = &[
     "readFileBytes",
     "stringFromBytes",
     "listDir",
+    "lineAt",
+    "colAt",
 ];
 
 /// Whether a type may appear in an `extern` signature (RFC-0012 ABI). The scalar

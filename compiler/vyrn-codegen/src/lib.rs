@@ -6081,6 +6081,15 @@ impl<'a> Gen<'a> {
         // enumeration (mediated through the loader's resolver). Neither has a
         // native/wasm lowering in v1 — a program that reaches one at runtime gets
         // a clear compile error rather than a link failure.
+        // `lineAt`/`colAt` memoize a line-start table per buffer, which only the
+        // interpreter has; a native lowering would recount from byte 0 per call
+        // and reintroduce the quadratic the builtin exists to remove. Generation
+        // time is the use case, so it is a clear error rather than a slow answer.
+        if name == "lineAt" || name == "colAt" {
+            return Err(format!(
+                "`{name}` runs in the interpreter / at generation time; it has no native or                  wasm lowering in v1 — use it in a `gen fn` or under `vyrn run`"
+            ));
+        }
         if name == "listDir" {
             return Err(format!(
                 "`listDir` runs in the interpreter / at generation time (RFC-0021); it has no \
