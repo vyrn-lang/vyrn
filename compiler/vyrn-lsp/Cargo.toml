@@ -19,3 +19,10 @@ serde_json = "1"
 [[bin]]
 name = "vyrn-lsp"
 path = "src/main.rs"
+
+# The extension's dev fallback runs the DEBUG binary (extension.js), and an
+# unoptimized analysis measured ~6x slower than a release one. `opt-level = 1`
+# keeps debug builds fast to produce while making the server usable, so nobody
+# has to remember to package a release build just to get a responsive editor.
+[profile.dev]
+opt-level = 1

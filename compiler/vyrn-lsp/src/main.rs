@@ -2141,7 +2141,7 @@ fn install_root(
         server.vyx_owner.insert(f, root_uri.clone());
     }
     if let Some(c) = connection {
-        publish_remapped(c, &analysis);
+        publish_remapped(c, server, &analysis);
     }
     // A re-analysis of this owner invalidates any cached generation for it.
     server.synth_cache.borrow_mut().remove(root_uri);
@@ -2393,7 +2393,7 @@ fn path_distance(cand: &std::path::Path, vyx_dir: &std::path::Path) -> usize {
 /// Publish origin-remapped diagnostics (RFC-0033) grouped by input file, so a
 /// template error appears inside its `.vyx` buffer. Every referenced input is
 /// republished (empty when clean) so a fixed error clears.
-fn publish_remapped(connection: &Connection, analysis: &Analysis) {
+fn publish_remapped(connection: &Connection, server: &Server, analysis: &Analysis) {
     let mut by_file: HashMap<String, Vec<vyrn_frontend::diagnostics::Diagnostic>> = HashMap::new();
     for f in analysis.origins.input_files() {
         by_file.entry(f).or_default();
@@ -2406,7 +2406,15 @@ fn publish_remapped(connection: &Connection, analysis: &Analysis) {
     for (file, diags) in by_file {
         // `file` is an absolute slash path; rebuild a native path for the URI.
         if let Ok(uri) = Url::from_file_path(file.replace('/', std::path::MAIN_SEPARATOR_STR)) {
-            let src = std::fs::read_to_string(&file).unwrap_or_default();
+            // Prefer the open buffer. Reading from disk on every didChange both
+            // costs a syscall per generator input and reports against text the
+            // user has already edited away — the diagnostic ranges would be
+            // computed from a stale file.
+            let src = server
+                .docs
+                .get(&uri)
+                .cloned()
+                .unwrap_or_else(|| std::fs::read_to_string(&file).unwrap_or_default());
             publish(connection, &uri, &src, &diags);
         }
     }
