@@ -64,6 +64,20 @@ use crate::regex::{self, ConcatPiece, Dfa};
 /// clauses (a length or comparison clause ⇒ not a regex language ⇒ runtime
 /// fallback).
 pub fn regex_dfa_of_type(decl: &TypeDecl) -> Option<Dfa> {
+    let pats = patterns_of(decl)?;
+    let mut dfa = regex::compile(&pats[0]).ok()?;
+    for p in &pats[1..] {
+        let next = regex::compile(p).ok()?;
+        dfa = regex::intersect(&dfa, &next);
+    }
+    Some(dfa)
+}
+
+/// The `value =~ "literal"` clauses of a validated `String` type, in order —
+/// everything [`regex_dfa_of_type`] needs, and a cheap identity for the language
+/// it denotes (walking the predicate AST, no regex work). The enumeration memos
+/// below key on it.
+fn patterns_of(decl: &TypeDecl) -> Option<Vec<String>> {
     if decl.base != Type::Str {
         return None;
     }
@@ -73,12 +87,7 @@ pub fn regex_dfa_of_type(decl: &TypeDecl) -> Option<Dfa> {
     if pats.is_empty() {
         return None;
     }
-    let mut dfa = regex::compile(&pats[0]).ok()?;
-    for p in &pats[1..] {
-        let next = regex::compile(p).ok()?;
-        dfa = regex::intersect(&dfa, &next);
-    }
-    Some(dfa)
+    Some(pats)
 }
 
 /// Gather every `value =~ "literal"` clause from a predicate that is a pure
@@ -306,7 +315,7 @@ pub fn string_flow_proven(
 /// completion. `None` if the type is not a finite string type or has more than
 /// `cap` members.
 pub fn enumerate_type(decl: &TypeDecl, cap: usize) -> Option<Vec<String>> {
-    regex_dfa_of_type(decl)?.enumerate(cap)
+    memo_enum(decl, cap, false)
 }
 
 /// Enumerate the **alphabet** of a *sequence* validated string type — a pure-regex
@@ -317,7 +326,37 @@ pub fn enumerate_type(decl: &TypeDecl, cap: usize) -> Option<Vec<String>> {
 /// no drift. `None` when the type is finite (use [`enumerate_type`] for those),
 /// not a pure-regex string type, or its space-free sublanguage exceeds `cap`.
 pub fn enumerate_alphabet(decl: &TypeDecl, cap: usize) -> Option<Vec<String>> {
+    memo_enum(decl, cap, true)
+}
+
+/// Both enumerations, memoized on the clause patterns. The DFA build is already
+/// cached, but WALKING it is not: the alphabet path explores up to 8,192 paths,
+/// and the indexer runs both over every type declaration of the LINKED program on
+/// every analysis — measured at ~177 ms per keystroke on a themed app. The
+/// language is a function of the patterns alone, so the patterns are the key.
+fn memo_enum(decl: &TypeDecl, cap: usize, alphabet: bool) -> Option<Vec<String>> {
+    let pats = patterns_of(decl)?;
+    // ponytail: unbounded, like the DFA memo — keyed by patterns present in the
+    // program being analyzed, so it is bounded by the source.
+    thread_local! {
+        static MEMO: std::cell::RefCell<
+            std::collections::HashMap<(Vec<String>, usize, bool), Option<Vec<String>>>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let key = (pats, cap, alphabet);
+    if let Some(hit) = MEMO.with(|m| m.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let out = enumerate_uncached(decl, cap, alphabet);
+    MEMO.with(|m| m.borrow_mut().insert(key, out.clone()));
+    out
+}
+
+fn enumerate_uncached(decl: &TypeDecl, cap: usize, alphabet: bool) -> Option<Vec<String>> {
     let dfa = regex_dfa_of_type(decl)?;
+    if !alphabet {
+        return dfa.enumerate(cap);
+    }
     // A finite type is a whole-domain type, not a sequence — its members ARE the
     // completions (the `enumerate_type` path). Only an infinite regex string type
     // is a candidate sequence whose alphabet we enumerate.
