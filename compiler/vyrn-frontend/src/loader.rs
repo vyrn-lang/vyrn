@@ -1081,37 +1081,14 @@ fn run_generator(
         )));
     }
 
-    // 4. Load + check the generator module as a runnable program (its own
-    //    comptime-purity is enforced by the check).
+    // 4. The generator's own source, for the cache key. Loading and CHECKING it
+    //    is deferred to the cache-miss path below — on a hit nothing here is
+    //    used, and it was the most expensive step in a warm keystroke.
     let gen_source = resolver.read(&gen_mod_key).map_err(|e| {
         err(format!(
             "cannot re-read generator module `{gen_mod_key}`: {e}"
         ))
     })?;
-    let mut gen_program = load(&gen_source, &gen_mod_key, opts, resolver)?;
-    let mut gdiags = crate::checker::check_accum(&gen_program);
-    if gdiags.is_empty() {
-        gdiags.extend(crate::movecheck::check_accum(&gen_program));
-    }
-    if !gdiags.is_empty() {
-        return Err(gdiags);
-    }
-
-    // 4b. Contract provenance (RFC-0071). A generator is re-loaded as its OWN
-    //     root, so a contract declared *in* the generator (the normal case —
-    //     `std/ui` declares `Page` and `std/ui`'s generator checks against it)
-    //     would carry `module: None` and every diagnostic would lose the "which
-    //     library demanded this?" half of its message. Restamp each contract with
-    //     the IMPORT SPECIFIER of its declaring module (`std/ui`, `./contract`)
-    //     rather than a resolved absolute path, since that is what the reader can
-    //     actually type. Done after checking so ordinary diagnostics are
-    //     untouched, and only for the generator's private copy of the program.
-    let std_root = opts.std_root.as_deref();
-    let gen_dir = dir_of(&gen_mod_key).to_string();
-    for c in &mut gen_program.contracts {
-        let key = c.module.clone().unwrap_or_else(|| gen_mod_key.clone());
-        c.module = Some(import_specifier(&gen_dir, &key, std_root));
-    }
 
     // 5. Content-addressed cache key: generator sources ++ args ++ inputs read.
     // Each constant string path argument becomes an allowed input root. A path
@@ -1149,6 +1126,36 @@ fn run_generator(
                 }
             }
         }
+    }
+
+    // 5b. Cache MISS. Only now load and check the generator as a runnable
+    //     program (its own comptime-purity is enforced by the check). Sound to
+    //     skip on a hit: an entry is only written after a successful run, which
+    //     already passed this same check, and the generator's sources are part
+    //     of the cache key — so any edit to it misses and re-checks here.
+    let mut gen_program = load(&gen_source, &gen_mod_key, opts, resolver)?;
+    let mut gdiags = crate::checker::check_accum(&gen_program);
+    if gdiags.is_empty() {
+        gdiags.extend(crate::movecheck::check_accum(&gen_program));
+    }
+    if !gdiags.is_empty() {
+        return Err(gdiags);
+    }
+
+    // 4b. Contract provenance (RFC-0071). A generator is re-loaded as its OWN
+    //     root, so a contract declared *in* the generator (the normal case —
+    //     `std/ui` declares `Page` and `std/ui`'s generator checks against it)
+    //     would carry `module: None` and every diagnostic would lose the "which
+    //     library demanded this?" half of its message. Restamp each contract with
+    //     the IMPORT SPECIFIER of its declaring module (`std/ui`, `./contract`)
+    //     rather than a resolved absolute path, since that is what the reader can
+    //     actually type. Done after checking so ordinary diagnostics are
+    //     untouched, and only for the generator's private copy of the program.
+    let std_root = opts.std_root.as_deref();
+    let gen_dir = dir_of(&gen_mod_key).to_string();
+    for c in &mut gen_program.contracts {
+        let key = c.module.clone().unwrap_or_else(|| gen_mod_key.clone());
+        c.module = Some(import_specifier(&gen_dir, &key, std_root));
     }
 
     // 5b. Cache miss: run the generator in the mediated sandbox.
