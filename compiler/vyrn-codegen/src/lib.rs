@@ -1100,6 +1100,8 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // the reclamation strategy is RFC-0004's open question.
     out.push_str("declare i64 @__vyrn_strlen(ptr)\n");
     out.push_str("declare i64 @__vyrn_charcount(ptr)\n");
+    out.push_str("declare i64 @__vyrn_line_at(ptr, i64, i64)\n");
+    out.push_str("declare i64 @__vyrn_col_at(ptr, i64, i64)\n");
     out.push_str("declare ptr @__vyrn_malloc(i64)\n");
     out.push_str("declare ptr @__vyrn_realloc(ptr, i64)\n");
     out.push_str("declare void @free(ptr)\n");
@@ -6081,14 +6083,33 @@ impl<'a> Gen<'a> {
         // enumeration (mediated through the loader's resolver). Neither has a
         // native/wasm lowering in v1 — a program that reaches one at runtime gets
         // a clear compile error rather than a link failure.
-        // `lineAt`/`colAt` memoize a line-start table per buffer, which only the
-        // interpreter has; a native lowering would recount from byte 0 per call
-        // and reintroduce the quadratic the builtin exists to remove. Generation
-        // time is the use case, so it is a clear error rather than a slow answer.
+        // `lineAt(bytes, off)` / `colAt(bytes, off)`: the buffer is `{ ptr, i64,
+        // i64 }` and `UInt8` is i8-stride, so the data pointer and length go
+        // straight to a C helper.
+        //
+        // The interpreter memoizes a line-start table per buffer (a scanner asks
+        // once per node, and counting from byte 0 each time is quadratic); the
+        // native helper counts directly. Same answer, which is what parity
+        // requires — the cache is an optimization, not a semantic.
+        //
+        // These need a lowering at all because a library that calls them is
+        // COMPILED as a module: `std/vyx` reaches them only from generator code,
+        // but codegen emits every function in a linked module regardless. That is
+        // why `listDir`/`moduleInterface` can stay comptime-only — they appear
+        // directly inside `gen fn` bodies — and these cannot.
         if name == "lineAt" || name == "colAt" {
-            return Err(format!(
-                "`{name}` runs in the interpreter / at generation time; it has no native or                  wasm lowering in v1 — use it in a `gen fn` or under `vyrn run`"
+            let (av, _) = self.gen_expr(&args[0])?;
+            let (ov, _) = self.gen_expr(&args[1])?;
+            let dptr = self.fresh_tmp();
+            let dlen = self.fresh_tmp();
+            let r = self.fresh_tmp();
+            self.emit(format!("{dptr} = extractvalue {{ ptr, i64, i64 }} {av}, 0"));
+            self.emit(format!("{dlen} = extractvalue {{ ptr, i64, i64 }} {av}, 1"));
+            let helper = if name == "lineAt" { "__vyrn_line_at" } else { "__vyrn_col_at" };
+            self.emit(format!(
+                "{r} = call i64 @{helper}(ptr {dptr}, i64 {dlen}, i64 {ov})"
             ));
+            return Ok((r, Type::Int));
         }
         if name == "listDir" {
             return Err(format!(

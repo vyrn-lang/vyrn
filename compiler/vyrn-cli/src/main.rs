@@ -1833,6 +1833,29 @@ void* __vyrn_stdout(void) { return stdout; }
    adapt on ILP32 targets (wasm32) and are transparent on LP64/LLP64. */
 unsigned long long __vyrn_strlen(const char* s) { return (unsigned long long)strlen(s); }
 
+/* lineAt/colAt (1-based) over a byte buffer. The interpreter memoizes a
+   line-start table per buffer because a scanner asks once per node and counting
+   from byte 0 each time is quadratic; natively there is no such cache, so these
+   count directly. Same answer either way — which is all parity requires — and a
+   native program calling them in a loop pays what the naive loop would have. */
+long long __vyrn_line_at(const unsigned char* d, long long len, long long off) {
+    long long line = 1;
+    if (off > len) off = len;
+    for (long long i = 0; i < off; i++) {
+        if (d[i] == 10) line++;
+    }
+    return line;
+}
+
+long long __vyrn_col_at(const unsigned char* d, long long len, long long off) {
+    long long col = 1;
+    if (off > len) off = len;
+    for (long long i = off; i > 0 && d[i - 1] != 10; i--) {
+        col++;
+    }
+    return col;
+}
+
 /* charCount (RFC-0058): the number of Unicode scalar values in a validated UTF-8
    string = the count of non-continuation bytes (those where (b & 0xC0) != 0x80).
    Byte-identical to the interpreter's loop. Strings are NUL-terminated (interior

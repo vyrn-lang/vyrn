@@ -158,28 +158,14 @@ fn vyxAppend(arr: Array<String>, s: String) -> Array<String> {
 
 /// The 1-based line number of byte offset `off` within `ba` (newlines before it).
 fn vyxLineAt(ba: Array<UInt8>, off: Int64) -> Int64 {
-    let mut line = 1
-    let mut i = 0
-    while i < off && i < ba.length {
-        if ba[i] == '\n' {
-            line = line + 1
-        }
-        i = i + 1
-    }
-    return line
+    return lineAt(ba, off)
 }
 
 /// The 1-based column of byte offset `off` within `ba` (chars since the last LF).
 /// RFC-0033 origin directives are 1-based; this feeds their `:col` field so a
 /// diagnostic in a template pass-through maps to the exact `.vyx` column.
 fn vyxColAt(ba: Array<UInt8>, off: Int64) -> Int64 {
-    let mut col = 1
-    let mut i = off
-    while i > 0 && ba[i - 1] != '\n' {
-        col = col + 1
-        i = i - 1
-    }
-    return col
+    return colAt(ba, off)
 }
 
 /// The byte offset of the first non-whitespace byte in `ba[from..)`, so a
