@@ -26,6 +26,63 @@ use crate::diagnostics::Diagnostic;
 /// does not suppress errors in the others. Inside a single function body the
 /// check is still first-error (recovery there is the same class of work as
 /// parser recovery, and is deferred).
+/// Like [`check_accum_with_let_types`], but reuses the diagnostics of modules
+/// that have not changed since the last call.
+///
+/// `module_hashes` is `module key -> content hash` from the load that produced
+/// `program` ([`crate::loader::last_module_hashes`]). A function's check is
+/// reused only when BOTH hold: its module's content hash is what it was, and the
+/// SIGNATURE FINGERPRINT — every type declaration and function signature in the
+/// linked program — is what it was. The second condition is what makes this
+/// sound: a function's diagnostics depend on its own body plus everything it can
+/// refer to, so an edit that changes any signature invalidates every reuse, while
+/// an edit inside a body changes no signature and invalidates only that body.
+///
+/// The ROOT module carries no key (`module: None`), so the file being edited is
+/// never reused — only the libraries behind it.
+///
+/// Returns diagnostics and inferred `let` types. It deliberately does NOT return
+/// [`StoredFnEffects`]: those accumulate during body checks, and a reused body
+/// contributes none. Callers that need effects must use the full check.
+pub fn check_accum_reusing(
+    program: &Program,
+    module_hashes: &std::collections::HashMap<String, String>,
+) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
+    let (out, let_types, _) = check_accum_inner(program, Some(module_hashes));
+    (out, let_types)
+}
+
+thread_local! {
+    /// `(signature fingerprint, module key, module hash, fn name) -> diagnostics`.
+    static CHECK_MEMO: std::cell::RefCell<HashMap<(u64, String, String, String), Vec<Diagnostic>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// A cheap hash over everything a function body may refer to by name: every type
+/// declaration and every function signature. Bodies are deliberately excluded —
+/// that is the whole point, since a body edit must not invalidate other modules.
+fn signature_fingerprint(
+    types: &HashMap<String, TypeDecl>,
+    sigs: &HashMap<String, (Vec<Type>, Type)>,
+) -> u64 {
+    let mut parts: Vec<String> = Vec::with_capacity(types.len() + sigs.len());
+    for (n, t) in types {
+        parts.push(format!("t{n}={:?}|{:?}", t.base, t.predicate));
+    }
+    for (n, (ps, r)) in sigs {
+        parts.push(format!("f{n}={ps:?}->{r:?}"));
+    }
+    parts.sort_unstable();
+    let mut h: u64 = 0xcbf29ce484222325;
+    for p in &parts {
+        for b in p.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
 pub fn check_accum_with_let_types(
     program: &Program,
 ) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
@@ -44,6 +101,17 @@ pub fn stored_fn_effects(program: &Program) -> StoredFnEffects {
 /// RFC-0037 stored-function-value collection.
 fn check_accum_full(
     program: &Program,
+) -> (
+    Vec<Diagnostic>,
+    HashMap<(usize, String), Type>,
+    StoredFnEffects,
+) {
+    check_accum_inner(program, None)
+}
+
+fn check_accum_inner(
+    program: &Program,
+    reuse: Option<&std::collections::HashMap<String, String>>,
 ) -> (
     Vec<Diagnostic>,
     HashMap<(usize, String), Type>,
@@ -490,7 +558,26 @@ fn check_accum_full(
     //    check is still first-error). `function` returns the first as `Err`
     //    (preserving the historical single-error `check()` surface) and leaves
     //    the rest in the sink, which we drain here.
+    // Only meaningful when reuse was asked for; computed once for the whole pass.
+    let sig_fp = reuse.map(|_| signature_fingerprint(&types, &sigs));
+
+
     for f in &program.functions {
+        // Reusable only if this function's module is known AND unchanged.
+        let memo_key = match (reuse, sig_fp, f.module.as_ref()) {
+            (Some(hashes), Some(fp), Some(mk)) => hashes
+                .get(mk)
+                .map(|mh| (fp, mk.clone(), mh.clone(), f.name.clone())),
+            _ => None,
+        };
+        if let Some(k) = &memo_key {
+            if let Some(cached) = CHECK_MEMO.with(|m| m.borrow().get(k).cloned()) {
+                out.extend(cached);
+                continue;
+            }
+        }
+        let produced_from = out.len();
+
         // Signature validation (params/return) runs outside `function()`, so make
         // it gen-aware here too — a `Code` type in a `gen fn` signature is legal.
         *checker.in_gen.borrow_mut() = f.is_gen;
@@ -555,6 +642,19 @@ fn check_accum_full(
             let mut d = Diagnostic::from_rendered(s, "check");
             d.file = f.module.clone();
             out.push(d);
+        }
+        if let Some(k) = memo_key {
+            let produced = out[produced_from..].to_vec();
+            CHECK_MEMO.with(|m| {
+                let mut m = m.borrow_mut();
+                // ponytail: a signature edit strands the previous fingerprint's
+                // entries. Cleared wholesale rather than tracked; a proper LRU if
+                // a long session ever shows growth that matters.
+                if m.len() > 4096 {
+                    m.clear();
+                }
+                m.insert(k, produced);
+            });
         }
     }
 

@@ -391,7 +391,17 @@ fn analyze_inner(
     // give unannotated lets a real type on hover (`let x: Int`).
     let let_types = match &checked {
         Some(prog) => {
-            let (check_diags, let_types) = checker::check_accum_with_let_types(prog);
+            // The LSP re-checks on every keystroke, and all but the edited
+            // module are byte-identical to last time — reuse their diagnostics
+            // when no signature moved. Effects are not needed here (the workers
+            // gate uses the full check), which is why the reusing entry does not
+            // return them.
+            let hashes = crate::loader::last_module_hashes();
+            let (check_diags, let_types) = if hashes.is_empty() {
+                checker::check_accum_with_let_types(prog)
+            } else {
+                checker::check_accum_reusing(prog, &hashes)
+            };
             let mut checked_diags = check_diags;
             checked_diags.extend(movecheck::check_accum(prog));
             // RFC-0033: a diagnostic at an origin-governed line in a synthesized

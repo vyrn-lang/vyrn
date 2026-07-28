@@ -547,6 +547,7 @@ pub fn load_with_origins(
     });
     if depth == 1 {
         LOAD_EPOCH.with(|e| e.set(e.get().wrapping_add(1)));
+        MODULE_HASHES.with(|m| m.borrow_mut().clear());
     }
     let out = load_with_origins_inner(root_source, root_path, opts, resolver);
     LOAD_DEPTH.with(|d| d.set(d.get() - 1));
@@ -575,6 +576,13 @@ fn load_with_origins_inner(
 
 /// `(module key, resolved import targets, synthesized source)` per loaded module.
 pub type ModuleGraph = Vec<(String, Vec<String>, Option<String>)>;
+
+/// `module key -> content hash` for the modules the last outermost load visited.
+/// The checker uses it to reuse diagnostics for modules that did not change
+/// (RFC-free: see `check_accum_reusing`). Valid until the next load begins.
+pub fn last_module_hashes() -> HashMap<String, String> {
+    MODULE_HASHES.with(|m| m.borrow().clone())
+}
 
 fn graph_of(modules: &[Module]) -> ModuleGraph {
     modules
@@ -776,6 +784,7 @@ fn load_modules(
                 }
                 format!("{h:x}:{}", text.len())
             };
+            MODULE_HASHES.with(|m| m.borrow_mut().insert(key.to_string(), hash.clone()));
             if let Some(hit) = PARSE_CACHE.with(|c| c.borrow().get(&hash).cloned()) {
                 hit
             } else {
@@ -1029,6 +1038,13 @@ const GEN_MAX_OUTPUT: usize = 4 * 1024 * 1024;
 /// skips interpretation) → on a miss, run the generator in the mediated sandbox,
 /// then cache the result keyed by `sha256(generator sources ++ args ++ inputs)`.
 #[allow(clippy::too_many_arguments)]
+thread_local! {
+    /// `module key -> content hash` for the load in progress. Handed to the
+    /// checker so it can tell which modules are byte-identical to last time.
+    static MODULE_HASHES: std::cell::RefCell<HashMap<String, String>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
 thread_local! {
     /// Bumped once per outermost load; stamps [`HASH_MEMO`] entries.
     static LOAD_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -1650,9 +1666,16 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         .flatten()
         .map(|(_, t)| t.clone())
         .collect();
+    // Deterministic order at BOTH levels. The inner names were sorted from the
+    // start; the targets were not, and `namespaced_targets` is a `HashSet`, so
+    // which module got `__from0` and which got `__from1` varied per run for the
+    // same input. Two consecutive loads of an unchanged program produced
+    // different linked programs — `encodeProps__from0` naming `Array<Paste>` in
+    // one and `Paste` in the next.
+    let mut namespaced_targets: Vec<String> = namespaced_targets.into_iter().collect();
+    namespaced_targets.sort();
     for target in &namespaced_targets {
         let exports = module_exports.get(target).cloned().unwrap_or_default();
-        // Deterministic order so the minted suffixes are stable across runs.
         let mut names: Vec<&String> = exports.iter().collect();
         names.sort();
         for name in names {
