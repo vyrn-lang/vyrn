@@ -142,10 +142,52 @@ measurement. That is the number this RFC will be judged on, not the 165x.
   the cost enough that it may never need answering.
 - It does not apply to `vyrn build`'s own speed beyond generation.
 
+## How the runtime is hosted — the open decision
+
+Measured after the first draft, and it changes the shape of this RFC.
+
+The wasmtime CLI's ~106 ms is **process launch**, not module compilation.
+Precompiling to `.cwasm` does not help: a trivial module still costs 121 ms, and
+the real one 129 ms. So spawning a process per generator call is a non-starter —
+a `.vyx` keystroke runs two generators, which is ~240 ms of launch, exactly the
+cost this RFC exists to remove.
+
+The runtime must therefore be long-lived. Three ways, and the choice is a
+project-level one because it trades against a stated property of this workspace:
+the default members build with **zero external dependencies**, which is why the
+LLVM backend and the LSP are excluded crates rather than optional features.
+
+**(A) Feature-gated dependency.** `wasmtime` as an optional dependency of
+`vyrn-frontend`, off by default. `cargo build` stays dependency-free; the fast
+path is `--features wasm-gen`. CI builds both. Simplest to implement and to
+reason about; the cost is that the zero-dep property becomes "zero by default"
+rather than absolute, and the shipped binary is the one with the feature on.
+
+**(B) Excluded crate.** Consistent with `vyrn-codegen-llvm` and `vyrn-lsp`. But
+those depend INTO the workspace; nothing in the default members may depend back
+out, so `vyrn` itself could not use the engine. It would mean a second driver
+binary, which splits the tool.
+
+**(C) A persistent generation server.** One wasmtime process for the session,
+fed work over a pipe — which is how rust-analyzer hosts proc-macro expansion, and
+which needs no Rust dependency at all. Launch is paid once per session instead of
+per call. `readFile`/`listDir` can go through WASI preopens, which the wasm
+target already uses (RFC-0014), so M1 and M2 need no custom host functions.
+`moduleInterface` is the difficulty: it is a callback from guest to host, which
+over a pipe is a request/response protocol rather than an import — and the plain
+wasmtime CLI cannot host a custom import at all, so M3 would still need an
+embedding or a redesign of how reflection reaches the guest.
+
+Recommendation: **(A)**, with (C) as the fallback if the dependency is judged too
+expensive. (A) keeps one binary, one code path, and lets reflection stay a normal
+host import instead of a protocol. The zero-dep property survives where it
+matters — a contributor without wasmtime can still build and test everything.
+
 ## Risks, honestly
 
-**A new dependency.** wasmtime is a large crate. That is a real cost, and it is
-the main argument against this RFC. The counter is that the alternative — a
+**A new dependency.** wasmtime is a large crate, and this workspace deliberately
+has none — see the hosting decision above, which is the main open question in
+this RFC rather than a footnote to it. The counter is that the alternative — a
 bytecode VM for comptime — is both more work and, on the evidence, a much smaller
 win: GoAWK's real-world suite gained 13% moving from tree-walking to bytecode, and
 a Prolog study measured bytecode 25–60% SLOWER than its AST interpreter. A
