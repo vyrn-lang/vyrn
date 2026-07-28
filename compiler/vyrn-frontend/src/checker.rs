@@ -53,9 +53,20 @@ pub fn check_accum_reusing(
 }
 
 thread_local! {
-    /// `(signature fingerprint, module key, module hash, fn name) -> diagnostics`.
-    static CHECK_MEMO: std::cell::RefCell<HashMap<(u64, String, String, String), Vec<Diagnostic>>> =
-        std::cell::RefCell::new(HashMap::new());
+    /// Reused function diagnostics for ONE signature fingerprint:
+    /// `(module key, module hash, fn name) -> diagnostics`.
+    ///
+    /// Keyed by fingerprint at the top rather than inside the entry key, because
+    /// a fingerprint change invalidates every entry anyway — so the whole map is
+    /// dropped and rebuilt, and nothing needs an eviction policy.
+    ///
+    /// It used to be one flat map cleared whenever it passed 4,096 entries. That
+    /// worked on a project with 813 functions and silently did NOTHING on one
+    /// with 4,801: the cache blew its own bound while filling, cleared, and hit
+    /// zero times. An arbitrary cap on a per-program table is a scaling cliff
+    /// disguised as memory hygiene.
+    static CHECK_MEMO: std::cell::RefCell<(u64, HashMap<(String, String, String), Vec<Diagnostic>>)> =
+        std::cell::RefCell::new((0, HashMap::new()));
 }
 
 /// A cheap hash over everything a function body may refer to by name: every type
@@ -567,13 +578,16 @@ fn check_accum_inner(
     for f in &program.functions {
         // Reusable only if this function's module is known AND unchanged.
         let memo_key = match (reuse, sig_fp, f.module.as_ref()) {
-            (Some(hashes), Some(fp), Some(mk)) => hashes
+            (Some(hashes), Some(_), Some(mk)) => hashes
                 .get(mk)
-                .map(|mh| (fp, mk.clone(), mh.clone(), f.name.clone())),
+                .map(|mh| (mk.clone(), mh.clone(), f.name.clone())),
             _ => None,
         };
         if let Some(k) = &memo_key {
-            if let Some(cached) = CHECK_MEMO.with(|m| m.borrow().get(k).cloned()) {
+            if let Some(cached) = CHECK_MEMO.with(|m| {
+                let m = m.borrow();
+                if Some(m.0) == sig_fp { m.1.get(k).cloned() } else { None }
+            }) {
                 out.extend(cached);
                 continue;
             }
@@ -647,16 +661,17 @@ fn check_accum_inner(
         }
         if let Some(k) = memo_key {
             let produced = out[produced_from..].to_vec();
-            CHECK_MEMO.with(|m| {
-                let mut m = m.borrow_mut();
-                // ponytail: a signature edit strands the previous fingerprint's
-                // entries. Cleared wholesale rather than tracked; a proper LRU if
-                // a long session ever shows growth that matters.
-                if m.len() > 4096 {
-                    m.clear();
-                }
-                m.insert(k, produced);
-            });
+            if let Some(fp) = sig_fp {
+                CHECK_MEMO.with(|m| {
+                    let mut m = m.borrow_mut();
+                    // A new fingerprint means every existing entry is stale.
+                    if m.0 != fp {
+                        m.0 = fp;
+                        m.1.clear();
+                    }
+                    m.1.insert(k, produced);
+                });
+            }
         }
     }
 
