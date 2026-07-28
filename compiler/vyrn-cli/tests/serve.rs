@@ -31,14 +31,14 @@ fn main() -> Int64 {
 fn handle(req: Request) -> Response {
     hits = hits + 1
     if req.path == "/health" {
-        return Response { status: 200, contentType: "text/plain", body: "ok" }
+        return Response { status: 200, contentType: "text/plain", body: "ok", vary: "" }
     }
     if req.path == "/boom" {
         let z = hits - hits
         let bad = hits / z
-        return Response { status: 200, contentType: "text/plain", body: bad.toString() }
+        return Response { status: 200, contentType: "text/plain", body: bad.toString(), vary: "" }
     }
-    return Response { status: 200, contentType: "text/plain", body: "hits=\{hits.toString()}" }
+    return Response { status: 200, contentType: "text/plain", body: "hits=\{hits.toString()}", vary: "" }
 }
 "#;
 
@@ -270,9 +270,9 @@ fn main() -> Int64 {
 
 fn handle(req: Request) -> Response {
     if req.path == "/fib" {
-        return Response { status: 200, contentType: "text/plain", body: fib(20).toString() }
+        return Response { status: 200, contentType: "text/plain", body: fib(20).toString(), vary: "" }
     }
-    return Response { status: 200, contentType: "text/plain", body: "echo:\{req.path}" }
+    return Response { status: 200, contentType: "text/plain", body: "echo:\{req.path}", vary: "" }
 }
 "#;
 
@@ -320,9 +320,9 @@ fn handle(req: Request) -> Response {
     if req.path == "/boom" {
         let n = req.body.byteLength
         let z = n - n
-        return Response { status: 200, contentType: "text/plain", body: (n / z).toString() }
+        return Response { status: 200, contentType: "text/plain", body: (n / z).toString(), vary: "" }
     }
-    return Response { status: 200, contentType: "text/plain", body: "ok" }
+    return Response { status: 200, contentType: "text/plain", body: "ok", vary: "" }
 }
 "#,
         &["--workers", "2"],
@@ -350,7 +350,7 @@ fn bump() -> Int64 {
 }
 
 fn handle(req: Request) -> Response {
-    return Response { status: 200, contentType: "text/plain", body: bump().toString() }
+    return Response { status: 200, contentType: "text/plain", body: bump().toString(), vary: "" }
 }
 "#;
     let unique = format!(

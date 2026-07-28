@@ -185,14 +185,14 @@ fn string_segment_and_respond_route_end_to_end() {
         &dir.join("pages/raw/[id].vyrn"),
         "export type Params = { id: String }\n\
          export fn respond(p: Params) -> Response {\n\
-         return Response { status: 200, contentType: \"text/plain; charset=utf-8\", body: \"raw:\" + p.id }\n\
+         return Response { status: 200, contentType: \"text/plain; charset=utf-8\", body: \"raw:\" + p.id, vary: \"\" }\n\
          }\n",
     );
     write(
         &dir.join("app.vyrn"),
         "import { pages } from \"std/ui\"\n\
          import { route } from pages(\"./pages\")\n\
-         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, body: \"\" }) }\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, headers: [:], body: \"\" }) }\n\
          fn main() -> Int64 {\n\
          let a = h(\"/p/deadbeef\")\n\
          print(\"P:\\{a.status}:\\{a.body.byteLength}\")\n\
@@ -245,7 +245,7 @@ fn vyx_page_with_loader_routes_through_pages_themed() {
         &dir.join("app.vyrn"),
         "import { pagesThemed } from \"std/ui\"\n\
          import { route } from pagesThemed(\"./pages\", \"./theme.json\")\n\
-         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, body: \"\" }) }\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, headers: [:], body: \"\" }) }\n\
          fn main() -> Int64 {\n\
          let a = h(\"/\")\n\
          print(\"home:\\{a.status}\")\n\
@@ -325,7 +325,7 @@ fn imported_params_type_works_via_the_closure() {
         "import { pages } from \"std/ui\"\n\
          import { route } from pages(\"./pages\")\n\
          fn main() -> Int64 {\n\
-             let r = route(Request { method: \"GET\", path: \"/users/7\", body: \"\" })\n\
+             let r = route(Request { method: \"GET\", path: \"/users/7\", headers: [:], body: \"\" })\n\
              print(\"\\{r.status}\")\n\
              return 0\n\
          }\n",
@@ -409,7 +409,7 @@ fn layout_head_and_error_pages_route_end_to_end() {
         &dir.join("app.vyrn"),
         "import { pagesThemed } from \"std/ui\"\n\
          import { route } from pagesThemed(\"./pages\", \"./theme.json\")\n\
-         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, body: \"\" }) }\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, headers: [:], body: \"\" }) }\n\
          fn main() -> Int64 {\n\
          let a = h(\"/\")\n\
          print(\"home:\\{a.status}:\\{a.body.contains(\"class=\\\"shell\\\"\")}:\\{a.body.contains(\"/style.css\")}\")\n\
@@ -477,7 +477,7 @@ fn the_page_contract_members_route_end_to_end() {
         &dir.join("app.vyrn"),
         "import { pages } from \"std/ui\"\n\
          import { route } from pages(\"./pages\")\n\
-         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, body: \"\" }) }\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, headers: [:], body: \"\" }) }\n\
          fn main() -> Int64 {\n\
          let a = h(\"/\")\n\
          print(\"new:\\{a.status}:\\{a.body.contains(\"<title>Home</title>\")}:\\{a.body.contains(\"/style.css\")}:\\{a.body.contains(\"<h1>2</h1>\")}\")\n\
@@ -783,7 +783,7 @@ fn a_layout_head_block_still_works() {
         "import { pages } from \"std/ui\"\n\
          import { route } from pages(\"./pages\")\n\
          fn main() -> Int64 {\n\
-         let r = route(Request { method: \"GET\", path: \"/\", body: \"\" })\n\
+         let r = route(Request { method: \"GET\", path: \"/\", headers: [:], body: \"\" })\n\
          print(\"lay:\\{r.status}:\\{r.body.contains(\"<title>Shell</title>\")}:\\{r.body.contains(\"/theme.css\")}\")\n\
          return 0\n\
          }\n",

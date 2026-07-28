@@ -850,6 +850,10 @@ where
 pub struct ServeRequest {
     pub method: String,
     pub path: String,
+    /// The request's header block, in wire order, with names ALREADY LOWERCASED
+    /// (RFC-0072 M4). Case folding happens here, at the edge, so the `Map` the
+    /// program sees has one spelling per header and an exact lookup is correct.
+    pub headers: Vec<(String, String)>,
     pub body: String,
 }
 
@@ -859,6 +863,8 @@ pub struct ServeResponse {
     pub status: i64,
     pub content_type: String,
     pub body: String,
+    /// The `Vary` header to write, or `""` for none (RFC-0072 M4).
+    pub vary: String,
 }
 
 /// Run a served program (RFC-0016) under the interpreter: build ONE interpreter,
@@ -917,9 +923,16 @@ where
 /// interpreter, and read the `Response` record back out — the shared body of
 /// [`serve`] (one interpreter) and [`serve_pool`] (one per worker, RFC-0025).
 fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeResponse, String> {
+    let headers = Val::Map(
+        req.headers
+            .into_iter()
+            .map(|(k, v)| (k, Val::Str(v)))
+            .collect(),
+    );
     let request = Val::Record(HashMap::from([
         ("method".to_string(), Val::Str(req.method)),
         ("path".to_string(), Val::Str(req.path)),
+        ("headers".to_string(), headers),
         ("body".to_string(), Val::Str(req.body)),
     ]));
     match interp.call("handle", &[request]) {
@@ -937,10 +950,15 @@ fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeRespons
                 Some(Val::Str(s)) => s.clone(),
                 _ => return Err("handle returned a Response without a String `body`".into()),
             };
+            let vary = match map.get("vary") {
+                Some(Val::Str(s)) => s.clone(),
+                _ => return Err("handle returned a Response without a String `vary`".into()),
+            };
             Ok(ServeResponse {
                 status,
                 content_type,
                 body,
+                vary,
             })
         }
         Ok(other) => Err(format!(

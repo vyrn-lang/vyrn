@@ -41,10 +41,10 @@ fn handle(req: Request) -> Response {
 fn routed(req: Request) -> Response {
     // Baked constants served with their conventional content types.
     if req.method == "GET" && req.path == "/theme.css" {
-        return Response { status: 200, contentType: "text/css", body: theme.css() }
+        return Response { status: 200, contentType: "text/css", body: theme.css(), vary: "" }
     }
     if req.method == "GET" && req.path == "/openapi.json" {
-        return Response { status: 200, contentType: "application/json", body: openapiJson() }
+        return Response { status: 200, contentType: "application/json", body: openapiJson(), vary: "" }
     }
     // The RPC surface (/rpc/*) claims its paths first; everything else routes.
     return match rpcHandle(req) {
@@ -56,17 +56,17 @@ fn routed(req: Request) -> Response {
 fn main() -> Int64 {
     // A read-only smoke over handle. `vyrn serve`/`vyrn dev` run main() once at
     // startup, so it must not mutate the live store.
-    let list = handle(Request { method: "POST", path: "/rpc/listPastes", body: "" })
+    let list = handle(Request { method: "POST", path: "/rpc/listPastes", headers: [:], body: "" })
     print("listPastes -> \{list.status}: \{list.body}")
-    let bad = handle(Request { method: "POST", path: "/rpc/createPaste", body: "{\"title\":\"x\",\"body\":\"\",\"lang\":\"klingon\"}" })
+    let bad = handle(Request { method: "POST", path: "/rpc/createPaste", headers: [:], body: "{\"title\":\"x\",\"body\":\"\",\"lang\":\"klingon\"}" })
     print("createPaste(bad) -> \{bad.status}: \{bad.body}")
-    let home = handle(Request { method: "GET", path: "/", body: "" })
+    let home = handle(Request { method: "GET", path: "/", headers: [:], body: "" })
     print("/ -> \{home.status}")
-    let miss = handle(Request { method: "GET", path: "/p/deadbeef", body: "" })
+    let miss = handle(Request { method: "GET", path: "/p/deadbeef", headers: [:], body: "" })
     print("/p/deadbeef -> \{miss.status}")
-    let rawMiss = handle(Request { method: "GET", path: "/raw/deadbeef", body: "" })
+    let rawMiss = handle(Request { method: "GET", path: "/raw/deadbeef", headers: [:], body: "" })
     print("/raw/deadbeef -> \{rawMiss.status}")
-    let oa = handle(Request { method: "GET", path: "/openapi.json", body: "" })
+    let oa = handle(Request { method: "GET", path: "/openapi.json", headers: [:], body: "" })
     print("/openapi.json -> \{oa.status} (\{oa.body.byteLength} bytes)")
     return 0
 }

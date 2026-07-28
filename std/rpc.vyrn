@@ -282,22 +282,22 @@ fn serverHandlerFn(f: FnInfo) -> String {
         if retUnit {
             let runName = "rpcRun" + cap
             out = out + "        Valid(input) => " + runName + "(input),\n"
-            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }) },\n"
+            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }), vary: \"\" },\n"
             out = out + "    }\n}\n"
             out = out + "fn " + runName + "(input: " + reqType + ") -> Response {\n"
             out = out + "    " + f.name + "(input)\n"
-            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\" }\n}\n"
+            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\" }\n}\n"
         } else {
-            out = out + "        Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "(input)) },\n"
-            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }) },\n"
+            out = out + "        Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "(input)), vary: \"\" },\n"
+            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }), vary: \"\" },\n"
             out = out + "    }\n}\n"
         }
     } else {
         if retUnit {
             out = out + "    " + f.name + "()\n"
-            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\" }\n}\n"
+            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\" }\n}\n"
         } else {
-            out = out + "    return Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "()) }\n}\n"
+            out = out + "    return Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "()), vary: \"\" }\n}\n"
         }
     }
     return out
@@ -340,21 +340,21 @@ fn serverRouterFn(iface: ModuleInterface) -> String {
     let mut out = "export fn rpcHandle(req: Request) -> Option<Response> {\n"
     out = out + "    if req.path == \"/rpc/$schema\" {\n"
     out = out + "        if req.method == \"GET\" {\n"
-    out = out + "            return Some(Response { status: 200, contentType: \"application/json\", body: rpcSchema() })\n"
+    out = out + "            return Some(Response { status: 200, contentType: \"application/json\", body: rpcSchema(), vary: \"\" })\n"
     out = out + "        }\n"
-    out = out + "        return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\" })\n"
+    out = out + "        return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\" })\n"
     out = out + "    }\n"
     for f in iface.functions {
         let cap = capFirst(f.name)
         out = out + "    if req.path == \"/rpc/" + f.name + "\" {\n"
         out = out + "        if req.method != \"POST\" {\n"
-        out = out + "            return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\" })\n"
+        out = out + "            return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\" })\n"
         out = out + "        }\n"
         out = out + "        return Some(rpcHandle" + cap + "(req.body))\n"
         out = out + "    }\n"
     }
     out = out + "    if req.path.startsWith(\"/rpc/\") {\n"
-    out = out + "        return Some(Response { status: 404, contentType: \"text/plain\", body: \"no such procedure\" })\n"
+    out = out + "        return Some(Response { status: 404, contentType: \"text/plain\", body: \"no such procedure\", vary: \"\" })\n"
     out = out + "    }\n"
     out = out + "    return None\n}\n"
     return out
@@ -944,22 +944,22 @@ fn rpcDirHandler(f: FnInfo, qual: String, ns: String) -> String {
         if retUnit {
             let runName = "rpcRun" + capFirst(qual)
             out = out + "        Valid(input) => " + runName + "(input),\n"
-            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }) },\n"
+            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }), vary: \"\" },\n"
             out = out + "    }\n}\n"
             out = out + "fn " + runName + "(input: " + reqType + ") -> Response {\n"
             out = out + "    " + real + "(input)\n"
-            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\" }\n}\n"
+            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\" }\n}\n"
         } else {
-            out = out + "        Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(" + real + "(input)) },\n"
-            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }) },\n"
+            out = out + "        Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(" + real + "(input)), vary: \"\" },\n"
+            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }), vary: \"\" },\n"
             out = out + "    }\n}\n"
         }
     } else {
         if retUnit {
             out = out + "    " + real + "()\n"
-            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\" }\n}\n"
+            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\" }\n}\n"
         } else {
-            out = out + "    return Response { status: 200, contentType: \"application/json\", body: toJson(" + real + "()) }\n}\n"
+            out = out + "    return Response { status: 200, contentType: \"application/json\", body: toJson(" + real + "()), vary: \"\" }\n}\n"
         }
     }
     return out
@@ -1005,9 +1005,9 @@ gen fn rpcDirRouter(mods: Array<RpcModule>, cfg: RpcConfig) -> String {
     let mut out = "export fn rpcHandle(req: Request) -> Option<Response> {\n"
     out = out + "    if req.path == \"" + cfg.prefix + "/$schema\" {\n"
     out = out + "        if req.method == \"GET\" {\n"
-    out = out + "            return Some(Response { status: 200, contentType: \"application/json\", body: rpcSchema() })\n"
+    out = out + "            return Some(Response { status: 200, contentType: \"application/json\", body: rpcSchema(), vary: \"\" })\n"
     out = out + "        }\n"
-    out = out + "        return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\" })\n"
+    out = out + "        return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\" })\n"
     out = out + "    }\n"
     for m in mods {
         let iface = moduleInterface(m.modPath)
@@ -1015,14 +1015,14 @@ gen fn rpcDirRouter(mods: Array<RpcModule>, cfg: RpcConfig) -> String {
             let qual = rpcQualified(m.rel, f.name)
             out = out + "    if req.path == \"" + rpcPathFor(cfg, m.rel, f.name) + "\" {\n"
             out = out + "        if req.method != \"POST\" {\n"
-            out = out + "            return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\" })\n"
+            out = out + "            return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\" })\n"
             out = out + "        }\n"
             out = out + "        return Some(rpcHandle" + capFirst(qual) + "(req.body))\n"
             out = out + "    }\n"
         }
     }
     out = out + "    if req.path.startsWith(\"" + cfg.prefix + "/\") {\n"
-    out = out + "        return Some(Response { status: 404, contentType: \"text/plain\", body: \"no such procedure\" })\n"
+    out = out + "        return Some(Response { status: 404, contentType: \"text/plain\", body: \"no such procedure\", vary: \"\" })\n"
     out = out + "    }\n"
     out = out + "    return None\n}\n"
     return out

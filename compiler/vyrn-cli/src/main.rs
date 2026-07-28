@@ -3819,7 +3819,13 @@ fn dev_serve_one(
     match call_handle(req) {
         Ok(resp) => {
             eprintln!("{method} {path} -> {}", resp.status);
-            write_response(stream, resp.status, &resp.content_type, resp.body.as_bytes());
+            write_response_vary(
+                stream,
+                resp.status,
+                &resp.content_type,
+                &resp.vary,
+                resp.body.as_bytes(),
+            );
         }
         Err(msg) => {
             eprintln!("error: {msg}");
@@ -3855,7 +3861,13 @@ fn serve_one(
             match call_handle(req) {
                 Ok(resp) => {
                     eprintln!("{method} {path} -> {}", resp.status);
-                    write_response(stream, resp.status, &resp.content_type, resp.body.as_bytes());
+                    write_response_vary(
+                        stream,
+                        resp.status,
+                        &resp.content_type,
+                        &resp.vary,
+                        resp.body.as_bytes(),
+                    );
                 }
                 Err(msg) => {
                     // Canonical trap wording to stderr, then a generic 500.
@@ -3920,9 +3932,14 @@ fn parse_request(
         return Err(ParseError::Bad);
     }
 
-    // Headers: `name: value`, name compared case-insensitively.
+    // Headers: `name: value`, name compared case-insensitively. Every field is
+    // kept for the program (RFC-0072 M4), lowercased HERE — the one place a
+    // header name crosses from the wire into a Vyrn `Map`, whose lookup is exact.
+    // Repeated fields join with `", "`, which RFC 9110 §5.3 makes equivalent to
+    // sending them separately.
     let mut content_length: usize = 0;
     let mut chunked = false;
+    let mut headers: Vec<(String, String)> = Vec::new();
     for line in lines {
         if line.is_empty() {
             continue;
@@ -3934,6 +3951,13 @@ fn parse_request(
             content_length = value.parse::<usize>().map_err(|_| ParseError::Bad)?;
         } else if lname == "transfer-encoding" && value.to_ascii_lowercase().contains("chunked") {
             chunked = true;
+        }
+        match headers.iter_mut().find(|(n, _)| *n == lname) {
+            Some((_, prev)) => {
+                prev.push_str(", ");
+                prev.push_str(value);
+            }
+            None => headers.push((lname, value.to_string())),
         }
     }
     if chunked {
@@ -3958,7 +3982,7 @@ fn parse_request(
     // decoding would silently corrupt it).
     let body = String::from_utf8(body).map_err(|_| ParseError::Bad)?;
 
-    Ok(vyrn_frontend::interp::ServeRequest { method, path: target, body })
+    Ok(vyrn_frontend::interp::ServeRequest { method, path: target, headers, body })
 }
 
 /// A minimal status-code → reason-phrase table. Unknown codes get an empty
@@ -3997,10 +4021,28 @@ fn reason_phrase(status: i64) -> &'static str {
 /// `Connection: close`, blank line, body. Errors are ignored — the peer may
 /// have hung up, and one dropped connection must not fault the server.
 fn write_response(stream: &mut std::net::TcpStream, status: i64, content_type: &str, body: &[u8]) {
+    write_response_vary(stream, status, content_type, "", body)
+}
+
+/// [`write_response`] plus a `Vary` field (RFC-0072 M4). `vary` empty writes no
+/// header at all, so a response that does not negotiate stays byte-identical to
+/// what this host wrote before the field existed.
+fn write_response_vary(
+    stream: &mut std::net::TcpStream,
+    status: i64,
+    content_type: &str,
+    vary: &str,
+    body: &[u8],
+) {
     use std::io::Write;
     let reason = reason_phrase(status);
+    let vary_line = if vary.is_empty() {
+        String::new()
+    } else {
+        format!("Vary: {vary}\r\n")
+    };
     let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{vary_line}Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(header.as_bytes());

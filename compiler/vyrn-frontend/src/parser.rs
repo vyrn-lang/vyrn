@@ -498,6 +498,15 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     // boundary. `path` carries the query string as sent; `body` is the raw
     // request body (`""` when absent). Users construct them freely — `main`
     // calling `handle` directly is the parity story.
+    //
+    // `headers` (RFC-0072 M4) carries the request's header block. RFC 9110 makes
+    // field names case-insensitive, and a `Map<String, String>` lookup is exact,
+    // so the NAMES ARE LOWERCASED WHERE THE REQUEST IS BUILT — the host lowercases
+    // as it parses the wire, and a hand-written `Request` literal writes lowercase
+    // keys. Normalizing at construction rather than at lookup keeps the map itself
+    // canonical: iterating it yields one spelling per header, and no reader has to
+    // remember a helper to be correct. Duplicate field lines join with `", "` per
+    // RFC 9110 §5.3.
     program.type_decls.push(TypeDecl {
         name: "Request".to_string(),
         exported: false,
@@ -512,6 +521,10 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             Field {
                 name: "path".to_string(),
                 ty: Type::Str,
+            },
+            Field {
+                name: "headers".to_string(),
+                ty: Type::Map(Box::new(Type::Str), Box::new(Type::Str)),
             },
             Field {
                 name: "body".to_string(),
@@ -538,6 +551,14 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             },
             Field {
                 name: "body".to_string(),
+                ty: Type::Str,
+            },
+            // The `Vary` response header (RFC-0072 M4). A response whose body
+            // depends on a request header must say which, or a shared cache will
+            // serve one audience's copy to the other — a page's HTML to a client
+            // asking for its JSON payload. `""` emits no header.
+            Field {
+                name: "vary".to_string(),
                 ty: Type::Str,
             },
         ]),

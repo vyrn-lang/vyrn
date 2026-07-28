@@ -372,23 +372,25 @@ fn uiDataParamLazy() -> Int64
 
 `fn data() -> ParamLazy<P, T>` — params, render-then-fill.
 
-## uiDataMarker
+## uiWantsData
 
 ```vyrn
-fn uiDataMarker() -> String
+fn uiWantsData(req: Request) -> Bool
 ```
 
-The data-request marker (RFC-0069 §2). The server `Request` exposes no headers,
-so the marker rides the query string; `uiRouteSegments` already strips the query
-from routing, so a marked request routes to the same page.
+Whether `req` asked for a page's DATA representation rather than its document
+(RFC-0072 M4).
 
-## uiIsDataRequest
+The rule: JSON wins only when the client NAMED `application/json` and did not
+also name `text/html`. The document is the DEFAULT representation, so a browser
+navigation (`text/html,application/xhtml+xml,…,*/*;q=0.8`), a bare `*/*`, and a
+missing `Accept` all get HTML — which is also what keeps an ordinary `GET`
+byte-identical to what it answered before this milestone.
 
-```vyrn
-fn uiIsDataRequest(path: String) -> Bool
-```
-
-Whether `path`'s query carries the data marker.
+Full q-value ranking is deliberately not implemented. It would be a second
+content-negotiation engine to keep honest against the first, and no client that
+reaches this router separates these two types by weight alone: a document
+navigation never names `application/json`, and `vyrn-nav` sends it alone.
 
 ## uiPayload
 
@@ -414,9 +416,13 @@ a `title` so vyrn-nav v3 sets `document.title` on a client-rendered error.
 fn uiDataResponse(body: String) -> Response
 ```
 
-Wrap a payload body in a `200 application/json` `Response`. A marked request is a
-DATA fetch: it always answers 200 (the payload's `page`/`status` describe what to
-render), while the UNMARKED document channel still returns a real 404 etc.
+Wrap a payload body in a `200 application/json` `Response`. A negotiated request
+is a DATA fetch: it always answers 200 (the payload's `page`/`status` describe
+what to render), while the DOCUMENT channel still returns a real 404 etc.
+
+`vary: "Accept"` is what makes one URL with two representations safe to cache:
+without it a shared cache would store whichever came first and hand a page's
+JSON to a browser asking for its HTML.
 
 ## uiDataMiss
 

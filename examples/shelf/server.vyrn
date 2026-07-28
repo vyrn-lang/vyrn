@@ -27,7 +27,7 @@ let mut middleware: Array<Middleware> = [
         return None
     },
         |req| if req.path =~ "/admin.*" {
-        Some(Response { status: 403, contentType: "text/plain", body: "forbidden" })
+        Some(Response { status: 403, contentType: "text/plain", body: "forbidden", vary: "" })
     } else {
         None
     },
@@ -52,13 +52,13 @@ fn handle(req: Request) -> Response {
 fn routed(req: Request) -> Response {
     // Baked constants served with their conventional content types.
     if req.method == "GET" && req.path == "/theme.css" {
-        return Response { status: 200, contentType: "text/css", body: theme.css() }
+        return Response { status: 200, contentType: "text/css", body: theme.css(), vary: "" }
     }
     if req.method == "GET" && req.path == "/openapi.json" {
-        return Response { status: 200, contentType: "application/json", body: openapiJson() }
+        return Response { status: 200, contentType: "application/json", body: openapiJson(), vary: "" }
     }
     if req.method == "GET" && req.path == "/schema.graphql" {
-        return Response { status: 200, contentType: "application/graphql", body: sdlText() }
+        return Response { status: 200, contentType: "application/graphql", body: sdlText(), vary: "" }
     }
     // rpcHandle (/rpc/*) and connectHandle (the Connect /<service>.<Proc> surface)
     // mount side by side — one contract, two protocols; anything else routes.
@@ -74,24 +74,24 @@ fn routed(req: Request) -> Response {
 fn main() -> Int64 {
     // A smoke over handle. Mutating calls persist for the process, so run order
     // matters.
-    let list = handle(Request { method: "POST", path: "/rpc/listBooks", body: "" })
+    let list = handle(Request { method: "POST", path: "/rpc/listBooks", headers: [:], body: "" })
     print("listBooks -> \{list.status}")
-    let tags = handle(Request { method: "POST", path: "/rpc/tagCounts", body: "" })
+    let tags = handle(Request { method: "POST", path: "/rpc/tagCounts", headers: [:], body: "" })
     print("tagCounts -> \{tags.status}: \{tags.body}")
-    let bad = handle(Request { method: "POST", path: "/rpc/addBook", body: "{\"title\":\"\",\"url\":\"not-a-url\",\"tags\":[]}" })
+    let bad = handle(Request { method: "POST", path: "/rpc/addBook", headers: [:], body: "{\"title\":\"\",\"url\":\"not-a-url\",\"tags\":[]}" })
     print("addBook(bad) -> \{bad.status}: \{bad.body}")
-    let home = handle(Request { method: "GET", path: "/", body: "" })
+    let home = handle(Request { method: "GET", path: "/", headers: [:], body: "" })
     print("/ -> \{home.status}")
     // The guard answers /admin before any route runs.
-    let blocked = handle(Request { method: "GET", path: "/admin/secrets", body: "" })
+    let blocked = handle(Request { method: "GET", path: "/admin/secrets", headers: [:], body: "" })
     print("/admin/secrets -> \{blocked.status}: \{blocked.body}")
-    let conn = handle(Request { method: "POST", path: "/contract.listBooks", body: "{}" })
+    let conn = handle(Request { method: "POST", path: "/contract.listBooks", headers: [:], body: "{}" })
     print("connect listBooks -> \{conn.status}")
-    let badConn = handle(Request { method: "POST", path: "/contract.addBook", body: "{\"title\":\"\",\"url\":\"nope\",\"tags\":[]}" })
+    let badConn = handle(Request { method: "POST", path: "/contract.addBook", headers: [:], body: "{\"title\":\"\",\"url\":\"nope\",\"tags\":[]}" })
     print("connect addBook(bad) -> \{badConn.status}: \{badConn.body}")
-    let oa = handle(Request { method: "GET", path: "/openapi.json", body: "" })
+    let oa = handle(Request { method: "GET", path: "/openapi.json", headers: [:], body: "" })
     print("/openapi.json -> \{oa.status} (\{oa.body.byteLength} bytes)")
-    let gql = handle(Request { method: "GET", path: "/schema.graphql", body: "" })
+    let gql = handle(Request { method: "GET", path: "/schema.graphql", headers: [:], body: "" })
     print("/schema.graphql -> \{gql.status} (\{gql.body.byteLength} bytes)")
     return 0
 }

@@ -21,11 +21,11 @@ fn handle(req: Request) -> Response {
 
 fn main() -> Int64 {
     // Drive `handle` once so `vyrn run server.vyrn` is a quick smoke test.
-    let schema = handle(Request { method: "GET", path: "/rpc/$schema", body: "" })
+    let schema = handle(Request { method: "GET", path: "/rpc/$schema", headers: [:], body: "" })
     print("$schema -> \{schema.status}")
-    let home = handle(Request { method: "GET", path: "/", body: "" })
+    let home = handle(Request { method: "GET", path: "/", headers: [:], body: "" })
     print("/ -> \{home.status}")
-    let user = handle(Request { method: "GET", path: "/users/7", body: "" })
+    let user = handle(Request { method: "GET", path: "/users/7", headers: [:], body: "" })
     print("/users/7 -> \{user.status}")
     return 0
 }

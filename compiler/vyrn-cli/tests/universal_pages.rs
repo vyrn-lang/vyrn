@@ -294,7 +294,7 @@ fn unmarked_missing_paste_is_404_html() {
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn marked_about_is_the_exact_static_payload() {
     let port = bin_port();
-    let (status, headers, body) = get(port, "/about?__vyrn=data");
+    let (status, headers, body) = get_data(port, "/about");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "application/json");
     // A static page: empty props, empty params, the url-pattern title/id.
@@ -306,7 +306,7 @@ fn marked_about_is_the_exact_static_payload() {
 fn marked_home_payload_carries_the_loaded_list() {
     let port = bin_port();
     let id = create_paste(port, "hello", "world", "text");
-    let (status, headers, body) = get(port, "/?__vyrn=data");
+    let (status, headers, body) = get_data(port, "/");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "application/json");
     assert!(body.starts_with("{\"page\":\"/\",\"title\":"), "unexpected payload:\n{body}");
@@ -321,7 +321,7 @@ fn marked_home_payload_carries_the_loaded_list() {
 fn marked_paste_props_round_trip_through_the_wire_codec() {
     let port = bin_port();
     let id = create_paste(port, "deep title", "the body text", "text");
-    let (status, headers, body) = get(port, &format!("/p/{id}?__vyrn=data"));
+    let (status, headers, body) = get_data(port, &format!("/p/{id}"));
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "application/json");
     assert!(body.starts_with("{\"page\":\"/p/:id\","), "unexpected payload:\n{body}");
@@ -337,7 +337,7 @@ fn marked_paste_props_round_trip_through_the_wire_codec() {
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn marked_missing_paste_is_the_error_payload() {
     let port = bin_port();
-    let (status, headers, body) = get(port, "/p/ghost?__vyrn=data");
+    let (status, headers, body) = get_data(port, "/p/ghost");
     // A miss on the DATA channel is a 200 carrying the @error payload (the client
     // renders the themed error page); the document channel still 404s.
     assert_eq!(status, "HTTP/1.1 200 OK");
@@ -353,7 +353,7 @@ fn marked_non_client_route_falls_back_to_its_real_response() {
     let id = create_paste(port, "raw", "raw body content", "text");
     // /raw/[id] is a `.vyrn` respond page — NOT in the client bundle. A marked
     // request must NOT be answered as JSON, so the client hard-navs to it.
-    let (status, headers, body) = get(port, &format!("/raw/{id}?__vyrn=data"));
+    let (status, headers, body) = get_data(port, &format!("/raw/{id}"));
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert!(!content_type(&headers).contains("application/json"), "raw route must not be JSON: {}", content_type(&headers));
     assert!(body.contains("raw body content"));

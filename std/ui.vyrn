@@ -51,7 +51,7 @@ import { vyxPageShape, vyxPageInterface, vyxQueryDataType, vyxDataRunner, vyxDat
 // Shared string / array helpers (RFC-0046/0059) — the former private uiJoinList,
 // uiContainsStr, uiTrimStr copies now live once in std; the infallible-decode
 // swallows route through the shared `fromBytesOr`.
-import { joinWith, trim, fromBytesOr } from "std/strings"
+import { joinWith, trim, fromBytesOr, indexOf, toLower } from "std/strings"
 import { includes } from "std/arrays"
 // The `Head` value a page's `head()` returns renders through `std/html` here
 // (RFC-0071 M2) rather than as generated source, because its includes are now
@@ -374,7 +374,7 @@ export fn uiNoView() -> Html {
 
 /// The absent raw response. See [`uiNoView`].
 export fn uiNoRespond() -> Response {
-    return Response { status: 404, contentType: "text/plain", body: "" }
+    return Response { status: 404, contentType: "text/plain", body: "", vary: "" }
 }
 
 /// The `data` member's alternative-signature indices, as `matchedMember` reports
@@ -401,45 +401,48 @@ export fn uiDataParamLazy() -> Int64 {
 }
 
 // ===========================================================================
-// The data-payload runtime (RFC-0069 §2) — RUNTIME helpers (not `gen`) the
-// synthesized router imports to answer a marked (`?__vyrn=data`) soft-nav request
-// with `{page, title, props[, params]}` JSON. Kept here as ordinary Vyrn (so the
-// JSON string building uses normal `"\""` literals, not a code quote) and shared by
+// The data-payload runtime (RFC-0069 §2, RFC-0072 M4) — RUNTIME helpers (not
+// `gen`) the synthesized router imports to answer a soft-nav DATA request with
+// `{page, title, props[, params]}` JSON. Kept here as ordinary Vyrn (so the JSON
+// string building uses normal `"\""` literals, not a code quote) and shared by
 // every generated router rather than re-emitted per module.
+//
+// A page has TWO representations at ONE URL, told apart by `Accept`. That is
+// content negotiation — the technique's own name, understood by every HTTP client
+// in every language, and naming no language or framework on the wire. It replaces
+// RFC-0069's `?__vyrn=data` query marker, which existed only because `Request`
+// carried no headers; it does now.
 // ===========================================================================
 
-/// The data-request marker (RFC-0069 §2). The server `Request` exposes no headers,
-/// so the marker rides the query string; `uiRouteSegments` already strips the query
-/// from routing, so a marked request routes to the same page.
-export fn uiDataMarker() -> String {
-    return "__vyrn=data"
+/// Whether `accept` names the media type `ty`. A substring test over the
+/// already-lowercased field value: only the PRESENCE of the type matters here,
+/// never where it appeared.
+fn uiAcceptNames(accept: String, ty: String) -> Bool {
+    return match indexOf(accept, ty) {
+        Some(at) => true,
+        None => false,
+    }
 }
 
-/// Whether `path`'s query carries the data marker.
-export fn uiIsDataRequest(path: String) -> Bool {
-    let ba = bytes(path)
-    let m = bytes(uiDataMarker())
-    if m.length > ba.length {
-        return false
+/// Whether `req` asked for a page's DATA representation rather than its document
+/// (RFC-0072 M4).
+///
+/// The rule: JSON wins only when the client NAMED `application/json` and did not
+/// also name `text/html`. The document is the DEFAULT representation, so a browser
+/// navigation (`text/html,application/xhtml+xml,…,*/*;q=0.8`), a bare `*/*`, and a
+/// missing `Accept` all get HTML — which is also what keeps an ordinary `GET`
+/// byte-identical to what it answered before this milestone.
+///
+/// Full q-value ranking is deliberately not implemented. It would be a second
+/// content-negotiation engine to keep honest against the first, and no client that
+/// reaches this router separates these two types by weight alone: a document
+/// navigation never names `application/json`, and `vyrn-nav` sends it alone.
+export fn uiWantsData(req: Request) -> Bool {
+    let accept = match req.headers["accept"] {
+        Some(v) => toLower(v),
+        None => "",
     }
-    let mut i = 0
-    while i + m.length <= ba.length {
-        let mut hit = true
-        let mut j = 0
-        while j < m.length {
-            if ba[i + j] != m[j] {
-                hit = false
-                j = m.length
-            } else {
-                j = j + 1
-            }
-        }
-        if hit {
-            return true
-        }
-        i = i + 1
-    }
-    return false
+    return uiAcceptNames(accept, "application/json") && uiAcceptNames(accept, "text/html") == false
 }
 
 /// Assemble a page data payload. `props`/`params` are already JSON (a `toJson`
@@ -454,11 +457,15 @@ export fn uiErrorPayload(status: Int64, props: String) -> String {
     return "{\"page\":\"@error\",\"status\":" + status.toString() + ",\"title\":\"Error\",\"props\":" + props + "}"
 }
 
-/// Wrap a payload body in a `200 application/json` `Response`. A marked request is a
-/// DATA fetch: it always answers 200 (the payload's `page`/`status` describe what to
-/// render), while the UNMARKED document channel still returns a real 404 etc.
+/// Wrap a payload body in a `200 application/json` `Response`. A negotiated request
+/// is a DATA fetch: it always answers 200 (the payload's `page`/`status` describe
+/// what to render), while the DOCUMENT channel still returns a real 404 etc.
+///
+/// `vary: "Accept"` is what makes one URL with two representations safe to cache:
+/// without it a shared cache would store whichever came first and hand a page's
+/// JSON to a browser asking for its HTML.
 export fn uiDataResponse(body: String) -> Response {
-    return Response { status: 200, contentType: "application/json", body: body }
+    return Response { status: 200, contentType: "application/json", body: body, vary: "Accept" }
 }
 
 /// The data response for a true miss (no route matched): the themed error page's
@@ -1488,7 +1495,7 @@ fn uiRouteNone(o: Option<Response>) -> Bool {
     }
 }
 fn uiRouteNotFound() -> Response {
-    return Response { status: 404, contentType: "text/html", body: document("Not Found", [], el("main", [], [el("h1", [], [text("404 — Not Found")])])) }
+    return Response { status: 404, contentType: "text/html", body: document("Not Found", [], el("main", [], [el("h1", [], [text("404 — Not Found")])])), vary: "" }
 }
 fn uiRouteIssue(iss: Issue) -> Html {
     return el("li", [], [text(iss.path + ": " + iss.message)])
@@ -1738,14 +1745,14 @@ gen fn uiTitleExpr(layoutIdxs: Array<Int64>, pageTitleCall: String, dflt: String
 gen fn uiSuccessResponse(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>) -> String {
     let bodyExpr = uiWrapLayout(uiBodyCall(p, idx), layoutIdxs)
     if uiNeedsThreading(p, layoutIdxs) == false {
-        return "Response { status: 200, contentType: \"text/html\", body: document(" + uiStrLit(p.urlPattern) + ", [], " + bodyExpr + ") }"
+        return "Response { status: 200, contentType: \"text/html\", body: document(" + uiStrLit(p.urlPattern) + ", [], " + bodyExpr + "), vary: \"\" }"
     }
     let args = uiPageCallArgs(p)
     let pageHeadCall = if p.isVyx { "p" + idx + ".head(" + args + ")" } else { "" }
     let pageTitleCall = if p.isVyx { "p" + idx + ".headTitle(" + args + ")" } else { "" }
     let headE = uiHeadExpr(layoutIdxs, pageHeadCall)
     let titleE = uiTitleExpr(layoutIdxs, pageTitleCall, p.urlPattern)
-    return "Response { status: 200, contentType: \"text/html\", body: document(" + titleE + ", " + headE + ", " + bodyExpr + ") }"
+    return "Response { status: 200, contentType: \"text/html\", body: document(" + titleE + ", " + headE + ", " + bodyExpr + "), vary: \"\" }"
 }
 
 /// Whether the page dispatches a failure through `uiErrDoc` (a `Result` loader, or
@@ -1768,7 +1775,7 @@ gen fn uiEmitErrDoc(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, errorI
     let headE = uiHeadExpr(layoutIdxs, "")
     let titleE = uiTitleExpr(layoutIdxs, "", "Error")
     let mut out = "fn uiErrDoc" + idx + "(uiPe: PageError) -> Response {\n"
-    out = out + "    return Response { status: uiPe.status, contentType: \"text/html\", body: document(" + titleE + ", " + headE + ", " + bodyExpr + ") }\n}\n"
+    out = out + "    return Response { status: uiPe.status, contentType: \"text/html\", body: document(" + titleE + ", " + headE + ", " + bodyExpr + "), vary: \"\" }\n}\n"
     return out
 }
 
@@ -1804,7 +1811,7 @@ gen fn uiEmitLoadDispatch(p: UiPageInfo, idx: String, layoutIdxs: Array<Int64>, 
     } else if errorIdx >= 0 {
         out = out + "        Invalid(issues) => uiErrDoc" + idx + "(uiIssuesToError(issues)),\n"
     } else {
-        out = out + "        Invalid(issues) => Response { status: 422, contentType: \"text/html\", body: document(\"Error\", [], uiRouteError(issues)) },\n"
+        out = out + "        Invalid(issues) => Response { status: 422, contentType: \"text/html\", body: document(\"Error\", [], uiRouteError(issues)), vary: \"\" },\n"
     }
     out = out + "    }\n}\n"
     return out
@@ -2107,7 +2114,7 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
         out = out + "import { " + joinWith(runners, ", ") + " } from \"std/ui\"\n"
     }
     if anyClientPage {
-        out = out + "import { uiIsDataRequest, uiPayload, uiErrorPayload, uiDataResponse, uiDataMiss, uiErrorResponseOf } from \"std/ui\"\n"
+        out = out + "import { uiWantsData, uiPayload, uiErrorPayload, uiDataResponse, uiDataMiss, uiErrorResponseOf } from \"std/ui\"\n"
     }
 
     // Segment parsing for `Int64` dynamic params.
@@ -2162,10 +2169,10 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
     }
 
     // route(): static routes first, then dynamic, first hit wins. The normal HTML
-    // dispatch (`hit`) runs identically whether or not the request is marked; only a
-    // MARKED request (RFC-0069 §2) additionally consults the data channel and, when
-    // it renders a client page, answers JSON instead — the unmarked response is
-    // byte-identical to today.
+    // dispatch (`hit`) runs identically whichever representation was asked for; only
+    // a request that NEGOTIATED JSON (RFC-0072 M4) additionally consults the data
+    // channel and, when it renders a client page, answers JSON instead — a document
+    // request is byte-identical to what it was before negotiation existed.
     out = out + "export fn route(req: Request) -> Response {\n"
     out = out + "    let segs = uiRouteSegments(req.path)\n"
     out = out + "    let mut hit: Option<Response> = None\n"
@@ -2173,7 +2180,7 @@ gen fn uiBuildModule(pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors:
         out = out + "    if uiRouteNone(hit) {\n        hit = uiTry" + order.toString() + "(segs)\n    }\n"
     }
     if anyClientPage {
-        out = out + "    if uiIsDataRequest(req.path) {\n"
+        out = out + "    if uiWantsData(req) {\n"
         out = out + "        let mut dhit: Option<Response> = None\n"
         for order in uiDispatchOrder(pages) {
             if uiClientRenderable(pages[order]) {

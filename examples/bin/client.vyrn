@@ -257,7 +257,7 @@ test "resolvePage matches a dynamic /p/:id path as a data page" {
 }
 
 test "resolvePage strips the query before matching" {
-    let r = resolvePage("/about?__vyrn=data")
+    let r = resolvePage("/about?ref=nav&page=2")
     assert(r.contains("\"found\":true"))
     assert(r.contains("\"page\":\"/about\""))
 }

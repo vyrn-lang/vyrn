@@ -52,8 +52,8 @@
 // WHAT v3 CHANGES over v2 (RFC-0069): v2 fetched full HTML on every nav — a real
 // server render each time, only the transition going soft. v3 goes the Nuxt route:
 // when the client page bundle is present (the island's wasm exposes `renderPage`),
-// a soft nav fetches ONLY a `{page, title, props}` JSON payload (the data marker
-// `?__vyrn=data`), renders the next page CLIENT-side through `renderPage`, and
+// a soft nav fetches ONLY a `{page, title, props}` JSON payload, renders the next
+// page CLIENT-side through `renderPage`, and
 // paints the resulting tree into `<main>` via vyrn-dom — no HTML transfer, no shell
 // re-render. Fallbacks, in order: a route not in the client bundle (the server
 // answers non-JSON) → the v2 HTML swap; anything odd → v2's hard nav. If the bundle
@@ -71,10 +71,18 @@
 //
 // WHAT RFC-0070 CHANGES: `resolvePage` also returns `lazy`. A resolved LAZY page
 // (`lazy fn load()`) renders its skeleton INSTANTLY from a `{"__loading__":true}`
-// payload — zero wait — then fetches the data marker and fills in `Ready(props)` by
+// payload — zero wait — then fetches the payload and fills in `Ready(props)` by
 // PATCHING the retained skeleton view (vyrn-dom's static differ), so only the data
 // region repaints and the shell + island never move. A non-lazy data page still
 // blocks (fetch, then render) exactly as RFC-0069. Dataless/unknown are unchanged.
+//
+// WHAT RFC-0072 M4 CHANGES: the data channel is no longer a REWRITTEN URL. v3 asked
+// for the payload at `<path>?__vyrn=data`; it now asks at `<path>` with `Accept:
+// application/json` — content negotiation, one URL with two representations. The
+// document channel states `Accept: text/html` for the same reason. The inert
+// `x-vyrn-nav` hint is gone with it: nothing ever read it, and both it and the query
+// marker put a framework's name on the wire for no one's benefit. A payload request
+// is now something you can paste into curl unchanged.
 
 import { renderTree, makePageView, patchPageView } from "./vyrn-dom.js";
 
@@ -268,16 +276,18 @@ let pageRenderer = null;
 // trip: a known dataless page renders immediately (zero fetch), a data page fetches
 // its payload, an unknown path falls through to the v2 HTML swap. When it is null (an
 // older bundle that registered only the renderer), the navigator keeps the M3
-// behavior — fetch the data marker on every nav.
+// behavior — ask for the data representation on every nav.
 let pageResolver = null;
 
-// The data-marked variant of a URL — the same path, with `?__vyrn=data` added, so
-// the server answers with the page's JSON payload instead of its HTML document.
-function withDataMarker(url) {
-  const u = new URL(url, location.href);
-  u.searchParams.set("__vyrn", "data");
-  return u.href;
-}
+// The request headers that ask for a page's DATA representation instead of its
+// document (RFC-0072 M4). Same URL, different `Accept` — content negotiation. The
+// URL a soft nav fetches is now exactly the URL in the address bar, so a payload
+// request is copy-pasteable into curl and names no framework on the wire.
+const DATA_HEADERS = { Accept: "application/json" };
+
+// The headers for a v2 HTML swap: the document representation, stated explicitly
+// so the negotiation is symmetric and nothing depends on the browser's default.
+const DOC_HEADERS = { Accept: "text/html" };
 
 // Resolve a nav target against the client bundle (RFC-0069 M4), returning the parsed
 // {found, hasData, page, title} descriptor, or null when there is no resolver / it
@@ -388,7 +398,7 @@ async function navigateLazy(url, { push }, resolved) {
   const timer = setTimeout(() => controller.abort(), CONFIG.timeoutMs);
   let res;
   try {
-    res = await fetch(withDataMarker(url), { headers: { "x-vyrn-nav": "data" }, signal: controller.signal });
+    res = await fetch(url, { headers: DATA_HEADERS, signal: controller.signal });
   } catch (err) {
     clearTimeout(timer);
     inflight = null;
@@ -503,18 +513,16 @@ async function navigate(url, { push }) {
   inflight = controller;
   const timer = setTimeout(() => controller.abort(), CONFIG.timeoutMs);
 
-  // Fetch the data marker (JSON payload) ONLY for a resolved DATA page; an unresolved
-  // path — not in the client bundle — takes the plain HTML channel (the v2 swap /
-  // hard-nav chain, unchanged). Without a resolver (an older bundle that registered
-  // only the renderer) keep the M3 behavior: the marker on every nav. `x-vyrn-nav`
-  // stays a hint the server ignores (it keys off the query marker), kept for
-  // observability.
+  // Ask for the JSON payload ONLY for a resolved DATA page; an unresolved path — not
+  // in the client bundle — takes the plain HTML channel (the v2 swap / hard-nav chain,
+  // unchanged). Without a resolver (an older bundle that registered only the renderer)
+  // keep the M3 behavior: ask for data on every nav. Both channels now hit the SAME
+  // URL and differ only in `Accept` (RFC-0072 M4).
   const wantData = dataMode && (resolved ? resolved.found && resolved.hasData : true);
-  const fetchUrl = wantData ? withDataMarker(url) : url;
 
   let res;
   try {
-    res = await fetch(fetchUrl, { headers: { "x-vyrn-nav": wantData ? "data" : "soft" }, signal: controller.signal });
+    res = await fetch(url, { headers: wantData ? DATA_HEADERS : DOC_HEADERS, signal: controller.signal });
   } catch (err) {
     clearTimeout(timer);
     inflight = null;
