@@ -9,6 +9,71 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+
+/// A fast, non-cryptographic hasher for the interpreter's own maps.
+///
+/// Scope frames are `name -> Slot`, and a variable reference hashes its name on
+/// every read — measured at ~150-235 ns per reference, which dominates every
+/// interpreted program. Rust's default hasher is SipHash, chosen to resist
+/// hash-flooding from untrusted keys; these keys are identifiers from the
+/// program being run, so that protection buys nothing and costs the hot path.
+/// FxHash (the algorithm rustc uses on its own interned strings) is a multiply
+/// and a rotate per 8 bytes.
+#[derive(Default, Clone, Copy)]
+pub struct FxHasher {
+    hash: u64,
+}
+
+impl FxHasher {
+    const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(Self::SEED);
+    }
+}
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_ne_bytes(c.try_into().unwrap()));
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut buf = [0u8; 8];
+            buf[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_ne_bytes(buf));
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct FxBuild;
+
+impl std::hash::BuildHasher for FxBuild {
+    type Hasher = FxHasher;
+    #[inline]
+    fn build_hasher(&self) -> FxHasher {
+        FxHasher::default()
+    }
+}
+
+/// The interpreter's scope frame: identifiers to slots, hashed cheaply.
+type Frame = HashMap<String, Slot, FxBuild>;
 use std::io::Write as _;
 
 use crate::ast::*;
@@ -773,7 +838,7 @@ where
                 continue;
             }
         }
-        let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+        let mut scope: Vec<Frame> = vec![Frame::default()];
         // Any `Ctrl::Err` is a FAILED test (including a failed `assert`); a bare
         // `?`-propagated `Ctrl::Return` (a test may use `?`) simply ends it.
         let result: Result<(), String> = match interp.block(&t.body, &mut scope) {
@@ -841,7 +906,7 @@ where
                 continue;
             }
         }
-        let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+        let mut scope: Vec<Frame> = vec![Frame::default()];
         let result: Result<(), String> = match interp.block(&b.body, &mut scope) {
             Ok(_) => Ok(()),
             Err(Ctrl::Return(_)) => Ok(()),
@@ -1245,7 +1310,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
             .flatten()
             .collect(),
         region_depth: std::cell::Cell::new(0),
-        globals: RefCell::new(HashMap::new()),
+        globals: RefCell::new(Frame::default()),
         args: prog_args.to_vec(),
         mono_counter: std::cell::Cell::new(0),
         gen: None,
@@ -1287,7 +1352,7 @@ struct Interp<'a> {
     /// bottoms out on this. Populated once (in declaration order) before
     /// `main`; variable reads/writes fall back to it when the local scope misses.
     /// Slot-typed so reassignments coerce (and auto-validate) exactly like locals.
-    globals: RefCell<HashMap<String, Slot>>,
+    globals: RefCell<Frame>,
     /// The program's command-line arguments (RFC-0014 `args()`), argv[1..].
     args: Vec<String>,
     /// Per-call counter for the fixed monotonic clock (RFC-0043): under
@@ -1359,7 +1424,7 @@ impl<'a> Interp<'a> {
     /// remembered so later assignments coerce.
     fn init_globals(&self, program: &Program) -> Result<(), Ctrl> {
         for g in &program.globals {
-            let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+            let mut scope: Vec<Frame> = vec![Frame::default()];
             let mut v = self.expr(&g.init, &mut scope)?;
             if let Some(t) = &g.ty {
                 v = self.coerce(v, t)?;
@@ -1588,7 +1653,7 @@ impl<'a> Interp<'a> {
         &self,
         params: &[String],
         body: &LambdaBody,
-        scope: &[HashMap<String, Slot>],
+        scope: &[Frame],
         param_tys: Vec<Type>,
         ret: Type,
     ) -> Val {
@@ -1613,7 +1678,7 @@ impl<'a> Interp<'a> {
     /// Look up `name` in the local scope — or module state (RFC-0037) — and
     /// return a clone if it is a function value: the dispatch step for a call
     /// through a `fn`-typed parameter or any stored fn-typed binding.
-    fn lookup_fnval(&self, scope: &[HashMap<String, Slot>], name: &str) -> Option<FnVal> {
+    fn lookup_fnval(&self, scope: &[Frame], name: &str) -> Option<FnVal> {
         for frame in scope.iter().rev() {
             if let Some(slot) = frame.get(name) {
                 return match &slot.v {
@@ -1638,7 +1703,7 @@ impl<'a> Interp<'a> {
     fn eval_fn_arg(
         &self,
         arg: &Expr,
-        scope: &mut Vec<HashMap<String, Slot>>,
+        scope: &mut Vec<Frame>,
         fnty: &Type,
     ) -> Result<Val, Ctrl> {
         let (ptys, ret) = match fnty {
@@ -1674,14 +1739,14 @@ impl<'a> Interp<'a> {
                 param_tys,
                 ret,
             } => {
-                let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+                let mut scope: Vec<Frame> = vec![Frame::default()];
                 // The captured environment is the outer (read-only) frame.
                 for (k, v) in captures {
                     scope[0].insert(k.clone(), Slot::untyped(v.clone()));
                 }
                 // Then the lambda's own parameters shadow captures, coerced to the
                 // signature's parameter types (sized-int wrapping / validation).
-                scope.push(HashMap::new());
+                scope.push(Frame::default());
                 for (i, p) in params.iter().enumerate() {
                     let v = args.get(i).cloned().unwrap_or(Val::Unit);
                     let v = match param_tys.get(i) {
@@ -1737,7 +1802,7 @@ impl<'a> Interp<'a> {
                 "extern `{name}` is not available on this target"
             )));
         }
-        let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+        let mut scope: Vec<Frame> = vec![Frame::default()];
         for (p, v) in f.params.iter().zip(args) {
             // Coerce each argument to its parameter type (sized-int wrapping,
             // and automatic validation into predicated types).
@@ -1786,8 +1851,8 @@ impl<'a> Interp<'a> {
         Ok(v)
     }
 
-    fn block(&self, block: &Block, scope: &mut Vec<HashMap<String, Slot>>) -> Result<Flow, Ctrl> {
-        scope.push(HashMap::new());
+    fn block(&self, block: &Block, scope: &mut Vec<Frame>) -> Result<Flow, Ctrl> {
+        scope.push(Frame::default());
         // Values reclaimed when this frame exits (normally or via `return`),
         // mirroring the native backend's block-exit drops. Only a reference
         // release is observable here (the slab slot is recycled and stale
@@ -1842,7 +1907,7 @@ impl<'a> Interp<'a> {
         Ok(())
     }
 
-    fn stmt(&self, stmt: &Stmt, scope: &mut Vec<HashMap<String, Slot>>) -> Result<Flow, Ctrl> {
+    fn stmt(&self, stmt: &Stmt, scope: &mut Vec<Frame>) -> Result<Flow, Ctrl> {
         // Generation step budget (RFC-0021): a runaway generator fails loudly
         // instead of hanging the build. Only active inside a generation run.
         if let Some(g) = &self.gen {
@@ -2188,7 +2253,7 @@ impl<'a> Interp<'a> {
                 let sv = self.expr(scrutinee, scope)?;
                 match Self::match_pattern(pattern, &sv) {
                     Some(binds) => {
-                        scope.push(HashMap::new());
+                        scope.push(Frame::default());
                         for (n, v) in binds {
                             scope.last_mut().unwrap().insert(n, Slot::untyped(v));
                         }
@@ -2242,7 +2307,7 @@ impl<'a> Interp<'a> {
                 for item in items.iter() {
                     // Fresh frame per iteration holding the loop variable; the
                     // body's own inner frame nests inside it.
-                    scope.push(HashMap::new());
+                    scope.push(Frame::default());
                     scope
                         .last_mut()
                         .unwrap()
@@ -2296,7 +2361,7 @@ impl<'a> Interp<'a> {
         }
     }
 
-    fn expr(&self, expr: &Expr, scope: &mut Vec<HashMap<String, Slot>>) -> Result<Val, Ctrl> {
+    fn expr(&self, expr: &Expr, scope: &mut Vec<Frame>) -> Result<Val, Ctrl> {
         match expr {
             Expr::Int(n) => Ok(Val::Int(*n)),
             // A byte literal (RFC-0057) is an integer value at runtime — the
@@ -3457,7 +3522,7 @@ impl<'a> Interp<'a> {
                         let mut env = vec![map
                             .iter()
                             .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
-                            .collect::<HashMap<_, _>>()];
+                            .collect::<Frame>()];
                         match self.expr(pred, &mut env)? {
                             Val::Bool(true) => {}
                             Val::Bool(false) => {
@@ -3586,7 +3651,7 @@ impl<'a> Interp<'a> {
             None => return Ok(true),
             Some(p) => p,
         };
-        let mut scope = vec![HashMap::from([(
+        let mut scope = vec![Frame::from_iter([(
             "value".to_string(),
             Slot::untyped(v.clone()),
         )])];
@@ -3605,13 +3670,13 @@ impl<'a> Interp<'a> {
         &self,
         sv: Val,
         arms: &[MatchArm],
-        scope: &mut Vec<HashMap<String, Slot>>,
+        scope: &mut Vec<Frame>,
     ) -> Result<Val, Ctrl> {
         for arm in arms {
             let Some(bindings) = Self::match_pattern(&arm.pattern, &sv) else {
                 continue;
             };
-            scope.push(HashMap::new());
+            scope.push(Frame::default());
             for (name, val) in bindings {
                 scope.last_mut().unwrap().insert(name, Slot::untyped(val));
             }
@@ -3942,7 +4007,7 @@ impl<'a> Interp<'a> {
                                 let mut env = vec![map
                                     .iter()
                                     .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
-                                    .collect::<HashMap<_, _>>()];
+                                    .collect::<Frame>()];
                                 match self.expr(pred, &mut env)? {
                                     Val::Bool(b) => b,
                                     other => {
@@ -4040,7 +4105,7 @@ impl<'a> Interp<'a> {
     /// map). Covers the forms a codable value flows through: bindings/params,
     /// record literals, field access, `Some(..)`, indexing, numeric
     /// conversions, and user-function results.
-    fn type_of(&self, e: &Expr, scope: &[HashMap<String, Slot>]) -> Option<Type> {
+    fn type_of(&self, e: &Expr, scope: &[Frame]) -> Option<Type> {
         match e {
             Expr::Var { name, .. } => {
                 for frame in scope.iter().rev() {
@@ -4569,7 +4634,7 @@ impl<'a> Interp<'a> {
                 let mut env = vec![map
                     .iter()
                     .map(|(k, val)| (k.clone(), Slot::untyped(val.clone())))
-                    .collect::<HashMap<_, _>>()];
+                    .collect::<Frame>()];
                 return match self.expr(pred, &mut env)? {
                     Val::Bool(b) => Ok(b),
                     _ => Ok(false),
