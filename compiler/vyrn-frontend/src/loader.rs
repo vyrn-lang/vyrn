@@ -524,6 +524,11 @@ pub type Warnings = Vec<Diagnostic>;
 /// RFC-0071 M2b: the third element is the load's WARNINGS — diagnostics that do
 /// not fail it. They are returned on the error path too (empty, since a failed
 /// load has nothing to advise about), so callers have one shape to destructure.
+/// The fourth element is the module GRAPH this load already built — the same
+/// `(key, import targets, synthesized source)` triples [`module_graph_with_sources`]
+/// derives. It is returned rather than dropped because the symbol indexer needs
+/// it to resolve `import * as ns`, and recomputing it there meant a SECOND
+/// complete load — generators, cache lookups and all — on every keystroke.
 pub fn load_with_origins(
     root_source: &str,
     root_path: &str,
@@ -533,13 +538,25 @@ pub fn load_with_origins(
     Result<Program, Vec<Diagnostic>>,
     crate::origin::OriginMaps,
     Warnings,
+    ModuleGraph,
 ) {
     match load_modules(root_source, root_path, opts, resolver) {
-        Err((diags, origins)) => (Err(diags), origins, Vec::new()),
+        Err((diags, origins)) => (Err(diags), origins, Vec::new(), Vec::new()),
         Ok((modules, root_key, origins, warnings)) => {
-            (link(modules, &root_key), origins, warnings)
+            let graph = graph_of(&modules);
+            (link(modules, &root_key), origins, warnings, graph)
         }
     }
+}
+
+/// `(module key, resolved import targets, synthesized source)` per loaded module.
+pub type ModuleGraph = Vec<(String, Vec<String>, Option<String>)>;
+
+fn graph_of(modules: &[Module]) -> ModuleGraph {
+    modules
+        .iter()
+        .map(|m| (m.key.clone(), m.import_targets.clone(), m.gen_source.clone()))
+        .collect()
 }
 
 /// The module dependency graph: every (module key, resolved import targets)

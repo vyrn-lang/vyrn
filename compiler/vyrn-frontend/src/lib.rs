@@ -137,7 +137,7 @@ pub fn load_warned(
     Result<ast::Program, Vec<diagnostics::Diagnostic>>,
     loader::Warnings,
 ) {
-    let (loaded, origins, warnings) =
+    let (loaded, origins, warnings, _graph) =
         loader::load_with_origins(root_source, root_path, opts, resolver);
     // RFC-0053: load/lex/parse diagnostics are already remapped by the loader.
     let program = match loaded {

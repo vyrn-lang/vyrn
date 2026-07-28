@@ -338,14 +338,16 @@ fn analyze_inner(
     // RFC-0033 origin maps for the linked program, plus the diagnostics that
     // remap into a generator input file (published against that file's URI).
     let mut origins = crate::origin::OriginMaps::default();
+    let mut graph: crate::loader::ModuleGraph = Vec::new();
     let mut remapped: Vec<Diagnostic> = Vec::new();
     let checked: Option<crate::ast::Program> = if parse_failed {
         None
     } else {
         match (&linker, program.imports.is_empty()) {
             (Some((root_path, opts, resolver)), false) => {
-                let (loaded, o, load_warnings) =
+                let (loaded, o, load_warnings, g) =
                     crate::loader::load_with_origins(source, root_path, opts, *resolver);
+                graph = g;
                 // RFC-0053: the maps come back even when the load FAILED (they
                 // need no successful parse), so a `.vyx` whose template stopped
                 // lexing still knows its owner and still gets its squiggle.
@@ -423,7 +425,7 @@ fn analyze_inner(
     // RFC-0027: namespace bindings and their reachable exports (for `ns.`
     // completion and `ns.member` hover / go-to-definition). Needs the linker to
     // resolve each namespace import to its source module.
-    let namespaces = index_namespaces(source, &program, linker);
+    let namespaces = index_namespaces(&graph, &program, linker);
     let locals = index_locals(&program, &tok_info, &let_types);
 
     // Protocol/impl member tables for `.foo` completion (RFC-0002 §5). Impls
@@ -1766,7 +1768,7 @@ fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Sym
 /// then parsed for its exported decls — so members show ORIGINAL names (not the
 /// loader's collision-rename symbols) with correct source lines for jumping in.
 fn index_namespaces(
-    source: &str,
+    graph: &crate::loader::ModuleGraph,
     root: &ast::Program,
     linker: Option<(
         &str,
@@ -1784,10 +1786,10 @@ fn index_namespaces(
     // carrying each module's synthesized source, since a namespace may name a
     // GENERATED module (`import * as t from i18n("./strings")`) whose key is a
     // banner no resolver can read (RFC-0051 §2).
-    let Ok(graph) = crate::loader::module_graph_with_sources(source, root_path, opts, resolver)
-    else {
-        return Vec::new();
-    };
+    // The graph comes from the load `analyze_inner` already performed — deriving
+    // it here meant a second complete load, generators included, per keystroke.
+    let _ = resolver;
+    let _ = opts;
     let root_key = crate::loader::normalize(root_path);
     let Some((_, targets, _)) = graph.iter().find(|(k, _, _)| *k == root_key) else {
         return Vec::new();
