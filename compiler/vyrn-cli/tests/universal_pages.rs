@@ -1,14 +1,18 @@
 //! Integration tests for RFC-0069 universal pages — the pastebin's `handle`
-//! driven through a real `vyrn serve`, exercising both channels of the page
-//! router:
+//! driven through a real `vyrn serve`, exercising both representations the page
+//! router negotiates at ONE url (RFC-0072 M4):
 //!
-//!   * an UNMARKED request is served as HTML exactly as before (the soft-nav
-//!     document channel is byte-for-byte unchanged);
-//!   * a MARKED request (`?__vyrn=data`) is answered with the
+//!   * a DOCUMENT request is served as HTML exactly as before — byte-for-byte
+//!     unchanged whether it states `Accept: text/html`, states nothing at all, or
+//!     states a browser's full navigation `Accept`;
+//!   * a request stating `Accept: application/json` is answered with the
 //!     `{page, title, props[, params]}` JSON payload, running `load()` exactly
 //!     as SSR would — the home list, a paste's `load()` props round-trip, the
 //!     static `/about` payload, the `@error` payload on a miss, and the
 //!     non-client `/raw/*` route falling back to its real (non-JSON) response.
+//!
+//! The payload carries `Vary: Accept`, and no response anywhere names the
+//! language or the framework — both are asserted here against the real wire.
 //!
 //! The store is file-backed (`data/pastes.json` relative to the process cwd), so
 //! the server runs in a fresh temp dir — an empty store the test seeds through
@@ -114,6 +118,15 @@ fn spawn_bin_server() -> Result<u16, String> {
         .arg("--port")
         .arg(port.to_string())
         .current_dir(&dir)
+        // EVERY stdio explicitly, `stdin` included. The server outlives this
+        // process by design (see the `mem::forget` below), and a child that
+        // inherits the console keeps the test runner's own stdout pipe OPEN after
+        // `cargo test` has exited — so a `cargo test … | tail` never sees EOF and
+        // hangs forever on a suite that already PASSED. That cost hours three
+        // times before it was understood, and it hid a real failure while it did
+        // it. `parity.rs` has always spelled `stdin(Stdio::null())` and has never
+        // hung; this suite did not, and did. Do not drop any of these three.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -152,6 +165,33 @@ fn get(port: u16, path: &str) -> (String, String, String) {
     request(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
 }
 
+/// A GET stating what representation it wants (RFC-0072 M4) — the whole wire
+/// difference between a page's document and its data payload.
+fn get_accept(port: u16, path: &str, accept: &str) -> (String, String, String) {
+    request(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: {accept}\r\nConnection: close\r\n\r\n"),
+    )
+}
+
+/// The JSON representation of a page.
+fn get_data(port: u16, path: &str) -> (String, String, String) {
+    get_accept(port, path, "application/json")
+}
+
+fn header(headers: &str, name: &str) -> String {
+    for line in headers.lines() {
+        let (n, v) = match line.split_once(':') {
+            Some(p) => p,
+            None => continue,
+        };
+        if n.trim().eq_ignore_ascii_case(name) {
+            return v.trim().to_string();
+        }
+    }
+    String::new()
+}
+
 fn post(port: u16, path: &str, body: &str) -> (String, String, String) {
     request(
         port,
@@ -163,12 +203,7 @@ fn post(port: u16, path: &str, body: &str) -> (String, String, String) {
 }
 
 fn content_type(headers: &str) -> String {
-    for line in headers.lines() {
-        if let Some(v) = line.strip_prefix("Content-Type:").or_else(|| line.strip_prefix("content-type:")) {
-            return v.trim().to_string();
-        }
-    }
-    String::new()
+    header(headers, "content-type")
 }
 
 /// Seed one paste through the RPC surface; return its server-assigned id.
@@ -185,11 +220,34 @@ fn create_paste(port: u16, title: &str, body: &str, lang: &str) -> String {
 
 // ---- the document channel is unchanged -------------------------------------
 
+/// The claim RFC-0072 M4 has to make good on: turning the query marker into
+/// content negotiation must not move a single byte of the document channel. A GET
+/// stating `Accept: text/html`, a GET stating nothing, and a GET sending a real
+/// browser's navigation `Accept` must all produce the SAME response — status,
+/// headers and body — and no `Vary` header, since the document is what this URL
+/// answers by default.
 #[test]
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
-fn unmarked_about_is_html() {
+fn every_document_accept_is_byte_identical() {
     let port = bin_port();
-    let (status, headers, body) = get(port, "/about");
+    const BROWSER: &str = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
+    for path in ["/about", "/", "/p/nope404"] {
+        let bare = get(port, path);
+        for accept in ["text/html", BROWSER, "*/*", "text/html,application/json"] {
+            let stated = get_accept(port, path, accept);
+            assert_eq!(bare.0, stated.0, "{path} status moved under Accept: {accept}");
+            assert_eq!(bare.2, stated.2, "{path} body moved under Accept: {accept}");
+            assert_eq!(content_type(&stated.1), "text/html", "{path} @ {accept}");
+            assert_eq!(header(&stated.1, "vary"), "", "a document must not Vary: {path} @ {accept}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
+fn document_about_is_html() {
+    let port = bin_port();
+    let (status, headers, body) = get_accept(port, "/about", "text/html");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "text/html");
     // The full themed page (shell + body), not a JSON payload.
