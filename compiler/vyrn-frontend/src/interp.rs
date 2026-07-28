@@ -1858,6 +1858,63 @@ impl<'a> Interp<'a> {
                 Ok(Flow::Normal)
             }
             Stmt::Assign { name, value, .. } => {
+                // `xs.push(v)` on a local Array: append IN PLACE.
+                //
+                // `push` clones the whole array to return a grown copy, and the
+                // statement form desugars to `xs = push(xs, v)`, so building an
+                // array is quadratic: 3,000 pushes measured 251 ms against
+                // 19,270 ms for 30,000. std/vyx builds its output as
+                // `Array<UInt8>` buffers, which is what makes compiling one .vyx
+                // page cost seconds.
+                //
+                // When the binding is DECLARED (`let mut out: Array<UInt8> = []`)
+                // the general path also re-coerces the whole array on every push,
+                // re-validating every element already proven valid. Appending one
+                // element only requires that element to be checked, so the item is
+                // coerced to the element type and the rest left alone — the same
+                // guarantee without the rescan.
+                //
+                // The slot is inspected BEFORE the item is evaluated, so a shape
+                // this cannot handle falls through to the general path having
+                // evaluated nothing. Safe for a local: no callee can reach it, so
+                // evaluating the item cannot change what was just inspected.
+                if let Expr::Call { name: fname, args, .. } = value {
+                    if fname == "push"
+                        && args.len() == 2
+                        && matches!(&args[0], Expr::Var { name: n, .. } if n == name)
+                    {
+                        let shape = scope.iter().rev().find_map(|f| f.get(name)).and_then(|s| {
+                            if !matches!(s.v, Val::Array(_)) {
+                                return None;
+                            }
+                            match &s.ty {
+                                None => Some(None),
+                                Some(t) => match crate::types::resolve(t, &self.type_map) {
+                                    Type::Array(i) => Some(Some(*i)),
+                                    // ArrayN/SmallArray carry a capacity the
+                                    // general path enforces; leave those alone.
+                                    _ => None,
+                                },
+                            }
+                        });
+                        if let Some(elem_ty) = shape {
+                            let item = self.expr(&args[1], scope)?;
+                            let item = match &elem_ty {
+                                Some(t) => self.coerce(item, t)?,
+                                None => item,
+                            };
+                            for frame in scope.iter_mut().rev() {
+                                if let Some(slot) = frame.get_mut(name) {
+                                    if let Val::Array(elems) = &mut slot.v {
+                                        elems.push(item);
+                                        return Ok(Flow::Normal);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
                 // `s = s + a + b + …` on an untyped local String: append IN PLACE.
                 //
                 // String `+` allocates a fresh String and copies both operands,
@@ -2298,6 +2355,58 @@ impl<'a> Interp<'a> {
                 let l = self.expr(lhs, scope)?;
                 let r = self.expr(rhs, scope)?;
                 self.binop(*op, l, r)
+            }
+            // `xs[i]` on a local Array or String, read WITHOUT copying `xs`.
+            //
+            // `xs[i]` parses as `at(xs, i)`, and evaluating the `xs` argument
+            // clones the whole collection so the index can throw it away: an
+            // array read cost ~24 us against ~0.7 us for a loop doing no array
+            // work, and the gap scaled with the collection's LENGTH rather than
+            // the number of reads. std/vyx scans its input byte by byte this way,
+            // which is most of what made compiling a .vyx page cost seconds.
+            //
+            // The guard matches only when it will succeed — a local holding an
+            // Array or a String — so there is no fallback to get wrong. An
+            // earlier version fell back to `self.call("at", ..)`, which is not
+            // where that builtin is dispatched; every Map and record receiver
+            // took the fallback and died with "unknown function `at`". Parity
+            // caught it, which is what parity is for.
+            //
+            // Restricted to a local receiver so nothing evaluated for the index
+            // can reach it — the same reason the in-place append above is safe.
+            Expr::Call { name, args, .. }
+                if name == "at"
+                    && args.len() == 2
+                    && matches!(&args[0], Expr::Var { .. })
+                    && {
+                        let Expr::Var { name: v, .. } = &args[0] else { unreachable!() };
+                        scope
+                            .iter()
+                            .rev()
+                            .find_map(|f| f.get(v))
+                            .is_some_and(|s| matches!(s.v, Val::Array(_) | Val::Str(_)))
+                    } =>
+            {
+                let Expr::Var { name: v, .. } = &args[0] else { unreachable!() };
+                let idx = self.expr(&args[1], scope)?;
+                let i = match &idx {
+                    Val::Int(i) => *i,
+                    Val::IntN { v, .. } => *v,
+                    other => return Err(format!("index must be an integer, found {other:?}").into()),
+                };
+                let slot = scope.iter().rev().find_map(|f| f.get(v)).expect("guarded above");
+                match &slot.v {
+                    Val::Array(elems) => elems
+                        .get(i as usize)
+                        .cloned()
+                        .ok_or_else(|| Ctrl::from(format!("array index {i} out of bounds"))),
+                    Val::Str(st) => st
+                        .as_bytes()
+                        .get(i as usize)
+                        .map(|b| Val::IntN { v: *b as i64, bits: 8, signed: false })
+                        .ok_or_else(|| Ctrl::from(format!("string index {i} out of bounds"))),
+                    _ => unreachable!("guarded above"),
+                }
             }
             Expr::Call { name, args, line } => {
                 // Calling a `fn`-typed parameter (RFC-0023): `f(x)` where `f` is a
@@ -3279,6 +3388,31 @@ impl<'a> Interp<'a> {
                     }
                 }
                 Ok(Val::Record(map))
+            }
+            // `xs.length` on a local Array or Map, read WITHOUT copying `xs` —
+            // same reason as the index peephole above. A scan loop mentions it in
+            // its condition on every iteration, so cloning the collection just to
+            // ask how long it is costs as much as the scan itself. The guard
+            // matches only when it will succeed, so nothing needs a fallback.
+            Expr::Field { expr, field, .. }
+                if field == "length"
+                    && matches!(&**expr, Expr::Var { .. })
+                    && {
+                        let Expr::Var { name: v, .. } = &**expr else { unreachable!() };
+                        scope
+                            .iter()
+                            .rev()
+                            .find_map(|f| f.get(v))
+                            .is_some_and(|s| matches!(s.v, Val::Array(_) | Val::Map(_)))
+                    } =>
+            {
+                let Expr::Var { name: v, .. } = &**expr else { unreachable!() };
+                let slot = scope.iter().rev().find_map(|f| f.get(v)).expect("guarded above");
+                Ok(match &slot.v {
+                    Val::Array(items) => Val::Int(items.len() as i64),
+                    Val::Map(pairs) => Val::Int(pairs.len() as i64),
+                    _ => unreachable!("guarded above"),
+                })
             }
             Expr::Field { expr, field, .. } => {
                 let v = self.expr(expr, scope)?;
