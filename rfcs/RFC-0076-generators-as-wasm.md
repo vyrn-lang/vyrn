@@ -183,6 +183,39 @@ expensive. (A) keeps one binary, one code path, and lets reflection stay a norma
 host import instead of a protocol. The zero-dep property survives where it
 matters — a contributor without wasmtime can still build and test everything.
 
+## M1 validation (done, by hand, before writing the engine)
+
+The engine's plan is: take the generator module, clear `is_gen` on the target
+function, synthesize a `main` that calls it with the constant arguments and
+prints the result, compile that to wasm, and take stdout as the module source.
+That was validated manually on a capability-free generator emitting 200
+functions:
+
+| | sha256 of emitted source |
+|---|---|
+| wrapper, interpreted | `50edb49d…` |
+| wrapper, compiled to wasm | `50edb49d…` |
+
+Identical. Clearing `is_gen` compiles cleanly, and the emitted source survives the
+engine change — which is the property the whole RFC rests on, now checked rather
+than assumed.
+
+**And a negative worth keeping.** On that same generator, timed end to end:
+
+| | total | of which process launch |
+|---|---|---|
+| interpreted | 85 ms | ~30 ms |
+| wasm via the wasmtime CLI | 103 ms | ~106 ms |
+
+Execution fell to approximately zero and launch swamped it, so **wasm-via-
+subprocess is SLOWER than interpreting for a small generator**. This is the same
+finding as the `.cwasm` measurement from a different angle, and it settles
+something: the subprocess route is adequate for validating correctness — it is how
+the table above was produced — and useless for performance. The engine only pays
+once the runtime is embedded and instantiation replaces process spawn. Any
+milestone that reports a speedup from a subprocess measurement is measuring the
+wrong thing.
+
 ## Risks, honestly
 
 **A new dependency.** wasmtime is a large crate, and this workspace deliberately
