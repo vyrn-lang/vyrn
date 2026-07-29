@@ -38,6 +38,7 @@ use std::process::Command;
 const PASSING: &[&str] = &[
     "benching.vyrn",
     "consume.vyrn",
+    "enum.vyrn",
     "externdemo2.vyrn",
     "fib.vyrn",
     "record.vyrn",

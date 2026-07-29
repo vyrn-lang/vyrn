@@ -73,7 +73,19 @@ pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
 
     let types: HashMap<String, TypeDecl> =
         program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
-    let mut cx = Cx { types, sigs: HashMap::new(), rt };
+    let mut variants: HashMap<String, Vec<(String, u64, Vec<Type>)>> = HashMap::new();
+    for d in &program.type_decls {
+        if let Type::Enum(vs) = &d.base {
+            for (i, v) in vs.iter().enumerate() {
+                variants.entry(v.name.clone()).or_default().push((
+                    d.name.clone(),
+                    i as u64,
+                    v.payload.clone(),
+                ));
+            }
+        }
+    }
+    let mut cx = Cx { types, sigs: HashMap::new(), rt, variants };
 
     // Every function the module will define, in the order they are defined, so a
     // call can name an index before the callee's body exists. Recursion and
@@ -156,6 +168,10 @@ struct Cx {
     types: HashMap<String, TypeDecl>,
     sigs: HashMap<String, Sig>,
     rt: Rt,
+    /// Variant name → every enum that declares it, with the variant's tag and
+    /// payload types. A name may belong to two enums, which is why the
+    /// expectation decides and an ambiguous one is a gap rather than a guess.
+    variants: HashMap<String, Vec<(String, u64, Vec<Type>)>>,
 }
 
 impl Cx {
@@ -310,6 +326,13 @@ struct Fn_<'a> {
     /// followed by the reads that consume it, so one pair suffices however
     /// deeply expressions nest.
     scratch: HashMap<(ValType, u8), u32>,
+    /// The type a value is being built FOR, innermost last.
+    ///
+    /// `None` and `Some(x)` do not say what they are — an `Option<T>`'s `T`
+    /// comes from the position, not the constructor — so the sum constructors
+    /// read it back off here. Same mechanism the LLVM emitter uses, for the
+    /// same reason.
+    expect: Vec<Type>,
 }
 
 fn lower_fn(m: &mut Module, f: &Function, cx: &Cx) -> Result<(), String> {
@@ -328,6 +351,7 @@ fn lower_fn(m: &mut Module, f: &Function, cx: &Cx) -> Result<(), String> {
         ret_ty: cx.resolve(&sig.ret_ty),
         dest,
         scratch: HashMap::new(),
+        expect: Vec::new(),
     };
 
     // By-value parameter semantics: an aggregate arrives as the caller's
@@ -641,7 +665,10 @@ impl Fn_<'_> {
         e: &Expr,
         want: &Type,
     ) -> Result<(), String> {
-        let got = self.expr(m, b, e)?;
+        self.expect.push(want.clone());
+        let got = self.expr(m, b, e);
+        self.expect.pop();
+        let got = got?;
         let line = Expr::line(e);
         if self.cx.ll(&got) == self.cx.ll(want) {
             return Ok(());
@@ -710,6 +737,18 @@ impl Fn_<'_> {
                 let at = self.cx.rt.intern(m, s);
                 b.ins(&Instruction::I32Const(at as i32));
                 Type::Str
+            }
+            // A nullary constructor (`None`, or an enum's `Empty`) parses as a
+            // bare name, so it is only distinguishable from a local by failing
+            // to be one.
+            Expr::Var { name, line }
+                if self.lookup(name, *line).is_err()
+                    && (name == "None" || self.cx.variants.contains_key(name)) =>
+            {
+                match self.sum_ctor(m, b, name, &[], *line)? {
+                    Some(t) => t,
+                    None => return unsupported(&format!("the name `{name}`"), *line),
+                }
             }
             Expr::Var { name, line } => {
                 let (place, t) = self.lookup(name, *line)?;
@@ -790,6 +829,7 @@ impl Fn_<'_> {
                 }
                 t
             }
+            Expr::Match { scrutinee, arms, line } => self.match_expr(m, b, scrutinee, arms, *line)?,
             Expr::Binary { op, lhs, rhs, line } => self.binary(m, b, *op, lhs, rhs, *line)?,
             Expr::Call { name, args, line } => self.call(m, b, name, args, *line)?,
             other => return unsupported(&expr_name(other), Expr::line(other)),
@@ -853,17 +893,37 @@ impl Fn_<'_> {
     /// arm runs. Deliberately shallow: anything it cannot see is a gap rather
     /// than a guess, and [`Fn_::expr_as`] re-checks the answer against what the
     /// arm actually produced, so a wrong prediction is loud rather than silent.
-    fn peek(&self, e: &Expr, line: usize) -> Result<Type, String> {
+    fn peek(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
         Ok(match e {
             Expr::Int(_) | Expr::Byte(_) => Type::Int,
             Expr::Bool(_) => Type::Bool,
             Expr::Str(_) => Type::Str,
             Expr::Var { name, .. } => self.lookup(name, line)?.1,
             Expr::Field { expr, field, .. } => {
-                self.field_of(&self.peek(expr, line)?, field, line)?.1
+                let base = self.peek(expr, line)?;
+                self.field_of(&base, field, line)?.1
             }
             Expr::StructLit { name, .. } => Type::Named(name.clone()),
             Expr::IfExpr { then_branch, .. } => self.peek(then_branch, line)?,
+            // A `match` is typed by its first arm, like an `if` expression —
+            // and like one, every other arm is checked against that.
+            Expr::Match { scrutinee, arms, .. } => {
+                let st = self.peek(scrutinee, line)?;
+                let sum = self
+                    .sum_of(&st)
+                    .ok_or_else(|| gap(&format!("a `match` on `{st}`"), line))?;
+                let first = arms.first().ok_or_else(|| gap("an empty `match`", line))?;
+                let binds = self.pattern_binds(&sum, &first.pattern, line)?;
+                // `peek` does not emit, so a scope frame it cannot mutate is
+                // enough to type an arm that mentions its bindings.
+                let mark = self.scope.len();
+                for (n, t) in binds {
+                    self.scope.push((n, Place::Local(u32::MAX), t));
+                }
+                let got = self.peek(&first.body, line);
+                self.scope.truncate(mark);
+                got?
+            }
             Expr::Unary { expr, .. } => self.peek(expr, line)?,
             Expr::Binary { op, lhs, .. } => match op {
                 BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq
@@ -1054,6 +1114,9 @@ impl Fn_<'_> {
             }
             _ => {}
         }
+        if let Some(t) = self.sum_ctor(m, b, name, args, line)? {
+            return Ok(t);
+        }
         let Some(sig) = self.cx.sigs.get(name).cloned() else {
             return unsupported(&format!("the call `{name}`"), line);
         };
@@ -1080,6 +1143,480 @@ impl Fn_<'_> {
         }
         Ok(self.cx.resolve(&sig.ret_ty))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Sum types: Option, Result, and user enums
+// ---------------------------------------------------------------------------
+
+/// The tag-and-payload shape behind a sum type.
+///
+/// Two conventions, both inherited from the LLVM emitter rather than invented
+/// here: `Option`/`Result` are `{ i1 tag, i64 w0, i64 w1 }` with two payload
+/// words (so a `Ref` fits inline, unboxed), while a user enum is
+/// `{ i64 tag, i64 p0, .. }` with one word per payload slot of its widest
+/// variant. Inheriting them is not politeness — parity compares this backend's
+/// output against a build that uses the other one.
+enum Sum {
+    Opt(Type),
+    Res(Type, Type),
+    Enum(Vec<EnumVariant>),
+}
+
+/// How one payload travels inside a sum's `i64` word.
+#[derive(PartialEq)]
+enum Word {
+    /// It IS the word.
+    Direct,
+    /// A narrower scalar, zero-extended into the word.
+    Ext(ValType),
+    /// Two words, side by side, no heap (a `Ref` or a stored `fn`).
+    Inline2,
+    /// The word is a pointer to it.
+    Boxed,
+}
+
+impl Fn_<'_> {
+    fn sum_of(&self, ty: &Type) -> Option<Sum> {
+        match self.cx.resolve(ty) {
+            Type::Option(t) => Some(Sum::Opt(*t)),
+            Type::Result(a, b) => Some(Sum::Res(*a, *b)),
+            Type::Enum(vs) => Some(Sum::Enum(vs)),
+            _ => None,
+        }
+    }
+
+    /// How an `Option`/`Result` payload of type `t` fills its two words.
+    fn word2(&self, t: &Type) -> Result<Word, String> {
+        Ok(match self.cx.repr(t, 0)? {
+            Repr::Scalar(ValType::I64) => Word::Direct,
+            Repr::Scalar(v) => Word::Ext(v),
+            Repr::Agg(_) if self.cx.ll(t) == "{ i64, i64 }" => Word::Inline2,
+            _ => Word::Boxed,
+        })
+    }
+
+    /// How a user-enum payload of type `t` fills its ONE word: an `i64` is the
+    /// word, and everything else is a pointer to itself.
+    fn word1(&self, t: &Type) -> Word {
+        if self.cx.ll(t) == "i64" {
+            Word::Direct
+        } else {
+            Word::Boxed
+        }
+    }
+
+    /// Copy the value on the stack (a scalar, or an aggregate's address) onto
+    /// the heap, leaving its address as an `i64` word.
+    fn box_value(&mut self, b: &mut Frame, t: &Type, line: usize) -> Result<(), String> {
+        let malloc = self.cx.rt.malloc;
+        let ll = self.cx.ll(t);
+        match self.cx.repr(t, line)? {
+            Repr::Scalar(v) => {
+                let size = layout::of_ll(&ll).map_err(|e| format!("direct backend: {e}"))?.size;
+                let val = self.scratch(b, v, 2);
+                let p = self.scratch(b, ValType::I32, 2);
+                b.ins(&Instruction::LocalSet(val));
+                b.ins(&Instruction::I32Const(size as i32));
+                b.ins(&Instruction::Call(malloc));
+                b.ins(&Instruction::LocalTee(p));
+                b.ins(&Instruction::LocalGet(val));
+                b.ins(&store_of(&ll));
+                b.ins(&Instruction::LocalGet(p));
+            }
+            Repr::Agg(l) => {
+                let src = self.scratch(b, ValType::I32, 1);
+                let p = self.scratch(b, ValType::I32, 2);
+                b.ins(&Instruction::LocalSet(src));
+                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::Call(malloc));
+                b.ins(&Instruction::LocalTee(p));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                b.ins(&Instruction::LocalGet(p));
+            }
+            Repr::Unit => return unsupported("a Unit payload", line),
+        }
+        b.ins(&Instruction::I64ExtendI32U);
+        Ok(())
+    }
+
+    /// Build an `Option`/`Result` value: the tag, then the two payload words.
+    fn build_sum2(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        ty: &Type,
+        tag: i32,
+        payload: Option<(&Expr, Type)>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let Repr::Agg(l) = self.cx.repr(ty, line)? else {
+            return unsupported("a sum that is not an aggregate", line);
+        };
+        let off = b.alloc(l.size, l.align);
+        b.slot(off);
+        b.ins(&Instruction::I32Const(tag));
+        b.ins(&Instruction::I32Store8(byte()));
+        let (w0, w1) = (off + l.fields[1], off + l.fields[2]);
+        match payload {
+            None => {
+                for a in [w0, w1] {
+                    b.slot(a);
+                    b.ins(&Instruction::I64Const(0));
+                    b.ins(&Instruction::I64Store(word8()));
+                }
+            }
+            Some((e, t)) if self.word2(&t)? == Word::Inline2 => {
+                // Two words already side by side: one copy, no encoding.
+                b.slot(w0);
+                self.expr_as(m, b, e, &t)?;
+                b.ins(&Instruction::I32Const(16));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            }
+            Some((e, t)) => {
+                b.slot(w0);
+                self.expr_as(m, b, e, &t)?;
+                match self.word2(&t)? {
+                    Word::Direct => {}
+                    Word::Ext(_) => {
+                        b.ins(&Instruction::I64ExtendI32U);
+                    }
+                    _ => self.box_value(b, &t, line)?,
+                }
+                b.ins(&Instruction::I64Store(word8()));
+                b.slot(w1);
+                b.ins(&Instruction::I64Const(0));
+                b.ins(&Instruction::I64Store(word8()));
+            }
+        }
+        b.slot(off);
+        Ok(ty.clone())
+    }
+
+    /// Build a user-enum value: the tag, then one word per payload.
+    fn build_enum(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        ty: &Type,
+        tag: u64,
+        args: &[Expr],
+        payload: &[Type],
+        line: usize,
+    ) -> Result<Type, String> {
+        if args.len() != payload.len() {
+            return unsupported("an enum variant at this arity", line);
+        }
+        let Repr::Agg(l) = self.cx.repr(ty, line)? else {
+            return unsupported("an enum that is not an aggregate", line);
+        };
+        let off = b.alloc(l.size, l.align);
+        b.slot(off);
+        b.ins(&Instruction::I64Const(tag as i64));
+        b.ins(&Instruction::I64Store(word8()));
+        for (i, (a, t)) in args.iter().zip(payload).enumerate() {
+            b.slot(off + l.fields[1 + i]);
+            self.expr_as(m, b, a, t)?;
+            if self.word1(t) == Word::Boxed {
+                self.box_value(b, t, line)?;
+            }
+            b.ins(&Instruction::I64Store(word8()));
+        }
+        b.slot(off);
+        Ok(ty.clone())
+    }
+
+    /// The sum type an expectation names, if it names one.
+    fn expected_sum(&self) -> Option<Type> {
+        self.expect.last().filter(|t| self.sum_of(t).is_some()).cloned()
+    }
+
+    /// `Some(x)` / `Ok(x)` / `Err(e)` / `Circle(r)` / `None`, or `Ok(None)` if
+    /// `name` is not a constructor at all.
+    fn sum_ctor(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<Type>, String> {
+        let want = self.expected_sum();
+        match name {
+            "None" => {
+                let ty = want.ok_or_else(|| gap("a `None` with no expected Option type", line))?;
+                return self.build_sum2(m, b, &ty, 0, None, line).map(Some);
+            }
+            "Some" | "Ok" | "Err" => {
+                if args.len() != 1 {
+                    return unsupported(&format!("`{name}` at this arity"), line);
+                }
+                // The payload's type is the position's, not the argument's — a
+                // `Some(0)` in an `Option<UInt8>` slot is a UInt8.
+                let picked = want.as_ref().and_then(|t| self.sum_of(t).map(|s| (t.clone(), s)));
+                let (ty, payload) = match picked {
+                    Some((t, Sum::Opt(p))) if name == "Some" => (t, p),
+                    Some((t, Sum::Res(ok, er))) if name != "Some" => {
+                        (t, if name == "Ok" { ok } else { er })
+                    }
+                    // An unexpected `Some` still types itself from its payload;
+                    // `Ok`/`Err` cannot, because the other half is unknowable.
+                    _ if name == "Some" => {
+                        let p = self.peek(&args[0], line)?;
+                        (Type::Option(Box::new(p.clone())), p)
+                    }
+                    _ => {
+                        return unsupported(&format!("`{name}` with no expected Result type"), line);
+                    }
+                };
+                let tag = i32::from(name != "Err");
+                return self
+                    .build_sum2(m, b, &ty, tag, Some((&args[0], payload)), line)
+                    .map(Some);
+            }
+            _ => {}
+        }
+        if !self.cx.variants.contains_key(name) {
+            return Ok(None);
+        }
+        // Two enums may declare the same variant name; the expectation decides,
+        // and an ambiguity with nothing to decide it is a gap, not a coin toss.
+        let pick = want
+            .as_ref()
+            .and_then(|t| match self.cx.resolve(t) {
+                Type::Enum(vs) => vs
+                    .iter()
+                    .position(|v| v.name == name)
+                    .map(|i| (t.clone(), i as u64, vs[i].payload.clone())),
+                _ => None,
+            })
+            .or_else(|| {
+                let cands = &self.cx.variants[name];
+                (cands.len() == 1).then(|| {
+                    let (e, tag, p) = &cands[0];
+                    (Type::Named(e.clone()), *tag, p.clone())
+                })
+            });
+        let Some((ty, tag, payload)) = pick else {
+            return unsupported(&format!("the ambiguous variant `{name}`"), line);
+        };
+        self.build_enum(m, b, &ty, tag, args, &payload, line).map(Some)
+    }
+
+    /// What a pattern binds, and to what — without emitting anything, because a
+    /// join needs the arm's type before the arm exists.
+    fn pattern_binds(
+        &self,
+        sum: &Sum,
+        pat: &Pattern,
+        line: usize,
+    ) -> Result<Vec<(String, Type)>, String> {
+        Ok(match (sum, pat) {
+            (Sum::Opt(t), Pattern::Some(n)) => vec![(n.clone(), t.clone())],
+            (Sum::Opt(_), Pattern::None) => vec![],
+            (Sum::Res(t, _), Pattern::Ok(n)) => vec![(n.clone(), t.clone())],
+            (Sum::Res(_, e), Pattern::Err(n)) => vec![(n.clone(), e.clone())],
+            (Sum::Enum(vs), Pattern::Variant(name, binds)) => {
+                let v = vs
+                    .iter()
+                    .find(|v| v.name == *name)
+                    .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?;
+                if v.payload.len() != binds.len() {
+                    return unsupported(&format!("the variant `{name}` at this arity"), line);
+                }
+                binds.iter().cloned().zip(v.payload.iter().cloned()).collect()
+            }
+            _ => return unsupported("a pattern of the wrong shape for its scrutinee", line),
+        })
+    }
+
+    /// `match` — the n-way join M0 warned about, lowered destination-first.
+    ///
+    /// The arms are a chain of `if`s inside one `block`, and each arm leaves by
+    /// branching to it: a scalar result rides the branch, an aggregate one is
+    /// copied into a slot allocated BEFORE the first test. Nothing here counts
+    /// arms, which is the property that makes 46 four-to-seven-way joins cost
+    /// exactly what 103 diamonds cost.
+    fn match_expr(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+        line: usize,
+    ) -> Result<Type, String> {
+        let st = self.expr(m, b, scrutinee)?;
+        let sum = self.sum_of(&st).ok_or_else(|| gap(&format!("a `match` on `{st}`"), line))?;
+        let addr = self.scratch(b, ValType::I32, 3);
+        b.ins(&Instruction::LocalSet(addr));
+        let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
+            return unsupported("a `match` on a non-aggregate", line);
+        };
+        let first = arms.first().ok_or_else(|| gap("an empty `match`", line))?;
+
+        // The arms' common type, read off the first one with its bindings in
+        // scope. `expr_as` re-checks every arm against it, so a wrong guess here
+        // is a compile error rather than a miscompile. The place is a dummy:
+        // `peek` reads types and never emits.
+        let mark = self.scope.len();
+        for (n, t) in self.pattern_binds(&sum, &first.pattern, line)? {
+            self.scope.push((n, Place::Local(u32::MAX), t));
+        }
+        let want = self.peek(&first.body, line);
+        self.scope.truncate(mark);
+        let want = want?;
+        let r = self.cx.repr(&want, line)?;
+
+        let dest = match &r {
+            Repr::Agg(l) => Some((b.alloc(l.size, l.align), l.size)),
+            _ => None,
+        };
+        let out = self.depth;
+        b.ins(&Instruction::Block(match &r {
+            Repr::Scalar(v) => BlockType::Result(*v),
+            _ => BlockType::Empty,
+        }));
+        self.depth += 1;
+
+        for arm in arms {
+            // The tag test. `Option`/`Result` carry a one-byte tag; a user enum
+            // carries an i64 one.
+            b.ins(&Instruction::LocalGet(addr));
+            match (&sum, &arm.pattern) {
+                (Sum::Enum(vs), Pattern::Variant(name, _)) => {
+                    let tag = vs
+                        .iter()
+                        .position(|v| v.name == *name)
+                        .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?;
+                    b.ins(&Instruction::I64Load(word8()));
+                    b.ins(&Instruction::I64Const(tag as i64));
+                    b.ins(&Instruction::I64Eq);
+                }
+                (_, p) => {
+                    let one = matches!(p, Pattern::Some(_) | Pattern::Ok(_));
+                    b.ins(&Instruction::I32Load8U(byte()));
+                    b.ins(&Instruction::I32Const(i32::from(one)));
+                    b.ins(&Instruction::I32Eq);
+                }
+            }
+            b.ins(&Instruction::If(BlockType::Empty));
+            self.depth += 1;
+
+            let mark = self.scope.len();
+            let binds = self.pattern_binds(&sum, &arm.pattern, line)?;
+            for (i, (n, t)) in binds.into_iter().enumerate() {
+                let place = self.bind_payload(b, addr, &sum, &sl, i, &t, line)?;
+                self.scope.push((n, place, t));
+            }
+            match dest {
+                Some((off, size)) => {
+                    b.slot(off);
+                    self.expr_as(m, b, &arm.body, &want)?;
+                    b.ins(&Instruction::I32Const(size as i32));
+                    b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                }
+                None => self.expr_as(m, b, &arm.body, &want)?,
+            }
+            self.scope.truncate(mark);
+            let d = self.br_to(out);
+            b.ins(&Instruction::Br(d));
+
+            self.depth -= 1;
+            b.ins(&Instruction::End);
+        }
+        // The checker proves the arms exhaustive; the validator cannot see the
+        // proof, so it is told instead.
+        b.ins(&Instruction::Unreachable);
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        if let Some((off, _)) = dest {
+            b.slot(off);
+        }
+        Ok(want)
+    }
+
+    /// Bind payload `i` of the matched variant out of the sum at `addr`.
+    fn bind_payload(
+        &mut self,
+        b: &mut Frame,
+        addr: u32,
+        sum: &Sum,
+        sl: &Layout,
+        i: usize,
+        t: &Type,
+        line: usize,
+    ) -> Result<Place, String> {
+        let is_enum = matches!(sum, Sum::Enum(_));
+        let off = sl.fields[1 + if is_enum { i } else { 0 }];
+        let kind = if is_enum { self.word1(t) } else { self.word2(t)? };
+        let ll = self.cx.ll(t);
+        Ok(match kind {
+            Word::Direct => {
+                let l = b.local(ValType::I64);
+                b.ins(&Instruction::LocalGet(addr));
+                b.ins(&Instruction::I64Load(at(off)));
+                b.ins(&Instruction::LocalSet(l));
+                Place::Local(l)
+            }
+            Word::Ext(v) => {
+                let l = b.local(v);
+                b.ins(&Instruction::LocalGet(addr));
+                b.ins(&Instruction::I64Load(at(off)));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalSet(l));
+                Place::Local(l)
+            }
+            // Both words at once, and they are contiguous.
+            Word::Inline2 => {
+                let slot = b.alloc(16, 8);
+                b.slot(slot);
+                b.ins(&Instruction::LocalGet(addr));
+                b.ins(&Instruction::I32Const(off as i32));
+                b.ins(&Instruction::I32Add);
+                b.ins(&Instruction::I32Const(16));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                Place::Slot(slot)
+            }
+            // The word is a heap pointer; the binding gets its own copy, so an
+            // arm's value is as independent as every other binding's.
+            Word::Boxed => {
+                let p = self.scratch(b, ValType::I32, 1);
+                b.ins(&Instruction::LocalGet(addr));
+                b.ins(&Instruction::I64Load(at(off)));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalSet(p));
+                match self.cx.repr(t, line)? {
+                    Repr::Scalar(v) => {
+                        let l = b.local(v);
+                        b.ins(&Instruction::LocalGet(p));
+                        b.ins(&load_of(&ll, 0));
+                        b.ins(&Instruction::LocalSet(l));
+                        Place::Local(l)
+                    }
+                    Repr::Agg(l) => {
+                        let slot = b.alloc(l.size, l.align);
+                        b.slot(slot);
+                        b.ins(&Instruction::LocalGet(p));
+                        b.ins(&Instruction::I32Const(l.size as i32));
+                        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                        Place::Slot(slot)
+                    }
+                    Repr::Unit => return unsupported("a Unit payload", line),
+                }
+            }
+        })
+    }
+}
+
+/// An 8-byte access at a static offset.
+fn at(off: u32) -> MemArg {
+    MemArg { offset: off as u64, align: 3, memory_index: 0 }
+}
+
+fn word8() -> MemArg {
+    MemArg { offset: 0, align: 3, memory_index: 0 }
 }
 
 /// The comparison instruction for an `i32`-shaped operand pair.
@@ -1619,6 +2156,7 @@ mod tests {
         Cx {
             types: HashMap::new(),
             sigs: HashMap::new(),
+            variants: HashMap::new(),
             rt: Rt {
                 write_all: 0,
                 malloc: 0,
