@@ -393,10 +393,14 @@ crosses the boundary:
 
 - **M3a — `Code` as an opaque host handle.** DONE, and it did unblock `std/tw`
   and `std/i18n` — see below.
-- **M3b — `lex` as a host import** with a codegen-emitted decoder for the fixed
-  token record.
-- **M3c — reflection.** `moduleInterface` / `contractOf` as JSON plus a decoder
-  written in Vyrn in `std/`, since the shape is deep and nested.
+- **M3b — structured host results.** `lex`, `moduleInterface` and `contractOf`
+  are one problem, not three: each returns *a value of a known named type*
+  (`Array<Token>`, `ModuleInterface`, `ContractInfo`) built entirely out of
+  strings, ints, bools, records and arrays. So build the mechanism once — a host
+  encoder and a codegen-emitted decoder that BOTH walk the static type, which is
+  what makes them agree — instead of a JSON schema two sides have to interpret
+  the same way. (The earlier plan split these and reached for `std/json`; the
+  type is already the schema, so it does not need one.)
 - **M4 — a home the LSP can reach.** The engine lives in `vyrn-cli` today and
   `vyrn-lsp` is a separate excluded crate; the payoff is entirely in the
   long-lived process, so this is where the 243 ms is finally measured.
