@@ -39,6 +39,7 @@ const PASSING: &[&str] = &[
     "arrays.vyrn",
     "autovalidate.vyrn",
     "benching.vyrn",
+    "bytecount.vyrn",
     "consume.vyrn",
     "ecs.vyrn",
     "enum.vyrn",
@@ -492,6 +493,142 @@ fn main() -> Int64 {
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
     assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
     assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// `bytes` / `slice` / `stringFromBytes`, which no example reaches (RFC-0077 M2g).
+///
+/// The four examples the ladder filed under `stringFromBytes` all reach it through
+/// `std/strings`, and `std/strings` is a wall of five more blockers behind it — so
+/// lowering the builtin moved them from its name to `Shr` on `UInt64` and left the
+/// lowering itself completely unrun. That is the case this repo treats as worse
+/// than a gap, so it gets the running test the corpus cannot supply.
+///
+/// What is actually being checked is the failure semantics, because they are the
+/// part a plausible-looking implementation gets wrong: an embedded NUL is rejected
+/// BEFORE the UTF-8 check and with its own wording (a Vyrn `String` is
+/// NUL-terminated, so it could not carry one), and the DFA has to reject what
+/// Rust's `String::from_utf8` rejects — an overlong form and a lone continuation
+/// byte are here for that, not for coverage. `slice`'s two traps are separate
+/// programs because a trap ends the run.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn the_string_builtins_agree_with_the_interpreter_about_their_failures() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-strbytes");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let show = "\
+fn show(r: Result<String, String>) -> String {
+    return match r {
+        Ok(s) => \"ok:\" + s,
+        Err(e) => \"err:\" + e,
+    }
+}
+";
+    let cases: [(&str, &str); 3] = [
+        (
+            "ok",
+            "\
+fn main() -> Int64 {
+    print(show(stringFromBytes(bytes(\"héllo\"))))
+    print(show(stringFromBytes([]))) // the empty buffer is a valid empty String
+    print(show(stringFromBytes(['\\xf0', '\\x9f', '\\x98', '\\x80'])))
+    print(slice(\"héllo wörld\", 0, 6))
+    print(slice(\"héllo\", 6, 6))     // `to == len` reads the terminator
+    print(bytes(\"hé\").length)
+    return 0
+}
+",
+        ),
+        (
+            "bad",
+            "\
+fn main() -> Int64 {
+    print(show(stringFromBytes(['h', '\\x00', 'i'])))  // NUL, not bad UTF-8
+    print(show(stringFromBytes(['\\xc0', '\\xaf'])))    // overlong '/'
+    print(show(stringFromBytes(['\\x80'])))            // lone continuation
+    print(show(stringFromBytes(['\\xed', '\\xa0', '\\x80']))) // a surrogate
+    print(show(stringFromBytes(['\\xf5', '\\x80', '\\x80', '\\x80']))) // > U+10FFFF
+    print(show(stringFromBytes(['\\xe2', '\\x82'])))    // truncated
+    return 0
+}
+",
+        ),
+        // Both `slice` traps: out of range, and a cut inside a multi-byte
+        // character. The wording is what parity compares, not the fact of trapping.
+        (
+            "traps",
+            "fn main() -> Int64 {\n print(slice(\"hi\", 0, 9))\n return 0\n}\n",
+        ),
+    ];
+    for (what, body) in cases {
+        for (name, src) in [
+            (what.to_string(), format!("{show}{body}")),
+            // The split trap, only for the trapping case: byte 1 of "é" is a
+            // continuation byte, so cutting there is the error slicing exists to
+            // catch.
+            (
+                format!("{what}2"),
+                "fn main() -> Int64 {\n print(slice(\"hé\", 0, 2))\n return 0\n}\n".to_string(),
+            ),
+        ] {
+            if name.ends_with('2') && what != "traps" {
+                continue;
+            }
+            let path = dir.join(format!("{name}.vyrn"));
+            std::fs::write(&path, &src).unwrap();
+            let module = dir.join(format!("{name}.wasm"));
+            let build = vyrn()
+                .arg("build")
+                .arg(&path)
+                .arg("--target")
+                .arg("wasm")
+                .arg("-o")
+                .arg(&module)
+                .env("VYRN_WASM_BACKEND", "direct")
+                .output()
+                .expect("build wasm");
+            assert!(build.status.success(), "{name}: {}", String::from_utf8_lossy(&build.stderr));
+
+            let mut interp_cmd = vyrn();
+            interp_cmd.arg("run").arg(&path);
+            let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+            let mut wasm_cmd = Command::new(&wasmtime);
+            wasm_cmd.arg("run").arg(&module);
+            let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+            assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{name}: stdout");
+            assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{name}: stderr");
+            assert_eq!(interp.status.code(), w.status.code(), "{name}: exit");
+            // Comparing two backends would pass if both were silently wrong about
+            // which failure happened, so the interpreter's own answer is pinned.
+            match what {
+                "ok" => assert_eq!(
+                    norm(&interp.stdout),
+                    "ok:héllo\nok:\nok:😀\nhéllo\n\n3\n",
+                    "the interpreter moved"
+                ),
+                "bad" => assert_eq!(
+                    norm(&interp.stdout),
+                    "err:bytes contain a NUL byte\n\
+                     err:bytes are not valid UTF-8\n\
+                     err:bytes are not valid UTF-8\n\
+                     err:bytes are not valid UTF-8\n\
+                     err:bytes are not valid UTF-8\n\
+                     err:bytes are not valid UTF-8\n",
+                    "the interpreter moved"
+                ),
+                _ => assert!(
+                    runtime_err(&w.stderr).contains("slice "),
+                    "{name}: not a slice trap: {:?}",
+                    runtime_err(&w.stderr)
+                ),
+            }
+        }
+    }
 }
 
 /// The construct a build failed on, with the source line dropped so the same gap

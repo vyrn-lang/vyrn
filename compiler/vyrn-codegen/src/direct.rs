@@ -1204,6 +1204,25 @@ impl Fn_<'_> {
                 return self.heapify(b, &inner, n, to, line);
             }
         }
+        // A plain integer flowing into a sized slot truncates, which is the
+        // interpreter's `wrap_intn` and the textual backend's one `trunc`.
+        //
+        // UNSIGNED, and no wider than 16 bits. Those are exactly the widths whose
+        // zero-extended `i32` compares the same signed or unsigned, so `binary`
+        // needs no second comparison table and `load_of`'s `I32Load8U` invariant
+        // holds everywhere. A signed narrow int would need the opposite extension
+        // and a `UInt32` needs unsigned comparisons; both are refused rather than
+        // guessed at, and they are the row `Add on Int32` names.
+        if let Type::IntN { bits, signed: false } = self.cx.resolve(to) {
+            if bits <= 16 && matches!(self.cx.resolve(from), Type::Int | Type::IntN { .. }) {
+                if self.cx.ll(from) == "i64" {
+                    b.ins(&Instruction::I32WrapI64);
+                }
+                b.ins(&Instruction::I32Const(((1u32 << bits) - 1) as i32));
+                b.ins(&Instruction::I32And);
+                return Ok(());
+            }
+        }
         // RFC-0002's record width subtyping: a wider record used as a narrower
         // one. A rebuild rather than a prefix, because the two field orders need
         // not agree — the shapes are the same length only by coincidence.
@@ -1671,8 +1690,10 @@ impl Fn_<'_> {
                 _ => return unsupported("a branch yielding an empty array literal", line),
             },
             Expr::Call { name, args, .. } => match name.as_str() {
-                "@str" | "@concat" | "jsonSchema" => Type::Str,
+                "@str" | "@concat" | "jsonSchema" | "slice" => Type::Str,
                 "@charCount" => Type::Int,
+                "stringFromBytes" => Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+                "bytes" => Type::Array(Box::new(Type::IntN { bits: 8, signed: false })),
                 // The two builtins whose result type is a declared one: `Schema` is
                 // the record `schema_struct_lit` names, and `Value`'s name comes off
                 // the variant table rather than being spelled here twice.
@@ -1782,6 +1803,33 @@ impl Fn_<'_> {
             b.ins(&cmp_i32(op).ok_or_else(|| gap(&format!("`{op:?}` on booleans"), line))?);
             return Ok(Type::Bool);
         }
+        // A narrow unsigned int is an `i32` on the stack, zero-extended — so its
+        // comparisons are the `i32` ones and no arithmetic table is implied. Only
+        // the widths `coerce` will produce, for the same reason it stops at 16.
+        if let Type::IntN { bits, signed: false } = lt {
+            if bits <= 16 {
+                self.expr_as(m, b, rhs, &lt)?;
+                if let Some(i) = cmp_i32(op) {
+                    b.ins(&i);
+                    return Ok(Type::Bool);
+                }
+                // Wrapping arithmetic at the width: mask after the operator, which
+                // IS the wrap for an unsigned type (the interpreter's `wrap_intn`),
+                // and is why this stops at the operators that only overflow.
+                // Division needs the two traps and an unsigned divide, so it stays
+                // in the sized-int row with the signed widths.
+                let ins = match op {
+                    BinOp::Add => Instruction::I32Add,
+                    BinOp::Sub => Instruction::I32Sub,
+                    BinOp::Mul => Instruction::I32Mul,
+                    _ => return unsupported(&format!("`{op:?}` on `{l}`"), line),
+                };
+                b.ins(&ins);
+                b.ins(&Instruction::I32Const(((1u32 << bits) - 1) as i32));
+                b.ins(&Instruction::I32And);
+                return Ok(lt);
+            }
+        }
         if lt != Type::Int && lt != (Type::IntN { bits: 64, signed: true }) {
             return unsupported(&format!("`{op:?}` on `{l}`"), line);
         }
@@ -1866,6 +1914,10 @@ impl Fn_<'_> {
                     Type::Int | Type::IntN { bits: 64, signed: true } => {
                         b.ins(&Instruction::Call(self.cx.rt.print_i64));
                     }
+                    Type::IntN { bits, signed: false } if bits <= 16 => {
+                        b.ins(&Instruction::I64ExtendI32U);
+                        b.ins(&Instruction::Call(self.cx.rt.print_i64));
+                    }
                     Type::Str => {
                         b.ins(&Instruction::Call(self.cx.rt.print_str));
                     }
@@ -1887,6 +1939,12 @@ impl Fn_<'_> {
                 match self.cx.resolve(&t) {
                     Type::Str => {}
                     Type::Int | Type::IntN { bits: 64, signed: true } => {
+                        b.ins(&Instruction::Call(self.cx.rt.int_str));
+                    }
+                    // A narrow unsigned int is a zero-extended `i32`, so widening it
+                    // is the whole conversion — the digits are the same ones.
+                    Type::IntN { bits, signed: false } if bits <= 16 => {
+                        b.ins(&Instruction::I64ExtendI32U);
                         b.ins(&Instruction::Call(self.cx.rt.int_str));
                     }
                     Type::Bool => {
@@ -1925,6 +1983,79 @@ impl Fn_<'_> {
                     Some(t) => Ok(t),
                     None => unsupported("the built-in `Value` enum", line),
                 };
+            }
+            // `stringFromBytes(b)` (RFC-0014): the bytes copied into a fresh
+            // NUL-terminated buffer and UTF-8-validated, as a
+            // `Result<String, String>`. The result is an aggregate, so the slot is
+            // allocated here and the runtime writes through it — the same hidden
+            // destination an aggregate-returning Vyrn call gets.
+            "stringFromBytes" if args.len() == 1 => {
+                let ty = Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+                let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
+                    return unsupported("`stringFromBytes` returning a non-aggregate", line);
+                };
+                // Through `expr_as`, so a literal argument is typed by the position
+                // rather than by its first element: `['h', 'i']` is bytes because
+                // this is where bytes are wanted, and an empty one has nothing else
+                // to be typed by at all.
+                let bytes = Type::Array(Box::new(Type::IntN { bits: 8, signed: false }));
+                self.expr_as(m, b, &args[0], &bytes)?;
+                let src = self.scratch(b, ValType::I32, 0);
+                let al = self.layout_of(&bytes, line)?;
+                b.ins(&Instruction::LocalSet(src));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I32Load(word_at(al.fields[0])));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I64Load(at(al.fields[1])));
+                b.ins(&Instruction::I32WrapI64);
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
+                b.ins(&Instruction::Call(self.cx.rt.str_from_bytes));
+                b.slot(off);
+                return Ok(ty);
+            }
+            // `bytes(s)` — the string's UTF-8 bytes as an `Array<UInt8>`, i8 stride.
+            // A copy, because the array is growable and the string is not: a `push`
+            // on the result must not write into the string's storage.
+            "bytes" if args.len() == 1 => {
+                let ty = Type::Array(Box::new(Type::IntN { bits: 8, signed: false }));
+                let l = self.layout_of(&ty, line)?;
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                let s = self.scratch(b, ValType::I32, 0);
+                let n = self.scratch(b, ValType::I32, 1);
+                let buf = self.scratch(b, ValType::I32, 2);
+                let (strlen, malloc) = (self.cx.rt.strlen, self.cx.rt.malloc);
+                b.ins(&Instruction::LocalTee(s));
+                b.ins(&Instruction::Call(strlen));
+                b.ins(&Instruction::LocalTee(n));
+                // A zero-length string still gets a buffer, so the triple's pointer
+                // is never null — `push` reallocs from it either way.
+                b.ins(&Instruction::I32Const(1));
+                b.ins(&Instruction::I32Add);
+                b.ins(&Instruction::Call(malloc));
+                b.ins(&Instruction::LocalTee(buf));
+                b.ins(&Instruction::LocalGet(s));
+                b.ins(&Instruction::LocalGet(n));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
+                b.ins(&Instruction::LocalGet(buf));
+                b.ins(&Instruction::I32Store(word_at(l.fields[0])));
+                for f in [l.fields[1], l.fields[2]] {
+                    b.slot(off + f);
+                    b.ins(&Instruction::LocalGet(n));
+                    b.ins(&Instruction::I64ExtendI32U);
+                    b.ins(&Instruction::I64Store(word8()));
+                }
+                b.slot(off);
+                return Ok(ty);
+            }
+            "slice" if args.len() == 3 => {
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                self.expr_as(m, b, &args[1], &Type::Int)?;
+                self.expr_as(m, b, &args[2], &Type::Int)?;
+                b.ins(&Instruction::Call(self.cx.rt.slice));
+                return Ok(Type::Str);
             }
             "@charCount" if args.len() == 1 => {
                 self.expr_as(m, b, &args[0], &Type::Str)?;
@@ -3292,6 +3423,9 @@ struct Rt {
     concat: u32,
     trap_idx: u32,
     charcount: u32,
+    utf8valid: u32,
+    str_from_bytes: u32,
+    slice: u32,
     count: u32,
     msg_div0: u32,
     msg_rem0: u32,
@@ -3334,7 +3468,10 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
         concat: base + 9,
         trap_idx: base + 10,
         charcount: base + 11,
-        count: 12,
+        utf8valid: base + 12,
+        str_from_bytes: base + 13,
+        slice: base + 14,
+        count: 15,
         msg_div0: 0,
         msg_rem0: 0,
         msg_divovf: 0,
@@ -3689,6 +3826,232 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
             .ins(&Instruction::LocalGet(n))
             .ins(&Instruction::I64ExtendI32U);
     });
+
+    // utf8valid(s, len) — Björn Höhrmann's DFA, over the SAME table the textual
+    // backend emits (`crate::utf8d_table`). Sharing the bytes is the point: two
+    // tables would be two answers to "is this valid UTF-8", free to drift by one
+    // entry, and the thing they decide is whether a program traps.
+    //
+    // 256 byte-class entries, then 9 states × 12 classes of transitions. State 0
+    // accepts, 12 rejects, and every rejecting transition stays at 12 — so the
+    // loop never needs an early exit.
+    let utf8d = m.data(&crate::utf8d_table(), 1);
+    let (i, st) = (3, 4);
+    m.func(
+        &[ValType::I32, ValType::I32],
+        &[ValType::I32],
+        &[ValType::I32, ValType::I32],
+        0,
+        |b| {
+            b.ins(&Instruction::Block(BlockType::Empty))
+                .ins(&Instruction::Loop(BlockType::Empty))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I32GeU)
+                .ins(&Instruction::BrIf(1))
+                // st = utf8d[256 + st + utf8d[s[i]]]
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::I32Const(utf8d as i32))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const((utf8d + 256) as i32))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::LocalSet(st))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(i))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::I32Eqz);
+        },
+    );
+
+    // str_from_bytes(data, len, dest) — RFC-0014's `stringFromBytes`, writing a
+    // whole `Result<String, String>` through `dest`.
+    //
+    // A runtime function rather than inline lowering because the two failures are
+    // where the semantics live, and both are canonical wording parity compares:
+    // an embedded NUL is rejected BEFORE the UTF-8 check (a Vyrn `String` is
+    // NUL-terminated, so it could not carry one), and the DFA decides the rest.
+    // Nothing frees, so an `Err` payload is the interned message itself rather
+    // than a heap copy of it — the textual backend copies only so that every I/O
+    // error payload is owned storage, and this backend's allocator has no free to
+    // make that distinction observable.
+    let bnul = rt.intern(m, "bytes contain a NUL byte");
+    let butf8 = rt.intern(m, "bytes are not valid UTF-8");
+    let res = layout::of_ll("{ i1, i64, i64 }").expect("the Result<String, String> shape");
+    // params 0..2, the frame base 3, then ours — `i` is NOT `utf8valid`'s `i`
+    // above, whose 3 is this function's base.
+    let (buf, err, c, at_i) = (4, 5, 6, 7);
+    let (utf8valid, malloc) = (rt.utf8valid, rt.malloc);
+    m.func(
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[],
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        0,
+        |b| {
+            b.ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalSet(buf));
+            b.ins(&Instruction::Block(BlockType::Empty)) // fin
+                .ins(&Instruction::Block(BlockType::Empty)) // copied
+                .ins(&Instruction::Loop(BlockType::Empty))
+                .ins(&Instruction::LocalGet(at_i))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I32GeU)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(at_i))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::LocalTee(c))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(bnul as i32))
+                .ins(&Instruction::LocalSet(err))
+                .ins(&Instruction::Br(3))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(at_i))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(c))
+                .ins(&Instruction::I32Store8(byte()))
+                .ins(&Instruction::LocalGet(at_i))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(at_i))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32Store8(byte()))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::Call(utf8valid))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(butf8 as i32))
+                .ins(&Instruction::LocalSet(err))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End); // fin
+            // The tag is `no error`, and the word is whichever pointer that named.
+            b.ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::LocalGet(err))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::I32Store8(MemArg {
+                    offset: res.fields[0] as u64,
+                    align: 0,
+                    memory_index: 0,
+                }));
+            b.ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::LocalGet(err))
+                .ins(&Instruction::If(BlockType::Result(ValType::I32)))
+                .ins(&Instruction::LocalGet(err))
+                .ins(&Instruction::Else)
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::End)
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::I64Store(at(res.fields[1])));
+            b.ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I64Const(0))
+                .ins(&Instruction::I64Store(at(res.fields[2])));
+        },
+    );
+
+    // slice(s, from, to) — RFC-0046's byte-range substring, with the two traps
+    // that make it safe rather than merely fast.
+    //
+    // Both bounds are SIGNED against the byte length, and both cut points must
+    // land on a leading byte: slicing a multi-byte character in half would produce
+    // a `String` that is not UTF-8, which every later check assumes it cannot be.
+    // `to == len` reads the terminator, which is 0 and therefore never a
+    // continuation byte — the reason no special case is needed at the end.
+    let oob = rt.intern(m, "error: slice index out of range\n");
+    let split = rt.intern(m, "error: slice splits a UTF-8 character\n");
+    let (strlen, trap) = (rt.strlen, rt.trap);
+    let (slen, sub) = (5, 6);
+    m.func(
+        &[ValType::I32, ValType::I64, ValType::I64],
+        &[ValType::I32],
+        &[ValType::I32, ValType::I32, ValType::I32],
+        0,
+        |b| {
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::LocalSet(slen));
+            // from < 0 || to > len || from > to
+            b.ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I64Const(0))
+                .ins(&Instruction::I64LtS)
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::LocalGet(slen))
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::I64GtS)
+                .ins(&Instruction::I32Or)
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I64GtS)
+                .ins(&Instruction::I32Or)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(oob as i32))
+                .ins(&Instruction::Call(trap))
+                .ins(&Instruction::End);
+            let cont = |b: &mut Frame, which: u32| {
+                b.ins(&Instruction::LocalGet(0))
+                    .ins(&Instruction::LocalGet(which))
+                    .ins(&Instruction::I32WrapI64)
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::I32Load8U(byte()))
+                    .ins(&Instruction::I32Const(0xC0))
+                    .ins(&Instruction::I32And)
+                    .ins(&Instruction::I32Const(0x80))
+                    .ins(&Instruction::I32Eq);
+            };
+            cont(b, 1);
+            cont(b, 2);
+            b.ins(&Instruction::I32Or)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(split as i32))
+                .ins(&Instruction::Call(trap))
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I64Sub)
+                .ins(&Instruction::I32WrapI64)
+                .ins(&Instruction::LocalSet(sub))
+                .ins(&Instruction::LocalGet(sub))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalTee(buf))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I32WrapI64)
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(sub))
+                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(sub))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32Store8(byte()))
+                .ins(&Instruction::LocalGet(buf));
+        },
+    );
 
     rt
 }

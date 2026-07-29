@@ -9839,7 +9839,11 @@ fn llvm_str(s: &str) -> (String, usize) {
 /// by a 108-entry (9 states × 12 classes) transition table. State 0 is ACCEPT,
 /// 12 is REJECT. Used by `@__vyrn_utf8valid` so the native decoders reject exactly
 /// what Rust's `String::from_utf8` rejects (overlong forms, surrogates, > U+10FFFF).
-fn utf8d_table() -> Vec<u8> {
+///
+/// Shared with the direct wasm backend (RFC-0077 M2g), which puts the same bytes
+/// in a data segment and walks them with the same two loads. A second table would
+/// have been a second answer to "is this valid UTF-8", free to drift by a byte.
+pub(crate) fn utf8d_table() -> Vec<u8> {
     let mut t = vec![0u8; 256];
     for b in 0x80..=0x8F {
         t[b] = 1;
