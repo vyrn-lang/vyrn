@@ -113,6 +113,56 @@ jobs:
         working-directory: compiler
         run: cargo test --quiet -p vyrn-cli --test universal_pages -- --ignored
 
+  gen-engine:
+    name: cross-engine generation (interp == wasm)
+    # Its own job rather than a step in `test`: it is the only thing in CI that
+    # builds wasmtime + cranelift, which is minutes of compile the other jobs
+    # must not wait on or share a cache with. Parallel to `parity`, and for the
+    # same reason — both are the expensive tier that proves an invariant.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compiler
+          # Distinct build graph (vyrn-genwasm and its wasmtime tree) — its own
+          # slot, like parity's.
+          prefix-key: genwasm
+      - name: wasm toolchain cache
+        id: wasm-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/wasm-tools
+          # Deliberately the SAME key as the parity job: one download, one cache
+          # entry, two consumers. This job needs only the sysroot and builtins
+          # (wasmtime is embedded as a crate, not spawned), but sharing the entry
+          # beats maintaining a second recipe that drifts from the first.
+          key: wasm-tools-wasi25-wasmtime46
+      - name: Fetch wasi-sysroot + builtins + wasmtime
+        if: steps.wasm-tools.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/wasm-tools && cd ~/wasm-tools
+          curl -sSfL -o sysroot.tar.gz https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sysroot-25.0.tar.gz
+          curl -sSfL -o builtins.tar.gz https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/libclang_rt.builtins-wasm32-wasi-25.0.tar.gz
+          curl -sSfL -o wasmtime.tar.xz https://github.com/bytecodealliance/wasmtime/releases/download/v46.0.1/wasmtime-v46.0.1-x86_64-linux.tar.xz
+          tar xf sysroot.tar.gz && tar xf builtins.tar.gz && tar xf wasmtime.tar.xz
+      - name: Every generator agrees under both engines (RFC-0076)
+        # The RFC's acceptance criteria, both halves in one run: the wasm column
+        # must match the interpreter column byte for byte over every
+        # generator-using example, and the interpreter column IS the
+        # `VYRN_NO_WASM_GEN=1` configuration, so "the interpreter still works with
+        # the wasm path disabled" is exercised by the same corpus.
+        #
+        # `--release` because cranelift compiles the guest: measured over this
+        # corpus with an empty artifact cache, 20 s release against 98 s debug.
+        working-directory: compiler
+        run: |
+          export WASI_SYSROOT=$(echo ~/wasm-tools/wasi-sysroot-*)
+          export WASI_BUILTINS=$(find ~/wasm-tools -name 'libclang_rt.builtins-wasm32.a' | head -1)
+          cargo test --quiet -p vyrn-cli --release --features wasm-gen \
+            --test genwasm -- --ignored --nocapture
+
   bench:
     name: benchmarks (informational)
     # Push-to-main only: timing on shared PR runners is noise, and the trend

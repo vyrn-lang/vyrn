@@ -19,13 +19,58 @@ fn repo_file(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap()
 }
 
+/// Every example that imports through a generator call — `import ... from
+/// gen(...)`, as opposed to `from "some/path"`. Both spellings count: the named
+/// form and `import * as ns from tw(...)` (RFC-0027), which is how `twdemo`
+/// reaches `std/tw` and which a corpus written by hand would have missed.
+///
+/// Discovered rather than listed. A hard-coded corpus is a gate that keeps
+/// passing after it stops looking at the thing that changed, and the example
+/// tree grows faster than anyone remembers to edit a constant.
+fn generator_examples() -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let mut entries: Vec<PathBuf> =
+            std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok().map(|e| e.path())).collect();
+        entries.sort();
+        for p in entries {
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "vyrn") && imports_from_a_generator(&p) {
+                out.push(p);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&repo_file("examples"), &mut out);
+    out
+}
+
+fn imports_from_a_generator(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    text.lines().any(|l| {
+        let l = l.trim_start();
+        l.starts_with("import ")
+            && l.split_once(" from ").is_some_and(|(_, src)| !src.starts_with('"'))
+    })
+}
+
 /// `emit-gen <file>`, with the on-disk generator cache off so the second run
 /// cannot be a cache hit answering for the first.
 fn emit_gen(file: &Path, wasm: bool) -> std::process::Output {
+    emit_gen_traced(file, wasm, false)
+}
+
+/// As above, plus `VYRN_GENWASM_TRACE` — which puts per-phase lines on stderr,
+/// so only the caller that reads them (and not the ones comparing stderr trap
+/// wording) may ask for it.
+fn emit_gen_traced(file: &Path, wasm: bool, trace: bool) -> std::process::Output {
     let mut c = Command::new(env!("CARGO_BIN_EXE_vyrn"));
     c.env("VYRN_NO_GEN_CACHE", "1");
     if !wasm {
         c.env("VYRN_NO_WASM_GEN", "1");
+    }
+    if trace {
+        c.env("VYRN_GENWASM_TRACE", "1");
     }
     c.arg("emit-gen").arg(file).output().expect("emit-gen")
 }
@@ -485,4 +530,73 @@ fn editing_a_generator_recompiles_its_artifact() {
         "the engines diverged after the edit"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// RFC-0076's own acceptance criteria, which until now had only ever been run by
+/// hand: *every* generator-using example in the repo must emit byte-identical
+/// source under both engines, and the interpreter must still work with the wasm
+/// path disabled. Both halves are the same run — the interpreter column IS the
+/// `VYRN_NO_WASM_GEN=1` configuration, exercised over the whole corpus.
+///
+/// The tests above pin the milestones (one file each, chosen for the capability
+/// it exercises). This one pins the CORPUS, and it is the difference between
+/// "the cases we thought of still agree" and "nothing in the repo disagrees".
+///
+/// The engine declines silently by design — the interpreter just runs the
+/// generator — so a green run proves nothing unless the engine actually ran.
+/// `VYRN_GENWASM_TRACE` is the only way to tell, and every successful engine run
+/// prints a `run` phase, so a file with no `genwasm run:` line is a FAILURE here
+/// even though its two columns agree: it means the comparison was the
+/// interpreter against itself.
+///
+/// Ignored: needs clang and a wasi sysroot, and compiles every generator in the
+/// repo. ~20 s in release with an empty artifact cache; ~100 s in debug, because
+/// the guest is compiled by cranelift and a debug cranelift is the whole
+/// difference. Run it in release.
+#[test]
+#[ignore = "needs clang + wasi sysroot: cargo test -p vyrn-cli --release --features wasm-gen --test genwasm -- --ignored"]
+fn every_generator_example_emits_the_same_source_under_both_engines() {
+    // Without the feature both columns are the interpreter and the whole thing
+    // agrees with itself. Loudly, because a silent skip is exactly the failure
+    // mode this test exists to close.
+    assert!(
+        cfg!(feature = "wasm-gen"),
+        "build with --features wasm-gen, or this compares the interpreter to itself"
+    );
+
+    let corpus = generator_examples();
+    assert!(corpus.len() >= 10, "generator corpus looks wrong: {corpus:?}");
+
+    let mut failures: Vec<String> = Vec::new();
+    let root = repo_file("examples");
+    for path in &corpus {
+        let name = path.strip_prefix(&root).unwrap_or(path).display().to_string();
+        let wasm = emit_gen_traced(path, true, true);
+        let interp = emit_gen(path, false);
+        let w_err = String::from_utf8_lossy(&wasm.stderr).to_string();
+        let ran = w_err.matches("genwasm run:").count();
+
+        if interp.status != wasm.status {
+            failures.push(format!(
+                "{name}: exit {:?} (interp) vs {:?} (wasm)\n{w_err}",
+                interp.status.code(),
+                wasm.status.code()
+            ));
+        } else if interp.stdout != wasm.stdout {
+            failures.push(format!("{name}: the emitted source diverged between engines"));
+        } else if !interp.status.success() {
+            failures.push(format!("{name}: generation failed under both engines:\n{w_err}"));
+        } else if ran == 0 {
+            failures.push(format!(
+                "{name}: the engine never ran, so the columns are both the interpreter\n{w_err}"
+            ));
+        } else {
+            eprintln!("OK  {name}  ({ran} generator calls compiled)");
+            continue;
+        }
+        for line in w_err.lines().filter(|l| l.starts_with("genwasm declined:")) {
+            eprintln!("  {name}: {line}");
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
