@@ -204,11 +204,16 @@ impl Cx {
 
     /// Why `ty` cannot be lowered, if it cannot.
     ///
-    /// The two dangerous cases are silent rather than loud without this. A
-    /// validated type (`type Age = Int64 where value >= 0`) has the SAME
-    /// representation as its base, so it would lower cleanly and simply never
-    /// check the refinement — a wrong program, not a missing one. And an
+    /// The dangerous case is silent rather than loud without this: an
     /// unresolvable name lowers to `void`, i.e. to nothing at all.
+    ///
+    /// A validated type (`type Age = Int64 where value >= 0`) used to be refused
+    /// here for a related reason — it has the SAME representation as its base, so
+    /// it lowers cleanly and simply never checks the refinement. That is now
+    /// [`Fn_::coerce`]'s job instead: the check belongs at the flow, not in the
+    /// type, because the type is where it would have to be re-decided at every
+    /// site. `a_validated_type_is_checked_wherever_it_is_reached` is the test that
+    /// followed the refusal.
     ///
     /// Depth-bounded because a record may hold a `Ref` to its own type, which is
     /// finite in memory and infinite as a tree.
@@ -219,9 +224,6 @@ impl Cx {
         match ty {
             Type::Param(p) => return Some(format!("the generic parameter `{p}`")),
             Type::Named(n) | Type::App(n, _) => match self.types.get(n) {
-                Some(d) if d.predicate.is_some() => {
-                    return Some(format!("the validated type `{n}`"));
-                }
                 Some(_) => {}
                 // `Code` and `Token` are builtins `resolve` knows without a decl.
                 None if n == "Code" || n == "Token" => {}
@@ -348,7 +350,10 @@ fn lower_fn(m: &mut Module, f: &Function, cx: &Cx) -> Result<(), String> {
         depth: 0,
         loops: Vec::new(),
         ret: sig.ret.clone(),
-        ret_ty: cx.resolve(&sig.ret_ty),
+        // As DECLARED, not resolved. A function returning `Age` has to validate
+        // at its `return`, and `Age` resolved to `Int64` is the flow that does
+        // not — which is the whole class of silent hole M2d exists to close.
+        ret_ty: sig.ret_ty.clone(),
         dest,
         scratch: HashMap::new(),
         expect: Vec::new(),
@@ -360,7 +365,10 @@ fn lower_fn(m: &mut Module, f: &Function, cx: &Cx) -> Result<(), String> {
     // into a fresh alloca), so the convention costs nothing new.
     for (i, p) in f.params.iter().enumerate() {
         let local = shift + i as u32;
-        let ty = cx.resolve(&p.ty);
+        // The DECLARED type, for the same reason `ret_ty` is: a binding whose
+        // type is `Age` must validate what is assigned to it, and one whose type
+        // has already been resolved to `Int64` cannot know to.
+        let ty = p.ty.clone();
         let place = match cx.repr(&p.ty, f.line)? {
             Repr::Agg(l) => {
                 let off = b.alloc(l.size, l.align);
@@ -437,7 +445,10 @@ impl Fn_<'_> {
                 let want = match ty {
                     Some(t) => {
                         self.cx.repr(t, *line)?;
-                        Some(self.cx.resolve(t))
+                        // The annotation as written: `let mut m: Age = 21`
+                        // re-validates on every later assignment, and it can only
+                        // do that if the binding remembers it is an `Age`.
+                        Some(t.clone())
                     }
                     None => None,
                 };
@@ -748,11 +759,6 @@ impl Fn_<'_> {
     // -- expressions --------------------------------------------------------
 
     /// Evaluate `e`, leaving a value of type `want` on the stack.
-    ///
-    /// The only conversion this does is RFC-0002's record width subtyping, where
-    /// a wider record is used as a narrower one. That is a rebuild rather than a
-    /// prefix, because the two field orders need not agree — the shapes are the
-    /// same length only by coincidence.
     fn expr_as(
         &mut self,
         m: &mut Module,
@@ -764,22 +770,66 @@ impl Fn_<'_> {
         let got = self.expr(m, b, e);
         self.expect.pop();
         let got = got?;
-        let line = Expr::line(e);
-        if self.cx.ll(&got) == self.cx.ll(want) {
+        self.coerce(m, b, Some(e), &got, want, Expr::line(e))
+    }
+
+    /// Reconcile the value on the stack, of type `from`, into `to`.
+    ///
+    /// **The seam** (RFC-0077 M2d). Before this the backend had no coercion
+    /// concept at all: it lowered when `repr()` already agreed on both sides and
+    /// [`Cx::ty_gap`] refused everything needing reconciliation — which is why a
+    /// validated type, a `modify` parameter, a `SmallArray`, a `Map` index and a
+    /// two-word `Option` payload were five gaps rather than one absence wearing
+    /// five hats. Every flow site reaches here through [`Fn_::expr_as`]: a typed
+    /// `let`, an assignment, a field or element store, a call argument, a return,
+    /// a join arm, an enum payload. A reconciliation added here is added at all
+    /// of them at once, which is the property the five separate refusals lacked.
+    ///
+    /// `expr` is the expression that produced the value, when there is one — only
+    /// RFC-0020's containment proof needs it, and only for strings.
+    ///
+    /// **Validation runs FIRST**, and that order is the entire point. A refined
+    /// type has the SAME representation as its base, so the `ll`-equality
+    /// shortcut below would let `Int64 → Even` past unchecked: same bytes, no
+    /// check, wrong program, forever.
+    fn coerce(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        expr: Option<&Expr>,
+        from: &Type,
+        to: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        if let Some(decl) = crate::validation_required(from, to, &self.cx.types).cloned() {
+            // The value has to be in the base's representation before the
+            // predicate reads it. The recursion terminates because a base is one
+            // step nearer a builtin than the name it backs.
+            self.coerce(m, b, expr, from, &decl.base, line)?;
+            if !expr.is_some_and(|e| self.proven(e, to)) {
+                self.emit_validation(m, b, &decl, line)?;
+            }
+            return Ok(());
+        }
+        if self.cx.ll(from) == self.cx.ll(to) {
             return Ok(());
         }
         // A literal is a fixed `[N x T]`; an `Array<T>` slot wants the growable
         // triple. One conversion, so every literal position — a `let`, an
         // argument, a `return`, a field, an element — reaches the heap the same
         // way.
-        if let (Type::ArrayN(from, n), Type::Array(to)) =
-            (self.cx.resolve(&got), self.cx.resolve(want))
+        if let (Type::ArrayN(inner, n), Type::Array(el)) =
+            (self.cx.resolve(from), self.cx.resolve(to))
         {
-            if self.cx.ll(&from) == self.cx.ll(&to) {
-                return self.heapify(b, &from, n, want, line);
+            if self.cx.ll(&inner) == self.cx.ll(&el) {
+                return self.heapify(b, &inner, n, to, line);
             }
         }
-        let (Some(from), Some(to)) = (self.cx.fields(&got), self.cx.fields(want)) else {
+        // RFC-0002's record width subtyping: a wider record used as a narrower
+        // one. A rebuild rather than a prefix, because the two field orders need
+        // not agree — the shapes are the same length only by coincidence.
+        let (got, want) = (from, to);
+        let (Some(from), Some(to)) = (self.cx.fields(got), self.cx.fields(want)) else {
             return unsupported(
                 &format!("a conversion from `{got}` to `{want}`"),
                 line,
@@ -792,7 +842,7 @@ impl Fn_<'_> {
             return unsupported("a record that is not an aggregate", line);
         };
         let off = b.alloc(dl.size, dl.align);
-        let sl = layout::of_ll(&self.cx.ll(&got)).map_err(|e| format!("direct backend: {e}"))?;
+        let sl = layout::of_ll(&self.cx.ll(got)).map_err(|e| format!("direct backend: {e}"))?;
         for (i, f) in to.iter().enumerate() {
             let j = from
                 .iter()
@@ -820,6 +870,114 @@ impl Fn_<'_> {
             }
         }
         b.slot(off);
+        Ok(())
+    }
+
+    /// RFC-0020's containment escape: a string flow the checker proved lands
+    /// inside `to`'s language needs no runtime check.
+    ///
+    /// Both backends run the same frontend predicate over the same AST rather
+    /// than agreeing by construction — the consteval precedent, and the reason
+    /// `lib.rs::coerce_flow` exists at all. Skipping differently here would show
+    /// up as a trap on one target only.
+    fn proven(&self, e: &Expr, to: &Type) -> bool {
+        let resolve = |x: &Expr| match x {
+            Expr::Var { name, .. } => self.lookup(name, 0).ok().map(|(_, t)| t),
+            _ => None,
+        };
+        vyrn_frontend::finite::string_flow_proven(e, to, &self.cx.types, &resolve)
+    }
+
+    /// Emit the runtime check that the value on the stack satisfies `decl`'s
+    /// `where` predicate, trapping with the canonical message if it does not.
+    ///
+    /// The value is LEFT on the stack: a validation is a check on a flow, not a
+    /// step in it. But the predicate's own code would bury it — the operand stack
+    /// is not addressable — so it is parked in the place the predicate binds it
+    /// to, which for a scalar base is the same place and therefore costs no copy.
+    ///
+    /// What binds is [`crate::predicate_binds`]'s call, shared with the LLVM
+    /// emitter. The lowering of the predicate itself cannot be shared, since one
+    /// prints text and this writes bytes; what is shared is the structure walked.
+    fn emit_validation(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        decl: &TypeDecl,
+        line: usize,
+    ) -> Result<(), String> {
+        let Some(pred) = decl.predicate.clone() else { return Ok(()) };
+        let binds = crate::predicate_binds(decl);
+        let mark = self.scope.len();
+        // Whatever the value was parked in, so the flow can carry on with it.
+        let held = match (self.cx.repr(&decl.base, line)?, &decl.base) {
+            // A record base binds every field by name, so the value is parked by
+            // ADDRESS and each field copied out of it. A copy rather than a view
+            // because `Place` is a local or a frame slot and nothing else — M0's
+            // convention, and a predicate cannot write to what it was given.
+            (Repr::Agg(l), Type::Record(_)) => {
+                let addr = b.local(ValType::I32);
+                b.ins(&Instruction::LocalSet(addr));
+                for (name, ty, field) in &binds {
+                    let i = field.expect("a record base binds by field index");
+                    let fr = self.cx.repr(ty, line)?;
+                    let place = self.place_for(b, &fr, line)?;
+                    match (place, &fr) {
+                        (Place::Local(loc), _) => {
+                            b.ins(&Instruction::LocalGet(addr));
+                            b.ins(&load_of(&self.cx.ll(ty), l.fields[i]));
+                            b.ins(&Instruction::LocalSet(loc));
+                        }
+                        (Place::Slot(off), Repr::Agg(fl)) => {
+                            b.slot(off);
+                            b.ins(&Instruction::LocalGet(addr));
+                            b.ins(&Instruction::I32Const(l.fields[i] as i32));
+                            b.ins(&Instruction::I32Add);
+                            b.ins(&Instruction::I32Const(fl.size as i32));
+                            b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                        }
+                        _ => return unsupported("a Unit field in a `where` clause", line),
+                    }
+                    self.scope.push((name.clone(), place, ty.clone()));
+                }
+                addr
+            }
+            // Every other base binds `value`, and the parked local IS it.
+            (Repr::Scalar(v), _) => {
+                let loc = b.local(v);
+                b.ins(&Instruction::LocalSet(loc));
+                let (name, ty, _) = binds.into_iter().next().expect("a scalar base binds `value`");
+                self.scope.push((name, Place::Local(loc), ty));
+                loc
+            }
+            // An aggregate base that is not a record has one `value` binding and
+            // nowhere for it to live — `Place` cannot name "the address in this
+            // local". Refused rather than bound to something adjacent.
+            _ => {
+                return unsupported(
+                    &format!("a `where` clause over the non-record aggregate `{}`", decl.base),
+                    line,
+                );
+            }
+        };
+        let cond = self.expr(m, b, &pred)?;
+        self.scope.truncate(mark);
+        if self.cx.resolve(&cond) != Type::Bool {
+            return unsupported("a `where` clause that is not a Bool", line);
+        }
+        // The message on stderr and exit 1 — `Rt::trap`, the same path the
+        // division and bounds checks take, because parity compares stderr and a
+        // wasm `unreachable` would print wasmtime's wording instead of ours.
+        let msg = self.cx.rt.intern(m, &crate::validation_message(decl));
+        let trap = self.cx.rt.trap;
+        b.ins(&Instruction::I32Eqz);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        b.ins(&Instruction::I32Const(msg as i32));
+        b.ins(&Instruction::Call(trap));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        b.ins(&Instruction::LocalGet(held));
         Ok(())
     }
 
@@ -915,6 +1073,23 @@ impl Fn_<'_> {
                     }
                 }
                 b.slot(off);
+                // A predicated record's cross-field `where` runs on the finished
+                // literal. There is no coercion to hang it on — the literal
+                // already IS the named type, so `from == to` and
+                // `validation_required` correctly says no — which is exactly why
+                // the LLVM emitter validates at its construction site too. A
+                // wholly constant literal was proven by the checker, so only a
+                // dynamic one pays.
+                if let Some(d) =
+                    self.cx.types.get(name).filter(|d| d.predicate.is_some()).cloned()
+                {
+                    let dynamic = fields.iter().any(|(_, e)| {
+                        vyrn_frontend::consteval::eval(e, &HashMap::new()).is_none()
+                    });
+                    if dynamic {
+                        self.emit_validation(m, b, &d, *line)?;
+                    }
+                }
                 ty
             }
             Expr::IfExpr { cond, then_branch, else_branch, line } => {
@@ -1082,6 +1257,9 @@ impl Fn_<'_> {
                         other => return unsupported(&format!("a branch popping `{other}`"), line),
                     }
                 }
+                _ if self.cx.types.get(name).is_some_and(|d| d.predicate.is_some()) => {
+                    Type::Named(name.clone())
+                }
                 _ => match self.cx.sigs.get(name) {
                     Some(s) => s.ret_ty.clone(),
                     None => return unsupported(&format!("a branch yielding `{name}`"), line),
@@ -1146,7 +1324,11 @@ impl Fn_<'_> {
         if lt != Type::Int && lt != (Type::IntN { bits: 64, signed: true }) {
             return unsupported(&format!("`{op:?}` on `{l}`"), line);
         }
-        self.expr_as(m, b, rhs, &l)?;
+        // The RESOLVED operand type, and the result is that too — arithmetic runs
+        // on the base representation, so `age + 1` must not validate `1` against
+        // `Age`'s predicate. It is the *assignment* that re-validates the sum,
+        // which is why the LLVM emitter returns its `numty` rather than `lty`.
+        self.expr_as(m, b, rhs, &lt)?;
         // Division is the one arithmetic operator with control flow in it. Both
         // operands come off the stack into scratch first, because the checks
         // need to look at them and then hand them back; and the overflow case is
@@ -1200,7 +1382,7 @@ impl Fn_<'_> {
         };
         b.ins(&ins);
         Ok(match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => l,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => lt,
             _ => Type::Bool,
         })
     }
@@ -1284,6 +1466,19 @@ impl Fn_<'_> {
         }
         if let Some(t) = self.sum_ctor(m, b, name, args, line)? {
             return Ok(t);
+        }
+        // `Age(n)` — the explicit spelling of what a boundary now does by itself
+        // (RFC-0003). Same rule as the record literal above: a constant was
+        // proven by the checker, so only a dynamic value pays for a check.
+        if let Some(d) = self.cx.types.get(name).filter(|d| d.predicate.is_some()).cloned() {
+            if args.len() != 1 {
+                return unsupported(&format!("`{name}` at this arity"), line);
+            }
+            self.expr_as(m, b, &args[0], &d.base)?;
+            if vyrn_frontend::consteval::eval(&args[0], &HashMap::new()).is_none() {
+                self.emit_validation(m, b, &d, line)?;
+            }
+            return Ok(Type::Named(name.to_string()));
         }
         let Some(sig) = self.cx.sigs.get(name).cloned() else {
             return unsupported(&format!("the call `{name}`"), line);
@@ -2958,29 +3153,51 @@ mod tests {
         assert_eq!(c.repr(&Type::Option(Box::new(Type::Int)), 0).unwrap().val(), Some(ValType::I32));
     }
 
-    /// A validated type has the SAME representation as its base, so lowering it
-    /// blindly would silently skip the refinement — a wrong program rather than
-    /// a missing one. It has to be a gap until the checks are emitted.
+    /// A validated type has the SAME representation as its base, so a lowering
+    /// that emits the type and forgets the check turns every refinement example
+    /// green while validating nothing, permanently. `Even` and `Int64` are the
+    /// same bytes; "the examples pass" is therefore not evidence, and this is.
+    ///
+    /// It used to be a refusal (`a_validated_type_is_a_gap_not_a_bare_int`),
+    /// asserting the same two positions — the bare type, and inside a record,
+    /// "because that is where it would hide". Now that RFC-0077 M2d emits the
+    /// check, both positions assert that it IS emitted, which is the same
+    /// property from the other side.
+    ///
+    /// The evidence is the trap message in the data segment. `emit_validation` is
+    /// the only thing that interns it, so its presence means a check was emitted
+    /// and its absence means one was not — a stronger signal than any byte count,
+    /// and one no amount of correct-looking wasm can fake.
     #[test]
-    fn a_validated_type_is_a_gap_not_a_bare_int() {
-        let mut c = cx();
-        c.types.insert(
-            "Age".into(),
-            TypeDecl {
-                name: "Age".into(),
-                exported: false,
-                module: None,
-                doc: None,
-                type_params: vec![],
-                base: Type::Int,
-                predicate: Some(Expr::Bool(true)),
-                line: 1,
-            },
+    fn a_validated_type_is_checked_wherever_it_is_reached() {
+        let msg = "validation failed for `Age`";
+        let bare = "type Age = Int64 where value >= 18 \
+                    fn f(n: Int64) -> Int64 { let a: Age = n return a }
+                    fn main() -> Int64 { return f(20) }";
+        // Inside a record field, the position the refusal called out: nothing
+        // about `{ i64 }` says one of those words is refined.
+        let hidden = "type Age = Int64 where value >= 18 \
+                      type U = { age: Age } \
+                      fn f(n: Int64) -> Int64 { let u = U { age: n } return u.age }
+                      fn main() -> Int64 { return f(20) }";
+        for (what, src) in [("bare", bare), ("in a record", hidden)] {
+            let p = vyrn_frontend::check(src).expect(what);
+            let bytes = compile(&p).expect(what);
+            assert!(
+                bytes.windows(msg.len()).any(|w| w == msg.as_bytes()),
+                "{what}: no `where` check was emitted"
+            );
+        }
+        // And the negative, so the assertion above is about a check being emitted
+        // and not about the word "Age" reaching the module some other way: the
+        // same declaration, with nothing flowing into it.
+        let unreached = "type Age = Int64 where value >= 18 \
+                         fn main() -> Int64 { return 20 }";
+        let p = vyrn_frontend::check(unreached).unwrap();
+        let bytes = compile(&p).unwrap();
+        assert!(
+            !bytes.windows(msg.len()).any(|w| w == msg.as_bytes()),
+            "an unreached refinement emitted a check"
         );
-        let e = c.repr(&Type::Named("Age".into()), 7).unwrap_err();
-        assert!(e.contains("the validated type `Age`"), "{e}");
-        // …and inside a record, because that is where it would hide.
-        let rec = Type::Record(vec![Field { name: "age".into(), ty: Type::Named("Age".into()) }]);
-        assert!(c.repr(&rec, 7).is_err());
     }
 }

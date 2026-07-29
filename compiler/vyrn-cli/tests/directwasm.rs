@@ -37,6 +37,7 @@ use std::process::Command;
 /// interpreter. Grows as M2 lands; never shrinks silently.
 const PASSING: &[&str] = &[
     "arrays.vyrn",
+    "autovalidate.vyrn",
     "benching.vyrn",
     "consume.vyrn",
     "ecs.vyrn",
@@ -44,11 +45,17 @@ const PASSING: &[&str] = &[
     "externdemo2.vyrn",
     "fib.vyrn",
     "foreach.vyrn",
+    "ifexpr.vyrn",
     "map.vyrn",
     "ownership.vyrn",
     "record.vyrn",
     "testing.vyrn",
     "utility.vyrn",
+    // The one example whose refinement is VIOLATED at runtime, so it is the one
+    // that proves the checks are emitted rather than that the bytes agree: a
+    // lowering that emits the type and forgets the check passes every other
+    // refinement example and fails this one (RFC-0077 M2d).
+    "validate_fail.vyrn",
     "validation.vyrn",
 ];
 
