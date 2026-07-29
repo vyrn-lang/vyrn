@@ -771,3 +771,120 @@ M4 is where most of it leaves again.
 The first row is one feature — a growable array and its runtime — and it is
 worth 21. That is M2c's first item, and it is the same shape of argument M2a
 made about the type wall, which turned out to be right.
+
+---
+
+## M2c, as landed
+
+`Array<T>` and `for`. **14 of 80**, from 8 — and `for` is no longer the first
+blocker of anything, nor is an array literal, `.length` or an index.
+
+The bucket was worth 21 and paid 6, which is the honest number and the reason
+the ladder is a list. The other 15 moved on to a different blocker rather than
+passing: `toJson` (4), a `where` refinement, `stringFromBytes`, `parse`,
+`@charCount`, module state. Every one of them now stops somewhere *after* the
+array code, which is what the burndown was measuring.
+
+### The shadow-stack convention needed no fifth rule, but arrays needed one fact
+
+A growable `Array<T>` is the `{ptr, i64, i64}` triple in a frame slot, so it is
+an aggregate like every other and M2b's four rules cover it unchanged. What is
+new is that the **buffer** is not — it is heap, it moves, and it outlives the
+slot. Keeping those two facts apart is the whole of this milestone.
+
+`Walk` is where they meet: it takes an indexable value apart into *locals* —
+data pointer and length — and everything downstream indexes off the snapshot.
+That is not an optimization. The LLVM backend gets the same snapshot for free by
+holding an SSA aggregate, and it is why a `for` whose body grows the array it is
+walking keeps walking the buffer it started on rather than following the
+reallocation to a new one. All three engines agree, because the interpreter
+iterates a copy. Checked directly rather than reasoned about: a loop that pushes
+on every turn sums the two elements it started with and finishes at length four,
+identically under both.
+
+Aliasing came out where M2b left it. Indexing an `Array<Record>` yields the
+*interior address*, exactly as a record field access does, and every place that
+stores — a `let`, an argument, a `return`, a `match` arm — was already copying.
+So `pts[i].field = v`, which the parser desugars into a three-statement
+copy-modify-store, is sound without the backend knowing the desugar exists.
+
+### `continue` is the one place structured control flow cost something
+
+A `while` re-tests its condition, so `continue` can branch to the `loop` itself.
+A `for` does not: it steps its index in a latch, and branching to the loop would
+re-enter the body on the same element forever.
+
+So the body goes inside an **inner `block`**, and `continue` leaves that —
+landing on the increment, which is what falling off the end does too. `break` is
+still the outer block. One extra block, no relooper, and no phi anywhere: the
+pre-flight's claim survives its first real loop. A `return` out of a `for` nested
+inside a `while` still reaches the epilogue, which is the M1 rule being exercised
+by the construct most likely to break it.
+
+### One conversion, not one per literal position
+
+An array literal is always the fixed `[N x T]` shape — the same thing the LLVM
+backend builds — and reaches the heap through a single `ArrayN → Array`
+conversion in `expr_as`. So a literal in a `let`, an argument, a `return`, a
+record field, an enum payload or a `match` arm all heapify by the same code.
+
+Copying there is what makes it sound rather than merely convenient: the triple
+outlives the frame slot the literal was built in, and `push` will reallocate the
+buffer it is handed. The empty `[]` is the one exception, because it has no
+element to be typed by — it can only be the empty triple its expected type
+names, which is a gap when nothing expects one.
+
+### Refused, for the usual reason
+
+- A **`SmallArray<T, N>`** (RFC-0056) is a four-field header with an inline
+  buffer and two live states. Its first field is a length where a triple's is a
+  pointer, so reading one as a triple compiles cleanly and indexes garbage. 1
+  example, and it now says so.
+- A **`Map` index**, for the same shape of reason.
+- An **`Option` of a two-word payload** out of `pop`: `build_sum2` copies those
+  16 bytes whole rather than encoding one word, and the encode path has no
+  second word to write.
+
+### The corner that is the allocator's, not the array's
+
+`push` grows by allocating and copying rather than `realloc`ing, because this
+backend's allocator is still M2b's bump pointer that never frees. The abandoned
+buffer is that decision's cost, not a new one, and M4 is where the shim's real
+allocator arrives and this line deletes itself.
+
+### The one message with a number in it
+
+`error: array index 7 out of bounds` has the index in the *middle*, so it cannot
+be one interned string: it is `trap_idx(prefix, i, suffix)`, three writes and the
+existing `int_str`. That is also the one runtime message no example reaches — a
+bounds check that never fires reads exactly like one that fires with the wrong
+wording — so it has its own test, both spellings, compared against the
+interpreter's stdout, stderr and exit code.
+
+### Nothing contradicted M0, M1, M2a or M2b
+
+Every offset is still `layout::of_ll ∘ llt`, including the element stride, which
+is a size: `of_ll` rounds a shape up to its own alignment, so a size IS a stride
+and nothing had to compute one. Destination-first, no-`return`-in-a-body, the
+widening rule and the memory map all went in as written.
+
+### 14 of 80, regrouped
+
+| blocked on | n |
+|---|---|
+| a `where` refinement | 14 |
+| generics — monomorphization runs inside `Gen`, not before it | 10 |
+| builtins with no lowering (`toJson` 4, `args`, `cell`/`set`/`get` 4, `logger`, `readFile`, `readLine`, `jsonSchema`, `schemaOf`, `chars`, `stringFromBytes` 2, `parse`, `@charCount`, a map literal) | 19 |
+| a `modify` parameter | 4 |
+| module state (RFC-0013 top-level `let`) | 5 |
+| `spawn` 2, `region` 1, `if let` 1 | 4 |
+| floats, sized-int arithmetic and conversion, bitwise | 4 |
+| a `Map` or `SmallArray` index — refused above | 2 |
+| a `T` conversion inside a generic payload | 1 |
+
+The two rows worth 24 are both single features, and neither is control flow.
+A `where` refinement is a check to emit at a coercion — the one thing M2b
+refused precisely because it would otherwise be silent — and generics are a
+monomorphization pass that already exists in the LLVM emitter and runs on the
+wrong side of the boundary. Builtins are 19 but they are 14 different things,
+which is the row that does not compress.

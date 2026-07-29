@@ -1380,7 +1380,7 @@ impl Fn_<'_> {
     ///
     /// Fresh locals rather than scratch: a [`Walk`] outlives the expression that
     /// produced it — a `for` holds one across its whole body — so sharing would
-    /// be a miscompile the moment two nested.
+    /// be a miscompile the moment two of them nested.
     fn walk(&mut self, b: &mut Frame, ty: &Type, line: usize) -> Result<Walk, String> {
         let addr = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(addr));

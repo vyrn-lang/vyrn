@@ -170,6 +170,56 @@ fn examples_through_the_direct_wasm_backend() {
     );
 }
 
+/// The one message this backend assembles at runtime rather than interning
+/// whole, and the one no example reaches.
+///
+/// `error: array index 7 out of bounds` has the offending index in the MIDDLE,
+/// so it is three writes and an `int_str` rather than a string constant — and a
+/// bounds check that never fires reads exactly like one that fires with the
+/// wrong wording. Both spellings, because the array and the string paths pick
+/// different prefixes.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn the_bounds_trap_says_what_the_interpreter_says() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-oob");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (what, src) in [
+        ("array", "fn main() -> Int64 {\n let xs: Array<Int64> = [1, 2, 3]\n print(xs[7])\n return 0\n}\n"),
+        ("string", "fn main() -> Int64 {\n let s = \"hi\"\n let b = s[9]\n return 0\n}\n"),
+    ] {
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src).unwrap();
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .env("VYRN_WASM_BACKEND", "direct")
+            .output()
+            .expect("build wasm");
+        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg(&module);
+        let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+        assert!(runtime_err(&w.stderr).contains(&format!("{what} index")), "{what}: wrong wording");
+    }
+}
+
 /// The construct a build failed on, with the source line dropped so the same gap
 /// at fifty sites is one entry. Anything that is not a lowering gap is reported
 /// whole — an ICE or a load error is not a burndown item.
