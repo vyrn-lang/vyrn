@@ -45,9 +45,12 @@ const PASSING: &[&str] = &[
     "externdemo2.vyrn",
     "fib.vyrn",
     "foreach.vyrn",
+    "gendemo.vyrn",
+    "generics.vyrn",
     "ifexpr.vyrn",
     "map.vyrn",
     "ownership.vyrn",
+    "protocol.vyrn",
     "record.vyrn",
     "testing.vyrn",
     "utility.vyrn",
@@ -225,6 +228,84 @@ fn the_bounds_trap_says_what_the_interpreter_says() {
         assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
         assert!(runtime_err(&w.stderr).contains(&format!("{what} index")), "{what}: wrong wording");
     }
+}
+
+/// Monomorphization discovering itself, which `generics.vyrn` does not do.
+///
+/// A wasm call names a function INDEX, so a specialization's index is handed out
+/// where it is *discovered* and its body added later — which only works if the
+/// two orders are the same. `twice` calls `wrap`, so `wrap<Int64>` is discovered
+/// while three other specializations are still queued: a driver that drained its
+/// worklist as a stack, or that appended out of turn, would renumber every call
+/// after that point. The textual backend cannot notice — it emits symbols.
+///
+/// Also here because they are the shapes generics reach through: an aggregate
+/// returned from a generic (the hidden leading destination, allocated before the
+/// substitution is even solved), and a further generic solved from a generic
+/// call's RESULT type — `firstOf(twice(41))` can only fix `A` if the call
+/// reports `Pair<Int64, Int64>` rather than its record shape.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_specialization_discovered_from_another_gets_the_index_its_callers_named() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-mono");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+type Pair<A, B> = { first: A, second: B }
+
+fn wrap<T>(x: T) -> Pair<T, T> {
+    return Pair { first: x, second: x }
+}
+
+fn twice<T>(x: T) -> Pair<T, T> {
+    return wrap(x)
+}
+
+fn firstOf<A, B>(p: Pair<A, B>) -> A {
+    return p.first
+}
+
+fn main() -> Int64 {
+    let a = twice(41)
+    let b = twice(\"hi\")
+    print(firstOf(a) + 1)
+    print(firstOf(b))
+    print(wrap(true).second)
+    return firstOf(a) - 41
+}
+";
+    let path = dir.join("mono.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("mono.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .env("VYRN_WASM_BACKEND", "direct")
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // A merged specialization is the failure this is really about: `twice<Int64>`
+    // and `twice<String>` are the same source and different code, and merging
+    // them prints a plausible number where a string belongs.
+    assert_eq!(norm(&interp.stdout), "42\nhi\ntrue\n", "the interpreter moved");
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
 /// The construct a build failed on, with the source line dropped so the same gap

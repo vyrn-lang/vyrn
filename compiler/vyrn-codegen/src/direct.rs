@@ -34,6 +34,7 @@
 //! rule, and it is indifferent to how many arms there are — which is what M2a's
 //! pre-flight said mattered, 46 of the 149 joins having four to seven edges.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use vyrn_frontend::ast::*;
@@ -85,20 +86,82 @@ pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
             }
         }
     }
-    let mut cx = Cx { types, sigs: HashMap::new(), rt, variants };
+    // Three kinds of function define nothing, and are skipped exactly as the
+    // textual driver skips them (`lib.rs`, step 1). Lowering an unspecializable
+    // shell would fail the whole build over a function nothing calls.
+    let mut generics: HashMap<String, Function> = HashMap::new();
+    let mut higher_order: HashMap<String, usize> = HashMap::new();
+    let mut user: Vec<&Function> = Vec::new();
+    for f in &program.functions {
+        // An `extern` is an import; a `gen fn` (RFC-0021) runs only in the
+        // compiler's own interpreter and may use builtins with no lowering at all.
+        if f.is_extern || f.is_gen {
+            continue;
+        }
+        // RFC-0023: a function taking a `fn`-typed parameter exists only as
+        // higher-order specializations — a SECOND worklist, which this milestone
+        // does not build. Recorded by name so the ladder can say RFC-0023 rather
+        // than reporting the call as an unknown one.
+        if f.params.iter().any(|p| matches!(p.ty, Type::Fn(..))) {
+            higher_order.insert(f.name.clone(), f.line);
+            continue;
+        }
+        if !f.type_params.is_empty() {
+            generics.insert(f.name.clone(), f.clone());
+            continue;
+        }
+        user.push(f);
+    }
+    let protocol_methods: HashMap<String, String> = program
+        .protocols
+        .iter()
+        .flat_map(|p| p.methods.iter().map(|m| (m.name.clone(), p.name.clone())))
+        .collect();
+
+    let mut cx = Cx {
+        types,
+        sigs: HashMap::new(),
+        rt,
+        variants,
+        generics,
+        higher_order,
+        protocol_methods,
+        subst: HashMap::new(),
+        mono: RefCell::new(Mono::default()),
+    };
 
     // Every function the module will define, in the order they are defined, so a
     // call can name an index before the callee's body exists. Recursion and
     // forward references both need this; there is no fixup pass.
-    let user: Vec<&Function> = program.functions.iter().filter(|f| !f.is_extern).collect();
     let first = m.n_imports() + rt.count;
     for (i, f) in user.iter().enumerate() {
         let s = cx.signature(f)?;
         cx.sigs.insert(f.name.clone(), Sig { index: first + i as u32, ..s });
     }
+    // Specializations are indexed after every ordinary definition, because all of
+    // those are indexed before any body is walked and none can therefore be
+    // discovered late.
+    cx.mono.borrow_mut().base = first + user.len() as u32;
 
     for f in &user {
-        lower_fn(&mut m, f, &cx)?;
+        let sig = cx.sigs[&f.name].clone();
+        lower_fn(&mut m, f, &sig, &cx)?;
+    }
+
+    // Drain the specializations the bodies discovered. A specialization's body
+    // may discover more — including of a generic it is itself an instance of —
+    // so this reads `insts` afresh every turn rather than iterating a snapshot.
+    loop {
+        let inst = {
+            let mono = cx.mono.borrow();
+            mono.insts.get(mono.done).cloned()
+        };
+        let Some(inst) = inst else { break };
+        let f = cx.generics[&inst.name].clone();
+        cx.subst = inst.subst;
+        lower_fn(&mut m, &f, &inst.sig, &cx)?;
+        cx.subst = HashMap::new();
+        cx.mono.borrow_mut().done += 1;
     }
 
     // `_start`: WASI's entry point. The exit code is `main & 255`, the same
@@ -164,6 +227,42 @@ struct Sig {
     ret_ty: Type,
 }
 
+/// One specialization of a generic function.
+///
+/// The signature's parameter and return types are **already substituted**: a
+/// caller has its own `subst` and must not apply it to a callee's concrete types.
+#[derive(Clone)]
+struct Inst {
+    name: String,
+    type_args: Vec<Type>,
+    subst: HashMap<String, Type>,
+    sig: Sig,
+}
+
+/// The monomorphization worklist (RFC-0077 M2e).
+///
+/// This RFC said "monomorphization runs before any instruction is emitted". It
+/// does not, in either backend: a specialization is *discovered* at a call site,
+/// so the only thing that can feed a worklist is a body being lowered. There is
+/// no pre-pass to consume, and writing one would be a second traversal that has
+/// to agree with lowering about what gets instantiated — a new source of truth,
+/// free to drift, which is the failure mode `llt_of` and `predicate_binds` exist
+/// to prevent.
+///
+/// So this is fed from inside [`Fn_`] and drained by [`compile`], exactly as
+/// `Gen::instantiations` is by the textual driver. One thing is stricter here: a
+/// wasm call names a function INDEX, not a symbol, so an index is handed out at
+/// discovery and the bodies must be added in that same order. `insts` is
+/// append-only and `done` only moves forward — FIFO by construction, because a
+/// queue that could reorder would silently renumber every call in the module.
+#[derive(Default)]
+struct Mono {
+    /// Where the first specialization's function index lands.
+    base: u32,
+    insts: Vec<Inst>,
+    done: usize,
+}
+
 struct Cx {
     types: HashMap<String, TypeDecl>,
     sigs: HashMap<String, Sig>,
@@ -172,17 +271,92 @@ struct Cx {
     /// payload types. A name may belong to two enums, which is why the
     /// expectation decides and an ambiguous one is a gap rather than a guess.
     variants: HashMap<String, Vec<(String, u64, Vec<Type>)>>,
+    /// Generic functions by name. They have no index and no body of their own —
+    /// only specializations do — so a call to one is a discovery.
+    generics: HashMap<String, Function>,
+    /// Functions with a `fn`-typed parameter (RFC-0023), and where each is
+    /// declared. Refused by name rather than by symptom.
+    higher_order: HashMap<String, usize>,
+    /// Protocol method name → its protocol (RFC-0002 §5). A bounded generic is
+    /// what protocols are for, so `x.show()` inside one has to resolve.
+    protocol_methods: HashMap<String, String>,
+    /// The monomorphization whose body is being lowered; empty for an ordinary
+    /// function.
+    subst: HashMap<String, Type>,
+    mono: RefCell<Mono>,
 }
 
 impl Cx {
+    /// Substitute the monomorphization this lowering is inside.
+    ///
+    /// The chokepoint, and the point of having one: [`Cx::resolve`], [`Cx::ll`],
+    /// [`Cx::fields`] and [`Cx::ty_gap`] all go through it, so a `Type::Param`
+    /// cannot reach `llt_of` — where it lowers to `void`, which is not an error
+    /// but a smaller function — by any route that asks this `Cx` about a type.
+    /// That is what makes M0's `Type::Param` arm and `ty_gap`'s refusal
+    /// unreachable rather than merely unhit.
+    ///
+    /// Note this substitutes into the type EXPRESSION, before any `App` is
+    /// expanded: `Box<T>` and `fn f<T>` may both spell their parameter `T`, and
+    /// `resolve` builds the declaration's own substitution from the `App`'s
+    /// arguments afterwards. So the two `T`s cannot be confused.
+    fn sub(&self, ty: &Type) -> Type {
+        if self.subst.is_empty() {
+            ty.clone()
+        } else {
+            ftypes::substitute(ty, &self.subst)
+        }
+    }
+
     /// The LLVM shape of `ty` — `Gen`'s own answer, so layout and lowering
     /// cannot drift apart (RFC-0077 M0's whole argument for parsing the string).
     fn ll(&self, ty: &Type) -> String {
-        llt_of(ty, &self.types)
+        llt_of(&self.sub(ty), &self.types)
     }
 
     fn resolve(&self, ty: &Type) -> Type {
-        ftypes::resolve(ty, &self.types)
+        ftypes::resolve(&self.sub(ty), &self.types)
+    }
+
+    /// The signature of `f` specialized at `type_args`, discovering it — and
+    /// handing out its function index — if this is the first site to ask.
+    fn instantiate(
+        &self,
+        f: &Function,
+        type_args: Vec<Type>,
+        subst: HashMap<String, Type>,
+    ) -> Result<Sig, String> {
+        // Keyed on the type arguments themselves rather than on a mangled name.
+        // `mangle_name` is the textual backend's SYMBOL, and it is not injective
+        // (every record mangles as `Rec`); a wasm function has no symbol at all,
+        // so there is nothing to gain by narrowing the key to a string that two
+        // distinct specializations could share.
+        if let Some(i) =
+            self.mono.borrow().insts.iter().find(|i| i.name == f.name && i.type_args == type_args)
+        {
+            return Ok(i.sig.clone());
+        }
+        // The signature is built under the SPECIALIZATION's substitution, not
+        // whatever the discovering body happens to be inside. `signature` then
+        // does the rest — the `modify` refusal, a representation per parameter —
+        // so an instance and an ordinary function are checked by one function.
+        let mut sf = f.clone();
+        sf.type_params.clear();
+        for p in &mut sf.params {
+            p.ty = ftypes::substitute(&p.ty, &subst);
+        }
+        sf.ret = ftypes::substitute(&f.ret, &subst);
+        let s = self.signature(&sf)?;
+
+        let mut mono = self.mono.borrow_mut();
+        let sig = Sig { index: mono.base + mono.insts.len() as u32, ..s };
+        mono.insts.push(Inst {
+            name: f.name.clone(),
+            type_args,
+            subst,
+            sig: sig.clone(),
+        });
+        Ok(sig)
     }
 
     fn repr(&self, ty: &Type, line: usize) -> Result<Repr, String> {
@@ -221,8 +395,14 @@ impl Cx {
         if depth > 6 {
             return None;
         }
+        let ty = &self.sub(ty);
         match ty {
-            Type::Param(p) => return Some(format!("the generic parameter `{p}`")),
+            // Unreachable for a well-typed program since M2e: every type this
+            // `Cx` is asked about goes through [`Cx::sub`] first, so a surviving
+            // parameter means the instantiation that should have fixed it did
+            // not. Kept as a refusal rather than trusted, because `llt_of` prints
+            // `void` for a parameter and a `void` is not a diagnostic.
+            Type::Param(p) => return Some(format!("the unsolved type parameter `{p}`")),
             Type::Named(n) | Type::App(n, _) => match self.types.get(n) {
                 Some(_) => {}
                 // `Code` and `Token` are builtins `resolve` knows without a decl.
@@ -244,7 +424,7 @@ impl Cx {
     }
 
     fn fields(&self, ty: &Type) -> Option<Vec<Field>> {
-        ftypes::record_fields(ty, &self.types)
+        ftypes::record_fields(&self.sub(ty), &self.types)
     }
 
     /// The signature a call site sees. `index` is filled in by the caller, which
@@ -337,8 +517,11 @@ struct Fn_<'a> {
     expect: Vec<Type>,
 }
 
-fn lower_fn(m: &mut Module, f: &Function, cx: &Cx) -> Result<(), String> {
-    let sig = cx.sigs[&f.name].clone();
+/// Lower one body. `sig` is passed rather than looked up because a generic
+/// specialization has no entry in `Cx::sigs` — it is keyed on its type arguments,
+/// not on its name, and several instances share one `Function`.
+fn lower_fn(m: &mut Module, f: &Function, sig: &Sig, cx: &Cx) -> Result<(), String> {
+    let sig = sig.clone();
     let (params, results) = cx.wasm_sig(&sig, f.line)?;
     let dest = sig.ret.agg().map(|_| 0u32);
     let shift = dest.map_or(0, |_| 1);
@@ -801,6 +984,13 @@ impl Fn_<'_> {
         to: &Type,
         line: usize,
     ) -> Result<(), String> {
+        // Substituted, not resolved. M2d's rule is that a declared spelling must
+        // survive to here or the boundary is not a boundary — but a `Param` is a
+        // spelling that says nothing until the monomorphization fills it in, so
+        // it is the one thing that MUST be reduced before `validation_required`
+        // looks at it: a `T` where `T = Age` is an `Age` flow, and a `Param`
+        // would silently be neither `Named` nor a boundary.
+        let (from, to) = (&self.cx.sub(from), &self.cx.sub(to));
         if let Some(decl) = crate::validation_required(from, to, &self.cx.types).cloned() {
             // The value has to be in the base's representation before the
             // predicate reads it. The recursion terminates because a base is one
@@ -1042,7 +1232,7 @@ impl Fn_<'_> {
                 fty
             }
             Expr::StructLit { name, fields, line } => {
-                let ty = Type::Named(name.clone());
+                let ty = self.applied_record(name, fields, *line)?;
                 let decl = self
                     .cx
                     .fields(&ty)
@@ -1121,6 +1311,49 @@ impl Fn_<'_> {
         })
     }
 
+    /// The concrete type a record literal produces.
+    ///
+    /// For a generic record the type arguments come from the FIELD values, by the
+    /// same shared rule a call site uses — and they have to be solved before the
+    /// literal's slot is allocated, because `Box<Int64>` and `Box<Bool>` are not
+    /// the same size. Non-generic is the overwhelming majority and costs nothing:
+    /// the name IS the type.
+    fn applied_record(
+        &mut self,
+        name: &str,
+        fields: &[(String, Expr)],
+        line: usize,
+    ) -> Result<Type, String> {
+        let named = Type::Named(name.to_string());
+        let Some(decl) = self.cx.types.get(name).filter(|d| !d.type_params.is_empty()).cloned()
+        else {
+            return Ok(named);
+        };
+        // The declared field types carry the DECLARATION's parameters, not this
+        // body's — `Cx::fields` substitutes into its argument, and `Named("Box")`
+        // has nothing to substitute.
+        let declared = self
+            .cx
+            .fields(&named)
+            .ok_or_else(|| gap(&format!("the record literal `{name}`"), line))?;
+        let mut actual = Vec::new();
+        for f in &declared {
+            let e = fields
+                .iter()
+                .find(|(n, _)| *n == f.name)
+                .map(|(_, e)| e)
+                .ok_or_else(|| gap(&format!("the missing field `{}`", f.name), line))?;
+            let t = self.peek(e, line)?;
+            actual.push(self.cx.sub(&t));
+        }
+        Ok(crate::applied_type(
+            Some(&decl),
+            name,
+            &declared.iter().map(|f| f.ty.clone()).collect::<Vec<_>>(),
+            &actual,
+        ))
+    }
+
     /// Two arms meeting at one value — M0's destination-first rule.
     ///
     /// A scalar join is a `block (result T)` and needs nothing special. An
@@ -1193,7 +1426,7 @@ impl Fn_<'_> {
                     _ => self.field_of(&base, field, line)?.1,
                 }
             }
-            Expr::StructLit { name, .. } => Type::Named(name.clone()),
+            Expr::StructLit { name, fields, .. } => self.applied_record(name, fields, line)?,
             Expr::IfExpr { then_branch, .. } => self.peek(then_branch, line)?,
             // A `match` is typed by its first arm, like an `if` expression —
             // and like one, every other arm is checked against that.
@@ -1259,6 +1492,16 @@ impl Fn_<'_> {
                 }
                 _ if self.cx.types.get(name).is_some_and(|d| d.predicate.is_some()) => {
                     Type::Named(name.clone())
+                }
+                // A generic call in a branch: the same solve the emitting path
+                // does, so the join's destination is sized for the type the arm
+                // will actually produce.
+                _ if self.cx.generics.contains_key(name) => {
+                    let f = self.cx.generics[name].clone();
+                    let declared: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
+                    let actual = self.arg_types(&declared, args, line)?;
+                    let (subst, _) = crate::solve_type_args(&f.type_params, &declared, &actual);
+                    ftypes::substitute(&f.ret, &subst)
                 }
                 _ => match self.cx.sigs.get(name) {
                     Some(s) => s.ret_ty.clone(),
@@ -1480,12 +1723,108 @@ impl Fn_<'_> {
             }
             return Ok(Type::Named(name.to_string()));
         }
+        // A protocol method (RFC-0002 §5): `x.show()` parses as `show(x)` and
+        // dispatches statically on the receiver's concrete type — which inside a
+        // bounded generic is concrete only because `subst` says so. The same
+        // mangled impl the textual emitter calls, so there is one naming scheme.
+        if let Some(proto) = self.cx.protocol_methods.get(name).cloned() {
+            let recv = args
+                .first()
+                .ok_or_else(|| gap(&format!("the protocol method `{name}` with no receiver"), line))?;
+            let rty = self.peek(recv, line)?;
+            let rty = self.cx.sub(&rty);
+            let key = ftypes::type_key(&rty)
+                .ok_or_else(|| gap(&format!("`{name}` dispatched on `{rty}`"), line))?;
+            let mangled = ftypes::impl_method_name(&proto, &key, name);
+            return self.call(m, b, &mangled, args, line);
+        }
+        // RFC-0023's higher-order specialization is a second worklist, and this
+        // milestone builds only the generic one. Refused by name so the ladder
+        // groups these as one feature rather than as N unknown calls.
+        if self.cx.higher_order.contains_key(name) {
+            return unsupported("a `fn`-typed parameter (RFC-0023 specialization)", line);
+        }
+        // A generic callee: solve its type arguments, discover the specialization
+        // (which is what hands out its function index), then call it like any
+        // other function.
+        if let Some(f) = self.cx.generics.get(name).cloned() {
+            if f.params.len() != args.len() {
+                return unsupported(&format!("the call `{name}` at this arity"), line);
+            }
+            let arg_tys = self.arg_types(&f.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(), args, line)?;
+            let (subst, solved) = crate::solve_type_args(
+                &f.type_params,
+                &f.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
+                &arg_tys,
+            );
+            let mut type_args = Vec::new();
+            for (tp, got) in f.type_params.iter().zip(solved) {
+                match got {
+                    Some(t) => type_args.push(t),
+                    // The textual emitter substitutes `Unit` and lowers it to
+                    // `void`; in wasm that is a signature with one fewer
+                    // parameter, which is a different function rather than a
+                    // diagnostic.
+                    None => {
+                        return unsupported(
+                            &format!("a generic type parameter `{tp}` the call `{name}` does not fix"),
+                            line,
+                        )
+                    }
+                }
+            }
+            let sig = self.cx.instantiate(&f, type_args, subst)?;
+            return self.emit_call(m, b, &sig, args);
+        }
         let Some(sig) = self.cx.sigs.get(name).cloned() else {
             return unsupported(&format!("the call `{name}`"), line);
         };
         if sig.params.len() != args.len() {
             return unsupported(&format!("the call `{name}` at this arity"), line);
         }
+        self.emit_call(m, b, &sig, args)
+    }
+
+    /// The concrete type of each argument, WITHOUT emitting it.
+    ///
+    /// A generic call needs these before the first argument is lowered: the
+    /// specialization's parameter types are what the arguments get coerced to,
+    /// and an aggregate return's destination is a hidden LEADING argument, so
+    /// nothing can go on the stack until the substitution is solved. Same bind a
+    /// join is in, and the same answer — [`Fn_::peek`] predicts and `expr_as`
+    /// re-checks, so a wrong prediction is a compile error rather than a wrong
+    /// specialization.
+    ///
+    /// `declared` is only consulted where `peek` needs a position to type an
+    /// argument that has none of its own (an empty array literal, a bare `None`).
+    fn arg_types(
+        &mut self,
+        declared: &[Type],
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Vec<Type>, String> {
+        let mut out = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            if let Some(d) = declared.get(i) {
+                self.expect.push(d.clone());
+            }
+            let t = self.peek(a, line);
+            if declared.get(i).is_some() {
+                self.expect.pop();
+            }
+            out.push(self.cx.sub(&t?));
+        }
+        Ok(out)
+    }
+
+    /// The call itself, once the callee's signature is known.
+    fn emit_call(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        sig: &Sig,
+        args: &[Expr],
+    ) -> Result<Type, String> {
         // An aggregate result is written through a hidden leading pointer into a
         // slot of ours, so the destination goes on the stack before the
         // arguments and is pushed again afterwards as the value.
@@ -1504,7 +1843,12 @@ impl Fn_<'_> {
         if let Some(off) = dest {
             b.slot(off);
         }
-        Ok(self.cx.resolve(&sig.ret_ty))
+        // The DECLARED return type, not its structural form. Resolving here threw
+        // away exactly the information a caller needs to solve a further generic:
+        // a `Pair<Int64, Int64>` reduced to its record shape no longer matches
+        // `Pair<A, B>`, so `firstOf(twice(41))` could not fix `A`. The textual
+        // emitter returns the declared type for the same reason.
+        Ok(sig.ret_ty.clone())
     }
 
     /// `.length` / `.byteLength`, neither of which is a field: the receiver's
@@ -2295,24 +2639,39 @@ impl Fn_<'_> {
         }
         // Two enums may declare the same variant name; the expectation decides,
         // and an ambiguity with nothing to decide it is a gap, not a coin toss.
-        let pick = want
-            .as_ref()
-            .and_then(|t| match self.cx.resolve(t) {
-                Type::Enum(vs) => vs
-                    .iter()
-                    .position(|v| v.name == name)
-                    .map(|i| (t.clone(), i as u64, vs[i].payload.clone())),
-                _ => None,
-            })
-            .or_else(|| {
-                let cands = &self.cx.variants[name];
-                (cands.len() == 1).then(|| {
-                    let (e, tag, p) = &cands[0];
-                    (Type::Named(e.clone()), *tag, p.clone())
-                })
-            });
-        let Some((ty, tag, payload)) = pick else {
-            return unsupported(&format!("the ambiguous variant `{name}`"), line);
+        let pick = want.as_ref().and_then(|t| match self.cx.resolve(t) {
+            Type::Enum(vs) => vs
+                .iter()
+                .position(|v| v.name == name)
+                .map(|i| (t.clone(), i as u64, vs[i].payload.clone())),
+            _ => None,
+        });
+        let (ty, tag, payload) = match pick {
+            Some(p) => p,
+            None => {
+                let cands = self.cx.variants[name].clone();
+                if cands.len() != 1 {
+                    return unsupported(&format!("the ambiguous variant `{name}`"), line);
+                }
+                let (e, tag, declared) = cands.into_iter().next().unwrap();
+                // A generic enum has no type until a use site fixes it, and a
+                // bare constructor's use site is its PAYLOAD — the rule
+                // `Gen::applied_enum_type` gives the textual emitter, shared.
+                let actual = self.arg_types(&declared, args, line)?;
+                let decl = self.cx.types.get(&e).cloned();
+                let ty = crate::applied_type(decl.as_ref(), &e, &declared, &actual);
+                // The payloads the APPLIED type declares, which for a generic
+                // enum are the solved ones rather than its parameters.
+                let payload = match self.cx.resolve(&ty) {
+                    Type::Enum(vs) => vs
+                        .iter()
+                        .find(|v| v.name == name)
+                        .map(|v| v.payload.clone())
+                        .unwrap_or_default(),
+                    _ => return unsupported(&format!("the variant `{name}` of `{ty}`"), line),
+                };
+                (ty, tag, payload)
+            }
         };
         self.build_enum(m, b, &ty, tag, args, &payload, line).map(Some)
     }
@@ -3108,6 +3467,11 @@ mod tests {
             types: HashMap::new(),
             sigs: HashMap::new(),
             variants: HashMap::new(),
+            generics: HashMap::new(),
+            higher_order: HashMap::new(),
+            protocol_methods: HashMap::new(),
+            subst: HashMap::new(),
+            mono: RefCell::new(Mono::default()),
             rt: Rt {
                 write_all: 0,
                 malloc: 0,
@@ -3151,6 +3515,38 @@ mod tests {
         // this number is not a guess.
         assert_eq!(r.unwrap(), Repr::Agg(Layout { size: 16, align: 8, fields: vec![0, 8] }));
         assert_eq!(c.repr(&Type::Option(Box::new(Type::Int)), 0).unwrap().val(), Some(ValType::I32));
+    }
+
+    /// M0 left two ways for an escaped type parameter to be silent: `llt_of`
+    /// prints `void` for one, and `layout` gives `void` a size of zero. Between
+    /// them a parameter that survived monomorphization became a *smaller
+    /// function* rather than an error. `ty_gap`'s refusal stood in front of that,
+    /// but it was the ordinary case rather than the unreachable one.
+    ///
+    /// Since M2e every type this `Cx` is asked about goes through [`Cx::sub`]
+    /// first, so the refusal is what is left over when an instantiation failed to
+    /// fix something — asserted here from both sides, because "it never fires" is
+    /// not the same claim as "it cannot".
+    #[test]
+    fn a_type_parameter_is_substituted_before_it_can_reach_a_layout() {
+        let t = Type::Param("T".into());
+        let mut c = cx();
+        // Outside a monomorphization: refused, and `void` is what the refusal is
+        // standing in front of.
+        assert!(c.repr(&t, 0).is_err());
+        assert_eq!(c.ll(&t), "void");
+        // Inside one: the type the instantiation fixed, at every entry point —
+        // one `sub`, not one substitution per caller.
+        c.subst.insert("T".into(), Type::Int);
+        assert_eq!(c.repr(&t, 0).unwrap(), Repr::Scalar(ValType::I64));
+        assert_eq!(c.ll(&t), "i64");
+        assert_eq!(c.resolve(&t), Type::Int);
+        assert!(c.ty_gap(&t, 0).is_none());
+        // And through a constructor, because `Array<T>` is the same triple for
+        // every `T` but its element STRIDE is not: the substitution has to reach
+        // inside the shape, not just past the outermost one.
+        assert_eq!(c.ll(&Type::ArrayN(Box::new(t.clone()), 3)), "[3 x i64]");
+        assert_eq!(c.ll(&Type::Option(Box::new(t))), "{ i1, i64, i64 }");
     }
 
     /// A validated type has the SAME representation as its base, so a lowering
