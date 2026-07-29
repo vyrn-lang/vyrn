@@ -3234,8 +3234,20 @@ fn rewrite_stmt(s: &mut Stmt, map: &HashMap<String, String>, ns: &HashSet<String
             }
             rewrite_expr(value, map, ns);
         }
-        Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => rewrite_expr(value, map, ns),
-        Stmt::IndexSet { index, value, .. } => {
+        // The assignment TARGET is a reference too, not a declaration: module
+        // state (RFC-0029) is a top-level decl, so a rename must reach `g = v`
+        // exactly as it reaches the `g` reads (`Expr::Var` below). Missing these
+        // left the write side naming a decl that no longer exists ("assignment
+        // to unknown variable `filter`" once std/arrays' `filter` forced the
+        // name-privacy rename of a same-named global).
+        Stmt::Assign { name, value, .. } | Stmt::SetField { name, value, .. } => {
+            *name = ren(map, name);
+            rewrite_expr(value, map, ns);
+        }
+        Stmt::IndexSet {
+            name, index, value, ..
+        } => {
+            *name = ren(map, name);
             rewrite_expr(index, map, ns);
             rewrite_expr(value, map, ns);
         }
@@ -3273,7 +3285,9 @@ fn rewrite_stmt(s: &mut Stmt, map: &HashMap<String, String>, ns: &HashSet<String
             rewrite_expr(iter, map, ns);
             rewrite_block(body, map, ns);
         }
-        Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        // `drop g` names a binding the same way — same rule as the target above.
+        Stmt::Drop { name, .. } => *name = ren(map, name),
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
         Stmt::Expr(e) => rewrite_expr(e, map, ns),
         Stmt::Region { body, .. } => rewrite_block(body, map, ns),
     }
@@ -3823,6 +3837,31 @@ mod tests {
                     fn pad2(n: Int64) -> Int64 { return n + 100 } \
                     fn main() -> Int64 { return tick() + pad2(0) }";
         assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 7 + 100);
+    }
+
+    #[test]
+    fn module_state_assignment_survives_a_never_imported_foreign_namesake() {
+        // The shelf `filter` bug: `arrays` exports `filter`, `ui` imports only
+        // `includes` from it, so `arrays::filter` is LINKED but never imported
+        // here — enough to force the name-privacy rename of this module's
+        // same-named state. The rename has to reach the assignment TARGETS, not
+        // just the reads, or the write side names a decl that no longer exists.
+        let arrays = "export fn filter() -> Int64 { return 99 } \
+                      export fn includes() -> Int64 { return 1 }";
+        let ui = "import { includes } from \"./arrays\" \
+                  export fn tag() -> Int64 { return includes() }";
+        let root = "import { tag } from \"./ui\" \
+                    let mut filter: Int64 = 0 \
+                    let mut includes: Array<Int64> = [0] \
+                    fn main() -> Int64 { \
+                        filter = 7 \
+                        includes[0] = 2 \
+                        return filter + includes[0] + tag() \
+                    }";
+        assert_eq!(
+            run_multi(root, &[("arrays.vyrn", arrays), ("ui.vyrn", ui)]).unwrap(),
+            7 + 2 + 1
+        );
     }
 
     #[test]
