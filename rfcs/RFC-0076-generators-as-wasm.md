@@ -391,8 +391,8 @@ crosses the boundary:
 
 ### Revised milestones
 
-- **M3a — `Code` as an opaque host handle.** Unblocks `std/tw` and `std/i18n`,
-  which already have their capabilities.
+- **M3a — `Code` as an opaque host handle.** DONE, and it did unblock `std/tw`
+  and `std/i18n` — see below.
 - **M3b — `lex` as a host import** with a codegen-emitted decoder for the fixed
   token record.
 - **M3c — reflection.** `moduleInterface` / `contractOf` as JSON plus a decoder
@@ -402,6 +402,63 @@ crosses the boundary:
   long-lived process, so this is where the 243 ms is finally measured.
 - **M5 — fuel, traps, and the on-disk artifact cache**, so a cold editor session
   does not pay clang on its first keystroke.
+
+## M3a shipped: `Code` as a handle, and the rules stayed put
+
+`Type::Named("Code")` lowers to `i64` on the generator-host path — an index into
+a per-run arena of `Vec<CodePiece>` living in the wasm store — and every
+operation on it is an import in the `vyrn_gen` module: `text`, `splice`, `rawAt`,
+`concat`, `render`. Nothing guest-side knows what a piece is. `render_code` and
+the splice table run in the host, which is the interpreter's own code, so the
+escaping, the identifier validation and the shortest-roundtrip float formatting
+are byte-identical by construction rather than by testing. The one new frontend
+API is `interp::gen_code_splice`, which is `code_splice` with a `String` error
+instead of a `Ctrl` — the `gen_scoped_path` precedent, for the same reason.
+
+`@codeSplice`'s value crosses as a **tag plus one 64-bit word** (plus a pointer
+when it is a String), because the host needs the value and cannot chase a guest
+pointer to anything else: `(i32 tag, i64 bits, ptr, i64 ctx) -> i64`. The tag
+names the interpreter `Val` the host rebuilds and is a COMPILE-TIME constant —
+codegen knows the static type at every call site — so there is no runtime
+dispatch. It covers exactly what the splice rule accepts: String, `Code` (as its
+handle), Bool, signed and unsigned integers (`sext`/`zext` to agree with the
+tag), `Float64` and `Float32` as bit patterns, which is lossless and leaves the
+formatting where it belongs. Equality on `Code` needed no import: the checker
+permits only `+` on it.
+
+The imports are declared in the emitted IR with the same `wasm-import-module`
+attribute groups an RFC-0012 `extern` uses, so the C shim gained nothing. It
+could not have, cheaply: an unused `extern` in C emits nothing, so a shim
+declaration would have needed a pass-through call per import just to keep its
+attributes alive.
+
+Blast radius on the emitter: one `llt` arm, one `gen_binary` branch, one dispatch
+in `gen_call`, and the declarations. An ordinary build still refuses a code quote
+with the RFC-0054 wording — "`render` is only available during generation" —
+which is now a test.
+
+Measured, cold, cache cleared, three runs, medians:
+
+| | interpreted | wasm | of which clang | cranelift | execution |
+|---|---|---|---|---|---|
+| `twdemo` | 113 ms | 352 ms | 250 ms | 61 ms | ~2 ms |
+| `i18ndemo` | 72 ms | 404 ms | 295 ms | 77 ms | ~2 ms |
+
+Against a 37 ms baseline for the same command with the on-disk generation cache
+warm (load, check and emit, no generation at all), interpreted generation is
+~76 ms for `twdemo` and ~35 ms for `i18ndemo`, against ~2 ms executed — 38x and
+18x. And the total is still worse, for the third milestone running, because one
+`emit-gen` process calls each generator exactly once and pays a whole clang for
+it. That is not a new finding, it is the same one M1 and M2 recorded, and M4 is
+the milestone that resolves it: in a long-lived process the compile is paid once
+and every keystroke after it costs the ~2 ms.
+
+`std/vyx` still declines on `lex` (M3b) and the reflection generators on
+`contractOf`/`moduleInterface` (M3c), as expected. All twelve generator-using
+examples emit byte-identical sources under both engines; `examples/bin/server`,
+`examples/shelf/server` and `examples/shelf/client` now serve two generators each
+while declining the rest, which is the fallback working per call rather than per
+module.
 
 ## Risks, honestly
 

@@ -221,6 +221,21 @@ pub fn render_code(pieces: &[CodePiece]) -> String {
     out
 }
 
+/// [`code_splice`] as a trap message rather than a `Ctrl`.
+///
+/// Public, and a free function, for the same reason [`gen_scoped_path`] is: the
+/// wasm generation engine (RFC-0076) lowers `Code` to a handle into a host-side
+/// arena and applies the splice rule host-side. It must be THIS rule — the
+/// escaping, the identifier validation and the shortest-roundtrip float
+/// formatting are not things a second implementation would reproduce, they are
+/// things it would eventually disagree with.
+pub fn gen_code_splice(val: &Val, ctx: i64) -> Result<Vec<CodePiece>, String> {
+    code_splice(val, ctx).map_err(|c| match c {
+        Ctrl::Err(m) => m,
+        Ctrl::Return(_) => "internal: `?` propagated out of a code splice".to_string(),
+    })
+}
+
 /// Apply the RFC-0054 splice rule for a value in a hole of grammatical context
 /// `ctx` (`0` expression, `1` identifier fragment, `2` standalone identifier /
 /// type), yielding the code pieces to splice. A `String` is DATA, never code:

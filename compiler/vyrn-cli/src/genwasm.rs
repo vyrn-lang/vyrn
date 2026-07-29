@@ -30,18 +30,17 @@ use std::sync::mpsc;
 
 use vyrn_frontend::ast::{Block, Expr, Function, Param, Program, Stmt, Type};
 use vyrn_frontend::consteval::ConstVal;
-use vyrn_frontend::interp::{GenInputs, GenOutput};
+use vyrn_frontend::interp::{CodePiece, GenInputs, GenOutput};
 
 /// What this path cannot serve yet. A generator reaching any of these is handed
 /// back to the interpreter — see [`engine`].
 ///
-/// `moduleInterface`/`contractOf` are M3: they return structured reflection, not
-/// bytes. The RFC-0054 code quotes are the surprise — `Code` is a comptime-only
-/// VALUE TYPE (a piece list, rendered with origin directives), so serving a
-/// generator that builds source with `vyrn"…"` needs that type lowered, not a
-/// capability. Both `std/tw` and `std/i18n` render code quotes, which is why M2
-/// alone does not make them servable; `examples/gendemo` is the generator M2 was
-/// actually about.
+/// `moduleInterface`/`contractOf` are M3c: they return structured reflection,
+/// not bytes. `lex` is M3b — it returns a whole token list, and the lexer must
+/// stay single-sourced in the host, so it needs a serialization and a decoder.
+/// The RFC-0054 code quotes left this list in M3a: `Code` is now an opaque
+/// handle into a host-side arena, which is what makes `std/tw` and `std/i18n`
+/// servable.
 ///
 /// The write capabilities are not a milestone at all: a `gen fn` may not call
 /// them (comptime purity forbids it), so their only effect here is to decline a
@@ -49,11 +48,6 @@ use vyrn_frontend::interp::{GenInputs, GenOutput};
 const UNSERVED: &[&str] = &[
     "moduleInterface",
     "contractOf",
-    "@codeText",
-    "@codeSplice",
-    "render",
-    "rawAt",
-    "raw",
     "lex",
     "writeFile",
     "writeAtomic",
@@ -245,6 +239,13 @@ fn wrapper_program(program: &Program, fn_name: &str, arity: usize) -> Option<Pro
         if target.params.iter().any(|par| par.ty != Type::Str) {
             return None;
         }
+        // A `gen fn` may return `Code` directly, which the interpreter renders
+        // for it (RFC-0054). Here that would print the handle, so decline —
+        // nothing in this repo does it, and a wrong answer is worse than a slow
+        // one.
+        if target.ret != Type::Str {
+            return None;
+        }
     }
     // Every `gen fn`, not just the target: a generator calls its helpers, and in
     // this repo those helpers are themselves `gen fn` (the convention that keeps
@@ -372,10 +373,33 @@ struct Streams {
     argv: Vec<Vec<u8>>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-    /// The bytes of the last served read, waiting for `fetch` to copy them into
-    /// guest memory. The host never allocates on the guest's side of the wall.
+    /// The bytes of the last served read or `render`, waiting for `fetch` to
+    /// copy them into guest memory. The host never allocates on the guest's side
+    /// of the wall.
     stash: Vec<u8>,
+    /// The code-quote arena (RFC-0076 M3a): a `Code` value is an index into
+    /// this. Per generation run and nowhere near the module cache — a handle
+    /// from one run must be meaningless in the next, and being an index into a
+    /// vector that no longer exists is the strongest form of that.
+    code: Vec<Vec<CodePiece>>,
     caps: Option<Caps>,
+}
+
+impl Streams {
+    /// The pieces a handle names, or the trap for a handle that names nothing.
+    /// Unreachable from compiled code — every handle this sees came out of one
+    /// of the imports below — but the arena is indexed by a guest-supplied
+    /// integer, and an index from the guest is checked.
+    fn pieces(&self, h: i64) -> wasmtime::Result<&Vec<CodePiece>> {
+        self.code
+            .get(h as usize)
+            .ok_or_else(|| wasmtime::Error::msg(format!("bad code handle {h}")))
+    }
+
+    fn intern(&mut self, pieces: Vec<CodePiece>) -> i64 {
+        self.code.push(pieces);
+        self.code.len() as i64 - 1
+    }
 }
 
 /// The guest's end of the capability channel.
@@ -403,9 +427,10 @@ impl std::fmt::Display for Exit {
 
 impl std::error::Error for Exit {}
 
-/// A read outside the generator's declared inputs, carried out of the guest as a
-/// trap. Mediation failure aborts generation under the interpreter too — it must
-/// never reach the generator as an error value it could swallow.
+/// A host-side refusal, carried out of the guest as a trap: a read outside the
+/// generator's declared inputs, or a value with no splice rule. Both abort
+/// generation under the interpreter too — neither may reach the generator as an
+/// error value it could swallow.
 #[derive(Debug)]
 struct Denied(String);
 
@@ -416,6 +441,58 @@ impl std::fmt::Display for Denied {
 }
 
 impl std::error::Error for Denied {}
+
+/// The guest's linear memory and its store data, together — every host import
+/// that touches a pointer needs both, and `data_and_store_mut` is the only way
+/// to hold them at once.
+fn guest_mem<'a>(
+    caller: &'a mut wasmtime::Caller<'_, Streams>,
+) -> wasmtime::Result<(&'a mut [u8], &'a mut Streams)> {
+    let Some(wasmtime::Extern::Memory(mem)) = caller.get_export("memory") else {
+        return Err(wasmtime::Error::msg("generator has no memory"));
+    };
+    Ok(mem.data_and_store_mut(caller))
+}
+
+/// A NUL-terminated guest string. Vyrn strings are validated UTF-8 with no
+/// interior NUL by construction, so this is a copy, not a parse.
+fn cstr(data: &[u8], at: i32) -> wasmtime::Result<String> {
+    let rest = data
+        .get(at as usize..)
+        .ok_or_else(|| wasmtime::Error::msg("bad string pointer"))?;
+    let n = rest.iter().position(|b| *b == 0).unwrap_or(rest.len());
+    Ok(String::from_utf8_lossy(&rest[..n]).into_owned())
+}
+
+/// Rebuild the interpreter value a `@codeSplice` call is splicing, from the tag
+/// codegen chose statically and the one word it sent (RFC-0076 M3a).
+///
+/// The point of the round trip is that the splice rule then runs on a `Val`,
+/// which is what the interpreter would have handed it — so there is one rule,
+/// not two that agree. Floats cross as bit patterns because the formatting
+/// (`{f:?}`, shortest-roundtrip) belongs on this side; a guest-side rendering
+/// would be a second float formatter.
+fn splice_value(
+    tag: i32,
+    bits: i64,
+    p: i32,
+    data: &[u8],
+    streams: &Streams,
+) -> wasmtime::Result<vyrn_frontend::interp::Val> {
+    use vyrn_frontend::interp::Val;
+    Ok(match tag {
+        vyrn_codegen::TAG_STR => Val::Str(std::rc::Rc::new(cstr(data, p)?)),
+        vyrn_codegen::TAG_CODE => Val::Code(streams.pieces(bits)?.clone()),
+        vyrn_codegen::TAG_BOOL => Val::Bool(bits != 0),
+        // `Val::Int` renders as the signed decimal, which is what a signed
+        // integer of any width becomes after codegen's `sext`.
+        vyrn_codegen::TAG_INT => Val::Int(bits),
+        vyrn_codegen::TAG_UINT => Val::IntN { v: bits, signed: false, bits: 64 },
+        vyrn_codegen::TAG_F64 => Val::Float(f64::from_bits(bits as u64)),
+        vyrn_codegen::TAG_F32 => Val::Float32(f32::from_bits(bits as u32)),
+        other => return Err(wasmtime::Error::msg(format!("bad splice tag {other}"))),
+    })
+}
 
 const ERRNO_SUCCESS: i32 = 0;
 const ERRNO_BADF: i32 = 8;
@@ -573,15 +650,8 @@ fn run_wasm(
             "vyrn_gen",
             "read",
             |mut caller: Caller<'_, Streams>, path: i32, mode: i32| -> Result<i64> {
-                let Some(Extern::Memory(mem)) = caller.get_export("memory") else {
-                    return Err(Error::msg("generator has no memory"));
-                };
-                let (data, streams) = mem.data_and_store_mut(&mut caller);
-                let at = path as usize;
-                let rest = data.get(at..).ok_or_else(|| Error::msg("bad path pointer"))?;
-                let n = rest.iter().position(|b| *b == 0).unwrap_or(rest.len());
-                // A Vyrn String is validated UTF-8 by construction.
-                let path = String::from_utf8_lossy(&rest[..n]).into_owned();
+                let (data, streams) = guest_mem(&mut caller)?;
+                let path = cstr(data, path)?;
                 let caps = streams.caps.as_ref().ok_or_else(|| Error::msg("no host"))?;
                 caps.req
                     .send((path, mode))
@@ -605,16 +675,81 @@ fn run_wasm(
             "vyrn_gen",
             "fetch",
             |mut caller: Caller<'_, Streams>, dest: i32| -> Result<()> {
-                let Some(Extern::Memory(mem)) = caller.get_export("memory") else {
-                    return Err(Error::msg("generator has no memory"));
-                };
-                let (data, streams) = mem.data_and_store_mut(&mut caller);
+                let (data, streams) = guest_mem(&mut caller)?;
                 let stash = std::mem::take(&mut streams.stash);
                 let slot = data
                     .get_mut(dest as usize..dest as usize + stash.len())
                     .ok_or_else(|| Error::msg("bad fetch destination"))?;
                 slot.copy_from_slice(&stash);
                 Ok(())
+            },
+        )
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
+
+    // The code-quote arena (RFC-0076 M3a). `Code` is an i64 handle and every
+    // operation on it happens here, so the splice rules, the string escaping and
+    // the float formatting are the interpreter's own — byte-identical by
+    // construction, not by testing.
+    linker
+        .func_wrap(
+            "vyrn_gen",
+            "text",
+            |mut caller: Caller<'_, Streams>, s: i32| -> Result<i64> {
+                let (data, streams) = guest_mem(&mut caller)?;
+                let text = cstr(data, s)?;
+                Ok(streams.intern(vec![CodePiece::Text(text)]))
+            },
+        )
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
+    linker
+        .func_wrap(
+            "vyrn_gen",
+            "rawAt",
+            |mut caller: Caller<'_, Streams>, s: i32, path: i32, line: i64, col: i64| -> Result<i64> {
+                let (data, streams) = guest_mem(&mut caller)?;
+                let text = cstr(data, s)?;
+                let path = cstr(data, path)?;
+                Ok(streams.intern(vec![CodePiece::Origin { path, line, col, text }]))
+            },
+        )
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
+    linker
+        .func_wrap(
+            "vyrn_gen",
+            "splice",
+            |mut caller: Caller<'_, Streams>, tag: i32, bits: i64, p: i32, ctx: i64| -> Result<i64> {
+                let (data, streams) = guest_mem(&mut caller)?;
+                let val = splice_value(tag, bits, p, data, streams)?;
+                // A splice violation — an identifier that is not one, a value of
+                // a type with no splice rule — is a trap under the interpreter,
+                // so it unwinds out of `_start` rather than becoming a value.
+                let pieces = vyrn_frontend::interp::gen_code_splice(&val, ctx)
+                    .map_err(|m| Error::new(Denied(m)))?;
+                Ok(caller.data_mut().intern(pieces))
+            },
+        )
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
+    linker
+        .func_wrap(
+            "vyrn_gen",
+            "concat",
+            |mut caller: Caller<'_, Streams>, a: i64, b: i64| -> Result<i64> {
+                let s = caller.data_mut();
+                let mut pieces = s.pieces(a)?.clone();
+                pieces.extend(s.pieces(b)?.iter().cloned());
+                Ok(s.intern(pieces))
+            },
+        )
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
+    linker
+        .func_wrap(
+            "vyrn_gen",
+            "render",
+            |mut caller: Caller<'_, Streams>, h: i64| -> Result<i64> {
+                let s = caller.data_mut();
+                let text = vyrn_frontend::interp::render_code(s.pieces(h)?);
+                s.stash = text.into_bytes();
+                Ok(s.stash.len() as i64)
             },
         )
         .map_err(|e| EngineError::Failed(e.to_string()))?;

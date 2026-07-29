@@ -1105,6 +1105,35 @@ thread_local! {
     static GEN_HOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// The `vyrn_gen` imports that make `Code` (RFC-0054) work as a handle: an IR
+/// declaration and the name it imports under (RFC-0076 M3a). Every one of them
+/// operates on the HOST's piece arena, which is what keeps the splice rules, the
+/// string escaping and the float formatting in a single implementation — the
+/// interpreter's — instead of a second one that agrees until it does not.
+const CODE_IMPORTS: &[(&str, &str)] = &[
+    ("i64 @__vyrn_code_text(ptr)", "text"),
+    ("i64 @__vyrn_code_splice(i32, i64, ptr, i64)", "splice"),
+    ("i64 @__vyrn_code_raw_at(ptr, ptr, i64, i64)", "rawAt"),
+    ("i64 @__vyrn_code_concat(i64, i64)", "concat"),
+    ("i64 @__vyrn_code_render(i64)", "render"),
+    // The M2 stash reader: `render` answers with a length and the guest
+    // allocates, because the host must not allocate inside guest memory.
+    ("void @__vyrn_gen_fetch(ptr)", "fetch"),
+];
+
+/// `@__vyrn_code_splice`'s value tags — which interpreter `Val` the host is to
+/// rebuild from the word it was handed. Exactly the set the splice rule accepts
+/// (`interp::gen_code_splice`), no more: the checker has already rejected
+/// anything else by the time codegen sees the call. `pub` so the host reads the
+/// same numbering it is emitted against, rather than a second copy of it.
+pub const TAG_STR: i32 = 0;
+pub const TAG_CODE: i32 = 1;
+pub const TAG_BOOL: i32 = 2;
+pub const TAG_INT: i32 = 3;
+pub const TAG_UINT: i32 = 4;
+pub const TAG_F64: i32 = 5;
+pub const TAG_F32: i32 = 6;
+
 /// Emit a complete LLVM IR module for `program`.
 pub fn emit(program: &Program) -> Result<String, String> {
     emit_with(program, false)
@@ -1181,9 +1210,25 @@ fn emit_with(program: &Program, gen_host: bool) -> Result<String, String> {
     out.push_str("declare ptr @__vyrn_read_line(ptr)\n");
     out.push_str("declare i32 @__vyrn_read_file(ptr, ptr, ptr)\n");
     out.push_str("declare i32 @__vyrn_read_file_bytes(ptr, ptr, ptr)\n");
+    let mut code_attr_groups = String::new();
     if gen_host {
         // RFC-0076 M2: only the generator-host shim defines this one.
         out.push_str("declare i32 @__vyrn_gen_list_dir(ptr, ptr, ptr)\n");
+        // RFC-0076 M3a: the code-quote arena lives in the host, so every
+        // operation on a `Code` handle is an import from `vyrn_gen`. Declared
+        // here with their wasm-import attributes, the way an RFC-0012 `extern`
+        // is, rather than through the C shim: an unused `extern` in C emits
+        // nothing, so the shim would need a pass-through call per import just to
+        // keep the attributes alive. `fetch` is the M2 stash reader, shared —
+        // `render` answers with a length and the guest allocates.
+        for (i, (decl, import)) in CODE_IMPORTS.iter().enumerate() {
+            let grp = 200 + i;
+            out.push_str(&format!("declare {decl} #{grp}\n"));
+            code_attr_groups.push_str(&format!(
+                "attributes #{grp} = {{ \"wasm-import-module\"=\"vyrn_gen\" \
+                 \"wasm-import-name\"=\"{import}\" }}\n"
+            ));
+        }
     }
     out.push_str("declare i32 @__vyrn_write_file(ptr, ptr)\n");
     // RFC-0044: atomic rename + fsync host primitives (implemented in the C shim
@@ -1962,6 +2007,10 @@ fn emit_with(program: &Program, gen_host: bool) -> Result<String, String> {
         out.push('\n');
         out.push_str(&extern_attr_groups);
     }
+    if !code_attr_groups.is_empty() {
+        out.push('\n');
+        out.push_str(&code_attr_groups);
+    }
 
     Ok(out)
 }
@@ -2316,6 +2365,12 @@ impl<'a> Gen<'a> {
                 let arity = vs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
                 enum_ll(arity)
             }
+            // RFC-0076 M3a: on the generator-host path `Code` (RFC-0054) is an
+            // opaque i64 HANDLE into the host's piece arena — the one `Named`
+            // that survives `resolve` undeclared. i64 is also what makes it
+            // travel for free: `box_payload` passes an i64 through, so a `Code`
+            // in an Option/Array needs no case of its own.
+            Type::Named(ref n) if n == "Code" && GEN_HOST.with(|g| g.get()) => "i64".into(),
             // Unreachable after `resolve` (Named/App/transformers/params reduced away).
             Type::Named(_) | Type::App(..) | Type::Omit(..) | Type::Pick(..) | Type::Merge(..)
             | Type::Partial(..) | Type::Param(_) => "void".into(),
@@ -4750,6 +4805,15 @@ impl<'a> Gen<'a> {
             return Ok((t, Type::Bool));
         }
 
+        // `Code + Code` concatenates fragments, origins carried (RFC-0054). Both
+        // sides are handles, so the concatenation happens in the host's arena
+        // (RFC-0076 M3a) and this is one import call.
+        if op == BinOp::Add && matches!(self.resolve(&lty), Type::Named(ref n) if n == "Code") {
+            let t = self.fresh_tmp();
+            self.emit(format!("{t} = call i64 @__vyrn_code_concat(i64 {l}, i64 {r})"));
+            return Ok((t, lty));
+        }
+
         // `a + b` on two Strings is concatenation (replacing `concat`): the same
         // heap allocation, region routing, and drop analysis.
         if op == BinOp::Add && self.resolve(&lty) == Type::Str {
@@ -5962,6 +6026,110 @@ impl<'a> Gen<'a> {
         self.subst.clone()
     }
 
+    /// Lower one code-quote operation (RFC-0054) to its `vyrn_gen` host import
+    /// (RFC-0076 M3a). A `Code` value is an i64 handle into the host's arena and
+    /// nothing here knows what a piece is — which is the point: `render_code`
+    /// and the splice table exist once, in the interpreter, and both engines run
+    /// that one copy.
+    fn gen_code_quote(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
+        let code = Type::Named("Code".to_string());
+        match name {
+            // `raw(s)` IS `@codeText(s)` in the interpreter — a single verbatim
+            // text piece, no origin — so it is the same import here.
+            "@codeText" | "raw" => {
+                let (s, _) = self.gen_expr(&args[0])?;
+                let t = self.fresh_tmp();
+                self.emit(format!("{t} = call i64 @__vyrn_code_text(ptr {s})"));
+                Ok((t, code))
+            }
+            "rawAt" => {
+                let (s, _) = self.gen_expr(&args[0])?;
+                let (p, _) = self.gen_expr(&args[1])?;
+                let (l, _) = self.gen_expr(&args[2])?;
+                let (c, _) = self.gen_expr(&args[3])?;
+                let t = self.fresh_tmp();
+                self.emit(format!(
+                    "{t} = call i64 @__vyrn_code_raw_at(ptr {s}, ptr {p}, i64 {l}, i64 {c})"
+                ));
+                Ok((t, code))
+            }
+            // `render(c)` — the host renders and stashes; the guest asks for the
+            // length, allocates, and fetches, exactly as the M2 read path does.
+            "render" => {
+                let (h, _) = self.gen_expr(&args[0])?;
+                let len = self.fresh_tmp();
+                let sz = self.fresh_tmp();
+                let buf = self.fresh_tmp();
+                let end = self.fresh_tmp();
+                self.emit(format!("{len} = call i64 @__vyrn_code_render(i64 {h})"));
+                self.emit(format!("{sz} = add i64 {len}, 1"));
+                self.emit(format!("{buf} = call ptr @__vyrn_malloc(i64 {sz})"));
+                self.emit(format!("call void @__vyrn_gen_fetch(ptr {buf})"));
+                self.emit(format!("{end} = getelementptr i8, ptr {buf}, i64 {len}"));
+                self.emit(format!("store i8 0, ptr {end}"));
+                Ok((buf, Type::Str))
+            }
+            // The spliced value crosses as a TAG plus one 64-bit word (plus a
+            // pointer for a String), because the host needs the value itself and
+            // cannot chase a guest pointer to anything else. The tag names the
+            // interpreter `Val` the host rebuilds, and it is a compile-time
+            // constant: codegen knows the static type at every call site, so
+            // there is no runtime dispatch and no way to disagree about it.
+            "@codeSplice" => {
+                let (v, vty) = self.gen_expr(&args[0])?;
+                let (ctx, _) = self.gen_expr(&args[1])?;
+                let null = "null".to_string();
+                let zero = "0".to_string();
+                let (tag, bits, ptr) = match self.resolve(&vty) {
+                    Type::Str => (TAG_STR, zero, v),
+                    Type::Named(ref n) if n == "Code" => (TAG_CODE, v, null),
+                    Type::Bool => (TAG_BOOL, self.widen(&v, "zext i1", "i64"), null),
+                    Type::Int => (TAG_INT, v, null),
+                    // A sized integer arrives at its own width; the host renders
+                    // it signed or unsigned, so the extension must agree with the
+                    // tag (`sext` for signed, `zext` for unsigned) — at 64 bits
+                    // it is already the word.
+                    Type::IntN { bits: w, signed } => {
+                        let tag = if signed { TAG_INT } else { TAG_UINT };
+                        if w == 64 {
+                            (tag, v, null)
+                        } else {
+                            let op = format!("{} i{w}", if signed { "sext" } else { "zext" });
+                            (tag, self.widen(&v, &op, "i64"), null)
+                        }
+                    }
+                    // Floats cross as their bit pattern, which is lossless — the
+                    // shortest-roundtrip formatting (`{f:?}`) happens host-side.
+                    Type::Float => (TAG_F64, self.widen(&v, "bitcast double", "i64"), null),
+                    Type::Float32 => {
+                        let w = self.widen(&v, "bitcast float", "i32");
+                        (TAG_F32, self.widen(&w, "zext i32", "i64"), null)
+                    }
+                    other => {
+                        return Err(format!(
+                            "cannot splice {other} into a code quote (expected String, number, \
+                             Bool, or Code)"
+                        ))
+                    }
+                };
+                let t = self.fresh_tmp();
+                self.emit(format!(
+                    "{t} = call i64 @__vyrn_code_splice(i32 {tag}, i64 {bits}, ptr {ptr}, \
+                     i64 {ctx})"
+                ));
+                Ok((t, code))
+            }
+            _ => unreachable!("not a code-quote builtin: {name}"),
+        }
+    }
+
+    /// `<op> <v> to <to>` — the one-line conversions the splice ABI needs.
+    fn widen(&mut self, v: &str, op: &str, to: &str) -> String {
+        let t = self.fresh_tmp();
+        self.emit(format!("{t} = {op} {v} to {to}"));
+        t
+    }
+
     fn gen_call(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
         // Calling a `fn`-typed parameter inside a specialized instance (RFC-0023):
         // a direct call to the monomorphized target with the captured values (this
@@ -6323,6 +6491,19 @@ impl<'a> Gen<'a> {
                 "{r} = call i64 @{helper}(ptr {dptr}, i64 {dlen}, i64 {ov})"
             ));
             return Ok((r, Type::Int));
+        }
+        // RFC-0054 code quotes as host handles (RFC-0076 M3a). `render`, `raw`
+        // and `rawAt` are common words and therefore SHADOWABLE — the checker's
+        // rule is that a user function of the same name wins (`examples/
+        // templates.vyrn` has one) — while the `@`-prefixed desugar names are
+        // unspellable and always ours. Off this path nothing changes: a code
+        // quote outside a generation context is still the checker's error.
+        if GEN_HOST.with(|g| g.get())
+            && (matches!(name, "@codeText" | "@codeSplice")
+                || (matches!(name, "render" | "raw" | "rawAt")
+                    && !self.funcs.contains_key(name)))
+        {
+            return self.gen_code_quote(name, args);
         }
         if name == "listDir" {
             // RFC-0076 M2: on the generator-host path the listing comes from the
