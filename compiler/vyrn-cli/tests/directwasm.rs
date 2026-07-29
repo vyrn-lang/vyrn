@@ -311,6 +311,110 @@ fn main() -> Int64 {
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
+/// The two `modify` shapes the corpus does not have, and one it does (RFC-0077
+/// M2f).
+///
+/// Every `modify` parameter in `examples/` and `std/` is an **aggregate** — a
+/// record, an `Array<T>`, a `Parser`, a `Scanner` — so the scalar case is
+/// entirely untested by the ladder, and it is the one that needs work the
+/// aggregate case does not: a scalar binding is a wasm local, which has no
+/// address for the callee to write through, so the caller spills it to a frame
+/// slot and reloads it after the call. Omitting either half compiles cleanly and
+/// prints 21 where 42 belongs — the same silent shape M2b caught by running
+/// (`modify.vyrn` printed zeroes), and the reason this exists rather than a
+/// comment claiming the path is covered.
+///
+/// Also here: **module state as a `modify` argument**, where the address is a
+/// constant rather than a frame offset, and a `modify` parameter **handed on to
+/// another** one, where the address the inner call writes through is the outer
+/// callee's own slot. And a global read by a later initializer, which is what
+/// makes declaration order observable inside a single file.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_modify_parameter_copies_back_whatever_the_caller_kept_it_in() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-modify");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+type Counter = { value: Int64, hits: Int64 }
+
+let mut base: Int64 = 7
+let derived: Int64 = base * 2
+let mut shared: Counter = Counter { value: 0, hits: 0 }
+let label: String = \"label\"
+
+fn twice(n: modify Int64) {
+    n = n * 2
+}
+
+fn bump(c: modify Counter, by: Int64) {
+    c.value = c.value + by
+    c.hits = c.hits + 1
+}
+
+fn bumpTwice(c: modify Counter) {
+    bump(c, 1)
+    bump(c, 1)
+}
+
+fn main() -> Int64 {
+    print(base)
+    print(derived)
+    base = base + 1
+    print(base)
+
+    let mut n = 21
+    twice(n)
+    print(n)
+
+    bump(shared, 5)
+    bumpTwice(shared)
+    print(label)
+    print(shared.value)
+    print(shared.hits)
+
+    shared.value = 100
+    print(shared.value)
+    return shared.hits
+}
+";
+    let path = dir.join("modifyshapes.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("modifyshapes.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .env("VYRN_WASM_BACKEND", "direct")
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // Spelled out rather than only compared, because the failure this is about is
+    // a plausible number: 21 instead of 42, or a 5 that never became a 7.
+    assert_eq!(
+        norm(&interp.stdout),
+        "7\n14\n8\n42\nlabel\n7\n3\n100\n",
+        "the interpreter moved"
+    );
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
 /// The construct a build failed on, with the source line dropped so the same gap
 /// at fifty sites is one entry. Anything that is not a lowering gap is reported
 /// whole — an ICE or a load error is not a burndown item.

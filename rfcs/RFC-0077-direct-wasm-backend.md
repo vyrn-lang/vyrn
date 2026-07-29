@@ -1280,3 +1280,147 @@ one throws the callee's writes away silently), and module state is one global pe
 top-level `let` plus an initializer that runs before `main`. Neither is control
 flow, neither is a type-system gap, and after them the biggest thing left in this
 corpus is `toJson`.
+
+---
+
+## M2f, as landed
+
+Module state and `modify` parameters. **23 of 80**, from 20 — and both rows of
+the M2e table are gone, which was 12 examples' first blocker between them.
+
+### They were not one gap. They were one gap and one non-gap
+
+The milestone was framed on a hypothesis: `Place` is a wasm local or a frame slot,
+module state needs a *global* place and a `modify` parameter needs an *indirect*
+one, so extending `Place` twice unblocks both. Half of that survived contact.
+
+**Module state needed the new place.** `Place::Static(u32)` — an absolute address
+in linear memory, reserved zeroed by the encoder before any body is walked. It is
+a separate variant rather than a flag on `Slot` for the reason that makes module
+state module state: a frame offset is relative to a base that changes every call
+and a global's address does not.
+
+**A `modify` parameter needed no place at all.** It is call-by-value-result: the
+incoming wasm local holds the caller's address, the value is copied *in* at the
+prologue and back *out* at the epilogue, and in between the parameter is an
+ordinary local or frame slot indistinguishable from a `read` one. An
+`Indirect(local)` place would have been smaller code — no copies — and *different
+semantics*: the caller would see each write as it happened rather than at the
+return. The textual backend already chose copy-in/copy-out (`modify_copyout`), so
+parity decided this rather than taste, and the smaller design was the wrong one.
+
+So the shared cause under the two rows is real but narrower than the framing:
+what both need is **the address of a binding**, and that is `Place::addr`, one
+method with an `Option` return. The `None` case is the finding — a scalar in a
+wasm local has no address — and it is what the caller side of `modify` had to
+handle rather than assume away.
+
+### One mechanism for both kinds of global, and it is not a wasm global
+
+A wasm global holds one value type, so an aggregate could never have lived in
+one; the obvious split is scalars in globals and aggregates in a data segment.
+That is two mechanisms for one language feature. Everything goes in memory
+instead, which costs a scalar global a load where a local would have had a
+`local.get` and buys one code path — and it is what the textual backend does
+anyway, since an LLVM global is a pointer.
+
+`Module::reserve` is deliberately not `Module::data`: `data` shares identical
+contents, which is exactly right for a string pool and exactly wrong for storage.
+Two zero-initialized `Int64` globals would have been one address, i.e. one
+variable, and the module would still have validated. It has its own test.
+
+### `modify.vyrn`'s zeroes were the missing copy-back, as they looked
+
+M2b's refusal recorded the symptom without diagnosing it. Confirmed: the callee
+copies the aggregate into a slot of its own in the prologue — M0's by-value
+parameter convention, which is right for every other capability — and without a
+copy-out the caller's record never changes. `c.value` stays 0 across three
+`bump`s. Nothing about the convention was wrong; one direction of it was missing.
+
+### The copy-out is in one place, because M1 said a body has one exit
+
+`return` is a `br` to the function's outermost block (M1), so the copy-out goes
+*after* that block's `End` and runs on every return path including the fall-off.
+A backend that emitted a real `return` would need the copy at every exit and
+would silently miss one. This is the second time that rule has paid for itself,
+and it needed M2d's other fact too: the instructions are stack-neutral, so a
+scalar result already sitting on the block's stack survives them untouched.
+
+### The one thing the convention costs that the textual backend does not pay
+
+A `modify` argument is the caller's binding by address. A frame slot has one and
+module state has one. **A scalar in a wasm local does not** — so it is spilled to
+a frame slot for the callee to write through and reloaded after the call. LLVM
+never faced this because its locals are already `alloca` slots.
+
+Nothing in `examples/` or `std/` has a scalar `modify` parameter — every one of
+the 36 is a record, an `Array<T>`, a `Parser` or a `Scanner` — so the ladder
+cannot see that path
+at all, and omitting either half of the spill compiles cleanly and prints 21
+where 42 belongs. It has its own running test
+(`a_modify_parameter_copies_back_whatever_the_caller_kept_it_in`), together with
+the two shapes the corpus also lacks: module state as a `modify` argument, where
+the address is a constant, and a `modify` parameter handed on to another one,
+where the address the inner call writes through is the outer callee's own slot.
+
+### Initialization order was already decided, and the loader had already done it
+
+RFC-0013 made top-level `let` root-only and host-owns-the-loop, and the textual
+backend's `@__vyrn_globals_init` runs the initializers in declaration order from
+`vyrn_entry` before `main`. `program.globals` arrives from the loader already in
+linker order, dependencies first, so declaration order *is* the answer and
+nothing had to be sorted: `statemod`'s diamond initializes its shared store
+before either arm reads it, and prints its init markers in the order that proves
+it. Once rather than per call falls out of there being one function and one call
+to it from `_start`.
+
+The initializer is a body like any other rather than a table of constants, which
+is what lets it go through [`Fn_::store_into`] and therefore through the M2d
+coercion seam: a top-level `let n: Age = ..` validates exactly as one inside a
+function does, and a top-level array literal reaches the heap by the same
+`ArrayN → Array` conversion. An unannotated global is typed by `peek`, so the
+reservation loop had to move *after* the signature loop — a call is the one
+initializer shape whose type only a signature knows.
+
+### The M2d refusal is liftable, and it stopped being a `Place` problem
+
+M2d refused a `where` clause over a **non-record aggregate** because "`Place` is a
+wasm local or a frame slot and cannot name 'the address in this local'".
+`Static` does not lift that — a global's address is fixed, and the value under
+check is on the operand stack — but writing the record arm made the shape
+obvious: copy the whole value into a frame slot and bind `value` to it, which is
+what the record base already does field by field and needs **no new variant**.
+Left refused, because no example has one and an untested lowering is worse than a
+named gap. The comment now says that instead of blaming the enum.
+
+### Nothing contradicted M0, M1, M2a, M2b, M2c, M2d or M2e
+
+Every offset is still `layout::of_ll ∘ llt`, including a global's size and
+alignment. Destination-first at a store, no-`return`-in-a-body, the widening rule
+and the memory map all went in as written — the last of them twice over, since
+module state is data placed from `DATA_BASE` up and the encoder's
+`STATICS_LIMIT` assertion covers it for free.
+
+One small thing came along because it was in the way: `pop` and `swapRemove` took
+their receiver's frame offset and re-derived it three times. They take its address
+into a local once instead, so they work on module state as well as a local — and
+two of the four `b.slot(base + off)` sequences collapsed into a `MemArg` offset,
+which is one instruction rather than three.
+
+### 23 of 80, regrouped
+
+| blocked on | n |
+|---|---|
+| builtins with no lowering (`toJson` 6, `stringFromBytes` 4, `jsonSchema` 3, `cell`/`set`/`get` 2, `readLine` 2, `args`, `chars`, `fromJson`, `hostNowMillis`, `Int64`, `logger`, `parse`, `readFile`, `schemaOf`, `value`, `@charCount`) | **28** |
+| a map literal 3, indexing a `Map` 2, indexing a `SmallArray` 1 | 6 |
+| `Match` on strings 4, `if let` 2, `?`, a fallible construction | 8 |
+| a `fn`-typed parameter (RFC-0023) 3, a lambda 1 | 4 |
+| a branch yielding an unpeekable call (`get` 3, `Held` 1) | 4 |
+| `spawn` 2, `region` | 3 |
+| floats, sized-int arithmetic and conversion, bitwise | 4 |
+
+Every row is now either one big undifferentiated bucket of builtins or a small
+named feature. The `modify` and module-state rows are gone, and the six examples
+each held did not turn into six passes — three did, and the rest moved on to
+`toJson`, a map literal, `Match` on strings and `if let`, which is what the
+burndown is for. The 12 → 3 reading is the honest one; 20 → 23 is the number.

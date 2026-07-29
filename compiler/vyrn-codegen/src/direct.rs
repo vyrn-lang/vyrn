@@ -1292,8 +1292,8 @@ impl Fn_<'_> {
         let held = match (self.cx.repr(&decl.base, line)?, &decl.base) {
             // A record base binds every field by name, so the value is parked by
             // ADDRESS and each field copied out of it. A copy rather than a view
-            // because `Place` is a local or a frame slot and nothing else — M0's
-            // convention, and a predicate cannot write to what it was given.
+            // because a predicate cannot write to what it was given, so the two
+            // can never be observed to differ.
             (Repr::Agg(l), Type::Record(_)) => {
                 let addr = b.local(ValType::I32);
                 b.ins(&Instruction::LocalSet(addr));
@@ -1329,9 +1329,14 @@ impl Fn_<'_> {
                 self.scope.push((name, Place::Local(loc), ty));
                 loc
             }
-            // An aggregate base that is not a record has one `value` binding and
-            // nowhere for it to live — `Place` cannot name "the address in this
-            // local". Refused rather than bound to something adjacent.
+            // An aggregate base that is not a record has one `value` binding, and
+            // M2d refused it because `Place` could not name where to put it. M2f's
+            // `Static` does not change that — a global's address is fixed and this
+            // one is on the operand stack — but the record arm above shows the
+            // shape that would: copy the whole value into a frame slot and bind
+            // `value` to it, needing no new variant at all. Still refused, because
+            // no example has one and an untested lowering is worse than a named
+            // gap: this is the milestone where it stopped being a Place problem.
             _ => {
                 return unsupported(
                     &format!("a `where` clause over the non-record aggregate `{}`", decl.base),
@@ -3723,6 +3728,7 @@ mod tests {
             protocol_methods: HashMap::new(),
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),
+            globals: HashMap::new(),
             rt: Rt {
                 write_all: 0,
                 malloc: 0,
