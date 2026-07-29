@@ -15,7 +15,16 @@ description = "RFC-0076: runs `gen fn` generators as compiled wasm in an embedde
 [dependencies]
 vyrn-frontend = { path = "../vyrn-frontend" }
 vyrn-codegen = { path = "../vyrn-codegen" }
-wasmtime = { version = "47", default-features = false, features = ["cranelift", "runtime", "std"] }
+wasmtime = { version = "47", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "std",
+    # Cranelift compiles a module's functions on a thread pool. It is a wasmtime
+    # DEFAULT feature, so `default-features = false` silently turned it off and
+    # every artifact was compiled single-threaded — measured at 1,055 ms across a
+    # cold open's five artifacts against 250 ms with it on.
+    "parallel-compilation",
+] }
 
 [lib]
 name = "vyrn_genwasm"
