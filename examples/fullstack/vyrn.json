@@ -1,6 +1,7 @@
 {
   "name": "fullstack",
   "server": "server.vyrn",
-  "client": "client.vyrn",
-  "public": "public"
+  "client": "client/boot.vyrn",
+  "public": "public",
+  "audience": { "server": ["server"], "client": ["client"], "universal": ["app", "shared"] }
 }

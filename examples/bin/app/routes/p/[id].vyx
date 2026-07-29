@@ -1,0 +1,57 @@
+<script>
+// GET /p/[id] — the SSR paste view (RFC-0041 §3). A String segment binds the
+// content-addressed id; the query returns Result<Paste, PageError>, so an unknown
+// id renders the themed error.vyx at 404 instead of a hand-built hyperscript 404.
+//
+// RFC-0071 M2b: this is the page that could not migrate in M2, and both things
+// that blocked it are visible here. Its <title> IS its loaded data's title, so
+// `head` must be able to see the data — `fn head(d: Paste)` is one of the four
+// shapes the `Page` contract declares, under the house rule that head takes what
+// the view takes. And its data depends on the route parameters, so `data` returns
+// a `ParamQuery<Params, …>`: the deferred call receives `Params`, which is
+// declared per page and which std/ui therefore cannot name.
+import { byId } from "../../../server/api/pastes"
+import { IdReq, Paste } from "../../../shared/wire/paste"
+import { format, fromMillis } from "std/time"
+import { Head, PageError, ParamQuery, noHead, withTitle, paramQuery, notFound } from "std/ui"
+import { i18n } from "std/i18n"
+import * as t from i18n("../../../strings")
+params { id: String }
+
+/// The document title: this paste's title.
+export fn head(d: Paste) -> Head {
+    return withTitle(noHead(), pasteTitle(d))
+}
+
+/// The paste this route names, or a 404 through the themed error page.
+export fn data() -> ParamQuery<Params, Result<Paste, PageError>> {
+    return paramQuery(fetchPaste)
+}
+
+fn fetchPaste(p: Params) -> Result<Paste, PageError> {
+    return match byId(IdReq { id: p.id }) {
+        Ok(paste) => Ok(paste),
+        Err(why) => Err(notFound(why)),
+    }
+}
+
+fn pasteTitle(p: Paste) -> String {
+    if p.title.byteLength == 0 {
+        return t.binUntitled()
+    }
+    return p.title
+}
+</script>
+
+<template>
+<main>
+    <p><a href="/" class="mr-2 hover:text-brand-600">{{ t.binBackHome() }}</a></p>
+    <h2>{{ pasteTitle(data) }}</h2>
+    <p class="pmeta">
+        <span class="plang">{{ data.lang }}</span>
+        <span class="pwhen">{{ t.binCreated(format(fromMillis(data.created))) }}</span>
+        <a :href='"/raw/" + data.id' class="rawlink">{{ t.binViewRaw() }}</a>
+    </p>
+    <pre class="pbody">{{ data.body }}</pre>
+</main>
+</template>

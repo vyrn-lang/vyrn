@@ -209,8 +209,8 @@ fn content_type(headers: &str) -> String {
 /// Seed one paste through the RPC surface; return its server-assigned id.
 fn create_paste(port: u16, title: &str, body: &str, lang: &str) -> String {
     let req = format!("{{\"title\":\"{title}\",\"body\":\"{body}\",\"lang\":\"{lang}\"}}");
-    let (status, _h, resp) = post(port, "/rpc/createPaste", &req);
-    assert_eq!(status, "HTTP/1.1 200 OK", "createPaste failed: {resp}");
+    let (status, _h, resp) = post(port, "/_/pastes/create", &req);
+    assert_eq!(status, "HTTP/1.1 200 OK", "pastes/create failed: {resp}");
     // Result procedure → 200 `{"Ok":{...paste...}}`. Pull the id field.
     let key = "\"id\":\"";
     let i = resp.find(key).expect("paste id in create response") + key.len();

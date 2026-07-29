@@ -47,7 +47,7 @@ async function main() {
   // build, so no stub (and no pending callback) is involved: POST it raw, then
   // hand the server's 422 body to the exported renderer (RFC-0040 §2).
   $("badBtn").onclick = async () => {
-    const res = await fetch("/rpc/createUser", {
+    const res = await fetch("/_/users/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: "Bob", age: 200 }),
@@ -58,7 +58,7 @@ async function main() {
 
   // The procedure registry — a raw GET, straight from the server.
   $("schemaBtn").onclick = async () => {
-    const text = await (await fetch("/rpc/$schema")).text();
+    const text = await (await fetch("/_/$schema")).text();
     try {
       $("schemaOut").textContent = JSON.stringify(JSON.parse(text), null, 2);
     } catch {

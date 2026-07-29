@@ -166,32 +166,98 @@ fn nearest_segment_wins_so_feature_outer_layouts_work() {
     assert!(err.contains("`src/notes/server/api/notes.vyrn`, which is server-only"), "{err}");
 }
 
+const MANIFEST_TWO_ROOTS: &str = r#"{
+  "name": "aud",
+  "server": "server.vyrn",
+  "client": "client/boot.vyrn",
+  "audience": { "server": ["server"], "client": ["client"], "universal": ["app", "shared"] }
+}
+"#;
+
 #[test]
-fn a_page_generated_from_a_vyx_inherits_the_pages_own_audience() {
-    // The generated server/client modules of a `.vyx` page have no path of their
-    // own. Their audience is the page's, which is the only answer that could be
-    // right — and it is what makes the rule reach a page written as a template.
+fn a_vyx_reaching_a_server_module_is_an_error_in_the_half_that_ships() {
+    // A `.vyx` compiles to TWO modules on opposite sides of the wire, and neither
+    // has a path of its own, so each takes the audience of the root that mounts
+    // it (RFC-0072 M5). The half that reaches a browser is the one the rule is
+    // about: a component whose VIEW calls a server module is rejected when the
+    // client root bundles it, naming both ends.
     let dir = scratch("vyx");
-    write(&dir, "vyrn.json", MANIFEST_WITH_AUDIENCE);
+    write(&dir, "vyrn.json", MANIFEST_TWO_ROOTS);
     write(&dir, "server/store.vyrn", "export fn secret() -> String {\n    return \"s\"\n}\n");
     write(
         &dir,
-        "app/routes/index.vyx",
-        "<template>\n  <div>{ secret() }</div>\n</template>\n\
+        "app/widgets/Leak.vyx",
+        "<template>\n  <div>{{ secret() }}</div>\n</template>\n\
          <script>\nimport { secret } from \"../../server/store\"\n</script>\n",
     );
     write(
         &dir,
-        "main.vyrn",
-        "import { pages } from \"std/ui\"\n\
-         import { route } from pages(\"./app/routes\")\n\
+        "client/boot.vyrn",
+        "import { components } from \"std/vyx\"\n\
+         import { leak } from components(\"../app/widgets\")\n\
+         import { toHtmlString } from \"std/html\"\n\
+         export extern fn v() -> String {\n    return toHtmlString(leak())\n}\n\
          fn main() -> Int64 {\n    return 0\n}\n",
     );
-    let out = vyrn().arg("check").arg(dir.join("main.vyrn")).output().unwrap();
-    assert!(!out.status.success(), "a .vyx page must not reach a server module either");
+    let out = vyrn().arg("check").arg(dir.join("client/boot.vyrn")).output().unwrap();
+    assert!(!out.status.success(), "a .vyx in the client bundle must not reach a server module");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("app/routes/index.vyx"), "{err}");
-    assert!(err.contains("server/store.vyrn"), "{err}");
+    assert!(err.contains("app/widgets/Leak.vyx"), "{err}");
+    assert!(err.contains("`client/boot.vyrn` is client-only"), "{err}");
+    assert!(err.contains("`server/store.vyrn`, which is server-only"), "{err}");
+}
+
+#[test]
+fn a_pages_ssr_half_may_load_from_the_server_that_mounts_it() {
+    // The other side of the same rule, and the reason M5's move is possible at
+    // all: a page's `data()` runs on the server, `vyxPageClient` strips it out of
+    // the client bundle, and the SSR module is compiled for the server root. A
+    // loader reaching `server/api` is therefore not a widening import — it is
+    // what server-side rendering IS.
+    let dir = scratch("ssr");
+    write(&dir, "vyrn.json", MANIFEST_TWO_ROOTS);
+    write(
+        &dir,
+        "server/api/notes.vyrn",
+        "import { Note } from \"../../shared/wire\"\n\
+         /// The one note.\nexport fn one() -> Note {\n    return Note { n: 7 }\n}\n",
+    );
+    write(&dir, "shared/wire.vyrn", "export type Note = { n: Int64 }\n");
+    write(
+        &dir,
+        "app/routes/index.vyx",
+        "<script>\nimport { one } from \"../../server/api/notes\"\n\
+         import { Note } from \"../../shared/wire\"\n\
+         import { Query, query } from \"std/ui\"\n\
+         export fn data() -> Query<Note> {\n    return query(one)\n}\n</script>\n\n\
+         <template>\n<main><p>{{ data.n }}</p></main>\n</template>\n",
+    );
+    write(
+        &dir,
+        "server.vyrn",
+        r#"import { pages } from "std/ui"
+import { route } from pages("./app/routes")
+fn main() -> Int64 {
+    let r = route(Request { method: "GET", path: "/", headers: [:], body: "" })
+    print("\{r.status}")
+    return 0
+}
+"#,
+    );
+    write(
+        &dir,
+        "client/boot.vyrn",
+        "import { pagesClient } from \"std/ui\"\n\
+         import { renderPage } from pagesClient(\"../app/routes\")\n\
+         export extern fn vyrnRenderPage(p: String) -> String {\n    return renderPage(p)\n}\n\
+         fn main() -> Int64 {\n    return 0\n}\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("server.vyrn")).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "200");
+    // And the client bundle, which is where a leak would matter, still checks.
+    let out = vyrn().arg("check").arg(dir.join("client/boot.vyrn")).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
 }
 
 #[test]

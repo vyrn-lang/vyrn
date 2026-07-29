@@ -1,0 +1,121 @@
+/// Shared server-side view helpers: the page bodies (the shell now lives in
+/// routes/layout.vyx, RFC-0041 §1). Labels come from the live i18n instance via its
+/// stateful accessors, and the home page reads the books store directly to
+/// server-render the live list.
+import { el, text, Html, Attr } from "std/html"
+import { i18n } from "std/i18n"
+import { setLocale, locale, Locale, tAppTagline, tNavHomeLabel, tShelfCount, tShelfEmpty, tShelfTags, transKey, t } from i18n("../strings")
+import { tw } from "std/tw"
+import * as theme from tw("../theme.json")
+import { Book, BookList, TagCounts } from "../shared/wire"
+
+/// A nav link, styled with theme utilities checked against Tw at compile time —
+/// a typo in the class string here would fail `vyrn check`.
+fn navLink(href: String, label: String) -> Html {
+    return el("a", [A("href", href), theme.cls("mr-2 hover:text-brand-600")], [text(label)])
+}
+
+/// One rendered book row (server-side, static — the client hydrates the
+/// interactive version). Tags localized through the dynamic-key lookup.
+fn bookRow(b: Book) -> Html {
+    let mut rating = "☆"
+    if b.rating > 0 {
+        rating = "★ \{b.rating}"
+    }
+    let mut tagKids: Array<Html> = []
+    for tag in b.tags {
+        let label = match transKey("tag." + tag) {
+            Some(k) => t(k),
+            None => tag,
+        }
+        tagKids.push(el("span", [Cls("tag")], [text(label)]))
+    }
+    return el("li", [Cls("book")], [
+            el("a", [A("href", b.url)], [text(b.title)]),
+            el("a", [A("href", "/books/\{b.id}"), A("data-nav", "prefetch"), Cls("detail")], [text("details →")]),
+            el("span", [Cls("rating")], [text(rating)]),
+            el("span", [Cls("tags")], tagKids),
+        ])
+}
+
+/// The home page body — SSR the live shelf list AND a tag summary read straight
+/// from the store; the client mounts into `#app` for the interactive version.
+export fn homePage(list: BookList, tags: TagCounts) -> Html {
+    let mut items: Array<Html> = []
+    for b in list.books {
+        items.push(bookRow(b))
+    }
+    let mut body: Array<Html> = []
+    if list.books.length == 0 {
+        body = [el("p", [Cls("sub")], [text(tShelfEmpty())])]
+    } else {
+        body = [el("ul", [Cls("books")], items)]
+    }
+    return el("main", [], [
+            el("p", [Cls("sub")], [text(tAppTagline())]),
+            el("p", [Cls("count")], [text(tShelfCount(list.books.length))]),
+            el("div", [Id("app")], body),
+            el("script", [A("type", "module"), A("src", "/app.js")], []),
+        ])
+}
+
+/// One row of the plural table: locale label, then the plural rendered in `loc`.
+/// The stateful accessor reads `currentLocale`, so we flip it per group.
+fn pluralRow(label: String, n: Int64) -> Html {
+    return el("tr", [], [
+            el("td", [], [text(label)]),
+            el("td", [], [text("\{n}")]),
+            el("td", [], [text(tShelfCount(n))]),
+        ])
+}
+
+/// The About page: static prose plus a live CLDR-plural demonstration rendered in
+/// English AND Ukrainian side by side. With the stateful API we `setLocale` per
+/// group (rows build eagerly), then restore the incoming locale.
+export fn aboutPage() -> Html {
+    let saved = locale()
+    setLocale(En)
+    let enRows = [pluralRow("en", 1), pluralRow("en", 2), pluralRow("en", 5)]
+    setLocale(Uk)
+    let ukRows = [pluralRow("uk", 1), pluralRow("uk", 2), pluralRow("uk", 5)]
+    setLocale(saved)
+    return el("main", [], [
+            el("h2", [], [text("About")]),
+            el("p", [], [text("Shelf is a tiny dogfood app exercising the whole Vyrn UI stack: std/html, std/ui pages, std/rpc, std/i18n, and Map on the wire.")]),
+            el("h3", [], [text("CLDR plurals")]),
+            el("p", [Cls("sub")], [text("The same message for counts 1 / 2 / 5 — English has two forms, Ukrainian has three (one / few / many).")]),
+            el("table", [Cls("plurals")], [
+                    el("thead", [], [el("tr", [], [el("th", [], [text("locale")]), el("th", [], [text("n")]), el("th", [], [text("message")])])]),
+                    el("tbody", [], [
+                            enRows[0], enRows[1], enRows[2],
+                            ukRows[0], ukRows[1], ukRows[2],
+                        ]),
+                ]),
+        ])
+}
+
+/// The book-detail page: SSR the real record read from the store (the loader
+/// validated the id and fetched the book). `id` is already an integer.
+export fn detailPage(b: Book) -> Html {
+    let mut rating = "☆"
+    if b.rating > 0 {
+        rating = "★ \{b.rating}"
+    }
+    let mut tagKids: Array<Html> = []
+    for tag in b.tags {
+        let label = match transKey("tag." + tag) {
+            Some(k) => t(k),
+            None => tag,
+        }
+        tagKids.push(el("span", [Cls("tag")], [text(label)]))
+    }
+    return el("main", [], [
+            el("p", [], [navLink("/", tNavHomeLabel())]),
+            el("h2", [], [text("Book #\{b.id}")]),
+            el("div", [Id("book"), theme.cls("p-4 rounded-lg border")], [
+                    el("h3", [], [el("a", [A("href", b.url)], [text(b.title)])]),
+                    el("p", [Cls("rating")], [text(rating)]),
+                    el("p", [Cls("tags")], tagKids),
+                ]),
+        ])
+}

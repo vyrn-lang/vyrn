@@ -1,0 +1,43 @@
+/// The book procedures: the whole RPC surface of this app, and nothing else.
+///
+/// There is no forwarding layer. The file RFC-0072 M5 deleted (`contract.vyrn`)
+/// re-declared each signature below and returned `store.<same name>(req)`,
+/// because the generators needed one module to reflect over; the directory is
+/// what they reflect over now, so these bodies call the store directly — it is a
+/// sibling under `server/`.
+///
+/// `rpc("./server/api")` mounts each export at `/_/books/<name>`, derived from
+/// this module's api-relative path and the export name. The names shed their
+/// `Book` suffix in the move: `books/add` already says it once.
+import { IdReq, AddBookReq, RateReq, BookList, BookResult, DeleteResult, TagCounts } from "../../shared/wire"
+import * as store from "../store"
+
+/// Every book. Zero-param => POST with an empty body.
+export fn browse() -> BookList {
+    return store.listBooks()
+}
+
+/// Fetch one book by id; `Err` when absent.
+export fn byId(req: IdReq) -> BookResult {
+    return store.getBook(req)
+}
+
+/// Add a book (title/url/tags already validated by `fromJson`); returns the copy.
+export fn add(req: AddBookReq) -> BookResult {
+    return store.addBook(req)
+}
+
+/// Delete a book by id. The seed book (id 0) is refused — an application outcome.
+export fn del(req: IdReq) -> DeleteResult {
+    return store.deleteBook(req)
+}
+
+/// Set a book's rating (already validated 1..5); `Err` when the book is absent.
+export fn rate(req: RateReq) -> BookResult {
+    return store.rateBook(req)
+}
+
+/// Tag histogram over the whole shelf — the `Map<String, Int64>` pillar.
+export fn tags() -> TagCounts {
+    return store.tagCounts()
+}

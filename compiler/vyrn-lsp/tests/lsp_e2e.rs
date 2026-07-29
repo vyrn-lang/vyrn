@@ -2551,7 +2551,7 @@ fn is_dev_entry_positive_and_negative() {
         ("bin/server.vyrn", true),
         ("shelf/server.vyrn", true),
         ("vlog.vyrn", false),
-        ("bin/client.vyrn", false),
+        ("bin/client/boot.vyrn", false),
     ] {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples")
@@ -3168,7 +3168,7 @@ fn m4_a_user_authored_contract_gets_the_same_editor_support() {
 #[ignore]
 fn m4_the_repos_own_page_gets_contract_completion() {
     let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
-    let page = root.join("examples/bin/routes/index.vyx");
+    let page = root.join("examples/bin/app/routes/index.vyx");
     let server = root.join("examples/bin/server.vyrn");
     let page_src = std::fs::read_to_string(&page).expect("the real page");
     let server_src = std::fs::read_to_string(&server).expect("the real server root");

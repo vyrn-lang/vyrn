@@ -193,7 +193,32 @@ pub fn from_manifest(json_text: &str, base: &str) -> Option<AudienceMap> {
 /// triggered generation first. A page's generated server and client modules
 /// therefore inherit the page's own audience, which is the only answer that
 /// could be right: the audience is a property of the file a person wrote.
-pub fn audience_of(path: &str, map: &AudienceMap) -> Verdict {
+pub fn audience_of(key: &str, map: &AudienceMap) -> Verdict {
+    let verdict = declared_audience_of(key, map);
+    if verdict.audience != Audience::Universal {
+        return verdict;
+    }
+    // A generated module has no independent existence: it is compiled for
+    // whoever generated it, and the root that mounts it is the one that runs it.
+    // A `.vyx` page is the case that forces this — `vyxPage` and `vyxPageClient`
+    // compile the SAME file into two modules that go to opposite sides of the
+    // wire, and reading both as the file's own (universal) audience makes the
+    // SSR half — the half whose whole job is to reach the server — illegal for
+    // doing exactly that. The half that reaches a browser is still checked,
+    // against the client root that mounts it, so nothing is exempted: a page
+    // whose VIEW touches a server module is rejected there (RFC-0072 M5).
+    if let Some(importer) = crate::loader::generated_importer(key) {
+        let caller = audience_of(importer, map);
+        if caller.audience != Audience::Universal {
+            return caller;
+        }
+    }
+    verdict
+}
+
+/// The audience `path` declares for itself: the manifest key naming it as an
+/// entry point, else the nearest audience segment on its path.
+fn declared_audience_of(path: &str, map: &AudienceMap) -> Verdict {
     let path = source_file(path);
     // An entry point's audience is DECLARED (by the key that names it), so it
     // beats anything read off the path. There is nothing above a composition

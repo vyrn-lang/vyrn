@@ -1099,8 +1099,15 @@ fn rpcDirUnifyFn(f: FnInfo, qual: String) -> String {
     return out
 }
 
-/// One directory-derived wire stub. The transport is handed the PATH, not a
-/// procedure name: under a derived scheme the path is the whole address.
+/// One directory-derived wire stub. The transport is handed the qualified NAME
+/// and the PATH, in that order.
+///
+/// The single-module form passes one string because the name is both: the URL is
+/// `/rpc/<name>` and the completion dispatcher is `vyrnRpcDone<Name>`. Under a
+/// derived scheme the path is the whole address and a pin can make it anything,
+/// so it no longer determines the dispatcher — the host would have to invert the
+/// template (and the pins) to route a reply. Passing both keeps the transport a
+/// transport: it POSTs to the path and calls back the named dispatcher.
 fn rpcDirClientFns(f: FnInfo, qual: String, path: String) -> String {
     let cap = capFirst(qual)
     let ret = if f.ret == "" { "Bool" } else { f.ret }
@@ -1109,10 +1116,10 @@ fn rpcDirClientFns(f: FnInfo, qual: String, path: String) -> String {
     out = out + "let mut rpcPending" + cap + ": Map<String, " + cb + "> = [:]\n"
     if f.params.length == 1 {
         out = out + "export fn " + qual + "(req: " + f.params[0].spelling + ", cb: " + cb + ") {\n"
-        out = out + "    let id = vyrnRpcCall(\"" + path + "\", toJson(req))\n"
+        out = out + "    let id = vyrnRpcCall(\"" + qual + "\", \"" + path + "\", toJson(req))\n"
     } else {
         out = out + "export fn " + qual + "(cb: " + cb + ") {\n"
-        out = out + "    let id = vyrnRpcCall(\"" + path + "\", \"\")\n"
+        out = out + "    let id = vyrnRpcCall(\"" + qual + "\", \"" + path + "\", \"\")\n"
     }
     out = out + "    rpcPending" + cap + "[id.toString()] = cb\n}\n"
     out = out + "fn rpcDeliver" + cap + "(key: String, cb: " + cb + ", res: RpcReply<" + ret + ">) {\n"
@@ -1179,7 +1186,7 @@ export gen fn client(dir: String) -> String {
     out = out + rpcClientTypes(mods)
     out = out + rpcReplyTypes()
     out = out + "type RpcIssues = { issues: Array<RpcIssue> }\n"
-    out = out + "extern fn vyrnRpcCall(name: String, body: String) -> Int64\n"
+    out = out + "extern fn vyrnRpcCall(proc: String, path: String, body: String) -> Int64\n"
     out = out + "fn rpcIgnoreReply() {\n}\n"
     for m in mods {
         let iface = moduleInterface(m.modPath)

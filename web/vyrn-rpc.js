@@ -2,8 +2,10 @@
 //
 // A wasm module built with std/rpc's `rpcClient` generator imports one shared
 // extern, `vyrn.vyrnRpcCall(name, body) -> Int64`, and exports one completion
-// dispatcher per procedure, `vyrnRpcDone<Proc>(id, status, body)`. This module
-// supplies that extern (a `fetch` POST to `<baseUrl>/rpc/<name>`) and, when the
+// dispatcher per procedure, `vyrnRpcDone<Proc>(id, status, body)`. The directory
+// form (`client`, RFC-0072 M3) imports the same extern with the procedure and
+// its DERIVED path as separate arguments. This module supplies that extern (a
+// `fetch` POST to `<baseUrl>/rpc/<name>`, or to the derived path) and, when the
 // request settles, calls the matching dispatcher back into the module with the
 // SAME id the extern returned — so the module routes the reply to the pending
 // callback the stub stored under that id (RFC-0040 §2). The extern ABI is
@@ -57,19 +59,27 @@ export function makeRpcTransport({ baseUrl = "", fetchImpl } = {}) {
     exportsRef[name](BigInt(id), BigInt(status), body);
   }
 
-  // The single shared extern. wasi-min.js decodes the two String params to JS
-  // strings and converts our BigInt return to the i64 request id.
-  function vyrnRpcCall(name, body) {
+  // The single shared extern, in both shapes std/rpc emits. `rpcClient` (one
+  // module) passes `(name, body)`: the name is the URL and the dispatcher both.
+  // `client` (a derived api directory, RFC-0072 M3) passes `(proc, path, body)`,
+  // because a derived — or pinned — path no longer says which dispatcher owns the
+  // reply, and inverting the path template in the host would be a second
+  // implementation of the derivation rule.
+  function vyrnRpcCall(a, b, c) {
+    const derived = c !== undefined;
+    const proc = a;
+    const url = derived ? baseUrl + b : baseUrl + "/rpc/" + a;
+    const body = derived ? c : b;
     const id = nextId++;
-    doFetch(baseUrl + "/rpc/" + name, {
+    doFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: body,
     })
-      .then((res) => res.text().then((text) => complete(name, id, res.status, text)))
+      .then((res) => res.text().then((text) => complete(proc, id, res.status, text)))
       // A network failure (offline, DNS, CORS) reports status 0 = "unreachable",
       // which the generated unifier turns into an `rpc.transport` Issue.
-      .catch(() => complete(name, id, 0, ""));
+      .catch(() => complete(proc, id, 0, ""));
     return BigInt(id);
   }
 

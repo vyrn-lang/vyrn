@@ -243,7 +243,7 @@ fn a_role_may_declare_its_own_exceptions() {
 /// module the generator was imported from.
 #[test]
 fn roles_fall_back_to_the_generator_call_site() {
-    let roots: Vec<(String, String)> = ["examples/bin/server.vyrn", "examples/bin/client.vyrn"]
+    let roots: Vec<(String, String)> = ["examples/bin/server.vyrn", "examples/bin/client/boot.vyrn"]
         .iter()
         .map(|p| {
             let path = repo(p);
@@ -262,16 +262,16 @@ fn roles_fall_back_to_the_generator_call_site() {
     );
     let page = roles.iter().find(|r| r.contract == "Page").unwrap();
     match &page.scope {
-        RoleScope::Dir(d) => assert!(d.ends_with("examples/bin/routes"), "resolved dir: {d}"),
+        RoleScope::Dir(d) => assert!(d.ends_with("examples/bin/app/routes"), "resolved dir: {d}"),
         s => panic!("expected a resolved directory, got {s:?}"),
     }
     // And the real page in that directory is governed by it, while the real
     // layout beside it is not.
     assert_eq!(
-        role_for(&repo("examples/bin/routes/index.vyx"), &roles).map(|r| r.contract.as_str()),
+        role_for(&repo("examples/bin/app/routes/index.vyx"), &roles).map(|r| r.contract.as_str()),
         Some("Page")
     );
-    assert!(role_for(&repo("examples/bin/routes/layout.vyx"), &roles).is_none());
+    assert!(role_for(&repo("examples/bin/app/routes/layout.vyx"), &roles).is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -452,13 +452,13 @@ fn edit_distance_matches_the_vyrn_one() {
 // Status (`vyrn why --contract`)
 // ---------------------------------------------------------------------------
 
-/// The real `examples/bin/routes/index.vyx` page satisfies `Page`, and the
+/// The real `examples/bin/app/routes/index.vyx` page satisfies `Page`, and the
 /// report says WHICH shape each member matched — the fact the generator reads
 /// off a declaration instead of scanning a body.
 #[test]
 fn status_reports_the_matched_shape() {
     let v = page();
-    let vyx = std::fs::read_to_string(repo("examples/bin/routes/index.vyx")).unwrap();
+    let vyx = std::fs::read_to_string(repo("examples/bin/app/routes/index.vyx")).unwrap();
     let script = script_of(&vyx);
     let st = contract_status(&v, &script);
     let head = st.iter().find(|e| e.name == "head").unwrap();

@@ -581,12 +581,12 @@ fn a_contract_still_has_at_most_one_open_rule() {
 /// contract, its declaring module, and WHICH declared shape each member matched.
 #[test]
 fn why_contract_reports_the_matched_shape_of_a_real_page() {
-    let page = repo_dir("examples/bin/routes/index.vyx");
+    let page = repo_dir("examples/bin/app/routes/index.vyx");
     let out = vyrn().arg("why").arg("--contract").arg(&page).output().expect("why");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "why must answer:\n{text}{}", String::from_utf8_lossy(&out.stderr));
     assert!(
-        text.contains("role: directory") && text.contains("examples/bin/routes"),
+        text.contains("role: directory") && text.contains("examples/bin/app/routes"),
         "the role, discovered from the generator call site:\n{text}"
     );
     assert!(text.contains("contract: Page (std/ui)"), "the resolved contract:\n{text}");
@@ -604,7 +604,7 @@ fn why_contract_reports_the_matched_shape_of_a_real_page() {
 /// than checking it against a contract it was never meant to satisfy.
 #[test]
 fn why_contract_says_a_layout_is_in_no_role() {
-    let layout = repo_dir("examples/bin/routes/layout.vyx");
+    let layout = repo_dir("examples/bin/app/routes/layout.vyx");
     let out = vyrn().arg("why").arg("--contract").arg(&layout).output().expect("why");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(text.contains("no contract: this file is in no role"), "{text}");
@@ -665,7 +665,7 @@ fn why_contract_reports_every_status_class() {
 /// `std/vyx:Component` half of the mapping, on the repo's own widget.
 #[test]
 fn why_contract_resolves_the_open_component_contract() {
-    let widget = repo_dir("examples/bin/widgets/CreateForm.vyx");
+    let widget = repo_dir("examples/bin/app/widgets/CreateForm.vyx");
     let out = vyrn().arg("why").arg("--contract").arg(&widget).output().expect("why");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "{text}");

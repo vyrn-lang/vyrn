@@ -288,8 +288,9 @@ mechanize a one-time move of code we own would cost more than the move.
   see below.
 - **M4 — the wire.** `Request.headers`, `Response.vary`, content negotiation in
   the page router, `vyrn-nav` sending `Accept`; `?__vyrn=data` deleted.
+  **Landed** — see below.
 - **M5 — the move.** Move all five fullstack examples; delete every
-  `contract.vyrn`.
+  `contract.vyrn`. **Landed** — see below.
 
 ## M1 — as landed
 
@@ -462,6 +463,112 @@ failure mode RFC-0071 M4 avoided by making the LSP a pure adapter over
 reserved (the removed `list([..])` array form), so the tests spell it `recent`.
 Nothing about the derivation changes — it is worth recording only because the
 example reads as though it were runnable.
+
+## M4 — as landed
+
+Two places where the implementation is not what this document said, and why.
+
+**Negotiation is `application/json` AND NOT `text/html`, not "prefers JSON".** A
+browser's navigation `Accept` names `text/html` first and then, in most builds,
+`*/*` — which matches `application/json` under any subtype-wildcard reading, so a
+rule that merely looked for JSON would have turned every ordinary page load into a
+payload response. `uiWantsData` therefore requires the request to name JSON and to
+NOT name HTML, which is the only shape that leaves the document channel where it
+was. Quality values are not parsed: a client that wants the payload says so
+exactly, and `vyrn-nav` does (`Accept: application/json` for data, `Accept:
+text/html` for the document swap), so `q=` would be a parser with no caller.
+
+**A negotiated request always answers 200, and only it carries `Vary`.** The
+payload's own `page`/`status` describe what to render, so a data fetch for a
+missing paste is a 200 carrying the `@error` payload while the DOCUMENT channel
+for the same URL still returns a real 404 — the two representations disagree about
+status on purpose, because one is a document and the other is a description of
+one. `Vary: Accept` rides the payload response only; a document response sets no
+`Vary`, since the document is what the URL answers by default and adding the
+header would fragment every shared cache for a variation most clients never ask
+for.
+
+## M5 — as landed
+
+Six places where the implementation is not what this document said, and why.
+
+**A page's SSR half is server code, and that is what unblocked the move.** This
+document's migration table puts `routes/**` under `app/` — universal — and the
+audience rule says a universal module may not import `server/`. But a page that is
+worth server-rendering is exactly a page with a `data()` loader, and a loader's
+whole job is to reach the server. Every data page in the repo failed the check on
+its first move, which is the rule doing its job on a reading that was too coarse: a
+`.vyx` compiles to TWO modules, `vyxPage` for SSR and `vyxPageClient` for the
+bundle, and only the second one reaches a browser. So a generated module whose own
+path says nothing (M1's `Verdict` reason `Default`) now takes the audience of the
+root that mounts it — server for the SSR half, client for the bundle — while a
+generator input with a real audience segment still lends its own. Nothing is
+exempted: `vyxPageClient` strips `data`/`load` and their imports, so a page whose
+VIEW touches a server module keeps that import into the client half and is rejected
+there, naming both files. M1's `.vyx` test now proves it on that half, where a leak
+would actually be a leak, and a second test pins the SSR half rendering `200` from
+a loader that reads `server/api`. `vyrn why server/api/pastes.vyrn` still prints a
+chain through `client/boot.vyrn`, because it reads the TREE and not a build (M1 —
+as landed): the source really does say the client root reaches the page, and the
+strip is what makes that untrue of the artifact. Naming the difference is more
+useful than hiding it — the chain is where the leak would come back.
+
+**A `.vyrn` page is not universal, and three examples said so.** std/ui never
+bundles a `.vyrn` page — `uiClientRenderable` requires `.vyx` and no `respond` — so
+a soft nav to one falls back to an HTML swap and its module reaches no browser
+under any build. It has a real path, so no generated-module rule can rescue it: it
+IS server code and belongs under `server/`. `shelf`'s whole route tree and
+`fullstack`'s whole page tree are `.vyrn`, so they moved to `server/routes` and
+`server/pages` rather than `app/`, and the manifest now TELLS you those two apps
+ship islands rather than page bundles. `bin`, whose routes are `.vyx` and really
+are universal, keeps `app/routes/**` and grew a second mount — `pages("./server/
+routes")` for the one `respond` page (`/raw/:id`) — guarded by a path prefix in the
+server root, which is where "which surface answers which prefix" already lived.
+Two mounts collide in the flat namespace (`route`, `RoutePath`), so the second binds
+through `import * as` — the same answer M3 reached for two api modules.
+
+**The move found the leak the rule exists to catch, and it was real.** Before this
+milestone `examples/bin`'s client wasm contained `loadStore`, `fullDigest`, the
+paste store's procedure bodies and the literal string `data/pastes.json`. The cause
+is RFC-0071 M2b: a `data` accessor hands its work to a NAMED helper, so the import
+the server call actually names lives in the helper, and `vyxPruneClientImports` only
+ever scanned the ACCESSOR for load-only names. `vyxStripDeadHelpers` had been added
+to cut the orphaned helper; the import prune was never taught to match. It now
+scans the whole pre-strip body, which keeps the conservative half of the old rule
+(a name the page never used — an enum variant reached through its type — is still
+never dropped) and drops what only removed code named. The client bundle is now
+clean of all four markers, and `vyxLoadBody` is gone with the last caller.
+
+**The wire client is handed the procedure AND the path.** `rpcClient`'s extern
+takes one string because the name is both the URL (`/rpc/<name>`) and the
+completion dispatcher (`vyrnRpcDone<Name>`). A derived path is not: `{module}`
+templates and `rpc.json` pins mean the host would have to invert the derivation
+rule to know which dispatcher owns a reply — a second implementation of the exact
+thing M3 kept to one producer. `client()`'s extern is therefore
+`vyrnRpcCall(proc, path, body)`, and `web/vyrn-rpc.js` dispatches on arity so one
+transport serves both generators.
+
+**Reserved and occupied names shape the derived surface more than expected.** M3
+recorded that `list` is reserved; the move added three more. `get` is reserved.
+`remove` desugars to the builtin `@remove` and so is unreachable as a namespace
+member — the generated router says `has no exported member \`@remove\``, which is a
+latent bug in member-access desugaring, worked around here by not spelling it.
+`all` collides with `std/arrays.all` in the flat namespace as soon as anything in
+the program imports it. The procedures are `pastes/{recent,byId,create}`,
+`books/{browse,byId,add,del,rate,tags}`, `users/{byId,create,del}` and
+`items/byId` — and the names got SHORTER, because `{module}` already says `Paste`
+and `Book`.
+
+**`rpc.vyrn` and `rpcsplit.vyrn` needed no audience at all.** Both are single-file
+parity citizens with no `vyrn.json`, so no manifest declares a vocabulary and the
+whole mechanism stays off — the compatibility story this document promises, tested
+by the two examples that exercise it. What they did need is the directory
+generators: `rpcInProcess("./contract")` became
+`clientInProcess("./<app>/server/api")`, which is one import line and no call-site
+change, since M3's stubs are same-named across the wire and in-process flavors.
+`examples/rpcsplit` kept its point — the reachable type closure — because its wire
+types moved to `shared/wire.vyrn` and the generated dispatch module still imports
+them from there rather than from the module whose signature merely names them.
 
 ## Acceptance
 

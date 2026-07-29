@@ -1,0 +1,80 @@
+<script>
+// GET / — the home page body (the shell now lives in routes/layout.vyx). The
+// recent-pastes list enters through a zero-parameter `load()` (RFC-0069 §0) so the
+// page is pure over its data and the CLIENT bundle can render it on a soft nav; the
+// browser create-island hydrates #app, booted by the /app.js head include.
+//
+// RFC-0070: the query is `lazy`, so on a client soft nav the shell (create form +
+// headings) paints INSTANTLY and the list region shows a one-row spinner until the
+// data arrives — then vyrn-dom patches only that region in. The FIRST load is full
+// SSR: the server always has the data, so it renders `Ready` (the real list, no
+// skeleton). The view is over `PageData<Array<Paste>>` (`Loading | Ready(T)`).
+//
+// RFC-0071: `head` and `data` are declared members of the `std/ui:Page` contract,
+// not names a scanner hunts for. Misspell either and the build says so.
+import { recent } from "../../server/api/pastes"
+import { Paste } from "../../shared/wire/paste"
+import { format, fromMillis } from "std/time"
+import { Head, Lazy, noHead, withModule, query, lazy } from "std/ui"
+import { i18n } from "std/i18n"
+import * as t from i18n("../../strings")
+
+/// The /app.js include that boots the browser create-island.
+export fn head() -> Head {
+    return withModule(noHead(), "/app.js")
+}
+
+/// The recent pastes, filled in after the shell paints. The `Lazy` return TYPE
+/// is what tells the generator to render-then-fill (RFC-0071 M2b) — nothing is
+/// read out of this body.
+export fn data() -> Lazy<Array<Paste>> {
+    return lazy(query(|| recent().pastes))
+}
+
+/// Whether the recent-pastes list is still loading (client soft nav only — the
+/// server always renders `Ready`).
+fn isLoading(d: PageData<Array<Paste>>) -> Bool {
+    return match d {
+        Loading => true,
+        Ready(uiPs) => false,
+    }
+}
+
+/// The recent pastes once ready (an empty list while loading — the `Loading` arm of
+/// the view never reaches this).
+fn recentRows(d: PageData<Array<Paste>>) -> Array<Paste> {
+    return match d {
+        Loading => [],
+        Ready(uiPs) => uiPs,
+    }
+}
+
+fn shownTitle(p: Paste) -> String {
+    if p.title.byteLength == 0 {
+        return t.binUntitled()
+    }
+    return p.title
+}
+</script>
+
+<template>
+<main>
+    <p class="sub">{{ t.appTagline() }}</p>
+    <div id="app"></div>
+    <h2>{{ t.binRecent() }}</h2>
+    <ul v-if="isLoading(data)" class="pastelist">
+        <li class="paste loading"><span class="spinner"></span><span class="pwhen">{{ t.binLoading() }}</span></li>
+    </ul>
+    <p v-else-if="recentRows(data).length == 0" class="empty">{{ t.binEmpty() }}</p>
+    <div v-else>
+        <p class="count">{{ t.binCount(recentRows(data).length) }}</p>
+        <ul class="pastelist">
+            <li class="paste" v-for="p in recentRows(data)" :key="p.id">
+                <a :href='"/p/" + p.id' data-nav="prefetch" class="ptitle">{{ shownTitle(p) }}</a>
+                <span class="plang">{{ p.lang }}</span>
+                <span class="pwhen">{{ t.binCreated(format(fromMillis(p.created))) }}</span>
+            </li>
+        </ul>
+    </div>
+</main>
+</template>

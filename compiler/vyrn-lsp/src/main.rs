@@ -634,15 +634,17 @@ fn handle_is_dev_entry(server: &Server, params: serde_json::Value) -> bool {
 }
 
 /// The dev-entry predicate (RFC-0064): the root module imports `std/rpc` **and**
-/// has an `rpcServer(…)` call site in it. That is precisely the set of server
-/// roots `vyrn dev` builds+serves — a client (`rpcClient`), an in-process module
-/// (`rpcInProcess`), a library, and a CLI example are all excluded.
+/// mounts a SERVER surface from it — `rpc("./server/api")` (RFC-0072 M3) or the
+/// single-module `rpcServer(…)`. That is precisely the set of server roots
+/// `vyrn dev` builds+serves — a client (`client` / `rpcClient`), an in-process
+/// module (`clientInProcess` / `rpcInProcess`), a library, and a CLI example are
+/// all excluded.
 ///
 /// Deviation from the RFC letter (documented in RFC-0064 "As landed"): the RFC
 /// wrote the predicate as "calls `serve(` from std/rpc", but `std/rpc` exposes no
-/// `serve` — a server root is composed by importing from the `rpcServer("…")`
-/// GENERATOR (`import { rpcHandle } from rpcServer("./contract")`). The generator
-/// import IS the "import present + call site" the RFC describes, so `rpcServer` is
+/// `serve` — a server root is composed by importing from the mounting GENERATOR
+/// (`import { rpcHandle } from rpc("./server/api")`). The generator import IS the
+/// "import present + call site" the RFC describes, so the mounting generator is
 /// the real spelling of `serve`.
 ///
 /// Cheap on purpose: a lex+parse of the ROOT source only (no linking, no
@@ -662,7 +664,7 @@ fn is_dev_entry(source: &str) -> bool {
     let calls_server = program
         .imports
         .iter()
-        .any(|i| matches!(&i.source, ImportSource::Generator { name, .. } if name == "rpcServer"));
+        .any(|i| matches!(&i.source, ImportSource::Generator { name, .. } if name == "rpc" || name == "rpcServer"));
     imports_rpc && calls_server
 }
 

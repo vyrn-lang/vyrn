@@ -1,0 +1,30 @@
+/// The paste procedures: the whole RPC surface of this app, and nothing else.
+///
+/// There is no forwarding layer. The file RFC-0072 M5 deleted (`contract.vyrn`)
+/// re-declared each signature below and returned `store.<same name>(req)`,
+/// because the generators needed one module to reflect over; now the directory is
+/// what they reflect over, so these bodies call the store directly — it is a
+/// sibling under `server/`.
+///
+/// Nothing here declares a route either. `rpc("./server/api")` mounts each export
+/// at `/_/pastes/<name>`, derived from this module's api-relative path and the
+/// export name. The names lose their `Paste` suffix in the move: `pastes/recent`
+/// already says what `listPastes` was spelling twice.
+import { CreateReq, IdReq, PasteList, PasteResult } from "../../shared/wire/paste"
+import * as store from "../store"
+
+/// Every paste, most-recent first. Zero-param => POST with an empty body.
+export fn recent() -> PasteList {
+    return store.listPastes()
+}
+
+/// Fetch one paste by id; `Err` when absent.
+export fn byId(req: IdReq) -> PasteResult {
+    return store.getPaste(req)
+}
+
+/// Create a paste (title/body/lang already validated by `fromJson`); returns the
+/// stored copy with its server-assigned id and `created` wall-clock timestamp.
+export fn create(req: CreateReq) -> PasteResult {
+    return store.createPaste(req)
+}

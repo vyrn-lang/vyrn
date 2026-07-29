@@ -3297,32 +3297,6 @@ gen fn vyxStripLoadFn(script: String) -> String {
     return script
 }
 
-/// The source text of the statement-leading data declaration ("" when there is
-/// none) — the set of names it references decides which now-dead imports the
-/// client prune may drop (only load-only names, never a name the load never used,
-/// so an enum-variant import like `Locale` for `En`/`Uk` survives).
-gen fn vyxLoadBody(script: String) -> String {
-    let sb = bytes(script)
-    let n = sb.length
-    let mut i = 0
-    let mut lineStart = 0
-    while i <= n {
-        if i == n || sb[i] == '\n' {
-            let line = trim(vyxSlice(sb, lineStart, i))
-            if vyxIsDataDecl(line) {
-                let brace = vyxFind(sb, bytes("{"), lineStart)
-                if brace >= 0 {
-                    let end = vyxMatchCurly(sb, brace)
-                    return vyxSlice(sb, lineStart, end)
-                }
-            }
-            lineStart = i + 1
-        }
-        i = i + 1
-    }
-    return ""
-}
-
 /// Whether `name` is CALLED (`name(`) anywhere in `corpus`, as a whole token — the
 /// signal of an inline helper invocation (`listPastes()` mid-view).
 fn vyxCalledInCorpus(corpus: String, name: String) -> Bool {
@@ -3520,10 +3494,18 @@ fn vyxLastIdent(s: String) -> String {
 }
 
 /// Whether an import binding `name` is dead in the client bundle: it must have been
-/// used by the (now-stripped) `load` AND be unused everywhere else. A name the load
-/// never referenced is NEVER dropped — the prune only removes what stripping `load`
-/// orphaned, so an import kept for a side effect the usage scan can't see (an enum
-/// variant imported via its type) always survives.
+/// used by the ORIGINAL script AND be unused everywhere that remains. A name the
+/// original body never referenced is NEVER dropped — the prune only removes what
+/// stripping the loader orphaned, so an import kept for a side effect the usage scan
+/// can't see (an enum variant imported via its type) always survives.
+///
+/// `loadBody` is the whole pre-strip body rather than the `data` declaration alone,
+/// because RFC-0071 M2b made a `data` accessor hand its work to a NAMED helper: the
+/// import the server call actually names appears in the HELPER, which
+/// [`vyxStripDeadHelpers`] then removes. Scanning only the accessor left every such
+/// import in the client bundle — which is how `examples/bin` shipped its paste store,
+/// its persistence layer and its file paths to the browser until RFC-0072 M5 put an
+/// audience rule in front of the same edge and it finally had a name.
 fn vyxImportNameDead(name: String, corpus: String, loadBody: String) -> Bool {
     return vyxWordUsed(loadBody, name) && vyxWordUsed(corpus, name) == false
 }
@@ -3570,6 +3552,20 @@ fn vyxStripLineComment(line: String) -> String {
         return line
     }
     return vyxSlice(lb, 0, idx)
+}
+
+/// `script` with its `import` lines dropped and the rest comment-stripped: what the
+/// page's own code referenced before the client strip ran. An imported name that
+/// appears ONLY on import lines was never used by the page, so the prune must leave
+/// it alone (see [`vyxImportNameDead`]).
+fn vyxNonImportBody(script: String) -> String {
+    let mut out = ""
+    for line in vyxLines(script) {
+        if trim(line).startsWith("import ") == false {
+            out = out + vyxStripLineComment(line) + " "
+        }
+    }
+    return out
 }
 
 /// The lines of `lines` except index `skip`, comment-stripped and space-joined —
@@ -3768,7 +3764,9 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     // name they still reference alive). `dataType`/`hasLoad` were read above from
     // the ORIGINAL script, so the client `page(d: Data)` signature stays correct.
     if client {
-        let loadBody = vyxLoadBody(restScript)
+        // The whole pre-strip body: the loader AND the helpers it reached, since
+        // the import a server call names lives in the helper, not the accessor.
+        let loadBody = vyxNonImportBody(restScript)
         restScript = vyxStripLoadFn(restScript)
         // RFC-0071 M2b: a `data` accessor hands its work to a NAMED function, so
         // cutting the accessor leaves that function behind — dead in the browser

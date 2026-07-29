@@ -1,0 +1,51 @@
+<script>
+// GET /about — static prose plus a live CLDR-plural demo (en + uk). The shell
+// (header/nav/stylesheets) now lives in routes/layout.vyx; this is just the body.
+import { i18n } from "std/i18n"
+import { tBinCount, setLocale, locale, Locale } from i18n("../../strings")
+
+type PluralRow = { loc: String, n: Int64, msg: String }
+
+// The count message under an explicit locale, restoring the current locale after.
+fn countIn(loc: String, n: Int64) -> String {
+    let saved = locale()
+    if loc == "uk" {
+        setLocale(Uk)
+    } else {
+        setLocale(En)
+    }
+    let msg = tBinCount(n)
+    setLocale(saved)
+    return msg
+}
+
+fn pluralRow(loc: String, n: Int64) -> PluralRow {
+    return PluralRow { loc: loc, n: n, msg: countIn(loc, n) }
+}
+
+fn pluralRows() -> Array<PluralRow> {
+    return [
+        pluralRow("en", 1),
+        pluralRow("en", 2),
+        pluralRow("en", 5),
+        pluralRow("uk", 1),
+        pluralRow("uk", 2),
+        pluralRow("uk", 5),
+    ]
+}
+</script>
+
+<template>
+<main>
+    <h2>About</h2>
+    <p>A tiny pastebin dogfooding the Vyrn stack: std/html, std/ui pages, std/rpc, std/i18n, std/tw, Map on the wire, stored-closure middleware, and — the point — persistence to disk via readFile/writeFile.</p>
+    <h3>CLDR plurals</h3>
+    <p class="sub">The same count message for 1 / 2 / 5 — English has two forms, Ukrainian three (one / few / many).</p>
+    <table class="plurals">
+        <thead><tr><th>locale</th><th>n</th><th>message</th></tr></thead>
+        <tbody>
+            <tr v-for="r in pluralRows()" :key='r.loc + "-" + r.n.toString()'><td>{{ r.loc }}</td><td>{{ r.n }}</td><td>{{ r.msg }}</td></tr>
+        </tbody>
+    </table>
+</main>
+</template>

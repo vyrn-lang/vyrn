@@ -168,7 +168,14 @@ no framework, nothing new in the shim.
   (RFC-0040 §2), so the callback you passed at the call site runs with a decoded
   `Validation<T>`. The proc→dispatcher name is the shared convention:
   `vyrnRpcDone` + the procedure name with its first letter uppercased
-  (`getUser` → `vyrnRpcDoneGetUser`). A network failure reports **status 0**,
+  (`getUser` → `vyrnRpcDoneGetUser`). A module built with the DIRECTORY generator
+  (`client("./server/api")`, RFC-0072 M3) imports the same extern with the
+  procedure and its derived path as separate arguments —
+  `vyrnRpcCall(proc, path, body)` — because a derived or pinned path no longer
+  says which dispatcher owns the reply, and inverting the path template in the
+  host would be a second implementation of the derivation rule. The transport
+  dispatches on arity, so one runtime serves both. A network failure reports
+  **status 0**,
   which the generated unifier turns into an `rpc.transport` "unreachable" `Issue`.
   `runVyrnRpc(bytes, { baseUrl })` wires it onto `runVyrn` in one call.
 

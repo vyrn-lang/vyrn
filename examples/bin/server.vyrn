@@ -1,11 +1,23 @@
-/// The bin server root: RPC handler, page router, OpenAPI document, and theme
-/// stylesheet, composed from the contract and the routes directory.
-import { rpcServer } from "std/rpc"
-import { rpcHandle } from rpcServer("./contract")
+/// The bin server root: RPC handler, page routers, OpenAPI document, and theme
+/// stylesheet, composed from the api directory and the two route trees.
+///
+/// It is the one module that legitimately names both sides of the wire, and the
+/// manifest key that NAMES it is what gives it its audience (RFC-0072 M1) — no
+/// path segment could say it, and blessing the filename would be the hardcoding
+/// the `audience` key exists to avoid.
+///
+/// Two page trees, because they have two audiences. `app/routes` is universal:
+/// server-rendered here AND compiled into the browser bundle, so a soft nav
+/// paints the next page itself. `server/routes` holds the raw endpoint, which
+/// answers with `respond` and is never bundled — it is server-only, and saying so
+/// in the tree is the whole point of the milestone.
+import { rpc } from "std/rpc"
+import { rpcHandle } from rpc("./server/api")
 import { openapi } from "std/openapi"
-import { openapiJson } from openapi("./contract")
+import { openapiJson } from openapi("./server/api/pastes")
 import { pagesThemed } from "std/ui"
-import { route } from pagesThemed("./routes", "./theme.json")
+import { route } from pagesThemed("./app/routes", "./theme.json")
+import * as rawPages from pagesThemed("./server/routes", "./theme.json")
 import { tw } from "std/tw"
 import * as theme from tw("./theme.json")
 
@@ -46,7 +58,12 @@ fn routed(req: Request) -> Response {
     if req.method == "GET" && req.path == "/openapi.json" {
         return Response { status: 200, contentType: "application/json", body: openapiJson(), vary: "" }
     }
-    // The RPC surface (/rpc/*) claims its paths first; everything else routes.
+    // The server-only route tree owns its prefix outright; a server root is
+    // exactly where "which surface answers which prefix" belongs.
+    if req.path.startsWith("/raw/") {
+        return rawPages.route(req)
+    }
+    // The derived RPC surface (/_/*) claims its paths first; everything else routes.
     return match rpcHandle(req) {
         Some(r) => r,
         None => route(req),
@@ -56,10 +73,10 @@ fn routed(req: Request) -> Response {
 fn main() -> Int64 {
     // A read-only smoke over handle. `vyrn serve`/`vyrn dev` run main() once at
     // startup, so it must not mutate the live store.
-    let list = handle(Request { method: "POST", path: "/rpc/listPastes", headers: [:], body: "" })
-    print("listPastes -> \{list.status}: \{list.body}")
-    let bad = handle(Request { method: "POST", path: "/rpc/createPaste", headers: [:], body: "{\"title\":\"x\",\"body\":\"\",\"lang\":\"klingon\"}" })
-    print("createPaste(bad) -> \{bad.status}: \{bad.body}")
+    let list = handle(Request { method: "POST", path: "/_/pastes/recent", headers: [:], body: "" })
+    print("pastes/recent -> \{list.status}: \{list.body}")
+    let bad = handle(Request { method: "POST", path: "/_/pastes/create", headers: [:], body: "{\"title\":\"x\",\"body\":\"\",\"lang\":\"klingon\"}" })
+    print("pastes/create(bad) -> \{bad.status}: \{bad.body}")
     let home = handle(Request { method: "GET", path: "/", headers: [:], body: "" })
     print("/ -> \{home.status}")
     let miss = handle(Request { method: "GET", path: "/p/deadbeef", headers: [:], body: "" })

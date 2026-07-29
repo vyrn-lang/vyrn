@@ -1,0 +1,14 @@
+/// The item procedures. Every export is a procedure of the derived surface
+/// (contract `std/rpc:Api`), reached at `<module>/<name>` — here `items/byId`.
+///
+/// There is no forwarding layer: the body calls the store directly, because the
+/// store is a sibling under `server/`. That is the whole of what RFC-0072 M5
+/// deleted — the file that used to sit here re-declared this signature and
+/// returned `store.getItem(req)`.
+import { GetReq, ItemResult } from "../../shared/wire"
+import * as store from "../store"
+
+/// Fetch one item by id.
+export fn byId(req: GetReq) -> ItemResult {
+    return store.getItem(req)
+}
