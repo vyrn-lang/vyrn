@@ -718,6 +718,48 @@ of the measurement itself, with fuel metering now on. The interpreted column
 reproduces its own baseline, so the two are still the same build differing only
 in engine.
 
+## As landed: one artifact per MODULE, not per generator
+
+Found by dumping the `.ll` files a cold `.vyx` open compiles. Three of them were
+1,970,036 / 1,970,037 / 1,970,038 bytes, and diffing two gave a one-line answer:
+
+```
+36897c36897
+<   %t14 = call ptr @vyrn_vyxPageThemed(ptr %t6, ptr %t13)
+---
+>   %t14 = call ptr @vyrn_vyxLayoutThemed(ptr %t6, ptr %t13)
+```
+
+Two megabytes of identical IR, compiled three times. `artifact_key` was keyed on
+`(module fingerprint, function)`, and `std/vyx` exports three page generators —
+so the module's whole linked program went through clang once per generator, and
+the difference between the three programs was which one `main` called.
+
+The fix is the argv trick applied one slot further. Arguments already travel as
+argv, which is what makes an artifact argument-independent; now the generator's
+NAME travels as `args()[0]` too, and the synthesized `main` is a chain comparing
+it against each of the module's exported, `String`-only, `String`-returning
+`gen fn`s. A name outside that set traps rather than emitting an empty module,
+and `run` checks the requested generator is in the set BEFORE the artifact cache
+can hand back a sibling's compile — otherwise a decline would have become a trap.
+
+This grows nothing: the whole linked program was always emitted, so the siblings'
+bodies were already in every artifact. What went away is duplicate compiles.
+
+| `examples/bin`, generation cache cleared | before | after |
+|---|---|---|
+| `emit-gen server.vyrn`, artifacts compiled | 8 | **6** |
+| `emit-gen server.vyrn`, clang total | 2,676 ms | **1,961 ms** |
+| cold `didOpen` of `app/routes/index.vyx` | 4,253 ms | **3,535 ms** |
+| keystroke, median of 15 | 53–55 ms | 52–55 ms |
+
+The key needed nothing added to stay honest when a module gains or loses a
+generator: the fingerprint hashes the module's sources and the no-fingerprint
+fallback hashes the whole program, so the dispatch set is covered either way. The
+on-disk artifacts carry a scheme tag so a per-function artifact from an older
+build cannot be read as a per-module one — belt and braces, since the key already
+carries the compiler binary's identity and a rebuild invalidates everything.
+
 ## Milestones
 
 - **M1 — embed the runtime, one generator, no capabilities.** DONE. wasmtime as

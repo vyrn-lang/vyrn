@@ -143,17 +143,31 @@ fn run(
     // String-only, because the arguments travel as argv rather than being baked
     // into the module — which is what lets ONE compiled artifact serve every
     // call. Every generator in this repo takes constant paths and names.
-    let argv: Vec<String> = args
-        .iter()
-        .map(|a| match a {
-            ConstVal::Str(s) => Some(s.clone()),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| decline("a non-String constant argument"))?;
+    //
+    // argv[0] is the generator's NAME, which `main` dispatches on: the artifact
+    // is one per MODULE, not one per generator, so it has to be told which of
+    // the module's generators this call wants.
+    let mut argv: Vec<String> = vec![fn_name.to_string()];
+    argv.extend(
+        args.iter()
+            .map(|a| match a {
+                ConstVal::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| decline("a non-String constant argument"))?,
+    );
+
+    // Eagerly, because the key no longer names the target: an artifact compiled
+    // for a sibling generator would be a cache HIT here, and dispatching to a
+    // name the wrapper never emitted is a trap rather than a decline.
+    match program.functions.iter().find(|f| f.name == fn_name) {
+        Some(f) if dispatchable(f) && f.params.len() == args.len() => {}
+        _ => return Err(decline("the generator is not one this path serves")),
+    }
 
     let t = std::time::Instant::now();
-    let key = artifact_key(program, fn_name, inputs.sources_fingerprint.as_deref());
+    let key = artifact_key(program, inputs.sources_fingerprint.as_deref());
     trace("key", t.elapsed());
 
     let t = std::time::Instant::now();
@@ -162,7 +176,7 @@ fn run(
     // file written by a previous process — see `artifact_key`.
     let persist = inputs.sources_fingerprint.is_some();
     let mut source = run_module(&key, persist, &argv, program, inputs, &mut reads, || {
-        let wrapper = wrapper_program(program, fn_name, argv.len())
+        let wrapper = wrapper_program(program)
             .ok_or_else(|| decline("the wrapper program cannot be synthesized"))?;
         compile_to_wasm(&key, &wrapper)
     })?;
@@ -239,73 +253,92 @@ fn serve(
     }
 }
 
-/// The program actually compiled: the generator's own module with `is_gen`
-/// cleared, plus a `main` that calls the target with `args()` and prints the
-/// result.
+/// Whether the engine can serve this function at all: an exported `gen fn`
+/// taking only `String`s and returning one.
+///
+/// A `gen fn` may return `Code` directly, which the interpreter renders for it
+/// (RFC-0054); here that would print the handle, so it is not dispatchable —
+/// nothing in this repo does it, and a wrong answer is worse than a slow one.
+/// `exported` because the loader only ever resolves a generator import to an
+/// exported `gen fn`, so anything else could not be asked for.
+fn dispatchable(f: &Function) -> bool {
+    f.is_gen
+        && f.exported
+        && f.ret == Type::Str
+        && f.params.iter().all(|par| par.ty == Type::Str)
+}
+
+/// The program actually compiled: the generator's module with `is_gen` cleared,
+/// plus a `main` that dispatches on `args()[0]` to whichever of the module's
+/// generators was asked for and prints the result.
 ///
 /// Clearing `is_gen` is what makes it compilable — a `gen fn` is comptime-only
 /// by construction. Everything else about the function is untouched, which is
 /// why the output matches.
 ///
-/// The arguments come from `args()` (argv[1..], RFC-0014) rather than being
-/// baked in as literals, so the artifact does not depend on them: `std/vyx`
-/// compiles ten pages with one compilation, not ten.
-fn wrapper_program(program: &Program, fn_name: &str, arity: usize) -> Option<Program> {
+/// Both the arguments and the generator's NAME come from `args()` (argv[1..],
+/// RFC-0014) rather than being baked in, so the artifact depends on neither:
+/// one artifact per module, serving every generator in it for every call.
+/// That is not a saving of code size — the whole linked program is emitted
+/// either way, so the siblings' bodies were always in there — it is a saving of
+/// COMPILES. `std/vyx` exports three page generators over the same two megabytes
+/// of IR; keying on the function compiled it three times.
+fn wrapper_program(program: &Program) -> Option<Program> {
     // A generator module with its own `main` would collide with the synthesized
     // one. Rare enough not to be worth renaming around.
     if program.functions.iter().any(|f| f.name == "main") {
         return None;
     }
     let mut p = program.clone();
-    {
-        let target = p.functions.iter().find(|f| f.name == fn_name)?;
-        if target.params.len() != arity {
-            return None;
-        }
-        if target.params.iter().any(|par| par.ty != Type::Str) {
-            return None;
-        }
-        // A `gen fn` may return `Code` directly, which the interpreter renders
-        // for it (RFC-0054). Here that would print the handle, so decline —
-        // nothing in this repo does it, and a wrong answer is worse than a slow
-        // one.
-        if target.ret != Type::Str {
-            return None;
-        }
+    // `args()[i]` — the parser's own desugar for indexing.
+    let argv = |i: usize| {
+        call("at", vec![call("args", vec![]), Expr::Int(i as i64)])
+    };
+    let mut body = vec![Stmt::Let {
+        name: "g".into(),
+        mutable: false,
+        ty: Some(Type::Str),
+        value: argv(0),
+        line: 0,
+    }];
+    for f in p.functions.iter().filter(|f| dispatchable(f)) {
+        body.push(Stmt::If {
+            cond: Expr::Binary {
+                op: vyrn_frontend::ast::BinOp::Eq,
+                lhs: Box::new(var("g")),
+                rhs: Box::new(Expr::Str(f.name.clone())),
+                line: 0,
+            },
+            then_block: Block {
+                stmts: vec![
+                    Stmt::Expr(call(
+                        "print",
+                        vec![call(&f.name, (0..f.params.len()).map(|i| argv(i + 1)).collect())],
+                    )),
+                    Stmt::Return { value: Some(Expr::Int(0)), line: 0 },
+                ],
+            },
+            else_block: None,
+            line: 0,
+        });
     }
-    // Every `gen fn`, not just the target: a generator calls its helpers, and in
-    // this repo those helpers are themselves `gen fn` (the convention that keeps
-    // generation-only I/O out of shipped binaries). Clearing only the target
-    // emitted calls into functions codegen had skipped, and the link failed —
-    // which is why M1 could not have served `std/tw` even with the capabilities.
+    // Unreachable — `run` checks the target is dispatchable before it can hit a
+    // cached artifact. Falling off the chain would emit an EMPTY module, which
+    // is a silently wrong program, so read past the end of `args()` instead and
+    // let the bounds check trap.
+    body.push(Stmt::Expr(call("print", vec![argv(1_000_000_000)])));
+    body.push(Stmt::Return { value: Some(Expr::Int(0)), line: 0 });
+
+    // Every `gen fn`, not just the dispatched ones: a generator calls its
+    // helpers, and in this repo those helpers are themselves `gen fn` (the
+    // convention that keeps generation-only I/O out of shipped binaries).
+    // Clearing only the target emitted calls into functions codegen had skipped,
+    // and the link failed — which is why M1 could not have served `std/tw` even
+    // with the capabilities.
     for f in p.functions.iter_mut() {
         f.is_gen = false;
     }
-
-    let call = Expr::Call {
-        name: fn_name.to_string(),
-        // `args()[i]` — the parser's own desugar for indexing.
-        args: (0..arity)
-            .map(|i| Expr::Call {
-                name: "at".to_string(),
-                args: vec![
-                    Expr::Call { name: "args".to_string(), args: vec![], line: 0 },
-                    Expr::Int(i as i64),
-                ],
-                line: 0,
-            })
-            .collect(),
-        line: 0,
-    };
-    p.functions.push(func(
-        "main",
-        Vec::new(),
-        Type::Int,
-        vec![
-            Stmt::Expr(Expr::Call { name: "print".to_string(), args: vec![call], line: 0 }),
-            Stmt::Return { value: Some(Expr::Int(0)), line: 0 },
-        ],
-    ));
+    p.functions.push(func("main", Vec::new(), Type::Int, body));
     // RFC-0076 M3b: the builtins that hand back a structured value get an entry
     // point plus the decoders it needs, synthesized before the emitter sees the
     // program (so the string pool, the ownership analysis and the array lowering
@@ -948,9 +981,16 @@ fn rd32(data: &[u8], at: i32) -> Option<u32> {
     Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?))
 }
 
-/// What a compiled artifact is keyed on: the generator's whole module closure
-/// and the function. NOT the arguments — those arrive as argv, so one artifact
-/// serves every call, which is what makes a cache hit the common case.
+/// What a compiled artifact is keyed on: the generator's whole module closure.
+/// NOT the function and NOT the arguments — both arrive as argv, so one artifact
+/// serves every generator in the module for every call, which is what makes a
+/// cache hit the common case. Keying on the function too compiled `std/vyx`'s
+/// three page generators separately: two megabytes of identical IR differing by
+/// the one `call` line, three times, ~950 ms of clang per cold page open.
+///
+/// Nothing needs adding to keep the key honest when a module gains or loses a
+/// generator: the fingerprint hashes the module's sources and the fallback
+/// hashes the whole program, so either way the dispatch set is covered.
 ///
 /// Two keys, because there are two ways to describe that closure and only one of
 /// them is cheap. The loader hands over content hashes of the generator's own
@@ -965,12 +1005,14 @@ fn rd32(data: &[u8], at: i32) -> Option<u32> {
 /// Only the fingerprinted key crosses to disk, and it carries the compiler's own
 /// identity: the artifact is this codegen's output, so a rebuilt `vyrn` must not
 /// inherit the last one's artifacts.
-fn artifact_key(program: &Program, fn_name: &str, fingerprint: Option<&str>) -> String {
+fn artifact_key(program: &Program, fingerprint: Option<&str>) -> String {
     use std::fmt::Write as _;
 
+    // The `gen1` tag is what keeps a per-function artifact written by an older
+    // build out of this scheme's namespace — same directory, same hash shape.
     if let Some(fp) = fingerprint {
         return vyrn_frontend::hash::sha256_hex(
-            format!("{fn_name}\u{0}{}\u{0}{fp}", compiler_identity()).as_bytes(),
+            format!("gen1\u{0}{}\u{0}{fp}", compiler_identity()).as_bytes(),
         );
     }
 
@@ -987,7 +1029,7 @@ fn artifact_key(program: &Program, fn_name: &str, fingerprint: Option<&str>) -> 
     // Hashed straight out of `Debug` into the hasher, so nothing is materialized
     // to hash it.
     let mut sink = Sink(0xcbf2_9ce4_8422_2325);
-    let _ = write!(sink, "{fn_name}\u{0}{program:?}");
+    let _ = write!(sink, "gen1\u{0}{program:?}");
     format!("{:016x}", sink.0)
 }
 
