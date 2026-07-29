@@ -120,7 +120,11 @@ invariants — statics below the halfway mark, no import the shim does not expor
   reproduce clang's offsets, or the aggregate convention does not fall out
   cleanly, the RFC stops here having cost one milestone.
 - **M1 — module encoder.** Sections, functions, locals, memory, globals,
-  imports/exports, via `wasm-encoder`. Validated by `Module::new`.
+  imports/exports, via `wasm-encoder`. Validated by RUNNING the output under a
+  `wasmtime` binary — not by `wasmtime::Module::new`, as an earlier draft of
+  this line said: wasmtime lives in the excluded `vyrn-genwasm` precisely so
+  `vyrn-codegen` builds with no LLVM, clang or sysroot, and M0 already
+  established shelling out via `VYRN_WASMTIME` as the posture.
 - **M2 — lowering.** The emit sites. Structured control flow straight from the
   AST. Before starting, re-verify the "no phis in loop headers, no indirect
   calls" measurement across every example rather than the two sampled.
