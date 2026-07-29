@@ -888,3 +888,47 @@ refused precisely because it would otherwise be silent — and generics are a
 monomorphization pass that already exists in the LLVM emitter and runs on the
 wrong side of the boundary. Builtins are 19 but they are 14 different things,
 which is the row that does not compress.
+
+## M2d — what stopped it before it started
+
+Three dispatches of M2d died on transient server errors without touching the
+tree. Reading the code to write a better brief turned up the thing that actually
+matters, and it reframes the milestone.
+
+**`coerce` appears zero times in `direct.rs`.** The direct backend has no
+coercion concept. It lowers a value when `repr()` already agrees on both sides,
+and `ty_gap` refuses everything that would need reconciling — which is precisely
+why validated types, `modify` parameters, `SmallArray`, `Map` indexing and a
+two-word `Option` payload are all gaps rather than bugs. The refusals were not
+five separate omissions; they are one absence wearing five hats.
+
+So M2d is not "emit the check at the coerce site". There is no coerce site. The
+LLVM backend's `coerce` (`lib.rs` ~2406) does four things at once:
+
+1. runs a `where` predicate and traps — the validation this milestone wants
+2. re-tags a function value between fn-typed spellings (RFC-0037)
+3. re-materializes an `Option`/`Result` whose payload representation changed
+4. numeric conversion between widths
+
+Item 3 is the same shape as the `Option`-of-two-word-payload refusal from M2c,
+and item 4 is the sized-int arithmetic blocker. **A coercion path in the direct
+backend is therefore worth more than the 14 examples `where` refinements
+account for** — it is the common cause under several rows of the blocker table.
+
+The decision about *when* validation is required stays where it is
+(`Type::Named`, `from != to`, `predicate.is_some()`, minus
+`finite::string_flow_proven`) and must be extracted into a function both
+backends call rather than written a second time. Same for the trap wording,
+which is byte-identical today:
+
+- record base: ``error: validation failed: `{name}` violates its `where` clause``
+- scalar base: ``error: validation failed for `{name}` ``
+
+And `emit_predicate_cond` carries a comment saying it is deliberately the ONE
+place a predicate is lowered, shared with the RFC-0018 JSON decode path "so the
+two never drift". A direct backend that lowers predicates its own way breaks
+that property silently.
+
+**Revised plan: M2d becomes the coercion path, with validation as its first
+client.** The gap list shrinks by more than the refinement row, and the pieces
+that would otherwise be built twice get built once.
