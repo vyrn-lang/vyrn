@@ -2352,76 +2352,13 @@ impl<'a> Gen<'a> {
     }
 
     /// The LLVM type string for `ty`. Records lower to a `{ .. }` literal struct.
+    ///
+    /// Substitution is this emitter's (it knows the monomorphization it is in);
+    /// the shape rules themselves are [`llt_of`], because RFC-0077's direct wasm
+    /// backend needs the same answers and two matches on `Type` would be two
+    /// sources of truth for one fact.
     fn llt(&self, ty: &Type) -> String {
-        match self.resolve(ty) {
-            Type::Int => "i64".into(),
-            Type::IntN { bits, .. } => format!("i{bits}"),
-            Type::Float => "double".into(),
-            Type::Float32 => "float".into(),
-            Type::Bool => "i1".into(),
-            Type::Str => "ptr".into(),
-            Type::Unit => "void".into(),
-            // Option/Result both lower to { tag, payload }; payload is i64.
-            // { tag, word0, word1 } — two payload words so a `Ref` (which is two
-            // words) fits inline without a heap box.
-            Type::Option(_) | Type::Result(..) => "{ i1, i64, i64 }".into(),
-            // A generational reference is { i64 slot, i64 generation } for any T
-            // (the payload is boxed), so it is a fixed-size handle.
-            Type::Ref(_) => "{ i64, i64 }".into(),
-            // A growable array is { ptr data, i64 len, i64 cap }.
-            Type::Array(_) => "{ ptr, i64, i64 }".into(),
-            // A `Map<String, V>` (RFC-0028) is two parallel growable buffers
-            // sharing one length/capacity: { ptr keys, ptr values, i64 len,
-            // i64 cap }. Keys are `ptr` (String); values are `llt(V)`-stride.
-            Type::Map(..) => "{ ptr, ptr, i64, i64 }".into(),
-            // A fixed-size array lowers to the LLVM value aggregate [N x T].
-            Type::ArrayN(inner, n) => format!("[{n} x {}]", self.llt(&inner)),
-            // A small-buffer array (RFC-0056) lowers to
-            // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — `cap` is the
-            // state discriminant (`cap == N` inline; `cap > N` spilled onto
-            // `data`). Every element access branches on it to pick the base.
-            Type::SmallArray(inner, n) => {
-                format!("{{ i64, i64, ptr, [{n} x {}] }}", self.llt(&inner))
-            }
-            // A task handle (RFC-0025) is an opaque `ptr` to the shim's task
-            // record (thread handle + heap frame); `t.join()` blocks on it and
-            // loads the result from the frame's leading slot.
-            Type::Task(_) => "ptr".into(),
-            // A logger handle is a `ptr` to its name string.
-            Type::Logger => "ptr".into(),
-            Type::Record(fields) => {
-                let inner: Vec<String> = fields.iter().map(|f| self.llt(&f.ty)).collect();
-                format!("{{ {} }}", inner.join(", "))
-            }
-            // A user enum is { i64 tag, i64 payload0, ... } — one payload slot per
-            // the widest variant (payloads are i64 in native).
-            Type::Enum(vs) => {
-                let arity = vs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
-                enum_ll(arity)
-            }
-            // RFC-0076 M3a: on the generator-host path `Code` (RFC-0054) is an
-            // opaque i64 HANDLE into the host's piece arena — the one `Named`
-            // that survives `resolve` undeclared. i64 is also what makes it
-            // travel for free: `box_payload` passes an i64 through, so a `Code`
-            // in an Option/Array needs no case of its own.
-            Type::Named(ref n) if n == "Code" && GEN_HOST.with(|g| g.get()) => "i64".into(),
-            // Unreachable after `resolve` (Named/App/transformers/params reduced away).
-            Type::Named(_) | Type::App(..) | Type::Omit(..) | Type::Pick(..) | Type::Merge(..)
-            | Type::Partial(..) | Type::Param(_) => "void".into(),
-            // A bare integer type argument (RFC-0056) never stands alone as a
-            // runtime type — `SmallArray` consumes it before lowering.
-            Type::ConstInt(_) => "void".into(),
-            // A stored function value (RFC-0037) is a synthesized closed enum:
-            // `{ i64 tag, i64 payload }` — tag selects the source (one variant
-            // per named function / lifted lambda), payload is 0 or a pointer to
-            // the malloc'd capture block. v1 `fn`-typed PARAMETERS never reach
-            // `llt` (they monomorphize away before lowering).
-            Type::Fn(..) => "{ i64, i64 }".into(),
-            // `Err` is the checker's recovery sentinel; a program with any `Err`
-            // already has diagnostics and never reaches codegen. Lower to void
-            // as a defensive fallback (never observed in practice).
-            Type::Err => "void".into(),
-        }
+        llt_of(&vyrn_frontend::types::substitute(ty, self.subst), self.types)
     }
 
     /// Coerce a value of type `from` to type `to`, emitting a field-by-field
@@ -10613,6 +10550,87 @@ fn gather_codec_strings(
             gather_codec_strings(&inner, types, out, seen);
         }
         _ => {}
+    }
+}
+
+/// The LLVM shape of a Vyrn type: the ONE match that turns a type into a memory
+/// layout, so `Gen::llt` and RFC-0077's direct wasm backend cannot come to
+/// different conclusions about the same value. `layout::of_ll` parses what this
+/// prints, which is what keeps size and offset arithmetic downstream of lowering
+/// rather than beside it.
+///
+/// `ty` is resolved here but NOT substituted — a caller inside a monomorphized
+/// body substitutes first (`Gen::llt` does), because only it knows which
+/// instantiation it is in.
+pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
+    match vyrn_frontend::types::resolve(ty, types) {
+        Type::Int => "i64".into(),
+        Type::IntN { bits, .. } => format!("i{bits}"),
+        Type::Float => "double".into(),
+        Type::Float32 => "float".into(),
+        Type::Bool => "i1".into(),
+        Type::Str => "ptr".into(),
+        Type::Unit => "void".into(),
+        // Option/Result both lower to { tag, payload }; payload is i64.
+        // { tag, word0, word1 } — two payload words so a `Ref` (which is two
+        // words) fits inline without a heap box.
+        Type::Option(_) | Type::Result(..) => "{ i1, i64, i64 }".into(),
+        // A generational reference is { i64 slot, i64 generation } for any T
+        // (the payload is boxed), so it is a fixed-size handle.
+        Type::Ref(_) => "{ i64, i64 }".into(),
+        // A growable array is { ptr data, i64 len, i64 cap }.
+        Type::Array(_) => "{ ptr, i64, i64 }".into(),
+        // A `Map<String, V>` (RFC-0028) is two parallel growable buffers
+        // sharing one length/capacity: { ptr keys, ptr values, i64 len,
+        // i64 cap }. Keys are `ptr` (String); values are `llt(V)`-stride.
+        Type::Map(..) => "{ ptr, ptr, i64, i64 }".into(),
+        // A fixed-size array lowers to the LLVM value aggregate [N x T].
+        Type::ArrayN(inner, n) => format!("[{n} x {}]", llt_of(&inner, types)),
+        // A small-buffer array (RFC-0056) lowers to
+        // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — `cap` is the
+        // state discriminant (`cap == N` inline; `cap > N` spilled onto
+        // `data`). Every element access branches on it to pick the base.
+        Type::SmallArray(inner, n) => {
+            format!("{{ i64, i64, ptr, [{n} x {}] }}", llt_of(&inner, types))
+        }
+        // A task handle (RFC-0025) is an opaque `ptr` to the shim's task
+        // record (thread handle + heap frame); `t.join()` blocks on it and
+        // loads the result from the frame's leading slot.
+        Type::Task(_) => "ptr".into(),
+        // A logger handle is a `ptr` to its name string.
+        Type::Logger => "ptr".into(),
+        Type::Record(fields) => {
+            let inner: Vec<String> = fields.iter().map(|f| llt_of(&f.ty, types)).collect();
+            format!("{{ {} }}", inner.join(", "))
+        }
+        // A user enum is { i64 tag, i64 payload0, ... } — one payload slot per
+        // the widest variant (payloads are i64 in native).
+        Type::Enum(vs) => {
+            let arity = vs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
+            enum_ll(arity)
+        }
+        // RFC-0076 M3a: on the generator-host path `Code` (RFC-0054) is an
+        // opaque i64 HANDLE into the host's piece arena — the one `Named`
+        // that survives `resolve` undeclared. i64 is also what makes it
+        // travel for free: `box_payload` passes an i64 through, so a `Code`
+        // in an Option/Array needs no case of its own.
+        Type::Named(ref n) if n == "Code" && GEN_HOST.with(|g| g.get()) => "i64".into(),
+        // Unreachable after `resolve` (Named/App/transformers/params reduced away).
+        Type::Named(_) | Type::App(..) | Type::Omit(..) | Type::Pick(..) | Type::Merge(..)
+        | Type::Partial(..) | Type::Param(_) => "void".into(),
+        // A bare integer type argument (RFC-0056) never stands alone as a
+        // runtime type — `SmallArray` consumes it before lowering.
+        Type::ConstInt(_) => "void".into(),
+        // A stored function value (RFC-0037) is a synthesized closed enum:
+        // `{ i64 tag, i64 payload }` — tag selects the source (one variant
+        // per named function / lifted lambda), payload is 0 or a pointer to
+        // the malloc'd capture block. v1 `fn`-typed PARAMETERS never reach
+        // `llt` (they monomorphize away before lowering).
+        Type::Fn(..) => "{ i64, i64 }".into(),
+        // `Err` is the checker's recovery sentinel; a program with any `Err`
+        // already has diagnostics and never reaches codegen. Lower to void
+        // as a defensive fallback (never observed in practice).
+        Type::Err => "void".into(),
     }
 }
 

@@ -178,14 +178,20 @@ impl Module {
 
     /// Define a function, giving its index.
     ///
-    /// `frame` is the size in bytes of its shadow-stack frame — statically known
-    /// for every function the emitter produces (M0: 17,270 allocas, none of them
-    /// dynamically sized). The prologue and epilogue that claim and release it
-    /// are emitted here so no body has to remember to.
+    /// `frame` is a reservation in bytes at the bottom of its shadow-stack frame;
+    /// a body grows the rest with [`Frame::alloc`]. Frames are statically sized
+    /// either way (M0: 17,270 allocas, none of them dynamically sized) — the size
+    /// is simply not known until the body has been walked, which is why the body
+    /// is BUFFERED here and the prologue written in front of it afterwards. The
+    /// alternative was a sizing pre-pass over the AST, i.e. a second traversal
+    /// that has to agree with the first about which expressions need a slot.
     ///
-    /// Local indices: parameters are `0..params.len()`, then [`Frame::base`] —
+    /// Locals are dynamic for the same reason: `locals` are pre-declared (a body
+    /// that wants fixed indices), and [`Frame::local`] appends after them. So
+    /// indices are parameters `0..params.len()`, then [`Frame::base`] —
     /// allocated even for an empty frame, so the numbering does not depend on
-    /// whether a function happens to need stack — then `locals` after it.
+    /// whether a function happens to need stack — then `locals`, then whatever
+    /// the body asked for.
     pub fn func(
         &mut self,
         params: &[ValType],
@@ -194,18 +200,49 @@ impl Module {
         frame: u32,
         build: impl FnOnce(&mut Frame),
     ) -> u32 {
+        let mut f = Frame::new(params.len(), locals, frame);
+        build(&mut f);
+        self.add(params, results, f)
+    }
+
+    /// Install an already-built body as a function, giving its index.
+    ///
+    /// The half of [`Module::func`] that a lowering wants when it needs the
+    /// module WHILE it emits — interning a string literal mid-expression, say,
+    /// which a `build` closure borrowing `&mut Module` could not do.
+    pub fn add(&mut self, params: &[ValType], results: &[ValType], f: Frame) -> u32 {
         let t = self.ty(params, results);
         self.funcs.function(t);
-        let mut decl = vec![(1u32, ValType::I32)]; // the frame base
-        decl.extend(locals.iter().map(|&l| (1u32, l)));
-        let base = params.len() as u32;
-        let frame = round_up(frame, FRAME_ALIGN);
-        let mut f = Frame { f: Function::new(decl), frame, base };
-        f.prologue();
-        build(&mut f);
-        f.epilogue();
-        f.f.instruction(&Instruction::End);
-        self.code.function(&f.f);
+        debug_assert_eq!(f.base, params.len() as u32, "frame built for a different signature");
+
+        let mut decl = vec![ValType::I32]; // the frame base
+        decl.extend(f.locals.iter().copied());
+        let mut out = Function::new_with_locals_types(decl);
+        let frame = round_up(f.frame, FRAME_ALIGN);
+        // Claim the frame. Subtracting past 0 wraps to near `0xFFFFFFFF`, where
+        // every access is out of bounds — the trap `--stack-first` buys, and the
+        // reason the stack is at the BOTTOM of memory rather than above the data
+        // it would otherwise overwrite.
+        if frame != 0 {
+            out.instruction(&Instruction::GlobalGet(SP))
+                .instruction(&Instruction::I32Const(frame as i32))
+                .instruction(&Instruction::I32Sub)
+                .instruction(&Instruction::LocalTee(f.base))
+                .instruction(&Instruction::GlobalSet(SP));
+        }
+        for i in &f.body {
+            out.instruction(i);
+        }
+        // Release it: adding back to the base is the same value the prologue
+        // found, without a second local to hold it.
+        if frame != 0 {
+            out.instruction(&Instruction::LocalGet(f.base))
+                .instruction(&Instruction::I32Const(frame as i32))
+                .instruction(&Instruction::I32Add)
+                .instruction(&Instruction::GlobalSet(SP));
+        }
+        out.instruction(&Instruction::End);
+        self.code.function(&out);
         self.n_imports + self.funcs.len() - 1
     }
 
@@ -258,6 +295,14 @@ impl Module {
             GlobalType { val_type: ValType::I32, mutable: true, shared: false },
             &ConstExpr::i32_const(STACK_TOP as i32),
         );
+        // The bump heap starts where the statics end, 16-aligned so a `malloc`
+        // result is aligned for anything `layout` can put in it. This is the
+        // number M0 said a direct emitter would know by construction instead of
+        // reading back out of linked bytes.
+        globals.global(
+            GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+            &ConstExpr::i32_const(round_up(self.data_end(), 16) as i32),
+        );
 
         let mut data = DataSection::new();
         if !self.pool.is_empty() {
@@ -283,47 +328,44 @@ impl Module {
     }
 }
 
-/// The module's `__stack_pointer`. Index 0 because it is the only global the
-/// encoder defines — the emitter has no module-level mutable state that is not
-/// in memory.
+/// The module's `__stack_pointer`. Index 0 because the encoder defines its
+/// globals before anything else can — the emitter has no module-level mutable
+/// state of its own that is not in memory.
 pub const SP: u32 = 0;
 
-/// A function body plus the frame it was given.
+/// The module's bump-allocation cursor, initialized past the statics by
+/// [`Module::finish`]. RFC-0076's shim owns `malloc` for the split build; a
+/// standalone module has no shim to ask, so the direct backend emits its own
+/// against this global.
+pub const HEAP: u32 = 1;
+
+/// A function body under construction, plus the frame it is accumulating.
+///
+/// The instructions are buffered rather than encoded as they arrive, because the
+/// prologue in front of them depends on a frame size only the finished body
+/// knows. See [`Module::func`].
 pub struct Frame {
-    f: Function,
+    body: Vec<Instruction<'static>>,
+    locals: Vec<ValType>,
+    next_local: u32,
     frame: u32,
     /// Local holding the frame's base address, valid for the whole body.
     base: u32,
 }
 
 impl Frame {
-    /// Claim the frame. Subtracting past 0 wraps to near `0xFFFFFFFF`, where
-    /// every access is out of bounds — which is the trap `--stack-first` buys,
-    /// and the reason the stack is at the BOTTOM of memory rather than above the
-    /// data it would otherwise overwrite.
-    fn prologue(&mut self) {
-        if self.frame == 0 {
-            return;
+    /// An empty body for a function with `n_params` parameters, `locals`
+    /// pre-declared after the frame base, and `frame` bytes of stack reserved
+    /// before anything [`Frame::alloc`] adds.
+    pub fn new(n_params: usize, locals: &[ValType], frame: u32) -> Self {
+        let base = n_params as u32;
+        Frame {
+            body: Vec::new(),
+            locals: locals.to_vec(),
+            next_local: base + 1 + locals.len() as u32,
+            frame,
+            base,
         }
-        self.f
-            .instruction(&Instruction::GlobalGet(SP))
-            .instruction(&Instruction::I32Const(self.frame as i32))
-            .instruction(&Instruction::I32Sub)
-            .instruction(&Instruction::LocalTee(self.base))
-            .instruction(&Instruction::GlobalSet(SP));
-    }
-
-    /// Release it. Adding back to the base is the same value the prologue
-    /// found, without a second local to hold it.
-    fn epilogue(&mut self) {
-        if self.frame == 0 {
-            return;
-        }
-        self.f
-            .instruction(&Instruction::LocalGet(self.base))
-            .instruction(&Instruction::I32Const(self.frame as i32))
-            .instruction(&Instruction::I32Add)
-            .instruction(&Instruction::GlobalSet(SP));
     }
 
     /// Append one instruction.
@@ -332,18 +374,34 @@ impl Frame {
     /// jump past the epilogue and leak the frame. Returns go through a `br` to
     /// the function's outermost block, or the epilogue moves into a helper the
     /// return path calls.
-    pub fn ins(&mut self, i: &Instruction) -> &mut Self {
-        self.f.instruction(i);
+    pub fn ins(&mut self, i: &Instruction<'static>) -> &mut Self {
+        self.body.push(i.clone());
         self
+    }
+
+    /// Take another local of type `t`, giving its index.
+    pub fn local(&mut self, t: ValType) -> u32 {
+        self.locals.push(t);
+        self.next_local += 1;
+        self.next_local - 1
+    }
+
+    /// Take `size` bytes of frame at `align`, giving the offset from the frame
+    /// base. Offsets are handed out for the whole function, never reused — a
+    /// slot inside a loop is one slot, written afresh each turn.
+    pub fn alloc(&mut self, size: u32, align: u32) -> u32 {
+        debug_assert!(align.is_power_of_two());
+        let at = round_up(self.frame, align.max(1));
+        self.frame = at + size;
+        at
     }
 
     /// Push the address of the frame slot at `off`.
     pub fn slot(&mut self, off: u32) -> &mut Self {
-        self.f.instruction(&Instruction::LocalGet(self.base));
+        self.body.push(Instruction::LocalGet(self.base));
         if off != 0 {
-            self.f
-                .instruction(&Instruction::I32Const(off as i32))
-                .instruction(&Instruction::I32Add);
+            self.body.push(Instruction::I32Const(off as i32));
+            self.body.push(Instruction::I32Add);
         }
         self
     }
@@ -445,11 +503,28 @@ mod tests {
     #[test]
     fn an_empty_frame_emits_no_prologue() {
         let mut m = Module::new();
-        m.func(&[ValType::I32], &[], &[], 0, |b| {
+        let empty = m.func(&[ValType::I32], &[], &[], 0, |b| {
             assert_eq!(b.base(), 1);
         });
-        m.func(&[], &[], &[], 1, |b| {
-            assert_eq!(b.frame, FRAME_ALIGN, "frames round up to the stack alignment");
+        let framed = m.func(&[], &[], &[], 1, |_| {});
+        // The prologue is five instructions; an empty frame emits none of them,
+        // so the framed body is strictly longer than the one that took no stack.
+        assert!(framed > empty);
+    }
+
+    /// A slot and a local are both handed out mid-body, which is the whole point
+    /// of buffering: the frame size is not known until the body is walked.
+    #[test]
+    fn slots_and_locals_are_taken_as_the_body_needs_them() {
+        let mut m = Module::new();
+        m.func(&[ValType::I64], &[], &[ValType::I32], 0, |b| {
+            // params 0, the frame base 1, the pre-declared local 2, then ours.
+            assert_eq!(b.local(ValType::I64), 3);
+            assert_eq!(b.local(ValType::I32), 4);
+            assert_eq!(b.alloc(4, 4), 0);
+            // The i64 skips the hole rather than landing mid-word.
+            assert_eq!(b.alloc(8, 8), 8);
+            assert_eq!(b.alloc(1, 1), 16);
         });
     }
 

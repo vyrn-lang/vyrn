@@ -35,7 +35,15 @@ use std::process::Command;
 
 /// Examples the direct backend compiles and runs identically to the
 /// interpreter. Grows as M2 lands; never shrinks silently.
-const PASSING: &[&str] = &["fib.vyrn", "testing.vyrn"];
+const PASSING: &[&str] = &[
+    "benching.vyrn",
+    "consume.vyrn",
+    "externdemo2.vyrn",
+    "fib.vyrn",
+    "record.vyrn",
+    "testing.vyrn",
+    "utility.vyrn",
+];
 
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored --nocapture"]
