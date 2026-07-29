@@ -932,3 +932,158 @@ that property silently.
 **Revised plan: M2d becomes the coercion path, with validation as its first
 client.** The gap list shrinks by more than the refinement row, and the pieces
 that would otherwise be built twice get built once.
+
+---
+
+## M2d, as landed
+
+The seam, and validation running through it. **17 of 80**, from 14 — and no
+example is blocked on a `where` refinement any more, which was the row worth 14.
+
+Seventeen is the wrong number to read this milestone by, and the reason is the
+one the brief opened with: `Even` and `Int64` are the same bytes. A lowering that
+emits the type and forgets the check turns all fourteen refinement examples green
+while validating nothing, permanently. So the number that matters is one.
+
+### The seam went where `expr_as` already was
+
+`Fn_::coerce`. `expr_as` is now its only caller and does nothing but evaluate and
+hand over, which means the seam inherited every flow site rather than having to
+find them: a typed `let`, an assignment, a field store, an element store, a call
+argument, a return, a join arm, an array element, an enum payload. The two
+conversions that were already there — the `ArrayN → Array` heapify and RFC-0002's
+record width rebuild — moved inside it unchanged, which is the check that the
+seam is where the reconciliations were rather than a new layer above them.
+
+**Validation runs first, before the `ll`-equality shortcut.** That ordering IS the
+milestone. Every other conversion in `coerce` is reached because the
+representations differ; this one is reached precisely because they do not.
+
+### Three flows were validating nothing for a reason that was not the seam
+
+Found by writing the seam and then asking which boundaries actually reach it. The
+backend was resolving declared types away: a parameter, a `let` annotation and a
+return type spelled `Age` were all in scope as `Int64`, so `from == to` at every
+one of them and the boundary was not a boundary. `ret_ty: cx.resolve(..)` was one
+character's worth of code and three missing checks.
+
+They keep the declared spelling now. `binary` does the exact opposite for the same
+reason — it coerces its right operand to the RESOLVED type, because `age + 1` must
+not check `1` against `Age`'s predicate, and it returns the resolved type so that
+the *assignment* re-validates the sum. The LLVM emitter reaches that same split by
+returning its `numty` rather than its `lty`, which is worth recording: the
+direct backend rediscovered a decision the other one had already made, and
+disagreeing would have been a spurious trap on one target only.
+
+### Two sites are not the seam, and correctly so
+
+A record literal of a predicated type, and `Age(n)`. At both, the value already
+IS the named type — `from == to`, so `validation_required` says no, and it is
+right to. There is no flow to hang the check on because construction is not a
+flow. That is why the LLVM emitter has a construction site of its own, and this
+backend now has the same two. Both skip the check when every argument is
+constant, which is `gen_construction`'s rule.
+
+### What is single-sourced, and what is not
+
+Three things are now free functions in `vyrn-codegen`, and both backends call
+them:
+
+- **`validation_required`** — the decision. `Type::Named`, `from != to`,
+  `predicate.is_some()`. A second spelling would have been two semantics for one
+  fact, exactly what `llt_of` exists to prevent for shapes.
+- **`validation_message`** — the wording, byte-identical because parity compares
+  stderr.
+- **`predicate_binds`** — what a predicate has in scope: a record base binds every
+  field by name, everything else binds `value`.
+
+RFC-0020's containment escape needs the expression rather than the two types, so
+it stays one layer out — but it was already a single shared function
+(`finite::string_flow_proven`), and both backends call it on the same AST. The
+consteval precedent.
+
+**What is duplicated, and why.** The predicate's *lowering* — one backend prints
+LLVM text, the other writes wasm bytes, so there is no version of this where one
+function emits both. `emit_predicate_cond` carries a comment claiming to be the
+ONE place a predicate is lowered; that is now true of LLVM specifically, and what
+the two backends share is the structure each walks. `predicate_binds` is that
+structure, and it is the only thing that decides what a predicate can see.
+
+`predicate_binds` paid for itself before the direct backend used it. The comment
+was already wrong about its own file: `emit_validation` held a byte-for-byte copy
+of the same binding walk, so the two could have drifted exactly as the comment
+feared. It is now that function plus a trap. A third copy — the cross-field check
+in `gen_struct_lit` — binds registers that are not in an aggregate yet, so it
+walks its own list and stays where it is; it is the one place still able to drift,
+and it is named here rather than left to be found.
+
+### How the checks were proved to be emitted
+
+Two ways, because "the examples pass" is the thing being guarded against.
+
+**`validate_fail.vyrn` is in `PASSING`.** Its refinement is violated at runtime,
+so the ladder compares its stderr and its exit code against the interpreter — and
+a backend that emits the type and forgets the check fails it while passing every
+other refinement example. It already existed in the corpus, which is luck; M2c's
+bounds message had to have a test written for it.
+
+**`a_validated_type_is_checked_wherever_it_is_reached`** is what became of
+`a_validated_type_is_a_gap_not_a_bare_int`. Same two positions — the bare type,
+and inside a record "because that is where it would hide" — asserting the check IS
+emitted rather than that the type is refused. The evidence is the trap message in
+the data segment, which only `emit_validation` interns, so its presence means a
+check exists and its absence means one does not. A third case with the refinement
+declared but unreached pins that the assertion is about the check and not about
+the word `Age` arriving some other way.
+
+### Nothing contradicted M0, M1, M2a, M2b or M2c
+
+One new fact about the encoder, learned by needing it: **a value may sit on the
+operand stack underneath an `if` block**. An `if` records the stack height it
+opened at and nothing inside can reach below it, but what is below survives to
+the `End`. That is what lets a validation be a check ON a flow rather than a step
+in it — the destination address a store already pushed is still there afterwards.
+It is exercised rather than reasoned about: an `Array<Age, 2>` literal validates
+each element with the element's destination address live beneath the check.
+
+The value under check is parked in a local, not left on the stack, because the
+predicate's own code would bury it. For a scalar base the parked local IS the
+`value` binding, so nothing is copied twice.
+
+### Refused, specifically
+
+Items 2–4 of the LLVM `coerce` list did **not** fall out free, and none is
+pretended to have:
+
+- **Re-tagging a function value** between fn-typed spellings (RFC-0037) — no
+  example reaches it, because generics stop them all first.
+- **Re-materializing an `Option`/`Result` whose payload representation changed** —
+  still the M2c refusal it was.
+- **Numeric conversion between widths** — `a conversion from Int64 to UInt16`,
+  one example. The truncation itself is small; `wrap_intn` parity across the
+  sized widths is not, and the sibling blocker `Add on Int32` says the arithmetic
+  table is i64-only anyway. Two rows of the table below, named.
+
+Also refused: **a `where` clause over a non-record aggregate**. Its one `value`
+binding has nowhere to live, because `Place` is a wasm local or a frame slot and
+cannot name "the address in this local". No example has one; binding it to
+something adjacent would have been silent.
+
+### 17 of 80, regrouped
+
+| blocked on | n |
+|---|---|
+| generics — monomorphization runs inside `Gen`, not before it | 9 |
+| builtins with no lowering (`toJson` 5, `stringFromBytes` 3, `jsonSchema` 3, `readFile` 2, `readLine` 2, `args`, `cell`/`set`/`get`, `logger`, `parse`, `chars`, `schemaOf`, `fromJson`, `hostNowMillis`, `@charCount`, a map literal) | 25 |
+| module state (RFC-0013 top-level `let`) | 5 |
+| a `modify` parameter | 4 |
+| `=~` on strings, `?`, `if let`, a fallible construction, `spawn` 2, `region` | 7 |
+| floats, sized-int arithmetic and conversion, bitwise | 4 |
+| a `Map` or `SmallArray` index — refused in M2c | 2 |
+| a `T` conversion inside a generic payload | 1 |
+
+The refinement row is gone. What is left is one big row that does not compress
+(25 builtins, 15 different things) and one that is a single pass in the wrong
+place: **monomorphization runs inside `Gen`**, so the direct backend never sees a
+concrete instantiation. That is 9 examples and the same shape of argument M2a made
+about the type wall and M2b made about arrays, both of which were right.
