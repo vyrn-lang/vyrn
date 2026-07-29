@@ -3,7 +3,9 @@
 - **Status:** Draft
 - **Depends on:** RFC-0076 (generators as wasm; the shared runtime shim and the
   memory map it established), RFC-0012 (the `extern` ABI), RFC-0037
-  (defunctionalized closures — the reason no function table is needed)
+  (defunctionalized closures — the reason *closures* need no function table),
+  RFC-0025 (`spawn`, which is the reason a small one is needed anyway — see the
+  M2a pre-flight)
 - **Evidence (measured, this repo):** compiling generators, cold, `examples/bin`:
 
   | phase | time |
@@ -74,9 +76,14 @@ A spike measured the shape of the job rather than guessing at it:
   (`&&`, `||`, if-expressions, `match`) that become a `block (result T)` or one
   scratch local; the remaining 31 are in the hand-written IR prelude, not
   emitter output.
-- **No function table.** Zero indirect calls and zero function-addresses-as-values
-  in the artifacts checked — RFC-0037's defunctionalization holds, so stored `fn`
-  values already go through a synthesized `switch` into direct calls.
+- **No function table** — *wrong, and the M2a pre-flight caught it.* Indirect
+  calls really are zero, and RFC-0037's defunctionalization really does route
+  stored `fn` values through a synthesized `switch` into direct calls. But
+  function-addresses-as-values is **9**, not 0: RFC-0025's `spawn` hands the shim
+  a thunk symbol (`call @__vyrn_spawn(ptr @__vyrn_task_*, ptr)`) and the shim
+  calls it, which in wasm needs a table element, `ref.func` and `call_indirect`.
+  Bounded and enumerable — 9 sites across 3 examples, all syntactic — but a
+  milestone that had assumed this away would have discovered it at the end.
 - **No generics.** Monomorphization runs before any instruction is emitted.
 - **A small, fixed boundary.** 58 external symbols in the largest real artifact:
   48 `__vyrn_*`, 9 libc, 1 intrinsic.
