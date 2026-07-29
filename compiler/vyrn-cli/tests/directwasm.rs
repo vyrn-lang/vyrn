@@ -36,14 +36,20 @@ use std::process::Command;
 /// Examples the direct backend compiles and runs identically to the
 /// interpreter. Grows as M2 lands; never shrinks silently.
 const PASSING: &[&str] = &[
+    "arrays.vyrn",
     "benching.vyrn",
     "consume.vyrn",
+    "ecs.vyrn",
     "enum.vyrn",
     "externdemo2.vyrn",
     "fib.vyrn",
+    "foreach.vyrn",
+    "map.vyrn",
+    "ownership.vyrn",
     "record.vyrn",
     "testing.vyrn",
     "utility.vyrn",
+    "validation.vyrn",
 ];
 
 #[test]

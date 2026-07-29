@@ -565,6 +565,101 @@ impl Fn_<'_> {
                 self.depth -= 1;
                 b.ins(&Instruction::End);
             }
+            Stmt::ForIn { var, iter, body, line } => {
+                // `block { loop { br_if 1 (i >= len); bind; block { body }; i++;
+                // br 0 } }`. The INNER block is what makes `continue` correct:
+                // branching to it leaves the body and lands on the increment, so
+                // a `continue` steps the index exactly like falling off the end
+                // does. Branching to the loop instead would spin on one element.
+                let it = self.expr(m, b, iter)?;
+                let w = self.walk(b, &it, *line)?;
+                let i = b.local(ValType::I64);
+                b.ins(&Instruction::I64Const(0));
+                b.ins(&Instruction::LocalSet(i));
+
+                let brk = self.depth;
+                b.ins(&Instruction::Block(BlockType::Empty));
+                self.depth += 1;
+                let top = self.depth;
+                b.ins(&Instruction::Loop(BlockType::Empty));
+                self.depth += 1;
+                b.ins(&Instruction::LocalGet(i));
+                b.ins(&Instruction::LocalGet(w.len));
+                b.ins(&Instruction::I64GeU);
+                let out = self.br_to(brk);
+                b.ins(&Instruction::BrIf(out));
+
+                // The loop variable is a COPY, so a body that grows the array
+                // cannot leave it pointing into a buffer that was abandoned.
+                let r = self.cx.repr(&w.elem, *line)?;
+                let place = self.place_for(b, &r, *line)?;
+                match (place, &r) {
+                    (Place::Local(l), _) => {
+                        self.elem_addr(b, &w, i);
+                        self.load_elem(b, &w, *line)?;
+                        b.ins(&Instruction::LocalSet(l));
+                    }
+                    (Place::Slot(off), Repr::Agg(el)) => {
+                        b.slot(off);
+                        self.elem_addr(b, &w, i);
+                        b.ins(&Instruction::I32Const(el.size as i32));
+                        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                    }
+                    _ => return unsupported("an array of Unit", *line),
+                }
+                let mark = self.scope.len();
+                self.scope.push((var.clone(), place, w.elem.clone()));
+
+                let cont = self.depth;
+                b.ins(&Instruction::Block(BlockType::Empty));
+                self.depth += 1;
+                self.loops.push((brk, cont));
+                self.block(m, b, body)?;
+                self.loops.pop();
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                self.scope.truncate(mark);
+
+                b.ins(&Instruction::LocalGet(i));
+                b.ins(&Instruction::I64Const(1));
+                b.ins(&Instruction::I64Add);
+                b.ins(&Instruction::LocalSet(i));
+                let back = self.br_to(top);
+                b.ins(&Instruction::Br(back));
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+            }
+            Stmt::IndexSet { name, index, value, line } => {
+                let (place, ty) = self.lookup(name, *line)?;
+                let Place::Slot(slot) = place else {
+                    return unsupported("an element assignment to a non-array", *line);
+                };
+                b.slot(slot);
+                let w = self.walk(b, &ty, *line)?;
+                if w.byte {
+                    return unsupported("an element assignment into a String", *line);
+                }
+                self.expr_as(m, b, index, &Type::Int)?;
+                let i = b.local(ValType::I64);
+                b.ins(&Instruction::LocalSet(i));
+                self.bounds_check(b, &w, i, false);
+                self.elem_addr(b, &w, i);
+                let elem = w.elem.clone();
+                match self.cx.repr(&elem, *line)? {
+                    Repr::Scalar(_) => {
+                        self.expr_as(m, b, value, &elem)?;
+                        b.ins(&store_of(&self.cx.ll(&elem)));
+                    }
+                    Repr::Agg(el) => {
+                        self.expr_as(m, b, value, &elem)?;
+                        b.ins(&Instruction::I32Const(el.size as i32));
+                        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                    }
+                    Repr::Unit => return unsupported("an array of Unit", *line),
+                }
+            }
             Stmt::Break { line } => {
                 let &(brk, _) = self.loops.last().ok_or_else(|| gap("`break` outside a loop", *line))?;
                 let d = self.br_to(brk);
@@ -673,6 +768,17 @@ impl Fn_<'_> {
         if self.cx.ll(&got) == self.cx.ll(want) {
             return Ok(());
         }
+        // A literal is a fixed `[N x T]`; an `Array<T>` slot wants the growable
+        // triple. One conversion, so every literal position — a `let`, an
+        // argument, a `return`, a field, an element — reaches the heap the same
+        // way.
+        if let (Type::ArrayN(from, n), Type::Array(to)) =
+            (self.cx.resolve(&got), self.cx.resolve(want))
+        {
+            if self.cx.ll(&from) == self.cx.ll(&to) {
+                return self.heapify(b, &from, n, want, line);
+            }
+        }
         let (Some(from), Some(to)) = (self.cx.fields(&got), self.cx.fields(want)) else {
             return unsupported(
                 &format!("a conversion from `{got}` to `{want}`"),
@@ -764,6 +870,9 @@ impl Fn_<'_> {
             }
             Expr::Field { expr, field, line } => {
                 let base = self.expr(m, b, expr)?;
+                if let Some(t) = self.length_of(b, &base, field, *line)? {
+                    return Ok(t);
+                }
                 let (off, fty) = self.field_of(&base, field, *line)?;
                 match self.cx.repr(&fty, *line)? {
                     Repr::Scalar(_) => b.ins(&load_of(&self.cx.ll(&fty), off)),
@@ -829,6 +938,7 @@ impl Fn_<'_> {
                 }
                 t
             }
+            Expr::ArrayLit { elems, line } => self.array_lit(m, b, elems, *line)?,
             Expr::Match { scrutinee, arms, line } => self.match_expr(m, b, scrutinee, arms, *line)?,
             Expr::Binary { op, lhs, rhs, line } => self.binary(m, b, *op, lhs, rhs, *line)?,
             Expr::Call { name, args, line } => self.call(m, b, name, args, *line)?,
@@ -901,7 +1011,12 @@ impl Fn_<'_> {
             Expr::Var { name, .. } => self.lookup(name, line)?.1,
             Expr::Field { expr, field, .. } => {
                 let base = self.peek(expr, line)?;
-                self.field_of(&base, field, line)?.1
+                match (field.as_str(), self.cx.resolve(&base)) {
+                    ("byteLength", Type::Str)
+                    | ("length", Type::Array(_))
+                    | ("length", Type::ArrayN(..)) => Type::Int,
+                    _ => self.field_of(&base, field, line)?.1,
+                }
             }
             Expr::StructLit { name, .. } => Type::Named(name.clone()),
             Expr::IfExpr { then_branch, .. } => self.peek(then_branch, line)?,
@@ -930,8 +1045,43 @@ impl Fn_<'_> {
                 | BinOp::And | BinOp::Or | BinOp::Match => Type::Bool,
                 _ => self.peek(lhs, line)?,
             },
-            Expr::Call { name, .. } => match name.as_str() {
+            // A literal in a branch is the fixed shape; the join's conversion
+            // heapifies it if the other arm made it an `Array<T>`. An EMPTY one
+            // has no element to be typed by, so it can only be what the position
+            // expects — the same rule the emitting path uses.
+            Expr::ArrayLit { elems, .. } if !elems.is_empty() => {
+                Type::ArrayN(Box::new(self.peek(&elems[0], line)?), elems.len())
+            }
+            Expr::ArrayLit { .. } => match self.expect.last().map(|t| self.cx.resolve(t)) {
+                Some(t @ Type::Array(_)) => t,
+                _ => return unsupported("a branch yielding an empty array literal", line),
+            },
+            Expr::Call { name, args, .. } => match name.as_str() {
                 "@str" | "@concat" => Type::Str,
+                // An arm that only prints: the join carries nothing, which the
+                // `match` lowering already handles — it just has to be told.
+                "print" => Type::Unit,
+                "at" | "@swapRemove" if args.len() == 2 => {
+                    let a = self.peek(&args[0], line)?;
+                    match self.cx.resolve(&a) {
+                        Type::Array(i) | Type::ArrayN(i, _) => *i,
+                        Type::Str => Type::IntN { bits: 8, signed: false },
+                        other => return unsupported(&format!("a branch indexing `{other}`"), line),
+                    }
+                }
+                "push" | "@list" if !args.is_empty() => match self.peek(&args[0], line)? {
+                    t => match self.cx.resolve(&t) {
+                        Type::ArrayN(i, _) => Type::Array(i),
+                        _ => t,
+                    },
+                },
+                "@pop" if args.len() == 1 => {
+                    let a = self.peek(&args[0], line)?;
+                    match self.cx.resolve(&a) {
+                        Type::Array(i) => Type::Option(i),
+                        other => return unsupported(&format!("a branch popping `{other}`"), line),
+                    }
+                }
                 _ => match self.cx.sigs.get(name) {
                     Some(s) => s.ret_ty.clone(),
                     None => return unsupported(&format!("a branch yielding `{name}`"), line),
@@ -1112,6 +1262,24 @@ impl Fn_<'_> {
                 b.ins(&Instruction::Call(self.cx.rt.concat));
                 return Ok(Type::Str);
             }
+            "at" if args.len() == 2 => return self.at(m, b, args, line),
+            "push" if args.len() == 2 => return self.push(m, b, args, line),
+            "@pop" if args.len() == 1 => return self.pop(b, args, line),
+            "@swapRemove" if args.len() == 2 => return self.swap_remove(m, b, args, line),
+            // `list([..])` is the explicit spelling of the contextual literal;
+            // both land on the same `ArrayN → Array` conversion.
+            "@list" if args.len() == 1 => {
+                let got = self.expr(m, b, &args[0])?;
+                return match self.cx.resolve(&got) {
+                    Type::Array(_) => Ok(got),
+                    Type::ArrayN(inner, n) => {
+                        let want = Type::Array(inner.clone());
+                        self.heapify(b, &inner, n, &want, line)?;
+                        Ok(want)
+                    }
+                    other => unsupported(&format!("`list` of `{other}`"), line),
+                };
+            }
             _ => {}
         }
         if let Some(t) = self.sum_ctor(m, b, name, args, line)? {
@@ -1142,6 +1310,555 @@ impl Fn_<'_> {
             b.slot(off);
         }
         Ok(self.cx.resolve(&sig.ret_ty))
+    }
+
+    /// `.length` / `.byteLength`, neither of which is a field: the receiver's
+    /// value is on the stack already, so each has to consume it — including the
+    /// fixed array, whose length is a constant and whose address is therefore
+    /// dropped.
+    fn length_of(
+        &mut self,
+        b: &mut Frame,
+        base: &Type,
+        field: &str,
+        line: usize,
+    ) -> Result<Option<Type>, String> {
+        match (field, self.cx.resolve(base)) {
+            ("byteLength", Type::Str) => {
+                b.ins(&Instruction::Call(self.cx.rt.strlen));
+                b.ins(&Instruction::I64ExtendI32U);
+            }
+            ("length", Type::Array(_)) => {
+                let l = self.layout_of(base, line)?;
+                b.ins(&Instruction::I64Load(at(l.fields[1])));
+            }
+            ("length", Type::ArrayN(_, n)) => {
+                b.ins(&Instruction::Drop);
+                b.ins(&Instruction::I64Const(n as i64));
+            }
+            _ => return Ok(None),
+        }
+        Ok(Some(Type::Int))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `Array<T>`, `Array<T, N>`, and walking either of them (RFC-0077 M2c)
+// ---------------------------------------------------------------------------
+
+/// What an indexable value is made of, once its parts are in locals: where its
+/// elements start, how many there are, and what one is.
+///
+/// The parts are SNAPSHOTTED — the same thing the LLVM backend does by taking
+/// them out of an SSA aggregate, and the reason a `for` that grows its own array
+/// keeps walking the buffer it started on rather than following a `realloc` to a
+/// new one. Both backends agree with the interpreter, which iterates a copy.
+struct Walk {
+    /// `i32` local: the address of element 0.
+    data: u32,
+    /// `i64` local: the element count.
+    len: u32,
+    elem: Type,
+    stride: u32,
+    /// A `String`'s elements are bytes widened to `Int`, not stored values —
+    /// which is what the LLVM backend's `for` over a String produces too.
+    byte: bool,
+}
+
+impl Fn_<'_> {
+    fn layout_of(&self, ty: &Type, line: usize) -> Result<Layout, String> {
+        layout::of_ll(&self.cx.ll(ty)).map_err(|e| gap(&format!("the layout of `{ty}` ({e})"), line))
+    }
+
+    /// The distance between consecutive elements. `of_ll` already rounds a
+    /// shape's size up to its own alignment, so a size IS a stride.
+    fn stride(&self, elem: &Type, line: usize) -> Result<u32, String> {
+        Ok(self.layout_of(elem, line)?.size)
+    }
+
+    /// Take the indexable value on the stack apart into locals.
+    ///
+    /// Fresh locals rather than scratch: a [`Walk`] outlives the expression that
+    /// produced it — a `for` holds one across its whole body — so sharing would
+    /// be a miscompile the moment two nested.
+    fn walk(&mut self, b: &mut Frame, ty: &Type, line: usize) -> Result<Walk, String> {
+        let addr = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(addr));
+        let len = b.local(ValType::I64);
+        Ok(match self.cx.resolve(ty) {
+            Type::Array(inner) => {
+                let l = self.layout_of(ty, line)?;
+                let data = b.local(ValType::I32);
+                b.ins(&Instruction::LocalGet(addr));
+                b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+                b.ins(&Instruction::LocalSet(data));
+                b.ins(&Instruction::LocalGet(addr));
+                b.ins(&Instruction::I64Load(at(l.fields[1])));
+                b.ins(&Instruction::LocalSet(len));
+                let stride = self.stride(&inner, line)?;
+                Walk { data, len, stride, elem: *inner, byte: false }
+            }
+            // A fixed array is its own buffer: the slot address IS element 0,
+            // and the length is in the type.
+            Type::ArrayN(inner, n) => {
+                b.ins(&Instruction::I64Const(n as i64));
+                b.ins(&Instruction::LocalSet(len));
+                let stride = self.stride(&inner, line)?;
+                Walk { data: addr, len, stride, elem: *inner, byte: false }
+            }
+            Type::Str => {
+                b.ins(&Instruction::LocalGet(addr));
+                b.ins(&Instruction::Call(self.cx.rt.strlen));
+                b.ins(&Instruction::I64ExtendI32U);
+                b.ins(&Instruction::LocalSet(len));
+                Walk { data: addr, len, stride: 1, elem: Type::Int, byte: true }
+            }
+            // A `SmallArray` is a four-field header with an inline buffer and
+            // two live states (RFC-0056); reading it as a triple would be a
+            // silent miscompile rather than a missing one.
+            other => return unsupported(&format!("indexing `{other}`"), line),
+        })
+    }
+
+    /// Push the address of element `idx` (an `i64` local).
+    fn elem_addr(&mut self, b: &mut Frame, w: &Walk, idx: u32) {
+        b.ins(&Instruction::LocalGet(w.data));
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::I32WrapI64);
+        if w.stride != 1 {
+            b.ins(&Instruction::I32Const(w.stride as i32));
+            b.ins(&Instruction::I32Mul);
+        }
+        b.ins(&Instruction::I32Add);
+    }
+
+    /// Trap unless `idx` is in `0..len`.
+    ///
+    /// The index is in the message, so it cannot be one interned string — hence
+    /// `trap_idx(prefix, i, suffix)` rather than the plain `trap` the arithmetic
+    /// checks use. Unsigned, so a negative index is caught by the same compare.
+    fn bounds_check(&mut self, b: &mut Frame, w: &Walk, idx: u32, string: bool) {
+        let (pre, post, trap) = (
+            if string { self.cx.rt.msg_soob } else { self.cx.rt.msg_aoob },
+            self.cx.rt.msg_oob_end,
+            self.cx.rt.trap_idx,
+        );
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::LocalGet(w.len));
+        b.ins(&Instruction::I64GeU);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        b.ins(&Instruction::I32Const(pre as i32));
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::I32Const(post as i32));
+        b.ins(&Instruction::Call(trap));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+    }
+
+    /// Turn the element address on the stack into the element itself — a value
+    /// for a scalar, and the address unchanged for an aggregate, which is the
+    /// aggregate convention rather than an exception to it.
+    fn load_elem(&mut self, b: &mut Frame, w: &Walk, line: usize) -> Result<(), String> {
+        if w.byte {
+            b.ins(&Instruction::I32Load8U(byte()));
+            b.ins(&Instruction::I64ExtendI32U);
+            return Ok(());
+        }
+        match self.cx.repr(&w.elem, line)? {
+            Repr::Scalar(_) => {
+                b.ins(&load_of(&self.cx.ll(&w.elem), 0));
+            }
+            Repr::Agg(_) => {}
+            Repr::Unit => return unsupported("an array of Unit", line),
+        }
+        Ok(())
+    }
+
+    /// `[a, b, c]`, and the empty `[]`.
+    ///
+    /// A literal is always the FIXED `[N x T]` shape, exactly as the LLVM
+    /// backend builds it; the growable triple is reached from there through the
+    /// same `ArrayN → Array` conversion, so there is one heap-wrapping path
+    /// rather than one per literal position. The empty literal is the exception,
+    /// because there is no element to take a type from — it can only be the
+    /// empty triple its expected type names.
+    fn array_lit(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        elems: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let want = self.expect.last().map(|t| self.cx.resolve(t));
+        let elem_want = match &want {
+            Some(Type::Array(i)) | Some(Type::ArrayN(i, _)) => Some((**i).clone()),
+            _ => None,
+        };
+        if elems.is_empty() {
+            let Some(Type::Array(inner)) = want else {
+                return unsupported("an empty array literal with no expected `Array<T>` type", line);
+            };
+            let ty = Type::Array(inner);
+            let l = self.layout_of(&ty, line)?;
+            let off = b.alloc(l.size, l.align);
+            b.slot(off + l.fields[0]);
+            b.ins(&Instruction::I32Const(0));
+            b.ins(&Instruction::I32Store(word()));
+            for f in [l.fields[1], l.fields[2]] {
+                b.slot(off + f);
+                b.ins(&Instruction::I64Const(0));
+                b.ins(&Instruction::I64Store(word8()));
+            }
+            b.slot(off);
+            return Ok(ty);
+        }
+        let elem = match elem_want {
+            Some(t) => t,
+            None => self.peek(&elems[0], line)?,
+        };
+        let stride = self.stride(&elem, line)?;
+        let el = self.layout_of(&elem, line)?;
+        let off = b.alloc(stride * elems.len() as u32, el.align);
+        let r = self.cx.repr(&elem, line)?;
+        for (i, e) in elems.iter().enumerate() {
+            b.slot(off + stride * i as u32);
+            self.expr_as(m, b, e, &elem)?;
+            match &r {
+                Repr::Scalar(_) => {
+                    b.ins(&store_of(&self.cx.ll(&elem)));
+                }
+                Repr::Agg(_) => {
+                    b.ins(&Instruction::I32Const(stride as i32));
+                    b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                }
+                Repr::Unit => return unsupported("an array of Unit", line),
+            }
+        }
+        b.slot(off);
+        Ok(Type::ArrayN(Box::new(elem), elems.len()))
+    }
+
+    /// `[N x T]` → the growable `{ptr, len, cap}` triple: a heap buffer with a
+    /// COPY of the elements in it.
+    ///
+    /// Copying rather than pointing at the frame slot is what makes the
+    /// conversion sound — the triple outlives the frame, and `push` will
+    /// reallocate the buffer it is handed.
+    fn heapify(
+        &mut self,
+        b: &mut Frame,
+        from: &Type,
+        n: usize,
+        want: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        let src = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(src));
+        let bytes = (self.stride(from, line)? * n as u32) as i32;
+        let buf = b.local(ValType::I32);
+        b.ins(&Instruction::I32Const(bytes.max(1)));
+        b.ins(&Instruction::Call(self.cx.rt.malloc));
+        b.ins(&Instruction::LocalTee(buf));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Const(bytes));
+        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        let l = self.layout_of(want, line)?;
+        let off = b.alloc(l.size, l.align);
+        b.slot(off + l.fields[0]);
+        b.ins(&Instruction::LocalGet(buf));
+        b.ins(&Instruction::I32Store(word()));
+        // len and cap are both N: a literal's buffer is exactly full, so the
+        // first `push` grows it — the same schedule the LLVM path produces.
+        for f in [l.fields[1], l.fields[2]] {
+            b.slot(off + f);
+            b.ins(&Instruction::I64Const(n as i64));
+            b.ins(&Instruction::I64Store(word8()));
+        }
+        b.slot(off);
+        Ok(())
+    }
+
+    /// `xs.push(v)` — the value, and a NEW triple describing the array with it
+    /// in. The parser turns the statement into `xs = push(xs, v)`, so the
+    /// write-back is an ordinary assignment and this never touches the binding.
+    fn push(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let aty = self.expr(m, b, &args[0])?;
+        let Type::Array(elem) = self.cx.resolve(&aty) else {
+            return unsupported(&format!("`push` onto `{aty}`"), line);
+        };
+        let elem = *elem;
+        let l = self.layout_of(&aty, line)?;
+        let stride = self.stride(&elem, line)? as i32;
+        let (src, data, len, cap) = (
+            b.local(ValType::I32),
+            b.local(ValType::I32),
+            b.local(ValType::I64),
+            b.local(ValType::I64),
+        );
+        b.ins(&Instruction::LocalSet(src));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalSet(data));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(l.fields[1])));
+        b.ins(&Instruction::LocalSet(len));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(l.fields[2])));
+        b.ins(&Instruction::LocalSet(cap));
+
+        // Full: 0 → 4, else double. Growing means allocating and copying rather
+        // than `realloc`ing, because this backend's allocator is a bump pointer
+        // that never frees (see `runtime`) — the old buffer is simply abandoned.
+        // M4 hands this to the shim's real allocator.
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Eq);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Eqz);
+        b.ins(&Instruction::If(BlockType::Result(ValType::I64)));
+        self.depth += 1;
+        b.ins(&Instruction::I64Const(4));
+        b.ins(&Instruction::Else);
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Const(2));
+        b.ins(&Instruction::I64Mul);
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        b.ins(&Instruction::LocalSet(cap));
+        let grown = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::Call(self.cx.rt.malloc));
+        b.ins(&Instruction::LocalTee(grown));
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        b.ins(&Instruction::LocalGet(grown));
+        b.ins(&Instruction::LocalSet(data));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+
+        let w = Walk { data, len, stride: stride as u32, elem: elem.clone(), byte: false };
+        self.elem_addr(b, &w, len);
+        let r = self.cx.repr(&elem, line)?;
+        self.expr_as(m, b, &args[1], &elem)?;
+        match &r {
+            Repr::Scalar(_) => {
+                b.ins(&store_of(&self.cx.ll(&elem)));
+            }
+            Repr::Agg(_) => {
+                b.ins(&Instruction::I32Const(stride));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            }
+            Repr::Unit => return unsupported("an array of Unit", line),
+        }
+        let off = b.alloc(l.size, l.align);
+        b.slot(off + l.fields[0]);
+        b.ins(&Instruction::LocalGet(data));
+        b.ins(&Instruction::I32Store(word()));
+        b.slot(off + l.fields[1]);
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off + l.fields[2]);
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off);
+        Ok(Type::Array(Box::new(elem)))
+    }
+
+    /// `xs[i]` — bounds-checked, and a String's `s[i]` with it.
+    fn at(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let aty = self.expr(m, b, &args[0])?;
+        let string = self.cx.resolve(&aty) == Type::Str;
+        let w = self.walk(b, &aty, line)?;
+        self.expr_as(m, b, &args[1], &Type::Int)?;
+        let idx = b.local(ValType::I64);
+        b.ins(&Instruction::LocalSet(idx));
+        self.bounds_check(b, &w, idx, string);
+        self.elem_addr(b, &w, idx);
+        // `s[i]` is a `UInt8` (RFC-0022), not the `Int` a `for` over the same
+        // String yields — the two really do differ, and the LLVM backend has the
+        // same pair.
+        if string {
+            b.ins(&Instruction::I32Load8U(byte()));
+            return Ok(Type::IntN { bits: 8, signed: false });
+        }
+        self.load_elem(b, &w, line)?;
+        Ok(w.elem)
+    }
+
+    /// `xs.pop()` → `Option<T>`, shrinking the binding in place. Variable-only,
+    /// which is the checker's rule too: it returns a value AND mutates, so there
+    /// is no assignment the parser could have desugared it into.
+    fn pop(
+        &mut self,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let (Place::Slot(slot), aty) = self.receiver(args, "pop", line)? else {
+            return unsupported("`pop` on a non-array binding", line);
+        };
+        let Type::Array(elem) = self.cx.resolve(&aty) else {
+            return unsupported(&format!("`pop` on `{aty}`"), line);
+        };
+        let elem = *elem;
+        let al = self.layout_of(&aty, line)?;
+        let opt = Type::Option(Box::new(elem.clone()));
+        let ol = self.layout_of(&opt, line)?;
+        let out = b.alloc(ol.size, ol.align);
+        // `None` first, then the `Some` arm overwrites the tag and the payload:
+        // one destination, filled in place, which is destination-first with the
+        // trivial arm pre-applied.
+        b.slot(out + ol.fields[0]);
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::I32Store8(byte()));
+        for f in [ol.fields[1], ol.fields[2]] {
+            b.slot(out + f);
+            b.ins(&Instruction::I64Const(0));
+            b.ins(&Instruction::I64Store(word8()));
+        }
+        b.slot(slot);
+        let w = self.walk(b, &aty, line)?;
+        b.ins(&Instruction::LocalGet(w.len));
+        b.ins(&Instruction::I64Eqz);
+        b.ins(&Instruction::I32Eqz);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        let last = b.local(ValType::I64);
+        b.slot(slot + al.fields[1]);
+        b.ins(&Instruction::LocalGet(w.len));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Sub);
+        b.ins(&Instruction::LocalTee(last));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(out + ol.fields[0]);
+        b.ins(&Instruction::I32Const(1));
+        b.ins(&Instruction::I32Store8(byte()));
+        b.slot(out + ol.fields[1]);
+        self.elem_addr(b, &w, last);
+        self.load_elem(b, &w, line)?;
+        self.encode_word2(b, &elem, line)?;
+        b.ins(&Instruction::I64Store(word8()));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        b.slot(out);
+        Ok(opt)
+    }
+
+    /// `xs.swapRemove(i)` → the element, with the last one moved into its slot.
+    /// O(1) and unordered, which is the whole point of it (RFC-0011).
+    fn swap_remove(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let (Place::Slot(slot), aty) = self.receiver(args, "swapRemove", line)? else {
+            return unsupported("`swapRemove` on a non-array binding", line);
+        };
+        let Type::Array(elem) = self.cx.resolve(&aty) else {
+            return unsupported(&format!("`swapRemove` on `{aty}`"), line);
+        };
+        let elem = *elem;
+        let al = self.layout_of(&aty, line)?;
+        b.slot(slot);
+        let w = self.walk(b, &aty, line)?;
+        self.expr_as(m, b, &args[1], &Type::Int)?;
+        let idx = b.local(ValType::I64);
+        b.ins(&Instruction::LocalSet(idx));
+        self.bounds_check(b, &w, idx, false);
+        // The removed element goes to a slot of its own before the last one
+        // lands on top of it — for `i == len-1` those are the same address.
+        let r = self.cx.repr(&elem, line)?;
+        let taken = self.place_for(b, &r, line)?;
+        match (taken, &r) {
+            (Place::Local(l), _) => {
+                self.elem_addr(b, &w, idx);
+                self.load_elem(b, &w, line)?;
+                b.ins(&Instruction::LocalSet(l));
+            }
+            (Place::Slot(off), Repr::Agg(el)) => {
+                b.slot(off);
+                self.elem_addr(b, &w, idx);
+                b.ins(&Instruction::I32Const(el.size as i32));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            }
+            _ => return unsupported("an array of Unit", line),
+        }
+        let last = b.local(ValType::I64);
+        b.slot(slot + al.fields[1]);
+        b.ins(&Instruction::LocalGet(w.len));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Sub);
+        b.ins(&Instruction::LocalTee(last));
+        b.ins(&Instruction::I64Store(word8()));
+        self.elem_addr(b, &w, idx);
+        self.elem_addr(b, &w, last);
+        b.ins(&Instruction::I32Const(w.stride as i32));
+        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        match taken {
+            Place::Local(l) => {
+                b.ins(&Instruction::LocalGet(l));
+            }
+            Place::Slot(off) => {
+                b.slot(off);
+            }
+        }
+        Ok(elem)
+    }
+
+    /// The binding a mutating array method is applied to. Anything else is a gap
+    /// rather than a silent no-op: a `pop` whose shrink went nowhere is a wrong
+    /// program.
+    fn receiver(
+        &mut self,
+        args: &[Expr],
+        what: &str,
+        line: usize,
+    ) -> Result<(Place, Type), String> {
+        match args.first() {
+            Some(Expr::Var { name, .. }) => self.lookup(name, line),
+            _ => unsupported(&format!("`{what}` on something that is not a variable"), line),
+        }
+    }
+
+    /// Encode the value on the stack into an `Option`'s first payload word.
+    fn encode_word2(&mut self, b: &mut Frame, t: &Type, line: usize) -> Result<(), String> {
+        match self.word2(t)? {
+            Word::Direct => {}
+            Word::Ext(_) => {
+                b.ins(&Instruction::I64ExtendI32U);
+            }
+            Word::Boxed => self.box_value(b, t, line)?,
+            // A two-word payload is copied whole by `build_sum2`, not encoded
+            // into one word; doing it here would need the second word too.
+            Word::Inline2 => return unsupported("an Option of a two-word payload", line),
+        }
+        Ok(())
     }
 }
 
@@ -1615,6 +2332,11 @@ fn at(off: u32) -> MemArg {
     MemArg { offset: off as u64, align: 3, memory_index: 0 }
 }
 
+/// A 4-byte access at a static offset.
+fn word_at(off: u32) -> MemArg {
+    MemArg { offset: off as u64, align: 2, memory_index: 0 }
+}
+
 fn word8() -> MemArg {
     MemArg { offset: 0, align: 3, memory_index: 0 }
 }
@@ -1683,10 +2405,14 @@ struct Rt {
     int_str: u32,
     bool_str: u32,
     concat: u32,
+    trap_idx: u32,
     count: u32,
     msg_div0: u32,
     msg_rem0: u32,
     msg_divovf: u32,
+    msg_aoob: u32,
+    msg_soob: u32,
+    msg_oob_end: u32,
 }
 
 impl Rt {
@@ -1720,10 +2446,14 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
         int_str: base + 7,
         bool_str: base + 8,
         concat: base + 9,
-        count: 10,
+        trap_idx: base + 10,
+        count: 11,
         msg_div0: 0,
         msg_rem0: 0,
         msg_divovf: 0,
+        msg_aoob: 0,
+        msg_soob: 0,
+        msg_oob_end: 0,
     };
     let nl = rt.intern(m, "\n");
     let t = rt.intern(m, "true");
@@ -1731,6 +2461,11 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
     rt.msg_div0 = rt.intern(m, "error: division by zero\n");
     rt.msg_rem0 = rt.intern(m, "error: remainder by zero\n");
     rt.msg_divovf = rt.intern(m, "error: integer overflow in division\n");
+    // The bounds message has the offending index in the MIDDLE, so it is three
+    // pieces rather than one interned string — see `trap_idx` below.
+    rt.msg_aoob = rt.intern(m, "error: array index ");
+    rt.msg_soob = rt.intern(m, "error: string index ");
+    rt.msg_oob_end = rt.intern(m, " out of bounds\n");
 
     // write_all(fd, ptr, len) — the ONE place bytes leave this module.
     //
@@ -2012,6 +2747,27 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
         },
     );
 
+    // trap_idx(pre, i, post) — `error: array index 7 out of bounds`, which the
+    // interpreter and the native build both print with the index interpolated.
+    // Three writes rather than a `printf`: varargs are M3, and this is the only
+    // runtime message with a number in it.
+    let int_str = rt.int_str;
+    m.func(&[ValType::I32, ValType::I64, ValType::I32], &[], &[ValType::I32], 0, |b| {
+        let s = 4; // params 0..2, the frame base 3, then ours
+        let put = |b: &mut Frame, p: u32| {
+            b.ins(&Instruction::I32Const(2))
+                .ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::LocalGet(p))
+                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::Call(write_all));
+        };
+        put(b, 0);
+        b.ins(&Instruction::LocalGet(1)).ins(&Instruction::Call(int_str)).ins(&Instruction::LocalSet(s));
+        put(b, s);
+        put(b, 2);
+        b.ins(&Instruction::I32Const(1)).ins(&Instruction::Call(proc_exit));
+    });
+
     rt
 }
 
@@ -2168,10 +2924,14 @@ mod tests {
                 int_str: 0,
                 bool_str: 0,
                 concat: 0,
+                trap_idx: 0,
                 count: 0,
                 msg_div0: 0,
                 msg_rem0: 0,
                 msg_divovf: 0,
+                msg_aoob: 0,
+                msg_soob: 0,
+                msg_oob_end: 0,
             },
         }
     }
