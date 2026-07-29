@@ -531,3 +531,102 @@ milestone that assumed it would have discovered that at the end instead of here.
 
 The design survives. No relooper, no reconstruction of joins, one small table
 whose contents are a compile-time list.
+
+---
+
+## M2a, as landed
+
+One example, all the way through. `examples/fib.vyrn` — functions, recursion,
+`if`, comparison, `print`, `return`, an exit code — compiles under
+`VYRN_WASM_BACKEND=direct`, runs under wasmtime, and prints `55\n` and exits 55
+byte-identically to `vyrn run`. `vyrn-codegen/src/direct.rs`, ~560 lines
+including the gap reporting.
+
+The point was never fib. It was to find out whether the pipeline M0 and M1 built
+actually closes, and to leave behind the instrument that measures the rest.
+
+### What the constraints cost, now that they are code
+
+Both of them cost bookkeeping, and neither cost a redesign.
+
+**A body must not emit `return`.** The body is wrapped in one `block` whose
+result type is the function's, and `return` is `br <depth>` to it. `depth`
+therefore has to be exactly right — every `if` that opens a wasm block increments
+it — which is the kind of counter that is silently wrong rather than loudly
+wrong, so it lives in the lowering context beside the scope stack rather than
+being recomputed. The one pleasant surprise: `Frame::epilogue` is
+stack-neutral (it pushes two values and pops two), so the returned value can sit
+underneath it and no helper function was needed.
+
+**Destination-first at joins** is not exercised yet — M2a produces no
+aggregates — but nothing it did forecloses it, because scalars are wasm locals
+and the frame is already allocated and addressable beneath them. `print` uses
+the frame (digits backwards from the end of a 32-byte buffer, then an iovec
+pointing at wherever it stopped), so the convention is exercised rather than only
+written down.
+
+**Widening.** No boundary crossing yet beyond WASI's own `fd_write`/`proc_exit`,
+which are `i32` throughout. `abi`'s one widening site stays M1's.
+
+`print` is emitted as wasm rather than deferred: it is `printf("%lld\n")` today
+and varargs are M3. Unsigned division throughout, so `Int64.min` — whose negation
+is itself — prints its digits instead of wrapping to nothing. Checked against the
+interpreter on 0, −7, both `Int64` extremes and a round number.
+
+### The ladder
+
+`vyrn-cli/tests/directwasm.rs`, `#[ignore]`d beside `parity`, sharing its harness
+rather than copying it: `examples_dir`, `run_io`'s conventions (cwd, `.stdin` and
+`.args` fixtures, the RFC-0043 fixed clock and seed), `norm`, `runtime_err` and
+the exclusion lists moved to `tests/common/mod.rs`, which both tiers include. Two
+tiers disagreeing about what "the same run" means is the one way this number
+could stop being about the backend.
+
+It needs **only a `wasmtime` binary** — no clang, no sysroot, no builtins
+archive. That is this RFC's acceptance criterion, asserted by the shape of the
+test years before the criterion is met.
+
+**A committed list, not a count.** `PASSING` names the examples that work, and
+the run fails if any of them stops working, reporting what it is now blocked on.
+A count would let the set churn silently — one example starts passing while
+another regresses and the number does not move. An example that passes *without*
+being listed prints a line asking to be added and does not fail: a burndown whose
+every widening commit is red until it is finished is a burndown nobody runs.
+
+### 2 of 80
+
+`fib.vyrn` and `testing.vyrn` (whose `main` is a two-`if` `clamp` and a `print`).
+80 rather than 81 is parity's denominator: `validate_compile.vyrn` never builds
+on any backend and `externdemo.vyrn` needs a browser.
+
+The blocker list is not what a 2/80 suggests. It is not 44 different problems:
+
+| blocked on | count |
+|---|---|
+| a non-scalar type in a signature (`String` 23, `Array<..>` 11, records and validated names 15, `Option`/`Result`/`Ref` 9, `Map`/`SmallArray`/`RpcReply` 4) | **62** |
+| a builtin with no lowering (`args`, `logger`, `newScanner`, `jsonSchema`, `handle`) | 5 |
+| `while` | 2 |
+| module state (RFC-0013 top-level `let`) | 2 |
+| `spawn`, `region` | 2 |
+| generics, floats, sized ints, bitwise, a Unit value in a value position | 5 |
+
+So M2b is the aggregate ABI and the `String` representation, not control flow —
+62 of 78 examples stop at the same wall, and the pre-flight already said that
+wall has no relooper behind it. Structured control flow is 2 examples' worth of
+work.
+
+### One number worth recording, and its caveat
+
+`fib.vyrn` to wasm: **19 ms and 383 bytes** direct, **190 ms and 277,438 bytes**
+through clang (five builds each, warm).
+
+The caveat is large. fib is the smallest interesting program, most of those 277 KB
+is wasi-libc and the IR prelude, and M3 and M4 will add some of both back. The
+honest claim is only that the double compile this RFC exists to delete is
+measurable at the smallest possible scale, which is where it should be hardest
+to see.
+
+### What M2b inherits
+
+A working pipeline, a switch that fails loudly, and a list of 78 examples sorted
+by what stops them. The first item on it is worth 62.
