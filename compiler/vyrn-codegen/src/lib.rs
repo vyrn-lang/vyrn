@@ -2038,6 +2038,13 @@ struct Gen<'a> {
     /// Signatures called through a stored value anywhere in the module — each
     /// gets one synthesized dispatcher `@__vyrn_fndispatch_<sig>` at the end.
     fnval_dispatch: Vec<Type>,
+    /// Local `String` accumulators of the function being emitted that may be
+    /// appended to in place (from `append_candidates`, recomputed per body).
+    append_ok: std::collections::HashSet<String>,
+    /// Variable slot -> its `(len, cap)` shadow slots, for the in-place append
+    /// path. An entry exists only for a `let`-declared local `String` in
+    /// `append_ok`; its presence is what licenses the fast path.
+    str_append: HashMap<String, (String, String)>,
 }
 
 /// One variant of a synthesized stored-function enum (RFC-0037): a source
@@ -2146,6 +2153,8 @@ impl<'a> Gen<'a> {
             expect: Vec::new(),
             fnval_variants: Vec::new(),
             fnval_dispatch: Vec::new(),
+            append_ok: std::collections::HashSet::new(),
+            str_append: HashMap::new(),
         }
     }
 
@@ -2554,6 +2563,128 @@ impl<'a> Gen<'a> {
         buf
     }
 
+    /// The `(len, cap)` shadow slots of a local String accumulator, created on
+    /// demand. A Vyrn String is a bare NUL-terminated pointer with no header, so
+    /// growing one in place needs its length and capacity kept beside the slot.
+    ///
+    /// `cap == 0` means "this pointer was not allocated by the append path" — a
+    /// literal in .rodata, a concat result, a call result — so it may not be
+    /// `realloc`'d and `len` says nothing; the next append copies it into a
+    /// fresh owned buffer first. Every other write to the variable stores 0 back
+    /// into `cap`, and the entry block zeroes it, so the invariant holds on
+    /// every path (including the second trip through a loop that re-runs the
+    /// `let`).
+    fn str_append_shadow(&mut self, slot: &str) -> (String, String) {
+        if let Some(pair) = self.str_append.get(slot) {
+            return pair.clone();
+        }
+        let len = self.fresh_alloca("i64");
+        let cap = self.fresh_alloca("i64");
+        self.allocas.push(format!("  store i64 0, ptr {cap}"));
+        self.str_append
+            .insert(slot.to_string(), (len.clone(), cap.clone()));
+        (len, cap)
+    }
+
+    /// Append `val` to the String in `slot`, in place, growing geometrically.
+    /// `emit_str_concat` allocates and copies both halves every time, which
+    /// makes `out = out + piece` in a loop quadratic in the result — the shape
+    /// every generator is written in. Three steps, each re-reading the shadow
+    /// slots so no phi is needed (mem2reg folds them away):
+    /// take ownership of the buffer if it is not ours, reserve room, copy.
+    fn emit_str_append(&mut self, slot: &str, val: &str) {
+        let (lens, caps) = self.str_append_shadow(slot);
+        let vlen = self.fresh_tmp();
+        self.emit(format!("{vlen} = call i64 @__vyrn_strlen(ptr {val})"));
+
+        // Step 1: `cap == 0` — copy the borrowed buffer into one we own.
+        let own_l = self.fresh_label("app.own");
+        let have_l = self.fresh_label("app.have");
+        let cap0 = self.fresh_tmp();
+        let owned = self.fresh_tmp();
+        self.emit(format!("{cap0} = load i64, ptr {caps}"));
+        self.emit(format!("{owned} = icmp ne i64 {cap0}, 0"));
+        self.emit_term(format!("br i1 {owned}, label %{have_l}, label %{own_l}"));
+        self.emit_label(&own_l);
+        let ob = self.fresh_tmp();
+        let ol = self.fresh_tmp();
+        self.emit(format!("{ob} = load ptr, ptr {slot}"));
+        self.emit(format!("{ol} = call i64 @__vyrn_strlen(ptr {ob})"));
+        let need0 = self.fresh_tmp();
+        let need0n = self.fresh_tmp();
+        let big0 = self.fresh_tmp();
+        let c0 = self.fresh_tmp();
+        self.emit(format!("{need0} = add i64 {ol}, {vlen}"));
+        self.emit(format!("{need0n} = add i64 {need0}, 1"));
+        self.emit(format!("{big0} = icmp ugt i64 {need0n}, 32"));
+        self.emit(format!("{c0} = select i1 {big0}, i64 {need0n}, i64 32"));
+        let nb0 = self.fresh_tmp();
+        self.emit(format!("{nb0} = call ptr @__vyrn_malloc(i64 {c0})"));
+        self.emit(format!(
+            "call void @llvm.memcpy.p0.p0.i64(ptr {nb0}, ptr {ob}, i64 {ol}, i1 false)"
+        ));
+        self.emit(format!("store ptr {nb0}, ptr {slot}"));
+        self.emit(format!("store i64 {ol}, ptr {lens}"));
+        self.emit(format!("store i64 {c0}, ptr {caps}"));
+        self.emit_term(format!("br label %{have_l}"));
+
+        // Step 2: reserve `len + vlen + 1` bytes, doubling so N appends are O(N).
+        self.emit_label(&have_l);
+        let grow_l = self.fresh_label("app.grow");
+        let copy_l = self.fresh_label("app.copy");
+        let len1 = self.fresh_tmp();
+        let cap1 = self.fresh_tmp();
+        let need = self.fresh_tmp();
+        let needn = self.fresh_tmp();
+        let short = self.fresh_tmp();
+        self.emit(format!("{len1} = load i64, ptr {lens}"));
+        self.emit(format!("{cap1} = load i64, ptr {caps}"));
+        self.emit(format!("{need} = add i64 {len1}, {vlen}"));
+        self.emit(format!("{needn} = add i64 {need}, 1"));
+        self.emit(format!("{short} = icmp ugt i64 {needn}, {cap1}"));
+        self.emit_term(format!("br i1 {short}, label %{grow_l}, label %{copy_l}"));
+        self.emit_label(&grow_l);
+        let dbl = self.fresh_tmp();
+        let usedbl = self.fresh_tmp();
+        let nc = self.fresh_tmp();
+        self.emit(format!("{dbl} = shl i64 {cap1}, 1"));
+        self.emit(format!("{usedbl} = icmp ugt i64 {dbl}, {needn}"));
+        self.emit(format!("{nc} = select i1 {usedbl}, i64 {dbl}, i64 {needn}"));
+        let gb = self.fresh_tmp();
+        let nb1 = self.fresh_tmp();
+        self.emit(format!("{gb} = load ptr, ptr {slot}"));
+        self.emit(format!("{nb1} = call ptr @__vyrn_realloc(ptr {gb}, i64 {nc})"));
+        self.emit(format!("store ptr {nb1}, ptr {slot}"));
+        self.emit(format!("store i64 {nc}, ptr {caps}"));
+        self.emit_term(format!("br label %{copy_l}"));
+
+        // Step 3: copy the operand's bytes AND its NUL over the old terminator.
+        self.emit_label(&copy_l);
+        let buf = self.fresh_tmp();
+        let len2 = self.fresh_tmp();
+        let dst = self.fresh_tmp();
+        let n1 = self.fresh_tmp();
+        let nlen = self.fresh_tmp();
+        self.emit(format!("{buf} = load ptr, ptr {slot}"));
+        self.emit(format!("{len2} = load i64, ptr {lens}"));
+        self.emit(format!("{dst} = getelementptr i8, ptr {buf}, i64 {len2}"));
+        self.emit(format!("{n1} = add i64 {vlen}, 1"));
+        self.emit(format!(
+            "call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr {val}, i64 {n1}, i1 false)"
+        ));
+        self.emit(format!("{nlen} = add i64 {len2}, {vlen}"));
+        self.emit(format!("store i64 {nlen}, ptr {lens}"));
+    }
+
+    /// Invalidate the append shadow after any other write to `slot`: the
+    /// variable now holds a pointer this path did not allocate.
+    fn str_append_reset(&mut self, slot: &str) {
+        if let Some((_, cap)) = self.str_append.get(slot) {
+            let cap = cap.clone();
+            self.emit(format!("store i64 0, ptr {cap}"));
+        }
+    }
+
     /// Copy a fixed `[N x T]` aggregate value `v` (type `arr_ty`) into a fresh
     /// heap buffer and wrap it in the `{ptr,len,cap}` growable-array triple —
     /// the lowering behind a contextual array literal `[..]` in an `Array<T>`
@@ -2851,6 +2982,8 @@ impl<'a> Gen<'a> {
         self.cur_fn_name = f.name.clone();
         self.lambda_counter = 0;
         self.droppable = self.droppable_map.get(&f.name).cloned().unwrap_or_default();
+        self.append_ok = append_candidates(&f.body);
+        self.str_append.clear();
         self.modify_copyout.clear();
         let ret = self.llt(&f.ret);
         // A `modify` parameter is received by pointer (call-by-value-result).
@@ -3084,6 +3217,14 @@ impl<'a> Gen<'a> {
                 let ll = self.llt(&bty);
                 let slot = self.declare(name, &bty);
                 self.emit(format!("store {ll} {v}, ptr {slot}"));
+                // A String accumulator gets its append shadow here, at the one
+                // declaration site, and starts every execution of this `let`
+                // unowned — including the second trip through an enclosing loop,
+                // where the slot has just been re-stored with the initializer.
+                if bty == Type::Str && self.append_ok.contains(name.as_str()) {
+                    self.str_append_shadow(&slot);
+                    self.str_append_reset(&slot);
+                }
                 // If ownership analysis proved this heap binding non-escaping,
                 // schedule it to be reclaimed when its block exits.
                 if let Some(&kind) = self.droppable.get(&key) {
@@ -3093,6 +3234,26 @@ impl<'a> Gen<'a> {
             }
             Stmt::Assign { name, value, .. } => {
                 let (slot, tty) = self.lookup(name).ok_or_else(|| format!("unbound `{name}`"))?;
+                // `s = s + a + b` on an eligible local String: grow the buffer
+                // instead of building a new one (see `emit_str_append`). Only
+                // outside a `region` — arena memory cannot be `realloc`'d — and
+                // only for a slot that owns a shadow, which is exactly a `let`
+                // -declared local that `append_candidates` cleared. Operands are
+                // evaluated left to right, as the general path would.
+                if self.region_depth == 0 && self.str_append.contains_key(&slot) {
+                    if let Some(parts) = self_append_spine(name, value) {
+                        self.expect.push(tty.clone());
+                        let vals: Result<Vec<String>, String> = parts
+                            .iter()
+                            .map(|p| self.gen_expr(p).map(|(v, _)| v))
+                            .collect();
+                        self.expect.pop();
+                        for v in vals? {
+                            self.emit_str_append(&slot, &v);
+                        }
+                        return Ok(());
+                    }
+                }
                 self.expect.push(tty.clone());
                 let r = self.gen_expr(value);
                 self.expect.pop();
@@ -3100,6 +3261,7 @@ impl<'a> Gen<'a> {
                 let (v, _) = self.coerce(v, &vty, &tty)?;
                 let ll = self.llt(&tty);
                 self.emit(format!("store {ll} {v}, ptr {slot}"));
+                self.str_append_reset(&slot);
                 Ok(())
             }
             Stmt::SetField { name, field, value, .. } => {
@@ -5211,6 +5373,11 @@ impl<'a> Gen<'a> {
         let saved_droppable = std::mem::take(&mut self.droppable);
         let saved_modify = std::mem::take(&mut self.modify_copyout);
         let saved_bindings = std::mem::take(&mut self.fn_bindings);
+        // The lifted body is a different function: the enclosing one's append
+        // candidates say nothing about its locals, and its shadow slots would
+        // be allocas of the outer frame.
+        let saved_append_ok = std::mem::take(&mut self.append_ok);
+        let saved_str_append = std::mem::take(&mut self.str_append);
         self.tmp = 0;
         self.label = 0;
 
@@ -5290,6 +5457,8 @@ impl<'a> Gen<'a> {
         self.droppable = saved_droppable;
         self.modify_copyout = saved_modify;
         self.fn_bindings = saved_bindings;
+        self.append_ok = saved_append_ok;
+        self.str_append = saved_str_append;
 
         self.lambda_defs.push((sym.clone(), def));
         Ok((sym, ret_ty))
@@ -5684,6 +5853,8 @@ impl<'a> Gen<'a> {
         self.cur_fn_name = inst.name.clone();
         self.lambda_counter = 0;
         self.droppable = self.droppable_map.get(&inst.name).cloned().unwrap_or_default();
+        self.append_ok = append_candidates(&callee.body);
+        self.str_append.clear();
         self.fn_ret = vyrn_frontend::types::substitute(&callee.ret, &self.subst_clone());
         self.fn_bindings.clear();
 
@@ -9438,6 +9609,192 @@ fn utf8d_table() -> Vec<u8> {
     t
 }
 
+/// If `value` is `name + e1 + e2 + …` — a `+` chain whose left spine bottoms
+/// out in a bare `name` — the appended operands in written order. The chain
+/// matters: `out + a + ", "` parses as `Add(Add(Var(out), a), ", ")`, so the
+/// accumulator sits at the far end of the spine, not under the top `+`.
+fn self_append_spine<'e>(name: &str, value: &'e Expr) -> Option<Vec<&'e Expr>> {
+    let mut parts: Vec<&Expr> = Vec::new();
+    let mut cur = value;
+    while let Expr::Binary { op: BinOp::Add, lhs, rhs, .. } = cur {
+        parts.push(rhs);
+        cur = lhs;
+    }
+    match cur {
+        Expr::Var { name: n, .. } if n == name && !parts.is_empty() => {
+            parts.reverse();
+            Some(parts)
+        }
+        _ => None,
+    }
+}
+
+/// The local `String` accumulators of one function body that `s = s + …` may
+/// grow IN PLACE (see `Gen::emit_str_append`).
+///
+/// In-place growth reallocates, so every other holder of the old pointer is
+/// invalidated — `let copy = out` before an append must keep reading "a". The
+/// interpreter is safe here because `Rc::make_mut` clones a shared buffer;
+/// native code has no refcount, so eligibility is decided statically and the
+/// rule is a WHITELIST: a name qualifies only if every occurrence of it in the
+/// function is a use that provably cannot retain the pointer — the root of a
+/// self-append, a `.field` read (a String's fields are byte/char counts),
+/// an operand of the interpolation desugar (which copies), or a tail
+/// `return`. Anything else — another `let`, any user call, a record
+/// field, an array element, a lambda body, an unrecognized builtin — bans the
+/// name. An unknown callee is therefore ineligible by construction, so a new
+/// retaining builtin cannot silently make this unsound.
+fn append_candidates(body: &Block) -> std::collections::HashSet<String> {
+    let mut targets = std::collections::HashSet::new();
+    let mut banned = std::collections::HashSet::new();
+    scan_append_block(body, &mut targets, &mut banned, false);
+    targets.retain(|n| !banned.contains(n));
+    targets
+}
+
+/// Walk a block collecting append targets and banned names. `strict` marks a
+/// lambda body: everything inside one is banned outright, because a capture
+/// copies the pointer into a value that outlives the append.
+fn scan_append_block(
+    b: &Block,
+    targets: &mut std::collections::HashSet<String>,
+    banned: &mut std::collections::HashSet<String>,
+    strict: bool,
+) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let { value, .. } => ban_append_expr(value, banned, strict),
+            Stmt::Assign { name, value, .. } => match self_append_spine(name, value) {
+                Some(parts) if !strict => {
+                    targets.insert(name.clone());
+                    // The accumulator may not appear on the right as well:
+                    // `out = out + out` would read a buffer the realloc moved.
+                    for p in parts {
+                        ban_append_expr(p, banned, strict);
+                    }
+                }
+                _ => ban_append_expr(value, banned, strict),
+            },
+            Stmt::SetField { value, .. } | Stmt::Expr(value) => {
+                ban_append_expr(value, banned, strict)
+            }
+            Stmt::IndexSet { index, value, .. } => {
+                ban_append_expr(index, banned, strict);
+                ban_append_expr(value, banned, strict);
+            }
+            // Returning the accumulator hands off the buffer at the point the
+            // frame dies — nothing can append after it.
+            Stmt::Return { value: Some(e), .. } => ban_append_read(e, banned, strict),
+            // `drop s` frees the buffer; leave that path on the general lowering.
+            Stmt::Drop { name, .. } => {
+                banned.insert(name.clone());
+            }
+            Stmt::If { cond, then_block, else_block, .. } => {
+                ban_append_expr(cond, banned, strict);
+                scan_append_block(then_block, targets, banned, strict);
+                if let Some(eb) = else_block {
+                    scan_append_block(eb, targets, banned, strict);
+                }
+            }
+            Stmt::IfLet { scrutinee, then_block, else_block, .. } => {
+                ban_append_expr(scrutinee, banned, strict);
+                scan_append_block(then_block, targets, banned, strict);
+                if let Some(eb) = else_block {
+                    scan_append_block(eb, targets, banned, strict);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                ban_append_expr(cond, banned, strict);
+                scan_append_block(body, targets, banned, strict);
+            }
+            Stmt::ForIn { iter, body, .. } => {
+                ban_append_expr(iter, banned, strict);
+                scan_append_block(body, targets, banned, strict);
+            }
+            Stmt::Region { body, .. } => scan_append_block(body, targets, banned, strict),
+            Stmt::Return { value: None, .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        }
+    }
+}
+
+/// A position that does not retain its operand: a bare variable there is fine.
+fn ban_append_read(e: &Expr, banned: &mut std::collections::HashSet<String>, strict: bool) {
+    if strict || !matches!(e, Expr::Var { .. }) {
+        ban_append_expr(e, banned, strict);
+    }
+}
+
+/// Ban every variable `e` mentions in a position that might retain it. The
+/// match is exhaustive on purpose: a new `Expr` variant must be classified
+/// rather than silently fall into a permissive default.
+fn ban_append_expr(e: &Expr, banned: &mut std::collections::HashSet<String>, strict: bool) {
+    match e {
+        Expr::Var { name, .. } => {
+            banned.insert(name.clone());
+        }
+        // A String's fields are `byteLength`/`charCount` — an Int, not a borrow.
+        Expr::Field { expr, .. } => ban_append_read(expr, banned, strict),
+        // The two copying builtins the interpolation desugar emits: `@str`
+        // strdups its argument, `@concat` builds a fresh buffer from both
+        // halves. Only these two, because the lexer cannot produce a leading
+        // `@` — no local binding can shadow the name and turn the call into a
+        // dispatch through a stored function value that keeps what it is given.
+        // (`print` is spellable, and `let print = f` does exactly that.)
+        Expr::Call { name, args, .. } if matches!(name.as_str(), "@str" | "@concat") => {
+            for a in args {
+                ban_append_read(a, banned, strict);
+            }
+        }
+        Expr::Call { args, .. }
+        | Expr::Spawn { args, .. }
+        | Expr::TryConstruct { args, .. }
+        | Expr::ArrayLit { elems: args, .. } => {
+            for a in args {
+                ban_append_expr(a, banned, strict);
+            }
+        }
+        Expr::Unary { expr, .. } | Expr::Try { expr, .. } => {
+            ban_append_expr(expr, banned, strict)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            ban_append_expr(lhs, banned, strict);
+            ban_append_expr(rhs, banned, strict);
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            ban_append_expr(scrutinee, banned, strict);
+            for arm in arms {
+                ban_append_expr(&arm.body, banned, strict);
+            }
+        }
+        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            ban_append_expr(cond, banned, strict);
+            ban_append_expr(then_branch, banned, strict);
+            if let Some(eb) = else_branch {
+                ban_append_expr(eb, banned, strict);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields {
+                ban_append_expr(v, banned, strict);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                ban_append_expr(k, banned, strict);
+                ban_append_expr(v, banned, strict);
+            }
+        }
+        // A capture outlives the append, so nothing a lambda touches is eligible.
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(e) => ban_append_expr(e, banned, true),
+            LambdaBody::Block(b) => {
+                scan_append_block(b, &mut std::collections::HashSet::new(), banned, true)
+            }
+        },
+        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
+    }
+}
+
 /// Collect distinct `=~` pattern literals (first-seen order) from a block.
 fn collect_regex_block(b: &Block, out: &mut Vec<String>) {
     for s in &b.stmts {
@@ -10552,6 +10909,44 @@ mod tests {
         assert!(ir.contains("@__vyrn_strlen"), "concat length: {ir}");
         assert!(ir.contains("@strcpy") && ir.contains("@strcat"), "concat copy: {ir}");
         assert!(ir.contains("@__vyrn_snprintf"), "toString(Int) -> snprintf: {ir}");
+    }
+
+    #[test]
+    fn string_accumulator_appends_in_place() {
+        // `out = out + piece` on a local String whose every other use is a
+        // non-retaining read grows one buffer (`realloc` + `memcpy`) instead of
+        // allocating a fresh one per iteration.
+        let src = "fn main() -> Int64 { let mut out = \"\"; let mut i = 0; \
+                   while i < 4 { out = out + \"x\"; i = i + 1; } \
+                   print(\"\\{out}\"); return out.byteLength; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("app.own"), "takes ownership of the buffer once: {ir}");
+        assert!(ir.contains("call ptr @__vyrn_realloc"), "grows in place: {ir}");
+        assert!(
+            ir.contains("call void @llvm.memcpy.p0.p0.i64"),
+            "copies the operand in: {ir}"
+        );
+    }
+
+    #[test]
+    fn string_accumulator_not_appended_when_aliased_or_in_region() {
+        // An alias taken before the append must keep reading the old contents,
+        // so a `let` that copies the variable disqualifies it...
+        let aliased = "fn main() -> Int64 { let mut out = \"a\"; let copy = out; \
+                       out = out + \"b\"; print(copy); return out.byteLength; }";
+        let ir = emit(&check(aliased).unwrap()).unwrap();
+        assert!(!ir.contains("app.own"), "aliased accumulator stays copying: {ir}");
+        // ...and so does any user call, which may store what it is handed.
+        let escaped = "fn keep(s: String) -> Int64 { return s.byteLength; } \
+                       fn main() -> Int64 { let mut out = \"a\"; out = out + \"b\"; \
+                       return keep(out); }";
+        let ir = emit(&check(escaped).unwrap()).unwrap();
+        assert!(!ir.contains("app.own"), "escaping accumulator stays copying: {ir}");
+        // Region memory comes from an arena that cannot be `realloc`'d.
+        let regioned = "fn main() -> Int64 { region { let mut out = \"a\"; \
+                        out = out + \"b\"; print(\"\\{out}\"); } return 0; }";
+        let ir = emit(&check(regioned).unwrap()).unwrap();
+        assert!(!ir.contains("app.own"), "region accumulator stays copying: {ir}");
     }
 
     #[test]
