@@ -1,0 +1,22 @@
+[package]
+name = "vyrn-genwasm"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "RFC-0076: runs `gen fn` generators as compiled wasm in an embedded wasmtime."
+
+# NOT part of the default workspace (see ../Cargo.toml `exclude`), for the same
+# reason `vyrn-codegen-llvm` and `vyrn-lsp` are not: `wasmtime` is an external
+# dependency, and `cargo build` / `cargo test` at `compiler/` must keep resolving
+# to path dependencies only. Both consumers depend on this crate OPTIONALLY,
+# behind a feature spelled `wasm-gen` in each — off by default in `vyrn-cli`, on
+# by default in `vyrn-lsp`, which is the long-lived process the engine pays off
+# in.
+[dependencies]
+vyrn-frontend = { path = "../vyrn-frontend" }
+vyrn-codegen = { path = "../vyrn-codegen" }
+wasmtime = { version = "47", default-features = false, features = ["cranelift", "runtime", "std"] }
+
+[lib]
+name = "vyrn_genwasm"
+path = "src/lib.rs"

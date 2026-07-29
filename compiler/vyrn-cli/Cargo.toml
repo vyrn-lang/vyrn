@@ -7,18 +7,16 @@ description = "The vyrn driver: check, run (interpret), or emit LLVM IR for a .v
 [dependencies]
 vyrn-frontend = { path = "../vyrn-frontend" }
 vyrn-codegen = { path = "../vyrn-codegen" }
-# RFC-0076: the embedded wasm engine that runs generators. OPTIONAL and off by
-# default, so `cargo build` and `cargo test` keep working with no external
-# dependency — the property the default workspace members were chosen for. The
-# dependency lives here rather than in `vyrn-frontend` because compiling a
-# generator to wasm needs codegen and clang, which only the driver has; the
-# frontend just exposes the seam.
-wasmtime = { version = "47", optional = true, default-features = false, features = ["cranelift", "runtime", "std"] }
+# RFC-0076: the embedded wasm engine that runs generators. An EXCLUDED crate
+# (it pulls in `wasmtime`), depended on OPTIONALLY, so `cargo build` and
+# `cargo test` keep resolving to path dependencies only — the property the
+# default workspace members were chosen for.
+vyrn-genwasm = { path = "../vyrn-genwasm", optional = true }
 
 [features]
 # `cargo build --features wasm-gen` opts into running generators as compiled
 # wasm instead of interpreting them.
-wasm-gen = ["dep:wasmtime"]
+wasm-gen = ["dep:vyrn-genwasm"]
 
 [[bin]]
 name = "vyrn"

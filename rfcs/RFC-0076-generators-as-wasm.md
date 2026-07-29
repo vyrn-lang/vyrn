@@ -554,6 +554,68 @@ every example that uses reflection.
 the same unit. Exhausting either must produce the same canonical message, or a
 runaway generator traps differently depending on the engine.
 
+## M4 shipped: the long-lived process, and the number
+
+The engine moved out of `vyrn-cli` (a binary crate, so nothing could depend on
+it) into `compiler/vyrn-genwasm`, EXCLUDED for the same reason
+`vyrn-codegen-llvm` and `vyrn-lsp` are: `cargo build` and `cargo test` at
+`compiler/` must still resolve to path dependencies only. Both consumers depend
+on it optionally, behind a feature spelled `wasm-gen` in each — off by default in
+the CLI, ON by default in the LSP, which is the process the engine exists for.
+
+The move needed one thing that was not a move. `genwasm.rs` reached into its
+parent crate for the C runtime shim and for clang/wasi-sysroot discovery, and the
+ordinary `vyrn build` path uses those too — so they could not follow the engine
+into a crate the driver depends on only optionally. They went DOWN instead, into
+`vyrn-codegen::toolchain`, which both crates already depend on and which is where
+they belong on their own account: the shim is the C half of what codegen emits,
+and clang is what codegen's output is fed to.
+
+Installing an engine is not analysis, so the LSP stays a pure adapter: one call
+at startup, the same shape and the same `VYRN_NO_WASM_GEN` escape the CLI's
+`real_main` has. No clang, or no wasi sysroot, is a `decline` — the editor falls
+back to the interpreter and is slower, never broken.
+
+Measured with the same release LSP binary, engine on against
+`VYRN_NO_WASM_GEN=1`, eight keystrokes each:
+
+| page | keystroke, interpreted | keystroke, wasm (min/median/max) | cold `didOpen` |
+|---|---|---|---|
+| `examples/bin/routes/index.vyx` | 243 ms | 53 / **54** / 59 ms | 315 → 1,220 ms |
+| `examples/bin/routes/about.vyx` | 162 ms | 52 / **54** / 57 ms | 318 → 1,176 ms |
+| `examples/bin/widgets/CreateForm.vyx` | 87 ms | 35 / **37** / 38 ms | 290 → 584 ms |
+| `examples/bin/routes/layout.vyx` | 44 ms | 34 / **37** / 44 ms | 843 → 765 ms |
+| `examples/shelf/widgets/ShelfApp.vyx` | 91 ms | 32 / **34** / 35 ms | 653 → 740 ms |
+
+**4.5x on the page this RFC was written about**, and the interpreted column
+reproduces the pre-M4 baseline exactly, so the two columns really are the same
+build differing only in engine.
+
+The spread is the finding, and it is the opposite of what was expected: the
+keystrokes are FLAT (53–59 ms on `index.vyx`, no first-keystroke outlier), and
+the whole compilation cost lands in `didOpen`, which pays clang for all seven
+artifacts the page's imports reach — **+905 ms, once per editor session**. Per
+keystroke the trace is two generator calls at 2.5–4 ms of execution each, against
+~190 ms interpreted. Break-even is about five keystrokes; a session is thousands.
+
+Two smaller measurements, both of which had to be checked rather than assumed:
+
+- **The artifact key costs 1.1–1.9 ms per call**, so ~3 ms of a 54 ms keystroke.
+  It is a `Debug`-hash of the whole generator program (`std/vyx` is 4,536 lines)
+  and it now runs on every keystroke — about 40% of what a cache-hit generation
+  costs, which makes it the next thing worth attacking, but not yet.
+- **A `.vyrn` keystroke did not move**: `examples/shelf/server.vyrn` is 23–27 ms
+  under both engines across three paired runs, and the trace shows zero generator
+  calls during those keystrokes. Nothing was paid by files that do not generate.
+
+### Is M5's on-disk artifact cache urgent?
+
+Not urgent, and it is now measurable rather than speculative. The cost it removes
+is exactly the +905 ms on the FIRST page opened per session, amortized over every
+keystroke after it. That is a real editor-startup cost and worth removing, but it
+is paid once per session against a saving of ~190 ms per keystroke — the ordering
+in the milestone list was right.
+
 ## Milestones
 
 - **M1 — embed the runtime, one generator, no capabilities.** DONE. wasmtime as
@@ -571,10 +633,9 @@ runaway generator traps differently depending on the engine.
   below.
 - **M3 — reflection.** DONE (M3a `Code` as a handle, M3b the structured
   results). Every generator in the repo is served, with byte-identical output.
-- **M4 — a long-lived process, and the measurement that matters.** The `.vyx`
-  keystroke, end to end, against the 244 ms baseline. Every milestone so far has
-  measured compilation dominating a one-shot process; this is the one that stops
-  paying it per call.
+- **M4 — a long-lived process, and the measurement that matters.** DONE. The
+  engine moved to its own excluded crate and the LSP installs it; the `.vyx`
+  keystroke fell from 243 ms to 54 ms — see below.
 - **M5 — fuel, traps, and the fallback.** Fuel mapping, trap-wording parity, and
   an explicit fallback to the interpreter for anything the wasm path refuses,
   so a generator can never become uncompilable by adopting this.

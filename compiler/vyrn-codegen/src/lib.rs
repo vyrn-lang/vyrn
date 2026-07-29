@@ -16,6 +16,8 @@
 //! The Inkwell (in-memory LLVM) backend in the excluded `vyrn-codegen-llvm`
 //! crate will eventually replace this; both must agree with the interpreter.
 
+pub mod toolchain;
+
 use std::collections::HashMap;
 use std::fmt::Write;
 

@@ -1,0 +1,1101 @@
+//! Where the emitted IR meets the toolchain that turns it into a binary.
+//!
+//! The C shim is the portable half of what this crate emits — `stdout`/`stderr`
+//! are macros with no linkable symbol, so the IR calls shim functions instead —
+//! and clang plus the wasi sysroot are what that IR is fed to. All four pieces
+//! sit here rather than in the driver because RFC-0076's wasm generation engine
+//! is an EXCLUDED crate the driver may only depend on optionally, so it cannot
+//! reach back into the driver for them, and the driver cannot reach into it.
+//! This crate is the nearest place both already depend on.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// The portable half of the runtime: `stderr`/`stdout` are C macros with no
+/// linkable symbol, so the emitted IR calls these two functions instead. The
+/// shim is compiled by clang next to the IR on every target — MSVC, glibc,
+/// and wasi-libc alike.
+pub const RUNTIME_SHIM: &str = r#"
+/* MSVC's UCRT deprecates fopen in favor of fopen_s; the portable spelling is
+   intentional (glibc and wasi-libc have no fopen_s), so silence the advisory. */
+#define _CRT_SECURE_NO_WARNINGS
+/* rand_s (a UCRT CSPRNG) needs this defined before <stdlib.h> on MSVC/UCRT; it
+   is the native Windows seed source (RFC-0043). Harmless elsewhere. */
+#define _CRT_RAND_S
+#include <errno.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#if !defined(_WIN32)
+/* getentropy: the POSIX/wasi seed CSPRNG (glibc >= 2.25 and wasi-libc). */
+#include <unistd.h>
+#include <sys/random.h>
+#endif
+#if defined(_WIN32)
+/* _commit / _fileno for fsync (RFC-0044). MoveFileExA gives the atomic overwrite
+   the C `rename` refuses on Windows (it fails when the target exists); declared
+   here (not via the heavy <windows.h>, which would leak min/max macros into the
+   codec below) and satisfied from kernel32. */
+#include <io.h>
+__declspec(dllimport) int __stdcall MoveFileExA(const char*, const char*, unsigned long);
+__declspec(dllimport) unsigned long __stdcall GetLastError(void);
+#pragma comment(lib, "kernel32")
+#define VYRN_MOVEFILE_REPLACE_EXISTING 0x1u
+#define VYRN_ERROR_NOT_SAME_DEVICE 17u
+#endif
+
+void* __vyrn_stderr(void) { return stderr; }
+void* __vyrn_stdout(void) { return stdout; }
+
+/* size_t-clean wrappers: the IR always passes/returns 64-bit sizes, so these
+   adapt on ILP32 targets (wasm32) and are transparent on LP64/LLP64. */
+unsigned long long __vyrn_strlen(const char* s) { return (unsigned long long)strlen(s); }
+
+/* lineAt/colAt (1-based) over a byte buffer. The interpreter memoizes a
+   line-start table per buffer because a scanner asks once per node and counting
+   from byte 0 each time is quadratic; natively there is no such cache, so these
+   count directly. Same answer either way — which is all parity requires — and a
+   native program calling them in a loop pays what the naive loop would have. */
+long long __vyrn_line_at(const unsigned char* d, long long len, long long off) {
+    long long line = 1;
+    if (off > len) off = len;
+    for (long long i = 0; i < off; i++) {
+        if (d[i] == 10) line++;
+    }
+    return line;
+}
+
+long long __vyrn_col_at(const unsigned char* d, long long len, long long off) {
+    long long col = 1;
+    if (off > len) off = len;
+    for (long long i = off; i > 0 && d[i - 1] != 10; i--) {
+        col++;
+    }
+    return col;
+}
+
+/* charCount (RFC-0058): the number of Unicode scalar values in a validated UTF-8
+   string = the count of non-continuation bytes (those where (b & 0xC0) != 0x80).
+   Byte-identical to the interpreter's loop. Strings are NUL-terminated (interior
+   NUL is rejected at construction), so `strlen`-style iteration is exact. */
+unsigned long long __vyrn_charcount(const char* s) {
+    unsigned long long n = 0;
+    for (const unsigned char* p = (const unsigned char*)s; *p; p++) {
+        if ((*p & 0xC0) != 0x80) n++;
+    }
+    return n;
+}
+
+/* Allocation failure is a trap, not a null dereference: the emitted IR never
+   null-checks (every alloc site would need a branch), so the single choke
+   point checks instead. The size guard matters on ILP32 (wasm32): without it
+   a 64-bit request silently truncates in the (size_t) cast, and a huge size
+   could wrap to a tiny allocation - a buffer overflow, not an error. */
+static void* __vyrn_alloc_check(void* p, unsigned long long n) {
+    if (p == NULL && n > 0) {
+        fputs("error: out of memory\n", stderr);
+        exit(1);
+    }
+    return p;
+}
+void* __vyrn_malloc(unsigned long long n) {
+    if (n > (unsigned long long)(size_t)-1) {
+        fputs("error: out of memory\n", stderr);
+        exit(1);
+    }
+    return __vyrn_alloc_check(malloc((size_t)n), n);
+}
+void* __vyrn_realloc(void* p, unsigned long long n) {
+    if (n > (unsigned long long)(size_t)-1) {
+        fputs("error: out of memory\n", stderr);
+        exit(1);
+    }
+    return __vyrn_alloc_check(realloc(p, (size_t)n), n);
+}
+int __vyrn_strncmp(const char* a, const char* b, unsigned long long n) {
+    return strncmp(a, b, (size_t)n);
+}
+
+/* ---- Map<String, V> runtime (RFC-0028) ---------------------------------- */
+/* A Map lowers to { char** keys, char* vals, i64 len, i64 cap } — two parallel
+   growable buffers sharing one length/capacity, in first-insertion order. The
+   value buffer is raw bytes with a per-entry stride `esz` (the value type's
+   size, passed by the caller). Keys are stored by pointer (no copy — matching
+   the array element-store convention). Lookup is a linear strcmp scan. */
+typedef struct { char** keys; char* vals; long long len, cap; } VMap;
+/* Index of `key`, or -1. Operates on a raw keys buffer so read paths (`at`,
+   `has`) can call it with values extracted from an SSA aggregate. */
+long long __vyrn_map_find(char** keys, long long len, const char* key) {
+    long long i;
+    for (i = 0; i < len; i++) if (strcmp(keys[i], key) == 0) return i;
+    return -1;
+}
+/* Ensure room for one more entry, growing both buffers (cap 0 -> 4, else 2x). */
+void __vyrn_map_reserve(VMap* m, long long esz) {
+    if (m->len + 1 > m->cap) {
+        m->cap = m->cap ? m->cap * 2 : 4;
+        m->keys = (char**)__vyrn_realloc(m->keys, (unsigned long long)m->cap * sizeof(char*));
+        m->vals = (char*)__vyrn_realloc(m->vals, (unsigned long long)m->cap * (unsigned long long)esz);
+    }
+}
+/* Remove entry `i`, shifting later entries down so first-insertion order is
+   preserved for the survivors (remove-then-insert therefore moves a key end). */
+void __vyrn_map_remove_at(VMap* m, long long i, long long esz) {
+    long long rest = m->len - i - 1;
+    if (rest > 0) {
+        memmove(m->keys + i, m->keys + i + 1, (size_t)(rest * (long long)sizeof(char*)));
+        memmove(m->vals + i * esz, m->vals + (i + 1) * esz, (size_t)(rest * esz));
+    }
+    m->len--;
+}
+/* A snapshot copy of the key pointers (for `keys()`), owned by the fresh
+   Array<String>; the map may then be mutated without disturbing the snapshot. */
+char** __vyrn_map_keys_copy(char** keys, long long len) {
+    char** r = (char**)__vyrn_malloc((unsigned long long)(len ? len : 1) * sizeof(char*));
+    long long i;
+    for (i = 0; i < len; i++) r[i] = keys[i];
+    return r;
+}
+int __vyrn_snprintf(char* buf, unsigned long long n, const char* fmt, ...) {
+    va_list ap;
+    int r;
+    va_start(ap, fmt);
+    r = vsnprintf(buf, (size_t)n, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+/* ---- input I/O (RFC-0014) ----------------------------------------------- */
+/* argv is stashed by `main` and served to `args()` as argv[1..]. wasi-libc
+   populates argv identically on the wasm target (the host provides args_get). */
+static int __vyrn_argc = 0;
+static char** __vyrn_argv = 0;
+long long __vyrn_args_count(void) {
+    return (long long)(__vyrn_argc > 1 ? __vyrn_argc - 1 : 0);
+}
+const char* __vyrn_args_get(long long i) { return __vyrn_argv[i + 1]; }
+
+/* readLine: one line from stdin as a malloc'd, NUL-terminated buffer with its
+   trailing \r?\n stripped; *outlen is its byte length. Returns NULL at EOF (no
+   bytes) and also for a line containing an embedded NUL byte, which cannot live
+   in a NUL-terminated Vyrn String (the parity-safe rule, RFC-0014). The codegen
+   validates UTF-8 (via the shared DFA); an invalid line reads as None too. */
+char* __vyrn_read_line(unsigned long long* outlen) {
+    int c = getchar();
+    if (c == EOF) return 0;
+    unsigned long long cap = 64, len = 0;
+    char* buf = (char*)__vyrn_malloc(cap);
+    int had_nul = 0;
+    while (c != EOF && c != '\n') {
+        if (c == 0) had_nul = 1;
+        if (len + 2 >= cap) { cap *= 2; buf = (char*)__vyrn_realloc(buf, cap); }
+        buf[len++] = (char)c;
+        c = getchar();
+    }
+    if (len > 0 && buf[len - 1] == '\r') len--;
+    buf[len] = '\0';
+    if (had_nul) { free(buf); return 0; }
+    *outlen = len;
+    return buf;
+}
+
+#ifdef VYRN_GEN_HOST
+/* ---- generator host imports (RFC-0076 M2) -------------------------------
+   A generator does NOT read the filesystem: it reads through the loader's
+   resolver, which in the LSP serves UNSAVED buffers and elsewhere serves
+   vendored or remote modules. Opening files here would read different bytes
+   than the interpreter does, so on this build the two read primitives are
+   replaced by host imports backed by that resolver — path-mediated and
+   recorded on the host side, exactly as `Interp::gen_read_file` does.
+
+   Two calls rather than one because the host must not allocate inside guest
+   memory: `read` resolves, mediates, reads and stashes, returning
+   (status << 32) | len; `fetch` copies the stash into a buffer the GUEST
+   allocated. Status is the same alphabet the codegen already renders errors
+   from (0 ok / 1 io / 3 embedded NUL), so the wording needs no new agreement. */
+__attribute__((import_module("vyrn_gen"), import_name("read")))
+extern long long __vyrn_gen_read(const char* path, int mode);
+__attribute__((import_module("vyrn_gen"), import_name("fetch")))
+extern void __vyrn_gen_fetch(char* dest);
+
+/* mode: 0 = readFile (host checks for NUL), 1 = readFileBytes, 2 = listDir
+   (the stash is the sorted entry names joined by '\n'). */
+static char* __vyrn_gen_slurp(const char* path, int mode, unsigned long long* outlen, int* status) {
+    long long r = __vyrn_gen_read(path, mode);
+    unsigned long long len = (unsigned long long)(r & 0xffffffffLL);
+    char* buf;
+    *status = (int)(r >> 32);
+    if (*status != 0) return 0;
+    buf = (char*)__vyrn_malloc(len + 1);
+    __vyrn_gen_fetch(buf);
+    buf[len] = '\0';
+    *outlen = len;
+    return buf;
+}
+
+int __vyrn_read_file(const char* path, char** out, unsigned long long* outlen) {
+    int st;
+    char* buf = __vyrn_gen_slurp(path, 0, outlen, &st);
+    if (st != 0) return st;
+    *out = buf;
+    return 0;
+}
+
+int __vyrn_read_file_bytes(const char* path, char** out, unsigned long long* outlen) {
+    int st;
+    char* buf = __vyrn_gen_slurp(path, 1, outlen, &st);
+    if (st != 0) return st;
+    *out = buf;
+    return 0;
+}
+
+/* listDir has no runtime lowering in the language (RFC-0021) — this exists only
+   on the generator-host build, and only `emit_gen_host` emits a call to it. The
+   host sorts and joins; splitting on '\n' in place gives the char** the
+   Array<String> triple wants (an entry name cannot contain a newline). */
+int __vyrn_gen_list_dir(const char* path, char*** out, unsigned long long* outlen) {
+    int st;
+    unsigned long long len = 0, n = 0, i, k = 0;
+    char** names;
+    char* start;
+    char* buf = __vyrn_gen_slurp(path, 2, &len, &st);
+    if (st != 0) return st;
+    if (len > 0) {
+        n = 1;
+        for (i = 0; i < len; i++) if (buf[i] == '\n') n++;
+    }
+    names = (char**)__vyrn_malloc((n ? n : 1) * sizeof(char*));
+    start = buf;
+    for (i = 0; i < len; i++) {
+        if (buf[i] == '\n') { buf[i] = '\0'; names[k++] = start; start = buf + i + 1; }
+    }
+    if (len > 0) names[k++] = start;
+    *out = names;
+    *outlen = n;
+    return 0;
+}
+#else
+/* readFile: whole file into a malloc'd, NUL-terminated buffer (*out, *outlen).
+   Status: 0 ok, 1 io-error (missing/permission/directory/read error), 3 the
+   file contains an embedded NUL byte. UTF-8 validation (status 2) is done by
+   the codegen after this returns, reusing the shared DFA. A read loop (not
+   fseek/ftell) keeps it portable across regular files, pipes, and wasi-libc. */
+int __vyrn_read_file(const char* path, char** out, unsigned long long* outlen) {
+    FILE* f = fopen(path, "rb");
+    if (f == 0) return 1;
+    unsigned long long cap = 1024, len = 0;
+    char* buf = (char*)__vyrn_malloc(cap);
+    for (;;) {
+        if (len + 1 >= cap) { cap *= 2; buf = (char*)__vyrn_realloc(buf, cap); }
+        size_t got = fread(buf + len, 1, (size_t)(cap - len - 1), f);
+        len += (unsigned long long)got;
+        if (got == 0) break;
+    }
+    int bad = ferror(f);
+    fclose(f);
+    if (bad) { free(buf); return 1; }
+    buf[len] = '\0';
+    for (unsigned long long k = 0; k < len; k++) {
+        if (buf[k] == 0) { free(buf); return 3; }
+    }
+    *out = buf;
+    *outlen = len;
+    return 0;
+}
+
+/* readFileBytes (M2): binary read, no UTF-8/NUL checks. Status 0 ok / 1 io. */
+int __vyrn_read_file_bytes(const char* path, char** out, unsigned long long* outlen) {
+    FILE* f = fopen(path, "rb");
+    if (f == 0) return 1;
+    unsigned long long cap = 1024, len = 0;
+    char* buf = (char*)__vyrn_malloc(cap);
+    for (;;) {
+        if (len + 1 >= cap) { cap *= 2; buf = (char*)__vyrn_realloc(buf, cap); }
+        size_t got = fread(buf + len, 1, (size_t)(cap - len), f);
+        len += (unsigned long long)got;
+        if (got == 0) break;
+    }
+    int bad = ferror(f);
+    fclose(f);
+    if (bad) { free(buf); return 1; }
+    *out = buf;
+    *outlen = len;
+    return 0;
+}
+#endif
+
+/* writeFile: create/truncate + write all bytes. Status 0 ok / 1 io-error. A
+   Vyrn String is NUL-terminated and never contains a NUL, so strlen is its
+   full length. */
+int __vyrn_write_file(const char* path, const char* contents) {
+    FILE* f = fopen(path, "wb");
+    if (f == 0) return 1;
+    size_t n = strlen(contents);
+    size_t wrote = fwrite(contents, 1, n, f);
+    int bad = (wrote != n);
+    if (fclose(f) != 0) bad = 1;
+    return bad ? 1 : 0;
+}
+
+/* renameFile: atomically move `from` over `to` (RFC-0044). Status 0 ok / 1 io /
+   2 cross-device. POSIX/wasi `rename` replaces atomically and reports EXDEV;
+   Windows C `rename` refuses an existing target, so MoveFileExA(REPLACE_EXISTING)
+   is used and ERROR_NOT_SAME_DEVICE maps to the cross-device status. */
+int __vyrn_rename_file(const char* from, const char* to) {
+#if defined(_WIN32)
+    if (MoveFileExA(from, to, VYRN_MOVEFILE_REPLACE_EXISTING) != 0) return 0;
+    return GetLastError() == VYRN_ERROR_NOT_SAME_DEVICE ? 2 : 1;
+#else
+    if (rename(from, to) == 0) return 0;
+    return errno == EXDEV ? 2 : 1;
+#endif
+}
+
+/* fsyncFile: flush a file's data to stable storage (RFC-0044, the optional
+   power-durability step). Open, sync the descriptor, close. Status 0 ok / 1 io.
+   wasi-libc lowers fsync to fd_sync. */
+int __vyrn_fsync_file(const char* path) {
+    /* read+write (not "rb"): flushing buffers needs write access on Windows
+       (_commit → FlushFileBuffers); "rb+" opens an existing file without
+       truncating it. */
+    FILE* f = fopen(path, "rb+");
+    if (f == 0) return 1;
+    int rc = 0;
+#if defined(_WIN32)
+    if (_commit(_fileno(f)) != 0) rc = 1;
+#else
+    if (fsync(fileno(f)) != 0) rc = 1;
+#endif
+    fclose(f);
+    return rc;
+}
+
+/* ---- time & randomness at the host boundary (RFC-0043) ------------------ */
+/* now()/monotonic()/randomSeed() are host INPUTS, not part of the deterministic
+   core. Each honors an injected value (VYRN_FIXED_TIME / VYRN_FIXED_SEED) so the
+   parity harness can fix the clock and seed identically in every backend; the
+   interpreter reads the same env. Absent the env vars they read the real host.
+   These symbols are compiled on EVERY target (native + wasi), so a clock/random
+   program links and runs under wasmtime with no `vyrn` host page: timespec_get /
+   clock_gettime / getentropy lower to WASI clock_time_get / random_get. */
+
+/* Wall clock, epoch milliseconds (UTC). timespec_get(TIME_UTC) is the portable
+   spelling across UCRT, glibc, and wasi-libc. */
+long long __vyrn_now_millis(void) {
+    const char* e = getenv("VYRN_FIXED_TIME");
+    if (e && e[0]) return strtoll(e, 0, 10);
+    struct timespec ts;
+    if (timespec_get(&ts, TIME_UTC) == 0) return 0;
+    return (long long)ts.tv_sec * 1000 + (long long)(ts.tv_nsec / 1000000);
+}
+
+/* Monotonic nanoseconds. Under a fixed clock: a fixed base plus a deterministic
+   per-call increment, so successive calls are byte-identical across backends
+   (the interpreter mirrors this base/step exactly: 1e9 + n*1e6). */
+static long long __vyrn_mono_ctr = 0;
+long long __vyrn_monotonic_nanos(void) {
+    const char* e = getenv("VYRN_FIXED_TIME");
+    if (e && e[0]) {
+        long long v = 1000000000LL + __vyrn_mono_ctr * 1000000LL;
+        __vyrn_mono_ctr++;
+        return v;
+    }
+#if defined(_WIN32)
+    /* UCRT has no clock_gettime(CLOCK_MONOTONIC); the wall clock in ns is an
+       adequate elapsed source (never exercised under the fixed-clock harness). */
+    struct timespec ts;
+    timespec_get(&ts, TIME_UTC);
+    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+#endif
+}
+
+/* An unpredictable Int64 seed from the host CSPRNG. */
+long long __vyrn_random_seed(void) {
+    const char* e = getenv("VYRN_FIXED_SEED");
+    if (e && e[0]) return strtoll(e, 0, 10);
+#if defined(_WIN32)
+    unsigned int a = 0, b = 0;
+    rand_s(&a);
+    rand_s(&b);
+    return (long long)(((unsigned long long)a << 32) ^ (unsigned long long)b);
+#else
+    unsigned long long v = 0;
+    if (getentropy(&v, sizeof v) != 0) v = 0;
+    return (long long)v;
+#endif
+}
+
+/* ---- JSON codec runtime (RFC-0018) -------------------------------------- */
+/* A tagged JSON DOM plus a parser, canonical encoder, and a decode-side issue
+   accumulator. The per-type encode/decode functions are GENERATED as LLVM IR
+   (see vyrn-codegen); this shim owns the parity-critical string work — number
+   formatting, escaping, and the parser error wording — so the native output is
+   byte-identical to the interpreter's `crate::codec`. */
+
+enum { VJ_NULL = 0, VJ_BOOL = 1, VJ_NUM = 2, VJ_STR = 3, VJ_ARR = 4, VJ_OBJ = 5 };
+typedef struct VJ VJ;
+typedef struct { char* key; VJ* val; } VJMember;
+struct VJ {
+    int kind;
+    int bval;                                   /* VJ_BOOL */
+    char* text;                                 /* VJ_NUM verbatim / VJ_STR bytes */
+    int is_int;                                 /* VJ_NUM: integer syntax? */
+    VJ** items; unsigned long long nitems, capitems;   /* VJ_ARR */
+    VJMember* mem; unsigned long long nmem, capmem;     /* VJ_OBJ */
+};
+
+static char* __vyrn_dup(const char* s) {
+    unsigned long long n = strlen(s);
+    char* r = (char*)__vyrn_malloc(n + 1);
+    memcpy(r, s, n + 1);
+    return r;
+}
+static VJ* __vyrn_vj_new(int kind) {
+    VJ* v = (VJ*)__vyrn_malloc(sizeof(VJ));
+    v->kind = kind; v->bval = 0; v->text = 0; v->is_int = 0;
+    v->items = 0; v->nitems = 0; v->capitems = 0;
+    v->mem = 0; v->nmem = 0; v->capmem = 0;
+    return v;
+}
+VJ* __vyrn_vj_obj(void) { return __vyrn_vj_new(VJ_OBJ); }
+VJ* __vyrn_vj_arr(void) { return __vyrn_vj_new(VJ_ARR); }
+VJ* __vyrn_vj_null(void) { return __vyrn_vj_new(VJ_NULL); }
+VJ* __vyrn_vj_bool(int b) { VJ* v = __vyrn_vj_new(VJ_BOOL); v->bval = b ? 1 : 0; return v; }
+static VJ* __vyrn_vj_num_text(const char* t, int is_int) {
+    VJ* v = __vyrn_vj_new(VJ_NUM); v->text = __vyrn_dup(t); v->is_int = is_int; return v;
+}
+VJ* __vyrn_vj_int(long long x) {
+    char buf[32]; __vyrn_snprintf(buf, 32, "%lld", x); return __vyrn_vj_num_text(buf, 1);
+}
+VJ* __vyrn_vj_uint(unsigned long long x) {
+    char buf[32]; __vyrn_snprintf(buf, 32, "%llu", x); return __vyrn_vj_num_text(buf, 1);
+}
+VJ* __vyrn_vj_float(double x) {
+    /* NaN renders as `NaN` (matching the interpreter's Rust formatting). */
+    if (x != x) return __vyrn_vj_num_text("NaN", 0);
+    char buf[512]; __vyrn_snprintf(buf, 512, "%f", x); return __vyrn_vj_num_text(buf, 0);
+}
+VJ* __vyrn_vj_str(const char* s) { VJ* v = __vyrn_vj_new(VJ_STR); v->text = __vyrn_dup(s); return v; }
+void __vyrn_vj_push(VJ* a, VJ* c) {
+    if (a->nitems + 1 > a->capitems) {
+        a->capitems = a->capitems ? a->capitems * 2 : 4;
+        a->items = (VJ**)__vyrn_realloc(a->items, a->capitems * sizeof(VJ*));
+    }
+    a->items[a->nitems++] = c;
+}
+void __vyrn_vj_set(VJ* o, const char* key, VJ* c) {
+    if (o->nmem + 1 > o->capmem) {
+        o->capmem = o->capmem ? o->capmem * 2 : 4;
+        o->mem = (VJMember*)__vyrn_realloc(o->mem, o->capmem * sizeof(VJMember));
+    }
+    o->mem[o->nmem].key = __vyrn_dup(key);
+    o->mem[o->nmem].val = c;
+    o->nmem++;
+}
+
+/* ---- growable byte buffer (encoder) ------------------------------------- */
+typedef struct { char* p; unsigned long long len, cap; } VSB;
+static void vsb_init(VSB* s) { s->cap = 64; s->len = 0; s->p = (char*)__vyrn_malloc(s->cap); s->p[0] = 0; }
+static void vsb_ensure(VSB* s, unsigned long long extra) {
+    if (s->len + extra + 1 > s->cap) {
+        while (s->len + extra + 1 > s->cap) s->cap *= 2;
+        s->p = (char*)__vyrn_realloc(s->p, s->cap);
+    }
+}
+static void vsb_putc(VSB* s, char c) { vsb_ensure(s, 1); s->p[s->len++] = c; s->p[s->len] = 0; }
+static void vsb_puts(VSB* s, const char* t) {
+    unsigned long long n = strlen(t); vsb_ensure(s, n); memcpy(s->p + s->len, t, n); s->len += n; s->p[s->len] = 0;
+}
+static void vsb_escape(VSB* s, const char* t) {
+    vsb_putc(s, '"');
+    for (const unsigned char* q = (const unsigned char*)t; *q; q++) {
+        unsigned char c = *q;
+        if (c == '"') vsb_puts(s, "\\\"");
+        else if (c == '\\') vsb_puts(s, "\\\\");
+        else if (c == '\n') vsb_puts(s, "\\n");
+        else if (c == '\t') vsb_puts(s, "\\t");
+        else if (c == '\r') vsb_puts(s, "\\r");
+        else if (c < 0x20) { char b[8]; __vyrn_snprintf(b, 8, "\\u%04x", (unsigned)c); vsb_puts(s, b); }
+        else vsb_putc(s, (char)c);
+    }
+    vsb_putc(s, '"');
+}
+static void __vyrn_vj_write(VSB* s, VJ* v) {
+    unsigned long long i;
+    switch (v->kind) {
+        case VJ_NULL: vsb_puts(s, "null"); break;
+        case VJ_BOOL: vsb_puts(s, v->bval ? "true" : "false"); break;
+        case VJ_NUM: vsb_puts(s, v->text); break;
+        case VJ_STR: vsb_escape(s, v->text); break;
+        case VJ_ARR:
+            vsb_putc(s, '[');
+            for (i = 0; i < v->nitems; i++) { if (i) vsb_putc(s, ','); __vyrn_vj_write(s, v->items[i]); }
+            vsb_putc(s, ']');
+            break;
+        default: /* VJ_OBJ */
+            vsb_putc(s, '{');
+            for (i = 0; i < v->nmem; i++) {
+                if (i) vsb_putc(s, ',');
+                vsb_escape(s, v->mem[i].key);
+                vsb_putc(s, ':');
+                __vyrn_vj_write(s, v->mem[i].val);
+            }
+            vsb_putc(s, '}');
+            break;
+    }
+}
+char* __vyrn_vj_encode(VJ* v) { VSB s; vsb_init(&s); __vyrn_vj_write(&s, v); return s.p; }
+
+/* ---- parser (byte positions; wording mirrors crate::codec) -------------- */
+typedef struct { const char* b; unsigned long long i, n; char* err; } VJP;
+static void vjp_err_pos(VJP* p, const char* what) {
+    char buf[64]; __vyrn_snprintf(buf, 64, "%s at position %llu", what, p->i);
+    p->err = __vyrn_dup(buf);
+}
+static void vjp_err_end(VJP* p) { p->err = __vyrn_dup("unexpected end of input"); }
+static void vjp_ws(VJP* p) {
+    while (p->i < p->n) {
+        char c = p->b[p->i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') p->i++; else break;
+    }
+}
+static int vjp_hex(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+static VJ* vjp_value(VJP* p);
+static char* vjp_string(VJP* p) {
+    p->i++;                                     /* opening quote */
+    VSB s; vsb_init(&s);
+    for (;;) {
+        if (p->i >= p->n) { vjp_err_end(p); return 0; }
+        unsigned char c = (unsigned char)p->b[p->i];
+        if (c == '"') { p->i++; return s.p; }
+        if (c == '\\') {
+            p->i++;
+            if (p->i >= p->n) { vjp_err_end(p); return 0; }
+            char e = p->b[p->i];
+            if (e == '"') vsb_putc(&s, '"');
+            else if (e == '\\') vsb_putc(&s, '\\');
+            else if (e == '/') vsb_putc(&s, '/');
+            else if (e == 'n') vsb_putc(&s, '\n');
+            else if (e == 't') vsb_putc(&s, '\t');
+            else if (e == 'r') vsb_putc(&s, '\r');
+            else if (e == 'b') vsb_putc(&s, '\b');
+            else if (e == 'f') vsb_putc(&s, '\f');
+            else if (e == 'u') {
+                unsigned int cp = 0; int k;
+                for (k = 0; k < 4; k++) {
+                    p->i++;
+                    if (p->i >= p->n) { vjp_err_end(p); return 0; }
+                    int h = vjp_hex((unsigned char)p->b[p->i]);
+                    if (h < 0) { vjp_err_pos(p, "unexpected character"); return 0; }
+                    cp = cp * 16 + (unsigned)h;
+                }
+                if (cp >= 0xD800 && cp <= 0xDFFF) { vjp_err_pos(p, "unexpected character"); return 0; }
+                if (cp < 0x80) vsb_putc(&s, (char)cp);
+                else if (cp < 0x800) {
+                    vsb_putc(&s, (char)(0xC0 | (cp >> 6)));
+                    vsb_putc(&s, (char)(0x80 | (cp & 0x3F)));
+                } else {
+                    vsb_putc(&s, (char)(0xE0 | (cp >> 12)));
+                    vsb_putc(&s, (char)(0x80 | ((cp >> 6) & 0x3F)));
+                    vsb_putc(&s, (char)(0x80 | (cp & 0x3F)));
+                }
+            } else { vjp_err_pos(p, "unexpected character"); return 0; }
+            p->i++;
+        } else if (c < 0x20) { vjp_err_pos(p, "unexpected character"); return 0; }
+        else { vsb_putc(&s, (char)c); p->i++; }
+    }
+}
+static int vjp_isdigit(VJP* p) { return p->i < p->n && p->b[p->i] >= '0' && p->b[p->i] <= '9'; }
+static VJ* vjp_num(VJP* p) {
+    unsigned long long start = p->i;
+    int is_int = 1;
+    if (p->i < p->n && p->b[p->i] == '-') p->i++;
+    if (!vjp_isdigit(p)) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
+    while (vjp_isdigit(p)) p->i++;
+    if (p->i < p->n && p->b[p->i] == '.') {
+        is_int = 0; p->i++;
+        if (!vjp_isdigit(p)) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
+        while (vjp_isdigit(p)) p->i++;
+    }
+    if (p->i < p->n && (p->b[p->i] == 'e' || p->b[p->i] == 'E')) {
+        is_int = 0; p->i++;
+        if (p->i < p->n && (p->b[p->i] == '+' || p->b[p->i] == '-')) p->i++;
+        if (!vjp_isdigit(p)) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
+        while (vjp_isdigit(p)) p->i++;
+    }
+    unsigned long long len = p->i - start;
+    char* t = (char*)__vyrn_malloc(len + 1);
+    memcpy(t, p->b + start, len); t[len] = 0;
+    return __vyrn_vj_num_text(t, is_int);
+}
+static VJ* vjp_lit(VJP* p, const char* word, VJ* v) {
+    for (const char* w = word; *w; w++) {
+        if (p->i >= p->n) { vjp_err_end(p); return 0; }
+        if (p->b[p->i] != *w) { vjp_err_pos(p, "unexpected character"); return 0; }
+        p->i++;
+    }
+    return v;
+}
+static VJ* vjp_obj(VJP* p) {
+    p->i++;                                     /* '{' */
+    VJ* o = __vyrn_vj_obj();
+    vjp_ws(p);
+    if (p->i < p->n && p->b[p->i] == '}') { p->i++; return o; }
+    for (;;) {
+        vjp_ws(p);
+        if (!(p->i < p->n && p->b[p->i] == '"')) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
+        char* k = vjp_string(p);
+        if (!k) return 0;
+        vjp_ws(p);
+        if (!(p->i < p->n && p->b[p->i] == ':')) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
+        p->i++;
+        vjp_ws(p);
+        VJ* v = vjp_value(p);
+        if (!v) return 0;
+        __vyrn_vj_set(o, k, v);
+        vjp_ws(p);
+        if (p->i < p->n && p->b[p->i] == ',') { p->i++; continue; }
+        if (p->i < p->n && p->b[p->i] == '}') { p->i++; return o; }
+        if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character");
+        return 0;
+    }
+}
+static VJ* vjp_arr(VJP* p) {
+    p->i++;                                     /* '[' */
+    VJ* a = __vyrn_vj_arr();
+    vjp_ws(p);
+    if (p->i < p->n && p->b[p->i] == ']') { p->i++; return a; }
+    for (;;) {
+        vjp_ws(p);
+        VJ* v = vjp_value(p);
+        if (!v) return 0;
+        __vyrn_vj_push(a, v);
+        vjp_ws(p);
+        if (p->i < p->n && p->b[p->i] == ',') { p->i++; continue; }
+        if (p->i < p->n && p->b[p->i] == ']') { p->i++; return a; }
+        if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character");
+        return 0;
+    }
+}
+static VJ* vjp_value(VJP* p) {
+    if (p->i >= p->n) { vjp_err_end(p); return 0; }
+    char c = p->b[p->i];
+    if (c == '{') return vjp_obj(p);
+    if (c == '[') return vjp_arr(p);
+    if (c == '"') { char* s = vjp_string(p); if (!s) return 0; return __vyrn_vj_str(s); }
+    if (c == 't') return vjp_lit(p, "true", __vyrn_vj_bool(1));
+    if (c == 'f') return vjp_lit(p, "false", __vyrn_vj_bool(0));
+    if (c == 'n') return vjp_lit(p, "null", __vyrn_vj_null());
+    if (c == '-' || (c >= '0' && c <= '9')) return vjp_num(p);
+    vjp_err_pos(p, "unexpected character");
+    return 0;
+}
+VJ* __vyrn_json_parse(const char* src, char** errout) {
+    VJP p; p.b = src; p.i = 0; p.n = strlen(src); p.err = 0;
+    vjp_ws(&p);
+    VJ* v = vjp_value(&p);
+    if (!v) { *errout = p.err; return 0; }
+    vjp_ws(&p);
+    if (p.i != p.n) { vjp_err_pos(&p, "trailing characters"); *errout = p.err; return 0; }
+    return v;
+}
+
+/* ---- decode-side accessors + issue accumulator -------------------------- */
+int __vyrn_vj_kind(VJ* v) { return v->kind; }
+VJ* __vyrn_vj_get(VJ* o, const char* key) {
+    unsigned long long i;
+    for (i = 0; i < o->nmem; i++) if (strcmp(o->mem[i].key, key) == 0) return o->mem[i].val;
+    return 0;
+}
+int __vyrn_vj_bool_get(VJ* v) { return v->bval; }
+long long __vyrn_vj_len(VJ* a) { return (long long)a->nitems; }
+VJ* __vyrn_vj_at(VJ* a, long long i) { return a->items[i]; }
+/* An array element, or a fresh `null` node when `i` is out of range — the
+   RFC-0024 tuple-payload decode treats a short array's missing slots as null. */
+VJ* __vyrn_vj_at_or_null(VJ* a, long long i) {
+    if (i < 0 || (unsigned long long)i >= a->nitems) return __vyrn_vj_null();
+    return a->items[i];
+}
+/* Object member count / i-th key / i-th value — the RFC-0024 payload-enum
+   decode enforces "exactly one key" and reads it back. */
+long long __vyrn_vj_obj_len(VJ* o) { return (long long)o->nmem; }
+const char* __vyrn_vj_obj_key(VJ* o, long long i) { return o->mem[i].key; }
+VJ* __vyrn_vj_obj_at(VJ* o, long long i) { return o->mem[i].val; }
+const char* __vyrn_vj_str_get(VJ* v) { return v->text; }
+/* Parse a number node into an integer target: 0 ok (*out set), 1 rejected
+   (non-integer syntax, or out of range for the width/signedness). */
+int __vyrn_vj_asint(VJ* v, int bits, int is_signed, long long* out) {
+    if (v->kind != VJ_NUM || !v->is_int) return 1;
+    char* end;
+    if (is_signed) {
+        errno = 0;
+        long long x = strtoll(v->text, &end, 10);
+        if (errno != 0 || *end != 0) return 1;
+        if (bits < 64) {
+            long long mx = (1LL << (bits - 1)) - 1;
+            long long mn = -(1LL << (bits - 1));
+            if (x < mn || x > mx) return 1;
+        }
+        *out = x;
+        return 0;
+    }
+    if (v->text[0] == '-') return 1;
+    errno = 0;
+    unsigned long long x = strtoull(v->text, &end, 10);
+    if (errno != 0 || *end != 0) return 1;
+    if (bits < 64) {
+        unsigned long long mx = (1ULL << bits) - 1ULL;
+        if (x > mx) return 1;
+    }
+    *out = (long long)x;
+    return 0;
+}
+double __vyrn_vj_asfloat(VJ* v) { return strtod(v->text, 0); }
+const char* __vyrn_vj_kindname(int kind) {
+    switch (kind) {
+        case VJ_NULL: return "null";
+        case VJ_BOOL: return "boolean";
+        case VJ_NUM: return "number";
+        case VJ_STR: return "string";
+        case VJ_ARR: return "array";
+        default: return "object";
+    }
+}
+/* `expected <what>, found <kind>` — the runtime half of a `json.type` Issue. */
+char* __vyrn_json_type_msg(const char* expected, int kind) {
+    const char* found = __vyrn_vj_kindname(kind);
+    unsigned long long n = strlen("expected , found ") + strlen(expected) + strlen(found) + 1;
+    char* r = (char*)__vyrn_malloc(n);
+    __vyrn_snprintf(r, n, "expected %s, found %s", expected, found);
+    return r;
+}
+char* __vyrn_json_field_path(const char* parent, const char* field) {
+    if (parent[0] == 0) return __vyrn_dup(field);
+    unsigned long long n = strlen(parent) + 1 + strlen(field) + 1;
+    char* r = (char*)__vyrn_malloc(n);
+    __vyrn_snprintf(r, n, "%s.%s", parent, field);
+    return r;
+}
+char* __vyrn_json_index_path(const char* parent, long long i) {
+    unsigned long long n = strlen(parent) + 2 + 24 + 1;
+    char* r = (char*)__vyrn_malloc(n);
+    __vyrn_snprintf(r, n, "%s[%lld]", parent, i);
+    return r;
+}
+typedef struct { char* key; char* path; char* message; } VIssue;
+typedef struct { VIssue* items; unsigned long long n, cap; } VIssues;
+VIssues* __vyrn_issues_new(void) {
+    VIssues* s = (VIssues*)__vyrn_malloc(sizeof(VIssues));
+    s->items = 0; s->n = 0; s->cap = 0; return s;
+}
+void __vyrn_issues_push(VIssues* s, const char* key, const char* path, const char* message) {
+    if (s->n + 1 > s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 4;
+        s->items = (VIssue*)__vyrn_realloc(s->items, s->cap * sizeof(VIssue));
+    }
+    s->items[s->n].key = __vyrn_dup(key);
+    s->items[s->n].path = __vyrn_dup(path);
+    s->items[s->n].message = __vyrn_dup(message);
+    s->n++;
+}
+long long __vyrn_issues_len(VIssues* s) { return (long long)s->n; }
+const char* __vyrn_issue_key(VIssues* s, long long i) { return s->items[i].key; }
+const char* __vyrn_issue_path(VIssues* s, long long i) { return s->items[i].path; }
+const char* __vyrn_issue_msg(VIssues* s, long long i) { return s->items[i].message; }
+
+/* ---- worker threads (RFC-0025) ------------------------------------------ */
+/* `spawn f(args)` lowers to __vyrn_spawn(thunk, frame): the IR packs the
+   already-evaluated arguments (behind a leading result slot) into a heap frame
+   and passes a per-callee thunk that loads them, calls the isolated task
+   function, and stores the result back into the frame. The task is isolated
+   (checker-enforced, transitively: no I/O, no module state, no shared cells,
+   no `drop`), so ANY schedule produces byte-identical program output — the
+   threads below are pure wall-clock optimization. `t.join()` lowers to
+   __vyrn_join: block until completion, return the frame (the IR loads the
+   result from its leading slot).
+
+   One shared IR, three behaviors, all byte-identical:
+     - native: a real OS thread per task (Win32 / pthreads);
+     - VYRN_SEQUENTIAL_SPAWN=1 (native): the thunk runs inline at the spawn
+       point — the old eager path, a debugging escape hatch;
+     - wasm (__wasi__): no threads exist; the thunk always runs inline.
+
+   Locked trap protocol: a trapping task performs the standard trap protocol
+   itself (one fputs of the canonical `error: ...` line to stderr, then
+   exit(1)) from whichever thread it runs on — same wording, same exit code,
+   printed once; exit() flushes stdout so no output is lost. Tasks that were
+   never joined are joined at process exit (below, in spawn order): the eager
+   semantics ran every task, so a trap in a leaked task must not be lost.
+
+   Ownership: task records and frames are never freed — a task may be joined
+   more than once (join is idempotent), and the count is bounded by the number
+   of spawns (the "unproven ownership leaks, which is always safe" rule). */
+#if defined(__wasi__)
+typedef struct VTask { void* frame; } VTask;
+void* __vyrn_spawn(void (*thunk)(void*), void* frame) {
+    VTask* t = (VTask*)__vyrn_malloc(sizeof(VTask));
+    t->frame = frame;
+    thunk(frame); /* eager: single-threaded target */
+    return t;
+}
+void* __vyrn_join(void* task) { return ((VTask*)task)->frame; }
+static void __vyrn_join_all(void) {}
+#else
+#ifdef _WIN32
+#include <windows.h>
+typedef struct VTask {
+    void (*thunk)(void*);
+    void* frame;
+    HANDLE done; /* manual-reset event, signaled when the task completed */
+    struct VTask* next;
+} VTask;
+static DWORD WINAPI __vyrn_task_main(LPVOID p) {
+    VTask* t = (VTask*)p;
+    t->thunk(t->frame);
+    SetEvent(t->done);
+    return 0;
+}
+static SRWLOCK __vyrn_task_lock = SRWLOCK_INIT;
+static void __vyrn_tasks_acquire(void) { AcquireSRWLockExclusive(&__vyrn_task_lock); }
+static void __vyrn_tasks_release(void) { ReleaseSRWLockExclusive(&__vyrn_task_lock); }
+static void __vyrn_task_wait(VTask* t) { WaitForSingleObject(t->done, INFINITE); }
+#else
+#include <pthread.h>
+typedef struct VTask {
+    void (*thunk)(void*);
+    void* frame;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int done;
+    struct VTask* next;
+} VTask;
+static void* __vyrn_task_main(void* p) {
+    VTask* t = (VTask*)p;
+    t->thunk(t->frame);
+    pthread_mutex_lock(&t->mu);
+    t->done = 1;
+    pthread_cond_broadcast(&t->cv);
+    pthread_mutex_unlock(&t->mu);
+    return 0;
+}
+static pthread_mutex_t __vyrn_task_lock = PTHREAD_MUTEX_INITIALIZER;
+static void __vyrn_tasks_acquire(void) { pthread_mutex_lock(&__vyrn_task_lock); }
+static void __vyrn_tasks_release(void) { pthread_mutex_unlock(&__vyrn_task_lock); }
+static void __vyrn_task_wait(VTask* t) {
+    pthread_mutex_lock(&t->mu);
+    while (!t->done) pthread_cond_wait(&t->cv, &t->mu);
+    pthread_mutex_unlock(&t->mu);
+}
+#endif
+/* Registry of every spawned task, appended in spawn order (a task may itself
+   spawn — the list is append-only under the lock, so the exit-time walk below
+   observes children its waits allowed to be registered). */
+static VTask* __vyrn_task_head = 0;
+static VTask* __vyrn_task_tail = 0;
+
+void* __vyrn_spawn(void (*thunk)(void*), void* frame) {
+    int started = 0;
+    VTask* t = (VTask*)__vyrn_malloc(sizeof(VTask));
+    t->thunk = thunk;
+    t->frame = frame;
+    t->next = 0;
+#ifdef _WIN32
+    t->done = CreateEvent(0, TRUE, FALSE, 0);
+#else
+    pthread_mutex_init(&t->mu, 0);
+    pthread_cond_init(&t->cv, 0);
+    t->done = 0;
+#endif
+    {
+        const char* seq = getenv("VYRN_SEQUENTIAL_SPAWN");
+        if (!(seq && seq[0] == '1' && seq[1] == 0)) {
+#ifdef _WIN32
+            HANDLE th = CreateThread(0, 0, __vyrn_task_main, t, 0, 0);
+            if (th != 0) { CloseHandle(th); started = 1; } /* completion is t->done */
+#else
+            pthread_t th;
+            pthread_attr_t at;
+            pthread_attr_init(&at);
+            pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+            started = (pthread_create(&th, &at, __vyrn_task_main, t) == 0);
+            pthread_attr_destroy(&at);
+#endif
+        }
+    }
+    if (!started) {
+        /* sequential mode, or thread creation failed: the eager path (run at
+           the spawn point, on this thread) — the same bytes, by isolation. */
+        __vyrn_task_main(t);
+    }
+    __vyrn_tasks_acquire();
+    if (__vyrn_task_tail) __vyrn_task_tail->next = t; else __vyrn_task_head = t;
+    __vyrn_task_tail = t;
+    __vyrn_tasks_release();
+    return t;
+}
+
+void* __vyrn_join(void* task) {
+    VTask* t = (VTask*)task;
+    __vyrn_task_wait(t); /* idempotent; safe from any number of joiners */
+    return t->frame;
+}
+
+/* Join every task that is still outstanding when the program returns from
+   `main` — under eager semantics every spawned task ran, so a leaked task's
+   work (and, if it traps, its canonical trap + exit(1)) must still happen. */
+static void __vyrn_join_all(void) {
+    __vyrn_tasks_acquire();
+    VTask* t = __vyrn_task_head;
+    __vyrn_tasks_release();
+    while (t) {
+        __vyrn_task_wait(t);
+        __vyrn_tasks_acquire();
+        t = t->next;
+        __vyrn_tasks_release();
+    }
+}
+#endif
+
+/* The real C entry point: every target's crt (MSVC, glibc, wasi-libc) knows
+   how to call a plain C main; the IR only exports vyrn_entry. argv is stashed
+   for `args()` (RFC-0014). Outstanding tasks are joined before the exit code
+   is returned (RFC-0025). */
+extern int vyrn_entry(void);
+int main(int argc, char** argv) {
+    __vyrn_argc = argc;
+    __vyrn_argv = argv;
+    int code = vyrn_entry();
+    __vyrn_join_all();
+    return code;
+}
+"#;
+
+/// The dev-tree wasi sysroot, if one exists: the first `tools/wasi-sysroot-*`
+/// directory found walking up from `start` (sorted, so the pick is
+/// deterministic when several versions are unpacked side by side).
+pub fn tools_wasi_sysroot_from(start: &Path) -> Option<std::path::PathBuf> {
+    for dir in start.ancestors() {
+        let tools = dir.join("tools");
+        if !tools.is_dir() {
+            continue;
+        }
+        let mut hits: Vec<std::path::PathBuf> = std::fs::read_dir(&tools)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_dir()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("wasi-sysroot"))
+            })
+            .collect();
+        hits.sort();
+        if let Some(hit) = hits.into_iter().next() {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// Auto-discovered wasi sysroot for the running exe (see
+/// [`tools_wasi_sysroot_from`]); `None` when no `tools/` convention applies.
+pub fn discovered_wasi_sysroot() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    tools_wasi_sysroot_from(exe.parent()?)
+}
+
+/// `libclang_rt.builtins-wasm32.a` from a `libclang_rt.builtins-wasm32-wasi-*`
+/// directory next to the sysroot (the wasi-sdk release-artifact layout),
+/// version-agnostic and deterministic (sorted).
+pub fn builtins_near_sysroot(sysroot: &Path) -> Option<std::path::PathBuf> {
+    let parent = sysroot.parent()?;
+    let mut hits: Vec<std::path::PathBuf> = std::fs::read_dir(parent)
+        .ok()?
+        .flatten()
+        .map(|e| e.path().join("libclang_rt.builtins-wasm32.a"))
+        .filter(|p| {
+            p.exists()
+                && p.parent()
+                    .and_then(|d| d.file_name())
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("libclang_rt.builtins-wasm32"))
+        })
+        .collect();
+    hits.sort();
+    hits.into_iter().next()
+}
+
+/// Locate a clang executable: `$CLANG`, then PATH, then the default Windows
+/// install location.
+pub fn find_clang() -> Option<PathBuf> {
+    if let Ok(c) = std::env::var("CLANG") {
+        let p = PathBuf::from(c);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    // Trust PATH: if `clang --version` runs, use the bare name.
+    if Command::new("clang")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return Some(PathBuf::from("clang"));
+    }
+    if cfg!(windows) {
+        let default = PathBuf::from(r"C:\Program Files\LLVM\bin\clang.exe");
+        if default.exists() {
+            return Some(default);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dev-tree toolchain discovery: `tools/wasi-sysroot-*` found from any
+    /// ancestor of the starting dir, builtins found version-agnostically next
+    /// to the sysroot, and both absent on a layout without the convention.
+    #[test]
+    fn wasi_toolchain_discovery_walks_the_tools_convention() {
+        let root = std::env::temp_dir()
+            .join(format!("vyrn_tools_probe_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sysroot = root.join("tools/wasi-sysroot-25.0");
+        let builtins_dir = root.join("tools/libclang_rt.builtins-wasm32-wasi-25.0");
+        let deep = root.join("compiler/target/release");
+        std::fs::create_dir_all(&sysroot).unwrap();
+        std::fs::create_dir_all(&builtins_dir).unwrap();
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(builtins_dir.join("libclang_rt.builtins-wasm32.a"), b"x").unwrap();
+
+        let found = tools_wasi_sysroot_from(&deep).expect("sysroot discovered from exe dir");
+        assert_eq!(found, sysroot);
+        let b = builtins_near_sysroot(&found).expect("builtins discovered next to sysroot");
+        assert!(b.ends_with("libclang_rt.builtins-wasm32.a"));
+
+        // No convention → no discovery (never invent a path).
+        let bare = root.join("elsewhere/deeper");
+        std::fs::create_dir_all(&bare).unwrap();
+        let _ = std::fs::remove_dir_all(root.join("tools"));
+        assert!(tools_wasi_sysroot_from(&bare).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

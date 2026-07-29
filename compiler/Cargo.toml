@@ -14,6 +14,11 @@
 # `lsp-server`/`lsp-types`, which would break the zero-external-dependency
 # property of the default resolve. Build it explicitly:
 #   cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml
+#
+# `vyrn-genwasm` (RFC-0076: generators compiled to wasm and run in an embedded
+# wasmtime) is EXCLUDED for the same reason. `vyrn-cli` and `vyrn-lsp` both
+# depend on it OPTIONALLY, behind a feature spelled `wasm-gen` in each, so it
+# enters the resolve only when asked for.
 
 [workspace]
 resolver = "2"
@@ -25,6 +30,7 @@ members = [
 exclude = [
     "vyrn-codegen-llvm",
     "vyrn-lsp",
+    "vyrn-genwasm",
 ]
 
 [profile.release]

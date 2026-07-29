@@ -11,10 +11,18 @@ publish = false
 #   cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml
 [dependencies]
 vyrn-frontend = { path = "../vyrn-frontend" }
+# RFC-0076 M4: the wasm generation engine. ON by default here — the LSP is the
+# long-lived process the engine pays off in — but still a feature, so a build
+# without a wasm toolchain can drop it entirely.
+vyrn-genwasm = { path = "../vyrn-genwasm", optional = true }
 lsp-server = "0.7"
 lsp-types = "0.95"
 serde = "1"
 serde_json = "1"
+
+[features]
+default = ["wasm-gen"]
+wasm-gen = ["dep:vyrn-genwasm"]
 
 [[bin]]
 name = "vyrn-lsp"

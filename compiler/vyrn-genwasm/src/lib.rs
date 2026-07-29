@@ -31,6 +31,14 @@
 //!
 //! Anything still unserved is declined and the interpreter runs it, so this path
 //! can make generation faster but never different.
+//!
+//! M4 gave it this crate. It started inside `vyrn-cli`, which is a binary, so
+//! `vyrn-lsp` could not reach it — and the LSP is the whole point: a compiled
+//! artifact is argument-independent and cached for the process, so a long-lived
+//! one pays clang once per generator instead of once per call. Excluded from the
+//! default workspace like `vyrn-lsp` and `vyrn-codegen-llvm`, for the same
+//! reason: `wasmtime` is an external dependency and `cargo build` must not need
+//! one.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -83,7 +91,10 @@ fn engine(
 /// compile from a cache hit from an execution without guessing.
 fn trace(phase: &str, d: std::time::Duration) {
     if std::env::var("VYRN_GENWASM_TRACE").is_ok() {
-        eprintln!("genwasm {phase}: {} ms", d.as_millis());
+        // Fractions of a millisecond, because the phases now differ by three
+        // orders of magnitude: a cache-hit `run` and the `key` that guards it
+        // both round to 0 ms, and the key is what every keystroke pays.
+        eprintln!("genwasm {phase}: {:.2} ms", d.as_secs_f64() * 1000.0);
     }
 }
 
@@ -603,9 +614,9 @@ fn compile_to_wasm(key: u64, program: &Program) -> Result<Vec<u8>, EngineError> 
     std::fs::write(&ll, ir).map_err(|e| EngineError::Failed(e.to_string()))?;
     // No extern trap stubs: this is a wasm build, and a generator cannot call
     // `extern` anyway (comptime purity forbids it).
-    std::fs::write(&shim, crate::RUNTIME_SHIM).map_err(|e| EngineError::Failed(e.to_string()))?;
+    std::fs::write(&shim, vyrn_codegen::toolchain::RUNTIME_SHIM).map_err(|e| EngineError::Failed(e.to_string()))?;
 
-    let clang = crate::find_clang().ok_or_else(|| decline("no clang"))?;
+    let clang = vyrn_codegen::toolchain::find_clang().ok_or_else(|| decline("no clang"))?;
     let sysroot = wasi_sysroot().ok_or_else(|| decline("no wasi sysroot"))?;
     let builtins = wasi_builtins(&sysroot).ok_or_else(|| decline("no wasi builtins"))?;
 
@@ -636,14 +647,14 @@ fn compile_to_wasm(key: u64, program: &Program) -> Result<Vec<u8>, EngineError> 
 fn wasi_sysroot() -> Option<PathBuf> {
     match std::env::var("WASI_SYSROOT") {
         Ok(s) if Path::new(&s).exists() => Some(PathBuf::from(s)),
-        _ => crate::discovered_wasi_sysroot(),
+        _ => vyrn_codegen::toolchain::discovered_wasi_sysroot(),
     }
 }
 
 fn wasi_builtins(sysroot: &Path) -> Option<PathBuf> {
     match std::env::var("WASI_BUILTINS") {
         Ok(b) if Path::new(&b).exists() => Some(PathBuf::from(b)),
-        _ => crate::builtins_near_sysroot(sysroot),
+        _ => vyrn_codegen::toolchain::builtins_near_sysroot(sysroot),
     }
 }
 

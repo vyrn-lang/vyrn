@@ -278,6 +278,20 @@ fn dbg_log(msg: &str) {
 }
 
 fn main() {
+    // RFC-0076 M4. Choosing an engine, not adding analysis: the generator still
+    // runs the same Vyrn program and still returns the same source. This is the
+    // process the engine exists for — a compiled artifact is argument-independent
+    // and cached for the session, so the clang is paid once per generator instead
+    // of once per keystroke. Installed before any document can be opened, since
+    // generation happens deep inside the load, and it declines to the interpreter
+    // when there is no clang or no wasi sysroot, so an editor on a machine
+    // without a toolchain is slower and never broken. `VYRN_NO_WASM_GEN=1`
+    // forces the interpreter, spelled exactly as the CLI spells it.
+    #[cfg(feature = "wasm-gen")]
+    if std::env::var("VYRN_NO_WASM_GEN").is_err() {
+        vyrn_genwasm::install();
+    }
+
     // `Connection::stdio` sets up the stdin/stdout channels. The server is
     // single-threaded and blocking — no tokio, no I/O threads.
     let (connection, io_threads) = Connection::stdio();

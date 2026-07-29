@@ -61,6 +61,7 @@ cargo build       # builds the `vyrn` binary
 | `vyrn-codegen`  | emits **textual LLVM IR** (a string; no LLVM libs to produce it) |
 | `vyrn-cli`      | the `vyrn` driver |
 | `vyrn-lsp`      | Language Server Protocol server (excluded — pulls `lsp-server`/`lsp-types`; see below) |
+| `vyrn-genwasm`  | RFC-0076: runs `gen fn` generators as compiled wasm (excluded — pulls `wasmtime`; optional in both `vyrn-cli` and `vyrn-lsp`, feature `wasm-gen`) |
 
 ## Running programs
 
@@ -277,11 +278,12 @@ check; a failed runtime validation exits with code 1 (native prints
 
 ```
 compiler/
-├── Cargo.toml              workspace (excludes vyrn-codegen-llvm and vyrn-lsp)
+├── Cargo.toml              workspace (excludes vyrn-codegen-llvm, vyrn-lsp, vyrn-genwasm)
 ├── vyrn-frontend/          lexer, parser, ast, checker, movecheck, interp, types, diagnostics (+ tests)
 ├── vyrn-codegen/           textual LLVM IR emitter (+ unit tests)
 ├── vyrn-cli/               vyrn: run | check | emit-ir | emit-gen | build
 ├── vyrn-lsp/               LSP server (excluded — pulls lsp-server/lsp-types)
+├── vyrn-genwasm/           wasm generation engine (excluded — pulls wasmtime; feature `wasm-gen`)
 └── vyrn-codegen-llvm/      Inkwell backend (works; excluded — needs LLVM 22 dev SDK)
 
 editor/vscode/             VS Code extension: extension.js (LSP client) + TextMate grammar
