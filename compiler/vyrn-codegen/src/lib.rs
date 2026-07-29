@@ -13,6 +13,7 @@
 //! to SSA registers), which keeps the emitter simple. `&&`/`||` short-circuit
 //! via branches + `phi`, matching the interpreter in [`vyrn_frontend::interp`].
 
+pub mod layout;
 pub mod toolchain;
 
 use std::collections::HashMap;
@@ -10635,6 +10636,63 @@ fn sanitize(name: &str) -> String {
 mod tests {
     use super::*;
     use vyrn_frontend::check;
+
+    // ---- the layout engine's link to lowering (RFC-0077 M0) -------------
+
+    /// [`layout::SHAPES`] is what the clang comparison is run against, so it is
+    /// only worth anything if it is what `llt` prints. Assert that here — in the
+    /// one place `Gen` is reachable — so a new case in `llt` cannot quietly
+    /// escape the layout check that stands between it and a silent miscompile.
+    #[test]
+    fn llt_prints_the_shapes_the_layout_engine_was_verified_on() {
+        let (rt, pt, pc, ty, va, sg, sb, fs, dm, rg) = Default::default();
+        let g = Gen::new(&rt, &pt, &pc, &ty, &va, &sg, &sb, &fs, &dm, &rg);
+        let rec = |fs: &[Type]| {
+            Type::Record(
+                fs.iter()
+                    .enumerate()
+                    .map(|(i, t)| Field { name: format!("f{i}"), ty: t.clone() })
+                    .collect(),
+            )
+        };
+        let i8t = Type::IntN { bits: 8, signed: false };
+        let cases: &[(&str, Type)] = &[
+            ("Int64", Type::Int),
+            ("Int32", Type::IntN { bits: 32, signed: true }),
+            ("Int16", Type::IntN { bits: 16, signed: true }),
+            ("Int8", i8t.clone()),
+            ("Bool", Type::Bool),
+            ("Float64", Type::Float),
+            ("Float32", Type::Float32),
+            ("String", Type::Str),
+            ("Option/Result", Type::Option(Box::new(Type::Int))),
+            ("Option/Result", Type::Result(Box::new(Type::Int), Box::new(Type::Str))),
+            ("Array", Type::Array(Box::new(Type::Str))),
+            ("Map", Type::Map(Box::new(Type::Str), Box::new(Type::Int))),
+            ("Ref", Type::Ref(Box::new(Type::Int))),
+            ("Fn", Type::Fn(Vec::new(), Box::new(Type::Int))),
+            ("RecordEmpty", rec(&[])),
+            ("RecordMixed", rec(&[Type::Bool, Type::Str, Type::Int, i8t.clone(), Type::Float])),
+            ("ArrayN_i64", Type::ArrayN(Box::new(Type::Int), 4)),
+            ("ArrayN_i8", Type::ArrayN(Box::new(i8t.clone()), 3)),
+            ("SmallArray_i64", Type::SmallArray(Box::new(Type::Int), 4)),
+            ("SmallArray_i8", Type::SmallArray(Box::new(i8t), 3)),
+            ("SmallArray_str", Type::SmallArray(Box::new(Type::Str), 2)),
+        ];
+        for (name, ty) in cases {
+            let want = layout::SHAPES
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("{name} missing from layout::SHAPES"))
+                .1;
+            assert_eq!(&g.llt(ty), want, "llt({name}) drifted from layout::SHAPES");
+        }
+        // The enum arities, which come from the same helper `llt` calls.
+        for (name, arity) in [("Enum0", 0), ("Enum1", 1), ("Enum3", 3)] {
+            let want = layout::SHAPES.iter().find(|(n, _)| *n == name).unwrap().1;
+            assert_eq!(enum_ll(arity), want, "enum_ll({arity}) drifted");
+        }
+    }
 
     // ---- blackBox / benchmarking barrier (RFC-0055) ---------------------
 
