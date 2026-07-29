@@ -1249,6 +1249,40 @@ fn run_generator(
         c.module = Some(import_specifier(&gen_dir, &key, std_root));
     }
 
+    // The generator's own transitive sources, hashed. Needed twice: the cache
+    // entry below records them as inputs (which is what makes editing the
+    // generator miss), and the wasm engine keys its compiled artifact on them.
+    // Hashing is memoized and these files are re-read on the caching path
+    // regardless, so hoisting it above the run costs nothing.
+    //
+    // A generated module's key is a banner no resolver can read. If the closure
+    // contains one there is no describable fingerprint at all — no cache entry
+    // (an unverifiable input is worse than a miss) and no artifact key.
+    let mut gen_sources: Vec<(String, String)> = Vec::new();
+    let mut describable = true;
+    for (key, _, _) in &gen_graph {
+        match current_input_hash(resolver, key) {
+            Some(h) => gen_sources.push((key.clone(), h)),
+            None => {
+                describable = false;
+                break;
+            }
+        }
+    }
+    // `gen_mod_key` and the std root join the hashes because the program handed
+    // to the engine is not only its files: the contract restamping above spells
+    // each module as an import specifier resolved against them.
+    let fingerprint = describable.then(|| {
+        let mut fp = format!("{gen_mod_key}\u{0}{}\u{0}", std_root.unwrap_or(""));
+        for (k, h) in &gen_sources {
+            fp.push_str(k);
+            fp.push('\u{0}');
+            fp.push_str(h);
+            fp.push('\u{0}');
+        }
+        fp
+    });
+
     // 5b. Cache miss: run the generator in the mediated sandbox.
     let out = crate::interp::generate(
         &gen_program,
@@ -1263,6 +1297,7 @@ fn run_generator(
             max_output: GEN_MAX_OUTPUT_OVERRIDE
                 .with(|c| c.get())
                 .unwrap_or(GEN_MAX_OUTPUT),
+            sources_fingerprint: fingerprint,
         },
     )
     .map_err(|trap| err(format!("generator `{name}({arg_repr})` failed: {trap}")))?;
@@ -1280,22 +1315,9 @@ fn run_generator(
         // what lets the lookup key stay cheap: the entry now carries everything
         // needed to decide whether it is still valid, instead of the key having to
         // encode it (which meant discovering the closure, which meant parsing the
-        // whole generator graph, on every keystroke).
-        //
-        // `current_input_hash` must be able to re-read every recorded path. A
-        // generated module's key is a banner no resolver can read, so if the
-        // closure contains one, DO NOT write an entry: an unverifiable input is
-        // worse than a cache miss.
-        let mut describable = true;
-        for (key, _, _) in &gen_graph {
-            match current_input_hash(resolver, key) {
-                Some(h) => inputs.push((key.clone(), h)),
-                None => {
-                    describable = false;
-                    break;
-                }
-            }
-        }
+        // whole generator graph, on every keystroke). Hashed above, before the
+        // run, because the engine needs the same hashes for its artifact key.
+        inputs.extend(gen_sources);
         if describable {
             resolver.gen_cache_put(&sources_hash, &render_cache_entry(&inputs, &out.source));
         }

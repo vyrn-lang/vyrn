@@ -317,3 +317,172 @@ fn a_read_outside_the_declared_inputs_traps_identically() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A generator that fails on its own terms — an index past the end, a division
+/// by zero — must READ the same under either engine. It nearly did not: the
+/// compiled runtime prefixes a trap with `error: ` on its way to stderr, which
+/// is right at the top level (the CLI prints the same prefix for an interpreted
+/// trap, and parity compares them) and wrong here, where the loader supplies the
+/// context and the interpreter hands it a bare message.
+#[test]
+fn a_generator_trap_reads_identically_under_both_engines() {
+    let dir = std::env::temp_dir().join(format!("vyrn_m5_traps_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Each body computes its failing value through a loop, so the failure is a
+    // runtime trap in the generator rather than something const-folded away.
+    std::fs::write(
+        dir.join("gen.vyrn"),
+        "export gen fn oob(tag: String) -> String {\n\
+         \x20   let xs = [1, 2, 3]\n\
+         \x20   let mut i = 0\n\
+         \x20   while i < 10 { i = i + 1 }\n\
+         \x20   return \"export fn n() -> Int64 { return \" + xs[i].toString() + \" }\"\n\
+         }\n\
+         export gen fn dz(tag: String) -> String {\n\
+         \x20   let mut i = 0\n\
+         \x20   while i < 3 { i = i + 1 }\n\
+         \x20   return \"export fn n() -> Int64 { return \" + (10 / (i - 3)).toString() + \" }\"\n\
+         }\n\
+         export gen fn si(tag: String) -> String {\n\
+         \x20   let mut i = 0\n\
+         \x20   while i < 99 { i = i + 1 }\n\
+         \x20   return \"export fn n() -> Int64 { return \" + tag[i].toString() + \" }\"\n\
+         }\n",
+    )
+    .unwrap();
+    for (g, want) in [
+        ("oob", "array index 10 out of bounds"),
+        ("dz", "division by zero"),
+        ("si", "string index 99 out of bounds"),
+    ] {
+        let main = dir.join(format!("{g}.vyrn"));
+        std::fs::write(
+            &main,
+            format!(
+                "import {{ {g} }} from \"./gen\"\n\
+                 import {{ n }} from {g}(\"x\")\n\
+                 fn main() -> Int64 {{ print(n()) return 0 }}\n"
+            ),
+        )
+        .unwrap();
+        let interp = emit_gen(&main, false);
+        let wasm = emit_gen(&main, true);
+        assert!(!interp.status.success(), "{g} should have trapped");
+        assert_eq!(
+            String::from_utf8_lossy(&interp.stderr),
+            String::from_utf8_lossy(&wasm.stderr),
+            "{g}: the wasm engine's trap wording diverged from the interpreter's"
+        );
+        assert!(
+            String::from_utf8_lossy(&wasm.stderr).contains(want),
+            "{g}: unexpected failure: {}",
+            String::from_utf8_lossy(&wasm.stderr)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The milestone's reason to exist (RFC-0076 M5). A runaway generator fails
+/// loudly under the interpreter's step budget; under wasm, before fuel metering,
+/// it ran forever — and since M4 that means it hung the editor.
+///
+/// Both halves matter: the message must be the interpreter's, and the wasm run
+/// must actually END. A test that hangs on regression is a test that failed.
+#[test]
+fn a_runaway_generator_is_killed_under_both_engines() {
+    let dir = std::env::temp_dir().join(format!("vyrn_m5_runaway_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("gen.vyrn"),
+        // The append is unreachable, and there so the loop cannot be optimized
+        // away as having no effect: what is being metered is the spinning.
+        "export gen fn spin(tag: String) -> String {\n\
+         \x20   let mut i = 0\n\
+         \x20   let mut s = \"\"\n\
+         \x20   while i < 1000000000 {\n\
+         \x20       i = i + 1\n\
+         \x20       if i < 0 { s = s + tag }\n\
+         \x20   }\n\
+         \x20   return \"export fn n() -> Int64 { return 1 }\"\n\
+         }\n",
+    )
+    .unwrap();
+    let main = dir.join("main.vyrn");
+    std::fs::write(
+        &main,
+        "import { spin } from \"./gen\"\n\
+         import { n } from spin(\"x\")\n\
+         fn main() -> Int64 { print(n()) return 0 }\n",
+    )
+    .unwrap();
+
+    let interp = emit_gen(&main, false);
+    let wasm = emit_gen(&main, true);
+    assert!(!interp.status.success() && !wasm.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&interp.stderr),
+        String::from_utf8_lossy(&wasm.stderr),
+        "the wasm engine's budget trap diverged from the interpreter's"
+    );
+    assert!(
+        String::from_utf8_lossy(&wasm.stderr).contains("generator exceeded its step budget"),
+        "unexpected failure: {}",
+        String::from_utf8_lossy(&wasm.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The compiled artifact is cached on disk across sessions (RFC-0076 M5), keyed
+/// on the content hashes of the generator's own module closure. So the thing
+/// worth testing is not the hit — every other test here is one — but the MISS:
+/// editing the generator, or a file it imports, must never be answered by the
+/// artifact compiled from the old text. A stale artifact is a silently wrong
+/// program, which is worse than any amount of clang.
+#[test]
+fn editing_a_generator_recompiles_its_artifact() {
+    let dir = std::env::temp_dir().join(format!("vyrn_m5_artifact_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // The number the generator emits comes from a module the generator IMPORTS,
+    // so only a fingerprint over the whole closure notices the edit.
+    std::fs::write(dir.join("part.vyrn"), "export fn v() -> Int64 { return 1 }\n").unwrap();
+    std::fs::write(
+        dir.join("gen.vyrn"),
+        "import { v } from \"./part\"\n\
+         export gen fn mk(tag: String) -> String {\n\
+         \x20   return \"export fn n() -> Int64 { return \" + v().toString() + \" }\"\n\
+         }\n",
+    )
+    .unwrap();
+    let main = dir.join("main.vyrn");
+    std::fs::write(
+        &main,
+        "import { mk } from \"./gen\"\n\
+         import { n } from mk(\"x\")\n\
+         fn main() -> Int64 { print(n()) return 0 }\n",
+    )
+    .unwrap();
+
+    // `VYRN_NO_GEN_CACHE` turns off the OUTPUT cache, not the artifact cache, so
+    // a stale artifact would show through as stale generated source.
+    let before = emit_gen(&main, true);
+    assert!(before.status.success());
+    assert!(String::from_utf8_lossy(&before.stdout).contains("return 1"));
+
+    std::fs::write(dir.join("part.vyrn"), "export fn v() -> Int64 { return 2 }\n").unwrap();
+    let after = emit_gen(&main, true);
+    assert!(after.status.success());
+    assert!(
+        String::from_utf8_lossy(&after.stdout).contains("return 2"),
+        "a stale compiled artifact answered for an edited generator: {}",
+        String::from_utf8_lossy(&after.stdout)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&after.stdout),
+        String::from_utf8_lossy(&emit_gen(&main, false).stdout),
+        "the engines diverged after the edit"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

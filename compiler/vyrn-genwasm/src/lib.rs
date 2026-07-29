@@ -153,15 +153,18 @@ fn run(
         .ok_or_else(|| decline("a non-String constant argument"))?;
 
     let t = std::time::Instant::now();
-    let key = artifact_key(program, fn_name);
+    let key = artifact_key(program, fn_name, inputs.sources_fingerprint.as_deref());
     trace("key", t.elapsed());
 
     let t = std::time::Instant::now();
     let mut reads = Vec::new();
-    let mut source = run_module(key, &argv, program, inputs, &mut reads, || {
+    // Only a fingerprinted key describes the generator well enough to trust a
+    // file written by a previous process — see `artifact_key`.
+    let persist = inputs.sources_fingerprint.is_some();
+    let mut source = run_module(&key, persist, &argv, program, inputs, &mut reads, || {
         let wrapper = wrapper_program(program, fn_name, argv.len())
             .ok_or_else(|| decline("the wrapper program cannot be synthesized"))?;
-        compile_to_wasm(key, &wrapper)
+        compile_to_wasm(&key, &wrapper)
     })?;
     trace("run", t.elapsed());
     // `print` appends a newline; the generator's own source did not have it.
@@ -601,16 +604,16 @@ fn mangle(ty: &Type) -> Option<String> {
 /// own error reporting, none of which belongs on this path. The pieces that
 /// matter — clang, the sysroot, the builtins archive, the runtime shim — are the
 /// same ones `build` uses.
-fn compile_to_wasm(key: u64, program: &Program) -> Result<Vec<u8>, EngineError> {
+fn compile_to_wasm(key: &str, program: &Program) -> Result<Vec<u8>, EngineError> {
     // `emit_gen_host`, not `emit`: the same emitter, plus the one lowering that
     // only makes sense with the host imports below it (`listDir`).
     let ir = vyrn_codegen::emit_gen_host(program).map_err(|e| decline(&format!("codegen: {e}")))?;
 
     let dir = std::env::temp_dir().join(format!("vyrn-genwasm-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| EngineError::Failed(e.to_string()))?;
-    let ll = dir.join(format!("{key:016x}.ll"));
-    let shim = dir.join(format!("{key:016x}.shim.c"));
-    let out = dir.join(format!("{key:016x}.wasm"));
+    let ll = dir.join(format!("{key}.ll"));
+    let shim = dir.join(format!("{key}.shim.c"));
+    let out = dir.join(format!("{key}.wasm"));
     std::fs::write(&ll, ir).map_err(|e| EngineError::Failed(e.to_string()))?;
     // No extern trap stubs: this is a wasm build, and a generator cannot call
     // `extern` anyway (comptime purity forbids it).
@@ -949,10 +952,27 @@ fn rd32(data: &[u8], at: i32) -> Option<u32> {
 /// and the function. NOT the arguments — those arrive as argv, so one artifact
 /// serves every call, which is what makes a cache hit the common case.
 ///
-/// A hit skips clang AND cranelift. Hashed straight out of `Debug` into the
-/// hasher, so nothing is materialized to hash it.
-fn artifact_key(program: &Program, fn_name: &str) -> u64 {
+/// Two keys, because there are two ways to describe that closure and only one of
+/// them is cheap. The loader hands over content hashes of the generator's own
+/// sources (`sources_fingerprint`) — it hashes those files anyway to write the
+/// generation cache entry, so keying on them is free, where hashing the whole
+/// `Debug` of a 4,536-line `std/vyx` cost 1.1–1.9 ms of a 54 ms keystroke.
+/// Without a fingerprint (a generated module in the closure, which no resolver
+/// can re-read) the `Debug` hash is still the only complete description, and it
+/// stays the fallback — a cheap key that could miss an edit would be a stale
+/// artifact, which is a silently wrong program.
+///
+/// Only the fingerprinted key crosses to disk, and it carries the compiler's own
+/// identity: the artifact is this codegen's output, so a rebuilt `vyrn` must not
+/// inherit the last one's artifacts.
+fn artifact_key(program: &Program, fn_name: &str, fingerprint: Option<&str>) -> String {
     use std::fmt::Write as _;
+
+    if let Some(fp) = fingerprint {
+        return vyrn_frontend::hash::sha256_hex(
+            format!("{fn_name}\u{0}{}\u{0}{fp}", compiler_identity()).as_bytes(),
+        );
+    }
 
     struct Sink(u64);
     impl std::fmt::Write for Sink {
@@ -964,9 +984,118 @@ fn artifact_key(program: &Program, fn_name: &str) -> u64 {
         }
     }
 
+    // Hashed straight out of `Debug` into the hasher, so nothing is materialized
+    // to hash it.
     let mut sink = Sink(0xcbf2_9ce4_8422_2325);
     let _ = write!(sink, "{fn_name}\u{0}{program:?}");
-    sink.0
+    format!("{:016x}", sink.0)
+}
+
+/// Which build of the compiler produced an artifact. Every crate here is version
+/// `0.0.0`, so the only honest answer is the executable itself — its size and
+/// mtime change on every rebuild, which is exactly when a persisted artifact
+/// stops being this codegen's output.
+fn compiler_identity() -> String {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let m = std::env::current_exe().and_then(|p| std::fs::metadata(p));
+        match m {
+            Ok(m) => format!(
+                "{}:{:?}",
+                m.len(),
+                m.modified().ok().and_then(|t| t
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_nanos()))
+            ),
+            // No answer is not "any answer": an artifact that cannot be tied to a
+            // build must not be reused across processes at all.
+            Err(_) => format!("unknown-{}", std::process::id()),
+        }
+    })
+    .clone()
+}
+
+/// Where compiled artifacts persist, beside the generation cache they belong to
+/// (`~/.vyrn/cache/gen`, `VYRN_GEN_CACHE_DIR`). Inside it rather than next to it
+/// so that clearing the generation cache clears these too — an artifact is a
+/// compiled generator, and the two go stale together.
+///
+/// The location is the CLI's `remote::gen_cache_dir` rule, restated because this
+/// crate is BELOW the CLI: the frontend's cache port carries `String`, and a
+/// serialized module is bytes.
+fn artifact_dir() -> PathBuf {
+    let base = match std::env::var("VYRN_GEN_CACHE_DIR") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => {
+            let home = std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .unwrap_or_else(|_| ".".to_string());
+            Path::new(&home).join(".vyrn/cache/gen")
+        }
+    };
+    base.join("wasm")
+}
+
+/// Read a cranelift-compiled artifact back, skipping the expensive half of a
+/// cold start: opening the first `.vyx` page of a session compiled seven
+/// artifacts and cost ~900 ms, all of it clang and cranelift.
+///
+/// The one `unsafe` in this workspace, confined here. `Module::deserialize`
+/// trusts its input completely — it maps in native code — so what makes this
+/// sound is that the input is a file THIS process's cache directory wrote, keyed
+/// by a content hash that includes the compiler build. wasmtime's own header
+/// carries its version and configuration and refuses anything foreign, and every
+/// failure (missing, truncated, foreign, corrupt) is a cache MISS that
+/// recompiles rather than an error the user ever sees.
+fn load_artifact(key: &str) -> Option<wasmtime::Module> {
+    let bytes = std::fs::read(artifact_dir().join(key)).ok()?;
+    // SAFETY: see above — our own cache directory, our own serialization, and a
+    // rejection is a miss.
+    unsafe { wasmtime::Module::deserialize(wasm_engine(), &bytes) }.ok()
+}
+
+/// Store an artifact for the next session. Best-effort: a full disk or a
+/// read-only home costs a recompile, nothing more.
+fn store_artifact(key: &str, module: &wasmtime::Module) {
+    let Ok(bytes) = module.serialize() else { return };
+    let dir = artifact_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    // Written to a per-process name and renamed, so a concurrent reader (the LSP
+    // and a build share this directory) never sees a half-written artifact.
+    let tmp = dir.join(format!("{key}.{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, &bytes).is_ok() && std::fs::rename(&tmp, dir.join(key)).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// RFC-0021's step budget, converted into the unit the guest is metered in.
+///
+/// The units do not correspond and cannot be made to: the interpreter spends one
+/// step per Vyrn STATEMENT, wasmtime spends one fuel per wasm INSTRUCTION. So
+/// the mapping is deliberately biased LOOSE — anything that finishes inside the
+/// interpreter's budget must finish inside this one, which leaves the only
+/// divergence in a pathological band where wasm succeeds and the interpreter
+/// would have failed. That direction never breaks a generator that worked.
+///
+/// The multiplier is measured, not guessed. Every generator call in the repo,
+/// under both engines (`VYRN_GEN_STEPS` against `VYRN_GENWASM_TRACE`), spends
+/// between 56 and 755 fuel per interpreted step; the worst SUSTAINED ratio, once
+/// the fixed ~23k of libc startup is discounted, is ~410, and the string-heavy
+/// ones that dominate real work (`std/tw` 307, `std/vyx` 152, `std/i18n` 74) sit
+/// well below it. 1,000 is ~2.4x above the worst measured, and the flat 1M
+/// absorbs that startup cost so a generator of a few dozen statements is not
+/// killed by it (`examples/gendemo` is 31 steps and 23,416 fuel).
+///
+/// It is a margin, not a proof: one Vyrn statement can copy an unbounded number
+/// of bytes, so a ratio can always be constructed past any multiplier. The
+/// measured ones do not come close, and the guardrail's job is to stop a runaway
+/// generator hanging the editor, which it does — the default budget burns out in
+/// ~1.6 s, against ~3.4 s for the same generator interpreted.
+fn wasm_fuel(steps: u64) -> u64 {
+    steps.saturating_mul(1_000).saturating_add(1_000_000)
 }
 
 /// One wasmtime engine and one compiled module per artifact, for the process.
@@ -976,38 +1105,62 @@ fn artifact_key(program: &Program, fn_name: &str) -> u64 {
 /// milliseconds.
 fn wasm_engine() -> &'static wasmtime::Engine {
     static ENGINE: std::sync::OnceLock<wasmtime::Engine> = std::sync::OnceLock::new();
-    ENGINE.get_or_init(wasmtime::Engine::default)
+    ENGINE.get_or_init(|| {
+        let mut cfg = wasmtime::Config::new();
+        // Fuel, not epochs (RFC-0076 M5). An epoch is wall-clock, so the same
+        // generator would die on a slow machine and pass on a fast one; fuel is
+        // counted instructions, and determinism is what this whole path rests on.
+        cfg.consume_fuel(true);
+        wasmtime::Engine::new(&cfg).unwrap_or_default()
+    })
 }
 
-fn module_cache() -> &'static std::sync::Mutex<std::collections::HashMap<u64, wasmtime::Module>> {
+fn module_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, wasmtime::Module>> {
     static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<u64, wasmtime::Module>>,
+        std::sync::Mutex<std::collections::HashMap<String, wasmtime::Module>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
 /// Compile (once) and run, returning what the guest wrote to stdout.
+///
+/// Three tiers, cheapest first: this process's modules, then the artifacts a
+/// previous process left on disk, then clang plus cranelift.
 fn run_module(
-    key: u64,
+    key: &str,
+    persist: bool,
     argv: &[String],
     program: &Program,
     inputs: &GenInputs<'_>,
     reads: &mut Vec<(String, Vec<u8>)>,
     build: impl FnOnce() -> Result<Vec<u8>, EngineError>,
 ) -> Result<String, EngineError> {
-    let cached = module_cache().lock().ok().and_then(|c| c.get(&key).cloned());
+    let cached = module_cache().lock().ok().and_then(|c| c.get(key).cloned());
     let module = match cached {
         Some(m) => m,
         None => {
             let t = std::time::Instant::now();
-            let bytes = build()?;
-            trace("clang", t.elapsed());
-            let t = std::time::Instant::now();
-            let m = wasmtime::Module::new(wasm_engine(), &bytes)
-                .map_err(|e| EngineError::Failed(format!("wasm: {e}")))?;
-            trace("cranelift", t.elapsed());
+            let from_disk = persist.then(|| load_artifact(key)).flatten();
+            let m = match from_disk {
+                Some(m) => {
+                    trace("deserialize", t.elapsed());
+                    m
+                }
+                None => {
+                    let bytes = build()?;
+                    trace("clang", t.elapsed());
+                    let t = std::time::Instant::now();
+                    let m = wasmtime::Module::new(wasm_engine(), &bytes)
+                        .map_err(|e| EngineError::Failed(format!("wasm: {e}")))?;
+                    trace("cranelift", t.elapsed());
+                    if persist {
+                        store_artifact(key, &m);
+                    }
+                    m
+                }
+            };
             if let Ok(mut c) = module_cache().lock() {
-                c.insert(key, m.clone());
+                c.insert(key.to_string(), m.clone());
             }
             m
         }
@@ -1025,6 +1178,7 @@ fn run_hosted(
     inputs: &GenInputs<'_>,
     reads: &mut Vec<(String, Vec<u8>)>,
 ) -> Result<String, EngineError> {
+    let fuel = wasm_fuel(inputs.fuel);
     let (req_tx, req_rx) = mpsc::channel::<(String, i32)>();
     let (resp_tx, resp_rx) = mpsc::channel::<Result<Served, String>>();
 
@@ -1046,6 +1200,7 @@ fn run_hosted(
                 &argv,
                 types,
                 contracts,
+                fuel,
                 Caps {
                     req: req_tx,
                     resp: resp_rx,
@@ -1081,6 +1236,7 @@ fn run_wasm(
     argv: &[String],
     types: std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>,
     contracts: Vec<vyrn_frontend::ast::ContractDecl>,
+    fuel: u64,
     caps: Caps,
 ) -> Result<String, EngineError> {
     use wasmtime::*;
@@ -1449,6 +1605,9 @@ fn run_wasm(
         .extend(argv.iter().map(|a| [a.as_bytes(), b"\0"].concat()));
 
     let mut store = Store::new(engine, world);
+    store
+        .set_fuel(fuel)
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
     let inst = linker
         .instantiate(&mut store, module)
         .map_err(|e| EngineError::Failed(format!("instantiate: {e}")))?;
@@ -1457,15 +1616,38 @@ fn run_wasm(
         .map_err(|e| EngineError::Failed(format!("_start: {e}")))?;
 
     let result = start.call(&mut store, ());
+    if std::env::var("VYRN_GENWASM_TRACE").is_ok() {
+        // What a real generator actually costs, which is the only honest way to
+        // pick the multiplier in `wasm_fuel`.
+        let spent = fuel - store.get_fuel().unwrap_or(0);
+        eprintln!("genwasm fuel: {spent}");
+    }
     let streams = store.into_data();
     match result {
+        // Out of fuel is the ONE trap that must be re-worded rather than passed
+        // through: the guest never got to print anything, and the interpreter's
+        // step budget says exactly this.
+        Err(e) if e.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel) => {
+            return Err(EngineError::Failed("generator exceeded its step budget".into()))
+        }
         Ok(()) => {}
         Err(e) => match e.downcast_ref::<Exit>() {
             Some(Exit(0)) => {}
             // The guest failed on its own terms — its message is already on
             // stderr, in the canonical wording both engines share.
+            //
+            // Share, but not present identically: the compiled runtime writes
+            // `error: division by zero`, because at the TOP level the CLI prints
+            // that same prefix for an interpreted trap and parity compares the
+            // two. Inside generation there is no CLI — the interpreter hands the
+            // loader the bare message and the loader supplies the context — so
+            // the prefix has to come off here or the same trap reads differently
+            // by engine. The message is the LAST line for the same reason it is
+            // the whole buffer's tail: a trap is the last thing a guest writes.
             Some(Exit(code)) => {
-                let msg = String::from_utf8_lossy(&streams.stderr).trim_end().to_string();
+                let err = String::from_utf8_lossy(&streams.stderr);
+                let msg = err.trim_end().lines().last().unwrap_or_default();
+                let msg = msg.strip_prefix("error: ").unwrap_or(msg).to_string();
                 return Err(EngineError::Failed(if msg.is_empty() {
                     format!("generator exited with {code}")
                 } else {

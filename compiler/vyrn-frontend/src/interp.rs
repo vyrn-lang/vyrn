@@ -1209,6 +1209,16 @@ pub struct GenInputs<'a> {
     /// Step budget and output-size cap (guardrails).
     pub fuel: u64,
     pub max_output: usize,
+    /// A fingerprint of the generator's own module closure — its keys and the
+    /// content hashes the loader hashes them by anyway — or `None` when the
+    /// closure contains something no resolver can re-read (a generated module),
+    /// so no honest fingerprint exists.
+    ///
+    /// The interpreter ignores it. It is here for an engine that CACHES a
+    /// compiled artifact (RFC-0076 M5): keying on this instead of on the whole
+    /// program's `Debug` output turns a 1.1–1.9 ms hash of 4,536 lines into a
+    /// string compare, and the loader already computed every part of it.
+    pub sources_fingerprint: Option<String>,
 }
 
 /// Resolve a mediated path argument against the importer's directory, then
@@ -1414,6 +1424,16 @@ pub fn generate_interpreted(
         ));
     }
     let reads = interp.gen.as_ref().unwrap().reads.borrow().clone();
+    // `VYRN_GEN_STEPS=1` — what this generator actually spent of its budget. The
+    // wasm engine meters in wasm instructions instead (RFC-0076 M5), and the
+    // multiplier between the two units is only defensible if both sides can be
+    // measured on the same run; this is the interpreted half of that pair.
+    if std::env::var("VYRN_GEN_STEPS").is_ok() {
+        eprintln!(
+            "gen steps {fn_name}: {}",
+            inputs.fuel - interp.gen.as_ref().unwrap().fuel.get()
+        );
+    }
     Ok(GenOutput { source, reads })
 }
 

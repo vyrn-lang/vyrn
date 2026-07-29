@@ -616,6 +616,108 @@ keystroke after it. That is a real editor-startup cost and worth removing, but i
 is paid once per session against a saving of ~190 ms per keystroke — the ordering
 in the milestone list was right.
 
+## M5 shipped: the guardrails, and what a cold session costs now
+
+### Fuel, which was a correctness bug rather than polish
+
+The engine honoured no budget at all. A generator that fails loudly under the
+interpreter's step budget ran forever under wasm — and since M4 that means it
+hung the editor, which is the one failure mode this whole path was supposed to
+remove.
+
+Fuel metering (`Config::consume_fuel`, `Store::set_fuel`), NOT epoch
+interruption: an epoch is wall-clock, so the same generator would die on a slow
+machine and pass on a fast one, and determinism is what every claim in this
+document rests on.
+
+The units cannot be reconciled — the interpreter spends a step per Vyrn
+STATEMENT, wasmtime a fuel per wasm INSTRUCTION — so the mapping is biased
+deliberately loose, and the multiplier is measured rather than guessed. Every
+generator call in the repo, run under both engines (`VYRN_GEN_STEPS` against
+`VYRN_GENWASM_TRACE`, which is why the first of those is now a permanent
+one-line trace beside the second):
+
+| generator | steps, interpreted | fuel, wasm | fuel/step |
+|---|---|---|---|
+| `std/tw` | 91,234 | 28,017,086 | 307 |
+| `std/vyx` (`vyxPageThemed`) | 253,128 | 38,481,467 | 152 |
+| `std/i18n` | 165,554 | 12,256,992 | 74 |
+| `std/rpc` (`rpcClient`) | 560 | 250,965 | 448 |
+| `examples/gendemo` | 31 | 23,416 | 755 |
+
+The two small ones are the fixed ~23k of wasi-libc startup showing through; the
+worst SUSTAINED ratio, once that is discounted, is ~410. So: **1,000 fuel per
+step, plus a flat 1,000,000** — ~2.4x above the worst measured, with the flat
+term absorbing the startup so a generator of a few dozen statements is not killed
+by it. Anything inside the interpreter's budget is inside this one, which leaves
+the only divergence in a band where wasm succeeds and the interpreter would have
+failed. That direction never breaks a generator that worked.
+
+It is a margin and not a proof — one Vyrn statement can copy an unbounded number
+of bytes — and the comment on `wasm_fuel` says so. What it buys is that the
+default budget now burns out in **~1.6 s** against ~3.4 s for the same runaway
+interpreted, with byte-identical wording. That is a test, not a manual check.
+
+### Trap wording, where the engines really did differ
+
+`error: division by zero` against `division by zero`. The compiled runtime
+prefixes a trap on its way to stderr because at the TOP level the CLI prints the
+same prefix for an interpreted trap — that is what parity compares. Inside
+generation there is no CLI: the interpreter hands the loader a bare message and
+the loader supplies the context. So the engine strips the prefix, and three trap
+kinds (array index, division by zero, string index) are now asserted identical
+end to end, which is what the user actually reads.
+
+### The artifact key stopped being a hash of the program
+
+It was a `Debug`-format hash of the whole generator program — 1.1–1.9 ms of a
+54 ms keystroke, ~40% of what a cache-hit generation costs, on 4,536 lines of
+`std/vyx`, every keystroke. It is now the loader's own content hashes of the
+generator's module closure, handed over as `GenInputs.sources_fingerprint`:
+**0.05–0.07 ms**, and free, because the loader hashes exactly those files anyway
+to write the generation cache entry. The hashing simply moved above the run from
+below it.
+
+Correctness first, since a stale artifact is a silently wrong program: the
+fingerprint covers every module in the generator's closure (the same graph whose
+hashes decide whether the OUTPUT cache entry is still valid), plus the generator
+module key and the std root, because the contract restamping spells modules
+against those. When the closure contains something no resolver can re-read — a
+generated module — there is no honest fingerprint, and the `Debug` hash stays the
+fallback rather than a cheap key that could miss an edit.
+
+### The compiled artifact persists
+
+`Module::serialize` output, beside the generation cache at
+`~/.vyrn/cache/gen/wasm`, keyed the same way as the in-process cache and carrying
+the compiler binary's own identity (every crate here is version `0.0.0`, so the
+executable's size and mtime are the only honest answer to "which build emitted
+this"). Deserializing skips cranelift AND clang, which is the entire cold cost.
+
+`Module::deserialize` is `unsafe` and trusts its input completely, so it is
+confined to one function whose input is a file this cache directory wrote, and
+every failure — missing, truncated, foreign, corrupt — is a MISS that recompiles.
+Checked by corrupting and truncating artifacts on disk: the run recompiles and
+emits the same 130,764 bytes. wasmtime's own header carries its version and
+configuration and refuses anything foreign, which is what makes a wasmtime
+upgrade a miss rather than a crash.
+
+Measured on `examples/bin/routes/index.vyx`, same LSP binary, generation cache
+cleared for both so only the artifacts differ:
+
+| | cold `didOpen` | keystroke, median of 8 |
+|---|---|---|
+| no artifacts on disk | 3,934 ms | 58 ms |
+| artifacts on disk | **201 ms** | 61 ms |
+| everything warm | 134 ms | 62 ms |
+| `VYRN_NO_WASM_GEN=1` | 391 ms | 262 ms |
+
+**20x on opening the first page of a session**, which was seven artifacts of
+clang, and the keystroke is unmoved — 58–63 ms against 56 ms before, the spread
+of the measurement itself, with fuel metering now on. The interpreted column
+reproduces its own baseline, so the two are still the same build differing only
+in engine.
+
 ## Milestones
 
 - **M1 — embed the runtime, one generator, no capabilities.** DONE. wasmtime as
@@ -636,9 +738,11 @@ in the milestone list was right.
 - **M4 — a long-lived process, and the measurement that matters.** DONE. The
   engine moved to its own excluded crate and the LSP installs it; the `.vyx`
   keystroke fell from 243 ms to 54 ms — see below.
-- **M5 — fuel, traps, and the fallback.** Fuel mapping, trap-wording parity, and
-  an explicit fallback to the interpreter for anything the wasm path refuses,
-  so a generator can never become uncompilable by adopting this.
+- **M5 — fuel, traps, and the artifact cache.** DONE. A measured fuel mapping,
+  the trap-wording divergence found and fixed, an artifact key that costs
+  0.05 ms instead of 1.5 ms, and compiled artifacts that persist across
+  sessions — a cold `didOpen` of 3,934 ms became 201 ms. The fallback to the
+  interpreter was already there from M1 and is what every decline uses.
 
 ## Acceptance
 
