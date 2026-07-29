@@ -630,13 +630,45 @@ fn mangle(ty: &Type) -> Option<String> {
     })
 }
 
-/// Emit IR, compile it against wasi-libc, and read back the module bytes.
+/// Where the shared shim's data and heap begin, and where its stack starts
+/// growing back down (RFC-0076 M6).
+///
+/// The two modules share one linear memory, so their static layouts must not
+/// overlap — and the hard part is not the data, it is the STACK. Every
+/// wasm32-wasip1 link is `--stack-first`, so both modules would put a stack at
+/// address zero and the second one to be linked would silently write through
+/// the first one's frames. That is what a naive split does, and it shows up as
+/// a variadic call reading a zero.
+///
+/// So the shim's stack is sized to this address instead of the default 64 KB:
+/// its frames live just below 16 MB, growing down, while the generated module
+/// keeps a stack at zero — trapping on overflow exactly as the fat module does,
+/// which matters because the deeply recursive code (every generator is a
+/// parser) is the generated half. Between them sits an unused gap: the
+/// generated module's statics may not pass the halfway mark (see `data_end`),
+/// so the shim would have to recurse through 8 MB of C frames to reach them.
+/// Low addresses cost nothing to reserve — a wasm page is committed when it is
+/// touched — and every artifact in this repo ends between 68 and 82 KB, so the
+/// ceiling is ~100x above anything real.
+const SHIM_BASE: u32 = 16 * 1024 * 1024;
+
+/// `__vyrn_spawn` takes a FUNCTION POINTER, and a function pointer is an index
+/// into the caller's table — which the split does not share. A generator that
+/// spawns therefore gets the single fat module, where the table is one.
+const NOT_SPLITTABLE: &[&str] = &["__vyrn_spawn"];
+
+/// Emit IR, compile it, and read back the module bytes.
 ///
 /// Deliberately its own orchestration rather than a refactor of `build`: that
 /// function owns argument parsing, output naming, native/wasm selection and its
 /// own error reporting, none of which belongs on this path. The pieces that
 /// matter — clang, the sysroot, the builtins archive, the runtime shim — are the
 /// same ones `build` uses.
+///
+/// Two shapes, preferring the split one (RFC-0076 M6): a module that imports the
+/// pre-compiled shim skips ~55 ms of compiling 39 KB of C that was going to come
+/// out byte-identical anyway. It falls back to the fat module whenever the split
+/// cannot be proven safe, so the worst case is the cost this path always had.
 fn compile_to_wasm(key: &str, program: &Program) -> Result<Vec<u8>, EngineError> {
     // `emit_gen_host`, not `emit`: the same emitter, plus the one lowering that
     // only makes sense with the host imports below it (`listDir`).
@@ -645,16 +677,22 @@ fn compile_to_wasm(key: &str, program: &Program) -> Result<Vec<u8>, EngineError>
     let dir = std::env::temp_dir().join(format!("vyrn-genwasm-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| EngineError::Failed(e.to_string()))?;
     let ll = dir.join(format!("{key}.ll"));
-    let shim = dir.join(format!("{key}.shim.c"));
     let out = dir.join(format!("{key}.wasm"));
     std::fs::write(&ll, ir).map_err(|e| EngineError::Failed(e.to_string()))?;
-    // No extern trap stubs: this is a wasm build, and a generator cannot call
-    // `extern` anyway (comptime purity forbids it).
-    std::fs::write(&shim, vyrn_codegen::toolchain::RUNTIME_SHIM).map_err(|e| EngineError::Failed(e.to_string()))?;
 
     let clang = vyrn_codegen::toolchain::find_clang().ok_or_else(|| decline("no clang"))?;
     let sysroot = wasi_sysroot().ok_or_else(|| decline("no wasi sysroot"))?;
     let builtins = wasi_builtins(&sysroot).ok_or_else(|| decline("no wasi builtins"))?;
+
+    if let Some(bytes) = compile_split(&clang, &ll, &out) {
+        return Ok(bytes);
+    }
+
+    let shim = dir.join(format!("{key}.shim.c"));
+    // No extern trap stubs: this is a wasm build, and a generator cannot call
+    // `extern` anyway (comptime purity forbids it).
+    std::fs::write(&shim, vyrn_codegen::toolchain::RUNTIME_SHIM)
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
 
     let st = std::process::Command::new(clang)
         .arg(&ll)
@@ -678,6 +716,253 @@ fn compile_to_wasm(key: &str, program: &Program) -> Result<Vec<u8>, EngineError>
         return Err(decline(&String::from_utf8_lossy(&st.stderr)));
     }
     std::fs::read(&out).map_err(|e| EngineError::Failed(e.to_string()))
+}
+
+/// The generated module alone, importing memory and every `__vyrn_*`/libc symbol
+/// from the shared shim (RFC-0076 M6). `None` means "use the fat module" — it is
+/// never an error, only a slower answer.
+///
+/// `-nostdlib` is what makes the sharing whole rather than partial: without it
+/// wasm-ld would resolve `malloc` out of the archive locally and the two modules
+/// would keep two heaps in one memory.
+fn compile_split(clang: &Path, ll: &Path, out: &Path) -> Option<Vec<u8>> {
+    let shim = shim_module()?;
+    let st = std::process::Command::new(clang)
+        .arg(ll)
+        .arg("-o")
+        .arg(out)
+        .arg("-Wno-override-module")
+        .arg("--target=wasm32-wasip1")
+        .arg("-nostdlib")
+        .arg("-Wl,--import-memory")
+        .arg("-Wl,--import-undefined")
+        .arg("-Wl,--no-entry")
+        .arg("-Wl,--export=vyrn_entry")
+        // Statics start above the stack, so one number — the end of the last
+        // data segment — bounds the module's whole footprint, and a stack
+        // overflow runs off address zero and traps instead of eating them.
+        .arg("-Wl,--stack-first")
+        .output()
+        .ok()?;
+    if !st.status.success() {
+        return None;
+    }
+    let bytes = std::fs::read(out).ok()?;
+
+    // The two checks that make the split safe, both on the bytes rather than on
+    // the link succeeding: the link cannot fail here, because `--import-undefined`
+    // turns every symbol this module got wrong into a plausible-looking import.
+    let end = data_end(&bytes)?;
+    if end > SHIM_BASE / 2 {
+        return None;
+    }
+    let exports: std::collections::HashSet<&str> = shim.exports().map(|e| e.name()).collect();
+    for imp in module_imports(&bytes)? {
+        if imp.0 == "env" && (!exports.contains(imp.1.as_str()) || NOT_SPLITTABLE.contains(&imp.1.as_str())) {
+            return None;
+        }
+    }
+    Some(bytes)
+}
+
+/// The runtime shim as its own module, compiled once per compiler build and kept
+/// on disk beside the artifacts (RFC-0076 M6).
+///
+/// `None` disables the split for the process — a missing toolchain, a shim that
+/// will not build, a wasm the engine rejects. Tried once: if it failed the first
+/// time it will fail identically the next, and a per-artifact retry would pay
+/// the fallback's cost twice.
+fn shim_module() -> Option<&'static wasmtime::Module> {
+    static SHIM: std::sync::OnceLock<Option<wasmtime::Module>> = std::sync::OnceLock::new();
+    SHIM.get_or_init(build_shim).as_ref()
+}
+
+fn build_shim() -> Option<wasmtime::Module> {
+    // Keyed on the shim source as well as the compiler build, because the source
+    // is what was compiled and the build is what compiled it — and on the base
+    // address, which decides where its data landed.
+    let key = vyrn_frontend::hash::sha256_hex(
+        format!(
+            "shim1\u{0}{}\u{0}{SHIM_BASE}\u{0}{}",
+            compiler_identity(),
+            vyrn_frontend::hash::sha256_hex(vyrn_codegen::toolchain::RUNTIME_SHIM.as_bytes())
+        )
+        .as_bytes(),
+    );
+    let t = std::time::Instant::now();
+    if let Some(m) = load_artifact(&key) {
+        trace("shim deserialize", t.elapsed());
+        return Some(m);
+    }
+
+    let clang = vyrn_codegen::toolchain::find_clang()?;
+    let sysroot = wasi_sysroot()?;
+    let builtins = wasi_builtins(&sysroot)?;
+    let dir = std::env::temp_dir().join(format!("vyrn-genwasm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    let src = dir.join("shim.c");
+    let out = dir.join("shim.wasm");
+    std::fs::write(&src, vyrn_codegen::toolchain::RUNTIME_SHIM).ok()?;
+
+    let t = std::time::Instant::now();
+    let st = std::process::Command::new(clang)
+        .arg(&src)
+        .arg("-o")
+        .arg(&out)
+        .arg("-DVYRN_GEN_HOST")
+        // Drops `main` and adds the three entry points the host drives instead.
+        .arg("-DVYRN_GEN_SHIM")
+        .arg("--target=wasm32-wasip1")
+        // No `main`, so no `_start`: the host calls in, repeatedly, over a life
+        // longer than one call.
+        .arg("-mexec-model=reactor")
+        .arg(format!("--sysroot={}", sysroot.display()))
+        .arg("-nodefaultlibs")
+        .arg(&builtins)
+        .arg("-lc")
+        // Nothing here is reachable from this module's own entry points, so
+        // without this wasm-ld would garbage-collect the whole runtime away.
+        .arg("-Wl,--export-all")
+        .arg("-Wl,--export-memory")
+        // Data above the line, stack growing down TO the line — see `SHIM_BASE`.
+        .arg(format!("-Wl,--global-base={SHIM_BASE}"))
+        .arg(format!("-Wl,-z,stack-size={SHIM_BASE}"))
+        .output()
+        .ok()?;
+    if !st.status.success() {
+        return None;
+    }
+    trace("shim clang", t.elapsed());
+    let t = std::time::Instant::now();
+    let m = wasmtime::Module::new(wasm_engine(), &std::fs::read(&out).ok()?).ok()?;
+    trace("shim cranelift", t.elapsed());
+    store_artifact(&key, &m);
+    Some(m)
+}
+
+/// The end of a module's last data segment: the top of everything it statically
+/// occupies, given `--stack-first`.
+///
+/// Read off the bytes rather than off an exported `__heap_base` global because
+/// it has to be known BEFORE instantiation — instantiating is what writes the
+/// data segments, and by then a collision has already happened.
+fn data_end(wasm: &[u8]) -> Option<u32> {
+    let mut end = 0u32;
+    for (id, body) in wasm_sections(wasm)? {
+        if id != 11 {
+            continue;
+        }
+        let mut r = Reader(body, 0);
+        for _ in 0..r.leb()? {
+            let flags = r.leb()?;
+            let mut off = 0u32;
+            if flags & 1 == 0 {
+                if flags & 2 != 0 {
+                    r.leb()?; // memory index
+                }
+                // A data offset is a constant expression, and the only one
+                // wasm-ld ever emits here is `i32.const N; end`.
+                if r.byte()? != 0x41 {
+                    return None;
+                }
+                off = r.leb()?;
+                if r.byte()? != 0x0b {
+                    return None;
+                }
+            }
+            let len = r.leb()?;
+            r.skip(len as usize)?;
+            end = end.max(off.checked_add(len)?);
+        }
+    }
+    Some(end)
+}
+
+/// A module's (module, name) imports.
+fn module_imports(wasm: &[u8]) -> Option<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    for (id, body) in wasm_sections(wasm)? {
+        if id != 2 {
+            continue;
+        }
+        let mut r = Reader(body, 0);
+        for _ in 0..r.leb()? {
+            let m = r.name()?;
+            let n = r.name()?;
+            // The import descriptor is skipped, not read — only the names matter
+            // here — but it has to be skipped exactly, or the next import's name
+            // starts in the wrong place.
+            let kind = r.byte()?;
+            match kind {
+                0x00 => {
+                    r.leb()?; // type index
+                }
+                0x03 => {
+                    r.skip(2)?; // value type, mutability
+                }
+                0x01 | 0x02 => {
+                    if kind == 0x01 {
+                        r.byte()?; // element type
+                    }
+                    let limits = r.byte()?;
+                    r.leb()?; // minimum
+                    if limits & 1 != 0 {
+                        r.leb()?; // maximum
+                    }
+                }
+                _ => return None,
+            }
+            out.push((m, n));
+        }
+    }
+    Some(out)
+}
+
+/// Just enough of the binary format to read the two sections above.
+struct Reader<'a>(&'a [u8], usize);
+
+impl Reader<'_> {
+    fn byte(&mut self) -> Option<u8> {
+        let b = *self.0.get(self.1)?;
+        self.1 += 1;
+        Some(b)
+    }
+    fn leb(&mut self) -> Option<u32> {
+        let (mut v, mut shift) = (0u32, 0);
+        loop {
+            let b = self.byte()?;
+            v |= ((b & 0x7f) as u32).checked_shl(shift)?;
+            if b & 0x80 == 0 {
+                return Some(v);
+            }
+            shift += 7;
+        }
+    }
+    fn skip(&mut self, n: usize) -> Option<()> {
+        self.1 = self.1.checked_add(n).filter(|i| *i <= self.0.len())?;
+        Some(())
+    }
+    fn name(&mut self) -> Option<String> {
+        let n = self.leb()? as usize;
+        let s = String::from_utf8(self.0.get(self.1..self.1 + n)?.to_vec()).ok()?;
+        self.1 += n;
+        Some(s)
+    }
+}
+
+fn wasm_sections(wasm: &[u8]) -> Option<Vec<(u8, &[u8])>> {
+    if wasm.get(..4)? != b"\0asm" {
+        return None;
+    }
+    let mut r = Reader(wasm, 8);
+    let mut out = Vec::new();
+    while r.1 < wasm.len() {
+        let id = r.byte()?;
+        let n = r.leb()? as usize;
+        out.push((id, wasm.get(r.1..r.1 + n)?));
+        r.skip(n)?;
+    }
+    Some(out)
 }
 
 fn wasi_sysroot() -> Option<PathBuf> {
@@ -743,6 +1028,10 @@ struct Streams {
     types: std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>,
     contracts: Vec<vyrn_frontend::ast::ContractDecl>,
     caps: Option<Caps>,
+    /// The one linear memory, held here rather than looked up per call: when the
+    /// shim is a separate module (RFC-0076 M6) it is the SHIM that exports the
+    /// memory, and half the imports below are called from the other module.
+    mem: Option<wasmtime::Memory>,
 }
 
 impl Streams {
@@ -920,7 +1209,7 @@ impl std::error::Error for Denied {}
 fn guest_mem<'a>(
     caller: &'a mut wasmtime::Caller<'_, Streams>,
 ) -> wasmtime::Result<(&'a mut [u8], &'a mut Streams)> {
-    let Some(wasmtime::Extern::Memory(mem)) = caller.get_export("memory") else {
+    let Some(mem) = caller.data().mem else {
         return Err(wasmtime::Error::msg("generator has no memory"));
     };
     Ok(mem.data_and_store_mut(caller))
@@ -1493,7 +1782,7 @@ fn run_wasm(
             wasi,
             "fd_write",
             |mut caller: Caller<'_, Streams>, fd: i32, iovs: i32, iovs_len: i32, nwritten: i32| {
-                let Some(Extern::Memory(mem)) = caller.get_export("memory") else {
+                let Some(mem) = caller.data().mem else {
                     return ERRNO_BADF;
                 };
                 if fd != 1 && fd != 2 {
@@ -1533,7 +1822,7 @@ fn run_wasm(
             wasi,
             "fd_fdstat_get",
             |mut caller: Caller<'_, Streams>, fd: i32, buf: i32| {
-                let Some(Extern::Memory(mem)) = caller.get_export("memory") else {
+                let Some(mem) = caller.data().mem else {
                     return ERRNO_BADF;
                 };
                 if fd > 2 {
@@ -1568,7 +1857,7 @@ fn run_wasm(
             wasi,
             "args_sizes_get",
             |mut caller: Caller<'_, Streams>, count: i32, size: i32| {
-                let Some(Extern::Memory(mem)) = caller.get_export("memory") else {
+                let Some(mem) = caller.data().mem else {
                     return ERRNO_BADF;
                 };
                 let (data, streams) = mem.data_and_store_mut(&mut caller);
@@ -1586,7 +1875,7 @@ fn run_wasm(
             wasi,
             "args_get",
             |mut caller: Caller<'_, Streams>, ptrs: i32, buf: i32| {
-                let Some(Extern::Memory(mem)) = caller.get_export("memory") else {
+                let Some(mem) = caller.data().mem else {
                     return ERRNO_BADF;
                 };
                 let (data, streams) = mem.data_and_store_mut(&mut caller);
@@ -1614,7 +1903,7 @@ fn run_wasm(
             wasi,
             "environ_sizes_get",
             |mut caller: Caller<'_, Streams>, count: i32, size: i32| {
-                let Some(Extern::Memory(mem)) = caller.get_export("memory") else {
+                let Some(mem) = caller.data().mem else {
                     return ERRNO_BADF;
                 };
                 let (data, _) = mem.data_and_store_mut(&mut caller);
@@ -1628,12 +1917,6 @@ fn run_wasm(
     linker
         .func_wrap(wasi, "environ_get", |_: i32, _: i32| ERRNO_SUCCESS)
         .map_err(|e| EngineError::Failed(e.to_string()))?;
-    // Anything else — a filesystem or clock import — is a generator this path
-    // said it would not serve, so it traps loudly instead of silently lying.
-    linker
-        .define_unknown_imports_as_traps(module)
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-
     // argv[0] is the program name, which `args()` (argv[1..]) skips.
     let mut world = Streams {
         caps: Some(caps),
@@ -1650,14 +1933,87 @@ fn run_wasm(
     store
         .set_fuel(fuel)
         .map_err(|e| EngineError::Failed(e.to_string()))?;
+
+    // Which shape this artifact is, asked of the artifact itself rather than
+    // remembered: an importing module and a fat one both come out of the same
+    // cache, and the import IS the difference (RFC-0076 M6).
+    let split = module
+        .imports()
+        .any(|i| i.module() == "env" && i.name() == "memory");
+    if split {
+        let shim = shim_module().ok_or_else(|| decline("no runtime shim"))?;
+        // The standalone shim keeps all 75 `__vyrn_*` entry points instead of
+        // being garbage-collected down to one artifact's needs, so it declares
+        // more of preview1 than any generator can reach. Declares, not calls —
+        // a generator has no filesystem and no clock.
+        linker
+            .define_unknown_imports_as_traps(shim)
+            .map_err(|e| EngineError::Failed(e.to_string()))?;
+        // Spelled out rather than left to `Linker::module`, for the ordering:
+        // the memory has to be on the store BEFORE the reactor's `_initialize`
+        // runs, because the imports below reach for it and libc's constructors
+        // are the first thing that calls them.
+        let inst = linker
+            .instantiate(&mut store, shim)
+            .map_err(|e| EngineError::Failed(format!("shim: {e}")))?;
+        let Some(Extern::Memory(mem)) = inst.get_export(&mut store, "memory") else {
+            return Err(EngineError::Failed("shim exports no memory".into()));
+        };
+        store.data_mut().mem = Some(mem);
+        if let Some(Extern::Func(init)) = inst.get_export(&mut store, "_initialize") {
+            init.typed::<(), ()>(&store)
+                .and_then(|f| f.call(&mut store, ()))
+                .map_err(|e| EngineError::Failed(format!("shim init: {e}")))?;
+        }
+        // Every shim export becomes the `env` the artifact imports — the memory
+        // among them, which is what makes the two modules one program.
+        linker
+            .instance(&mut store, "env", inst)
+            .map_err(|e| EngineError::Failed(format!("shim: {e}")))?;
+    }
+    // Anything else — a filesystem or clock import — is a generator this path
+    // said it would not serve, so it traps loudly instead of silently lying.
+    linker
+        .define_unknown_imports_as_traps(module)
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
     let inst = linker
         .instantiate(&mut store, module)
         .map_err(|e| EngineError::Failed(format!("instantiate: {e}")))?;
-    let start = inst
-        .get_typed_func::<(), ()>(&mut store, "_start")
-        .map_err(|e| EngineError::Failed(format!("_start: {e}")))?;
 
-    let result = start.call(&mut store, ());
+    // A fat module is a wasi command and its own memory; a split one is neither,
+    // so the host does what crt1 would have: argv in, entry, flush.
+    let result = if split {
+        let shim_call = |store: &mut Store<Streams>, f: &str| -> Result<(), Error> {
+            let Ok(Extern::Func(func)) = linker.get(&mut *store, "env", f) else {
+                return Err(Error::msg(format!("shim exports no {f}")));
+            };
+            func.typed::<(), ()>(&*store)?.call(store, ())
+        };
+        let entry = inst
+            .get_typed_func::<(), i32>(&mut store, "vyrn_entry")
+            .map_err(|e| EngineError::Failed(format!("vyrn_entry: {e}")))?;
+        shim_call(&mut store, "__vyrn_gen_init")
+            .and_then(|()| entry.call(&mut store, ()))
+            .and_then(|code| {
+                // A trap already left through `exit`, which flushed on its way
+                // out; this is the path that is still running.
+                shim_call(&mut store, "__vyrn_gen_fini")?;
+                // What crt1 does with a nonzero return from `main`.
+                match code {
+                    0 => Ok(()),
+                    code => Err(Error::new(Exit(code))),
+                }
+            })
+    } else {
+        let start = inst
+            .get_typed_func::<(), ()>(&mut store, "_start")
+            .map_err(|e| EngineError::Failed(format!("_start: {e}")))?;
+        store.data_mut().mem = match inst.get_export(&mut store, "memory") {
+            Some(Extern::Memory(m)) => Some(m),
+            _ => return Err(EngineError::Failed("generator has no memory".into())),
+        };
+        start.call(&mut store, ())
+    };
     if std::env::var("VYRN_GENWASM_TRACE").is_ok() {
         // What a real generator actually costs, which is the only honest way to
         // pick the multiplier in `wasm_fuel`.

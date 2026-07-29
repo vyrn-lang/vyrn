@@ -967,6 +967,52 @@ static void __vyrn_join_all(void) {
 }
 #endif
 
+#ifdef VYRN_GEN_SHIM
+/* ---- standalone-shim build (RFC-0076 M6) --------------------------------
+   Here this file is its own wasm module, which every generated module imports
+   instead of embedding a private copy of. There is no `main`: `vyrn_entry`
+   lives in the OTHER module, and importing it back would make the two modules
+   an instantiation cycle. So the host drives, in order, the three things crt1
+   would have driven — capture argv, call the generated module's entry, flush.
+
+   Only reached with --target=wasm32-wasip1, which is why the WASI calls are
+   spelled as imports rather than through <wasi/api.h>. */
+__attribute__((import_module("wasi_snapshot_preview1"), import_name("args_sizes_get")))
+extern int __vyrn_wasi_args_sizes(unsigned*, unsigned*);
+__attribute__((import_module("wasi_snapshot_preview1"), import_name("args_get")))
+extern int __vyrn_wasi_args(char**, char*);
+
+void __vyrn_gen_init(void) {
+    unsigned n = 0, sz = 0;
+    char** argv;
+    char* buf;
+    if (__vyrn_wasi_args_sizes(&n, &sz) != 0) return;
+    argv = (char**)__vyrn_malloc((n + 1) * sizeof(char*));
+    buf = (char*)__vyrn_malloc(sz ? sz : 1);
+    if (__vyrn_wasi_args(argv, buf) != 0) return;
+    argv[n] = 0;
+    __vyrn_argc = (int)n;
+    __vyrn_argv = argv;
+}
+
+/* What crt1's `__wasm_call_dtors` did on the way out of `main`: a generator's
+   whole output is buffered stdout, so nothing may be left in the FILE. */
+void __vyrn_gen_fini(void) { fflush(0); }
+
+/* wasm-ld pulls an archive member only when something references it, and the
+   generated module's references are IMPORTS — invisible to the link of this
+   module. So the libc entry points the emitted IR can call are named here, or
+   they would not be in this module for it to import. The list is exactly what
+   `vyrn-codegen` declares beyond `__vyrn_*`, plus the four `mem*` LLVM lowers
+   intrinsics to; anything missed is caught by the export check on the other
+   side and costs a fallback, not a miscompile. */
+static void* const __vyrn_gen_libc[] = {
+    (void*)printf, (void*)fprintf, (void*)fputs, (void*)fopen, (void*)fclose,
+    (void*)exit,   (void*)free,    (void*)strcpy, (void*)strcat, (void*)strcmp,
+    (void*)strstr, (void*)memcpy,  (void*)memmove, (void*)memset, (void*)memcmp,
+};
+void* __vyrn_gen_libc_keep(int i) { return __vyrn_gen_libc[i]; }
+#else
 /* The real C entry point: every target's crt (MSVC, glibc, wasi-libc) knows
    how to call a plain C main; the IR only exports vyrn_entry. argv is stashed
    for `args()` (RFC-0014). Outstanding tasks are joined before the exit code
@@ -979,6 +1025,7 @@ int main(int argc, char** argv) {
     __vyrn_join_all();
     return code;
 }
+#endif
 "#;
 
 /// The dev-tree wasi sysroot, if one exists: the first `tools/wasi-sysroot-*`

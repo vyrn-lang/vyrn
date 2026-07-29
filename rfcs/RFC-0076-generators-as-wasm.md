@@ -760,6 +760,65 @@ on-disk artifacts carry a scheme tag so a per-function artifact from an older
 build cannot be read as a per-module one — belt and braces, since the key already
 carries the compiler binary's identity and a rebuild invalidates everything.
 
+## As landed: one compiled shim, imported instead of embedded
+
+Every artifact carried its own copy of the 35 KB C runtime shim; in a cold open
+of `examples/bin` all eight were byte-identical. So the shim is now built once —
+`-mexec-model=reactor`, cranelift-compiled, serialized beside the artifacts and
+keyed on its own source plus the compiler's identity — and each generated module
+is linked `-nostdlib -Wl,--import-memory -Wl,--import-undefined`, turning every
+`__vyrn_*` and libc symbol it uses into an import wasmtime satisfies from that
+one instance at link time. Shared linear memory, one dlmalloc heap, one stdout.
+
+**The trap is the STACK, not the data.** Every wasm32-wasip1 link is
+`--stack-first`, so both modules put a stack at address zero, and the second
+one's frames are written straight through the first one's. It does not fail
+loudly: it surfaced as `7.toString()` returning `"0"` while `2.5.toString()`
+returned `2.500000` — a variadic call whose argument buffer, sitting in the
+generated module's frame, had been overwritten by the shim's own frame for
+`vsnprintf`. In the whole-repo generators it showed up as a list shifted by one
+element and an import specifier gone empty, which parses. This is the failure the
+milestone was de-risking, and a spike on a hand-written module cannot find it —
+the spike's module had no frame to lose.
+
+The layout that fixes it, and which the ceiling check enforces:
+
+| | |
+|---|---|
+| generated module | stack `[0, 64 KB)`, statics above it, ceiling **8 MB** |
+| shim | `-z stack-size=16 MB` so its frames grow DOWN from 16 MB |
+| shim | `--global-base=16 MB`, so its data and heap grow UP from there |
+
+The deeply recursive half is the generated one — every generator is a parser —
+so it keeps the stack that traps on overflow by running off address zero, exactly
+as the fat module's did. The shim would have to recurse through 8 MB of C frames
+to reach anything. The generated module's statics are measured from its data
+segments BEFORE instantiation (instantiating is what would write them), and an
+artifact over the ceiling declines to the fat build rather than shipping a
+corrupted one; so does one importing a symbol the shim does not export, or
+`__vyrn_spawn`, whose function-pointer argument indexes a table the split does
+not share. Forcing the ceiling to zero makes all 15 roots take the fallback and
+the cross-engine gate still passes.
+
+The payoff is smaller than the shim's share of a fat compile suggested:
+
+| `examples/bin`, generation cache cleared | before | after |
+|---|---|---|
+| `emit-gen server.vyrn`, clang total | 1,985 ms | **1,829 ms** (+96 ms shim, once) |
+| `emit-gen server.vyrn`, wall | 2,462–2,941 ms | **2,290–2,564 ms** |
+| cold `didOpen` of `app/routes/index.vyx` | 2,969 ms | **2,685 ms** |
+| second session, artifacts on disk | 459 ms | 436 ms |
+| keystroke, median of 3 | 60 ms | 55–60 ms |
+
+~44 ms per artifact, not the ~99 ms the phase breakdown implied: compiling
+`shim.c` to an object is 55 ms, and the split gives some of it back at the link,
+where `--import-undefined` costs more than resolving out of `libc.a` saved.
+Cranelift is unmoved, as the spike predicted — wasm-ld was already garbage-
+collecting libc down to what each artifact used. What did improve structurally is
+that `find_clang() == None` now costs one fewer compile per artifact, and that
+the 35 KB of C is compiled once per compiler build rather than once per
+generator module.
+
 ## Milestones
 
 - **M1 — embed the runtime, one generator, no capabilities.** DONE. wasmtime as
@@ -785,6 +844,10 @@ carries the compiler binary's identity and a rebuild invalidates everything.
   0.05 ms instead of 1.5 ms, and compiled artifacts that persist across
   sessions — a cold `didOpen` of 3,934 ms became 201 ms. The fallback to the
   interpreter was already there from M1 and is what every decline uses.
+- **M6 — one compiled shim for every artifact.** DONE. The 35 KB C runtime is
+  its own pre-compiled module the generated modules import, memory included,
+  linked at instantiation. ~44 ms of clang per artifact, and a stack-layout trap
+  found and closed — see above.
 
 ## Acceptance
 
