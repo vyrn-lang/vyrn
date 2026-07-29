@@ -7159,7 +7159,12 @@ fn init_restrictions(
 }
 
 /// The names of every function/builtin called (or spawned) anywhere in a block.
-fn fn_calls(b: &Block) -> std::collections::HashSet<String> {
+/// Every function name called anywhere in `b`.
+///
+/// Public because RFC-0076's wasm engine needs the same question the
+/// comptime-purity check asks — "what does this reach?" — to decide whether a
+/// generator touches a capability it cannot yet serve. One walker, one answer.
+pub fn fn_calls(b: &Block) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     calls_block(b, &mut out);
     out

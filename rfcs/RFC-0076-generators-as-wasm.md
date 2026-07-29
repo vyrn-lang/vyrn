@@ -216,6 +216,61 @@ once the runtime is embedded and instantiation replaces process spawn. Any
 milestone that reports a speedup from a subprocess measurement is measuring the
 wrong thing.
 
+## M1 shipped, and the blocker it exposed
+
+M1 is implemented: `vyrn-cli/src/genwasm.rs`, behind `--features wasm-gen`. It
+clears `is_gen`, synthesizes a `main` that calls the generator with `args()` and
+prints the result, compiles that to wasm, and runs it in an embedded wasmtime
+with a hand-written 10-import WASI (the same shim `web/wasi-min.js` is, in Rust).
+Output is byte-identical to the interpreted run. Arguments travel as **argv**
+rather than baked-in literals, so one compiled artifact serves every call — four
+calls to one generator compile once.
+
+Then it was measured, and it is **slower than the interpreter**:
+
+| heavy capability-free generator, 4 calls | |
+|---|---|
+| interpreted | 1,496 ms |
+| wasm (one compile, four executions) | 2,548 ms |
+
+Phase trace: clang 257 ms, cranelift 37 ms, and then **~600 ms per execution** —
+against ~370 ms interpreted. Execution was supposed to be the fast part.
+
+Worth stating plainly: M1 serves **zero** generators in this repo. Every one of
+`std/vyx`, `std/tw`, `std/i18n`, `std/rpc`, `std/openapi`, `std/graphql` and
+`std/ui` reaches `readFile` or `moduleInterface`, so all nine generator-using
+examples decline to the interpreter and emit byte-identical sources. That is M2
+and M3's work, and it is correctly ordered after the blocker below.
+
+The cause is not wasm. It is that the compiled backend has no in-place string
+append, and the interpreter does:
+
+```vyrn
+let mut out = ""
+while i < 4000 { out = out + "export fn f\{i}() -> Int64 { return \{i} }\n"; i = i + 1 }
+```
+
+| | time |
+|---|---|
+| interpreted | **52 ms** |
+| native (`vyrn build`) | **512 ms** |
+
+The interpreter appends in place when a local `String` accumulates onto itself.
+`emit_str_concat` allocates a fresh buffer and `strcpy`+`strcat`s both halves
+every iteration, so the same loop is quadratic compiled and linear interpreted —
+**10x slower compiled, on the single idiom every generator is built out of.**
+
+Compute is unaffected and confirms the original premise: a 5M-iteration
+arithmetic loop is 2,166 ms interpreted against 337 ms native (which includes
+~300 ms of process launch).
+
+So the 165x is real for compute-bound generators and unreachable for the
+string-building ones, which is all of them. **RFC-0076 is blocked on a codegen
+fix, not on anything in this RFC**: `s = s + x` on a local `String` must append
+in place, with capacity, the way the interpreter already does. That fix stands on
+its own — the compiled backend being 10x slower than the interpreter at building
+a string is a bug whether or not generators ever run as wasm.
+
 ## Risks, honestly
 
 **A new dependency.** wasmtime is a large crate, and this workspace deliberately
@@ -241,10 +296,15 @@ runaway generator traps differently depending on the engine.
 
 ## Milestones
 
-- **M1 — embed the runtime, one generator, no capabilities.** wasmtime as a
-  library; compile a `gen fn` with no `readFile`/`listDir`/`moduleInterface` to
-  wasm; run it; assert the emitted source is byte-identical to the interpreted
-  run. Proves the boundary and kills the 106 ms.
+- **M1 — embed the runtime, one generator, no capabilities.** DONE. wasmtime as
+  a library; compile a `gen fn` with no `readFile`/`listDir`/`moduleInterface` to
+  wasm; run it; the emitted source is byte-identical to the interpreted run.
+  Proves the boundary and kills the 106 ms — and shows the next milestone is not
+  the one that was planned.
+- **M1.5 — in-place string append in codegen.** `s = s + x` on a local `String`
+  appends with amortized capacity instead of reallocating and copying, matching
+  what the interpreter does. Blocks every milestone after it, and is worth doing
+  on its own account.
 - **M2 — the byte capabilities.** `read` and `list` as host imports, with the
   `allowed` mediation and read recording intact, and the canonical RFC-0014 error
   wording preserved. `std/tw` and `std/i18n` become servable.

@@ -1028,16 +1028,6 @@ fn load_modules(
 const GEN_FUEL: u64 = 20_000_000;
 const GEN_MAX_OUTPUT: usize = 4 * 1024 * 1024;
 
-/// Run a generator-call import target (RFC-0021) and return
-/// `(synthesized module key, Some(source) | None-if-already-synthesized)`.
-///
-/// Flow: prove the arguments are compile-time constants → compute the
-/// synthesized module key (which dedups identical calls and separates distinct
-/// arguments) → find the exported `gen fn` in an already-loaded module → load +
-/// check it as a runnable program → consult the content-addressed cache (a hit
-/// skips interpretation) → on a miss, run the generator in the mediated sandbox,
-/// then cache the result keyed by `sha256(generator sources ++ args ++ inputs)`.
-#[allow(clippy::too_many_arguments)]
 thread_local! {
     /// `module key -> content hash` for the load in progress. Handed to the
     /// checker so it can tell which modules are byte-identical to last time.
@@ -1061,6 +1051,16 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
 }
 
+/// Run a generator-call import target (RFC-0021) and return
+/// `(synthesized module key, Some(source) | None-if-already-synthesized)`.
+///
+/// Flow: prove the arguments are compile-time constants → compute the
+/// synthesized module key (which dedups identical calls and separates distinct
+/// arguments) → find the exported `gen fn` in an already-loaded module → load +
+/// check it as a runnable program → consult the content-addressed cache (a hit
+/// skips interpretation) → on a miss, run the generator in the mediated sandbox,
+/// then cache the result keyed by `sha256(generator sources ++ args ++ inputs)`.
+#[allow(clippy::too_many_arguments)]
 fn run_generator(
     importer: &str,
     importer_is_root: bool,

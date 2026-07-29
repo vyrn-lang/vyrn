@@ -44,6 +44,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+/// RFC-0076: generators compiled to wasm instead of interpreted. Behind a
+/// feature so the default build keeps its zero external dependencies.
+#[cfg(feature = "wasm-gen")]
+mod genwasm;
 mod remote;
 
 const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn routes [file.vyrn]   (the resolved wire table: every derived and pinned path, with its source)\n\
@@ -81,6 +85,13 @@ fn main() -> ExitCode {
 }
 
 fn real_main() -> ExitCode {
+    // RFC-0076. Installed before anything can load a module, since generation
+    // happens deep inside the load. `VYRN_NO_WASM_GEN=1` forces the
+    // interpreter — the configuration the acceptance criteria compare against.
+    #[cfg(feature = "wasm-gen")]
+    if std::env::var("VYRN_NO_WASM_GEN").is_err() {
+        genwasm::install();
+    }
     let mut args: Vec<String> = std::env::args().collect();
     let is_offline = offline(&args);
     if is_offline {
