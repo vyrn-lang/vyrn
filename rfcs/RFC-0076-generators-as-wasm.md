@@ -345,6 +345,64 @@ paid once per artifact per process. Nothing in this repo yet calls a servable
 generator often enough to amortize it, which is another way of saying M3 is where
 the win lives.
 
+## What M2 found, and the plan it produced
+
+M2 shipped the byte capabilities and served exactly one generator:
+`examples/gendemo`. The capabilities were never the hard part. What actually
+blocks the generators that matter is two things this RFC did not anticipate:
+
+| generator | blocked by |
+|---|---|
+| `std/tw`, `std/i18n` | RFC-0054 code quotes (`@codeSplice`) |
+| `std/openapi`, `std/graphql` | `moduleInterface` |
+| `std/rpc`, `std/ui` | `contractOf` + `moduleInterface` |
+| `std/vyx` | `lex` + `moduleInterface` |
+
+And the target, measured on the real pages (`.vyx` keystroke, LSP end to end):
+`examples/bin/routes/index.vyx` **243 ms**, `about.vyx` 163 ms,
+`widgets/CreateForm.vyx` 87 ms, `routes/layout.vyx` 49 ms.
+
+### The unifying idea: keep compiler machinery in the host
+
+Every remaining blocker is a comptime builtin that needs something only the
+compiler has — a lexer, a linker, a piece list with exact splice semantics. None
+of it should be reimplemented guest-side, because a second implementation is a
+second chance to disagree, and disagreement here means two different programs.
+
+So each one becomes a host import, and the only question per builtin is what
+crosses the boundary:
+
+- **`Code` is an opaque handle.** `Type::Named("Code")` lowers to `i64`, an index
+  into a host-side arena of `Vec<CodePiece>`. `@codeText`, `@codeSplice`, `raw`,
+  `rawAt`, `render` and `Code + Code` all become host imports operating on
+  handles. The splice rules, the string escaping and the float formatting stay in
+  the one Rust implementation, so they are byte-identical by construction rather
+  than by testing. `Code` is comptime-only and never escapes into runtime data,
+  which is exactly what makes an opaque handle a faithful representation.
+- **`lex` returns data, so it is serialized.** The token record shape is fixed and
+  known to codegen (`{kind, text, line, col}`), so the guest decoder is
+  mechanical. The lexer itself stays single-sourced in the host — a Vyrn lexer
+  written in Vyrn would be a second lexer to keep in agreement, which is the
+  thing worth avoiding above all.
+- **Reflection is serialized too**, per the seam this RFC already identified.
+  `moduleInterface` cannot be pre-evaluated and spliced: all eighteen call sites
+  in `std/` take a runtime-computed path (`m.modPath`, `contract`, `modPath`),
+  never a literal.
+
+### Revised milestones
+
+- **M3a — `Code` as an opaque host handle.** Unblocks `std/tw` and `std/i18n`,
+  which already have their capabilities.
+- **M3b — `lex` as a host import** with a codegen-emitted decoder for the fixed
+  token record.
+- **M3c — reflection.** `moduleInterface` / `contractOf` as JSON plus a decoder
+  written in Vyrn in `std/`, since the shape is deep and nested.
+- **M4 — a home the LSP can reach.** The engine lives in `vyrn-cli` today and
+  `vyrn-lsp` is a separate excluded crate; the payoff is entirely in the
+  long-lived process, so this is where the 243 ms is finally measured.
+- **M5 — fuel, traps, and the on-disk artifact cache**, so a cold editor session
+  does not pay clang on its first keystroke.
+
 ## Risks, honestly
 
 **A new dependency.** wasmtime is a large crate, and this workspace deliberately
