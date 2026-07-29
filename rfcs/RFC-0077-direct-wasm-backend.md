@@ -443,3 +443,91 @@ past the epilogue and leak the frame for the rest of the program. Returns go
 through a `br` to the function's outermost block, or the epilogue moves into a
 helper the return path calls. That sits beside M0's destination-first rule at
 joins as the second shape constraint on the M2 traversal.
+
+---
+
+## M2a — the pre-flight
+
+M2 said to re-verify the no-relooper measurement across every example before
+writing lowering, rather than trusting the two artifacts the spike sampled. That
+was worth doing: the corpus holds one exception to each of the two claims, and
+one of them is a real correction to this RFC.
+
+Measured over the emitted IR of all 81 examples (`vyrn emit-ir`), with the
+hand-written IR runtime separated from emitter output — the runtime is 31
+functions copied into every module, so leaving it in triples the counts and
+hides everything interesting:
+
+| | emitter | hand-written runtime |
+|---|---|---|
+| functions | 4,045 | 2,511 |
+| basic blocks | 66,992 | 9,801 |
+| loop headers (back-edge targets) | 2,824 | 1,296 |
+| `phi` | 2,990 | 2,511 |
+| **`phi` in a loop header** | **10** | 2,025 |
+| aggregate `phi` | **149** | 0 |
+| aggregate `select` | **0** | 0 |
+| calls | 83,098 | 5,589 |
+| **indirect calls** | **0** | **0** |
+| function address as a value | **9** | 0 |
+
+`indirectbr`, `blockaddress`, `invoke` and `landingpad`: zero everywhere.
+
+### No relooper. The ten phis are one canned builtin, not control flow
+
+Every phi in a loop header that the emitter produced is in the same five blocks:
+`parse.loop`, from the `parse(String) -> Option<Int64>` builtin, which the
+emitter writes as a fixed six-block routine with two induction phis it
+backpatches itself (`lib.rs`, "Backpatch the loop phis' back-edge values"). Two
+phis at five call sites across four examples — `argsdemo`, `input` (twice),
+`stringops`, `vlog`.
+
+That is not the case the relooper question is about. Nothing *derived from an
+AST loop* has a phi in its header, because the emitter keeps every user variable
+in an alloca and lets `mem2reg` do the SSA later; the direct backend keeps them
+in frame slots and lets nothing do it. `parse` is a hand-written subroutine that
+happens to be spelled in the emitter rather than in the runtime string, and its
+two phis are two wasm locals. The claim M2 rests on holds.
+
+### The aggregate joins are wider than "diamond", and it does not matter
+
+149 aggregate phis, exactly the number M0 measured, none of them in a loop
+header, and aggregate `select` is still 0 — so every one has a branch to hang
+stores on. But they are not all two-way: 103 have two incoming edges, 46 have
+between four and seven (`match` over an enum with many arms is an n-way join,
+not a diamond).
+
+Destination-first is indifferent to the arity: allocate the join's slot before
+the branch, have each arm store into it. A relooper-free traversal would have
+cared, because it would have had to reconstruct the join; this one does not.
+
+### The correction: there IS a function table, and it is `spawn`
+
+> **No function table.** Zero indirect calls and zero function-addresses-as-values
+> in the artifacts checked.
+
+The first half is true — zero indirect calls, in 88,687. The second half is not.
+Nine sites take a function's address:
+
+```
+%t2 = call ptr @__vyrn_spawn(ptr @__vyrn_task_vyrn_fib, ptr %t0)
+```
+
+RFC-0025 `spawn` hands the shim a per-spawn-site thunk symbol plus a heap frame,
+and the shim calls it. The emitter's own comment is why the spike missed this —
+"the thunk symbol is a C-boundary detail, not a Vyrn-level function value: every
+`call` still names a symbol" — and that is exactly right about the *emitter*.
+It is wrong about wasm, where a callee reached through a pointer needs a table
+entry, `ref.func`, and `call_indirect` on the shim's side.
+
+It is bounded and enumerable rather than open: 9 sites in 3 examples
+(`concurrency` 4, `parallel` 4, `controlflow` 1), one table element each, all
+known at emit time because a spawn site is a syntactic construct. Defunctionalized
+closures (RFC-0037) still need no table, which was the load-bearing half of the
+claim. But "no function table" is not true of the finished backend, and a
+milestone that assumed it would have discovered that at the end instead of here.
+
+### Verdict
+
+The design survives. No relooper, no reconstruction of joins, one small table
+whose contents are a compile-time list.
