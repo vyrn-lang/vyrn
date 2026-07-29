@@ -1992,6 +1992,82 @@ char* __vyrn_read_line(unsigned long long* outlen) {
     return buf;
 }
 
+#ifdef VYRN_GEN_HOST
+/* ---- generator host imports (RFC-0076 M2) -------------------------------
+   A generator does NOT read the filesystem: it reads through the loader's
+   resolver, which in the LSP serves UNSAVED buffers and elsewhere serves
+   vendored or remote modules. Opening files here would read different bytes
+   than the interpreter does, so on this build the two read primitives are
+   replaced by host imports backed by that resolver — path-mediated and
+   recorded on the host side, exactly as `Interp::gen_read_file` does.
+
+   Two calls rather than one because the host must not allocate inside guest
+   memory: `read` resolves, mediates, reads and stashes, returning
+   (status << 32) | len; `fetch` copies the stash into a buffer the GUEST
+   allocated. Status is the same alphabet the codegen already renders errors
+   from (0 ok / 1 io / 3 embedded NUL), so the wording needs no new agreement. */
+__attribute__((import_module("vyrn_gen"), import_name("read")))
+extern long long __vyrn_gen_read(const char* path, int mode);
+__attribute__((import_module("vyrn_gen"), import_name("fetch")))
+extern void __vyrn_gen_fetch(char* dest);
+
+/* mode: 0 = readFile (host checks for NUL), 1 = readFileBytes, 2 = listDir
+   (the stash is the sorted entry names joined by '\n'). */
+static char* __vyrn_gen_slurp(const char* path, int mode, unsigned long long* outlen, int* status) {
+    long long r = __vyrn_gen_read(path, mode);
+    unsigned long long len = (unsigned long long)(r & 0xffffffffLL);
+    char* buf;
+    *status = (int)(r >> 32);
+    if (*status != 0) return 0;
+    buf = (char*)__vyrn_malloc(len + 1);
+    __vyrn_gen_fetch(buf);
+    buf[len] = '\0';
+    *outlen = len;
+    return buf;
+}
+
+int __vyrn_read_file(const char* path, char** out, unsigned long long* outlen) {
+    int st;
+    char* buf = __vyrn_gen_slurp(path, 0, outlen, &st);
+    if (st != 0) return st;
+    *out = buf;
+    return 0;
+}
+
+int __vyrn_read_file_bytes(const char* path, char** out, unsigned long long* outlen) {
+    int st;
+    char* buf = __vyrn_gen_slurp(path, 1, outlen, &st);
+    if (st != 0) return st;
+    *out = buf;
+    return 0;
+}
+
+/* listDir has no runtime lowering in the language (RFC-0021) — this exists only
+   on the generator-host build, and only `emit_gen_host` emits a call to it. The
+   host sorts and joins; splitting on '\n' in place gives the char** the
+   Array<String> triple wants (an entry name cannot contain a newline). */
+int __vyrn_gen_list_dir(const char* path, char*** out, unsigned long long* outlen) {
+    int st;
+    unsigned long long len = 0, n = 0, i, k = 0;
+    char** names;
+    char* start;
+    char* buf = __vyrn_gen_slurp(path, 2, &len, &st);
+    if (st != 0) return st;
+    if (len > 0) {
+        n = 1;
+        for (i = 0; i < len; i++) if (buf[i] == '\n') n++;
+    }
+    names = (char**)__vyrn_malloc((n ? n : 1) * sizeof(char*));
+    start = buf;
+    for (i = 0; i < len; i++) {
+        if (buf[i] == '\n') { buf[i] = '\0'; names[k++] = start; start = buf + i + 1; }
+    }
+    if (len > 0) names[k++] = start;
+    *out = names;
+    *outlen = n;
+    return 0;
+}
+#else
 /* readFile: whole file into a malloc'd, NUL-terminated buffer (*out, *outlen).
    Status: 0 ok, 1 io-error (missing/permission/directory/read error), 3 the
    file contains an embedded NUL byte. UTF-8 validation (status 2) is done by
@@ -2039,6 +2115,7 @@ int __vyrn_read_file_bytes(const char* path, char** out, unsigned long long* out
     *outlen = len;
     return 0;
 }
+#endif
 
 /* writeFile: create/truncate + write all bytes. Status 0 ok / 1 io-error. A
    Vyrn String is NUL-terminated and never contains a NUL, so strlen is its

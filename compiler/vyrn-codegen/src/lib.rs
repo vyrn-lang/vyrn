@@ -959,6 +959,15 @@ entry:
   ret ptr %buf
 }
 
+define ptr @__vyrn_list_err(ptr %path) {
+entry:
+  %plen = call i64 @__vyrn_strlen(ptr %path)
+  %bsz = add i64 %plen, 40
+  %buf = call ptr @__vyrn_malloc(i64 %bsz)
+  call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr %buf, i64 %bsz, ptr @.io.listerr, ptr %path)
+  ret ptr %buf
+}
+
 define ptr @__vyrn_rename_err(ptr %to, i32 %status) {
 entry:
   %isx = icmp eq i32 %status, 2
@@ -1084,8 +1093,33 @@ fn drain_ho(
     }
 }
 
+thread_local! {
+    /// RFC-0076 M2: whether this module is being emitted to run as a GENERATOR
+    /// under the wasm engine, where `listDir` is a host import backed by the
+    /// loader's resolver. An ordinary build must keep rejecting it (the language
+    /// gives `listDir` no runtime lowering), so the flag gates exactly that one
+    /// branch.
+    ///
+    /// A thread-local rather than a `Gen` field because `Gen` is constructed at
+    /// nine sites inside [`emit_with`] and not one of them has an opinion.
+    static GEN_HOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Emit a complete LLVM IR module for `program`.
 pub fn emit(program: &Program) -> Result<String, String> {
+    emit_with(program, false)
+}
+
+/// Emit `program` to run as a generator under the wasm engine (RFC-0076 M2):
+/// same emitter, except `listDir` lowers to the host-import shim instead of
+/// being rejected. Paired with `-DVYRN_GEN_HOST` on the clang line, which swaps
+/// the read primitives for their resolver-backed imports.
+pub fn emit_gen_host(program: &Program) -> Result<String, String> {
+    emit_with(program, true)
+}
+
+fn emit_with(program: &Program, gen_host: bool) -> Result<String, String> {
+    GEN_HOST.with(|g| g.set(gen_host));
     let mut out = String::new();
     // module preamble: printf/abort + format strings (opaque-pointer style)
     out.push_str("; Vyrn v0.1 — generated LLVM IR (target: LLVM 15+)\n");
@@ -1147,6 +1181,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("declare ptr @__vyrn_read_line(ptr)\n");
     out.push_str("declare i32 @__vyrn_read_file(ptr, ptr, ptr)\n");
     out.push_str("declare i32 @__vyrn_read_file_bytes(ptr, ptr, ptr)\n");
+    if gen_host {
+        // RFC-0076 M2: only the generator-host shim defines this one.
+        out.push_str("declare i32 @__vyrn_gen_list_dir(ptr, ptr, ptr)\n");
+    }
     out.push_str("declare i32 @__vyrn_write_file(ptr, ptr)\n");
     // RFC-0044: atomic rename + fsync host primitives (implemented in the C shim
     // on every target, like the RFC-0043 clock — wasi lowers to path_rename /
@@ -1359,6 +1397,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
         ("@.io.readerr", "cannot read `%s`"),
         ("@.io.writeerr", "cannot write `%s`"),
         ("@.io.utf8err", "`%s` is not valid UTF-8"),
+        // `listDir` (RFC-0021), reachable from a compiled module only on the
+        // generator-host path (RFC-0076 M2) — the wording still lives here, with
+        // the rest, rather than in the shim that renders it.
+        ("@.io.listerr", "cannot list `%s`"),
         ("@.io.nulerr", "`%s` contains a NUL byte"),
         // RFC-0044: a cross-device (`EXDEV`) rename — surfaced distinctly instead
         // of silently degrading to copy. Ordinary not-found/permission rename
@@ -6283,10 +6325,72 @@ impl<'a> Gen<'a> {
             return Ok((r, Type::Int));
         }
         if name == "listDir" {
-            return Err(format!(
-                "`listDir` runs in the interpreter / at generation time (RFC-0021); it has no \
-                 native or wasm lowering in v1 — use it in a `gen fn` or under `vyrn run`"
+            // RFC-0076 M2: on the generator-host path the listing comes from the
+            // loader's resolver (host-sorted, host-recorded) through the shim, so
+            // the one thing that made `std/i18n` uncompilable is lowered. Every
+            // other build keeps the error: the language still gives `listDir` no
+            // runtime meaning.
+            if !GEN_HOST.with(|g| g.get()) {
+                return Err(format!(
+                    "`listDir` runs in the interpreter / at generation time (RFC-0021); it has no \
+                     native or wasm lowering in v1 — use it in a `gen fn` or under `vyrn run`"
+                ));
+            }
+            let (path, _) = self.gen_expr(&args[0])?;
+            let outp = self.fresh_alloca("ptr");
+            let lenp = self.fresh_alloca("i64");
+            let st = self.fresh_tmp();
+            self.emit(format!(
+                "{st} = call i32 @__vyrn_gen_list_dir(ptr {path}, ptr {outp}, ptr {lenp})"
             ));
+            let isok = self.fresh_tmp();
+            self.emit(format!("{isok} = icmp eq i32 {st}, 0"));
+            let ok_l = self.fresh_label("ld.ok");
+            let err_l = self.fresh_label("ld.err");
+            let end_l = self.fresh_label("ld.end");
+            self.emit_term(format!("br i1 {isok}, label %{ok_l}, label %{err_l}"));
+            self.emit_label(&err_l);
+            let msg = self.fresh_tmp();
+            self.emit(format!("{msg} = call ptr @__vyrn_list_err(ptr {path})"));
+            let ew = self.fresh_tmp();
+            let e0 = self.fresh_tmp();
+            let e1 = self.fresh_tmp();
+            let e2 = self.fresh_tmp();
+            self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
+            self.emit(format!("{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"));
+            self.emit(format!("{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"));
+            self.emit(format!("{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"));
+            let err_end = self.cur_block.clone();
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&ok_l);
+            // The names buffer is a `char**` of length n — the Array<String>
+            // triple, boxed into the Ok payload like `readFileBytes` does.
+            let buf = self.fresh_tmp();
+            let len = self.fresh_tmp();
+            self.emit(format!("{buf} = load ptr, ptr {outp}"));
+            self.emit(format!("{len} = load i64, ptr {lenp}"));
+            let a0 = self.fresh_tmp();
+            let a1 = self.fresh_tmp();
+            let a2 = self.fresh_tmp();
+            self.emit(format!("{a0} = insertvalue {{ ptr, i64, i64 }} undef, ptr {buf}, 0"));
+            self.emit(format!("{a1} = insertvalue {{ ptr, i64, i64 }} {a0}, i64 {len}, 1"));
+            self.emit(format!("{a2} = insertvalue {{ ptr, i64, i64 }} {a1}, i64 {len}, 2"));
+            let elem_ty = Type::Array(Box::new(Type::Str));
+            let (w0, w1) = self.encode_payload(&a2, &elem_ty);
+            let o0 = self.fresh_tmp();
+            let o1 = self.fresh_tmp();
+            let o2 = self.fresh_tmp();
+            self.emit(format!("{o0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"));
+            self.emit(format!("{o1} = insertvalue {{ i1, i64, i64 }} {o0}, i64 {w0}, 1"));
+            self.emit(format!("{o2} = insertvalue {{ i1, i64, i64 }} {o1}, i64 {w1}, 2"));
+            let ok_end = self.cur_block.clone();
+            self.emit_term(format!("br label %{end_l}"));
+            self.emit_label(&end_l);
+            let r = self.fresh_tmp();
+            self.emit(format!(
+                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_end} ], [ {o2}, %{ok_end} ]"
+            ));
+            return Ok((r, Type::Result(Box::new(elem_ty), Box::new(Type::Str))));
         }
         if name == "moduleInterface" {
             return Err(

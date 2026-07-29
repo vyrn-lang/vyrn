@@ -5,32 +5,56 @@
 //! slower walked than compiled. This module compiles the generator instead.
 //!
 //! The plan, validated by hand before any of this was written (RFC-0076 §M1
-//! validation): clear `is_gen` on the target function, synthesize a `main` that
-//! calls it with the constant arguments and prints the result, compile that to
-//! wasm, and take stdout as the module source. Both routes hashed identically.
+//! validation): clear `is_gen`, synthesize a `main` that calls the generator
+//! with the constant arguments and prints the result, compile that to wasm, and
+//! take stdout as the module source. Both routes hashed identically.
 //!
 //! Why swapping engines is safe here at all: the sacred invariant is that
 //! interp == native == wasm, byte-identical including traps, proven over every
 //! example on every commit. A generator is a Vyrn program, so that invariant is
 //! exactly the correctness condition this needs.
 //!
-//! M1 serves only capability-free generators. Anything else is declined and the
-//! interpreter runs it, so this path can make generation faster but never
-//! different.
+//! M2 adds the byte capabilities. A generator does NOT read the filesystem — it
+//! reads through `GenInputs.resolver`, which in the LSP serves unsaved buffers
+//! and elsewhere serves vendored or remote modules. So `readFile`/`listDir` are
+//! host imports backed by that resolver, mediated by the same
+//! [`vyrn_frontend::interp::gen_scoped_path`] the interpreter uses and recorded
+//! into `GenOutput.reads` the same way, which is what the on-disk generator
+//! cache validates against.
+//!
+//! Anything still unserved is declined and the interpreter runs it, so this path
+//! can make generation faster but never different.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 use vyrn_frontend::ast::{Block, Expr, Function, Param, Program, Stmt, Type};
 use vyrn_frontend::consteval::ConstVal;
 use vyrn_frontend::interp::{GenInputs, GenOutput};
 
-/// Capabilities M1 cannot serve. A generator reaching any of these is handed
+/// What this path cannot serve yet. A generator reaching any of these is handed
 /// back to the interpreter — see [`engine`].
-const MEDIATED: &[&str] = &[
-    "readFile",
-    "readFileBytes",
-    "listDir",
+///
+/// `moduleInterface`/`contractOf` are M3: they return structured reflection, not
+/// bytes. The RFC-0054 code quotes are the surprise — `Code` is a comptime-only
+/// VALUE TYPE (a piece list, rendered with origin directives), so serving a
+/// generator that builds source with `vyrn"…"` needs that type lowered, not a
+/// capability. Both `std/tw` and `std/i18n` render code quotes, which is why M2
+/// alone does not make them servable; `examples/gendemo` is the generator M2 was
+/// actually about.
+///
+/// The write capabilities are not a milestone at all: a `gen fn` may not call
+/// them (comptime purity forbids it), so their only effect here is to decline a
+/// module that merely CONTAINS one somewhere.
+const UNSERVED: &[&str] = &[
     "moduleInterface",
+    "contractOf",
+    "@codeText",
+    "@codeSplice",
+    "render",
+    "rawAt",
+    "raw",
+    "lex",
     "writeFile",
     "writeAtomic",
     "renameFile",
@@ -53,7 +77,8 @@ fn engine(
     args: &[ConstVal],
     inputs: &GenInputs<'_>,
 ) -> Option<Result<GenOutput, String>> {
-    if reaches_capability(program) {
+    if let Some(what) = reaches_unserved(program) {
+        decline(&format!("the module reaches `{what}`"));
         return None;
     }
     match run(program, fn_name, args, inputs) {
@@ -71,6 +96,16 @@ fn trace(phase: &str, d: std::time::Duration) {
     }
 }
 
+/// Decline, saying why under `VYRN_GENWASM_TRACE`. A decline is invisible by
+/// design — the interpreter just runs the generator — so without this the only
+/// symptom of a broken engine is that it silently never runs.
+fn decline(why: &str) -> EngineError {
+    if std::env::var("VYRN_GENWASM_TRACE").is_ok() {
+        eprintln!("genwasm declined: {why}");
+    }
+    EngineError::Unsupported
+}
+
 enum EngineError {
     /// This path cannot serve the generator; the interpreter should.
     Unsupported,
@@ -78,18 +113,22 @@ enum EngineError {
     Failed(String),
 }
 
-/// Whether any function in the program calls a capability M1 does not implement.
+/// Whether any function in the program calls something this path cannot lower.
 ///
 /// Reuses the checker's `fn_calls` — the same walker the comptime-purity check
 /// uses to ask what a generator reaches. Deliberately whole-program rather than
-/// reachability-precise: if a mediated call appears anywhere in the generator's
+/// reachability-precise: if an unserved call appears anywhere in the generator's
 /// module closure, decline. Being wrong in this direction costs speed; being
 /// wrong in the other would run a generator outside its sandbox.
-fn reaches_capability(program: &Program) -> bool {
-    program.functions.iter().any(|f| {
-        vyrn_frontend::checker::fn_calls(&f.body)
-            .iter()
-            .any(|c| MEDIATED.contains(&c.as_str()))
+fn reaches_unserved(program: &Program) -> Option<String> {
+    program.functions.iter().find_map(|f| {
+        let mut hits: Vec<String> = vyrn_frontend::checker::fn_calls(&f.body)
+            .into_iter()
+            .filter(|c| UNSERVED.contains(&c.as_str()))
+            .collect();
+        // `fn_calls` returns a set; sort so the reported blocker is stable.
+        hits.sort();
+        hits.into_iter().next()
     })
 }
 
@@ -109,15 +148,17 @@ fn run(
             _ => None,
         })
         .collect::<Option<Vec<_>>>()
-        .ok_or(EngineError::Unsupported)?;
+        .ok_or_else(|| decline("a non-String constant argument"))?;
 
     let t = std::time::Instant::now();
     let key = artifact_key(program, fn_name);
     trace("key", t.elapsed());
 
     let t = std::time::Instant::now();
-    let mut source = run_module(key, &argv, || {
-        let wrapper = wrapper_program(program, fn_name, argv.len()).ok_or(EngineError::Unsupported)?;
+    let mut reads = Vec::new();
+    let mut source = run_module(key, &argv, inputs, &mut reads, || {
+        let wrapper = wrapper_program(program, fn_name, argv.len())
+            .ok_or_else(|| decline("the wrapper program cannot be synthesized"))?;
         compile_to_wasm(key, &wrapper)
     })?;
     trace("run", t.elapsed());
@@ -131,13 +172,56 @@ fn run(
             inputs.max_output
         )));
     }
-    // M1 serves only capability-free generators, so nothing was read.
-    Ok(GenOutput { source, reads: Vec::new() })
+    Ok(GenOutput { source, reads })
+}
+
+/// Serve one mediated capability request from the guest, exactly as
+/// `Interp::gen_read_file` / `gen_list_dir` do: scope the path, go through the
+/// resolver, record the bytes, and answer in the status alphabet the compiled
+/// caller already renders errors from (0 ok / 1 io / 3 embedded NUL).
+///
+/// `Err` is a scoping violation, which must abort generation rather than become
+/// a value the generator can observe — the guest never sees it.
+fn serve(
+    inputs: &GenInputs<'_>,
+    reads: &mut Vec<(String, Vec<u8>)>,
+    path: &str,
+    mode: i32,
+) -> Result<(i32, Vec<u8>), String> {
+    let resolved =
+        vyrn_frontend::interp::gen_scoped_path(&inputs.importer_dir, &inputs.allowed, path)?;
+    if mode == MODE_LIST {
+        return match inputs.resolver.list(&resolved) {
+            Ok(mut names) => {
+                names.sort();
+                // Recorded as a synthetic input under the directory key, in the
+                // interpreter's own encoding, so a directory whose contents
+                // change invalidates the same cache entry.
+                let joined = names.join("\n").into_bytes();
+                reads.push((format!("{resolved}/"), joined.clone()));
+                Ok((0, joined))
+            }
+            Err(_) => Ok((1, Vec::new())),
+        };
+    }
+    match inputs.resolver.read(&resolved) {
+        Ok(content) => {
+            let bytes = content.into_bytes();
+            reads.push((resolved, bytes.clone()));
+            // Recorded before the NUL rule rejects it, like the interpreter: the
+            // file was read, and the cache must notice when it changes.
+            if mode == MODE_READ && bytes.contains(&0) {
+                return Ok((3, Vec::new()));
+            }
+            Ok((0, bytes))
+        }
+        Err(_) => Ok((1, Vec::new())),
+    }
 }
 
 /// The program actually compiled: the generator's own module with `is_gen`
-/// cleared on the target, plus a `main` that calls it with `args()` and prints
-/// the result.
+/// cleared, plus a `main` that calls the target with `args()` and prints the
+/// result.
 ///
 /// Clearing `is_gen` is what makes it compilable — a `gen fn` is comptime-only
 /// by construction. Everything else about the function is untouched, which is
@@ -153,14 +237,23 @@ fn wrapper_program(program: &Program, fn_name: &str, arity: usize) -> Option<Pro
         return None;
     }
     let mut p = program.clone();
-    let target = p.functions.iter_mut().find(|f| f.name == fn_name)?;
-    if target.params.len() != arity {
-        return None;
+    {
+        let target = p.functions.iter().find(|f| f.name == fn_name)?;
+        if target.params.len() != arity {
+            return None;
+        }
+        if target.params.iter().any(|par| par.ty != Type::Str) {
+            return None;
+        }
     }
-    if target.params.iter().any(|par| par.ty != Type::Str) {
-        return None;
+    // Every `gen fn`, not just the target: a generator calls its helpers, and in
+    // this repo those helpers are themselves `gen fn` (the convention that keeps
+    // generation-only I/O out of shipped binaries). Clearing only the target
+    // emitted calls into functions codegen had skipped, and the link failed —
+    // which is why M1 could not have served `std/tw` even with the capabilities.
+    for f in p.functions.iter_mut() {
+        f.is_gen = false;
     }
-    target.is_gen = false;
 
     let call = Expr::Call {
         name: fn_name.to_string(),
@@ -208,7 +301,9 @@ fn wrapper_program(program: &Program, fn_name: &str, arity: usize) -> Option<Pro
 /// matter — clang, the sysroot, the builtins archive, the runtime shim — are the
 /// same ones `build` uses.
 fn compile_to_wasm(key: u64, program: &Program) -> Result<Vec<u8>, EngineError> {
-    let ir = vyrn_codegen::emit(program).map_err(|_| EngineError::Unsupported)?;
+    // `emit_gen_host`, not `emit`: the same emitter, plus the one lowering that
+    // only makes sense with the host imports below it (`listDir`).
+    let ir = vyrn_codegen::emit_gen_host(program).map_err(|e| decline(&format!("codegen: {e}")))?;
 
     let dir = std::env::temp_dir().join(format!("vyrn-genwasm-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| EngineError::Failed(e.to_string()))?;
@@ -220,9 +315,9 @@ fn compile_to_wasm(key: u64, program: &Program) -> Result<Vec<u8>, EngineError> 
     // `extern` anyway (comptime purity forbids it).
     std::fs::write(&shim, crate::RUNTIME_SHIM).map_err(|e| EngineError::Failed(e.to_string()))?;
 
-    let clang = crate::find_clang().ok_or(EngineError::Unsupported)?;
-    let sysroot = wasi_sysroot().ok_or(EngineError::Unsupported)?;
-    let builtins = wasi_builtins(&sysroot).ok_or(EngineError::Unsupported)?;
+    let clang = crate::find_clang().ok_or_else(|| decline("no clang"))?;
+    let sysroot = wasi_sysroot().ok_or_else(|| decline("no wasi sysroot"))?;
+    let builtins = wasi_builtins(&sysroot).ok_or_else(|| decline("no wasi builtins"))?;
 
     let st = std::process::Command::new(clang)
         .arg(&ll)
@@ -230,17 +325,20 @@ fn compile_to_wasm(key: u64, program: &Program) -> Result<Vec<u8>, EngineError> 
         .arg("-o")
         .arg(&out)
         .arg("-Wno-override-module")
+        // Swaps the shim's stdio reads for the resolver-backed host imports.
+        // Only this path defines it; an ordinary `vyrn build` is untouched.
+        .arg("-DVYRN_GEN_HOST")
         .arg("--target=wasm32-wasip1")
         .arg(format!("--sysroot={}", sysroot.display()))
         .arg("-nodefaultlibs")
         .arg(&builtins)
         .arg("-lc")
         .output()
-        .map_err(|_| EngineError::Unsupported)?;
+        .map_err(|e| decline(&format!("clang: {e}")))?;
     if !st.status.success() {
         // The generator runs under the interpreter; if it will not compile here
         // that is this path's problem, not the program's.
-        return Err(EngineError::Unsupported);
+        return Err(decline(&String::from_utf8_lossy(&st.stderr)));
     }
     std::fs::read(&out).map_err(|e| EngineError::Failed(e.to_string()))
 }
@@ -263,13 +361,33 @@ fn wasi_builtins(sysroot: &Path) -> Option<PathBuf> {
 // The runtime: an embedded wasmtime plus a hand-written minimal WASI.
 // ---------------------------------------------------------------------------
 
-/// The guest's world: its argv, and what it wrote.
+/// `__vyrn_gen_read`'s modes, shared with the C shim.
+const MODE_READ: i32 = 0;
+const MODE_LIST: i32 = 2;
+
+/// The guest's world: its argv, what it wrote, and its line to the host.
 #[derive(Default)]
 struct Streams {
     /// NUL-terminated argv, argv[0] first — the shape `args_get` writes.
     argv: Vec<Vec<u8>>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    /// The bytes of the last served read, waiting for `fetch` to copy them into
+    /// guest memory. The host never allocates on the guest's side of the wall.
+    stash: Vec<u8>,
+    caps: Option<Caps>,
+}
+
+/// The guest's end of the capability channel.
+///
+/// The guest runs on its own thread and the resolver stays on the caller's,
+/// because wasmtime requires the store's data to be `'static` and the resolver
+/// is borrowed for the call. A pair of channels buys that without an `unsafe`
+/// lifetime extension in a workspace that has none; the thread costs tens of
+/// microseconds against a generation measured in milliseconds.
+struct Caps {
+    req: mpsc::Sender<(String, i32)>,
+    resp: mpsc::Receiver<Result<(i32, Vec<u8>), String>>,
 }
 
 /// `proc_exit`, carried out of the guest as an error because that is the only
@@ -284,6 +402,20 @@ impl std::fmt::Display for Exit {
 }
 
 impl std::error::Error for Exit {}
+
+/// A read outside the generator's declared inputs, carried out of the guest as a
+/// trap. Mediation failure aborts generation under the interpreter too — it must
+/// never reach the generator as an error value it could swallow.
+#[derive(Debug)]
+struct Denied(String);
+
+impl std::fmt::Display for Denied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Denied {}
 
 const ERRNO_SUCCESS: i32 = 0;
 const ERRNO_BADF: i32 = 8;
@@ -345,6 +477,8 @@ fn module_cache() -> &'static std::sync::Mutex<std::collections::HashMap<u64, wa
 fn run_module(
     key: u64,
     argv: &[String],
+    inputs: &GenInputs<'_>,
+    reads: &mut Vec<(String, Vec<u8>)>,
     build: impl FnOnce() -> Result<Vec<u8>, EngineError>,
 ) -> Result<String, EngineError> {
     let cached = module_cache().lock().ok().and_then(|c| c.get(&key).cloned());
@@ -364,7 +498,49 @@ fn run_module(
             m
         }
     };
-    run_wasm(&module, argv)
+    run_hosted(&module, argv, inputs, reads)
+}
+
+/// Run the guest on its own thread and serve its capability requests from this
+/// one, which is where the resolver lives. The guest's `Sender` dies with its
+/// store, which is what ends the loop.
+fn run_hosted(
+    module: &wasmtime::Module,
+    argv: &[String],
+    inputs: &GenInputs<'_>,
+    reads: &mut Vec<(String, Vec<u8>)>,
+) -> Result<String, EngineError> {
+    let (req_tx, req_rx) = mpsc::channel::<(String, i32)>();
+    let (resp_tx, resp_rx) = mpsc::channel::<Result<(i32, Vec<u8>), String>>();
+
+    let module = module.clone();
+    let argv: Vec<String> = argv.to_vec();
+    let guest = std::thread::Builder::new()
+        // Cranelift-compiled code runs on this stack; a deeply recursive
+        // generator (every parser here is one) would otherwise overflow the
+        // default well before wasmtime's own wasm-stack limit bites.
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            run_wasm(
+                &module,
+                &argv,
+                Caps {
+                    req: req_tx,
+                    resp: resp_rx,
+                },
+            )
+        })
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
+
+    while let Ok((path, mode)) = req_rx.recv() {
+        if resp_tx.send(serve(inputs, reads, &path, mode)).is_err() {
+            break;
+        }
+    }
+    match guest.join() {
+        Ok(r) => r,
+        Err(_) => Err(EngineError::Failed("generator panicked".into())),
+    }
 }
 
 /// Instantiate the module and return what it wrote to stdout.
@@ -378,12 +554,70 @@ fn run_module(
 /// precedent already in this repo: `web/wasi-min.js` is the same shim for the
 /// browser. A capability-free generator only ever writes to stdout, so the
 /// surface is small, and every import outside it traps rather than existing.
-fn run_wasm(module: &wasmtime::Module, argv: &[String]) -> Result<String, EngineError> {
+fn run_wasm(
+    module: &wasmtime::Module,
+    argv: &[String],
+    caps: Caps,
+) -> Result<String, EngineError> {
     use wasmtime::*;
 
     let engine = wasm_engine();
     let mut linker: Linker<Streams> = Linker::new(engine);
     let wasi = "wasi_snapshot_preview1";
+
+    // The mediated capabilities (RFC-0076 M2). `read` resolves, mediates, reads
+    // and stashes; `fetch` copies the stash into a buffer the GUEST allocated,
+    // so nothing on the host side has to allocate inside linear memory.
+    linker
+        .func_wrap(
+            "vyrn_gen",
+            "read",
+            |mut caller: Caller<'_, Streams>, path: i32, mode: i32| -> Result<i64> {
+                let Some(Extern::Memory(mem)) = caller.get_export("memory") else {
+                    return Err(Error::msg("generator has no memory"));
+                };
+                let (data, streams) = mem.data_and_store_mut(&mut caller);
+                let at = path as usize;
+                let rest = data.get(at..).ok_or_else(|| Error::msg("bad path pointer"))?;
+                let n = rest.iter().position(|b| *b == 0).unwrap_or(rest.len());
+                // A Vyrn String is validated UTF-8 by construction.
+                let path = String::from_utf8_lossy(&rest[..n]).into_owned();
+                let caps = streams.caps.as_ref().ok_or_else(|| Error::msg("no host"))?;
+                caps.req
+                    .send((path, mode))
+                    .map_err(|_| Error::msg("generator host is gone"))?;
+                match caps.resp.recv() {
+                    Ok(Ok((status, bytes))) => {
+                        let len = bytes.len() as i64;
+                        streams.stash = bytes;
+                        Ok((status as i64) << 32 | len)
+                    }
+                    // A scoping violation unwinds out of `_start` instead of
+                    // becoming an `Err` value — same as the interpreter's trap.
+                    Ok(Err(msg)) => Err(Error::new(Denied(msg))),
+                    Err(_) => Err(Error::msg("generator host is gone")),
+                }
+            },
+        )
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
+    linker
+        .func_wrap(
+            "vyrn_gen",
+            "fetch",
+            |mut caller: Caller<'_, Streams>, dest: i32| -> Result<()> {
+                let Some(Extern::Memory(mem)) = caller.get_export("memory") else {
+                    return Err(Error::msg("generator has no memory"));
+                };
+                let (data, streams) = mem.data_and_store_mut(&mut caller);
+                let stash = std::mem::take(&mut streams.stash);
+                let slot = data
+                    .get_mut(dest as usize..dest as usize + stash.len())
+                    .ok_or_else(|| Error::msg("bad fetch destination"))?;
+                slot.copy_from_slice(&stash);
+                Ok(())
+            },
+        )
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
 
     // fd_write(fd, iovs, iovs_len, nwritten) — the only import that does work.
     linker
@@ -533,7 +767,10 @@ fn run_wasm(module: &wasmtime::Module, argv: &[String]) -> Result<String, Engine
         .map_err(|e| EngineError::Failed(e.to_string()))?;
 
     // argv[0] is the program name, which `args()` (argv[1..]) skips.
-    let mut world = Streams::default();
+    let mut world = Streams {
+        caps: Some(caps),
+        ..Streams::default()
+    };
     world.argv.push(b"gen\0".to_vec());
     world
         .argv
@@ -562,6 +799,14 @@ fn run_wasm(module: &wasmtime::Module, argv: &[String]) -> Result<String, Engine
                 } else {
                     msg
                 }));
+            }
+            // A rejected read reads exactly as it does interpreted. The message
+            // is taken from the payload, not from `e`: wasmtime wraps a host
+            // error in a guest backtrace on the way out.
+            None if e.downcast_ref::<Denied>().is_some() => {
+                return Err(EngineError::Failed(
+                    e.downcast_ref::<Denied>().unwrap().0.clone(),
+                ))
             }
             None => return Err(EngineError::Failed(format!("generator trapped: {e}"))),
         },

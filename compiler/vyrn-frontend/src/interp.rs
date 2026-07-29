@@ -1164,6 +1164,34 @@ pub struct GenInputs<'a> {
     pub max_output: usize,
 }
 
+/// Resolve a mediated path argument against the importer's directory, then
+/// enforce that it stays under one of the generator's declared input roots (its
+/// constant path args). Returns the resolved resolver key, or the scoping trap
+/// message.
+///
+/// Public, and a free function, because the wasm generation engine (RFC-0076)
+/// mediates its host imports with exactly this rule. Two implementations of a
+/// sandbox boundary is one too many.
+pub fn gen_scoped_path(importer_dir: &str, allowed: &[String], arg: &str) -> Result<String, String> {
+    let joined = if importer_dir.is_empty() {
+        arg.to_string()
+    } else {
+        format!("{importer_dir}/{arg}")
+    };
+    let resolved = crate::loader::normalize(&joined);
+    let ok = allowed
+        .iter()
+        .any(|root| resolved == *root || resolved.starts_with(&format!("{root}/")));
+    if !ok {
+        return Err(format!(
+            "generator read `{arg}` escapes its declared inputs ({}) — a generator may only \
+             read under its constant path arguments",
+            allowed.join(", ")
+        ));
+    }
+    Ok(resolved)
+}
+
 /// An alternative engine for running a generator (RFC-0076).
 ///
 /// The frontend defines this seam and nothing more: compiling a generator to
@@ -1486,24 +1514,7 @@ impl<'a> Interp<'a> {
     /// (its constant path args). Returns the resolved key or a scoping trap.
     fn gen_scoped_path(&self, arg: &str) -> Result<String, Ctrl> {
         let g = self.gen.as_ref().expect("gen context");
-        let joined = if g.importer_dir.is_empty() {
-            arg.to_string()
-        } else {
-            format!("{}/{arg}", g.importer_dir)
-        };
-        let resolved = crate::loader::normalize(&joined);
-        let ok = g
-            .allowed
-            .iter()
-            .any(|root| resolved == *root || resolved.starts_with(&format!("{root}/")));
-        if !ok {
-            return Err(Ctrl::Err(format!(
-                "generator read `{arg}` escapes its declared inputs ({}) — a generator may only \
-                 read under its constant path arguments",
-                g.allowed.join(", ")
-            )));
-        }
-        Ok(resolved)
+        gen_scoped_path(&g.importer_dir, &g.allowed, arg).map_err(Ctrl::Err)
     }
 
     /// Mediated `readFile` (RFC-0021): read through the resolver, record the

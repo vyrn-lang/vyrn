@@ -294,6 +294,57 @@ argument-independent and cached. Per-execution that is ~370x, against ~370 ms
 interpreted. Compilation is now the entire cost, paid once, and a long-lived
 process pays it once per generator rather than once per call.
 
+## M2 shipped, and what it was actually blocked on
+
+`readFile`, `readFileBytes` and `listDir` are now host imports in the module
+`vyrn_gen`, backed by `GenInputs.resolver` — not by the filesystem, because in
+the LSP the resolver serves UNSAVED buffers and a guest that opened files itself
+would read different bytes than the interpreter. Two imports, so the host never
+allocates inside guest memory:
+
+| import | signature | |
+|---|---|---|
+| `vyrn_gen.read` | `(path: i32, mode: i32) -> i64` | resolves, mediates, reads, records; returns `(status << 32) \| len` and stashes the bytes host-side |
+| `vyrn_gen.fetch` | `(dest: i32)` | copies the stash into a buffer the GUEST allocated |
+
+`mode` is 0 `readFile` / 1 `readFileBytes` / 2 `listDir` (whose stash is the
+sorted names joined by `\n` — the interpreter's own recording encoding). `status`
+is the alphabet the compiled `readFile` caller already renders errors from (0 ok
+/ 1 io / 3 embedded NUL), which is why the RFC-0014 wording needed no new
+agreement: `@.io.readerr`/`@.io.nulerr` already say exactly what
+`Interp::gen_read_file` says. The mediation rule is not reimplemented — the
+interpreter's was extracted into `interp::gen_scoped_path` and both engines call
+it; a rejected read is a `wasmtime::Error` that unwinds out of `_start`, so the
+guest can never observe it as a value. Measured: the cache key for
+`examples/gendemo` is byte-identical under both engines, i.e. the recorded reads
+are.
+
+Only `readFile` and `readFileBytes` needed no codegen change. `listDir` had no
+lowering at all, and must keep having none in the language, so it lowers behind
+`emit_gen_host` — a second entry point beside `emit`, one flag, two `if`s.
+
+**And the milestone's premise was wrong.** `std/tw` and `std/i18n` do not become
+servable, and neither reaches for a capability this milestone lacks: both build
+their output with RFC-0054 code quotes. `Code` is a comptime-only *value type* (a
+piece list rendered with origin directives, spliced with context-dependent
+escaping, produced by a `lex()` that is a whole Vyrn lexer), so serving those
+generators needs that type lowered — a milestone of its own, not a host import.
+`contractOf` joins `moduleInterface` on the M3 side for the same reason. Sorted
+by what actually blocks each example: `@codeSplice` (tw, i18n, pages, vyx),
+`lex` (vyx), `contractOf`/`moduleInterface` (rpc, ui). The generator M2 was
+really about is `examples/gendemo`, which reads a file AND lists a directory, and
+which the engine now serves with byte-identical output.
+
+Timings, cold, cache cleared, `examples/gendemo`: interpreted **33 ms**, wasm
+**~240 ms** — of which clang is 163 ms and cranelift 27 ms. On a generator that
+small the engine loses, exactly as §M1's negative predicted for anything where
+compilation dominates. On a synthetic read-driven generator doing 40,000 appends:
+interpreted 200 ms, wasm 380 ms of which 199 ms is compilation and ~9 ms is
+execution — the execution gap is real (~18x) and the compile is the whole cost,
+paid once per artifact per process. Nothing in this repo yet calls a servable
+generator often enough to amortize it, which is another way of saying M3 is where
+the win lives.
+
 ## Risks, honestly
 
 **A new dependency.** wasmtime is a large crate, and this workspace deliberately
@@ -328,9 +379,10 @@ runaway generator traps differently depending on the engine.
   `String` appends with amortized capacity instead of reallocating and copying,
   matching what the interpreter does. Was blocking every milestone after it, and
   was worth doing on its own account.
-- **M2 — the byte capabilities.** `read` and `list` as host imports, with the
-  `allowed` mediation and read recording intact, and the canonical RFC-0014 error
-  wording preserved. `std/tw` and `std/i18n` become servable.
+- **M2 — the byte capabilities.** DONE. `read` and `list` as host imports, with
+  the `allowed` mediation and read recording intact, and the canonical RFC-0014
+  error wording preserved. `std/tw` and `std/i18n` do NOT become servable — see
+  below.
 - **M3 — reflection.** The `moduleInterface` import and its shared encoder.
   `std/rpc`, `std/openapi`, `std/graphql` and `std/ui` become servable.
 - **M4 — `std/vyx`, and the measurement that matters.** The `.vyx` keystroke,
