@@ -170,6 +170,20 @@ impl Module {
         at
     }
 
+    /// Reserve `size` zero bytes at an `align`-aligned address, giving that
+    /// address. Storage rather than a constant: module state (RFC-0013) lives
+    /// here, and every reservation is its own address.
+    ///
+    /// Deliberately NOT [`Module::data`], which shares identical contents — two
+    /// zero-initialized globals of the same size would be one address, and they
+    /// would be the same variable.
+    pub fn reserve(&mut self, size: u32, align: u32) -> u32 {
+        debug_assert!(align.is_power_of_two());
+        let at = DATA_BASE + round_up(self.pool.len() as u32, align);
+        self.pool.resize((at - DATA_BASE + size) as usize, 0);
+        at
+    }
+
     /// The first address past everything this module statically occupies. The
     /// number [`STATICS_LIMIT`] bounds.
     pub fn data_end(&self) -> u32 {
@@ -496,6 +510,20 @@ mod tests {
         // An aligned static skips the hole rather than landing mid-word.
         assert_eq!(m.data(&[0u8; 8], 8), DATA_BASE + 16);
         assert_eq!(m.data_end(), DATA_BASE + 24);
+    }
+
+    /// Two globals of the same size are two variables. `data` would have shared
+    /// them, which is why module state does not go through it.
+    #[test]
+    fn a_reservation_is_never_shared_with_another() {
+        let mut m = Module::new();
+        let a = m.reserve(8, 8);
+        let b = m.reserve(8, 8);
+        assert_ne!(a, b);
+        assert_eq!(b, a + 8);
+        assert_eq!(m.data(b"x\0", 1), b + 8, "a later string packs after the reservation");
+        // And a reservation reads as zeroes, not as whatever preceded it.
+        assert_eq!(m.reserve(4, 4), b + 12);
     }
 
     /// Frames are rounded, and an empty one costs no instructions — but still

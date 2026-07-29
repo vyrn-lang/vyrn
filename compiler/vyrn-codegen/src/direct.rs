@@ -128,6 +128,7 @@ pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
         protocol_methods,
         subst: HashMap::new(),
         mono: RefCell::new(Mono::default()),
+        globals: HashMap::new(),
     };
 
     // Every function the module will define, in the order they are defined, so a
@@ -138,14 +139,46 @@ pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
         let s = cx.signature(f)?;
         cx.sigs.insert(f.name.clone(), Sig { index: first + i as u32, ..s });
     }
-    // Specializations are indexed after every ordinary definition, because all of
-    // those are indexed before any body is walked and none can therefore be
-    // discovered late.
-    cx.mono.borrow_mut().base = first + user.len() as u32;
+
+    // Module state (RFC-0013), before any body: a top-level `let` is one fixed
+    // address per binding, reserved zeroed, and every read and write anywhere in
+    // the program resolves to it through `Fn_::lookup`'s fallback. The addresses
+    // have to exist before the first body is walked, since a body may read one —
+    // and after the signatures, because an unannotated initializer may be a call
+    // whose type only a signature knows.
+    for g in &program.globals {
+        let ty = match &g.ty {
+            Some(t) => t.clone(),
+            None => top_level(&cx).peek(&g.init, g.line)?,
+        };
+        let l = layout::of_ll(&cx.ll(&ty)).map_err(|e| format!("direct backend: {e}"))?;
+        if cx.repr(&ty, g.line)? == Repr::Unit {
+            return unsupported("module state of Unit", g.line);
+        }
+        cx.globals.insert(g.name.clone(), (Place::Static(m.reserve(l.size, l.align)), ty));
+    }
+
+    // The initializer sits between the ordinary definitions and the
+    // specializations, because an index is only ever handed out ahead of a body
+    // that will be added in the same order. Specializations come last, since all
+    // of those are indexed before any body is walked and none can be discovered
+    // late.
+    let init_index = first + user.len() as u32;
+    let has_globals = !program.globals.is_empty();
+    cx.mono.borrow_mut().base = init_index + u32::from(has_globals);
 
     for f in &user {
         let sig = cx.sigs[&f.name].clone();
         lower_fn(&mut m, f, &sig, &cx)?;
+    }
+
+    // The initializers, in DECLARATION order — which the loader has already made
+    // linker order, dependencies first, so `statemod`'s diamond initializes its
+    // shared store before either arm reads it. One function, called once from
+    // `_start`, so nothing runs per call and nothing runs twice.
+    if has_globals {
+        let init = lower_globals_init(&mut m, program, &cx)?;
+        assert_eq!(init, init_index, "the globals initializer took an index a caller did not name");
     }
 
     // Drain the specializations the bodies discovered. A specialization's body
@@ -176,6 +209,9 @@ pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
     }
     let main = main.index;
     let start = m.func(&[], &[], &[], 0, |b| {
+        if has_globals {
+            b.ins(&Instruction::Call(init_index));
+        }
         b.ins(&Instruction::Call(main))
             .ins(&Instruction::I64Const(255))
             .ins(&Instruction::I64And)
@@ -223,6 +259,12 @@ impl Repr {
 struct Sig {
     index: u32,
     params: Vec<Type>,
+    /// Which parameters are `modify` (RFC-0004 §1) and therefore cross as the
+    /// address of the caller's binding rather than as a value. A caller cannot
+    /// read this off the parameter's TYPE — a `modify Counter` and a `read
+    /// Counter` are the same type and different ABIs — which is why it travels in
+    /// the signature, exactly as `param_caps` does in the textual backend.
+    modify: Vec<bool>,
     ret: Repr,
     ret_ty: Type,
 }
@@ -284,6 +326,11 @@ struct Cx {
     /// function.
     subst: HashMap<String, Type>,
     mono: RefCell<Mono>,
+    /// Module state (RFC-0013): name → its fixed address and declared type. Every
+    /// body sees all of them, which is the textual backend's `globals` fallback in
+    /// [`Gen::lookup`] — the checker already forbids an initializer reading a
+    /// global declared after it, so there is nothing for a partial view to catch.
+    globals: HashMap<String, (Place, Type)>,
 }
 
 impl Cx {
@@ -434,21 +481,17 @@ impl Cx {
             return unsupported(&format!("generic function `{}`", f.name), f.line);
         }
         for p in &f.params {
-            // `modify` is by-pointer with copy-out (RFC-0004 §1). Passing it
-            // like a `read` parameter compiles cleanly and throws the callee's
-            // writes away — a wrong program, not a missing one, so it is a gap
-            // until the copy-out is emitted.
-            if p.capability == Capability::Modify {
-                return unsupported("a `modify` parameter", f.line);
-            }
             // A parameter's representation has to exist even though the call
             // site does not read it back, or a gap in a callee would surface as
-            // a mystery at every caller instead.
+            // a mystery at every caller instead. A `modify` one included: it
+            // crosses as an address, but the callee still copies the pointed-to
+            // value in and out, so its shape has to be describable.
             self.repr(&p.ty, f.line)?;
         }
         Ok(Sig {
             index: 0,
             params: f.params.iter().map(|p| p.ty.clone()).collect(),
+            modify: f.params.iter().map(|p| p.capability == Capability::Modify).collect(),
             ret: self.repr(&f.ret, f.line)?,
             ret_ty: f.ret.clone(),
         })
@@ -462,7 +505,14 @@ impl Cx {
         if sig.ret.agg().is_some() {
             params.push(ValType::I32);
         }
-        for p in &sig.params {
+        for (i, p) in sig.params.iter().enumerate() {
+            // A `modify` parameter is a pointer whatever it points at, so even a
+            // scalar one crosses as an `i32`.
+            if sig.modify.get(i) == Some(&true) {
+                self.repr(p, line)?;
+                params.push(ValType::I32);
+                continue;
+            }
             match self.repr(p, line)?.val() {
                 Some(v) => params.push(v),
                 None => return unsupported("a Unit parameter", line),
@@ -481,11 +531,42 @@ impl Cx {
 // ---------------------------------------------------------------------------
 
 /// Where a binding lives: a wasm local for a scalar, a frame slot for an
-/// aggregate. There is no third case — M0's convention is that uniform.
+/// aggregate, or a fixed address for module state.
+///
+/// The third case is RFC-0013's top-level `let` (RFC-0077 M2f), and it is a
+/// separate variant rather than a flag on `Slot` because a frame offset is
+/// relative to a base that changes every call and a global's address does not —
+/// which is the whole of what makes it survive between them.
+///
+/// `Static` covers a scalar global as well as an aggregate one, so there is one
+/// mechanism rather than two. A wasm global holds one value type and could not
+/// have held a record, and the textual backend's globals are memory too, so
+/// matching it costs nothing: a scalar global is a load and a store where a local
+/// would have been a `local.get`.
 #[derive(Clone, Copy)]
 enum Place {
     Local(u32),
     Slot(u32),
+    Static(u32),
+}
+
+impl Place {
+    /// Push the address `off` bytes into this place, or `None` for a wasm local —
+    /// the one place with no address at all, which is exactly why a scalar passed
+    /// as a `modify` argument has to be spilled.
+    fn addr(self, b: &mut Frame, off: u32) -> Option<()> {
+        match self {
+            Place::Local(_) => None,
+            Place::Slot(base) => {
+                b.slot(base + off);
+                Some(())
+            }
+            Place::Static(at) => {
+                b.ins(&Instruction::I32Const((at + off) as i32));
+                Some(())
+            }
+        }
+    }
 }
 
 /// One function being lowered.
@@ -517,6 +598,46 @@ struct Fn_<'a> {
     expect: Vec<Type>,
 }
 
+/// A lowering context with nothing in scope and nothing to return to: what the
+/// globals initializer is, and what typing an initializer outside any function
+/// needs. Module state itself is still visible, because it lives in [`Cx`].
+fn top_level<'a>(cx: &'a Cx) -> Fn_<'a> {
+    Fn_ {
+        cx,
+        scope: Vec::new(),
+        depth: 0,
+        loops: Vec::new(),
+        ret: Repr::Unit,
+        ret_ty: Type::Unit,
+        dest: None,
+        scratch: HashMap::new(),
+        expect: Vec::new(),
+    }
+}
+
+/// The module-state initializer (RFC-0013): every top-level `let`'s value stored
+/// into its fixed address, in declaration order, in one function `_start` calls
+/// before `main`.
+///
+/// It is a body like any other — the initializers go through [`Fn_::store_into`]
+/// and therefore through the M2d coercion seam, so a `let n: Age = f()` at the top
+/// level validates exactly as one inside a function does. That is why this is not
+/// a data segment of constants: an initializer may be a string, an array literal
+/// that has to reach the heap, or a call.
+///
+/// No wrapping `block`, because there is no `return` to route: an initializer is
+/// an expression.
+fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx) -> Result<u32, String> {
+    let mut b = Frame::new(0, &[], 0);
+    let mut f = top_level(cx);
+    for g in &program.globals {
+        let (place, ty) = cx.globals[&g.name].clone();
+        let r = cx.repr(&ty, g.line)?;
+        f.store_into(m, &mut b, place, &r, &g.init, &ty)?;
+    }
+    Ok(m.add(&[], &[], b))
+}
+
 /// Lower one body. `sig` is passed rather than looked up because a generic
 /// specialization has no entry in `Cx::sigs` — it is keyed on its type arguments,
 /// not on its name, and several instances share one `Function`.
@@ -546,22 +667,55 @@ fn lower_fn(m: &mut Module, f: &Function, sig: &Sig, cx: &Cx) -> Result<(), Stri
     // address, so the prologue copies it into a slot of our own. M0 measured
     // that the LLVM emitter already does exactly this (every parameter is stored
     // into a fresh alloca), so the convention costs nothing new.
+    //
+    // A `modify` parameter (RFC-0004 §1) is call-by-value-**result**: the local
+    // holds the caller's address, the value is copied IN here and copied back OUT
+    // at the epilogue. Working through the pointer instead would be smaller code
+    // and different semantics — the caller would see each write as it happened —
+    // and the textual backend already chose copy-in/copy-out, so parity decides
+    // this rather than taste.
+    let mut copy_out: Vec<(u32, Place, Repr, String)> = Vec::new();
     for (i, p) in f.params.iter().enumerate() {
         let local = shift + i as u32;
         // The DECLARED type, for the same reason `ret_ty` is: a binding whose
         // type is `Age` must validate what is assigned to it, and one whose type
         // has already been resolved to `Int64` cannot know to.
         let ty = p.ty.clone();
-        let place = match cx.repr(&p.ty, f.line)? {
-            Repr::Agg(l) => {
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::LocalGet(local));
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
-                Place::Slot(off)
+        let r = cx.repr(&p.ty, f.line)?;
+        let place = if p.capability == Capability::Modify {
+            let ll = cx.ll(&p.ty);
+            let place = match &r {
+                Repr::Agg(l) => {
+                    let off = b.alloc(l.size, l.align);
+                    b.slot(off);
+                    b.ins(&Instruction::LocalGet(local));
+                    b.ins(&Instruction::I32Const(l.size as i32));
+                    b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                    Place::Slot(off)
+                }
+                Repr::Scalar(v) => {
+                    let own = b.local(*v);
+                    b.ins(&Instruction::LocalGet(local));
+                    b.ins(&load_of(&ll, 0));
+                    b.ins(&Instruction::LocalSet(own));
+                    Place::Local(own)
+                }
+                Repr::Unit => return unsupported("a `modify` parameter of Unit", f.line),
+            };
+            copy_out.push((local, place, r.clone(), ll));
+            place
+        } else {
+            match &r {
+                Repr::Agg(l) => {
+                    let off = b.alloc(l.size, l.align);
+                    b.slot(off);
+                    b.ins(&Instruction::LocalGet(local));
+                    b.ins(&Instruction::I32Const(l.size as i32));
+                    b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                    Place::Slot(off)
+                }
+                _ => Place::Local(local),
             }
-            _ => Place::Local(local),
         };
         cx_fn.scope.push((p.name.clone(), place, ty));
     }
@@ -581,6 +735,30 @@ fn lower_fn(m: &mut Module, f: &Function, sig: &Sig, cx: &Cx) -> Result<(), Stri
         b.ins(&Instruction::Unreachable);
     }
     b.ins(&Instruction::End);
+
+    // The copy-out, once, AFTER the block every `return` branches to — which is
+    // why M1's no-`return`-in-a-body rule pays for itself a second time here. A
+    // backend that emitted a real `return` would need this at every exit; there
+    // is only one exit, so there is only one copy. The instructions are
+    // stack-neutral, so a scalar result already sitting on the stack (the block's
+    // own value) survives them untouched, the same property M2d needed for a
+    // validation.
+    for (arg, place, r, ll) in &copy_out {
+        match (place, r) {
+            (Place::Local(own), _) => {
+                b.ins(&Instruction::LocalGet(*arg));
+                b.ins(&Instruction::LocalGet(*own));
+                b.ins(&store_of(ll));
+            }
+            (Place::Slot(off), Repr::Agg(l)) => {
+                b.ins(&Instruction::LocalGet(*arg));
+                b.slot(*off);
+                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            }
+            _ => return unsupported("a `modify` parameter of this shape", f.line),
+        }
+    }
 
     m.add(&params, &results, b);
     Ok(())
@@ -617,6 +795,10 @@ impl Fn_<'_> {
             .rev()
             .find(|(n, _, _)| n == name)
             .map(|(_, p, t)| (*p, t.clone()))
+            // Module state (RFC-0013) is the fallback rather than a scope frame,
+            // so a local always shadows a global — the same order the textual
+            // backend's `lookup` uses.
+            .or_else(|| self.cx.globals.get(name).cloned())
             .ok_or_else(|| gap(&format!("the name `{name}` (not a local)"), line))
     }
 
@@ -679,12 +861,11 @@ impl Fn_<'_> {
             }
             Stmt::SetField { name, field, value, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
-                let Place::Slot(off) = place else {
-                    return unsupported("a field assignment to a non-record", *line);
-                };
                 let (foff, fty) = self.field_of(&ty, field, *line)?;
                 let fr = self.cx.repr(&fty, *line)?;
-                b.slot(off + foff);
+                place
+                    .addr(b, foff)
+                    .ok_or_else(|| gap("a field assignment to a non-record", *line))?;
                 match &fr {
                     Repr::Scalar(_) => {
                         self.expr_as(m, b, value, &fty)?;
@@ -827,10 +1008,9 @@ impl Fn_<'_> {
             }
             Stmt::IndexSet { name, index, value, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
-                let Place::Slot(slot) = place else {
-                    return unsupported("an element assignment to a non-array", *line);
-                };
-                b.slot(slot);
+                place
+                    .addr(b, 0)
+                    .ok_or_else(|| gap("an element assignment to a non-array", *line))?;
                 let w = self.walk(b, &ty, *line)?;
                 if w.byte {
                     return unsupported("an element assignment into a String", *line);
@@ -914,11 +1094,20 @@ impl Fn_<'_> {
                 self.expr_as(m, b, value, ty)?;
                 b.ins(&Instruction::LocalSet(l));
             }
-            (Place::Slot(off), Repr::Agg(l)) => {
-                b.slot(off);
+            // Destination-first, exactly as at a join: the address goes down
+            // before the value is built, so an aggregate has somewhere to be
+            // copied to. A `Static` destination is the same shape with a constant
+            // address, which is why module state needed no new store path.
+            (Place::Slot(_) | Place::Static(_), Repr::Agg(l)) => {
+                place.addr(b, 0);
                 self.expr_as(m, b, value, ty)?;
                 b.ins(&Instruction::I32Const(l.size as i32));
                 b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            }
+            (Place::Static(_), Repr::Scalar(_)) => {
+                place.addr(b, 0);
+                self.expr_as(m, b, value, ty)?;
+                b.ins(&store_of(&self.cx.ll(ty)));
             }
             _ => return unsupported("a store of a Unit value", Expr::line(value)),
         }
@@ -1213,6 +1402,18 @@ impl Fn_<'_> {
                     Place::Slot(off) => {
                         b.slot(off);
                     }
+                    // A global aggregate IS its address, like a slot; a global
+                    // scalar has to be loaded out of memory, which is the one way
+                    // module state differs from a local at a read.
+                    Place::Static(at) => match self.cx.repr(&t, *line)? {
+                        Repr::Scalar(_) => {
+                            b.ins(&Instruction::I32Const(at as i32));
+                            b.ins(&load_of(&self.cx.ll(&t), 0));
+                        }
+                        _ => {
+                            b.ins(&Instruction::I32Const(at as i32));
+                        }
+                    },
                 }
                 t
             }
@@ -1836,10 +2037,50 @@ impl Fn_<'_> {
             }
             None => None,
         };
-        for (a, p) in args.iter().zip(&sig.params) {
-            self.expr_as(m, b, a, p)?;
+        // A `modify` argument is the caller's binding by ADDRESS. Reloads are the
+        // one case that needs a fixup after the call: a scalar in a wasm local has
+        // no address at all, so it is spilled to a slot for the callee to write
+        // through and read back afterwards.
+        let mut reload: Vec<(u32, u32, String)> = Vec::new();
+        for (i, (a, p)) in args.iter().zip(&sig.params).enumerate() {
+            if sig.modify.get(i) != Some(&true) {
+                self.expr_as(m, b, a, p)?;
+                continue;
+            }
+            let line = Expr::line(a);
+            let Expr::Var { name, .. } = a else {
+                return unsupported("a `modify` argument that is not a variable", line);
+            };
+            let (place, ty) = self.lookup(name, line)?;
+            match place {
+                Place::Local(l) => {
+                    let Repr::Scalar(_) = self.cx.repr(&ty, line)? else {
+                        return unsupported("a `modify` argument in a local", line);
+                    };
+                    let ll = self.cx.ll(&ty);
+                    let l2 = layout::of_ll(&ll).map_err(|e| format!("direct backend: {e}"))?;
+                    let off = b.alloc(l2.size, l2.align);
+                    b.slot(off);
+                    b.ins(&Instruction::LocalGet(l));
+                    b.ins(&store_of(&ll));
+                    b.slot(off);
+                    reload.push((off, l, ll));
+                }
+                // A frame slot or module state: hand over the address itself, so
+                // the callee's copy-out lands in the caller's own storage.
+                _ => {
+                    place
+                        .addr(b, 0)
+                        .ok_or_else(|| gap("a `modify` argument with no address", line))?;
+                }
+            }
         }
         b.ins(&Instruction::Call(sig.index));
+        for (off, l, ll) in &reload {
+            b.slot(*off);
+            b.ins(&load_of(ll, 0));
+            b.ins(&Instruction::LocalSet(*l));
+        }
         if let Some(off) = dest {
             b.slot(off);
         }
@@ -2257,9 +2498,13 @@ impl Fn_<'_> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
-        let (Place::Slot(slot), aty) = self.receiver(args, "pop", line)? else {
-            return unsupported("`pop` on a non-array binding", line);
-        };
+        let (place, aty) = self.receiver(args, "pop", line)?;
+        // The binding's ADDRESS, taken once: `pop` shrinks the triple in place, so
+        // it needs the storage rather than the value — and module state is storage
+        // at a fixed address exactly as a frame slot is at a moving one.
+        let slot = b.local(ValType::I32);
+        place.addr(b, 0).ok_or_else(|| gap("`pop` on a non-array binding", line))?;
+        b.ins(&Instruction::LocalSet(slot));
         let Type::Array(elem) = self.cx.resolve(&aty) else {
             return unsupported(&format!("`pop` on `{aty}`"), line);
         };
@@ -2279,7 +2524,7 @@ impl Fn_<'_> {
             b.ins(&Instruction::I64Const(0));
             b.ins(&Instruction::I64Store(word8()));
         }
-        b.slot(slot);
+        b.ins(&Instruction::LocalGet(slot));
         let w = self.walk(b, &aty, line)?;
         b.ins(&Instruction::LocalGet(w.len));
         b.ins(&Instruction::I64Eqz);
@@ -2287,7 +2532,9 @@ impl Fn_<'_> {
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
         let last = b.local(ValType::I64);
-        b.slot(slot + al.fields[1]);
+        b.ins(&Instruction::LocalGet(slot));
+        b.ins(&Instruction::I32Const(al.fields[1] as i32));
+        b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalGet(w.len));
         b.ins(&Instruction::I64Const(1));
         b.ins(&Instruction::I64Sub);
@@ -2316,15 +2563,16 @@ impl Fn_<'_> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
-        let (Place::Slot(slot), aty) = self.receiver(args, "swapRemove", line)? else {
-            return unsupported("`swapRemove` on a non-array binding", line);
-        };
+        let (place, aty) = self.receiver(args, "swapRemove", line)?;
+        let slot = b.local(ValType::I32);
+        place.addr(b, 0).ok_or_else(|| gap("`swapRemove` on a non-array binding", line))?;
+        b.ins(&Instruction::LocalSet(slot));
         let Type::Array(elem) = self.cx.resolve(&aty) else {
             return unsupported(&format!("`swapRemove` on `{aty}`"), line);
         };
         let elem = *elem;
         let al = self.layout_of(&aty, line)?;
-        b.slot(slot);
+        b.ins(&Instruction::LocalGet(slot));
         let w = self.walk(b, &aty, line)?;
         self.expr_as(m, b, &args[1], &Type::Int)?;
         let idx = b.local(ValType::I64);
@@ -2349,7 +2597,9 @@ impl Fn_<'_> {
             _ => return unsupported("an array of Unit", line),
         }
         let last = b.local(ValType::I64);
-        b.slot(slot + al.fields[1]);
+        b.ins(&Instruction::LocalGet(slot));
+        b.ins(&Instruction::I32Const(al.fields[1] as i32));
+        b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalGet(w.len));
         b.ins(&Instruction::I64Const(1));
         b.ins(&Instruction::I64Sub);
@@ -2363,8 +2613,9 @@ impl Fn_<'_> {
             Place::Local(l) => {
                 b.ins(&Instruction::LocalGet(l));
             }
-            Place::Slot(off) => {
-                b.slot(off);
+            // `place_for` hands out a local or a frame slot, never module state.
+            p => {
+                p.addr(b, 0);
             }
         }
         Ok(elem)
