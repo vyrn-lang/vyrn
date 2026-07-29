@@ -264,12 +264,35 @@ Compute is unaffected and confirms the original premise: a 5M-iteration
 arithmetic loop is 2,166 ms interpreted against 337 ms native (which includes
 ~300 ms of process launch).
 
-So the 165x is real for compute-bound generators and unreachable for the
-string-building ones, which is all of them. **RFC-0076 is blocked on a codegen
-fix, not on anything in this RFC**: `s = s + x` on a local `String` must append
-in place, with capacity, the way the interpreter already does. That fix stands on
-its own — the compiled backend being 10x slower than the interpreter at building
-a string is a bug whether or not generators ever run as wasm.
+So the 165x was real for compute-bound generators and unreachable for the
+string-building ones, which is all of them. **RFC-0076 was blocked on a codegen
+fix, not on anything in this RFC**: `s = s + x` on a local `String` had to append
+in place, with capacity, the way the interpreter already does.
+
+## M1.5, and the number the RFC was written for
+
+Fixed: a local `String` that only ever accumulates onto itself now appends in
+place with amortized growth, guarded by a whitelist eligibility rule (every
+occurrence of the name must be a self-append root, a `.field` read, an
+`@str`/`@concat` operand, or a tail `return` — anything else, including an
+unknown callee, disqualifies it). Accumulation went from quadratic to flat:
+
+| 50,000 appends | before | after | interpreted |
+|---|---|---|---|
+| | 28,692 ms | **47 ms** | 103 ms |
+
+And with that, the same four-call generator workload measured above:
+
+| | cold, 4 calls |
+|---|---|
+| interpreted | 1,484 ms |
+| wasm | **255 ms** |
+
+Phase trace: clang 158 ms, cranelift 25 ms, first execution ~3 ms — and calls
+two, three and four cost **1 ms each**, because the artifact is
+argument-independent and cached. Per-execution that is ~370x, against ~370 ms
+interpreted. Compilation is now the entire cost, paid once, and a long-lived
+process pays it once per generator rather than once per call.
 
 ## Risks, honestly
 
@@ -301,10 +324,10 @@ runaway generator traps differently depending on the engine.
   wasm; run it; the emitted source is byte-identical to the interpreted run.
   Proves the boundary and kills the 106 ms — and shows the next milestone is not
   the one that was planned.
-- **M1.5 — in-place string append in codegen.** `s = s + x` on a local `String`
-  appends with amortized capacity instead of reallocating and copying, matching
-  what the interpreter does. Blocks every milestone after it, and is worth doing
-  on its own account.
+- **M1.5 — in-place string append in codegen.** DONE. `s = s + x` on a local
+  `String` appends with amortized capacity instead of reallocating and copying,
+  matching what the interpreter does. Was blocking every milestone after it, and
+  was worth doing on its own account.
 - **M2 — the byte capabilities.** `read` and `list` as host imports, with the
   `allowed` mediation and read recording intact, and the canonical RFC-0014 error
   wording preserved. `std/tw` and `std/i18n` become servable.
