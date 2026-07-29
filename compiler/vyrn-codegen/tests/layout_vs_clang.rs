@@ -23,17 +23,11 @@
 use std::path::{Path, PathBuf};
 use vyrn_codegen::layout::{of_ll, SHAPES};
 
-/// A wasmtime executable, from `$VYRN_WASMTIME` or the repo's `tools/`.
-/// The same lookup `vyrn-cli`'s parity harness does.
+/// A wasmtime executable, from `$VYRN_WASMTIME` or the repo's `tools/` — the
+/// same lookup `vyrn-cli`'s parity harness does, moved into the crate when
+/// RFC-0077 M1's tests needed the second copy.
 fn find_wasmtime() -> Option<PathBuf> {
-    std::env::var("VYRN_WASMTIME")
-        .map(PathBuf::from)
-        .ok()
-        .filter(|p| p.exists())
-        .or_else(|| {
-            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-            Some(root.join("tools/wasmtime-v46.0.1-x86_64-windows/wasmtime.exe")).filter(|p| p.exists())
-        })
+    vyrn_codegen::toolchain::find_wasmtime_from(Path::new(env!("CARGO_MANIFEST_DIR")))
 }
 
 /// One LLVM type string as a C type expression around the declarator `decl`.

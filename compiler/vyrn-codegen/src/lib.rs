@@ -15,6 +15,7 @@
 
 pub mod layout;
 pub mod toolchain;
+pub mod wasm;
 
 use std::collections::HashMap;
 use std::fmt::Write;

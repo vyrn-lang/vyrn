@@ -1063,6 +1063,36 @@ pub fn discovered_wasi_sysroot() -> Option<std::path::PathBuf> {
     tools_wasi_sysroot_from(exe.parent()?)
 }
 
+/// A wasmtime executable to run a module with: `$VYRN_WASMTIME`, else the first
+/// `tools/wasmtime-*` directory found walking up from `start`.
+///
+/// The same lookup the parity harness does, in the crate both it and RFC-0077's
+/// tests can see — nothing here needs wasmtime to BUILD, only to check its own
+/// output, so a machine without it skips loudly rather than failing.
+pub fn find_wasmtime_from(start: &Path) -> Option<PathBuf> {
+    if let Some(p) = std::env::var("VYRN_WASMTIME").map(PathBuf::from).ok().filter(|p| p.exists()) {
+        return Some(p);
+    }
+    let exe = if cfg!(windows) { "wasmtime.exe" } else { "wasmtime" };
+    for dir in start.ancestors() {
+        let tools = dir.join("tools");
+        if !tools.is_dir() {
+            continue;
+        }
+        let mut hits: Vec<PathBuf> = std::fs::read_dir(&tools)
+            .ok()?
+            .flatten()
+            .map(|e| e.path().join(exe))
+            .filter(|p| p.exists())
+            .collect();
+        hits.sort();
+        if let Some(hit) = hits.into_iter().next() {
+            return Some(hit);
+        }
+    }
+    None
+}
+
 /// `libclang_rt.builtins-wasm32.a` from a `libclang_rt.builtins-wasm32-wasi-*`
 /// directory next to the sysroot (the wasi-sdk release-artifact layout),
 /// version-agnostic and deterministic (sorted).

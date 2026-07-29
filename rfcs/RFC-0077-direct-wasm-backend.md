@@ -324,10 +324,118 @@ valid address there. Nothing relies on it not being — the one null sentinel in
 the runtime (`@__vyrn_bytes_dup`) is compared, never dereferenced — but M2 must
 not introduce a null check that assumes a trap.
 
-### What M1 inherits
+### What M1 inherited
 
 `layout::of_ll` and `layout::SHAPES`, a clang comparison that will catch a
 layout drift years from now, and three facts worth not re-deriving: frames are
 statically sized, the aggregate convention is already half-implemented in the
 prologue, and the memory map needs no negotiation. The one design constraint to
 carry forward is destination-first lowering at joins.
+
+---
+
+## M1, as landed
+
+`vyrn-codegen/src/wasm.rs`. Sections, imports, exports, the memory, the
+`__stack_pointer` global, the data pool, and the shadow-stack prologue and
+epilogue around a body someone else emits. No lowering — that is M2, and the
+bodies here are the three-instruction kind whose only job is to prove the frame
+is real.
+
+Two of the encoder's decisions are constraints rather than choices, so they live
+in the type rather than in a convention:
+
+- **Section order is framed once.** wasm fixes the order of its sections and
+  `wasm-encoder` will emit them in whatever order it is called in, so the
+  sections are accumulated as fields and written out in `finish` — one list, in
+  one place, instead of an ordering that emerges from the traversal. A unit test
+  reads the ids back off the finished bytes and asserts they ascend.
+- **Imports must precede definitions**, because they share one function index
+  space. `Module::import` after `Module::func` panics with that sentence, which
+  is cheaper than debugging an off-by-N in every call in the module.
+
+### The import audit: one mismatch, and it is the only one
+
+`vyrn-codegen/tests/imports_vs_shim.rs` walks both sides and diffs them — the
+`declare` lines the emitter prints, mapped through `wasm::abi`, against the C
+definitions parsed out of `RUNTIME_SHIM`, mapped through the C ABI for wasm32.
+Neither side is transcribed, for the reason M0's clang test gives.
+
+**68 signatures agree with the definitions they call.** Three are variadic
+(`printf`, `fprintf`, `__vyrn_snprintf`) and are M3's milestone, not a
+mismatch. `llvm.memcpy` is an intrinsic, not an import — it becomes
+`memory.copy`. Every declared `__vyrn_*` resolved to a definition; a dangling one
+would have failed the test rather than become a plausible-looking import.
+
+The only mismatch is the one M0 found, and the sweep proves it is the only one:
+`__vyrn_vj_bool` is the sole `declare` with a sub-`i32` parameter anywhere in the
+boundary, so `abi`'s widening has exactly one site to be right about. A second
+test pins that count, because the sweep passes whether there is one widening or
+fifty.
+
+The class of bug worth naming, since it did not occur: `size_t` is 4 bytes on
+wasm32 and 8 natively, so a `declare` handing `i64` to a libc function taking one
+would be wrong on exactly one target. The three that would have — `strlen`,
+`strncmp`, `snprintf` — are already wrapped as `__vyrn_*` so the IR can stay
+64-bit. The libc expectations are written as C in that test and mapped through
+the same function the shim's definitions go through, so the two sides cannot
+disagree about what `int` means.
+
+The `vyrn_gen` namespace (RFC-0076's nine `CODE_IMPORTS`) is not in the sweep:
+its ground truth is `func_wrap` in the excluded `vyrn-genwasm`, which this crate
+cannot see. Checked by hand — all nine agree — and the cross-engine gate already
+covers them behaviourally.
+
+### What ran under wasmtime
+
+`vyrn-codegen/tests/wasm_runs.rs`. The RFC said M1 would be "validated by
+`Module::new`", which is wrong twice over: that is `wasmtime::Module::new`, and
+wasmtime lives in the excluded `vyrn-genwasm` because keeping `vyrn-codegen`
+buildable with no LLVM, no clang and no wasi sysroot is the property the
+workspace defends. So M1 does what M0 did — shells out to a `wasmtime` binary,
+skips loudly without one.
+
+Running is the better check anyway. Validation says the sections are well
+formed; a module that runs and prints the right bytes says the section order,
+the memory map, the stack pointer's initial value and the prologue/epilogue pair
+are *simultaneously* correct.
+
+1. `_start` calls an imported `proc_exit(7)`, exits 7.
+2. A string in the data segment, an iovec built in the shadow-stack frame,
+   `fd_write` to stdout — data placement, frame and import in one assertion. A
+   wrong data address prints garbage; a wrong frame overwrites the string.
+3. **The round trip M0 could only make on paper.** One function writes an
+   `{ ptr, i64, i64 }` into a frame slot at the offsets `of_ll` computed; a
+   *different* function reads them back at those offsets, re-packs them
+   contiguously, and the raw bytes go to stdout. Two functions disagreeing about
+   an offset is the silent miscompile this RFC keeps warning about, made loud —
+   and the 4-byte hole after the pointer is in the output, still zero, which is
+   the number clang gave us in M0.
+4. A frame larger than the 64 KB below `STACK_TOP` underflows past 0, wraps to
+   near `0xFFFFFFFF`, and traps — `--stack-first`'s safety property asserted
+   rather than assumed.
+
+### Nothing contradicted the memory map
+
+`STACK_TOP` = `DATA_BASE` = 65,536 and `STATICS_LIMIT` = 8 MB went in as
+measured. Two things it was simply silent about, decided here:
+
+- **Frames round to 16 bytes.** clang keeps the wasm32 stack pointer
+  16-aligned; matching costs nothing and means a frame base is always aligned
+  for the widest thing `layout` can put in it.
+- **`data_end` bounds the memory's minimum size**, one page past everything
+  static. `compile_split` reads that number back out of linked bytes today; the
+  encoder returns it from `Module::data_end` before writing anything, which is
+  the "forensics to construction" move M0 predicted, now real.
+
+`toolchain::find_wasmtime_from` also landed, because the wasmtime lookup was
+about to have a third copy.
+
+### What M2 inherits
+
+`wasm::Module`, `wasm::abi`, and one constraint that is easy to violate and
+silent when violated: **a body must not emit `return`**, because it would jump
+past the epilogue and leak the frame for the rest of the program. Returns go
+through a `br` to the function's outermost block, or the epilogue moves into a
+helper the return path calls. That sits beside M0's destination-first rule at
+joins as the second shape constraint on the M2 traversal.
