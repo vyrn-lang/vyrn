@@ -58,6 +58,7 @@ const PASSING: &[&str] = &[
     "protocol.vyrn",
     "record.vyrn",
     "reflection.vyrn",
+    "scan.vyrn",
     "schemaimport.vyrn",
     "statemod.vyrn",
     "tagged.vyrn",

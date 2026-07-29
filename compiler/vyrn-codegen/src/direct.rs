@@ -1204,6 +1204,17 @@ impl Fn_<'_> {
                 return self.heapify(b, &inner, n, to, line);
             }
         }
+        // The other direction: a narrow unsigned int widening to `Int64` is a
+        // zero-extension, because zero-extended is the invariant everything narrow
+        // is kept in (`load_of`'s `I32Load8U`, and the mask below).
+        if matches!(self.cx.resolve(to), Type::Int | Type::IntN { bits: 64, .. }) {
+            if let Type::IntN { bits, signed: false } = self.cx.resolve(from) {
+                if bits <= 16 {
+                    b.ins(&Instruction::I64ExtendI32U);
+                    return Ok(());
+                }
+            }
+        }
         // A plain integer flowing into a sized slot truncates, which is the
         // interpreter's `wrap_intn` and the textual backend's one `trunc`.
         //
@@ -2061,6 +2072,16 @@ impl Fn_<'_> {
                 self.expr_as(m, b, &args[0], &Type::Str)?;
                 b.ins(&Instruction::Call(self.cx.rt.charcount));
                 return Ok(Type::Int);
+            }
+            // `Int64(x)` / `UInt16(x)` — a conversion, not a call. Which names are
+            // conversions is the frontend's answer (`numeric_conv_target`), so the
+            // two backends cannot disagree about whether `Int64` is a cast, and the
+            // conversion itself is the M2d seam rather than a second truncation
+            // rule: an out-of-range width is refused there, once, for every flow.
+            _ if args.len() == 1 && ftypes::numeric_conv_target(name).is_some() => {
+                let to = ftypes::numeric_conv_target(name).unwrap();
+                self.expr_as(m, b, &args[0], &to)?;
+                return Ok(to);
             }
             "at" if args.len() == 2 => return self.at(m, b, args, line),
             "push" if args.len() == 2 => return self.push(m, b, args, line),
@@ -3409,7 +3430,7 @@ fn store_of(ll: &str) -> Instruction<'static> {
 /// `vyrn build --target wasm` produces ONE module with no shim beside it, so
 /// these are emitted. M4 is where the prelude moves into the shim and most of
 /// this goes away; until then it is about 400 bytes in every module.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Rt {
     write_all: u32,
     malloc: u32,
@@ -4204,26 +4225,10 @@ mod tests {
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),
             globals: HashMap::new(),
-            rt: Rt {
-                write_all: 0,
-                malloc: 0,
-                strlen: 0,
-                strcmp: 0,
-                trap: 0,
-                print_str: 0,
-                print_i64: 0,
-                int_str: 0,
-                bool_str: 0,
-                concat: 0,
-                trap_idx: 0,
-                count: 0,
-                msg_div0: 0,
-                msg_rem0: 0,
-                msg_divovf: 0,
-                msg_aoob: 0,
-                msg_soob: 0,
-                msg_oob_end: 0,
-            },
+            // Every index 0: a `Cx` for a type-level test never emits a call, and
+            // a field per runtime function would have to be edited for each new
+            // one.
+            rt: Rt::default(),
         }
     }
 

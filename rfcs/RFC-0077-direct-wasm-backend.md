@@ -1424,3 +1424,155 @@ named feature. The `modify` and module-state rows are gone, and the six examples
 each held did not turn into six passes — three did, and the rest moved on to
 `toJson`, a map literal, `Match` on strings and `if let`, which is what the
 burndown is for. The 12 → 3 reading is the honest one; 20 → 23 is the number.
+
+---
+
+## M2g, as landed
+
+Eight builtins and a refusal. **30 of 80**, from 23 — and the builtins row is 17
+rather than 28, which is the first time it has moved at all.
+
+This milestone was briefed as the one with no unifying insight: sixteen unrelated
+builtins, highest count first, no compression. Two of those three things turned
+out to be wrong, and the third is what the milestone is actually about.
+
+### The row was sorted by count, and count was the wrong order
+
+`toJson` is 6 and `stringFromBytes` was 4, so those were the brief's first two
+items. Neither was where the examples were.
+
+**`jsonSchema` and `schemaOf` have no runtime lowering in EITHER backend.** They
+are RFC-0021-family compile-time reflection: `gen_call` rewrites `jsonSchema(T)`
+into `Expr::Str(json_schema_string(decl, types))` and `schemaOf(T)` into
+`schema_struct_lit(decl)`, then lowers the ordinary expression that comes out. So
+the direct backend does the same rewrite from the same two frontend functions —
+about twenty lines, four examples, and *no bytes for the two backends to disagree
+about*, which is the same argument `llt_of` and `predicate_binds` rest on. The
+brief's instinct that `schemaOf` might have to be refused as compile-time-only
+was exactly half right: it IS compile-time-only, and that is what makes it the
+cheapest item on the list rather than the most expensive.
+
+`value(x)`, `charCount`, `bytes`, `slice` and the numeric conversions came next,
+in cost order rather than count order, and between them they closed four more
+rows.
+
+### `stringFromBytes` was not a wall, it was a queue
+
+All four examples filed under it reach it through `std/strings`, and behind it
+that module is a chain: `slice`, then `Eq` on `UInt8`, then `Add` on `UInt8`, then
+`Shr` on `UInt64`. Four of those five are lowered now, and the four examples have
+moved to the fifth. **Zero of them passed.**
+
+That is a property of the ladder worth naming, because three milestones have now
+read its rows as features: a blocker table names each example's FIRST stop, so a
+row of size *n* is a lower bound on *n* examples' worth of work and says nothing
+about how much. Every previous row happened to be one feature deep. This one was
+five, and the only way to find that out was to lower the first item and look.
+
+The lowerings stand — `utf8valid` over the shared Höhrmann table, `bytes`,
+`slice` with both of its traps — and they have a running test rather than an
+example, because an untested lowering is the thing this RFC keeps refusing to
+ship. What that test checks is the *failures*: an embedded NUL rejected before the
+UTF-8 check and with its own wording, an overlong form, a surrogate, a lone
+continuation byte, `> U+10FFFF`, a truncated sequence, and `slice`'s two traps.
+Comparing two backends would pass if both were confidently wrong about which
+failure happened, so the interpreter's own answer is pinned in the assertion.
+
+### The bug only running could catch, again — and it was not in any of the eight
+
+`box_value` took **one** scratch local for the value and for the box's address.
+`Fn_::scratch` is keyed on `(ValType, n)`, so for an i32-shaped payload — a
+`String`, a `Bool`, a `UInt8` — `scratch(I32, 2)` twice is one local: the
+`LocalTee` of the `malloc` result clobbered the value, the store wrote the box's
+address into the box, and `print` of the payload showed the pointer's bytes.
+
+It compiled, it validated, and no passing example had ever boxed an i32 scalar
+into a sum's word — every one was an `i64`, which takes a different scratch key
+and so never collided. `tagged.vyrn`'s `StrVal(userName)` is the first, and it
+arrived only because `value` unblocked the file. The two shapes still absent from
+the corpus (`BoolVal`, and `charCount` at all) have their own running test.
+
+### One row of the sized-int table came along, and only the provable half
+
+`Eq` on `UInt8` was in the way, so narrow unsigned ints are now lowered:
+comparison, `+`/`-`/`*`, truncation into the width, zero-extension out of it, and
+`toString`/`print`.
+
+`UInt8`/`UInt16` **only**, and the boundary is not taste. Those are the widths
+whose zero-extended `i32` compares the same signed or unsigned — so `binary`
+needs no second comparison table — and for an unsigned type a mask after the
+operator IS the wrap `wrap_intn` performs. A signed narrow int needs the opposite
+extension (and `load_of` zero-extends), and a `UInt32` needs unsigned compares.
+Both are still refused, and `Add` on `Int32` still names them. `Int64(x)` reaching
+the same seam is what closed `a conversion from Int64 to UInt16` too, one row it
+was not filed under.
+
+### `toJson` is refused, and the reason is not its size
+
+It is not a builtin with no lowering. It is a **serializer**, and the textual
+backend's version is roughly 300 lines plus a *generated function per
+payload-bearing enum* (`__vyrn_enc_<name>`, a tag switch, so a self-referential
+payload becomes a call), plus RFC-0024's wire tagging, plus `Map`, tuples and
+validated names. Under it sits the shim's JSON DOM and `vsb_escape`, which own
+key order, escaping and number formatting — the bytes parity compares.
+
+A direct backend has no shim, so it needs its own: an output buffer, an escaper
+that agrees byte-for-byte with `vsb_escape` including `\u00xx` under 0x20, and a
+runtime tag dispatch per enum. That is a milestone, and two of its six examples
+(`storage`, `domdemo`) have further blockers behind it anyway.
+
+Also refused, specifically: `readLine` and `parse` (2 examples, and only
+`input.vyrn` needs *just* those two — `vlog.vyrn` is a whole CLI behind them),
+`args`, `readFile` and `hostNowMillis` (each needs WASI syscalls and, for the
+fixed clock, `environ_get`), `chars` (a UTF-8 *decoder*, where `bytes` needed only
+a copy), `cell`/`get`/`set` (a generational slot table, which is also what the
+`a branch yielding get` row really is), `fromJson` (the parser half of `toJson`),
+and `logger`.
+
+### The widening `abi` exists for was NOT exercised, and cannot be here
+
+The brief said `toJson` is where M0's one live ABI mismatch lives — the emitter's
+`ptr @__vyrn_vj_bool(i1)` against the shim's `VJ* __vyrn_vj_bool(int)` — and that
+M2g would finally exercise `wasm::abi`'s widening.
+
+It cannot. **`direct::compile` imports exactly two functions**, `fd_write` and
+`proc_exit`, both `i32` throughout. There is no shim beside a directly-emitted
+module (M2b: `vyrn build --target wasm` produces ONE module) and `Module::import`
+is called nowhere else, so the entire 68-signature boundary M1 audited is
+*unreachable from this backend today*. `abi`'s widening is dead code with a unit
+test, and it stays that way until M4 moves the prelude into the shim and the
+direct backend starts importing from it. `tests/imports_vs_shim.rs` keeps guarding
+the textual emitter's side, which is the side that has the boundary.
+
+That is worth recording as a fourth falsified assumption, in the same direction as
+the other three: the milestone that finally makes `__vyrn_vj_bool` a live call is
+M4, not this one — and when it comes, it arrives with every other shim import at
+once rather than one builtin at a time.
+
+### Nothing contradicted M0, M1, M2a–M2f
+
+Every offset is still `layout::of_ll ∘ llt`, including the `{ i1, i64, i64 }` the
+`stringFromBytes` runtime writes through — it reads its own field offsets from
+`of_ll` rather than spelling 0/8/16, so the runtime and the lowering cannot
+disagree about where the tag is. Destination-first, no-`return`-in-a-body and the
+memory map went in as written; the aggregate-through-a-hidden-pointer convention
+covered a *runtime* function returning an aggregate with no change at all.
+
+### 30 of 80, regrouped
+
+| blocked on | n |
+|---|---|
+| builtins with no lowering (`toJson` 6, `readLine` 2, `args`, `cell`/`set`, `chars`, `fromJson`, `hostNowMillis`, `logger`, `parse`, `readFile`) | **17** |
+| `Match` on strings 4, a map literal 3, indexing a `Map` 2, indexing a `SmallArray` | 10 |
+| sized-int and float arithmetic (`Shr` on `UInt64` 4, a float literal 2, `Add` on `Int32`, `BitAnd`) | 8 |
+| a `fn`-typed parameter (RFC-0023) 3, a lambda | 4 |
+| a branch yielding an unpeekable call (`get` 3, `Held` 1) | 4 |
+| `if let` 2, `?`, a fallible construction | 4 |
+| `spawn` 2, `region` | 3 |
+
+The builtins row finally has a shape: `toJson` is a third of it and is one
+subsystem, and everything else in it is a WASI syscall or a runtime data
+structure. The row that grew is sized ints and floats — 4 → 8, because the
+`stringFromBytes` chain deposited four examples there — and it is now the second
+biggest, which makes it the argument M2c made about arrays and M2e made about
+generics: one table, in one place, worth eight.
