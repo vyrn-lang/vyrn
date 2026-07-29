@@ -2325,16 +2325,7 @@ impl<'a> Gen<'a> {
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
-        let mut subst: HashMap<String, Type> = HashMap::new();
-        for (d, a) in declared.iter().zip(arg_tys) {
-            solve_param(d, a, &mut subst);
-        }
-        let args = decl
-            .type_params
-            .iter()
-            .map(|p| subst.get(p).cloned().unwrap_or(Type::Unit))
-            .collect();
-        Type::App(enum_name.to_string(), args)
+        applied_type(Some(decl), enum_name, &declared, arg_tys)
     }
 
     /// Whether `t` is a generic enum instantiation whose type arguments are all
@@ -4093,7 +4084,6 @@ impl<'a> Gen<'a> {
         let rfields = self
             .record_fields(&Type::Named(name.to_string()))
             .ok_or_else(|| format!("`{name}` is not a record type"))?;
-        let type_params = self.types.get(name).map(|d| d.type_params.clone()).unwrap_or_default();
 
         // Emit each field value in declared order; infer generic parameters.
         let mut solved: HashMap<String, Type> = HashMap::new();
@@ -4113,16 +4103,16 @@ impl<'a> Gen<'a> {
             vals.push((v, vty));
         }
 
-        // The concrete result type (generic parameters filled in).
-        let result_ty = if type_params.is_empty() {
-            Type::Named(name.to_string())
-        } else {
-            let args = type_params
-                .iter()
-                .map(|tp| solved.get(tp).cloned().unwrap_or(Type::Unit))
-                .collect();
-            Type::App(name.to_string(), args)
-        };
+        // The concrete result type (generic parameters filled in), by the same
+        // shared rule an enum variant's construction uses. `solved` above is the
+        // incremental form of it, kept because each field's own type needs it
+        // while the fields are still being emitted.
+        let result_ty = applied_type(
+            self.types.get(name),
+            name,
+            &rfields.iter().map(|f| f.ty.clone()).collect::<Vec<_>>(),
+            &vals.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
+        );
         let ll = self.llt(&result_ty);
 
         let mut cur = "undef".to_string();
@@ -8080,16 +8070,15 @@ impl<'a> Gen<'a> {
                 arg_tys.push(vyrn_frontend::types::substitute(&vty, self.subst));
                 arg_vals.push(v);
             }
-            // Bind each type parameter from the matching argument.
-            let mut call_subst: HashMap<String, Type> = HashMap::new();
-            for (p, aty) in callee.params.iter().zip(&arg_tys) {
-                solve_param(&p.ty, aty, &mut call_subst);
-            }
-            let type_args: Vec<Type> = callee
-                .type_params
-                .iter()
-                .map(|tp| call_subst.get(tp).cloned().unwrap_or(Type::Unit))
-                .collect();
+            // Bind each type parameter from the matching argument. An unsolved
+            // one becomes `Unit` here — see `solve_type_args`.
+            let (call_subst, solved) = solve_type_args(
+                &callee.type_params,
+                &callee.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
+                &arg_tys,
+            );
+            let type_args: Vec<Type> =
+                solved.into_iter().map(|t| t.unwrap_or(Type::Unit)).collect();
             let sym = mangle_name(name, &type_args);
 
             // Coerce args to their (substituted) parameter types.
@@ -8252,15 +8241,13 @@ impl<'a> Gen<'a> {
                 arg_tys.push(vyrn_frontend::types::substitute(&vty, self.subst));
                 arg_vals.push(v);
             }
-            let mut call_subst: HashMap<String, Type> = HashMap::new();
-            for (p, aty) in callee.params.iter().zip(&arg_tys) {
-                solve_param(&p.ty, aty, &mut call_subst);
-            }
-            let type_args: Vec<Type> = callee
-                .type_params
-                .iter()
-                .map(|tp| call_subst.get(tp).cloned().unwrap_or(Type::Unit))
-                .collect();
+            let (call_subst, solved) = solve_type_args(
+                &callee.type_params,
+                &callee.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
+                &arg_tys,
+            );
+            let type_args: Vec<Type> =
+                solved.into_iter().map(|t| t.unwrap_or(Type::Unit)).collect();
             let sym = mangle_name(name, &type_args);
             let mut pairs = Vec::new();
             for ((p, v), aty) in callee.params.iter().zip(arg_vals).zip(&arg_tys) {
@@ -10347,7 +10334,7 @@ fn collect_strings_expr(e: &Expr, out: &mut Vec<String>, types: &HashMap<String,
 /// Bind type parameters by matching a (possibly generic) parameter type against
 /// a concrete argument type. Mirrors the checker's `unify`, minus error checks
 /// (the checker already validated the call).
-fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
+pub(crate) fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
     match (pty, aty) {
         (Type::Param(t), _) => {
             subst.entry(t.clone()).or_insert_with(|| aty.clone());
@@ -10374,6 +10361,50 @@ fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
         (Type::Ref(p), Type::Ref(a)) => solve_param(p, a, subst),
         _ => {}
     }
+}
+
+/// The type arguments a construction or call site instantiates a generic with:
+/// `declared` are the parametric types (a function's parameters, an enum
+/// variant's payloads, a record's fields), `actual` the concrete types supplied
+/// for them. Each declared type parameter comes back `Some` if the match fixed
+/// it and `None` if nothing did.
+///
+/// This is **the rule**, shared rather than reimplemented (RFC-0077 M2e). Two
+/// backends solving one site differently would specialize *different* functions
+/// for the same source, and nothing in this repo compares the two backends'
+/// instantiation sets — it is a disagreement no test would name.
+///
+/// What each backend does with a `None` is its own business, which is why this
+/// reports rather than decides. The LLVM emitter has always substituted `Unit`
+/// and let it lower to `void`; the direct backend refuses, because a `void` in a
+/// wasm signature is not a diagnostic, it is a different function.
+pub(crate) fn solve_type_args(
+    type_params: &[String],
+    declared: &[Type],
+    actual: &[Type],
+) -> (HashMap<String, Type>, Vec<Option<Type>>) {
+    let mut subst: HashMap<String, Type> = HashMap::new();
+    for (d, a) in declared.iter().zip(actual) {
+        solve_param(d, a, &mut subst);
+    }
+    let args = type_params.iter().map(|p| subst.get(p).cloned()).collect();
+    (subst, args)
+}
+
+/// The concrete type a construction site of `name` produces: the bare
+/// [`Type::Named`] when the declaration takes no parameters, and otherwise a
+/// [`Type::App`] with each parameter solved from what was supplied. An unsolved
+/// parameter becomes `Unit`, which is what this has always done for enums.
+pub(crate) fn applied_type(
+    decl: Option<&TypeDecl>,
+    name: &str,
+    declared: &[Type],
+    actual: &[Type],
+) -> Type {
+    let named = || Type::Named(name.to_string());
+    let Some(decl) = decl.filter(|d| !d.type_params.is_empty()) else { return named() };
+    let (_, args) = solve_type_args(&decl.type_params, declared, actual);
+    Type::App(name.to_string(), args.into_iter().map(|a| a.unwrap_or(Type::Unit)).collect())
 }
 
 /// The mangled LLVM symbol for a generic instantiation, e.g. `vyrn_id__Int`.
