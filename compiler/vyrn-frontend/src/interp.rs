@@ -362,27 +362,59 @@ fn is_bare_identifier(s: &str) -> bool {
 /// work-in-progress text). Every other token carries the canonical token-name
 /// string plus its 1-based line/col.
 fn lex_tokens(source: &str) -> Vec<Val> {
-    let token_val = |kind: &str, text: &str, line: usize, col: usize| {
-        let mut r = HashMap::new();
-        r.insert("kind".to_string(), Val::Str(std::rc::Rc::new(kind.to_string())));
-        r.insert("text".to_string(), Val::Str(std::rc::Rc::new(text.to_string())));
-        r.insert("line".to_string(), Val::Int(line as i64));
-        r.insert("col".to_string(), Val::Int(col as i64));
-        Val::Record(r)
-    };
+    lexed(source)
+        .into_iter()
+        .map(|(kind, text, line, col)| {
+            let mut r = HashMap::new();
+            r.insert("kind".to_string(), Val::Str(std::rc::Rc::new(kind)));
+            r.insert("text".to_string(), Val::Str(std::rc::Rc::new(text)));
+            r.insert("line".to_string(), Val::Int(line));
+            r.insert("col".to_string(), Val::Int(col));
+            Val::Record(r)
+        })
+        .collect()
+}
+
+/// The same token list as an `Array<Token>` record *literal* — what the wasm
+/// generation engine (RFC-0076 M3b) encodes for the guest.
+///
+/// Both this and [`lex_tokens`] read one [`lexed`], so the two engines cannot
+/// disagree about which tokens `lex` yields, only about how the value is built.
+pub fn gen_lex_tokens_lit(source: &str) -> Expr {
+    Expr::ArrayLit {
+        elems: lexed(source)
+            .into_iter()
+            .map(|(kind, text, line, col)| Expr::StructLit {
+                name: "Token".to_string(),
+                fields: vec![
+                    ("kind".to_string(), Expr::Str(kind)),
+                    ("text".to_string(), Expr::Str(text)),
+                    ("line".to_string(), Expr::Int(line)),
+                    ("col".to_string(), Expr::Int(col)),
+                ],
+                line: 0,
+            })
+            .collect(),
+        line: 0,
+    }
+}
+
+/// The compiler's real lexer over `source`, as `(kind, text, line, col)` rows —
+/// the one place the `lex` builtin's token list is decided.
+fn lexed(source: &str) -> Vec<(String, String, i64, i64)> {
     match crate::lexer::lex(source) {
         Ok(toks) => toks
             .iter()
             .filter(|t| !matches!(t.tok, crate::lexer::Tok::Eof))
             .map(|t| {
                 let (kind, text) = crate::lexer::token_name_and_text(&t.tok);
-                token_val(&kind, &text, t.line, t.col)
+                (kind, text, t.line as i64, t.col as i64)
             })
             .collect(),
         Err(d) => {
             // Non-fatal: attribute the unlexable input as one `error` token at the
             // diagnostic's position.
-            vec![token_val("error", &d.message, d.line, d.col)]
+            vec![("error".to_string(), d.message, d.line as i64, d.col as i64)]
         }
     }
 }
@@ -1207,6 +1239,82 @@ pub fn gen_scoped_path(importer_dir: &str, allowed: &[String], arg: &str) -> Res
     Ok(resolved)
 }
 
+/// `moduleInterface(path)` (RFC-0021): read the referenced module through the
+/// resolver, link it to follow its reachable type closure (RFC-0031), and build
+/// the `ModuleInterface` record literal for its exported surface. Every module
+/// the link touched is appended to `reads`, which is what makes editing a
+/// closure type's DEFINING file miss the generator cache even though its path
+/// was never a generator argument.
+///
+/// Public, and a free function, for the same reason [`gen_scoped_path`] is: the
+/// wasm generation engine (RFC-0076 M3b) serves its `moduleInterface` import
+/// from here. Reflection is compiler machinery — a second implementation would
+/// be a second answer, and a second set of recorded reads is a stale cache hit.
+pub fn gen_module_interface_lit(
+    resolver: &dyn crate::loader::ModuleResolver,
+    opts: &crate::loader::LoadOptions,
+    importer_dir: &str,
+    allowed: &[String],
+    reads: &mut Vec<(String, Vec<u8>)>,
+    path: &str,
+) -> Result<Expr, String> {
+    // Resolve like a module specifier (`.vyrn` appended), scoped like readFile.
+    let spec = if path.ends_with(".vyrn") || path.ends_with(".json") {
+        path.to_string()
+    } else {
+        format!("{path}.vyrn")
+    };
+    let resolved = gen_scoped_path(importer_dir, allowed, &spec)?;
+    let source = resolver
+        .read(&resolved)
+        .map_err(|e| format!("moduleInterface cannot read `{path}`: {e}"))?;
+    reads.push((resolved.clone(), source.clone().into_bytes()));
+
+    // Follow the reflected module's imports to build the reachable type closure
+    // (RFC-0031): link it into one program so a type declared in an imported
+    // module is still visible to the closure walk. Every module the link reads is
+    // recorded through a proxy resolver, so a closure type's defining FILE joins
+    // the generator's cache inputs — editing `types.vyrn` must miss the cache
+    // even though its path was never a generator argument.
+    let rec = crate::loader::RecordingResolver::new(resolver);
+    let program = crate::loader::load(&source, &resolved, opts, &rec).map_err(|diags| {
+        let d = diags.first();
+        let where_ = d
+            .and_then(|d| d.file.clone())
+            .map(|f| format!(" ({f})"))
+            .unwrap_or_default();
+        let msg = d
+            .map(|d| d.message.clone())
+            .unwrap_or_else(|| "load failed".to_string());
+        format!("moduleInterface `{path}`{where_}: {msg}")
+    })?;
+    for (p, s) in rec.into_reads() {
+        // The root module was already recorded above; skip the duplicate.
+        if p != resolved {
+            reads.push((p, s.into_bytes()));
+        }
+    }
+
+    // Import specifier per declaring module, so a generator that must SHARE a
+    // closure type's identity (rpcServer/rpcInProcess) can import it from the
+    // module that declares it (RFC-0031). The reflected module's own types
+    // (`module == None`) keep the generator's own argument spelling; a foreign
+    // type gets a specifier relative to the real importing file's directory.
+    let mut specifiers: HashMap<Option<String>, String> = HashMap::new();
+    specifiers.insert(None, path.to_string());
+    for t in &program.type_decls {
+        if let Some(key) = &t.module {
+            specifiers.entry(Some(key.clone())).or_insert_with(|| {
+                crate::loader::import_specifier(importer_dir, key, opts.std_root.as_deref())
+            });
+        }
+    }
+    Ok(crate::schema_reflect::module_interface_lit(
+        &program,
+        &specifiers,
+    ))
+}
+
 /// An alternative engine for running a generator (RFC-0076).
 ///
 /// The frontend defines this seam and nothing more: compiling a generator to
@@ -1591,69 +1699,21 @@ impl<'a> Interp<'a> {
                 "`moduleInterface` is only available during generation".to_string(),
             ));
         }
-        // Resolve like a module specifier (`.vyrn` appended), scoped like readFile.
-        let spec = if path.ends_with(".vyrn") || path.ends_with(".json") {
-            path.to_string()
-        } else {
-            format!("{path}.vyrn")
-        };
-        let resolved = self.gen_scoped_path(&spec)?;
         let g = self.gen.as_ref().unwrap();
-        let source = g
-            .resolver
-            .read(&resolved)
-            .map_err(|e| Ctrl::Err(format!("moduleInterface cannot read `{path}`: {e}")))?;
-        g.reads
-            .borrow_mut()
-            .push((resolved.clone(), source.clone().into_bytes()));
-
-        // Follow the reflected module's imports to build the reachable type
-        // closure (RFC-0031): link it into one program so a type declared in an
-        // imported module is still visible to the closure walk. Every module the
-        // link reads is recorded through a proxy resolver, so a closure type's
-        // defining FILE joins the generator's cache inputs — editing `types.vyrn`
-        // must miss the cache even though its path was never a generator argument.
-        let rec = crate::loader::RecordingResolver::new(g.resolver);
-        let program = crate::loader::load(&source, &resolved, g.opts, &rec).map_err(|diags| {
-            let d = diags.first();
-            let where_ = d
-                .and_then(|d| d.file.clone())
-                .map(|f| format!(" ({f})"))
-                .unwrap_or_default();
-            let msg = d
-                .map(|d| d.message.clone())
-                .unwrap_or_else(|| "load failed".to_string());
-            Ctrl::Err(format!("moduleInterface `{path}`{where_}: {msg}"))
-        })?;
-        for (p, s) in rec.into_reads() {
-            // The root module was already recorded above; skip the duplicate.
-            if p != resolved {
-                g.reads.borrow_mut().push((p, s.into_bytes()));
-            }
-        }
-
-        // Import specifier per declaring module, so a generator that must SHARE a
-        // closure type's identity (rpcServer/rpcInProcess) can import it from the
-        // module that declares it (RFC-0031). The reflected module's own types
-        // (`module == None`) keep the generator's own argument spelling; a foreign
-        // type gets a specifier relative to the real importing file's directory.
-        let mut specifiers: HashMap<Option<String>, String> = HashMap::new();
-        specifiers.insert(None, path.to_string());
-        for t in &program.type_decls {
-            if let Some(key) = &t.module {
-                specifiers.entry(Some(key.clone())).or_insert_with(|| {
-                    crate::loader::import_specifier(
-                        &g.importer_dir,
-                        key,
-                        g.opts.std_root.as_deref(),
-                    )
-                });
-            }
-        }
-        Ok(crate::schema_reflect::module_interface_lit(
-            &program,
-            &specifiers,
-        ))
+        let mut reads = Vec::new();
+        let r = gen_module_interface_lit(
+            g.resolver,
+            g.opts,
+            &g.importer_dir,
+            &g.allowed,
+            &mut reads,
+            path,
+        );
+        // Recorded whether or not the reflection succeeded: the root module is
+        // read before the link can fail, and a read that happened is a cache
+        // input either way.
+        g.reads.borrow_mut().extend(reads);
+        r.map_err(Ctrl::Err)
     }
 
     fn call(&self, name: &str, args: &[Val]) -> Result<Val, Ctrl> {

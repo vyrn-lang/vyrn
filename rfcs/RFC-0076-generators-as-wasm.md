@@ -393,11 +393,12 @@ crosses the boundary:
 
 - **M3a — `Code` as an opaque host handle.** DONE, and it did unblock `std/tw`
   and `std/i18n` — see below.
-- **M3b — structured host results.** `lex`, `moduleInterface` and `contractOf`
-  are one problem, not three: each returns *a value of a known named type*
+- **M3b — structured host results.** DONE, and it served every remaining
+  generator — see below. `lex`, `moduleInterface` and `contractOf` are one
+  problem, not three: each returns *a value of a known named type*
   (`Array<Token>`, `ModuleInterface`, `ContractInfo`) built entirely out of
   strings, ints, bools, records and arrays. So build the mechanism once — a host
-  encoder and a codegen-emitted decoder that BOTH walk the static type, which is
+  encoder and a synthesized decoder that BOTH walk the static type, which is
   what makes them agree — instead of a JSON schema two sides have to interpret
   the same way. (The earlier plan split these and reached for `std/json`; the
   type is already the schema, so it does not need one.)
@@ -464,6 +465,72 @@ examples emit byte-identical sources under both engines; `examples/bin/server`,
 while declining the rest, which is the fallback working per call rather than per
 module.
 
+## M3b shipped: one transfer, walked from both ends
+
+`lex`, `moduleInterface` and `contractOf` were built as one mechanism, because
+they are one problem: each returns a value of a known named type. A host import
+`reflect(kind, arg)` computes that value — the real lexer, the real linker, the
+real contract table, all still in the compiler — and leaves it as a flat stream
+of atoms. `nextInt`/`nextStr` pull the atoms back; `nextStr` answers with a
+length and the guest allocates, the same stash protocol M2 already had.
+
+**What makes the two sides agree is that both walk the static type.** An array
+pushes its length first, a String its bytes, an Option a presence atom, a record
+its fields in the DECLARATION's order — and nothing else is tagged, because the
+reader always knows what it is about to read. There is no self-describing
+format, so there is no format for two implementations to read differently. Both
+sides get the field order from the same `record_fields`, so the order is not a
+convention either has to remember. The host pulls each field out of the
+reflection literal BY NAME rather than positionally: `module_interface_lit`
+happens to build them in declaration order today, and depending on that would be
+a silent, load-bearing coincidence.
+
+The decoder is **not hand-written IR**. The engine synthesizes it as ordinary
+Vyrn functions appended to the wrapper program, so the arrays it grows, the
+records it builds and the Options it unwraps are the ones every other Vyrn
+program gets — a change to how codegen lowers a record cannot make the two walks
+disagree. Codegen's whole share is redirecting the three builtins' call sites to
+those entry points plus lowering three stream primitives. `contractOf` gets one
+nullary entry per declared contract, since its argument is a declaration, not a
+value; `lex` gets one only when no user function claims the name, which is how
+the shadowing rule survives without being restated.
+
+The atom stream is also its own tripwire. A `nextInt` that finds a string, a
+read past the end, or an unread atom left when the value is finished all trap
+with a message saying the two walks disagreed — the one failure this design can
+have, made loud instead of silent.
+
+`moduleInterface` is the one that had to be exactly right, because getting it
+wrong is a stale cache hit rather than a wrong answer. It is not reimplemented:
+`Interp::gen_module_interface` became the free function
+`interp::gen_module_interface_lit` and both engines call it, so the
+`RecordingResolver` link and the reachable type closure (RFC-0031) record
+identically. Measured on a generator reflecting a module whose types are
+declared in a THIRD file: the on-disk cache entries — which are the recorded
+read lists — are byte-identical under both engines, and editing that third file
+(never a generator argument) misses the cache under both. That is now a test.
+
+**Every generator in the repo is served.** All twelve generator-using examples
+emit byte-identical sources with zero declines, where M3a still declined
+`std/vyx`, `std/rpc`, `std/ui`, `std/openapi` and `std/graphql`.
+
+Measured cold, cache cleared, medians of three:
+
+| | interpreted | wasm | clang | cranelift | execution |
+|---|---|---|---|---|---|
+| `vyxdemo` (`lex` + reflection) | 72 ms | 567 ms | 399 | 94 | ~2 ms |
+| `rpc` (`moduleInterface` + `contractOf`) | 50 ms | 441 ms | 329 | 54 | ~2 ms |
+
+Against a 41 ms / 37 ms baseline for the same command with generation cached,
+interpreted generation is ~31 ms and ~12 ms against ~2 ms executed. The total is
+worse for the fourth milestone running, for the fourth identical reason: one
+`emit-gen` process calls each generator once and pays a whole clang for it.
+`examples/bin/server.vyrn` shows both halves of that at once — ten generator
+calls, of which two hit the artifact cache and cost **2 ms and 1 ms** while the
+other eight each pay a fresh ~350 ms compile. The artifact is
+argument-independent and the cache works; there is simply nothing in a one-shot
+process to amortize it against. M4 is that milestone.
+
 ## Risks, honestly
 
 **A new dependency.** wasmtime is a large crate, and this workspace deliberately
@@ -502,10 +569,12 @@ runaway generator traps differently depending on the engine.
   the `allowed` mediation and read recording intact, and the canonical RFC-0014
   error wording preserved. `std/tw` and `std/i18n` do NOT become servable — see
   below.
-- **M3 — reflection.** The `moduleInterface` import and its shared encoder.
-  `std/rpc`, `std/openapi`, `std/graphql` and `std/ui` become servable.
-- **M4 — `std/vyx`, and the measurement that matters.** The `.vyx` keystroke,
-  end to end, against the 244 ms baseline.
+- **M3 — reflection.** DONE (M3a `Code` as a handle, M3b the structured
+  results). Every generator in the repo is served, with byte-identical output.
+- **M4 — a long-lived process, and the measurement that matters.** The `.vyx`
+  keystroke, end to end, against the 244 ms baseline. Every milestone so far has
+  measured compilation dominating a one-shot process; this is the one that stops
+  paying it per call.
 - **M5 — fuel, traps, and the fallback.** Fuel mapping, trap-wording parity, and
   an explicit fallback to the interpreter for anything the wasm path refuses,
   so a generator can never become uncompilable by adopting this.

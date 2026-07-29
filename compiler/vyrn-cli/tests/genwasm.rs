@@ -68,6 +68,152 @@ fn code_quote_generators_emit_the_same_source_under_both_engines() {
     }
 }
 
+/// The M3b acceptance cases: `std/vyx` reaches `lex`, and the reflection
+/// generators reach `moduleInterface` and `contractOf` — the three builtins that
+/// hand back a value of a known named type. `shelf/server` runs nine generator
+/// calls across `std/vyx`, `std/rpc` and `std/ui`, so it exercises the encoder
+/// over `Array<Token>`, `ModuleInterface` and `ContractInfo` in one process.
+#[test]
+fn structured_result_generators_emit_the_same_source_under_both_engines() {
+    for demo in ["examples/vyxdemo.vyrn", "examples/rpc.vyrn", "examples/shelf/server.vyrn"] {
+        let f = repo_file(demo);
+        let interp = emit_gen(&f, false);
+        let wasm = emit_gen(&f, true);
+        assert!(interp.status.success() && wasm.status.success(), "{demo} failed to generate");
+        assert_eq!(
+            String::from_utf8_lossy(&interp.stdout),
+            String::from_utf8_lossy(&wasm.stdout),
+            "{demo}: the wasm engine's emitted source diverged from the interpreter's"
+        );
+    }
+}
+
+/// `moduleInterface` records EVERY module its link touched (RFC-0031), which is
+/// what makes editing a closure type's defining file miss the generator cache
+/// even though its path was never a generator argument. A stale hit is worse
+/// than a slow generator, so the recorded reads are compared engine to engine —
+/// the cache entry IS the read list, so comparing the entries compares them.
+#[test]
+fn the_reflected_type_closure_is_recorded_identically_by_both_engines() {
+    let dir = std::env::temp_dir().join(format!("vyrn_m3b_reads_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // `wire` is reached ONLY through `api`'s imports — never a generator
+    // argument, so only the closure walk can put it in the cache key.
+    std::fs::write(dir.join("wire.vyrn"), "export type Wire = { n: Int64 }\n").unwrap();
+    std::fs::write(
+        dir.join("api.vyrn"),
+        "import { Wire } from \"./wire\"\nexport fn ping(w: Wire) -> Int64 { return w.n }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("gen.vyrn"),
+        "export gen fn stub(path: String) -> String {\n\
+         \x20   let iface = moduleInterface(path)\n\
+         \x20   let mut out = \"\"\n\
+         \x20   for f in iface.functions { out = out + \"export fn \" + f.name + \
+         \"Arity() -> Int64 { return \" + f.params.length.toString() + \" }\\n\" }\n\
+         \x20   for t in iface.types { out = out + \"// \" + t.source + \"\\n\" }\n\
+         \x20   return out\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.vyrn"),
+        "import { stub } from \"./gen\"\n\
+         import { pingArity } from stub(\"./api\")\n\
+         fn main() -> Int64 { print(pingArity()) return 0 }\n",
+    )
+    .unwrap();
+
+    let main = dir.join("main.vyrn");
+    let interp = emit_gen(&main, false);
+    let wasm = emit_gen(&main, true);
+    assert!(interp.status.success() && wasm.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&interp.stdout),
+        String::from_utf8_lossy(&wasm.stdout),
+        "the reflected interface diverged between engines"
+    );
+    // The closure type's source really did travel: without the link, `Wire`
+    // (declared in another file) would not be in the interface at all.
+    assert!(String::from_utf8_lossy(&wasm.stdout).contains("export type Wire = { n: Int64 }"));
+
+    // With the on-disk cache ON, the entry file IS the recorded read list. Both
+    // engines must write the same one, and editing `wire.vyrn` must change it.
+    let cached = |wasm: bool| -> String {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_vyrn"));
+        if !wasm {
+            c.env("VYRN_NO_WASM_GEN", "1");
+        }
+        assert!(c.arg("emit-gen").arg(&main).output().unwrap().status.success());
+        let dir = dirs_gen_cache();
+        let mut entries: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| std::fs::read_to_string(e.unwrap().path()).ok())
+            .collect();
+        entries.sort();
+        entries.join("\n---\n")
+    };
+    let before_interp = cached(false);
+    let before_wasm = cached(true);
+    assert_eq!(before_interp, before_wasm, "the engines recorded different generator inputs");
+    assert!(before_wasm.contains("wire.vyrn"), "the closure file is not a cache input: {before_wasm}");
+
+    std::fs::write(dir.join("wire.vyrn"), "export type Wire = { n: Int64, extra: String }\n")
+        .unwrap();
+    let after_wasm = cached(true);
+    assert_ne!(
+        before_wasm, after_wasm,
+        "editing a file in the reflected type closure was a stale cache hit"
+    );
+    assert_eq!(after_wasm, cached(false), "the engines diverged after the closure edit");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The on-disk generator cache, so the test above can read the recorded inputs
+/// back. Mirrors the loader's own location.
+fn dirs_gen_cache() -> PathBuf {
+    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap();
+    PathBuf::from(home).join(".vyrn").join("cache").join("gen")
+}
+
+/// The structured builtins are lowered ONLY on the generation path. In the
+/// language they stay comptime-only, and an ordinary build still says so — the
+/// `gen_host` flag must not leak a runtime meaning into a normal compile.
+#[test]
+fn reflection_outside_a_generator_is_still_the_same_error() {
+    for (src, want) in [
+        (
+            "fn main() -> Int64 { let i = moduleInterface(\"./x\") return 0 }",
+            "`moduleInterface` is compile-time reflection",
+        ),
+        (
+            "contract C { fn g() -> Int64 }\nfn main() -> Int64 { let c = contractOf(C) return 0 }",
+            "`contractOf` is compile-time reflection",
+        ),
+        (
+            "fn main() -> Int64 { let t = lex(\"let x = 1\") return 0 }",
+            "`lex` is only available during generation",
+        ),
+    ] {
+        let f = std::env::temp_dir().join(format!(
+            "vyrn_m3b_{}_{}.vyrn",
+            std::process::id(),
+            want.len()
+        ));
+        std::fs::write(&f, src).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_vyrn")).arg("build").arg(&f).output().unwrap();
+        assert!(!out.status.success(), "{src} compiled");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(want),
+            "unexpected failure for {src}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = std::fs::remove_file(&f);
+    }
+}
+
 /// A value that has no splice rule in its hole's position aborts generation with
 /// the RFC-0054 message, under either engine — the host applies the rule, so a
 /// refusal is a trap out of `_start` and never a value the generator could

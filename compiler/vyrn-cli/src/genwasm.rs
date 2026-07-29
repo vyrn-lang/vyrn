@@ -22,6 +22,13 @@
 //! into `GenOutput.reads` the same way, which is what the on-disk generator
 //! cache validates against.
 //!
+//! M3b adds the structured results. `lex`, `moduleInterface` and `contractOf`
+//! each hand back a value of a known named type, so there is ONE transfer: the
+//! host encodes by walking the static type, and a decoder synthesized here (as
+//! ordinary Vyrn, not IR) walks the same type pulling it back. Both walks read
+//! the same `record_fields`, which is what makes them agree — there is no
+//! self-describing format for two implementations to read differently.
+//!
 //! Anything still unserved is declined and the interpreter runs it, so this path
 //! can make generation faster but never different.
 
@@ -32,28 +39,18 @@ use vyrn_frontend::ast::{Block, Expr, Function, Param, Program, Stmt, Type};
 use vyrn_frontend::consteval::ConstVal;
 use vyrn_frontend::interp::{CodePiece, GenInputs, GenOutput};
 
-/// What this path cannot serve yet. A generator reaching any of these is handed
-/// back to the interpreter — see [`engine`].
+/// What this path cannot serve. A generator reaching any of these is handed back
+/// to the interpreter — see [`engine`].
 ///
-/// `moduleInterface`/`contractOf` are M3c: they return structured reflection,
-/// not bytes. `lex` is M3b — it returns a whole token list, and the lexer must
-/// stay single-sourced in the host, so it needs a serialization and a decoder.
-/// The RFC-0054 code quotes left this list in M3a: `Code` is now an opaque
-/// handle into a host-side arena, which is what makes `std/tw` and `std/i18n`
-/// servable.
+/// The RFC-0054 code quotes left this list in M3a (`Code` became an opaque
+/// handle into a host-side arena) and `lex`/`moduleInterface`/`contractOf` left
+/// it in M3b (they became a host encoder and a synthesized decoder that both
+/// walk the static type).
 ///
 /// The write capabilities are not a milestone at all: a `gen fn` may not call
 /// them (comptime purity forbids it), so their only effect here is to decline a
 /// module that merely CONTAINS one somewhere.
-const UNSERVED: &[&str] = &[
-    "moduleInterface",
-    "contractOf",
-    "lex",
-    "writeFile",
-    "writeAtomic",
-    "renameFile",
-    "fsyncFile",
-];
+const UNSERVED: &[&str] = &["writeFile", "writeAtomic", "renameFile", "fsyncFile"];
 
 /// Install the wasm generation engine (RFC-0076). Called once from `main`.
 pub fn install() {
@@ -150,7 +147,7 @@ fn run(
 
     let t = std::time::Instant::now();
     let mut reads = Vec::new();
-    let mut source = run_module(key, &argv, inputs, &mut reads, || {
+    let mut source = run_module(key, &argv, program, inputs, &mut reads, || {
         let wrapper = wrapper_program(program, fn_name, argv.len())
             .ok_or_else(|| decline("the wrapper program cannot be synthesized"))?;
         compile_to_wasm(key, &wrapper)
@@ -181,7 +178,22 @@ fn serve(
     reads: &mut Vec<(String, Vec<u8>)>,
     path: &str,
     mode: i32,
-) -> Result<(i32, Vec<u8>), String> {
+) -> Result<Served, String> {
+    // `moduleInterface` links the reflected module and records EVERY module the
+    // link touched, which is what makes editing a closure type's defining file
+    // miss the generator cache (RFC-0031). The interpreter's own implementation,
+    // called here, so the recorded reads cannot differ by engine.
+    if mode == MODE_MODULE_INTERFACE {
+        return vyrn_frontend::interp::gen_module_interface_lit(
+            inputs.resolver,
+            inputs.opts,
+            &inputs.importer_dir,
+            &inputs.allowed,
+            reads,
+            path,
+        )
+        .map(|lit| Served::Lit(Box::new(lit)));
+    }
     let resolved =
         vyrn_frontend::interp::gen_scoped_path(&inputs.importer_dir, &inputs.allowed, path)?;
     if mode == MODE_LIST {
@@ -193,9 +205,9 @@ fn serve(
                 // change invalidates the same cache entry.
                 let joined = names.join("\n").into_bytes();
                 reads.push((format!("{resolved}/"), joined.clone()));
-                Ok((0, joined))
+                Ok(Served::Bytes(0, joined))
             }
-            Err(_) => Ok((1, Vec::new())),
+            Err(_) => Ok(Served::Bytes(1, Vec::new())),
         };
     }
     match inputs.resolver.read(&resolved) {
@@ -205,11 +217,11 @@ fn serve(
             // Recorded before the NUL rule rejects it, like the interpreter: the
             // file was read, and the cache must notice when it changes.
             if mode == MODE_READ && bytes.contains(&0) {
-                return Ok((3, Vec::new()));
+                return Ok(Served::Bytes(3, Vec::new()));
             }
-            Ok((0, bytes))
+            Ok(Served::Bytes(0, bytes))
         }
-        Err(_) => Ok((1, Vec::new())),
+        Err(_) => Ok(Served::Bytes(1, Vec::new())),
     }
 }
 
@@ -271,27 +283,304 @@ fn wrapper_program(program: &Program, fn_name: &str, arity: usize) -> Option<Pro
             .collect(),
         line: 0,
     };
-    p.functions.push(Function {
-        name: "main".to_string(),
+    p.functions.push(func(
+        "main",
+        Vec::new(),
+        Type::Int,
+        vec![
+            Stmt::Expr(Expr::Call { name: "print".to_string(), args: vec![call], line: 0 }),
+            Stmt::Return { value: Some(Expr::Int(0)), line: 0 },
+        ],
+    ));
+    // RFC-0076 M3b: the builtins that hand back a structured value get an entry
+    // point plus the decoders it needs, synthesized before the emitter sees the
+    // program (so the string pool, the ownership analysis and the array lowering
+    // all cover them like any other function).
+    reflect_entries(&mut p)?;
+    Some(p)
+}
+
+// ---------------------------------------------------------------------------
+// RFC-0076 M3b — structured host results.
+//
+// `lex`, `moduleInterface` and `contractOf` are one problem: each returns a
+// value of a KNOWN NAMED TYPE built out of strings, ints, bools, records and
+// arrays. So there is one transfer, walked from both ends. The host encoder
+// (`encode`) walks the static type over the value; the decoder synthesized here
+// walks the same type pulling atoms back. Neither side reads a schema and
+// neither side tags anything beyond an array's length and an Option's presence,
+// because the reader always knows what it is about to read.
+//
+// The decoders are ordinary Vyrn, not hand-written IR: the arrays, records and
+// Options they build are the ones every other program gets, so a change to how
+// codegen lowers a record cannot make the two walks disagree.
+// ---------------------------------------------------------------------------
+
+fn func(name: &str, params: Vec<Param>, ret: Type, stmts: Vec<Stmt>) -> Function {
+    Function {
+        name: name.to_string(),
         exported: false,
         module: None,
         doc: None,
         type_params: Vec::new(),
         type_bounds: Default::default(),
-        params: Vec::<Param>::new(),
-        ret: Type::Int,
-        body: Block {
-            stmts: vec![
-                Stmt::Expr(Expr::Call { name: "print".to_string(), args: vec![call], line: 0 }),
-                Stmt::Return { value: Some(Expr::Int(0)), line: 0 },
-            ],
-        },
+        params,
+        ret,
+        body: Block { stmts },
         line: 0,
         is_extern: false,
         is_export_extern: false,
         is_gen: false,
-    });
-    Some(p)
+    }
+}
+
+fn call(name: &str, args: Vec<Expr>) -> Expr {
+    Expr::Call { name: name.to_string(), args, line: 0 }
+}
+
+fn var(name: &str) -> Expr {
+    Expr::Var { name: name.to_string(), line: 0 }
+}
+
+/// Append an entry point per reachable structured builtin, plus the decoders
+/// they need. `None` declines the whole run — a missing declaration is a
+/// generator this path will not guess at.
+fn reflect_entries(p: &mut Program) -> Option<()> {
+    let reaches = |what: &str| {
+        p.functions
+            .iter()
+            .any(|f| vyrn_frontend::checker::fn_calls(&f.body).contains(what))
+    };
+    let named = |n: &str| Type::Named(n.to_string());
+    let mut dec = Decoders::new(p);
+    let mut entries: Vec<Function> = Vec::new();
+    let str_param = |n: &str| Param {
+        name: n.to_string(),
+        capability: vyrn_frontend::ast::Capability::Read,
+        ty: Type::Str,
+    };
+    // `fn <entry>(arg) -> T { @reflect(kind, arg); return <decode T>() }`.
+    let mut entry = |name: String, params: Vec<Param>, ret: Type, kind: i64, arg: Expr, d: &mut Decoders| {
+        let body = d.decode(&ret)?;
+        entries.push(func(
+            &name,
+            params,
+            ret,
+            vec![
+                Stmt::Expr(call(vyrn_codegen::GEN_REFLECT, vec![Expr::Int(kind), arg])),
+                Stmt::Return { value: Some(body), line: 0 },
+            ],
+        ));
+        Some(())
+    };
+
+    if reaches("moduleInterface") {
+        entry(
+            vyrn_codegen::GEN_ENTRY_MODULE_INTERFACE.to_string(),
+            vec![str_param("path")],
+            named("ModuleInterface"),
+            vyrn_codegen::REFLECT_MODULE_INTERFACE,
+            var("path"),
+            &mut dec,
+        )?;
+    }
+    // `lex` is a common word and therefore shadowable (the checker's rule): a
+    // user function of the same name wins, and emitting no entry for it is what
+    // makes codegen leave that call site alone.
+    if reaches("lex") && !p.functions.iter().any(|f| f.name == "lex") {
+        entry(
+            vyrn_codegen::GEN_ENTRY_LEX.to_string(),
+            vec![str_param("src")],
+            Type::Array(Box::new(named("Token"))),
+            vyrn_codegen::REFLECT_LEX,
+            var("src"),
+            &mut dec,
+        )?;
+    }
+    // A contract name is a declaration, not a value, so the entry is per-contract
+    // and nullary. One per declared contract rather than one per call site: there
+    // are a handful in a module closure, and finding the call sites would mean a
+    // second walk of the whole AST to learn what codegen already knows.
+    if reaches("contractOf") {
+        for name in p.contracts.iter().map(|c| c.name.clone()).collect::<Vec<_>>() {
+            entry(
+                format!("{}{name}", vyrn_codegen::GEN_ENTRY_CONTRACT_OF),
+                Vec::new(),
+                named("ContractInfo"),
+                vyrn_codegen::REFLECT_CONTRACT_OF,
+                Expr::Str(name),
+                &mut dec,
+            )?;
+        }
+    }
+    p.functions.extend(entries);
+    p.functions.extend(dec.fns);
+    Some(())
+}
+
+/// The synthesized decoders, one per composite type, memoized by name.
+struct Decoders {
+    types: std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>,
+    fns: Vec<Function>,
+    made: std::collections::HashSet<String>,
+}
+
+impl Decoders {
+    fn new(p: &Program) -> Self {
+        Decoders {
+            types: p.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect(),
+            fns: Vec::new(),
+            made: std::collections::HashSet::new(),
+        }
+    }
+
+    /// The expression that decodes one value of `ty`. Scalars are the stream
+    /// primitives inline; everything else is a call to a decoder function this
+    /// materializes on demand.
+    fn decode(&mut self, ty: &Type) -> Option<Expr> {
+        Some(match vyrn_frontend::types::resolve(ty, &self.types) {
+            Type::Str => call(vyrn_codegen::GEN_NEXT_STR, vec![]),
+            Type::Int | Type::IntN { .. } => call(vyrn_codegen::GEN_NEXT_INT, vec![]),
+            Type::Bool => Expr::Binary {
+                op: vyrn_frontend::ast::BinOp::Eq,
+                lhs: Box::new(call(vyrn_codegen::GEN_NEXT_INT, vec![])),
+                rhs: Box::new(Expr::Int(1)),
+                line: 0,
+            },
+            _ => {
+                let name = self.materialize(ty)?;
+                call(&name, vec![])
+            }
+        })
+    }
+
+    /// Emit (once) the decoder for a composite type and return its name.
+    fn materialize(&mut self, ty: &Type) -> Option<String> {
+        let name = format!("__vyrnGenDec_{}", mangle(ty)?);
+        if !self.made.insert(name.clone()) {
+            return Some(name);
+        }
+        let body = match vyrn_frontend::types::resolve(ty, &self.types) {
+            // The length, then that many elements.
+            Type::Array(inner) => {
+                let elem = self.decode(&inner)?;
+                vec![
+                    Stmt::Let {
+                        name: "n".into(),
+                        mutable: false,
+                        ty: Some(Type::Int),
+                        value: call(vyrn_codegen::GEN_NEXT_INT, vec![]),
+                        line: 0,
+                    },
+                    Stmt::Let {
+                        name: "xs".into(),
+                        mutable: true,
+                        ty: Some(ty.clone()),
+                        value: Expr::ArrayLit { elems: Vec::new(), line: 0 },
+                        line: 0,
+                    },
+                    Stmt::Let {
+                        name: "i".into(),
+                        mutable: true,
+                        ty: Some(Type::Int),
+                        value: Expr::Int(0),
+                        line: 0,
+                    },
+                    Stmt::While {
+                        cond: Expr::Binary {
+                            op: vyrn_frontend::ast::BinOp::Lt,
+                            lhs: Box::new(var("i")),
+                            rhs: Box::new(var("n")),
+                            line: 0,
+                        },
+                        body: Block {
+                            stmts: vec![
+                                // The parser's own write-back for a statement
+                                // `xs.push(v)`: push returns the reallocated
+                                // triple, so it must be stored back.
+                                Stmt::Assign {
+                                    name: "xs".into(),
+                                    value: call("push", vec![var("xs"), elem]),
+                                    line: 0,
+                                },
+                                Stmt::Assign {
+                                    name: "i".into(),
+                                    value: Expr::Binary {
+                                        op: vyrn_frontend::ast::BinOp::Add,
+                                        lhs: Box::new(var("i")),
+                                        rhs: Box::new(Expr::Int(1)),
+                                        line: 0,
+                                    },
+                                    line: 0,
+                                },
+                            ],
+                        },
+                        line: 0,
+                    },
+                    Stmt::Return { value: Some(var("xs")), line: 0 },
+                ]
+            }
+            // One tag atom, then the payload only when it is there.
+            Type::Option(inner) => {
+                let some = self.decode(&inner)?;
+                vec![
+                    Stmt::If {
+                        cond: Expr::Binary {
+                            op: vyrn_frontend::ast::BinOp::Eq,
+                            lhs: Box::new(call(vyrn_codegen::GEN_NEXT_INT, vec![])),
+                            rhs: Box::new(Expr::Int(1)),
+                            line: 0,
+                        },
+                        then_block: Block {
+                            stmts: vec![Stmt::Return {
+                                value: Some(call("Some", vec![some])),
+                                line: 0,
+                            }],
+                        },
+                        else_block: None,
+                        line: 0,
+                    },
+                    Stmt::Return { value: Some(var("None")), line: 0 },
+                ]
+            }
+            // Fields in the DECLARATION's order, which is the order the host
+            // pushed them — both sides read `record_fields`, so there is no field
+            // -order convention for either to remember.
+            Type::Record(_) => {
+                let Type::Named(rec) = ty else { return None };
+                let fields = vyrn_frontend::types::record_fields(ty, &self.types)?;
+                let mut lit = Vec::new();
+                for f in &fields {
+                    lit.push((f.name.clone(), self.decode(&f.ty)?));
+                }
+                vec![Stmt::Return {
+                    value: Some(Expr::StructLit {
+                        name: rec.clone(),
+                        fields: lit,
+                        line: 0,
+                    }),
+                    line: 0,
+                }]
+            }
+            _ => return None,
+        };
+        self.fns.push(func(&name, Vec::new(), ty.clone(), body));
+        Some(name)
+    }
+}
+
+/// A decoder's name suffix. Only the shapes the reflected types are built from —
+/// anything else declines rather than being encoded by accident.
+fn mangle(ty: &Type) -> Option<String> {
+    Some(match ty {
+        Type::Named(n) => n.clone(),
+        Type::Array(t) => format!("Arr_{}", mangle(t)?),
+        Type::Option(t) => format!("Opt_{}", mangle(t)?),
+        Type::Str => "Str".into(),
+        Type::Int => "Int".into(),
+        Type::Bool => "Bool".into(),
+        _ => return None,
+    })
 }
 
 /// Emit IR, compile it against wasi-libc, and read back the module bytes.
@@ -365,6 +654,21 @@ fn wasi_builtins(sysroot: &Path) -> Option<PathBuf> {
 /// `__vyrn_gen_read`'s modes, shared with the C shim.
 const MODE_READ: i32 = 0;
 const MODE_LIST: i32 = 2;
+/// Not a read at all: `moduleInterface`, which needs the resolver AND the
+/// loader, so it is served on the host thread like one (RFC-0076 M3b).
+const MODE_MODULE_INTERFACE: i32 = 3;
+
+/// One unit of a structured host result (RFC-0076 M3b).
+///
+/// The stream carries no type information beyond this, and does not need to:
+/// both the host encoder and the synthesized decoder walk the same static type,
+/// so the reader always knows what it is about to read. The distinction between
+/// the two variants is therefore not a tag the decoder consults — it is a
+/// tripwire, and a `nextInt` that finds a string means the two walks disagreed.
+enum Atom {
+    Int(i64),
+    Str(Vec<u8>),
+}
 
 /// The guest's world: its argv, what it wrote, and its line to the host.
 #[derive(Default)]
@@ -382,6 +686,15 @@ struct Streams {
     /// from one run must be meaningless in the next, and being an index into a
     /// vector that no longer exists is the strongest form of that.
     code: Vec<Vec<CodePiece>>,
+    /// The structured result being handed over, and how far the decoder has read
+    /// (RFC-0076 M3b). One at a time: a decoder only ever calls `nextInt`/
+    /// `nextStr`, so a stream is always fully consumed before the next `reflect`.
+    atoms: Vec<Atom>,
+    cursor: usize,
+    /// The generator's own declarations, so `contractOf` and `lex` can be
+    /// answered on this thread — neither needs the resolver.
+    types: std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>,
+    contracts: Vec<vyrn_frontend::ast::ContractDecl>,
     caps: Option<Caps>,
 }
 
@@ -400,6 +713,109 @@ impl Streams {
         self.code.push(pieces);
         self.code.len() as i64 - 1
     }
+
+    /// Start handing over `lit` as a value of type `ty`.
+    ///
+    /// The previous stream must be exhausted: an unread atom means the decoder
+    /// walked a shorter type than the encoder did, which is the one failure this
+    /// design can have and the one worth catching loudly.
+    fn stream(&mut self, ty: &Type, lit: &Expr) -> wasmtime::Result<()> {
+        self.drained()?;
+        let mut atoms = Vec::new();
+        encode(ty, lit, &self.types, &mut atoms).map_err(wasmtime::Error::msg)?;
+        self.atoms = atoms;
+        self.cursor = 0;
+        Ok(())
+    }
+
+    fn drained(&self) -> wasmtime::Result<()> {
+        if self.cursor != self.atoms.len() {
+            return Err(wasmtime::Error::msg(format!(
+                "generator decoder left {} atoms unread — the host and guest walks of the \
+                 reflected type disagree",
+                self.atoms.len() - self.cursor
+            )));
+        }
+        Ok(())
+    }
+
+    fn next_atom(&mut self) -> wasmtime::Result<&Atom> {
+        let a = self.atoms.get(self.cursor).ok_or_else(|| {
+            wasmtime::Error::msg(
+                "generator decoder read past the end of a reflected value — the host and guest \
+                 walks of the reflected type disagree",
+            )
+        })?;
+        self.cursor += 1;
+        Ok(a)
+    }
+}
+
+/// Push `lit` — a record literal built by the compiler's own reflection — onto
+/// the atom stream, walking the STATIC TYPE rather than the literal (RFC-0076
+/// M3b).
+///
+/// Walking the type is the whole design. The decoder walks it too, from
+/// `record_fields`/`resolve`, so the two agree by construction instead of by a
+/// convention each side has to remember. Fields are pulled out of the literal BY
+/// NAME for the same reason: `module_interface_lit` happens to build them in
+/// declaration order today, and depending on that would be a silent,
+/// load-bearing coincidence.
+fn encode(
+    ty: &Type,
+    lit: &Expr,
+    types: &std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>,
+    out: &mut Vec<Atom>,
+) -> Result<(), String> {
+    let wrong = || format!("cannot encode {lit:?} as {ty}");
+    match vyrn_frontend::types::resolve(ty, types) {
+        Type::Str => match lit {
+            Expr::Str(s) => out.push(Atom::Str(s.clone().into_bytes())),
+            _ => return Err(wrong()),
+        },
+        Type::Int | Type::IntN { .. } => match lit {
+            Expr::Int(n) => out.push(Atom::Int(*n)),
+            _ => return Err(wrong()),
+        },
+        Type::Bool => match lit {
+            Expr::Bool(b) => out.push(Atom::Int(*b as i64)),
+            _ => return Err(wrong()),
+        },
+        // `Some(x)` / `None` — one presence atom, then the payload if there is one.
+        Type::Option(inner) => match lit {
+            Expr::Call { name, args, .. } if name == "Some" && args.len() == 1 => {
+                out.push(Atom::Int(1));
+                encode(&inner, &args[0], types, out)?;
+            }
+            Expr::Var { name, .. } if name == "None" => out.push(Atom::Int(0)),
+            _ => return Err(wrong()),
+        },
+        Type::Array(inner) => match lit {
+            Expr::ArrayLit { elems, .. } => {
+                out.push(Atom::Int(elems.len() as i64));
+                for e in elems {
+                    encode(&inner, e, types, out)?;
+                }
+            }
+            _ => return Err(wrong()),
+        },
+        Type::Record(_) => {
+            let Expr::StructLit { fields, .. } = lit else {
+                return Err(wrong());
+            };
+            let decl = vyrn_frontend::types::record_fields(ty, types).ok_or_else(wrong)?;
+            for f in &decl {
+                let v = fields
+                    .iter()
+                    .find(|(k, _)| *k == f.name)
+                    .map(|(_, v)| v)
+                    .ok_or_else(|| format!("reflected literal has no field `{}`", f.name))?;
+                encode(&f.ty, v, types, out)?;
+            }
+        }
+        _ => return Err(wrong()),
+    }
+    Ok(())
 }
 
 /// The guest's end of the capability channel.
@@ -411,7 +827,16 @@ impl Streams {
 /// microseconds against a generation measured in milliseconds.
 struct Caps {
     req: mpsc::Sender<(String, i32)>,
-    resp: mpsc::Receiver<Result<(i32, Vec<u8>), String>>,
+    resp: mpsc::Receiver<Result<Served, String>>,
+}
+
+/// What the host thread answers a guest request with: bytes for a read or a
+/// listing, and the compiler's reflection literal for `moduleInterface`.
+enum Served {
+    Bytes(i32, Vec<u8>),
+    /// Encoded on the GUEST thread, so all three structured builtins share one
+    /// call to [`encode`] rather than one per request kind.
+    Lit(Box<Expr>),
 }
 
 /// `proc_exit`, carried out of the guest as an error because that is the only
@@ -554,6 +979,7 @@ fn module_cache() -> &'static std::sync::Mutex<std::collections::HashMap<u64, wa
 fn run_module(
     key: u64,
     argv: &[String],
+    program: &Program,
     inputs: &GenInputs<'_>,
     reads: &mut Vec<(String, Vec<u8>)>,
     build: impl FnOnce() -> Result<Vec<u8>, EngineError>,
@@ -575,7 +1001,7 @@ fn run_module(
             m
         }
     };
-    run_hosted(&module, argv, inputs, reads)
+    run_hosted(&module, argv, program, inputs, reads)
 }
 
 /// Run the guest on its own thread and serve its capability requests from this
@@ -584,14 +1010,20 @@ fn run_module(
 fn run_hosted(
     module: &wasmtime::Module,
     argv: &[String],
+    program: &Program,
     inputs: &GenInputs<'_>,
     reads: &mut Vec<(String, Vec<u8>)>,
 ) -> Result<String, EngineError> {
     let (req_tx, req_rx) = mpsc::channel::<(String, i32)>();
-    let (resp_tx, resp_rx) = mpsc::channel::<Result<(i32, Vec<u8>), String>>();
+    let (resp_tx, resp_rx) = mpsc::channel::<Result<Served, String>>();
 
     let module = module.clone();
     let argv: Vec<String> = argv.to_vec();
+    // The declarations `contractOf` and `lex` reflect over. Cloned across because
+    // the store's data must be `'static`, and cheap beside the `program.clone()`
+    // the wrapper already pays.
+    let types = program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
+    let contracts = program.contracts.clone();
     let guest = std::thread::Builder::new()
         // Cranelift-compiled code runs on this stack; a deeply recursive
         // generator (every parser here is one) would otherwise overflow the
@@ -601,6 +1033,8 @@ fn run_hosted(
             run_wasm(
                 &module,
                 &argv,
+                types,
+                contracts,
                 Caps {
                     req: req_tx,
                     resp: resp_rx,
@@ -634,6 +1068,8 @@ fn run_hosted(
 fn run_wasm(
     module: &wasmtime::Module,
     argv: &[String],
+    types: std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>,
+    contracts: Vec<vyrn_frontend::ast::ContractDecl>,
     caps: Caps,
 ) -> Result<String, EngineError> {
     use wasmtime::*;
@@ -657,11 +1093,12 @@ fn run_wasm(
                     .send((path, mode))
                     .map_err(|_| Error::msg("generator host is gone"))?;
                 match caps.resp.recv() {
-                    Ok(Ok((status, bytes))) => {
+                    Ok(Ok(Served::Bytes(status, bytes))) => {
                         let len = bytes.len() as i64;
                         streams.stash = bytes;
                         Ok((status as i64) << 32 | len)
                     }
+                    Ok(Ok(Served::Lit(_))) => Err(Error::msg("read answered with a literal")),
                     // A scoping violation unwinds out of `_start` instead of
                     // becoming an `Err` value — same as the interpreter's trap.
                     Ok(Err(msg)) => Err(Error::new(Denied(msg))),
@@ -749,6 +1186,93 @@ fn run_wasm(
                 let s = caller.data_mut();
                 let text = vyrn_frontend::interp::render_code(s.pieces(h)?);
                 s.stash = text.into_bytes();
+                Ok(s.stash.len() as i64)
+            },
+        )
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
+
+    // Structured host results (RFC-0076 M3b). `reflect` computes a value of a
+    // known named type in the HOST — the lexer, the linker and the contract
+    // tables are compiler machinery and a guest-side copy would be a second
+    // answer — and leaves it as a flat atom stream the decoder pulls back.
+    linker
+        .func_wrap(
+            "vyrn_gen",
+            "reflect",
+            |mut caller: Caller<'_, Streams>, kind: i64, arg: i32| -> Result<()> {
+                let (data, streams) = guest_mem(&mut caller)?;
+                let arg = cstr(data, arg)?;
+                match kind {
+                    // The one kind that needs the resolver, so it goes to the
+                    // host thread and comes back as the compiler's own literal.
+                    vyrn_codegen::REFLECT_MODULE_INTERFACE => {
+                        let caps = streams.caps.as_ref().ok_or_else(|| Error::msg("no host"))?;
+                        caps.req
+                            .send((arg, MODE_MODULE_INTERFACE))
+                            .map_err(|_| Error::msg("generator host is gone"))?;
+                        let lit = match caps.resp.recv() {
+                            Ok(Ok(Served::Lit(lit))) => lit,
+                            Ok(Ok(Served::Bytes(..))) => {
+                                return Err(Error::msg("moduleInterface answered with bytes"))
+                            }
+                            // An unreadable module or a load failure is a trap
+                            // under the interpreter too, so it unwinds out of
+                            // `_start` rather than becoming a value.
+                            Ok(Err(msg)) => return Err(Error::new(Denied(msg))),
+                            Err(_) => return Err(Error::msg("generator host is gone")),
+                        };
+                        streams.stream(&Type::Named("ModuleInterface".into()), &lit)
+                    }
+                    // A contract is a declaration the generator's own module
+                    // closure carries, so this needs nothing from the host thread.
+                    vyrn_codegen::REFLECT_CONTRACT_OF => {
+                        let decl = streams
+                            .contracts
+                            .iter()
+                            .find(|c| c.name == arg)
+                            .ok_or_else(|| {
+                                Error::new(Denied(format!(
+                                    "`contractOf` needs a declared contract name; `{arg}` is not \
+                                     a contract"
+                                )))
+                            })?;
+                        let lit = vyrn_frontend::schema_reflect::contract_info_lit(decl);
+                        streams.stream(&Type::Named("ContractInfo".into()), &lit)
+                    }
+                    vyrn_codegen::REFLECT_LEX => {
+                        let lit = vyrn_frontend::interp::gen_lex_tokens_lit(&arg);
+                        streams.stream(&Type::Array(Box::new(Type::Named("Token".into()))), &lit)
+                    }
+                    other => Err(Error::msg(format!("bad reflect kind {other}"))),
+                }
+            },
+        )
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
+    linker
+        .func_wrap(
+            "vyrn_gen",
+            "nextInt",
+            |mut caller: Caller<'_, Streams>| -> Result<i64> {
+                match caller.data_mut().next_atom()? {
+                    Atom::Int(n) => Ok(*n),
+                    Atom::Str(_) => Err(Error::msg("reflected value: expected an Int atom")),
+                }
+            },
+        )
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
+    // Length, then `fetch` — the M2 stash protocol, so the host still never
+    // allocates inside guest memory.
+    linker
+        .func_wrap(
+            "vyrn_gen",
+            "nextStr",
+            |mut caller: Caller<'_, Streams>| -> Result<i64> {
+                let s = caller.data_mut();
+                let bytes = match s.next_atom()? {
+                    Atom::Str(b) => b.clone(),
+                    Atom::Int(_) => return Err(Error::msg("reflected value: expected a Str atom")),
+                };
+                s.stash = bytes;
                 Ok(s.stash.len() as i64)
             },
         )
@@ -904,6 +1428,8 @@ fn run_wasm(
     // argv[0] is the program name, which `args()` (argv[1..]) skips.
     let mut world = Streams {
         caps: Some(caps),
+        types,
+        contracts,
         ..Streams::default()
     };
     world.argv.push(b"gen\0".to_vec());
@@ -946,6 +1472,12 @@ fn run_wasm(
             None => return Err(EngineError::Failed(format!("generator trapped: {e}"))),
         },
     }
+    // The last reflected value has no following `reflect` to check it, so its
+    // stream is checked here: an unread atom means the decoder walked a shorter
+    // type than the encoder did.
+    streams
+        .drained()
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
     String::from_utf8(streams.stdout)
         .map_err(|_| EngineError::Failed("generator emitted invalid UTF-8".into()))
 }

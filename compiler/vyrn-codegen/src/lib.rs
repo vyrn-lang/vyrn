@@ -1119,7 +1119,39 @@ const CODE_IMPORTS: &[(&str, &str)] = &[
     // The M2 stash reader: `render` answers with a length and the guest
     // allocates, because the host must not allocate inside guest memory.
     ("void @__vyrn_gen_fetch(ptr)", "fetch"),
+    // RFC-0076 M3b — structured host results. `reflect` asks the host for a
+    // value of a known named type (`lex`, `moduleInterface`, `contractOf`) and
+    // leaves it as a flat atom stream; `nextInt`/`nextStr` pull the atoms back in
+    // the order the decoder walks the type. `nextStr` answers with a length and
+    // the guest allocates, exactly as `render` does.
+    ("void @__vyrn_gen_reflect(i64, ptr)", "reflect"),
+    ("i64 @__vyrn_gen_next_int()", "nextInt"),
+    ("i64 @__vyrn_gen_next_str()", "nextStr"),
 ];
+
+/// `@__vyrn_gen_reflect`'s kinds — which builtin the host is answering
+/// (RFC-0076 M3b). The argument is the module path, the contract NAME, or the
+/// source to lex.
+pub const REFLECT_MODULE_INTERFACE: i64 = 0;
+pub const REFLECT_CONTRACT_OF: i64 = 1;
+pub const REFLECT_LEX: i64 = 2;
+
+/// The generator-host entry points the ENGINE synthesizes and this emitter calls
+/// (RFC-0076 M3b).
+///
+/// Each is an ordinary Vyrn function the engine appends to the wrapper program:
+/// it asks the host to compute the value, then decodes it by walking the static
+/// type. Codegen only redirects the builtin's call site to it, so the decode is
+/// compiled by the ordinary emitter rather than hand-written as IR — the arrays,
+/// the records and the Options are the ones every other Vyrn program gets.
+pub const GEN_ENTRY_MODULE_INTERFACE: &str = "__vyrnGenModuleInterface";
+pub const GEN_ENTRY_LEX: &str = "__vyrnGenLex";
+/// Suffixed with the contract's name: the argument is a declaration, not a value.
+pub const GEN_ENTRY_CONTRACT_OF: &str = "__vyrnGenContractOf_";
+/// The atom-stream primitives the synthesized decoders are written against.
+pub const GEN_REFLECT: &str = "__vyrnGenReflect";
+pub const GEN_NEXT_INT: &str = "__vyrnGenNextInt";
+pub const GEN_NEXT_STR: &str = "__vyrnGenNextStr";
 
 /// `@__vyrn_code_splice`'s value tags — which interpreter `Val` the host is to
 /// rebuild from the word it was handed. Exactly the set the splice rule accepts
@@ -6504,6 +6536,69 @@ impl<'a> Gen<'a> {
                     && !self.funcs.contains_key(name)))
         {
             return self.gen_code_quote(name, args);
+        }
+        // RFC-0076 M3b — the builtins that return a value of a known named type.
+        // Each call site is redirected to the entry function the engine
+        // synthesized for it; the entry asks the host for the value and decodes
+        // it in ordinary Vyrn. `contractOf`'s argument is a contract NAME, so the
+        // entry is per-contract and nullary.
+        //
+        // The redirect is conditional on the entry existing, which is what keeps
+        // the shadowing rules intact without restating them: the engine emits an
+        // entry for `lex` only when no user function claims the name (`render`/
+        // `raw`/`rawAt` are handled the same way above), while `moduleInterface`
+        // and `contractOf` are reserved words and cannot be shadowed at all.
+        if GEN_HOST.with(|g| g.get()) {
+            let entry = match name {
+                "moduleInterface" => Some(GEN_ENTRY_MODULE_INTERFACE.to_string()),
+                "lex" => Some(GEN_ENTRY_LEX.to_string()),
+                "contractOf" => match args.first() {
+                    Some(Expr::Var { name: cn, .. }) => {
+                        Some(format!("{GEN_ENTRY_CONTRACT_OF}{cn}"))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(entry) = entry.filter(|e| self.funcs.contains_key(e.as_str())) {
+                // A contract name is a declaration, not an argument.
+                let fwd: &[Expr] = if name == "contractOf" { &[] } else { args };
+                return self.gen_call(&entry, fwd);
+            }
+            match name {
+                // The stream primitives the synthesized decoders call. `reflect`
+                // computes the value host-side and leaves it as atoms; the two
+                // `next` calls pull them back. Nothing about the value's shape is
+                // encoded here — the decoder walks the type, and so does the host.
+                GEN_REFLECT => {
+                    let (kind, _) = self.gen_expr(&args[0])?;
+                    let (arg, _) = self.gen_expr(&args[1])?;
+                    self.emit(format!(
+                        "call void @__vyrn_gen_reflect(i64 {kind}, ptr {arg})"
+                    ));
+                    return Ok((String::new(), Type::Unit));
+                }
+                GEN_NEXT_INT => {
+                    let t = self.fresh_tmp();
+                    self.emit(format!("{t} = call i64 @__vyrn_gen_next_int()"));
+                    return Ok((t, Type::Int));
+                }
+                // Length, then allocate, then fetch — the M2 stash protocol.
+                GEN_NEXT_STR => {
+                    let len = self.fresh_tmp();
+                    let sz = self.fresh_tmp();
+                    let buf = self.fresh_tmp();
+                    let end = self.fresh_tmp();
+                    self.emit(format!("{len} = call i64 @__vyrn_gen_next_str()"));
+                    self.emit(format!("{sz} = add i64 {len}, 1"));
+                    self.emit(format!("{buf} = call ptr @__vyrn_malloc(i64 {sz})"));
+                    self.emit(format!("call void @__vyrn_gen_fetch(ptr {buf})"));
+                    self.emit(format!("{end} = getelementptr i8, ptr {buf}, i64 {len}"));
+                    self.emit(format!("store i8 0, ptr {end}"));
+                    return Ok((buf, Type::Str));
+                }
+                _ => {}
+            }
         }
         if name == "listDir" {
             // RFC-0076 M2: on the generator-host path the listing comes from the
