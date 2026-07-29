@@ -1,6 +1,6 @@
 # RFC-0076 — Generators as Wasm: Compile the Generator, Don't Interpret It
 
-- **Status:** Draft
+- **Status:** Implemented — M1 through M5 shipped; see the milestone sections below.
 - **Depends on:** RFC-0021 (`gen fn`, the comptime sandbox, the content-addressed
   generator cache), RFC-0012 (`extern` both directions, the String ABI),
   RFC-0014 (the WASI shim and its canonical error wording), RFC-0031
