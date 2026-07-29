@@ -36,7 +36,7 @@ use wasm_encoder::{
     FunctionSection, GlobalSection, GlobalType, ImportSection, MemorySection, MemoryType,
     TypeSection,
 };
-pub use wasm_encoder::{Instruction, MemArg, ValType};
+pub use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
 
 /// Top of the generated module's shadow stack; it grows down from here to 0.
 pub const STACK_TOP: u32 = 65_536;
@@ -207,6 +207,13 @@ impl Module {
         f.f.instruction(&Instruction::End);
         self.code.function(&f.f);
         self.n_imports + self.funcs.len() - 1
+    }
+
+    /// How many functions this module imports — the offset a defined
+    /// function's index starts from, which a lowering needs before any body
+    /// exists in order to name a callee it has not emitted yet.
+    pub fn n_imports(&self) -> u32 {
+        self.n_imports
     }
 
     /// Export a defined function under `name` — `vyrn_entry`, and one per

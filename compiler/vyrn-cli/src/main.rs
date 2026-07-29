@@ -3231,14 +3231,6 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let ir = match vyrn_codegen::emit(&program) {
-        Ok(ir) => ir,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
     // default output name: <stem> (+ .exe on Windows, .wasm for wasm)
     let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("a");
     let out_path = out.unwrap_or_else(|| {
@@ -3250,6 +3242,42 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
             stem.to_string()
         }
     });
+
+    // RFC-0077 M2: the direct wasm backend, behind a flag that is TEMPORARY BY
+    // DESIGN — M5 deletes it along with the LLVM wasm path, because this repo
+    // has already watched an ungated second backend rot to unbuildable in twelve
+    // days (`vyrn-codegen-llvm`, b1eef04). Until then it is opt-in, so the wasm
+    // column of parity keeps being produced by the path that works.
+    //
+    // A construct it cannot lower is an ERROR, never a fall-through to clang: the
+    // burndown ladder counts what this backend can do, and a silent fallback
+    // would make that number a statement about LLVM instead.
+    if wasm && std::env::var("VYRN_WASM_BACKEND").as_deref() == Ok("direct") {
+        return match vyrn_codegen::direct::compile(&program) {
+            Ok(bytes) => match std::fs::write(&out_path, bytes) {
+                Ok(()) => {
+                    println!("wrote {out_path}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: cannot write {out_path}: {e}");
+                    ExitCode::FAILURE
+                }
+            },
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    let ir = match vyrn_codegen::emit(&program) {
+        Ok(ir) => ir,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     // write IR + the portable stream shim next to the output so failures are
     // inspectable

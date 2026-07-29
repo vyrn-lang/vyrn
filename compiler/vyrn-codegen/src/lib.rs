@@ -13,6 +13,7 @@
 //! to SSA registers), which keeps the emitter simple. `&&`/`||` short-circuit
 //! via branches + `phi`, matching the interpreter in [`vyrn_frontend::interp`].
 
+pub mod direct;
 pub mod layout;
 pub mod toolchain;
 pub mod wasm;
