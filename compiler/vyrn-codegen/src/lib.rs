@@ -12,9 +12,6 @@
 //! Local variables use `alloca`/`load`/`store` (LLVM's `mem2reg` promotes them
 //! to SSA registers), which keeps the emitter simple. `&&`/`||` short-circuit
 //! via branches + `phi`, matching the interpreter in [`vyrn_frontend::interp`].
-//!
-//! The Inkwell (in-memory LLVM) backend in the excluded `vyrn-codegen-llvm`
-//! crate will eventually replace this; both must agree with the interpreter.
 
 pub mod toolchain;
 

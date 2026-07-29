@@ -36,7 +36,7 @@
 //! `vyrn-lsp` could not reach it — and the LSP is the whole point: a compiled
 //! artifact is argument-independent and cached for the process, so a long-lived
 //! one pays clang once per generator instead of once per call. Excluded from the
-//! default workspace like `vyrn-lsp` and `vyrn-codegen-llvm`, for the same
+//! default workspace like `vyrn-lsp`, for the same
 //! reason: `wasmtime` is an external dependency and `cargo build` must not need
 //! one.
 
