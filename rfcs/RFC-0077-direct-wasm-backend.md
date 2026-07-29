@@ -637,3 +637,137 @@ to see.
 
 A working pipeline, a switch that fails loudly, and a list of 78 examples sorted
 by what stops them. The first item on it is worth 62.
+
+---
+
+## M2b, as landed
+
+The wall M2a measured was one wall. It is gone, and what is behind it is a
+different list rather than the same one — which is what a burndown is for.
+
+`vyrn-codegen/src/direct.rs`, ~1,700 lines. **8 of 80**, from 2.
+
+Eight is not the interesting number. 62 of 78 examples used to stop at *a
+non-scalar type in a signature*; zero do now. The type system reaches the
+backend, and what stops an example today is a construct that has to be written
+(`for`, an array literal, a `where` refinement) rather than a shape the backend
+could not describe.
+
+### The aggregate ABI survived contact with code, unchanged
+
+M0 wrote down four rules. All four are now emitted, and none of them needed a
+fifth:
+
+- On the operand stack an aggregate is **always** the `i32` address of a frame
+  slot, never a value.
+- A parameter is an address the callee copies out of in its prologue. M0 said
+  this would be free because the LLVM emitter already stores every parameter
+  into a fresh alloca; it was.
+- A return is a hidden leading `i32` the callee writes through, and the wasm
+  function returns nothing.
+- A join allocates its slot **before** the branch and each arm copies into it.
+
+No shape needed a case outside those: records (including nested and
+width-subtyped), `Option`/`Result`, user enums, and the `{ i64, i64 }` pair a
+`Ref` is. Field offsets are `layout::of_ll` ∘ `llt` at every site — nothing in
+this milestone computes an offset.
+
+### The n-way joins cost what the diamonds cost
+
+M0's warning, and the one thing worth reporting as a result rather than as
+work. 46 of the 149 aggregate joins have four to seven incoming edges.
+
+A `match` lowers to a chain of `if`s inside one `block`, each arm leaving by
+`br` to it. A scalar result rides the branch; an aggregate one is copied into a
+slot allocated before the first tag test. **There is no arm count anywhere in
+the lowering** — no phi to reconstruct, no join to rediscover — so seven arms
+cost seven `if`s and nothing else. Aggregate `select` remains 0, so the case
+with no branch to hang stores on never arose.
+
+The one thing destination-first *does* cost is that the arms must agree on a
+type before either is emitted, since the slot is allocated first. That is a
+small `peek` typer, and every arm is then checked against its answer by the
+ordinary conversion path — so a wrong prediction is a compile error, not a
+miscompile.
+
+### `String` was the easy half of its own bucket
+
+A `String` is a NUL-terminated `ptr`, i.e. a **scalar**. The 23 examples it
+blocked were never blocked by its representation; they were blocked by what you
+can do with one. So the module emits `strlen`, `strcmp`, `int_str` and `concat`
+— which between them are `print`, `==`, `+` and `"\{x}"` — over a bump `malloc`
+of its own.
+
+That allocator is the milestone's one deliberate corner. RFC-0076's shim owns
+the real one, but `vyrn build --target wasm` produces ONE module with no shim
+beside it, and M4 is where the prelude moves. Until then: a second mutable
+global, initialized past the statics by the encoder (the number M0 predicted a
+direct emitter would know by construction), and **it never frees**. Nothing
+observable depends on that — a free is not something a program can print — and
+`Stmt::Drop` is already in the AST for when it does.
+
+### Two things are refused because getting them wrong is silent
+
+Both were found by the ladder, and both are the class this RFC keeps naming:
+
+- A **validated type** (`type Age = Int64 where value >= 0`) has the *same
+  representation* as its base. It would have lowered perfectly and simply never
+  checked the refinement — a wrong program, not a missing one. 14 examples.
+- A **`modify` parameter** is by-pointer with copy-out. Passed like a `read`
+  one it compiles cleanly and throws the callee's writes away; `modify.vyrn`
+  printed zeroes where the interpreter printed 115. 4 examples.
+
+A type-level gap walk (depth-bounded, because a record may hold a `Ref` to its
+own type) catches the first anywhere it hides, including inside a record field.
+
+### Two structural changes, both to stop a second source of truth
+
+**`llt` is now the free `llt_of`.** M0 chose to parse the LLVM type *string*
+precisely so layout could not drift from lowering; that argument applies twice
+over to a second backend, so `Gen::llt` and `direct` now call one function. A
+second match on `Type` would have been the mistake this RFC exists to avoid
+making twice.
+
+**`wasm::Frame` buffers its instructions.** The prologue depends on a frame size
+that only the finished body knows. The alternative was a sizing pre-pass over
+the AST — a second traversal that has to agree with the first about which
+expressions need a slot, which is the same class of bug wearing a different
+hat. Buffering also made locals dynamic, which deleted M2a's `collect_lets`
+and its shallow `infer` entirely.
+
+### The bug worth recording
+
+`print` wrote its string and its newline as two iovecs of one `fd_write`, and
+only the first arrived. A short write is legal and the return value was being
+dropped — the emitted code was *correct wasm* and *wrong I/O*, which no
+validator was ever going to say. Every byte now leaves through one `write_all`
+that retries, rather than three call sites that each have to remember to.
+
+M2a's `print_i64` had the same latent exposure and never showed it, because 21
+bytes never short-write.
+
+### Nothing contradicted M0, M1 or M2a
+
+The destination-first rule, the no-`return`-in-a-body rule, the widening rule
+and the memory map all went in as written. The one M2a note that is now
+outdated is its size measurement: `fib.vyrn` is **944 bytes**, not 383, because
+every module carries the ~500-byte emitted runtime whether it calls it or not.
+Still three orders of magnitude under the 277,438 the clang path produces, and
+M4 is where most of it leaves again.
+
+### 8 of 80, regrouped
+
+| blocked on | n |
+|---|---|
+| `Array<T>` and what you do with one (array literals 8, `for` 7, `.length` 3, `at` 2, `chars` 1) | **21** |
+| a `where` refinement (`Age`, `Count`, `Percent`, `Username`, …) | 14 |
+| builtins with no lowering (`args`, `cell`/`set`/`get`, `logger`, `readFile`, `readLine`, `jsonSchema`, `schemaOf`, a map literal) | 12 |
+| generics — monomorphization runs inside `Gen`, not before it | 10 |
+| a `modify` parameter | 4 |
+| module state (RFC-0013 top-level `let`) | 3 |
+| `spawn` 2, `region` 1, `if let` 1 | 4 |
+| floats, sized-int arithmetic, bitwise | 3 |
+
+The first row is one feature — a growable array and its runtime — and it is
+worth 21. That is M2c's first item, and it is the same shape of argument M2a
+made about the type wall, which turned out to be right.
