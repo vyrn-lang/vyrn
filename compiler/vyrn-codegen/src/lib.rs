@@ -1433,12 +1433,7 @@ fn emit_with(program: &Program, gen_host: bool) -> Result<String, String> {
         if t.predicate.is_none() {
             continue;
         }
-        let msg = if matches!(t.base, Type::Record(_)) {
-            format!("error: validation failed: `{}` violates its `where` clause\n", t.name)
-        } else {
-            format!("error: validation failed for `{}`\n", t.name)
-        };
-        let (escaped, len) = llvm_str(&msg);
+        let (escaped, len) = llvm_str(&validation_message(t));
         out.push_str(&format!(
             "@.trap.verr.{} = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n",
             t.name
@@ -2380,13 +2375,9 @@ impl<'a> Gen<'a> {
         to: &Type,
     ) -> Result<(String, Type), String> {
         if self.string_flow_proven(expr, to) {
-            if let Type::Named(n) = to {
-                if let Some(decl) = self.types.get(n).cloned() {
-                    if decl.predicate.is_some() {
-                        let (v, _) = self.coerce(op, from, &decl.base)?;
-                        return Ok((v, to.clone()));
-                    }
-                }
+            if let Some(base) = validation_required(from, to, self.types).map(|d| d.base.clone()) {
+                let (v, _) = self.coerce(op, from, &base)?;
+                return Ok((v, to.clone()));
             }
         }
         self.coerce(op, from, to)
@@ -2407,18 +2398,12 @@ impl<'a> Gen<'a> {
         // AUTOMATIC VALIDATION: a value flowing into a predicated named type
         // coerces to its base, then runs the `where` predicate inline and traps
         // with the canonical message — mirroring the interpreter's `coerce`.
-        // The exact same named type skips the check (it was validated when it
-        // was constructed/coerced originally).
-        if let Type::Named(n) = to {
-            if from != to {
-                if let Some(decl) = self.types.get(n).cloned() {
-                    if decl.predicate.is_some() {
-                        let (v, _) = self.coerce(op, from, &decl.base)?;
-                        self.emit_validation(&decl, &v)?;
-                        return Ok((v, to.clone()));
-                    }
-                }
-            }
+        // Whether that is required is [`validation_required`]'s call, not this
+        // site's, because the direct wasm backend has to reach the same verdict.
+        if let Some(decl) = validation_required(from, to, self.types).cloned() {
+            let (v, _) = self.coerce(op, from, &decl.base)?;
+            self.emit_validation(&decl, &v)?;
+            return Ok((v, to.clone()));
         }
         // A function value flowing between fn-typed spellings (RFC-0037): the
         // structural form and any named alias share the `{ i64, i64 }` enum
@@ -8411,24 +8396,10 @@ impl<'a> Gen<'a> {
     /// cross-field predicate references them by name). Shared by explicit
     /// construction (`Age(n)`) and every automatic-validation coercion.
     fn emit_validation(&mut self, decl: &TypeDecl, v: &str) -> Result<(), String> {
-        let Some(pred) = decl.predicate.clone() else { return Ok(()) };
-        self.scope.push(Vec::new());
-        if let Type::Record(fields) = &decl.base.clone() {
-            let rec_ll = self.llt(&decl.base);
-            for (i, f) in fields.iter().enumerate() {
-                let ext = self.fresh_tmp();
-                self.emit(format!("{ext} = extractvalue {rec_ll} {v}, {i}"));
-                let slot = self.declare(&f.name, &f.ty);
-                let fll = self.llt(&f.ty);
-                self.emit(format!("store {fll} {ext}, ptr {slot}"));
-            }
-        } else {
-            let base_ll = self.llt(&decl.base);
-            let slot = self.declare("value", &decl.base);
-            self.emit(format!("store {base_ll} {v}, ptr {slot}"));
+        if decl.predicate.is_none() {
+            return Ok(());
         }
-        let (cond, _) = self.gen_expr(&pred)?;
-        self.scope.pop();
+        let cond = self.emit_predicate_cond(decl, v)?;
         let nok = self.fresh_tmp();
         self.emit(format!("{nok} = xor i1 {cond}, true"));
         self.trap_if(&nok, &format!("@.trap.verr.{}", decl.name), "vfail");
@@ -8436,26 +8407,26 @@ impl<'a> Gen<'a> {
     }
 
     /// Lower a refined type's `where` predicate to an `i1` (true = holds),
-    /// binding the value under check: a record base binds each field name; a
-    /// scalar base binds `value`. This is the ONE place a predicate is lowered
-    /// — both the trap path (`emit_validation`) and the JSON decode `validate`
-    /// path (RFC-0018) derive from it, so the two never drift.
+    /// binding the value under check as [`predicate_binds`] says to. This is the
+    /// ONE place a predicate is lowered to LLVM — the trap path
+    /// (`emit_validation`) and the JSON decode `validate` path (RFC-0018) both
+    /// derive from it, so the two never drift.
     fn emit_predicate_cond(&mut self, decl: &TypeDecl, v: &str) -> Result<String, String> {
         let pred = decl.predicate.clone().expect("predicate present");
+        let rec_ll = self.llt(&decl.base);
         self.scope.push(Vec::new());
-        if let Type::Record(fields) = &decl.base.clone() {
-            let rec_ll = self.llt(&decl.base);
-            for (i, f) in fields.iter().enumerate() {
-                let ext = self.fresh_tmp();
-                self.emit(format!("{ext} = extractvalue {rec_ll} {v}, {i}"));
-                let slot = self.declare(&f.name, &f.ty);
-                let fll = self.llt(&f.ty);
-                self.emit(format!("store {fll} {ext}, ptr {slot}"));
-            }
-        } else {
-            let base_ll = self.llt(&decl.base);
-            let slot = self.declare("value", &decl.base);
-            self.emit(format!("store {base_ll} {v}, ptr {slot}"));
+        for (name, ty, field) in predicate_binds(decl) {
+            let val = match field {
+                Some(i) => {
+                    let ext = self.fresh_tmp();
+                    self.emit(format!("{ext} = extractvalue {rec_ll} {v}, {i}"));
+                    ext
+                }
+                None => v.to_string(),
+            };
+            let slot = self.declare(&name, &ty);
+            let ll = self.llt(&ty);
+            self.emit(format!("store {ll} {val}, ptr {slot}"));
         }
         let (cond, _) = self.gen_expr(&pred)?;
         self.scope.pop();
@@ -10550,6 +10521,66 @@ fn gather_codec_strings(
             gather_codec_strings(&inner, types, out, seen);
         }
         _ => {}
+    }
+}
+
+/// The declaration whose `where` predicate a value flowing from `from` into `to`
+/// must satisfy, if any (RFC-0003's automatic validation).
+///
+/// The ONE copy of that decision, for the reason [`llt_of`] is the one copy of
+/// the shape rules: RFC-0077's direct wasm backend asks the same question, and a
+/// second spelling of it would fork the semantics silently — a flow one backend
+/// checks and the other does not is a wrong program on exactly one target.
+///
+/// The exactly-same named type is not a boundary crossing: it was checked when
+/// it was built, so re-running the predicate would be work that cannot fail.
+///
+/// One exemption is deliberately NOT here, because it needs the expression
+/// rather than the two types: [`vyrn_frontend::finite::string_flow_proven`],
+/// RFC-0020's containment proof. Both backends call that function themselves on
+/// the same AST — the consteval precedent — so it is single-sourced too, just
+/// one layer out.
+pub(crate) fn validation_required<'t>(
+    from: &Type,
+    to: &Type,
+    types: &'t HashMap<String, TypeDecl>,
+) -> Option<&'t TypeDecl> {
+    let Type::Named(n) = to else { return None };
+    if from == to {
+        return None;
+    }
+    types.get(n).filter(|d| d.predicate.is_some())
+}
+
+/// The message a `where` violation prints. A record base gets the cross-field
+/// wording, because what violated it is not one value.
+///
+/// Byte-identical across interp, native and wasm — parity compares stderr — so
+/// it is built here rather than spelled at each of the places that trap.
+pub(crate) fn validation_message(decl: &TypeDecl) -> String {
+    if matches!(decl.base, Type::Record(_)) {
+        format!("error: validation failed: `{}` violates its `where` clause\n", decl.name)
+    } else {
+        format!("error: validation failed for `{}`\n", decl.name)
+    }
+}
+
+/// What a `where` predicate has in scope while it is lowered: a record base binds
+/// every field by name (a cross-field predicate names them), and every other base
+/// binds the whole value as `value`. `Some(i)` is the field's index in the base
+/// record.
+///
+/// The predicate itself cannot be lowered in one place — one backend prints LLVM
+/// text and the other wasm bytes — so what is shared is the STRUCTURE both walk.
+/// This file had three copies of that walk before RFC-0077 M2d wanted a fourth.
+pub(crate) fn predicate_binds(decl: &TypeDecl) -> Vec<(String, Type, Option<usize>)> {
+    match &decl.base {
+        Type::Record(fs) => fs
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.name.clone(), f.ty.clone(), Some(i)))
+            .collect(),
+        base => vec![("value".to_string(), base.clone(), None)],
     }
 }
 
