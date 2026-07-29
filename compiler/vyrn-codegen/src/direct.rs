@@ -1671,7 +1671,19 @@ impl Fn_<'_> {
                 _ => return unsupported("a branch yielding an empty array literal", line),
             },
             Expr::Call { name, args, .. } => match name.as_str() {
-                "@str" | "@concat" => Type::Str,
+                "@str" | "@concat" | "jsonSchema" => Type::Str,
+                "@charCount" => Type::Int,
+                // The two builtins whose result type is a declared one: `Schema` is
+                // the record `schema_struct_lit` names, and `Value`'s name comes off
+                // the variant table rather than being spelled here twice.
+                "schemaOf" => Type::Named("Schema".into()),
+                "value" if args.len() == 1 => {
+                    let v = self.value_variant(&args[0], line)?;
+                    match self.cx.variants.get(v).and_then(|c| c.first()) {
+                        Some((e, _, _)) => Type::Named(e.clone()),
+                        None => return unsupported("the built-in `Value` enum", line),
+                    }
+                }
                 // An arm that only prints: the join carries nothing, which the
                 // `match` lowering already handles — it just has to be told.
                 "print" => Type::Unit,
@@ -1893,6 +1905,32 @@ impl Fn_<'_> {
                 b.ins(&Instruction::Call(self.cx.rt.concat));
                 return Ok(Type::Str);
             }
+            // Not calls at all: RFC-0021-family COMPILE-TIME reflection, which the
+            // textual emitter rewrites into an ordinary expression built from the
+            // type declaration. Same rewrite, from the same two frontend functions,
+            // so neither backend has a runtime lowering to get wrong and the bytes
+            // cannot disagree. `jsonSchema` is one string; `schemaOf` is a `Schema`
+            // record literal that then lowers like any other.
+            "jsonSchema" | "schemaOf" if args.len() == 1 => {
+                let e = self.reflected(name, &args[0], line)?;
+                return self.expr(m, b, &e);
+            }
+            // `value(x)` boxes a scalar into the built-in `Value` enum. Its variant
+            // is picked by the argument's type and built by the ordinary enum path,
+            // so the tag and the payload encoding are the same ones a user's
+            // `IntVal(3)` would get.
+            "value" if args.len() == 1 => {
+                let name = self.value_variant(&args[0], line)?;
+                return match self.sum_ctor(m, b, name, args, line)? {
+                    Some(t) => Ok(t),
+                    None => unsupported("the built-in `Value` enum", line),
+                };
+            }
+            "@charCount" if args.len() == 1 => {
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                b.ins(&Instruction::Call(self.cx.rt.charcount));
+                return Ok(Type::Int);
+            }
             "at" if args.len() == 2 => return self.at(m, b, args, line),
             "push" if args.len() == 2 => return self.push(m, b, args, line),
             "@pop" if args.len() == 1 => return self.pop(b, args, line),
@@ -1989,6 +2027,37 @@ impl Fn_<'_> {
             return unsupported(&format!("the call `{name}` at this arity"), line);
         }
         self.emit_call(m, b, &sig, args)
+    }
+
+    /// The expression `jsonSchema(T)` / `schemaOf(T)` stands for.
+    ///
+    /// Both are compile-time reflection over a *declaration*, so the argument is a
+    /// type name rather than a value — which is also why this is a rewrite rather
+    /// than a call: there is nothing to evaluate at runtime.
+    fn reflected(&self, which: &str, arg: &Expr, line: usize) -> Result<Expr, String> {
+        let Expr::Var { name: tn, .. } = arg else {
+            return unsupported(&format!("`{which}` of something other than a type name"), line);
+        };
+        let Some(decl) = self.cx.types.get(tn) else {
+            return unsupported(&format!("`{which}` of the undeclared type `{tn}`"), line);
+        };
+        Ok(if which == "jsonSchema" {
+            Expr::Str(ftypes::json_schema_string(decl, &self.cx.types))
+        } else {
+            ftypes::schema_struct_lit(decl)
+        })
+    }
+
+    /// Which `Value` variant `value(x)` builds. The three the interpreter and the
+    /// textual emitter box, and nothing else.
+    fn value_variant(&mut self, arg: &Expr, line: usize) -> Result<&'static str, String> {
+        let t = self.peek(arg, line)?;
+        Ok(match self.cx.resolve(&t) {
+            Type::Int | Type::IntN { bits: 64, signed: true } => "IntVal",
+            Type::Bool => "BoolVal",
+            Type::Str => "StrVal",
+            other => return unsupported(&format!("`value` of `{other}`"), line),
+        })
     }
 
     /// The concrete type of each argument, WITHOUT emitting it.
@@ -2726,8 +2795,14 @@ impl Fn_<'_> {
         match self.cx.repr(t, line)? {
             Repr::Scalar(v) => {
                 let size = layout::of_ll(&ll).map_err(|e| format!("direct backend: {e}"))?.size;
+                // Two DIFFERENT scratch slots, and it matters: `scratch` is keyed on
+                // (type, n), so for an i32-shaped scalar — a `String`, a `Bool`, a
+                // `UInt8` — the same `n` would hand out one local for both, the
+                // `LocalTee` below would clobber the value with the box's address,
+                // and the box would end up holding a pointer to itself. `print` of
+                // one showed the pointer's bytes where the string belonged.
                 let val = self.scratch(b, v, 2);
-                let p = self.scratch(b, ValType::I32, 2);
+                let p = self.scratch(b, ValType::I32, 3);
                 b.ins(&Instruction::LocalSet(val));
                 b.ins(&Instruction::I32Const(size as i32));
                 b.ins(&Instruction::Call(malloc));
@@ -3216,6 +3291,7 @@ struct Rt {
     bool_str: u32,
     concat: u32,
     trap_idx: u32,
+    charcount: u32,
     count: u32,
     msg_div0: u32,
     msg_rem0: u32,
@@ -3257,7 +3333,8 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
         bool_str: base + 8,
         concat: base + 9,
         trap_idx: base + 10,
-        count: 11,
+        charcount: base + 11,
+        count: 12,
         msg_div0: 0,
         msg_rem0: 0,
         msg_divovf: 0,
@@ -3576,6 +3653,41 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
         put(b, s);
         put(b, 2);
         b.ins(&Instruction::I32Const(1)).ins(&Instruction::Call(proc_exit));
+    });
+
+    // charcount(s) — Unicode scalar values, i.e. bytes that are not UTF-8
+    // continuation bytes (RFC-0058). The interpreter counts the same thing the
+    // same way; the shim's `__vyrn_charcount` is this loop in C.
+    //
+    // A String is NUL-terminated and an interior NUL is rejected at construction,
+    // so scanning to the zero is exact — the same argument `strlen` rests on.
+    let n = 3;
+    m.func(&[ValType::I32], &[ValType::I64], &[ValType::I32, ValType::I32], 0, |b| {
+        b.ins(&Instruction::Block(BlockType::Empty))
+            .ins(&Instruction::Loop(BlockType::Empty))
+            .ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::I32Load8U(byte()))
+            .ins(&Instruction::LocalTee(p))
+            .ins(&Instruction::I32Eqz)
+            .ins(&Instruction::BrIf(1))
+            // n += (b & 0xC0) != 0x80
+            .ins(&Instruction::LocalGet(n))
+            .ins(&Instruction::LocalGet(p))
+            .ins(&Instruction::I32Const(0xC0))
+            .ins(&Instruction::I32And)
+            .ins(&Instruction::I32Const(0x80))
+            .ins(&Instruction::I32Ne)
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalSet(n))
+            .ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalSet(0))
+            .ins(&Instruction::Br(0))
+            .ins(&Instruction::End)
+            .ins(&Instruction::End)
+            .ins(&Instruction::LocalGet(n))
+            .ins(&Instruction::I64ExtendI32U);
     });
 
     rt

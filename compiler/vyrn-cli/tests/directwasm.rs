@@ -49,12 +49,17 @@ const PASSING: &[&str] = &[
     "gendemo.vyrn",
     "generics.vyrn",
     "ifexpr.vyrn",
+    "inlinewhere.vyrn",
+    "jsonschema.vyrn",
     "map.vyrn",
     "modify.vyrn",
     "ownership.vyrn",
     "protocol.vyrn",
     "record.vyrn",
+    "reflection.vyrn",
+    "schemaimport.vyrn",
     "statemod.vyrn",
+    "tagged.vyrn",
     "testing.vyrn",
     "utility.vyrn",
     // The one example whose refinement is VIOLATED at runtime, so it is the one
@@ -410,6 +415,80 @@ fn main() -> Int64 {
         "7\n14\n8\n42\nlabel\n7\n3\n100\n",
         "the interpreter moved"
     );
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// The two builtins M2g landed that the corpus does not run, and the boxing bug
+/// they found (RFC-0077 M2g).
+///
+/// `tagged.vyrn` is the only example that reaches `value(x)`, and it reaches it
+/// through the `sql"..."` desugar — for `Int64` and `String` only. `charCount` has
+/// no example at all: `bytecount.vyrn` stops on a sized-int conversion two lines
+/// later, so the lowering would ship untested, which this repo treats as worse
+/// than a named gap.
+///
+/// Both go through the same enum payload word, which is where the bug was: an
+/// i32-shaped payload — a `String`, a `Bool` — took ONE scratch local for the
+/// value and the box address both, so the box ended up pointing at itself and
+/// `print` showed the pointer's bytes. It compiled and it validated. `BoolVal` is
+/// here because it is the shape no example builds at all.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_boxed_enum_payload_survives_the_word_it_travels_in() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-value");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+fn show(v: Value) -> String {
+    return match v {
+        IntVal(n) => n.toString(),
+        BoolVal(b) => b.toString(),
+        StrVal(s) => s,
+    }
+}
+
+fn main() -> Int64 {
+    print(show(value(\"hi there\")))
+    print(show(value(true)))
+    print(show(value(-7)))
+    // Unicode scalar values, not bytes: two of these five are multi-byte.
+    print(\"héllo\".charCount())
+    print(\"héllo\".byteLength)
+    print(\"\".charCount())
+    return \"héllo\".charCount()
+}
+";
+    let path = dir.join("valuecount.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("valuecount.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .env("VYRN_WASM_BACKEND", "direct")
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // Spelled out, because the failure was a plausible-looking string rather than
+    // a crash: garbage bytes where "hi there" belonged, and a byte count where a
+    // character count belonged.
+    assert_eq!(norm(&interp.stdout), "hi there\ntrue\n-7\n5\n6\n0\n", "the interpreter moved");
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
     assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
     assert_eq!(interp.status.code(), w.status.code(), "exit");
