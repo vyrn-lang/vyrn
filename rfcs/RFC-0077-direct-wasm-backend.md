@@ -84,7 +84,14 @@ A spike measured the shape of the job rather than guessing at it:
   calls it, which in wasm needs a table element, `ref.func` and `call_indirect`.
   Bounded and enumerable — 9 sites across 3 examples, all syntactic — but a
   milestone that had assumed this away would have discovered it at the end.
-- **No generics.** Monomorphization runs before any instruction is emitted.
+- **No generics** — *wrong, and M2e is where it was corrected.* Monomorphization
+  does not run before any instruction is emitted, in either backend: a
+  specialization is **discovered** at a call site as a side effect of emitting
+  the body containing it (`Gen::instantiations`, drained by the driver). So a
+  direct backend cannot consume monomorphized code; it needs the same
+  interleaved shape, and it needs one more thing the textual one does not,
+  because a wasm call names a function *index* rather than a symbol. See
+  "M2e, as landed".
 - **A small, fixed boundary.** 58 external symbols in the largest real artifact:
   48 `__vyrn_*`, 9 libc, 1 intrinsic.
 - **The traversal is reused.** Monomorphization, defunctionalization, drop
@@ -1087,3 +1094,189 @@ The refinement row is gone. What is left is one big row that does not compress
 place: **monomorphization runs inside `Gen`**, so the direct backend never sees a
 concrete instantiation. That is 9 examples and the same shape of argument M2a made
 about the type wall and M2b made about arrays, both of which were right.
+
+---
+
+## M2e, as landed
+
+Generics. **20 of 80**, from 17 — and the generics row is gone, which is the
+smaller half of the story, because six of its nine examples were never blocked on
+generic *functions* at all.
+
+### The third assumption this corpus falsified
+
+> **No generics.** Monomorphization runs before any instruction is emitted.
+
+It does not, in either backend. `Gen` accumulates `instantiations` as a **side
+effect of emitting a body**; the driver takes them, enqueues, and drains a
+worklist, and two worklists feed each other because a generic body may take `fn`
+parameters and a specialized instance may call generics. There is no pre-pass to
+consume.
+
+Which made the design question the interesting part, and the trap in it explicit:
+a standalone "collect the instantiations reachable from these roots" pass would
+have been a second traversal that has to agree with lowering about what gets
+instantiated. That is a new source of truth, free to drift — the failure mode
+`llt_of` (M2b) and `predicate_binds` (M2d) exist to prevent, and in M2d's case
+one that had *already happened* inside a single file. So there is no discovery
+walker. `Mono` is fed from inside `Fn_` and drained by `compile`, the same shape
+as the textual driver.
+
+### The one thing that is stricter here, and it is not a taste
+
+A textual call emits a **symbol**; a wasm call emits a function **index**. So an
+index has to be handed out where a specialization is *discovered* and its body
+added later, which only works if the two orders are the same. `Mono::insts` is
+append-only and `done` only moves forward — FIFO by construction.
+
+That is not defensive framing. The textual driver drains with `queue.pop()`, a
+stack, and is right to: nothing depends on the order because every reference is a
+name. The same code here would renumber every call after the first out-of-turn
+discovery, and *the module would still validate* — wrong function, plausible
+output, no diagnostic. It has its own running test rather than a comment:
+`twice` calls `wrap`, so `wrap<Int64>` is discovered while three other instances
+are still queued.
+
+### What is shared, and the one thing that turned out not to be shareable
+
+Shared as free functions both backends call:
+
+- **`solve_param`** — the unification rule, already single-sourced, now
+  `pub(crate)`.
+- **`solve_type_args`** — the *decision* a site makes: which type arguments it
+  fixes, given the declared types and the concrete ones supplied. It **reports**
+  an unsolved parameter rather than deciding for it, because the two backends
+  genuinely differ there and pretending otherwise would have changed the textual
+  output. The textual emitter has always substituted `Unit` and let it lower to
+  `void`; the direct backend refuses, because a `void` in a wasm signature is not
+  a diagnostic, it is a signature with one fewer parameter.
+- **`applied_type`** — the concrete type a *construction* site produces. Four
+  sites in the textual emitter route through the two of them (both generic call
+  paths, `applied_enum_type`, and `gen_struct_lit`'s result type); `emit-ir` over
+  every generic-using example is byte-identical.
+
+**`mangle_name` is not shareable, and this RFC's brief was wrong to list it.** It
+is a *symbol*, and a wasm function does not have one — imports and exports do,
+internal functions are indices. Worse, it is not injective: every record mangles
+as `Rec`, so two distinct instantiations can produce one symbol, and the textual
+driver's `emitted.insert(sym)` would silently skip the second. The direct backend
+keys specializations on the type arguments themselves, which cannot collide on
+the thing being distinguished. (The textual hole is latent rather than observed —
+named here rather than left to be found, like M2d's third `predicate_binds`
+copy.)
+
+**What is duplicated:** nothing new. M2d's precedent is that a predicate's
+*lowering* is necessarily per-backend while the structure it walks is shared;
+here the *recording* of instantiations is per-backend, because each walks its own
+bodies, while the rule for what to record is not.
+
+### `Type::Param` is now unreachable rather than unhit
+
+`Cx::sub` is the chokepoint: `ll`, `resolve`, `fields` and `ty_gap` all go through
+it, so a parameter cannot reach `llt_of` — where M0 left it printing `void`, and
+`layout` gives `void` a size of zero — by any route that asks this `Cx` about a
+type. `ty_gap`'s arm stays, reworded, as what is left over when an instantiation
+failed to fix something. Asserted from both sides, because "it never fires" is a
+different claim from "it cannot": outside a monomorphization the parameter is
+refused and `ll` gives `void`; inside one, every entry point gives the type the
+instantiation fixed, *including inside a constructor* — `Array<T>` is the same
+triple for every `T` but its element stride is not.
+
+One substitution subtlety worth recording: `sub` substitutes into the type
+*expression*, before any `App` is expanded. `type Box<T>` and `fn f<T>` may both
+spell their parameter `T`, and `resolve` builds the declaration's own
+substitution from the `App`'s arguments afterwards — so the two cannot be
+confused, and nothing had to rename anything.
+
+### Generic records and enums did NOT fall out free
+
+The brief asked whether generic enums fall out, since they monomorphize inline at
+concrete use sites. Half of one does, and records do not at all.
+
+- A **generic record** literal needs its type arguments solved from the FIELD
+  values, before the slot is allocated, because `Box<Int64>` and `Box<Bool>` are
+  not the same size.
+- A **generic enum** falls out wherever the position names the type
+  (`let b: Opt<Int64> = Empty`), because `resolve` substitutes an `App`'s
+  arguments and every payload type arrives concrete. It does not fall out for a
+  bare constructor with no expectation (`let a = Wrap(41)`), whose use site is
+  its own payload.
+
+Both are `applied_type` from a different set of declared types — fields, or a
+variant's payloads — so they are one rule applied twice, not two features. And
+both put the backend back in the bind M2b's `peek` was written for: the
+destination has to exist before the value does, so `peek` predicts and `expr_as`
+re-checks, and a wrong prediction is a compile error. That is now the third
+construct standing on that pattern (`if`, `match`, and a call whose callee's
+signature is not known until its arguments are typed).
+
+### The bug only running could catch, again
+
+A call reported its return type **resolved**. `Pair<Int64, Int64>` reduced to its
+record shape no longer matches `Pair<A, B>`, so `firstOf(twice(41))` could not
+fix `A` — and the failure was a refusal only by luck: had the outer generic's
+parameter been solvable from somewhere else, the resolved type would have flowed
+on and specialized something plausible. It returns the declared type now, which
+is what the textual emitter always did. Three milestones' worth of examples never
+noticed because no example nested one generic's result inside another's argument.
+
+### Refused, specifically
+
+**RFC-0023 higher-order specialization did not fall out free, and is refused by
+name.** A function with a `fn`-typed parameter has no first-order definition in
+either backend — it exists only as specializations, from a *second* worklist that
+this milestone does not build. It is refused at the call site rather than at the
+callee's shell so the ladder groups it as one feature.
+
+That is the number worth being honest about: of the nine examples the generics row
+held, **six were RFC-0023** (`map` in five, `defer` in one), not generic
+functions. Only one of those six is still blocked on it — the other five moved on
+to a `modify` parameter, a map literal or `stringFromBytes` — which is what the
+burndown is for, but 17 → 20 rather than 17 → 26 is the honest reading of the
+row.
+
+### Three things came along because the shells were in the way
+
+The textual driver skips three kinds of function in its step 1; this one skipped
+only externs, and lowered the rest as unspecializable shells. A shell that cannot
+lower fails the whole build over a function nothing calls, which is what
+`gendemo.vyrn` was blocked on — a `readFile` inside a `gen fn`, i.e. inside code
+that only ever runs in the compiler. Generic, `fn`-parameter and `gen fn`
+functions are all skipped now, as they always should have been.
+
+**Protocol dispatch** (RFC-0002 §5) landed with generics rather than after them,
+because a bounded generic is what protocols are for: `describe<T: Show>` calling
+`x.show()` is the whole of `protocol.vyrn`. Static dispatch on the receiver's
+concrete type — which inside a bounded generic is concrete only because `subst`
+says so — through the same mangled impl name the textual emitter calls.
+
+### Nothing contradicted M0, M1, M2a, M2b, M2c or M2d
+
+Every offset is still `layout::of_ll ∘ llt`. Destination-first, no-`return`-in-a-
+body, the widening rule and the memory map all went in as written, and the M2d
+seam took the one addition generics needed: `coerce` substitutes before
+`validation_required` looks at its two types, because a `T` where `T = Age` is an
+`Age` flow and a bare `Param` is neither `Named` nor a boundary. That is the same
+class of silent hole M2d found three of — a declared spelling that stops being
+one — reached by a different route.
+
+### 20 of 80, regrouped
+
+| blocked on | n |
+|---|---|
+| builtins with no lowering (`toJson` 5, `stringFromBytes` 4, `cell`/`set`/`get` 5, `jsonSchema` 3, `readLine` 2, a map literal 2, `args`, `chars`, `fromJson`, `hostNowMillis`, `logger`, `parse`, `readFile`, `schemaOf`, `value`, `@charCount`) | **31** |
+| a `modify` parameter | 6 |
+| module state (RFC-0013 top-level `let`) | 6 |
+| `?`, `if let`, `=~` on strings 2, a fallible construction, `spawn` 2, `region` | 8 |
+| floats, sized-int arithmetic and conversion, bitwise | 4 |
+| a lambda 1, a `fn`-typed parameter (RFC-0023) 1 | 2 |
+| a `Map` or `SmallArray` index — refused in M2c | 2 |
+| a generic enum variant with no expectation to type it | 1 |
+
+The shape of the list has changed. Every remaining row is small except the one
+that is 16 different builtins, and the two 6s are single features: a `modify`
+parameter is copy-out at a call (M2b refused it because passing it like a `read`
+one throws the callee's writes away silently), and module state is one global per
+top-level `let` plus an initializer that runs before `main`. Neither is control
+flow, neither is a type-system gap, and after them the biggest thing left in this
+corpus is `toJson`.
