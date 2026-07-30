@@ -11,7 +11,7 @@
   |---|---|
   | builtins the checker knows | 40 |
   | Rust implementations in the interpreter | 50 |
-  | C functions in the runtime shim | 80 — now 74, M2b having deleted six (see "M2b, as landed") |
+  | C functions in the runtime shim | 80 as first counted; **94 (65 exported, 29 static)** by the method M4a states and M4c reproduces. M2b took the exported boundary from 74 to 70; M3 deleted one `static`; M4c deleted one exported (`__vyrn_strncmp`). The number moves only when a milestone retires a builtin, which is the point of stating the method. |
   | of those, the JSON DOM alone | 49 — but SHARED writer/reader, so M2 retired SIX (not 11: the parser's unescaper shares the buffer) and M3 takes **32** (not 38 — see "M3, as measured", which also states its counting method, since this row has now been wrong three times) |
   | `std/json.vyrn` — a JSON reader and writer, in Vyrn | 752 lines |
   | interp + shim + textual emitter + direct emitter | 27,334 lines |
@@ -147,17 +147,31 @@ at any time.
   LIBRARY (`std/num`), standing on two irreducible primitives (`floatBits` /
   `floatFromBits`) rather than on a `parseFloat` builtin. M3's block is lifted.
   `f64_str` was NOT retired and the reason is measured rather than deferred.
-  M4b — `chars`, `stringFromBytes`, and the `%f` direction — is untouched.
+  **M4b DONE as three equivalence proofs (`std/codecs`, `std/text`, `std/strpred`)
+  and M4c DONE as the swap — see "M4c, as landed".** Ten of the fourteen builtins
+  those modules cover now route into Vyrn on every engine, deleting 603 lines of
+  emitted LLVM IR, 292 lines of Rust and one C function, and raising RFC-0077's
+  ladder 46/84 -> 49/87. Four are refused with reasons: `slice` needs an abort
+  primitive, `byteLength` is a compile-time-folded view, and `lineAt`/`colAt` are
+  the interpreter cache M5 owns. `stringFromBytes` and the `%f` direction remain.
 - **M5 — the interpreter's fast paths become caches.** Each Rust arm either
   delegates to the Vyrn definition or is documented as an optimization that
   parity proves equivalent. The count of Rust arms should fall.
+  **Partly pre-empted, and narrowed — see "M4c, as landed".** M2b and M4c deleted
+  eleven Rust arms outright rather than keeping any of them as a cache, so what is
+  left for M5 is the caches that are DELIBERATE: `lineAt`/`colAt`'s memoized
+  line-start table, which a Vyrn library cannot hold because generators may not
+  touch module state.
 
 ## Acceptance
 
 - Parity green throughout — every milestone is byte-identical on stdout, stderr
   and exit code, or it does not land.
 - The shim's function count falls, measurably, per milestone. It was 80 when this
-  was written; M2b took it to 74, and took eleven `declare` lines with it.
+  was written; M2b took it to 74, and took eleven `declare` lines with it; M4c took
+  one more (`__vyrn_strncmp`) and two more `declare` lines. **A milestone that
+  retires no builtin reports a zero rather than a smaller number reached by counting
+  differently** — M3, M4a and M4b each did, and each stated its method.
 - RFC-0077's ladder does not regress, and rises where a builtin becomes Vyrn.
 - No builtin has two *definitions*. Caches are allowed; second opinions are not.
 
@@ -1334,3 +1348,256 @@ of the four that is not also written in Vyrn, and `decodeUtf8` is most of it: th
 missing piece is not validation but the `Array<UInt8> -> String` construction, which
 needs a primitive or a view the way `floatFromBits` did. `f64_str` stays where M4a
 left it — a milestone with its own pin of `print`, not a corollary.
+
+---
+
+## M4c, as landed: ten of the fourteen route, and four refusals with reasons
+
+M4b's three modules were an equivalence proof: fourteen builtins written in Vyrn and
+shown to answer what the builtins answer, with the builtin as the oracle. M4c
+performs the swap. **Ten builtins now ARE their Vyrn functions on the interpreter,
+the native backend and both wasm paths, and the second and third implementations are
+deleted rather than kept as opinions.**
+
+| module | routed | refused |
+|---|---|---|
+| `std/codecs` | `hexEncode` `hexDecode` `base64Encode` `base64Decode` `urlEncode` `urlDecode` | — |
+| `std/text` | `chars` | `lineAt`, `colAt` |
+| `std/strpred` | `contains` `startsWith` `endsWith` | `slice`, `byteLength` |
+
+### The mechanism is M2b's, turned into a table rather than copied
+
+M2b's note said "the next builtin RFC-0078 moves reuses these mechanisms unchanged".
+For these ten that held literally, and the way it held is the finding: **the whole
+compiler part is a rename.**
+
+`loader.rs` grew `RT_MODULES`, a const table of `(spec, reserved prefix, desugared
+builtins, routed builtins)`. `Module::injected` became `Option<&'static str>` — the
+prefix — because four runtime modules can now be in one link, which a single `bool`
+could not represent. The injection block became a loop over the table. Nothing else
+about the mechanism changed: declarations are still renamed to `$` spellings
+unconditionally, `$` is still unlexable, and the two failures M2b made unreachable
+stay unreachable.
+
+`routed_builtin(name) -> Option<&'static str>` is the one function every engine
+calls, and each engine's implementation of a routed builtin is now:
+
+```rust
+if let Some(rt) = vyrn_frontend::loader::routed_builtin(name) {
+    if self.cx.sigs.contains_key(rt) { return self.call(m, b, rt, args, line); }
+}
+```
+
+Three call sites, five lines each, exactly M2b's shape one size down — `toJson`
+needed a shared AST walk and synthesized per-type encoders because it reads a
+value's static type, and `hexEncode(s)` is `String -> String`.
+
+**Routing in the engines rather than as an AST pass was the load-bearing choice, and
+it is about diagnostics.** The obvious implementation is one rewrite in
+`check_and_synthesize`, where M2b already appends encoders — one site instead of
+three. It was rejected after measuring what it costs: the checker's builtin arms are
+where `hexEncode(5)` becomes "`hexEncode` needs a String, found Int64", and a
+program rewritten before the check reports that against `codecs$hexEncodeV`. Routing
+inside each engine's existing builtin arm keeps the checker as the **typing** rule
+while the **implementation** moves, which is precisely this document's own sentence —
+"a builtin becomes, at most, a type-directed compiler part plus a call into Vyrn."
+Verified rather than assumed: all three diagnostics still name the builtin.
+
+Two hazards the pre-check rewrite would also have carried, both avoided by not taking
+it: `rewrite_expr` renames `Expr::Var` as well as call names, so a local
+`let contains = true` would have been rewritten into a function name; and it does not
+walk `Program::tests`, where `examples/bin/client/boot.vyrn` alone has forty
+`.contains` calls.
+
+One question evaporated on contact. **All fourteen names are reserved** — `fn
+contains` is "`contains` is a reserved name" today — so there is no shadowing rule to
+preserve and the routing is unconditional.
+
+### What was refused, and why each is a reason rather than a deferral
+
+`slice` was named in advance. The other three were not, and each is refused on the
+grounds M4a's note established:
+
+- **`slice` traps** (`error: slice index out of range`, `error: slice splits a UTF-8
+  character`) and Vyrn has no expression that aborts, so `sliceV` returns
+  `Option<String>`. Routing it would change observable behaviour. M4b(3) called this
+  a *control* primitive — a third category beyond "operation vs view" — and it needs
+  a language decision, not a milestone. **Blocked on that decision.**
+- **`byteLength` is a VIEW.** It is `strlen`: two instructions in the direct backend,
+  one line in the interpreter. It is also folded by `consteval`, which is what lets
+  `type Name = String where value.byteLength >= 3` be proved at compile time and a
+  provably-wrong constant be rejected before it runs. Routing it would turn an O(1)
+  read into an O(n) heap copy AND take that folding away — the opposite of the trade
+  this RFC exists to make. `byteLength` belongs on M1's representation row beside
+  `floatBits`, not on M5's.
+- **`lineAt` / `colAt` are a cache question, which is M5's.** M4b(2) already measured
+  the shape: they exist because the obvious loop is O(offset) and a scanner asks once
+  per node, costing `std/vyx` 122 ms of a 291 ms page compile, and the interpreter
+  memoizes a line-start table per buffer that a Vyrn library **cannot** — a generator
+  may not touch module state (comptime purity), so the cache has to live below it.
+  Routing them uniformly deletes that cache; keeping it means the interpreter holds a
+  Rust arm the other engines do not, which this RFC allows ("a Rust fast path is fine
+  provided the Vyrn implementation is the definition") but which is a different
+  milestone with a different shape. Two builtins and ~20 lines of C, against the one
+  cache in the repo a measurement says is load-bearing.
+
+That is four refusals and ten moves, and the refusals are not the cheap ones.
+`byteLength` and `lineAt`/`colAt` would have been trivial to route; they are refused
+because routing them is wrong, not because it is hard.
+
+### The oracle tests had to be converted, and one of them stopped meaning anything
+
+The hazard M4b built towards and M4c had to discharge: **after the swap, an oracle
+comparing the Vyrn implementation to the builtin is `x == x`.** Green forever,
+proving nothing. Every one was converted, and the conversions are not uniform because
+the three modules are not in the same position.
+
+Converted to a pin, because the builtin and the Vyrn function are now one:
+
+- `tests/codecs.rs`'s 6,354-comparison corpus. Same corpus, same generator; the
+  program now calls only the BUILTIN and prints one line per answer, and the test
+  asserts the SHA-256 of the transcript against a literal. A digest rather than a
+  6,000-line golden file, with spot pins keyed by input so a failure has a readable
+  neighbour, and the payload renderer rewritten onto `bytes` rather than `hexEncode`
+  so the reporting does not depend on the code under test.
+- `tests/text.rs`'s codepoint corpus, the same way, over 5,972 buffers.
+- `examples/codecbytes.vyrn` and `examples/strpredbytes.vyrn`, whose `mine == builtin`
+  rows became the values themselves plus `test` blocks of literals. `strpredbytes`
+  lost a whole block — `predsAgree` asserted that a function equals itself over
+  twenty inputs — and its twenty rows became the literal table that replaced it.
+
+**Left as live oracles, because what they compare against did not move:**
+`decodeUtf8`'s accept/reject against `stringFromBytes`'s over ~1,400 malformed
+buffers, `lineAtV`/`colAtV` against `lineAt`/`colAt` at every offset from -3 to
+`len + 3` of twelve buffers, and `sliceV`'s `None` against `slice`'s two traps over
+ten ranges in ten processes. That asymmetry is the useful part of refusing four
+builtins: half the M4b proof is still a proof.
+
+Each converted test was checked to BITE by mutating the Vyrn implementation:
+lowercasing `urlEncode`'s hex (86 rows and three pins), changing base64's 63rd
+alphabet entry (`w7/Dvw==` -> `w7-Dvw==`), narrowing `hexVal`'s uppercase bound to
+`c < 'F'`, and two off-by-ones in `decodeUtf8`'s three- and four-byte arithmetic. The
+`hexVal` mutation is the one worth naming: **every literal pin still passed and only
+the digest failed**, which is what says the digest is load-bearing rather than
+decoration.
+
+### The NUL fix, measured across the swap
+
+M4b(1) found that a decoder producing `0x00` — `hexDecode("00")`,
+`base64Decode("AA==")`, `urlDecode("%00")` — answered `Some` and **did not agree with
+itself across engines**: the interpreter kept a Rust `String` holding the byte, the
+native path returned a `char*` `__vyrn_strlen` truncated at it. `std/codecs` answers
+`None`, which RFC-0014 requires and which is identical everywhere.
+
+The corpus transcript was captured twice, once with the pre-swap binary (`494f883`)
+and once after, and diffed line by line:
+
+| | |
+|---|---|
+| pre-swap digest | `ad39879f2fbcb7df65ce9eb2da7145031af6fa99ccc92046ce9b2a591f926275` |
+| post-swap digest | `2c1e8a949d6a051aea91bd9b6ca0fe67b8a8b1c6bb0a6e26ca7b163dfddac675` |
+| rows that changed | **16 of 6,354** |
+| rows that changed for any reason other than NUL | **0** |
+
+Every one of the 16 is a decoder whose payload contained a genuine `0x00` byte
+(`S00`, `S0041`, `S410010`, `S610062`, …) becoming `None`. So the swap is a **bug
+fix**, it is scoped to exactly the rows predicted, and four representative rows are
+pinned individually rather than left inside the digest. `chars`'s digest, by contrast,
+is the SAME value before and after — 5,972 buffers byte for byte.
+
+### The count, with the method stated, because this row has been wrong four times
+
+Counted with `git diff -U0` against `494f883`, deletions only, classified by what the
+deleted line was. The shim is counted by M4a's method exactly (C function definitions
+in `RUNTIME_SHIM`, one-line definitions included, `static` treated as internal),
+which reproduces M3's and M4a's 95 / 66 / 29 on the parent commit — that is how the
+method was checked rather than assumed.
+
+| | |
+|---|---|
+| LLVM IR text deleted from `vyrn-codegen`'s runtime `const`s | **603** — the six codecs 485, the hex-digit helpers 36, `__vyrn_str_chars` 82 |
+| Rust deleted from the textual emitter's `gen_call` | **88** |
+| Rust deleted from the interpreter | **204** — 160 of codec helpers, 44 of call arms |
+| C function definitions in the shim | **94 (65 exported, 29 static)**, was 95 (66, 29) |
+| deleted in this milestone, in C | **1** — `__vyrn_strncmp` |
+| `declare` lines at the boundary | two fewer (`__vyrn_strncmp`, `strstr`); `shim_link`'s census 57 -> 55 |
+
+**One C function, and that is the honest number.** These builtins were chosen by M4b
+precisely because they had no shim implementation — the codecs' 485 lines were IR the
+textual emitter printed, not C it called. The single C casualty is `__vyrn_strncmp`,
+which `startsWith` and `endsWith` were the only callers of, and it is the first shim
+function this RFC has retired since M2b. `strstr` also left the boundary; it is
+libc's, so nothing was deleted, but the `declare` and the `__vyrn_gen_libc`
+keep-alive entry went.
+
+895 lines of Rust and IR deleted against the 762 lines of Vyrn M4b had already
+committed (350 + 270 + 142). The trade is not "less code" and should not be sold as
+one — it is **one definition instead of two or three**, plus a fourth the direct
+backend no longer owes.
+
+### RFC-0077's ladder: 46/84 -> 49/87, and the reason is the whole relationship
+
+`codecbytes.vyrn`, `strpredbytes.vyrn` and — the interesting one —
+`examples/encoding.vyrn`, which has called the codec builtins since RFC-0014 and was
+blocked on them and nothing else. The direct backend had **no lowering for any of the
+ten**, so this is the RFC-0077 relationship as arithmetic: ten rows that would each
+have had to be hand-emitted in `wasm-encoder` became a library the backend already
+compiles. `textbytes.vyrn` still fails there, and now for a reason this milestone
+chose: it exercises `lineAt`/`colAt`, which were refused.
+
+The corpus grew 84 -> 87 with M4b's three examples, so the honest reading is 46 -> 49
+of a larger denominator: without the routing all three new examples would have
+failed, making it 46/87.
+
+### The interpreter got measurably no slower, which was not obvious
+
+`std/strpred`'s `byteLengthV` is `bytes(s).length`, which **allocates**, and
+`std/vyx` calls these predicates 97 times over a page — so an O(n) copy per
+`startsWith` in an interpreted scanner was the plausible regression. Timed with
+`VYRN_NO_GEN_CACHE=1`, eight runs, best-of:
+
+| | pre | post |
+|---|---|---|
+| `examples/vyxdemo.vyrn` | 79 ms | 76 ms |
+| `examples/bin` (the largest generator app) | 933 ms | 951 ms |
+
+Two percent on the large one and nothing on the small one. So the module was left
+exactly as the equivalence proof wrote it — imports nothing, reaches no builtin but
+the byte view — rather than rebuilt on `s.byteLength` for a speed nothing needed.
+Recorded because the *decision* was to measure before optimizing, and the measurement
+is what kept `std/strpred` identical to the code its proof covers.
+
+### Two properties M2b's tests could not have covered
+
+Both are new with the table and neither follows from M2b's single-module test, so
+both are pinned in `tests/codecs.rs`:
+
+- **Four runtime modules in one link.** A program mentioning `toJson`, `hexEncode`,
+  `chars` and `contains` injects all four, each renamed to its own prefix.
+- **A new module's PRIVATE names.** A program declaring its own `hexDigit`, `hexVal`,
+  `decoded`, `ascii`, `b64Val`, `showCps` and `byteLengthV` — every private name
+  `std/codecs` has, plus one export each from `std/text` and `std/strpred` — while
+  calling all four routed builtins. Every line resolves to the user's function and
+  every builtin still answers.
+
+`every_route_is_spelled_with_its_modules_prefix` pins the table itself: each route's
+reserved name is its module's prefix plus the export, no builtin is claimed twice,
+and `slice` / `lineAt` are asserted absent so a later edit cannot route them by
+accident without reading this note.
+
+### Gates, at this note
+
+1230 workspace tests (the same count as M4b's: six deleted with the code they
+pinned, four added and two renamed), parity green three ways over 87 examples, the
+RFC-0077 ladder at **49/87** and its shim-linked shape likewise 49/87, genwasm green,
+`doc --std --verify` clean, `vyrn-lsp` builds, `fmt --check` clean on every edited
+`.vyrn`.
+
+**What M4b's remaining half and M5 now need.** `stringFromBytes` is still the only
+text builtin of the four with no Vyrn implementation, and `decodeUtf8` is most of it:
+the missing piece is the `Array<UInt8> -> String` construction, which wants a
+primitive or a view the way `floatFromBits` did. `f64_str` stays where M4a left it.
+M5 inherits a smaller question than it was written for — `toJson` and these ten hold
+no Rust arm at all, so "the count of Rust arms should fall" has already happened for
+eleven builtins, and what is left for M5 is the *deliberate* caches: `lineAt`/`colAt`,
+and whether the language grows the abort primitive `slice` needs.
