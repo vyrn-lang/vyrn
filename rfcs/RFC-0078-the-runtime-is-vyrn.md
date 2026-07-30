@@ -1181,3 +1181,156 @@ passed / 0 failed with all three sibling M4b modules present in the tree.
 wasm). `doc --std --verify` clean with `docs/api/std/codecs.md` added. The
 RFC-0077 ladder is untouched — no builtin moved, and the example calls the ones
 the direct backend has not lowered.
+
+---
+
+## M4b(2), as landed: `chars`, `lineAt` and `colAt`, and the view was already there
+
+The three text builtins are written as ordinary Vyrn in `std/text` —
+`decodeUtf8`/`charsV` for the codepoints, `lineAtV`/`colAtV` for the 1-based line
+and column of a byte offset. Nothing is retired, deliberately: the builtins are
+what the Vyrn versions are proved *against*, and equivalence has to exist before a
+deletion can be safe. When the swap lands, `tests/text.rs` becomes the regression
+pin without being rewritten.
+
+### M4a's question, asked again, and answered the other way
+
+M4a's general finding was that the irreducible primitive is a missing **view**
+rather than a missing operation: nothing in the language could read a `Float64`'s
+bits, so every text -> float route had to be a builtin, and two reinterpretation
+instructions removed the need to write the conversion at all. M4a then asked that
+`chars` and `stringFromBytes` be checked against the same question before a
+builtin was assumed.
+
+**The string half needs no new view, and it already had the right one.** `bytes(s)`
+exposes a `String` as its UTF-8 bytes and `stringFromBytes` is the validated
+inverse, so `std/text` needed **no compiler change of any kind** — not one line in
+the checker, the interpreter, either emitter or the shim. That is the cleanest form
+of the RFC's thesis so far: `std/num` cost two primitives, this cost zero.
+
+The line/column pair is a different case and worth separating. Those builtins do
+not exist because the operation was inexpressible — the loop is four lines of Vyrn
+— but because it is O(offset) and a scanner asks once per node, which cost
+`std/vyx` 122 ms of a 291 ms page compile. The interpreter memoizes a line-start
+table per buffer; **the native shim does not, and counts exactly as the Vyrn
+version does.** So the Vyrn implementation is not slower than every engine, it is
+slower than one of them and identical to the other, and retiring the builtin would
+be a decision about the interpreter's cache rather than about capability. That is
+M5's question arriving early.
+
+### The oracle, and where it actually bites
+
+`tests/text.rs` runs the builtin as the oracle over three corpora, all of them
+generated so the Rust side never reimplements UTF-8 a fifth time — it asserts on
+`ok` lines from a Vyrn comparator.
+
+- **Valid codepoints:** every scalar below U+0800 exhaustively (both one- and
+  two-byte forms, byte for byte), sampled through the BMP and the astral planes,
+  plus each encoding boundary spelled out so no step size can skip one; then the
+  same codepoints in multi-codepoint buffers, since a decoder that resynchronizes
+  wrongly only shows up on a sequence. `decodeUtf8`, `charsV` and `chars` must all
+  three agree per row.
+- **Malformed bytes — the half that matters:** ~1,400 buffers where the only
+  observable is accept/reject, because a `String` cannot hold invalid UTF-8 and so
+  `chars` never sees a bad byte. Every lead byte `0xC0..0xFF` against ten
+  continuation bytes chosen to straddle each boundary the encoding cares about
+  (0x7F/0x80, 0x8F/0x90, 0x9F/0xA0, 0xBF/0xC0) at widths two, three and four; the
+  surrogate range encoded as if it were a scalar; overlong forms of the same value
+  at every width; every proper prefix of a valid sequence, and each prefix followed
+  by valid text; and the five-byte forms UTF-8 originally allowed.
+- **Line and column:** every offset from -3 to `len + 3` of twelve buffers,
+  including CRLF, an empty buffer, nothing but newlines, and multi-byte text.
+  Every offset rather than a chosen few precisely because the two engines compute
+  the answer differently — a binary search over a memoized line-start table
+  against a backward walk to the previous LF — so a third implementation that
+  agrees at offset 0 and disagrees at the byte after the last newline is the
+  failure mode. The clamping past the end and below zero is behaviour nothing else
+  in the suite pinned.
+
+The corpus proves it can fail rather than only that it passes: widening 0xED's
+first-continuation bound from 0x9F to 0xBF (the surrogate check, the single
+easiest thing to get wrong) fails three of the five rows, naming the exact byte
+strings.
+
+### A column counts BYTES, and the wrapper's doc says otherwise
+
+Measured off the builtin rather than assumed, because it is not obvious and both
+answers are defensible. The interpreter computes `off - lineStart + 1` and the shim
+walks bytes backwards, so both count **bytes**: the `x` in `éx` is column 3, not
+column 2. That is asserted on its own line in `tests/text.rs` rather than left
+implied by 400 green rows.
+
+`std/vyx`'s wrapper (`std/vyx.vyrn:165`) documents `colAt` as "chars since the last
+LF", which is wrong for any line containing non-ASCII text. Nothing is broken by it
+— RFC-0033 origin directives feed a C-style `#line`, where byte columns are the
+convention — but the comment is a wrong statement about a shared builtin and should
+be corrected when `std/vyx` is next touched.
+
+### The one disagreement, and it is not about UTF-8
+
+`decodeUtf8` accepts `0x00` and returns codepoint 0; `stringFromBytes` refuses the
+buffer with `bytes contain a NUL byte`. That is RFC-0014's rule — a Vyrn `String` is
+NUL-terminated, so it could not carry one — and not a decoding question, so NUL is
+excluded from the cross product and pinned as its own row in both modules' `test`
+blocks. Stating it explicitly is the point: an implementation that "agreed with the
+oracle everywhere" would have had to be wrong about UTF-8 to do so.
+
+### One general native bug, found by putting an array literal somewhere new
+
+`examples/textbytes.vyrn` would not build natively, and the reason is nothing to do
+with text:
+
+```
+error: '%t1' defined with type '[2 x i64]' but expected '{ ptr, i64, i64 }'
+  store { ptr, i64, i64 } %t1, ptr %b.addr2
+```
+
+**An array literal whose element type is a sized integer lowers in the textual
+emitter as a fixed-size `[n x i64]` aggregate, and is then stored into — or passed
+as — the `{ ptr, i64, i64 }` heap-array triple.** clang refuses the module.
+Reproduced at two words: `let b: Array<UInt8> = [65, 66]` fails, and so does
+`let b: Array<Int32> = [1, 2]`; `Array<Int64>` is fine, and an empty literal plus
+`push` is fine. The interpreter and both wasm backends accept the literal, so
+**parity is what found it** — the same shape as M4a's `Option<Float64>` payload and
+its poison float -> int conversions, and the third milestone running where the
+defect was in an engine nobody suspected.
+
+Nothing in the corpus had ever written a sized-integer array literal: `bytes(s)`
+produces the array everywhere it is used, `std/strings` starts from `[]` and
+pushes, and the one place byte literals appear in an array (RFC-0077 M2g's
+`stringFromBytes` test) targets the direct wasm backend. This milestone did not fix
+it — the file ownership for M4b's three parallel modules put the emitters out of
+reach — so the example works around it with a `buf(Array<Int64>) -> Array<UInt8>`
+helper, documented at the call site with the reason. **The fix belongs to whoever
+next touches `vyrn-codegen`'s array lowering**, and the two-line repro above is the
+whole test.
+
+### The count
+
+Unchanged, and it must be: M4b(2) retired no builtin. Counting C function
+definitions in `RUNTIME_SHIM` by M4a's stated method (including one-line
+definitions, `static` as internal):
+
+| | |
+|---|---|
+| C function definitions in the shim | 95 (66 exported, 29 static) |
+| deleted in this milestone | **0** |
+
+`__vyrn_line_at`, `__vyrn_col_at` and the `chars` lowering all stay. What changed is
+that each now has a Vyrn definition proved equal to it, which is the precondition
+for M5's cache-or-delete question rather than the question itself.
+
+### Gates, at this note
+
+Workspace tests green with all three sibling M4b modules in the tree (`tests/text.rs`
+adds five rows: the two modules' inline `test` blocks plus the three differential
+corpora, and they run in 0.2 s — the generated programs are ~4,000 rows and the
+interpreter is not the bottleneck anyone expected). Parity green three ways over the
+corpus including `examples/textbytes.vyrn`. `doc --std --verify` clean with
+`docs/api/std/text.md` added. The RFC-0077 ladder is untouched — no builtin moved.
+
+**What M4b's remaining half needs.** `stringFromBytes` is now the only text builtin
+of the four that is not also written in Vyrn, and `decodeUtf8` is most of it: the
+missing piece is not validation but the `Array<UInt8> -> String` construction, which
+needs a primitive or a view the way `floatFromBits` did. `f64_str` stays where M4a
+left it — a milestone with its own pin of `print`, not a corollary.

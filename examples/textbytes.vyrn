@@ -38,6 +38,24 @@ fn verdict(b: Array<UInt8>) -> String {
     return mine + " | " + theirs
 }
 
+/// A byte buffer from codepoint-free integers, because a `UInt8` array LITERAL
+/// does not survive the native backend.
+///
+/// This is a workaround and it is worth naming precisely: an array literal whose
+/// element type is a sized integer (`Array<UInt8>`, and `Array<Int32>` too) lowers
+/// in the textual emitter as a fixed-size `[n x i64]` aggregate and is then stored
+/// into, or passed as, the `{ ptr, i64, i64 }` heap-array triple — clang refuses
+/// the module. `Array<Int64>` literals are fine, and so is an empty literal plus
+/// `push`, which is what this does. Interpreted and wasm builds accept the literal,
+/// so parity is what found it; see "M4b, as landed" in RFC-0078.
+fn buf(cs: Array<Int64>) -> Array<UInt8> {
+    let mut out: Array<UInt8> = []
+    for c in cs {
+        out.push(UInt8(c))
+    }
+    return out
+}
+
 /// One line/column row, again both ways.
 fn lc(b: Array<UInt8>, off: Int64) -> String {
     return lineAtV(b, off).toString() + ":" + colAtV(b, off).toString() + " | " +
@@ -58,20 +76,22 @@ fn main() -> Int64 {
     print(cps("\u{10ffff}"))
 
     // ---- the malformed table ------------------------------------------------
+    // Decimal through `buf` rather than `['\xc0', '\xaf']`, for the native reason
+    // documented on `buf` — nothing here is about the spelling of a byte.
     print(verdict(bytes("héllo"))) // valid, for contrast
-    print(verdict([])) // the empty buffer is a valid empty String
-    print(verdict(['\xc0', '\xaf'])) // overlong '/'
-    print(verdict(['\x80'])) // lone continuation
-    print(verdict(['\xe2', '\x82'])) // truncated 3-byte
-    print(verdict(['\xed', '\xa0', '\x80'])) // a surrogate half
-    print(verdict(['\xf5', '\x80', '\x80', '\x80'])) // above U+10FFFF
-    print(verdict(['\xf4', '\x8f', '\xbf', '\xbf'])) // U+10FFFF exactly — legal
-    print(verdict(['\xf4', '\x90', '\x80', '\x80'])) // one past it
-    print(verdict(['\xe0', '\x80', '\x80'])) // overlong 3-byte
-    print(verdict(['\xf0', '\x80', '\x80', '\x80'])) // overlong 4-byte
+    print(verdict(buf([]))) // the empty buffer is a valid empty String
+    print(verdict(buf([192, 175]))) // C0 AF — overlong '/'
+    print(verdict(buf([128]))) // 80 — lone continuation
+    print(verdict(buf([226, 130]))) // E2 82 — truncated 3-byte
+    print(verdict(buf([237, 160, 128]))) // ED A0 80 — a surrogate half
+    print(verdict(buf([245, 128, 128, 128]))) // F5 .. — above U+10FFFF
+    print(verdict(buf([244, 143, 191, 191]))) // F4 8F BF BF — U+10FFFF, legal
+    print(verdict(buf([244, 144, 128, 128]))) // F4 90 80 80 — one past it
+    print(verdict(buf([224, 128, 128]))) // E0 80 80 — overlong 3-byte
+    print(verdict(buf([240, 128, 128, 128]))) // F0 80 80 80 — overlong 4-byte
     // Valid UTF-8 that a `String` still cannot hold: the one row where the two
     // verdicts differ, and the reason is NUL termination rather than UTF-8.
-    print(verdict(['h', '\x00', 'i']))
+    print(verdict(buf([104, 0, 105])))
 
     // ---- line and column, 1-based -------------------------------------------
     let b = bytes("ab\ncd\n\nx")
@@ -107,6 +127,9 @@ test "the four UTF-8 widths decode to the same codepoints both ways" {
     assertEq(cps("\u{10ffff}"), "1114111 | 1114111")
 }
 
+/// Spelled with byte literals, which read better and are legal everywhere — a
+/// `test` block is never lowered natively (RFC-0015 keeps them out of `build`),
+/// so the `buf` workaround `main` needs does not apply here.
 test "the two validators agree on every malformed shape" {
     assertEq(verdict(['\xc0', '\xaf']), "reject | reject: bytes are not valid UTF-8")
     assertEq(verdict(['\x80']), "reject | reject: bytes are not valid UTF-8")
