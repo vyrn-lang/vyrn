@@ -2568,3 +2568,104 @@ handed out.
 Pure refactor, and it is checked as one: `fib`, `mapdemo` and `freelist` emit
 byte-identical modules before and after, and the ladder is unchanged at 63/87 on
 both link shapes.
+
+---
+
+## M2m, as landed
+
+**`=~`, and the row that was not a dispatch problem.** 63/87 → 67/87, on both
+link shapes. Four examples: `finitekeys`, `i18ndemo`, `regex`, `twdemo`. 128 lines
+of `direct.rs`, nothing refused, nothing deleted.
+
+### The row was read as a `match`, and it is an operator
+
+"`Match` on strings" is the gap message `` `Match` on strings ``, and it came from
+`cmp_i32(BinOp::Match)` returning `None` at the tail of the string-operator arm —
+`BinOp::Match` is RFC-0046's `=~`. So the question of whether a `match` on strings
+with many arms wants something denser than an O(n) chain has no site to be asked
+at: `Pattern` has no string case, nothing in the corpus matches on a string value,
+and the dense form is what `=~` already *is*. RFC-0046 answered that question with
+a DFA, and this milestone's job was to run one.
+
+What was left to choose is small and worth stating anyway:
+
+- **One runner over a per-pattern table, not a walk specialized per pattern.** The
+  pattern is entirely in the table it is handed, so every `=~` site in a module
+  shares 33 instructions. That is the same split `@__vyrn_regex_run` /
+  `@.rx.N.table` makes in the textual backend, and matching it means a divergence
+  between the two can only be in the walk, never in the language.
+- **The table is interned at the USE site**, which the textual backend cannot do.
+  An LLVM global has a name that must exist before the reference to it, so `emit`
+  walks every function, type predicate and global to collect the patterns first
+  (`collect_regex_expr`). A data address has no name, and `Module::data` already
+  shares identical contents — so the two sites of `value =~ "[a-z]+"` in
+  `regex.vyrn` get one table because their bytes are equal, not because a pass
+  went looking for them. There is no collection pass here at all, and generated
+  code (RFC-0021 generators, RFC-0078's rewrites) is reached for free rather than
+  by teaching a walker about it.
+
+That second choice paid a number nobody was aiming at. `twdemo`'s generated module
+declares two finite-string types, `TwClass` (391 states) and `Tw` (781); every
+`TwClass` boundary in the file is proven at compile time by RFC-0020's containment,
+so **no check for it is emitted and its 400,384-byte table is not in the module at
+all.** The textual backend emits both. Measured on the data section: 831,524 bytes,
+of which 799,744 is `Tw`.
+
+### The footprint is RFC-0046's, and it is named rather than discovered
+
+A complete 256-wide table of `u32` is 1 KB per state, so `Tw` is the largest static
+this backend emits anywhere — an 880 KB module whose code section is 69 KB. Not a
+regression, since the textual path emits the same shape (twice over, here), and
+comfortably under `STATICS_LIMIT`'s 8 MB, which is about 8,000 states. The upgrade
+path if it ever matters is byte equivalence classes, and it is written down beside
+the interning rather than left to be rediscovered from a module size.
+
+### The bug only running could catch, and this time it had to be planted
+
+Ninth consecutive milestone, by a different route. There was no accidental bug —
+all four examples built and agreed on the first run, which has not happened before
+— so the walk was broken on purpose instead, and that found something better than
+a bug: **the whole corpus is blind to a non-ASCII input byte.**
+
+The load of the input byte has to be unsigned. With `i32.load8_s` a UTF-8
+continuation byte becomes a negative table index, the walk reads memory *below* the
+transition table, and the answer is wrong with no trap — the table sits in the
+middle of a live address space, so there is nothing to fault on. All four examples,
+rebuilt against that, still pass: every `=~` in `examples/` and `std/` runs over
+ASCII keys and ASCII class names.
+
+So `the_dfa_walk_agrees_with_the_interpreter_on_what_no_example_reaches` pins nine
+answers against the interpreter's. The two that matter are `"é" =~ "."` false and
+`"é" =~ ".."` true — `.` is one BYTE, which is the fact RFC-0046's byte DFA rests
+on and the fact a signed load destroys. It also covers the zero-length walk, where
+the answer is whether the START state accepts (a do-while shape gets that wrong and
+no example asks), and a non-match that keeps walking after it is already lost,
+which is what a dead state absorbing the rest of the input means.
+
+### Nothing contradicted M0, M1, M2a–M2l
+
+No offset is computed here at all: a DFA row is `state << 10` into a table this
+milestone interned, not a field of a Vyrn type, so `layout::of_ll ∘ llt` has
+nothing to say and is not consulted. `=~` yields a scalar `Bool`, so
+destination-first has no destination; the runner reaches its epilogue without a
+`return`, as `map_find` does; and the widening rule is untouched because the table
+is data rather than a boundary. M2l's self-registering `Rt` did exactly what it was
+built for — the new helper is one `slot("regex_run")` beside its `next_is`, and the
+count test needed no edit. The LLVM wasm path is byte-for-byte unaffected: the diff
+does not touch `lib.rs`.
+
+### 67 of 87, regrouped
+
+| blocked on | n |
+|---|---|
+| the call `parse` | 4 |
+| the call `lineAt` 3, the call `logger` 2 | 5 |
+| a `fn`-typed parameter (RFC-0023) 3, a lambda 2 | 5 |
+| `spawn` 2, `region` 2 | 4 |
+| a conversion from `Cargo`/`Config` to `T` | 2 |
+
+M2l's list minus one row, and nothing else moved: no example blocked on `=~` had a
+second blocker behind it, which is the first time a row has paid its full face
+value. What remains is the nine-example builtins row (`parse`, `lineAt`, `logger`),
+the RFC-0023/RFC-0037 function-value worklist, the two control-flow features this
+RFC scoped out from the start, and one generic-payload conversion twice.
