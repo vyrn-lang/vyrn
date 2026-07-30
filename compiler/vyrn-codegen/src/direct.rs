@@ -1890,6 +1890,7 @@ impl Fn_<'_> {
             }
             Expr::Binary { op, lhs, rhs, line } => self.binary(m, b, *op, lhs, rhs, *line)?,
             Expr::Call { name, args, line } => self.call(m, b, name, args, *line)?,
+            Expr::Spawn { name, args, line } => self.spawn(m, b, name, args, *line)?,
             other => return unsupported(&expr_name(other), Expr::line(other)),
         })
     }
@@ -2811,6 +2812,43 @@ impl Fn_<'_> {
                 }
                 return Ok(elem);
             }
+            // `t.join()` (RFC-0025). The task already ran, at the spawn point, so
+            // there is nothing to wait for: this is a read out of its heap box.
+            // Idempotent for the same reason a second `__vyrn_join` is — the box
+            // is written once and never freed.
+            "@join" if args.len() == 1 => {
+                let t = self.expr(m, b, &args[0])?;
+                let Type::Task(inner) = self.cx.resolve(&t) else {
+                    // The checker admits nothing else; keep the textual backend's
+                    // defensive identity rather than inventing a diagnostic.
+                    return Ok(t);
+                };
+                match self.cx.repr(&inner, line)? {
+                    Repr::Scalar(_) => {
+                        b.ins(&load_of(&self.cx.ll(&inner), 0, self.cx.signed(&inner)));
+                    }
+                    // A copy, where the LLVM backend emits `load {ll}`. Handing
+                    // out the box's own address would make a joined aggregate an
+                    // alias into the task's result — M2l's `get` hazard, one
+                    // container along.
+                    Repr::Agg(l) => {
+                        let src = b.local(ValType::I32);
+                        b.ins(&Instruction::LocalSet(src));
+                        let off = b.alloc(l.size, l.align);
+                        b.slot(off);
+                        b.ins(&Instruction::LocalGet(src));
+                        b.ins(&Instruction::I32Const(l.size as i32));
+                        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                        b.slot(off);
+                    }
+                    // A Unit task has no result to read, but it still has a box:
+                    // the `Task` was a value and has to be consumed.
+                    Repr::Unit => {
+                        b.ins(&Instruction::Drop);
+                    }
+                }
+                return Ok(*inner);
+            }
             "@has" | "@remove" if args.len() == 2 => {
                 return self.map_method(m, b, name, args, line)
             }
@@ -3139,6 +3177,93 @@ impl Fn_<'_> {
             _ => return Ok(None),
         }
         Ok(Some(Type::Int))
+    }
+
+    /// `spawn f(args)` (RFC-0025) — and the whole reason this backend needs no
+    /// function table after all.
+    ///
+    /// M2a's pre-flight measured nine function-addresses-as-values over the
+    /// corpus and concluded "there IS a function table, and it is `spawn`". All
+    /// nine are the *textual* emitter's `call @__vyrn_spawn(ptr @__vyrn_task_*,
+    /// ptr)`, and the half of that finding which is about wasm is wrong. Read what
+    /// the shim does with the pointer on this target (`toolchain::RUNTIME_SHIM`,
+    /// `#if defined(__wasi__)`): wasm has no threads, so `__vyrn_spawn` calls
+    /// `thunk(frame)` **inline** and returns a `VTask` holding the frame. The
+    /// pointer is formed and consumed in one C statement, and it exists only
+    /// because the LLVM path routes an eager call through a C function that cannot
+    /// know the callee.
+    ///
+    /// A spawn site names its callee statically, so emitting that eager path here
+    /// forms no pointer at all: no table, no element segment, no `ref.func`, no
+    /// `call_indirect`. `spawn f(a)` IS `f(a)`, at the spawn point, in argument
+    /// order — which is also literally what the interpreter does (`interp.rs`,
+    /// `Expr::Spawn`), so all three engines run one schedule.
+    ///
+    /// What survives of the machinery is the **frame**: a `Task<T>` outlives the
+    /// shadow-stack frame that made it and `join` is idempotent, so the result is
+    /// boxed on the heap and the `Task` is that address — the shim's
+    /// `VTask { frame }` minus the thunk field it no longer needs. Never freed,
+    /// which is the shim's own stated ownership rule for a task.
+    ///
+    /// Isolation is NOT enforced here, and must not be: the checker proves it
+    /// transitively (`checker.rs`, `spawn_safe`) for every engine, so a second
+    /// opinion in one backend would be a rule free to disagree with itself.
+    /// `__vyrn_join_all` has nothing to do either — eager means every spawned task
+    /// has already run by the time `main` returns, which is why the shim's wasm
+    /// arm defines it empty.
+    fn spawn(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        // A spawn callee is always a user function — the checker resolves the name
+        // in its own `sigs` and admits nothing else. Guarded before routing
+        // through [`Fn_::call`], which matches builtin spellings first: without
+        // this, a user function named like a builtin would spawn the builtin while
+        // the textual backend (whose `prep_spawn_target` looks only at `funcs`)
+        // spawned the function.
+        if !self.cx.sigs.contains_key(name) && !self.cx.generics.contains_key(name) {
+            return unsupported(&format!("`spawn {name}(..)` of something not a function"), line);
+        }
+        // Everything a call needs — argument coercion, generic instantiation, the
+        // hidden destination for an aggregate return — is `call`'s, so a spawned
+        // call and a plain one cannot diverge in how they pass arguments.
+        let ret = self.call(m, b, name, args, line)?;
+        let boxed = b.local(ValType::I32);
+        match self.cx.repr(&ret, line)? {
+            Repr::Scalar(v) => {
+                let l = self.layout_of(&ret, line)?;
+                let held = b.local(v);
+                b.ins(&Instruction::LocalSet(held));
+                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::Call(self.cx.rt.malloc));
+                b.ins(&Instruction::LocalTee(boxed));
+                b.ins(&Instruction::LocalGet(held));
+                b.ins(&store_of(&self.cx.ll(&ret)));
+            }
+            Repr::Agg(l) => {
+                let src = b.local(ValType::I32);
+                b.ins(&Instruction::LocalSet(src));
+                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::Call(self.cx.rt.malloc));
+                b.ins(&Instruction::LocalTee(boxed));
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            }
+            // A `Task<Unit>` still has to be a value: one word, so `join` has a
+            // pointer to drop rather than a `Task` with no representation.
+            Repr::Unit => {
+                b.ins(&Instruction::I32Const(8));
+                b.ins(&Instruction::Call(self.cx.rt.malloc));
+                b.ins(&Instruction::LocalSet(boxed));
+            }
+        }
+        b.ins(&Instruction::LocalGet(boxed));
+        Ok(Type::Task(Box::new(ret)))
     }
 }
 
