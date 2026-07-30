@@ -53,6 +53,12 @@ const PASSING: &[&str] = &[
     // RFC-0014 — it was blocked on them and nothing else.
     "encoding.vyrn",
     "enum.vyrn",
+    // RFC-0078 M3: `fromJson` is `std/jsonread` plus a per-type walk generated as
+    // Vyrn, so the two `fromJson` rows RFC-0077 had left unlowered became a library
+    // this backend already compiles — and with them every example whose only
+    // blocker was a decode. `jsondecbytes` is the pin, failure shapes included.
+    "enumarray.vyrn",
+    "enumcodec.vyrn",
     "eventloop.vyrn",
     "externdemo2.vyrn",
     "fib.vyrn",
@@ -65,10 +71,13 @@ const PASSING: &[&str] = &[
     "ifexpr.vyrn",
     "inlinewhere.vyrn",
     "jsonbytes.vyrn",
+    "jsoncodec.vyrn",
+    "jsondecbytes.vyrn",
     "jsonschema.vyrn",
     "map.vyrn",
     "modify.vyrn",
     "modules.vyrn",
+    "namespace.vyrn",
     "numparse.vyrn",
     "option.vyrn",
     "ownership.vyrn",
