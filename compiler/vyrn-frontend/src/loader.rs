@@ -521,10 +521,25 @@ pub struct RtModule {
 
 /// Every runtime module, in load order.
 pub const RT_MODULES: &[RtModule] = &[
+    // `fromJson` links this one too, and for the same reason `toJson` does: the
+    // `Json` tree its decoders walk is declared here. It is listed as desugared
+    // rather than routed because both builtins need the argument's static type,
+    // which is a compiler part no table entry can express.
     RtModule {
         spec: RT_JSON_SPEC,
         prefix: RT_PREFIX,
-        desugared: &["toJson"],
+        desugared: &["toJson", "fromJson"],
+        routes: &[],
+    },
+    // RFC-0078 M3: `fromJson`'s untyped half — the reader (via `std/jsonread`),
+    // the RFC-0018 Issue vocabulary, the path arithmetic and the scalar decoders.
+    // The typed half is generated per target type by `jsondec` and calls in here,
+    // so the 32 `__vyrn_vj_*` C functions and the interpreter's own walk are gone
+    // rather than duplicated.
+    RtModule {
+        spec: "std/jsondec",
+        prefix: "jsondec$",
+        desugared: &["fromJson"],
         routes: &[],
     },
     // RFC-0078 M4b(1)/M4c: the six codecs. They had no C shim at all — ~520 lines
@@ -3812,10 +3827,33 @@ mod tests {
         }
     }
 
+    /// Every runtime module a builtin can inject (RFC-0078), plus the modules those
+    /// import. Added to every `run_multi` resolver rather than per test: injection is
+    /// conditional on the mention, so a program that never says `fromJson` links none
+    /// of them, and a test that does say it should not have to know which files that
+    /// implies.
+    const RT_FILES: &[(&str, &str)] = &[
+        ("std/json.vyrn", include_str!("../../../std/json.vyrn")),
+        ("std/jsonread.vyrn", include_str!("../../../std/jsonread.vyrn")),
+        ("std/jsondec.vyrn", include_str!("../../../std/jsondec.vyrn")),
+        ("std/num.vyrn", include_str!("../../../std/num.vyrn")),
+        ("std/codecs.vyrn", include_str!("../../../std/codecs.vyrn")),
+        ("std/text.vyrn", include_str!("../../../std/text.vyrn")),
+        ("std/strpred.vyrn", include_str!("../../../std/strpred.vyrn")),
+    ];
+
     fn run_multi(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
-        let program = load(root, "main.vyrn", &opts(), &map(files))
-            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
-        let diags = crate::checker::check_accum(&program);
+        let files: Vec<(&str, &str)> = files.iter().copied().chain(RT_FILES.iter().copied()).collect();
+        let files = &files[..];
+        let mut program = load(root, "main.vyrn", &opts(), &map(files))
+            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("
+"))?;
+        // `check_and_synthesize` rather than a bare check: since RFC-0078 M2b/M3 a
+        // linked program is not runnable until the JSON builtins' generated Vyrn is
+        // in it, and `loader::load` deliberately stops at the link. A test that ran
+        // the bare check would fail at the call site with "no decoder", which is a
+        // true statement about a program nobody finished assembling.
+        let diags = crate::check_and_synthesize(&mut program);
         if let Some(d) = diags.first() {
             return Err(d.render());
         }

@@ -2407,6 +2407,22 @@ impl Fn_<'_> {
                 let e = vyrn_frontend::jsonenc::encode_expr(args[0].clone(), &ty, line);
                 return self.expr(m, b, &e);
             }
+            // `fromJson(T, s)` is the mirror (RFC-0078 M3), and it needs less: the
+            // target is a type NAME, so there is nothing to peek. The reader is
+            // `std/jsonread` and the walk is generated per target, so this backend
+            // gets `fromJson` without a DOM, a number parser or a message
+            // assembler — the two rows RFC-0077 had left unlowered.
+            "fromJson" if args.len() == 2 => {
+                let Expr::Var { name: tn, .. } = &args[0] else {
+                    return unsupported("`fromJson` without a type name", line);
+                };
+                let target = vyrn_frontend::ast::Type::Named(tn.clone());
+                if !self.cx.sigs.contains_key(&vyrn_frontend::jsondec::top_name(&target)) {
+                    return unsupported("`fromJson` without the JSON runtime linked", line);
+                }
+                let e = vyrn_frontend::jsondec::decode_expr(&target, args[1].clone(), line);
+                return self.expr(m, b, &e);
+            }
             // `value(x)` boxes a scalar into the built-in `Value` enum. Its variant
             // is picked by the argument's type and built by the ordinary enum path,
             // so the tag and the payload encoding are the same ones a user's

@@ -21,6 +21,7 @@ pub mod finite;
 pub mod fmt;
 pub mod hash;
 pub mod interp;
+pub mod jsondec;
 pub mod jsonenc;
 pub mod lexer;
 pub mod loader;
@@ -146,10 +147,19 @@ pub fn load(
 /// are ordinary Vyrn: move-checked below with everything else, and lowered by every
 /// backend as source it cannot tell apart from the user's.
 pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
-    let (mut diags, json_types) = checker::check_accum_with_json_types(program);
+    let (mut diags, json_types, json_dec_types) =
+        checker::check_accum_with_json_types(program);
     if diags.is_empty() {
-        match jsonenc::encoders(&json_types, &types::decl_map(program)) {
+        let types = types::decl_map(program);
+        match jsonenc::encoders(&json_types, &types) {
             Ok(fns) => program.functions.extend(fns),
+            Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
+        }
+        match jsondec::decoders(&json_dec_types, &types) {
+            Ok((fns, aliases)) => {
+                program.functions.extend(fns);
+                program.type_decls.extend(aliases);
+            }
             Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
         }
     }

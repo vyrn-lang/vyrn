@@ -48,7 +48,7 @@ pub fn check_accum_reusing(
     program: &Program,
     module_hashes: &std::collections::HashMap<String, String>,
 ) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
-    let (out, let_types, _, _) = check_accum_inner(program, Some(module_hashes));
+    let (out, let_types, _, _, _) = check_accum_inner(program, Some(module_hashes));
     (out, let_types)
 }
 
@@ -97,7 +97,7 @@ fn signature_fingerprint(
 pub fn check_accum_with_let_types(
     program: &Program,
 ) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
-    let (out, let_types, _, _) = check_accum_full(program);
+    let (out, let_types, _, _, _) = check_accum_full(program);
     (out, let_types)
 }
 
@@ -108,13 +108,16 @@ pub fn stored_fn_effects(program: &Program) -> StoredFnEffects {
     check_accum_full(program).2
 }
 
-/// Diagnostics AND the static type of every `toJson` argument (RFC-0078 M2b) —
-/// the shape `lib::load_warned` needs, since the encoder functions those types
-/// require must be in the program before any engine builds its function table.
-/// One pass: a second full check to collect them would double every load.
-pub fn check_accum_with_json_types(program: &Program) -> (Vec<Diagnostic>, Vec<Type>) {
-    let (out, _, _, json) = check_accum_full(program);
-    (out, json)
+/// Diagnostics AND the static types the JSON builtins need synthesized for
+/// (RFC-0078 M2b, M3): every `toJson` argument's type, and every `fromJson`
+/// target. `lib::check_and_synthesize` needs both before any engine builds its
+/// function table. One pass: a second full check to collect them would double
+/// every load.
+pub fn check_accum_with_json_types(
+    program: &Program,
+) -> (Vec<Diagnostic>, Vec<Type>, Vec<Type>) {
+    let (out, _, _, json, jdec) = check_accum_full(program);
+    (out, json, jdec)
 }
 
 /// The full checking pass: diagnostics, the inferred-`let`-type table, and the
@@ -125,6 +128,7 @@ fn check_accum_full(
     Vec<Diagnostic>,
     HashMap<(usize, String), Type>,
     StoredFnEffects,
+    Vec<Type>,
     Vec<Type>,
 ) {
     check_accum_inner(program, None)
@@ -137,6 +141,7 @@ fn check_accum_inner(
     Vec<Diagnostic>,
     HashMap<(usize, String), Type>,
     StoredFnEffects,
+    Vec<Type>,
     Vec<Type>,
 ) {
     let mut out = Vec::new();
@@ -511,6 +516,7 @@ fn check_accum_inner(
         stored_calls: RefCell::new(Vec::new()),
         spawn_sites: RefCell::new(Vec::new()),
         json_types: RefCell::new(Vec::new()),
+        json_dec_types: RefCell::new(Vec::new()),
     };
 
     // 2b. Module state (RFC-0013): check each initializer in declaration order,
@@ -745,7 +751,9 @@ fn check_accum_inner(
     let let_types = checker.let_types.borrow().clone();
     let mut json_types = checker.json_types.borrow().clone();
     json_types.dedup_by_key(|t| format!("{t:?}"));
-    (out, let_types, effects, json_types)
+    let mut json_dec_types = checker.json_dec_types.borrow().clone();
+    json_dec_types.dedup_by_key(|t| format!("{t:?}"));
+    (out, let_types, effects, json_types, json_dec_types)
 }
 
 /// Check every `test` body (RFC-0015). Duplicate names per module are reported;
@@ -966,6 +974,9 @@ struct Checker<'a> {
     /// type expressions but build their function tables once, from a `&Program`.
     /// So the checker collects, and `lib::load_warned` synthesizes the encoders.
     json_types: RefCell<Vec<Type>>,
+    /// RFC-0078 M3: the target type of every `fromJson(T, s)` in the program, for
+    /// the same reason and synthesized at the same point — the decoders.
+    json_dec_types: RefCell<Vec<Type>>,
 }
 
 /// What an enum variant name resolves to.
@@ -4945,6 +4956,9 @@ impl<'a> Checker<'a> {
                     "line {line}: `fromJson`'s second argument must be a String, found {sty}"
                 ));
             }
+            // RFC-0078 M3: record the target so its decoder exists in the linked
+            // program by the time an engine lowers this call.
+            self.json_dec_types.borrow_mut().push(target.clone());
             return Ok(Type::App("Validation".to_string(), vec![target]));
         }
         // built-in: value(x) -> Value — box a scalar into the interpolation value

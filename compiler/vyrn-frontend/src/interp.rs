@@ -518,40 +518,6 @@ fn wrap_intn(v: i64, bits: u8, signed: bool) -> i64 {
     }
 }
 
-/// Decode a JSON number into a sized-integer target (RFC-0018): the token must
-/// be integer syntax AND fit the target's width/signedness exactly (never
-/// through `f64`). Returns the `i64` bit pattern (as stored in `Val::IntN`), or
-/// `None` for a non-integral or out-of-range value.
-fn intn_from_num(n: &crate::codec::Num, bits: u8, signed: bool) -> Option<i64> {
-    if !n.is_int {
-        return None;
-    }
-    if signed {
-        let v = n.text.parse::<i64>().ok()?;
-        let (min, max) = if bits >= 64 {
-            (i64::MIN, i64::MAX)
-        } else {
-            let m = 1i64 << (bits - 1);
-            (-m, m - 1)
-        };
-        if v < min || v > max {
-            return None;
-        }
-        Some(wrap_intn(v, bits, signed))
-    } else {
-        let v = n.text.parse::<u64>().ok()?;
-        let max = if bits >= 64 {
-            u64::MAX
-        } else {
-            (1u64 << bits) - 1
-        };
-        if v > max {
-            return None;
-        }
-        Some(wrap_intn(v as i64, bits, signed))
-    }
-}
-
 /// Convert a numeric value to `target` (Int / sized IntN / Float / Float32),
 /// matching the native casts (sext/trunc via `wrap_intn`, si/uitofp, fpto si/ui,
 /// fp trunc/ext). Float→int truncates toward zero; out-of-range float→int is
@@ -2608,16 +2574,16 @@ impl<'a> Interp<'a> {
                         }
                         _ => return Err("`fromJson` needs a declared type name".into()),
                     };
-                    let s = match self.expr(&args[1], scope)? {
-                        Val::Str(s) => s,
-                        other => {
-                            return Err(format!(
-                                "`fromJson`'s second argument must be a String, found {other:?}"
-                            )
-                            .into())
-                        }
-                    };
-                    return Ok(self.decode_top(&tn, &s));
+                    let target = Type::Named(tn);
+                    let e = crate::jsondec::decode_expr(&target, args[1].clone(), *line);
+                    let top = crate::jsondec::top_name(&target);
+                    if !self.funcs.contains_key(top.as_str()) {
+                        return Err(format!(
+                            "`fromJson` needs the Vyrn runtime: no decoder for `{target}`                              (is a std library root reachable?)"
+                        )
+                        .into());
+                    }
+                    return self.expr(&e, scope);
                 }
                 // `a.pop()` (RFC-0011) — remove and return the last element as
                 // `Option<T>` (`None` on empty), mutating the receiver in place.
@@ -4174,339 +4140,6 @@ impl<'a> Interp<'a> {
         None
     }
 
-    /// Decode `s` into `Validation<tn>` (RFC-0018). Never traps; a parse error
-    /// or any accumulated `Issue` yields `Invalid([Issue])`.
-    fn decode_top(&self, tn: &str, s: &str) -> Val {
-        let json = match crate::codec::parse(s) {
-            Ok(j) => j,
-            Err(e) => {
-                let issue = self.issue_val("json.parse", "", &e.0);
-                return Val::Enum("Invalid".to_string(), vec![Val::Array(std::rc::Rc::new(vec![issue]))]);
-            }
-        };
-        let mut issues = Vec::new();
-        let target = Type::Named(tn.to_string());
-        let v = self.decode_val(&json, &target, "", &mut issues);
-        if issues.is_empty() {
-            Val::Enum("Valid".to_string(), vec![v.unwrap_or(Val::Unit)])
-        } else {
-            Val::Enum("Invalid".to_string(), vec![Val::Array(std::rc::Rc::new(issues))])
-        }
-    }
-
-    /// Walk a parsed JSON node against a target type, building the value and
-    /// accumulating `Issue`s. Returns `None` when this node produced no value
-    /// (a structural failure) — the caller keeps going so every problem is
-    /// reported at once.
-    fn decode_val(
-        &self,
-        json: &crate::codec::JsonV,
-        ty: &Type,
-        path: &str,
-        issues: &mut Vec<Val>,
-    ) -> Option<Val> {
-        use crate::codec::JsonV;
-        // A named type decodes against its base, then runs its `where` clause
-        // (accumulating a `validate` Issue instead of trapping).
-        if let Type::Named(n) = ty {
-            let decl = self.type_map.get(n)?.clone();
-            let base_val = self.decode_val(json, &decl.base, path, issues)?;
-            if decl.predicate.is_some() {
-                let holds = self.run_predicate(&decl, &base_val).unwrap_or(false);
-                if !holds {
-                    issues.push(self.issue_val(
-                        "validate",
-                        path,
-                        &crate::codec::validate_message(&decl),
-                    ));
-                }
-            }
-            return Some(base_val);
-        }
-        match ty {
-            Type::Record(fields) => {
-                let obj_fields = match json {
-                    JsonV::Obj(fs) => fs,
-                    _ => {
-                        issues.push(self.type_issue(path, "object", json));
-                        return None;
-                    }
-                };
-                let get = |k: &str| obj_fields.iter().find(|(fk, _)| fk == k).map(|(_, v)| v);
-                let mut map = HashMap::new();
-                for f in fields {
-                    let child = crate::codec::field_path(path, &f.name);
-                    let ft = crate::types::resolve(&f.ty, &self.type_map);
-                    if let Type::Option(inner) = ft {
-                        // Absent OR null -> None; otherwise Some(decode).
-                        let val = match get(&f.name) {
-                            None | Some(JsonV::Null) => Val::Option(None),
-                            Some(j) => match self.decode_val(j, &inner, &child, issues) {
-                                Some(x) => Val::Option(Some(Box::new(x))),
-                                None => Val::Option(None),
-                            },
-                        };
-                        map.insert(f.name.clone(), val);
-                    } else {
-                        match get(&f.name) {
-                            None => {
-                                issues.push(self.issue_val(
-                                    "json.missing",
-                                    &child,
-                                    &crate::codec::missing_message(&f.name),
-                                ));
-                            }
-                            Some(j) => {
-                                if let Some(fv) = self.decode_val(j, &f.ty, &child, issues) {
-                                    map.insert(f.name.clone(), fv);
-                                }
-                            }
-                        }
-                    }
-                }
-                Some(Val::Record(map))
-            }
-            Type::Array(inner) => {
-                let items = match json {
-                    JsonV::Arr(items) => items,
-                    _ => {
-                        issues.push(self.type_issue(path, "array", json));
-                        return None;
-                    }
-                };
-                let mut out = Vec::new();
-                for (i, it) in items.iter().enumerate() {
-                    let child = crate::codec::index_path(path, i);
-                    if let Some(ev) = self.decode_val(it, inner, &child, issues) {
-                        out.push(ev);
-                    }
-                }
-                Some(Val::Array(std::rc::Rc::new(out)))
-            }
-            // A `Map<String, V>` decodes any JSON object (RFC-0028): document
-            // order becomes insertion order; each value is validated as `V` at
-            // path `field.<key>`. Duplicate keys mirror the record decoder's
-            // first-wins policy (`JsonV::get`/`__vyrn_vj_get`): the first
-            // occurrence's slot and value are kept.
-            Type::Map(_, val) => {
-                let obj_fields = match json {
-                    JsonV::Obj(fs) => fs,
-                    _ => {
-                        issues.push(self.type_issue(path, "object", json));
-                        return None;
-                    }
-                };
-                let mut pairs: Vec<(String, Val)> = Vec::new();
-                for (k, jv) in obj_fields {
-                    let child = crate::codec::field_path(path, k);
-                    if let Some(v) = self.decode_val(jv, val, &child, issues) {
-                        if !pairs.iter().any(|(pk, _)| pk == k) {
-                            pairs.push((k.clone(), v));
-                        }
-                    }
-                }
-                Some(Val::Map(pairs))
-            }
-            Type::Int => match json {
-                JsonV::Num(n) => match n.as_i64() {
-                    Some(i) => Some(Val::Int(i)),
-                    None => {
-                        issues.push(self.type_issue(path, "integer", json));
-                        None
-                    }
-                },
-                _ => {
-                    issues.push(self.type_issue(path, "integer", json));
-                    None
-                }
-            },
-            Type::IntN { bits, signed } => {
-                let ok = match json {
-                    JsonV::Num(n) => intn_from_num(n, *bits, *signed),
-                    _ => None,
-                };
-                match ok {
-                    Some(v) => Some(Val::IntN {
-                        v,
-                        bits: *bits,
-                        signed: *signed,
-                    }),
-                    None => {
-                        issues.push(self.type_issue(path, "integer", json));
-                        None
-                    }
-                }
-            }
-            Type::Float => match json {
-                JsonV::Num(n) => Some(Val::Float(n.as_f64())),
-                _ => {
-                    issues.push(self.type_issue(path, "number", json));
-                    None
-                }
-            },
-            Type::Float32 => match json {
-                JsonV::Num(n) => Some(Val::Float32(n.as_f64() as f32)),
-                _ => {
-                    issues.push(self.type_issue(path, "number", json));
-                    None
-                }
-            },
-            Type::Bool => match json {
-                JsonV::Bool(b) => Some(Val::Bool(*b)),
-                _ => {
-                    issues.push(self.type_issue(path, "boolean", json));
-                    None
-                }
-            },
-            Type::Str => match json {
-                JsonV::Str(s) => Some(Val::Str(std::rc::Rc::new(s.clone()))),
-                _ => {
-                    issues.push(self.type_issue(path, "string", json));
-                    None
-                }
-            },
-            Type::Enum(vs) => {
-                let expected = crate::codec::enum_expected(vs);
-                self.decode_variant(json, vs, &expected, path, issues)
-            }
-            Type::Result(t, e) => {
-                // `Result<T, E>` decodes from `{"Ok":<T>}` / `{"Err":<E>}`
-                // (RFC-0024) — a two-variant payload enum with single payloads.
-                let vs = vec![
-                    EnumVariant {
-                        name: "Ok".to_string(),
-                        payload: vec![(**t).clone()],
-                    },
-                    EnumVariant {
-                        name: "Err".to_string(),
-                        payload: vec![(**e).clone()],
-                    },
-                ];
-                let expected = crate::codec::result_expected();
-                self.decode_variant(json, &vs, &expected, path, issues)
-                    .map(|ev| match ev {
-                        Val::Enum(name, mut ps) => {
-                            Val::Result(name == "Ok", Box::new(ps.pop().unwrap_or(Val::Unit)))
-                        }
-                        other => other,
-                    })
-            }
-            Type::Option(inner) => match json {
-                JsonV::Null => Some(Val::Option(None)),
-                _ => self
-                    .decode_val(json, inner, path, issues)
-                    .map(|x| Val::Option(Some(Box::new(x)))),
-            },
-            _ => None,
-        }
-    }
-
-    /// Decode a payload enum / `Result` from its RFC-0024 wire form. A bare
-    /// string is a nullary variant; a one-key object `{"Tag":..}` names a payload
-    /// variant (single payload direct, tuple payload as an array). Exactly one
-    /// wire form per value: a payload variant as a bare string, a nullary variant
-    /// as an object, an unknown key, or a multi/zero-key object all fail with the
-    /// locked expected-one-of `json.type` Issue.
-    fn decode_variant(
-        &self,
-        json: &crate::codec::JsonV,
-        vs: &[EnumVariant],
-        expected: &str,
-        path: &str,
-        issues: &mut Vec<Val>,
-    ) -> Option<Val> {
-        use crate::codec::JsonV;
-        let mismatch = |me: &Self, issues: &mut Vec<Val>| {
-            issues.push(me.issue_val(
-                "json.type",
-                path,
-                &crate::codec::type_message(expected, json.kind()),
-            ));
-            None
-        };
-        match json {
-            JsonV::Str(s) => match vs.iter().find(|v| &v.name == s) {
-                Some(v) if v.payload.is_empty() => Some(Val::Enum(s.clone(), Vec::new())),
-                _ => mismatch(self, issues),
-            },
-            JsonV::Obj(members) => {
-                if members.len() != 1 {
-                    return mismatch(self, issues);
-                }
-                let (key, val) = &members[0];
-                match vs.iter().find(|v| &v.name == key) {
-                    Some(v) if !v.payload.is_empty() => {
-                        let child = crate::codec::field_path(path, key);
-                        let ptys = &v.payload;
-                        if ptys.len() == 1 {
-                            let pv = self.decode_val(val, &ptys[0], &child, issues);
-                            Some(Val::Enum(key.clone(), vec![pv.unwrap_or(Val::Unit)]))
-                        } else {
-                            let items = match val {
-                                JsonV::Arr(items) => items.clone(),
-                                _ => {
-                                    issues.push(self.type_issue(&child, "array", val));
-                                    return None;
-                                }
-                            };
-                            let mut payloads = Vec::new();
-                            for (i, pty) in ptys.iter().enumerate() {
-                                let node = items.get(i).cloned().unwrap_or(JsonV::Null);
-                                let ipath = crate::codec::index_path(&child, i);
-                                let iv = self.decode_val(&node, pty, &ipath, issues);
-                                payloads.push(iv.unwrap_or(Val::Unit));
-                            }
-                            Some(Val::Enum(key.clone(), payloads))
-                        }
-                    }
-                    _ => mismatch(self, issues),
-                }
-            }
-            _ => mismatch(self, issues),
-        }
-    }
-
-    /// Run a refined type's predicate as a boolean (no trap), for decode's
-    /// accumulating `validate` check. Mirrors `coerce`'s predicate evaluation:
-    /// a record base binds field names; a scalar base binds `value`.
-    fn run_predicate(&self, decl: &TypeDecl, v: &Val) -> Result<bool, Ctrl> {
-        let Some(pred) = &decl.predicate else {
-            return Ok(true);
-        };
-        if matches!(decl.base, Type::Record(_)) {
-            if let Val::Record(map) = v {
-                let mut env = vec![map
-                    .iter()
-                    .map(|(k, val)| (k.clone(), Slot::untyped(val.clone())))
-                    .collect::<Frame>()];
-                return match self.expr(pred, &mut env)? {
-                    Val::Bool(b) => Ok(b),
-                    _ => Ok(false),
-                };
-            }
-            return Ok(true);
-        }
-        self.validates(decl, v)
-    }
-
-    /// Build an `Issue { key, path, message }` record value.
-    fn issue_val(&self, key: &str, path: &str, message: &str) -> Val {
-        let mut m = HashMap::new();
-        m.insert("key".to_string(), Val::Str(std::rc::Rc::new(key.to_string())));
-        m.insert("path".to_string(), Val::Str(std::rc::Rc::new(path.to_string())));
-        m.insert("message".to_string(), Val::Str(std::rc::Rc::new(message.to_string())));
-        Val::Record(m)
-    }
-
-    /// A `json.type` Issue: `expected <what>, found <kind>`.
-    fn type_issue(&self, path: &str, expected: &str, json: &crate::codec::JsonV) -> Val {
-        self.issue_val(
-            "json.type",
-            path,
-            &crate::codec::type_message(expected, json.kind()),
-        )
-    }
-
     fn as_ref(&self, v: &Val) -> Result<(usize, u64), Ctrl> {
         match v {
             Val::Ref { slot, gen } => Ok((*slot, *gen)),
@@ -4607,6 +4240,22 @@ mod tests {
                 (
                     "std/strpred.vyrn".to_string(),
                     include_str!("../../../std/strpred.vyrn").to_string(),
+                ),
+                // RFC-0078 M3: `fromJson`'s untyped half, and the two modules it
+                // stands on. `std/jsondec` imports `std/jsonread` and `std/num`, and
+                // the loader resolves those like any other import, so all three have
+                // to be here even though only one is injected by name.
+                (
+                    "std/jsondec.vyrn".to_string(),
+                    include_str!("../../../std/jsondec.vyrn").to_string(),
+                ),
+                (
+                    "std/jsonread.vyrn".to_string(),
+                    include_str!("../../../std/jsonread.vyrn").to_string(),
+                ),
+                (
+                    "std/num.vyrn".to_string(),
+                    include_str!("../../../std/num.vyrn").to_string(),
                 ),
             ]
             .into_iter()
@@ -4840,7 +4489,7 @@ mod tests {
             outcome(&good),
         );
         // Missing=1, Corrupt=2, Loaded(41)=141.
-        assert_eq!(run(&src).unwrap(), 1_002_141);
+        assert_eq!(run_json(&src).unwrap(), 1_002_141);
         let _ = std::fs::remove_file(&good);
         let _ = std::fs::remove_file(&bad);
     }
@@ -4865,7 +4514,7 @@ mod tests {
                  return g * 100 + m * 10 + c }}"
         );
         // good=7, missing=9(default), corrupt=9(default) -> 799.
-        assert_eq!(run(&src).unwrap(), 799);
+        assert_eq!(run_json(&src).unwrap(), 799);
         let _ = std::fs::remove_file(&good);
         let _ = std::fs::remove_file(&bad);
     }
@@ -6718,7 +6367,7 @@ mod tests {
                            Valid(w) => w.n - 9007199254740992, \
                            Invalid(iss) => 0 - iss.length, \
                        }; }";
-        assert_eq!(run(src).unwrap(), 1);
+        assert_eq!(run_json(src).unwrap(), 1);
     }
 
     #[test]
@@ -6729,7 +6378,7 @@ mod tests {
                            Valid(u) => match u.nick { Some(s) => 2, None => 1, }, \
                            Invalid(iss) => 0 - iss.length, \
                        }; }";
-        assert_eq!(run(src).unwrap(), 1);
+        assert_eq!(run_json(src).unwrap(), 1);
     }
 
     #[test]
@@ -6741,7 +6390,7 @@ mod tests {
                            Invalid(iss) => eq(iss[0].key, \"json.missing\") + eq(iss[0].path, \"age\") \
                                + eq(iss[0].message, \"missing required field `age`\"), \
                        }; }";
-        assert_eq!(run(&format!("{EQ}{src}")).unwrap(), 3);
+        assert_eq!(run_json(&format!("{EQ}{src}")).unwrap(), 3);
     }
 
     #[test]
@@ -6753,7 +6402,7 @@ mod tests {
                            Invalid(iss) => eq(iss[0].key, \"json.type\") + eq(iss[0].path, \"age\") \
                                + eq(iss[0].message, \"expected integer, found string\"), \
                        }; }";
-        assert_eq!(run(&format!("{EQ}{src}")).unwrap(), 3);
+        assert_eq!(run_json(&format!("{EQ}{src}")).unwrap(), 3);
     }
 
     #[test]
@@ -6767,7 +6416,7 @@ mod tests {
                            Valid(u) => 0, \
                            Invalid(iss) => iss.length, \
                        }; }";
-        assert_eq!(run(src).unwrap(), 2);
+        assert_eq!(run_json(src).unwrap(), 2);
     }
 
     #[test]
@@ -6780,7 +6429,7 @@ mod tests {
                            Invalid(iss) => eq(iss[0].key, \"validate\") + eq(iss[0].path, \"age\") \
                                + eq(iss[0].message, \"validation failed for `Age`\"), \
                        }; }";
-        assert_eq!(run(&format!("{EQ}{src}")).unwrap(), 3);
+        assert_eq!(run_json(&format!("{EQ}{src}")).unwrap(), 3);
     }
 
     #[test]
@@ -6792,7 +6441,7 @@ mod tests {
                            Invalid(iss) => iss.length + eq(iss[0].key, \"json.parse\") + eq(iss[0].path, \"\"), \
                        }; }";
         // one parse issue + key match + path match = 3.
-        assert_eq!(run(&format!("{EQ}{src}")).unwrap(), 3);
+        assert_eq!(run_json(&format!("{EQ}{src}")).unwrap(), 3);
     }
 
     #[test]

@@ -1,9 +1,9 @@
-/// The exact bytes `fromJson` produces — RFC-0078 M3's pin.
+/// The exact bytes `fromJson` produces — RFC-0078 M3's pin, and now its proof.
 ///
-/// M3 would rewire `fromJson`'s parser half from the C shim's `__vyrn_json_parse`
-/// to `std/jsonread`, the same JSON reader written in Vyrn, exactly as M2b rewired
-/// the writer. The bytes have to be captured BEFORE that swap: a test written
-/// afterwards proves whatever came out, not that the two readers agree.
+/// M3 rewired `fromJson` off the C shim's `__vyrn_json_parse` and its
+/// `__vyrn_vj_*` DOM onto `std/jsonread` plus generated Vyrn decoders, exactly as
+/// M2b rewired the writer. The bytes were captured BEFORE that swap: a test
+/// written afterwards proves whatever came out, not that the two readers agree.
 ///
 /// So this example is deliberately dull, and deliberately weighted towards the
 /// FAILURE shapes — the accumulated `Issue`s nobody looks at, which is precisely
@@ -12,13 +12,12 @@
 /// `main` so parity checks interp == native == wasm on it, and pins the interesting
 /// rows as literals in the `test` blocks below.
 ///
-/// The literals are what the C shim produces TODAY, before any rewiring. Three of
-/// them are rows where `std/jsonread` reads the same input differently, and unlike
-/// M2's two they are not all cosmetic: two of the three change which documents parse
-/// at all, in OPPOSITE directions. See the `test "where std/jsonread would
-/// disagree"` block — that is a semantic ruling M3 has to make, and it is one of the
-/// reasons M3 did not land alongside M2b.
-
+/// Of twenty-five rows the swap moved SEVEN, and every one of them is a parse
+/// error: the four rewordings the strictness ruling required, plus the three rows
+/// where the two readers disagreed about which documents parse at all. Everything
+/// else — every issue key, path, message and accumulation order — is byte-identical
+/// to what the C decoder produced, which is what pinning first buys.
+///
 /// A refined scalar, so a `where` failure is observed as an accumulated Issue
 /// rather than a trap.
 type Age = Int64 where value > 0 && value < 200
@@ -229,33 +228,41 @@ test "enums decode by name, and an unknown tag lists what was expected" {
     assertEq(shapeOf("{\"Rect\":[2,5]}"), "ok {\"Rect\":[2,5]}")
 }
 
-test "where std/jsonread would disagree" {
-    // M2's swap moved two rows and both were cosmetic — `\b` versus `\u0008`, the
-    // same string either way. These are not. Two of the three change which
-    // documents PARSE AT ALL, in opposite directions, so M3 is a semantic ruling
-    // and not a byte-formatting one:
+test "the three rows the strictness ruling moved" {
+    // RFC-0078's ruling, applied. Two of the three change which documents PARSE AT
+    // ALL, in opposite directions, so M3 was a semantic ruling and not a
+    // byte-formatting one — and `std/jsonread` won all three, each for its own
+    // reason:
     //
-    //   1. A surrogate pair is REJECTED today (`codec::parse` decodes each `\uXXXX`
-    //      independently, and a lone surrogate is not a `char`). `std/jsonread`
-    //      accepts it and decodes 😀 — its own test asserts so. A document that
-    //      fails today would start succeeding.
-    //   2. A duplicate key is ACCEPTED today, first occurrence winning.
-    //      `std/jsonread` rejects it, naming the key. A document that works today
-    //      would start failing — the dangerous direction, and the one that needs a
-    //      ruling rather than a preference.
-    //   3. Every parse error's wording differs: a 0-based byte `position N` here,
-    //      a 1-based `line N, col M:` prefix there. Cosmetic, but it is the whole
-    //      `json.parse` message surface, and RFC-0018 locks these bytes.
-    assertEq(sOf("{\"s\":\"\\uD83D\\uDE00\"}"), "json.parse@: unexpected character at position 11")
-    assertEq(sOf("{\"s\":\"a\",\"s\":\"b\"}"), "ok {\"s\":\"a\"}")
-    assertEq(sOf("{\"s\":\"a\",}"), "json.parse@: unexpected character at position 9")
+    //   1. A surrogate pair was REJECTED (`codec::parse` decoded each `\uXXXX`
+    //      independently, and a lone surrogate is not a `char`). It is exactly how
+    //      RFC 8259 escapes an astral codepoint, so refusing it meant Vyrn could
+    //      not read valid JSON that any other implementation writes. Now accepted.
+    //   2. A duplicate key was ACCEPTED, first occurrence winning. For a TYPED
+    //      decode the ambiguity is the problem — silently picking one is the only
+    //      outcome with no diagnosis — so it is rejected, naming the key. This is
+    //      the one direction that can break a working program, and pre-1.0 is when
+    //      to take it.
+    //   3. Every parse error's wording moved from a 0-based byte `position N` to a
+    //      1-based `line N, col M:` prefix. A byte offset into a document a human
+    //      did not write is not actionable.
+    assertEq(sOf("{\"s\":\"\\uD83D\\uDE00\"}"), "ok {\"s\":\"😀\"}")
+    assertEq(
+        sOf("{\"s\":\"a\",\"s\":\"b\"}"),
+        "json.parse@: line 1, col 13: duplicate object key: s",
+    )
+    assertEq(sOf("{\"s\":\"a\",}"), "json.parse@: line 1, col 10: trailing comma before '}'")
 }
 
 test "a parse error is exactly one issue, keyed json.parse" {
-    assertEq(famOf("{ bad"), "json.parse@: unexpected character at position 2")
-    assertEq(famOf(""), "json.parse@: unexpected end of input")
+    assertEq(famOf("{ bad"), "json.parse@: line 1, col 3: expected a string key")
+    assertEq(famOf(""), "json.parse@: line 1, col 1: unexpected end of input")
     assertEq(
         famOf("{\"sur\":\"a\",\"kids\":[]} trailing"),
-        "json.parse@: trailing characters at position 22",
+        "json.parse@: line 1, col 23: trailing content after the JSON value",
+    )
+    assertEq(
+        famOf("{\"sur\":\"a\",\"kids\":[1,]}"),
+        "json.parse@: line 1, col 22: trailing comma before ']'",
     )
 }

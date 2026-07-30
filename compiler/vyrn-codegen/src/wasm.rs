@@ -574,8 +574,11 @@ mod tests {
         // an LLVM `i1` crossing as an `i32`. RFC-0078 M2b retired the JSON DOM
         // BUILDERS along with the shim's serializer, and that was the boundary's
         // only sub-i32 argument, so the widening is now a fact about `abi`
-        // (asserted in the next test) with no live crossing to point at.
-        assert_eq!(b["__vyrn_vj_kind"], Some((vec![Some(ValType::I32)], Some(ValType::I32))));
+        // (asserted in the next test) with no live crossing to point at. M3 took
+        // the rest of the DOM, so the census has no JSON row at all — pinned as an
+        // absence, since a returning row would mean a second reader appeared.
+        assert!(!b.keys().any(|k| k.starts_with("__vyrn_vj_")), "the DOM is gone");
+        assert_eq!(b["__vyrn_charcount"], Some((vec![Some(ValType::I32)], Some(ValType::I64))));
         assert_eq!(b["__vyrn_malloc"], Some((vec![Some(ValType::I64)], Some(ValType::I32))));
         assert_eq!(b["__vyrn_now_millis"], Some((vec![], Some(ValType::I64))));
         assert_eq!(b["free"], Some((vec![Some(ValType::I32)], None)), "void is None");
