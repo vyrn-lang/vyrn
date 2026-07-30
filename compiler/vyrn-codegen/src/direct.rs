@@ -2414,6 +2414,81 @@ impl Fn_<'_> {
         ))
     }
 
+    /// The fully-applied type an enum-variant construction produces.
+    ///
+    /// [`Fn_::applied_record`] for a variant instead of a record's fields, and the
+    /// same shared [`crate::applied_type`] — a generic enum's arguments come from
+    /// its PAYLOAD, because a bare constructor's use site is its payload (M2e).
+    /// `Ok(None)` when the name is not a variant, or is one two enums declare: an
+    /// ambiguity is the caller's to refuse, and both callers do.
+    ///
+    /// Naming only the enum, as `peek` used to, leaves the variant's payload the
+    /// declaration's own `Type::Param` — which is where "a conversion from `Cargo`
+    /// to `T`" came from. It is not solvable at the payload's own coercion, either:
+    /// by then the destination slot exists and its type is fixed.
+    fn applied_variant(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<Type>, String> {
+        let cands = match self.cx.variants.get(name) {
+            Some(c) if c.len() == 1 => c.clone(),
+            _ => return Ok(None),
+        };
+        let (e, _, declared) = cands.into_iter().next().unwrap();
+        let actual = self.arg_types(&declared, args, line)?;
+        let decl = self.cx.types.get(&e).cloned();
+        Ok(Some(crate::applied_type(decl.as_ref(), &e, &declared, &actual)))
+    }
+
+    /// Whether `t` is an instantiation with every type argument fixed, under this
+    /// body's substitution. [`crate::ty_is_concrete_app`] is the rule.
+    fn concrete_app(&self, t: &Type) -> bool {
+        crate::ty_is_concrete_app(t, &|a| self.cx.resolve(a))
+    }
+
+    /// The type a `match`'s arms agree on, without emitting anything.
+    ///
+    /// The FIRST arm answers, as it does for an `if`: [`Fn_::expr_as`] re-checks
+    /// every other arm against the answer, so a wrong guess is a compile error
+    /// rather than a miscompile. The one thing a later arm can add is a type
+    /// ARGUMENT — see [`crate::ty_is_concrete_app`] — so a non-applied answer is
+    /// upgraded by the first arm that has one, and the answer stops depending on
+    /// arm ORDER. `genericpayload.vyrn` puts the concrete arm first and the
+    /// param-free one last precisely so a first-arm-wins rule looks correct.
+    ///
+    /// A later arm `peek` cannot see forfeits the upgrade and nothing else: its own
+    /// `expr_as` refuses it later if it truly cannot be lowered. So the scan never
+    /// narrows what this backend reaches.
+    fn match_ty(&mut self, sum: &Sum, arms: &[MatchArm], line: usize) -> Result<Type, String> {
+        let first = arms.first().ok_or_else(|| gap("an empty `match`", line))?;
+        let ty = self.peek_arm(first, sum, line)?;
+        if self.concrete_app(&ty) {
+            return Ok(ty);
+        }
+        for arm in &arms[1..] {
+            if let Ok(t) = self.peek_arm(arm, sum, line) {
+                if self.concrete_app(&t) {
+                    return Ok(t);
+                }
+            }
+        }
+        Ok(ty)
+    }
+
+    /// One arm's type, with its bindings in scope. The place is a dummy: `peek`
+    /// reads types and never emits, so a scope frame it cannot mutate is enough.
+    fn peek_arm(&mut self, arm: &MatchArm, sum: &Sum, line: usize) -> Result<Type, String> {
+        let mark = self.scope.len();
+        for (n, t) in self.pattern_binds(sum, &arm.pattern, line)? {
+            self.scope.push((n, Place::Local(u32::MAX), t));
+        }
+        let got = self.peek(&arm.body, line);
+        self.scope.truncate(mark);
+        got
+    }
+
     /// Two arms meeting at one value — M0's destination-first rule.
     ///
     /// A scalar join is a `block (result T)` and needs nothing special. An
@@ -2510,6 +2585,32 @@ impl Fn_<'_> {
                 let t = &self.fn_binds[name].target;
                 Type::Fn(t.sig.params[t.ncaps..].to_vec(), Box::new(t.sig.ret_ty.clone()))
             }
+            // A nullary constructor (`None`, or an enum's `Empty`) parses as a bare
+            // name, so it is only distinguishable from a local by failing to be one
+            // — the same test, in the same order, that the emitting path makes.
+            // Without this a `match` whose FIRST arm is a param-free variant could
+            // not be typed at all, which is the arm order the checker demands an
+            // annotation for.
+            Expr::Var { name, .. }
+                if self.lookup(name, line).is_err()
+                    && (name == "None" || self.cx.variants.contains_key(name)) =>
+            {
+                match (name.as_str(), self.expected_sum()) {
+                    ("None", Some(t)) => t,
+                    ("None", None) => {
+                        return unsupported("a branch yielding `None` with no expected type", line)
+                    }
+                    _ => match self.applied_variant(name, &[], line)? {
+                        Some(t) => t,
+                        None => {
+                            return unsupported(
+                                &format!("a branch yielding the ambiguous variant `{name}`"),
+                                line,
+                            )
+                        }
+                    },
+                }
+            }
             Expr::Var { name, .. }
                 if self.lookup(name, line).is_err() && self.cx.sigs.contains_key(name) =>
             {
@@ -2541,24 +2642,14 @@ impl Fn_<'_> {
                 },
             },
             Expr::IfExpr { then_branch, .. } => self.peek(then_branch, line)?,
-            // A `match` is typed by its first arm, like an `if` expression —
-            // and like one, every other arm is checked against that.
+            // A `match` is typed by its arms — see [`Fn_::match_ty`], which is the
+            // same rule the emitting path uses.
             Expr::Match { scrutinee, arms, .. } => {
                 let st = self.peek(scrutinee, line)?;
                 let sum = self
                     .sum_of(&st)
                     .ok_or_else(|| gap(&format!("a `match` on `{st}`"), line))?;
-                let first = arms.first().ok_or_else(|| gap("an empty `match`", line))?;
-                let binds = self.pattern_binds(&sum, &first.pattern, line)?;
-                // `peek` does not emit, so a scope frame it cannot mutate is
-                // enough to type an arm that mentions its bindings.
-                let mark = self.scope.len();
-                for (n, t) in binds {
-                    self.scope.push((n, Place::Local(u32::MAX), t));
-                }
-                let got = self.peek(&first.body, line);
-                self.scope.truncate(mark);
-                got?
+                self.match_ty(&sum, arms, line)?
             }
             Expr::Unary { expr, .. } => self.peek(expr, line)?,
             Expr::Binary { op, lhs, .. } => match op {
@@ -2724,15 +2815,16 @@ impl Fn_<'_> {
                     let (subst, _) = crate::solve_type_args(&f.type_params, &declared, &actual);
                     ftypes::substitute(&f.ret, &subst)
                 }
-                // A user enum's variant constructor in a branch (`One(a)`). Its type
-                // is the enum that declares the name; an ambiguous name — two enums
-                // with one variant spelling — is a gap rather than a guess, exactly
-                // as `sum_ctor` treats it when it emits.
+                // A user enum's variant constructor in a branch (`One(a)`). The
+                // fully APPLIED type, from the same shared rule `sum_ctor` uses
+                // when it emits — the bare enum name left a generic variant's
+                // payload a `Type::Param`, and a `match` on the result then bound
+                // it. An ambiguous name — two enums with one variant spelling — is
+                // a gap rather than a guess, exactly as `sum_ctor` treats it.
                 _ if self.cx.variants.contains_key(name) => {
-                    let cands = &self.cx.variants[name];
-                    match (cands.len(), cands.first()) {
-                        (1, Some((e, _, _))) => Type::Named(e.clone()),
-                        _ => {
+                    match self.applied_variant(name, args, line)? {
+                        Some(t) => t,
+                        None => {
                             return unsupported(
                                 &format!("a branch yielding the ambiguous variant `{name}`"),
                                 line,
@@ -5470,17 +5562,16 @@ impl Fn_<'_> {
         let (ty, tag, payload) = match pick {
             Some(p) => p,
             None => {
-                let cands = self.cx.variants[name].clone();
-                if cands.len() != 1 {
-                    return unsupported(&format!("the ambiguous variant `{name}`"), line);
-                }
-                let (e, tag, declared) = cands.into_iter().next().unwrap();
+                let tag = match self.cx.variants.get(name) {
+                    Some(c) if c.len() == 1 => c[0].1,
+                    _ => return unsupported(&format!("the ambiguous variant `{name}`"), line),
+                };
                 // A generic enum has no type until a use site fixes it, and a
                 // bare constructor's use site is its PAYLOAD — the rule
                 // `Gen::applied_enum_type` gives the textual emitter, shared.
-                let actual = self.arg_types(&declared, args, line)?;
-                let decl = self.cx.types.get(&e).cloned();
-                let ty = crate::applied_type(decl.as_ref(), &e, &declared, &actual);
+                let Some(ty) = self.applied_variant(name, args, line)? else {
+                    return unsupported(&format!("the ambiguous variant `{name}`"), line);
+                };
                 // The payloads the APPLIED type declares, which for a generic
                 // enum are the solved ones rather than its parameters.
                 let payload = match self.cx.resolve(&ty) {
@@ -5546,19 +5637,11 @@ impl Fn_<'_> {
         let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
             return unsupported("a `match` on a non-aggregate", line);
         };
-        let first = arms.first().ok_or_else(|| gap("an empty `match`", line))?;
-
-        // The arms' common type, read off the first one with its bindings in
-        // scope. `expr_as` re-checks every arm against it, so a wrong guess here
-        // is a compile error rather than a miscompile. The place is a dummy:
-        // `peek` reads types and never emits.
-        let mark = self.scope.len();
-        for (n, t) in self.pattern_binds(&sum, &first.pattern, line)? {
-            self.scope.push((n, Place::Local(u32::MAX), t));
-        }
-        let want = self.peek(&first.body, line);
-        self.scope.truncate(mark);
-        let want = self.join_ty(want?);
+        // The arms' common type — [`Fn_::match_ty`], the same answer `peek` gives a
+        // `match` in a branch. `expr_as` re-checks every arm against it, so a wrong
+        // guess here is a compile error rather than a miscompile.
+        let want = self.match_ty(&sum, arms, line)?;
+        let want = self.join_ty(want);
         let r = self.cx.repr(&want, line)?;
 
         let dest = match &r {

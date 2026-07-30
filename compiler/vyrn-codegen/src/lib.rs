@@ -1574,12 +1574,10 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether `t` is a generic enum instantiation whose type arguments are all
-    /// concretely known (no `Unit` placeholder, no unresolved `Param`). Used to
-    /// pick the most-informative arm type when reconciling a `match`.
+    /// concretely known. [`ty_is_concrete_app`] is the rule; this is the
+    /// substitution this emitter is in.
     fn ty_is_concrete_app(&self, t: &Type) -> bool {
-        matches!(t, Type::App(_, args)
-            if !args.is_empty()
-                && args.iter().all(|a| !matches!(self.resolve(a), Type::Unit | Type::Param(_))))
+        ty_is_concrete_app(t, &|a| self.resolve(a))
     }
 
     /// The LLVM type string for `ty`. Records lower to a `{ .. }` literal struct.
@@ -8309,6 +8307,27 @@ pub(crate) fn applied_type(
     let Some(decl) = decl.filter(|d| !d.type_params.is_empty()) else { return named() };
     let (_, args) = solve_type_args(&decl.type_params, declared, actual);
     Type::App(name.to_string(), args.into_iter().map(|a| a.unwrap_or(Type::Unit)).collect())
+}
+
+/// Whether `t` is a generic instantiation whose every type argument is known —
+/// no `Unit` placeholder [`applied_type`] put there, no unresolved `Param`.
+///
+/// **The arm-reconciliation rule** (RFC-0077 M2m). Every arm of a `match` yields
+/// the same enum, but they do not all know its type arguments: an arm whose
+/// payload mentions the parameter fixes it (`Held(c)` is a `Crate<Cargo>`), and a
+/// param-free one cannot (`Empty` is a `Crate<Unit>`). Preferring the applied
+/// answer is what lets a downstream `match` recover the concrete payload instead
+/// of a bare `Type::Param` — which the textual backend lowers to an invalid
+/// `alloca void` and the direct one refuses as "a conversion from `Cargo` to `T`".
+///
+/// Shared rather than spelled twice, for `solve_type_args`'s reason: two backends
+/// preferring different arms would report two different types for one expression,
+/// and the enum's LAYOUT is the same either way (`enum_ll` is arity-wide), so the
+/// disagreement would surface as a payload encoded one way and read the other.
+pub(crate) fn ty_is_concrete_app(t: &Type, resolve: &dyn Fn(&Type) -> Type) -> bool {
+    matches!(t, Type::App(_, args)
+        if !args.is_empty()
+            && args.iter().all(|a| !matches!(resolve(a), Type::Unit | Type::Param(_))))
 }
 
 /// The mangled LLVM symbol for a generic instantiation, e.g. `vyrn_id__Int`.

@@ -90,7 +90,12 @@ const PASSING: &[&str] = &[
     // one that proves the release fires — 100,000 allocations through the slab.
     "freelist.vyrn",
     "gendemo.vyrn",
+    // RFC-0077 M2n: a concrete type flowing into a type parameter's position
+    // inside an enum payload. `peek` named the bare enum where the emitting path
+    // had always named the APPLIED one, so a `match` on the result bound a
+    // `Type::Param` — "a conversion from `Cargo` to `T`".
     "generics.vyrn",
+    "genericpayload.vyrn",
     "genref.vyrn",
     "htmltree.vyrn",
     "i18ndemo.vyrn",
@@ -2133,4 +2138,95 @@ fn main() -> Int64 {
             runtime_err(&w.stderr)
         );
     }
+}
+
+/// A generic enum whose type argument comes from a `match` arm that is not the
+/// FIRST one (RFC-0077 M2n).
+///
+/// `genericpayload.vyrn` is the corpus's only generic-payload example and it puts
+/// the concrete arm first, so a first-arm-wins rule passes it. This is the order
+/// that rule gets wrong — and the order the CHECKER only permits with an
+/// annotation, which is why no example has it: without one it refuses `Empty` as
+/// uninferable.
+///
+/// Two payload shapes, because they fail differently. A `Cargo` payload is
+/// `Word::Boxed`, so forgetting `T` refuses (`a conversion from Cargo to Unit`,
+/// which is exactly what this source produced with the arm scan removed). An
+/// `Int64` payload is `Word::Direct`, so the SAME mistake has no conversion to
+/// refuse — the word is an `i64` either way — and would read a pointer as a
+/// number. So the values are pinned, not just the agreement.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_generic_payload_is_typed_by_whichever_arm_knows_it() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-payload");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = r#"
+type Cargo = { weight: Int64, label: String }
+type Crate<T> = | Empty | Held(T)
+type Choice = | First | Second
+
+fn boxedPayload(p: Choice) -> Cargo {
+    let boxed: Crate<Cargo> = match p {
+        Second => Empty,
+        First => Held(Cargo { weight: 3, label: "three" }),
+    }
+    return match boxed {
+        Empty => Cargo { weight: 99, label: "fallback" },
+        Held(s) => s,
+    }
+}
+
+fn directPayload(p: Choice) -> Int64 {
+    let boxed: Crate<Int64> = match p {
+        Second => Empty,
+        First => Held(41),
+    }
+    return match boxed {
+        Empty => 0 - 1,
+        Held(n) => n + 1,
+    }
+}
+
+fn main() -> Int64 {
+    let a = boxedPayload(First)
+    print("boxed first: \{a.weight} \{a.label}")
+    let b = boxedPayload(Second)
+    print("boxed second: \{b.weight} \{b.label}")
+    print("direct first: \{directPayload(First)}")
+    print("direct second: \{directPayload(Second)}")
+    return 0
+}
+"#;
+    let path = dir.join("armorder.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("armorder.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .env("VYRN_WASM_BACKEND", "direct")
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    let want = "boxed first: 3 three\nboxed second: 99 fallback\n\
+                direct first: 42\ndirect second: -1\n";
+    assert_eq!(norm(&interp.stdout), want, "the interpreter moved");
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
