@@ -36,17 +36,20 @@ use std::process::Command;
 /// Examples the direct backend compiles and runs identically to the
 /// interpreter. Grows as M2 lands; never shrinks silently.
 const PASSING: &[&str] = &[
+    "args.vyrn",
     "arrays.vyrn",
     "autovalidate.vyrn",
     "benching.vyrn",
     "bits.vyrn",
     "bytecount.vyrn",
+    "clock.vyrn",
     "consume.vyrn",
     "ecs.vyrn",
     "enum.vyrn",
     "eventloop.vyrn",
     "externdemo2.vyrn",
     "fib.vyrn",
+    "files.vyrn",
     "floats.vyrn",
     "foreach.vyrn",
     "gendemo.vyrn",
@@ -82,11 +85,14 @@ const PASSING: &[&str] = &[
 /// by construction — the two emissions differ in five instructions plus whatever
 /// only a shim can supply — so it is written as one, and the tier fails if a
 /// standalone pass stops passing here.
-const PASSING_SHIM: &[&str] = &[
-    // RFC-0043's host boundary is three shim symbols, so this is the whole of
-    // what reaching the shim bought: a clock, a monotonic counter and a seed.
-    "clock.vyrn",
-];
+///
+/// **Empty, and that is the M2j result.** M2i's whole delta was RFC-0043's host
+/// boundary — `clock.vyrn`, passing only because the shim defines
+/// `__vyrn_now_millis` on every target. WASI defines `clock_time_get` and
+/// `random_get` on every target too, so the emitted runtime reads them directly
+/// and the linked shape buys nothing the standalone one does not already have.
+/// Which is what M2i predicted when it found the split makes a module LARGER.
+const PASSING_SHIM: &[&str] = &[];
 
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored --nocapture"]
@@ -1026,6 +1032,200 @@ fn main() -> Int64 {
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
     assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
     assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// The RFC-0014 semantics the corpus cannot reach, over raw WASI (RFC-0077 M2j).
+///
+/// Three examples moved to `PASSING` this milestone and between them they exercise
+/// the happy path only: `args.vyrn` runs with an EMPTY argv (it has no `.args`
+/// fixture, deliberately — the harness gives every example zero arguments),
+/// `files.vyrn` reaches exactly one of `readFile`'s three failures, and nothing at
+/// all reaches `readLine`, because `input.vyrn` and `vlog.vyrn` are both blocked
+/// behind other builtins. So the parts most likely to be plausibly wrong are the
+/// parts with no example:
+///
+/// - **`readLine`'s line rules.** A `\r\n` and a `\n` must read identically or
+///   Windows and POSIX pipes disagree; an empty line is `Some("")` and not `None`;
+///   a final line with no newline at all is still a line. And `None` is three
+///   different things — EOF, a line carrying a NUL byte (which a NUL-terminated
+///   `String` could not hold), and a line that is not UTF-8, which is where the
+///   interpreter's `String::from_utf8` fails.
+/// - **`readFile`'s other two payloads.** The NUL rule fires BEFORE the UTF-8
+///   check and has its own wording, so a reader that validated first would report
+///   the wrong one — and `readFileBytes` of the same two files must SUCCEED, which
+///   is what makes them rules about `String` rather than about reading.
+/// - **`args` with an argv.** A token with a space in it is the one that says the
+///   pointers are being read out of WASI's own array rather than re-split.
+///
+/// Everything is pinned against the interpreter's own answer, not just compared
+/// between backends: two backends can be confidently wrong together about which
+/// failure happened, and every wrong answer here is a plausible-looking one.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn the_wasi_io_builtins_agree_with_the_interpreter_about_their_edges() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-wasiio");
+    std::fs::create_dir_all(&dir).unwrap();
+    // Two files a `String` cannot hold, and one it can. Written as bytes, because
+    // that is the whole point of them.
+    std::fs::write(dir.join("plain.txt"), b"hi\n").unwrap();
+    // NOT `nul.bin`: on Windows `nul` is a reserved device name with ANY
+    // extension, and wasmtime's capability-based path resolution refuses one — so
+    // the file would read as an I/O error under wasm and as five bytes under the
+    // interpreter, for a reason that has nothing to do with this backend.
+    std::fs::write(dir.join("hasnul.bin"), b"ab\x00cd").unwrap();
+    std::fs::write(dir.join("bad.bin"), b"ab\xff\xfecd").unwrap();
+
+    let lines = "\
+fn nextLine() -> String {
+    return match readLine() {
+        Some(s) => \"[\" + s + \"]\",
+        None => \"<none>\",
+    }
+}
+
+fn main() -> Int64 {
+    let mut n = 0
+    let mut going = true
+    while going {
+        let s = nextLine()
+        if s == \"<none>\" {
+            going = false
+        } else {
+            n = n + 1
+            print(\"\\{n} \\{s} \\{s.byteLength}\")
+        }
+    }
+    print(\"lines \\{n}\")
+    return n
+}
+";
+    let files = "\
+fn show(r: Result<String, String>) -> String {
+    return match r {
+        Ok(s) => \"ok:\" + s,
+        Err(e) => \"err:\" + e,
+    }
+}
+
+fn size(r: Result<Array<UInt8>, String>) -> Int64 {
+    return match r {
+        Ok(b) => b.length,
+        Err(e) => 0 - 1,
+    }
+}
+
+fn wrote(r: Result<Bool, String>) -> String {
+    return match r {
+        Ok(b) => \"ok:\\{b}\",
+        Err(e) => \"err:\" + e,
+    }
+}
+
+fn main() -> Int64 {
+    print(show(readFile(\"plain.txt\")))
+    print(show(readFile(\"hasnul.bin\")))
+    print(show(readFile(\"bad.bin\")))
+    print(show(readFile(\"missing.txt\")))
+    // The same two files as BYTES: no NUL rule, no UTF-8 rule, so both read.
+    print(size(readFileBytes(\"hasnul.bin\")))
+    print(size(readFileBytes(\"bad.bin\")))
+    print(size(readFileBytes(\"missing.txt\")))
+    print(wrote(writeFile(\"nested/nope.txt\", \"x\")))
+    print(wrote(writeFile(\"out.tmp.txt\", \"round\")))
+    print(show(readFile(\"out.tmp.txt\")))
+    return 0
+}
+";
+    let argv = "\
+fn main() -> Int64 {
+    let a = args()
+    print(\"n=\\{a.length}\")
+    for x in a {
+        print(\"<\\{x}>\")
+    }
+    return a.length
+}
+";
+    // `\r\n` and `\n` mixed, an empty line, a multi-byte line, then a final line
+    // with no terminator at all; the second fixture puts the two unrepresentable
+    // lines after a good one, so a reader that stopped early would still print it.
+    let stdin_ok: &[u8] = b"alpha\r\nbeta\n\nc\xc3\xa9\nlast, unterminated";
+    let stdin_bad: &[u8] = b"good\nwith\x00nul\n";
+
+    let no_args: Vec<String> = Vec::new();
+    for (what, src, stdin, prog_args, want) in [
+        (
+            "lines",
+            lines,
+            Some(stdin_ok),
+            no_args.clone(),
+            // The byte length is of the BRACKETED line, so the two constant
+            // brackets are in it — which still pins the line, and is what says a
+            // `\r` was stripped rather than kept.
+            "1 [alpha] 7\n2 [beta] 6\n3 [] 2\n4 [cé] 5\n5 [last, unterminated] 20\nlines 5\n",
+        ),
+        // The NUL line is `None`, so the loop ends there — one line printed, and
+        // the rest of stdin unread. That IS the semantics, not a truncation bug.
+        ("nulline", lines, Some(stdin_bad), no_args.clone(), "1 [good] 6\nlines 1\n"),
+        (
+            "files",
+            files,
+            None,
+            no_args.clone(),
+            "ok:hi\n\n\
+             err:`hasnul.bin` contains a NUL byte\n\
+             err:`bad.bin` is not valid UTF-8\n\
+             err:cannot read `missing.txt`\n\
+             5\n6\n-1\n\
+             err:cannot write `nested/nope.txt`\n\
+             ok:true\nok:round\n",
+        ),
+        (
+            "argv",
+            argv,
+            None,
+            vec!["one".into(), "two words".into(), "--three".into()],
+            "n=3\n<one>\n<two words>\n<--three>\n",
+        ),
+    ] {
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src).unwrap();
+        let stdin_path = dir.join(format!("{what}.stdin"));
+        match stdin {
+            Some(bytes) => std::fs::write(&stdin_path, bytes).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(&stdin_path);
+            }
+        }
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .env("VYRN_WASM_BACKEND", "direct")
+            .output()
+            .expect("build wasm");
+        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path).args(&prog_args);
+        let interp = run_io(interp_cmd, &dir, &stdin_path);
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg("--dir").arg(".").arg(&module).args(&prog_args);
+        let w = run_io(wasm_cmd, &dir, &stdin_path);
+
+        assert_eq!(norm(&interp.stdout), want, "{what}: the interpreter moved");
+        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+    }
 }
 
 /// The construct a build failed on, with the source line dropped so the same gap

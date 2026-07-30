@@ -78,15 +78,62 @@ pub enum Link {
 /// `tests/imports_vs_shim.rs` proves agrees with the C. Writing a signature down
 /// here would be a second chance to get one wrong, and a wrong import signature
 /// is a misread argument rather than a link error.
-const SHIM_IMPORTS: &[&str] = &[
-    "__vyrn_malloc",
-    // RFC-0043's host boundary. All three are real shim symbols on every target
-    // rather than `vyrn` host imports, which is what makes a clock example a
-    // three-way parity citizen — see `crate::host_boundary_extern`.
-    "__vyrn_now_millis",
-    "__vyrn_monotonic_nanos",
-    "__vyrn_random_seed",
-];
+const SHIM_IMPORTS: &[&str] = &["__vyrn_malloc"];
+
+/// The `wasi_snapshot_preview1` calls a directly-emitted module makes.
+///
+/// **All of them, unconditionally.** An import has to be declared before the
+/// first body (M1: one index space, imports at the bottom), and nothing knows
+/// which builtins a program reaches until the bodies are walked — so the
+/// alternative was a pre-scan over the AST, i.e. a second traversal that has to
+/// agree with lowering about what it needs. That is the failure mode `llt_of`
+/// (M2b) and `predicate_binds` (M2d) exist to prevent, and M2e refused a
+/// standalone instantiation walker for the same reason.
+///
+/// Cheap because the set is already implemented twice over: wasmtime provides all
+/// of preview1, and `web/wasi-min.js` implements exactly these for the browser —
+/// with RFC-0014's graceful degradation (no argv, EOF on stdin, no preopens, every
+/// `path_open` NOENT), which is what a page's `readFile` is supposed to be.
+#[derive(Clone, Copy)]
+struct Wasi {
+    fd_write: u32,
+    fd_read: u32,
+    fd_close: u32,
+    proc_exit: u32,
+    path_open: u32,
+    fd_prestat_get: u32,
+    args_sizes_get: u32,
+    args_get: u32,
+    environ_sizes_get: u32,
+    environ_get: u32,
+    clock_time_get: u32,
+    random_get: u32,
+}
+
+fn wasi_imports(m: &mut Module) -> Wasi {
+    use ValType::{I32, I64};
+    let mut im = |name: &str, params: &[ValType], results: &[ValType]| {
+        m.import("wasi_snapshot_preview1", name, params, results)
+    };
+    Wasi {
+        fd_write: im("fd_write", &[I32, I32, I32, I32], &[I32]),
+        fd_read: im("fd_read", &[I32, I32, I32, I32], &[I32]),
+        fd_close: im("fd_close", &[I32], &[I32]),
+        proc_exit: im("proc_exit", &[I32], &[]),
+        path_open: im(
+            "path_open",
+            &[I32, I32, I32, I32, I32, I64, I64, I32, I32],
+            &[I32],
+        ),
+        fd_prestat_get: im("fd_prestat_get", &[I32, I32], &[I32]),
+        args_sizes_get: im("args_sizes_get", &[I32, I32], &[I32]),
+        args_get: im("args_get", &[I32, I32], &[I32]),
+        environ_sizes_get: im("environ_sizes_get", &[I32, I32], &[I32]),
+        environ_get: im("environ_get", &[I32, I32], &[I32]),
+        clock_time_get: im("clock_time_get", &[I32, I64, I32], &[I32]),
+        random_get: im("random_get", &[I32, I32], &[I32]),
+    }
+}
 
 /// Compile a whole program to a standalone `wasm32-wasi` module.
 pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
@@ -104,13 +151,7 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
     // `wasm::Module` panics if one arrives late. Which is also why the shim's
     // imports are a fixed list rather than discovered as bodies need them: an
     // index handed out after the first definition would renumber every call.
-    let fd_write = m.import(
-        "wasi_snapshot_preview1",
-        "fd_write",
-        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
-        &[ValType::I32],
-    );
-    let proc_exit = m.import("wasi_snapshot_preview1", "proc_exit", &[ValType::I32], &[]);
+    let wasi = wasi_imports(&mut m);
     let mut shim: HashMap<&'static str, u32> = HashMap::new();
     if link == Link::Shim {
         for name in SHIM_IMPORTS {
@@ -126,7 +167,7 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
         }
     }
 
-    let rt = runtime(&mut m, fd_write, proc_exit, shim.get("__vyrn_malloc").copied());
+    let rt = runtime(&mut m, &wasi, shim.get("__vyrn_malloc").copied());
 
     let types: HashMap<String, TypeDecl> =
         program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
@@ -189,7 +230,6 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
         subst: HashMap::new(),
         mono: RefCell::new(Mono::default()),
         globals: HashMap::new(),
-        shim,
         externs,
     };
 
@@ -278,7 +318,7 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
             .ins(&Instruction::I64Const(255))
             .ins(&Instruction::I64And)
             .ins(&Instruction::I32WrapI64)
-            .ins(&Instruction::Call(proc_exit));
+            .ins(&Instruction::Call(wasi.proc_exit));
     });
     m.export("_start", start);
     Ok(m.finish())
@@ -393,11 +433,6 @@ struct Cx {
     /// [`Gen::lookup`] — the checker already forbids an initializer reading a
     /// global declared after it, so there is nothing for a partial view to catch.
     globals: HashMap<String, (Place, Type)>,
-    /// The shim's functions by symbol, when this module is linked against one
-    /// (RFC-0077 M2i). Empty for a standalone module, which is why every lowering
-    /// that wants one asks rather than assumes: the same construct is a call here
-    /// and a named gap there.
-    shim: HashMap<&'static str, u32>,
     /// `extern fn` declarations by name, with the return type they declared. The
     /// bodies are skipped, but RFC-0043's host boundary is reached BY NAME, and
     /// what it returns is the declaration's business rather than this file's.
@@ -2307,6 +2342,59 @@ impl Fn_<'_> {
                 b.ins(&Instruction::Call(self.cx.rt.slice));
                 return Ok(Type::Str);
             }
+            // RFC-0014's input I/O. Every one of these is a runtime function that
+            // writes its whole result through a slot allocated here — the same
+            // hidden destination an aggregate-returning Vyrn call gets, which is
+            // why none of them needed a case outside M2b's four ABI rules.
+            "args" if args.is_empty() => {
+                let ty = Type::Array(Box::new(Type::Str));
+                let l = self.layout_of(&ty, line)?;
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
+                b.ins(&Instruction::Call(self.cx.rt.args));
+                b.slot(off);
+                return Ok(ty);
+            }
+            "readLine" if args.is_empty() => {
+                let ty = Type::Option(Box::new(Type::Str));
+                let l = self.layout_of(&ty, line)?;
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
+                b.ins(&Instruction::Call(self.cx.rt.read_line));
+                b.slot(off);
+                return Ok(ty);
+            }
+            "readFile" | "readFileBytes" if args.len() == 1 => {
+                let ok = if name == "readFile" {
+                    Type::Str
+                } else {
+                    Type::Array(Box::new(Type::IntN { bits: 8, signed: false }))
+                };
+                let ty = Type::Result(Box::new(ok), Box::new(Type::Str));
+                let l = self.layout_of(&ty, line)?;
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
+                let f = if name == "readFile" {
+                    self.cx.rt.read_file
+                } else {
+                    self.cx.rt.read_file_bytes
+                };
+                b.ins(&Instruction::Call(f));
+                b.slot(off);
+                return Ok(ty);
+            }
+            "writeFile" if args.len() == 2 => {
+                let ty = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
+                let l = self.layout_of(&ty, line)?;
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                self.expr_as(m, b, &args[1], &Type::Str)?;
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
+                b.ins(&Instruction::Call(self.cx.rt.write_file));
+                b.slot(off);
+                return Ok(ty);
+            }
             "@charCount" if args.len() == 1 => {
                 self.expr_as(m, b, &args[0], &Type::Str)?;
                 b.ins(&Instruction::Call(self.cx.rt.charcount));
@@ -2415,11 +2503,19 @@ impl Fn_<'_> {
         // an ordinary RFC-0012 `extern`: the C shim defines them on every target,
         // honouring `VYRN_FIXED_TIME`/`VYRN_FIXED_SEED`, which is what makes a
         // clock example a three-way parity citizen instead of a browser-only one.
-        // So a linked module simply calls the symbol, and a standalone one has
-        // nowhere at all to get a clock — the name says which.
+        //
+        // M2i got them by reaching the shim, and M2j took that back out: the shim
+        // link can never be the default (M5 needs no clang), so a shape that only
+        // works linked does not advance this RFC. WASI has `clock_time_get` and
+        // `random_get`, the env injection is `environ_get`, and wasi-libc's
+        // `timespec_get`/`getentropy` are thin wrappers over the first two — so
+        // the emitted runtime reads the same syscalls by a shorter route, in BOTH
+        // link shapes rather than one.
         if let Some(sym) = crate::host_boundary_extern(name) {
-            let Some(&f) = self.cx.shim.get(sym) else {
-                return unsupported(&format!("the call `{name}` without a linked runtime shim"), line);
+            let f = match sym {
+                "__vyrn_now_millis" => self.cx.rt.now_millis,
+                "__vyrn_monotonic_nanos" => self.cx.rt.mono_nanos,
+                _ => self.cx.rt.random_seed,
             };
             if !args.is_empty() {
                 return unsupported(&format!("the call `{name}` at this arity"), line);
@@ -3861,6 +3957,25 @@ struct Rt {
     str_from_bytes: u32,
     slice: u32,
     f64_str: u32,
+    // RFC-0014 input I/O and RFC-0043's host boundary, served straight from WASI
+    // (M2j) rather than through the shim — a standalone module has no shim, and
+    // `clock_time_get`/`random_get`/`args_get`/`fd_read`/`path_open` are the same
+    // syscalls wasi-libc would have reached for us.
+    starts: u32,
+    env_get: u32,
+    str_i64: u32,
+    now_millis: u32,
+    mono_nanos: u32,
+    random_seed: u32,
+    args: u32,
+    getbyte: u32,
+    read_line: u32,
+    open_at: u32,
+    read_all: u32,
+    err3: u32,
+    read_file: u32,
+    read_file_bytes: u32,
+    write_file: u32,
     count: u32,
     msg_div0: u32,
     msg_rem0: u32,
@@ -3889,7 +4004,8 @@ fn word() -> MemArg {
     MemArg { offset: 0, align: 2, memory_index: 0 }
 }
 
-fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32, shim_malloc: Option<u32>) -> Rt {
+fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
+    let (fd_write, proc_exit) = (wasi.fd_write, wasi.proc_exit);
     let base = m.n_imports();
     let mut rt = Rt {
         write_all: base,
@@ -3908,7 +4024,22 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32, shim_malloc: Option<u3
         str_from_bytes: base + 13,
         slice: base + 14,
         f64_str: base + 15,
-        count: 16,
+        starts: base + 16,
+        env_get: base + 17,
+        str_i64: base + 18,
+        now_millis: base + 19,
+        mono_nanos: base + 20,
+        random_seed: base + 21,
+        args: base + 22,
+        getbyte: base + 23,
+        read_line: base + 24,
+        open_at: base + 25,
+        read_all: base + 26,
+        err3: base + 27,
+        read_file: base + 28,
+        read_file_bytes: base + 29,
+        write_file: base + 30,
+        count: 31,
         msg_div0: 0,
         msg_rem0: 0,
         msg_divovf: 0,
@@ -4352,8 +4483,8 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32, shim_malloc: Option<u3
     // than a heap copy of it — the textual backend copies only so that every I/O
     // error payload is owned storage, and this backend's allocator has no free to
     // make that distinction observable.
-    let bnul = rt.intern(m, "bytes contain a NUL byte");
-    let butf8 = rt.intern(m, "bytes are not valid UTF-8");
+    let bnul = rt.intern(m, crate::io_message("bnul"));
+    let butf8 = rt.intern(m, crate::io_message("butf8"));
     let res = layout::of_ll("{ i1, i64, i64 }").expect("the Result<String, String> shape");
     // params 0..2, the frame base 3, then ours — `i` is NOT `utf8valid`'s `i`
     // above, whose 3 is this function's base.
@@ -4520,8 +4651,954 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32, shim_malloc: Option<u3
     );
 
     float_str(m, malloc, nan, inf, ninf);
+    io_runtime(m, &rt, wasi);
 
     rt
+}
+
+/// Rights and flags from the `wasi_snapshot_preview1` witx, named rather than
+/// spelled at the call: a wrong bit in `path_open` is an `ENOTCAPABLE` that reads
+/// exactly like a missing file, i.e. a canonical `Err` for the wrong reason.
+const RIGHT_FD_READ: i64 = 1 << 1;
+const RIGHT_FD_WRITE: i64 = 1 << 6;
+const OFLAGS_CREAT_TRUNC: i32 = 1 | 8;
+/// `lookupflags`: follow a symlink, which is what `fopen` does.
+const LOOKUP_SYMLINK_FOLLOW: i32 = 1;
+
+/// RFC-0014's input I/O and RFC-0043's host boundary, over raw WASI.
+///
+/// M2i established that reaching the shared shim can never be the default — M5
+/// requires `vyrn build --target wasm` to need no clang — so "the shim defines
+/// these on every target" stopped being an answer for the standalone shape. WASI
+/// has `clock_time_get`, `random_get`, `args_get`, `fd_read` and `path_open`, and
+/// wasi-libc's own `timespec_get`/`getentropy`/`fopen` are thin wrappers over
+/// exactly those, so this is the same syscall by a shorter route.
+///
+/// The three semantics that are parity-critical rather than mechanical, all
+/// RFC-0014:
+///
+/// - **The canonical wording is single-sourced.** Every message comes from
+///   [`crate::io_message_parts`], split on the `%s` the textual backend hands to
+///   `__vyrn_snprintf`. A backend that spelled `cannot read` itself would be a
+///   second wording of one fact, and parity compares these bytes.
+/// - **The NUL rule.** A file (or a line) containing a NUL byte is rejected
+///   BEFORE the UTF-8 check and with its own message, because a Vyrn `String` is
+///   NUL-terminated and could not carry one.
+/// - **`readLine` is `None` at EOF**, and also for a NUL or invalid UTF-8 —
+///   exactly where the interpreter's `String::from_utf8` fails.
+///
+/// The functions are added in the order [`Rt`] hands out their indices; a body
+/// added out of turn would renumber every call to it and the module would still
+/// validate (M2e's finding, in a different place).
+fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
+    let (malloc, strlen, utf8valid, concat) = (rt.malloc, rt.strlen, rt.utf8valid, rt.concat);
+    let triple = layout::of_ll("{ ptr, i64, i64 }").expect("the growable-array triple");
+    let sum2 = layout::of_ll("{ i1, i64, i64 }").expect("the Option/Result shape");
+    // RFC-0043's injected clock and seed. The env NAME carries its own `=`, so a
+    // lookup is one prefix test and the value is whatever follows — no separate
+    // check that the separator is where it should be.
+    let fixed_time = rt.intern(m, "VYRN_FIXED_TIME=");
+    let fixed_seed = rt.intern(m, "VYRN_FIXED_SEED=");
+    // The monotonic counter under a fixed clock: a static, because successive
+    // calls have to differ and the interpreter's own base/step is `1e9 + n·1e6`.
+    let mono_ctr = m.reserve(8, 8);
+
+    // starts(a, b) — whether NUL-terminated `a` begins with NUL-terminated `b`.
+    m.func(&[ValType::I32, ValType::I32], &[ValType::I32], &[ValType::I32], 0, |b| {
+        let c = 3; // params 0..1, the frame base 2, then ours
+        b.ins(&Instruction::Block(BlockType::Result(ValType::I32)))
+            .ins(&Instruction::Loop(BlockType::Empty))
+            .ins(&Instruction::LocalGet(1))
+            .ins(&Instruction::I32Load8U(byte()))
+            .ins(&Instruction::LocalTee(c))
+            .ins(&Instruction::I32Eqz)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::Br(2))
+            .ins(&Instruction::End)
+            .ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::I32Load8U(byte()))
+            .ins(&Instruction::LocalGet(c))
+            .ins(&Instruction::I32Ne)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(0))
+            .ins(&Instruction::Br(2))
+            .ins(&Instruction::End)
+            .ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalSet(0))
+            .ins(&Instruction::LocalGet(1))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalSet(1))
+            .ins(&Instruction::Br(0))
+            .ins(&Instruction::End)
+            .ins(&Instruction::Unreachable)
+            .ins(&Instruction::End);
+    });
+
+    // env_get(key) — the value of the environment entry `key` names (`key`
+    // includes its `=`), or 0. WASI hands the whole environment over in one go,
+    // so this is `environ_get` plus a prefix scan; nothing caches it, because a
+    // clock program makes a handful of calls and the bump allocator's cost for
+    // them is a few hundred bytes that nothing can observe.
+    let (env_sizes, env_get_i) = (wasi.environ_sizes_get, wasi.environ_get);
+    let starts = rt.starts;
+    m.func(
+        &[ValType::I32],
+        &[ValType::I32],
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        8,
+        |b| {
+            let (cnt, ptrs, i, e) = (2, 3, 4, 5); // param 0, base 1, then ours
+            b.ins(&Instruction::Block(BlockType::Result(ValType::I32)));
+            // Zeroed first: a failing `environ_sizes_get` leaves the frame slots
+            // holding whatever the last call put there, and a garbage count is a
+            // scan over garbage pointers rather than an empty environment.
+            b.slot(0).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
+            b.slot(4).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
+            b.slot(0);
+            b.slot(4);
+            b.ins(&Instruction::Call(env_sizes))
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::Br(1))
+                .ins(&Instruction::End);
+            b.slot(0).ins(&Instruction::I32Load(word())).ins(&Instruction::LocalTee(cnt));
+            b.ins(&Instruction::I32Const(2))
+                .ins(&Instruction::I32Shl)
+                .ins(&Instruction::I32Const(8))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalSet(ptrs))
+                .ins(&Instruction::LocalGet(ptrs));
+            b.slot(4)
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::Call(env_get_i))
+                .ins(&Instruction::Drop);
+            b.ins(&Instruction::I32Const(0)).ins(&Instruction::LocalSet(i));
+            b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
+            b.ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::LocalGet(cnt))
+                .ins(&Instruction::I32GeU)
+                .ins(&Instruction::BrIf(1));
+            b.ins(&Instruction::LocalGet(ptrs))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Const(2))
+                .ins(&Instruction::I32Shl)
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalTee(e))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::Call(starts))
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(e))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::Br(3))
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(i))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            b.ins(&Instruction::I32Const(0)).ins(&Instruction::End);
+        },
+    );
+
+    // str_i64(p) — `strtoll(p, 0, 10)` for everything an injected value can be:
+    // an optional sign then decimal digits, stopping at the first byte that is not
+    // one.
+    //
+    // ponytail: no leading-whitespace skip and no overflow clamp to
+    // `LLONG_MAX`/`MIN`. Both are `strtoll` behaviours nothing reaches — the only
+    // callers are `VYRN_FIXED_TIME` and `VYRN_FIXED_SEED`, which the harness writes
+    // as bare decimals. A program that could pass arbitrary text here would need
+    // the real thing.
+    m.func(
+        &[ValType::I32],
+        &[ValType::I64],
+        &[ValType::I64, ValType::I32, ValType::I32],
+        0,
+        |b| {
+            let (v, neg, c) = (2, 3, 4);
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::LocalTee(c))
+                .ins(&Instruction::I32Const(b'-' as i32))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::LocalSet(neg))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(0))
+                .ins(&Instruction::Else)
+                .ins(&Instruction::LocalGet(c))
+                .ins(&Instruction::I32Const(b'+' as i32))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            b.ins(&Instruction::Block(BlockType::Empty))
+                .ins(&Instruction::Loop(BlockType::Empty))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::LocalTee(c))
+                .ins(&Instruction::I32Const(b'0' as i32))
+                .ins(&Instruction::I32LtU)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::LocalGet(c))
+                .ins(&Instruction::I32Const(b'9' as i32))
+                .ins(&Instruction::I32GtU)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::LocalGet(v))
+                .ins(&Instruction::I64Const(10))
+                .ins(&Instruction::I64Mul)
+                .ins(&Instruction::LocalGet(c))
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::I64Const(b'0' as i64))
+                .ins(&Instruction::I64Sub)
+                .ins(&Instruction::I64Add)
+                .ins(&Instruction::LocalSet(v))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(0))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(neg))
+                .ins(&Instruction::If(BlockType::Result(ValType::I64)))
+                .ins(&Instruction::I64Const(0))
+                .ins(&Instruction::LocalGet(v))
+                .ins(&Instruction::I64Sub)
+                .ins(&Instruction::Else)
+                .ins(&Instruction::LocalGet(v))
+                .ins(&Instruction::End);
+        },
+    );
+
+    // The injected-value preamble every one of the three host readings starts
+    // with: `if (e && e[0]) return str_i64(e)`, which is the C shim's own guard —
+    // an env var set to the empty string falls through to the real host.
+    let (env_get, str_i64) = (rt.env_get, rt.str_i64);
+    let fixed = move |b: &mut Frame, key: u32, out: u32| {
+        b.ins(&Instruction::I32Const(key as i32))
+            .ins(&Instruction::Call(env_get))
+            .ins(&Instruction::LocalTee(out))
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::LocalGet(out))
+            .ins(&Instruction::I32Load8U(byte()))
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::LocalGet(out))
+            .ins(&Instruction::Call(str_i64))
+            .ins(&Instruction::Br(2))
+            .ins(&Instruction::End)
+            .ins(&Instruction::End);
+    };
+
+    // now_millis() — epoch millis. `clock_time_get(REALTIME)` is nanoseconds, and
+    // the native shim's `tv_sec*1000 + tv_nsec/1e6` is the same floor division.
+    // A failing clock reads 0, which is what `timespec_get` returning 0 gives.
+    let clock_time_get = wasi.clock_time_get;
+    m.func(&[], &[ValType::I64], &[ValType::I32], 8, |b| {
+        let p = 1; // no params, the frame base 0, then ours
+        b.ins(&Instruction::Block(BlockType::Result(ValType::I64)));
+        fixed(b, fixed_time, p);
+        b.ins(&Instruction::I32Const(0)).ins(&Instruction::I64Const(1_000_000));
+        b.slot(0);
+        b.ins(&Instruction::Call(clock_time_get))
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I64Const(0))
+            .ins(&Instruction::Br(1))
+            .ins(&Instruction::End);
+        b.slot(0);
+        b.ins(&Instruction::I64Load(word8()))
+            .ins(&Instruction::I64Const(1_000_000))
+            .ins(&Instruction::I64DivU)
+            .ins(&Instruction::End);
+    });
+
+    // mono_nanos() — monotonic nanoseconds. Under a fixed clock the interpreter's
+    // own base and step, so successive calls are byte-identical across backends;
+    // otherwise `clock_time_get(MONOTONIC)`.
+    m.func(&[], &[ValType::I64], &[ValType::I32], 8, |b| {
+        let p = 1;
+        b.ins(&Instruction::Block(BlockType::Result(ValType::I64)))
+            .ins(&Instruction::I32Const(fixed_time as i32))
+            .ins(&Instruction::Call(env_get))
+            .ins(&Instruction::LocalTee(p))
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::LocalGet(p))
+            .ins(&Instruction::I32Load8U(byte()))
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(mono_ctr as i32))
+            .ins(&Instruction::I64Load(word8()))
+            .ins(&Instruction::I64Const(1_000_000))
+            .ins(&Instruction::I64Mul)
+            .ins(&Instruction::I64Const(1_000_000_000))
+            .ins(&Instruction::I64Add)
+            .ins(&Instruction::I32Const(mono_ctr as i32))
+            .ins(&Instruction::I32Const(mono_ctr as i32))
+            .ins(&Instruction::I64Load(word8()))
+            .ins(&Instruction::I64Const(1))
+            .ins(&Instruction::I64Add)
+            .ins(&Instruction::I64Store(word8()))
+            .ins(&Instruction::Br(2))
+            .ins(&Instruction::End)
+            .ins(&Instruction::End);
+        b.ins(&Instruction::I32Const(1)).ins(&Instruction::I64Const(1_000));
+        b.slot(0);
+        b.ins(&Instruction::Call(clock_time_get)).ins(&Instruction::Drop);
+        b.slot(0);
+        b.ins(&Instruction::I64Load(word8())).ins(&Instruction::End);
+    });
+
+    // random_seed() — eight CSPRNG bytes as an `Int64`, which is what the native
+    // shim's `getentropy(&v, sizeof v)` reads. Zeroing first is not tidiness: the
+    // C leaves `v = 0` when `getentropy` fails, so pre-zeroing IS the error path
+    // and there is no errno to check.
+    let random_get = wasi.random_get;
+    m.func(&[], &[ValType::I64], &[ValType::I32], 8, |b| {
+        let p = 1;
+        b.ins(&Instruction::Block(BlockType::Result(ValType::I64)));
+        fixed(b, fixed_seed, p);
+        b.slot(0);
+        b.ins(&Instruction::I64Const(0)).ins(&Instruction::I64Store(word8()));
+        b.slot(0);
+        b.ins(&Instruction::I32Const(8))
+            .ins(&Instruction::Call(random_get))
+            .ins(&Instruction::Drop);
+        b.slot(0);
+        b.ins(&Instruction::I64Load(word8())).ins(&Instruction::End);
+    });
+
+    // args(dest) — `argv[1..]` as an `Array<String>` triple written through `dest`.
+    //
+    // WASI writes the pointers as a contiguous array of wasm32 pointers, which is
+    // exactly the buffer an `Array<String>` wants — the element stride IS
+    // `of_ll("ptr")` — so dropping the program name is `+ 4` rather than a copy.
+    let (args_sizes_get, args_get) = (wasi.args_sizes_get, wasi.args_get);
+    m.func(&[ValType::I32], &[], &[ValType::I32, ValType::I32], 8, |b| {
+        let (cnt, ptrs) = (2, 3);
+        b.slot(0).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
+        b.slot(4).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
+        b.slot(0);
+        b.slot(4);
+        b.ins(&Instruction::Call(args_sizes_get)).ins(&Instruction::Drop);
+        b.slot(0);
+        b.ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::LocalTee(cnt))
+            .ins(&Instruction::I32Const(2))
+            .ins(&Instruction::I32Shl)
+            // Two words of slack, so `ptrs + 4` is inside the allocation even
+            // when there are no arguments at all and it is never read.
+            .ins(&Instruction::I32Const(8))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::Call(malloc))
+            .ins(&Instruction::LocalSet(ptrs))
+            .ins(&Instruction::LocalGet(ptrs));
+        b.slot(4);
+        b.ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::Call(malloc))
+            .ins(&Instruction::Call(args_get))
+            .ins(&Instruction::Drop);
+        b.ins(&Instruction::LocalGet(cnt))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::I32GtU)
+            .ins(&Instruction::If(BlockType::Result(ValType::I32)))
+            .ins(&Instruction::LocalGet(cnt))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::I32Sub)
+            .ins(&Instruction::Else)
+            .ins(&Instruction::I32Const(0))
+            .ins(&Instruction::End)
+            .ins(&Instruction::LocalSet(cnt));
+        b.ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::LocalGet(ptrs))
+            .ins(&Instruction::I32Const(4))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::I32Store(word_at(triple.fields[0])));
+        for f in [triple.fields[1], triple.fields[2]] {
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(cnt))
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::I64Store(at(f)));
+        }
+    });
+
+    // getbyte() — one byte from stdin, or -1 at EOF (and on any error, which is
+    // what `getchar` returning `EOF` covers too).
+    //
+    // ponytail: one `fd_read` per byte, where C's `getchar` is buffered. `readLine`
+    // is the only caller and the corpus feeds it a few hundred bytes from a
+    // fixture; a 4 KB buffer here would need its own invalidation story to stay
+    // correct if anything else ever reads fd 0.
+    let fd_read = wasi.fd_read;
+    m.func(&[], &[ValType::I32], &[], 16, |b| {
+        b.slot(0);
+        b.slot(12);
+        b.ins(&Instruction::I32Store(word()));
+        b.slot(4).ins(&Instruction::I32Const(1)).ins(&Instruction::I32Store(word()));
+        b.slot(8).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
+        b.ins(&Instruction::I32Const(0));
+        b.slot(0);
+        b.ins(&Instruction::I32Const(1));
+        b.slot(8);
+        b.ins(&Instruction::Call(fd_read)).ins(&Instruction::If(BlockType::Result(ValType::I32)));
+        b.ins(&Instruction::I32Const(-1)).ins(&Instruction::Else);
+        b.slot(8);
+        b.ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32Eqz)
+            .ins(&Instruction::If(BlockType::Result(ValType::I32)))
+            .ins(&Instruction::I32Const(-1))
+            .ins(&Instruction::Else);
+        b.slot(12);
+        b.ins(&Instruction::I32Load8U(byte()))
+            .ins(&Instruction::End)
+            .ins(&Instruction::End);
+    });
+
+    // read_line(dest) — RFC-0014's `readLine()` as an `Option<String>` written
+    // through `dest`. `None` at EOF, for a line carrying a NUL byte (which a
+    // NUL-terminated `String` could not hold), and for one that is not UTF-8 —
+    // the last of those is where the interpreter's `String::from_utf8` fails, so
+    // the DFA decides it here rather than the caller.
+    let getbyte = rt.getbyte;
+    m.func(
+        &[ValType::I32],
+        &[],
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        0,
+        |b| {
+            let (buf, cap, len, c, nul, nb) = (2, 3, 4, 5, 6, 7);
+            b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
+                .ins(&Instruction::Block(BlockType::Empty)) // 0: none
+                .ins(&Instruction::Call(getbyte))
+                .ins(&Instruction::LocalTee(c))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32LtS)
+                .ins(&Instruction::BrIf(0))
+                .ins(&Instruction::I32Const(64))
+                .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalSet(buf))
+                .ins(&Instruction::Block(BlockType::Empty)) // 0: eol
+                .ins(&Instruction::Loop(BlockType::Empty)) // 0: rd
+                .ins(&Instruction::LocalGet(c))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32LtS)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::LocalGet(c))
+                .ins(&Instruction::I32Const(b'\n' as i32))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::LocalGet(c))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::LocalSet(nul))
+                .ins(&Instruction::End)
+                // Grow at len+2 rather than len+1: the terminator goes on after
+                // the loop and must not need a reallocation of its own.
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Const(2))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32GeU)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Shl)
+                .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalTee(nb))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
+                .ins(&Instruction::LocalGet(nb))
+                .ins(&Instruction::LocalSet(buf))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(c))
+                .ins(&Instruction::I32Store8(byte()))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(len))
+                .ins(&Instruction::Call(getbyte))
+                .ins(&Instruction::LocalSet(c))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            // A trailing `\r` goes with the `\n`, so a Windows pipe and a POSIX
+            // one read identically.
+            b.ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(-1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::I32Const(b'\r' as i32))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Const(-1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(len))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32Store8(byte()))
+                .ins(&Instruction::LocalGet(nul))
+                .ins(&Instruction::BrIf(0))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::Call(utf8valid))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::BrIf(0));
+            sum2_write(b, &sum2, 1, Some(buf));
+            b.ins(&Instruction::Br(1)).ins(&Instruction::End); // none
+            sum2_write(b, &sum2, 0, None);
+            b.ins(&Instruction::End); // fin
+        },
+    );
+
+    // open_at(path, oflags, rights) — a file descriptor, or -1.
+    //
+    // WASI has no `open` relative to a working directory: every path is resolved
+    // under a preopened directory, and the host decides which ones exist. So the
+    // preopens are walked from fd 3 (the first one WASI can hand out) until
+    // `fd_prestat_get` says there are no more, and the first that resolves the
+    // path wins — which is `--dir .` giving exactly one, and no preopens at all
+    // (a browser) giving -1 for every path, i.e. RFC-0014's canonical `Err`.
+    //
+    // ponytail: no prefix matching against the preopens' own names, so an
+    // ABSOLUTE guest path only opens under a preopen mounted at `/`. wasi-libc
+    // does the matching for the textual backend; nothing in the corpus has an
+    // absolute path, and adding it means a string-prefix walk over
+    // `fd_prestat_dir_name` for a case no example has.
+    let (path_open, fd_prestat_get) = (wasi.path_open, wasi.fd_prestat_get);
+    m.func(
+        &[ValType::I32, ValType::I32, ValType::I64],
+        &[ValType::I32],
+        &[ValType::I32, ValType::I32],
+        16,
+        |b| {
+            let (fd, plen) = (4, 5); // params 0..2, the frame base 3, then ours
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::LocalSet(plen))
+                .ins(&Instruction::I32Const(3))
+                .ins(&Instruction::LocalSet(fd))
+                .ins(&Instruction::Block(BlockType::Result(ValType::I32)))
+                .ins(&Instruction::Loop(BlockType::Empty))
+                .ins(&Instruction::LocalGet(fd));
+            b.slot(0);
+            b.ins(&Instruction::Call(fd_prestat_get))
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(-1))
+                .ins(&Instruction::Br(2))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(fd))
+                .ins(&Instruction::I32Const(LOOKUP_SYMLINK_FOLLOW))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(plen))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I64Const(0))
+                .ins(&Instruction::I32Const(0));
+            b.slot(8);
+            b.ins(&Instruction::Call(path_open))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Empty));
+            b.slot(8);
+            b.ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::Br(2))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(fd))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(fd))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::Unreachable)
+                .ins(&Instruction::End);
+        },
+    );
+
+    // read_all(fd, outlen) — the whole descriptor into one NUL-terminated buffer,
+    // with its byte length through `outlen`; 0 on a read error.
+    //
+    // A read loop rather than a stat-and-slurp, for the reason the C shim gives:
+    // it is the same code for a regular file and for a pipe. The terminator is
+    // there so a `String` result needs no second copy, and it is past `outlen`
+    // bytes so a bytes result simply ignores it.
+    m.func(
+        &[ValType::I32, ValType::I32],
+        &[ValType::I32],
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        16,
+        |b| {
+            let (buf, cap, len, nb, got) = (3, 4, 5, 6, 7);
+            b.ins(&Instruction::I32Const(1024))
+                .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalSet(buf))
+                .ins(&Instruction::Block(BlockType::Empty))
+                .ins(&Instruction::Loop(BlockType::Empty))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32GeU)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Shl)
+                .ins(&Instruction::LocalTee(cap))
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalTee(nb))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
+                .ins(&Instruction::LocalGet(nb))
+                .ins(&Instruction::LocalSet(buf))
+                .ins(&Instruction::End);
+            b.slot(0);
+            b.ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Store(word()));
+            b.slot(4);
+            b.ins(&Instruction::LocalGet(cap))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Sub)
+                .ins(&Instruction::I32Store(word()));
+            b.slot(8);
+            b.ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
+            b.ins(&Instruction::LocalGet(0));
+            b.slot(0);
+            b.ins(&Instruction::I32Const(1));
+            b.slot(8);
+            b.ins(&Instruction::Call(fd_read))
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::LocalSet(buf))
+                .ins(&Instruction::Br(2))
+                .ins(&Instruction::End);
+            b.slot(8);
+            b.ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalTee(got))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::LocalGet(got))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(len))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32Store8(byte()))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32Store(word()))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(buf));
+        },
+    );
+
+    // err3(pre, mid, post) — one canonical I/O message with the path in it.
+    //
+    // The two halves come from `io_message_parts`, i.e. from the same format
+    // string the textual backend hands `__vyrn_snprintf`, so there is no second
+    // wording to keep in step. Nothing frees, so the pieces are the interned
+    // constants themselves.
+    m.func(&[ValType::I32, ValType::I32, ValType::I32], &[ValType::I32], &[], 0, |b| {
+        b.ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::LocalGet(1))
+            .ins(&Instruction::Call(concat))
+            .ins(&Instruction::LocalGet(2))
+            .ins(&Instruction::Call(concat));
+    });
+
+    let msg = |m: &mut Module, which: &str| {
+        let (pre, post) = crate::io_message_parts(which);
+        (rt.intern(m, pre), rt.intern(m, post))
+    };
+    let (readpre, readpost) = msg(m, "readerr");
+    let (utf8pre, utf8post) = msg(m, "utf8err");
+    let (nulpre, nulpost) = msg(m, "nulerr");
+    let (writepre, writepost) = msg(m, "writeerr");
+
+    let (open_at, read_all, err3) = (rt.open_at, rt.read_all, rt.err3);
+    let fd_close = wasi.fd_close;
+    // The open-and-slurp both readers start with, leaving the buffer in `buf`, the
+    // length in `len`, and branching to `err` (a depth) with the read message set
+    // when either step fails.
+    let slurp = move |b: &mut Frame,
+                      base_off: u32,
+                      fd: u32,
+                      buf: u32,
+                      len: u32,
+                      err_msg: u32,
+                      err_depth: u32| {
+        b.ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::I32Const(0))
+            .ins(&Instruction::I64Const(RIGHT_FD_READ))
+            .ins(&Instruction::Call(open_at))
+            .ins(&Instruction::LocalTee(fd))
+            .ins(&Instruction::I32Const(0))
+            .ins(&Instruction::I32LtS)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(readpre as i32))
+            .ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::I32Const(readpost as i32))
+            .ins(&Instruction::Call(err3))
+            .ins(&Instruction::LocalSet(err_msg))
+            .ins(&Instruction::Br(err_depth + 1))
+            .ins(&Instruction::End)
+            .ins(&Instruction::LocalGet(fd));
+        b.slot(base_off);
+        b.ins(&Instruction::Call(read_all))
+            .ins(&Instruction::LocalSet(buf))
+            .ins(&Instruction::LocalGet(fd))
+            .ins(&Instruction::Call(fd_close))
+            .ins(&Instruction::Drop)
+            .ins(&Instruction::LocalGet(buf))
+            .ins(&Instruction::I32Eqz)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(readpre as i32))
+            .ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::I32Const(readpost as i32))
+            .ins(&Instruction::Call(err3))
+            .ins(&Instruction::LocalSet(err_msg))
+            .ins(&Instruction::Br(err_depth + 1))
+            .ins(&Instruction::End);
+        b.slot(base_off);
+        b.ins(&Instruction::I32Load(word())).ins(&Instruction::LocalSet(len));
+    };
+
+    // read_file(path, dest) — RFC-0014's `readFile` as a `Result<String, String>`.
+    //
+    // The NUL scan comes BEFORE the UTF-8 check and carries its own wording,
+    // because a `String` is NUL-terminated: a file with one in it is not
+    // representable rather than badly encoded, and the two messages differ.
+    m.func(
+        &[ValType::I32, ValType::I32],
+        &[],
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        8,
+        |b| {
+            let (fd, buf, len, emsg, i) = (3, 4, 5, 6, 7);
+            b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
+                .ins(&Instruction::Block(BlockType::Empty)); // 0: err
+            slurp(b, 0, fd, buf, len, emsg, 0);
+            b.ins(&Instruction::Block(BlockType::Empty)) // 0: scanned
+                .ins(&Instruction::Loop(BlockType::Empty)) // 0: sl
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32GeU)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(nulpre as i32))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(nulpost as i32))
+                .ins(&Instruction::Call(err3))
+                .ins(&Instruction::LocalSet(emsg))
+                // out of the `if`, the scan loop and its block, landing where the
+                // `err` block's own exit lands.
+                .ins(&Instruction::Br(3))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(i))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::Call(utf8valid))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(utf8pre as i32))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(utf8post as i32))
+                .ins(&Instruction::Call(err3))
+                .ins(&Instruction::LocalSet(emsg))
+                .ins(&Instruction::Br(1))
+                .ins(&Instruction::End);
+            sum2_write_to(b, 1, &sum2, 1, Some(buf));
+            b.ins(&Instruction::Br(1)).ins(&Instruction::End); // err
+            sum2_write_to(b, 1, &sum2, 0, Some(emsg));
+            b.ins(&Instruction::End); // fin
+        },
+    );
+
+    // read_file_bytes(path, dest) — the same open-and-slurp with no NUL or UTF-8
+    // rule at all, which is the whole point of a byte read, as a
+    // `Result<Array<UInt8>, String>`.
+    //
+    // The `Ok` payload is three words, so it does not fit the sum's two: it is
+    // boxed, exactly as `Fn_::box_value` would box it, and the box IS the triple
+    // rather than a copy of one built elsewhere.
+    m.func(
+        &[ValType::I32, ValType::I32],
+        &[],
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        8,
+        |b| {
+            let (fd, buf, len, emsg, boxed) = (3, 4, 5, 6, 7);
+            b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
+                .ins(&Instruction::Block(BlockType::Empty)); // 0: err
+            slurp(b, 0, fd, buf, len, emsg, 0);
+            b.ins(&Instruction::I32Const(triple.size as i32))
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalTee(boxed))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::I32Store(word_at(triple.fields[0])));
+            for f in [triple.fields[1], triple.fields[2]] {
+                b.ins(&Instruction::LocalGet(boxed))
+                    .ins(&Instruction::LocalGet(len))
+                    .ins(&Instruction::I64ExtendI32U)
+                    .ins(&Instruction::I64Store(at(f)));
+            }
+            sum2_write_to(b, 1, &sum2, 1, Some(boxed));
+            b.ins(&Instruction::Br(1)).ins(&Instruction::End); // err
+            sum2_write_to(b, 1, &sum2, 0, Some(emsg));
+            b.ins(&Instruction::End); // fin
+        },
+    );
+
+    // write_file(path, contents, dest) — create-or-truncate and write every byte,
+    // as a `Result<Bool, String>` whose `Ok` is `true`.
+    //
+    // A Vyrn `String` never contains a NUL (the readers above are why), so
+    // `strlen` is its full length and there is no separate length to pass.
+    let write_all = rt.write_all;
+    m.func(
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[],
+        &[ValType::I32, ValType::I32],
+        0,
+        |b| {
+            let (fd, emsg) = (4, 5); // params 0..2, the frame base 3, then ours
+            b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
+                .ins(&Instruction::Block(BlockType::Empty)) // 0: err
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(OFLAGS_CREAT_TRUNC))
+                .ins(&Instruction::I64Const(RIGHT_FD_WRITE))
+                .ins(&Instruction::Call(open_at))
+                .ins(&Instruction::LocalTee(fd))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32LtS)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(writepre as i32))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(writepost as i32))
+                .ins(&Instruction::Call(err3))
+                .ins(&Instruction::LocalSet(emsg))
+                .ins(&Instruction::Br(1))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(fd))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::Call(write_all))
+                .ins(&Instruction::LocalGet(fd))
+                .ins(&Instruction::Call(fd_close))
+                .ins(&Instruction::Drop);
+            // `Ok(true)`: the payload is a `Bool`, zero-extended into the word,
+            // which is the encoding `build_sum2`'s `Word::Ext` arm produces.
+            b.ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Store8(MemArg {
+                    offset: sum2.fields[0] as u64,
+                    align: 0,
+                    memory_index: 0,
+                }))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I64Const(1))
+                .ins(&Instruction::I64Store(at(sum2.fields[1])))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I64Const(0))
+                .ins(&Instruction::I64Store(at(sum2.fields[2])))
+                .ins(&Instruction::Br(1))
+                .ins(&Instruction::End); // err
+            sum2_write_to(b, 2, &sum2, 0, Some(emsg));
+            b.ins(&Instruction::End); // fin
+        },
+    );
+}
+
+/// Write an `Option`/`Result` through the destination in parameter 0: the tag,
+/// then a one-word payload out of `word` (a pointer or a zero-extended scalar),
+/// then the unused second word.
+///
+/// The same three stores `Fn_::build_sum2` emits, at the same
+/// `layout::of_ll ∘ llt` offsets — a runtime function that spelled 0/8/16 could
+/// disagree with the lowering about where the tag is.
+fn sum2_write(b: &mut Frame, l: &Layout, tag: i32, word: Option<u32>) {
+    sum2_write_to(b, 0, l, tag, word)
+}
+
+fn sum2_write_to(b: &mut Frame, dest: u32, l: &Layout, tag: i32, word: Option<u32>) {
+    b.ins(&Instruction::LocalGet(dest))
+        .ins(&Instruction::I32Const(tag))
+        .ins(&Instruction::I32Store8(MemArg {
+            offset: l.fields[0] as u64,
+            align: 0,
+            memory_index: 0,
+        }))
+        .ins(&Instruction::LocalGet(dest));
+    match word {
+        Some(w) => {
+            b.ins(&Instruction::LocalGet(w)).ins(&Instruction::I64ExtendI32U);
+        }
+        None => {
+            b.ins(&Instruction::I64Const(0));
+        }
+    }
+    b.ins(&Instruction::I64Store(at(l.fields[1])))
+        .ins(&Instruction::LocalGet(dest))
+        .ins(&Instruction::I64Const(0))
+        .ins(&Instruction::I64Store(at(l.fields[2])));
 }
 
 /// `f64_str(x)` — a `Float64` as its fixed six-decimal spelling, exactly.
@@ -5188,7 +6265,6 @@ mod tests {
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),
             globals: HashMap::new(),
-            shim: HashMap::new(),
             externs: HashMap::new(),
             // Every index 0: a `Cx` for a type-level test never emits a call, and
             // a field per runtime function would have to be edited for each new

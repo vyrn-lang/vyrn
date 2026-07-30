@@ -1029,6 +1029,48 @@ fn extern_symbol(name: &str) -> String {
 /// WASI clocks/random, so no `vyrn` host page is needed. Returns the shim symbol
 /// for the recognized Vyrn extern name. Matched by name (like the I/O builtins);
 /// these `host*` names are reserved.
+/// The RFC-0014 I/O error wording, canonical Vyrn strings and NEVER OS text, so
+/// every backend produces byte-identical `Err` payloads. `%s` is the path.
+///
+/// One list because parity compares these bytes. The textual emitter interns them
+/// as `@.io.<name>` globals and renders them with `__vyrn_snprintf`; the direct
+/// wasm backend has no `snprintf` (RFC-0077 M2j) and splits each format on its
+/// `%s` instead — so a message reworded here changes both, and neither can hold a
+/// private copy that drifts.
+pub const IO_MESSAGES: &[(&str, &str)] = &[
+    ("readerr", "cannot read `%s`"),
+    ("writeerr", "cannot write `%s`"),
+    ("utf8err", "`%s` is not valid UTF-8"),
+    // `listDir` (RFC-0021), reachable from a compiled module only on the
+    // generator-host path (RFC-0076 M2) — the wording still lives here, with the
+    // rest, rather than in the shim that renders it.
+    ("listerr", "cannot list `%s`"),
+    ("nulerr", "`%s` contains a NUL byte"),
+    // RFC-0044: a cross-device (`EXDEV`) rename — surfaced distinctly instead of
+    // silently degrading to copy. Ordinary not-found/permission rename failures
+    // reuse `writeerr` (rewriting the destination).
+    ("xdeverr", "cannot rename `%s` across devices"),
+    // Byte-bridge errors (M2, no path): fixed payloads for `stringFromBytes`.
+    ("bnul", "bytes contain a NUL byte"),
+    ("butf8", "bytes are not valid UTF-8"),
+];
+
+/// One [`IO_MESSAGES`] entry by name. Panics on an unknown key, because every
+/// caller names a literal and a typo is a wrong payload rather than a miss.
+pub fn io_message(name: &str) -> &'static str {
+    IO_MESSAGES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, m)| *m)
+        .unwrap_or_else(|| panic!("no I/O message named `{name}`"))
+}
+
+/// The two halves of an [`io_message`] around its `%s`, for a backend that
+/// concatenates rather than formatting.
+pub fn io_message_parts(name: &str) -> (&'static str, &'static str) {
+    io_message(name).split_once("%s").unwrap_or_else(|| panic!("`{name}` has no `%s`"))
+}
+
 pub fn host_boundary_extern(name: &str) -> Option<&'static str> {
     match name {
         "hostNowMillis" => Some("__vyrn_now_millis"),
@@ -1463,30 +1505,12 @@ fn emit_with(program: &Program, gen_host: bool) -> Result<String, String> {
     out.push_str("@.fmt.nan = private unnamed_addr constant [5 x i8] c\"NaN\\0A\\00\"\n");
     out.push_str("@.str.nan = private unnamed_addr constant [4 x i8] c\"NaN\\00\"\n");
 
-    // Input-I/O error wording (RFC-0014): canonical Vyrn strings, NEVER OS text,
-    // so every backend produces byte-identical `Err` payloads. `%s` is the path;
-    // the message is built at runtime (`@__vyrn_read_err`/`@__vyrn_write_err`).
+    // Input-I/O error wording (RFC-0014), from the one list both backends read.
     // These are payload strings (no trailing newline — unlike the trap globals).
-    for (name, msg) in [
-        ("@.io.readerr", "cannot read `%s`"),
-        ("@.io.writeerr", "cannot write `%s`"),
-        ("@.io.utf8err", "`%s` is not valid UTF-8"),
-        // `listDir` (RFC-0021), reachable from a compiled module only on the
-        // generator-host path (RFC-0076 M2) — the wording still lives here, with
-        // the rest, rather than in the shim that renders it.
-        ("@.io.listerr", "cannot list `%s`"),
-        ("@.io.nulerr", "`%s` contains a NUL byte"),
-        // RFC-0044: a cross-device (`EXDEV`) rename — surfaced distinctly instead
-        // of silently degrading to copy. Ordinary not-found/permission rename
-        // failures reuse `@.io.writeerr` (rewriting the destination).
-        ("@.io.xdeverr", "cannot rename `%s` across devices"),
-        // Byte-bridge errors (M2, no path): fixed payloads for `stringFromBytes`.
-        ("@.io.bnul", "bytes contain a NUL byte"),
-        ("@.io.butf8", "bytes are not valid UTF-8"),
-    ] {
+    for (name, msg) in IO_MESSAGES {
         let (escaped, len) = llvm_str(msg);
         out.push_str(&format!(
-            "{name} = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n"
+            "@.io.{name} = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n"
         ));
     }
     out.push_str(IO_RUNTIME);
