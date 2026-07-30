@@ -156,6 +156,12 @@ const PASSING: &[&str] = &[
     // the four header-mutating operations have arms of their own.
     "smallarray.vyrn",
     "statemod.vyrn",
+    // RFC-0077 M2p, and the LAST of the 87: `std/storage`'s `writeAtomic` is
+    // `writeFile` then `renameFile`, and the second was refused at M2o because a
+    // thirteenth UNCONDITIONAL WASI import renumbered every module in the corpus.
+    // The sweep made an import a program cannot reach an import it does not have,
+    // so `path_rename` costs a program that never renames nothing at all.
+    "storage.vyrn",
     // The one example whose `parse` sits beside the rest of the string surface, so
     // it says the lowering composes rather than that it works alone.
     "stringops.vyrn",
@@ -1401,6 +1407,35 @@ fn main() -> Int64 {
     return 0
 }
 ";
+    // RFC-0044's `renameFile` (M2p). Self-setting-up, because the interpreter and
+    // the wasm module run in the SAME directory one after the other and a rename is
+    // destructive: both runs write both files first, so both see the same world.
+    let rename = "\
+fn show(r: Result<Bool, String>) -> String {
+    return match r {
+        Ok(b) => \"ok:\\{b}\",
+        Err(e) => \"err:\" + e,
+    }
+}
+
+fn read(p: String) -> String {
+    return match readFile(p) {
+        Ok(s) => \"ok:\" + s,
+        Err(e) => \"err:\" + e,
+    }
+}
+
+fn main() -> Int64 {
+    print(show(writeFile(\"rn-from.txt\", \"moved\")))
+    print(show(writeFile(\"rn-onto.txt\", \"clobbered\")))
+    print(show(renameFile(\"rn-from.txt\", \"rn-onto.txt\")))
+    print(read(\"rn-onto.txt\"))
+    print(read(\"rn-from.txt\"))
+    print(show(renameFile(\"rn-missing.txt\", \"rn-onto.txt\")))
+    print(show(renameFile(\"rn-onto.txt\", \"rn-nodir/x.txt\")))
+    return 0
+}
+";
     let argv = "\
 fn main() -> Int64 {
     let a = args()
@@ -1444,6 +1479,23 @@ fn main() -> Int64 {
              5\n6\n-1\n\
              err:cannot write `nested/nope.txt`\n\
              ok:true\nok:round\n",
+        ),
+        (
+            "rename",
+            rename,
+            None,
+            no_args.clone(),
+            // Line 3 says it overwrote an existing target — which POSIX `rename`
+            // and `path_rename` do and Windows C `rename` refuses, so it is the
+            // semantic RFC-0044 is about. Line 5 says it MOVED rather than copied.
+            // The two failures are the reachable half of the two error classes: a
+            // missing source and an unresolvable target are both `cannot write`
+            // ABOUT THE TARGET, and the cross-device wording is the arm nothing
+            // here can reach, a preopen being one mount.
+            "ok:true\nok:true\nok:true\nok:moved\n\
+             err:cannot read `rn-from.txt`\n\
+             err:cannot write `rn-onto.txt`\n\
+             err:cannot write `rn-nodir/x.txt`\n",
         ),
         (
             "argv",

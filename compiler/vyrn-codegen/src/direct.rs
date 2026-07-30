@@ -84,18 +84,24 @@ const SHIM_IMPORTS: &[&str] = &["__vyrn_malloc"];
 
 /// The `wasi_snapshot_preview1` calls a directly-emitted module makes.
 ///
-/// **All of them, unconditionally.** An import has to be declared before the
-/// first body (M1: one index space, imports at the bottom), and nothing knows
-/// which builtins a program reaches until the bodies are walked — so the
-/// alternative was a pre-scan over the AST, i.e. a second traversal that has to
-/// agree with lowering about what it needs. That is the failure mode `llt_of`
-/// (M2b) and `predicate_binds` (M2d) exist to prevent, and M2e refused a
+/// **All of them are DECLARED, and then swept.** An import has to be declared
+/// before the first body (M1: one index space, imports at the bottom), and
+/// nothing knows which builtins a program reaches until the bodies are walked —
+/// so the alternative was a pre-scan over the AST, i.e. a second traversal that
+/// has to agree with lowering about what it needs. That is the failure mode
+/// `llt_of` (M2b) and `predicate_binds` (M2d) exist to prevent, and M2e refused a
 /// standalone instantiation walker for the same reason.
 ///
-/// Cheap because the set is already implemented twice over: wasmtime provides all
-/// of preview1, and `web/wasi-min.js` implements exactly these for the browser —
-/// with RFC-0014's graceful degradation (no argv, EOF on stdin, no preopens, every
-/// `path_open` NOENT), which is what a page's `readFile` is supposed to be.
+/// M2p is the other end of it: [`wasm::Module::sweep`] drops what no export
+/// reaches AFTER the bodies exist, so the thirteen here cost a program only what
+/// it calls (`fib.wasm` imports two). Which is why `path_rename` could be added at
+/// all — M2o refused it as a thirteenth UNCONDITIONAL import, renumbering every
+/// module in the corpus.
+///
+/// The set is implemented twice over: wasmtime provides all of preview1, and
+/// `web/wasi-min.js` implements exactly these for the browser — with RFC-0014's
+/// graceful degradation (no argv, EOF on stdin, no preopens, every `path_open`
+/// NOENT), which is what a page's `readFile` is supposed to be.
 #[derive(Clone, Copy)]
 struct Wasi {
     fd_write: u32,
@@ -103,6 +109,7 @@ struct Wasi {
     fd_close: u32,
     proc_exit: u32,
     path_open: u32,
+    path_rename: u32,
     fd_prestat_get: u32,
     args_sizes_get: u32,
     args_get: u32,
@@ -127,6 +134,7 @@ fn wasi_imports(m: &mut Module) -> Wasi {
             &[I32, I32, I32, I32, I32, I64, I64, I32, I32],
             &[I32],
         ),
+        path_rename: im("path_rename", &[I32, I32, I32, I32, I32, I32], &[I32]),
         fd_prestat_get: im("fd_prestat_get", &[I32, I32], &[I32]),
         args_sizes_get: im("args_sizes_get", &[I32, I32], &[I32]),
         args_get: im("args_get", &[I32, I32], &[I32]),
@@ -2738,6 +2746,14 @@ impl Fn_<'_> {
                 "floatBits" => Type::IntN { bits: 64, signed: false },
                 "floatFromBits" => Type::Float,
                 "stringFromBytes" => Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+                // RFC-0014/RFC-0044's I/O as a BRANCH's value rather than a
+                // statement's — `std/storage`'s `Ok(done) => renameFile(tmp, path)`
+                // is the shape, and nothing in the corpus had put one in an arm
+                // before, which is why M2o read `storage.vyrn` as blocked on the
+                // syscall alone. Same function the emitting path reads.
+                n if io_builtin_ty(n, args.len()).is_some() => {
+                    io_builtin_ty(n, args.len()).expect("guarded above")
+                }
                 "bytes" => Type::Array(Box::new(Type::IntN { bits: 8, signed: false })),
                 // `Some`/`Ok`/`Err`/`None` in a branch, typed by the position the
                 // same way `sum_ctor` types them when it emits: an arm yielding
@@ -3463,7 +3479,7 @@ impl Fn_<'_> {
             // hidden destination an aggregate-returning Vyrn call gets, which is
             // why none of them needed a case outside M2b's four ABI rules.
             "args" if args.is_empty() => {
-                let ty = Type::Array(Box::new(Type::Str));
+                let ty = io_builtin_ty(name, 0).expect("`args` is an I/O builtin");
                 let l = self.layout_of(&ty, line)?;
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
@@ -3472,7 +3488,7 @@ impl Fn_<'_> {
                 return Ok(ty);
             }
             "readLine" if args.is_empty() => {
-                let ty = Type::Option(Box::new(Type::Str));
+                let ty = io_builtin_ty(name, 0).expect("`readLine` is an I/O builtin");
                 let l = self.layout_of(&ty, line)?;
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
@@ -3481,12 +3497,7 @@ impl Fn_<'_> {
                 return Ok(ty);
             }
             "readFile" | "readFileBytes" if args.len() == 1 => {
-                let ok = if name == "readFile" {
-                    Type::Str
-                } else {
-                    Type::Array(Box::new(Type::IntN { bits: 8, signed: false }))
-                };
-                let ty = Type::Result(Box::new(ok), Box::new(Type::Str));
+                let ty = io_builtin_ty(name, 1).expect("both readers are I/O builtins");
                 let l = self.layout_of(&ty, line)?;
                 self.expr_as(m, b, &args[0], &Type::Str)?;
                 let off = b.alloc(l.size, l.align);
@@ -3500,14 +3511,21 @@ impl Fn_<'_> {
                 b.slot(off);
                 return Ok(ty);
             }
-            "writeFile" if args.len() == 2 => {
-                let ty = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
+            // Two strings in, a `Result<Bool, String>` out, through a destination
+            // slot — the same shape, so one arm. RFC-0044's `renameFile` differs
+            // from `writeFile` only in which runtime function it calls.
+            "writeFile" | "renameFile" if args.len() == 2 => {
+                let ty = io_builtin_ty(name, 2).expect("both writers are I/O builtins");
                 let l = self.layout_of(&ty, line)?;
                 self.expr_as(m, b, &args[0], &Type::Str)?;
                 self.expr_as(m, b, &args[1], &Type::Str)?;
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
-                b.ins(&Instruction::Call(self.cx.rt.write_file));
+                b.ins(&Instruction::Call(if name == "writeFile" {
+                    self.cx.rt.write_file
+                } else {
+                    self.cx.rt.rename_file
+                }));
                 b.slot(off);
                 return Ok(ty);
             }
@@ -7169,8 +7187,10 @@ fn store_of(ll: &str) -> Instruction<'static> {
 ///
 /// RFC-0076's shim owns `malloc` and the string runtime for the split build, but
 /// `vyrn build --target wasm` produces ONE module with no shim beside it, so
-/// these are emitted. M4 is where the prelude moves into the shim and most of
-/// this goes away; until then it is about 400 bytes in every module.
+/// these are emitted. All forty of them, whether the program reaches one or not —
+/// and then [`wasm::Module::sweep`] (M2p) drops the ones no export reaches, which
+/// is why the whole table costs `fib.wasm` 290 bytes of code rather than 4,420.
+/// The data each interned on its way past is NOT swept.
 #[derive(Clone, Copy, Default)]
 struct Rt {
     write_all: u32,
@@ -7208,6 +7228,7 @@ struct Rt {
     read_file: u32,
     read_file_bytes: u32,
     write_file: u32,
+    rename_file: u32,
     // RFC-0004 §4's generational slot table (M2l). Three entries, not the LLVM
     // prelude's five, because two of them only ever appear together: every
     // `get`/`set`/`release`/`drop` checks the generation and then wants the
@@ -7317,6 +7338,7 @@ impl Rt {
             read_file: slot("read_file"),
             read_file_bytes: slot("read_file_bytes"),
             write_file: slot("write_file"),
+            rename_file: slot("rename_file"),
             cell_new: slot("cell_new"),
             cell_addr: slot("cell_addr"),
             cell_release: slot("cell_release"),
@@ -8565,6 +8587,11 @@ const RIGHT_FD_WRITE: i64 = 1 << 6;
 const OFLAGS_CREAT_TRUNC: i32 = 1 | 8;
 /// `lookupflags`: follow a symlink, which is what `fopen` does.
 const LOOKUP_SYMLINK_FOLLOW: i32 = 1;
+/// `errno::xdev`, the last of preview1's alphabetical errno list — and NOT POSIX's
+/// `EXDEV`, which is 18 and is `errno::dom` here. RFC-0044's cross-device rename
+/// is the one place this backend has to read a WASI errno by value rather than
+/// just testing it against zero.
+const ERRNO_XDEV: i32 = 75;
 
 /// RFC-0014's input I/O and RFC-0043's host boundary, over raw WASI.
 ///
@@ -9481,6 +9508,105 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
             b.ins(&Instruction::End); // fin
         },
     );
+
+    // rename_file(from, to, dest) — RFC-0044's atomic overwrite, as a
+    // `Result<Bool, String>` whose `Ok` is `true`.
+    //
+    // `path_rename` needs a directory fd for each side, so this is `open_at`'s
+    // preopen walk without the open: the first preopen under which the rename
+    // resolves wins. Both paths go through the SAME fd, which is also why the
+    // cross-device arm is nearly unreachable here — a preopen is one mount.
+    //
+    // Two failure classes, because RFC-0044 has two: `EXDEV` is
+    // `@.io.xdeverr` and everything else is `@.io.writeerr`, both about the
+    // TARGET path. The interpreter picks between the same two on
+    // `is_cross_device`, and this reads the same words out of `IO_MESSAGES`
+    // rather than spelling either.
+    let (xdevpre, xdevpost) = msg(m, "xdeverr");
+    let path_rename = wasi.path_rename;
+    rt.next_is(m, rt.rename_file);
+    m.func(
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[],
+        &[ValType::I32; 7],
+        8,
+        |b| {
+            // params 0..2, the frame base 3, then ours.
+            let (fd, flen, tlen, xdev, st, e, emsg) = (4, 5, 6, 7, 8, 9, 10);
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::LocalSet(flen))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::LocalSet(tlen))
+                .ins(&Instruction::I32Const(3))
+                .ins(&Instruction::LocalSet(fd))
+                // Nothing resolved yet: an io failure until a preopen says
+                // otherwise, which is also the answer a browser gets.
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::LocalSet(st))
+                .ins(&Instruction::Block(BlockType::Empty)) // 1: decided
+                .ins(&Instruction::Loop(BlockType::Empty)) // 0: next preopen
+                .ins(&Instruction::LocalGet(fd));
+            b.slot(0);
+            b.ins(&Instruction::Call(fd_prestat_get))
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::Br(2))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(fd))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(flen))
+                .ins(&Instruction::LocalGet(fd))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::LocalGet(tlen))
+                .ins(&Instruction::Call(path_rename))
+                .ins(&Instruction::LocalTee(e))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::LocalSet(st))
+                .ins(&Instruction::Br(2))
+                .ins(&Instruction::End)
+                // Remembered rather than returned: a later preopen may still
+                // resolve the pair, and only if none does is WHY the last one
+                // failed the answer.
+                .ins(&Instruction::LocalGet(e))
+                .ins(&Instruction::I32Const(ERRNO_XDEV))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::LocalSet(xdev))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(fd))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(fd))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End) // loop
+                .ins(&Instruction::End); // decided
+            b.ins(&Instruction::LocalGet(st)).ins(&Instruction::If(BlockType::Empty));
+            b.ins(&Instruction::LocalGet(xdev))
+                .ins(&Instruction::If(BlockType::Result(ValType::I32)))
+                .ins(&Instruction::I32Const(xdevpre as i32))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I32Const(xdevpost as i32))
+                .ins(&Instruction::Call(err3))
+                .ins(&Instruction::Else)
+                .ins(&Instruction::I32Const(writepre as i32))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I32Const(writepost as i32))
+                .ins(&Instruction::Call(err3))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalSet(emsg));
+            sum2_write_to(b, 2, &sum2, 0, Some(emsg));
+            b.ins(&Instruction::Else);
+            // `Ok(true)`: a `Bool` payload is the word zero-extended, which is
+            // what `sum2_write_to` does with a local — so the `1` needs one.
+            b.ins(&Instruction::I32Const(1)).ins(&Instruction::LocalSet(e));
+            sum2_write_to(b, 2, &sum2, 1, Some(e));
+            b.ins(&Instruction::End);
+        },
+    );
 }
 
 /// Write an `Option`/`Result` through the destination in parameter 0: the tag,
@@ -10102,6 +10228,29 @@ fn print_i64(m: &mut Module, write_all: u32) -> u32 {
         b.ins(&Instruction::LocalGet(p));
         b.slot(BUF_END).ins(&Instruction::LocalGet(p)).ins(&Instruction::I32Sub);
         b.ins(&Instruction::Call(write_all));
+    })
+}
+
+/// The result type of an RFC-0014/RFC-0044 I/O builtin, or `None` if the name is
+/// not one.
+///
+/// ONE spelling, read by the emitting path (which sizes a destination slot with
+/// it) and by [`Fn_::peek`] (which needs the same answer when the call is a
+/// branch's value). M2l's rule is that a builtin `call` lowers owes `peek` a row;
+/// this is that row and that lowering reading one function, because two
+/// spellings of `Result<Bool, String>` are two chances to size a slot one field
+/// differently from the value written into it.
+fn io_builtin_ty(name: &str, argc: usize) -> Option<Type> {
+    let str_err = |ok| Type::Result(Box::new(ok), Box::new(Type::Str));
+    Some(match (name, argc) {
+        ("args", 0) => Type::Array(Box::new(Type::Str)),
+        ("readLine", 0) => Type::Option(Box::new(Type::Str)),
+        ("readFile", 1) => str_err(Type::Str),
+        ("readFileBytes", 1) => {
+            str_err(Type::Array(Box::new(Type::IntN { bits: 8, signed: false })))
+        }
+        ("writeFile", 2) | ("renameFile", 2) => str_err(Type::Bool),
+        _ => return None,
     })
 }
 
