@@ -201,20 +201,17 @@ fn every_import_matches_the_signature_its_definition_has() {
     eprintln!("imports: {checked} signatures agree with their definitions, {variadic} variadic (M3)");
 }
 
-/// The one mismatch M0 found, kept as a named case rather than left implicit in
-/// the sweep above: `i1` is an LLVM fiction, the shim's `int` is what is really
-/// there, and the sweep only passes because [`abi`] widens. Delete the widening
-/// and this is the test that says why it was there.
+/// The one mismatch M0 found — and the milestone that removed it.
+///
+/// `i1` is an LLVM fiction, the shim's `int` is what is really there, and the
+/// sweep above only passed because [`abi`] widens. The single crossing that
+/// exercised it was `declare ptr @__vyrn_vj_bool(i1)`, and RFC-0078 M2b retired
+/// the JSON DOM builders along with the shim's serializer, so the boundary now has
+/// NO sub-i32 argument at all. That is worth an assertion rather than a deletion:
+/// it is the shape a new one would take, and the day something reintroduces one
+/// the widening had better still be there.
 #[test]
 fn the_i1_that_is_really_an_i32() {
-    let declared = emitted_declarations();
-    let sig = declared["__vyrn_vj_bool"].clone().expect("not variadic");
-    assert_eq!(sig.0, vec![Some(ValType::I32)], "an i1 argument crosses as i32");
-    assert_eq!(shim_definitions()["__vyrn_vj_bool"].0, sig.0);
-
-    // And it is the only one. The sweep above passes whether there is one
-    // widening or fifty, so the count is worth pinning separately: M2 has
-    // exactly one place where the declared type is narrower than what crosses.
     let toks = vyrn_frontend::lexer::lex("fn main() -> Int64 { return 0 }").unwrap();
     let program = vyrn_frontend::parser::parse(toks).unwrap();
     let ir = vyrn_codegen::emit(&program).unwrap();
@@ -223,7 +220,10 @@ fn the_i1_that_is_really_an_i32() {
         .filter(|l| l.starts_with("declare ") && !l.contains("@llvm."))
         .filter(|l| ["i1", "i8", "i16"].iter().any(|n| l.contains(&format!("({n},")) || l.contains(&format!("({n})")) || l.contains(&format!(" {n},")) || l.contains(&format!(" {n})"))))
         .collect();
-    assert_eq!(narrow, ["declare ptr @__vyrn_vj_bool(i1)"], "a new sub-i32 boundary type");
+    assert!(
+        narrow.is_empty(),
+        "a new sub-i32 boundary type — check `abi` still widens it: {narrow:?}"
+    );
 }
 
 /// No aggregate crosses the boundary — M0 measured 0, and this is the assertion

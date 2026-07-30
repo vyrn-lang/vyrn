@@ -570,11 +570,12 @@ mod tests {
     #[test]
     fn the_boundary_census_is_the_declare_lines() {
         let b = boundary();
-        assert_eq!(
-            b["__vyrn_vj_bool"],
-            Some((vec![Some(ValType::I32)], Some(ValType::I32))),
-            "the one widening: an LLVM i1 crosses as i32"
-        );
+        // The census used to lead with `__vyrn_vj_bool(i1)` — M0's one widening,
+        // an LLVM `i1` crossing as an `i32`. RFC-0078 M2b retired the JSON DOM
+        // BUILDERS along with the shim's serializer, and that was the boundary's
+        // only sub-i32 argument, so the widening is now a fact about `abi`
+        // (asserted in the next test) with no live crossing to point at.
+        assert_eq!(b["__vyrn_vj_kind"], Some((vec![Some(ValType::I32)], Some(ValType::I32))));
         assert_eq!(b["__vyrn_malloc"], Some((vec![Some(ValType::I64)], Some(ValType::I32))));
         assert_eq!(b["__vyrn_now_millis"], Some((vec![], Some(ValType::I64))));
         assert_eq!(b["free"], Some((vec![Some(ValType::I32)], None)), "void is None");

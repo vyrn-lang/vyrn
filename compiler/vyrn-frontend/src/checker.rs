@@ -48,7 +48,7 @@ pub fn check_accum_reusing(
     program: &Program,
     module_hashes: &std::collections::HashMap<String, String>,
 ) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
-    let (out, let_types, _) = check_accum_inner(program, Some(module_hashes));
+    let (out, let_types, _, _) = check_accum_inner(program, Some(module_hashes));
     (out, let_types)
 }
 
@@ -97,7 +97,7 @@ fn signature_fingerprint(
 pub fn check_accum_with_let_types(
     program: &Program,
 ) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
-    let (out, let_types, _) = check_accum_full(program);
+    let (out, let_types, _, _) = check_accum_full(program);
     (out, let_types)
 }
 
@@ -108,6 +108,15 @@ pub fn stored_fn_effects(program: &Program) -> StoredFnEffects {
     check_accum_full(program).2
 }
 
+/// Diagnostics AND the static type of every `toJson` argument (RFC-0078 M2b) —
+/// the shape `lib::load_warned` needs, since the encoder functions those types
+/// require must be in the program before any engine builds its function table.
+/// One pass: a second full check to collect them would double every load.
+pub fn check_accum_with_json_types(program: &Program) -> (Vec<Diagnostic>, Vec<Type>) {
+    let (out, _, _, json) = check_accum_full(program);
+    (out, json)
+}
+
 /// The full checking pass: diagnostics, the inferred-`let`-type table, and the
 /// RFC-0037 stored-function-value collection.
 fn check_accum_full(
@@ -116,6 +125,7 @@ fn check_accum_full(
     Vec<Diagnostic>,
     HashMap<(usize, String), Type>,
     StoredFnEffects,
+    Vec<Type>,
 ) {
     check_accum_inner(program, None)
 }
@@ -127,6 +137,7 @@ fn check_accum_inner(
     Vec<Diagnostic>,
     HashMap<(usize, String), Type>,
     StoredFnEffects,
+    Vec<Type>,
 ) {
     let mut out = Vec::new();
 
@@ -497,6 +508,7 @@ fn check_accum_inner(
         stored_sources: RefCell::new(Vec::new()),
         stored_calls: RefCell::new(Vec::new()),
         spawn_sites: RefCell::new(Vec::new()),
+        json_types: RefCell::new(Vec::new()),
     };
 
     // 2b. Module state (RFC-0013): check each initializer in declaration order,
@@ -729,7 +741,9 @@ fn check_accum_inner(
     }
 
     let let_types = checker.let_types.borrow().clone();
-    (out, let_types, effects)
+    let mut json_types = checker.json_types.borrow().clone();
+    json_types.dedup_by_key(|t| format!("{t:?}"));
+    (out, let_types, effects, json_types)
 }
 
 /// Check every `test` body (RFC-0015). Duplicate names per module are reported;
@@ -944,6 +958,12 @@ struct Checker<'a> {
     /// after checking against the stored-closure-extended fixpoint (RFC-0037):
     /// (caller, callee, line).
     spawn_sites: RefCell<Vec<(String, String, usize)>>,
+    /// RFC-0078 M2b: the static type of every `toJson(x)` argument in the program.
+    /// This is the ONE place in the pipeline that knows it — the loader can add
+    /// functions to a linked program but not type an expression, and the engines
+    /// type expressions but build their function tables once, from a `&Program`.
+    /// So the checker collects, and `lib::load_warned` synthesizes the encoders.
+    json_types: RefCell<Vec<Type>>,
 }
 
 /// What an enum variant name resolves to.
@@ -4853,6 +4873,9 @@ impl<'a> Checker<'a> {
                     "line {line}: `toJson` cannot encode `{off}` (not a codable type)"
                 ));
             }
+            // RFC-0078 M2b: record the argument type so the encoder for it exists
+            // in the linked program by the time an engine lowers this call.
+            self.json_types.borrow_mut().push(at);
             return Ok(Type::Str);
         }
         // built-in: fromJson(TypeName, s) -> Validation<T> (RFC-0018) —

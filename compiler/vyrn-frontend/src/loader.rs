@@ -1302,10 +1302,10 @@ fn run_generator(
     let (loaded, _, _, gen_graph) =
         load_with_origins(&gen_source, &gen_mod_key, opts, resolver);
     let mut gen_program = loaded?;
-    let mut gdiags = crate::checker::check_accum(&gen_program);
-    if gdiags.is_empty() {
-        gdiags.extend(crate::movecheck::check_accum(&gen_program));
-    }
+    // The same check+synthesize a root gets (`crate::check_and_synthesize`): a
+    // generator is a runnable program, and RFC-0076 compiles it to wasm, so a
+    // builtin whose implementation is synthesized has to be synthesized here too.
+    let gdiags = crate::check_and_synthesize(&mut gen_program);
     if !gdiags.is_empty() {
         return Err(gdiags);
     }
@@ -3314,6 +3314,17 @@ fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
 /// `ns.member` into `ns.renamed` before pass 5 can resolve it (RFC-0031 found
 /// this via a thin contract delegating `store.getItem(..)` while a generated
 /// module co-named `getItem`).
+/// Rewrite every reference to a declaration name in `p` through `map`.
+///
+/// The plain-name half of the machinery above, exposed for [`crate::jsonenc`]:
+/// generated encoder source spells the injected module's reserved names as
+/// `VyrnRt_` placeholders (a `$` is unlexable, which is the point of it), and this
+/// is the pass that folds them back. One rewriter, so a generated program and an
+/// imported one resolve names by the same code.
+pub(crate) fn rewrite_names(p: &mut Program, map: &HashMap<String, String>) {
+    rewrite_module_refs(p, map, &HashSet::new());
+}
+
 fn rewrite_expr(e: &mut Expr, map: &HashMap<String, String>, ns: &HashSet<String>) {
     match e {
         Expr::Call { name, args, .. } => {

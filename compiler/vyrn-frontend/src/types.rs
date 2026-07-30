@@ -893,6 +893,15 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
 }
 
 /// Reduce `ty` to its structural form (scalar, `Record`, `Option`, `Result`, …).
+/// A program's type declarations by name — the map `resolve` and the JSON codec
+/// take. Every engine builds one of these; this is the shared spelling.
+pub fn decl_map(p: &crate::ast::Program) -> HashMap<String, TypeDecl> {
+    p.type_decls
+        .iter()
+        .map(|t| (t.name.clone(), t.clone()))
+        .collect()
+}
+
 pub fn resolve(ty: &Type, types: &HashMap<String, TypeDecl>) -> Type {
     resolve_d(ty, types, 0)
 }

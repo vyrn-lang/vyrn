@@ -2746,13 +2746,11 @@ impl<'a> Interp<'a> {
                 // JSON. The argument's static type drives record field order and
                 // the None-field omission, so infer it alongside the value.
                 if name == "toJson" {
-                    let v = self.expr(&args[0], scope)?;
                     let ty = self
                         .type_of(&args[0], scope)
                         .ok_or("`toJson` could not determine the argument's type")?;
-                    let mut out = String::new();
-                    self.encode_val(&v, &ty, &mut out)?;
-                    return Ok(Val::Str(std::rc::Rc::new(out)));
+                    let e = crate::jsonenc::encode_expr(args[0].clone(), &ty, *line);
+                    return self.expr(&e, scope);
                 }
                 // `fromJson(TypeName, s)` (RFC-0018) — type-directed decode into
                 // `Validation<T>`. Never traps; every problem is an accumulated
@@ -4333,148 +4331,6 @@ impl<'a> Interp<'a> {
         None
     }
 
-    /// Encode a value to canonical JSON (RFC-0018), driven by its static type:
-    /// record fields in declaration order, `None` fields omitted, a bare `None`
-    /// as `null`, numbers via the canonical `scalar_to_string` rendering, and
-    /// the minimal escaping table.
-    fn encode_val(&self, v: &Val, ty: &Type, out: &mut String) -> Result<(), Ctrl> {
-        match crate::types::resolve(ty, &self.type_map) {
-            Type::Record(fields) => {
-                out.push('{');
-                let mut first = true;
-                if let Val::Record(map) = v {
-                    for f in &fields {
-                        let fv = match map.get(&f.name) {
-                            Some(x) => x,
-                            None => continue,
-                        };
-                        // A `None` record field is omitted entirely.
-                        if matches!(fv, Val::Option(None)) {
-                            continue;
-                        }
-                        if !first {
-                            out.push(',');
-                        }
-                        first = false;
-                        out.push('"');
-                        crate::codec::escape_into(&f.name, out);
-                        out.push_str("\":");
-                        self.encode_val(fv, &f.ty, out)?;
-                    }
-                }
-                out.push('}');
-            }
-            Type::Array(inner) | Type::ArrayN(inner, _) => {
-                out.push('[');
-                if let Val::Array(items) = v {
-                    for (i, it) in items.iter().enumerate() {
-                        if i > 0 {
-                            out.push(',');
-                        }
-                        self.encode_val(it, &inner, out)?;
-                    }
-                }
-                out.push(']');
-            }
-            // A `Map<String, V>` encodes as a JSON object (RFC-0028): keys
-            // JSON-escaped, values via V's codec, in insertion order.
-            Type::Map(_, val) => {
-                out.push('{');
-                if let Val::Map(pairs) = v {
-                    for (i, (k, pv)) in pairs.iter().enumerate() {
-                        if i > 0 {
-                            out.push(',');
-                        }
-                        out.push('"');
-                        crate::codec::escape_into(k, out);
-                        out.push_str("\":");
-                        self.encode_val(pv, &val, out)?;
-                    }
-                }
-                out.push('}');
-            }
-            Type::Option(inner) => match v {
-                Val::Option(Some(x)) => self.encode_val(x, &inner, out)?,
-                Val::Option(None) => out.push_str("null"),
-                other => self.encode_val(other, &inner, out)?,
-            },
-            Type::Str => {
-                out.push('"');
-                if let Val::Str(s) = v {
-                    crate::codec::escape_into(s, out);
-                }
-                out.push('"');
-            }
-            Type::Enum(vs) => {
-                // RFC-0024 wire tagging: a nullary variant is a bare string
-                // (byte-identical to the payload-less encoding); one payload is
-                // `{"Tag":<value>}`; two+ is `{"Tag":[v1,v2,...]}`.
-                if let Val::Enum(name, payloads) = v {
-                    let variant = vs.iter().find(|vt| &vt.name == name);
-                    let ptys = variant.map(|vt| vt.payload.as_slice()).unwrap_or(&[]);
-                    self.encode_variant(name, payloads, ptys, out)?;
-                }
-            }
-            Type::Result(t, e) => {
-                // `Result<T, E>` on the wire (RFC-0024): `{"Ok":<T>}` / `{"Err":<E>}`.
-                if let Val::Result(is_ok, payload) = v {
-                    let (tag, pty) = if *is_ok { ("Ok", &*t) } else { ("Err", &*e) };
-                    self.encode_variant(
-                        tag,
-                        std::slice::from_ref(&**payload),
-                        std::slice::from_ref(pty),
-                        out,
-                    )?;
-                }
-            }
-            Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool => {
-                out.push_str(&scalar_to_string(v));
-            }
-            other => {
-                return Err(format!("toJson: cannot encode type {other}").into());
-            }
-        }
-        Ok(())
-    }
-
-    /// Encode one enum/Result variant to its RFC-0024 wire form: a nullary
-    /// variant is a bare JSON string; a single payload is `{"Tag":<value>}`; two
-    /// or more payloads is `{"Tag":[v1,v2,...]}`.
-    fn encode_variant(
-        &self,
-        tag: &str,
-        payloads: &[Val],
-        ptys: &[Type],
-        out: &mut String,
-    ) -> Result<(), Ctrl> {
-        if ptys.is_empty() {
-            out.push('"');
-            crate::codec::escape_into(tag, out);
-            out.push('"');
-            return Ok(());
-        }
-        out.push('{');
-        out.push('"');
-        crate::codec::escape_into(tag, out);
-        out.push_str("\":");
-        if ptys.len() == 1 {
-            let pv = payloads.first().unwrap_or(&Val::Unit);
-            self.encode_val(pv, &ptys[0], out)?;
-        } else {
-            out.push('[');
-            for (i, pty) in ptys.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                let pv = payloads.get(i).unwrap_or(&Val::Unit);
-                self.encode_val(pv, pty, out)?;
-            }
-            out.push(']');
-        }
-        out.push('}');
-        Ok(())
-    }
-
     /// Decode `s` into `Validation<tn>` (RFC-0018). Never traps; a parse error
     /// or any accumulated `Issue` yields `Invalid([Issue])`.
     fn decode_top(&self, tn: &str, s: &str) -> Val {
@@ -4880,6 +4736,32 @@ mod tests {
     use super::{code_splice, lex_tokens, render_code, CodePiece, Ctrl, Val};
     use crate::run;
 
+    /// Run a single-source program that uses `toJson`, with `std/json` reachable.
+    ///
+    /// Since RFC-0078 M2b, `toJson`'s serializer IS that module's `emit`: the
+    /// builtin is a type-directed walk plus a call into Vyrn, and the module enters
+    /// the link by injection. `crate::run` takes a bare source with no resolver, so
+    /// it has no runtime library to inject — these tests go through the loader, with
+    /// the real `std/json` text so nothing here can drift from what ships.
+    fn run_json(src: &str) -> Result<i64, String> {
+        let files = crate::loader::MapResolver(
+            [(
+                "std/json.vyrn".to_string(),
+                include_str!("../../../std/json.vyrn").to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let opts = crate::loader::LoadOptions {
+            std_root: Some("std".into()),
+            ..Default::default()
+        };
+        let program = crate::load(src, "main.vyrn", &opts, &files)
+            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("
+"))?;
+        crate::interp::run(&program)
+    }
+
     #[test]
     fn arithmetic_and_return() {
         assert_eq!(run("fn main() -> Int64 { return 2 + 3 * 4; }").unwrap(), 14);
@@ -4912,7 +4794,7 @@ mod tests {
                        let err = Box { s: Nothing, r: Err(\"boom\"), tags: [], opt: None } \
                        return same(ok) + same(err) \
                    }";
-        assert_eq!(run(src).unwrap(), 0);
+        assert_eq!(run_json(src).unwrap(), 0);
     }
 
     // ---- testing (RFC-0015) ---------------------------------------------
@@ -6951,7 +6833,7 @@ mod tests {
                        let p = P { name: \"a\\\"b\", age: 30, ok: true } \
                        if toJson(p) == \"{\\\"name\\\":\\\"a\\\\\\\"b\\\",\\\"age\\\":30,\\\"ok\\\":true}\" { return 1; } \
                        return 0; }";
-        assert_eq!(run(src).unwrap(), 1);
+        assert_eq!(run_json(src).unwrap(), 1);
     }
 
     #[test]
@@ -6961,7 +6843,7 @@ mod tests {
                        let p = P { name: \"x\", nick: None } \
                        if toJson(p) == \"{\\\"name\\\":\\\"x\\\"}\" { return 1; } \
                        return 0; }";
-        assert_eq!(run(src).unwrap(), 1);
+        assert_eq!(run_json(src).unwrap(), 1);
     }
 
     #[test]
@@ -6976,7 +6858,7 @@ mod tests {
                            Invalid(iss) => 0 - iss.length, \
                        }; }";
         // age 36 + name length 3 = 39.
-        assert_eq!(run(src).unwrap(), 39);
+        assert_eq!(run_json(src).unwrap(), 39);
     }
 
     #[test]
@@ -7076,7 +6958,7 @@ mod tests {
                            return match fromJson(P, s) { Valid(q) => 1, Invalid(iss) => 0, }; \
                        } \
                        return 5; }";
-        assert_eq!(run(src).unwrap(), 1);
+        assert_eq!(run_json(src).unwrap(), 1);
     }
 
     // ---- function values (RFC-0023) -------------------------------------

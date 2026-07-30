@@ -124,7 +124,7 @@ fn guest(shim_exports: &[String], wrong: Wrong) -> (Vec<u8>, usize) {
     }
     let n = at.len();
     let (malloc, strlen) = (at["__vyrn_malloc"], at["__vyrn_strlen"]);
-    let (vj_bool, vj_encode) = (at["__vyrn_vj_bool"], at["__vyrn_vj_encode"]);
+    let charcount = at["__vyrn_charcount"];
 
     // iovec at 0, the written count at 8; `p` and `s` in locals.
     let (p, s) = (1u32, 2u32);
@@ -150,13 +150,16 @@ fn guest(shim_exports: &[String], wrong: Wrong) -> (Vec<u8>, usize) {
                 .ins(&Instruction::I32Const(byte as i32))
                 .ins(&Instruction::I32Store8(MemArg { offset: off, align: 0, memory_index: 0 }));
         }
-        // `__vyrn_vj_bool(true)` is M0's one widening — an LLVM `i1` reaching a C
-        // function that reads 32 bits — and encoding it is the shim's own JSON
-        // writer answering with bytes we can compare.
-        b.ins(&Instruction::I32Const(1))
-            .ins(&Instruction::Call(vj_bool))
-            .ins(&Instruction::Call(vj_encode))
-            .ins(&Instruction::LocalSet(s));
+        // The bytes we compare are the ones the guest just wrote into the shim's
+        // allocation, read back through the shim's own UTF-8 counter. This used to be
+        // `__vyrn_vj_bool(true)` through `__vyrn_vj_encode` — M0's one widening
+        // feeding the shim's JSON writer — until RFC-0078 M2b retired both, JSON
+        // being Vyrn now. Same property, two fewer C functions: only a shared
+        // address space makes a pointer the guest filled mean anything over there.
+        b.ins(&Instruction::LocalGet(p))
+            .ins(&Instruction::Call(charcount))
+            .ins(&Instruction::Drop);
+        b.ins(&Instruction::LocalGet(p)).ins(&Instruction::LocalSet(s));
         b.slot(0).ins(&Instruction::LocalGet(s)).ins(&i32_store(0));
         b.slot(0)
             .ins(&Instruction::LocalGet(s))
@@ -215,12 +218,17 @@ fn the_whole_boundary_agrees_with_the_shim_it_resolves_to() {
     let (code, out, err) = run(&wasmtime, &shim, "boundary", &wasm);
 
     assert_ne!(code, 99, "the allocation did not come from the shim's heap");
+    assert_eq!(code, 22, "expected strlen(\"hi\")*10 + strlen(\"hi\"); stderr:\n{err}");
     assert_eq!(
-        code, 24,
-        "expected strlen(\"hi\")*10 + strlen(\"true\"); stderr:\n{err}"
+        String::from_utf8_lossy(&out),
+        "hi",
+        "the bytes the guest wrote into the shim's heap, read back through C"
     );
-    assert_eq!(String::from_utf8_lossy(&out), "true", "the shim's JSON writer");
-    assert!(n >= 60, "only {n} of the boundary was importable — the census shrank");
+    // Was 60 before RFC-0078 M2b, which removed eleven `declare` lines: the JSON
+    // DOM builders and the serializer, all of them unreferenced once `toJson`
+    // became a shared AST walk over `std/json`. A boundary that shrinks because a
+    // milestone deleted C is the point; one that shrinks quietly is not.
+    assert!(n >= 57, "only {n} of the boundary was importable — the census shrank");
     eprintln!("shim link: {n} boundary signatures instantiated against the module that defines them");
 }
 
@@ -230,10 +238,13 @@ fn the_whole_boundary_agrees_with_the_shim_it_resolves_to() {
 /// because wasm has no `i1` to get wrong once `abi` has widened it. So both
 /// failures are asserted, and they are not the same failure:
 ///
-/// **The one M0 named.** `declare ptr @__vyrn_vj_bool(i1)` mis-mapped to an `i64`
-/// parameter does not reach instantiation at all — the caller pushes what `abi`
-/// said the value was, and wasm's own type checker rejects the module. That is
-/// the widening being load-bearing at emission time rather than at link time.
+/// **The one M0 named.** A pointer parameter mis-mapped to an `i64` does not reach
+/// instantiation at all — the caller pushes what `abi` said the value was, and
+/// wasm's own type checker rejects the module. That is `abi` being load-bearing at
+/// emission time rather than at link time. M0 demonstrated it on
+/// `declare ptr @__vyrn_vj_bool(i1)`, the boundary's only sub-i32 argument until
+/// RFC-0078 M2b retired the DOM builders; `__vyrn_charcount(ptr)` is the same
+/// crossing one width up.
 ///
 /// **The one only a shim can catch.** A mismatch on an import nothing in this
 /// body calls validates perfectly and fails when the two modules are put
@@ -248,13 +259,13 @@ fn a_boundary_signature_that_does_not_match_is_refused() {
     };
     let exports = exported_funcs(&std::fs::read(&shim).unwrap());
 
-    let widening = Some(("__vyrn_vj_bool", vec![ValType::I64], vec![ValType::I32]));
+    let widening = Some(("__vyrn_charcount", vec![ValType::I64], vec![ValType::I64]));
     let (wasm, _) = guest(&exports, widening);
     let (code, _, err) = run(&wasmtime, &shim, "narrowed", &wasm);
     assert_ne!(code, 24, "a mismatched signature must not run");
     assert!(
         err.contains("type mismatch: expected i64, found i32"),
-        "an i1 that is not widened to i32 should fail wasm's own type check:
+        "a pointer that is not an i32 should fail wasm's own type check:
 {err}"
     );
 

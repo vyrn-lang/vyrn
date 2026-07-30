@@ -21,6 +21,7 @@ pub mod finite;
 pub mod fmt;
 pub mod hash;
 pub mod interp;
+pub mod jsonenc;
 pub mod lexer;
 pub mod loader;
 pub mod movecheck;
@@ -128,6 +129,36 @@ pub fn load(
 /// the program rather than replacing it, and printing it must never change an
 /// exit code or a byte of the program's own output. `load` stays as the
 /// warning-oblivious entry point for callers that only care whether it built.
+/// Type-check `program`, synthesize what its builtins need into it, then
+/// move-check the result. Returns every diagnostic found.
+///
+/// The one place a LINKED program becomes a runnable one, and it has to be a
+/// single function because there are two callers: an ordinary load, and a
+/// generator re-loaded as its own root (RFC-0021), which RFC-0076 then compiles to
+/// wasm. A generator that missed the synthesis compiled to a module calling a
+/// function that was never emitted — found by `genwasm`, exactly the tier meant to
+/// find it.
+///
+/// The synthesis sits HERE and nowhere else because this is the only point with
+/// both halves of what it needs: the checker has just supplied the static type of
+/// every `toJson` argument (RFC-0078 M2b), and no engine has yet built its function
+/// table — all three build one, once, from a `&Program`. Afterwards the encoders
+/// are ordinary Vyrn: move-checked below with everything else, and lowered by every
+/// backend as source it cannot tell apart from the user's.
+pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
+    let (mut diags, json_types) = checker::check_accum_with_json_types(program);
+    if diags.is_empty() {
+        match jsonenc::encoders(&json_types, &types::decl_map(program)) {
+            Ok(fns) => program.functions.extend(fns),
+            Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
+        }
+    }
+    if diags.is_empty() {
+        diags.extend(movecheck::check_accum(program));
+    }
+    diags
+}
+
 pub fn load_warned(
     root_source: &str,
     root_path: &str,
@@ -144,10 +175,8 @@ pub fn load_warned(
         Ok(p) => p,
         Err(diags) => return (Err(diags), warnings),
     };
-    let mut diags = checker::check_accum(&program);
-    if diags.is_empty() {
-        diags.extend(movecheck::check_accum(&program));
-    }
+    let mut program = program;
+    let mut diags = check_and_synthesize(&mut program);
     if diags.is_empty() {
         (Ok(program), warnings)
     } else {

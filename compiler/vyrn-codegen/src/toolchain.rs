@@ -470,17 +470,6 @@ VJ* __vyrn_vj_bool(int b) { VJ* v = __vyrn_vj_new(VJ_BOOL); v->bval = b ? 1 : 0;
 static VJ* __vyrn_vj_num_text(const char* t, int is_int) {
     VJ* v = __vyrn_vj_new(VJ_NUM); v->text = __vyrn_dup(t); v->is_int = is_int; return v;
 }
-VJ* __vyrn_vj_int(long long x) {
-    char buf[32]; __vyrn_snprintf(buf, 32, "%lld", x); return __vyrn_vj_num_text(buf, 1);
-}
-VJ* __vyrn_vj_uint(unsigned long long x) {
-    char buf[32]; __vyrn_snprintf(buf, 32, "%llu", x); return __vyrn_vj_num_text(buf, 1);
-}
-VJ* __vyrn_vj_float(double x) {
-    /* NaN renders as `NaN` (matching the interpreter's Rust formatting). */
-    if (x != x) return __vyrn_vj_num_text("NaN", 0);
-    char buf[512]; __vyrn_snprintf(buf, 512, "%f", x); return __vyrn_vj_num_text(buf, 0);
-}
 VJ* __vyrn_vj_str(const char* s) { VJ* v = __vyrn_vj_new(VJ_STR); v->text = __vyrn_dup(s); return v; }
 void __vyrn_vj_push(VJ* a, VJ* c) {
     if (a->nitems + 1 > a->capitems) {
@@ -512,45 +501,12 @@ static void vsb_putc(VSB* s, char c) { vsb_ensure(s, 1); s->p[s->len++] = c; s->
 static void vsb_puts(VSB* s, const char* t) {
     unsigned long long n = strlen(t); vsb_ensure(s, n); memcpy(s->p + s->len, t, n); s->len += n; s->p[s->len] = 0;
 }
-static void vsb_escape(VSB* s, const char* t) {
-    vsb_putc(s, '"');
-    for (const unsigned char* q = (const unsigned char*)t; *q; q++) {
-        unsigned char c = *q;
-        if (c == '"') vsb_puts(s, "\\\"");
-        else if (c == '\\') vsb_puts(s, "\\\\");
-        else if (c == '\n') vsb_puts(s, "\\n");
-        else if (c == '\t') vsb_puts(s, "\\t");
-        else if (c == '\r') vsb_puts(s, "\\r");
-        else if (c < 0x20) { char b[8]; __vyrn_snprintf(b, 8, "\\u%04x", (unsigned)c); vsb_puts(s, b); }
-        else vsb_putc(s, (char)c);
-    }
-    vsb_putc(s, '"');
-}
-static void __vyrn_vj_write(VSB* s, VJ* v) {
-    unsigned long long i;
-    switch (v->kind) {
-        case VJ_NULL: vsb_puts(s, "null"); break;
-        case VJ_BOOL: vsb_puts(s, v->bval ? "true" : "false"); break;
-        case VJ_NUM: vsb_puts(s, v->text); break;
-        case VJ_STR: vsb_escape(s, v->text); break;
-        case VJ_ARR:
-            vsb_putc(s, '[');
-            for (i = 0; i < v->nitems; i++) { if (i) vsb_putc(s, ','); __vyrn_vj_write(s, v->items[i]); }
-            vsb_putc(s, ']');
-            break;
-        default: /* VJ_OBJ */
-            vsb_putc(s, '{');
-            for (i = 0; i < v->nmem; i++) {
-                if (i) vsb_putc(s, ',');
-                vsb_escape(s, v->mem[i].key);
-                vsb_putc(s, ':');
-                __vyrn_vj_write(s, v->mem[i].val);
-            }
-            vsb_putc(s, '}');
-            break;
-    }
-}
-char* __vyrn_vj_encode(VJ* v) { VSB s; vsb_init(&s); __vyrn_vj_write(&s, v); return s.p; }
+/* RFC-0078 M2b: the SERIALIZER is gone from here. `toJson` renders through
+   `std/json`'s `emit` -- the same JSON writer, in Vyrn, injected into the link --
+   so `vsb_escape`, `__vyrn_vj_write` and `__vyrn_vj_encode` went with it, along
+   with the three number constructors above. `vsb_init`/`_ensure`/`_putc`/`_puts`
+   stay: the PARSER's string unescaper shares the buffer, which is why M2's note
+   over-counted this at eleven functions. It is six. */
 
 /* ---- parser (byte positions; wording mirrors crate::codec) -------------- */
 typedef struct { const char* b; unsigned long long i, n; char* err; } VJP;

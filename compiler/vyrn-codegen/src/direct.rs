@@ -1967,6 +1967,22 @@ impl Fn_<'_> {
                     let (subst, _) = crate::solve_type_args(&f.type_params, &declared, &actual);
                     ftypes::substitute(&f.ret, &subst)
                 }
+                // A user enum's variant constructor in a branch (`One(a)`). Its type
+                // is the enum that declares the name; an ambiguous name — two enums
+                // with one variant spelling — is a gap rather than a guess, exactly
+                // as `sum_ctor` treats it when it emits.
+                _ if self.cx.variants.contains_key(name) => {
+                    let cands = &self.cx.variants[name];
+                    match (cands.len(), cands.first()) {
+                        (1, Some((e, _, _))) => Type::Named(e.clone()),
+                        _ => {
+                            return unsupported(
+                                &format!("a branch yielding the ambiguous variant `{name}`"),
+                                line,
+                            )
+                        }
+                    }
+                }
                 _ => match self.cx.sigs.get(name) {
                     Some(s) => s.ret_ty.clone(),
                     None => return unsupported(&format!("a branch yielding `{name}`"), line),
@@ -2275,6 +2291,16 @@ impl Fn_<'_> {
             // record literal that then lowers like any other.
             "jsonSchema" | "schemaOf" if args.len() == 1 => {
                 let e = self.reflected(name, &args[0], line)?;
+                return self.expr(m, b, &e);
+            }
+            // `toJson(x)` is the same shape one size up (RFC-0078 M2b): the
+            // type-directed walk is a shared AST builder in the frontend and the
+            // serializer is `std/json`'s `emit`, injected into the link. So this
+            // backend gets `toJson` for the price of typing the argument — no DOM,
+            // no escaping table, no number formatter of its own.
+            "toJson" if args.len() == 1 => {
+                let ty = self.peek(&args[0], line)?;
+                let e = vyrn_frontend::jsonenc::encode_expr(args[0].clone(), &ty, line);
                 return self.expr(m, b, &e);
             }
             // `value(x)` boxes a scalar into the built-in `Value` enum. Its variant
