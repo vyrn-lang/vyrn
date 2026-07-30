@@ -37,6 +37,10 @@ use std::process::Command;
 /// interpreter. Grows as M2 lands; never shrinks silently.
 const PASSING: &[&str] = &[
     "args.vyrn",
+    // RFC-0077 M2n: `parse`, whose overflow WRAPS — RFC-0078 refused to fold it
+    // into `std/num`'s `parseInt64` for that reason, so it is a digit loop here.
+    // `argsdemo` is the shape where it is also a branch's value.
+    "argsdemo.vyrn",
     "arrays.vyrn",
     // RFC-0077 M2l: the INFERRED release. `own::analyze` is now read by this
     // backend too, and its `ReleaseRef` bindings are released at block exit — a
@@ -96,6 +100,10 @@ const PASSING: &[&str] = &[
     "i18ndemo.vyrn",
     "ifexpr.vyrn",
     "inlinewhere.vyrn",
+    // The one example that reads a line and turns it into a number, i.e. the first
+    // to reach `readLine` at all: M2j lowered it and nothing exercised it, because
+    // this file needed `parse` too.
+    "input.vyrn",
     "jsonbytes.vyrn",
     "jsoncodec.vyrn",
     "jsondecbytes.vyrn",
@@ -111,9 +119,20 @@ const PASSING: &[&str] = &[
     "modify.vyrn",
     "modules.vyrn",
     "namespace.vyrn",
+    // The `parse` pin: twenty-eight numeric-conversion rows as literals, and among
+    // them every way `parse` declines and every way it wraps —
+    // `parse("18446744073709551615")` is `Some(-1)` on all three engines. RFC-0078
+    // M4a wrote this file before moving anything, so it is the oracle rather than a
+    // record of what came out.
+    "numbytes.vyrn",
     "numparse.vyrn",
     "option.vyrn",
     "ownership.vyrn",
+    // RFC-0077 M2n: `lineAt`/`colAt`. Both of these are page compiles, so they
+    // reach the pair only because codegen emits every function of a linked module
+    // whether it is called or not — `std/vyx`'s scanner asks at GENERATION time,
+    // on whichever engine ran the generator.
+    "pagesdemo.vyrn",
     "patchdemo.vyrn",
     "protocol.vyrn",
     "record.vyrn",
@@ -137,6 +156,9 @@ const PASSING: &[&str] = &[
     // the four header-mutating operations have arms of their own.
     "smallarray.vyrn",
     "statemod.vyrn",
+    // The one example whose `parse` sits beside the rest of the string surface, so
+    // it says the lowering composes rather than that it works alone.
+    "stringops.vyrn",
     "strings.vyrn",
     // RFC-0078 M4c: `contains`/`startsWith`/`endsWith` are `std/strpred`. `slice`
     // and `byteLength` did not move, and both already had a lowering here.
@@ -144,6 +166,10 @@ const PASSING: &[&str] = &[
     "tagged.vyrn",
     "templates.vyrn",
     "testing.vyrn",
+    // The one example that CALLS `lineAt`/`colAt` at run time, printing the
+    // builtin's answer beside `std/text`'s Vyrn one on every row — including the
+    // two that say a column counts bytes.
+    "textbytes.vyrn",
     "tree.vyrn",
     // The RFC-0039 Tailwind generator's `Tw` is a finite language of 781 DFA
     // states, so its transition table is 799,744 bytes — of an 831,524-byte data
@@ -162,6 +188,7 @@ const PASSING: &[&str] = &[
     // `validate_fail.vyrn` wants: `Age?(5)` prints `-1`.
     "validate.vyrn",
     "validation.vyrn",
+    "vyxdemo.vyrn",
     "concurrency.vyrn",
     "parallel.vyrn",
     "region.vyrn",
@@ -2133,4 +2160,97 @@ fn main() -> Int64 {
             runtime_err(&w.stderr)
         );
     }
+}
+
+/// `lineAt`/`colAt` at the offsets no example asks for, and one row that says what
+/// a column counts.
+///
+/// `examples/textbytes.vyrn` sweeps the interesting middle — a CRLF, an empty
+/// line, past the end, and `éx` proving column 3 for the `x` — but two cases it
+/// never reaches are the two whose lowering is a compare's SIGNEDNESS:
+///
+/// - **A negative offset.** The interpreter clamps with `.max(0)`; the native shim
+///   does not clamp at all and gets the same answer because its `i < off` and
+///   `i > 0` are signed. This backend takes the shim's route, so `i64.ge_s` versus
+///   `i64.ge_u` is the whole difference between `1:1` and a walk over four
+///   exabytes. RFC-0078's oracle sweeps to `-3` for exactly this reason and the
+///   RFC-0077 ladder cannot, because no `.vyrn` in the corpus passes a negative
+///   offset.
+/// - **An empty buffer**, where every line start and the length are zero, and the
+///   `off > len` clamp is the only thing between `colAt` and a read below the
+///   allocation.
+///
+/// Plus a byte column on a line that is NOT the first, because `std/vyx.vyrn:165`
+/// documents `colAt` as counting chars and RFC-0078 M4b(2) measured that it counts
+/// bytes. Every row is compared against the interpreter AND spelled out: two
+/// backends can be confidently wrong together, which is how M2m's non-ASCII `=~`
+/// walk passed every example it had.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn line_and_column_agree_with_the_interpreter_off_both_ends_of_the_buffer() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-linecol");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+fn lc(b: Array<UInt8>, off: Int64) -> String {
+    return lineAt(b, off).toString() + \":\" + colAt(b, off).toString()
+}
+
+fn main() -> Int64 {
+    let b = bytes(\"ab\\ncd\")
+    // Below zero, and further below zero.
+    print(lc(b, 0 - 1))
+    print(lc(b, 0 - 3))
+    // Exactly at the length, which is one past the last byte.
+    print(lc(b, 5))
+    // The empty buffer, from below, at, and past its one valid offset.
+    print(lc(bytes(\"\"), 0 - 1))
+    print(lc(bytes(\"\"), 0))
+    print(lc(bytes(\"\"), 5))
+    // Nothing but newlines: every offset starts a line of its own.
+    let n = bytes(\"\\n\\n\\n\")
+    print(lc(n, 0))
+    print(lc(n, 1))
+    print(lc(n, 3))
+    print(lc(n, 4))
+    // A two-byte codepoint on the SECOND line: the `x` is column 3, not column 2.
+    let u = bytes(\"\\u{e9}\\n\\u{fc}x\")
+    print(lc(u, 4))
+    print(lc(u, 5))
+    return 0
+}
+";
+    let path = dir.join("lc.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("lc.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .env("VYRN_WASM_BACKEND", "direct")
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    assert_eq!(
+        norm(&interp.stdout),
+        "1:1\n1:1\n2:3\n1:1\n1:1\n1:1\n1:1\n2:1\n4:1\n4:1\n2:2\n2:3\n",
+        "the interpreter moved"
+    );
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
