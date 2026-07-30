@@ -142,8 +142,12 @@ invariants — statics below the halfway mark, no import the shim does not expor
 - **M2 — lowering.** The emit sites. Structured control flow straight from the
   AST. Before starting, re-verify the "no phis in loop headers, no indirect
   calls" measurement across every example rather than the two sampled.
-- **M3 — varargs.** 377 `printf`-family sites, and wasm has none; fixed-arity
-  shim wrappers generated from the call shapes the emitter actually sees.
+- **M3 — varargs. STRUCK; see "M2j, as landed".** The premise was 377
+  `printf`-family sites against a wasm target that has no varargs. Every one of
+  them is the *textual* emitter's, and M5 deletes that path for wasm; the direct
+  backend emits zero, in either link shape, because it cannot import a variadic
+  function and so was never able to plan on one. There are no call shapes to
+  generate wrappers from.
 - **M4 — the prelude.** The 1,080-line hand-written IR prelude moves into the C
   shim, which RFC-0076 M6 already compiles once.
 - **M5 — delete the LLVM wasm path.** Not before, and not left behind a flag.
@@ -1953,3 +1957,207 @@ The standalone tier is unchanged from M2h. The shim tier is that list plus
 JSON subsystem and four are WASI syscalls — i.e. eleven of them are now a
 *decision* about which tier should own them rather than a lowering nobody has
 written, which is what M2i changed and the reason it is worth its 37.
+
+---
+
+## M2j, as landed
+
+RFC-0014's input I/O and RFC-0043's host boundary, over raw
+`wasi_snapshot_preview1`. **39 of 80 standalone**, from 36 — and the shim tier is
+39 as well, because its entire delta went away.
+
+### The milestone is that `clock.vyrn` moved, not that three examples did
+
+M2i got `clock.vyrn` passing by reaching the shim, and then found two things that
+between them make that not count: the split makes a directly-emitted module
+*larger*, and M5's own acceptance criterion (`vyrn build --target wasm` needs no
+clang) forbids the link from ever being the default. A shape that only works
+linked does not advance this RFC.
+
+So the question was whether the three symbols the shim was supplying —
+`__vyrn_now_millis`, `__vyrn_monotonic_nanos`, `__vyrn_random_seed` — could be
+served standalone. They can, and the reason is that they never needed C in the
+first place: the shim's implementations are `getenv` + `timespec_get` +
+`getentropy`, and on `wasm32-wasip1` those **are** `environ_get`,
+`clock_time_get` and `random_get`. wasi-libc is a wrapper this backend was paying
+a whole C toolchain to call. The emitted runtime calls them directly, in **both**
+link shapes rather than one, and `SHIM_IMPORTS` is down to `__vyrn_malloc` — the
+one import whose whole purpose is to prove the two modules share an address
+space.
+
+`PASSING_SHIM` is therefore empty, which is the number worth reading this
+milestone by. `direct-shim` still runs, still audits 68 signatures against the C
+in `tests/shim_link.rs`, and no longer passes anything `direct` does not.
+
+### Twelve imports, unconditionally, and the alternative was the mistake
+
+An import is declared before the first body (M1: one index space, imports at the
+bottom), and nothing knows which builtins a program reaches until the bodies are
+walked. So either every module imports the whole WASI set it *might* use, or
+there is a pre-scan over the AST — a second traversal that has to agree with
+lowering about what it needs. That is the failure mode `llt_of` (M2b) and
+`predicate_binds` (M2d) exist to prevent, and the one M2e refused a standalone
+instantiation walker over. Twelve unconditional imports it is.
+
+It costs less than it looks like, because the set is already implemented twice:
+wasmtime provides all of preview1, and `web/wasi-min.js` implements exactly these
+for the browser with RFC-0014's graceful degradation — no argv, EOF on stdin, no
+preopens, every `path_open` NOENT. Two names had to be added there
+(`environ_sizes_get`, `environ_get`) and an empty environment is precisely the
+right answer: it sends a page's `now()` to `clock_time_get`, where
+`hooks.fixedTime` already is.
+
+### The wording is now one list, and it was already two
+
+The canonical RFC-0014 messages are `IO_MESSAGES` in `lib.rs`. The textual backend
+interns them as `@.io.<name>` globals and renders them with `__vyrn_snprintf`;
+this backend has no `snprintf` and splits each format on its `%s`, so
+`` cannot read `%s` `` becomes two interned halves and one `concat`. A backend
+that spelled `cannot read` itself would have been a second wording of a fact
+parity compares byte-for-byte.
+
+Extracting the list also closed a hole that was already open: `direct.rs` held its
+own copies of `bytes contain a NUL byte` and `bytes are not valid UTF-8` from M2g.
+Two spellings, free to drift, exactly as the comment on `emit_predicate_cond`
+feared about predicates in M2d — and found the same way, by needing the thing next
+door.
+
+### `readFile` and `writeFile` came along, and `path_open` is why
+
+Neither was on this milestone's list. Both fall out of the one piece of real work
+`readFile` needs, which is not reading — it is that **WASI has no `open` relative
+to a working directory**. Every path resolves under a preopened directory the host
+chose, so `open_at` walks the preopens from fd 3 until `fd_prestat_get` says there
+are no more and takes the first that resolves the path. `--dir .` gives exactly
+one; a browser gives none, and every path is then RFC-0014's canonical `Err`
+rather than a crash. With that in hand, `readFileBytes` is the same slurp with no
+NUL and no UTF-8 rule, and `writeFile` is the same open with two more flag bits.
+
+`files.vyrn` needs all three, so it is the example those two bought.
+
+The `Ok` payload of `readFileBytes` is the one shape that needed care: an
+`Array<UInt8>` triple is three words and a sum's payload is two, so the runtime
+boxes it — the same `Word::Boxed` encoding `Fn_::box_value` produces, at the same
+`layout::of_ll ∘ llt` offsets, because a runtime function that spelled 0/8/16
+could disagree with the lowering about where the tag is.
+
+### What has no example, and therefore has a test
+
+Three examples moved and between them they exercise the happy path only:
+`args.vyrn` runs with an **empty** argv (it has no `.args` fixture, deliberately —
+the harness gives every example zero arguments), `files.vyrn` reaches one of
+`readFile`'s three failures, and **nothing at all reaches `readLine`**, because
+`input.vyrn` needs `parse` and `vlog.vyrn` needs `fromJson`. Both moved *to* those
+from `readLine`, which is the burndown working, and neither passes.
+
+So the edges are a running test pinning the interpreter's own answers:
+
+- `\r\n` and `\n` read identically, or Windows and POSIX pipes disagree; an empty
+  line is `Some("")` and not `None`; a final line with no terminator is still a
+  line. And `None` is three different things — EOF, a NUL byte, and invalid UTF-8.
+- `readFile`'s NUL rule fires **before** the UTF-8 check and with its own wording,
+  while `readFileBytes` of the same file **succeeds** — which is what makes them
+  rules about `String` rather than about reading. A reader that validated first
+  would report the wrong one of two plausible messages.
+- An argv token with a space in it, which is what says the pointers are read out
+  of WASI's own array rather than re-split.
+
+### The bug only running could catch — and this time it was the test's
+
+`nul.bin` is a Windows reserved device name **with any extension**, and wasmtime's
+capability-based path resolution refuses one. The fixture read as five bytes under
+the interpreter and as `cannot read` under wasm, which looked exactly like a
+`readFile` that had lost its NUL rule. Recorded because the next person to write a
+filesystem fixture on this platform will pick the same obvious name.
+
+### The size, honestly
+
+`examples/fib.vyrn`: **5,167 bytes**, from M2i's 2,836. It uses none of this — the
+whole I/O runtime is in every module whether it is reachable or not, which has
+been true since M2b and is now about 2.3 KB rather than 500 bytes. Still fiftyfold
+under the 277,438 the clang path produces, and the fix when it matters is a
+reachability sweep over the *finished* call graph, which is what a linker does and
+is not a second source of truth about what a program needs.
+
+### Is M3 needed at all? No, and it never was for this backend
+
+M3 was written for a backend that would call the shim's `printf`, `fprintf` and
+`__vyrn_snprintf`, on the premise of 377 `printf`-family sites. Checked rather
+than assumed:
+
+| | `printf`-family calls |
+|---|---|
+| textual emitter (`lib.rs`) | 39 sites, the 377 uses among them |
+| direct emitter (`direct.rs`) | **0** — six mentions, all of them comments |
+
+A directly-emitted module's entire import list is the twelve WASI functions plus,
+under the link, `__vyrn_malloc`. **None is variadic, and none could be**: wasm has
+no way to express a variadic call, so this backend was never able to plan on one
+and has emitted its own formatter at every point the textual backend reaches for
+`printf`. `print_i64` (M2a), `trap_idx` (M2c), `f64_str` (M2h) and now `err3` are
+each the place a `%lld`, a `%d`, a `%f` and a `%s` would have gone.
+
+So M3 has no call shapes to generate wrappers from. Its 377 sites belong to the
+path M5 deletes, and native — which keeps that path — has real varargs. **M3 is
+struck**, and the milestone list now says why.
+
+That also settles the loose end M2i left. It said `f64_str` could not be retired
+because `%f` needs `__vyrn_snprintf`, "the only three a linked module cannot
+import at all", and that M3 would change that. It would not have. `f64_str` is
+permanent, and it should be — it is exact half-to-even decimal conversion that
+parity proves against `10^300`'s 301 digits and a subnormal at `k = 1074`, and the
+alternative is a 353 KB C dependency.
+
+### Refused, specifically
+
+Unchanged, and named rather than lowered hopefully: `toJson` (a serializer — M2g's
+reasons all still hold), `fromJson`, `chars`, `parse`, `logger`,
+`cell`/`get`/`set`. None of them is a WASI syscall; every one is a subsystem or a
+data structure, which is what M2i predicted the residue would be.
+
+Three deliberate ceilings, marked in the code rather than left to be discovered:
+
+- **One `fd_read` per byte** in `getbyte`, where C's `getchar` is buffered.
+  `readLine` is the only caller and the corpus feeds it a fixture.
+- **No prefix matching against the preopens' own names**, so an *absolute* guest
+  path only opens under a preopen mounted at `/`. wasi-libc does that matching for
+  the textual backend; nothing in the corpus has an absolute path, and the fix is a
+  string walk over `fd_prestat_dir_name` for a case no example has.
+- **`str_i64` is not `strtoll`**: no leading-whitespace skip, no clamp to
+  `LLONG_MAX`. Its only callers are `VYRN_FIXED_TIME` and `VYRN_FIXED_SEED`, which
+  the harness writes as bare decimals.
+
+`write_all` also does not report a partial write, where the C `writeFile` returns
+status 1 on one. It is shared with `print`, no example can observe the difference,
+and giving it an errno would change four call sites to check one.
+
+### Nothing contradicted M0, M1, M2a–M2i
+
+Every offset is still `layout::of_ll ∘ llt` — the array triple `args` builds, the
+sum `read_line` writes, the box `read_file_bytes` allocates. Destination-first at
+the slot every one of these runtime functions writes through,
+no-`return`-in-a-body (each is one `block` with `br` to it, which is why
+`read_line` has a `none` block and a `fin` block rather than an early exit), the
+widening rule and the memory map all went in as written. `Fn_::coerce` took
+nothing new, for the second milestone running: every one of these builtins
+produces a value of a type the seam already knew how to flow.
+
+### 39 of 80, regrouped
+
+Both tiers, and they are now the same list:
+
+| blocked on | n |
+|---|---|
+| builtins with no lowering (`toJson` 6, `parse` 2, `fromJson` 2, `cell`/`set` 2, `chars`, `logger`) | **14** |
+| `Match` on strings 4, a map literal 3, indexing a `Map` 2, indexing a `SmallArray` | 10 |
+| a branch yielding an unpeekable call (`get` 3, `El`, `Held`) | 5 |
+| `if let` 3, `?`, a fallible construction | 5 |
+| a `fn`-typed parameter (RFC-0023) 3, a lambda | 4 |
+| `spawn` 2, `region` | 3 |
+
+The builtins row is 14 from 17, and for the first time it is not the whole story:
+`toJson` and `fromJson` are one subsystem worth 8, and what is left beside them is
+four small things. Every other row is exactly where M2h left it. The two worth 15
+between them — the `Map` family, and the five `peek` failures — are the same shape
+as everything M2b through M2f closed, which is to say small, named, and not
+control flow.
