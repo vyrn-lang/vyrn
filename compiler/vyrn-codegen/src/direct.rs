@@ -3377,6 +3377,7 @@ impl Fn_<'_> {
             Word::Ext(_) => {
                 b.ins(&Instruction::I64ExtendI32U);
             }
+            Word::Float(v) => float_into_word(b, v),
             Word::Boxed => self.box_value(b, t, line)?,
             // A two-word payload is copied whole by `build_sum2`, not encoded
             // into one word; doing it here would need the second word too.
@@ -3409,12 +3410,31 @@ enum Sum {
 enum Word {
     /// It IS the word.
     Direct,
-    /// A narrower scalar, zero-extended into the word.
+    /// A narrower INTEGER scalar, zero-extended into the word.
     Ext(ValType),
+    /// A float, whose BITS ride in the word — an `f64` reinterpreted, an `f32`
+    /// reinterpreted and then zero-extended. `Ext` cannot serve here: it emits
+    /// `i64.extend_i32_u`, which is a validation error against an `f64` on the
+    /// stack, so `Option<Float64>` produced a module wasmtime refused to load
+    /// rather than a diagnostic (RFC-0078 M4a found it; nothing in the corpus had
+    /// ever put a float in a sum payload).
+    Float(ValType),
     /// Two words, side by side, no heap (a `Ref` or a stored `fn`).
     Inline2,
     /// The word is a pointer to it.
     Boxed,
+}
+
+/// A float on the stack, as the `i64` word a sum payload holds. Its BITS, not its
+/// value: the round trip has to be exact, and an `f32` widened to `f64` and back
+/// would be too, but reinterpreting is one instruction either way.
+fn float_into_word(b: &mut Frame, v: ValType) {
+    if v == ValType::F32 {
+        b.ins(&Instruction::I32ReinterpretF32);
+        b.ins(&Instruction::I64ExtendI32U);
+    } else {
+        b.ins(&Instruction::I64ReinterpretF64);
+    }
 }
 
 impl Fn_<'_> {
@@ -3431,6 +3451,7 @@ impl Fn_<'_> {
     fn word2(&self, t: &Type) -> Result<Word, String> {
         Ok(match self.cx.repr(t, 0)? {
             Repr::Scalar(ValType::I64) => Word::Direct,
+            Repr::Scalar(v @ (ValType::F64 | ValType::F32)) => Word::Float(v),
             Repr::Scalar(v) => Word::Ext(v),
             Repr::Agg(_) if self.cx.ll(t) == "{ i64, i64 }" => Word::Inline2,
             _ => Word::Boxed,
@@ -3530,6 +3551,7 @@ impl Fn_<'_> {
                     Word::Ext(_) => {
                         b.ins(&Instruction::I64ExtendI32U);
                     }
+                    Word::Float(v) => float_into_word(b, v),
                     _ => self.box_value(b, &t, line)?,
                 }
                 b.ins(&Instruction::I64Store(word8()));
@@ -3998,6 +4020,19 @@ impl Fn_<'_> {
                 b.ins(&Instruction::LocalGet(addr));
                 b.ins(&Instruction::I64Load(at(off)));
                 b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::LocalSet(l));
+                Place::Local(l)
+            }
+            Word::Float(v) => {
+                let l = b.local(v);
+                b.ins(&Instruction::LocalGet(addr));
+                b.ins(&Instruction::I64Load(at(off)));
+                if v == ValType::F32 {
+                    b.ins(&Instruction::I32WrapI64);
+                    b.ins(&Instruction::F32ReinterpretI32);
+                } else {
+                    b.ins(&Instruction::F64ReinterpretI64);
+                }
                 b.ins(&Instruction::LocalSet(l));
                 Place::Local(l)
             }

@@ -63,6 +63,7 @@ const PASSING: &[&str] = &[
     "map.vyrn",
     "modify.vyrn",
     "modules.vyrn",
+    "numparse.vyrn",
     "option.vyrn",
     "ownership.vyrn",
     "patchdemo.vyrn",

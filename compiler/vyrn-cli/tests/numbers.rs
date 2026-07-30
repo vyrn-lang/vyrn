@@ -36,3 +36,126 @@ fn unit_tests_green(rel: &str, expected: &str) {
 fn number_conversion_pins_hold() {
     unit_tests_green("examples/numbytes.vyrn", "7 passed, 0 failed");
 }
+
+#[test]
+fn std_num_unit_tests_run_green() {
+    unit_tests_green("std/num.vyrn", "5 passed, 0 failed");
+}
+
+/// `std/num`'s `parseFloat64` against Rust's own `str::parse::<f64>()`, bit for
+/// bit, over a corpus (RFC-0078 M4a).
+///
+/// This is the test that decides whether "correctly rounded" is a claim or a
+/// fact. The module's own `test` blocks pin about a dozen values chosen by hand,
+/// which proves the hard cases someone thought of; a rounding bug lives in the
+/// cases nobody thought of, and the only oracle worth comparing against is an
+/// implementation already known to be correctly rounded.
+///
+/// The corpus is the union of two things. The hand-picked half is the standard
+/// list of values that break naive parsers — the exact ties at `2^53`, the two
+/// famous denial-of-service literals near `2^-1022` that hung PHP and Java, the
+/// largest finite double and the first value past it, both ends of the subnormal
+/// range, and a 900-digit significand that exercises the truncation flag. The
+/// generated half is deterministic pseudorandom (a fixed LCG, so a failure
+/// reproduces): random digit strings at random exponents, which is where a carry
+/// or an off-by-one in the scaling shows up.
+///
+/// Non-numbers are in the corpus too, because a parser that accepts `"1 "` or
+/// `"1e"` is wrong in a way `assertEq` on a value never catches.
+#[test]
+fn parsefloat64_is_bit_identical_to_rusts_own_parser() {
+    let mut corpus: Vec<String> = vec![
+        "0", "-0", "0.0", "1", "-1", "1.5", "-1.5", "0.1", "0.2", "0.3", "1e0", "1E0", "+1.5",
+        "1e3", "1e-3", "-2.5E-1", "123456789.123456789", "3.141592653589793",
+        "2.718281828459045",
+        // The exact ties at 2^53, where half-to-even decides the last bit.
+        "9007199254740992", "9007199254740993", "9007199254740994", "9007199254740995",
+        "9007199254740996",
+        // The two literals that hung a production runtime, on both sides.
+        "2.2250738585072011e-308", "2.2250738585072012e-308", "2.2250738585072014e-308",
+        // Both ends of the subnormal range, and half of the smallest one — a tie
+        // that must round DOWN to zero rather than up to something.
+        "5e-324", "4.9406564584124654e-324", "2.4703282292062327e-324",
+        "2.4703282292062328e-324", "1e-323", "2.2250738585072009e-308",
+        // The largest finite double, the first value past it, and beyond.
+        "1.7976931348623157e308", "1.7976931348623158e308", "1.8e308", "1e309", "1e400",
+        "-1e400", "1e-400", "1e-1000",
+        // Powers of ten, which are exact in decimal and not in binary.
+        "1e22", "1e23", "1e-22", "1e-23", "1e100", "-1e100", "1e-100",
+        // Values that a fast path computed in floating point gets wrong.
+        "8.98846567431158e307", "7.8459735791271921e65", "3.5844466002796428e298",
+        "9.194366959071701e-91", "7.4e47", "5.9e-8",
+        // Forms the scanner has to accept, and edges of its own grammar.
+        "000123", "0.000000000000000000001", "123000000000000000000000", ".5", "5.", "-.5",
+        "1e+3", "1e-0", "0e999999999", "-0e-99",
+        // Refusals.
+        "", "-", "+", ".", "abc", "1 ", " 1", "1x", "1e", "1e+", "1.2.3", "--1", "1_000", "NaN",
+        "inf", "0x10",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    // A 900-digit significand: past the 800-digit cap, so the truncation flag is
+    // what decides its rounding. `1` then 898 zeros then `1` is the shape where
+    // dropping the tail silently would produce an exact power of two instead.
+    corpus.push(format!("1.{}1e-5", "0".repeat(898)));
+    corpus.push(format!("{}5", "9".repeat(400)));
+
+    // Deterministic pseudorandom: a fixed LCG so a failure is reproducible.
+    let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut next = |m: u64| {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 33) % m
+    };
+    for _ in 0..220 {
+        let ndig = 1 + next(19) as usize;
+        let digits: String = (0..ndig).map(|_| (b'0' + next(10) as u8) as char).collect();
+        let exp = next(61) as i64 - 30;
+        corpus.push(format!("{}{}e{}", if next(2) == 0 { "-" } else { "" }, digits, exp));
+    }
+
+    let calls: String = corpus
+        .iter()
+        .map(|s| {
+            format!(
+                "    print(match parseFloat64(\"{}\") {{ Some(v) => floatBits(v).toString(), None => \"None\" }})\n",
+                s.replace('\\', "\\\\").replace('"', "\\\"")
+            )
+        })
+        .collect();
+    let src = format!(
+        "import {{ parseFloat64 }} from \"std/num\"\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n"
+    );
+
+    let dir = std::env::temp_dir().join("vyrn-m4a-strtod");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("strtod.vyrn");
+    std::fs::write(&file, &src).unwrap();
+    let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+    assert!(
+        out.status.success(),
+        "differential program failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got: Vec<String> =
+        String::from_utf8_lossy(&out.stdout).lines().map(|l| l.trim_end().to_string()).collect();
+    assert_eq!(got.len(), corpus.len(), "one line per input");
+
+    let mut bad: Vec<String> = Vec::new();
+    for (input, mine) in corpus.iter().zip(&got) {
+        // Rust's parser accepts `inf`/`NaN` and a few spellings `std/num`
+        // deliberately does not, so the oracle is "a finite decimal literal Rust
+        // reads the same way", and the rest must be refused by both.
+        let oracle = match input.parse::<f64>() {
+            Ok(v) if v.is_finite() || input.contains(|c: char| c.is_ascii_digit()) => {
+                v.to_bits().to_string()
+            }
+            _ => "None".to_string(),
+        };
+        if *mine != oracle {
+            bad.push(format!("{input:?}: std/num {mine}, Rust {oracle}"));
+        }
+    }
+    assert!(bad.is_empty(), "{} of {} disagree:\n{}", bad.len(), corpus.len(), bad.join("\n"));
+}

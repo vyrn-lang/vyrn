@@ -12,6 +12,7 @@
 - [std/json](std/json.md) — std/json (RFC-0059) — the shared JSON value tree and its canonical writer,
 - [std/jsonread](std/jsonread.md) — std/jsonread (RFC-0059, split out by RFC-0078 M2a) — the STRICT JSON reader,
 - [std/math](std/math.md) — std/math — numeric helpers, written in Vyrn itself. Being ordinary Vyrn,
+- [std/num](std/num.md) — std/num — text -> number, written in Vyrn (RFC-0078 M4a).
 - [std/openapi](std/openapi.md) — std/openapi — the contract as an OpenAPI 3.1 document (RFC-0038), a library
 - [std/random](std/random.md) — std/random — deterministic pseudo-randomness with a host-seeded escape
 - [std/rpc](std/rpc.md) — std/rpc — Typed RPC as a library (RFC-0019), built entirely on RFC-0021

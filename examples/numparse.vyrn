@@ -1,0 +1,81 @@
+/// Text into numbers — `std/num` (RFC-0078 M4a).
+///
+/// Going the other way from `toString()`: `parseFloat64` turns decimal text into
+/// the nearest `Float64`, correctly rounded, and `parseInt64` / `parseUInt64`
+/// give the exact integer or refuse rather than the `parse` builtin's silent
+/// wrap.
+///
+/// The interesting part is where it lives. This is not a builtin — no engine
+/// implements it — it is ordinary Vyrn in `std/num`, standing on two primitives
+/// that read a `Float64`'s bits and write them back. The interpreter, the native
+/// backend and both wasm backends therefore run the same conversion rather than
+/// three that have to be kept in agreement, which is why this example prints raw
+/// BIT PATTERNS: `%f`'s six decimals hide every rounding disagreement worth
+/// having, and the bits do not.
+
+import { parseFloat32, parseFloat64, parseInt64, parseUInt64 } from "std/num"
+
+/// A parsed double as its 64 raw bits, or the refusal.
+fn bitsOf(s: String) -> String {
+    return match parseFloat64(s) {
+        Some(v) => floatBits(v).toString(),
+        None => "None",
+    }
+}
+
+/// A parsed double as text again, which is the round trip a JSON decoder makes.
+fn shown(s: String) -> String {
+    return match parseFloat64(s) {
+        Some(v) => v.toString(),
+        None => "None",
+    }
+}
+
+fn main() -> Int64 {
+    // ---- the ordinary cases ------------------------------------------------
+    print(shown("1.5")) // 1.500000
+    print(shown("-0.25")) // -0.250000
+    print(shown("1e3")) // 1000.000000
+    print(shown("-2.5E-1")) // -0.250000
+
+    // ---- the ones where rounding is visible ---------------------------------
+    // `0.1` is not representable in binary, so what comes back is the nearest
+    // double and these are its exact bits.
+    print(bitsOf("0.1"))
+    // Exactly halfway between two doubles: ties go to even, so `...93` lands on
+    // `2^53` and `...95` lands on `2^53 + 4`.
+    print(bitsOf("9007199254740993"))
+    print(bitsOf("9007199254740995"))
+    // The smallest subnormal, and half of it — which is also a tie, and rounds
+    // down to zero rather than up.
+    print(bitsOf("5e-324"))
+    print(bitsOf("2.4703282292062327e-324"))
+    // The largest finite double, and the first value that rounds past it.
+    print(bitsOf("1.7976931348623157e308"))
+    print(bitsOf("1.8e308"))
+    print(shown("1e400")) // inf
+    print(shown("-1e400")) // -inf
+    print(shown("1e-400")) // 0.000000
+
+    // ---- refusals: the whole string has to be a number ----------------------
+    print(bitsOf("")) // None
+    print(bitsOf("1 ")) // None
+    print(bitsOf("1e")) // None
+    print(bitsOf("1.2.3")) // None
+
+    // ---- single precision, rounded once ------------------------------------
+    // Decimal -> `Float64` -> `Float32` rounds twice and is wrong near a
+    // `Float32` tie, so `parseFloat32` rounds straight to 24 bits.
+    print(match parseFloat32("0.1") { Some(v) => v.toString(), None => "None" }) // 0.100000
+    print(match parseFloat32("1e40") { Some(v) => v.toString(), None => "None" }) // inf
+    print(match parseFloat32("1e-50") { Some(v) => v.toString(), None => "None" }) // 0.000000
+
+    // ---- integers, exactly ---------------------------------------------------
+    print(match parseInt64("-9223372036854775808") { Some(v) => v.toString(), None => "None" })
+    // `parse("9223372036854775808")` is `Some(Int64.min)`; this refuses instead.
+    print(match parseInt64("9223372036854775808") { Some(v) => v.toString(), None => "None" })
+    // And the value no `Option<Int64>` can carry at all.
+    print(match parseUInt64("18446744073709551615") { Some(v) => v.toString(), None => "None" })
+    print(match parseUInt64("18446744073709551616") { Some(v) => v.toString(), None => "None" })
+    return 0
+}
