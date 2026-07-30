@@ -2321,3 +2321,222 @@ family at 10, a builtins row at 12 that `fromJson` alone is 6 of, and eight thin
 that are one gap each. `fromJson` is the next milestone by the same argument this
 one used — it is RFC-0078 M3's other half, and `std/jsonread` compiling is now the
 only reason it can be one.
+
+## M2l, as landed
+
+**The three containers, and one `peek` gap that was a whole class.** 54/87 → 63/87.
+Nine examples: `autorelease`, `fieldmut`, `freelist`, `genref`, `linkedlist`,
+`mapdemo`, `server`, `smallarray`, `tree`. `Map` and `SmallArray` both landed;
+nothing in the cluster is refused.
+
+The milestone was framed as "a container the direct backend cannot lower", and two
+of its three rows were M2c refusals with specific reasons. Both reasons survived
+contact; what changed is where they are paid.
+
+### The `peek` row was not three examples, it was a class
+
+The brief asked whether the "branch yielding `get`" rows might be one general fix.
+They were, and the fix is worth more than the three examples: `peek`'s `Call` arm
+fell through to `Cx::sigs`, which holds **user functions only**, so *any* builtin
+in a branch position read as "a branch yielding `X`". Two changes closed the group:
+
+- Route RFC-0078's Vyrn-implemented builtins through the same
+  `loader::routed_builtin` the emitting path uses, so a builtin that IS a Vyrn
+  function is typed by that function's signature rather than by a name written
+  here twice.
+- For the builtins `call` lowers by REWRITING, peek the rewrite. `fromJson`'s
+  rewrite bottoms out in a generated decoder whose signature `Cx::sigs` already
+  holds, so it needed no new case at all — which is the property worth keeping,
+  because a type named here would be a second answer free to drift from the one
+  the emitting path produces.
+
+`storage` and `argsdemo`, both outside this cluster, moved past their `peek` gap
+and now report what they actually want (`a conversion from Config to T`, `parse`).
+The remaining hand-written `peek` rows are the ones with no callee to ask: a
+literal, a constructor, an operator.
+
+There is still no general mechanism, and there cannot be one while `call` computes
+a builtin's result type as it emits. `peek` is a second source of truth for
+exactly the builtins that are neither routed nor rewritten, and every milestone
+that adds one to `call` owes it a row here. What M2l did was shrink that set to
+the ones that genuinely have no other answer.
+
+### The slot table is emitted, and it is the one thing the shim could never supply
+
+RFC-0004 §4's generational references are **not** in the C shim. The LLVM build
+gets them from a hand-written IR prelude (`CELL_RUNTIME`), so there was nothing to
+import in either link shape — M2i's split is irrelevant here, and this is the
+first runtime piece for which that is true.
+
+Three functions, not the prelude's five, and the merge is not tidying: every
+`get`, `set`, `release` and `drop` of a reference checks the generation and then
+wants the payload address, so `cell_addr(slot, gen) -> ptr` **is** the check and no
+caller can reach a payload without paying for one. `cell_new(dest, payload)` writes
+the `{ i64 slot, i64 generation }` pair through a destination pointer, which is the
+aggregate ABI (M2b rule 3) rather than a special case — a `Ref` is an aggregate.
+`cell_release(slot)` bumps the generation and pushes the slot.
+
+Two numbers are load-bearing and are worth writing down because both look
+arbitrary:
+
+- **65536 cells.** `autorelease` and `freelist` both run PAST it on purpose — a
+  million allocations and a hundred thousand respectively. A slab of a different
+  size would either exhaust where the other two engines do not, or hide a release
+  that never fired. It is the prelude's number and it has to be.
+- **Lazily allocated.** Statically reserving the three arrays would put 1 MiB of
+  zeroes in every module this backend emits, `fib` included, because `runtime()`
+  runs before any body is walked and cannot know whether the program uses a cell.
+  So the arrays are one `malloc` behind twelve bytes of reserved state. Bump-
+  allocated pages are fresh and therefore zero, which is what the prelude's
+  `zeroinitializer` globals give it for free.
+
+The payload is not freed on release. A bump allocator has no free, and a free is
+not a thing a program can print — but the **slot** very much is.
+
+### `get` of an aggregate copies, and that is the M2c hazard in a new place
+
+Handing back the slab's payload address would make `get(r)` an alias into the cell
+rather than a load of it, where the LLVM backend emits `load {ll}`. `freelist`
+holds `Ref<Node>` and `genref` holds `Ref<Ref<Int64>>`, so this is reached; the
+copy is three instructions and the alternative is a class of bug that prints the
+right answer until something writes.
+
+### The ownership analysis, which this backend had never read
+
+`autorelease.vyrn` built and DIVERGED, which is the shape M2 keeps producing: it
+allocates a cell per iteration and relies on the inferred release, and `Stmt::Drop`
+here was a no-op on the grounds that reclamation is unobservable. That is true of
+every kind `own::analyze` reports EXCEPT `ReleaseRef`. A missed `free` prints
+nothing different; a missed release loses one of 65536 slots, and a million
+iterations say so — loudly, with the interpreter's own wording, which is why it was
+a divergence rather than a silent wrong answer.
+
+So `own::analyze`'s `droppable` map is read here now, with the same key the textual
+backend uses (the `let` statement's node address), and only its `ReleaseRef` rows
+are acted on. Frames are per block, released innermost-first and newest-first on
+fall-through; `return`, `break` and `continue` release every frame they unwind past
+**before** branching, without popping it — so the enclosing block's own copy lands
+after the branch, where wasm has already marked it unreachable. That is the textual
+backend's rule arrived at from the other end: it keeps its frames for the same
+reason.
+
+### `Map` is the shape whose length is in the wrong place
+
+`{ ptr keys, ptr vals, i64 len, i64 cap }` — the length is field **2** where a
+growable array's is field 1. M2c's refusal was that reaching for it as a triple
+compiles, validates, and indexes off the value pointer. It is now a branch rather
+than a refusal: `at` and `IndexSet` test for a `Map` *ahead of* building a `Walk`,
+and the map path never snapshots at all.
+
+That last part is the other half of one fact. An `Array` is snapshotted so a `for`
+keeps walking the buffer it started on, matching an interpreter that iterates a
+copy. A Map has no iteration form to protect — `m.keys()` hands out a snapshot of
+its own — while an insert moves *both* buffers, so every read has to go through the
+header's address. The two containers want opposite things and the reason is the
+same reason.
+
+One runtime function, `map_find`. RFC-0028 chose insertion order over hashing, so
+the linear `strcmp` scan IS the lookup and matching the shim's is not a
+simplification. `reserve`, the order-preserving `remove` shift and the `keys`
+snapshot are each reached from one site and are a `malloc` plus a copy, so they are
+emitted there rather than becoming three more indices in a table whose numbering is
+load-bearing.
+
+**The value type comes from the position, not the first entry**, which is what
+`fieldmut` is: `["k": [[5], [6, 7]]]` in a `Map<String, Array<Array<Int64>>>` has to
+store growable arrays, and a nested literal on its own lowers as a fixed `[N x T]`.
+Storing one at the literal's width and reading it back as a triple is M2c's hazard
+one level down, and the textual backend has the same guard for the same reason.
+
+`mapdemo` passing was not planned for. It is the whole RFC-0028 surface AND
+`toJson`/`fromJson`/`jsonSchema` of a `Map`, and the codec half needed nothing:
+RFC-0078 made both directions rewrites over a Vyrn library, so a `Map` on the wire
+is just a `Map` in Vyrn. This is the second milestone in a row where RFC-0078's
+work arrived as an absence of work here.
+
+### `SmallArray`'s two states cost one function
+
+`{ i64 len, i64 cap, ptr data, [N x T] inline }`, `cap == N` inline and `cap > N`
+spilled. M2c's reason — first field a length where a growable array keeps a pointer
+— is why it was the last row standing, and the thing that made it affordable is
+that the hazard fits in **one** function. Every element access goes through
+[`Walk`], and a `Walk` is a base pointer and a count, so the state branch happens
+in `walk` once and nothing downstream knows there are two states. Only the four
+header-mutating operations (`push`, `pop`, `swapRemove`, `toArray`) needed arms of
+their own, and only `push` needed the spill.
+
+A contextual `[a, b, c]` in a `SmallArray` position does not reach the heap: it
+copies into the inline buffer and sets `cap` to `N`, which is the state
+discriminant. That is a second `ArrayN` conversion at the M2d seam rather than a
+second literal path — the fifth thing to move through that seam, after validation,
+substitution, integer resize, and `Age?(n)`'s detour around it.
+
+Refused, specifically: a `SmallArray` of a **two-word** value (a `Ref`, a stored
+`fn`) in `pop`. The payload word there IS an address, so encoding it needs the
+destination's second word rather than a `box_value`; nothing in the corpus holds
+one, and guessing is the silent class.
+
+### The bug only running could catch, again
+
+An empty `[]` into a `SmallArray` shares the builder with the non-empty case, and
+the builder starts by popping the source address off the stack — which the empty
+case never pushed, because `[0 x T]` is not a shape `llt` prints and there is no
+fixed literal to have produced one. wasmtime refused the module ("expected i32 but
+nothing on stack") rather than running it wrong, so this one was loud. It is still
+the eighth consecutive milestone whose real bug was found by executing something.
+
+Two failures no example reaches are now pinned by a test that executes:
+`a_stale_reference_and_a_full_slab_say_what_the_interpreter_says`. `genref` drops a
+cell and never touches it again, and `autorelease` only proves the slab does *not*
+fill — so a `cell_addr` that skipped the compare would pass every listed example,
+and so would a slab of the wrong size, whose exhaustion message is
+indistinguishable from a release that never fired. Both stderr strings are compared
+against the interpreter rather than against a spelling written in the test.
+
+### Nothing contradicted M0, M1, M2a–M2k
+
+Every offset is still `layout::of_ll ∘ llt` — the Map's four fields, the
+SmallArray's inline buffer at 24, the `Ref` pair at 0 and 8. A size is still a
+stride. Aggregates still travel as the address of a shadow-stack slot, which is why
+`cell_new` needed no new convention. `Type::Param` stayed unreachable, `Num`'s
+carrier invariant was not touched, no body emits a `return` (`map_find` carries its
+hit out of a block in a local rather than returning early), and the LLVM wasm path
+is byte-for-byte unaffected (parity: 6 passed, unchanged).
+
+One thing is *slightly* stricter than the textual backend and it is worth naming:
+`map_set` evaluates the key and then the value **before** the scan, matching the
+textual backend's order, because a side-effecting value expression must not run at
+a different point on the two backends. Nothing in the corpus has one; the cheaper
+order was the tempting one.
+
+### 63 of 87, regrouped
+
+| blocked on | n |
+|---|---|
+| `Match` on strings | 4 |
+| the call `parse` | 4 |
+| the call `lineAt` 3, the call `logger` 2 | 5 |
+| a `fn`-typed parameter (RFC-0023) 3, a lambda 2 | 5 |
+| `spawn` 2, `region` 2 | 4 |
+| a conversion from `Cargo`/`Config` to `T` | 2 |
+
+Every container is off the list. What remains is four groups and no long tail:
+three builtins with no lowering (`parse`, `lineAt`, `logger` — 9 examples), the
+RFC-0023/RFC-0037 function-value worklist (5), two control-flow features this RFC
+scoped out from the start (`spawn`, `region` — 4), `Match` on strings (4), and one
+generic-payload conversion twice (2).
+
+The nine-example builtins row is the next milestone, and — unlike the last three
+— **none of it is a routing question.** RFC-0078 checked and refused all three
+deliberately: `parse` wraps on overflow where `std/num`'s `parseInt64` declines, so
+folding them would be a language change; `lineAt`/`colAt` are a memoized
+line-start table that a Vyrn library cannot hold, and M4b asserts they stay absent
+from the routing table so a later edit cannot quietly add them. `logger` is
+RFC-0008's leveled sink. All three want real lowerings here, and all three are
+small and self-contained — the largest is `parse`, which is a digit loop with
+wrapping arithmetic this backend already has in `int_op`.
+
+What is genuinely large is what is left after that: `Match` on strings is
+RFC-0046's DFA, and the function-value worklist is RFC-0023 plus RFC-0037's
+defunctionalization, which M2a already identified as the one place this module has
+a function table.

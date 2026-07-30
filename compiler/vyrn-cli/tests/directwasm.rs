@@ -350,6 +350,69 @@ fn the_bounds_trap_says_what_the_interpreter_says() {
     }
 }
 
+/// The two ways the generational slot table (RFC-0077 M2l) fails, neither of
+/// which any example reaches.
+///
+/// `genref.vyrn` drops a cell and never touches it again, and `autorelease.vyrn`
+/// only proves the slab does NOT fill. So a `cell_addr` that skipped the
+/// generation compare would pass every listed example, and so would a slab of the
+/// wrong size — the exhaustion message is exactly what a too-small one would
+/// print, and exactly what a release that never fired would print too. Both are
+/// pinned against the interpreter rather than against a spelling written here.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_stale_reference_and_a_full_slab_say_what_the_interpreter_says() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-cells");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (what, src) in [
+        // Read through a copy of a reference whose cell has been released.
+        (
+            "stale",
+            "fn main() -> Int64 {\n let c = cell(7)\n let alias = c\n drop c\n \
+             print(get(alias))\n return 0\n}\n",
+        ),
+        // 70000 cells with no release: past the 65536-slot slab, which is the
+        // number the other two engines use.
+        (
+            "full",
+            "fn main() -> Int64 {\n let mut i = 0\n let mut keep: Array<Ref<Int64>> = []\n \
+             while i < 70000 {\n keep = keep.push(cell(i))\n i = i + 1\n }\n \
+             print(keep.length)\n return 0\n}\n",
+        ),
+    ] {
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src).unwrap();
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .env("VYRN_WASM_BACKEND", "direct")
+            .output()
+            .expect("build wasm");
+        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg(&module);
+        let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+        assert!(!runtime_err(&w.stderr).is_empty(), "{what}: no trap at all");
+    }
+}
+
 /// Monomorphization discovering itself, which `generics.vyrn` does not do.
 ///
 /// A wasm call names a function INDEX, so a specialization's index is handed out
