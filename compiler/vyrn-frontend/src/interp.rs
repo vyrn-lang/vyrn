@@ -3330,6 +3330,23 @@ impl<'a> Interp<'a> {
                         }
                         other => Err(format!("stringFromBytes of non-Array {other:?}").into()),
                     },
+                    // The IEEE-754 bit views (RFC-0078 M4a): a reinterpretation,
+                    // not a conversion. `UInt64` is carried as an `IntN` whose
+                    // `v` holds the raw pattern, so both directions are one
+                    // `to_bits`/`from_bits` and nothing rounds.
+                    "floatBits" => match &vals[0] {
+                        Val::Float(f) => Ok(Val::IntN {
+                            v: f.to_bits() as i64,
+                            bits: 64,
+                            signed: false,
+                        }),
+                        other => Err(format!("floatBits of non-Float64 {other:?}").into()),
+                    },
+                    "floatFromBits" => match &vals[0] {
+                        Val::IntN { v, .. } => Ok(Val::Float(f64::from_bits(*v as u64))),
+                        Val::Int(v) => Ok(Val::Float(f64::from_bits(*v as u64))),
+                        other => Err(format!("floatFromBits of non-UInt64 {other:?}").into()),
+                    },
                     // Text encodings: encoders return a String; decoders return
                     // `Option<String>` (None on malformed input or non-UTF-8 result).
                     "hexEncode" => match &vals[0] {

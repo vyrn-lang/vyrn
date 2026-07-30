@@ -2536,7 +2536,8 @@ pub struct SemToken {
 /// Contextual reserved words (`value`/`list` in a `where` clause) are excluded so
 /// they are never mis-coloured. Kept in sync with the checker's `RESERVED` list.
 static MACRO_BUILTINS: &[&str] = &[
-    "print", "len", "concat", "slice", "bytes", "chars", "hexEncode", "hexDecode",
+    "print", "len", "concat", "slice", "bytes", "chars", "floatBits", "floatFromBits", "hexEncode",
+    "hexDecode",
     "base64Encode", "base64Decode", "urlEncode", "urlDecode", "args", "readLine",
     "readFile", "writeFile", "renameFile", "fsyncFile", "readFileBytes",
     "stringFromBytes", "listDir", "moduleInterface", "schemaOf", "contractOf", "jsonSchema",

@@ -196,6 +196,8 @@ fn check_accum_inner(
         "slice",
         "bytes",
         "chars",
+        "floatBits",
+        "floatFromBits",
         "hexEncode",
         "hexDecode",
         "base64Encode",
@@ -4255,6 +4257,39 @@ impl<'a> Checker<'a> {
                 }
             }
             return Ok(Type::Str);
+        }
+
+        // The two IEEE-754 bit views (RFC-0078 M4a). `floatBits` is a `Float64`
+        // read as its 64 raw bits and `floatFromBits` is the inverse — not a
+        // numeric conversion, which rounds, but a reinterpretation, which is
+        // one instruction on every engine (`f64::to_bits`,
+        // `bitcast double to i64`, `i64.reinterpret_f64`).
+        //
+        // They are here because they are irreducible. Given them, decimal ->
+        // binary and binary -> decimal are ordinary Vyrn (`std/num`); without
+        // them there is no expression in the language that can BUILD a
+        // `Float64` from anything but another number, which is what blocked
+        // RFC-0078 M3.
+        if name == "floatBits" || name == "floatFromBits" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `{name}` takes 1 argument, got {}",
+                    args.len()
+                ));
+            }
+            let (want, got) = if name == "floatBits" {
+                (Type::Float, Type::IntN { bits: 64, signed: false })
+            } else {
+                (Type::IntN { bits: 64, signed: false }, Type::Float)
+            };
+            let t = self.base(&self.expr(&args[0], scope, Some(&want), fn_ret)?);
+            if matches!(t, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if t != want {
+                return Err(format!("line {line}: `{name}` needs a {want}, found {t}"));
+            }
+            return Ok(got);
         }
 
         // Text encodings. Encoders: String -> String. Decoders: String ->

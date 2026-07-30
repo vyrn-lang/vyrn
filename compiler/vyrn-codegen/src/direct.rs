@@ -1987,6 +1987,8 @@ impl Fn_<'_> {
             Expr::Call { name, args, .. } => match name.as_str() {
                 "@str" | "@concat" | "jsonSchema" | "slice" => Type::Str,
                 "@charCount" => Type::Int,
+                "floatBits" => Type::IntN { bits: 64, signed: false },
+                "floatFromBits" => Type::Float,
                 "stringFromBytes" => Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
                 "bytes" => Type::Array(Box::new(Type::IntN { bits: 8, signed: false })),
                 // `Some`/`Ok`/`Err`/`None` in a branch, typed by the position the
@@ -2402,6 +2404,20 @@ impl Fn_<'_> {
                     Some(t) => Ok(t),
                     None => unsupported("the built-in `Value` enum", line),
                 };
+            }
+            // The IEEE-754 bit views (RFC-0078 M4a). One instruction each, and
+            // the whole reason they are primitives: `f64` and `i64` are the same
+            // 64 bits in this backend's value stack, so a reinterpretation is
+            // free while a conversion rounds.
+            "floatBits" if args.len() == 1 => {
+                self.expr_as(m, b, &args[0], &Type::Float)?;
+                b.ins(&Instruction::I64ReinterpretF64);
+                return Ok(Type::IntN { bits: 64, signed: false });
+            }
+            "floatFromBits" if args.len() == 1 => {
+                self.expr_as(m, b, &args[0], &Type::IntN { bits: 64, signed: false })?;
+                b.ins(&Instruction::F64ReinterpretI64);
+                return Ok(Type::Float);
             }
             // `stringFromBytes(b)` (RFC-0014): the bytes copied into a fresh
             // NUL-terminated buffer and UTF-8-validated, as a

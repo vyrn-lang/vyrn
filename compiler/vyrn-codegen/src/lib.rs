@@ -6319,6 +6319,20 @@ impl<'a> Gen<'a> {
             self.emit(format!("{t} = call ptr {helper}(ptr {v})"));
             return Ok((t, Type::Str));
         }
+        // The IEEE-754 bit views (RFC-0078 M4a): a `bitcast`, which costs no
+        // instruction at all — the value is already in the right 64 bits and
+        // only the register class changes.
+        if matches!(name, "floatBits" | "floatFromBits") {
+            let (v, _) = self.gen_expr(&args[0])?;
+            let t = self.fresh_tmp();
+            let (fll, tll, ty) = if name == "floatBits" {
+                ("double", "i64", Type::IntN { bits: 64, signed: false })
+            } else {
+                ("i64", "double", Type::Float)
+            };
+            self.emit(format!("{t} = bitcast {fll} {v} to {tll}"));
+            return Ok((t, ty));
+        }
         if matches!(name, "hexDecode" | "base64Decode" | "urlDecode") {
             let (v, _) = self.gen_expr(&args[0])?;
             let helper = match name {
