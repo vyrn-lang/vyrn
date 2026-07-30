@@ -2068,6 +2068,16 @@ handle" either. `logger` itself is the identity (a handle is its name string) an
 could move alone — which would be exactly the half-Vyrn, half-C builtin this
 document names as worse than either end state.
 
+> Both costs were paid as predicted, and by the other RFC. RFC-0077 M2n lowered
+> `logger` in the direct wasm backend: the threshold fold survived (a suppressed
+> call interns no `[LEVEL] ` prefix, which is how the test proves no write exists),
+> and the held handle turned out expressible *there* — a `path_open` descriptor in
+> four reserved bytes, opened in `_start` and closed after `main`. That does not
+> reopen the routing question, and the distinction is the whole point: a **backend**
+> can hold a descriptor because it emits `fd_write` directly, and Vyrn still cannot,
+> because no expression in the language names a descriptor. The refusal above stands
+> on the reason it gave.
+
 **`stringFromBytes` is not waiting for a view — it IS the view.** M4b(2) left it
 as the last unmoved text builtin and predicted it "wants a primitive or a view the
 way `floatFromBits` did". Asked in M4a's terms the answer is that the prediction
