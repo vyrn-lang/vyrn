@@ -66,6 +66,11 @@ const PASSING: &[&str] = &[
     "enumcodec.vyrn",
     "eventloop.vyrn",
     "externdemo2.vyrn",
+    // RFC-0077 M2l: `Map<String, V>` (RFC-0028) — the literal, `m[k]`, `m[k] = v`,
+    // `has`/`remove`/`keys`/`length`. `mapdemo` is the whole surface INCLUDING the
+    // codecs, which came free: RFC-0078 made `toJson`/`fromJson` rewrites, so a
+    // Map on the wire is a Map in Vyrn.
+    "fieldmut.vyrn",
     "fib.vyrn",
     "files.vyrn",
     "floats.vyrn",
@@ -86,6 +91,7 @@ const PASSING: &[&str] = &[
     "jsonschema.vyrn",
     "linkedlist.vyrn",
     "map.vyrn",
+    "mapdemo.vyrn",
     "modify.vyrn",
     "modules.vyrn",
     "namespace.vyrn",
@@ -98,6 +104,7 @@ const PASSING: &[&str] = &[
     "reflection.vyrn",
     "scan.vyrn",
     "schemaimport.vyrn",
+    "server.vyrn",
     "sizedints.vyrn",
     "statemod.vyrn",
     "strings.vyrn",
