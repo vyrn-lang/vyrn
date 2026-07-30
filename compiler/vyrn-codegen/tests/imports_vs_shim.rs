@@ -19,9 +19,8 @@
 
 use std::collections::BTreeMap;
 use vyrn_codegen::toolchain::RUNTIME_SHIM;
-use vyrn_codegen::wasm::{abi, ValType};
+use vyrn_codegen::wasm::{Sig, ValType};
 
-type Sig = (Vec<Option<ValType>>, Option<ValType>);
 
 /// The libc entry points the emitter calls directly. wasi-libc is the ground
 /// truth here rather than the shim, so it is written down — but written down as
@@ -153,34 +152,12 @@ fn shim_definitions() -> BTreeMap<String, Sig> {
 /// Every `declare` the emitter prints, as a wasm signature. `None` for the
 /// variadic ones — wasm has no varargs at all, which is RFC-0077 M3's whole
 /// milestone, not a signature mismatch.
-fn emitted_declarations() -> BTreeMap<String, Option<Sig>> {
-    // Any program at all: the boundary declarations are unconditional, which is
-    // the property that makes one trivial program a complete census of them.
-    let toks = vyrn_frontend::lexer::lex("fn main() -> Int64 { return 0 }").unwrap();
-    let program = vyrn_frontend::parser::parse(toks).unwrap();
-    let ir = vyrn_codegen::emit(&program).unwrap();
-
-    let mut out = BTreeMap::new();
-    for line in ir.lines() {
-        let Some(rest) = line.strip_prefix("declare ") else { continue };
-        let (ret, rest) = rest.split_once(" @").expect("declare RET @NAME(..)");
-        let (name, rest) = rest.split_once('(').expect("declare RET @NAME(..)");
-        // `llvm.memcpy` is an intrinsic, not an import: it becomes `memory.copy`.
-        if name.starts_with("llvm.") {
-            continue;
-        }
-        let args = rest.rsplit_once(')').expect("declare RET @NAME(..)").0;
-        let sig = if args.contains("...") {
-            None
-        } else {
-            Some((
-                split_args(args).iter().map(|a| abi(a)).collect::<Vec<_>>(),
-                abi(ret),
-            ))
-        };
-        out.insert(name.to_string(), sig);
-    }
-    out
+///
+/// This used to parse the IR here. It is [`vyrn_codegen::wasm::boundary`] now,
+/// because M2i made the direct backend build its import section out of the same
+/// lines: a census read twice is a census that can be read two ways.
+fn emitted_declarations() -> &'static BTreeMap<String, Option<Sig>> {
+    vyrn_codegen::wasm::boundary()
 }
 
 #[test]
@@ -195,7 +172,7 @@ fn every_import_matches_the_signature_its_definition_has() {
         .collect();
 
     let (mut bad, mut checked, mut variadic, mut unknown) = (Vec::new(), 0, 0, Vec::new());
-    for (name, sig) in &declared {
+    for (name, sig) in declared {
         let Some(sig) = sig else {
             variadic += 1;
             continue;

@@ -30,7 +30,7 @@
 //! favour, so [`abi`] widens, and `tests/imports_vs_shim.rs` checks the widened
 //! signatures against the C the shim actually defines.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use wasm_encoder::{
     CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection, Function,
     FunctionSection, GlobalSection, GlobalType, ImportSection, MemorySection, MemoryType,
@@ -72,6 +72,69 @@ pub fn abi(ll: &str) -> Option<ValType> {
         "i64" => ValType::I64,
         _ => ValType::I32,
     })
+}
+
+/// One boundary signature: the wasm type of each parameter and of the result,
+/// `None` where the C says `void`.
+pub type Sig = (Vec<Option<ValType>>, Option<ValType>);
+
+/// Every function the textual emitter `declare`s, as the wasm signature it
+/// crosses as — `None` for the three variadic ones, which wasm cannot express at
+/// all (RFC-0077 M3).
+///
+/// Read off the `declare` lines rather than written down, because those lines are
+/// the side `tests/imports_vs_shim.rs` proves agrees with the C the shim defines.
+/// A second list here would be a second chance to get a signature wrong, and a
+/// wrong import signature is not a link error — it is a misread argument. The
+/// boundary declarations are unconditional, which is what makes one trivial
+/// program a complete census of them.
+pub fn boundary() -> &'static BTreeMap<String, Option<Sig>> {
+    static ONCE: std::sync::OnceLock<BTreeMap<String, Option<Sig>>> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let toks = vyrn_frontend::lexer::lex("fn main() -> Int64 { return 0 }").expect("lex");
+        let program = vyrn_frontend::parser::parse(toks).expect("parse");
+        let ir = crate::emit(&program).expect("the boundary declarations are unconditional");
+        let mut out = BTreeMap::new();
+        for line in ir.lines() {
+            let Some(rest) = line.strip_prefix("declare ") else { continue };
+            let (ret, rest) = rest.split_once(" @").expect("declare RET @NAME(..)");
+            let (name, rest) = rest.split_once('(').expect("declare RET @NAME(..)");
+            // `llvm.memcpy` is an intrinsic, not an import: it becomes `memory.copy`.
+            if name.starts_with("llvm.") {
+                continue;
+            }
+            let args = rest.rsplit_once(')').expect("declare RET @NAME(..)").0;
+            let sig = if args.contains("...") {
+                None
+            } else {
+                Some((split_args(args).iter().map(|a| abi(a)).collect(), abi(ret)))
+            };
+            out.insert(name.to_string(), sig);
+        }
+        out
+    })
+}
+
+/// Split a parameter list on top-level commas. Nothing in the boundary nests
+/// today — M0 measured no aggregate crossing it — but a `void (*)(ptr, i64)`
+/// would, and one comma read wrong shifts every parameter after it.
+fn split_args(s: &str) -> Vec<String> {
+    let (mut out, mut depth, mut start) = (Vec::new(), 0i32, 0usize);
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '{' | '[' => depth += 1,
+            ')' | '}' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(s[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if !s.trim().is_empty() {
+        out.push(s[start..].trim().to_string());
+    }
+    out
 }
 
 /// A module under construction.
@@ -301,8 +364,13 @@ impl Module {
             self.imports.import("env", "memory", EntityType::Memory(mem));
         } else {
             memories.memory(mem);
-            self.exports.export("memory", ExportKind::Memory, 0);
         }
+        // Exported either way, and the imported case is not cosmetic: wasmtime's
+        // WASI has to read an iovec out of the MAIN module's memory, so a module
+        // that only imports one fails `fd_write` with "missing required memory
+        // export" at the first `print`. An imported memory is index 0 too, so
+        // re-exporting it is the whole fix.
+        self.exports.export("memory", ExportKind::Memory, 0);
 
         let mut globals = GlobalSection::new();
         globals.global(
@@ -474,15 +542,38 @@ mod tests {
         assert!(ids.windows(2).all(|w| w[0] < w[1]), "sections out of order: {ids:?}");
     }
 
-    /// An imported memory moves the memory section away and takes the export
-    /// with it — the RFC-0076 split shape, where the shim owns the address space.
+    /// An imported memory moves the memory section away but NOT the export —
+    /// the RFC-0076 split shape, where the shim owns the address space and WASI
+    /// still needs to find it on the main module.
     #[test]
-    fn importing_memory_drops_the_memory_section() {
+    fn importing_memory_drops_the_memory_section_but_keeps_the_export() {
         let mut m = Module::new();
         m.import_memory();
         let f = m.func(&[], &[], &[], 0, |_| {});
         m.export("vyrn_entry", f);
-        assert_eq!(section_ids(&m.finish()), vec![1, 2, 3, 6, 7, 10]);
+        let bytes = m.finish();
+        assert_eq!(section_ids(&bytes), vec![1, 2, 3, 6, 7, 10]);
+        assert!(
+            bytes.windows(6).any(|w| w == b"memory"),
+            "an imported memory must still be exported, or WASI cannot read an iovec"
+        );
+    }
+
+    /// The census is the emitter's own `declare` lines, so a signature here
+    /// cannot disagree with the one the audit checks against the C.
+    #[test]
+    fn the_boundary_census_is_the_declare_lines() {
+        let b = boundary();
+        assert_eq!(
+            b["__vyrn_vj_bool"],
+            Some((vec![Some(ValType::I32)], Some(ValType::I32))),
+            "the one widening: an LLVM i1 crosses as i32"
+        );
+        assert_eq!(b["__vyrn_malloc"], Some((vec![Some(ValType::I64)], Some(ValType::I32))));
+        assert_eq!(b["__vyrn_now_millis"], Some((vec![], Some(ValType::I64))));
+        assert_eq!(b["free"], Some((vec![Some(ValType::I32)], None)), "void is None");
+        assert_eq!(b["printf"], None, "variadic has no wasm signature at all");
+        assert!(!b.contains_key("llvm.memcpy.p0.p0.i64"), "an intrinsic is not an import");
     }
 
     #[test]
