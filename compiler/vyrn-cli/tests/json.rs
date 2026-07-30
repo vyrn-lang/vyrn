@@ -101,3 +101,22 @@ fn tojson_byte_pins_hold() {
     assert!(out.status.success(), "toJson byte pins failed:\n{combined}");
     assert!(combined.contains("7 passed, 0 failed"), "expected 7 green pins:\n{combined}");
 }
+
+/// The same, for the other direction (RFC-0078 M3): `examples/jsondecbytes.vyrn`
+/// pins what `fromJson` produces — weighted towards the accumulated `Issue`s,
+/// their order, and the parse-error wording, which is where two READERS differ and
+/// which nothing else in the suite looks at.
+///
+/// One of its blocks pins three rows where `std/jsonread` reads the same input
+/// differently, two of them changing which documents parse at all. That block is
+/// the evidence M3 is a semantic ruling rather than a byte-formatting one, so it
+/// has to fail loudly if either reader moves under it.
+#[test]
+fn fromjson_byte_pins_hold() {
+    let example = repo_file("examples/jsondecbytes.vyrn");
+    let out = vyrn().arg("test").arg(&example).output().expect("vyrn test");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "fromJson byte pins failed:\n{combined}");
+    assert!(combined.contains("10 passed, 0 failed"), "expected 10 green pins:\n{combined}");
+}

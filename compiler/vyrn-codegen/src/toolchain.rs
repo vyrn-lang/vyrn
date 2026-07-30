@@ -488,7 +488,12 @@ void __vyrn_vj_set(VJ* o, const char* key, VJ* c) {
     o->nmem++;
 }
 
-/* ---- growable byte buffer (encoder) ------------------------------------- */
+/* ---- growable byte buffer (the PARSER's string unescaper) ---------------- */
+/* Named "(encoder)" until RFC-0078 M3 measured it: the encoder is gone (M2b) and
+   the only remaining caller is `vj_string`, which unescapes one byte at a time.
+   So `vsb_puts` -- the whole-string append the SERIALIZER used -- had no caller
+   left and is deleted here. M2b's note claimed all four helpers stay because the
+   unescaper shares them; three do. */
 typedef struct { char* p; unsigned long long len, cap; } VSB;
 static void vsb_init(VSB* s) { s->cap = 64; s->len = 0; s->p = (char*)__vyrn_malloc(s->cap); s->p[0] = 0; }
 static void vsb_ensure(VSB* s, unsigned long long extra) {
@@ -498,9 +503,6 @@ static void vsb_ensure(VSB* s, unsigned long long extra) {
     }
 }
 static void vsb_putc(VSB* s, char c) { vsb_ensure(s, 1); s->p[s->len++] = c; s->p[s->len] = 0; }
-static void vsb_puts(VSB* s, const char* t) {
-    unsigned long long n = strlen(t); vsb_ensure(s, n); memcpy(s->p + s->len, t, n); s->len += n; s->p[s->len] = 0;
-}
 /* RFC-0078 M2b: the SERIALIZER is gone from here. `toJson` renders through
    `std/json`'s `emit` -- the same JSON writer, in Vyrn, injected into the link --
    so `vsb_escape`, `__vyrn_vj_write` and `__vyrn_vj_encode` went with it, along

@@ -12,7 +12,7 @@
   | builtins the checker knows | 40 |
   | Rust implementations in the interpreter | 50 |
   | C functions in the runtime shim | 80 — now 74, M2b having deleted six (see "M2b, as landed") |
-  | of those, the JSON DOM alone | 49 — but SHARED writer/reader, so M2 retired SIX (not 11: the parser's unescaper shares the buffer) and M3 takes the rest |
+  | of those, the JSON DOM alone | 49 — but SHARED writer/reader, so M2 retired SIX (not 11: the parser's unescaper shares the buffer) and M3 takes **32** (not 38 — see "M3, as measured", which also states its counting method, since this row has now been wrong three times) |
   | `std/json.vyrn` — a JSON reader and writer, in Vyrn | 752 lines |
   | interp + shim + textual emitter + direct emitter | 27,334 lines |
 
@@ -128,6 +128,11 @@ at any time.
   matches the shim byte for byte.
 - **M3 — `fromJson`.** The parser half, same shape, plus RFC-0018's `Issue`
   accumulation.
+  **NOT DONE, and not "same shape" — see "M3, as measured" below.** The bytes are
+  pinned (`examples/jsondecbytes.vyrn`, failure shapes included) but the swap is
+  blocked on a primitive that does not exist and is on no milestone's list: there is
+  no `String -> Float64` in the language, so a decoder cannot be written in Vyrn at
+  all. M3 moves after M4, and M1's list is short by one entry.
 - **M4 — the string and number tier.** `chars` (UTF-8 decode), `parse`, the `%f`
   formatter `f64_str` (~300 lines of emitted wasm that should be ~40 lines of
   Vyrn), `stringFromBytes`.
@@ -593,4 +598,158 @@ the two repinned rows, the RFC-0077 ladder at **43/81** (was 39), genwasm green,
 **M3 (`fromJson`) inherits all three mechanisms.** The injected import and the
 shared-walk seam are general; what M3 adds is the reader (`std/jsonread`, which
 still wants `?` and `if let`) and RFC-0018's `Issue` accumulation. The remaining 38
-`__vyrn_vj_*` DOM functions fall with it.
+`__vyrn_vj_*` DOM functions fall with it. *(That sentence is optimistic on both
+counts — see M3's note.)*
+
+---
+
+## M3, as measured: the bytes are pinned, and the swap is blocked on a primitive
+
+**M3 did not land, and should not be attempted in M2b's shape.** What landed is the
+prerequisite — the decode surface pinned as a test, weighted towards the failure
+shapes — plus one dead C function and the four measurements below. Every one was
+taken by *running*, not by reading, and two of them contradict something this
+document already asserts.
+
+### The pin
+
+`examples/jsondecbytes.vyrn` is `jsonbytes.vyrn`'s mirror for the other direction:
+it decodes into a refined scalar, a nested record with an array and an `Option`, a
+nullary enum, a payload enum and every decodable scalar; prints from `main` so
+parity covers interp == native == wasm; and pins ten rows as literals in `test`
+blocks, wired into `tests/json.rs` so they are not decoration.
+
+It is deliberately weighted towards **failures**, because that is where two readers
+differ and nothing else in the suite looks there. The load-bearing pin is the ORDER
+issues accumulate in: three failures across two array elements, reported in the
+element-then-declaration walk (`kids[1]`'s missing `name` before its out-of-range
+`age`) rather than in order of discovery. A reader reporting the same set in another
+sequence is not a drop-in replacement, and only a pin written *before* the swap can
+say so.
+
+### 1. `Float64` has no decode expression in Vyrn — and that is a missing PRIMITIVE
+
+M2a measured the encode direction free: `toString()` already produced the shim's
+bytes, so numbers needed nothing and M4 was not a prerequisite. This document then
+warned to "check rather than assume the symmetry holds" for parsing. It does not
+hold, and not by a little:
+
+- `Float64("1.5")` is a **check error** — "`Float64(..)` converts a number, found
+  String". There is no numeric conversion from `String` in the language.
+- `parse` is `String -> Option<Int64>` and nothing else.
+
+So a decoder expressed in Vyrn cannot turn `JNum`'s raw text into a `Float64` or a
+`Float32` at all. No example decodes a float today, but `codec::decodable` admits
+them and all three engines implement them, so dropping the row is a language
+regression — and keeping the C path for floats alone is precisely the half-Vyrn,
+half-C builtin this document names as worse than either end state.
+
+**M4 does not fix this either.** M4's list is `chars`, `parse`, `f64_str`,
+`stringFromBytes` — the direction *out* of numbers. Text -> `f64` is not on it, and
+it is not the ~40 lines of Vyrn the `f64_str` row estimates: correct decimal-to-binary
+rounding is the hard direction, and the shim gets it for free by calling libc.
+Either the primitive set (M1) grows an entry, or someone writes an
+arbitrary-precision conversion in Vyrn and proves it byte-identical to `strtod`.
+**That is the sequencing finding: M3 is blocked on M1, not on M4.**
+
+The same shape in miniature: an exact `UInt64` above `Int64::MAX`
+(`18446744073709551615`, which both JSON pins carry) cannot come back through
+`parse`'s `Option<Int64>`. That one IS hand-rollable with wrapping arithmetic and
+explicit overflow detection; it is work, not a wall.
+
+### 2. A refined type cannot hold a value that failed its own predicate
+
+RFC-0018 decode does not stop at the first problem — it accumulates. So a decoder
+must carry *some* value for a field that failed and keep walking. The IR does this
+with a zeroed slot, which no Vyrn program can spell:
+
+```
+fn bad() -> Age { let mut n = 0; return n }   // error: validation failed for `Age`
+```
+
+Measured, at runtime, on the interpreter. Automatic validation at every value
+boundary (the property that makes refinements trustworthy) is exactly what makes the
+accumulating decoder inexpressible as written.
+
+There is a design that works — every decoder returns `Option<T>`, pushes its own
+issues, and a composite constructs only when all its parts are `Some` — and it
+preserves issue order for free, since the field walk is unchanged. But it is a
+DIFFERENT shape from M2b's encoder walk, not a mirror of it, and it has to be stated
+before it is built. M2b's "the next builtin reuses these mechanisms unchanged" holds
+for the injected import and the source-generating walk; it does not hold for the
+walk's *shape*.
+
+### 3. The two readers disagree about which documents parse, in opposite directions
+
+M2's swap moved two rows and both were cosmetic — `\b` versus `\u0008`, the same
+string either way. These are not. Pinned in the example as today's answers:
+
+| input | `fromJson` today | `std/jsonread` |
+|---|---|---|
+| `"😀"` (surrogate pair) | **rejected** — `unexpected character at position 11` | **accepted**, decodes 😀 (its own test asserts it) |
+| duplicate key `{"s":"a","s":"b"}` | **accepted**, first wins | **rejected**, naming the key |
+| every parse error | `<reason> at position N` (0-based byte) | `line N, col M: <reason>` (1-based) |
+
+`codec::parse` decodes each `\uXXXX` independently through a `char`, so a surrogate
+half is not representable and the pair fails; `std/jsonread` pairs them. In the other
+direction `codec::parse` keeps duplicate members and `get` takes the first, while
+`std/jsonread` rejects. So the swap does not just re-word `json.parse`: it changes
+which documents decode at all, one direction of which turns working programs into
+failures. That is a semantic ruling this RFC has to make explicitly, and it wants
+the repo's stored JSON (`examples/bin/data/`) checked against it first.
+
+### 4. One dead C function, deleted
+
+M2b's note says `vsb_init`/`_ensure`/`_putc`/`_puts` all stay because the parser's
+string unescaper shares the buffer. Three do. `vsb_puts` appends a whole string,
+which only the deleted serializer did — the unescaper goes one byte at a time
+through `vsb_putc` — so it has had no caller since M2b and is deleted here.
+
+### The count, with the method stated, because this document has been wrong twice
+
+Counting C function definitions in `RUNTIME_SHIM` by regex, treating `static` as
+internal and everything else as the exported boundary:
+
+| | |
+|---|---|
+| C function definitions in the shim | 95 (66 exported, 29 static) |
+| of those, JSON | **32** — 27 exported, 5 static |
+| of the 27, still called by an emitter | **19** |
+
+So **M3 would retire 32 C functions, not 38**, and the 38 above is the third estimate
+this document has gotten wrong. The other eight exported JSON functions
+(`vj_arr`, `vj_bool`, `vj_null`, `vj_obj`, `vj_push`, `vj_set`, `vj_str`,
+`vj_kindname`) have no emitter caller since M2b but are still non-static, so they sit
+on the boundary doing nothing — they can be made `static` today, independently of M3.
+
+**Deleted in this milestone: one** (`vsb_puts`). Not 32, and not zero.
+
+Note also that 66 exported is not the 70 the M2b note reports; the difference is
+method, not drift (this count excludes `static` definitions whose names begin with
+`__vyrn_`, of which the JSON section alone has two). Whoever counts next should say
+how.
+
+### What M3 should be, when it is taken
+
+In order, and none of it is the shape M2b's success suggests:
+
+1. **A text -> number primitive**, named in M1 alongside memory growth and the
+   syscalls. Without it no decoder can be written in Vyrn at all.
+2. **The ruling on strictness**, written down: surrogate pairs, duplicate keys, and
+   the `json.parse` wording, with the repo's stored JSON checked against it.
+3. **The `Option<T>`-returning decoder shape**, replacing the mirror-of-M2b
+   assumption.
+
+Until (1) exists, the honest position is that `fromJson` moves *after* M4 rather than
+before it, and M4's own list is short by one entry.
+
+### Gates, at this note
+
+1216 workspace tests (was 1215 — the new pin's row in `tests/json.rs`), parity green
+three ways over 82 examples including the new one, the RFC-0077 ladder unchanged at
+45/82 (`jsondecbytes` does not build on the direct backend, because `fromJson` is one
+of the rows RFC-0077 has not lowered and this milestone did not remove), genwasm
+green, `doc --std --verify` clean. The shim's exported boundary is **unchanged** —
+`vsb_puts` was `static`, so deleting it moves the total (96 -> 95) and not the
+boundary. A milestone that retires no builtin should not move that number, and this
+one did not.

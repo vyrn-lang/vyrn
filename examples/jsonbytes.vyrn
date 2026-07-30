@@ -125,7 +125,7 @@ test "escapes as \\u00XX, lowercase hex" {
 test "0x08 and 0x0c are the two writers' only disagreement" {
     // The whole surface this example walks produced exactly two disagreements, and
     // RFC-0078 M2b's swap moved these two rows and nothing else: the C shim wrote
-    // the long `` / ``, `std/json` writes the short `\b` / `\f`. Both
+    // the long `\u0008` / `\u000c`, `std/json` writes the short `\b` / `\f`. Both
     // are valid JSON and both parse back to the same string, so this was a choice,
     // and it went to `std/json` because its `emit` has committed consumers
     // (`std/tw`, `std/i18n`, `std/openapi` and their golden outputs) while the long
