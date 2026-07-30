@@ -4,8 +4,8 @@
 - **Depends on:** RFC-0076 (generators as wasm; the shared runtime shim and the
   memory map it established), RFC-0012 (the `extern` ABI), RFC-0037
   (defunctionalized closures — the reason *closures* need no function table),
-  RFC-0025 (`spawn`, which is the reason a small one is needed anyway — see the
-  M2a pre-flight)
+  RFC-0025 (`spawn`, which the M2a pre-flight read as the reason a small one is
+  needed anyway — and M2m found it is not; see "M2m, as landed")
 - **Evidence (measured, this repo):** compiling generators, cold, `examples/bin`:
 
   | phase | time |
@@ -85,6 +85,16 @@ A spike measured the shape of the job rather than guessing at it:
   Bounded and enumerable — 9 sites across 3 examples, all syntactic — but a
   milestone that had assumed this away would have discovered it at the end. M2m
   lowered both function-value features and added none: it is still only `spawn`.
+
+- **No function table** — right after all, but for a reason neither this line nor
+  the pre-flight that "corrected" it had. Indirect calls really are zero, and
+  RFC-0037's defunctionalization really does route stored `fn` values through a
+  synthesized `switch` into direct calls. Function-addresses-as-values is **9**,
+  and the M2a pre-flight concluded those 9 needed a table element, `ref.func` and
+  `call_indirect`. They do not: all nine are `spawn`, and on wasm the shim
+  IMMEDIATELY calls the pointer it was handed, because wasm has no threads. A
+  backend that emits the eager path itself never forms a pointer. See "M2m, as
+  landed" — the finished module has no table section and no element section.
 - **No generics** — *wrong, and M2e is where it was corrected.* Monomorphization
   does not run before any instruction is emitted, in either backend: a
   specialization is **discovered** at a call site as a side effect of emitting
@@ -522,7 +532,7 @@ Destination-first is indifferent to the arity: allocate the join's slot before
 the branch, have each arm store into it. A relooper-free traversal would have
 cared, because it would have had to reconstruct the join; this one does not.
 
-### The correction: there IS a function table, and it is `spawn`
+### The correction: there IS a function table, and it is `spawn` — WRONG; see M2m
 
 > **No function table.** Zero indirect calls and zero function-addresses-as-values
 > in the artifacts checked.
@@ -548,10 +558,19 @@ closures (RFC-0037) still need no table, which was the load-bearing half of the
 claim. But "no function table" is not true of the finished backend, and a
 milestone that assumed it would have discovered that at the end instead of here.
 
+**M2m: the last two sentences are wrong.** Counting the nine addresses was right;
+concluding a table from them was not. What the shim *does* with the pointer on
+this target was never checked, and it is `thunk(frame)` on the next line — wasm
+has no threads. So the nine are nine eager calls whose callee is named
+syntactically, and a backend that emits the eager path forms no pointer at all.
+"No function table" is true of the finished backend; the pre-flight's own
+instruction (measure rather than reason) was followed on the count and skipped on
+the consequence.
+
 ### Verdict
 
-The design survives. No relooper, no reconstruction of joins, one small table
-whose contents are a compile-time list.
+The design survives. No relooper, no reconstruction of joins, and — after
+M2m — no table either.
 
 **Cashed in M2m.** Both function-value features are lowered now and neither needed
 a table: an RFC-0023 target is a compile-time function index, and an RFC-0037
@@ -2745,6 +2764,154 @@ per-program cost of one function per lambda plus one dispatcher per signature.
 
 ### 68 of 87, regrouped
 
+---
+
+## M2m, as landed
+
+`spawn` and `join` (RFC-0025). **65/87**, from 63: `concurrency` and `parallel`,
+on both link shapes.
+
+The milestone is not the two examples. It is that the one wasm feature this RFC
+had convinced itself it needed — a function table — is not needed, and the
+measurement that "corrected" the original claim is where the mistake was.
+
+### The nine addresses are real, and none of them is a function pointer
+
+M2a's pre-flight counted 9 function-addresses-as-values across all 81 examples,
+all of them `spawn`:
+
+```
+%t2 = call ptr @__vyrn_spawn(ptr @__vyrn_task_vyrn_fib, ptr %t0)
+```
+
+and concluded a table element, `ref.func` and `call_indirect` per site. The count
+is right. The conclusion never checked what the shim does with the pointer *on
+this target*, and `toolchain::RUNTIME_SHIM` answers in four lines:
+
+```c
+#if defined(__wasi__)
+typedef struct VTask { void* frame; } VTask;
+void* __vyrn_spawn(void (*thunk)(void*), void* frame) {
+    VTask* t = (VTask*)__vyrn_malloc(sizeof(VTask));
+    t->frame = frame;
+    thunk(frame); /* eager: single-threaded target */
+    return t;
+}
+```
+
+wasm has no threads, so the pointer is formed and consumed in one statement. It
+exists only because the LLVM path routes an eager call through a C function that
+cannot know the callee — and a spawn site does know it, syntactically, which is
+the very reason the pre-flight could enumerate nine of them.
+
+So the lowering is that eager path emitted directly: `spawn f(a)` is `f(a)`, at
+the spawn point, in argument order. Which is also literally what the interpreter
+does (`interp.rs`, `Expr::Spawn`: evaluate the arguments, then `self.call`), so
+there is one schedule and all three engines run it. Measured on the finished
+module — its sections are type, import, func, memory, global, export, code, data:
+**no table section and no element section.**
+
+The sixth assumption this corpus has falsified, and like the other five it is in
+the direction of less work. The encoder needed nothing: `wasm.rs` is untouched.
+
+### What `spawn` has to do here, versus natively
+
+Natively `spawn` is a thread (Win32 or pthreads), a task registry, a per-task
+completion event, and `__vyrn_join_all` at exit so a leaked task's work — and its
+trap — still happens. Not one of those crosses to wasm:
+
+- **No thread.** The callee runs at the spawn point.
+- **No wait.** `join` cannot block on something that already ran; it reads.
+- **No registry and no `join_all`.** Eager means every task has run by the time
+  `main` returns, which is exactly why the shim's wasm arm defines
+  `__vyrn_join_all` empty.
+- **No thunk.** It existed to give C a callee it could not name.
+
+What survives is the **frame**, and it is load-bearing: a `Task<T>` outlives the
+shadow-stack frame that made it, and `join` is idempotent. So the result is boxed
+on the bump heap and the `Task` is that address — the shim's `VTask { frame }`
+minus the thunk field it no longer needs, under the same ownership rule (never
+freed; the count is bounded by the number of spawns).
+
+Isolation is **not** enforced here, and must not be. The checker proves it
+transitively for every engine (`checker.rs`: `spawn_safe`, the RFC-0037 rejection
+of `fn`-typed parameters, and the post-check re-verification against the extended
+fixpoint), so a second opinion in one backend would be a rule free to disagree
+with itself. The RFC-0013/RFC-0025 `spawn`-`drop` hole that was fixed once was
+fixed there, and this milestone adds nothing beside it.
+
+### The bug only running could catch — and the first version of the test missed it
+
+`Fn_::spawn` routes through `Fn_::call`, so argument coercion, the aggregate
+return convention and generic instantiation are the ones an ordinary call gets and
+cannot diverge from. The one thing it adds is the box, and the box is exactly
+where the plausible shortcut is wrong: a frame slot compiles, validates, and
+passes both examples.
+
+`Frame::alloc` hands out an offset once per function and never reuses it — a slot
+inside a loop is one slot — so four tasks spawned in a loop would all be the same
+address. The first version of the escaping test did not catch that. It returned a
+`Task` out of a callee and recursed 20 deep before joining, and it **passed** with
+a frame slot: `fib` keeps its parameters in wasm locals, so its frame is zero
+bytes and it never writes to the stack at all, and `print`'s 32-byte digit buffer
+landed one slot below the box. A test that cannot fail is worse than no test, so
+it was rewritten to hold four live tasks — the stack-slot build prints `233` four
+times where the interpreter prints `55 89 144 233`. Both versions were built and
+run to find out which one discriminates.
+
+`a_task_that_escapes_its_frame_says_what_the_interpreter_says` pins that plus the
+two other shapes no example makes: a `Task` of an **aggregate**, where `join`
+copies rather than handing out the box's own address (the `load {ll}` the LLVM
+backend emits, and M2l's `get` hazard one container along), and a `Task<Unit>`,
+which has no result to read and still has to be a value `join` can consume.
+
+### One guard, because `spawn f` and `f` must resolve the same way
+
+`Fn_::call` matches builtin spellings before user functions, and the textual
+backend's `prep_spawn_target` looks only at `funcs`. A user function sharing a
+builtin's name would therefore have spawned the builtin here and the function
+there. So the route is guarded by requiring the name to be a function this backend
+knows — which is the checker's own rule, since `Expr::Spawn` resolves in `sigs`
+and admits nothing else.
+
+Worth recording while checking that: `prep_spawn_target`'s generic branch in the
+textual backend is **unreachable**. The checker rejects a generic spawn callee
+before either backend sees it — `spawn twice(41)` is
+`` `spawn twice` argument expects T, found Int64 `` — because it checks the
+arguments against unsubstituted parameter types. Not touched; not this RFC's call
+to make.
+
+### M2i's split refusal is unaffected, and stays honest
+
+`vyrn-genwasm`'s `NOT_SPLITTABLE = ["__vyrn_spawn"]` is about the *textual*
+backend's clang output: a function pointer is an index into a table the two-module
+split does not share, so a generator that spawns gets the single fat module. That
+reasoning is unchanged and still correct for that path.
+
+It is simply not reachable from here. `SHIM_IMPORTS` is `["__vyrn_malloc"]`, so
+the direct backend never imports `__vyrn_spawn` in either link shape — the
+shim-linked module still defines it, and still nothing calls it. Both examples
+were run under `--preload env=….shim.wasm` as well as standalone, so
+`PASSING_SHIM` stays empty by construction rather than by omission.
+
+### Nothing contradicted M0, M1, M2a–M2l
+
+The box's size is the result type's layout through `layout::of_ll ∘ llt`, which
+for a scalar is a size that is also a stride (M2c). Aggregates still travel as the
+address of a slot, which is why an aggregate-returning spawned call needed no
+convention of its own — `call` allocated the destination and this copies out of
+it. No body emits a `return`: `spawn` is an expression and adds no exit. `Place`
+gained nothing, `wasm::Frame` gained nothing, and the runtime table gained no
+entry, because `malloc` was the only helper needed and it was already index 1.
+
+One thing the eager path makes observable, and it is RFC-0025's rather than this
+RFC's: a **trapping** spawned task traps at the spawn point here and in the
+interpreter (`1`, then `error: division by zero`, exit 1 — checked), where a
+native thread may print past it first. No example spawns a task that traps, so
+nothing in parity says which it should be. Recorded rather than legislated.
+
+### 65 of 87, regrouped
+
 | blocked on | n |
 |---|---|
 | `Match` on strings | 4 |
@@ -2858,3 +3025,11 @@ second blocker behind it, which is the first time a row has paid its full face
 value. What remains is the nine-example builtins row (`parse`, `lineAt`, `logger`),
 the RFC-0023/RFC-0037 function-value worklist, the two control-flow features this
 RFC scoped out from the start, and one generic-payload conversion twice.
+
+| a `fn`-typed parameter (RFC-0023) 3, a lambda 2 | 5 |
+| `region` | 2 |
+| a conversion from `Cargo`/`Config` to `T` | 2 |
+
+`controlflow.vyrn` spawns *and* opens a `region`, so its blocker moved from
+`spawn` to `region`: that row is `controlflow` and `region.vyrn`, the two examples
+it always was, now reported by the feature that actually stops them.

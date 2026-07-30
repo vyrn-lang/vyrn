@@ -162,6 +162,8 @@ const PASSING: &[&str] = &[
     // `validate_fail.vyrn` wants: `Age?(5)` prints `-1`.
     "validate.vyrn",
     "validation.vyrn",
+    "concurrency.vyrn",
+    "parallel.vyrn",
 ];
 
 /// The same, for the shim-linked shape (RFC-0077 M2i). A superset of [`PASSING`]
@@ -1883,5 +1885,92 @@ mod tests {
         );
         // Not a lowering gap: reported whole rather than mined for a construct.
         assert_eq!(blocker("error: cannot read foo.vyrn"), "error: cannot read foo.vyrn");
+    }
+}
+
+/// The three things a `Task` (RFC-0025) can be that no example makes one of.
+///
+/// `concurrency` and `parallel` between them only ever spawn a `Task<Int64>` and
+/// join it in the same frame that made it, so three parts of the lowering are
+/// unreached by the ladder and each would be silent:
+///
+/// - **Four live `Task`s at once.** The result is boxed on the heap for exactly
+///   this. A frame slot would be handed out ONCE per function — `Frame::alloc`
+///   offsets are never reused, so a slot inside a loop is one slot — and all four
+///   tasks would be the same address: the stack-slot version of this file prints
+///   `233` four times where the interpreter prints `55 89 144 233`. Checked by
+///   building it that way, because a lifetime bug that no example reaches is
+///   exactly the class this RFC keeps finding by running things.
+/// - **A `Task` of an aggregate**, where `join` copies rather than handing out the
+///   box's own address — the `load {ll}` the LLVM backend emits, and M2l's `get`
+///   hazard one container along.
+/// - **A `Task<Unit>`**, which has no result to read and still has to be a value
+///   `join` can consume.
+///
+/// Pinned against the interpreter, not against numbers written here: eager
+/// evaluation at the spawn point is the interpreter's own schedule, so there is
+/// one right answer and it is the one the interpreter gives.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_task_that_escapes_its_frame_says_what_the_interpreter_says() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-spawn");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (what, src) in [
+        // Four tasks spawned in a loop and all joined afterwards, so four boxes
+        // have to coexist.
+        (
+            "escaping",
+            "fn fib(n: Int64) -> Int64 {\n if n < 2 { return n }\n \
+             return fib(n - 1) + fib(n - 2)\n}\n\
+             fn main() -> Int64 {\n let mut ts: Array<Task<Int64>> = []\n \
+             let mut i = 0\n while i < 4 {\n let t = spawn fib(i + 10)\n \
+             ts = ts.push(t)\n i = i + 1\n }\n \
+             print(ts[0].join())\n print(ts[1].join())\n print(ts[2].join())\n \
+             print(ts[3].join())\n return 0\n}\n",
+        ),
+        // Two joins of one aggregate task, with the first one's copy mutated in
+        // between: a `join` that aliased the box would show 99 twice.
+        (
+            "aggregate",
+            "type P = { a: Int64, b: Int64 }\n\
+             fn mk(x: Int64) -> P {\n return P { a: x, b: x * 2 }\n}\n\
+             fn main() -> Int64 {\n let t = spawn mk(5)\n let mut p = t.join()\n \
+             p.a = 99\n let q = t.join()\n print(p.a)\n print(q.a)\n print(q.b)\n \
+             return 0\n}\n",
+        ),
+        ("unit", "fn noop(x: Int64) {\n let y = x + 1\n}\n\
+             fn main() -> Int64 {\n let t = spawn noop(3)\n t.join()\n print(1)\n return 0\n}\n"),
+    ] {
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src).unwrap();
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .env("VYRN_WASM_BACKEND", "direct")
+            .output()
+            .expect("build wasm");
+        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg(&module);
+        let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+        // A pass with no output at all would be two engines agreeing on nothing.
+        assert!(!norm(&w.stdout).is_empty(), "{what}: printed nothing");
     }
 }
