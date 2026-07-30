@@ -114,9 +114,9 @@ void* __vyrn_realloc(void* p, unsigned long long n) {
     }
     return __vyrn_alloc_check(realloc(p, (size_t)n), n);
 }
-int __vyrn_strncmp(const char* a, const char* b, unsigned long long n) {
-    return strncmp(a, b, (size_t)n);
-}
+/* (`__vyrn_strncmp` lived here for `startsWith`/`endsWith`, which are `std/strpred`
+   since RFC-0078 M4c. Nothing else called it, so it is the first shim function a
+   milestone of this RFC has retired since M2b.) */
 
 /* ---- Map<String, V> runtime (RFC-0028) ---------------------------------- */
 /* A Map lowers to { char** keys, char* vals, i64 len, i64 cap } — two parallel
@@ -967,7 +967,7 @@ void __vyrn_gen_fini(void) { fflush(0); }
 static void* const __vyrn_gen_libc[] = {
     (void*)printf, (void*)fprintf, (void*)fputs, (void*)fopen, (void*)fclose,
     (void*)exit,   (void*)free,    (void*)strcpy, (void*)strcat, (void*)strcmp,
-    (void*)strstr, (void*)memcpy,  (void*)memmove, (void*)memset, (void*)memcmp,
+    (void*)memcpy, (void*)memmove, (void*)memset,  (void*)memcmp,
 };
 void* __vyrn_gen_libc_keep(int i) { return __vyrn_gen_libc[i]; }
 #else

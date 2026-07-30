@@ -1,9 +1,14 @@
-/// UTF-8 decoding and byte-offset line/column — `std/text` (RFC-0078 M4b).
+/// UTF-8 decoding and byte-offset line/column — `std/text` (RFC-0078 M4b(2),
+/// converted by M4c).
 ///
-/// Three builtins written as ordinary Vyrn: `chars`, `lineAt`, `colAt`. Nothing is
-/// retired — the builtins still exist and this example prints BOTH answers on
-/// every row, so a disagreement between the Vyrn version and any engine's
-/// implementation shows up as a diff rather than as a passing test.
+/// Three builtins written as ordinary Vyrn: `chars`, `lineAt`, `colAt`. **One of
+/// the three moved.** `chars` IS `std/text`'s `charsV` now — Rust's `str::chars` in
+/// the interpreter and 82 lines of emitted IR are both gone — so its rows are
+/// pinned as LITERALS, captured before the swap. `lineAt` and `colAt` did not move:
+/// the interpreter memoizes a line-start table that a Vyrn library cannot (a
+/// generator may not touch module state), so retiring them is a decision about that
+/// cache rather than about capability. Their rows therefore stay a live oracle,
+/// printing the builtin's answer beside `lineAtV`/`colAtV`'s.
 ///
 /// The interesting rows are the malformed ones. A `String` cannot hold invalid
 /// UTF-8, so `chars` never sees a bad byte and the only place two decoders can
@@ -13,15 +18,20 @@
 /// U+10FFFF are here because those are the five shapes a plausible-looking
 /// decoder waves through.
 ///
-/// The one row where they legitimately differ is NUL: it is valid UTF-8, and a
-/// Vyrn `String` still cannot carry it (RFC-0014).
+/// `stringFromBytes` is also unmoved (it is the validated inverse of the byte view,
+/// and the `Array<UInt8> -> String` construction has no Vyrn expression), so the
+/// malformed table below is a live oracle too. The one row where the two verdicts
+/// legitimately differ is NUL: it is valid UTF-8, and a Vyrn `String` still cannot
+/// carry it (RFC-0014).
 
-import { charsV, colAtV, decodeUtf8, lineAtV, showCps } from "std/text"
+import { colAtV, decodeUtf8, lineAtV, showCps } from "std/text"
 
-/// One codepoint row: the Vyrn decode, then the builtin's, so parity compares
-/// them against each other as well as against the pinned literals.
+/// One codepoint row. `chars` is `std/text`'s `charsV` after M4c, so printing both
+/// spellings would print one answer twice; the literals in the `test` block below
+/// are the pin, and parity is what checks the routed builtin decodes identically on
+/// the interpreter, the native backend and wasm.
 fn cps(s: String) -> String {
-    return showCps(charsV(s)) + " | " + showCps(chars(s))
+    return showCps(chars(s))
 }
 
 /// One byte-buffer row: whether `decodeUtf8` accepted, and whether
@@ -116,15 +126,15 @@ fn main() -> Int64 {
 
 /// The pins. Parity already runs `main` three ways; these assert the actual text,
 /// so a change is a diff against a literal rather than against whatever came out.
-test "the four UTF-8 widths decode to the same codepoints both ways" {
-    assertEq(cps("hi"), "104,105 | 104,105")
-    assertEq(cps("é"), "233 | 233")
-    assertEq(cps("€"), "8364 | 8364")
-    assertEq(cps("😀"), "128512 | 128512")
-    assertEq(cps("a€😀é"), "97,8364,128512,233 | 97,8364,128512,233")
-    assertEq(cps(""), " | ")
-    assertEq(cps("\u{ffff}\u{10000}"), "65535,65536 | 65535,65536")
-    assertEq(cps("\u{10ffff}"), "1114111 | 1114111")
+test "the four UTF-8 widths decode to the codepoints the builtin gave" {
+    assertEq(cps("hi"), "104,105")
+    assertEq(cps("é"), "233")
+    assertEq(cps("€"), "8364")
+    assertEq(cps("😀"), "128512")
+    assertEq(cps("a€😀é"), "97,8364,128512,233")
+    assertEq(cps(""), "")
+    assertEq(cps("\u{ffff}\u{10000}"), "65535,65536")
+    assertEq(cps("\u{10ffff}"), "1114111")
 }
 
 /// Spelled with byte literals, which read better and are legal everywhere — a

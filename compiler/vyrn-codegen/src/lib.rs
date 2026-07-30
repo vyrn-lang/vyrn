@@ -188,49 +188,17 @@ entry:
 
 ";
 
-/// Text-encoding runtime (hex / base64 / url) plus the shared helpers: a strict
-/// UTF-8 validator (Björn Höhrmann's DFA — matches Rust's `from_utf8`) used by the
-/// decoders, and hex-digit conversions. The `@__vyrn_utf8d` and `@__vyrn_b64alpha`
-/// tables are emitted separately (generated in `emit`). Decoders return the
-/// Option aggregate `{ i1 tag, i64 word0, i64 word1 }` (word0 = `ptrtoint` of the
-/// result string on `Some`; all-zero on `None`).
+/// The strict UTF-8 validator: Björn Höhrmann's DFA over the `@__vyrn_utf8d`
+/// table, which is emitted separately in `emit` and shared with the direct wasm
+/// backend (RFC-0077 M2g). It matches Rust's `from_utf8` exactly, which is what
+/// makes `stringFromBytes` the single gate on what a `String` may hold.
+///
+/// It used to have company: the hex, base64 and percent codecs were ~520 lines of
+/// hand-written IR here, with the hex-digit helpers and the base64 alphabet table.
+/// RFC-0078 M4c routed those six builtins to `std/codecs`, so what remains is the
+/// primitive the Vyrn implementations are written ON — through `stringFromBytes` —
+/// rather than one of the operations they duplicated.
 const ENCODING_RUNTIME: &str = "\
-define i8 @__vyrn_hexdigit(i8 %n) {
-  %lt = icmp ult i8 %n, 10
-  %d0 = add i8 %n, 48
-  %da = add i8 %n, 87
-  %r = select i1 %lt, i8 %d0, i8 %da
-  ret i8 %r
-}
-
-define i8 @__vyrn_hexdigit_uc(i8 %n) {
-  %lt = icmp ult i8 %n, 10
-  %d0 = add i8 %n, 48
-  %da = add i8 %n, 55
-  %r = select i1 %lt, i8 %d0, i8 %da
-  ret i8 %r
-}
-
-define i32 @__vyrn_hexval(i8 %c) {
-  %cz = zext i8 %c to i32
-  %d0 = icmp uge i32 %cz, 48
-  %d9 = icmp ule i32 %cz, 57
-  %isd = and i1 %d0, %d9
-  %la = icmp uge i32 %cz, 97
-  %lf = icmp ule i32 %cz, 102
-  %isl = and i1 %la, %lf
-  %ua = icmp uge i32 %cz, 65
-  %uf = icmp ule i32 %cz, 70
-  %isu = and i1 %ua, %uf
-  %vd = sub i32 %cz, 48
-  %vl = sub i32 %cz, 87
-  %vu = sub i32 %cz, 55
-  %r1 = select i1 %isd, i32 %vd, i32 -1
-  %r2 = select i1 %isl, i32 %vl, i32 %r1
-  %r3 = select i1 %isu, i32 %vu, i32 %r2
-  ret i32 %r3
-}
-
 define i1 @__vyrn_utf8valid(ptr %s, i64 %len) {
 entry:
   br label %loop
@@ -258,497 +226,14 @@ fin:
   ret i1 %ok
 }
 
-define ptr @__vyrn_hex_encode(ptr %s) {
-entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
-  %outlen = mul i64 %len, 2
-  %sz = add i64 %outlen, 1
-  %out = call ptr @__vyrn_malloc(i64 %sz)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %entry ], [ %i2, %body ]
-  %done = icmp uge i64 %i, %len
-  br i1 %done, label %fin, label %body
-body:
-  %bp = getelementptr i8, ptr %s, i64 %i
-  %b = load i8, ptr %bp
-  %hi = lshr i8 %b, 4
-  %lo = and i8 %b, 15
-  %hc = call i8 @__vyrn_hexdigit(i8 %hi)
-  %lc = call i8 @__vyrn_hexdigit(i8 %lo)
-  %o = mul i64 %i, 2
-  %op0 = getelementptr i8, ptr %out, i64 %o
-  store i8 %hc, ptr %op0
-  %o1 = add i64 %o, 1
-  %op1 = getelementptr i8, ptr %out, i64 %o1
-  store i8 %lc, ptr %op1
-  %i2 = add i64 %i, 1
-  br label %loop
-fin:
-  %ep = getelementptr i8, ptr %out, i64 %outlen
-  store i8 0, ptr %ep
-  ret ptr %out
-}
-
-define {i1, i64, i64} @__vyrn_hex_decode(ptr %s) {
-entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
-  %odd = and i64 %len, 1
-  %isodd = icmp ne i64 %odd, 0
-  br i1 %isodd, label %none, label %ok0
-ok0:
-  %outlen = lshr i64 %len, 1
-  %sz = add i64 %outlen, 1
-  %out = call ptr @__vyrn_malloc(i64 %sz)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %ok0 ], [ %i2, %cont ]
-  %done = icmp uge i64 %i, %outlen
-  br i1 %done, label %valid, label %body
-body:
-  %hidx = mul i64 %i, 2
-  %lidx = add i64 %hidx, 1
-  %hip = getelementptr i8, ptr %s, i64 %hidx
-  %hc = load i8, ptr %hip
-  %lop = getelementptr i8, ptr %s, i64 %lidx
-  %lc = load i8, ptr %lop
-  %hv = call i32 @__vyrn_hexval(i8 %hc)
-  %lv = call i32 @__vyrn_hexval(i8 %lc)
-  %hbad = icmp slt i32 %hv, 0
-  %lbad = icmp slt i32 %lv, 0
-  %bad = or i1 %hbad, %lbad
-  br i1 %bad, label %none, label %cont
-cont:
-  %hv8 = trunc i32 %hv to i8
-  %lv8 = trunc i32 %lv to i8
-  %hsh = shl i8 %hv8, 4
-  %byte = or i8 %hsh, %lv8
-  %op = getelementptr i8, ptr %out, i64 %i
-  store i8 %byte, ptr %op
-  %i2 = add i64 %i, 1
-  br label %loop
-valid:
-  %ep = getelementptr i8, ptr %out, i64 %outlen
-  store i8 0, ptr %ep
-  %v = call i1 @__vyrn_utf8valid(ptr %out, i64 %outlen)
-  br i1 %v, label %some, label %none
-some:
-  %w0 = ptrtoint ptr %out to i64
-  %s0 = insertvalue {i1, i64, i64} undef, i1 1, 0
-  %s1 = insertvalue {i1, i64, i64} %s0, i64 %w0, 1
-  %s2 = insertvalue {i1, i64, i64} %s1, i64 0, 2
-  ret {i1, i64, i64} %s2
-none:
-  %n0 = insertvalue {i1, i64, i64} undef, i1 0, 0
-  %n1 = insertvalue {i1, i64, i64} %n0, i64 0, 1
-  %n2 = insertvalue {i1, i64, i64} %n1, i64 0, 2
-  ret {i1, i64, i64} %n2
-}
-
-define ptr @__vyrn_url_encode(ptr %s) {
-entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
-  %cap = mul i64 %len, 3
-  %sz = add i64 %cap, 1
-  %out = call ptr @__vyrn_malloc(i64 %sz)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %entry ], [ %i2, %cont ]
-  %o = phi i64 [ 0, %entry ], [ %o2, %cont ]
-  %done = icmp uge i64 %i, %len
-  br i1 %done, label %fin, label %body
-body:
-  %bp = getelementptr i8, ptr %s, i64 %i
-  %b = load i8, ptr %bp
-  %bz = zext i8 %b to i32
-  %alnum_l = icmp uge i32 %bz, 97
-  %alnum_lh = icmp ule i32 %bz, 122
-  %isl = and i1 %alnum_l, %alnum_lh
-  %alnum_u = icmp uge i32 %bz, 65
-  %alnum_uh = icmp ule i32 %bz, 90
-  %isu = and i1 %alnum_u, %alnum_uh
-  %dig_l = icmp uge i32 %bz, 48
-  %dig_h = icmp ule i32 %bz, 57
-  %isdig = and i1 %dig_l, %dig_h
-  %isdash = icmp eq i32 %bz, 45
-  %isund = icmp eq i32 %bz, 95
-  %isdot = icmp eq i32 %bz, 46
-  %istil = icmp eq i32 %bz, 126
-  %u1 = or i1 %isl, %isu
-  %u2 = or i1 %u1, %isdig
-  %u3 = or i1 %u2, %isdash
-  %u4 = or i1 %u3, %isund
-  %u5 = or i1 %u4, %isdot
-  %unres = or i1 %u5, %istil
-  br i1 %unres, label %plain, label %pct
-plain:
-  %pp = getelementptr i8, ptr %out, i64 %o
-  store i8 %b, ptr %pp
-  %op1 = add i64 %o, 1
-  br label %cont
-pct:
-  %hi = lshr i8 %b, 4
-  %lo = and i8 %b, 15
-  %hc = call i8 @__vyrn_hexdigit_uc(i8 %hi)
-  %lc = call i8 @__vyrn_hexdigit_uc(i8 %lo)
-  %p0 = getelementptr i8, ptr %out, i64 %o
-  store i8 37, ptr %p0
-  %o_1 = add i64 %o, 1
-  %p1 = getelementptr i8, ptr %out, i64 %o_1
-  store i8 %hc, ptr %p1
-  %o_2 = add i64 %o, 2
-  %p2 = getelementptr i8, ptr %out, i64 %o_2
-  store i8 %lc, ptr %p2
-  %op3 = add i64 %o, 3
-  br label %cont
-cont:
-  %o2 = phi i64 [ %op1, %plain ], [ %op3, %pct ]
-  %i2 = add i64 %i, 1
-  br label %loop
-fin:
-  %ep = getelementptr i8, ptr %out, i64 %o
-  store i8 0, ptr %ep
-  ret ptr %out
-}
-
-define {i1, i64, i64} @__vyrn_url_decode(ptr %s) {
-entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
-  %sz = add i64 %len, 1
-  %out = call ptr @__vyrn_malloc(i64 %sz)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %entry ], [ %inext, %cont ]
-  %o = phi i64 [ 0, %entry ], [ %onext, %cont ]
-  %done = icmp uge i64 %i, %len
-  br i1 %done, label %valid, label %body
-body:
-  %bp = getelementptr i8, ptr %s, i64 %i
-  %b = load i8, ptr %bp
-  %ispct = icmp eq i8 %b, 37
-  br i1 %ispct, label %pct, label %plain
-plain:
-  %pp = getelementptr i8, ptr %out, i64 %o
-  store i8 %b, ptr %pp
-  %o_p = add i64 %o, 1
-  %i_p = add i64 %i, 1
-  br label %cont
-pct:
-  %i1 = add i64 %i, 1
-  %i2 = add i64 %i, 2
-  %room = icmp ult i64 %i2, %len
-  br i1 %room, label %pctok, label %none
-pctok:
-  %hip = getelementptr i8, ptr %s, i64 %i1
-  %hc = load i8, ptr %hip
-  %lop = getelementptr i8, ptr %s, i64 %i2
-  %lc = load i8, ptr %lop
-  %hv = call i32 @__vyrn_hexval(i8 %hc)
-  %lv = call i32 @__vyrn_hexval(i8 %lc)
-  %hbad = icmp slt i32 %hv, 0
-  %lbad = icmp slt i32 %lv, 0
-  %bad = or i1 %hbad, %lbad
-  br i1 %bad, label %none, label %pctstore
-pctstore:
-  %hv8 = trunc i32 %hv to i8
-  %lv8 = trunc i32 %lv to i8
-  %hsh = shl i8 %hv8, 4
-  %byte = or i8 %hsh, %lv8
-  %pp2 = getelementptr i8, ptr %out, i64 %o
-  store i8 %byte, ptr %pp2
-  %o_pc = add i64 %o, 1
-  %i_pc = add i64 %i, 3
-  br label %cont
-cont:
-  %onext = phi i64 [ %o_p, %plain ], [ %o_pc, %pctstore ]
-  %inext = phi i64 [ %i_p, %plain ], [ %i_pc, %pctstore ]
-  br label %loop
-valid:
-  %ep = getelementptr i8, ptr %out, i64 %o
-  store i8 0, ptr %ep
-  %v = call i1 @__vyrn_utf8valid(ptr %out, i64 %o)
-  br i1 %v, label %some, label %none
-some:
-  %w0 = ptrtoint ptr %out to i64
-  %s0 = insertvalue {i1, i64, i64} undef, i1 1, 0
-  %s1 = insertvalue {i1, i64, i64} %s0, i64 %w0, 1
-  %s2 = insertvalue {i1, i64, i64} %s1, i64 0, 2
-  ret {i1, i64, i64} %s2
-none:
-  %n0 = insertvalue {i1, i64, i64} undef, i1 0, 0
-  %n1 = insertvalue {i1, i64, i64} %n0, i64 0, 1
-  %n2 = insertvalue {i1, i64, i64} %n1, i64 0, 2
-  ret {i1, i64, i64} %n2
-}
-
-define i8 @__vyrn_b64char(i64 %idx) {
-  %p = getelementptr i8, ptr @__vyrn_b64alpha, i64 %idx
-  %c = load i8, ptr %p
-  ret i8 %c
-}
-
-define ptr @__vyrn_b64_encode(ptr %s) {
-entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
-  %p2 = add i64 %len, 2
-  %grp = udiv i64 %p2, 3
-  %outlen = mul i64 %grp, 4
-  %sz = add i64 %outlen, 1
-  %out = call ptr @__vyrn_malloc(i64 %sz)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %entry ], [ %i3, %body ]
-  %o = phi i64 [ 0, %entry ], [ %o4, %body ]
-  %rem = sub i64 %len, %i
-  %has3 = icmp uge i64 %rem, 3
-  br i1 %has3, label %body, label %tail
-body:
-  %b0p = getelementptr i8, ptr %s, i64 %i
-  %b0 = load i8, ptr %b0p
-  %i1 = add i64 %i, 1
-  %b1p = getelementptr i8, ptr %s, i64 %i1
-  %b1 = load i8, ptr %b1p
-  %i2 = add i64 %i, 2
-  %b2p = getelementptr i8, ptr %s, i64 %i2
-  %b2 = load i8, ptr %b2p
-  %z0 = zext i8 %b0 to i64
-  %z1 = zext i8 %b1 to i64
-  %z2 = zext i8 %b2 to i64
-  %s0 = shl i64 %z0, 16
-  %s1 = shl i64 %z1, 8
-  %n01 = or i64 %s0, %s1
-  %n = or i64 %n01, %z2
-  %d0 = lshr i64 %n, 18
-  %d0m = and i64 %d0, 63
-  %d1 = lshr i64 %n, 12
-  %d1m = and i64 %d1, 63
-  %d2 = lshr i64 %n, 6
-  %d2m = and i64 %d2, 63
-  %d3m = and i64 %n, 63
-  %c0 = call i8 @__vyrn_b64char(i64 %d0m)
-  %c1 = call i8 @__vyrn_b64char(i64 %d1m)
-  %c2 = call i8 @__vyrn_b64char(i64 %d2m)
-  %c3 = call i8 @__vyrn_b64char(i64 %d3m)
-  %o0p = getelementptr i8, ptr %out, i64 %o
-  store i8 %c0, ptr %o0p
-  %oo1 = add i64 %o, 1
-  %o1p = getelementptr i8, ptr %out, i64 %oo1
-  store i8 %c1, ptr %o1p
-  %oo2 = add i64 %o, 2
-  %o2p = getelementptr i8, ptr %out, i64 %oo2
-  store i8 %c2, ptr %o2p
-  %oo3 = add i64 %o, 3
-  %o3p = getelementptr i8, ptr %out, i64 %oo3
-  store i8 %c3, ptr %o3p
-  %i3 = add i64 %i, 3
-  %o4 = add i64 %o, 4
-  br label %loop
-tail:
-  %is1 = icmp eq i64 %rem, 1
-  br i1 %is1, label %one, label %tail2
-one:
-  %t0p = getelementptr i8, ptr %s, i64 %i
-  %t0 = load i8, ptr %t0p
-  %tz0 = zext i8 %t0 to i64
-  %tn = shl i64 %tz0, 16
-  %e0 = lshr i64 %tn, 18
-  %e0m = and i64 %e0, 63
-  %e1 = lshr i64 %tn, 12
-  %e1m = and i64 %e1, 63
-  %ec0 = call i8 @__vyrn_b64char(i64 %e0m)
-  %ec1 = call i8 @__vyrn_b64char(i64 %e1m)
-  %e0p = getelementptr i8, ptr %out, i64 %o
-  store i8 %ec0, ptr %e0p
-  %eo1 = add i64 %o, 1
-  %e1p = getelementptr i8, ptr %out, i64 %eo1
-  store i8 %ec1, ptr %e1p
-  %eo2 = add i64 %o, 2
-  %e2p = getelementptr i8, ptr %out, i64 %eo2
-  store i8 61, ptr %e2p
-  %eo3 = add i64 %o, 3
-  %e3p = getelementptr i8, ptr %out, i64 %eo3
-  store i8 61, ptr %e3p
-  br label %fin
-tail2:
-  %is2 = icmp eq i64 %rem, 2
-  br i1 %is2, label %two, label %fin
-two:
-  %f0p = getelementptr i8, ptr %s, i64 %i
-  %f0 = load i8, ptr %f0p
-  %fi1 = add i64 %i, 1
-  %f1p = getelementptr i8, ptr %s, i64 %fi1
-  %f1 = load i8, ptr %f1p
-  %fz0 = zext i8 %f0 to i64
-  %fz1 = zext i8 %f1 to i64
-  %fs0 = shl i64 %fz0, 16
-  %fs1 = shl i64 %fz1, 8
-  %fn = or i64 %fs0, %fs1
-  %g0 = lshr i64 %fn, 18
-  %g0m = and i64 %g0, 63
-  %g1 = lshr i64 %fn, 12
-  %g1m = and i64 %g1, 63
-  %g2 = lshr i64 %fn, 6
-  %g2m = and i64 %g2, 63
-  %gc0 = call i8 @__vyrn_b64char(i64 %g0m)
-  %gc1 = call i8 @__vyrn_b64char(i64 %g1m)
-  %gc2 = call i8 @__vyrn_b64char(i64 %g2m)
-  %g0p = getelementptr i8, ptr %out, i64 %o
-  store i8 %gc0, ptr %g0p
-  %go1 = add i64 %o, 1
-  %g1p = getelementptr i8, ptr %out, i64 %go1
-  store i8 %gc1, ptr %g1p
-  %go2 = add i64 %o, 2
-  %g2p = getelementptr i8, ptr %out, i64 %go2
-  store i8 %gc2, ptr %g2p
-  %go3 = add i64 %o, 3
-  %g3p = getelementptr i8, ptr %out, i64 %go3
-  store i8 61, ptr %g3p
-  br label %fin
-fin:
-  %ep = getelementptr i8, ptr %out, i64 %outlen
-  store i8 0, ptr %ep
-  ret ptr %out
-}
-
-define i32 @__vyrn_b64val(i8 %c) {
-  %cz = zext i8 %c to i32
-  %ua = icmp uge i32 %cz, 65
-  %uz = icmp ule i32 %cz, 90
-  %isu = and i1 %ua, %uz
-  %la = icmp uge i32 %cz, 97
-  %lz = icmp ule i32 %cz, 122
-  %isl = and i1 %la, %lz
-  %da = icmp uge i32 %cz, 48
-  %dz = icmp ule i32 %cz, 57
-  %isd = and i1 %da, %dz
-  %isp = icmp eq i32 %cz, 43
-  %iss = icmp eq i32 %cz, 47
-  %vu = sub i32 %cz, 65
-  %vl = sub i32 %cz, 71
-  %vd = add i32 %cz, 4
-  %r1 = select i1 %isu, i32 %vu, i32 -1
-  %r2 = select i1 %isl, i32 %vl, i32 %r1
-  %r3 = select i1 %isd, i32 %vd, i32 %r2
-  %r4 = select i1 %isp, i32 62, i32 %r3
-  %r5 = select i1 %iss, i32 63, i32 %r4
-  ret i32 %r5
-}
-
-define {i1, i64, i64} @__vyrn_b64_decode(ptr %s) {
-entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
-  %m4 = and i64 %len, 3
-  %notmul4 = icmp ne i64 %m4, 0
-  %empty = icmp eq i64 %len, 0
-  br i1 %notmul4, label %none, label %ok0
-ok0:
-  %cap = mul i64 %len, 1
-  %sz = add i64 %cap, 1
-  %out = call ptr @__vyrn_malloc(i64 %sz)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %ok0 ], [ %i4, %store ]
-  %o = phi i64 [ 0, %ok0 ], [ %onext, %store ]
-  %done = icmp uge i64 %i, %len
-  br i1 %done, label %valid, label %body
-body:
-  %c0p = getelementptr i8, ptr %s, i64 %i
-  %c0 = load i8, ptr %c0p
-  %ci1 = add i64 %i, 1
-  %c1p = getelementptr i8, ptr %s, i64 %ci1
-  %c1 = load i8, ptr %c1p
-  %ci2 = add i64 %i, 2
-  %c2p = getelementptr i8, ptr %s, i64 %ci2
-  %c2 = load i8, ptr %c2p
-  %ci3 = add i64 %i, 3
-  %c3p = getelementptr i8, ptr %s, i64 %ci3
-  %c3 = load i8, ptr %c3p
-  %isLast4 = add i64 %i, 4
-  %islast = icmp eq i64 %isLast4, %len
-  %pad2 = icmp eq i8 %c2, 61
-  %pad3 = icmp eq i8 %c3, 61
-  %anypad = or i1 %pad2, %pad3
-  %padnotlast = and i1 %anypad, %islast
-  %padbad1 = xor i1 %islast, true
-  %badpadpos = and i1 %anypad, %padbad1
-  br i1 %badpadpos, label %none, label %chkpad
-chkpad:
-  %pad2only = and i1 %pad2, %pad3
-  %pad2butnot3 = xor i1 %pad3, true
-  %illegal = and i1 %pad2, %pad2butnot3
-  br i1 %illegal, label %none, label %vals
-vals:
-  %v0 = call i32 @__vyrn_b64val(i8 %c0)
-  %v1 = call i32 @__vyrn_b64val(i8 %c1)
-  %v2raw = call i32 @__vyrn_b64val(i8 %c2)
-  %v3raw = call i32 @__vyrn_b64val(i8 %c3)
-  %v2 = select i1 %pad2, i32 0, i32 %v2raw
-  %v3 = select i1 %pad3, i32 0, i32 %v3raw
-  %b0bad = icmp slt i32 %v0, 0
-  %b1bad = icmp slt i32 %v1, 0
-  %b2bad = icmp slt i32 %v2, 0
-  %b3bad = icmp slt i32 %v3, 0
-  %e01 = or i1 %b0bad, %b1bad
-  %e23 = or i1 %b2bad, %b3bad
-  %anybad = or i1 %e01, %e23
-  br i1 %anybad, label %none, label %store
-store:
-  %z0 = zext i32 %v0 to i64
-  %z1 = zext i32 %v1 to i64
-  %z2 = zext i32 %v2 to i64
-  %z3 = zext i32 %v3 to i64
-  %sh0 = shl i64 %z0, 18
-  %sh1 = shl i64 %z1, 12
-  %sh2 = shl i64 %z2, 6
-  %n01 = or i64 %sh0, %sh1
-  %n012 = or i64 %n01, %sh2
-  %n = or i64 %n012, %z3
-  %ob0 = lshr i64 %n, 16
-  %ob0t = trunc i64 %ob0 to i8
-  %op0 = getelementptr i8, ptr %out, i64 %o
-  store i8 %ob0t, ptr %op0
-  %o1 = add i64 %o, 1
-  %ob1 = lshr i64 %n, 8
-  %ob1t = trunc i64 %ob1 to i8
-  %op1 = getelementptr i8, ptr %out, i64 %o1
-  store i8 %ob1t, ptr %op1
-  %o2 = add i64 %o, 2
-  %ob2t = trunc i64 %n to i8
-  %op2 = getelementptr i8, ptr %out, i64 %o2
-  store i8 %ob2t, ptr %op2
-  %keep1 = xor i1 %pad3, true
-  %keep1n = zext i1 %keep1 to i64
-  %keep2 = xor i1 %pad2, true
-  %keep2n = zext i1 %keep2 to i64
-  %oplus = add i64 %o, 1
-  %oplus2 = add i64 %oplus, %keep1n
-  %onext = add i64 %oplus2, %keep2n
-  %i4 = add i64 %i, 4
-  br label %loop
-valid:
-  %ep = getelementptr i8, ptr %out, i64 %o
-  store i8 0, ptr %ep
-  %v = call i1 @__vyrn_utf8valid(ptr %out, i64 %o)
-  br i1 %v, label %some, label %none
-some:
-  %w0 = ptrtoint ptr %out to i64
-  %s0 = insertvalue {i1, i64, i64} undef, i1 1, 0
-  %s1 = insertvalue {i1, i64, i64} %s0, i64 %w0, 1
-  %s2 = insertvalue {i1, i64, i64} %s1, i64 0, 2
-  ret {i1, i64, i64} %s2
-none:
-  %n0 = insertvalue {i1, i64, i64} undef, i1 0, 0
-  %n1 = insertvalue {i1, i64, i64} %n0, i64 0, 1
-  %n2 = insertvalue {i1, i64, i64} %n1, i64 0, 2
-  ret {i1, i64, i64} %n2
-}
-
 ";
 
-/// `bytes(s)` / `chars(s)`: build an `Array<UInt8>` ({ptr,len,cap}, i8 stride —
-/// RFC-0014 M2) of a string's raw UTF-8 bytes, or an `Array<Int>` of its decoded
-/// Unicode code points (a two-pass UTF-8 decode — count leaders, then decode
-/// each 1–4 byte sequence).
+/// `bytes(s)`: an `Array<UInt8>` ({ptr,len,cap}, i8 stride — RFC-0014 M2) of a
+/// string's raw UTF-8 bytes. The VIEW every Vyrn string routine is written on, and
+/// irreducible for that reason (RFC-0078 M4a's category).
+///
+/// `chars(s)` shared this block until RFC-0078 M4c: its two-pass decoder was 82
+/// lines of IR and is now `std/text`'s `decodeUtf8`.
 const STRING_RUNTIME: &str = "\
 define {ptr, i64, i64} @__vyrn_str_bytes(ptr %s) {
 entry:
@@ -792,88 +277,6 @@ body:
   br label %loop
 ret:
   ret void
-}
-
-define {ptr, i64, i64} @__vyrn_str_chars(ptr %s) {
-entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
-  br label %cloop
-cloop:
-  %ci = phi i64 [ 0, %entry ], [ %ci2, %cbody ]
-  %cn = phi i64 [ 0, %entry ], [ %cn2, %cbody ]
-  %cdone = icmp uge i64 %ci, %len
-  br i1 %cdone, label %alloc, label %cbody
-cbody:
-  %cbp = getelementptr i8, ptr %s, i64 %ci
-  %cb = load i8, ptr %cbp
-  %cmask = and i8 %cb, -64
-  %iscont = icmp eq i8 %cmask, -128
-  %inc = select i1 %iscont, i64 0, i64 1
-  %cn2 = add i64 %cn, %inc
-  %ci2 = add i64 %ci, 1
-  br label %cloop
-alloc:
-  %sz = mul i64 %cn, 8
-  %data = call ptr @__vyrn_malloc(i64 %sz)
-  br label %dloop
-dloop:
-  %di = phi i64 [ 0, %alloc ], [ %di2, %store ]
-  %dj = phi i64 [ 0, %alloc ], [ %dj2, %store ]
-  %ddone = icmp uge i64 %di, %len
-  br i1 %ddone, label %ret, label %dbody
-dbody:
-  %b0p = getelementptr i8, ptr %s, i64 %di
-  %b0 = load i8, ptr %b0p
-  %b0z = zext i8 %b0 to i64
-  %c1 = icmp ult i64 %b0z, 128
-  br i1 %c1, label %L1, label %m2
-L1:
-  br label %have
-m2:
-  %c2 = icmp ult i64 %b0z, 224
-  br i1 %c2, label %L2, label %m3
-L2:
-  %cp2 = and i64 %b0z, 31
-  br label %have
-m3:
-  %c3 = icmp ult i64 %b0z, 240
-  br i1 %c3, label %L3, label %L4
-L3:
-  %cp3 = and i64 %b0z, 15
-  br label %have
-L4:
-  %cp4 = and i64 %b0z, 7
-  br label %have
-have:
-  %L = phi i64 [ 1, %L1 ], [ 2, %L2 ], [ 3, %L3 ], [ 4, %L4 ]
-  %cp0 = phi i64 [ %b0z, %L1 ], [ %cp2, %L2 ], [ %cp3, %L3 ], [ %cp4, %L4 ]
-  br label %kloop
-kloop:
-  %k = phi i64 [ 1, %have ], [ %k2, %kbody ]
-  %cp = phi i64 [ %cp0, %have ], [ %cpn, %kbody ]
-  %kdone = icmp uge i64 %k, %L
-  br i1 %kdone, label %store, label %kbody
-kbody:
-  %ki = add i64 %di, %k
-  %kp = getelementptr i8, ptr %s, i64 %ki
-  %kb = load i8, ptr %kp
-  %kbz = zext i8 %kb to i64
-  %kbits = and i64 %kbz, 63
-  %cpsh = shl i64 %cp, 6
-  %cpn = or i64 %cpsh, %kbits
-  %k2 = add i64 %k, 1
-  br label %kloop
-store:
-  %dp = getelementptr i64, ptr %data, i64 %dj
-  store i64 %cp, ptr %dp
-  %dj2 = add i64 %dj, 1
-  %di2 = add i64 %di, %L
-  br label %dloop
-ret:
-  %r0 = insertvalue {ptr, i64, i64} undef, ptr %data, 0
-  %r1 = insertvalue {ptr, i64, i64} %r0, i64 %cn, 1
-  %r2 = insertvalue {ptr, i64, i64} %r1, i64 %cn, 2
-  ret {ptr, i64, i64} %r2
 }
 
 ";
@@ -1233,8 +636,9 @@ fn emit_with(program: &Program, gen_host: bool) -> Result<String, String> {
     // matching the interpreter.
     out.push_str("declare void @exit(i32)\n");
     out.push_str("declare i32 @strcmp(ptr, ptr)\n");
-    out.push_str("declare i32 @__vyrn_strncmp(ptr, ptr, i64)\n");
-    out.push_str("declare ptr @strstr(ptr, ptr)\n");
+    // (`declare i32 @__vyrn_strncmp` and `declare ptr @strstr` went with the string
+    // predicates — RFC-0078 M4c. Neither had another caller, so the shim lost an
+    // exported function and the boundary lost two declarations.)
     // Heap + string runtime (dynamic strings). Allocations are not yet freed —
     // the reclamation strategy is RFC-0004's open question.
     out.push_str("declare i64 @__vyrn_strlen(ptr)\n");
@@ -1434,16 +838,14 @@ fn emit_with(program: &Program, gen_host: bool) -> Result<String, String> {
     // generation check instead of dangling.
     out.push_str(CELL_RUNTIME);
     out.push_str(STRING_RUNTIME);
-    // Encoding tables + runtime (hex/base64/url + the UTF-8 validator DFA).
+    // The UTF-8 validator DFA table, then the validator. (The base64 alphabet
+    // table went with the codecs -- RFC-0078 M4c; `std/codecs` builds it from a
+    // string literal instead.)
     let utf8d = utf8d_table();
     let table_body = utf8d.iter().map(|b| format!("i8 {b}")).collect::<Vec<_>>().join(", ");
     out.push_str(&format!(
         "@__vyrn_utf8d = private unnamed_addr constant [364 x i8] [{table_body}]\n"
     ));
-    out.push_str(
-        "@__vyrn_b64alpha = private unnamed_addr constant [64 x i8] \
-         c\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\"\n",
-    );
     out.push_str(ENCODING_RUNTIME);
     out.push_str(REGEX_RUNTIME);
     // `%lld\n` for i64 — `%ld` would be 32-bit under the Windows/MSVC ABI where
@@ -6051,6 +5453,22 @@ impl<'a> Gen<'a> {
     }
 
     fn gen_call(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
+        // RFC-0078 M4c: a builtin whose implementation IS a Vyrn function lowers as
+        // a call to it. The loader injected the module (reserved `$` spellings, so
+        // nothing can collide with or capture them) and this emitter holds no
+        // implementation of its own — the ~520 lines of hand-written IR the six
+        // codecs used to need are gone, and so is the UTF-8 decoder `chars` had.
+        if let Some(rt) = vyrn_frontend::loader::routed_builtin(name) {
+            if !self.funcs.contains_key(rt) {
+                // Loudly, and naming the reason — the same refusal `toJson` makes
+                // when its serializer is not in the link (RFC-0078 M2b).
+                return Err(format!(
+                    "`{name}` is implemented in Vyrn (`{rt}`) and its module is not in the link \
+                     — a std root is needed to compile a call to it"
+                ));
+            }
+            return self.gen_call(rt, args);
+        }
         // Calling a `fn`-typed parameter inside a specialized instance (RFC-0023):
         // a direct call to the monomorphized target with the captured values (this
         // instance's own extra parameters) prepended. No function pointer exists.
@@ -6306,19 +5724,9 @@ impl<'a> Gen<'a> {
 
         // (`len(String)` was removed; a String's byte length is the `.length`
         // field, lowered at `Expr::Field` via `@__vyrn_strlen`.)
-        // Text encodings. Encoders return a fresh String; decoders return the
-        // Option<String> aggregate (runtime helpers do the work + UTF-8 checking).
-        if matches!(name, "hexEncode" | "base64Encode" | "urlEncode") {
-            let (v, _) = self.gen_expr(&args[0])?;
-            let helper = match name {
-                "hexEncode" => "@__vyrn_hex_encode",
-                "base64Encode" => "@__vyrn_b64_encode",
-                _ => "@__vyrn_url_encode",
-            };
-            let t = self.fresh_tmp();
-            self.emit(format!("{t} = call ptr {helper}(ptr {v})"));
-            return Ok((t, Type::Str));
-        }
+        // (The six text encodings are `std/codecs` — RFC-0078 M4c. They were the
+        // only builtins with no C shim at all: ~520 lines of hand-written IR here,
+        // routed above and deleted from `ENCODING_RUNTIME`.)
         // The IEEE-754 bit views (RFC-0078 M4a): a `bitcast`, which costs no
         // instruction at all — the value is already in the right 64 bits and
         // only the register class changes.
@@ -6333,24 +5741,13 @@ impl<'a> Gen<'a> {
             self.emit(format!("{t} = bitcast {fll} {v} to {tll}"));
             return Ok((t, ty));
         }
-        if matches!(name, "hexDecode" | "base64Decode" | "urlDecode") {
+        // bytes(s): a string's raw UTF-8 bytes as an Array<UInt8> (i8 stride —
+        // RFC-0014 M2). The VIEW, which is irreducible: `std/codecs`, `std/text`
+        // and `std/strpred` are all written on it. (`chars` used to share this arm
+        // and is now `std/text`'s `charsV` — RFC-0078 M4c.)
+        if matches!(name, "bytes") {
             let (v, _) = self.gen_expr(&args[0])?;
-            let helper = match name {
-                "hexDecode" => "@__vyrn_hex_decode",
-                "base64Decode" => "@__vyrn_b64_decode",
-                _ => "@__vyrn_url_decode",
-            };
-            let t = self.fresh_tmp();
-            self.emit(format!("{t} = call {{ i1, i64, i64 }} {helper}(ptr {v})"));
-            return Ok((t, Type::Option(Box::new(Type::Str))));
-        }
-        // bytes(s) / chars(s): decode a string into an Array<UInt8> of bytes
-        // (i8 stride — RFC-0014 M2) or an Array<Int> of Unicode code points
-        // (runtime helpers do the UTF-8 work).
-        if matches!(name, "bytes" | "chars") {
-            let (v, _) = self.gen_expr(&args[0])?;
-            let helper =
-                if name == "bytes" { "@__vyrn_str_bytes" } else { "@__vyrn_str_chars" };
+            let helper = "@__vyrn_str_bytes";
             let t = self.fresh_tmp();
             self.emit(format!("{t} = call {{ ptr, i64, i64 }} {helper}(ptr {v})"));
             let elem = if name == "bytes" {
@@ -6921,60 +6318,9 @@ impl<'a> Gen<'a> {
             self.emit(format!("{n} = call i64 @__vyrn_charcount(ptr {s})"));
             return Ok((n, Type::Int));
         }
-        // contains(a, b): strstr(a, b) != null.
-        if name == "contains" {
-            let (a, _) = self.gen_expr(&args[0])?;
-            let (b, _) = self.gen_expr(&args[1])?;
-            let p = self.fresh_tmp();
-            let r = self.fresh_tmp();
-            self.emit(format!("{p} = call ptr @strstr(ptr {a}, ptr {b})"));
-            self.emit(format!("{r} = icmp ne ptr {p}, null"));
-            return Ok((r, Type::Bool));
-        }
-        // startsWith(a, b): strncmp(a, b, strlen(b)) == 0.
-        if name == "startsWith" {
-            let (a, _) = self.gen_expr(&args[0])?;
-            let (b, _) = self.gen_expr(&args[1])?;
-            let lb = self.fresh_tmp();
-            let c = self.fresh_tmp();
-            let r = self.fresh_tmp();
-            self.emit(format!("{lb} = call i64 @__vyrn_strlen(ptr {b})"));
-            self.emit(format!("{c} = call i32 @__vyrn_strncmp(ptr {a}, ptr {b}, i64 {lb})"));
-            self.emit(format!("{r} = icmp eq i32 {c}, 0"));
-            return Ok((r, Type::Bool));
-        }
-        // endsWith(a, b): b fits in a AND strncmp(a + (|a|-|b|), b, |b|) == 0.
-        if name == "endsWith" {
-            let (a, _) = self.gen_expr(&args[0])?;
-            let (b, _) = self.gen_expr(&args[1])?;
-            let la = self.fresh_tmp();
-            let lb = self.fresh_tmp();
-            self.emit(format!("{la} = call i64 @__vyrn_strlen(ptr {a})"));
-            self.emit(format!("{lb} = call i64 @__vyrn_strlen(ptr {b})"));
-            let fits = self.fresh_tmp();
-            self.emit(format!("{fits} = icmp uge i64 {la}, {lb}"));
-            let cmp_l = self.fresh_label("ew.cmp");
-            let no_l = self.fresh_label("ew.no");
-            let end_l = self.fresh_label("ew.end");
-            self.emit_term(format!("br i1 {fits}, label %{cmp_l}, label %{no_l}"));
-            self.emit_label(&cmp_l);
-            let off = self.fresh_tmp();
-            let p = self.fresh_tmp();
-            let c = self.fresh_tmp();
-            let eq = self.fresh_tmp();
-            self.emit(format!("{off} = sub i64 {la}, {lb}"));
-            self.emit(format!("{p} = getelementptr i8, ptr {a}, i64 {off}"));
-            self.emit(format!("{c} = call i32 @__vyrn_strncmp(ptr {p}, ptr {b}, i64 {lb})"));
-            self.emit(format!("{eq} = icmp eq i32 {c}, 0"));
-            let cmp_end = self.cur_block.clone();
-            self.emit_term(format!("br label %{end_l}"));
-            self.emit_label(&no_l);
-            self.emit_term(format!("br label %{end_l}"));
-            self.emit_label(&end_l);
-            let r = self.fresh_tmp();
-            self.emit(format!("{r} = phi i1 [ {eq}, %{cmp_end} ], [ false, %{no_l} ]"));
-            return Ok((r, Type::Bool));
-        }
+        // (`contains`, `startsWith` and `endsWith` are `std/strpred` — RFC-0078
+        // M4c. They were `strstr` and two `strncmp` shapes here, ~50 lines with a
+        // `phi` in one of them, and are now routed at the top of `gen_call`.)
         // slice(s, start, end) -> String (RFC-0046): the byte-range substring.
         // Validated O(1) — no whole-slice UTF-8 revalidation: bounds are checked,
         // then the single byte at each cut point must not be a UTF-8 continuation
@@ -11425,37 +10771,71 @@ mod tests {
         assert!(exit_calls(&ir) > exit_baseline(), "slice emits runtime traps: {ir}");
     }
 
+    /// RFC-0078 M4c: the three tests that used to pin `@__vyrn_hex_encode`,
+    /// `@__vyrn_str_chars` and `@strstr` are gone with the lowerings they pinned.
+    /// What replaces them is the refusal, because these `check(source)` helpers take
+    /// a bare source with no resolver and therefore have no runtime module to link —
+    /// the seam M2b named for `toJson`, now shared by ten more builtins.
+    ///
+    /// Loudly rather than silently: an emitter that dropped the call, or emitted one
+    /// to a function nobody defines, is the failure mode this pins against.
     #[test]
-    fn encodings_lower_to_runtime() {
-        let ir = emit(&check("fn main() -> Int64 { \
-            let a = hexEncode(\"x\"); let b = base64Encode(\"x\"); let c = urlEncode(\"x\"); \
-            let d = hexDecode(\"41\"); return 0; }").unwrap()).unwrap();
-        assert!(ir.contains("call ptr @__vyrn_hex_encode"), "hexEncode: {ir}");
-        assert!(ir.contains("call ptr @__vyrn_b64_encode"), "base64Encode: {ir}");
-        assert!(ir.contains("call ptr @__vyrn_url_encode"), "urlEncode: {ir}");
-        assert!(ir.contains("call { i1, i64, i64 } @__vyrn_hex_decode"), "hexDecode: {ir}");
-        // The strict UTF-8 validator DFA + its 364-byte table are present.
+    fn a_routed_builtin_without_its_module_refuses_by_name() {
+        for (src, builtin, reserved) in [
+            (
+                "fn main() -> Int64 { let a = hexEncode(\"x\"); return 0 }",
+                "hexEncode",
+                "codecs$hexEncodeV",
+            ),
+            (
+                "fn main() -> Int64 { let a = base64Decode(\"QQ==\"); return 0 }",
+                "base64Decode",
+                "codecs$base64DecodeV",
+            ),
+            ("fn main() -> Int64 { return chars(\"hi\").length }", "chars", "text$charsV"),
+            (
+                "fn f(s: String) -> Bool { return contains(s, \"x\") } \
+                 fn main() -> Int64 { return 0 }",
+                "contains",
+                "strpred$containsV",
+            ),
+            (
+                "fn f(s: String) -> Bool { return endsWith(s, \"x\") } \
+                 fn main() -> Int64 { return 0 }",
+                "endsWith",
+                "strpred$endsWithV",
+            ),
+        ] {
+            let e = emit(&check(src).unwrap()).unwrap_err();
+            assert!(e.contains(builtin) && e.contains(reserved), "{builtin}: {e}");
+        }
+    }
+
+    /// `bytes` did NOT move, and neither did the UTF-8 validator it shares with
+    /// `stringFromBytes` — both are the irreducible VIEW the Vyrn implementations are
+    /// written on, so both are still emitted. The codecs' own IR, by contrast, is
+    /// gone from the module rather than merely unreferenced.
+    #[test]
+    fn the_byte_view_and_the_validator_stay_in_the_runtime() {
+        let ir =
+            emit(&check("fn main() -> Int64 { return bytes(\"hi\").length }").unwrap()).unwrap();
+        assert!(ir.contains("call { ptr, i64, i64 } @__vyrn_str_bytes"), "bytes → helper: {ir}");
+        assert!(ir.contains("@__vyrn_str_bytes(ptr %s)"), "helper emitted: {ir}");
         assert!(ir.contains("@__vyrn_utf8valid"), "validator: {ir}");
         assert!(ir.contains("@__vyrn_utf8d = private"), "DFA table: {ir}");
-    }
-
-    #[test]
-    fn chars_and_bytes_lower_to_runtime() {
-        let ir = emit(&check("fn main() -> Int64 { return chars(\"hi\").length + bytes(\"hi\").length; }").unwrap()).unwrap();
-        assert!(ir.contains("call { ptr, i64, i64 } @__vyrn_str_chars"), "chars → decoder: {ir}");
-        assert!(ir.contains("call { ptr, i64, i64 } @__vyrn_str_bytes"), "bytes → helper: {ir}");
-        // The UTF-8 decoder is defined in the module.
-        assert!(ir.contains("@__vyrn_str_chars(ptr %s)"), "decoder emitted: {ir}");
-    }
-
-    #[test]
-    fn string_methods_lower_to_libc() {
-        let c = emit(&check("fn f(s: String) -> Bool { return contains(s, \"x\"); } \
-                             fn main() -> Int64 { return 0; }").unwrap()).unwrap();
-        assert!(c.contains("call ptr @strstr"), "contains → strstr: {c}");
-        let s = emit(&check("fn f(s: String) -> Bool { return startsWith(s, \"x\"); } \
-                             fn main() -> Int64 { return 0; }").unwrap()).unwrap();
-        assert!(s.contains("call i32 @__vyrn_strncmp"), "startsWith → strncmp: {s}");
+        for dead in [
+            "@__vyrn_hex_encode",
+            "@__vyrn_b64_encode",
+            "@__vyrn_url_encode",
+            "@__vyrn_hex_decode",
+            "@__vyrn_hexdigit",
+            "@__vyrn_hexval",
+            "@__vyrn_b64alpha",
+            "@__vyrn_str_chars",
+            "@strstr",
+        ] {
+            assert!(!ir.contains(dead), "`{dead}` should have gone with M4c: {ir}");
+        }
     }
 
     #[test]

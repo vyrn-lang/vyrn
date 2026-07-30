@@ -1,25 +1,28 @@
-//! The string tier's equivalence proof (RFC-0078 M4b).
+//! The string tier (RFC-0078 M4b(3), converted by M4c).
 //!
 //! `std/strpred` writes `contains`, `startsWith`, `endsWith`, `slice` and
-//! `byteLength` — five builtins with three implementations each — as ordinary
-//! Vyrn on the byte view. Nothing is swapped yet, which is exactly why this
-//! exists: equivalence has to be proved BEFORE a deletion, or the test ends up
-//! describing whatever the new code happens to do.
+//! `byteLength` as ordinary Vyrn on the byte view. **Three of the five moved and
+//! two did not**, which is what this file's shape now reflects:
 //!
-//! The oracle is the builtin itself. `examples/strpredbytes.vyrn` calls both in
-//! the same program over the surface where two substring searches can differ, and
-//! its `test` blocks assert they agree — parity already runs the example's `main`
-//! (so interp == native == wasm is covered), but nothing else in the suite runs an
-//! example's `test` blocks, so without the first row here the assertions are
-//! decoration.
+//! - `contains` / `startsWith` / `endsWith` are routed into the module, so the
+//!   example's rows are **literals** captured from the C and Rust implementations
+//!   before the swap. A test that still said "the two agree" would compare a
+//!   function with itself.
+//! - `slice` **traps** and Vyrn has no expression that aborts, so `sliceV` returns
+//!   `Option<String>` and swapping would change observable behaviour. `byteLength`
+//!   is a VIEW (`strlen`) that folds at compile time inside refinement predicates.
+//!   Both stayed builtins, so both keep a live oracle — the example prints the
+//!   builtin's answer beside the Vyrn one and asserts they agree.
 //!
-//! The rest of the file covers the one thing a single program cannot: `slice`
-//! **traps**, and a trap ends the process. `sliceV` returns `Option<String>`
-//! instead, because Vyrn has no expression that aborts with a message. That makes
-//! "`None` exactly where the builtin traps" the property to check, and it needs
-//! one process per case — each program prints `sliceV`'s answer to stdout and THEN
-//! calls the builtin on the same range, so a single run pins both halves of the
-//! pairing and the canonical wording with it.
+//! `examples/strpredbytes.vyrn` holds all of that; parity runs its `main` on the
+//! three engines, but nothing else in the suite runs an example's `test` blocks, so
+//! without the first row here they are decoration.
+//!
+//! The rest of the file covers the one thing a single program cannot: a trap ends
+//! the process. "`None` exactly where the builtin traps" needs one process per case
+//! — each program prints `sliceV`'s answer to stdout and THEN calls the builtin on
+//! the same range, so a single run pins both halves of the pairing and the
+//! canonical wording with it. Untouched by M4c: `slice` did not move.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,12 +40,15 @@ fn norm(bytes: &[u8]) -> String {
 }
 
 #[test]
-fn string_predicate_equivalence_pins_hold() {
+fn string_predicate_pins_hold() {
     let module = repo_file("examples/strpredbytes.vyrn");
     let out = vyrn().arg("test").arg(&module).output().expect("vyrn test");
     let combined = norm(&out.stdout) + &norm(&out.stderr);
     assert!(out.status.success(), "strpredbytes unit tests failed:\n{combined}");
-    assert!(combined.contains("5 passed, 0 failed"), "expected 5 green:\n{combined}");
+    // Four, not five: M4c deleted the `predsAgree` block, which after the routing
+    // asserted that a function equals itself over twenty inputs. Its rows became
+    // the literal table in the block that replaced it.
+    assert!(combined.contains("4 passed, 0 failed"), "expected 4 green:\n{combined}");
 }
 
 /// One case: `sliceV` must print `None` and the builtin must then trap with

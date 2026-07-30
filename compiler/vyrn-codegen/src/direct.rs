@@ -2297,6 +2297,19 @@ impl Fn_<'_> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
+        // RFC-0078 M4c: a builtin whose implementation IS a Vyrn function needs no
+        // lowering here at all — it is a call to the reserved spelling the loader
+        // injected. This backend had no lowering for any of the ten (the six
+        // codecs, `chars`, and the three string predicates), so routing them is the
+        // RFC-0077 relationship in its cleanest form: ten rows that would each have
+        // to be hand-emitted become a library this backend already compiles.
+        if let Some(rt) = vyrn_frontend::loader::routed_builtin(name) {
+            if self.cx.sigs.contains_key(rt) {
+                return self.call(m, b, rt, args, line);
+            }
+            // Otherwise fall through to `unsupported("the call \`{name}\`")` below,
+            // which is this backend's own wording for something it cannot reach.
+        }
         match name {
             "print" => {
                 if args.len() != 1 {

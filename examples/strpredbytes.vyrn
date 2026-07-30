@@ -1,18 +1,19 @@
-/// The string predicates and `slice`, proved against themselves (RFC-0078 M4b).
+/// The string predicates and `slice` (RFC-0078 M4b(3), converted by M4c).
 ///
-/// `contains`, `startsWith`, `endsWith`, `slice` and `byteLength` are builtins
-/// with three implementations each. `std/strpred` writes all five as ordinary
-/// Vyrn on the byte view (`bytes`, `s[i]`, `stringFromBytes`), and this example is
-/// the equivalence proof: **the builtin is the oracle**, called beside the Vyrn
-/// version in the same program, over the surface where two implementations of a
-/// substring search can disagree.
+/// `contains`, `startsWith` and `endsWith` ARE `std/strpred` now: M4b(3) proved the
+/// Vyrn versions equal to the builtins with the builtin as the oracle, and M4c
+/// routed the three builtins into the module, deleting the Rust arms and ~50 lines
+/// of `strstr`/`strncmp` IR. So those rows are **pinned as literals** here — a
+/// comparison against the builtin would be the same function on both sides.
 ///
-/// Every predicate row prints the builtin's three answers, then this module's, so
-/// a disagreement is a visible diff rather than a silent `false`. Printing from
-/// `main` puts it through parity, which means the Vyrn versions are checked
-/// interp == native == wasm as well as against the builtins. The `test` blocks at
-/// the bottom assert the agreement rather than describing it, so the proof holds
-/// before anything is swapped — and becomes the regression pin after.
+/// `slice` and `byteLength` did NOT move, for reasons in `std/strpred`'s doc and in
+/// RFC-0078's M4c note, so their rows are still a live oracle: the builtin's answer
+/// printed beside `sliceV`'s / `byteLengthV`'s, and a `test` block asserting they
+/// agree. That asymmetry is the file's shape — two refused builtins keep their
+/// oracle, three routed ones become pins.
+///
+/// Printing from `main` puts all of it through parity, so the routed predicates are
+/// checked interp == native == wasm as well as against the literals.
 ///
 /// Two things this file cannot show, both stated in `std/strpred`'s doc:
 ///
@@ -28,31 +29,18 @@
 ///   it — `"©"` (C2 A9) against `"é"` (C3 A9), same trailing byte — is the closest
 ///   a String can get, and both implementations say no.
 
-import { byteLengthV, containsV, endsWithV, sliceV, startsWithV } from "std/strpred"
+import { byteLengthV, sliceV } from "std/strpred"
 
 fn bit(b: Bool) -> String {
     return if b { "1" } else { "0" }
 }
 
-/// `contains startsWith endsWith`, the builtins' answers then `std/strpred`'s.
-/// Identical halves is the whole point; anything else is the bug.
+/// `contains startsWith endsWith` as three bits. One call per builtin, and after
+/// M4c one call per `std/strpred` function — the same thing said twice would print
+/// the same digit twice, so the row is three bits and the `test` block below pins
+/// every one of them.
 fn preds(h: String, n: String) -> String {
-    return bit(contains(h, n)) + bit(startsWith(h, n)) + bit(endsWith(h, n)) + " "
-    + bit(containsV(h, n)) + bit(startsWithV(h, n)) + bit(endsWithV(h, n))
-}
-
-/// The same three comparisons as one `Bool`, for the assertions.
-fn predsAgree(h: String, n: String) -> Bool {
-    if containsV(h, n) != contains(h, n) {
-        return false
-    }
-    if startsWithV(h, n) != startsWith(h, n) {
-        return false
-    }
-    if endsWithV(h, n) != endsWith(h, n) {
-        return false
-    }
-    return true
+    return bit(contains(h, n)) + bit(startsWith(h, n)) + bit(endsWith(h, n))
 }
 
 /// A range both can be asked about: the builtin's substring, then this module's.
@@ -144,43 +132,42 @@ fn main() -> Int64 {
     return 0
 }
 
-test "the predicates agree with the builtins over the whole surface" {
-    assert(predsAgree("abc", ""))
-    assert(predsAgree("", ""))
-    assert(predsAgree("", "a"))
-    assert(predsAgree("abc", "abcd"))
-    assert(predsAgree("abc", "abc"))
-    assert(predsAgree("aaaa", "aaa"))
-    assert(predsAgree("aaa", "aaaa"))
-    assert(predsAgree("abcabc", "abc"))
-    assert(predsAgree("abc", "b"))
-    assert(predsAgree("héllo", "é"))
-    assert(predsAgree("héllo", "hé"))
-    assert(predsAgree("héllo", "llo"))
-    assert(predsAgree("héllo", "h"))
-    assert(predsAgree("é", "©"))
-    assert(predsAgree("日本語", "本"))
-    assert(predsAgree("日本語", "語"))
-    assert(predsAgree("日本語", "日"))
-    assert(predsAgree("😀ok", "😀"))
-    assert(predsAgree("😀ok", "k"))
-    assert(predsAgree("😀ok", "o"))
-}
-
-test "the empty needle and the oversized needle are the two boundary answers" {
-    // An empty needle is a substring, a prefix AND a suffix — of the empty
-    // string too. A needle longer than the haystack is none of the three.
-    assertEq(preds("abc", ""), "111 111")
-    assertEq(preds("", ""), "111 111")
-    assertEq(preds("", "a"), "000 000")
-    assertEq(preds("abc", "abcd"), "000 000")
-    assertEq(preds("abc", "abc"), "111 111")
-    // Overlapping candidates: "aaa" is in "aaaa" at 0 and at 1, so it is both a
-    // prefix and a suffix; the reverse pair matches nothing at all.
-    assertEq(preds("aaaa", "aaa"), "111 111")
-    assertEq(preds("aaa", "aaaa"), "000 000")
-    // C2 A9 versus C3 A9: a matcher comparing only the last byte would say yes.
-    assertEq(preds("é", "©"), "000 000")
+test "the routed predicates answer what the C and Rust ones answered" {
+    // Every row of `main`'s predicate block, as a literal. Captured from the
+    // builtins BEFORE M4c routed them, which is what makes this a pin: an
+    // assertion that the two implementations agree would now compare a
+    // function with itself.
+    // an empty needle is a substring, a prefix AND a suffix
+    assertEq(preds("abc", ""), "111")
+    // of the empty string too
+    assertEq(preds("", ""), "111")
+    // a needle longer than the haystack is none of the three
+    assertEq(preds("", "a"), "000")
+    assertEq(preds("abc", "abcd"), "000")
+    // needle == haystack
+    assertEq(preds("abc", "abc"), "111")
+    // overlapping candidates: at 0 and at 1, so prefix and suffix
+    assertEq(preds("aaaa", "aaa"), "111")
+    assertEq(preds("aaa", "aaaa"), "000")
+    // two occurrences, one at each end
+    assertEq(preds("abcabc", "abc"), "111")
+    // interior only
+    assertEq(preds("abc", "b"), "100")
+    // a multi-byte needle on a boundary
+    assertEq(preds("héllo", "é"), "100")
+    assertEq(preds("héllo", "hé"), "110")
+    assertEq(preds("héllo", "llo"), "101")
+    assertEq(preds("héllo", "h"), "110")
+    // C2 A9 against C3 A9 — a matcher comparing the last byte says yes
+    assertEq(preds("é", "©"), "000")
+    // three bytes, interior
+    assertEq(preds("日本語", "本"), "100")
+    assertEq(preds("日本語", "語"), "101")
+    assertEq(preds("日本語", "日"), "110")
+    // four bytes, prefix
+    assertEq(preds("😀ok", "😀"), "110")
+    assertEq(preds("😀ok", "k"), "101")
+    assertEq(preds("😀ok", "o"), "100")
 }
 
 test "slice agrees with the builtin on every legal range" {

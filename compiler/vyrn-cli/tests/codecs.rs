@@ -1,40 +1,51 @@
-//! `std/codecs` against the six codec builtins it is a candidate to replace
-//! (RFC-0078 M4b).
+//! The six codec builtins, pinned over the surface where two codecs can differ
+//! (RFC-0078 M4b(1), converted by M4c).
 //!
-//! The builtin IS the oracle, and that is the whole point of the milestone.
-//! `hexEncode`, `base64Encode`, `urlEncode` and their inverses exist twice today
-//! — once in Rust in the interpreter, once as hand-written LLVM IR printed by the
-//! textual emitter — and RFC-0078's rule is that a builtin may not have two
-//! definitions. Before either copy can be deleted, the Vyrn implementation has to
-//! be shown to answer identically, and shown over more than the handful of inputs
-//! `examples/encoding.vyrn` prints.
+//! # Why this file changed shape
 //!
-//! So this test generates one Vyrn program that calls BOTH implementations on
-//! every input in a wide corpus and prints a line only when they disagree. The
-//! corpus is the surface where two codecs can differ: every byte a `String` can
-//! hold, every base64 alphabet digit, every printable ASCII byte in each of a
-//! group's four positions, all three padding residues, misplaced padding, odd
-//! hex lengths, non-hex digits, truncated percent escapes, and every `%XX` in
-//! both cases.
+//! M4b(1) wrote `std/codecs` and proved it equal to the builtins by calling BOTH
+//! on every input in this corpus and reporting only disagreements — 6,354
+//! comparisons, the builtin as the oracle. M4c then **routed the builtins into
+//! `std/codecs`**, which makes that comparison `x == x`: the same function on both
+//! sides of the `!=`, green forever, proving nothing.
 //!
-//! Written this way the test does not need rewriting when the swap lands: with
-//! the builtins gone it becomes the regression pin for whatever replaces them,
-//! and until then it is the equivalence proof.
+//! So the oracle is converted into a PIN. The corpus is unchanged and the program
+//! now calls only the BUILTIN, printing one line per answer; the test asserts the
+//! SHA-256 of the whole transcript against a literal. That statement — "the
+//! builtins answer exactly this over 6,354 checks" — is true before the swap and
+//! after it, which is the property a converted oracle needs. A digest rather than
+//! a 2,000-line golden file because the corpus generator below is deterministic
+//! and regenerating it is one command; the spot pins after the digest are what
+//! give a failure a human-readable neighbour.
 //!
-//! # The divergence rule
+//! # The two digests, and the bug the swap fixed
 //!
-//! Exactly one class of disagreement is expected, and it is accepted by RULE
-//! rather than by an enumerated allow-list, so a NEW divergence cannot hide
-//! inside a stale list: a decoder whose bytes contain `0x00`. RFC-0014 forbids a
-//! NUL inside a `String` and `stringFromBytes` enforces it, so `std/codecs`
-//! answers `None`; the builtin answers `Some`, and does not agree with itself
-//! across engines while doing so (the interpreter keeps a Rust `String` holding
-//! the byte, the native path hands back a `char*` truncated at it). The test
-//! asserts that class is non-empty, so the rule is exercised rather than
-//! vacuous.
+//! Both were captured by running this corpus against the pre-swap build
+//! (`494f883`, the C/Rust builtins) and the post-swap one:
+//!
+//! | | |
+//! |---|---|
+//! | pre-swap (hand-written LLVM IR + Rust) | `ad39879f2fbcb7df65ce9eb2da7145031af6fa99ccc92046ce9b2a591f926275` |
+//! | post-swap (`std/codecs`) | [`CORPUS_DIGEST`] |
+//!
+//! They differ in **16 of 6,354 rows, and every one of the 16 is a NUL row** —
+//! the two transcripts were diffed line by line and the whole diff is decoders
+//! whose bytes contain `0x00` (`S00`, `S0041`, `S410010`, `S610062`, …, each
+//! becoming `None`). That is RFC-0078 M4b(1)'s finding landing as a fix: `hexDecode("00")`
+//! answered `Some` and did not agree with itself across engines (the interpreter
+//! kept a Rust `String` holding the byte; the native path returned a `char*`
+//! `__vyrn_strlen` truncated at it). `std/codecs` answers `None`, which RFC-0014
+//! requires and which is identical on all three engines. Those rows are pinned
+//! individually below rather than left inside the digest.
+//!
+//! Regenerating a digest after a deliberate change: run the test, take the
+//! `actual` value out of the failure message, and diff the two transcripts (both
+//! are written beside the generated program in `%TEMP%/vyrn-m4c-codecs/`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use vyrn_frontend::hash::sha256_hex;
 
 fn repo_file(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap()
@@ -54,16 +65,24 @@ fn unit_tests_green(rel: &str, expected: &str) {
     assert!(combined.contains(expected), "expected `{expected}`:\n{combined}");
 }
 
-/// `std/codecs`'s own hand-picked pins, including the NUL rows.
+/// `std/codecs`'s own hand-picked pins, including the NUL rows. Literals, so they
+/// were never an oracle and did not have to be converted.
 #[test]
 fn std_codecs_unit_tests_run_green() {
     unit_tests_green("std/codecs.vyrn", "4 passed, 0 failed");
 }
 
-/// The example's three-way rows, which parity runs on all three engines but whose
-/// `main` nothing else in the suite asserts a shape for.
+/// The example's pins. Its `main` is what parity compares across the three engines;
+/// its `test` blocks assert the same rows as literals, and nothing else in the suite
+/// runs an example's `test` blocks, so without this row they are decoration.
+///
+/// M4c converted the example the same way it converted the corpus: it used to print
+/// `mine == builtin` beside each value, which after the swap is the same function on
+/// both sides. Now it calls the BUILTIN and prints the value, so `main` states "the
+/// routed builtin answers this, identically on interp, native and wasm".
 #[test]
-fn the_example_agrees_with_the_builtins_on_the_interpreter() {
+fn the_example_pins_hold() {
+    unit_tests_green("examples/codecbytes.vyrn", "3 passed, 0 failed");
     let file = repo_file("examples/codecbytes.vyrn");
     let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
     assert!(
@@ -72,9 +91,9 @@ fn the_example_agrees_with_the_builtins_on_the_interpreter() {
         String::from_utf8_lossy(&out.stderr)
     );
     let text = String::from_utf8_lossy(&out.stdout);
-    // Every comparison row in the example prints a bool; none may be `false`.
-    assert!(!text.lines().any(|l| l.trim_end() == "false"), "a row disagreed:\n{text}");
-    assert!(text.lines().filter(|l| l.trim_end() == "true").count() >= 25, "too few rows:\n{text}");
+    assert!(!text.lines().any(|l| l.trim_end() == "false"), "a round trip failed:\n{text}");
+    assert!(text.lines().count() >= 35, "too few rows:\n{text}");
+    assert!(text.contains("4869"), "the hex pin is missing:\n{text}");
 }
 
 const B64_ALPHABET: &str =
@@ -162,12 +181,12 @@ fn encoder_corpus() -> Vec<String> {
 }
 
 /// Decoder inputs, shared by all three decoders — any text may be handed to any
-/// of them, and a decoder that accepts something the builtin rejects is exactly
+/// of them, and a decoder that accepts something another engine rejects is exactly
 /// the failure worth catching.
 fn decoder_corpus() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     // Every byte as hex, in both cases: 256 valid `hexDecode` inputs, of which
-    // `00` is the divergence and 0x80..0xFF are lone bytes that are not UTF-8.
+    // `00` is the NUL row and 0x80..0xFF are lone bytes that are not UTF-8.
     for b in 0u32..256 {
         out.push(format!("{b:02x}"));
         out.push(format!("{b:02X}"));
@@ -220,13 +239,66 @@ fn decoder_corpus() -> Vec<String> {
     out
 }
 
-/// One generated program, both implementations, every input — and a line printed
-/// only where they disagree.
-#[test]
-fn std_codecs_agrees_with_the_codec_builtins_over_the_whole_surface() {
-    let enc = encoder_corpus();
-    let dec = decoder_corpus();
+/// The transcript's fixed preamble: how one answer is rendered.
+///
+/// `dump` renders an `Option<String>` payload as its own hex, WITHOUT calling
+/// `hexEncode` — the point of a pin is that its reporting does not depend on the
+/// code it is pinning, and after M4c `hexEncode` is the code under test. `bytes`
+/// is the irreducible view, so this is four lines and no builtin under question.
+const PREAMBLE: &str = r#"fn nib(n: UInt8) -> UInt8 {
+    if n < 10 {
+        return '0' + n
+    }
+    return 'a' + n - 10
+}
 
+fn dump(s: String) -> String {
+    let b = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    while i < b.length {
+        out.push(nib(b[i] >> 4))
+        out.push(nib(b[i] & 15))
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(e) => "?",
+    }
+}
+
+fn opt(o: Option<String>) -> String {
+    return match o {
+        Some(s) => "S" + dump(s),
+        None => "None",
+    }
+}
+
+fn fromB(b: Array<UInt8>) -> String {
+    return match stringFromBytes(b) {
+        Ok(s) => s,
+        Err(e) => "BADINPUT",
+    }
+}
+
+fn enc(x: String, label: String) {
+    print(label + " hexE " + hexEncode(x))
+    print(label + " b64E " + base64Encode(x))
+    print(label + " urlE " + urlEncode(x))
+    print(label + " hexRT " + opt(hexDecode(hexEncode(x))))
+    print(label + " b64RT " + opt(base64Decode(base64Encode(x))))
+    print(label + " urlRT " + opt(urlDecode(urlEncode(x))))
+}
+
+fn dec(x: String, label: String) {
+    print(label + " hexD " + opt(hexDecode(x)))
+    print(label + " b64D " + opt(base64Decode(x)))
+    print(label + " urlD " + opt(urlDecode(x)))
+}
+"#;
+
+/// The whole corpus, as one program calling only the BUILTINS.
+fn corpus_program(enc: &[String], dec: &[String]) -> String {
     let mut body = String::new();
     for (i, s) in enc.iter().enumerate() {
         body.push_str(&format!("    enc(fromB({}), \"e{i}\")\n", byte_literal(s)));
@@ -234,126 +306,173 @@ fn std_codecs_agrees_with_the_codec_builtins_over_the_whole_surface() {
     for (i, s) in dec.iter().enumerate() {
         body.push_str(&format!("    dec({}, \"d{i}\")\n", str_literal(s)));
     }
+    format!("{PREAMBLE}\nfn main() -> Int64 {{\n{body}    return 0\n}}\n")
+}
 
-    // `opt` renders a decoded payload through the BUILTIN `hexEncode`, so a
-    // mismatch line is ASCII even when the payload holds a NUL or raw UTF-8 — and
-    // so the test's own reporting does not depend on the code under test.
-    let src = format!(
-        r#"import {{
-    base64DecodeV,
-    base64EncodeV,
-    hexDecodeV,
-    hexEncodeV,
-    urlDecodeV,
-    urlEncodeV,
-}} from "std/codecs"
+/// The SHA-256 of the transcript, `std/codecs` answering. Captured post-swap; the
+/// pre-swap value and the exact difference are in this file's header.
+const CORPUS_DIGEST: &str =
+    "2c1e8a949d6a051aea91bd9b6ca0fe67b8a8b1c6bb0a6e26ca7b163dfddac675";
 
-fn fromB(b: Array<UInt8>) -> String {{
-    return match stringFromBytes(b) {{
-        Ok(s) => s,
-        Err(e) => "BADINPUT",
-    }}
-}}
+#[test]
+fn the_codec_builtins_answer_exactly_this_over_the_whole_surface() {
+    let enc = encoder_corpus();
+    let dec = decoder_corpus();
+    let src = corpus_program(&enc, &dec);
 
-fn opt(o: Option<String>) -> String {{
-    return match o {{
-        Some(s) => "S" + hexEncode(s),
-        None => "None",
-    }}
-}}
-
-fn chk(mine: String, oracle: String, label: String) {{
-    if mine != oracle {{
-        print("MISMATCH " + label + " mine=" + mine + " builtin=" + oracle)
-    }}
-}}
-
-fn enc(x: String, label: String) {{
-    chk(hexEncodeV(x), hexEncode(x), "hexE " + label)
-    chk(base64EncodeV(x), base64Encode(x), "b64E " + label)
-    chk(urlEncodeV(x), urlEncode(x), "urlE " + label)
-    chk(opt(hexDecodeV(hexEncode(x))), opt(hexDecode(hexEncode(x))), "hexRT " + label)
-    chk(
-        opt(base64DecodeV(base64Encode(x))),
-        opt(base64Decode(base64Encode(x))),
-        "b64RT " + label,
-    )
-    chk(opt(urlDecodeV(urlEncode(x))), opt(urlDecode(urlEncode(x))), "urlRT " + label)
-}}
-
-fn dec(x: String, label: String) {{
-    chk(opt(hexDecodeV(x)), opt(hexDecode(x)), "hexD " + label)
-    chk(opt(base64DecodeV(x)), opt(base64Decode(x)), "b64D " + label)
-    chk(opt(urlDecodeV(x)), opt(urlDecode(x)), "urlD " + label)
-}}
-
-fn main() -> Int64 {{
-{body}    return 0
-}}
-"#
-    );
-
-    let dir = std::env::temp_dir().join("vyrn-m4b-codecs");
+    let dir = std::env::temp_dir().join("vyrn-m4c-codecs");
     std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("oracle.vyrn");
+    let file = dir.join("corpus.vyrn");
     std::fs::write(&file, &src).unwrap();
     let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
     assert!(
         out.status.success(),
-        "oracle program failed:\n{}",
+        "corpus program failed:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.contains("BADINPUT"), "a corpus entry was not valid UTF-8:\n{stdout}");
+    let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    std::fs::write(dir.join("transcript.txt"), stdout.as_bytes()).unwrap();
+    assert!(!stdout.contains("BADINPUT"), "a corpus entry was not valid UTF-8");
+    let rows = stdout.lines().count();
+    assert_eq!(rows, enc.len() * 6 + dec.len() * 3, "one line per check");
 
-    // Every line is a disagreement; the NUL class is expected, anything else is a
-    // real difference between the Vyrn implementation and the builtin.
-    let mut nul: Vec<&str> = Vec::new();
-    let mut real: Vec<&str> = Vec::new();
-    for line in stdout.lines().map(str::trim_end).filter(|l| !l.is_empty()) {
-        assert!(line.starts_with("MISMATCH "), "unexpected output: {line}");
-        if is_the_nul_divergence(line) {
-            nul.push(line);
-        } else {
-            real.push(line);
-        }
-    }
-    assert!(
-        real.is_empty(),
-        "{} of {} inputs disagree beyond the NUL rule:\n{}",
-        real.len(),
-        enc.len() * 6 + dec.len() * 3,
-        real.join("\n")
-    );
-    // The rule must bite: `00`, `AA==` and `%00` are in the corpus, so an empty
-    // NUL class would mean the comparison is not running rather than that the
-    // implementations agree everywhere.
-    assert!(!nul.is_empty(), "the NUL divergence did not appear — is the corpus reaching it?");
-    for expect in ["hexD ", "b64D ", "urlD "] {
-        assert!(
-            nul.iter().any(|l| l.contains(expect)),
-            "no NUL divergence from {expect}:\n{}",
-            nul.join("\n")
+    // Spot pins first: a digest mismatch on its own is a wall of nothing, and one
+    // of these naming the value it expected is usually the whole diagnosis. Keyed
+    // by input rather than by corpus index so reordering the corpus cannot make
+    // them silently pin a different row.
+    let enc_row = |input: &str, kind: &str| -> String {
+        let i = enc.iter().position(|s| s == input).expect("encoder input in corpus");
+        stdout
+            .lines()
+            .find(|l| l.starts_with(&format!("e{i} {kind} ")))
+            .unwrap_or("<missing>")
+            .to_string()
+    };
+    let dec_row = |input: &str, kind: &str| -> String {
+        let i = dec.iter().position(|s| s == input).expect("decoder input in corpus");
+        stdout
+            .lines()
+            .find(|l| l.starts_with(&format!("d{i} {kind} ")))
+            .unwrap_or("<missing>")
+            .to_string()
+    };
+    let ends = |row: &str| -> String { row.rsplit(' ').next().unwrap().to_string() };
+    assert_eq!(ends(&enc_row("Hello, Vyrn!", "hexE")), "48656c6c6f2c205679726e21");
+    assert_eq!(ends(&enc_row("Hello, Vyrn!", "b64E")), "SGVsbG8sIFZ5cm4h");
+    assert_eq!(ends(&enc_row("name=a b&x", "urlE")), "name%3Da%20b%26x");
+    // Both alphabet entries above 61 — the two a naive table gets wrong.
+    assert_eq!(ends(&dec_row("////", "b64D")), "None"); // decodes to non-UTF-8
+    assert_eq!(ends(&dec_row("%C3%A9", "urlD")), "Sc3a9"); // é
+    assert_eq!(ends(&dec_row("QQ=", "b64D")), "None"); // length not a multiple of 4
+
+    // The NUL rows, which are the swap's one behavioural change (RFC-0014: a
+    // `String` cannot hold a NUL, so a decoder that would produce one must
+    // decline). Spelled out rather than left inside the digest, because pre-swap
+    // they were `Some` and did not agree across engines.
+    for (input, kind) in [("00", "hexD"), ("004100", "hexD"), ("AA==", "b64D"), ("%00", "urlD")] {
+        let row = dec_row(input, kind);
+        assert_eq!(
+            ends(&row),
+            "None",
+            "the NUL row `{input}` through {kind} must be None (RFC-0014); got {row}"
         );
     }
-    eprintln!(
-        "{} checks over {} encoder and {} decoder inputs; {} NUL divergences, 0 others",
-        enc.len() * 6 + dec.len() * 3,
+
+    let digest = sha256_hex(stdout.as_bytes());
+    assert_eq!(
+        digest, CORPUS_DIGEST,
+        "the codec builtins' answers moved over {rows} checks ({} encoder, {} decoder inputs). \
+         The transcript is at {}. If the change is deliberate, diff it against the previous one \
+         and repin.",
         enc.len(),
         dec.len(),
-        nul.len()
+        dir.join("transcript.txt").display()
     );
 }
 
-/// `std/codecs` said `None` where the builtin produced a string containing a NUL
-/// byte — the one accepted difference (RFC-0014's rule that a `String` cannot
-/// hold one). Recognised from the line rather than from a list of inputs, so it
-/// cannot drift.
-fn is_the_nul_divergence(line: &str) -> bool {
-    let Some((mine, builtin)) = line.split_once(" builtin=") else { return false };
-    if !mine.ends_with(" mine=None") {
-        return false;
-    }
-    let Some(hex) = builtin.strip_prefix('S') else { return false };
-    hex.len() % 2 == 0 && hex.as_bytes().chunks(2).any(|p| p == b"00")
+/// The two things M4c's injection does that M2b's never did (RFC-0078).
+///
+/// M2b injected exactly ONE module, for one builtin, and proved the reserved `$`
+/// spellings make a collision unreachable. M4c turned that into a table, so two
+/// properties are new and neither follows from M2b's test:
+///
+/// 1. **Four runtime modules in one link.** A program mentioning `toJson`,
+///    `hexEncode`, `chars` and `contains` injects `std/json`, `std/codecs`,
+///    `std/text` and `std/strpred` at once, each renamed to its own prefix. A single
+///    `injected` flag — which is what the loader held before M4c — could not have
+///    represented that.
+/// 2. **A new module's PRIVATE names.** `std/codecs` declares `hexDigit`, `hexVal`,
+///    `decoded`, `ascii`, `b64Val`; `std/text` declares nothing private but exports
+///    `showCps`; `std/strpred` exports `byteLengthV`. A user program is free to
+///    declare any of those, and the reserved spellings are what keeps its own
+///    definitions winning. The renaming is unconditional, so this is a regression
+///    pin rather than a hope.
+#[test]
+fn four_runtime_modules_link_at_once_and_the_users_names_win() {
+    let src = r#"type Point = { x: Int64, y: Int64 }
+
+/// Every name `std/codecs` declares privately, plus one each from `std/text` and
+/// `std/strpred`. All of them must mean THESE functions here.
+fn hexDigit(n: Int64) -> Int64 {
+    return n + 1000
+}
+
+fn hexVal(c: Int64) -> Int64 {
+    return c + 2000
+}
+
+fn decoded(s: String) -> String {
+    return "mine:" + s
+}
+
+fn ascii(s: String) -> String {
+    return "ascii:" + s
+}
+
+fn b64Val(c: Int64) -> Int64 {
+    return c + 3000
+}
+
+fn showCps(a: Int64) -> String {
+    return "cps:" + a.toString()
+}
+
+fn byteLengthV(s: String) -> Int64 {
+    return 42
+}
+
+fn main() -> Int64 {
+    // The user's own definitions, on every line.
+    print(hexDigit(1))
+    print(hexVal(1))
+    print(decoded("x"))
+    print(ascii("x"))
+    print(b64Val(1))
+    print(showCps(7))
+    print(byteLengthV("anything"))
+    // And all four runtime modules answering in the same program.
+    print(toJson(Point { x: 1, y: 2 }))
+    print(hexEncode("Hi"))
+    print(chars("é").length)
+    print(contains("hello", "ell"))
+    print(startsWith("hello", "he"))
+    return 0
+}
+"#;
+    let dir = std::env::temp_dir().join("vyrn-m4c-collide");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("main.vyrn");
+    std::fs::write(&file, src).unwrap();
+    let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+    assert!(
+        out.status.success(),
+        "the collision program failed to run:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    assert_eq!(
+        got,
+        "1001\n2001\nmine:x\nascii:x\n3001\ncps:7\n42\n\
+         {\"x\":1,\"y\":2}\n4869\n1\ntrue\ntrue\n"
+    );
 }

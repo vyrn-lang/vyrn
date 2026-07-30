@@ -4,12 +4,20 @@ std/text — UTF-8 decoding and byte-offset line/column, written in Vyrn
 (RFC-0078 M4b).
 
 Three builtins live here as ordinary Vyrn: `chars` (a `String`'s codepoints),
-`lineAt` and `colAt` (the 1-based line and column of a byte offset). None of
-them is retired by this module — this is the equivalence half of the
-milestone, and the swap is a separate decision — but each is now written once
-instead of once per engine, and `tests/text.rs` proves the Vyrn version
-answers what the builtin answers over the whole surface including the
-malformed one.
+`lineAt` and `colAt` (the 1-based line and column of a byte offset). **`chars`
+is retired** — RFC-0078 M4c routed the builtin into `charsV`, deleting Rust's
+`str::chars` from the interpreter and 82 lines of two-pass decoder from the
+textual emitter, and handing the direct wasm backend a row it never had to
+lower. `lineAt` and `colAt` are NOT: the interpreter memoizes a line-start table
+per buffer and a Vyrn library cannot (a generator may not touch module state —
+comptime purity), so retiring them is a decision about that cache, which is M5's
+question rather than this milestone's. They stay builtins and `lineAtV`/`colAtV`
+stay the thing they are proved against.
+
+`tests/text.rs` is what proves it: the `chars` half is now a pinned digest over
+~2,000 codepoints (a comparison against the builtin would compare `charsV` with
+itself), while the malformed table and the line/column table are still live
+oracles against `stringFromBytes` and `lineAt`/`colAt`, neither of which moved.
 
 **M4a's question, asked again.** The finding worth carrying from the number
 tier was that the irreducible primitive is a missing VIEW rather than a

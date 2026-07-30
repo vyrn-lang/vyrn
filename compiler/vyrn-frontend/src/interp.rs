@@ -611,165 +611,9 @@ fn convert_val(v: Val, target: &Type) -> Val {
     }
 }
 
-// ---- text encodings (hex / base64 / url) --------------------------------
-// Hand-rolled so the algorithm is identical to the native runtime (parity).
-// Encoders take a string's UTF-8 bytes → ASCII text. Decoders parse back to
-// bytes, then require the result to be valid UTF-8 (else `None`).
-
-const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-fn hex_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for b in s.bytes() {
-        out.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        out.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
-    }
-    out
-}
-
-fn hex_val(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn hex_decode(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    if b.len() % 2 != 0 {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(b.len() / 2);
-    let mut i = 0;
-    while i < b.len() {
-        bytes.push((hex_val(b[i])? << 4) | hex_val(b[i + 1])?);
-        i += 2;
-    }
-    String::from_utf8(bytes).ok()
-}
-
-fn base64_encode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = String::new();
-    let mut i = 0;
-    while i + 3 <= b.len() {
-        let n = ((b[i] as u32) << 16) | ((b[i + 1] as u32) << 8) | (b[i + 2] as u32);
-        out.push(B64[(n >> 18) as usize & 63] as char);
-        out.push(B64[(n >> 12) as usize & 63] as char);
-        out.push(B64[(n >> 6) as usize & 63] as char);
-        out.push(B64[n as usize & 63] as char);
-        i += 3;
-    }
-    let rem = b.len() - i;
-    if rem == 1 {
-        let n = (b[i] as u32) << 16;
-        out.push(B64[(n >> 18) as usize & 63] as char);
-        out.push(B64[(n >> 12) as usize & 63] as char);
-        out.push('=');
-        out.push('=');
-    } else if rem == 2 {
-        let n = ((b[i] as u32) << 16) | ((b[i + 1] as u32) << 8);
-        out.push(B64[(n >> 18) as usize & 63] as char);
-        out.push(B64[(n >> 12) as usize & 63] as char);
-        out.push(B64[(n >> 6) as usize & 63] as char);
-        out.push('=');
-    }
-    out
-}
-
-fn b64_val(c: u8) -> Option<u8> {
-    match c {
-        b'A'..=b'Z' => Some(c - b'A'),
-        b'a'..=b'z' => Some(c - b'a' + 26),
-        b'0'..=b'9' => Some(c - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    }
-}
-
-fn base64_decode(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    if b.len() % 4 != 0 {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        let c0 = b64_val(b[i])?;
-        let c1 = b64_val(b[i + 1])?;
-        // The last group may carry one or two `=` pad characters.
-        let p2 = b[i + 2] == b'=';
-        let p3 = b[i + 3] == b'=';
-        let c2 = if p2 { 0 } else { b64_val(b[i + 2])? };
-        let c3 = if p3 { 0 } else { b64_val(b[i + 3])? };
-        // Padding is only legal in the final group, and `=X` (pad then data) is not.
-        if (p2 || p3) && i + 4 != b.len() {
-            return None;
-        }
-        if p2 && !p3 {
-            return None;
-        }
-        let n = ((c0 as u32) << 18) | ((c1 as u32) << 12) | ((c2 as u32) << 6) | c3 as u32;
-        bytes.push((n >> 16) as u8);
-        if !p2 {
-            bytes.push((n >> 8) as u8);
-        }
-        if !p3 {
-            bytes.push(n as u8);
-        }
-        i += 4;
-    }
-    String::from_utf8(bytes).ok()
-}
-
-/// Unreserved URL characters (RFC 3986): everything else is percent-encoded.
-fn url_unreserved(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'~')
-}
-
-fn url_encode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        if url_unreserved(b) {
-            out.push(b as char);
-        } else {
-            out.push('%');
-            out.push(
-                char::from_digit((b >> 4) as u32, 16)
-                    .unwrap()
-                    .to_ascii_uppercase(),
-            );
-            out.push(
-                char::from_digit((b & 0xf) as u32, 16)
-                    .unwrap()
-                    .to_ascii_uppercase(),
-            );
-        }
-    }
-    out
-}
-
-fn url_decode(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    let mut bytes = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' {
-            if i + 2 >= b.len() {
-                return None;
-            }
-            bytes.push((hex_val(b[i + 1])? << 4) | hex_val(b[i + 2])?);
-            i += 3;
-        } else {
-            bytes.push(b[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(bytes).ok()
-}
+// (The hex / base64 / percent codecs lived here — 159 lines of Rust duplicating
+// the textual emitter's hand-written IR. RFC-0078 M4c routed the six builtins to
+// `std/codecs`, so the interpreter holds no definition of them at all.)
 
 /// Parse a base-10 integer with strict, backend-matched semantics: an optional
 /// leading `-`, then one or more ASCII digits, and nothing else (no whitespace,
@@ -2910,6 +2754,22 @@ impl<'a> Interp<'a> {
                 // reserved, so a same-named user function wins (RFC-0054).
                 let shadowed = matches!(name.as_str(), "render" | "rawAt" | "raw" | "lex")
                     && self.funcs.contains_key(name.as_str());
+                // RFC-0078 M4c: a builtin whose implementation IS a Vyrn function
+                // is a call to it, and nothing else. The loader injected the module
+                // and renamed its declarations to reserved `$` spellings no source
+                // can write; the builtin's own name is reserved too, so there is no
+                // shadowing question to answer — and the interpreter holds no second
+                // definition to drift from.
+                if let Some(rt) = crate::loader::routed_builtin(name) {
+                    if !self.funcs.contains_key(rt) {
+                        return Err(format!(
+                            "`{name}` is implemented in Vyrn and its module is not in the link \
+                             — a std root is needed to call it"
+                        )
+                        .into());
+                    }
+                    return self.call(rt, &vals);
+                }
                 match name.as_str() {
                     "print" => {
                         match &vals[0] {
@@ -3024,18 +2884,9 @@ impl<'a> Interp<'a> {
                         Val::Str(s) => Ok(Val::Array(std::rc::Rc::new(lex_tokens(s)))),
                         _ => Err("`lex` of non-String".into()),
                     },
-                    "contains" => match (&vals[0], &vals[1]) {
-                        (Val::Str(a), Val::Str(b)) => Ok(Val::Bool(a.contains(b.as_str()))),
-                        _ => Err("contains of non-Strings".into()),
-                    },
-                    "startsWith" => match (&vals[0], &vals[1]) {
-                        (Val::Str(a), Val::Str(b)) => Ok(Val::Bool(a.starts_with(b.as_str()))),
-                        _ => Err("startsWith of non-Strings".into()),
-                    },
-                    "endsWith" => match (&vals[0], &vals[1]) {
-                        (Val::Str(a), Val::Str(b)) => Ok(Val::Bool(a.ends_with(b.as_str()))),
-                        _ => Err("endsWith of non-Strings".into()),
-                    },
+                    // (`contains`, `startsWith` and `endsWith` are `std/strpred` —
+                    // RFC-0078 M4c. Three Rust one-liners, but three DEFINITIONS,
+                    // and the direct wasm backend owed a fourth.)
                     // `slice(s, start, end)` (RFC-0046): the byte-range substring.
                     // O(1)-validated — an out-of-range offset or a cut inside a
                     // multi-byte UTF-8 character traps with the canonical wording
@@ -3057,8 +2908,8 @@ impl<'a> Interp<'a> {
                         }
                         _ => Err("slice of non-String/Int".into()),
                     },
-                    // `bytes` decodes the UTF-8 bytes as UInt8 (RFC-0014 M2);
-                    // `chars` the code points as Int64.
+                    // `bytes` decodes the UTF-8 bytes as UInt8 (RFC-0014 M2) —
+                    // the irreducible VIEW every Vyrn string routine is built on.
                     "bytes" => match &vals[0] {
                         Val::Str(s) => Ok(Val::Array(
                             s.bytes()
@@ -3071,12 +2922,9 @@ impl<'a> Interp<'a> {
                         )),
                         _ => Err("bytes of non-String".into()),
                     },
-                    "chars" => match &vals[0] {
-                        Val::Str(s) => {
-                            Ok(Val::Array(std::rc::Rc::new(s.chars().map(|c| Val::Int(c as i64)).collect())))
-                        }
-                        _ => Err("chars of non-String".into()),
-                    },
+                    // (`chars` is `std/text`'s `charsV` — RFC-0078 M4c. Rust's
+                    // `str::chars` here against a two-pass decoder in 82 lines of
+                    // emitted IR; one Vyrn `decodeUtf8` replaces both.)
                     // Input I/O (RFC-0014). Error payloads are canonical Vyrn
                     // wording (never Rust `io::Error` text) — kept byte-identical
                     // to the codegen's format strings so all three backends agree.
@@ -3347,31 +3195,9 @@ impl<'a> Interp<'a> {
                         Val::Int(v) => Ok(Val::Float(f64::from_bits(*v as u64))),
                         other => Err(format!("floatFromBits of non-UInt64 {other:?}").into()),
                     },
-                    // Text encodings: encoders return a String; decoders return
-                    // `Option<String>` (None on malformed input or non-UTF-8 result).
-                    "hexEncode" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Str(std::rc::Rc::new(hex_encode(s)))),
-                        _ => Err("hexEncode of non-String".into()),
-                    },
-                    "base64Encode" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Str(std::rc::Rc::new(base64_encode(s)))),
-                        _ => Err("base64Encode of non-String".into()),
-                    },
-                    "urlEncode" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Str(std::rc::Rc::new(url_encode(s)))),
-                        _ => Err("urlEncode of non-String".into()),
-                    },
-                    "hexDecode" | "base64Decode" | "urlDecode" => {
-                        let out = match &vals[0] {
-                            Val::Str(s) => match name.as_str() {
-                                "hexDecode" => hex_decode(s),
-                                "base64Decode" => base64_decode(s),
-                                _ => url_decode(s),
-                            },
-                            _ => return Err(format!("{name} of non-String").into()),
-                        };
-                        Ok(Val::Option(out.map(|s| Box::new(Val::Str(std::rc::Rc::new(s))))))
-                    }
+                    // (The six text encodings are `std/codecs` — RFC-0078 M4c.
+                    // They were 159 lines of Rust here and are now a routed call,
+                    // handled above.)
                     // `@str` (from `x.toString()` and interpolation) must render
                     // exactly as `print` does: signed IntN by value, unsigned as
                     // `u64`, Float to 6 decimals.
@@ -4760,12 +4586,29 @@ mod tests {
     /// the link by injection. `crate::run` takes a bare source with no resolver, so
     /// it has no runtime library to inject — these tests go through the loader, with
     /// the real `std/json` text so nothing here can drift from what ships.
+    /// RFC-0078 M4c widened it: `std/codecs`, `std/text` and `std/strpred` are
+    /// injected the same way for the thirteen builtins they implement, so every
+    /// runtime module is mapped here rather than one per helper.
     fn run_json(src: &str) -> Result<i64, String> {
         let files = crate::loader::MapResolver(
-            [(
-                "std/json.vyrn".to_string(),
-                include_str!("../../../std/json.vyrn").to_string(),
-            )]
+            [
+                (
+                    "std/json.vyrn".to_string(),
+                    include_str!("../../../std/json.vyrn").to_string(),
+                ),
+                (
+                    "std/codecs.vyrn".to_string(),
+                    include_str!("../../../std/codecs.vyrn").to_string(),
+                ),
+                (
+                    "std/text.vyrn".to_string(),
+                    include_str!("../../../std/text.vyrn").to_string(),
+                ),
+                (
+                    "std/strpred.vyrn".to_string(),
+                    include_str!("../../../std/strpred.vyrn").to_string(),
+                ),
+            ]
             .into_iter()
             .collect(),
         );
@@ -5842,10 +5685,12 @@ mod tests {
         // "café": 5 UTF-8 bytes but 4 code points; `é` is U+00E9 = 233.
         let bytes = "fn main() -> Int64 { return bytes(\"caf\\u{e9}\").length; }";
         assert_eq!(run(bytes).unwrap(), 5);
+        // `chars` is `std/text` since RFC-0078 M4c, so it needs the loader path.
+        // `bytes` and `byteLength` are the views that stayed, so `run` still serves them.
         let chars = "fn main() -> Int64 { return chars(\"caf\\u{e9}\").length; }";
-        assert_eq!(run(chars).unwrap(), 4);
+        assert_eq!(run_json(chars).unwrap(), 4);
         let cp = "fn main() -> Int64 { return chars(\"caf\\u{e9}\")[3]; }";
-        assert_eq!(run(cp).unwrap(), 233);
+        assert_eq!(run_json(cp).unwrap(), 233);
     }
 
     #[test]
@@ -5854,9 +5699,9 @@ mod tests {
         let len = "fn main() -> Int64 { return \"\\u{1F600}\".byteLength; }"; // 4 bytes
         assert_eq!(run(len).unwrap(), 4);
         let one = "fn main() -> Int64 { return chars(\"\\u{1F600}\").length; }"; // 1 char
-        assert_eq!(run(one).unwrap(), 1);
+        assert_eq!(run_json(one).unwrap(), 1);
         let val = "fn main() -> Int64 { return chars(\"\\u{1F600}\")[0]; }";
-        assert_eq!(run(val).unwrap(), 128512);
+        assert_eq!(run_json(val).unwrap(), 128512);
     }
 
     #[test]
@@ -5874,40 +5719,24 @@ mod tests {
         );
     }
 
+    /// The six codecs, end to end (checker + loader + interpreter), on the routed
+    /// path (RFC-0078 M4c). There are no Rust helpers left to unit-test: the
+    /// implementation is `std/codecs`, so what is worth asserting here is that the
+    /// builtin still answers through the injected module — a round trip, and the
+    /// three refusals the deleted helper tests covered.
     #[test]
-    fn encoding_helpers_roundtrip() {
-        use super::{base64_decode, base64_encode, hex_decode, hex_encode, url_decode, url_encode};
-        assert_eq!(hex_encode("Hi"), "4869");
-        assert_eq!(hex_decode("4869").as_deref(), Some("Hi"));
-        assert_eq!(base64_encode("Hello"), "SGVsbG8=");
-        assert_eq!(base64_decode("SGVsbG8=").as_deref(), Some("Hello"));
-        assert_eq!(url_encode("a b&c"), "a%20b%26c");
-        assert_eq!(url_decode("a%20b%26c").as_deref(), Some("a b&c"));
-        // A UTF-8 round-trip through base64.
-        assert_eq!(
-            base64_decode(&base64_encode("café")).as_deref(),
-            Some("café")
-        );
+    fn encoding_builtins_route_through_std_codecs() {
+        let src = "fn main() -> Int64 {                    let d = base64Decode(base64Encode(\"hey\"))                    if match d { Some(s) => s, None => \"\" } != \"hey\" { return 1 }                    if hexEncode(\"Hi\") != \"4869\" { return 2 }                    if urlEncode(\"a b&c\") != \"a%20b%26c\" { return 3 }                    if match hexDecode(\"zz\") { Some(s) => 1, None => 0 } != 0 { return 4 }                    if match base64Decode(\"bad\") { Some(s) => 1, None => 0 } != 0 { return 5 }                    if match urlDecode(\"%ZZ\") { Some(s) => 1, None => 0 } != 0 { return 6 }                    return 0 }";
+        assert_eq!(run_json(src).unwrap(), 0);
     }
 
+    /// The seam M2b named, restated for M4c's builtins: a bare source with no
+    /// resolver has no runtime library to inject, so a routed builtin refuses
+    /// loudly instead of silently answering from a second definition.
     #[test]
-    fn encoding_rejects_bad_input() {
-        use super::{base64_decode, hex_decode, url_decode};
-        assert_eq!(hex_decode("zz"), None); // non-hex
-        assert_eq!(hex_decode("abc"), None); // odd length
-        assert_eq!(hex_decode("ff"), None); // 0xFF is not valid UTF-8
-        assert_eq!(base64_decode("bad"), None); // length not a multiple of 4
-        assert_eq!(base64_decode("////"), None); // decodes to non-UTF-8 bytes
-        assert_eq!(url_decode("%ZZ"), None); // bad percent escape
-    }
-
-    #[test]
-    fn encoding_builtins_in_program() {
-        // Exercised end-to-end (checker + interp) with an Option result.
-        let src = "fn main() -> Int64 { \
-                   let d = base64Decode(base64Encode(\"hey\")); \
-                   return match d { Some(s) => s.byteLength, None => 0 }; }";
-        assert_eq!(run(src).unwrap(), 3);
+    fn a_routed_builtin_without_a_std_root_refuses_by_name() {
+        let e = run("fn main() -> Int64 { return hexEncode(\"hi\").byteLength }").unwrap_err();
+        assert!(e.contains("implemented in Vyrn"), "{e}");
     }
 
     #[test]
@@ -5920,15 +5749,17 @@ mod tests {
 
     #[test]
     fn string_predicate_methods() {
-        let c = "fn main() -> Int64 { if contains(\"hello\", \"ell\") { return 1; } return 0; }";
-        assert_eq!(run(c).unwrap(), 1);
-        let s = "fn main() -> Int64 { if startsWith(\"hello\", \"he\") { return 1; } return 0; }";
-        assert_eq!(run(s).unwrap(), 1);
-        let e = "fn main() -> Int64 { if endsWith(\"hello\", \"lo\") { return 1; } return 0; }";
-        assert_eq!(run(e).unwrap(), 1);
+        // Routed to `std/strpred` since RFC-0078 M4c, so this goes through the
+        // loader — `run` has no resolver and therefore no module to inject.
+        let c = "fn main() -> Int64 { if contains(\"hello\", \"ell\") { return 1 } return 0 }";
+        assert_eq!(run_json(c).unwrap(), 1);
+        let s = "fn main() -> Int64 { if startsWith(\"hello\", \"he\") { return 1 } return 0 }";
+        assert_eq!(run_json(s).unwrap(), 1);
+        let e = "fn main() -> Int64 { if endsWith(\"hello\", \"lo\") { return 1 } return 0 }";
+        assert_eq!(run_json(e).unwrap(), 1);
         // `endsWith` guards against a suffix longer than the string.
-        let g = "fn main() -> Int64 { if endsWith(\"hi\", \"ahoy\") { return 1; } return 0; }";
-        assert_eq!(run(g).unwrap(), 0);
+        let g = "fn main() -> Int64 { if endsWith(\"hi\", \"ahoy\") { return 1 } return 0 }";
+        assert_eq!(run_json(g).unwrap(), 0);
     }
 
     #[test]

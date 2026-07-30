@@ -1,30 +1,32 @@
-//! The text tier's oracle (RFC-0078 M4b).
+//! The text tier (RFC-0078 M4b(2), converted by M4c).
 //!
-//! `std/text` writes `chars`, `lineAt` and `colAt` as ordinary Vyrn. The builtins
-//! still exist, and that is what makes this test possible rather than redundant:
-//! the builtin IS the oracle, so equivalence is proved BEFORE anything is
-//! deleted, and when the swap lands the same test becomes the regression pin
-//! without being rewritten.
-//!
-//! Three rows, in increasing breadth:
+//! `std/text` writes `chars`, `lineAt` and `colAt` as ordinary Vyrn. **One of the
+//! three was routed** and the file's shape follows that split, because a converted
+//! oracle has to stop comparing a function with itself:
 //!
 //! 1. the two modules' inline `test` blocks, which pin the hand-picked cases as
 //!    literals (nothing else in the suite runs an example's `test` blocks);
-//! 2. `decodeUtf8` against `chars` over ~2,000 codepoints — the whole of Latin-1
-//!    and the two- and three-byte boundaries exhaustively, then sampled through
-//!    the BMP and the astral planes;
+//! 2. the `chars` builtin over ~2,000 codepoints, as a **pinned digest**. It was
+//!    `decodeUtf8` against `chars`; after M4c those are one function, so what the
+//!    test asserts now is that the builtin's answers over 5,972 buffers hash to a
+//!    literal captured from the C/Rust implementations before the swap — and the
+//!    pre- and post-swap digests are the SAME value;
 //! 3. `decodeUtf8`'s accept/reject against `stringFromBytes`'s over ~1,400
-//!    MALFORMED byte strings, which is the half that matters. A decoder that
-//!    waves through an overlong form still decodes every valid string correctly,
-//!    so a corpus of valid text proves almost nothing about it.
-//!
-//! `lineAt`/`colAt` get every offset of every buffer, including past the end and
-//! negative, because the clamping is the part the two engine implementations
-//! reach differently (the interpreter binary-searches a memoized line-start
-//! table; the shim walks backwards from the offset).
+//!    MALFORMED byte strings — **still a live oracle**, because `stringFromBytes`
+//!    did not move. This is the half that matters: a decoder that waves through an
+//!    overlong form still decodes every valid string correctly, so a corpus of
+//!    valid text proves almost nothing about it;
+//! 4. `lineAtV`/`colAtV` against `lineAt`/`colAt` at every offset — **also still a
+//!    live oracle**, because those two builtins did not move either (the
+//!    interpreter's memoized line-start table is why, and retiring it is M5's
+//!    question). Every offset rather than a chosen few precisely because the two
+//!    engine implementations compute the answer differently: a binary search over
+//!    the memoized table against a backward walk to the previous LF.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use vyrn_frontend::hash::sha256_hex;
 
 fn repo_file(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel).canonicalize().unwrap()
@@ -125,15 +127,29 @@ fn row(b: Array<UInt8>) -> String {
 }
 "#;
 
-/// `decodeUtf8` against `chars`, over the codepoint space (RFC-0078 M4b).
+/// The SHA-256 of the `chars` transcript over the codepoint corpus below.
 ///
-/// Exhaustive where the encoding changes shape (every scalar below U+0800, so
-/// both one- and two-byte forms are covered byte for byte) and sampled above it,
-/// since a three-byte form differs from its neighbour only in a continuation
-/// byte. `charsV` is checked on the same rows, so the `String`-taking entry point
-/// and the `Array<UInt8>`-taking one cannot drift apart.
+/// Captured from the pre-swap build (`494f883`: Rust's `str::chars` in the
+/// interpreter) and re-measured after the routing — **the two are the same value**,
+/// which is the statement M4c needs and the one a `charsV == chars` comparison can
+/// no longer make. `std/text`'s `decodeUtf8` therefore decodes all 5,972 buffers
+/// byte for byte as the deleted implementations did.
+const CODEPOINT_DIGEST: &str =
+    "013ef87f67f7fa2b21ac9da8ae22c0261b3f4fb48e0d8fa7af7042ca32428b59";
+
+/// The `chars` builtin over the codepoint space, pinned (RFC-0078 M4b(2), M4c).
+///
+/// Exhaustive where the encoding changes shape (every scalar below U+0800, so both
+/// one- and two-byte forms are covered byte for byte) and sampled above it, since a
+/// three-byte form differs from its neighbour only in a continuation byte. Then the
+/// same codepoints in multi-codepoint buffers, because a decoder that
+/// resynchronizes wrongly only shows up on a sequence.
+///
+/// It used to compare `decodeUtf8` and `charsV` against `chars`. After M4c the
+/// builtin IS `charsV` (which is `decodeUtf8` plus a `bytes`), so all three sides
+/// are one function and the comparison proves nothing. The digest does.
 #[test]
-fn decodeutf8_gives_the_same_codepoints_as_the_chars_builtin() {
+fn the_chars_builtin_decodes_the_codepoint_space_exactly_as_it_did() {
     let mut cps: Vec<u32> = (1..0x800).collect();
     cps.extend((0x800..0x10000).step_by(53));
     cps.extend((0x10000..0x110000).step_by(521));
@@ -143,26 +159,56 @@ fn decodeutf8_gives_the_same_codepoints_as_the_chars_builtin() {
     cps.sort_unstable();
     cps.dedup();
 
-    // Single codepoints, then multi-codepoint buffers mixing the widths — a
-    // decoder that resynchronizes wrongly only shows up on a sequence.
     let mut buffers: Vec<Vec<u8>> = cps.iter().map(|c| utf8_of(*c)).collect();
     buffers.push(Vec::new());
     for w in cps.chunks(7) {
         buffers.push(w.iter().flat_map(|c| utf8_of(*c)).collect());
     }
 
+    // One `print` per buffer, of the builtin's codepoints. `stringFromBytes` builds
+    // the `String` (it did not move, so this is still the only route from bytes) and
+    // `showCps` renders the scalar values rather than the text — a wrong codepoint
+    // that still renders would otherwise hide.
+    let harness = r#"import { showCps } from "std/text"
+
+fn row(b: Array<UInt8>) -> String {
+    return match stringFromBytes(b) {
+        Ok(s) => showCps(chars(s)),
+        Err(e) => "reject",
+    }
+}
+"#;
     let calls: String =
         buffers.iter().map(|b| format!("    print(row({}))\n", byte_array(b))).collect();
-    let src = format!("{DECODE_HARNESS}\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n");
-    let lines = run_lines("vyrn-m4b-decode", &src);
+    let src = format!("{harness}\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n");
+    let lines = run_lines("vyrn-m4c-codepoints", &src);
     assert_eq!(lines.len(), buffers.len(), "one line per buffer");
-    let bad: Vec<String> = lines
-        .iter()
-        .zip(&buffers)
-        .filter(|(l, _)| *l != "ok")
-        .map(|(l, b)| format!("{b:02x?}: {l}"))
-        .collect();
-    assert!(bad.is_empty(), "{} of {} disagree:\n{}", bad.len(), buffers.len(), bad.join("\n"));
+    assert!(!lines.iter().any(|l| l == "reject"), "a valid buffer was refused");
+
+    // Spot pins, so a digest mismatch has a readable neighbour. Keyed by the
+    // buffer's bytes rather than by index.
+    let row_of = |cp: u32| -> &str {
+        let want = utf8_of(cp);
+        let i = buffers.iter().position(|b| *b == want).expect("in corpus");
+        lines[i].as_str()
+    };
+    assert_eq!(row_of(0x41), "65");
+    assert_eq!(row_of(0x7f), "127");
+    assert_eq!(row_of(0x80), "128"); // the first two-byte form
+    assert_eq!(row_of(0x7ff), "2047");
+    assert_eq!(row_of(0x800), "2048"); // the first three-byte form
+    assert_eq!(row_of(0xffff), "65535");
+    assert_eq!(row_of(0x10000), "65536"); // the first four-byte form
+    assert_eq!(row_of(0x10ffff), "1114111"); // the last codepoint there is
+
+    let digest = sha256_hex(lines.join("\n").as_bytes());
+    assert_eq!(
+        digest,
+        CODEPOINT_DIGEST,
+        "`chars` decodes {} buffers differently than it did before RFC-0078 M4c \
+         routed it into `std/text`",
+        buffers.len()
+    );
 }
 
 /// The malformed half: `decodeUtf8` must refuse exactly what `stringFromBytes`

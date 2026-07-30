@@ -226,9 +226,13 @@ fn the_whole_boundary_agrees_with_the_shim_it_resolves_to() {
     );
     // Was 60 before RFC-0078 M2b, which removed eleven `declare` lines: the JSON
     // DOM builders and the serializer, all of them unreferenced once `toJson`
-    // became a shared AST walk over `std/json`. A boundary that shrinks because a
-    // milestone deleted C is the point; one that shrinks quietly is not.
-    assert!(n >= 57, "only {n} of the boundary was importable — the census shrank");
+    // became a shared AST walk over `std/json`. Then 57 -> 55 at M4c, which routed
+    // `startsWith`/`endsWith`/`contains` into `std/strpred` and took
+    // `declare i32 @__vyrn_strncmp` and `declare ptr @strstr` with them — the first
+    // shim FUNCTION this RFC has retired since M2b, since nothing else called it. A
+    // boundary that shrinks because a milestone deleted C is the point; one that
+    // shrinks quietly is not.
+    assert!(n >= 55, "only {n} of the boundary was importable — the census shrank");
     eprintln!("shim link: {n} boundary signatures instantiated against the module that defines them");
 }
 

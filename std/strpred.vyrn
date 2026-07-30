@@ -1,25 +1,38 @@
 /// std/strpred — the string predicates and `slice`, written in Vyrn
-/// (RFC-0078 M4b).
+/// (RFC-0078 M4b(3); three of the five routed by M4c).
 ///
-/// `contains`, `startsWith`, `endsWith`, `slice` and the `byteLength` field are
-/// builtins: three implementations each (Rust in the interpreter, C in the shim
-/// the textual emitter calls, hand-emitted wasm in the direct backend). RFC-0078
-/// lists them as writable in Vyrn *today*, and the reason is M4a's finding
-/// restated for strings — the irreducible primitive is not the operation, it is
-/// the **view**. `bytes(s) -> Array<UInt8>` and `s[i] -> UInt8` already give a
-/// `String` its byte reading, and `stringFromBytes(b)` gives the way back, so
-/// none of the five needs to know anything a Vyrn program cannot see.
+/// `contains`, `startsWith`, `endsWith`, `slice` and the `byteLength` field were
+/// builtins with three implementations each (Rust in the interpreter, IR the textual
+/// emitter printed, and a fourth the direct wasm backend owed). RFC-0078 listed all
+/// five as writable in Vyrn *today*, and the reason is M4a's finding restated for
+/// strings — the irreducible primitive is not the operation, it is the **view**.
+/// `bytes(s) -> Array<UInt8>` and `s[i] -> UInt8` already give a `String` its byte
+/// reading, and `stringFromBytes(b)` gives the way back, so none of the five needs
+/// to know anything a Vyrn program cannot see.
 ///
-/// Nothing here is a *swap*: the builtins still exist and are still what user
-/// code calls. These are the equivalence candidates, and
-/// `examples/strpredbytes.vyrn` is the proof — it runs each one beside the
-/// builtin it would replace, over the surface where two implementations can
-/// differ, and asserts they agree. When the swap lands, that example becomes the
-/// regression pin.
+/// **Three moved. Two did not, and both refusals are measured rather than deferred.**
 ///
-/// Every function is `V`-suffixed (`containsV`, `sliceV`, …) so the module can be
-/// imported into a program that also calls the builtin, which is exactly what the
-/// proof needs.
+/// - `containsV`, `startsWithV` and `endsWithV` ARE the builtins now: every engine
+///   calls them, and `strstr` plus two `strncmp` shapes are gone from the emitted
+///   IR along with three Rust one-liners.
+/// - **`slice` traps** — `error: slice index out of range` or
+///   `error: slice splits a UTF-8 character` — and Vyrn has no expression that aborts
+///   with a message. There is no `panic` and no `abort`, so `sliceV` returns
+///   `Option<String>` and `None` means "the builtin would trap here". Routing it
+///   would change observable behaviour, which is a language decision (a *control*
+///   primitive — neither an operation nor a view) and not a milestone's to make. A
+///   trapping wrapper is one line on top of `sliceV` the day the primitive exists.
+/// - **`byteLength` is a VIEW**, not an operation: it is `strlen`, two instructions
+///   on every engine, and `consteval` folds it so a refinement predicate like
+///   `String where value.byteLength >= 3` can be proved at compile time. Routing it
+///   would make an O(1) read an O(n) heap copy and take that folding away — the
+///   opposite trade from the one this RFC exists to make.
+///
+/// Every function is still `V`-suffixed. For the three routed ones the suffix is
+/// now just a second spelling of the same function (the builtin resolves to it
+/// after linking); for `sliceV` and `byteLengthV` it is what keeps them callable
+/// beside the builtins they are proved against, which
+/// `examples/strpredbytes.vyrn` still does.
 ///
 /// **Bytes, not characters.** A `String` is UTF-8 bytes and every offset and
 /// length here is a byte offset, matching the builtins. That is also why the
@@ -29,14 +42,13 @@
 /// needle cannot match at a non-boundary offset. The case that looks dangerous is
 /// unreachable rather than handled.
 ///
-/// **The one place a builtin cannot be reproduced.** `slice` *traps* on a bad
-/// range (`error: slice index out of range`) or a cut inside a character
-/// (`error: slice splits a UTF-8 character`). Vyrn has no expression that aborts
-/// with a message — there is no `panic` and no `abort` — so `sliceV` returns
-/// `Option<String>` and `None` means "the builtin would trap here". A trapping
-/// wrapper is one line on top of that *if* the language ever grows the primitive;
-/// the honest view of a partial function is the `Option` either way, which is the
-/// house idiom for the rest of the standard library.
+/// One measurement worth keeping, since it decided whether the routing was safe to
+/// take: `byteLengthV` is `bytes(s).length`, which ALLOCATES, and `std/vyx` calls
+/// these predicates 97 times over a page. Timed with the generator cache off, the
+/// biggest generator app in the repo went 933 ms -> 951 ms and `examples/vyxdemo`
+/// went 79 ms -> 76 ms. So the allocation does not matter at these needle sizes and
+/// the module was left exactly as the equivalence proof wrote it, rather than
+/// rebuilt on `s.byteLength` for a speed nothing needed.
 
 /// The byte length of `s` — the `s.byteLength` field, as a function.
 ///

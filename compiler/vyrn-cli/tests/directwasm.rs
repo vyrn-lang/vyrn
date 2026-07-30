@@ -43,9 +43,15 @@ const PASSING: &[&str] = &[
     "bits.vyrn",
     "bytecount.vyrn",
     "clock.vyrn",
+    // RFC-0078 M4c: the six codec builtins are `std/codecs` now, so this backend
+    // compiles them as ordinary Vyrn rather than owing six hand-emitted lowerings.
+    "codecbytes.vyrn",
     "consume.vyrn",
     "domdemo.vyrn",
     "ecs.vyrn",
+    // Same routing, on the example that has called the codec builtins since
+    // RFC-0014 — it was blocked on them and nothing else.
+    "encoding.vyrn",
     "enum.vyrn",
     "eventloop.vyrn",
     "externdemo2.vyrn",
@@ -75,6 +81,9 @@ const PASSING: &[&str] = &[
     "sizedints.vyrn",
     "statemod.vyrn",
     "strings.vyrn",
+    // RFC-0078 M4c: `contains`/`startsWith`/`endsWith` are `std/strpred`. `slice`
+    // and `byteLength` did not move, and both already had a lowering here.
+    "strpredbytes.vyrn",
     "tagged.vyrn",
     "templates.vyrn",
     "testing.vyrn",

@@ -473,10 +473,10 @@ struct Module {
     /// (RFC-0021); `None` for a module read from disk. Powers `vyrn emit-gen`.
     gen_source: Option<String>,
     /// RFC-0078 M2b: this module entered the load by INJECTION — nothing imported
-    /// it; a builtin's desugar needs it. Its declarations are renamed to reserved
-    /// spellings (see [`RT_PREFIX`]) so they can neither collide with a user's
-    /// names nor be captured by them.
-    injected: bool,
+    /// it; a builtin's desugar or its routed call needs it. `Some(prefix)` is the
+    /// reserved spelling its declarations are renamed to (see [`RT_PREFIX`]), so
+    /// they can neither collide with a user's names nor be captured by them.
+    injected: Option<&'static str>,
 }
 
 /// The prefix every declaration of an INJECTED runtime module is renamed to
@@ -491,7 +491,102 @@ pub const RT_PREFIX: &str = "json$";
 /// and its writer, which after M2a's split imports nothing.
 pub const RT_JSON_SPEC: &str = "std/json";
 
-/// The reserved spelling of an injected runtime declaration.
+/// One Vyrn module a builtin's implementation lives in, and the reserved prefix
+/// its declarations are renamed to.
+///
+/// RFC-0078 M2b injected exactly one (`std/json`, for `toJson`) and M4c made the
+/// mechanism a table rather than a second copy of itself. Adding a builtin to the
+/// runtime is now an ENTRY here plus a deletion in each engine.
+pub struct RtModule {
+    /// The import spec, resolved against the std root like any other.
+    pub spec: &'static str,
+    /// The prefix every declaration of the module is renamed to. `$` is not an
+    /// identifier character, which is the whole defence — see [`RT_PREFIX`].
+    pub prefix: &'static str,
+    /// Builtins whose mention links the module but whose lowering is still a
+    /// compiler part: `toJson` needs the static type of its argument, so each
+    /// engine builds an AST through `jsonenc` and only the SERIALIZER is here.
+    pub desugared: &'static [&'static str],
+    /// Builtins that ARE one of the module's exported functions (RFC-0078 M4c):
+    /// `(builtin, the RESERVED spelling of the exported Vyrn function)`. Nothing
+    /// type-directed is involved — the argument types are fixed — so each engine's
+    /// whole implementation is a call to the second name.
+    ///
+    /// The prefix is written out rather than composed, so [`routed_builtin`] is a
+    /// scan returning a `&'static str` with no allocation on a path every call
+    /// expression takes. `every_route_is_spelled_with_its_modules_prefix` is what
+    /// keeps the redundancy honest.
+    pub routes: &'static [(&'static str, &'static str)],
+}
+
+/// Every runtime module, in load order.
+pub const RT_MODULES: &[RtModule] = &[
+    RtModule {
+        spec: RT_JSON_SPEC,
+        prefix: RT_PREFIX,
+        desugared: &["toJson"],
+        routes: &[],
+    },
+    // RFC-0078 M4b(1)/M4c: the six codecs. They had no C shim at all — ~520 lines
+    // of hand-written LLVM IR in the textual emitter and 159 lines of Rust in the
+    // interpreter — and needed no primitive to write in Vyrn.
+    RtModule {
+        spec: "std/codecs",
+        prefix: "codecs$",
+        desugared: &[],
+        routes: &[
+            ("hexEncode", "codecs$hexEncodeV"),
+            ("hexDecode", "codecs$hexDecodeV"),
+            ("base64Encode", "codecs$base64EncodeV"),
+            ("base64Decode", "codecs$base64DecodeV"),
+            ("urlEncode", "codecs$urlEncodeV"),
+            ("urlDecode", "codecs$urlDecodeV"),
+        ],
+    },
+    // RFC-0078 M4b(2)/M4c: `chars`. `lineAt`/`colAt` are deliberately NOT here —
+    // see the M4c note in RFC-0078: the interpreter memoizes a line-start table
+    // that a Vyrn library cannot, and retiring them is a decision about that cache
+    // (M5) rather than about capability.
+    RtModule {
+        spec: "std/text",
+        prefix: "text$",
+        desugared: &[],
+        routes: &[("chars", "text$charsV")],
+    },
+    // RFC-0078 M4b(3)/M4c: the three string predicates. `slice` is not here — it
+    // TRAPS, and Vyrn has no expression that aborts, so `sliceV` returns
+    // `Option<String>` and a swap would change observable behaviour. `byteLength`
+    // is not here either: it is a VIEW (`strlen`), it folds at compile time inside
+    // refinement predicates, and the byte view is what this module is built on.
+    RtModule {
+        spec: "std/strpred",
+        prefix: "strpred$",
+        desugared: &[],
+        routes: &[
+            ("contains", "strpred$containsV"),
+            ("startsWith", "strpred$startsWithV"),
+            ("endsWith", "strpred$endsWithV"),
+        ],
+    },
+];
+
+/// The reserved spelling a routed builtin's call becomes, or `None` for a name no
+/// runtime module implements.
+///
+/// The one function every engine calls, and the reason M4c is a rename rather
+/// than three lowerings: the interpreter, the textual emitter and the direct wasm
+/// backend each replace their implementation of `hexEncode` with
+/// `self.call(routed_builtin("hexEncode")?)`.
+pub fn routed_builtin(name: &str) -> Option<&'static str> {
+    RT_MODULES
+        .iter()
+        .flat_map(|rt| rt.routes)
+        .find(|(builtin, _)| *builtin == name)
+        .map(|(_, reserved)| *reserved)
+}
+
+/// The reserved spelling of an injected runtime declaration (`std/json`'s, the
+/// only prefix the `toJson` desugar spells).
 pub fn rt_name(name: &str) -> String {
     format!("{RT_PREFIX}{name}")
 }
@@ -776,7 +871,7 @@ fn load_modules(
                 },
                 import_targets: Vec::new(),
                 gen_source: None,
-                injected: false,
+                injected: None,
             });
             stack.pop();
             states.insert(key.to_string(), true);
@@ -1015,7 +1110,7 @@ fn load_modules(
             program,
             import_targets,
             gen_source,
-            injected: false,
+            injected: None,
         });
         Ok(())
     }
@@ -1045,56 +1140,69 @@ fn load_modules(
         return Err((diags, origins));
     }
 
-    // RFC-0078 M2b: the INJECTED import. `toJson` compiles into a call to
-    // `std/json`'s writer, so a program that mentions the builtin links that
-    // module even though no line of it says so. The loader walks imports from the
-    // root, and this is the one thing that enters that worklist without one.
+    // RFC-0078 M2b: the INJECTED imports. `toJson` compiles into a call to
+    // `std/json`'s writer and `hexEncode` into a call to `std/codecs`, so a program
+    // that mentions one of those builtins links the module even though no line of
+    // it says so. The loader walks imports from the root, and this is the one thing
+    // that enters that worklist without one.
     //
-    // Conditional on the mention: injecting unconditionally would put fifteen
-    // functions into every module and every wasm binary in the repo for a builtin
-    // most programs never use. `program_ref_names` is the same scan
-    // `resolve_aliases` uses, so "mentions `toJson`" means the same thing here as
-    // everywhere else — module-scope `let` initializers are outside it, and
-    // outside what a global may legally call anyway (no user calls, RFC-0013).
-    if modules
+    // Conditional on the mention: injecting unconditionally would put every
+    // runtime module's functions into every binary in the repo for builtins most
+    // programs never touch. `program_ref_names` is the same scan `resolve_aliases`
+    // uses, so "mentions `toJson`" means the same thing here as everywhere else —
+    // module-scope `let` initializers are outside it, and outside what a global may
+    // legally call anyway (no user calls, RFC-0013).
+    //
+    // M4c made this a loop over `RT_MODULES` rather than a second copy of itself,
+    // which is the whole reason the codecs cost no new mechanism.
+    let mentioned: HashSet<String> = modules
         .iter()
-        .any(|m| program_ref_names(&m.program).contains("toJson"))
-    {
-        // A missing std root is not an error HERE: `toJson` keeps its own
-        // implementation until the desugar lands, and the diagnostic for a
-        // program that needs the runtime and cannot find it belongs to whoever
-        // needs it, not to a scan.
-        if let Ok(target) = resolve_spec(RT_JSON_SPEC, &root_key, opts) {
-            if !states.contains_key(&target) {
-                if let Err(mut diags) = visit(
-                    &target,
-                    None,
-                    opts,
-                    resolver,
-                    &mut modules,
-                    &mut states,
-                    &mut identities,
-                    &mut origins,
-                    &mut warnings,
-                    &mut stack,
-                    &root_key,
-                ) {
-                    if !origins.is_empty() {
-                        for d in &mut diags {
-                            origins.remap(d);
-                        }
+        .flat_map(|m| program_ref_names(&m.program))
+        .collect();
+    for rt in RT_MODULES {
+        let wanted = rt
+            .desugared
+            .iter()
+            .chain(rt.routes.iter().map(|(b, _)| b))
+            .any(|b| mentioned.contains(*b));
+        if !wanted {
+            continue;
+        }
+        // A missing std root is not an error HERE: the diagnostic for a program
+        // that needs the runtime and cannot find it belongs to whoever needs it,
+        // not to a scan. Each engine refuses loudly at the call instead.
+        let Ok(target) = resolve_spec(rt.spec, &root_key, opts) else {
+            continue;
+        };
+        if !states.contains_key(&target) {
+            if let Err(mut diags) = visit(
+                &target,
+                None,
+                opts,
+                resolver,
+                &mut modules,
+                &mut states,
+                &mut identities,
+                &mut origins,
+                &mut warnings,
+                &mut stack,
+                &root_key,
+            ) {
+                if !origins.is_empty() {
+                    for d in &mut diags {
+                        origins.remap(d);
                     }
-                    return Err((diags, origins));
                 }
+                return Err((diags, origins));
             }
-            // Set AFTER the visit, and whether or not this load performed it: the
-            // program may ALSO import `std/json` by hand, in which case the module
-            // is already there and the reserved spellings apply to it either way.
-            // (They are transparent to a hand importer — `resolve_aliases` rewrites
-            // its references along with everything else.)
-            if let Some(m) = modules.iter_mut().find(|m| m.key == target) {
-                m.injected = true;
-            }
+        }
+        // Set AFTER the visit, and whether or not this load performed it: the
+        // program may ALSO import the module by hand, in which case it is already
+        // there and the reserved spellings apply to it either way. (They are
+        // transparent to a hand importer — `resolve_aliases` rewrites its
+        // references along with everything else.)
+        if let Some(m) = modules.iter_mut().find(|m| m.key == target) {
+            m.injected = Some(rt.prefix);
         }
     }
 
@@ -1691,15 +1799,18 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // ("function `JStr` is defined in `std/json.vyrn` but not imported here"),
     // which injection would turn into an error about a module the user never
     // mentioned.
-    let injected_key: Option<String> = modules
+    // `(module key, prefix)` for every injected module, and the variant renames of
+    // each — a variant is not an import name, so pass 2 would not otherwise reach
+    // it. Keyed per module so a hand importer of one runtime module keeps whatever
+    // another's variant names mean to it.
+    let injected: Vec<(String, &'static str)> = modules
         .iter()
-        .find(|m| m.injected)
-        .map(|m| m.key.clone());
-    // The injected module's variant names, for the importer rewrites in pass 2 —
-    // a variant is not an import name, so pass 2 would not otherwise reach it.
-    let mut injected_variants: HashMap<String, String> = HashMap::new();
-    if let Some(key) = &injected_key {
+        .filter_map(|m| m.injected.map(|p| (m.key.clone(), p)))
+        .collect();
+    let mut injected_variants: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for (key, prefix) in &injected {
         let m = modules.iter().find(|m| &m.key == key).expect("injected module");
+        let vars = injected_variants.entry(key.clone()).or_default();
         let mut names: Vec<String> = Vec::new();
         for t in &m.program.type_decls {
             if t.line == 0 {
@@ -1708,7 +1819,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             names.push(t.name.clone());
             if let Type::Enum(vs) = &t.base {
                 for v in vs {
-                    injected_variants.insert(v.name.clone(), rt_name(&v.name));
+                    vars.insert(v.name.clone(), format!("{prefix}{}", v.name));
                     names.push(v.name.clone());
                 }
             }
@@ -1729,8 +1840,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         // has no `$` in it, so a reserved spelling is unreachable from there —
         // and touching `all_names` here would defeat its lazy fill.
         for n in names {
-            let reserved = rt_name(&n);
-            foreign_renames.insert((key.clone(), n), reserved);
+            foreign_renames.insert((key.clone(), n.clone()), format!("{prefix}{n}"));
         }
     }
 
@@ -1954,11 +2064,13 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             // are references rather than import names, so nothing above reaches
             // them. Applied per importing module (not program-wide) so a module
             // that does NOT import `std/json` keeps whatever `JObj` means to it.
-            if Some(target) == injected_key.as_ref() && !imp.names.is_empty() {
-                rewrites
-                    .entry(m.key.clone())
-                    .or_default()
-                    .extend(injected_variants.iter().map(|(k, v)| (k.clone(), v.clone())));
+            if !imp.names.is_empty() {
+                if let Some(vars) = injected_variants.get(target) {
+                    rewrites
+                        .entry(m.key.clone())
+                        .or_default()
+                        .extend(vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+                }
             }
         }
     }
@@ -1983,7 +2095,8 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // constructor call and a `match` pattern both go through the rename map); the
     // variant list lives in the decl's `Type::Enum` base, which no reference
     // rewrite touches.
-    if let Some(key) = &injected_key {
+    for (key, _) in &injected {
+        let Some(vars) = injected_variants.get(key) else { continue };
         if let Some(tm) = modules.iter_mut().find(|m| &m.key == key) {
             for t in &mut tm.program.type_decls {
                 if t.line == 0 {
@@ -1991,7 +2104,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                 }
                 if let Type::Enum(vs) = &mut t.base {
                     for v in vs {
-                        if let Some(r) = injected_variants.get(&v.name) {
+                        if let Some(r) = vars.get(&v.name) {
                             v.name = r.clone();
                         }
                     }
@@ -3650,6 +3763,38 @@ fn rename_decl_in_module(p: &mut Program, from: &str, to: &str, ns: &HashSet<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`RT_MODULES`] writes each route's reserved name out in full so
+    /// [`routed_builtin`] can return a `&'static str` without composing one on a
+    /// path every call expression takes. That redundancy has to be checked, or a
+    /// row could name a spelling the decl rename never produces — a call to a
+    /// function nobody defines, which every engine would then refuse at the worst
+    /// possible moment. Also: no builtin may be claimed by two modules.
+    #[test]
+    fn every_route_is_spelled_with_its_modules_prefix() {
+        let mut seen: Vec<&str> = Vec::new();
+        for rt in RT_MODULES {
+            assert!(rt.prefix.ends_with('$'), "`{}` must end in `$`", rt.prefix);
+            for (builtin, reserved) in rt.routes {
+                assert_eq!(
+                    *reserved,
+                    format!("{}{}", rt.prefix, reserved.trim_start_matches(rt.prefix)),
+                    "`{builtin}` names `{reserved}`, which is not `{}`-prefixed",
+                    rt.prefix
+                );
+                assert!(reserved.starts_with(rt.prefix), "`{reserved}` vs `{}`", rt.prefix);
+                assert!(!seen.contains(builtin), "`{builtin}` is routed twice");
+                seen.push(builtin);
+                assert_eq!(routed_builtin(builtin), Some(*reserved));
+            }
+            for b in rt.desugared {
+                assert!(routed_builtin(b).is_none(), "`{b}` is a desugar, not a route");
+            }
+        }
+        assert!(routed_builtin("print").is_none());
+        assert!(routed_builtin("slice").is_none(), "`slice` traps; RFC-0078 M4c refused it");
+        assert!(routed_builtin("lineAt").is_none(), "`lineAt` keeps its interpreter cache");
+    }
 
     pub(super) fn map(entries: &[(&str, &str)]) -> MapResolver {
         MapResolver(

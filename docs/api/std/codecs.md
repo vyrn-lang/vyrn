@@ -17,21 +17,24 @@ and everything between is a `while` loop and the bitwise operators from
 RFC-0045. No primitive was missing — which is the finding, since M4a needed
 two (`floatBits`/`floatFromBits`) and M3 is still waiting on a ruling.
 
-The names carry a `V` suffix on purpose: the builtins still exist and nothing
-is swapped yet. `tests/codecs.rs` runs both over a wide corpus and asserts
-they agree, so the equivalence is proved BEFORE any deletion — the same
-ordering M2 and M3 used for their byte pins, and the reason those milestones
-found bugs in a third engine rather than shipping them.
+**These six ARE the builtins now** (RFC-0078 M4c). M4b(1) proved the Vyrn
+versions equal to them over 6,354 comparisons with the builtin as the oracle;
+M4c routed `hexEncode`, `hexDecode`, `base64Encode`, `base64Decode`, `urlEncode`
+and `urlDecode` into this module on every engine and deleted the duplicates —
+521 lines of hand-written LLVM IR and 162 lines of Rust. The `V` suffix is
+therefore a second spelling of the same function rather than a rival to it;
+`tests/codecs.rs` carries the old oracle forward as a pinned digest, since a
+comparison would now be `x == x`.
 
-**One deliberate divergence, and it is the builtin that is wrong.** A decoder
-whose bytes contain `0x00` — `hexDecodeV("00")`, `base64DecodeV("AA==")`,
-`urlDecodeV("%00")` — returns `None` here, because RFC-0014's rule is that a
-Vyrn `String` cannot hold a NUL and `stringFromBytes` enforces it. The
-builtin answers `Some`, and it does not agree with itself: the interpreter
-keeps a Rust `String` with an embedded NUL while the native path returns a
-NUL-terminated `char*` that is silently truncated at that byte. No example
-decodes a NUL, so parity has never looked. `tests/codecs.rs` pins the
-divergence as a divergence rather than papering over it.
+**One behavioural change, and it is a bug fix.** A decoder whose bytes contain
+`0x00` — `hexDecode("00")`, `base64Decode("AA==")`, `urlDecode("%00")` — returns
+`None`, because RFC-0014's rule is that a Vyrn `String` cannot hold a NUL and
+`stringFromBytes` enforces it. The deleted builtin answered `Some`, and did not
+agree with itself: the interpreter kept a Rust `String` with an embedded NUL
+while the native path returned a NUL-terminated `char*` silently truncated at
+that byte. No example decodes a NUL, so parity had never looked. Measured across
+the swap, that is **16 of 6,354 rows** and every one of the 16 is a NUL row —
+`tests/codecs.rs` records both digests and pins the rows individually.
 
 ## hexEncodeV
 
