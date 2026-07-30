@@ -59,29 +59,6 @@ fn gap(what: &str, line: usize) -> String {
     format!("direct backend: no lowering for {what} at line {line}")
 }
 
-/// Whether the emitted module stands alone or links against the shared runtime
-/// shim (RFC-0077 M2i).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Link {
-    /// One self-contained module: it defines its own memory, its own heap and its
-    /// own runtime. What `vyrn build --target wasm` produces, and the only shape
-    /// that needs no C toolchain to exist.
-    Standalone,
-    /// Memory and the C runtime come from RFC-0076's pre-compiled shim, linked at
-    /// instantiation — the same split its generator artifacts use, so one
-    /// `malloc` heap and one address space.
-    Shim,
-}
-
-/// The shim entry points this backend calls when there is a shim beside it.
-///
-/// NAMES only. Every signature comes from [`wasm::boundary`] — the textual
-/// emitter's own `declare` line for the same function, which is the side
-/// `tests/imports_vs_shim.rs` proves agrees with the C. Writing a signature down
-/// here would be a second chance to get one wrong, and a wrong import signature
-/// is a misread argument rather than a link error.
-const SHIM_IMPORTS: &[&str] = &["__vyrn_malloc"];
-
 /// The `wasi_snapshot_preview1` calls a directly-emitted module makes.
 ///
 /// **All of them are DECLARED, and then swept.** An import has to be declared
@@ -179,37 +156,27 @@ fn extern_abi_sig(f: &Function) -> (Vec<ValType>, Vec<ValType>) {
     (params, wasm::abi(crate::extern_abi_ll(&f.ret)).into_iter().collect())
 }
 
-/// Compile a whole program to a standalone `wasm32-wasi` module.
+/// Compile a whole program to a self-contained `wasm32-wasi` module.
+///
+/// One file: it defines its own memory, its own heap and its own runtime, and
+/// imports nothing but the `wasi_snapshot_preview1` calls it makes and the
+/// RFC-0012 `extern`s it declares. That is what makes `vyrn build --target wasm`
+/// need no clang, no wasi sysroot and no builtins archive (RFC-0077 M5).
+///
+/// M2i built a second shape that imported memory and the C runtime from RFC-0076's
+/// pre-compiled shim, selected by `VYRN_WASM_BACKEND=direct-shim`. It is gone with
+/// the flag, and the argument for deleting it is M2i's and M2j's own: the split
+/// makes a module LARGER (the runtime the shim would supply is already emitted and
+/// parity-proven), it needs a C toolchain and so could never be the default, and
+/// after M2j served RFC-0043's clock out of WASI directly it passed nothing this
+/// shape does not. The boundary audit it was said to protect —
+/// `vyrn-codegen/tests/shim_link.rs` — builds its own guest module out of
+/// `wasm::Module` and never went through here.
 pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
-    compile_linked(program, Link::Standalone)
-}
-
-/// Compile a whole program, choosing whether it stands alone or imports the
-/// shared shim.
-pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> {
     let mut m = Module::new();
-    if link == Link::Shim {
-        m.import_memory();
-    }
     // Imports first — they share the function index space with definitions, so
-    // `wasm::Module` panics if one arrives late. Which is also why the shim's
-    // imports are a fixed list rather than discovered as bodies need them: an
-    // index handed out after the first definition would renumber every call.
+    // `wasm::Module` panics if one arrives late.
     let wasi = wasi_imports(&mut m);
-    let mut shim: HashMap<&'static str, u32> = HashMap::new();
-    if link == Link::Shim {
-        for name in SHIM_IMPORTS {
-            let Some(Some((params, ret))) = wasm::boundary().get(*name) else {
-                return Err(format!("direct backend: `{name}` is not a boundary signature"));
-            };
-            // A `void` parameter is not a thing any `declare` has; a `void` result
-            // is, and is the empty result list.
-            let params: Vec<ValType> = params.iter().flatten().copied().collect();
-            let ret: Vec<ValType> = ret.iter().copied().collect();
-            let index = m.import("env", name, &params, &ret);
-            shim.insert(name, index);
-        }
-    }
     // RFC-0012 M1: every `extern fn` is one import from the fixed `vyrn`
     // namespace, which `web/wasi-min.js` fills from the page's own hooks. Declared
     // from the DECLARATIONS, before any body — not a pre-scan of the kind M2e and
@@ -237,7 +204,7 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
         );
     }
 
-    let rt = runtime(&mut m, &wasi, shim.get("__vyrn_malloc").copied());
+    let rt = runtime(&mut m, &wasi);
 
     let types: HashMap<String, TypeDecl> =
         program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
@@ -3922,13 +3889,12 @@ impl Fn_<'_> {
         // honouring `VYRN_FIXED_TIME`/`VYRN_FIXED_SEED`, which is what makes a
         // clock example a three-way parity citizen instead of a browser-only one.
         //
-        // M2i got them by reaching the shim, and M2j took that back out: the shim
-        // link can never be the default (M5 needs no clang), so a shape that only
-        // works linked does not advance this RFC. WASI has `clock_time_get` and
+        // M2i got them by reaching that shim, and M2j took it back out: a shape
+        // that only works linked cannot be what `vyrn build --target wasm` does,
+        // because M5's criterion is no clang. WASI has `clock_time_get` and
         // `random_get`, the env injection is `environ_get`, and wasi-libc's
         // `timespec_get`/`getentropy` are thin wrappers over the first two — so
-        // the emitted runtime reads the same syscalls by a shorter route, in BOTH
-        // link shapes rather than one.
+        // the emitted runtime reads the same syscalls by a shorter route.
         if let Some(sym) = crate::host_boundary_extern(name) {
             let f = match sym {
                 "__vyrn_now_millis" => self.cx.rt.now_millis,
@@ -5344,7 +5310,6 @@ impl Fn_<'_> {
         // Full: 0 → 4, else double. Growing means allocating and copying rather
         // than `realloc`ing, because this backend's allocator is a bump pointer
         // that never frees (see `runtime`) — the old buffer is simply abandoned.
-        // M4 hands this to the shim's real allocator.
         b.ins(&Instruction::LocalGet(len));
         b.ins(&Instruction::LocalGet(cap));
         b.ins(&Instruction::I64Eq);
@@ -7310,9 +7275,9 @@ fn store_of(ll: &str) -> Instruction<'static> {
 
 /// The handful of functions a standalone module needs and has nowhere to get.
 ///
-/// RFC-0076's shim owns `malloc` and the string runtime for the split build, but
-/// `vyrn build --target wasm` produces ONE module with no shim beside it, so
-/// these are emitted. All forty of them, whether the program reaches one or not —
+/// RFC-0076's shim owns `malloc` and the string runtime for its generator
+/// artifacts, but `vyrn build --target wasm` produces ONE module with no shim
+/// beside it, so these are emitted. All forty of them, whether the program reaches one or not —
 /// and then [`wasm::Module::sweep`] (M2p) drops the ones no export reaches, which
 /// is why the whole table costs `fib.wasm` 290 bytes of code rather than 4,420.
 /// The data each interned on its way past is NOT swept.
@@ -7518,7 +7483,7 @@ fn word() -> MemArg {
     MemArg { offset: 0, align: 2, memory_index: 0 }
 }
 
-fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
+fn runtime(m: &mut Module, wasi: &Wasi) -> Rt {
     let (fd_write, proc_exit) = (wasi.fd_write, wasi.proc_exit);
     let base = m.n_imports();
     let (mut rt, _table) = Rt::slots(base);
@@ -7586,31 +7551,14 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
         },
     );
 
-    // malloc(n) — the shim's real allocator when there is a shim, and a bump
-    // pointer over `HEAP` when there is not.
+    // malloc(n) — a bump pointer over `HEAP`.
     //
-    // A wrapper rather than a rewrite of ~20 call sites, and the shape is the
-    // reason: the wrapper's signature is the one the emitted runtime already
-    // calls, so the whole difference between a standalone module and a linked one
-    // is these five instructions. It is also where the split proves itself — a
-    // pointer that came out of the shim's dlmalloc heap, written by us, read back
-    // by C, is shared linear memory or nothing.
-    //
-    // ponytail: the standalone bump allocator never frees. Vyrn's ownership
-    // analysis knows exactly where every value dies (`Stmt::Drop` is already in
-    // the AST), so a real allocator belongs here eventually; nothing observable
-    // depends on it, because a free is not a thing a program can print.
+    // ponytail: it never frees. Vyrn's ownership analysis knows exactly where every
+    // value dies (`Stmt::Drop` is already in the AST), so a real allocator belongs
+    // here eventually; nothing observable depends on it, because a free is not a
+    // thing a program can print.
     let p = 2;
     rt.next_is(m, rt.malloc);
-    if let Some(shim_malloc) = shim_malloc {
-        m.func(&[ValType::I32], &[ValType::I32], &[], 0, |b| {
-            // The shim takes an `unsigned long long`, so the size widens; a Vyrn
-            // allocation is bounded by an i32 address space either way.
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::Call(shim_malloc));
-        });
-    } else {
     m.func(&[ValType::I32], &[ValType::I32], &[ValType::I32], 0, |b| {
         b.ins(&Instruction::GlobalGet(HEAP))
             .ins(&Instruction::LocalTee(p))
@@ -7637,7 +7585,6 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
             .ins(&Instruction::End)
             .ins(&Instruction::LocalGet(p));
     });
-    }
 
     // strlen(s)
     rt.next_is(m, rt.strlen);
@@ -8526,8 +8473,8 @@ const CELL_SLAB: u32 = CELL_FREE + CELLS * 4;
 /// The generational slot table (RFC-0004 §4, Path B), as three functions.
 ///
 /// The LLVM build gets this from a hand-written IR prelude — it is not in the C
-/// shim, so there is nothing to import in either link shape and this is the one
-/// runtime piece M2i's split cannot supply. What it has to reproduce is the
+/// shim at all, so there was never anything to import and it is the one runtime
+/// piece M2i's split could not have supplied. What it has to reproduce is the
 /// *behaviour*, not the shape: allocation hands out `{ slot, generation }`, a
 /// release bumps the slot's generation and pushes the slot on a LIFO free list,
 /// and every access compares the reference's captured generation against the

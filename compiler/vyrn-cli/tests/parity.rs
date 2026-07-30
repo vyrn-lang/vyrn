@@ -1,14 +1,35 @@
 //! Corpus parity harness: every example must behave byte-identically under the
-//! interpreter (`vyrn run`, the reference semantics) and the native binary
-//! (`vyrn build` + execute). Compares stdout, stderr, and exit code.
+//! interpreter (`vyrn run`, the reference semantics), the native binary
+//! (`vyrn build` + execute) and wasm (`vyrn build --target wasm` under
+//! `wasmtime`). Compares stdout, stderr, and exit code.
 //!
-//! Ignored by default (needs `clang` and builds every example — ~a minute):
+//! Ignored by default (needs `clang` for the native column and builds every
+//! example — ~a minute):
 //!
 //!     cargo test -p vyrn-cli --test parity -- --ignored --nocapture
 //!
 //! Line endings are normalized (CRLF → LF): the interpreter writes LF while
 //! the native binary inherits the platform's text-mode CRLF — a documented,
 //! benign difference.
+//!
+//! # One gate, since RFC-0077 M5
+//!
+//! The wasm column was produced by clang until M5 and is now the direct backend,
+//! which is why this file also holds the direct-backend cases the corpus does not
+//! reach. Those lived in a `directwasm` tier for the length of M2, beside a
+//! `PASSING` burndown list that was the milestone's real deliverable; the list
+//! reached 87 of 87 and the tier then measured exactly what the column below
+//! measures. Two gates over one corpus is how a number stops being about the
+//! thing it names — and the tier was never in CI, which ran only this file, so
+//! folding it in is also the first time those cases are gated at all.
+//!
+//! The pins are the other half. Every one of them exists because no example
+//! reaches the path: a bounds message whose wrong wording reads exactly like a
+//! check that never fires, a DFA walk over a non-ASCII byte, a column off both
+//! ends of a buffer, a stale cell and a full slab, a suppressed log call, a
+//! renumbering after the sweep. Each compares against the INTERPRETER's own
+//! answer rather than against a spelling written here, because two backends can be
+//! confidently wrong together.
 
 mod common;
 use common::*;
@@ -21,9 +42,12 @@ fn examples_interp_native_parity() {
     let dir = examples_dir();
     let out_dir = std::env::temp_dir().join("vyrn-parity");
     std::fs::create_dir_all(&out_dir).unwrap();
-    let wasm = wasm_toolchain();
+    // A `wasmtime` binary and nothing else: since RFC-0077 M5 the wasm column is
+    // emitted directly, so no clang, no wasi sysroot and no builtins archive stand
+    // between this harness and a module.
+    let wasm = wasmtime();
     if wasm.is_none() {
-        eprintln!("NOTE: wasm toolchain not found — verifying interp == native only");
+        eprintln!("NOTE: no wasmtime — verifying interp == native only");
     }
 
     let mut names: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -98,7 +122,7 @@ fn examples_interp_native_parity() {
         // Third column: the same program compiled to wasm32-wasi must match
         // the interpreter byte-for-byte too (wasm writes LF like the interp;
         // norm() makes it moot either way).
-        if let Some((sysroot, wasmtime)) = &wasm {
+        if let Some(wasmtime) = &wasm {
             let module = out_dir.join(format!("{name}.wasm"));
             let build = vyrn()
                 .arg("build")
@@ -107,7 +131,6 @@ fn examples_interp_native_parity() {
                 .arg("wasm")
                 .arg("-o")
                 .arg(&module)
-                .env("WASI_SYSROOT", sysroot)
                 .output()
                 .expect("build wasm");
             if !build.status.success() {
@@ -409,4 +432,2256 @@ fn expected_check_failures_do_fail() {
             "{name}: expected a validation diagnostic, got:\n{err}"
         );
     }
+}
+
+// -------------------------------------------------------------------------
+// The wasm cases the corpus does not reach (RFC-0077 M2a-M2p)
+// -------------------------------------------------------------------------
+/// The one message this backend assembles at runtime rather than interning
+/// whole, and the one no example reaches.
+///
+/// `error: array index 7 out of bounds` has the offending index in the MIDDLE,
+/// so it is three writes and an `int_str` rather than a string constant — and a
+/// bounds check that never fires reads exactly like one that fires with the
+/// wrong wording. Both spellings, because the array and the string paths pick
+/// different prefixes.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn the_bounds_trap_says_what_the_interpreter_says() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-oob");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (what, src) in [
+        ("array", "fn main() -> Int64 {\n let xs: Array<Int64> = [1, 2, 3]\n print(xs[7])\n return 0\n}\n"),
+        ("string", "fn main() -> Int64 {\n let s = \"hi\"\n let b = s[9]\n return 0\n}\n"),
+    ] {
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src).unwrap();
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .output()
+            .expect("build wasm");
+        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg(&module);
+        let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+        assert!(runtime_err(&w.stderr).contains(&format!("{what} index")), "{what}: wrong wording");
+    }
+}
+
+/// The two ways the generational slot table (RFC-0077 M2l) fails, neither of
+/// which any example reaches.
+///
+/// `genref.vyrn` drops a cell and never touches it again, and `autorelease.vyrn`
+/// only proves the slab does NOT fill. So a `cell_addr` that skipped the
+/// generation compare would pass every listed example, and so would a slab of the
+/// wrong size — the exhaustion message is exactly what a too-small one would
+/// print, and exactly what a release that never fired would print too. Both are
+/// pinned against the interpreter rather than against a spelling written here.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_stale_reference_and_a_full_slab_say_what_the_interpreter_says() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-cells");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (what, src) in [
+        // Read through a copy of a reference whose cell has been released.
+        (
+            "stale",
+            "fn main() -> Int64 {\n let c = cell(7)\n let alias = c\n drop c\n \
+             print(get(alias))\n return 0\n}\n",
+        ),
+        // 70000 cells with no release: past the 65536-slot slab, which is the
+        // number the other two engines use.
+        (
+            "full",
+            "fn main() -> Int64 {\n let mut i = 0\n let mut keep: Array<Ref<Int64>> = []\n \
+             while i < 70000 {\n keep = keep.push(cell(i))\n i = i + 1\n }\n \
+             print(keep.length)\n return 0\n}\n",
+        ),
+    ] {
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src).unwrap();
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .output()
+            .expect("build wasm");
+        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg(&module);
+        let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+        assert!(!runtime_err(&w.stderr).is_empty(), "{what}: no trap at all");
+    }
+}
+
+/// Monomorphization discovering itself, which `generics.vyrn` does not do.
+///
+/// A wasm call names a function INDEX, so a specialization's index is handed out
+/// where it is *discovered* and its body added later — which only works if the
+/// two orders are the same. `twice` calls `wrap`, so `wrap<Int64>` is discovered
+/// while three other specializations are still queued: a driver that drained its
+/// worklist as a stack, or that appended out of turn, would renumber every call
+/// after that point. The textual backend cannot notice — it emits symbols.
+///
+/// Also here because they are the shapes generics reach through: an aggregate
+/// returned from a generic (the hidden leading destination, allocated before the
+/// substitution is even solved), and a further generic solved from a generic
+/// call's RESULT type — `firstOf(twice(41))` can only fix `A` if the call
+/// reports `Pair<Int64, Int64>` rather than its record shape.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_specialization_discovered_from_another_gets_the_index_its_callers_named() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-mono");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+type Pair<A, B> = { first: A, second: B }
+
+fn wrap<T>(x: T) -> Pair<T, T> {
+    return Pair { first: x, second: x }
+}
+
+fn twice<T>(x: T) -> Pair<T, T> {
+    return wrap(x)
+}
+
+fn firstOf<A, B>(p: Pair<A, B>) -> A {
+    return p.first
+}
+
+fn main() -> Int64 {
+    let a = twice(41)
+    let b = twice(\"hi\")
+    print(firstOf(a) + 1)
+    print(firstOf(b))
+    print(wrap(true).second)
+    return firstOf(a) - 41
+}
+";
+    let path = dir.join("mono.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("mono.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // A merged specialization is the failure this is really about: `twice<Int64>`
+    // and `twice<String>` are the same source and different code, and merging
+    // them prints a plausible number where a string belongs.
+    assert_eq!(norm(&interp.stdout), "42\nhi\ntrue\n", "the interpreter moved");
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// The three things the `=~` walk (RFC-0077 M2m) can get wrong that the whole
+/// corpus is blind to, because every `=~` in `examples/` and `std/` runs over
+/// ASCII.
+///
+/// The load of the input byte has to be **unsigned**. A signed one turns a UTF-8
+/// continuation byte into a negative table index, which reads memory *below* the
+/// transition table and answers wrongly — no trap, because the table sits in the
+/// middle of a live address space. Checked by breaking it: with `i32.load8_s`,
+/// `regex`, `finitekeys`, `i18ndemo` and `twdemo` all still pass, and the two
+/// non-ASCII lines here go false where the interpreter says true and true where it
+/// says false.
+///
+/// The other two are the zero-length walk — the answer is whether the START state
+/// accepts, which a do-while shape gets wrong and no example asks — and a
+/// non-match that keeps walking after it is already lost, which is what the dead
+/// state absorbing every remaining byte means.
+///
+/// Pinned against the interpreter's answer, not against a spelling written here:
+/// `Dfa::matches` is the third walk over the same table and the one the checker
+/// already trusts.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn the_dfa_walk_agrees_with_the_interpreter_on_what_no_example_reaches() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-regex");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+fn main() -> Int64 {
+    print(\"\" =~ \"a*\")
+    print(\"\" =~ \"a+\")
+    print(\"b\" =~ \"a*\")
+    print(\"é\" =~ \".\")
+    print(\"é\" =~ \"..\")
+    print(\"café\" =~ \"caf.\")
+    print(\"café\" =~ \"caf..\")
+    print(\"ünïcödé\" =~ \".*\")
+    print(\"abcXdefghijklmnop\" =~ \"[a-z]+\")
+    return 0
+}
+";
+    let path = dir.join("rx.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("rx.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // Spelled out so a change in what the LANGUAGE answers is a failure here too,
+    // not just a change in what the two engines answer together. `"é" =~ "."` is
+    // false because `.` is one BYTE and `é` is two — RFC-0046 runs a byte DFA, and
+    // that is the fact both non-ASCII lines are really pinning.
+    assert_eq!(
+        norm(&interp.stdout),
+        "true\nfalse\nfalse\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\n",
+        "the interpreter moved"
+    );
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// The two `modify` shapes the corpus does not have, and one it does (RFC-0077
+/// M2f).
+///
+/// Every `modify` parameter in `examples/` and `std/` is an **aggregate** — a
+/// record, an `Array<T>`, a `Parser`, a `Scanner` — so the scalar case is
+/// entirely untested by the ladder, and it is the one that needs work the
+/// aggregate case does not: a scalar binding is a wasm local, which has no
+/// address for the callee to write through, so the caller spills it to a frame
+/// slot and reloads it after the call. Omitting either half compiles cleanly and
+/// prints 21 where 42 belongs — the same silent shape M2b caught by running
+/// (`modify.vyrn` printed zeroes), and the reason this exists rather than a
+/// comment claiming the path is covered.
+///
+/// Also here: **module state as a `modify` argument**, where the address is a
+/// constant rather than a frame offset, and a `modify` parameter **handed on to
+/// another** one, where the address the inner call writes through is the outer
+/// callee's own slot. And a global read by a later initializer, which is what
+/// makes declaration order observable inside a single file.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_modify_parameter_copies_back_whatever_the_caller_kept_it_in() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-modify");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+type Counter = { value: Int64, hits: Int64 }
+
+let mut base: Int64 = 7
+let derived: Int64 = base * 2
+let mut shared: Counter = Counter { value: 0, hits: 0 }
+let label: String = \"label\"
+
+fn twice(n: modify Int64) {
+    n = n * 2
+}
+
+fn bump(c: modify Counter, by: Int64) {
+    c.value = c.value + by
+    c.hits = c.hits + 1
+}
+
+fn bumpTwice(c: modify Counter) {
+    bump(c, 1)
+    bump(c, 1)
+}
+
+fn main() -> Int64 {
+    print(base)
+    print(derived)
+    base = base + 1
+    print(base)
+
+    let mut n = 21
+    twice(n)
+    print(n)
+
+    bump(shared, 5)
+    bumpTwice(shared)
+    print(label)
+    print(shared.value)
+    print(shared.hits)
+
+    shared.value = 100
+    print(shared.value)
+    return shared.hits
+}
+";
+    let path = dir.join("modifyshapes.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("modifyshapes.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // Spelled out rather than only compared, because the failure this is about is
+    // a plausible number: 21 instead of 42, or a 5 that never became a 7.
+    assert_eq!(
+        norm(&interp.stdout),
+        "7\n14\n8\n42\nlabel\n7\n3\n100\n",
+        "the interpreter moved"
+    );
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// The two builtins M2g landed that the corpus does not run, and the boxing bug
+/// they found (RFC-0077 M2g).
+///
+/// `tagged.vyrn` is the only example that reaches `value(x)`, and it reaches it
+/// through the `sql"..."` desugar — for `Int64` and `String` only. `charCount` has
+/// no example at all: `bytecount.vyrn` stops on a sized-int conversion two lines
+/// later, so the lowering would ship untested, which this repo treats as worse
+/// than a named gap.
+///
+/// Both go through the same enum payload word, which is where the bug was: an
+/// i32-shaped payload — a `String`, a `Bool` — took ONE scratch local for the
+/// value and the box address both, so the box ended up pointing at itself and
+/// `print` showed the pointer's bytes. It compiled and it validated. `BoolVal` is
+/// here because it is the shape no example builds at all.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_boxed_enum_payload_survives_the_word_it_travels_in() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-value");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+fn show(v: Value) -> String {
+    return match v {
+        IntVal(n) => n.toString(),
+        BoolVal(b) => b.toString(),
+        StrVal(s) => s,
+    }
+}
+
+fn main() -> Int64 {
+    print(show(value(\"hi there\")))
+    print(show(value(true)))
+    print(show(value(-7)))
+    // Unicode scalar values, not bytes: two of these five are multi-byte.
+    print(\"héllo\".charCount())
+    print(\"héllo\".byteLength)
+    print(\"\".charCount())
+    return \"héllo\".charCount()
+}
+";
+    let path = dir.join("valuecount.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("valuecount.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // Spelled out, because the failure was a plausible-looking string rather than
+    // a crash: garbage bytes where "hi there" belonged, and a byte count where a
+    // character count belonged.
+    assert_eq!(norm(&interp.stdout), "hi there\ntrue\n-7\n5\n6\n0\n", "the interpreter moved");
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// `bytes` / `slice` / `stringFromBytes`, which no example reaches (RFC-0077 M2g).
+///
+/// The four examples the ladder filed under `stringFromBytes` all reach it through
+/// `std/strings`, and `std/strings` is a wall of five more blockers behind it — so
+/// lowering the builtin moved them from its name to `Shr` on `UInt64` and left the
+/// lowering itself completely unrun. That is the case this repo treats as worse
+/// than a gap, so it gets the running test the corpus cannot supply.
+///
+/// What is actually being checked is the failure semantics, because they are the
+/// part a plausible-looking implementation gets wrong: an embedded NUL is rejected
+/// BEFORE the UTF-8 check and with its own wording (a Vyrn `String` is
+/// NUL-terminated, so it could not carry one), and the DFA has to reject what
+/// Rust's `String::from_utf8` rejects — an overlong form and a lone continuation
+/// byte are here for that, not for coverage. `slice`'s two traps are separate
+/// programs because a trap ends the run.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn the_string_builtins_agree_with_the_interpreter_about_their_failures() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-strbytes");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let show = "\
+fn show(r: Result<String, String>) -> String {
+    return match r {
+        Ok(s) => \"ok:\" + s,
+        Err(e) => \"err:\" + e,
+    }
+}
+";
+    let cases: [(&str, &str); 3] = [
+        (
+            "ok",
+            "\
+fn main() -> Int64 {
+    print(show(stringFromBytes(bytes(\"héllo\"))))
+    print(show(stringFromBytes([]))) // the empty buffer is a valid empty String
+    print(show(stringFromBytes(['\\xf0', '\\x9f', '\\x98', '\\x80'])))
+    print(slice(\"héllo wörld\", 0, 6))
+    print(slice(\"héllo\", 6, 6))     // `to == len` reads the terminator
+    print(bytes(\"hé\").length)
+    return 0
+}
+",
+        ),
+        (
+            "bad",
+            "\
+fn main() -> Int64 {
+    print(show(stringFromBytes(['h', '\\x00', 'i'])))  // NUL, not bad UTF-8
+    print(show(stringFromBytes(['\\xc0', '\\xaf'])))    // overlong '/'
+    print(show(stringFromBytes(['\\x80'])))            // lone continuation
+    print(show(stringFromBytes(['\\xed', '\\xa0', '\\x80']))) // a surrogate
+    print(show(stringFromBytes(['\\xf5', '\\x80', '\\x80', '\\x80']))) // > U+10FFFF
+    print(show(stringFromBytes(['\\xe2', '\\x82'])))    // truncated
+    return 0
+}
+",
+        ),
+        // Both `slice` traps: out of range, and a cut inside a multi-byte
+        // character. The wording is what parity compares, not the fact of trapping.
+        (
+            "traps",
+            "fn main() -> Int64 {\n print(slice(\"hi\", 0, 9))\n return 0\n}\n",
+        ),
+    ];
+    for (what, body) in cases {
+        for (name, src) in [
+            (what.to_string(), format!("{show}{body}")),
+            // The split trap, only for the trapping case: byte 1 of "é" is a
+            // continuation byte, so cutting there is the error slicing exists to
+            // catch.
+            (
+                format!("{what}2"),
+                "fn main() -> Int64 {\n print(slice(\"hé\", 0, 2))\n return 0\n}\n".to_string(),
+            ),
+        ] {
+            if name.ends_with('2') && what != "traps" {
+                continue;
+            }
+            let path = dir.join(format!("{name}.vyrn"));
+            std::fs::write(&path, &src).unwrap();
+            let module = dir.join(format!("{name}.wasm"));
+            let build = vyrn()
+                .arg("build")
+                .arg(&path)
+                .arg("--target")
+                .arg("wasm")
+                .arg("-o")
+                .arg(&module)
+                .output()
+                .expect("build wasm");
+            assert!(build.status.success(), "{name}: {}", String::from_utf8_lossy(&build.stderr));
+
+            let mut interp_cmd = vyrn();
+            interp_cmd.arg("run").arg(&path);
+            let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+            let mut wasm_cmd = Command::new(&wasmtime);
+            wasm_cmd.arg("run").arg(&module);
+            let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+            assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{name}: stdout");
+            assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{name}: stderr");
+            assert_eq!(interp.status.code(), w.status.code(), "{name}: exit");
+            // Comparing two backends would pass if both were silently wrong about
+            // which failure happened, so the interpreter's own answer is pinned.
+            match what {
+                "ok" => assert_eq!(
+                    norm(&interp.stdout),
+                    "ok:héllo\nok:\nok:😀\nhéllo\n\n3\n",
+                    "the interpreter moved"
+                ),
+                "bad" => assert_eq!(
+                    norm(&interp.stdout),
+                    "err:bytes contain a NUL byte\n\
+                     err:bytes are not valid UTF-8\n\
+                     err:bytes are not valid UTF-8\n\
+                     err:bytes are not valid UTF-8\n\
+                     err:bytes are not valid UTF-8\n\
+                     err:bytes are not valid UTF-8\n",
+                    "the interpreter moved"
+                ),
+                _ => assert!(
+                    runtime_err(&w.stderr).contains("slice "),
+                    "{name}: not a slice trap: {:?}",
+                    runtime_err(&w.stderr)
+                ),
+            }
+        }
+    }
+}
+
+/// Every sized-integer width, and the two answers that are plausible when it is
+/// wrong (RFC-0077 M2h).
+///
+/// `bits.vyrn` reaches the six bitwise operators and `strings.vyrn` reaches
+/// `UInt64`, but the example that actually exercises **wrapping at each width** —
+/// `sizedints.vyrn` — is blocked on a float conversion, so the ladder cannot see
+/// the signed narrow widths at all. Every mistake here compiles, validates and
+/// returns a number: wasm has no `i8` arithmetic, so an `Int8` rides an `i32` and
+/// a missing renormalization prints 200 where -56 belongs.
+///
+/// The half worth spelling out is **memory**. `llt` prints `i8` for both `Int8`
+/// and `UInt8`, so a load cannot tell from the shape how to extend the byte — a
+/// negative `Int8` in a record field or an array element reads back as 197 if it
+/// zero-extends, which is a plausible number in a program that never says which
+/// it meant. The comparisons are the other silent pair: a signed opcode reads
+/// `4000000000` as negative and an unsigned one reads `-59` as enormous, and both
+/// answers look like an answer.
+///
+/// The traps are separate programs because a trap ends the run, and they are here
+/// for the widths rather than for the wording: the divide-overflow guard compares
+/// against **the width's** minimum, so an `Int8` `-128 / -1` has to trap where a
+/// guard written for `Int64` would silently return -128.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn every_integer_width_wraps_where_the_interpreter_wraps() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-ints");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let widths = "\
+type Widths = { a: Int8, b: Int16, c: Int32, d: UInt8, e: UInt32, f: UInt64 }
+
+fn negate(x: Int8) -> Int8 {
+    return 0 - x
+}
+
+fn main() -> Int64 {
+    // Wrapping at each signed width — the operators wasm has to renormalize.
+    let a: Int8 = 100
+    let b: Int16 = 30000
+    let c: Int32 = 2000000000
+    print(a * 2)
+    print(b + b)
+    print(c + c)
+    // `0 - x` takes its width from the RIGHT operand, which is the one shape a
+    // left-operand-only rule gets wrong.
+    print(negate(a))
+
+    // Through memory: a record field and an array element, where a zero-extending
+    // load turns -59 into 197.
+    let w: Widths = Widths {
+        a: Int8(0 - 59),
+        b: Int16(0 - 300),
+        c: Int32(0 - 7),
+        d: 200,
+        e: 4000000000,
+        f: 18446744073709551615,
+    }
+    print(w.a)
+    print(w.b)
+    print(w.c)
+    print(w.d)
+    print(w.e)
+    print(w.f)
+    let xs: Array<Int8> = [Int8(0 - 59), 7]
+    print(xs[0])
+    print(xs[1])
+
+    // Comparisons, where the wrong opcode is a plausible answer both ways.
+    print(w.a < 0)
+    print(w.e > 2000000000)
+    print(w.f > 9223372036854775807)
+
+    // Division and remainder at each signedness.
+    print(w.d / 3)
+    print(w.d % 3)
+    print(w.c / 2)
+    print(w.c % 2)
+    print(w.f / 3)
+    print(w.f % 7)
+
+    // Conversions in both directions, including the two that discard bits.
+    print(Int64(w.a))
+    print(Int64(w.e))
+    print(Int8(w.e))
+    print(UInt8(w.a))
+    print(Int8(200))
+    print(UInt16(w.c))
+
+    // Bitwise at a narrow width: `>>` is arithmetic on the signed one and
+    // logical on the unsigned one, and `~` complements inside the width.
+    print(w.c & 12)
+    print(w.a >> 2)
+    print(w.d >> 2)
+    print(w.b << 4)
+    print(~w.a)
+    print(~w.e)
+    return 0
+}
+";
+    let path = dir.join("widths.vyrn");
+    std::fs::write(&path, widths).unwrap();
+    let module = dir.join("widths.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // Pinned rather than only compared: two backends can be confidently wrong
+    // together about a width, and every number here is one a wrong lowering also
+    // produces.
+    assert_eq!(
+        norm(&interp.stdout),
+        "-56\n-5536\n-294967296\n-100\n\
+         -59\n-300\n-7\n200\n4000000000\n18446744073709551615\n-59\n7\n\
+         true\ntrue\ntrue\n\
+         66\n2\n-3\n-1\n6148914691236517205\n1\n\
+         -59\n4000000000\n0\n197\n-56\n65529\n\
+         8\n-15\n50\n-4800\n58\n294967295\n",
+        "the interpreter moved"
+    );
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+
+    // The numeric traps, at widths other than `Int64` — the divide-overflow guard
+    // is the one that has to know the width rather than assume 64 bits. Each is a
+    // program of its own because a trap ends the run, and the divisor comes out of
+    // a call so the checker's const path cannot fold it into a compile error.
+    for (what, src, wording) in [
+        (
+            "minovf",
+            "fn neg1() -> Int8 { return Int8(0 - 1) }\n\
+             fn main() -> Int64 {\n let m: Int8 = Int8(0 - 128)\n print(m / neg1())\n return 0\n}\n",
+            "integer overflow in division",
+        ),
+        (
+            "div0",
+            "fn zero() -> UInt8 { return 0 }\n\
+             fn main() -> Int64 {\n let x: UInt8 = 200\n print(x / zero())\n return 0\n}\n",
+            "division by zero",
+        ),
+        (
+            "rem0",
+            "fn zero() -> UInt64 { return 0 }\n\
+             fn main() -> Int64 {\n let x: UInt64 = 200\n print(x % zero())\n return 0\n}\n",
+            "remainder by zero",
+        ),
+        // A shift by the width, and by a NEGATIVE amount — one unsigned `>=`
+        // covers both, which is the claim being checked rather than asserted.
+        (
+            "shiftwide",
+            "fn eight() -> UInt8 { return 8 }\n\
+             fn main() -> Int64 {\n let x: UInt8 = 3\n print(x << eight())\n return 0\n}\n",
+            "shift amount out of range",
+        ),
+        (
+            "shiftneg",
+            "fn negone() -> Int32 { return Int32(0 - 1) }\n\
+             fn main() -> Int64 {\n let x: Int32 = 3\n print(x >> negone())\n return 0\n}\n",
+            "shift amount out of range",
+        ),
+    ] {
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src).unwrap();
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .output()
+            .expect("build wasm");
+        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg(&module);
+        let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+        assert!(
+            runtime_err(&interp.stderr).contains(wording),
+            "{what}: the interpreter moved: {:?}",
+            runtime_err(&interp.stderr)
+        );
+        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+    }
+}
+
+/// The six decimals of a `Float64`, on the values that tell a correct formatter
+/// from a plausible one (RFC-0077 M2h).
+///
+/// `floats.vyrn` prints eleven floats and every one of them is small, finite and
+/// ordinary. What `%f` actually is, though, is an EXACT decimal conversion of the
+/// double, rounded half-to-EVEN at the sixth place — the interpreter's `{:.6}`
+/// and the native build's `printf("%f")` agree on that and nothing that computes
+/// six decimals in floating point does. So the cases here are the ones a
+/// shortcut gets wrong:
+///
+/// - `0.0078125` and `0.0234375` are exact ties. Half-to-even keeps the even `2`
+///   in the first and rounds the odd `7` up in the second, so a half-UP
+///   implementation passes one and fails the other.
+/// - `10^300` has 301 integer digits, which is why the numerator is a bignum and
+///   not a `u64`. Its digits are not `1` followed by zeros — they are the exact
+///   value of the nearest double — so a wrong carry anywhere in the doubling loop
+///   shows up as a wrong digit in the middle.
+/// - a subnormal reaches `k = 1074`, the deepest the multiply loop goes, and
+///   still has to print `0.000000` rather than run off the buffer.
+/// - `NaN`, `inf`, `-inf` and `-0.0` are all spelled rather than computed, and
+///   `-0.0` keeps a sign that no digit carries.
+/// - `Int64` of `10^300` saturates at `Int64.max`, because the interpreter is
+///   Rust's `as` and wasm's plain `trunc` would have trapped there.
+///
+/// Vyrn has no exponent literals, so the extreme values are built by
+/// multiplication — which is better than a literal would have been: both engines
+/// compute the same double by the same IEEE steps, and the mantissa that comes
+/// out is messy rather than round.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn six_decimals_of_a_float_are_the_exact_ones() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-floats");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+fn opaque(x: Float64) -> Float64 {
+    return x
+}
+
+fn pow10(n: Int64) -> Float64 {
+    let mut x: Float64 = 1.0
+    let mut i: Int64 = 0
+    while i < n {
+        x = x * 10.0
+        i = i + 1
+    }
+    return x
+}
+
+fn halved(n: Int64) -> Float64 {
+    let mut x: Float64 = 1.0
+    let mut i: Int64 = 0
+    while i < n {
+        x = x / 2.0
+        i = i + 1
+    }
+    return x
+}
+
+fn main() -> Int64 {
+    print(0.0078125)
+    print(0.0234375)
+    print(pow10(300))
+    print(0.0 - pow10(300))
+    print(halved(1074))
+    print(halved(1075))
+    print(opaque(0.0) * (0.0 - 1.0))
+    print(0.0 - 0.5)
+    print(1.0 / opaque(0.0))
+    print(0.0 - 1.0 / opaque(0.0))
+    print(opaque(0.0) / opaque(0.0))
+    print(9.9999995)
+    print(123456789.123456789)
+    let f: Float32 = 0.1
+    print(f)
+    print(f * f)
+    print(Int64(0.0 - 2.9))
+    print(UInt8(300.7))
+    print(Int64(pow10(300)))
+    print(Float32(pow10(300)))
+    return 0
+}
+";
+    // The exact decimal value of the double nearest 10^300, which is what both
+    // references print. Pinned whole because a carry bug in the doubling loop is
+    // a wrong digit in the middle rather than at either end.
+    const P300: &str = "\
+1000000000000000201206451102982726528510718396098215168041874281451248363566\
+0941273804370911208852185605358934485189371568149022546577356211033167392772\
+7776193144531116603838203491427854077548432800993666474448696900069727411136\
+1486849523430568151310289152823685865144042626214886587669241994282008576";
+    let path = dir.join("floats6.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("floats6.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    let want = format!(
+        "0.007812\n0.023438\n\
+         {P300}.000000\n-{P300}.000000\n\
+         0.000000\n0.000000\n-0.000000\n-0.500000\n\
+         inf\n-inf\nNaN\n\
+         9.999999\n123456789.123457\n\
+         0.100000\n0.010000\n\
+         -2\n44\n9223372036854775807\ninf\n"
+    );
+    assert_eq!(norm(&interp.stdout), want, "the interpreter moved");
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// The RFC-0014 semantics the corpus cannot reach, over raw WASI (RFC-0077 M2j).
+///
+/// Three examples moved to `PASSING` this milestone and between them they exercise
+/// the happy path only: `args.vyrn` runs with an EMPTY argv (it has no `.args`
+/// fixture, deliberately — the harness gives every example zero arguments),
+/// `files.vyrn` reaches exactly one of `readFile`'s three failures, and nothing at
+/// all reaches `readLine`, because `input.vyrn` and `vlog.vyrn` are both blocked
+/// behind other builtins. So the parts most likely to be plausibly wrong are the
+/// parts with no example:
+///
+/// - **`readLine`'s line rules.** A `\r\n` and a `\n` must read identically or
+///   Windows and POSIX pipes disagree; an empty line is `Some("")` and not `None`;
+///   a final line with no newline at all is still a line. And `None` is three
+///   different things — EOF, a line carrying a NUL byte (which a NUL-terminated
+///   `String` could not hold), and a line that is not UTF-8, which is where the
+///   interpreter's `String::from_utf8` fails.
+/// - **`readFile`'s other two payloads.** The NUL rule fires BEFORE the UTF-8
+///   check and has its own wording, so a reader that validated first would report
+///   the wrong one — and `readFileBytes` of the same two files must SUCCEED, which
+///   is what makes them rules about `String` rather than about reading.
+/// - **`args` with an argv.** A token with a space in it is the one that says the
+///   pointers are being read out of WASI's own array rather than re-split.
+///
+/// Everything is pinned against the interpreter's own answer, not just compared
+/// between backends: two backends can be confidently wrong together about which
+/// failure happened, and every wrong answer here is a plausible-looking one.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn the_wasi_io_builtins_agree_with_the_interpreter_about_their_edges() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-wasiio");
+    std::fs::create_dir_all(&dir).unwrap();
+    // Two files a `String` cannot hold, and one it can. Written as bytes, because
+    // that is the whole point of them.
+    std::fs::write(dir.join("plain.txt"), b"hi\n").unwrap();
+    // NOT `nul.bin`: on Windows `nul` is a reserved device name with ANY
+    // extension, and wasmtime's capability-based path resolution refuses one — so
+    // the file would read as an I/O error under wasm and as five bytes under the
+    // interpreter, for a reason that has nothing to do with this backend.
+    std::fs::write(dir.join("hasnul.bin"), b"ab\x00cd").unwrap();
+    std::fs::write(dir.join("bad.bin"), b"ab\xff\xfecd").unwrap();
+
+    let lines = "\
+fn nextLine() -> String {
+    return match readLine() {
+        Some(s) => \"[\" + s + \"]\",
+        None => \"<none>\",
+    }
+}
+
+fn main() -> Int64 {
+    let mut n = 0
+    let mut going = true
+    while going {
+        let s = nextLine()
+        if s == \"<none>\" {
+            going = false
+        } else {
+            n = n + 1
+            print(\"\\{n} \\{s} \\{s.byteLength}\")
+        }
+    }
+    print(\"lines \\{n}\")
+    return n
+}
+";
+    let files = "\
+fn show(r: Result<String, String>) -> String {
+    return match r {
+        Ok(s) => \"ok:\" + s,
+        Err(e) => \"err:\" + e,
+    }
+}
+
+fn size(r: Result<Array<UInt8>, String>) -> Int64 {
+    return match r {
+        Ok(b) => b.length,
+        Err(e) => 0 - 1,
+    }
+}
+
+fn wrote(r: Result<Bool, String>) -> String {
+    return match r {
+        Ok(b) => \"ok:\\{b}\",
+        Err(e) => \"err:\" + e,
+    }
+}
+
+fn main() -> Int64 {
+    print(show(readFile(\"plain.txt\")))
+    print(show(readFile(\"hasnul.bin\")))
+    print(show(readFile(\"bad.bin\")))
+    print(show(readFile(\"missing.txt\")))
+    // The same two files as BYTES: no NUL rule, no UTF-8 rule, so both read.
+    print(size(readFileBytes(\"hasnul.bin\")))
+    print(size(readFileBytes(\"bad.bin\")))
+    print(size(readFileBytes(\"missing.txt\")))
+    print(wrote(writeFile(\"nested/nope.txt\", \"x\")))
+    print(wrote(writeFile(\"out.tmp.txt\", \"round\")))
+    print(show(readFile(\"out.tmp.txt\")))
+    return 0
+}
+";
+    // RFC-0044's `renameFile` (M2p). Self-setting-up, because the interpreter and
+    // the wasm module run in the SAME directory one after the other and a rename is
+    // destructive: both runs write both files first, so both see the same world.
+    let rename = "\
+fn show(r: Result<Bool, String>) -> String {
+    return match r {
+        Ok(b) => \"ok:\\{b}\",
+        Err(e) => \"err:\" + e,
+    }
+}
+
+fn read(p: String) -> String {
+    return match readFile(p) {
+        Ok(s) => \"ok:\" + s,
+        Err(e) => \"err:\" + e,
+    }
+}
+
+fn main() -> Int64 {
+    print(show(writeFile(\"rn-from.txt\", \"moved\")))
+    print(show(writeFile(\"rn-onto.txt\", \"clobbered\")))
+    print(show(renameFile(\"rn-from.txt\", \"rn-onto.txt\")))
+    print(read(\"rn-onto.txt\"))
+    print(read(\"rn-from.txt\"))
+    print(show(renameFile(\"rn-missing.txt\", \"rn-onto.txt\")))
+    print(show(renameFile(\"rn-onto.txt\", \"rn-nodir/x.txt\")))
+    return 0
+}
+";
+    let argv = "\
+fn main() -> Int64 {
+    let a = args()
+    print(\"n=\\{a.length}\")
+    for x in a {
+        print(\"<\\{x}>\")
+    }
+    return a.length
+}
+";
+    // `\r\n` and `\n` mixed, an empty line, a multi-byte line, then a final line
+    // with no terminator at all; the second fixture puts the two unrepresentable
+    // lines after a good one, so a reader that stopped early would still print it.
+    let stdin_ok: &[u8] = b"alpha\r\nbeta\n\nc\xc3\xa9\nlast, unterminated";
+    let stdin_bad: &[u8] = b"good\nwith\x00nul\n";
+
+    let no_args: Vec<String> = Vec::new();
+    for (what, src, stdin, prog_args, want) in [
+        (
+            "lines",
+            lines,
+            Some(stdin_ok),
+            no_args.clone(),
+            // The byte length is of the BRACKETED line, so the two constant
+            // brackets are in it — which still pins the line, and is what says a
+            // `\r` was stripped rather than kept.
+            "1 [alpha] 7\n2 [beta] 6\n3 [] 2\n4 [cé] 5\n5 [last, unterminated] 20\nlines 5\n",
+        ),
+        // The NUL line is `None`, so the loop ends there — one line printed, and
+        // the rest of stdin unread. That IS the semantics, not a truncation bug.
+        ("nulline", lines, Some(stdin_bad), no_args.clone(), "1 [good] 6\nlines 1\n"),
+        (
+            "files",
+            files,
+            None,
+            no_args.clone(),
+            "ok:hi\n\n\
+             err:`hasnul.bin` contains a NUL byte\n\
+             err:`bad.bin` is not valid UTF-8\n\
+             err:cannot read `missing.txt`\n\
+             5\n6\n-1\n\
+             err:cannot write `nested/nope.txt`\n\
+             ok:true\nok:round\n",
+        ),
+        (
+            "rename",
+            rename,
+            None,
+            no_args.clone(),
+            // Line 3 says it overwrote an existing target — which POSIX `rename`
+            // and `path_rename` do and Windows C `rename` refuses, so it is the
+            // semantic RFC-0044 is about. Line 5 says it MOVED rather than copied.
+            // The two failures are the reachable half of the two error classes: a
+            // missing source and an unresolvable target are both `cannot write`
+            // ABOUT THE TARGET, and the cross-device wording is the arm nothing
+            // here can reach, a preopen being one mount.
+            "ok:true\nok:true\nok:true\nok:moved\n\
+             err:cannot read `rn-from.txt`\n\
+             err:cannot write `rn-onto.txt`\n\
+             err:cannot write `rn-nodir/x.txt`\n",
+        ),
+        (
+            "argv",
+            argv,
+            None,
+            vec!["one".into(), "two words".into(), "--three".into()],
+            "n=3\n<one>\n<two words>\n<--three>\n",
+        ),
+    ] {
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src).unwrap();
+        let stdin_path = dir.join(format!("{what}.stdin"));
+        match stdin {
+            Some(bytes) => std::fs::write(&stdin_path, bytes).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(&stdin_path);
+            }
+        }
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .output()
+            .expect("build wasm");
+        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path).args(&prog_args);
+        let interp = run_io(interp_cmd, &dir, &stdin_path);
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg("--dir").arg(".").arg(&module).args(&prog_args);
+        let w = run_io(wasm_cmd, &dir, &stdin_path);
+
+        assert_eq!(norm(&interp.stdout), want, "{what}: the interpreter moved");
+        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+    }
+}
+
+/// `?` reaches the epilogue, proved by the two things skipping it would break
+/// (RFC-0077 M2k).
+///
+/// M1's rule is that a body must not emit `return`: the shadow-stack release, and
+/// since M2f the `modify` copy-back, sit after the block every exit branches to.
+/// `?` is an early exit, so it is exactly the construct that can get this wrong,
+/// and both failures are invisible in a small program.
+///
+/// So: 20,000 calls that each propagate. A frame that is claimed and not released
+/// walks the stack pointer down past 0, where it wraps to `0xFFFFFFF8` and the
+/// next slot access is out of bounds — checked by ACTUALLY EMITTING
+/// `Instruction::Return` here once, which traps `out of bounds memory access`
+/// before the first `print`. And `s.n` counts the writes made BEFORE each
+/// propagation: 20,000 means every propagating call copied its `modify` parameter
+/// back, 0 would mean none did.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_propagating_early_exit_releases_its_frame_and_copies_modify_back() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-try");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+type Sink = { n: Int64 }
+
+fn bump(s: modify Sink, o: Option<Int64>) -> Option<Int64> {
+    s.n = s.n + 1
+    let v = o?
+    s.n = s.n + 100
+    return Some(v)
+}
+
+fn main() -> Int64 {
+    let mut s = Sink { n: 0 }
+    let mut i = 0
+    while i < 20000 {
+        bump(s, None)
+        i = i + 1
+    }
+    print(s.n)
+    bump(s, Some(7))
+    print(s.n)
+    return 0
+}
+";
+    let path = dir.join("try.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("try.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    assert_eq!(norm(&interp.stdout), "20000\n20101\n", "the interpreter moved");
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// `std/jsonread` through the direct backend (RFC-0077 M2k) — the claim that
+/// matters more than the two examples the milestone added.
+///
+/// The reader is the module RFC-0078 M3's `fromJson` is built on, and it was
+/// unbuildable here for exactly two reasons: `?` (six sites) and `if let`. So this
+/// is the thing that says M3 can land on all three engines at once rather than on
+/// the interpreter and the native build while wasm waits — and it says it by
+/// PARSING, not by compiling: a `?` that copied the wrong width, took the wrong
+/// `br`, or skipped the payload decode builds fine and gets a different answer.
+///
+/// The inputs are chosen for the parser's own control flow rather than for JSON
+/// coverage: a nested document (recursion through `?`, aggregates returned through
+/// the hidden destination), a surrogate pair (`readHex4`'s `?` twice in one
+/// expression, the only nested one in the module), and four rejections whose
+/// `line N, col M:` wording is an `Err` propagated out through six frames.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn the_json_reader_parses_the_same_on_the_direct_backend() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-jsonread");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+import { parseJson } from \"std/jsonread\"
+import { Json, emit } from \"std/json\"
+
+fn show(src: String) -> Int64 {
+    print(match parseJson(src) {
+        Ok(v) => emit(v),
+        Err(e) => \"err: \\{e}\",
+    })
+    return 0
+}
+
+fn main() -> Int64 {
+    show(\"{\\\"a\\\": [1, 2, {\\\"b\\\": null}], \\\"c\\\": \\\"hi\\\\u00e9\\\"}\")
+    show(\"  true \")
+    show(\"[1, 2,]\")
+    show(\"{\\\"k\\\": 1, \\\"k\\\": 2}\")
+    show(\"\\\"\\\\ud83d\\\\ude00\\\"\")
+    show(\"[1, 2\")
+    show(\"-0.5e+10\")
+    if let Ok(v) = parseJson(\"[]\") {
+        print(\"empty: \\{emit(v)}\")
+    }
+    return 0
+}
+";
+    let path = dir.join("jsonread.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("jsonread.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // Pinned, so a lowering that made both engines agree on nothing useful — an
+    // `Err` for every input, say — is still red.
+    assert_eq!(
+        norm(&interp.stdout),
+        "{\"a\":[1,2,{\"b\":null}],\"c\":\"hi\u{e9}\"}\n\
+         true\n\
+         err: line 1, col 7: trailing comma before ']'\n\
+         err: line 1, col 13: duplicate object key: k\n\
+         \"\u{1f600}\"\n\
+         err: line 1, col 6: unterminated array\n\
+         -0.5e+10\n\
+         empty: []\n",
+        "the reader moved"
+    );
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// The RFC-0023 shapes the corpus does not reach (RFC-0077 M2m).
+///
+/// `lambdas`, `rpc` and `rpcsplit` between them exercise a scalar capture, a named
+/// function as a target, and a pass-through whose target has NO captures. Every
+/// other shape a `fn`-typed parameter has is invisible to the ladder, and each one
+/// here is silent when wrong rather than loud:
+///
+/// - An **aggregate capture**, and a callee parameter with the SAME NAME as it. A
+///   specialization's capture parameters are `@cap..`, which no Vyrn identifier can
+///   be; a spelling that could collide would bind `p` inside the lambda to the
+///   callee's own `p` and print a plausible number.
+/// - The same capture through **two boundaries** (`via` forwards its `fn`
+///   parameter to `on`), which is what says a forwarded target carries its
+///   captures rather than re-reading them.
+/// - An **aggregate parameter and an aggregate return** on the `fn` type: the
+///   argument is an address and the return a hidden leading destination, so the
+///   convention has to reach a target call, not just an ordinary one.
+/// - **Two distinct lambdas of the same shape** at two sites: two instances. One
+///   shared instance would print the first lambda's answer twice.
+/// - **One literal inside a generic body, two instantiations**: two lifted copies.
+///   Sharing one would hand the `Int64` copy a `String`.
+/// - A **Unit-returning** `fn` type over an expression body, which is the rpc
+///   callback shape written the short way: the value is a statement, not a return.
+/// - A **block-bodied** lambda, two `fn` parameters in one specialization, and a
+///   `fn` parameter called three times in a loop.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_fn_typed_parameter_specializes_to_whatever_the_call_site_resolved() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-ho");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+type Pt = { x: Int64, y: Int64 }
+
+fn on(p: Pt, f: fn(Pt) -> Pt) -> Pt {
+    return f(p)
+}
+
+/// A pass-through whose target carries captures, so they travel two boundaries.
+fn via(p: Pt, f: fn(Pt) -> Pt) -> Pt {
+    return on(p, f)
+}
+
+fn flip(p: Pt) -> Pt {
+    return Pt { x: p.y, y: p.x }
+}
+
+fn foldOver<T, A>(xs: Array<T>, init: A, f: fn(A, T) -> A) -> A {
+    let mut acc = init
+    for x in xs {
+        acc = f(acc, x)
+    }
+    return acc
+}
+
+/// One lambda literal, two instantiations, two lifted copies.
+fn countAll<T>(xs: Array<T>) -> Int64 {
+    return foldOver(xs, 0, |acc, x| acc + 1)
+}
+
+fn both(n: Int64, f: fn(Int64) -> Int64, g: fn(Int64) -> Int64) -> Int64 {
+    return f(n) * 100 + g(n)
+}
+
+fn thrice(n: Int64, f: fn(Int64) -> Int64) -> Int64 {
+    let mut acc = 0
+    let mut i = 0
+    while i < 3 {
+        acc = acc + f(n + i)
+        i = i + 1
+    }
+    return acc
+}
+
+fn each(xs: Array<Int64>, f: fn(Int64)) {
+    for x in xs {
+        f(x)
+    }
+}
+
+fn main() -> Int64 {
+    // An aggregate capture named exactly as `on`'s own first parameter is.
+    let p = Pt { x: 10, y: 20 }
+    let a = on(Pt { x: 1, y: 2 }, |q| Pt { x: q.x + p.x, y: q.y + p.y })
+    print(a.x * 100 + a.y)
+    let b = via(Pt { x: 3, y: 4 }, |q| Pt { x: q.x + p.x, y: q.y + p.y })
+    print(b.x * 100 + b.y)
+    let c = on(Pt { x: 5, y: 6 }, flip)
+    print(c.x * 100 + c.y)
+
+    let nums: Array<Int64> = [1, 2, 3]
+    print(foldOver(nums, 0, |acc, x| acc + x))
+    print(foldOver(nums, 0, |acc, x| acc + x * 10))
+    let words: Array<String> = [\"a\", \"b\"]
+    print(countAll(nums) + countAll(words))
+
+    let u = 2
+    let v = 5
+    print(both(3, |x| x + u, |x| x * v))
+    print(thrice(10, |x| { let d = x * 2 return d + 1 }))
+    // One literal reached twice at one site: one instance.
+    print(thrice(1, |x| x) + thrice(1, |x| x))
+
+    let tag = \"n=\"
+    each(nums, |x| print(\"\\{tag}\\{x}\"))
+    return 0
+}
+";
+    let path = dir.join("ho.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("ho.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // Pinned to the INTERPRETER's answers, because two backends can be
+    // confidently wrong together — a merged specialization prints one lambda's
+    // result for both.
+    assert_eq!(
+        norm(&interp.stdout),
+        "1122\n1324\n605\n6\n60\n5\n515\n69\n12\nn=1\nn=2\nn=3\n",
+        "the interpreter moved"
+    );
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// The RFC-0037 shapes `closures2` and `fnvalstore` do not reach (RFC-0077 M2m).
+///
+/// Between them those two are most of the stored-`fn` surface — a record capture,
+/// a `Validation<Record>` payload, storage in a Map, an Array, a record field and
+/// module state, an aggregate return through `Middleware`, a stored value flowing
+/// into a `fn`-typed parameter, and a trap inside a closure. Three things they do
+/// not have, each silent when wrong:
+///
+/// - A **Unit-signature slot holding a value-returning function**. The dispatcher
+///   has to drop the result; leaving it on the stack is a module wasmtime refuses,
+///   but dropping the wrong one is not.
+/// - An **aggregate return from a lifted lambda** through a dispatcher, where the
+///   result travels through the dispatcher's own hidden destination rather than as
+///   a value.
+/// - **Two spellings of one signature.** `Make` and the bare `fn(Int64) -> Pt`
+///   must register and dispatch as ONE enum, or a tag built under one spelling
+///   falls through the other's switch to the defensive arm — which is exactly what
+///   `normalize_fn_sig` is shared with the textual backend for.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_stored_function_value_dispatches_by_signature_not_by_spelling() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-fnval");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+type Pt = { x: Int64, y: Int64 }
+
+type Sink = fn(Int64)
+
+type Make = fn(Int64) -> Pt
+
+fn shout(n: Int64) -> Int64 {
+    print(\"shout \\{n}\")
+    return n * 2
+}
+
+fn origin(n: Int64) -> Pt {
+    return Pt { x: n, y: 0 - n }
+}
+
+fn main() -> Int64 {
+    let s: Sink = shout
+    s(4)
+    let mk: Make = origin
+    let a = mk(3)
+    print(a.x * 100 + a.y)
+    let lam: Make = |n| Pt { x: n + 1, y: n + 2 }
+    let b = lam(10)
+    print(b.x * 100 + b.y)
+    let raw: fn(Int64) -> Pt = lam
+    let c = raw(20)
+    print(c.x * 100 + c.y)
+    return 0
+}
+";
+    let path = dir.join("fnval.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("fnval.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    assert_eq!(
+        norm(&interp.stdout),
+        "shout 4\n297\n1112\n2122\n",
+        "the interpreter moved"
+    );
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+
+/// The three things a `Task` (RFC-0025) can be that no example makes one of.
+///
+/// `concurrency` and `parallel` between them only ever spawn a `Task<Int64>` and
+/// join it in the same frame that made it, so three parts of the lowering are
+/// unreached by the ladder and each would be silent:
+///
+/// - **Four live `Task`s at once.** The result is boxed on the heap for exactly
+///   this. A frame slot would be handed out ONCE per function — `Frame::alloc`
+///   offsets are never reused, so a slot inside a loop is one slot — and all four
+///   tasks would be the same address: the stack-slot version of this file prints
+///   `233` four times where the interpreter prints `55 89 144 233`. Checked by
+///   building it that way, because a lifetime bug that no example reaches is
+///   exactly the class this RFC keeps finding by running things.
+/// - **A `Task` of an aggregate**, where `join` copies rather than handing out the
+///   box's own address — the `load {ll}` the LLVM backend emits, and M2l's `get`
+///   hazard one container along.
+/// - **A `Task<Unit>`**, which has no result to read and still has to be a value
+///   `join` can consume.
+///
+/// Pinned against the interpreter, not against numbers written here: eager
+/// evaluation at the spawn point is the interpreter's own schedule, so there is
+/// one right answer and it is the one the interpreter gives.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_task_that_escapes_its_frame_says_what_the_interpreter_says() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-spawn");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (what, src) in [
+        // Four tasks spawned in a loop and all joined afterwards, so four boxes
+        // have to coexist.
+        (
+            "escaping",
+            "fn fib(n: Int64) -> Int64 {\n if n < 2 { return n }\n \
+             return fib(n - 1) + fib(n - 2)\n}\n\
+             fn main() -> Int64 {\n let mut ts: Array<Task<Int64>> = []\n \
+             let mut i = 0\n while i < 4 {\n let t = spawn fib(i + 10)\n \
+             ts = ts.push(t)\n i = i + 1\n }\n \
+             print(ts[0].join())\n print(ts[1].join())\n print(ts[2].join())\n \
+             print(ts[3].join())\n return 0\n}\n",
+        ),
+        // Two joins of one aggregate task, with the first one's copy mutated in
+        // between: a `join` that aliased the box would show 99 twice.
+        (
+            "aggregate",
+            "type P = { a: Int64, b: Int64 }\n\
+             fn mk(x: Int64) -> P {\n return P { a: x, b: x * 2 }\n}\n\
+             fn main() -> Int64 {\n let t = spawn mk(5)\n let mut p = t.join()\n \
+             p.a = 99\n let q = t.join()\n print(p.a)\n print(q.a)\n print(q.b)\n \
+             return 0\n}\n",
+        ),
+        ("unit", "fn noop(x: Int64) {\n let y = x + 1\n}\n\
+             fn main() -> Int64 {\n let t = spawn noop(3)\n t.join()\n print(1)\n return 0\n}\n"),
+    ] {
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src).unwrap();
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .output()
+            .expect("build wasm");
+        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg(&module);
+        let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+        // A pass with no output at all would be two engines agreeing on nothing.
+        assert!(!norm(&w.stdout).is_empty(), "{what}: printed nothing");
+    }
+}
+
+/// Every edge that leaves a `region`, taken more often than the region stack is
+/// deep — and the depth bound itself, reached across calls.
+///
+/// This backend's region is a counter and a trap (RFC-0004 §4's arena is the bump
+/// allocator's ceiling, not a region-shaped hole — see `Fn_::region_exit`). A
+/// counter is exactly the M2l shape: a missed pop prints nothing different for the
+/// first 64 turns and then traps, and an extra pop reads as an enormous unsigned
+/// depth on the very next `region`. So both directions are loud, but only if
+/// something runs past 64 — and no example does. `region.vyrn` has two regions and
+/// one `continue`-free loop; `controlflow.vyrn` has one `continue` under a region,
+/// six turns.
+///
+/// Measured with each of the three unwind edges removed in turn: `break`,
+/// `continue` and `return` each make this print nothing and trap where the
+/// interpreter prints four numbers.
+///
+/// The nesting case is recursive rather than 65 literal blocks because the depth is
+/// DYNAMIC — a callee's region nests inside its caller's, which is why the counter
+/// is four bytes of memory and not a compile-time constant per body.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn every_exit_out_of_a_region_balances_and_the_65th_traps() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-region");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (what, src) in [
+        (
+            "balance",
+            r#"
+fn viaReturn(i: Int64) -> Int64 {
+    region {
+        if i >= 0 {
+            return i + 1
+        }
+    }
+    return 0
+}
+
+fn main() -> Int64 {
+    // `continue` out of a region — controlflow.vyrn's shape, 200 turns.
+    let mut acc = 0
+    let mut j = 0
+    while j < 200 {
+        j = j + 1
+        region {
+            if j % 2 == 0 {
+                continue
+            }
+            acc = acc + 1
+        }
+    }
+    print(acc)
+
+    // `break` out of a region, re-entered by an outer loop 200 times.
+    let mut brk = 0
+    let mut k = 0
+    while k < 200 {
+        k = k + 1
+        let mut n = 0
+        while n < 5 {
+            region {
+                if n == 2 {
+                    break
+                }
+                brk = brk + 1
+            }
+            n = n + 1
+        }
+    }
+    print(brk)
+
+    // `return` out of a region, 200 calls.
+    let mut r = 0
+    let mut q = 0
+    while q < 200 {
+        r = r + viaReturn(q)
+        q = q + 1
+    }
+    print(r)
+
+    // Nested regions, fall-through exits only.
+    let mut s = 0
+    let mut t = 0
+    while t < 200 {
+        region {
+            region {
+                s = s + 1
+            }
+        }
+        t = t + 1
+    }
+    print(s)
+    return 0
+}
+"#,
+        ),
+        (
+            "nested",
+            r#"
+fn deep(n: Int64) -> Int64 {
+    if n == 0 {
+        return 0
+    }
+    let mut r = 0
+    region {
+        r = deep(n - 1) + 1
+    }
+    return r
+}
+
+fn main() -> Int64 {
+    print(deep(63))
+    print(deep(70))
+    return 0
+}
+"#,
+        ),
+    ] {
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src).unwrap();
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .output()
+            .expect("build wasm");
+        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg(&module);
+        let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+        // The interpreter's own answers, not a spelling written here: two backends
+        // can be confidently wrong about the depth bound together.
+        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+        // The two cases have to be opposite, or a run in which nothing at all
+        // happened would satisfy every assertion above.
+        assert_eq!(
+            runtime_err(&w.stderr).is_empty(),
+            what == "balance",
+            "{what}: wrong outcome entirely — {:?}",
+            runtime_err(&w.stderr)
+        );
+    }
+}
+
+/// `lineAt`/`colAt` at the offsets no example asks for, and one row that says what
+/// a column counts.
+///
+/// `examples/textbytes.vyrn` sweeps the interesting middle — a CRLF, an empty
+/// line, past the end, and `éx` proving column 3 for the `x` — but two cases it
+/// never reaches are the two whose lowering is a compare's SIGNEDNESS:
+///
+/// - **A negative offset.** The interpreter clamps with `.max(0)`; the native shim
+///   does not clamp at all and gets the same answer because its `i < off` and
+///   `i > 0` are signed. This backend takes the shim's route, so `i64.ge_s` versus
+///   `i64.ge_u` is the whole difference between `1:1` and a walk over four
+///   exabytes. RFC-0078's oracle sweeps to `-3` for exactly this reason and the
+///   RFC-0077 ladder cannot, because no `.vyrn` in the corpus passes a negative
+///   offset.
+/// - **An empty buffer**, where every line start and the length are zero, and the
+///   `off > len` clamp is the only thing between `colAt` and a read below the
+///   allocation.
+///
+/// Plus a byte column on a line that is NOT the first, because `std/vyx.vyrn:165`
+/// documents `colAt` as counting chars and RFC-0078 M4b(2) measured that it counts
+/// bytes. Every row is compared against the interpreter AND spelled out: two
+/// backends can be confidently wrong together, which is how M2m's non-ASCII `=~`
+/// walk passed every example it had.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn line_and_column_agree_with_the_interpreter_off_both_ends_of_the_buffer() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-linecol");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+fn lc(b: Array<UInt8>, off: Int64) -> String {
+    return lineAt(b, off).toString() + \":\" + colAt(b, off).toString()
+}
+
+fn main() -> Int64 {
+    let b = bytes(\"ab\\ncd\")
+    // Below zero, and further below zero.
+    print(lc(b, 0 - 1))
+    print(lc(b, 0 - 3))
+    // Exactly at the length, which is one past the last byte.
+    print(lc(b, 5))
+    // The empty buffer, from below, at, and past its one valid offset.
+    print(lc(bytes(\"\"), 0 - 1))
+    print(lc(bytes(\"\"), 0))
+    print(lc(bytes(\"\"), 5))
+    // Nothing but newlines: every offset starts a line of its own.
+    let n = bytes(\"\\n\\n\\n\")
+    print(lc(n, 0))
+    print(lc(n, 1))
+    print(lc(n, 3))
+    print(lc(n, 4))
+    // A two-byte codepoint on the SECOND line: the `x` is column 3, not column 2.
+    let u = bytes(\"\\u{e9}\\n\\u{fc}x\")
+    print(lc(u, 4))
+    print(lc(u, 5))
+    return 0
+}
+";
+    let path = dir.join("lc.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("lc.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    assert_eq!(
+        norm(&interp.stdout),
+        "1:1\n1:1\n2:3\n1:1\n1:1\n1:1\n1:1\n2:1\n4:1\n4:1\n2:2\n2:3\n",
+        "the interpreter moved"
+    );
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// A generic enum whose type argument comes from a `match` arm that is not the
+/// FIRST one (RFC-0077 M2n).
+///
+/// `genericpayload.vyrn` is the corpus's only generic-payload example and it puts
+/// the concrete arm first, so a first-arm-wins rule passes it. This is the order
+/// that rule gets wrong — and the order the CHECKER only permits with an
+/// annotation, which is why no example has it: without one it refuses `Empty` as
+/// uninferable.
+///
+/// Two payload shapes, because they fail differently. A `Cargo` payload is
+/// `Word::Boxed`, so forgetting `T` refuses (`a conversion from Cargo to Unit`,
+/// which is exactly what this source produced with the arm scan removed). An
+/// `Int64` payload is `Word::Direct`, so the SAME mistake has no conversion to
+/// refuse — the word is an `i64` either way — and would read a pointer as a
+/// number. So the values are pinned, not just the agreement.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_generic_payload_is_typed_by_whichever_arm_knows_it() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-payload");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = r#"
+type Cargo = { weight: Int64, label: String }
+type Crate<T> = | Empty | Held(T)
+type Choice = | First | Second
+
+fn boxedPayload(p: Choice) -> Cargo {
+    let boxed: Crate<Cargo> = match p {
+        Second => Empty,
+        First => Held(Cargo { weight: 3, label: "three" }),
+    }
+    return match boxed {
+        Empty => Cargo { weight: 99, label: "fallback" },
+        Held(s) => s,
+    }
+}
+
+fn directPayload(p: Choice) -> Int64 {
+    let boxed: Crate<Int64> = match p {
+        Second => Empty,
+        First => Held(41),
+    }
+    return match boxed {
+        Empty => 0 - 1,
+        Held(n) => n + 1,
+    }
+}
+
+fn main() -> Int64 {
+    let a = boxedPayload(First)
+    print("boxed first: \{a.weight} \{a.label}")
+    let b = boxedPayload(Second)
+    print("boxed second: \{b.weight} \{b.label}")
+    print("direct first: \{directPayload(First)}")
+    print("direct second: \{directPayload(Second)}")
+    return 0
+}
+"#;
+    let path = dir.join("armorder.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("armorder.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    let want = "boxed first: 3 three\nboxed second: 99 fallback\n\
+                direct first: 42\ndirect second: -1\n";
+    assert_eq!(norm(&interp.stdout), want, "the interpreter moved");
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// RFC-0008's two sinks and three thresholds the corpus does not reach
+/// (RFC-0077 M2n).
+///
+/// `logging.vyrn` and `vlog.vyrn` are the only two logging examples and both write
+/// to `stderr`; `logging.vyrn` is the only one this backend can build at all, so
+/// `stdout`, `file(..)`, and every threshold but `debug` have no example.
+///
+/// The three cases are chosen for what would go unnoticed:
+///
+/// - **`stdout`.** The log line and `print` go to the SAME descriptor, so their
+///   interleaving is observable and a sink that quietly stayed on 2 would still
+///   look right in a test that only read stdout.
+/// - **`file(..)`.** A descriptor opened once and held, which `writeFile` cannot
+///   express. Run TWICE, because `path_open` without `TRUNC` appends and one run
+///   cannot tell the difference; the file's contents are compared against the
+///   interpreter's own `std::fs::File`, not against a spelling here.
+/// - **`level: error`.** Everything below the threshold is dropped, so the only
+///   log line in the file is the last one — and the `\{n}` in a suppressed
+///   message still runs, which is RFC-0008's Q4 and the half a fold could
+///   silently take away.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_log_sink_is_whichever_descriptor_the_config_named() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-logsink");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (what, src, want_out, want_err, want_file) in [
+        (
+            "stdout",
+            "logging { level: info, sink: stdout }\n\
+             \n\
+             fn side(n: Int64) -> Int64 {\n\
+             \x20   print(\"side \\{n}\")\n\
+             \x20   return n\n\
+             }\n\
+             \n\
+             fn main() -> Int64 {\n\
+             \x20   let log = logger(\"sink\")\n\
+             \x20   log.debug(\"dropped \\{side(1)}\")\n\
+             \x20   log.info(\"kept\")\n\
+             \x20   print(\"program output\")\n\
+             \x20   log.error(\"last\")\n\
+             \x20   return 0\n\
+             }\n",
+            // `side(1)` prints even though the `debug` line does not: the
+            // arguments of a suppressed call are still evaluated.
+            "side 1\n[INFO] sink: kept\nprogram output\n[ERROR] sink: last\n",
+            "",
+            None,
+        ),
+        (
+            "file",
+            "logging { level: debug, sink: file(\"sink.log\") }\n\
+             \n\
+             fn main() -> Int64 {\n\
+             \x20   let log = logger(\"sink\")\n\
+             \x20   log.trace(\"dropped\")\n\
+             \x20   log.debug(\"first\")\n\
+             \x20   log.warn(\"second\")\n\
+             \x20   print(\"program output\")\n\
+             \x20   return 0\n\
+             }\n",
+            "program output\n",
+            "",
+            Some("[DEBUG] sink: first\n[WARN] sink: second\n"),
+        ),
+        (
+            "threshold",
+            "logging { level: error, sink: file(\"sink.log\") }\n\
+             \n\
+             fn main() -> Int64 {\n\
+             \x20   let log = logger(\"sink\")\n\
+             \x20   log.trace(\"a\")\n\
+             \x20   log.debug(\"b\")\n\
+             \x20   log.info(\"c\")\n\
+             \x20   log.warn(\"d\")\n\
+             \x20   log.error(\"e\")\n\
+             \x20   return 0\n\
+             }\n",
+            "",
+            "",
+            Some("[ERROR] sink: e\n"),
+        ),
+    ] {
+        // Its own directory, because the file sink names a relative path and two
+        // cases writing one `sink.log` would read each other's run.
+        let dir = dir.join(what);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src).unwrap();
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .output()
+            .expect("build wasm");
+        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+
+        let log = dir.join("sink.log");
+        let read_log = || std::fs::read_to_string(&log).unwrap_or_default().replace("\r\n", "\n");
+
+        // Twice each, so a sink that APPENDS where the interpreter truncates is a
+        // failure rather than a coincidence.
+        let _ = std::fs::remove_file(&log);
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let interp_log = read_log();
+
+        let _ = std::fs::remove_file(&log);
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg("--dir").arg(".").arg(&module);
+        run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg("--dir").arg(".").arg(&module);
+        let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+        let wasm_log = read_log();
+
+        assert_eq!(norm(&interp.stdout), want_out, "{what}: the interpreter moved (stdout)");
+        assert_eq!(runtime_err(&interp.stderr), want_err, "{what}: the interpreter moved (stderr)");
+        assert_eq!(interp_log, want_file.unwrap_or("").to_string(), "{what}: the interpreter moved (file)");
+        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(interp_log, wasm_log, "{what}: the log file");
+        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+    }
+}
+
+/// A suppressed log call emits **no write**, and the evidence is in the bytes
+/// (RFC-0077 M2n).
+///
+/// The threshold fold is the one part of RFC-0008 that a passing ladder cannot
+/// vouch for: a backend that emitted a runtime comparison instead would print the
+/// same lines and pass every assertion above. So this reads the module.
+///
+/// `[LEVEL] ` is interned at the emitting site and nowhere else, so its presence
+/// means a write exists and its absence means one does not — the same argument M2d
+/// makes about a validation's trap message. The suppressed call's own MESSAGE is
+/// asserted present, because its arguments are still evaluated (Q4): a fold that
+/// deleted the whole statement would pass a test that only looked for the prefix.
+#[test]
+fn a_suppressed_log_call_is_not_in_the_module() {
+    let dir = std::env::temp_dir().join("vyrn-directwasm-logfold");
+    std::fs::create_dir_all(&dir).unwrap();
+    // `warn`, so two levels below it and two at-or-above are in one program.
+    let src = "logging { level: warn, sink: stderr }\n\
+               \n\
+               fn main() -> Int64 {\n\
+               \x20   let log = logger(\"f\")\n\
+               \x20   log.trace(\"gone-trace\")\n\
+               \x20   log.debug(\"gone-debug\")\n\
+               \x20   log.info(\"gone-info\")\n\
+               \x20   log.warn(\"kept-warn\")\n\
+               \x20   log.error(\"kept-error\")\n\
+               \x20   return 0\n\
+               }\n";
+    let path = dir.join("fold.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("fold.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let bytes = std::fs::read(&module).unwrap();
+    let has = |needle: &str| {
+        bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
+    };
+    for lvl in ["[TRACE] ", "[DEBUG] ", "[INFO] "] {
+        assert!(!has(lvl), "{lvl} is in the module, so a suppressed call emitted a write");
+    }
+    for lvl in ["[WARN] ", "[ERROR] "] {
+        assert!(has(lvl), "{lvl} is NOT in the module, so an enabled call emitted nothing");
+    }
+    // The other half of Q4: the suppressed calls' arguments are still evaluated,
+    // so their strings are still there. Without this the test would also pass on a
+    // backend that dropped the statement whole.
+    for msg in ["gone-trace", "gone-debug", "gone-info", "kept-warn", "kept-error"] {
+        assert!(has(msg), "`{msg}` is not in the module: a suppressed call lost its argument");
+    }
+}
+
+/// RFC-0012's two host boundaries, which nothing but a browser can drive.
+///
+/// `externdemo.vyrn` is in `WASM_ONLY` precisely because wasmtime supplies WASI and
+/// not `vyrn`, so there has never been a run to compare — which is how this backend
+/// reached 87/87 having never lowered an `extern` **import** at all, and how nobody
+/// noticed it named no exports but `_start` either (`--export-all` was doing that on
+/// the LLVM path). Both were found by loading `web/externdemo.html` and
+/// `web/domdemo.html`, and the ABI *shapes* stay verified there — a `(ptr, len)` pair
+/// only means something to a host that decodes it.
+///
+/// What is pinned here is the half that was simply ABSENT, and it is pinned on the
+/// module's bytes for M2o's reason (a name only one emit site writes is proof that
+/// site ran):
+///
+/// - the import exists under the `vyrn` namespace, name for name — the length-
+///   prefixed pair is exact, so this cannot pass on a module that merely mentions
+///   the word somewhere;
+/// - `__vyrn_malloc` is exported under exactly the condition that needs it. A JS
+///   caller cannot pass a `String` INTO an export without allocating inside the
+///   module first, and every `vyrn-dom.js` handler takes one — so a missing export
+///   is not a missing feature, it is a demo where no button works. The negative
+///   case is the assertion that matters: the condition is the thing that could be
+///   wrong, and always exporting it would pass a one-sided test.
+#[test]
+fn the_rfc_0012_host_boundary_is_named_in_the_module() {
+    let dir = examples_dir();
+    let out = std::env::temp_dir().join("vyrn-directwasm-extern");
+    std::fs::create_dir_all(&out).unwrap();
+    let build = |name: &str| -> Vec<u8> {
+        let module = out.join(format!("{name}.wasm"));
+        let b = vyrn()
+            .arg("build")
+            .arg(dir.join(format!("{name}.vyrn")))
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .output()
+            .expect("build wasm");
+        assert!(b.status.success(), "{name}: {}", norm(&b.stderr));
+        std::fs::read(&module).unwrap()
+    };
+    let has = |bytes: &[u8], needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+
+    // An import entry is `<mod len><mod><field len><field>`, so the namespace and
+    // the name are one literal and cannot be satisfied separately.
+    let externdemo = build("externdemo");
+    for field in ["jsLog", "jsNow", "jsAdd"] {
+        let mut needle = vec![4u8];
+        needle.extend_from_slice(b"vyrn");
+        needle.push(field.len() as u8);
+        needle.extend_from_slice(field.as_bytes());
+        assert!(
+            has(&externdemo, &needle),
+            "externdemo does not import `vyrn.{field}` — the page has nothing to supply"
+        );
+    }
+
+    // `greet(name: String)`, so the allocator is reachable; `onTick()`/`reset()`
+    // take nothing, so it is not.
+    assert!(
+        has(&build("externdemo2"), b"__vyrn_malloc"),
+        "a String parameter on an `export extern fn` needs the module's allocator exported"
+    );
+    assert!(
+        !has(&build("eventloop"), b"__vyrn_malloc"),
+        "the allocator is exported by a module with no String-taking export"
+    );
 }

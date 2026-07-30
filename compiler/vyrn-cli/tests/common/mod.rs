@@ -36,6 +36,12 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str)] =
 /// `error: extern `name` is not available on this target` trap, byte-identical
 /// to each other. The real browser behavior is exercised by `web/externdemo.html`.
 /// KNOWN_DIVERGENT stays empty — this list is about *hosts*, not divergence.
+///
+/// The cost of that exclusion is on record: because nothing here ever *built* one
+/// of these to wasm either, the direct backend reached 87 of 87 with no lowering
+/// for an `extern` import at all. The build is pinned now, in
+/// [`the_rfc_0012_host_boundary_is_named_in_the_module`], which is what an
+/// exclusion from the run comparison should have cost all along.
 pub const WASM_ONLY: &[(&str, &str)] =
     &[("externdemo.vyrn", "calls `extern` fns; only the browser provides the `vyrn` namespace")];
 
@@ -122,21 +128,12 @@ pub fn read_args(args_fixture: &Path) -> Vec<String> {
     text.lines().map(|l| l.to_string()).collect()
 }
 
-/// The wasi-libc sysroot `vyrn build --target wasm` needs to reach clang.
-/// Discovered from `$WASI_SYSROOT`, falling back to the repo's `tools/`.
-pub fn wasi_sysroot() -> Option<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    std::env::var("WASI_SYSROOT")
-        .map(PathBuf::from)
-        .ok()
-        .filter(|p| p.exists())
-        .or_else(|| Some(root.join("tools/wasi-sysroot-25.0")).filter(|p| p.exists()))
-}
-
-/// A `wasmtime` executable to run a module under. Separate from the sysroot
-/// because the RFC-0077 direct backend needs THIS and nothing else — no clang,
-/// no sysroot, no builtins archive — and its tier should skip on exactly what
-/// it actually depends on.
+/// A `wasmtime` executable to run a module under, and since RFC-0077 M5 the ONLY
+/// thing the wasm column depends on: `--target wasm` emits the module itself, so
+/// there is no clang, no wasi sysroot and no builtins archive to discover. The
+/// `wasi_sysroot`/`wasm_toolchain` pair that used to live here went with the LLVM
+/// wasm path; `vyrn-codegen`'s own clang comparisons find their sysroot through
+/// `toolchain::`, which the generator engine still needs.
 pub fn wasmtime() -> Option<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     std::env::var("VYRN_WASMTIME")
@@ -147,11 +144,4 @@ pub fn wasmtime() -> Option<PathBuf> {
             Some(root.join("tools/wasmtime-v46.0.1-x86_64-windows/wasmtime.exe"))
                 .filter(|p| p.exists())
         })
-}
-
-/// Both, for the LLVM wasm column: it goes through clang, so it needs the
-/// sysroot too. `None` disables that column with a notice (machines without the
-/// toolchain still verify interp == native).
-pub fn wasm_toolchain() -> Option<(PathBuf, PathBuf)> {
-    Some((wasi_sysroot()?, wasmtime()?))
 }

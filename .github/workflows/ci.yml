@@ -85,6 +85,10 @@ jobs:
           prefix-key: parity
       - name: wasm toolchain cache
         id: wasm-tools
+        # Deliberately the SAME key as the gen-engine job, which still needs the
+        # sysroot and the builtins archive for RFC-0076's C shim: one download,
+        # one cache. This job now uses only the wasmtime out of it — RFC-0077 M5
+        # made `--target wasm` need no clang, no sysroot and no builtins.
         uses: actions/cache@v4
         with:
           path: ~/wasm-tools
@@ -99,12 +103,12 @@ jobs:
           tar xf sysroot.tar.gz && tar xf builtins.tar.gz && tar xf wasmtime.tar.xz
       - name: Run the parity harness
         working-directory: compiler
+        # WASI_SYSROOT and WASI_BUILTINS are deliberately NOT exported: the wasm
+        # column is emitted directly, and leaving them unset is what makes this run
+        # evidence for M5's acceptance criterion rather than a claim about it. clang
+        # is still needed, for the NATIVE column.
         run: |
-          export WASI_SYSROOT=$(echo ~/wasm-tools/wasi-sysroot-*)
-          export WASI_BUILTINS=$(find ~/wasm-tools -name 'libclang_rt.builtins-wasm32.a' | head -1)
           export VYRN_WASMTIME=$(find ~/wasm-tools -type f -name wasmtime | head -1)
-          echo "sysroot:  $WASI_SYSROOT"
-          echo "builtins: $WASI_BUILTINS"
           echo "wasmtime: $VYRN_WASMTIME"
           cargo test --quiet -p vyrn-cli --test parity -- --ignored --nocapture
       - name: Universal-pages integration (RFC-0069)

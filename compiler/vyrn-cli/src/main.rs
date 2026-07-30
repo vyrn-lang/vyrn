@@ -44,11 +44,11 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-// The C shim and the clang/wasi-sysroot discovery live in `vyrn-codegen`, which
-// both this driver and the excluded `vyrn-genwasm` can see (RFC-0076 M4).
-use vyrn_codegen::toolchain::{
-    builtins_near_sysroot, discovered_wasi_sysroot, find_clang, RUNTIME_SHIM,
-};
+// The C shim and clang discovery live in `vyrn-codegen`, which both this driver
+// and the excluded `vyrn-genwasm` can see (RFC-0076 M4). The wasi-sysroot and
+// builtins lookups are still there, but this driver no longer needs them: after
+// RFC-0077 M5 nothing here compiles C for wasm — the generator engine does.
+use vyrn_codegen::toolchain::{find_clang, RUNTIME_SHIM};
 
 /// RFC-0076: generators compiled to wasm instead of interpreted. Behind a
 /// feature so the default build keeps its zero external dependencies.
@@ -1835,8 +1835,9 @@ fn extern_trap_stubs(program: &vyrn_frontend::ast::Program) -> String {
     s
 }
 
-/// `vyrn build <file.vyrn> [-o out] [--target wasm]` — emit IR, then invoke
-/// clang to link a native executable (or a `wasm32-wasi` module).
+/// `vyrn build <file.vyrn> [-o out] [--target wasm]` — a native executable via
+/// textual IR and clang, or a `wasm32-wasi` module emitted directly (RFC-0077 M5:
+/// no clang, no wasi sysroot, no builtins archive).
 /// `vyrn test [file] [--name <substring>]` (RFC-0015) — load + check the root
 /// file, then run its `test` blocks under the interpreter in declaration order.
 /// Prints `test "name" ... ok` / `... FAILED: <message>` per test and a
@@ -3243,46 +3244,18 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         }
     });
 
-    // RFC-0077 M2: the direct wasm backend, behind a flag that is TEMPORARY BY
-    // DESIGN — M5 deletes it along with the LLVM wasm path, because this repo
-    // has already watched an ungated second backend rot to unbuildable in twelve
-    // days (`vyrn-codegen-llvm`, b1eef04). Until then it is opt-in, so the wasm
-    // column of parity keeps being produced by the path that works.
+    // `--target wasm` is the direct backend (RFC-0077 M5), unconditionally. No
+    // clang, no wasi sysroot, no builtins archive, no `.ll` and no `.shim.c` — the
+    // module is written straight out.
     //
-    // A construct it cannot lower is an ERROR, never a fall-through to clang: the
-    // burndown ladder counts what this backend can do, and a silent fallback
-    // would make that number a statement about LLVM instead.
-    //
-    // `direct-shim` is the RFC-0077 M2i shape: the module imports memory and the
-    // C runtime from RFC-0076's pre-compiled shim, which is written out beside it
-    // and linked at instantiation (`wasmtime run --preload env=<out>.shim.wasm`).
-    // Two files rather than one, and a C toolchain to produce the second, which is
-    // exactly why it is a third value of this switch and not the default.
-    let backend = std::env::var("VYRN_WASM_BACKEND");
-    let link = match backend.as_deref() {
-        Ok("direct") => Some(vyrn_codegen::direct::Link::Standalone),
-        Ok("direct-shim") => Some(vyrn_codegen::direct::Link::Shim),
-        _ => None,
-    };
-    if let (true, Some(link)) = (wasm, link) {
-        let shim_out = PathBuf::from(&out_path).with_extension("shim.wasm");
-        if link == vyrn_codegen::direct::Link::Shim {
-            // Before emitting, because a module that imports a shim nobody can
-            // supply is worse than no module: it validates and fails to start.
-            match vyrn_codegen::toolchain::shim_wasm(false) {
-                Some(shim) => {
-                    if let Err(e) = std::fs::copy(&shim, &shim_out) {
-                        eprintln!("error: cannot write {}: {e}", shim_out.display());
-                        return ExitCode::FAILURE;
-                    }
-                }
-                None => {
-                    eprintln!("error: no runtime shim (needs clang and a wasi sysroot)");
-                    return ExitCode::FAILURE;
-                }
-            }
-        }
-        return match vyrn_codegen::direct::compile_linked(&program, link) {
+    // There is no switch here on purpose. The LLVM wasm path was kept beside this
+    // one behind `VYRN_WASM_BACKEND` for the length of M2, and the flag was given a
+    // deletion milestone at the same time it was introduced, because this repo has
+    // already watched an ungated second backend rot to unbuildable in twelve days
+    // (`vyrn-codegen-llvm`, b1eef04). Native keeps the textual-IR route below, with
+    // its own parity column; wasm has this one, with its own.
+    if wasm {
+        return match vyrn_codegen::direct::compile(&program) {
             Ok(bytes) => match std::fs::write(&out_path, bytes) {
                 Ok(()) => {
                     println!("wrote {out_path}");
@@ -3315,15 +3288,12 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         eprintln!("error: cannot write {}: {e}", ll_path.display());
         return ExitCode::FAILURE;
     }
-    // The portable shim, plus (native only) a trap stub per `extern` import
-    // (RFC-0012). On wasm the stubs are OMITTED so each `extern` resolves to the
-    // host page's `vyrn` import namespace; on native there is no host, so the
-    // stub satisfies the symbol by printing the canonical "not available on this
-    // target" message and exiting — the same wording the interpreter traps with.
-    let mut shim = RUNTIME_SHIM.to_string();
-    if !wasm {
-        shim.push_str(&extern_trap_stubs(&program));
-    }
+    // The portable shim, plus a trap stub per `extern` import (RFC-0012). Native
+    // has no host to supply one, so the stub satisfies the symbol by printing the
+    // canonical "not available on this target" message and exiting — the same
+    // wording the interpreter traps with. On wasm an `extern` resolves to the host
+    // page's `vyrn` import namespace, which the direct backend declares itself.
+    let shim = RUNTIME_SHIM.to_string() + &extern_trap_stubs(&program);
     let shim_path = PathBuf::from(&out_path).with_extension("shim.c");
     if let Err(e) = std::fs::write(&shim_path, &shim) {
         eprintln!("error: cannot write {}: {e}", shim_path.display());
@@ -3348,71 +3318,9 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         .arg(&out_path)
         // our IR carries no target triple; clang supplies the target's — don't warn.
         .arg("-Wno-override-module");
-    if !wasm && !cfg!(windows) {
-        // Worker threads (RFC-0025): pthreads. Win32 threads need no flag and
-        // wasm builds get the shim's inline (sequential) path instead.
+    if !cfg!(windows) {
+        // Worker threads (RFC-0025): pthreads. Win32 threads need no flag.
         cmd.arg("-pthread");
-    }
-    if wasm {
-        // wasm32-wasi: the same IR, compiled against wasi-libc. The sysroot
-        // comes from $WASI_SYSROOT (a wasi-sdk checkout's `share/wasi-sysroot`),
-        // else is auto-discovered from the dev-tree convention: a `tools/`
-        // directory holding `wasi-sysroot-*` in an ancestor of the running exe
-        // (`<repo>/tools/…` with vyrn.exe at `<repo>/compiler/target/<p>/`).
-        let sysroot = match std::env::var("WASI_SYSROOT") {
-            Ok(s) if Path::new(&s).exists() => s,
-            _ => match discovered_wasi_sysroot() {
-                Some(p) => p.to_string_lossy().into_owned(),
-                None => {
-                    eprintln!(
-                        "error: `--target wasm` needs the wasi-libc sysroot. Download wasi-sdk \
-                         (github.com/WebAssembly/wasi-sdk, or just its wasi-sysroot artifact) \
-                         and set WASI_SYSROOT to its wasi-sysroot directory, or unpack it \
-                         under <repo>/tools/."
-                    );
-                    return ExitCode::FAILURE;
-                }
-            },
-        };
-        cmd.arg("--target=wasm32-wasip1").arg(format!("--sysroot={sysroot}"));
-        // clang's own wasm32 compiler-rt builtins are not bundled with the
-        // Windows LLVM installer; wasi-sdk ships them as a separate archive.
-        // Accept it via $WASI_BUILTINS (path to libclang_rt.builtins-wasm32.a)
-        // or find a `libclang_rt.builtins-wasm32-wasi-*` dir next to the sysroot.
-        let builtins = std::env::var("WASI_BUILTINS")
-            .ok()
-            .filter(|b| Path::new(b).exists())
-            .or_else(|| {
-                let near = builtins_near_sysroot(Path::new(&sysroot));
-                near.map(|p| p.to_string_lossy().into_owned())
-            });
-        match builtins {
-            Some(b) => {
-                cmd.arg("-nodefaultlibs").arg(&b).arg("-lc");
-            }
-            None => {
-                eprintln!(
-                    "error: wasm builtins not found — set WASI_BUILTINS to \
-                     libclang_rt.builtins-wasm32.a (from the wasi-sdk release artifact \
-                     libclang_rt.builtins-wasm32-wasi-*.tar.gz), or unpack that archive \
-                     next to the sysroot under <repo>/tools/."
-                );
-                return ExitCode::FAILURE;
-            }
-        }
-        // `export extern fn` (RFC-0012 M2) — the functions themselves export via
-        // their `wasm-export-name` attribute (a GC root, no flag needed). But if
-        // any takes a `String` parameter, the JS shim must allocate the argument
-        // buffer inside the module before calling in, so the module's own
-        // allocator has to be reachable. `__vyrn_malloc` lives in the C shim (no
-        // IR attribute to hang off), so force-export it with a linker flag.
-        let needs_malloc_export = program.functions.iter().any(|f| {
-            f.is_export_extern
-                && f.params.iter().any(|p| matches!(p.ty, vyrn_frontend::ast::Type::Str))
-        });
-        if needs_malloc_export {
-            cmd.arg("-Wl,--export=__vyrn_malloc");
-        }
     }
     let status = cmd.status();
     match status {
