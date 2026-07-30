@@ -122,6 +122,59 @@ fn wasi_imports(m: &mut Module) -> Wasi {
     }
 }
 
+/// The `vyrn_gen` imports a GENERATOR module makes (RFC-0076 M7).
+///
+/// A generator compiled by this backend runs inside the compiler's own wasmtime,
+/// not under a WASI host, and everything it reaches for is compiler machinery: the
+/// loader's resolver (which serves unsaved editor buffers, so a guest that opened
+/// files itself would read different bytes than the interpreter), the RFC-0054
+/// piece arena, the real lexer, the real linker. All of it stays in the host, and
+/// the guest holds handles and pulls atoms — which is what makes the splice rules,
+/// the escaping and the float formatting single-sourced rather than agreed upon.
+///
+/// This is exactly the surface the textual emitter adds under `-DVYRN_GEN_HOST`,
+/// declared from the same list of LLVM declarations so no signature is spelled
+/// twice: `read` mediates and stashes, `fetch` copies a stash into a buffer the
+/// GUEST allocated (the host must not allocate inside guest memory), the five
+/// `Code` operations work on arena handles, and `reflect`/`nextInt`/`nextStr` are
+/// M3b's one transfer.
+#[derive(Clone, Copy)]
+struct Gen {
+    read: u32,
+    fetch: u32,
+    text: u32,
+    splice: u32,
+    raw_at: u32,
+    concat: u32,
+    render: u32,
+    reflect: u32,
+    next_int: u32,
+    next_str: u32,
+}
+
+fn gen_imports(m: &mut Module) -> Gen {
+    let mut at: HashMap<&str, u32> = HashMap::new();
+    for (decl, name) in crate::CODE_IMPORTS.iter().chain(std::iter::once(&crate::GEN_READ_IMPORT)) {
+        let (params, results) = wasm::declare_sig(decl);
+        at.insert(name, m.import("vyrn_gen", name, &params, &results));
+    }
+    // Every field named, so a name that stops being in the list is a panic here
+    // rather than an import nothing satisfies.
+    let g = |n: &str| at[n];
+    Gen {
+        read: g("read"),
+        fetch: g("fetch"),
+        text: g("text"),
+        splice: g("splice"),
+        raw_at: g("rawAt"),
+        concat: g("concat"),
+        render: g("render"),
+        reflect: g("reflect"),
+        next_int: g("nextInt"),
+        next_str: g("nextStr"),
+    }
+}
+
 /// One RFC-0012 `extern fn` — a host function the module imports from the fixed
 /// `vyrn` namespace, or one of RFC-0043's three host-boundary names.
 #[derive(Clone)]
@@ -173,10 +226,35 @@ fn extern_abi_sig(f: &Function) -> (Vec<ValType>, Vec<ValType>) {
 /// `vyrn-codegen/tests/shim_link.rs` — builds its own guest module out of
 /// `wasm::Module` and never went through here.
 pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
+    crate::set_gen_host(false);
+    compile_inner(program)
+}
+
+/// Compile `program` to run as a GENERATOR under RFC-0076's engine: the same
+/// traversal, plus the `vyrn_gen` host imports and the two lowerings that only
+/// make sense with them (`listDir`, and `Code` as an opaque `i64` handle).
+///
+/// This is RFC-0076 M7, and it closes RFC-0077's own opening complaint. The
+/// generation engine reached the wasm target through `emit_gen_host` and clang, so
+/// `find_clang() == None` made it DECLINE — a `.vyx` keystroke was 54 ms or 250 ms
+/// depending on whether someone had installed a C toolchain, which is the shape
+/// RFC-0077 exists to remove and which M5 removed for `vyrn build` only.
+pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, String> {
+    // The flag is thread-local because `llt_of` reads it (a `Code` is an `i64`
+    // handle only here) and `llt_of` is shared with the textual emitter. Cleared
+    // on the way out so a later `compile` on this thread cannot inherit it.
+    crate::set_gen_host(true);
+    let r = compile_inner(program);
+    crate::set_gen_host(false);
+    r
+}
+
+fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.
     let wasi = wasi_imports(&mut m);
+    let gen = crate::gen_host().then(|| gen_imports(&mut m));
     // RFC-0012 M1: every `extern fn` is one import from the fixed `vyrn`
     // namespace, which `web/wasi-min.js` fills from the page's own hooks. Declared
     // from the DECLARATIONS, before any body — not a pre-scan of the kind M2e and
@@ -204,7 +282,7 @@ pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
         );
     }
 
-    let rt = runtime(&mut m, &wasi);
+    let rt = runtime(&mut m, &wasi, gen.as_ref());
 
     let types: HashMap<String, TypeDecl> =
         program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
@@ -257,6 +335,7 @@ pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
         types,
         sigs: HashMap::new(),
         rt,
+        gen,
         variants,
         generics,
         higher_order,
@@ -642,6 +721,10 @@ struct Cx {
     types: HashMap<String, TypeDecl>,
     sigs: HashMap<String, Sig>,
     rt: Rt,
+    /// The `vyrn_gen` host imports, on the generator path only (RFC-0076 M7).
+    /// `None` is an ordinary `vyrn build --target wasm`, where every one of those
+    /// builtins is refused by name exactly as it was.
+    gen: Option<Gen>,
     /// Variant name → every enum that declares it, with the variant's tag and
     /// payload types. A name may belong to two enums, which is why the
     /// expectation decides and an ambiguous one is a gap rather than a guess.
@@ -2787,6 +2870,14 @@ impl Fn_<'_> {
                 _ => return unsupported("a branch yielding an empty array literal", line),
             },
             Expr::Call { name, args, .. } => match name.as_str() {
+                // RFC-0076 M7's generator-only builtins in a BRANCH's value rather
+                // than a statement's — `std/vyx` and `std/ui` both have arms
+                // yielding a `Code`, and `std/rpc` has one yielding a `listDir`.
+                // Every row reads the same thing the emitting path does: the entry's
+                // own signature, `gen_list_dir_ty`, or the `Code` handle.
+                n if self.gen_peek(n, args).is_some() => {
+                    self.gen_peek(n, args).expect("guarded above")
+                }
                 "@str" | "@concat" | "jsonSchema" | "slice" | "toJson" => Type::Str,
                 "@charCount" => Type::Int,
                 "floatBits" => Type::IntN { bits: 64, signed: false },
@@ -3100,6 +3191,20 @@ impl Fn_<'_> {
             b.ins(&cmp_i32(op).ok_or_else(|| gap(&format!("`{op:?}` on strings"), line))?);
             return Ok(Type::Bool);
         }
+        // `Code + Code` concatenates fragments with their origins carried
+        // (RFC-0054). Both sides are handles, so the concatenation happens in the
+        // HOST's arena and this is one import call (RFC-0076 M3a). Equality needs no
+        // import: the checker permits only `+`.
+        if let (Some(g), Type::Named(n)) = (self.cx.gen, &lt) {
+            if n == "Code" {
+                if op != BinOp::Add {
+                    return unsupported(&format!("`{op:?}` on a code quote"), line);
+                }
+                self.expr_as(m, b, rhs, &lt)?;
+                b.ins(&Instruction::Call(g.concat));
+                return Ok(l);
+            }
+        }
         if lt == Type::Bool {
             self.expr_as(m, b, rhs, &Type::Bool)?;
             b.ins(&cmp_i32(op).ok_or_else(|| gap(&format!("`{op:?}` on booleans"), line))?);
@@ -3259,6 +3364,255 @@ impl Fn_<'_> {
         })
     }
 
+    /// Whether a user function claims `name`, so a builtin spelled the same way
+    /// must NOT be lowered as one.
+    ///
+    /// `render`, `raw`, `rawAt` and `lex` are ordinary words, and the checker's rule
+    /// (RFC-0054, RFC-0076 M3b) is that a user function of the same name wins —
+    /// `examples/templates.vyrn` has a `render`. The three lists are the three
+    /// places a definition can be: an ordinary body, a generic, an RFC-0023 shell.
+    fn user_claims(&self, name: &str) -> bool {
+        self.cx.sigs.contains_key(name)
+            || self.cx.generics.contains_key(name)
+            || self.cx.higher_order.contains_key(name)
+    }
+
+    /// The M3b entry the engine synthesized for a structured builtin, if it did.
+    ///
+    /// `lex`, `moduleInterface` and `contractOf` each return a value of a known
+    /// named type, and the engine appends an ordinary Vyrn function that asks the
+    /// host for it and DECODES it by walking that type. So there is nothing to lower
+    /// here: the call site is redirected, and the decode is compiled by the same
+    /// emitter every other Vyrn function gets — which is what makes the two walks
+    /// unable to disagree about a record's field order.
+    ///
+    /// Conditional on the entry existing, which is how the shadowing rule survives
+    /// without being restated: the engine emits one for `lex` only when no user
+    /// function claims the name.
+    fn gen_entry(&self, name: &str, args: &[Expr]) -> Option<String> {
+        let e = match name {
+            "moduleInterface" => crate::GEN_ENTRY_MODULE_INTERFACE.to_string(),
+            "lex" => crate::GEN_ENTRY_LEX.to_string(),
+            // A contract name is a declaration, not an argument, so the entry is
+            // per-contract and nullary.
+            "contractOf" => match args.first() {
+                Some(Expr::Var { name: c, .. }) => format!("{}{c}", crate::GEN_ENTRY_CONTRACT_OF),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.cx.sigs.contains_key(&e).then_some(e)
+    }
+
+    /// What one of RFC-0076 M7's generator-only builtins yields, or `None` if
+    /// `name` is not one of them (or there is no generator host at all).
+    ///
+    /// [`Fn_::gen_builtin`]'s type column, read by `peek` when one of these is a
+    /// BRANCH's value — M2l's rule that a builtin `call` lowers owes `peek` a row,
+    /// because an arm's value is typed by `peek` and the join's destination is sized
+    /// from it. The three structured builtins answer with their ENTRY's signature
+    /// rather than a type spelled twice.
+    fn gen_peek(&self, name: &str, args: &[Expr]) -> Option<Type> {
+        self.cx.gen?;
+        if let Some(e) = self.gen_entry(name, args) {
+            return Some(self.cx.sigs[&e].ret_ty.clone());
+        }
+        let code = || Type::Named("Code".to_string());
+        Some(match (name, args.len()) {
+            ("@codeSplice", 2) => code(),
+            ("@codeText", 1) => code(),
+            ("raw", 1) | ("rawAt", 4) if !self.user_claims(name) => code(),
+            ("render", 1) if !self.user_claims(name) => Type::Str,
+            (crate::GEN_REFLECT, 2) => Type::Unit,
+            (crate::GEN_NEXT_INT, 0) => Type::Int,
+            (crate::GEN_NEXT_STR, 0) => Type::Str,
+            ("listDir", 1) => gen_list_dir_ty(),
+            _ => return None,
+        })
+    }
+
+    /// The builtins that exist only while a generator runs (RFC-0076 M7), or `None`
+    /// if `name` is not one of them.
+    ///
+    /// Everything here is a `vyrn_gen` import or a redirect to one. The RFC-0054
+    /// piece arena, the lexer, the linker and the contract table all stay in the
+    /// HOST — the interpreter's own code — so the splice rules, the identifier
+    /// validation and the shortest-roundtrip float formatting are byte-identical by
+    /// construction rather than by testing. Nothing guest-side knows what a piece
+    /// is: a `Code` is an `i64` index into that arena, which `llt_of` says and this
+    /// file therefore does not.
+    ///
+    /// `readFile` and `readFileBytes` are NOT here. They have a row in the table
+    /// below on every path; what differs is the runtime function behind it, and
+    /// [`gen_slurp`] is that difference — one mediated import in place of
+    /// `path_open`.
+    fn gen_builtin(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<Type>, String> {
+        let g = self.cx.gen.expect("the caller checked there is a generator host");
+        let code = Type::Named("Code".to_string());
+        if let Some(e) = self.gen_entry(name, args) {
+            let fwd: &[Expr] = if name == "contractOf" { &[] } else { args };
+            return self.call(m, b, &e, fwd, line).map(Some);
+        }
+        match (name, args.len()) {
+            // `raw(s)` IS `@codeText(s)` in the interpreter — one verbatim piece,
+            // no origin — so it is the same import.
+            ("@codeText", 1) | ("raw", 1) if !self.user_claims(name) => {
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                b.ins(&Instruction::Call(g.text));
+                Ok(Some(code))
+            }
+            ("rawAt", 4) if !self.user_claims(name) => {
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                self.expr_as(m, b, &args[1], &Type::Str)?;
+                self.expr_as(m, b, &args[2], &Type::Int)?;
+                self.expr_as(m, b, &args[3], &Type::Int)?;
+                b.ins(&Instruction::Call(g.raw_at));
+                Ok(Some(code))
+            }
+            // The host renders and stashes; the guest asks for the length,
+            // allocates, and fetches — the same protocol every host result uses,
+            // because the host must not allocate inside guest memory.
+            ("render", 1) if !self.user_claims(name) => {
+                self.expr_as(m, b, &args[0], &code)?;
+                b.ins(&Instruction::Call(g.render));
+                self.fetch_str(b, g);
+                Ok(Some(Type::Str))
+            }
+            // The spliced value crosses as a TAG plus one 64-bit word (plus a
+            // pointer when it is a String), because the host needs the value itself
+            // and cannot chase a guest pointer to anything else. The tag names the
+            // interpreter `Val` the host rebuilds and is a COMPILE-TIME constant —
+            // the static type is known here — so there is no runtime dispatch.
+            //
+            // Peeked before it is evaluated, unlike the textual emitter's version:
+            // the tag is the FIRST argument on the stack and the value is the
+            // second, so the type has to be known before the value is pushed.
+            ("@codeSplice", 2) => {
+                let vty = self.cx.resolve(&self.peek(&args[0], line)?);
+                let tag = match &vty {
+                    Type::Str => crate::TAG_STR,
+                    Type::Named(n) if n == "Code" => crate::TAG_CODE,
+                    Type::Bool => crate::TAG_BOOL,
+                    Type::Float => crate::TAG_F64,
+                    Type::Float32 => crate::TAG_F32,
+                    _ => match Num::of(&vty) {
+                        Some(n) if n.signed => crate::TAG_INT,
+                        Some(_) => crate::TAG_UINT,
+                        None => {
+                            return unsupported(
+                                &format!("splicing `{vty}` into a code quote"),
+                                line,
+                            )
+                        }
+                    },
+                };
+                b.ins(&Instruction::I32Const(tag));
+                // `bits` then `ptr`: a String travels as the pointer and a zero
+                // word, everything else as the word and a null pointer.
+                if vty == Type::Str {
+                    b.ins(&Instruction::I64Const(0));
+                    self.expr_as(m, b, &args[0], &Type::Str)?;
+                } else {
+                    self.expr_as(m, b, &args[0], &vty)?;
+                    match &vty {
+                        // Lossless, and it leaves the formatting where it belongs.
+                        Type::Float => {
+                            b.ins(&Instruction::I64ReinterpretF64);
+                        }
+                        Type::Float32 => {
+                            b.ins(&Instruction::I32ReinterpretF32)
+                                .ins(&Instruction::I64ExtendI32U);
+                        }
+                        Type::Bool => {
+                            b.ins(&Instruction::I64ExtendI32U);
+                        }
+                        // A sized integer's carrier is already correctly extended
+                        // for its signedness (the M2h invariant), so widening it
+                        // agrees with the tag by construction. A `Code` handle is
+                        // already the word.
+                        _ => {
+                            if let Some(n) = Num::of(&vty) {
+                                widen(b, n);
+                            }
+                        }
+                    }
+                    b.ins(&Instruction::I32Const(0));
+                }
+                self.expr_as(m, b, &args[1], &Type::Int)?;
+                b.ins(&Instruction::Call(g.splice));
+                Ok(Some(code))
+            }
+            // M3b's atom stream. `reflect` computes the value host-side and leaves
+            // it as atoms; the two `next` calls pull them back. Nothing about the
+            // value's SHAPE is encoded here — the synthesized decoder walks the
+            // type, and so does the host.
+            (crate::GEN_REFLECT, 2) => {
+                self.expr_as(m, b, &args[0], &Type::Int)?;
+                self.expr_as(m, b, &args[1], &Type::Str)?;
+                b.ins(&Instruction::Call(g.reflect));
+                Ok(Some(Type::Unit))
+            }
+            (crate::GEN_NEXT_INT, 0) => {
+                b.ins(&Instruction::Call(g.next_int));
+                Ok(Some(Type::Int))
+            }
+            (crate::GEN_NEXT_STR, 0) => {
+                b.ins(&Instruction::Call(g.next_str));
+                self.fetch_str(b, g);
+                Ok(Some(Type::Str))
+            }
+            // `listDir` (RFC-0021) has no runtime lowering in the language and must
+            // keep having none, so it lives behind this flag rather than in the
+            // table below. The listing comes from the loader's resolver — sorted and
+            // recorded host-side, in the interpreter's own encoding.
+            ("listDir", 1) => {
+                let Some(f) = self.cx.rt.list_dir else {
+                    return unsupported("`listDir` without a generator host", line);
+                };
+                let ty = gen_list_dir_ty();
+                let l = self.layout_of(&ty, line)?;
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
+                b.ins(&Instruction::Call(f));
+                b.slot(off);
+                Ok(Some(ty))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The stash protocol's guest half: a length is on the stack, so allocate,
+    /// fetch and NUL-terminate, leaving a `String`.
+    ///
+    /// Shared by `render` and `nextStr` because it is one protocol, not two — the
+    /// host stashes and answers with a length precisely so it never writes into
+    /// guest memory the guest did not hand it.
+    fn fetch_str(&mut self, b: &mut Frame, g: Gen) {
+        let len = b.local(ValType::I32);
+        let buf = b.local(ValType::I32);
+        b.ins(&Instruction::I32WrapI64)
+            .ins(&Instruction::LocalTee(len))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::Call(self.cx.rt.malloc))
+            .ins(&Instruction::LocalTee(buf))
+            .ins(&Instruction::Call(g.fetch))
+            .ins(&Instruction::LocalGet(buf))
+            .ins(&Instruction::LocalGet(len))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::I32Const(0))
+            .ins(&Instruction::I32Store8(byte()))
+            .ins(&Instruction::LocalGet(buf));
+    }
+
     fn call(
         &mut self,
         m: &mut Module,
@@ -3279,6 +3633,15 @@ impl Fn_<'_> {
             }
             // Otherwise fall through to `unsupported("the call \`{name}\`")` below,
             // which is this backend's own wording for something it cannot reach.
+        }
+        // RFC-0076 M7: the builtins that exist only while a generator runs — the
+        // `Code` handle operations, M3b's atom stream, and `listDir`, none of which
+        // has a row in the table below because none of them has a runtime meaning
+        // outside generation.
+        if self.cx.gen.is_some() {
+            if let Some(t) = self.gen_builtin(m, b, name, args, line)? {
+                return Ok(t);
+            }
         }
         match name {
             "print" => {
@@ -7319,6 +7682,15 @@ struct Rt {
     read_file_bytes: u32,
     write_file: u32,
     rename_file: u32,
+    /// `listDir` (RFC-0021), on the generator path ONLY — the language gives it no
+    /// runtime lowering at all, so the slot is handed out only when there is a
+    /// `vyrn_gen.read` to serve it (RFC-0076 M7). An `Option` rather than an index
+    /// that is sometimes a lie: the one call site has to be unreachable without it.
+    ///
+    /// It sits mid-table beside the other readers because the numbering is
+    /// COMPUTED — `slot` appends — so an absent entry shifts the ones after it and
+    /// nothing outside one compile depends on where they land.
+    list_dir: Option<u32>,
     // RFC-0004 §4's generational slot table (M2l). Three entries, not the LLVM
     // prelude's five, because two of them only ever appear together: every
     // `get`/`set`/`release`/`drop` checks the generation and then wants the
@@ -7387,7 +7759,7 @@ impl Rt {
     ///
     /// The returned table is that record: name beside index, which is what the
     /// consistency test checks and what a reader wanting the emission order reads.
-    fn slots(base: u32) -> (Rt, Vec<(&'static str, u32)>) {
+    fn slots(base: u32, gen_host: bool) -> (Rt, Vec<(&'static str, u32)>) {
         let mut table: Vec<(&'static str, u32)> = Vec::new();
         let mut slot = |name: &'static str| {
             let i = base + table.len() as u32;
@@ -7429,6 +7801,7 @@ impl Rt {
             read_file_bytes: slot("read_file_bytes"),
             write_file: slot("write_file"),
             rename_file: slot("rename_file"),
+            list_dir: gen_host.then(|| slot("list_dir")),
             cell_new: slot("cell_new"),
             cell_addr: slot("cell_addr"),
             cell_release: slot("cell_release"),
@@ -7483,10 +7856,10 @@ fn word() -> MemArg {
     MemArg { offset: 0, align: 2, memory_index: 0 }
 }
 
-fn runtime(m: &mut Module, wasi: &Wasi) -> Rt {
+fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     let (fd_write, proc_exit) = (wasi.fd_write, wasi.proc_exit);
     let base = m.n_imports();
-    let (mut rt, _table) = Rt::slots(base);
+    let (mut rt, _table) = Rt::slots(base, gen.is_some());
     let nl = rt.intern(m, "\n");
     let t = rt.intern(m, "true");
     let f = rt.intern(m, "false");
@@ -8093,7 +8466,7 @@ fn runtime(m: &mut Module, wasi: &Wasi) -> Rt {
 
     rt.next_is(m, rt.f64_str);
     float_str(m, malloc, nan, inf, ninf);
-    io_runtime(m, &rt, wasi);
+    io_runtime(m, &rt, wasi, gen);
     cell_runtime(m, &rt);
 
     // map_find(keys, len, key) -> the entry's index, or -1.
@@ -8690,7 +9063,7 @@ const ERRNO_XDEV: i32 = 75;
 /// The functions are added in the order [`Rt`] hands out their indices; a body
 /// added out of turn would renumber every call to it and the module would still
 /// validate (M2e's finding, in a different place).
-fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
+fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
     let (malloc, strlen, utf8valid, concat) = (rt.malloc, rt.strlen, rt.utf8valid, rt.concat);
     let triple = layout::of_ll("{ ptr, i64, i64 }").expect("the growable-array triple");
     let sum2 = layout::of_ll("{ i1, i64, i64 }").expect("the Option/Result shape");
@@ -9375,16 +9748,37 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
 
     let (open_at, read_all, err3) = (rt.open_at, rt.read_all, rt.err3);
     let fd_close = wasi.fd_close;
+    let gen = gen.copied();
     // The open-and-slurp both readers start with, leaving the buffer in `buf`, the
     // length in `len`, and branching to `err` (a depth) with the read message set
     // when either step fails.
+    //
+    // `mode` is RFC-0076's read mode, and it is the only thing the two shapes do
+    // not share. A GENERATOR does not open files: it reads through the loader's
+    // resolver, which in the LSP serves unsaved buffers, so opening one here would
+    // read different bytes than the interpreter does. On that path the whole open
+    // is one mediated import and the status comes back in the alphabet the error
+    // rendering below already speaks (0 ok / 1 io / 3 embedded NUL) — which is why
+    // the wording needed no new agreement when M2 introduced it and needs none now.
     let slurp = move |b: &mut Frame,
                       base_off: u32,
                       fd: u32,
                       buf: u32,
                       len: u32,
                       err_msg: u32,
-                      err_depth: u32| {
+                      err_depth: u32,
+                      mode: i32| {
+        if let Some(g) = gen {
+            gen_slurp(
+                b,
+                &g,
+                (malloc, err3),
+                [readpre, readpost, nulpre, nulpost],
+                (buf, len, err_msg, err_depth),
+                mode,
+            );
+            return;
+        }
         b.ins(&Instruction::LocalGet(0))
             .ins(&Instruction::I32Const(0))
             .ins(&Instruction::I64Const(RIGHT_FD_READ))
@@ -9436,7 +9830,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
             let (fd, buf, len, emsg, i) = (3, 4, 5, 6, 7);
             b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
                 .ins(&Instruction::Block(BlockType::Empty)); // 0: err
-            slurp(b, 0, fd, buf, len, emsg, 0);
+            slurp(b, 0, fd, buf, len, emsg, 0, crate::GEN_MODE_READ);
             b.ins(&Instruction::Block(BlockType::Empty)) // 0: scanned
                 .ins(&Instruction::Loop(BlockType::Empty)) // 0: sl
                 .ins(&Instruction::LocalGet(i))
@@ -9501,7 +9895,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
             let (fd, buf, len, emsg, boxed) = (3, 4, 5, 6, 7);
             b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
                 .ins(&Instruction::Block(BlockType::Empty)); // 0: err
-            slurp(b, 0, fd, buf, len, emsg, 0);
+            slurp(b, 0, fd, buf, len, emsg, 0, crate::GEN_MODE_READ_BYTES);
             b.ins(&Instruction::I32Const(triple.size as i32))
                 .ins(&Instruction::Call(malloc))
                 .ins(&Instruction::LocalTee(boxed))
@@ -9679,6 +10073,233 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
             b.ins(&Instruction::End);
         },
     );
+
+    // list_dir(path, dest) — `listDir` as a `Result<Array<String>, String>`, on the
+    // generator path only (RFC-0021 gives it no runtime meaning at all, and an
+    // ordinary build still refuses it by name).
+    //
+    // The host sorts the entries and joins them with `\n` — the interpreter's own
+    // recording encoding, so a directory whose contents change invalidates the same
+    // cache entry under either engine — and this splits them in place. That is what
+    // the C shim's `__vyrn_gen_list_dir` does, and it is safe for the same reason:
+    // an entry name cannot contain a newline, so the join is invertible.
+    //
+    // The `Ok` payload is the `Array<String>` triple, which is three words where a
+    // sum's payload is two, so it is BOXED — the same `Word::Boxed` encoding at the
+    // same `layout::of_ll ∘ llt` offsets `read_file_bytes` uses.
+    if let (Some(list_dir), Some(g)) = (rt.list_dir, gen) {
+        let (listpre, listpost) = msg(m, "listerr");
+        // A `String` element is a `ptr`, so the names buffer is a `char**` — the
+        // stride comes off the layout engine rather than off a 4 written here.
+        let stride = layout::of_ll("ptr").expect("a pointer has a layout").size as i32;
+        rt.next_is(m, list_dir);
+        m.func(&[ValType::I32, ValType::I32], &[], &[ValType::I32; 9], 0, |b| {
+            // params 0..1, the frame base 2, then ours.
+            let (buf, len, n, i, names, start, k, emsg, boxed) = (3, 4, 5, 6, 7, 8, 9, 10, 11);
+            b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
+                .ins(&Instruction::Block(BlockType::Empty)); // 0: err
+            gen_slurp(
+                b,
+                &g,
+                (malloc, err3),
+                [listpre, listpost, listpre, listpost],
+                (buf, len, emsg, 0),
+                crate::GEN_MODE_LIST,
+            );
+            // One pass to count separators, because the pointer array has to be
+            // allocated before the second pass can fill it.
+            b.ins(&Instruction::Block(BlockType::Empty))
+                .ins(&Instruction::Loop(BlockType::Empty))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32GeU)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::I32Const(b'\n' as i32))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(n))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(n))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(i))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End)
+                // A non-empty listing has one more name than it has separators; an
+                // EMPTY one is zero names rather than one empty name, which is the
+                // difference between `[]` and `[""]`.
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(n))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(n))
+                .ins(&Instruction::End)
+                // A zero-length array still gets a buffer, so the triple's pointer
+                // is never null — `push` reallocs from it either way.
+                .ins(&Instruction::LocalGet(n))
+                .ins(&Instruction::If(BlockType::Result(ValType::I32)))
+                .ins(&Instruction::LocalGet(n))
+                .ins(&Instruction::Else)
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::End)
+                .ins(&Instruction::I32Const(stride))
+                .ins(&Instruction::I32Mul)
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalSet(names))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalSet(start))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::LocalSet(i));
+            let elem = |b: &mut Frame| {
+                b.ins(&Instruction::LocalGet(names))
+                    .ins(&Instruction::LocalGet(k))
+                    .ins(&Instruction::I32Const(stride))
+                    .ins(&Instruction::I32Mul)
+                    .ins(&Instruction::I32Add)
+                    .ins(&Instruction::LocalGet(start))
+                    .ins(&Instruction::I32Store(word()));
+            };
+            b.ins(&Instruction::Block(BlockType::Empty))
+                .ins(&Instruction::Loop(BlockType::Empty))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::I32GeU)
+                .ins(&Instruction::BrIf(1))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::I32Const(b'\n' as i32))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::If(BlockType::Empty))
+                // The separator becomes this name's terminator, which is what makes
+                // the split in place rather than a copy per entry.
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32Store8(byte()));
+            elem(b);
+            b.ins(&Instruction::LocalGet(k))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(k))
+                .ins(&Instruction::LocalGet(buf))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(start))
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(i))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End)
+                .ins(&Instruction::LocalGet(len))
+                .ins(&Instruction::If(BlockType::Empty));
+            elem(b);
+            b.ins(&Instruction::End)
+                .ins(&Instruction::I32Const(triple.size as i32))
+                .ins(&Instruction::Call(malloc))
+                .ins(&Instruction::LocalTee(boxed))
+                .ins(&Instruction::LocalGet(names))
+                .ins(&Instruction::I32Store(word_at(triple.fields[0])));
+            for f in [triple.fields[1], triple.fields[2]] {
+                b.ins(&Instruction::LocalGet(boxed))
+                    .ins(&Instruction::LocalGet(n))
+                    .ins(&Instruction::I64ExtendI32U)
+                    .ins(&Instruction::I64Store(at(f)));
+            }
+            sum2_write_to(b, 1, &sum2, 1, Some(boxed));
+            b.ins(&Instruction::Br(1)).ins(&Instruction::End); // err
+            sum2_write_to(b, 1, &sum2, 0, Some(emsg));
+            b.ins(&Instruction::End); // fin
+        });
+    }
+}
+
+/// RFC-0076's mediated read, in place of `open_at` + `read_all`: the whole
+/// resource in one import, into a buffer the GUEST allocates.
+///
+/// Two calls rather than one because the host must not allocate inside guest
+/// memory — `read` resolves the path, mediates it against the generator's allowed
+/// roots, reads it, RECORDS it (which is what the on-disk generation cache
+/// validates against) and stashes the bytes, returning `(status << 32) | len`;
+/// `fetch` copies the stash into what the guest just malloc'd. Byte for byte the
+/// protocol `__vyrn_gen_slurp` in the C shim implements, because the host serving
+/// it is the same host.
+///
+/// The status alphabet is the shim's: 0 ok, 1 io, 3 an embedded NUL, which the
+/// HOST checks (mode 0 only) because it is holding the bytes. So this picks
+/// between two canonical messages, and both halves of each come out of
+/// `IO_MESSAGES` — a rejected path and a NUL differ in their prefix AND their
+/// suffix, so selecting only one of the two would say `cannot read \`x\` contains
+/// a NUL byte`.
+///
+/// A scoping violation is not in the alphabet at all: it unwinds out of the guest
+/// as a host error, so a generator can never observe one as a value.
+fn gen_slurp(
+    b: &mut Frame,
+    g: &Gen,
+    (malloc, err3): (u32, u32),
+    [readpre, readpost, nulpre, nulpost]: [u32; 4],
+    (buf, len, err_msg, err_depth): (u32, u32, u32, u32),
+    mode: i32,
+) {
+    let packed = b.local(ValType::I64);
+    let st = b.local(ValType::I32);
+    let pick = |b: &mut Frame, nul: u32, other: u32| {
+        b.ins(&Instruction::I32Const(nul as i32))
+            .ins(&Instruction::I32Const(other as i32))
+            .ins(&Instruction::LocalGet(st))
+            .ins(&Instruction::I32Const(3))
+            .ins(&Instruction::I32Eq)
+            .ins(&Instruction::Select);
+    };
+    b.ins(&Instruction::LocalGet(0))
+        .ins(&Instruction::I32Const(mode))
+        .ins(&Instruction::Call(g.read))
+        .ins(&Instruction::LocalTee(packed))
+        .ins(&Instruction::I64Const(32))
+        .ins(&Instruction::I64ShrU)
+        .ins(&Instruction::I32WrapI64)
+        .ins(&Instruction::LocalTee(st))
+        .ins(&Instruction::If(BlockType::Empty));
+    pick(b, nulpre, readpre);
+    b.ins(&Instruction::LocalGet(0));
+    pick(b, nulpost, readpost);
+    b.ins(&Instruction::Call(err3))
+        .ins(&Instruction::LocalSet(err_msg))
+        .ins(&Instruction::Br(err_depth + 1))
+        .ins(&Instruction::End)
+        // The low half is the length; `i32.wrap` IS the mask.
+        .ins(&Instruction::LocalGet(packed))
+        .ins(&Instruction::I32WrapI64)
+        .ins(&Instruction::LocalTee(len))
+        .ins(&Instruction::I32Const(1))
+        .ins(&Instruction::I32Add)
+        .ins(&Instruction::Call(malloc))
+        .ins(&Instruction::LocalTee(buf))
+        .ins(&Instruction::Call(g.fetch))
+        // NUL-terminated, because a Vyrn `String` is a `ptr` and everything
+        // downstream scans for the zero.
+        .ins(&Instruction::LocalGet(buf))
+        .ins(&Instruction::LocalGet(len))
+        .ins(&Instruction::I32Add)
+        .ins(&Instruction::I32Const(0))
+        .ins(&Instruction::I32Store8(byte()));
 }
 
 /// Write an `Option`/`Result` through the destination in parameter 0: the tag,
@@ -10312,6 +10933,13 @@ fn print_i64(m: &mut Module, write_all: u32) -> u32 {
 /// this is that row and that lowering reading one function, because two
 /// spellings of `Result<Bool, String>` are two chances to size a slot one field
 /// differently from the value written into it.
+/// `listDir`'s type (RFC-0021), in one place so the lowering and [`Fn_::peek`]
+/// cannot size a destination slot differently from the value written into it —
+/// M2l's rule, and the shape `io_builtin_ty` exists for on the other builtins.
+fn gen_list_dir_ty() -> Type {
+    Type::Result(Box::new(Type::Array(Box::new(Type::Str))), Box::new(Type::Str))
+}
+
 fn io_builtin_ty(name: &str, argc: usize) -> Option<Type> {
     let str_err = |ok| Type::Result(Box::new(ok), Box::new(Type::Str));
     Some(match (name, argc) {
@@ -10359,18 +10987,23 @@ mod tests {
     #[test]
     fn every_runtime_helper_gets_its_own_index() {
         let base = 7; // any offset; the imports are not always the same count
-        let (rt, table) = Rt::slots(base);
+        // Both shapes: the generator path hands out one more (`list_dir`), and the
+        // invariant is that adding it neither duplicates a name nor leaves a hole.
+        for gen_host in [false, true] {
+        let (rt, table) = Rt::slots(base, gen_host);
         assert_eq!(table.len() as u32, rt.count, "count is the number of slots handed out");
         let names: std::collections::HashSet<&str> = table.iter().map(|(n, _)| *n).collect();
         assert_eq!(names.len(), table.len(), "a name is registered twice");
         let idx: Vec<u32> = table.iter().map(|(_, i)| *i).collect();
         assert_eq!(idx, (base..base + rt.count).collect::<Vec<_>>(), "indices are dense and distinct");
+        }
     }
 
     fn cx() -> Cx {
         Cx {
             types: HashMap::new(),
             sigs: HashMap::new(),
+            gen: None,
             variants: HashMap::new(),
             generics: HashMap::new(),
             higher_order: HashMap::new(),

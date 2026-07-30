@@ -556,12 +556,26 @@ thread_local! {
     static GEN_HOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Whether this thread is emitting a generator-host module.
+///
+/// RFC-0076 M7 gave the flag a second reader: the DIRECT wasm backend emits the
+/// same surface without clang, and `llt_of`'s `Code` arm is shared between them,
+/// so the flag has to be the one both ask rather than a parameter one of them
+/// threads.
+pub(crate) fn gen_host() -> bool {
+    GEN_HOST.with(|g| g.get())
+}
+
+pub(crate) fn set_gen_host(on: bool) {
+    GEN_HOST.with(|g| g.set(on));
+}
+
 /// The `vyrn_gen` imports that make `Code` (RFC-0054) work as a handle: an IR
 /// declaration and the name it imports under (RFC-0076 M3a). Every one of them
 /// operates on the HOST's piece arena, which is what keeps the splice rules, the
 /// string escaping and the float formatting in a single implementation — the
 /// interpreter's — instead of a second one that agrees until it does not.
-const CODE_IMPORTS: &[(&str, &str)] = &[
+pub(crate) const CODE_IMPORTS: &[(&str, &str)] = &[
     ("i64 @__vyrn_code_text(ptr)", "text"),
     ("i64 @__vyrn_code_splice(i32, i64, ptr, i64)", "splice"),
     ("i64 @__vyrn_code_raw_at(ptr, ptr, i64, i64)", "rawAt"),
@@ -579,6 +593,24 @@ const CODE_IMPORTS: &[(&str, &str)] = &[
     ("i64 @__vyrn_gen_next_int()", "nextInt"),
     ("i64 @__vyrn_gen_next_str()", "nextStr"),
 ];
+
+/// The one `vyrn_gen` import the C shim declares for ITSELF under
+/// `-DVYRN_GEN_HOST` rather than taking from the IR: the mediated read, which the
+/// shim's `readFile`/`readFileBytes`/`listDir` are rewritten in terms of.
+///
+/// A directly-emitted generator module has no shim (RFC-0076 M7), so its runtime
+/// calls this import itself — and the signature is written here, beside the ones
+/// it joins, so [`wasm::declare_sig`] reads all of them off one list. Not folded
+/// into [`CODE_IMPORTS`] because the textual path must NOT declare it: the shim
+/// already does, with the same import module and name.
+pub(crate) const GEN_READ_IMPORT: (&str, &str) = ("i64 @__vyrn_gen_read(ptr, i32)", "read");
+
+/// `vyrn_gen.read`'s modes. Shared with the C shim's own `__vyrn_gen_slurp` and
+/// with the host that answers them, so the three spellings of "2 means listDir"
+/// are one.
+pub const GEN_MODE_READ: i32 = 0;
+pub const GEN_MODE_READ_BYTES: i32 = 1;
+pub const GEN_MODE_LIST: i32 = 2;
 
 /// `@__vyrn_gen_reflect`'s kinds — which builtin the host is answering
 /// (RFC-0076 M3b). The argument is the module path, the contract NAME, or the
@@ -631,7 +663,7 @@ pub fn emit_gen_host(program: &Program) -> Result<String, String> {
 }
 
 fn emit_with(program: &Program, gen_host: bool) -> Result<String, String> {
-    GEN_HOST.with(|g| g.set(gen_host));
+    set_gen_host(gen_host);
     let mut out = String::new();
     // module preamble: printf/abort + format strings (opaque-pointer style)
     out.push_str("; Vyrn v0.1 — generated LLVM IR (target: LLVM 15+)\n");
@@ -5769,7 +5801,7 @@ impl<'a> Gen<'a> {
         // templates.vyrn` has one) — while the `@`-prefixed desugar names are
         // unspellable and always ours. Off this path nothing changes: a code
         // quote outside a generation context is still the checker's error.
-        if GEN_HOST.with(|g| g.get())
+        if gen_host()
             && (matches!(name, "@codeText" | "@codeSplice")
                 || (matches!(name, "render" | "raw" | "rawAt")
                     && !self.funcs.contains_key(name)))
@@ -5787,7 +5819,7 @@ impl<'a> Gen<'a> {
         // entry for `lex` only when no user function claims the name (`render`/
         // `raw`/`rawAt` are handled the same way above), while `moduleInterface`
         // and `contractOf` are reserved words and cannot be shadowed at all.
-        if GEN_HOST.with(|g| g.get()) {
+        if gen_host() {
             let entry = match name {
                 "moduleInterface" => Some(GEN_ENTRY_MODULE_INTERFACE.to_string()),
                 "lex" => Some(GEN_ENTRY_LEX.to_string()),
@@ -5845,7 +5877,7 @@ impl<'a> Gen<'a> {
             // the one thing that made `std/i18n` uncompilable is lowered. Every
             // other build keeps the error: the language still gives `listDir` no
             // runtime meaning.
-            if !GEN_HOST.with(|g| g.get()) {
+            if !gen_host() {
                 return Err(format!(
                     "`listDir` runs in the interpreter / at generation time (RFC-0021); it has no \
                      native or wasm lowering in v1 — use it in a `gen fn` or under `vyrn run`"
@@ -8502,7 +8534,7 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         // that survives `resolve` undeclared. i64 is also what makes it
         // travel for free: `box_payload` passes an i64 through, so a `Code`
         // in an Option/Array needs no case of its own.
-        Type::Named(ref n) if n == "Code" && GEN_HOST.with(|g| g.get()) => "i64".into(),
+        Type::Named(ref n) if n == "Code" && gen_host() => "i64".into(),
         // Unreachable after `resolve` (Named/App/transformers/params reduced away).
         Type::Named(_) | Type::App(..) | Type::Omit(..) | Type::Pick(..) | Type::Merge(..)
         | Type::Partial(..) | Type::Param(_) => "void".into(),

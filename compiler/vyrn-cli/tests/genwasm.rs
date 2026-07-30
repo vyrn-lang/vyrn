@@ -443,10 +443,18 @@ fn a_runaway_generator_is_killed_under_both_engines() {
         dir.join("gen.vyrn"),
         // The append is unreachable, and there so the loop cannot be optimized
         // away as having no effect: what is being metered is the spinning.
+        // The bound is 10^12 rather than a merely large number, and RFC-0076 M7 is
+        // why: the fuel budget is `1000 * the interpreter's step budget`, and how
+        // far a loop gets inside it depends on how many wasm instructions the
+        // backend spends per Vyrn statement. The direct backend spends about 14
+        // where clang at `-O0` spent enough to exceed it, so at 10^9 this generator
+        // COMPLETED under wasm while still dying under the interpreter — the test
+        // was measuring the emitter's efficiency, not the guardrail. Past any
+        // multiplier this mapping could plausibly take, it measures the guardrail.
         "export gen fn spin(tag: String) -> String {\n\
          \x20   let mut i = 0\n\
          \x20   let mut s = \"\"\n\
-         \x20   while i < 1000000000 {\n\
+         \x20   while i < 1000000000000 {\n\
          \x20       i = i + 1\n\
          \x20       if i < 0 { s = s + tag }\n\
          \x20   }\n\

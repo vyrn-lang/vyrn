@@ -660,6 +660,26 @@ use vyrn_codegen::wasm::SHIM_BASE;
 /// spawns therefore gets the single fat module, where the table is one.
 const NOT_SPLITTABLE: &[&str] = &["__vyrn_spawn"];
 
+/// Compile the wrapper program to wasm (RFC-0076 M7).
+///
+/// The direct backend (RFC-0077), which is what makes this path need no C
+/// toolchain at all. It closes RFC-0077's own opening complaint: the generation
+/// engine used to reach wasm through textual LLVM IR and clang, so
+/// `find_clang() == None` made it DECLINE, and a `.vyx` keystroke was 54 ms or
+/// 250 ms depending on whether someone had installed one. RFC-0077 M5 removed
+/// clang from `vyrn build --target wasm` and proved it with a poisoned stub; the
+/// generation engine went on shelling out, so the motivating defect outlived the
+/// milestone that was supposed to remove it.
+///
+/// The gate that says the swap is honest is not this function: it is
+/// `vyrn-cli/tests/genwasm.rs`, which runs every generator example under BOTH
+/// engines and fails if the emitted source differs by a byte — so a backend that
+/// compiles a generator wrong is red rather than subtly wrong downstream. A backend
+/// that cannot compile one at all declines, and the interpreter runs it.
+fn compile_to_wasm(_key: &str, program: &Program) -> Result<Vec<u8>, EngineError> {
+    vyrn_codegen::direct::compile_gen_host(program).map_err(|e| decline(&e))
+}
+
 /// Emit IR, compile it, and read back the module bytes.
 ///
 /// Deliberately its own orchestration rather than a refactor of `build`: that
@@ -672,7 +692,7 @@ const NOT_SPLITTABLE: &[&str] = &["__vyrn_spawn"];
 /// pre-compiled shim skips ~55 ms of compiling 39 KB of C that was going to come
 /// out byte-identical anyway. It falls back to the fat module whenever the split
 /// cannot be proven safe, so the worst case is the cost this path always had.
-fn compile_to_wasm(key: &str, program: &Program) -> Result<Vec<u8>, EngineError> {
+fn compile_to_wasm_llvm(key: &str, program: &Program) -> Result<Vec<u8>, EngineError> {
     // `emit_gen_host`, not `emit`: the same emitter, plus the one lowering that
     // only makes sense with the host imports below it (`listDir`).
     let ir = vyrn_codegen::emit_gen_host(program).map_err(|e| decline(&format!("codegen: {e}")))?;
@@ -1382,20 +1402,34 @@ fn store_artifact(key: &str, module: &wasmtime::Module) {
 /// divergence in a pathological band where wasm succeeds and the interpreter
 /// would have failed. That direction never breaks a generator that worked.
 ///
-/// The multiplier is measured, not guessed. Every generator call in the repo,
-/// under both engines (`VYRN_GEN_STEPS` against `VYRN_GENWASM_TRACE`), spends
-/// between 56 and 755 fuel per interpreted step; the worst SUSTAINED ratio, once
-/// the fixed ~23k of libc startup is discounted, is ~410, and the string-heavy
-/// ones that dominate real work (`std/tw` 307, `std/vyx` 152, `std/i18n` 74) sit
-/// well below it. 1,000 is ~2.4x above the worst measured, and the flat 1M
-/// absorbs that startup cost so a generator of a few dozen statements is not
-/// killed by it (`examples/gendemo` is 31 steps and 23,416 fuel).
+/// The multiplier is measured, not guessed, and it was RE-measured for M7 because
+/// the module it meters is a different module: the direct wasm backend, with no
+/// wasi-libc startup in it and none of clang's unoptimized `-O0` code. Every
+/// generator call in the repo, under both engines (`VYRN_GEN_STEPS` against
+/// `VYRN_GENWASM_TRACE`):
+///
+/// | generator | steps | fuel | fuel/step |
+/// |---|---|---|---|
+/// | `std/rpc` | 645 | 265,191 | 411 |
+/// | `examples/gendemo` | 93 | 31,128 | 335 |
+/// | `std/ui` (`pagesdemo`) | 7,514 | 1,886,245 | 251 |
+/// | `std/tw` | 42,252 | 8,707,363 | 206 |
+/// | `std/vyx` | 33,427 | 2,506,554 | 75 |
+/// | `std/i18n` | 64,175 | 4,778,478 | 74 |
+///
+/// The shape held: 411 is the worst, against 448 before, and the string-heavy ones
+/// that dominate real work still sit at a quarter of it. So 1,000 stays — ~2.4x
+/// above the worst measured — and the flat 1M still covers a generator of a few
+/// dozen statements. What changed is only that the fixed startup the flat term was
+/// sized around is gone, which makes the small end looser rather than tighter.
 ///
 /// It is a margin, not a proof: one Vyrn statement can copy an unbounded number
 /// of bytes, so a ratio can always be constructed past any multiplier. The
 /// measured ones do not come close, and the guardrail's job is to stop a runaway
 /// generator hanging the editor, which it does — the default budget burns out in
-/// ~1.6 s, against ~3.4 s for the same generator interpreted.
+/// **0.69 s**, against 2.2 s for the same generator interpreted (M5 measured
+/// 1.6 s and 3.4 s; the emitted loop is leaner now, so the same fuel is spent
+/// faster).
 fn wasm_fuel(steps: u64) -> u64 {
     steps.saturating_mul(1_000).saturating_add(1_000_000)
 }
@@ -1450,7 +1484,10 @@ fn run_module(
                 }
                 None => {
                     let bytes = build()?;
-                    trace("clang", t.elapsed());
+                    // "emit", not "clang", since M7: this is the direct wasm
+                    // backend, and the ~350 ms of C toolchain the phase used to
+                    // measure is what the milestone removed.
+                    trace("emit", t.elapsed());
                     let t = std::time::Instant::now();
                     let m = wasmtime::Module::new(wasm_engine(), &bytes)
                         .map_err(|e| EngineError::Failed(format!("wasm: {e}")))?;

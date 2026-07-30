@@ -121,6 +121,24 @@ pub fn boundary() -> &'static BTreeMap<String, Option<Sig>> {
     })
 }
 
+/// One `RET @NAME(ARGS)` declaration as the wasm signature it crosses as.
+///
+/// The same three-line parse [`boundary`] does over the emitted `declare` lines,
+/// exposed for the lists that are declarations in Rust rather than lines in IR —
+/// `CODE_IMPORTS` and `GEN_READ_IMPORT` (RFC-0076 M7). The direct backend imports
+/// those by name, and a signature respelled in wasm types beside the LLVM one
+/// would be a second chance to get a widening wrong; here `i1`/`i8`/`ptr` all go
+/// through [`abi`] exactly once.
+pub fn declare_sig(decl: &str) -> (Vec<ValType>, Vec<ValType>) {
+    let (ret, rest) = decl.split_once(" @").expect("RET @NAME(..)");
+    let args = rest.split_once('(').expect("RET @NAME(..)").1;
+    let args = args.rsplit_once(')').expect("RET @NAME(..)").0;
+    (
+        split_args(args).iter().filter_map(|a| abi(a)).collect(),
+        abi(ret).into_iter().collect(),
+    )
+}
+
 /// Split a parameter list on top-level commas. Nothing in the boundary nests
 /// today — M0 measured no aggregate crossing it — but a `void (*)(ptr, i64)`
 /// would, and one comma read wrong shifts every parameter after it.
