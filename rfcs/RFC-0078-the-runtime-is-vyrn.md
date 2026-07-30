@@ -12,7 +12,7 @@
   | builtins the checker knows | 40 |
   | Rust implementations in the interpreter | 50 |
   | C functions in the runtime shim | 80 |
-  | of those, the JSON DOM alone | 49 |
+  | of those, the JSON DOM alone | 49 — but SHARED writer/reader, so M2 retires 11 and M3 the other 38 (see "M2, as landed") |
   | `std/json.vyrn` — a JSON reader and writer, in Vyrn | 752 lines |
   | interp + shim + textual emitter + direct emitter | 27,334 lines |
 
@@ -80,9 +80,10 @@ __vyrn_vj_encode(node)  -> serialize the DOM to text          [does not]
 Only the first half requires compiler knowledge — walking a record's fields and
 an enum's tag according to the value's static type. The second half already
 exists in Vyrn as `std/json:emit`. Rewiring `toJson` to produce a `Json` value
-and call it **retires 49 of the shim's 80 functions** and hands the direct
-backend `toJson` for free, because `std/json` is ordinary Vyrn that every
-backend already compiles.
+and call it retires **11 of the shim's 80 functions** — not 49, as this
+document first claimed: the `__vyrn_vj_*` DOM is shared with the *parser*, so 49
+is the pair's total and M3 takes the other 38. And it hands the direct backend
+`toJson` for free only once the writer is importable without the reader.
 
 ## Why this is safe HERE
 
@@ -119,6 +120,12 @@ at any time.
   implementation already written and parity-tested. Success is 49 shim functions
   deleted and `toJson` working on the direct backend without a line of new wasm
   lowering. Bytes must be pinned before the swap, not compared after.
+  **Blocked, measured, not attempted — see "M2, as landed". Needs, in order: the
+  writer in its own module (`import { emit } from "std/json"` links the whole
+  file, and the READER wants `?` and `if let`, which are RFC-0077's own rows); an
+  implicit link aliased to `@`-names, because RFC-0022 resolves a co-naming
+  collision by renaming the FOREIGN decl, so a user's own `emit` would silently
+  capture the desugar's call; and two escape literals repinned.**
 - **M3 — `fromJson`.** The parser half, same shape, plus RFC-0018's `Issue`
   accumulation.
 - **M4 — the string and number tier.** `chars` (UTF-8 decode), `parse`, the `%f`
