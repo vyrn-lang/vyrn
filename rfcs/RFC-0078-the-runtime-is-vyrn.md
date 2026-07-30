@@ -1601,3 +1601,37 @@ M5 inherits a smaller question than it was written for — `toJson` and these te
 no Rust arm at all, so "the count of Rust arms should fall" has already happened for
 eleven builtins, and what is left for M5 is the *deliberate* caches: `lineAt`/`colAt`,
 and whether the language grows the abort primitive `slice` needs.
+
+## The strictness ruling M3 asked for
+
+M3 stopped partly because the two readers disagree about which documents parse,
+and said a ruling was needed before any swap. Here it is. **`std/jsonread` wins
+all three**, and each for its own reason rather than by a blanket preference.
+
+| case | today (C) | `std/jsonread` | ruling |
+|---|---|---|---|
+| `"😀"` | rejected, `unexpected character at position 11` | accepted, decodes 😀 | **accept.** A surrogate pair is exactly how RFC 8259 escapes an astral codepoint. Rejecting it means Vyrn cannot read valid JSON that any other implementation writes, which is a bug, not strictness. |
+| `{"s":"a","s":"b"}` | accepted, first wins | rejected, naming the key | **reject.** RFC 8259 says names SHOULD be unique and leaves duplicates unpredictable. For a *typed decode* the ambiguity is the problem: silently picking one is the only outcome with no diagnosis. RFC-0059 already declared this reader strict; this is that declaration applied. |
+| error text | `<reason> at position N`, 0-based byte | `line N, col M: <reason>`, 1-based | **line and column.** A byte offset into a document a human did not write is not actionable. |
+
+Two consequences, stated so they are not surprises.
+
+**The duplicate-key change can break a working program**, and it is the only one
+of the three that can. That is acceptable here for the reason RFC-0071 and
+RFC-0072 already used: pre-1.0, no users, no compatibility window. It would not
+be acceptable later, which is an argument for making the ruling now rather than
+after the swap has shipped.
+
+**Every parse-error message changes shape**, so every pin carrying one has to be
+recaptured. `examples/jsondecbytes.vyrn` was written failure-shape-first exactly
+so this is a visible edit rather than a silent drift — the diff should show the
+wording moving and nothing else moving with it.
+
+And the general principle this settles, which applies to every later milestone:
+when the Vyrn implementation and the C one disagree, **neither wins by default**.
+The question is which is correct, decided case by case and written down. M2
+resolved `\b`/`\f` in favour of Vyrn because the C spelling had no observer; M4b
+resolved the NUL decoders in favour of Vyrn because C did not even agree with
+itself; here the surrogate case goes to Vyrn because C is wrong about JSON, and
+the duplicate-key case goes to Vyrn because strict is the ruling this project
+already made.
