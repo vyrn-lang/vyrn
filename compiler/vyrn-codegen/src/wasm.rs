@@ -143,23 +143,40 @@ fn split_args(s: &str) -> Vec<String> {
     out
 }
 
+/// One imported function, in index order.
+struct Imported {
+    module: String,
+    field: String,
+    params: Vec<ValType>,
+    results: Vec<ValType>,
+}
+
+/// One defined function: the signature it was reserved with, and its body —
+/// `None` while a reservation is outstanding.
+struct Defined {
+    params: Vec<ValType>,
+    results: Vec<ValType>,
+    body: Option<Frame>,
+}
+
 /// A module under construction.
+///
+/// Everything is held as plain data until [`Module::finish`], which is not just
+/// about section order any more: [`Module::sweep`] deletes what no export can
+/// reach, and a body already encoded to bytes cannot have its call indices
+/// renumbered.
 pub struct Module {
-    types: TypeSection,
-    /// Deduplicates signatures — a module with 6,000 functions has a few dozen
-    /// distinct types, and the type section is scanned linearly by validators.
-    type_ids: HashMap<(Vec<ValType>, Vec<ValType>), u32>,
-    imports: ImportSection,
+    imports: Vec<Imported>,
     import_memory: bool,
-    n_imports: u32,
-    funcs: FunctionSection,
-    /// One entry per defined function, in index order: its parameter count (so a
-    /// body handed over later can be checked against the signature it was
-    /// reserved with) and the encoded body, `None` while a reservation is
-    /// outstanding. A `Vec` rather than a [`CodeSection`] built as we go, because
-    /// [`Module::reserve_func`] hands out an index whose body arrives afterwards.
-    bodies: Vec<(usize, Option<Function>)>,
-    exports: ExportSection,
+    /// One entry per defined function, in index order. A `Vec` rather than a
+    /// [`CodeSection`] built as we go, because [`Module::reserve_func`] hands out
+    /// an index whose body arrives afterwards.
+    bodies: Vec<Defined>,
+    /// Exported functions, by name. The memory export is added by
+    /// [`Module::finish`] and is in a different index space, so it is not here.
+    exports: Vec<(String, u32)>,
+    /// Whether [`Module::finish`] keeps only what an export can reach.
+    sweep: bool,
     /// The single data segment, packed at [`DATA_BASE`]; `pool_at` deduplicates
     /// identical contents, which is what makes it a string pool.
     pool: Vec<u8>,
@@ -177,14 +194,11 @@ impl Module {
     /// `vyrn build --target wasm` produces.
     pub fn new() -> Self {
         Module {
-            types: TypeSection::new(),
-            type_ids: HashMap::new(),
-            imports: ImportSection::new(),
+            imports: Vec::new(),
             import_memory: false,
-            n_imports: 0,
-            funcs: FunctionSection::new(),
             bodies: Vec::new(),
-            exports: ExportSection::new(),
+            exports: Vec::new(),
+            sweep: false,
             pool: Vec::new(),
             pool_at: HashMap::new(),
         }
@@ -198,16 +212,22 @@ impl Module {
         self
     }
 
-    /// Intern a signature, giving its type index.
-    fn ty(&mut self, params: &[ValType], results: &[ValType]) -> u32 {
-        let key = (params.to_vec(), results.to_vec());
-        if let Some(&i) = self.type_ids.get(&key) {
-            return i;
-        }
-        let i = self.types.len();
-        self.types.ty().function(params.iter().copied(), results.iter().copied());
-        self.type_ids.insert(key, i);
-        i
+    /// Keep only what an export can reach, and renumber (RFC-0077 M2p).
+    ///
+    /// What a linker's `--gc-sections` does, and for the reason M2j declined to do
+    /// it any other way: the graph swept here is the FINISHED one, the calls that
+    /// were actually emitted. A pre-scan over the AST would have been a second
+    /// traversal obliged to agree with lowering about what lowering needs — the
+    /// failure mode `llt_of` and `predicate_binds` exist to prevent.
+    ///
+    /// Opt-in rather than automatic, because a `Module` is not always a program:
+    /// `tests/shim_link.rs` is an import CENSUS, and its point is that a signature
+    /// nothing calls is still resolved by name at instantiation.
+    ///
+    /// Call after the last [`Module::fill`] — an unfilled reachable body is a
+    /// panic here rather than in `finish`.
+    pub fn sweep(&mut self) {
+        self.sweep = true;
     }
 
     /// Declare an imported function, giving its index.
@@ -218,14 +238,17 @@ impl Module {
     /// call in the module.
     pub fn import(&mut self, module: &str, field: &str, params: &[ValType], results: &[ValType]) -> u32 {
         assert!(
-            self.funcs.is_empty(),
+            self.bodies.is_empty(),
             "import {module}.{field} declared after a defined function: \
              imports and definitions share one index space, imports first"
         );
-        let t = self.ty(params, results);
-        self.imports.import(module, field, EntityType::Function(t));
-        self.n_imports += 1;
-        self.n_imports - 1
+        self.imports.push(Imported {
+            module: module.to_string(),
+            field: field.to_string(),
+            params: params.to_vec(),
+            results: results.to_vec(),
+        });
+        self.imports.len() as u32 - 1
     }
 
     /// Place `bytes` in the data segment at an `align`-aligned address, giving
@@ -299,10 +322,13 @@ impl Module {
     /// module WHILE it emits — interning a string literal mid-expression, say,
     /// which a `build` closure borrowing `&mut Module` could not do.
     pub fn add(&mut self, params: &[ValType], results: &[ValType], f: Frame) -> u32 {
-        let t = self.ty(params, results);
-        self.funcs.function(t);
-        self.bodies.push((params.len(), Some(encode(f, params.len()))));
-        self.n_imports + self.funcs.len() - 1
+        debug_assert_eq!(f.base, params.len() as u32, "frame built for a different signature");
+        self.bodies.push(Defined {
+            params: params.to_vec(),
+            results: results.to_vec(),
+            body: Some(f),
+        });
+        self.next_func() - 1
     }
 
     /// Reserve a function index whose body arrives later, giving that index.
@@ -315,41 +341,126 @@ impl Module {
     /// while its index has to be callable from the middle of that walk. No
     /// ordering discipline can arrange that; a reservation can.
     pub fn reserve_func(&mut self, params: &[ValType], results: &[ValType]) -> u32 {
-        let t = self.ty(params, results);
-        self.funcs.function(t);
-        self.bodies.push((params.len(), None));
-        self.n_imports + self.funcs.len() - 1
+        self.bodies.push(Defined {
+            params: params.to_vec(),
+            results: results.to_vec(),
+            body: None,
+        });
+        self.next_func() - 1
     }
 
     /// Supply the body of a function [`Module::reserve_func`] handed out.
     pub fn fill(&mut self, index: u32, f: Frame) {
-        let i = (index - self.n_imports) as usize;
-        let (nparams, body) = &mut self.bodies[i];
-        assert!(body.is_none(), "function {index} filled twice");
-        *body = Some(encode(f, *nparams));
+        let i = (index - self.n_imports()) as usize;
+        let d = &mut self.bodies[i];
+        debug_assert_eq!(f.base, d.params.len() as u32, "frame built for a different signature");
+        assert!(d.body.is_none(), "function {index} filled twice");
+        d.body = Some(f);
     }
 
     /// How many functions this module imports — the offset a defined
     /// function's index starts from, which a lowering needs before any body
     /// exists in order to name a callee it has not emitted yet.
     pub fn n_imports(&self) -> u32 {
-        self.n_imports
+        self.imports.len() as u32
     }
 
     /// The index the next defined function will get.
     ///
     /// Emission order IS the numbering — indices are baked into every `call` — so
     /// a lowering that reserved indices ahead of the bodies can check here that
-    /// the bodies arrived where it said they would.
+    /// the bodies arrived where it said they would. [`Module::sweep`] renumbers
+    /// afterwards, which is why it runs when nothing is being emitted any more.
     pub fn next_func(&self) -> u32 {
-        self.n_imports + self.funcs.len()
+        self.n_imports() + self.bodies.len() as u32
     }
 
-    /// Export a defined function under `name` — `vyrn_entry`, and one per
-    /// RFC-0012 `export extern fn` under its own `wasm-export-name`.
+    /// Export a defined function under `name` — `_start`, and one per RFC-0012
+    /// `export extern fn` under its own name.
+    ///
+    /// Also what makes it a sweep ROOT: a function no export can reach is a
+    /// function nothing outside the module can call.
     pub fn export(&mut self, name: &str, func: u32) -> &mut Self {
-        self.exports.export(name, ExportKind::Func, func);
+        self.exports.push((name.to_string(), func));
         self
+    }
+
+    /// Which functions an export can reach, over the calls that were emitted.
+    fn reachable(&self) -> Vec<bool> {
+        let n_imports = self.n_imports();
+        let mut keep = vec![false; self.next_func() as usize];
+        let mut work: Vec<u32> = self.exports.iter().map(|&(_, i)| i).collect();
+        while let Some(i) = work.pop() {
+            if std::mem::replace(&mut keep[i as usize], true) || i < n_imports {
+                continue;
+            }
+            let d = &self.bodies[(i - n_imports) as usize];
+            let body = d
+                .body
+                .as_ref()
+                .unwrap_or_else(|| panic!("function {i} is reachable and was never filled"));
+            for ins in &body.body {
+                match ins {
+                    Instruction::Call(c) => work.push(*c),
+                    // Nothing in this backend emits a function REFERENCE — M2m
+                    // measured that the defunctionalized `fn` value is a tag and a
+                    // direct call, so there is no table and no `ref.func`. If one
+                    // ever arrives, the graph swept here stops being the whole
+                    // graph, and a pruned target is a validation error at best.
+                    Instruction::CallIndirect { .. }
+                    | Instruction::ReturnCall(_)
+                    | Instruction::ReturnCallIndirect { .. }
+                    | Instruction::RefFunc(_) => {
+                        panic!("sweep cannot see through {ins:?}: a function index that is not a `call`")
+                    }
+                    _ => {}
+                }
+            }
+        }
+        keep
+    }
+
+    /// Drop what no export reaches and renumber every `call` that survives.
+    ///
+    /// Imports go first in the index space, so the new numbering is: surviving
+    /// imports in their old relative order, then surviving definitions in theirs.
+    /// One map over the whole space, applied to every call and every export —
+    /// there is no third place a function index appears (`reachable` panics if one
+    /// ever arrives).
+    fn prune(&mut self) {
+        let keep = self.reachable();
+        let n_imports = self.n_imports() as usize;
+        let mut map = vec![u32::MAX; keep.len()];
+        let mut next = 0u32;
+        for (i, &k) in keep.iter().enumerate() {
+            if k {
+                map[i] = next;
+                next += 1;
+            }
+            // The imports are the bottom of the space, so one pass in index order
+            // renumbers both halves correctly by construction.
+        }
+        let mut i = 0;
+        self.imports.retain(|_| {
+            i += 1;
+            keep[i - 1]
+        });
+        let mut i = n_imports;
+        self.bodies.retain(|_| {
+            i += 1;
+            keep[i - 1]
+        });
+        for d in &mut self.bodies {
+            for ins in d.body.as_mut().expect("a reachable body").body.iter_mut() {
+                if let Instruction::Call(c) = ins {
+                    *c = map[*c as usize];
+                    debug_assert_ne!(*c, u32::MAX, "a surviving call to a pruned function");
+                }
+            }
+        }
+        for (_, i) in &mut self.exports {
+            *i = map[*i as usize];
+        }
     }
 
     /// The finished bytes.
@@ -363,6 +474,40 @@ impl Module {
             "statics end at {} — past the {STATICS_LIMIT}-byte line the shim's stack needs",
             self.data_end()
         );
+        if self.sweep {
+            self.prune();
+        }
+
+        // Types are interned HERE rather than as each function arrives, so that a
+        // signature only a pruned function used costs nothing either.
+        let mut types = TypeSection::new();
+        let mut type_ids: HashMap<(Vec<ValType>, Vec<ValType>), u32> = HashMap::new();
+        let mut ty = |params: &[ValType], results: &[ValType]| -> u32 {
+            let key = (params.to_vec(), results.to_vec());
+            if let Some(&i) = type_ids.get(&key) {
+                return i;
+            }
+            let i = types.len();
+            types.ty().function(params.iter().copied(), results.iter().copied());
+            type_ids.insert(key, i);
+            i
+        };
+        let mut imports = ImportSection::new();
+        for i in &self.imports {
+            let t = ty(&i.params, &i.results);
+            imports.import(&i.module, &i.field, EntityType::Function(t));
+        }
+        let mut funcs = FunctionSection::new();
+        for d in &self.bodies {
+            funcs.function(ty(&d.params, &d.results));
+        }
+        drop(ty);
+
+        let mut exports = ExportSection::new();
+        for (name, i) in &self.exports {
+            exports.export(name, ExportKind::Func, *i);
+        }
+
         let mem = MemoryType {
             // One page past the top of everything we occupy; wasi-libc's
             // `malloc` grows memory itself from there.
@@ -376,7 +521,7 @@ impl Module {
         if self.import_memory {
             // The import section is already framed by index above; memory is an
             // import too, and imports of different kinds may interleave.
-            self.imports.import("env", "memory", EntityType::Memory(mem));
+            imports.import("env", "memory", EntityType::Memory(mem));
         } else {
             memories.memory(mem);
         }
@@ -385,7 +530,7 @@ impl Module {
         // that only imports one fails `fd_write` with "missing required memory
         // export" at the first `print`. An imported memory is index 0 too, so
         // re-exporting it is the whole fix.
-        self.exports.export("memory", ExportKind::Memory, 0);
+        exports.export("memory", ExportKind::Memory, 0);
 
         let mut globals = GlobalSection::new();
         globals.global(
@@ -407,24 +552,25 @@ impl Module {
         }
 
         let mut code = CodeSection::new();
-        for (i, (_, body)) in self.bodies.iter().enumerate() {
-            let body = body
-                .as_ref()
+        for (i, d) in self.bodies.into_iter().enumerate() {
+            let n = d.params.len();
+            let body = d
+                .body
                 .unwrap_or_else(|| panic!("function {i} was reserved and never filled"));
-            code.function(body);
+            code.function(&encode(body, n));
         }
 
         let mut m = wasm_encoder::Module::new();
-        m.section(&self.types);
-        if !self.imports.is_empty() {
-            m.section(&self.imports);
+        m.section(&types);
+        if !imports.is_empty() {
+            m.section(&imports);
         }
-        m.section(&self.funcs);
+        m.section(&funcs);
         if !self.import_memory {
             m.section(&memories);
         }
         m.section(&globals);
-        m.section(&self.exports);
+        m.section(&exports);
         m.section(&code);
         if !data.is_empty() {
             m.section(&data);
@@ -724,6 +870,41 @@ mod tests {
         m.export("vyrn_entry", caller);
         // Two bodies out, in index order rather than in the order they arrived.
         assert_eq!(section_ids(&m.finish()), vec![1, 3, 5, 6, 7, 10]);
+    }
+
+    /// The sweep, at the section level: an import nothing reaches leaves the
+    /// module by NAME, and an unfilled reservation nothing reaches is not an
+    /// error. The behavioural half — that the surviving calls were renumbered —
+    /// needs running, and is in `tests/wasm_runs.rs`.
+    #[test]
+    fn the_sweep_takes_the_imports_and_the_bodies_nothing_reaches() {
+        let mut m = Module::new();
+        let exit = m.import("wasi_snapshot_preview1", "proc_exit", &[ValType::I32], &[]);
+        m.import("wasi_snapshot_preview1", "fd_write", &[ValType::I32; 4], &[ValType::I32]);
+        m.reserve_func(&[], &[ValType::F64]); // never filled, never reached
+        let start = m.func(&[], &[], &[], 0, |b| {
+            b.ins(&Instruction::I32Const(0)).ins(&Instruction::Call(exit));
+        });
+        m.export("_start", start);
+        m.sweep();
+        let bytes = m.finish();
+        assert!(bytes.windows(9).any(|w| w == b"proc_exit"), "the reached import stays");
+        assert!(!bytes.windows(8).any(|w| w == b"fd_write"), "the unreached import goes");
+        // The unreached signature went with it: `f64` (0x7c) appears nowhere.
+        assert!(!bytes.contains(&0x7c), "a type only a pruned function used");
+    }
+
+    #[test]
+    #[should_panic(expected = "is reachable and was never filled")]
+    fn a_reachable_body_that_was_never_filled_is_caught_by_the_sweep() {
+        let mut m = Module::new();
+        let later = m.reserve_func(&[], &[]);
+        let start = m.func(&[], &[], &[], 0, |b| {
+            b.ins(&Instruction::Call(later));
+        });
+        m.export("_start", start);
+        m.sweep();
+        m.finish();
     }
 
     #[test]

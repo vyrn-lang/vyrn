@@ -180,6 +180,53 @@ fn a_struct_round_trips_through_the_shadow_stack_at_the_computed_offsets() {
     assert_eq!(out, want, "the struct did not survive the frame");
 }
 
+/// The sweep (RFC-0077 M2p), checked the only way a renumbering can be checked:
+/// by running the module afterwards.
+///
+/// Every index in a wasm `call` is absolute, so dropping one function shifts every
+/// function above it. A prune that forgot to rewrite a call still VALIDATES
+/// whenever the two signatures match — which is the silent case `Rt::next_is`
+/// exists for inside the runtime, and the case this arranges deliberately: all
+/// four helpers here are `() -> i64`, so a call left pointing one slot off returns
+/// the wrong number and nothing complains. Two of the four are unreachable and
+/// sit BETWEEN the two that are, so the surviving pair cannot keep its old
+/// indices.
+#[test]
+fn a_swept_module_still_calls_what_it_meant_to() {
+    let mut m = Module::new();
+    // Unreachable: nothing in the module calls it, so the sweep takes it and
+    // every index above it moves down two.
+    let unused = import_fd_write(&mut m);
+    let exit = m.import("wasi_snapshot_preview1", "proc_exit", &[ValType::I32], &[]);
+    let n = |m: &mut Module, v: i64| {
+        m.func(&[], &[ValType::I64], &[], 0, |b| {
+            b.ins(&Instruction::I64Const(v));
+        })
+    };
+    let three = n(&mut m, 3);
+    let dead_a = n(&mut m, 90);
+    let dead_b = n(&mut m, 91);
+    let four = n(&mut m, 4);
+    let start = m.func(&[], &[], &[], 0, |b| {
+        b.ins(&Instruction::Call(three))
+            .ins(&Instruction::Call(four))
+            .ins(&Instruction::I64Add)
+            .ins(&Instruction::I32WrapI64)
+            .ins(&Instruction::Call(exit));
+    });
+    m.export("_start", start);
+    m.sweep();
+    let bytes = m.finish();
+    let _ = (unused, dead_a, dead_b);
+    let Some((code, _, err)) = run("swept", &bytes) else {
+        return;
+    };
+    // 7 says both surviving calls landed on their own bodies. 93, 94, 181 or a
+    // trap would each be one specific renumbering mistake.
+    assert_eq!(code, 7, "the swept module called something else; stderr:\n{err}");
+    assert!(!bytes.windows(8).any(|w| w == b"fd_write"), "an unreached import survived");
+}
+
 /// The half of the memory map that is a safety property rather than an address:
 /// a frame bigger than the 64 KB below `STACK_TOP` underflows past 0, wraps to
 /// near `0xFFFFFFFF`, and the first access traps. It does NOT wrap into the data

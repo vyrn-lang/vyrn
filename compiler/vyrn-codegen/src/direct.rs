@@ -385,6 +385,21 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
             .ins(&Instruction::Call(wasi.proc_exit));
     });
     m.export("_start", start);
+    // RFC-0012's `export extern fn`, under its own name — what `wasm-export-name`
+    // tells wasm-ld on the LLVM path, and what `--export-all` was doing for it by
+    // accident. Named here for two reasons: the direct backend had no export but
+    // `_start` at all, so a JS caller had nothing to call; and an export is what
+    // makes a function a sweep ROOT, so the two facts are one fact.
+    for f in &user {
+        if f.is_export_extern {
+            m.export(&f.name, cx.sigs[&f.name].index);
+        }
+    }
+    // Keep only what those exports reach (M2p). Everything above emits eagerly —
+    // 39 runtime helpers, 12 WASI imports, every function of every linked module —
+    // because nothing knows what a program reaches until its bodies are walked.
+    // This is where that is known.
+    m.sweep();
     Ok(m.finish())
 }
 
