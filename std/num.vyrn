@@ -247,6 +247,17 @@ fn ldexp(neg: Bool, mIn: Int64, exIn: Int64) -> Float64 {
         }
         return 0.0
     }
+    // A rounding carry out of the top mantissa bit leaves `m` at 2^53 — one bit
+    // wider than the field holds — and the encoding below would then spill that
+    // bit into the exponent with an `|` where a carry needs a `+`. An `|` is
+    // idempotent, so it worked for an EVEN biased exponent and silently halved the
+    // answer for an odd one: `parseFloat64("1.9999999999999999999")` was `1.0` and
+    // `parseFloat64("9223372036854775807")` was 2^62. Normalizing here instead is
+    // exact, because a carry cannot take `m` past 2^53.
+    if m >= 9007199254740992 {
+        m = m / 2
+        ex = ex + 1
+    }
     while m < 4503599627370496 && ex > 0 - 1074 {
         m = m * 2
         ex = ex - 1

@@ -80,6 +80,17 @@ fn parsefloat64_is_bit_identical_to_rusts_own_parser() {
         // The largest finite double, the first value past it, and beyond.
         "1.7976931348623157e308", "1.7976931348623158e308", "1.8e308", "1e309", "1e400",
         "-1e400", "1e-400", "1e-1000",
+        // A rounding carry OUT of the top mantissa bit — the class RFC-0078 M3's
+        // decode corpus found this oracle missing. Every one of these rounds up to
+        // an exact power of two, so the mantissa leaves the doubling loop at 2^53
+        // and the encoding has to raise the exponent rather than OR a bit into it.
+        // `|` is idempotent, so the bug showed only for an ODD biased exponent:
+        // `1.9999999999999999999` was `1.0` and `9223372036854775807` was 2^62,
+        // while `0.9999999999999999999` and `3.9999999999999999999` were right.
+        "9223372036854775807", "9223372036854775808", "0.9999999999999999999",
+        "1.9999999999999999999", "3.9999999999999999999", "7.9999999999999999999",
+        "0.49999999999999999999", "0.24999999999999999999", "18446744073709551615",
+        "4611686018427387903", "1.4999999999999999999", "2.9999999999999999999",
         // Powers of ten, which are exact in decimal and not in binary.
         "1e22", "1e23", "1e-22", "1e-23", "1e100", "-1e100", "1e-100",
         // Values that a fast path computed in floating point gets wrong.
