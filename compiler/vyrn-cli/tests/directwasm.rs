@@ -2602,3 +2602,74 @@ fn a_suppressed_log_call_is_not_in_the_module() {
         assert!(has(msg), "`{msg}` is not in the module: a suppressed call lost its argument");
     }
 }
+
+/// RFC-0012's two host boundaries, which nothing but a browser can drive.
+///
+/// `externdemo.vyrn` is in `WASM_ONLY` precisely because wasmtime supplies WASI and
+/// not `vyrn`, so there has never been a run to compare — which is how this backend
+/// reached 87/87 having never lowered an `extern` **import** at all, and how nobody
+/// noticed it named no exports but `_start` either (`--export-all` was doing that on
+/// the LLVM path). Both were found by loading `web/externdemo.html` and
+/// `web/domdemo.html`, and the ABI *shapes* stay verified there — a `(ptr, len)` pair
+/// only means something to a host that decodes it.
+///
+/// What is pinned here is the half that was simply ABSENT, and it is pinned on the
+/// module's bytes for M2o's reason (a name only one emit site writes is proof that
+/// site ran):
+///
+/// - the import exists under the `vyrn` namespace, name for name — the length-
+///   prefixed pair is exact, so this cannot pass on a module that merely mentions
+///   the word somewhere;
+/// - `__vyrn_malloc` is exported under exactly the condition that needs it. A JS
+///   caller cannot pass a `String` INTO an export without allocating inside the
+///   module first, and every `vyrn-dom.js` handler takes one — so a missing export
+///   is not a missing feature, it is a demo where no button works. The negative
+///   case is the assertion that matters: the condition is the thing that could be
+///   wrong, and always exporting it would pass a one-sided test.
+#[test]
+fn the_rfc_0012_host_boundary_is_named_in_the_module() {
+    let dir = examples_dir();
+    let out = std::env::temp_dir().join("vyrn-directwasm-extern");
+    std::fs::create_dir_all(&out).unwrap();
+    let build = |name: &str| -> Vec<u8> {
+        let module = out.join(format!("{name}.wasm"));
+        let b = vyrn()
+            .arg("build")
+            .arg(dir.join(format!("{name}.vyrn")))
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .env("VYRN_WASM_BACKEND", "direct")
+            .output()
+            .expect("build wasm");
+        assert!(b.status.success(), "{name}: {}", norm(&b.stderr));
+        std::fs::read(&module).unwrap()
+    };
+    let has = |bytes: &[u8], needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+
+    // An import entry is `<mod len><mod><field len><field>`, so the namespace and
+    // the name are one literal and cannot be satisfied separately.
+    let externdemo = build("externdemo");
+    for field in ["jsLog", "jsNow", "jsAdd"] {
+        let mut needle = vec![4u8];
+        needle.extend_from_slice(b"vyrn");
+        needle.push(field.len() as u8);
+        needle.extend_from_slice(field.as_bytes());
+        assert!(
+            has(&externdemo, &needle),
+            "externdemo does not import `vyrn.{field}` — the page has nothing to supply"
+        );
+    }
+
+    // `greet(name: String)`, so the allocator is reachable; `onTick()`/`reset()`
+    // take nothing, so it is not.
+    assert!(
+        has(&build("externdemo2"), b"__vyrn_malloc"),
+        "a String parameter on an `export extern fn` needs the module's allocator exported"
+    );
+    assert!(
+        !has(&build("eventloop"), b"__vyrn_malloc"),
+        "the allocator is exported by a module with no String-taking export"
+    );
+}

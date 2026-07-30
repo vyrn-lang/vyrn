@@ -145,6 +145,40 @@ fn wasi_imports(m: &mut Module) -> Wasi {
     }
 }
 
+/// One RFC-0012 `extern fn` — a host function the module imports from the fixed
+/// `vyrn` namespace, or one of RFC-0043's three host-boundary names.
+#[derive(Clone)]
+struct Ext {
+    /// The import's function index, or `None` for `hostNowMillis` and friends,
+    /// which the emitted runtime serves out of WASI itself (M2j) and so import
+    /// nothing.
+    index: Option<u32>,
+    params: Vec<Type>,
+    ret: Type,
+}
+
+/// The wasm signature one `extern fn` crosses as.
+///
+/// Both halves come from the textual emitter's own [`crate::extern_abi_ll`] mapped
+/// through [`wasm::abi`], for the reason `SHIM_IMPORTS` is a list of names: an ABI
+/// spelled a second time here is a misread argument rather than a link error. The
+/// one shape-level fact is `String`, which crosses as a `(ptr, len)` **pair** —
+/// the asymmetry `web/README.md` documents against an *export*, where a `String`
+/// parameter is a single pointer because the JS caller can allocate inside the
+/// module.
+fn extern_abi_sig(f: &Function) -> (Vec<ValType>, Vec<ValType>) {
+    let mut params = Vec::new();
+    for p in &f.params {
+        if matches!(p.ty, Type::Str) {
+            params.push(ValType::I32);
+            params.push(ValType::I64);
+        } else {
+            params.extend(wasm::abi(crate::extern_abi_ll(&p.ty)));
+        }
+    }
+    (params, wasm::abi(crate::extern_abi_ll(&f.ret)).into_iter().collect())
+}
+
 /// Compile a whole program to a standalone `wasm32-wasi` module.
 pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
     compile_linked(program, Link::Standalone)
@@ -176,6 +210,32 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
             shim.insert(name, index);
         }
     }
+    // RFC-0012 M1: every `extern fn` is one import from the fixed `vyrn`
+    // namespace, which `web/wasi-min.js` fills from the page's own hooks. Declared
+    // from the DECLARATIONS, before any body — not a pre-scan of the kind M2e and
+    // M2j refused, because there is nothing here for lowering to disagree with: an
+    // `extern fn` *is* the import, one for one, and `Module::sweep` drops the ones
+    // a program never calls. On native the same declaration becomes a C trap stub
+    // instead; only a *call* crosses a boundary.
+    let mut externs: HashMap<String, Ext> = HashMap::new();
+    for f in program.functions.iter().filter(|f| f.is_extern) {
+        // RFC-0043's three host-boundary names are not host imports on any target
+        // — see the note at their call site.
+        let index = if crate::host_boundary_extern(&f.name).is_some() {
+            None
+        } else {
+            let (params, results) = extern_abi_sig(f);
+            Some(m.import("vyrn", &f.name, &params, &results))
+        };
+        externs.insert(
+            f.name.clone(),
+            Ext {
+                index,
+                params: f.params.iter().map(|p| p.ty.clone()).collect(),
+                ret: f.ret.clone(),
+            },
+        );
+    }
 
     let rt = runtime(&mut m, &wasi, shim.get("__vyrn_malloc").copied());
 
@@ -199,14 +259,11 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
     let mut generics: HashMap<String, Function> = HashMap::new();
     let mut higher_order: HashMap<String, Function> = HashMap::new();
     let mut user: Vec<&Function> = Vec::new();
-    let mut externs: HashMap<String, Type> = HashMap::new();
     for f in &program.functions {
-        // An `extern` is an import; a `gen fn` (RFC-0021) runs only in the
-        // compiler's own interpreter and may use builtins with no lowering at all.
+        // An `extern` is an import (declared above); a `gen fn` (RFC-0021) runs
+        // only in the compiler's own interpreter and may use builtins with no
+        // lowering at all.
         if f.is_extern || f.is_gen {
-            if f.is_extern {
-                externs.insert(f.name.clone(), f.ret.clone());
-            }
             continue;
         }
         // RFC-0023: a function taking a `fn`-typed parameter exists only as
@@ -402,6 +459,26 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
         if f.is_export_extern {
             m.export(&f.name, cx.sigs[&f.name].index);
         }
+    }
+    // A `String` ARGUMENT to an exported function is a pointer into this module's
+    // memory, so the JS caller has to allocate inside it before it can call in —
+    // which is the whole reason an export's String ABI differs from an import's
+    // (one `ptr`, not a `(ptr, len)` pair). On the LLVM path this is
+    // `-Wl,--export=__vyrn_malloc`, under exactly the same condition. The wrapper
+    // exists because the boundary's `__vyrn_malloc` takes an `unsigned long long`
+    // and the emitted one takes an `i32`: `wasi-min.js` passes a BigInt, so the
+    // exported signature has to be the C one or every call traps on the argument
+    // type. Without this, every DOM handler in `web/domdemo.html` throws.
+    if user.iter().any(|f| {
+        f.is_export_extern && f.params.iter().any(|p| matches!(p.ty, Type::Str))
+    }) {
+        let malloc = cx.rt.malloc;
+        let wrap = m.func(&[ValType::I64], &[ValType::I32], &[], 0, |b| {
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32WrapI64)
+                .ins(&Instruction::Call(malloc));
+        });
+        m.export("__vyrn_malloc", wrap);
     }
     // Keep only what those exports reach (M2p). Everything above emits eagerly —
     // 39 runtime helpers, 12 WASI imports, every function of every linked module —
@@ -626,10 +703,12 @@ struct Cx {
     /// [`Gen::lookup`] — the checker already forbids an initializer reading a
     /// global declared after it, so there is nothing for a partial view to catch.
     globals: HashMap<String, (Place, Type)>,
-    /// `extern fn` declarations by name, with the return type they declared. The
-    /// bodies are skipped, but RFC-0043's host boundary is reached BY NAME, and
-    /// what it returns is the declaration's business rather than this file's.
-    externs: HashMap<String, Type>,
+    /// `extern fn` declarations by name (RFC-0012): the `vyrn` import's index and
+    /// the signature the ABI is read off. There is no body to lower — a call is the
+    /// only thing that crosses — and what one returns is the declaration's business
+    /// rather than this file's, which is also how RFC-0043's host boundary is
+    /// reached by name.
+    externs: HashMap<String, Ext>,
     /// Per function, which `let` statements own a heap value and how to reclaim
     /// it — `vyrn_frontend::own`'s answer, keyed by statement node address: the
     /// same map, read with the same key, as the textual backend's `droppable`.
@@ -2862,6 +2941,10 @@ impl Fn_<'_> {
                 _ if self.cx.types.get(name).is_some_and(|d| d.predicate.is_some()) => {
                     Type::Named(name.clone())
                 }
+                // An `extern fn` (RFC-0012) in a branch. Its declared return type,
+                // which is the same thing `call` hands back — the declaration is
+                // the only source there is.
+                _ if self.cx.externs.contains_key(name) => self.cx.externs[name].ret.clone(),
                 // A branch yielding a call through a `fn`-typed parameter
                 // (RFC-0023). Exact rather than predicted: the target's signature
                 // is already resolved, so this asks it rather than answering for
@@ -3858,12 +3941,54 @@ impl Fn_<'_> {
             // What it returns is the declaration's business, not this file's, and
             // the boundary hands back an `i64`. Anything else spelled over one of
             // these reserved names would read the wrong bytes silently.
-            let ret = self.cx.externs.get(name).cloned().unwrap_or(Type::Unit);
+            let ret =
+                self.cx.externs.get(name).map(|e| e.ret.clone()).unwrap_or(Type::Unit);
             if self.cx.repr(&ret, line)? != Repr::Scalar(ValType::I64) {
                 return unsupported(&format!("`{name}` declared as returning `{ret}`"), line);
             }
             b.ins(&Instruction::Call(f));
             return Ok(ret);
+        }
+        // RFC-0012 M1: a real call into the host, through the `vyrn` import
+        // declared from this `extern fn`'s own signature.
+        //
+        // Every ABI conversion the textual backend's `to_extern_abi` performs is
+        // already done here by the carrier invariant (M2h): a `Bool` and every
+        // sub-64-bit int ride an `i32`, correctly extended, which is exactly what
+        // the ABI widens them to. `String` is the one shape that is not one word,
+        // and it is the one thing this loop does.
+        if let Some(ext) = self.cx.externs.get(name).cloned() {
+            let Some(index) = ext.index else {
+                // A host-boundary name handled above; anything else here is a
+                // declaration this backend has no route for.
+                return unsupported(&format!("the call `{name}`"), line);
+            };
+            if ext.params.len() != args.len() {
+                return unsupported(&format!("the call `{name}` at this arity"), line);
+            }
+            for (i, (a, p)) in args.iter().zip(&ext.params).enumerate() {
+                self.expr_as(m, b, a, p)?;
+                if matches!(self.cx.resolve(p), Type::Str) {
+                    // (ptr, len): the host decodes UTF-8 out of linear memory, so
+                    // it needs the length a NUL-terminated pointer does not carry.
+                    // Its own scratch number per argument — one local for two live
+                    // values is the M2g bug, and here it would send the host a
+                    // length taken from the wrong string.
+                    let s = self.scratch(b, ValType::I32, 20 + i as u8);
+                    b.ins(&Instruction::LocalTee(s))
+                        .ins(&Instruction::LocalGet(s))
+                        .ins(&Instruction::Call(self.cx.rt.strlen))
+                        .ins(&Instruction::I64ExtendI32U);
+                }
+            }
+            b.ins(&Instruction::Call(index));
+            // The host returns an `i32` for every narrow width, and a JS number
+            // out of range would otherwise be a carrier the rest of this backend
+            // reads as in-range. `from_extern_abi`'s `trunc` on the other backend.
+            if let Some(n) = Num::of(&self.cx.resolve(&ext.ret)) {
+                renorm(b, n);
+            }
+            return Ok(ext.ret.clone());
         }
         let Some(sig) = self.cx.sigs.get(name).cloned() else {
             return unsupported(&format!("the call `{name}`"), line);

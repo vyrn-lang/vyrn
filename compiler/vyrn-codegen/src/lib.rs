@@ -488,7 +488,11 @@ pub fn host_boundary_extern(name: &str) -> Option<&'static str> {
 /// floats stay `double`/`float`, `String` returns as a bare `ptr`, `Unit` is a
 /// missing result. `String` *parameters* are handled separately (they cross as
 /// a `(ptr, len)` pair). The checker guarantees no other type reaches here.
-fn extern_abi_ll(ty: &Type) -> &'static str {
+///
+/// Shared with the direct wasm backend, which maps the answer through
+/// [`wasm::abi`] rather than keeping a second table: an ABI written down twice is
+/// a misread argument on one backend, not a link error.
+pub(crate) fn extern_abi_ll(ty: &Type) -> &'static str {
     match ty {
         Type::Int => "i64",
         Type::IntN { bits: 64, .. } => "i64",
