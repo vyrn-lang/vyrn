@@ -1576,3 +1576,182 @@ structure. The row that grew is sized ints and floats — 4 → 8, because the
 `stringFromBytes` chain deposited four examples there — and it is now the second
 biggest, which makes it the argument M2c made about arrays and M2e made about
 generics: one table, in one place, worth eight.
+
+---
+
+## M2h, as landed
+
+The sized-int and float row. **36 of 80**, from 30, and the row is gone.
+
+It was billed at eight and paid **six** — `bits`, `strings`, `modules`,
+`floats`, `sizedints`, `templates`. The two that did not pass moved on
+(`htmltree` to a branch yielding `El`, `vyxdemo` to `if let`), which is the
+first time a row has been read as a lower bound rather than as a feature and
+turned out to be worth most of it. M2g's warning still applies to the reading:
+the six are what the ladder says, not what the table promised.
+
+Unlike M2g's builtins it really was one table in one place, and the two halves
+turned out to have nothing in common except the row they shared. Integers are
+bookkeeping wasm forces on you; floats are four opcodes and one algorithm.
+
+### The invariant that makes the integer table a table
+
+wasm has `i32` and `i64` arithmetic and nothing narrower, so an `Int8` rides an
+`i32` and every operator that can overflow leaves it out of range. Written down
+as `Num`, the rule is the interpreter's own: a value is **correctly represented**
+in its carrier — sign-extended when signed, zero-extended when not — which is
+exactly where `wrap_intn` leaves it in an `i64`. `renorm` after every wrapping
+operator is what makes that true, and having made it true, signedness picks an
+*opcode* rather than a fixup: `div_s`/`div_u`, `shr_s`/`shr_u`, four orderings,
+and `+`/`-`/`*`/`&`/`|`/`^` blind to it because two's complement is.
+
+That is what M2e's "the arithmetic table is i64-only" note was pointing at, and
+M2g widened it by exactly the one row that was in the way — `UInt8`/`UInt16`,
+where a mask after the operator IS the wrap and a zero-extended `i32` compares
+the same either way. Those were the widths that needed no invariant. Every other
+one does.
+
+### Two places would have been silently wrong
+
+Both are the class this RFC keeps naming, and neither is arithmetic.
+
+**A load.** `llt` prints `i8` for both `Int8` and `UInt8`, so the bytes in memory
+do not say how to extend them — the same ambiguity the textual backend resolves
+with a `sext`/`zext` at each use, except that there the use site is looking at
+the type. Here it rides `load_of`, taken off the same type the shape comes off,
+so a caller cannot forget it. A negative `Int8` in a record field or an array
+element read back zero-extended is **197**, and 197 is a number rather than a
+crash.
+
+**The op width.** It comes from EITHER operand, which is the textual backend's
+`numty` rule. Reading it off the left alone computes `0 - eight` (an `Int32`) in
+64 bits — the *same answer* for `+`, `-` and `*`, because truncating a 64-bit
+sum gives the 32-bit sum, and a *different* one for `/`, `>>` and every
+comparison. So it is exactly the kind of hole that passes the examples that
+would have caught it.
+
+The integer resize also had to move **ahead of** `coerce`'s `ll`-equality
+shortcut. `Int8` and `UInt8` are one shape and two representations, and the
+shortcut would have swallowed that pair — M2d put validation before the same
+shortcut for the same reason, which is now twice that the shortcut has been the
+thing in the way.
+
+### `%f` is an exact decimal conversion, and there is nothing to borrow
+
+Float arithmetic needed no design: `f32` and `f64` are wasm value types, so
+nothing renormalizes and a `Float32` operation rounds to single precision because
+the opcode does. Printing is the milestone.
+
+`%f` is not "six decimals" — it is the **exact** decimal value of the double,
+rounded **half-to-even** at the sixth place. `{:.6}` and `printf("%f")` agree on
+that, nothing computed in floating point does, and M2g established there is no
+shim beside a directly-emitted module to take a `snprintf` from. So `f64_str`
+does it properly, and the arithmetic falls out of one identity: a double is
+`M × 2^E`, so `x × 10^6` has numerator `M × 10^6 × 2^E`. In base-10^6 limbs that
+is a single multiply loop with two parameters — by 2 `E` times when `E ≥ 0`, and
+no digit is dropped; by 5 `k = -E` times when `E < 0`, and the last `k` digits
+are the fraction to round away.
+
+Base 10^6 rather than the obvious 10^9 is the whole reason it is one loop: the
+`× 10^6` the six places need is then a shift by one *whole limb*, i.e. a zero
+limb at the bottom, so there is no separate scaling pass. Every limb operation
+then stays inside an `i32` (`999999 × 5 + 5` is small), so nothing after
+unpacking the mantissa needs 64-bit arithmetic.
+
+`k` reaches **1074** for a subnormal, which is why the digits are left-padded to
+`k + 1`. That is what deletes the edge cases rather than handling them: after the
+pad there is always a kept digit to round, always a digit before the one being
+examined, and always a spare byte in front for a carry that escapes.
+
+Two conversions are also not the opcode they look like:
+
+- **`trunc_sat`, not `trunc`.** wasm's plain `i64.trunc_f64_s` **traps** out of
+  range, where LLVM's `fptosi` is undefined and Rust's `as` saturates — and the
+  interpreter *is* Rust's `as`, which is the answer the ladder compares against.
+  `Int64(10^300)` is `Int64.max`.
+- **Float → sized int goes through 64 bits first** and narrows after, because the
+  interpreter does `f as i64` then `wrap_intn`, and the two genuinely disagree:
+  `Int8(1e10)` is 0 through an `i64` and −1 through an `i32` whose saturation
+  clamped at `i32::MAX`.
+
+### What was checked by running, and against what
+
+`sizedints.vyrn` is the example that exercises wrapping at each width and it was
+blocked on a float conversion, so until this milestone finished the ladder could
+not see the signed narrow widths at all. Both halves therefore have running
+tests pinning the **interpreter's** answers, because two backends can be
+confidently wrong together:
+
+- 33 numbers over every width, each one through a record field and an array
+  element as well as a local, plus the two comparison mistakes that are plausible
+  in both directions (a signed opcode reads `4000000000` as negative, an unsigned
+  one reads `-59` as enormous).
+- The five numeric traps at widths other than 64. The divide-overflow guard
+  compares against **the width's** minimum, so `Int8` `-128 / -1` has to trap
+  where a guard written for `Int64` silently returns −128. The shift trap is one
+  unsigned `>=` covering both an over-wide amount and a negative one, asserted
+  rather than argued.
+- The two exact ties: `0.0078125` keeps its even `2` and `0.0234375` rounds its
+  odd `7` up, so a half-**up** formatter passes one and fails the other.
+- `10^300`'s 301 digits pinned whole, because a carry bug in the doubling loop is
+  a wrong digit in the *middle* rather than at either end; a subnormal at the
+  loop's full depth; `NaN`, `inf`, `-inf` and `-0.0`, which are spelled rather
+  than computed.
+- 400 randomly generated doubles off-tree, byte-identical — worth doing once and
+  not worth committing, since the curated cases are the ones that fail.
+
+Vyrn has no exponent literals, so the extreme values are built by
+multiplication. That is better than a literal: both engines reach the same double
+by the same IEEE steps, and the mantissa that comes out is messy rather than
+round.
+
+### Refused, specifically
+
+Nothing new, and that is worth saying because every milestone since M2b has
+refused something. `%` and the bitwise family on a float are type errors in the
+checker, so there is no lowering to refuse; every integer width and every
+operator RFC-0045 defines is now emitted. The only thing this milestone leaves
+behind is a note rather than a gap: `f64_str` is ~300 lines of emitted wasm that
+M3's varargs shim and M4's prelude will make redundant, and it is here rather
+than deferred because a float that does not print is a float nothing can test.
+
+One divergence found rather than introduced, recorded because it is not this
+backend's: `NaN != NaN` is **true** in the interpreter (Rust's `!=`) and in wasm
+(`f64.ne` is the negation of `f64.eq`), and **false** natively (LLVM's `fcmp one`
+is "ordered and not equal"). No example compares a NaN, so parity has never seen
+it. Matching the interpreter is the rule the ladder is written to, and it happens
+to be free here.
+
+### Nothing contradicted M0, M1, M2a–M2g
+
+Every offset is still `layout::of_ll ∘ llt`. Destination-first, no-`return`-in-a-
+body — `f64_str` is one `block (result i32)` with a `br` for the non-finite
+cases, which is the M1 rule applied to a runtime function rather than a user one
+— and the memory map went in as written. The M2d seam took both numeric
+conversions without a second path, which is the third milestone in a row that
+`Fn_::coerce` has absorbed a new kind of reconciliation rather than growing a
+sibling.
+
+The one thing that grew is the shadow stack's appetite: `f64_str` claims 1,744
+bytes of frame for its limbs and digits, the largest single frame this backend
+emits by two orders of magnitude. It does not recurse and it is a leaf, so the
+64 KB below `STACK_TOP` still covers a deep call chain — but it is the first
+frame big enough that the number is worth knowing.
+
+### 36 of 80, regrouped
+
+| blocked on | n |
+|---|---|
+| builtins with no lowering (`toJson` 6, `readLine` 2, `args`, `cell`/`set`, `chars`, `fromJson`, `hostNowMillis`, `logger`, `parse`, `readFile`) | **17** |
+| `Match` on strings 4, a map literal 3, indexing a `Map` 2, indexing a `SmallArray` | 10 |
+| a branch yielding an unpeekable call (`get` 3, `El`, `Held`) | 5 |
+| a `fn`-typed parameter (RFC-0023) 3, a lambda | 4 |
+| `if let` 3, `?`, a fallible construction | 5 |
+| `spawn` 2, `region` | 3 |
+
+Six rows, and for the first time none of them is arithmetic or a type. `toJson`
+is a third of the biggest one and is a subsystem (M2g said so and it is still
+true); everything else in that row is a WASI syscall or a runtime data structure.
+The two rows that are neither — `Match` on strings with a map literal, and the
+`peek` failures — are both the same shape of thing as the rows M2b through M2f
+closed, which is to say small and named.
