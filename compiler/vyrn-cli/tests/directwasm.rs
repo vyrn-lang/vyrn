@@ -164,6 +164,7 @@ const PASSING: &[&str] = &[
     "validation.vyrn",
     "concurrency.vyrn",
     "parallel.vyrn",
+    "region.vyrn",
 ];
 
 /// The same, for the shim-linked shape (RFC-0077 M2i). A superset of [`PASSING`]
@@ -1972,5 +1973,164 @@ fn a_task_that_escapes_its_frame_says_what_the_interpreter_says() {
         assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
         // A pass with no output at all would be two engines agreeing on nothing.
         assert!(!norm(&w.stdout).is_empty(), "{what}: printed nothing");
+    }
+}
+
+/// Every edge that leaves a `region`, taken more often than the region stack is
+/// deep — and the depth bound itself, reached across calls.
+///
+/// This backend's region is a counter and a trap (RFC-0004 §4's arena is the bump
+/// allocator's ceiling, not a region-shaped hole — see `Fn_::region_exit`). A
+/// counter is exactly the M2l shape: a missed pop prints nothing different for the
+/// first 64 turns and then traps, and an extra pop reads as an enormous unsigned
+/// depth on the very next `region`. So both directions are loud, but only if
+/// something runs past 64 — and no example does. `region.vyrn` has two regions and
+/// one `continue`-free loop; `controlflow.vyrn` has one `continue` under a region,
+/// six turns.
+///
+/// Measured with each of the three unwind edges removed in turn: `break`,
+/// `continue` and `return` each make this print nothing and trap where the
+/// interpreter prints four numbers.
+///
+/// The nesting case is recursive rather than 65 literal blocks because the depth is
+/// DYNAMIC — a callee's region nests inside its caller's, which is why the counter
+/// is four bytes of memory and not a compile-time constant per body.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn every_exit_out_of_a_region_balances_and_the_65th_traps() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-region");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (what, src) in [
+        (
+            "balance",
+            r#"
+fn viaReturn(i: Int64) -> Int64 {
+    region {
+        if i >= 0 {
+            return i + 1
+        }
+    }
+    return 0
+}
+
+fn main() -> Int64 {
+    // `continue` out of a region — controlflow.vyrn's shape, 200 turns.
+    let mut acc = 0
+    let mut j = 0
+    while j < 200 {
+        j = j + 1
+        region {
+            if j % 2 == 0 {
+                continue
+            }
+            acc = acc + 1
+        }
+    }
+    print(acc)
+
+    // `break` out of a region, re-entered by an outer loop 200 times.
+    let mut brk = 0
+    let mut k = 0
+    while k < 200 {
+        k = k + 1
+        let mut n = 0
+        while n < 5 {
+            region {
+                if n == 2 {
+                    break
+                }
+                brk = brk + 1
+            }
+            n = n + 1
+        }
+    }
+    print(brk)
+
+    // `return` out of a region, 200 calls.
+    let mut r = 0
+    let mut q = 0
+    while q < 200 {
+        r = r + viaReturn(q)
+        q = q + 1
+    }
+    print(r)
+
+    // Nested regions, fall-through exits only.
+    let mut s = 0
+    let mut t = 0
+    while t < 200 {
+        region {
+            region {
+                s = s + 1
+            }
+        }
+        t = t + 1
+    }
+    print(s)
+    return 0
+}
+"#,
+        ),
+        (
+            "nested",
+            r#"
+fn deep(n: Int64) -> Int64 {
+    if n == 0 {
+        return 0
+    }
+    let mut r = 0
+    region {
+        r = deep(n - 1) + 1
+    }
+    return r
+}
+
+fn main() -> Int64 {
+    print(deep(63))
+    print(deep(70))
+    return 0
+}
+"#,
+        ),
+    ] {
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src).unwrap();
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .env("VYRN_WASM_BACKEND", "direct")
+            .output()
+            .expect("build wasm");
+        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg(&module);
+        let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+        // The interpreter's own answers, not a spelling written here: two backends
+        // can be confidently wrong about the depth bound together.
+        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+        // The two cases have to be opposite, or a run in which nothing at all
+        // happened would satisfy every assertion above.
+        assert_eq!(
+            runtime_err(&w.stderr).is_empty(),
+            what == "balance",
+            "{what}: wrong outcome entirely — {:?}",
+            runtime_err(&w.stderr)
+        );
     }
 }

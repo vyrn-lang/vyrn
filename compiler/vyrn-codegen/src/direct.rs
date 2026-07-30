@@ -868,11 +868,13 @@ struct Fn_<'a> {
     /// wasm blocks open between here and the function's outermost one. A
     /// `return` is `br depth`.
     depth: u32,
-    /// (break target, continue target, release boundary) per enclosing loop. The
-    /// first two are the depth each was opened at, so `br` distance is
-    /// `depth - opened - 1`; the third is how many release frames were open when
-    /// the loop started, which is what a `break` has to unwind to.
-    loops: Vec<(u32, u32, usize)>,
+    /// (break target, continue target, release boundary, region depth) per
+    /// enclosing loop. The first two are the depth each was opened at, so `br`
+    /// distance is `depth - opened - 1`; the third is how many release frames were
+    /// open when the loop started, which is what a `break` has to unwind to; the
+    /// fourth is the same question for `region` blocks, which are the other kind of
+    /// scope an exit edge has to close (RFC-0004 §4).
+    loops: Vec<(u32, u32, usize, u32)>,
     ret: Repr,
     ret_ty: Type,
     /// The wasm local holding the hidden aggregate-return pointer, if any.
@@ -885,6 +887,11 @@ struct Fn_<'a> {
     /// on the block's exit — innermost first, newest first, the order the textual
     /// backend's `drop_stack` uses.
     releases: Vec<Vec<Place>>,
+    /// Lexical `region` nesting depth within this body, so an exit edge knows how
+    /// many arena scopes it is leaving. The runtime counter is dynamic (a callee's
+    /// region nests inside its caller's); this is only the part one body can see,
+    /// which is exactly the part its own `br`s unwind past.
+    region_depth: u32,
     /// [`Cx::droppable`] for the function being lowered.
     drops: HashMap<usize, DropKind>,
     /// The type a value is being built FOR, innermost last.
@@ -915,6 +922,7 @@ fn top_level<'a>(cx: &'a Cx) -> Fn_<'a> {
         dest: None,
         scratch: HashMap::new(),
         releases: Vec::new(),
+        region_depth: 0,
         drops: HashMap::new(),
         expect: Vec::new(),
         fn_binds: HashMap::new(),
@@ -991,6 +999,7 @@ fn lower_body(
         dest,
         scratch: HashMap::new(),
         releases: Vec::new(),
+        region_depth: 0,
         drops: cx.droppable.get(&f.name).cloned().unwrap_or_default(),
         expect: Vec::new(),
         fn_binds: binds,
@@ -1293,6 +1302,65 @@ impl Fn_<'_> {
         Ok(())
     }
 
+    /// Push a region scope: trap if this would be the 65th, else bump the counter.
+    ///
+    /// The bound is the LLVM prelude's fixed 64-slot region stack and the
+    /// interpreter's own `region_depth >= 64`, so all three engines refuse the same
+    /// nesting with the same words. Inline rather than a runtime helper: it is
+    /// fourteen instructions at a handful of sites, and a helper would be a
+    /// thirty-sixth index in a table whose numbering is load-bearing.
+    fn region_enter(&mut self, b: &mut Frame) {
+        let (sp, msg, trap) = (self.cx.rt.region_sp, self.cx.rt.msg_region, self.cx.rt.trap);
+        b.ins(&Instruction::I32Const(sp as i32))
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32Const(64))
+            .ins(&Instruction::I32GeU)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(msg as i32))
+            .ins(&Instruction::Call(trap))
+            .ins(&Instruction::End);
+        self.region_bump(b, 1);
+    }
+
+    /// Pop a region scope. Stack-neutral, so it may be emitted with a return value
+    /// already on the operand stack — the same property M2f's `modify` copy-out
+    /// needs and M2d's note about a value sitting under a block established.
+    ///
+    /// It reclaims nothing, and that is this backend's allocator showing through
+    /// rather than a region-specific hole: `malloc` is a bump pointer that never
+    /// frees for `push`, for a cell payload and for `Stmt::Drop` alike (see
+    /// `runtime`). What a region owns that IS finite is this counter, so the
+    /// counter is what has to be exact.
+    ///
+    /// ponytail: no arena reclamation. The sound version is a SEPARATE bump arena
+    /// with a per-region mark, routed lexically the way `Gen::heap_alloc` routes in
+    /// the textual backend — marking the shared heap would reclaim the array buffer
+    /// a `push` inside a region grew for a binding outside it, and routing on the
+    /// *runtime* depth instead would arena-allocate a callee's String that the
+    /// region escape guard never examined. Both are silent wrong answers, and the
+    /// difference between them and this is not observable, so it waits for a real
+    /// allocator here.
+    fn region_exit(&mut self, b: &mut Frame) {
+        self.region_bump(b, -1);
+    }
+
+    fn region_bump(&mut self, b: &mut Frame, by: i32) {
+        let sp = self.cx.rt.region_sp;
+        b.ins(&Instruction::I32Const(sp as i32))
+            .ins(&Instruction::I32Const(sp as i32))
+            .ins(&Instruction::I32Load(word()))
+            .ins(&Instruction::I32Const(by))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::I32Store(word()));
+    }
+
+    /// Close every region scope open past `depth`, for an edge that leaves them.
+    fn exit_regions_above(&mut self, b: &mut Frame, depth: u32) {
+        for _ in depth..self.region_depth {
+            self.region_exit(b);
+        }
+    }
+
     /// `br` distance to a block that was opened when `depth` had the given value.
     fn br_to(&self, opened: u32) -> u32 {
         self.depth - opened - 1
@@ -1313,6 +1381,14 @@ impl Fn_<'_> {
 
     // -- statements ---------------------------------------------------------
 
+    /// Lower one statement.
+    ///
+    /// Exhaustive over `Stmt`, and deliberately without a catch-all: `region` was
+    /// the last unlowered kind, so the gap reporter that used to sit here (and the
+    /// `stmt_name`/`stmt_line` pair feeding it) was dead code claiming to cover
+    /// something. A statement kind added to the AST is now a compile error naming
+    /// this match, which is the same trade `Rt::slots`'s all-fields-named struct
+    /// literal makes. Expressions keep theirs — `expr_name` still has work.
     fn stmt(&mut self, m: &mut Module, b: &mut Frame, s: &Stmt) -> Result<(), String> {
         match s {
             Stmt::Let { name, ty, value, line, .. } => {
@@ -1425,6 +1501,14 @@ impl Fn_<'_> {
                 // Ownership analysis has un-tracked anything the return escapes, so
                 // this cannot release what is being handed back.
                 self.emit_releases_above(b, 0)?;
+                // And every region scope, for the same reason the interpreter
+                // decrements its counter on this path: a `return` out of a region
+                // leaves it. The textual backend does NOT — see the M2m note; there
+                // that omission is load-bearing, because its `region_exit` also
+                // frees the arena and a returned `a + b` built inside the region
+                // points into it. Nothing here frees, so nothing here can dangle,
+                // and the counter can simply be right.
+                self.exit_regions_above(b, 0);
                 b.ins(&Instruction::Br(self.depth));
             }
             Stmt::If { cond, then_block, else_block, line } => {
@@ -1493,7 +1577,7 @@ impl Fn_<'_> {
                 b.ins(&Instruction::I32Eqz);
                 let out = self.br_to(brk);
                 b.ins(&Instruction::BrIf(out));
-                self.loops.push((brk, cont, self.releases.len()));
+                self.loops.push((brk, cont, self.releases.len(), self.region_depth));
                 self.block(m, b, body)?;
                 self.loops.pop();
                 let back = self.br_to(cont);
@@ -1551,7 +1635,7 @@ impl Fn_<'_> {
                 let cont = self.depth;
                 b.ins(&Instruction::Block(BlockType::Empty));
                 self.depth += 1;
-                self.loops.push((brk, cont, self.releases.len()));
+                self.loops.push((brk, cont, self.releases.len(), self.region_depth));
                 self.block(m, b, body)?;
                 self.loops.pop();
                 self.depth -= 1;
@@ -1606,16 +1690,18 @@ impl Fn_<'_> {
                 }
             }
             Stmt::Break { line } => {
-                let &(brk, _, boundary) =
+                let &(brk, _, boundary, regions) =
                     self.loops.last().ok_or_else(|| gap("`break` outside a loop", *line))?;
                 self.emit_releases_above(b, boundary)?;
+                self.exit_regions_above(b, regions);
                 let d = self.br_to(brk);
                 b.ins(&Instruction::Br(d));
             }
             Stmt::Continue { line } => {
-                let &(_, cont, boundary) =
+                let &(_, cont, boundary, regions) =
                     self.loops.last().ok_or_else(|| gap("`continue` outside a loop", *line))?;
                 self.emit_releases_above(b, boundary)?;
+                self.exit_regions_above(b, regions);
                 let d = self.br_to(cont);
                 b.ins(&Instruction::Br(d));
             }
@@ -1625,6 +1711,23 @@ impl Fn_<'_> {
             // a cell bumps its generation and returns its SLOT to a fixed slab of
             // 65536. `freelist.vyrn` puts 100,000 allocations through it and only
             // fits because the release fires.
+            // `region { .. }` (RFC-0004 §4). An arena scope, and in this backend
+            // that is a counter and its trap — see `region_exit` for why the arena
+            // itself is the allocator's ceiling rather than a region-shaped hole.
+            //
+            // The body is an ordinary block, so its scope and its `ReleaseRef`
+            // frame come free; a region is one more frame the exit edges close, the
+            // same shape M2l gave the inferred release. No `if !terminated` guard
+            // like the textual backend's: a fall-through exit after a `br` is code
+            // wasm has already marked unreachable, which is the same argument
+            // `Fn_::block` makes about its own releases.
+            Stmt::Region { body, .. } => {
+                self.region_enter(b);
+                self.region_depth += 1;
+                self.block(m, b, body)?;
+                self.region_depth -= 1;
+                self.region_exit(b);
+            }
             Stmt::Drop { name, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
                 if matches!(self.cx.resolve(&ty), Type::Ref(_)) {
@@ -1638,7 +1741,6 @@ impl Fn_<'_> {
                     b.ins(&Instruction::Drop);
                 }
             }
-            other => return unsupported(&stmt_name(other), stmt_line(other)),
         }
         Ok(())
     }
@@ -6819,6 +6921,13 @@ struct Rt {
     msg_aoob: u32,
     msg_soob: u32,
     msg_oob_end: u32,
+    msg_region: u32,
+    /// RFC-0004 §4's region nesting counter: four reserved bytes, because the
+    /// depth is dynamic (a `region` in a callee nests inside its caller's) and
+    /// entering a 65th is a trap the interpreter also takes. Storage rather than a
+    /// wasm global for M2f's reason — module state showed that one mechanism in
+    /// memory beats two, and `reserve` is that mechanism.
+    region_sp: u32,
 }
 
 impl Rt {
@@ -6896,6 +7005,8 @@ impl Rt {
             msg_aoob: 0,
             msg_soob: 0,
             msg_oob_end: 0,
+            msg_region: 0,
+            region_sp: 0,
         };
         rt.count = table.len() as u32;
         (rt, table)
@@ -6950,6 +7061,11 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     rt.msg_aoob = rt.intern(m, "error: array index ");
     rt.msg_soob = rt.intern(m, "error: string index ");
     rt.msg_oob_end = rt.intern(m, " out of bounds\n");
+    // RFC-0004 §4. The 64 is the LLVM prelude's fixed region stack, and the
+    // interpreter traps at the same depth with the same words precisely so the
+    // three engines agree about it.
+    rt.msg_region = rt.intern(m, "error: region nesting exceeds 64\n");
+    rt.region_sp = m.reserve(4, 4);
 
     // write_all(fd, ptr, len) — the ONE place bytes leave this module.
     //
@@ -9409,45 +9525,6 @@ fn print_i64(m: &mut Module, write_all: u32) -> u32 {
         b.slot(BUF_END).ins(&Instruction::LocalGet(p)).ins(&Instruction::I32Sub);
         b.ins(&Instruction::Call(write_all));
     })
-}
-
-fn stmt_name(s: &Stmt) -> String {
-    match s {
-        Stmt::Let { .. } => "`let`",
-        Stmt::Assign { .. } => "an assignment",
-        Stmt::SetField { .. } => "a field assignment",
-        Stmt::IndexSet { .. } => "an element assignment",
-        Stmt::Return { .. } => "`return`",
-        Stmt::Break { .. } => "`break`",
-        Stmt::Continue { .. } => "`continue`",
-        Stmt::If { .. } => "`if`",
-        Stmt::IfLet { .. } => "`if let`",
-        Stmt::While { .. } => "`while`",
-        Stmt::ForIn { .. } => "`for`",
-        Stmt::Drop { .. } => "`drop`",
-        Stmt::Expr(_) => "an expression statement",
-        Stmt::Region { .. } => "`region`",
-    }
-    .to_string()
-}
-
-fn stmt_line(s: &Stmt) -> usize {
-    match s {
-        Stmt::Let { line, .. }
-        | Stmt::Assign { line, .. }
-        | Stmt::SetField { line, .. }
-        | Stmt::IndexSet { line, .. }
-        | Stmt::Return { line, .. }
-        | Stmt::Break { line }
-        | Stmt::Continue { line }
-        | Stmt::If { line, .. }
-        | Stmt::IfLet { line, .. }
-        | Stmt::While { line, .. }
-        | Stmt::ForIn { line, .. }
-        | Stmt::Drop { line, .. }
-        | Stmt::Region { line, .. } => *line,
-        Stmt::Expr(e) => Expr::line(e),
-    }
 }
 
 fn expr_name(e: &Expr) -> String {

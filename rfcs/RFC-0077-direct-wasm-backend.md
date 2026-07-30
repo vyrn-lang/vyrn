@@ -2764,6 +2764,7 @@ per-program cost of one function per lambda plus one dispatcher per signature.
 
 ### 68 of 87, regrouped
 
+
 ---
 
 ## M2m, as landed
@@ -2912,6 +2913,127 @@ nothing in parity says which it should be. Recorded rather than legislated.
 
 ### 65 of 87, regrouped
 
+`region { .. }` (RFC-0004 §4). **64 of 87 standalone**, from 63, and the number is
+the smaller half of the milestone: what a region *is* in this backend turned out to
+be a different thing from what the brief expected, and the reason is a soundness
+argument rather than a shortcut.
+
+### A region is a counter here, and the arena is somebody else's ceiling
+
+RFC-0004 §4's arena frees a group of allocations at once when the block exits. The
+brief asked whether a bump pointer with a save/restore mark is the right shape.
+**It is not, and neither is the obvious repair.** Both were checked against what
+else allocates:
+
+- **Marking the shared heap** and restoring at exit reclaims everything allocated
+  since the mark — including the `Array` buffer a `push` inside a region grew for a
+  binding *outside* it. `region.vyrn`'s own comment says growable arrays "compose
+  with the arena freely" precisely because the textual backend's `push` does not go
+  through `heap_alloc`; a mark does not know that. Same for a cell payload and both
+  of a `Map`'s buffers.
+- **A separate arena, routed on the RUNTIME depth**, is sound for everything the
+  region *lexically* contains and wrong one call out. The textual backend routes
+  lexically: `heap_alloc` reads the emitter's `region_depth`, so a function *called
+  from inside* a region concatenates out of `malloc`. Route on a runtime counter
+  instead and that callee's String comes from the arena — and the escape guard
+  never examined it, because the guard checks stores into *named bindings in the
+  region's own frames* (`region_store_guard`), which a callee storing into module
+  state is not.
+
+A lexically-routed separate arena is the sound version, and it is ~80 lines of
+emitted runtime plus a flag threaded through six string helpers. It is not here,
+and the reason is the standard this RFC has applied since M2f: **an untested
+lowering is worse than a named gap**, and there is nothing to test. This backend's
+`malloc` never frees for `push`, for a cell payload or for `Stmt::Drop` (M2b's
+`ponytail:` note, M2l's "the payload is not freed on release"), so a region that
+does not reclaim is that decision's cost rather than a new one, and a free is still
+not a thing a program can print. The ceiling is marked in `Fn_::region_exit` with
+both counterexamples, so the next person to reach for a mark has the argument.
+
+### The counter is the finite resource, and it is the M2l shape exactly
+
+The region stack is 64 deep — the LLVM prelude's number, and the interpreter's own
+`region_depth >= 64` with the same wording, so all three engines refuse the same
+nesting. That makes an unbalanced counter loud in both directions, and loud in the
+way M2l described: a missed pop prints nothing different for 64 turns and then
+traps, an extra pop reads as an enormous *unsigned* depth on the very next
+`region`.
+
+No example runs anywhere near either edge. `region.vyrn` has two regions, neither
+nested, neither left by a branch; `controlflow.vyrn` has one `continue` under a
+region and six turns. So the balance has its own running test —
+`every_exit_out_of_a_region_balances_and_the_65th_traps` — and it was measured by
+sabotage rather than asserted: with the unwind removed from `break`, from
+`continue`, and from `return` in turn, a 200-turn loop prints nothing and traps
+where the interpreter prints four numbers. An extra pop is caught by `region.vyrn`
+itself.
+
+Both halves pin the interpreter's answers rather than a spelling written in the
+test, for M2g's reason: two backends can be confidently wrong together about which
+depth is the bound.
+
+### Four edges, and `return` is where the engines disagree
+
+A region is one more frame the exit edges close, which is the shape M2l gave the
+inferred release — so `Stmt::Break` and `Stmt::Continue` unwind to the depth the
+loop recorded, and `Stmt::Return` unwinds to zero, in each case *after* the
+releases and without popping the frames. The fall-through exit then lands in code
+wasm has already marked unreachable, which is the same argument `Fn_::block` makes
+about its own releases and the reason no `if !terminated` guard was needed.
+
+`return` is not free, though, and finding out why is the part worth recording.
+**The textual backend leaks a region-stack slot on a `return` out of a region**:
+`Stmt::Region` emits `@__vyrn_region_exit` only on the fall-through path, and
+`Stmt::Return` does not emit one at all. Measured — 70 calls to a function whose
+region contains a `return` print `2485` under the interpreter and
+`error: region nesting exceeds 64`, exit 1, natively. No example returns out of a
+region, so parity has never seen it.
+
+It is not a two-line fix, which is why it is reported rather than patched:
+`__vyrn_region_exit` frees the arena as well as popping, and a `return a + b` out
+of a region hands back a pointer *into* that arena. Checked directly — the escape
+guard covers stores into bindings, not returns, so the program compiles and prints
+`Hello, world!` today. Fixing it needs either a pop that does not free or a guard
+on `return`, and both are RFC-0004 decisions.
+
+This backend frees nothing, so it cannot dangle, so it simply matches the
+interpreter — which is the rule the ladder is written to, and the same call M2h
+made about `NaN != NaN` diverging from native for free.
+
+### Both link shapes, trivially
+
+The counter touches no allocator, so M2i's split is irrelevant: `region.vyrn`
+prints `5`, `13` and exits 13 under `direct` and under `direct-shim`, and the
+nesting probe traps identically in both. First milestone since M2i where "which
+shapes does it work in" has a one-line answer, and it is because the thing that
+would have made it interesting is the thing that was refused.
+
+### `Stmt` is exhaustive now
+
+`region` was the last unlowered statement kind, so the catch-all gap reporter and
+the `stmt_name`/`stmt_line` pair feeding it were dead code claiming coverage.
+Deleted: a statement kind added to the AST is now a compile error naming the `stmt`
+match, the same trade `Rt::slots`'s all-fields-named struct literal makes.
+Expressions keep theirs — `expr_name` still has work.
+
+### Nothing contradicted M0, M1, M2a–M2l
+
+No offset was computed at all, which is a first: a region has no layout. No new
+runtime function, so `Rt`'s numbering did not move — the counter and the trap
+message are two more of the derived address fields beside `msg_div0`.
+Destination-first still holds where there is a destination, `region_exit` is
+stack-neutral so it composes with a return value already on the operand stack
+(M2d's note, M2f's copy-out), no body emits a `return`, and the memory map took
+four reserved bytes without negotiation.
+
+Cost, honestly: **+40 bytes in every module** — `fib.vyrn` 5,628 → 5,668 — for a
+trap message and a counter most programs never reach. `runtime` runs before any
+body is walked and so cannot know, which is M2j's twelve-unconditional-imports
+argument and M2l's lazily-allocated slab argument arriving a third time. The fix is
+still a reachability sweep over the finished call graph.
+
+### 64 of 87, regrouped
+
 | blocked on | n |
 |---|---|
 | `Match` on strings | 4 |
@@ -3033,3 +3155,11 @@ RFC scoped out from the start, and one generic-payload conversion twice.
 `controlflow.vyrn` spawns *and* opens a `region`, so its blocker moved from
 `spawn` to `region`: that row is `controlflow` and `region.vyrn`, the two examples
 it always was, now reported by the feature that actually stops them.
+
+| a `fn`-typed parameter (RFC-0023) 3, a lambda 2 | 5 |
+| `spawn` | 3 |
+| a conversion from `Cargo`/`Config` to `T` | 2 |
+
+`controlflow.vyrn` moved from `region` to `spawn`, which is the third example in
+that row and the reason the region row is gone while the spawn row grew. Nothing
+else moved: a region was nobody else's first blocker.
