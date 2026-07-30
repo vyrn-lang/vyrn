@@ -2668,6 +2668,10 @@ impl Fn_<'_> {
                 }
                 "set" | "release" => Type::Unit,
                 "parse" if args.len() == 1 => Type::Option(Box::new(Type::Int)),
+                // M2l's rule: a builtin `call` types as it emits owes this a row,
+                // and these two are `call`'s newest. Both are 1-based positions, so
+                // `Int` — the checker's own answer, and the only one it could be.
+                "lineAt" | "colAt" if args.len() == 2 => Type::Int,
                 // The two builtins `call` lowers by REWRITING: peek the rewrite
                 // rather than naming its type here, so there is no second answer
                 // to keep in step with the one the emitting path will produce.
@@ -3318,6 +3322,53 @@ impl Fn_<'_> {
             "@charCount" if args.len() == 1 => {
                 self.expr_as(m, b, &args[0], &Type::Str)?;
                 b.ins(&Instruction::Call(self.cx.rt.charcount));
+                return Ok(Type::Int);
+            }
+            // The two builtins RFC-0078 refused to route, and therefore the two
+            // this backend owes a loop. `text_runtime` is where those loops are and
+            // why they are not `std/num` and `std/text`.
+            //
+            // `parse` writes its `Option<Int64>` through a slot allocated here,
+            // which is the same hidden destination `readLine` gets — the M2b
+            // aggregate rule rather than a case of its own.
+            "parse" if args.len() == 1 => {
+                let ty = Type::Option(Box::new(Type::Int));
+                let l = self.layout_of(&ty, line)?;
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
+                b.ins(&Instruction::Call(self.cx.rt.parse_i64));
+                b.slot(off);
+                return Ok(ty);
+            }
+            // `lineAt(bytes, off)` / `colAt(bytes, off)`. The buffer goes through
+            // `walk`, so an `Array`, a fixed `ArrayN` and a `SmallArray` all arrive
+            // as one base-and-count — the same three the checker accepts — and the
+            // helper is handed exactly what the C one is handed natively.
+            //
+            // The offset lands in a FRESH local rather than a scratch: the two
+            // pushes below it have to survive whatever evaluating it does, and a
+            // scratch key is shared (the M2g `box_value` bug).
+            "lineAt" | "colAt" if args.len() == 2 => {
+                let bty = self.expr(m, b, &args[0])?;
+                let w = self.walk(b, &bty, line)?;
+                // A byte buffer, i.e. stride 1. The interpreter takes `v as u8` of
+                // whatever the elements are and the native helper reads
+                // `unsigned char*` off the data pointer, so a wider element would
+                // have three engines reading three different things — and nothing
+                // but `bytes(s)` ever reaches here.
+                if w.stride != 1 {
+                    return unsupported(&format!("`{name}` over a buffer of `{}`", w.elem), line);
+                }
+                self.expr_as(m, b, &args[1], &Type::Int)?;
+                let o = b.local(ValType::I64);
+                b.ins(&Instruction::LocalSet(o));
+                b.ins(&Instruction::LocalGet(w.data));
+                b.ins(&Instruction::LocalGet(w.len));
+                b.ins(&Instruction::LocalGet(o));
+                let f =
+                    if name == "lineAt" { self.cx.rt.line_at } else { self.cx.rt.col_at };
+                b.ins(&Instruction::Call(f));
                 return Ok(Type::Int);
             }
             // `Int64(x)` / `UInt16(x)` — a conversion, not a call. Which names are
@@ -6913,6 +6964,22 @@ struct Rt {
     /// in the table it is handed — which is the same split the textual backend's
     /// `@__vyrn_regex_run` makes.
     regex_run: u32,
+    /// The two builtins RFC-0078 refused to route into Vyrn, for two DIFFERENT
+    /// reasons — which is why they are three emitted functions here rather than a
+    /// library this backend already compiles.
+    ///
+    /// `parse` wraps on overflow where `std/num`'s `parseInt64` declines, so the
+    /// two are not one function and folding them would be a language change
+    /// (RFC-0078 M4a). `lineAt`/`colAt` exist because the obvious loop is
+    /// O(offset) and the interpreter memoizes a line-start table a Vyrn library
+    /// cannot hold — generators may not touch module state.
+    ///
+    /// All three are a loop over a buffer, and each has exactly one counterpart to
+    /// agree with: `parse` with the interpreter's `parse_int`, the other two with
+    /// `__vyrn_line_at`/`__vyrn_col_at` in `toolchain.rs`.
+    parse_i64: u32,
+    line_at: u32,
+    col_at: u32,
     count: u32,
     msg_div0: u32,
     msg_rem0: u32,
@@ -6995,6 +7062,9 @@ impl Rt {
             cell_release: slot("cell_release"),
             map_find: slot("map_find"),
             regex_run: slot("regex_run"),
+            parse_i64: slot("parse_i64"),
+            line_at: slot("line_at"),
+            col_at: slot("col_at"),
             // Derived, not declared. The data segment addresses are filled in by
             // `runtime` as it interns them.
             count: 0,
@@ -7778,10 +7848,258 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
         },
     );
 
+    text_runtime(m, &rt);
+
     // And the total: `count` is derived from the declarations, so this is the one
     // place it meets the emission.
     assert_eq!(m.next_func(), base + rt.count, "runtime function count");
     rt
+}
+
+/// `parse`, `lineAt` and `colAt` — the three loops RFC-0078 deliberately left as
+/// builtins, and therefore the three this backend owes a lowering.
+///
+/// They are together because they are refused for the same *kind* of reason and
+/// not the same reason. `parse` is a semantics refusal: `std/num`'s `parseInt64`
+/// is the same digit loop and DECLINES where this one wraps, so routing `parse`
+/// through it would change what every existing caller does with
+/// `parse("18446744073709551615")` — which is `Some(-1)` here and on the other two
+/// engines. `lineAt`/`colAt` are a cache refusal: the loop is four lines of Vyrn,
+/// but it is O(offset) and a scanner asks once per node, so the interpreter
+/// memoizes a line-start table per buffer that a generator — barred from module
+/// state by comptime purity — could not hold.
+///
+/// **No cache here, and that is a decision.** The native shim does not memoize
+/// either (`__vyrn_line_at` counts from byte 0 on every call), so counting
+/// directly makes this backend agree with the engine it is closest to rather than
+/// inventing a third behaviour; and the 122 ms RFC-0078 M4b(2) measured is a
+/// GENERATION-time cost, paid by whichever engine runs the generator. A module
+/// emitted by this backend reaches these only where compiled code calls them at
+/// run time, which in the corpus is `textbytes.vyrn` comparing the builtin against
+/// `std/text` over twelve short buffers. A cache would be per-buffer state in
+/// linear memory keyed on an address the bump allocator can recycle — the
+/// interpreter avoids that by holding the `Rc` — so it is not a small change, and
+/// nothing measured wants it yet.
+fn text_runtime(m: &mut Module, rt: &Rt) {
+    let sum2 = layout::of_ll("{ i1, i64, i64 }").expect("the Option/Result shape");
+
+    // parse_i64(s, dest) — RFC-0014's `parse` as an `Option<Int64>` written
+    // through `dest`: an optional `-`, then digits, ALL of them consumed.
+    //
+    // Every decline is the same decline (`None`), and there are three ways to
+    // reach it: nothing after the sign (`""` and `"-"`), a byte that is not a
+    // digit anywhere in the rest (`"+1"`, `" 1"`, `"1 "`, `"1.5"`, `"abc"`,
+    // `"12a"`, `"--1"`), and that is all — there is no third category, in
+    // particular NOT overflow. `acc * 10 + d` in wrapping `i64` is the
+    // interpreter's `wrapping_mul`/`wrapping_add` instruction for instruction, so
+    // `"9223372036854775808"` is `Int64.min` and `"18446744073709551615"` is `-1`
+    // on all three engines. `examples/numbytes.vyrn` pins every row of that table.
+    //
+    // Deliberately NOT `str_i64` next door, which reads `+` and stops at the first
+    // byte that is not a digit — that is `strtoll`'s contract for an injected
+    // `VYRN_FIXED_TIME`, and it is the opposite of this one's on exactly the inputs
+    // `numbytes` prints.
+    let (acc, neg, c) = (3, 4, 5); // params 0..1, the frame base 2, then ours
+    rt.next_is(m, rt.parse_i64);
+    m.func(
+        &[ValType::I32, ValType::I32],
+        &[],
+        &[ValType::I64, ValType::I32, ValType::I32],
+        0,
+        |b| {
+            b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
+                .ins(&Instruction::Block(BlockType::Empty)); // 0: none
+            // The sign, and then the first byte AFTER it — which is the byte the
+            // emptiness test is about.
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::LocalTee(c))
+                .ins(&Instruction::I32Const(b'-' as i32))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::LocalSet(neg))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalTee(0))
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::LocalSet(c))
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(c)).ins(&Instruction::I32Eqz).ins(&Instruction::BrIf(0));
+            b.ins(&Instruction::Block(BlockType::Empty)) // 1: the digits ran out
+                .ins(&Instruction::Loop(BlockType::Empty)); // 0
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::LocalTee(c))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::BrIf(1));
+            // Not a digit: out of the `none` block, which is two levels further
+            // out than the loop's own exit.
+            b.ins(&Instruction::LocalGet(c))
+                .ins(&Instruction::I32Const(b'0' as i32))
+                .ins(&Instruction::I32LtU)
+                .ins(&Instruction::BrIf(2))
+                .ins(&Instruction::LocalGet(c))
+                .ins(&Instruction::I32Const(b'9' as i32))
+                .ins(&Instruction::I32GtU)
+                .ins(&Instruction::BrIf(2));
+            b.ins(&Instruction::LocalGet(acc))
+                .ins(&Instruction::I64Const(10))
+                .ins(&Instruction::I64Mul)
+                .ins(&Instruction::LocalGet(c))
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::I64Const(b'0' as i64))
+                .ins(&Instruction::I64Sub)
+                .ins(&Instruction::I64Add)
+                .ins(&Instruction::LocalSet(acc))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(0))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            // `Some(±acc)`. Negated in place so the three stores below have no
+            // branch in the middle of them; `wrapping_neg` of `Int64.min` is
+            // `Int64.min`, which is `i64.sub` from zero and needs no note.
+            b.ins(&Instruction::LocalGet(neg))
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::I64Const(0))
+                .ins(&Instruction::LocalGet(acc))
+                .ins(&Instruction::I64Sub)
+                .ins(&Instruction::LocalSet(acc))
+                .ins(&Instruction::End);
+            // The same three stores `sum2_write_to` makes, at the same
+            // `layout::of_ll ∘ llt` offsets — spelled out only because the payload
+            // is already an `i64` rather than a word to zero-extend.
+            b.ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Store8(MemArg {
+                    offset: sum2.fields[0] as u64,
+                    align: 0,
+                    memory_index: 0,
+                }))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::LocalGet(acc))
+                .ins(&Instruction::I64Store(at(sum2.fields[1])))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I64Const(0))
+                .ins(&Instruction::I64Store(at(sum2.fields[2])));
+            b.ins(&Instruction::Br(1)).ins(&Instruction::End); // none
+            sum2_write_to(b, 1, &sum2, 0, None);
+            b.ins(&Instruction::End); // fin
+        },
+    );
+
+    // line_at(d, len, off) / col_at(d, len, off) — the 1-based line and column of
+    // a byte offset, and a column counts BYTES.
+    //
+    // That last part is measured rather than assumed (RFC-0078 M4b(2)): the
+    // interpreter computes `off - lineStart + 1` over a byte table and the shim
+    // walks bytes backwards, so the `x` in `éx` is column 3. `std/vyx.vyrn`'s
+    // wrapper documents it as "chars since the last LF", which is wrong for any
+    // line with non-ASCII in it, and RFC-0033's `#line` directives want the byte
+    // column anyway.
+    //
+    // Both clamp `off` to `len` and neither clamps it below zero, because a
+    // negative `off` falls out of the loop conditions being SIGNED: `0 >= off`
+    // ends the forward count before it starts and `off <= 0` ends the backward
+    // walk, which is 1 either way and is what the interpreter's `.max(0)` and the
+    // shim's `i < off` / `i > 0` both give.
+    let (i, out) = (4, 5); // params 0..2, the frame base 3, then ours
+    rt.next_is(m, rt.line_at);
+    m.func(
+        &[ValType::I32, ValType::I64, ValType::I64],
+        &[ValType::I64],
+        &[ValType::I64, ValType::I64],
+        0,
+        |b| {
+            b.ins(&Instruction::I64Const(1)).ins(&Instruction::LocalSet(out));
+            clamp_off(b);
+            b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
+            b.ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I64GeS)
+                .ins(&Instruction::BrIf(1));
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I32WrapI64)
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::I32Const(b'\n' as i32))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::If(BlockType::Empty))
+                .ins(&Instruction::LocalGet(out))
+                .ins(&Instruction::I64Const(1))
+                .ins(&Instruction::I64Add)
+                .ins(&Instruction::LocalSet(out))
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(i))
+                .ins(&Instruction::I64Const(1))
+                .ins(&Instruction::I64Add)
+                .ins(&Instruction::LocalSet(i))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(out));
+        },
+    );
+
+    rt.next_is(m, rt.col_at);
+    m.func(
+        &[ValType::I32, ValType::I64, ValType::I64],
+        &[ValType::I64],
+        &[ValType::I64],
+        0,
+        |b| {
+            let out = 4;
+            b.ins(&Instruction::I64Const(1)).ins(&Instruction::LocalSet(out));
+            clamp_off(b);
+            // `off` IS the cursor, walked down to the byte after the previous LF.
+            b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
+            b.ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I64Const(0))
+                .ins(&Instruction::I64LeS)
+                .ins(&Instruction::BrIf(1));
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I32WrapI64)
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(-1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::I32Const(b'\n' as i32))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::BrIf(1));
+            b.ins(&Instruction::LocalGet(out))
+                .ins(&Instruction::I64Const(1))
+                .ins(&Instruction::I64Add)
+                .ins(&Instruction::LocalSet(out))
+                .ins(&Instruction::LocalGet(2))
+                .ins(&Instruction::I64Const(-1))
+                .ins(&Instruction::I64Add)
+                .ins(&Instruction::LocalSet(2))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(out));
+        },
+    );
+}
+
+/// `if (off > len) off = len`, over parameters 1 and 2 of a `line_at`-shaped
+/// signature. One place, because the two helpers must clamp identically or they
+/// disagree past the end of the buffer — the offset RFC-0078's oracle sweeps to
+/// `len + 3` precisely to catch.
+fn clamp_off(b: &mut Frame) {
+    b.ins(&Instruction::LocalGet(2))
+        .ins(&Instruction::LocalGet(1))
+        .ins(&Instruction::I64GtS)
+        .ins(&Instruction::If(BlockType::Empty))
+        .ins(&Instruction::LocalGet(1))
+        .ins(&Instruction::LocalSet(2))
+        .ins(&Instruction::End);
 }
 
 /// How many generational reference cells the slab holds, and where each of its
