@@ -5188,6 +5188,8 @@ mod tests {
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),
             globals: HashMap::new(),
+            shim: HashMap::new(),
+            externs: HashMap::new(),
             // Every index 0: a `Cx` for a type-level test never emits a call, and
             // a field per runtime function would have to be edited for each new
             // one.

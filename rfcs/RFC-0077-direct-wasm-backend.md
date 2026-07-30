@@ -1755,3 +1755,201 @@ true); everything else in that row is a WASI syscall or a runtime data structure
 The two rows that are neither — `Match` on strings with a map literal, and the
 `peek` failures — are both the same shape of thing as the rows M2b through M2f
 closed, which is to say small and named.
+
+---
+
+## M2i, as landed
+
+The link. A directly-emitted module can import RFC-0076's shared shim instead of
+standing alone, memory included — `direct::compile_linked(program, Link::Shim)`,
+selected by `VYRN_WASM_BACKEND=direct-shim`, run as
+`wasmtime --preload env=<out>.shim.wasm <out>`.
+
+**36 → 37 of 80**, and the number is not the point. What this milestone found is
+that M3 and M4 were written for a backend that no longer exists, and the
+reordering below is the deliverable.
+
+### The mechanism was RFC-0076's, and reusing it was the whole design
+
+`toolchain::shim_wasm` is the clang half of what `vyrn-genwasm::build_shim` used
+to do alone, moved down so `vyrn-codegen` can reach it, with the cranelift half
+left where it was. `SHIM_BASE` moved to `wasm.rs` beside the `STATICS_LIMIT`
+derived from it. Neither is tidiness: `--global-base` and `-z stack-size` at that
+address ARE the memory map, and two copies of a memory map are a memory map that
+can disagree with itself — the failure RFC-0076 M6 spent a milestone finding once.
+
+Nothing about the map needed negotiating, which was M0's prediction and is now
+true of a second consumer. The `STATICS_LIMIT` assertion covers the split for
+free — it is the same 8 MB whether a shim is beside the module or not — and it
+covers one thing it was not written for: the memory's declared minimum is
+`data_end` rounded up, and the shim's actual memory is 256+ pages, so an import
+that fits under the ceiling fits the shim's memory by construction.
+
+Two spike findings, both of which would have cost a confusing afternoon:
+
+- **An imported memory must still be EXPORTED.** wasmtime's WASI reads an iovec
+  out of the *main* module's memory, so a module that only imports one dies on
+  its first `print` with `missing required memory export`. An imported memory is
+  index 0 too, so re-exporting it is the entire fix — but nothing about the
+  encoder said so, and `Module::import_memory` had been dropping the export since
+  M1 with a unit test asserting that it did.
+- **The shim is a MODULE, not a library.** `--preload env=shim.wasm` registers it
+  under the namespace the imports name, and wasmtime links the two at
+  instantiation. That works with a reactor shim that itself imports WASI, which
+  was the one thing worth checking before building anything.
+
+### The widening is live, and it fails in two different ways
+
+`wasm::abi` has been dead code with a unit test since M1 because
+`direct::compile` imported exactly `fd_write` and `proc_exit`. It is now on every
+shim import, and the signatures come from `wasm::boundary` — the textual
+emitter's own `declare` lines, parsed once and shared with the audit test, whose
+private copy of the same parser is deleted. `SHIM_IMPORTS` is therefore a list of
+NAMES: writing a signature down beside the one `imports_vs_shim.rs` proves
+against the C would have been a second chance to get it wrong.
+
+`tests/shim_link.rs` is that audit with wasmtime doing the checking: **68
+signatures** declared as imports and resolved against the module that defines
+them. And the two ways one can be wrong are not the same failure, which is worth
+recording because only one of them is what M0 warned about:
+
+- **M0's `i1`.** Mis-mapped to an `i64` parameter it never reaches instantiation
+  — the caller pushes what `abi` said the value was, and wasm's own type checker
+  rejects the module. The widening is load-bearing at *emission* time, not at
+  link time, and `__vyrn_vj_bool` could not have been got wrong quietly.
+- **A signature on an import nothing calls.** `__vyrn_now_millis` returning `i32`
+  instead of `i64` — the `size_t` shape M1 named — validates perfectly and fails
+  when the two modules meet, by name. That is the class the whole boundary was
+  unchecked-by-running for, and it is unreachable for a module with no shim.
+
+### Shared memory, proved by three parties
+
+The guest takes eight bytes out of the shim's `dlmalloc` heap, asserts the
+pointer is above `SHIM_BASE` (a private heap in a private memory would also
+"work", right up until something on the other side read it), writes `"hi"` into
+them, and C reads the length back. `__vyrn_vj_bool(true)` then encodes to `true`
+through the shim's own JSON writer. One address space, or the numbers do not come
+out.
+
+In the emitter the split is **five instructions**: `malloc` is a wrapper whose
+signature is the one the emitted runtime already calls, so it became
+`i64.extend_i32_u; call __vyrn_malloc` and ~20 call sites did not move.
+
+### What reaching the shim actually bought: three symbols
+
+RFC-0043's host boundary. `hostNowMillis`, `hostMonotonicNanos` and
+`hostRandomSeed` are real shim symbols on every target rather than `vyrn` host
+imports — which is what makes a clock example a three-way parity citizen — so a
+linked module simply calls them, and `clock.vyrn` passes with the fixed clock and
+seed honoured through WASI's `environ_get`. A standalone module still refuses
+them by name: it has nowhere at all to get a clock.
+
+That is one example, and every other row of the blocker table is exactly where
+M2h left it. **All 36 standalone passes hold under the link**, which is the result
+worth having: the memory map carries the entire existing backend unchanged.
+
+Gated by a second ladder tier rather than a flag on the first, for the reason this
+RFC keeps giving — `vyrn-codegen-llvm` rotted to unbuildable in twelve days — and
+written as the *delta*, so a standalone pass that stops passing under the link is
+reported as a regression in the link. One loop, two lists. The shim tier needs
+clang and a wasi sysroot, because the shim is C; the standalone tier still needs
+only a `wasmtime` binary, and it is the one carrying this RFC's acceptance
+criterion.
+
+### `f64_str` was not retired, and could not have been
+
+M2h left a note saying its ~300 lines and 1,744-byte frame would become redundant
+once the shim was reachable. They did not. `%f` needs `__vyrn_snprintf`, which is
+one of the **three variadic** boundary functions — the only three a linked module
+cannot import at all, because wasm has no varargs. So the shim being reachable
+does not make `snprintf` reachable, and it will not until M3.
+
+Even with M3 done, retiring `f64_str` would mean deleting exact half-to-even
+decimal conversion that parity proves — the two exact ties, `10^300`'s 301
+digits, a subnormal at `k = 1074` — in favour of a 353 KB C dependency. It stays.
+
+### The measurement that reorders the RFC
+
+`examples/fib.vyrn` to wasm:
+
+| | module | beside it |
+|---|---|---|
+| `direct` | **2,836 bytes** | — |
+| `direct-shim` | 2,914 bytes | 352,870 bytes of shim |
+
+The split makes a directly-emitted module *larger*, and the reason is not the
+shim's size — it is that M2b through M2h already emitted the runtime the shim
+would have supplied. `strlen`, `strcmp`, `int_str`, `concat`, `print`,
+`utf8valid`, `slice`, `f64_str` and the trap messages are all in that 2,836
+bytes, all parity-proven, and the split replaced exactly one of them.
+
+Which falsifies M4 as written:
+
+> **M4 — the prelude.** The 1,080-line hand-written IR prelude moves into the C
+> shim, which RFC-0076 M6 already compiles once.
+
+That was the right plan for a backend with no runtime of its own. This one has
+one, and moving it back would mean deleting working code in favour of a C
+toolchain dependency, a second file, and a `--preload` flag at every run — for a
+module that gets bigger. It is the fifth assumption this corpus has falsified,
+and like the other four it is in the direction of less work.
+
+It also puts M4 and M5 in direct conflict, which nothing said before: M5's
+acceptance is that `vyrn build --target wasm` needs no clang and no sysroot, and
+a module that imports the shim needs both. **The shim link can therefore never be
+the default for `vyrn build`.** That is why `direct-shim` is a third value of a
+temporary switch rather than a replacement for `direct`, and why the standalone
+ladder is the tier that gates the acceptance criterion.
+
+### What is left of M3 and M4
+
+- **M3 — varargs. Unchanged, and now the only thing standing between this backend
+  and the three functions it cannot import.** `printf`, `fprintf` and
+  `__vyrn_snprintf` are the whole of the boundary a linked module must decline.
+  Fixed-arity shim wrappers generated from the call shapes the emitter sees are
+  still the answer; they are what would make `logger` reachable through the shim,
+  and they are a prerequisite for anything that wants `%f` from C rather than from
+  `f64_str`.
+- **M4 — not the prelude any more.** What survives is the narrow version: reach
+  the shim for the subsystems that are not worth re-emitting, which the M2i
+  mechanism now makes a per-builtin decision instead of a milestone-sized move.
+  The three that qualify on the current blocker table are the JSON DOM and
+  `vsb_escape` (`toJson` 6, `fromJson` 1 — M2g refused `toJson` as "a serializer,
+  and the textual backend's is ~300 lines plus a generated function per
+  payload-bearing enum"; with the DOM importable what is left is the per-type
+  encode walk, which is emitter work rather than runtime work), the WASI I/O
+  helpers (`readLine`, `readFile`, `args` — 4), and `cell`/`get`/`set`'s
+  generational slot table. All of them land in the shim tier only, and the
+  standalone tier will keep refusing them by name until someone decides the
+  emitted runtime should grow instead.
+- **M5 — unchanged, with one constraint made explicit.** Deleting the LLVM wasm
+  path requires the standalone shape to be complete, not the linked one.
+  `VYRN_WASM_BACKEND` still does not survive it, and now neither does
+  `direct-shim`.
+
+### Nothing contradicted M0, M1, M2a–M2h
+
+Every offset is still `layout::of_ll ∘ llt`. Destination-first,
+no-`return`-in-a-body, the widening rule and the memory map all went in as
+written — the map twice over, since it is now shared with a second module and
+needed no adjustment for it. `Fn_::coerce` took nothing new this milestone, which
+is the first time since M2c that it has not.
+
+### 37 of 80, regrouped
+
+The standalone tier is unchanged from M2h. The shim tier is that list plus
+`clock.vyrn`:
+
+| blocked on | direct | direct-shim |
+|---|---|---|
+| builtins with no lowering (`toJson` 6, `readLine` 2, `args`, `cell`/`set`, `chars`, `fromJson`, `logger`, `parse`, `readFile`) | 17 | **16** |
+| `Match` on strings 4, a map literal 3, indexing a `Map` 2, indexing a `SmallArray` | 10 | 10 |
+| a branch yielding an unpeekable call (`get` 3, `El`, `Held`) | 5 | 5 |
+| a `fn`-typed parameter (RFC-0023) 3, a lambda | 4 | 4 |
+| `if let` 3, `?`, a fallible construction | 5 | 5 |
+| `spawn` 2, `region` | 3 | 3 |
+
+`hostNowMillis` is the row that left. Of the sixteen that remain, seven are the
+JSON subsystem and four are WASI syscalls — i.e. eleven of them are now a
+*decision* about which tier should own them rather than a lowering nobody has
+written, which is what M2i changed and the reason it is worth its 37.
