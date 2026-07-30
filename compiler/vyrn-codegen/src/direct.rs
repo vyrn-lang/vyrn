@@ -1900,6 +1900,25 @@ impl Fn_<'_> {
                 "@charCount" => Type::Int,
                 "stringFromBytes" => Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
                 "bytes" => Type::Array(Box::new(Type::IntN { bits: 8, signed: false })),
+                // `Some`/`Ok`/`Err`/`None` in a branch, typed by the position the
+                // same way `sum_ctor` types them when it emits: an arm yielding
+                // `Ok(v)` cannot name the error half, so the expectation has to.
+                // Without this the arm falls through to `sigs`, which has no entry
+                // for a constructor, and reads as "a branch yielding `Ok`".
+                "None" | "Some" | "Ok" | "Err" => match self.expected_sum() {
+                    Some(t) => t,
+                    // A bare `Some` still types itself from its payload; the other
+                    // three carry only one half of theirs.
+                    None if name == "Some" && args.len() == 1 => {
+                        Type::Option(Box::new(self.peek(&args[0], line)?))
+                    }
+                    None => {
+                        return unsupported(
+                            &format!("a branch yielding `{name}` with no expected type"),
+                            line,
+                        )
+                    }
+                },
                 // The two builtins whose result type is a declared one: `Schema` is
                 // the record `schema_struct_lit` names, and `Value`'s name comes off
                 // the variant table rather than being spelled here twice.
@@ -6373,5 +6392,26 @@ mod tests {
             !bytes.windows(msg.len()).any(|w| w == msg.as_bytes()),
             "an unreached refinement emitted a check"
         );
+    }
+
+    /// A branch that yields `Ok(..)`/`Err(..)` — the shape `std/json` re-wraps a
+    /// `stringFromBytes` result with, and the reason importing `std/json` was a
+    /// gap at all. The emitting path (`sum_ctor`) has always typed these from the
+    /// position; `peek` did not, so the arm fell through to the signature table,
+    /// which holds no entry for a constructor, and read as "a branch yielding
+    /// `Ok`". A `peek` with nothing expecting a `Result` is still a refusal —
+    /// the half the constructor does not carry is unknowable from the arm alone —
+    /// but a program cannot reach that state, so only the positive is asserted.
+    #[test]
+    fn a_branch_yields_a_result_when_the_position_names_one() {
+        let src = "fn f(b: Array<UInt8>) -> Result<String, String> { \
+                       return match stringFromBytes(b) { \
+                           Ok(v) => Ok(v), \
+                           Err(e) => Err(e), \
+                       } } \
+                   fn main() -> Int64 { \
+                       return match f(bytes(\"hi\")) { Ok(s) => s.byteLength, Err(e) => 0 - 1 } }";
+        let p = vyrn_frontend::check(src).unwrap();
+        assert!(compile(&p).is_ok());
     }
 }
