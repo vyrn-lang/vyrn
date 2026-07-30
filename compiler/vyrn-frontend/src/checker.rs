@@ -3929,12 +3929,38 @@ impl<'a> Checker<'a> {
                     args.len()
                 ));
             }
+            // The buffer must be a BYTE buffer, not any array. Two reasons, and
+            // they point the same way:
+            //
+            // - The engines disagreed on anything else. The interpreter reads
+            //   `v as u8` per *element*, so `[1, 10]: Array<Int64>` looks like the
+            //   bytes `01 0a`; native hands the `{ ptr, i64, i64 }` data pointer to
+            //   `__vyrn_line_at` as `unsigned char*`, where element 1 starts at
+            //   byte 8 and byte 1 is the zero padding of `01 00 00 …`. RFC-0077's
+            //   M2n note found `lineAt([1, 10], 2)` answering 2 interpreted and 1
+            //   native, and refused to pick a winner — correctly, because a line
+            //   number over an `Array<Int64>` is nonsense in both readings. So this
+            //   rejects the call instead of answering it.
+            // - `ArrayN`/`SmallArray` were never lowerable here anyway: the native
+            //   emitter `extractvalue`s a `{ ptr, i64, i64 }`, which is the growable
+            //   `Array` layout alone (`[N x T]` and `{ i64, i64, ptr, [N x T] }` are
+            //   different aggregates). Accepting them was a front-end promise no
+            //   backend kept.
+            //
+            // `bytes(s)` produces exactly `Array<UInt8>`, and that is what every
+            // real caller passes (`std/vyx`'s scanner, `std/text`'s oracles). The
+            // element goes through `base` so a validated newtype over `UInt8` — same
+            // byte, same stride — still counts.
             let b = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
-            if !matches!(b, Type::Err)
-                && !matches!(b, Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..))
-            {
+            let is_bytes = match &b {
+                Type::Array(el) => {
+                    matches!(self.base(el), Type::IntN { bits: 8, signed: false })
+                }
+                _ => false,
+            };
+            if !matches!(b, Type::Err) && !is_bytes {
                 return Err(format!(
-                    "line {line}: `{name}` takes an `Array<UInt8>` as its first argument"
+                    "line {line}: `{name}` needs an `Array<UInt8>` buffer, found {b}"
                 ));
             }
             let o = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
@@ -10108,5 +10134,50 @@ mod tests {
         // like an exported `type` or `protocol`.
         let src = "export contract Page { let head: String = \"\" }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn line_at_and_col_at_demand_a_byte_buffer() {
+        // The shape every real caller passes.
+        assert!(
+            check_src(
+                "fn main() -> Int64 { let b = bytes(\"a\\nb\")  print(lineAt(b, 2))  \
+                 print(colAt(b, 2))  return 0 }"
+            )
+            .is_ok()
+        );
+        // The program RFC-0077 M2n could not pick an answer for: interpreted it
+        // said 2 (one `u8` per element), native it said 1 (byte 1 of `01 00 00 …`
+        // is zero). It is now refused instead.
+        for name in ["lineAt", "colAt"] {
+            let e = check_src(&format!(
+                "fn main() -> Int64 {{ let mut a: Array<Int64> = []  a.push(1)  a.push(10)  \
+                 print({name}(a, 2))  return 0 }}"
+            ))
+            .unwrap_err();
+            assert_eq!(
+                e,
+                format!("line 1: `{name}` needs an `Array<UInt8>` buffer, found Array<Int64>")
+            );
+        }
+        // Not an array at all.
+        let s = check_src("fn main() -> Int64 { print(lineAt(\"ab\", 1))  return 0 }").unwrap_err();
+        assert_eq!(
+            s,
+            "line 1: `lineAt` needs an `Array<UInt8>` buffer, found String"
+        );
+        // A `SmallArray` of bytes is refused too, and deliberately: the native
+        // emitter reads a `{ ptr, i64, i64 }`, which a `SmallArray`'s
+        // `{ i64, i64, ptr, [N x T] }` is not. Front end and backend now agree
+        // on one accepted shape.
+        let sa = check_src(
+            "fn main() -> Int64 { let mut a: SmallArray<UInt8, 4> = []  a.push('x')  \
+             print(lineAt(a, 0))  return 0 }",
+        )
+        .unwrap_err();
+        assert!(
+            sa.contains("`lineAt` needs an `Array<UInt8>` buffer"),
+            "{sa}"
+        );
     }
 }
