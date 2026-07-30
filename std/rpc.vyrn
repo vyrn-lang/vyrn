@@ -581,7 +581,8 @@ export gen fn rpcInProcess(contract: String) -> String {
 // generator. RFC-0072's audience rule forbids the same edge from the other
 // direction, and neither one depends on the other being right.
 
-import { parseJson, Json, JsonField } from "std/json"
+import { Json, JsonField } from "std/json"
+import { parseJson } from "std/jsonread"
 import { replace, split } from "std/strings"
 
 /// One procedure module found under an api directory: the module path a

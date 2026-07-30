@@ -9,7 +9,8 @@
 - [std/hash](std/hash.md) — std/hash — non-cryptographic byte hashing (RFC-0045).
 - [std/html](std/html.md) — std/html — the view tree and the string renderer (RFC-0026 M1).
 - [std/i18n](std/i18n.md) — std/i18n — typed translations as a library (RFC-0020 M2), built entirely on
-- [std/json](std/json.md) — std/json (RFC-0059) — one shared JSON value tree with a STRICT reader and a
+- [std/json](std/json.md) — std/json (RFC-0059) — the shared JSON value tree and its canonical writer,
+- [std/jsonread](std/jsonread.md) — std/jsonread (RFC-0059, split out by RFC-0078 M2a) — the STRICT JSON reader,
 - [std/math](std/math.md) — std/math — numeric helpers, written in Vyrn itself. Being ordinary Vyrn,
 - [std/openapi](std/openapi.md) — std/openapi — the contract as an OpenAPI 3.1 document (RFC-0038), a library
 - [std/random](std/random.md) — std/random — deterministic pseudo-randomness with a host-seeded escape

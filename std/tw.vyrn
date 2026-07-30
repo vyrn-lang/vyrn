@@ -53,7 +53,8 @@
 // token can never smuggle structure into a rule body past the character grammar.
 import { Scanner, cssScanner, skipWs, peek, atEnd, advance, looksAt } from "std/scan"
 // The shared strict JSON reader (RFC-0059) — this module's former private reader.
-import { parseJson, Json, JsonField } from "std/json"
+import { Json, JsonField } from "std/json"
+import { parseJson } from "std/jsonread"
 // Shared string / array helpers (RFC-0046/0059) — the former private twJoin,
 // twSliceStr, twContains copies now live once in std.
 import { joinWith, substring, fromBytesOr } from "std/strings"

@@ -11,7 +11,8 @@
 /// `vyrn test std/bench.vyrn`).
 
 import { monotonic } from "std/time"
-import { Json, JsonField, emit, parseJson } from "std/json"
+import { Json, JsonField, emit } from "std/json"
+import { parseJson } from "std/jsonread"
 
 /// The minimum of a non-empty sample array (per-iteration nanoseconds).
 export fn minOf(xs: Array<Int64>) -> Int64 {

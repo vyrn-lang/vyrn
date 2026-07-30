@@ -33,7 +33,8 @@
 /// branch, are unsupported and fail generation with a load diagnostic.
 
 // The shared strict JSON reader (RFC-0059) — this module's former private reader.
-import { parseJson, Json, JsonField } from "std/json"
+import { Json, JsonField } from "std/json"
+import { parseJson } from "std/jsonread"
 // Shared string / array helpers (RFC-0046/0059) — the former private trimStr,
 // listContains, and manual-join copies now live once in std.
 import { joinWith, substring, fromBytesOr, trim } from "std/strings"

@@ -1,9 +1,12 @@
 //! Integration tests for JSON's two writers.
 //!
-//! `std/json` (RFC-0059): the module's own inline unit suite — strict-parse
-//! rejections with pinned `line N, col M` wording, the full escape set including
-//! surrogate pairs, the round-trip law, and field-order preservation — runs green
-//! through the real `vyrn` binary.
+//! `std/json` + `std/jsonread` (RFC-0059, split by RFC-0078 M2a): the two
+//! modules' own inline unit suites — the writer's escaping and indentation on one
+//! side, and on the other the strict-parse rejections with pinned `line N, col M`
+//! wording, the full escape set including surrogate pairs, the round-trip law and
+//! field-order preservation — run green through the real `vyrn` binary. Two rows
+//! rather than one because `vyrn test` runs one module's blocks, and the point of
+//! the split is that the writer links without the reader.
 //!
 //! `examples/jsonbytes.vyrn` (RFC-0078 M2): the bytes `toJson` produces, pinned as
 //! literals BEFORE its serializer half is rewired from the C shim to `std/json`.
@@ -25,14 +28,24 @@ fn vyrn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
 }
 
-#[test]
-fn std_json_unit_tests_run_green() {
-    let module = repo_file("std/json.vyrn");
+/// Run one std module's inline `test` blocks and assert the green count.
+fn unit_tests_green(rel: &str, expected: &str) {
+    let module = repo_file(rel);
     let out = vyrn().arg("test").arg(&module).output().expect("vyrn test");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "std/json unit tests failed:\n{combined}");
-    assert!(combined.contains("15 passed, 0 failed"), "expected 15 green tests:\n{combined}");
+    assert!(out.status.success(), "{rel} unit tests failed:\n{combined}");
+    assert!(combined.contains(expected), "expected `{expected}`:\n{combined}");
+}
+
+#[test]
+fn std_json_writer_unit_tests_run_green() {
+    unit_tests_green("std/json.vyrn", "2 passed, 0 failed");
+}
+
+#[test]
+fn std_jsonread_unit_tests_run_green() {
+    unit_tests_green("std/jsonread.vyrn", "13 passed, 0 failed");
 }
 
 #[test]
