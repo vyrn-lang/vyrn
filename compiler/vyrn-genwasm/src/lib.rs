@@ -650,7 +650,10 @@ fn mangle(ty: &Type) -> Option<String> {
 /// Low addresses cost nothing to reserve — a wasm page is committed when it is
 /// touched — and every artifact in this repo ends between 68 and 82 KB, so the
 /// ceiling is ~100x above anything real.
-const SHIM_BASE: u32 = 16 * 1024 * 1024;
+///
+/// RFC-0077 M2i made the direct wasm backend a second consumer of this layout,
+/// so the address itself moved to `vyrn_codegen::wasm` where both can see it.
+use vyrn_codegen::wasm::SHIM_BASE;
 
 /// `__vyrn_spawn` takes a FUNCTION POINTER, and a function pointer is an index
 /// into the caller's table — which the split does not share. A generator that
@@ -795,43 +798,11 @@ fn build_shim() -> Option<wasmtime::Module> {
         return Some(m);
     }
 
-    let clang = vyrn_codegen::toolchain::find_clang()?;
-    let sysroot = wasi_sysroot()?;
-    let builtins = wasi_builtins(&sysroot)?;
-    let dir = std::env::temp_dir().join(format!("vyrn-genwasm-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).ok()?;
-    let src = dir.join("shim.c");
-    let out = dir.join("shim.wasm");
-    std::fs::write(&src, vyrn_codegen::toolchain::RUNTIME_SHIM).ok()?;
-
     let t = std::time::Instant::now();
-    let st = std::process::Command::new(clang)
-        .arg(&src)
-        .arg("-o")
-        .arg(&out)
-        .arg("-DVYRN_GEN_HOST")
-        // Drops `main` and adds the three entry points the host drives instead.
-        .arg("-DVYRN_GEN_SHIM")
-        .arg("--target=wasm32-wasip1")
-        // No `main`, so no `_start`: the host calls in, repeatedly, over a life
-        // longer than one call.
-        .arg("-mexec-model=reactor")
-        .arg(format!("--sysroot={}", sysroot.display()))
-        .arg("-nodefaultlibs")
-        .arg(&builtins)
-        .arg("-lc")
-        // Nothing here is reachable from this module's own entry points, so
-        // without this wasm-ld would garbage-collect the whole runtime away.
-        .arg("-Wl,--export-all")
-        .arg("-Wl,--export-memory")
-        // Data above the line, stack growing down TO the line — see `SHIM_BASE`.
-        .arg(format!("-Wl,--global-base={SHIM_BASE}"))
-        .arg(format!("-Wl,-z,stack-size={SHIM_BASE}"))
-        .output()
-        .ok()?;
-    if !st.status.success() {
-        return None;
-    }
+    // The clang half is `toolchain::shim_wasm` — shared with the direct wasm
+    // backend since RFC-0077 M2i, along with its own on-disk cache of the bytes.
+    // Only the cranelift half is this crate's.
+    let out = vyrn_codegen::toolchain::shim_wasm(true)?;
     trace("shim clang", t.elapsed());
     let t = std::time::Instant::now();
     let m = wasmtime::Module::new(wasm_engine(), &std::fs::read(&out).ok()?).ok()?;

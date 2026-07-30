@@ -1143,6 +1143,110 @@ pub fn find_clang() -> Option<PathBuf> {
     None
 }
 
+/// The runtime shim compiled to a wasm module of its OWN, for a build that links
+/// two modules instead of embedding one (RFC-0076 M6, RFC-0077 M2i).
+///
+/// This is the clang half of what `vyrn-genwasm::build_shim` used to do alone.
+/// It moved here when the direct wasm backend became a second consumer, because
+/// the flags are the layout contract — `--global-base`/`-z stack-size` at
+/// [`crate::wasm::SHIM_BASE`] is what keeps the shim's downward-growing frames
+/// away from the generated module's statics — and two copies of a memory map are
+/// a memory map that can disagree with itself. `vyrn-genwasm` adds the cranelift
+/// half on top and keeps its own artifact cache for that.
+///
+/// Cached on disk keyed by the shim source and the base address, because it is
+/// byte-identical for every consumer and costs ~600 ms to produce. `None` is
+/// always "no split build available", never an error: a missing toolchain, or a
+/// shim that will not compile, means the caller falls back to the shape it had.
+/// `gen_host` picks the generator-host variant, whose `readFile`/`listDir` are
+/// host imports instead of stdio — a different module, so a different key. An
+/// ordinary `vyrn build` wants the other one, since nothing satisfies the
+/// `vyrn_gen` namespace outside RFC-0076's engine.
+pub fn shim_wasm(gen_host: bool) -> Option<PathBuf> {
+    // Keyed on what was compiled and where it was told to put it. Not on the
+    // compiler build: unlike a cranelift artifact these are plain wasm bytes,
+    // and the shim source hash is what decides them.
+    let key = format!(
+        "shim-{}-{}{}.wasm",
+        vyrn_frontend::hash::sha256_hex(RUNTIME_SHIM.as_bytes()),
+        crate::wasm::SHIM_BASE,
+        if gen_host { "-genhost" } else { "" }
+    );
+    let dir = shim_cache_dir();
+    let out = dir.join(&key);
+    if out.exists() {
+        return Some(out);
+    }
+
+    let clang = find_clang()?;
+    let sysroot = match std::env::var("WASI_SYSROOT") {
+        Ok(s) if Path::new(&s).exists() => PathBuf::from(s),
+        _ => discovered_wasi_sysroot()?,
+    };
+    let builtins = match std::env::var("WASI_BUILTINS") {
+        Ok(b) if Path::new(&b).exists() => PathBuf::from(b),
+        _ => builtins_near_sysroot(&sysroot)?,
+    };
+    std::fs::create_dir_all(&dir).ok()?;
+    let src = dir.join(format!("{key}.c"));
+    std::fs::write(&src, RUNTIME_SHIM).ok()?;
+    // Per-process, then renamed: the LSP and a build share this directory, and a
+    // reader must never see half a module.
+    let tmp = dir.join(format!("{key}.{}.tmp", std::process::id()));
+
+    let mut cmd = Command::new(&clang);
+    if gen_host {
+        cmd.arg("-DVYRN_GEN_HOST");
+    }
+    let st = cmd
+        .arg(&src)
+        .arg("-o")
+        .arg(&tmp)
+        // `VYRN_GEN_SHIM` is not about generators here: it is what drops `main`
+        // (the other module owns the entry point, and importing it back would
+        // make the two an instantiation cycle) and keeps the libc entry points
+        // the other module imports from being garbage-collected away.
+        .arg("-DVYRN_GEN_SHIM")
+        .arg("--target=wasm32-wasip1")
+        // No `main`, so no `_start`: the host, or the other module, calls in.
+        .arg("-mexec-model=reactor")
+        .arg(format!("--sysroot={}", sysroot.display()))
+        .arg("-nodefaultlibs")
+        .arg(&builtins)
+        .arg("-lc")
+        // Nothing here is reachable from this module's own entry points, so
+        // without this wasm-ld would garbage-collect the whole runtime away.
+        .arg("-Wl,--export-all")
+        .arg("-Wl,--export-memory")
+        // Data above the line, stack growing down TO the line.
+        .arg(format!("-Wl,--global-base={}", crate::wasm::SHIM_BASE))
+        .arg(format!("-Wl,-z,stack-size={}", crate::wasm::SHIM_BASE))
+        .output()
+        .ok()?;
+    if !st.status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    if std::fs::rename(&tmp, &out).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        // Lost a race with another process writing the same bytes; theirs will do.
+        return out.exists().then_some(out);
+    }
+    Some(out)
+}
+
+fn shim_cache_dir() -> PathBuf {
+    match std::env::var("VYRN_GEN_CACHE_DIR") {
+        Ok(d) => PathBuf::from(d).join("shim"),
+        Err(_) => {
+            let home = std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .unwrap_or_else(|_| ".".to_string());
+            Path::new(&home).join(".vyrn/cache/shim")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

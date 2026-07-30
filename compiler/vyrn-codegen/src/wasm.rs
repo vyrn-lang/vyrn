@@ -44,11 +44,17 @@ pub const STACK_TOP: u32 = 65_536;
 /// here, so the stack below can only reach them by underflowing past 0 — which
 /// traps.
 pub const DATA_BASE: u32 = 65_536;
-/// Everything this module statically occupies must end below here: half of the
-/// RFC-0076 shim's base (16 MB), the gap that keeps the shim's downward-growing
-/// frames from ever reaching our data. `compile_split` checks the same number on
-/// the linked bytes today; a direct emitter knows it before it writes it.
-pub const STATICS_LIMIT: u32 = 8 * 1024 * 1024;
+/// Where the RFC-0076 shim's data and heap begin, and where its stack starts
+/// growing back down. The one address the two modules have to agree about, so it
+/// is written down once: [`crate::toolchain::shim_wasm`] passes it to
+/// `--global-base`/`-z stack-size`, and `STATICS_LIMIT` is derived from it.
+pub const SHIM_BASE: u32 = 16 * 1024 * 1024;
+
+/// Everything this module statically occupies must end below here: half of
+/// [`SHIM_BASE`], the gap that keeps the shim's downward-growing frames from ever
+/// reaching our data. `compile_split` checks the same number on the linked bytes
+/// today; a direct emitter knows it before it writes it.
+pub const STATICS_LIMIT: u32 = SHIM_BASE / 2;
 
 /// wasm has no sub-32-bit values on the operand stack, and the stack pointer
 /// itself is 4-byte-aligned by convention; clang keeps frames 16-aligned on
