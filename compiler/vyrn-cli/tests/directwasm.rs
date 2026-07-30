@@ -39,6 +39,7 @@ const PASSING: &[&str] = &[
     "arrays.vyrn",
     "autovalidate.vyrn",
     "benching.vyrn",
+    "bits.vyrn",
     "bytecount.vyrn",
     "consume.vyrn",
     "ecs.vyrn",
@@ -54,6 +55,7 @@ const PASSING: &[&str] = &[
     "jsonschema.vyrn",
     "map.vyrn",
     "modify.vyrn",
+    "modules.vyrn",
     "ownership.vyrn",
     "protocol.vyrn",
     "record.vyrn",
@@ -61,6 +63,7 @@ const PASSING: &[&str] = &[
     "scan.vyrn",
     "schemaimport.vyrn",
     "statemod.vyrn",
+    "strings.vyrn",
     "tagged.vyrn",
     "testing.vyrn",
     "utility.vyrn",
@@ -629,6 +632,219 @@ fn main() -> Int64 {
                 ),
             }
         }
+    }
+}
+
+/// Every sized-integer width, and the two answers that are plausible when it is
+/// wrong (RFC-0077 M2h).
+///
+/// `bits.vyrn` reaches the six bitwise operators and `strings.vyrn` reaches
+/// `UInt64`, but the example that actually exercises **wrapping at each width** —
+/// `sizedints.vyrn` — is blocked on a float conversion, so the ladder cannot see
+/// the signed narrow widths at all. Every mistake here compiles, validates and
+/// returns a number: wasm has no `i8` arithmetic, so an `Int8` rides an `i32` and
+/// a missing renormalization prints 200 where -56 belongs.
+///
+/// The half worth spelling out is **memory**. `llt` prints `i8` for both `Int8`
+/// and `UInt8`, so a load cannot tell from the shape how to extend the byte — a
+/// negative `Int8` in a record field or an array element reads back as 197 if it
+/// zero-extends, which is a plausible number in a program that never says which
+/// it meant. The comparisons are the other silent pair: a signed opcode reads
+/// `4000000000` as negative and an unsigned one reads `-59` as enormous, and both
+/// answers look like an answer.
+///
+/// The traps are separate programs because a trap ends the run, and they are here
+/// for the widths rather than for the wording: the divide-overflow guard compares
+/// against **the width's** minimum, so an `Int8` `-128 / -1` has to trap where a
+/// guard written for `Int64` would silently return -128.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn every_integer_width_wraps_where_the_interpreter_wraps() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-ints");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let widths = "\
+type Widths = { a: Int8, b: Int16, c: Int32, d: UInt8, e: UInt32, f: UInt64 }
+
+fn negate(x: Int8) -> Int8 {
+    return 0 - x
+}
+
+fn main() -> Int64 {
+    // Wrapping at each signed width — the operators wasm has to renormalize.
+    let a: Int8 = 100
+    let b: Int16 = 30000
+    let c: Int32 = 2000000000
+    print(a * 2)
+    print(b + b)
+    print(c + c)
+    // `0 - x` takes its width from the RIGHT operand, which is the one shape a
+    // left-operand-only rule gets wrong.
+    print(negate(a))
+
+    // Through memory: a record field and an array element, where a zero-extending
+    // load turns -59 into 197.
+    let w: Widths = Widths {
+        a: Int8(0 - 59),
+        b: Int16(0 - 300),
+        c: Int32(0 - 7),
+        d: 200,
+        e: 4000000000,
+        f: 18446744073709551615,
+    }
+    print(w.a)
+    print(w.b)
+    print(w.c)
+    print(w.d)
+    print(w.e)
+    print(w.f)
+    let xs: Array<Int8> = [Int8(0 - 59), 7]
+    print(xs[0])
+    print(xs[1])
+
+    // Comparisons, where the wrong opcode is a plausible answer both ways.
+    print(w.a < 0)
+    print(w.e > 2000000000)
+    print(w.f > 9223372036854775807)
+
+    // Division and remainder at each signedness.
+    print(w.d / 3)
+    print(w.d % 3)
+    print(w.c / 2)
+    print(w.c % 2)
+    print(w.f / 3)
+    print(w.f % 7)
+
+    // Conversions in both directions, including the two that discard bits.
+    print(Int64(w.a))
+    print(Int64(w.e))
+    print(Int8(w.e))
+    print(UInt8(w.a))
+    print(Int8(200))
+    print(UInt16(w.c))
+
+    // Bitwise at a narrow width: `>>` is arithmetic on the signed one and
+    // logical on the unsigned one, and `~` complements inside the width.
+    print(w.c & 12)
+    print(w.a >> 2)
+    print(w.d >> 2)
+    print(w.b << 4)
+    print(~w.a)
+    print(~w.e)
+    return 0
+}
+";
+    let path = dir.join("widths.vyrn");
+    std::fs::write(&path, widths).unwrap();
+    let module = dir.join("widths.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .env("VYRN_WASM_BACKEND", "direct")
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // Pinned rather than only compared: two backends can be confidently wrong
+    // together about a width, and every number here is one a wrong lowering also
+    // produces.
+    assert_eq!(
+        norm(&interp.stdout),
+        "-56\n-5536\n-294967296\n-100\n\
+         -59\n-300\n-7\n200\n4000000000\n18446744073709551615\n-59\n7\n\
+         true\ntrue\ntrue\n\
+         66\n2\n-3\n-1\n6148914691236517205\n1\n\
+         -59\n4000000000\n0\n197\n-56\n65529\n\
+         8\n-15\n50\n-4800\n58\n294967295\n",
+        "the interpreter moved"
+    );
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+
+    // The numeric traps, at widths other than `Int64` — the divide-overflow guard
+    // is the one that has to know the width rather than assume 64 bits. Each is a
+    // program of its own because a trap ends the run, and the divisor comes out of
+    // a call so the checker's const path cannot fold it into a compile error.
+    for (what, src, wording) in [
+        (
+            "minovf",
+            "fn neg1() -> Int8 { return Int8(0 - 1) }\n\
+             fn main() -> Int64 {\n let m: Int8 = Int8(0 - 128)\n print(m / neg1())\n return 0\n}\n",
+            "integer overflow in division",
+        ),
+        (
+            "div0",
+            "fn zero() -> UInt8 { return 0 }\n\
+             fn main() -> Int64 {\n let x: UInt8 = 200\n print(x / zero())\n return 0\n}\n",
+            "division by zero",
+        ),
+        (
+            "rem0",
+            "fn zero() -> UInt64 { return 0 }\n\
+             fn main() -> Int64 {\n let x: UInt64 = 200\n print(x % zero())\n return 0\n}\n",
+            "remainder by zero",
+        ),
+        // A shift by the width, and by a NEGATIVE amount — one unsigned `>=`
+        // covers both, which is the claim being checked rather than asserted.
+        (
+            "shiftwide",
+            "fn eight() -> UInt8 { return 8 }\n\
+             fn main() -> Int64 {\n let x: UInt8 = 3\n print(x << eight())\n return 0\n}\n",
+            "shift amount out of range",
+        ),
+        (
+            "shiftneg",
+            "fn negone() -> Int32 { return Int32(0 - 1) }\n\
+             fn main() -> Int64 {\n let x: Int32 = 3\n print(x >> negone())\n return 0\n}\n",
+            "shift amount out of range",
+        ),
+    ] {
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src).unwrap();
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .env("VYRN_WASM_BACKEND", "direct")
+            .output()
+            .expect("build wasm");
+        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg(&module);
+        let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+        assert!(
+            runtime_err(&interp.stderr).contains(wording),
+            "{what}: the interpreter moved: {:?}",
+            runtime_err(&interp.stderr)
+        );
+        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
     }
 }
 

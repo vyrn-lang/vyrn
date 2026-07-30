@@ -365,6 +365,13 @@ impl Cx {
         ftypes::resolve(&self.sub(ty), &self.types)
     }
 
+    /// Whether a narrow scalar load of `ty` has to sign-extend — [`load_of`]'s
+    /// second argument, kept here so it comes off the same type the shape does
+    /// rather than being decided at the load.
+    fn signed(&self, ty: &Type) -> bool {
+        Num::of(&self.resolve(ty)).is_some_and(|n| n.signed)
+    }
+
     /// The signature of `f` specialized at `type_args`, discovering it — and
     /// handing out its function index — if this is the first site to ask.
     fn instantiate(
@@ -696,7 +703,7 @@ fn lower_fn(m: &mut Module, f: &Function, sig: &Sig, cx: &Cx) -> Result<(), Stri
                 Repr::Scalar(v) => {
                     let own = b.local(*v);
                     b.ins(&Instruction::LocalGet(local));
-                    b.ins(&load_of(&ll, 0));
+                    b.ins(&load_of(&ll, 0, cx.signed(&p.ty)));
                     b.ins(&Instruction::LocalSet(own));
                     Place::Local(own)
                 }
@@ -1190,6 +1197,35 @@ impl Fn_<'_> {
             }
             return Ok(());
         }
+        // An integer resize, and it has to come BEFORE the `ll`-equality
+        // shortcut: `llt` prints `i8` for both `Int8` and `UInt8`, so two types
+        // with the same shape can still want different bits in the carrier —
+        // an `Int8` is sign-extended where a `UInt8` is masked. That pair is
+        // exactly what the shortcut would have swallowed silently.
+        //
+        // Widening reads the SOURCE's signedness (a `UInt8` zero-extends, an
+        // `Int8` sign-extends); narrowing discards bits and renormalizes into the
+        // TARGET's. That is the interpreter's `wrap_intn` and the textual
+        // backend's `sext`/`zext`/`trunc`, and both stop being separate rules the
+        // moment [`Num`]'s invariant is written down.
+        if let (Some(f), Some(t)) = (Num::of(&self.cx.resolve(from)), Num::of(&self.cx.resolve(to)))
+        {
+            match (f == t, f.wide(), t.wide()) {
+                (true, ..) => {}
+                (_, false, true) => widen(b, f),
+                (_, true, false) => {
+                    b.ins(&Instruction::I32WrapI64);
+                    renorm(b, t);
+                }
+                // Both carriers are `i64`, so only the signedness changed and the
+                // bits do not move.
+                (_, true, true) => {}
+                // Both in an `i32`: the source's representation already holds the
+                // bits, and only the target's normalization is owed.
+                (_, false, false) => renorm(b, t),
+            }
+            return Ok(());
+        }
         if self.cx.ll(from) == self.cx.ll(to) {
             return Ok(());
         }
@@ -1202,36 +1238,6 @@ impl Fn_<'_> {
         {
             if self.cx.ll(&inner) == self.cx.ll(&el) {
                 return self.heapify(b, &inner, n, to, line);
-            }
-        }
-        // The other direction: a narrow unsigned int widening to `Int64` is a
-        // zero-extension, because zero-extended is the invariant everything narrow
-        // is kept in (`load_of`'s `I32Load8U`, and the mask below).
-        if matches!(self.cx.resolve(to), Type::Int | Type::IntN { bits: 64, .. }) {
-            if let Type::IntN { bits, signed: false } = self.cx.resolve(from) {
-                if bits <= 16 {
-                    b.ins(&Instruction::I64ExtendI32U);
-                    return Ok(());
-                }
-            }
-        }
-        // A plain integer flowing into a sized slot truncates, which is the
-        // interpreter's `wrap_intn` and the textual backend's one `trunc`.
-        //
-        // UNSIGNED, and no wider than 16 bits. Those are exactly the widths whose
-        // zero-extended `i32` compares the same signed or unsigned, so `binary`
-        // needs no second comparison table and `load_of`'s `I32Load8U` invariant
-        // holds everywhere. A signed narrow int would need the opposite extension
-        // and a `UInt32` needs unsigned comparisons; both are refused rather than
-        // guessed at, and they are the row `Add on Int32` names.
-        if let Type::IntN { bits, signed: false } = self.cx.resolve(to) {
-            if bits <= 16 && matches!(self.cx.resolve(from), Type::Int | Type::IntN { .. }) {
-                if self.cx.ll(from) == "i64" {
-                    b.ins(&Instruction::I32WrapI64);
-                }
-                b.ins(&Instruction::I32Const(((1u32 << bits) - 1) as i32));
-                b.ins(&Instruction::I32And);
-                return Ok(());
             }
         }
         // RFC-0002's record width subtyping: a wider record used as a narrower
@@ -1264,7 +1270,7 @@ impl Fn_<'_> {
                 Repr::Scalar(_) => {
                     b.slot(off + dl.fields[i]);
                     b.ins(&Instruction::LocalGet(src));
-                    b.ins(&load_of(&self.cx.ll(&f.ty), sl.fields[j]));
+                    b.ins(&load_of(&self.cx.ll(&f.ty), sl.fields[j], self.cx.signed(&f.ty)));
                     b.ins(&store_of(&self.cx.ll(&f.ty)));
                 }
                 Repr::Agg(fl) => {
@@ -1334,7 +1340,7 @@ impl Fn_<'_> {
                     match (place, &fr) {
                         (Place::Local(loc), _) => {
                             b.ins(&Instruction::LocalGet(addr));
-                            b.ins(&load_of(&self.cx.ll(ty), l.fields[i]));
+                            b.ins(&load_of(&self.cx.ll(ty), l.fields[i], self.cx.signed(ty)));
                             b.ins(&Instruction::LocalSet(loc));
                         }
                         (Place::Slot(off), Repr::Agg(fl)) => {
@@ -1443,7 +1449,7 @@ impl Fn_<'_> {
                     Place::Static(at) => match self.cx.repr(&t, *line)? {
                         Repr::Scalar(_) => {
                             b.ins(&Instruction::I32Const(at as i32));
-                            b.ins(&load_of(&self.cx.ll(&t), 0));
+                            b.ins(&load_of(&self.cx.ll(&t), 0, self.cx.signed(&t)));
                         }
                         _ => {
                             b.ins(&Instruction::I32Const(at as i32));
@@ -1459,7 +1465,7 @@ impl Fn_<'_> {
                 }
                 let (off, fty) = self.field_of(&base, field, *line)?;
                 match self.cx.repr(&fty, *line)? {
-                    Repr::Scalar(_) => b.ins(&load_of(&self.cx.ll(&fty), off)),
+                    Repr::Scalar(_) => b.ins(&load_of(&self.cx.ll(&fty), off, self.cx.signed(&fty))),
                     Repr::Agg(_) => b
                         .ins(&Instruction::I32Const(off as i32))
                         .ins(&Instruction::I32Add),
@@ -1526,13 +1532,31 @@ impl Fn_<'_> {
             }
             Expr::Unary { op, expr, line } => {
                 let t = self.expr(m, b, expr)?;
-                match (op, self.cx.resolve(&t)) {
-                    // `0 - x`, which is also what makes `Int64.min` negate to
-                    // itself — the wrapping the interpreter does, for free.
-                    (UnOp::Neg, Type::Int) => {
-                        b.ins(&Instruction::I64Const(-1)).ins(&Instruction::I64Mul);
+                let rt = self.cx.resolve(&t);
+                match (op, Num::of(&rt)) {
+                    // `x * -1`, which is also what makes the width's minimum
+                    // negate to itself — the wrapping the interpreter does, for
+                    // free. `~x` is `x ^ -1`, and both then renormalize because a
+                    // narrow carrier holds more bits than the width.
+                    (UnOp::Neg | UnOp::BitNot, Some(n)) => {
+                        if n.wide() {
+                            b.ins(&Instruction::I64Const(-1));
+                            b.ins(if *op == UnOp::Neg {
+                                &Instruction::I64Mul
+                            } else {
+                                &Instruction::I64Xor
+                            });
+                        } else {
+                            b.ins(&Instruction::I32Const(-1));
+                            b.ins(if *op == UnOp::Neg {
+                                &Instruction::I32Mul
+                            } else {
+                                &Instruction::I32Xor
+                            });
+                        }
+                        renorm(b, n);
                     }
-                    (UnOp::Not, Type::Bool) => {
+                    (UnOp::Not, _) if rt == Type::Bool => {
                         b.ins(&Instruction::I32Eqz);
                     }
                     _ => return unsupported("a unary operator on this type", *line),
@@ -1814,95 +1838,116 @@ impl Fn_<'_> {
             b.ins(&cmp_i32(op).ok_or_else(|| gap(&format!("`{op:?}` on booleans"), line))?);
             return Ok(Type::Bool);
         }
-        // A narrow unsigned int is an `i32` on the stack, zero-extended — so its
-        // comparisons are the `i32` ones and no arithmetic table is implied. Only
-        // the widths `coerce` will produce, for the same reason it stops at 16.
-        if let Type::IntN { bits, signed: false } = lt {
-            if bits <= 16 {
-                self.expr_as(m, b, rhs, &lt)?;
-                if let Some(i) = cmp_i32(op) {
-                    b.ins(&i);
-                    return Ok(Type::Bool);
+        let Some(mut n) = Num::of(&lt) else {
+            return unsupported(&format!("`{op:?}` on `{l}`"), line);
+        };
+        // The op width comes from EITHER operand: a plain-`Int` literal sibling
+        // adopts a sized one's width, which is the textual backend's `numty`
+        // rule. Taking it from the left alone would compute `0 - eight` (an
+        // `Int32`) in 64 bits — the same answer for `+`/`-`/`*` and a different
+        // one for `/`, `>>` and every comparison. `peek` is allowed to fail here:
+        // "not obviously sized" is the answer the left operand already gave.
+        let mut opty = lt.clone();
+        if n == Num::PLAIN {
+            if let Ok(rt) = self.peek(rhs, line) {
+                let rt = self.cx.resolve(&rt);
+                if let Some(rn) = Num::of(&rt).filter(|rn| *rn != Num::PLAIN) {
+                    // The left operand is already on the stack. It moves to the
+                    // narrower width through the M2d seam, like any other flow.
+                    self.coerce(m, b, None, &lt, &rt, line)?;
+                    (opty, n) = (rt, rn);
                 }
-                // Wrapping arithmetic at the width: mask after the operator, which
-                // IS the wrap for an unsigned type (the interpreter's `wrap_intn`),
-                // and is why this stops at the operators that only overflow.
-                // Division needs the two traps and an unsigned divide, so it stays
-                // in the sized-int row with the signed widths.
-                let ins = match op {
-                    BinOp::Add => Instruction::I32Add,
-                    BinOp::Sub => Instruction::I32Sub,
-                    BinOp::Mul => Instruction::I32Mul,
-                    _ => return unsupported(&format!("`{op:?}` on `{l}`"), line),
-                };
-                b.ins(&ins);
-                b.ins(&Instruction::I32Const(((1u32 << bits) - 1) as i32));
-                b.ins(&Instruction::I32And);
-                return Ok(lt);
             }
         }
-        if lt != Type::Int && lt != (Type::IntN { bits: 64, signed: true }) {
-            return unsupported(&format!("`{op:?}` on `{l}`"), line);
-        }
-        // The RESOLVED operand type, and the result is that too — arithmetic runs
-        // on the base representation, so `age + 1` must not validate `1` against
-        // `Age`'s predicate. It is the *assignment* that re-validates the sum,
-        // which is why the LLVM emitter returns its `numty` rather than `lty`.
-        self.expr_as(m, b, rhs, &lt)?;
-        // Division is the one arithmetic operator with control flow in it. Both
-        // operands come off the stack into scratch first, because the checks
-        // need to look at them and then hand them back; and the overflow case is
-        // checked rather than left to wasm, whose own `i64.div_s` trap would put
-        // wasmtime's wording on stderr where parity compares ours.
-        if matches!(op, BinOp::Div | BinOp::Rem) {
-            let d = self.scratch(b, ValType::I64, 0);
-            let n = self.scratch(b, ValType::I64, 1);
-            let (div0, ovf, trap) = (self.cx.rt.msg_div0, self.cx.rt.msg_divovf, self.cx.rt.trap);
-            let msg = if op == BinOp::Div { div0 } else { self.cx.rt.msg_rem0 };
+        // The RESOLVED operand type — arithmetic runs on the base representation,
+        // so `age + 1` must not validate `1` against `Age`'s predicate. It is the
+        // *assignment* that re-validates the sum, which is why the LLVM emitter
+        // returns its `numty` rather than `lty`.
+        self.expr_as(m, b, rhs, &opty)?;
+        // Division and the shifts are the operators with control flow in them.
+        // Both operands come off the stack into scratch first, because the checks
+        // have to look at them and then hand them back; and every case is checked
+        // rather than left to wasm, whose own `div_s` trap would put wasmtime's
+        // wording on stderr where parity compares ours.
+        if matches!(op, BinOp::Div | BinOp::Rem | BinOp::Shl | BinOp::Shr) {
+            let c = if n.wide() { ValType::I64 } else { ValType::I32 };
+            let (d, num) = (self.scratch(b, c, 0), self.scratch(b, c, 1));
+            let trap = self.cx.rt.trap;
+            let msg = match op {
+                BinOp::Div => self.cx.rt.msg_div0,
+                BinOp::Rem => self.cx.rt.msg_rem0,
+                _ => self.cx.rt.msg_shift,
+            };
             b.ins(&Instruction::LocalSet(d));
-            b.ins(&Instruction::LocalSet(n));
+            b.ins(&Instruction::LocalSet(num));
             b.ins(&Instruction::LocalGet(d));
-            b.ins(&Instruction::I64Eqz);
+            if matches!(op, BinOp::Shl | BinOp::Shr) {
+                // RFC-0045: a shift by `>= the width`, or a negative amount,
+                // traps. ONE unsigned `>=` covers both — a negative amount reads
+                // as a huge unsigned — which is exactly the interpreter's
+                // `y < 0 || y >= bits` and the textual backend's `icmp uge`.
+                if n.wide() {
+                    b.ins(&Instruction::I64Const(i64::from(n.bits)));
+                    b.ins(&Instruction::I64GeU);
+                } else {
+                    b.ins(&Instruction::I32Const(i32::from(n.bits)));
+                    b.ins(&Instruction::I32GeU);
+                }
+            } else if n.wide() {
+                b.ins(&Instruction::I64Eqz);
+            } else {
+                b.ins(&Instruction::I32Eqz);
+            }
             b.ins(&Instruction::If(BlockType::Empty));
             b.ins(&Instruction::I32Const(msg as i32));
             b.ins(&Instruction::Call(trap));
             b.ins(&Instruction::End);
-            if op == BinOp::Div {
-                // INT64_MIN / -1 has no representable answer. (`%` is exempt:
-                // wasm defines `i64.rem_s` there as 0, which is what LLVM's
-                // `srem` and the interpreter both produce.)
+            if op == BinOp::Div && n.signed {
+                // The width's minimum over -1 has no representable answer.
+                // (`%` is exempt: wasm defines `rem_s` there as 0, which is what
+                // LLVM's rewritten `srem` and the interpreter both produce. An
+                // unsigned divide is exempt because it has no minimum.)
+                let min = i64::MIN >> (64 - n.bits);
+                let ovf = self.cx.rt.msg_divovf;
                 b.ins(&Instruction::LocalGet(d));
-                b.ins(&Instruction::I64Const(-1));
-                b.ins(&Instruction::I64Eq);
-                b.ins(&Instruction::LocalGet(n));
-                b.ins(&Instruction::I64Const(i64::MIN));
-                b.ins(&Instruction::I64Eq);
+                if n.wide() {
+                    b.ins(&Instruction::I64Const(-1)).ins(&Instruction::I64Eq);
+                    b.ins(&Instruction::LocalGet(num));
+                    b.ins(&Instruction::I64Const(min)).ins(&Instruction::I64Eq);
+                } else {
+                    b.ins(&Instruction::I32Const(-1)).ins(&Instruction::I32Eq);
+                    b.ins(&Instruction::LocalGet(num));
+                    b.ins(&Instruction::I32Const(min as i32)).ins(&Instruction::I32Eq);
+                }
                 b.ins(&Instruction::I32And);
                 b.ins(&Instruction::If(BlockType::Empty));
                 b.ins(&Instruction::I32Const(ovf as i32));
                 b.ins(&Instruction::Call(trap));
                 b.ins(&Instruction::End);
             }
-            b.ins(&Instruction::LocalGet(n));
+            b.ins(&Instruction::LocalGet(num));
             b.ins(&Instruction::LocalGet(d));
         }
-        let ins = match op {
-            BinOp::Add => Instruction::I64Add,
-            BinOp::Sub => Instruction::I64Sub,
-            BinOp::Mul => Instruction::I64Mul,
-            BinOp::Div => Instruction::I64DivS,
-            BinOp::Rem => Instruction::I64RemS,
-            BinOp::Eq => Instruction::I64Eq,
-            BinOp::NotEq => Instruction::I64Ne,
-            BinOp::Lt => Instruction::I64LtS,
-            BinOp::LtEq => Instruction::I64LeS,
-            BinOp::Gt => Instruction::I64GtS,
-            BinOp::GtEq => Instruction::I64GeS,
-            _ => return unsupported(&format!("`{op:?}`"), line),
-        };
-        b.ins(&ins);
+        b.ins(&int_op(op, n).ok_or_else(|| gap(&format!("`{op:?}` on `{opty}`"), line))?);
         Ok(match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => lt,
+            // Arithmetic and bitwise keep the operand's integer type; a
+            // comparison is a `Bool`. `&`/`|`/`^` and `>>` would preserve the
+            // representation invariant on their own — two values whose high bits
+            // already agree still agree — but `<<` shifts foreign bits in, so
+            // renormalizing the whole group is one rule rather than five.
+            BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Div
+            | BinOp::Rem
+            | BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::BitXor
+            | BinOp::Shl
+            | BinOp::Shr => {
+                renorm(b, n);
+                opty
+            }
             _ => Type::Bool,
         })
     }
@@ -1922,11 +1967,14 @@ impl Fn_<'_> {
                 }
                 let t = self.expr(m, b, &args[0])?;
                 match self.cx.resolve(&t) {
-                    Type::Int | Type::IntN { bits: 64, signed: true } => {
-                        b.ins(&Instruction::Call(self.cx.rt.print_i64));
-                    }
-                    Type::IntN { bits, signed: false } if bits <= 16 => {
-                        b.ins(&Instruction::I64ExtendI32U);
+                    // Every width goes through one `i64` printer: widened by its
+                    // own signedness, and then told whether to look for a sign.
+                    // An unsigned type prints its magnitude, which is the
+                    // interpreter's `*v as u64`.
+                    ref it if Num::of(it).is_some() => {
+                        let n = Num::of(it).unwrap();
+                        widen(b, n);
+                        b.ins(&Instruction::I32Const(n.signed as i32));
                         b.ins(&Instruction::Call(self.cx.rt.print_i64));
                     }
                     Type::Str => {
@@ -1949,13 +1997,13 @@ impl Fn_<'_> {
                 let t = self.expr(m, b, &args[0])?;
                 match self.cx.resolve(&t) {
                     Type::Str => {}
-                    Type::Int | Type::IntN { bits: 64, signed: true } => {
-                        b.ins(&Instruction::Call(self.cx.rt.int_str));
-                    }
-                    // A narrow unsigned int is a zero-extended `i32`, so widening it
-                    // is the whole conversion — the digits are the same ones.
-                    Type::IntN { bits, signed: false } if bits <= 16 => {
-                        b.ins(&Instruction::I64ExtendI32U);
+                    // The same two steps `print` takes, for the same reason: the
+                    // digits of a sized int are the digits of the `i64` its own
+                    // signedness widens it to.
+                    ref it if Num::of(it).is_some() => {
+                        let n = Num::of(it).unwrap();
+                        widen(b, n);
+                        b.ins(&Instruction::I32Const(n.signed as i32));
                         b.ins(&Instruction::Call(self.cx.rt.int_str));
                     }
                     Type::Bool => {
@@ -2267,7 +2315,7 @@ impl Fn_<'_> {
         // one case that needs a fixup after the call: a scalar in a wasm local has
         // no address at all, so it is spilled to a slot for the callee to write
         // through and read back afterwards.
-        let mut reload: Vec<(u32, u32, String)> = Vec::new();
+        let mut reload: Vec<(u32, u32, String, bool)> = Vec::new();
         for (i, (a, p)) in args.iter().zip(&sig.params).enumerate() {
             if sig.modify.get(i) != Some(&true) {
                 self.expr_as(m, b, a, p)?;
@@ -2290,7 +2338,7 @@ impl Fn_<'_> {
                     b.ins(&Instruction::LocalGet(l));
                     b.ins(&store_of(&ll));
                     b.slot(off);
-                    reload.push((off, l, ll));
+                    reload.push((off, l, ll, self.cx.signed(&ty)));
                 }
                 // A frame slot or module state: hand over the address itself, so
                 // the callee's copy-out lands in the caller's own storage.
@@ -2302,9 +2350,9 @@ impl Fn_<'_> {
             }
         }
         b.ins(&Instruction::Call(sig.index));
-        for (off, l, ll) in &reload {
+        for (off, l, ll, signed) in &reload {
             b.slot(*off);
-            b.ins(&load_of(ll, 0));
+            b.ins(&load_of(ll, 0, *signed));
             b.ins(&Instruction::LocalSet(*l));
         }
         if let Some(off) = dest {
@@ -2473,7 +2521,7 @@ impl Fn_<'_> {
         }
         match self.cx.repr(&w.elem, line)? {
             Repr::Scalar(_) => {
-                b.ins(&load_of(&self.cx.ll(&w.elem), 0));
+                b.ins(&load_of(&self.cx.ll(&w.elem), 0, self.cx.signed(&w.elem)));
             }
             Repr::Agg(_) => {}
             Repr::Unit => return unsupported("an array of Unit", line),
@@ -3345,7 +3393,7 @@ impl Fn_<'_> {
                     Repr::Scalar(v) => {
                         let l = b.local(v);
                         b.ins(&Instruction::LocalGet(p));
-                        b.ins(&load_of(&ll, 0));
+                        b.ins(&load_of(&ll, 0, self.cx.signed(t)));
                         b.ins(&Instruction::LocalSet(l));
                         Place::Local(l)
                     }
@@ -3379,6 +3427,149 @@ fn word8() -> MemArg {
 }
 
 /// The comparison instruction for an `i32`-shaped operand pair.
+/// A Vyrn integer type as this backend has to think about it: a width, a
+/// signedness, and the wasm carrier both imply.
+///
+/// wasm has `i32` and `i64` arithmetic and nothing narrower, so an `Int8` rides
+/// an `i32` that has to be put back in range after every operator which could
+/// leave it. The invariant kept everywhere is the interpreter's own: a value is
+/// **correctly represented** in its carrier — sign-extended when signed,
+/// zero-extended when not — which is exactly where `wrap_intn` leaves it in an
+/// `i64`. That is what makes [`renorm`] the only place a width is enforced, and
+/// lets signedness pick an opcode rather than a fixup.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Num {
+    bits: u8,
+    signed: bool,
+}
+
+impl Num {
+    /// `Int` and `Int64` are one type, and it is the default.
+    const PLAIN: Num = Num { bits: 64, signed: true };
+
+    /// The integer type `ty` *is*, or `None` for anything that is not one. Takes
+    /// a RESOLVED type, so a validated name has already become its base.
+    fn of(ty: &Type) -> Option<Num> {
+        match ty {
+            Type::Int => Some(Num::PLAIN),
+            Type::IntN { bits, signed } => Some(Num { bits: *bits, signed: *signed }),
+            _ => None,
+        }
+    }
+
+    /// Whether the carrier is an `i64`. Everything 32 bits and under rides an
+    /// `i32`, which is `wasm::abi`'s answer rather than a choice made here.
+    fn wide(self) -> bool {
+        self.bits == 64
+    }
+}
+
+/// Put a value back in range after an operator that could have left it.
+///
+/// A no-op where the carrier IS the width (32 and 64 bits), one instruction
+/// otherwise. Called after every wrapping operator rather than only where
+/// overflow looks possible, because the invariant is what every other site reads.
+fn renorm(b: &mut Frame, n: Num) {
+    match (n.bits, n.signed) {
+        (8, true) => b.ins(&Instruction::I32Extend8S),
+        (16, true) => b.ins(&Instruction::I32Extend16S),
+        (8, false) => b.ins(&Instruction::I32Const(0xFF)).ins(&Instruction::I32And),
+        (16, false) => b.ins(&Instruction::I32Const(0xFFFF)).ins(&Instruction::I32And),
+        _ => b,
+    };
+}
+
+/// Widen an integer to the `i64` the `print`/`toString` runtime takes.
+fn widen(b: &mut Frame, n: Num) {
+    if !n.wide() {
+        b.ins(if n.signed {
+            &Instruction::I64ExtendI32S
+        } else {
+            &Instruction::I64ExtendI32U
+        });
+    }
+}
+
+/// The wasm opcode for `op` at width `n` — the whole sized-int table, in one
+/// place, which is what M2e's "the arithmetic is i64-only" note was about.
+///
+/// The two carriers have structurally identical opcode sets, so the shape of the
+/// match is the shape of the fact: the carrier picks `i32` or `i64`, and
+/// signedness picks only where wasm has two opcodes (divide, remainder, the
+/// orderings, and the right shift). `Eq`/`NotEq` and `+`/`-`/`*` have one each
+/// because two's complement makes them signedness-blind.
+fn int_op(op: BinOp, n: Num) -> Option<Instruction<'static>> {
+    let (w, s) = (n.wide(), n.signed);
+    Some(match op {
+        BinOp::Add if w => Instruction::I64Add,
+        BinOp::Add => Instruction::I32Add,
+        BinOp::Sub if w => Instruction::I64Sub,
+        BinOp::Sub => Instruction::I32Sub,
+        BinOp::Mul if w => Instruction::I64Mul,
+        BinOp::Mul => Instruction::I32Mul,
+        BinOp::Div => match (w, s) {
+            (true, true) => Instruction::I64DivS,
+            (true, false) => Instruction::I64DivU,
+            (false, true) => Instruction::I32DivS,
+            (false, false) => Instruction::I32DivU,
+        },
+        BinOp::Rem => match (w, s) {
+            (true, true) => Instruction::I64RemS,
+            (true, false) => Instruction::I64RemU,
+            (false, true) => Instruction::I32RemS,
+            (false, false) => Instruction::I32RemU,
+        },
+        BinOp::Eq if w => Instruction::I64Eq,
+        BinOp::Eq => Instruction::I32Eq,
+        BinOp::NotEq if w => Instruction::I64Ne,
+        BinOp::NotEq => Instruction::I32Ne,
+        BinOp::Lt => match (w, s) {
+            (true, true) => Instruction::I64LtS,
+            (true, false) => Instruction::I64LtU,
+            (false, true) => Instruction::I32LtS,
+            (false, false) => Instruction::I32LtU,
+        },
+        BinOp::LtEq => match (w, s) {
+            (true, true) => Instruction::I64LeS,
+            (true, false) => Instruction::I64LeU,
+            (false, true) => Instruction::I32LeS,
+            (false, false) => Instruction::I32LeU,
+        },
+        BinOp::Gt => match (w, s) {
+            (true, true) => Instruction::I64GtS,
+            (true, false) => Instruction::I64GtU,
+            (false, true) => Instruction::I32GtS,
+            (false, false) => Instruction::I32GtU,
+        },
+        BinOp::GtEq => match (w, s) {
+            (true, true) => Instruction::I64GeS,
+            (true, false) => Instruction::I64GeU,
+            (false, true) => Instruction::I32GeS,
+            (false, false) => Instruction::I32GeU,
+        },
+        BinOp::BitAnd if w => Instruction::I64And,
+        BinOp::BitAnd => Instruction::I32And,
+        BinOp::BitOr if w => Instruction::I64Or,
+        BinOp::BitOr => Instruction::I32Or,
+        BinOp::BitXor if w => Instruction::I64Xor,
+        BinOp::BitXor => Instruction::I32Xor,
+        BinOp::Shl if w => Instruction::I64Shl,
+        BinOp::Shl => Instruction::I32Shl,
+        // A signed `>>` is arithmetic and an unsigned one is logical — and both
+        // preserve the representation invariant, because shifting a
+        // sign-extended value right keeps its sign bits and shifting a masked one
+        // keeps its zeroes.
+        BinOp::Shr => match (w, s) {
+            (true, true) => Instruction::I64ShrS,
+            (true, false) => Instruction::I64ShrU,
+            (false, true) => Instruction::I32ShrS,
+            (false, false) => Instruction::I32ShrU,
+        },
+        // `&&`, `||` and `=~` are not arithmetic; they were handled before this.
+        BinOp::And | BinOp::Or | BinOp::Match => return None,
+    })
+}
+
 fn cmp_i32(op: BinOp) -> Option<Instruction<'static>> {
     Some(match op {
         BinOp::Eq => Instruction::I32Eq,
@@ -3395,15 +3586,23 @@ fn cmp_i32(op: BinOp) -> Option<Instruction<'static>> {
 ///
 /// The widths come from `llt`'s vocabulary rather than from a guess, and the
 /// alignment is the natural one because `layout` placed the field there.
-fn load_of(ll: &str, off: u32) -> Instruction<'static> {
+///
+/// `signed` is [`Num`]'s invariant crossing a load: `llt` prints `i8` for both
+/// `Int8` and `UInt8`, so the bytes in memory do not say how to extend them —
+/// which is the same ambiguity the textual backend resolves with a `sext`/`zext`
+/// at each use. Here it rides the load, so a caller cannot forget it. It is
+/// ignored for every shape whose carrier IS its width, and for a `Bool`, which
+/// occupies a byte holding 0 or 1.
+fn load_of(ll: &str, off: u32, signed: bool) -> Instruction<'static> {
     let m = |align| MemArg { offset: off as u64, align, memory_index: 0 };
     match ll {
         "i64" => Instruction::I64Load(m(3)),
         "double" => Instruction::F64Load(m(3)),
         "float" => Instruction::F32Load(m(2)),
         "i32" | "ptr" => Instruction::I32Load(m(2)),
+        "i16" if signed => Instruction::I32Load16S(m(1)),
         "i16" => Instruction::I32Load16U(m(1)),
-        // An `i1` occupies a byte, and a Vyrn `Bool` is 0 or 1 in it.
+        "i8" if signed => Instruction::I32Load8S(m(0)),
         _ => Instruction::I32Load8U(m(0)),
     }
 }
@@ -3451,6 +3650,7 @@ struct Rt {
     msg_div0: u32,
     msg_rem0: u32,
     msg_divovf: u32,
+    msg_shift: u32,
     msg_aoob: u32,
     msg_soob: u32,
     msg_oob_end: u32,
@@ -3496,6 +3696,7 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
         msg_div0: 0,
         msg_rem0: 0,
         msg_divovf: 0,
+        msg_shift: 0,
         msg_aoob: 0,
         msg_soob: 0,
         msg_oob_end: 0,
@@ -3506,6 +3707,7 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
     rt.msg_div0 = rt.intern(m, "error: division by zero\n");
     rt.msg_rem0 = rt.intern(m, "error: remainder by zero\n");
     rt.msg_divovf = rt.intern(m, "error: integer overflow in division\n");
+    rt.msg_shift = rt.intern(m, "error: shift amount out of range\n");
     // The bounds message has the offending index in the MIDDLE, so it is three
     // pieces rather than one interned string — see `trap_idx` below.
     rt.msg_aoob = rt.intern(m, "error: array index ");
@@ -3684,13 +3886,13 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
 
     print_i64(m, write_all);
 
-    // int_str(v) — the same digit loop as `print_i64`, into a fresh 24-byte
-    // block. The digits are written backwards from the end, so the result
+    // int_str(v, signed) — the same digit loop as `print_i64`, into a fresh
+    // 24-byte block. The digits are written backwards from the end, so the result
     // pointer is wherever they stopped.
-    let (pp, neg) = (2, 3);
+    let (pp, neg) = (3, 4);
     let malloc = rt.malloc;
     m.func(
-        &[ValType::I64],
+        &[ValType::I64, ValType::I32],
         &[ValType::I32],
         &[ValType::I32, ValType::I32],
         0,
@@ -3705,6 +3907,8 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
             b.ins(&Instruction::LocalGet(0))
                 .ins(&Instruction::I64Const(0))
                 .ins(&Instruction::I64LtS)
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I32And)
                 .ins(&Instruction::LocalTee(neg))
                 .ins(&Instruction::If(BlockType::Empty))
                 .ins(&Instruction::I64Const(0))
@@ -3807,7 +4011,10 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
                 .ins(&Instruction::Call(write_all));
         };
         put(b, 0);
-        b.ins(&Instruction::LocalGet(1)).ins(&Instruction::Call(int_str)).ins(&Instruction::LocalSet(s));
+        b.ins(&Instruction::LocalGet(1))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::Call(int_str))
+            .ins(&Instruction::LocalSet(s));
         put(b, s);
         put(b, 2);
         b.ins(&Instruction::I32Const(1)).ins(&Instruction::Call(proc_exit));
@@ -4091,12 +4298,17 @@ fn print_i64(m: &mut Module, write_all: u32) -> u32 {
     // A 32-byte buffer at the bottom of the frame; 20 digits and a sign is the
     // widest an i64 gets.
     const BUF_END: u32 = 32;
-    let (v, p, neg) = (0, 2, 3); // param 0, base is 1, then our two
-    m.func(&[ValType::I64], &[], &[ValType::I32, ValType::I32], BUF_END, |b| {
-        // neg = v < 0; v = |v| as unsigned
+    let (v, sgn, p, neg) = (0, 1, 3, 4); // params 0 and 1, base is 2, then our two
+    m.func(&[ValType::I64, ValType::I32], &[], &[ValType::I32, ValType::I32], BUF_END, |b| {
+        // neg = signed && v < 0; v = |v| as unsigned. An unsigned type prints its
+        // magnitude — the interpreter's `*v as u64` — so the caller says which,
+        // rather than there being a second digit loop to keep in step with this
+        // one.
         b.ins(&Instruction::LocalGet(v))
             .ins(&Instruction::I64Const(0))
             .ins(&Instruction::I64LtS)
+            .ins(&Instruction::LocalGet(sgn))
+            .ins(&Instruction::I32And)
             .ins(&Instruction::LocalTee(neg))
             .ins(&Instruction::If(BlockType::Empty))
             .ins(&Instruction::I64Const(0))
