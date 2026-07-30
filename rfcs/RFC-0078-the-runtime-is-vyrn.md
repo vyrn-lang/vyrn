@@ -143,6 +143,11 @@ at any time.
 - **M4 — the string and number tier.** `chars` (UTF-8 decode), `parse`, the `%f`
   formatter `f64_str` (~300 lines of emitted wasm that should be ~40 lines of
   Vyrn), `stringFromBytes`.
+  **M4a (the number half) DONE — see "M4a, as landed".** Text -> number is a
+  LIBRARY (`std/num`), standing on two irreducible primitives (`floatBits` /
+  `floatFromBits`) rather than on a `parseFloat` builtin. M3's block is lifted.
+  `f64_str` was NOT retired and the reason is measured rather than deferred.
+  M4b — `chars`, `stringFromBytes`, and the `%f` direction — is untouched.
 - **M5 — the interpreter's fast paths become caches.** Each Rust arm either
   delegates to the Vyrn definition or is documented as an optimization that
   parity proves equivalent. The count of Rust arms should fall.
@@ -760,3 +765,181 @@ green, `doc --std --verify` clean. The shim's exported boundary is **unchanged**
 `vsb_puts` was `static`, so deleting it moves the total (96 -> 95) and not the
 boundary. A milestone that retires no builtin should not move that number, and this
 one did not.
+
+---
+
+## M4a, as landed: text -> number is a library, and the primitive is a bitcast
+
+M3 stopped because a decoder written in Vyrn cannot turn `JNum`'s raw text into a
+`Float64` — there is no expression in the language that does text -> float. M4a
+makes that expression exist, and the decision it turns on is the one this
+milestone was created to make.
+
+### The decision: a library, and the primitive is not the conversion
+
+**Text -> number is a LIBRARY.** `std/num` is 250 lines of ordinary Vyrn, and no
+engine implements any part of it. What went into the compiler is smaller and of a
+different kind: **`floatBits(Float64) -> UInt64` and
+`floatFromBits(UInt64) -> Float64`**, the two IEEE-754 bit views. They are
+`f64::to_bits` in the interpreter, `bitcast double to i64` in the textual emitter
+and `i64.reinterpret_f64` in the direct wasm backend — one instruction each, and
+on the direct backend not even that, since the value stack already holds the bits.
+
+The argument for "primitive" was that the shim gets `strtod` from libc for free.
+It does — and the direct wasm backend does not, which is the whole point. A
+`parseFloat` builtin would have to grow a correctly-rounded decimal-to-binary
+conversion in hand-emitted `wasm-encoder` calls, next to the ~300 lines M2h
+already wrote for the other direction, and then that conversion would exist three
+times. Two reinterpretation instructions buy the way out of writing it even once
+in wasm.
+
+The general form of the finding, which is worth more than the decision: **the
+irreducible primitive was not the operation, it was the missing VIEW.** Nothing in
+the language could construct a `Float64` from anything except another number, so
+every text -> float route had to be a builtin. Give Vyrn the bits and the
+operation stops needing to be primitive at all — in either direction.
+
+### The primitive list, which is M1 discharged for numbers
+
+RFC-0077 M2j measured a directly-emitted module's import list as **twelve WASI
+functions plus `__vyrn_malloc`**. M3 proved that list incomplete. It now reads:
+
+| kind | primitives |
+|---|---|
+| memory | `__vyrn_malloc` |
+| syscalls | the twelve WASI imports (RFC-0077 M2j) |
+| representation | `floatBits`, `floatFromBits` |
+
+Three kinds, and the third is new as a *category*: a primitive that performs no
+work and calls nothing, existing only because a value has two readings and the
+language could name one of them. M4b's `chars` and `stringFromBytes` should be
+checked against the same question before they are assumed to need a builtin —
+`bytes` already exists, so the string half may already have its view.
+
+### Correctly rounded, and how that is known rather than claimed
+
+The conversion is exact, not floating point. The decimal stays a digit array and
+is scaled by powers of two until it lies in `[1/2, 1)`; from there repeated
+doubling hands over one mantissa bit at a time and the leftover fraction decides
+the rounding — above a half up, below down, exactly a half to even, and a
+truncated tail turns a tie into a round-up because the true value is then strictly
+greater. Subnormals are not a special case but a smaller bit budget; overflow is
+an exponent field that ran past its maximum. The only `Float64` in the file is the
+one assembled from bits at the end. It is M2h's `%f` algorithm run backwards,
+which is why "library" was the right answer rather than a hopeful one.
+
+"Correctly rounded" is checked against an oracle rather than asserted.
+`tests/numbers.rs` compares `parseFloat64` against Rust's own
+`str::parse::<f64>()` **bit for bit over 302 inputs**: the exact ties at `2^53`,
+the two literals that hung PHP and Java, both ends of the subnormal range and half
+the smallest one, the largest finite double and the first value past it, a
+900-digit significand that exercises the truncation flag, sixteen refusals, and
+220 deterministic pseudorandom decimals. All 302 agree. Flipping ties-to-even to
+ties-to-odd breaks three of them, so the oracle bites rather than nodding.
+
+The naive version scaled one bit at a time and took 0.8 s to parse `1e308` on the
+interpreter. Scaling a whole 32 bits per pass — the remainder stays under `2^32`,
+so `r * 10 + digit` still fits an `Int64` — took the module's suite from 2.9 s to
+0.44 s. Worth recording because it is the same trade M2h made in the other
+direction and reached the opposite way: M2h used base 10^6 limbs to make the
+scaling one loop, this uses base 10 digits and scales 32 bits at a time.
+
+### Pinning first found a bug in a third engine, again
+
+`examples/numbytes.vyrn` walks every numeric conversion the language has and pins
+twenty-eight rows as literals BEFORE anything moved. Three rows would not have
+been guessed and one of them was a defect:
+
+- `parse` **wraps** on overflow rather than declining, so
+  `parse("18446744073709551615")` is `Some(-1)`. That is the smaller half of what
+  M3 measured as blocking, and `std/num`'s `parseInt64`/`parseUInt64` are the
+  answer to it — they refuse, exactly.
+- `9.9999995` looks like a tie and is not one, so it is `9.999999`. `UInt8(300.7)`
+  is `44` and not `255`, because the float saturates into 64 bits and the
+  narrowing then wraps.
+- **Float -> integer was POISON on the native backend.** `Int64(10^300)` printed
+  `Int64.min` natively against `Int64.max` under the interpreter; `UInt64(-1.5)`
+  printed `UInt64.max` against `0`; `Int64(NaN)` printed `Int64.min` against `0`.
+  A bare `fptosi`/`fptoui` is undefined out of range and `convert_val`'s own
+  comment said "unspecified (as in C/LLVM)" — but the interpreter is Rust's `as`,
+  which saturates, and M2h had already made the direct wasm backend match the
+  interpreter. Native was alone, and no example had ever converted an
+  out-of-range float. Fixed with `llvm.fptosi.sat`/`llvm.fptoui.sat` into 64 bits
+  and a wrapping `trunc`, which is the interpreter's two steps one for one.
+
+That is the fourth milestone in a row where pinning the boring rows first found
+something only running could catch, and the second where the defect was in the
+engine nobody suspected.
+
+### One general backend bug, found by putting a float somewhere new
+
+`Option<Float64>` classified its payload as `Word::Ext` — the narrow-INTEGER case
+— and emitted `i64.extend_i32_u` against an `f64` on the stack. The direct backend
+produced a module **wasmtime refused to load**, rather than the "unsupported"
+diagnostic it produces for everything it cannot lower. Nothing in the corpus had
+ever put a float in a sum payload. Fixed generally for `Option` and `Result`,
+`Float64` and `Float32`, by reinterpreting the bits into the word.
+
+### `f64_str` was not retired, and this is the measurement rather than a deferral
+
+The brief allowed retiring it if it fell out. It does not, and the reason is not
+difficulty:
+
+- `float_str` is **511 lines** of `direct.rs` including its doc, with **two** call
+  sites: `print` of a float and `.toString()` on one.
+- It is one of THREE implementations. The interpreter formats with `{:.6}` and the
+  native build selects a format string around `printf("%f")`. RFC-0078's own rule
+  is whole builtin or none, so retiring `f64_str` means retiring all three.
+- Which makes float printing a call into a linked Vyrn module, through M2b's
+  injected-import mechanism, on every program that prints a float — a far larger
+  blast radius than `toJson`, which most programs never mention.
+
+So it is a milestone, not a corollary, and it needs its own pin of `print` before
+it is attempted. What M4a leaves behind is that the milestone is now *possible*:
+`floatBits` is exactly the primitive a Vyrn `%f` needs, and it exists on every
+engine. M2h's pinned cases all still pass, unchanged —
+`six_decimals_of_a_float_are_the_exact_ones` is green, and
+`examples/numbytes.vyrn` pins the same values a second time under the interpreter
+and the native build.
+
+`parse` itself also stays a builtin, with its two implementations, and that is a
+decision rather than an oversight: `std/num`'s integer parsers are not a second
+definition of it because they behave observably differently (refusing where
+`parse` wraps), so folding `parse` into `std/num` is a language change — the
+overflow semantics of every existing caller — and not a mechanical move. It is
+named here so the next milestone does not have to rediscover it.
+
+### The count, with the method stated, because this document has now been wrong four times
+
+Counting C function definitions in `RUNTIME_SHIM`, **including one-line
+definitions** (`double __vyrn_vj_asfloat(VJ* v) { return strtod(v->text, 0); }` is
+a definition and the obvious regex misses it), treating `static` as internal and
+everything else as the exported boundary:
+
+| | |
+|---|---|
+| C function definitions in the shim | 95 (66 exported, 29 static) |
+| deleted in this milestone | **0** |
+
+Unchanged, and it should be: M4a moved no builtin out of C. It added a capability
+that had no implementation anywhere, and the two primitives it did add are in the
+emitters rather than in the shim — `bitcast` and `i64.reinterpret_f64` need no C
+at all. A milestone that retires no builtin must not move that number, and the
+honest report is a zero rather than a smaller number reached by counting
+differently. (The method above is stated precisely enough to reproduce: it yields
+M3's 95 / 66 / 29 exactly, which is how it was checked.)
+
+### Gates, at this note
+
+1219 workspace tests (was 1216 — `std/num`'s unit blocks, the numeric pins and the
+differential test against Rust's parser), parity green three ways over 84 examples
+including both new ones, the RFC-0077 ladder at **46/84** (was 45/82 — `numparse`
+passes, `numbytes` does not, because it exercises the `parse` builtin this
+milestone deliberately did not move), genwasm green, `doc --std --verify` clean
+with `docs/api/std/num.md` added.
+
+**M3 is unblocked.** What it now needs is the two items its own note listed after
+the primitive: the ruling on strictness (surrogate pairs, duplicate keys, the
+`json.parse` wording), and the `Option<T>`-returning decoder shape. Neither is a
+missing primitive, and `std/jsonread` can `import { parseFloat64 } from "std/num"`
+today.
