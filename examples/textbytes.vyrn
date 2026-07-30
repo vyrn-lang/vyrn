@@ -1,0 +1,134 @@
+/// UTF-8 decoding and byte-offset line/column — `std/text` (RFC-0078 M4b).
+///
+/// Three builtins written as ordinary Vyrn: `chars`, `lineAt`, `colAt`. Nothing is
+/// retired — the builtins still exist and this example prints BOTH answers on
+/// every row, so a disagreement between the Vyrn version and any engine's
+/// implementation shows up as a diff rather than as a passing test.
+///
+/// The interesting rows are the malformed ones. A `String` cannot hold invalid
+/// UTF-8, so `chars` never sees a bad byte and the only place two decoders can
+/// differ is the accept/reject decision — which `stringFromBytes` makes and
+/// `decodeUtf8` has to make identically. `\xc0 \xaf` (an overlong `/`), a lone
+/// continuation byte, a truncated sequence, a surrogate and a codepoint above
+/// U+10FFFF are here because those are the five shapes a plausible-looking
+/// decoder waves through.
+///
+/// The one row where they legitimately differ is NUL: it is valid UTF-8, and a
+/// Vyrn `String` still cannot carry it (RFC-0014).
+
+import { charsV, colAtV, decodeUtf8, lineAtV, showCps } from "std/text"
+
+/// One codepoint row: the Vyrn decode, then the builtin's, so parity compares
+/// them against each other as well as against the pinned literals.
+fn cps(s: String) -> String {
+    return showCps(charsV(s)) + " | " + showCps(chars(s))
+}
+
+/// One byte-buffer row: whether `decodeUtf8` accepted, and whether
+/// `stringFromBytes` did. These must match everywhere except the NUL rule.
+fn verdict(b: Array<UInt8>) -> String {
+    let mine = match decodeUtf8(b) {
+        Some(cs) => "accept " + showCps(cs),
+        None => "reject",
+    }
+    let theirs = match stringFromBytes(b) {
+        Ok(s) => "accept " + showCps(chars(s)),
+        Err(e) => "reject: " + e,
+    }
+    return mine + " | " + theirs
+}
+
+/// One line/column row, again both ways.
+fn lc(b: Array<UInt8>, off: Int64) -> String {
+    return lineAtV(b, off).toString() + ":" + colAtV(b, off).toString() + " | " +
+    lineAt(b, off).toString() + ":" + colAt(b, off).toString()
+}
+
+fn main() -> Int64 {
+    // ---- the four widths ----------------------------------------------------
+    print(cps("hi")) // 104,105
+    print(cps("é")) // 233 — two bytes
+    print(cps("€")) // 8364 — three
+    print(cps("😀")) // 128512 — four, astral
+    print(cps("a€😀é"))
+    print(cps("")) // empty
+    // U+FFFF and U+10000: the boundary where three bytes become four.
+    print(cps("\u{ffff}\u{10000}"))
+    // The last codepoint there is, spelled as text this time.
+    print(cps("\u{10ffff}"))
+
+    // ---- the malformed table ------------------------------------------------
+    print(verdict(bytes("héllo"))) // valid, for contrast
+    print(verdict([])) // the empty buffer is a valid empty String
+    print(verdict(['\xc0', '\xaf'])) // overlong '/'
+    print(verdict(['\x80'])) // lone continuation
+    print(verdict(['\xe2', '\x82'])) // truncated 3-byte
+    print(verdict(['\xed', '\xa0', '\x80'])) // a surrogate half
+    print(verdict(['\xf5', '\x80', '\x80', '\x80'])) // above U+10FFFF
+    print(verdict(['\xf4', '\x8f', '\xbf', '\xbf'])) // U+10FFFF exactly — legal
+    print(verdict(['\xf4', '\x90', '\x80', '\x80'])) // one past it
+    print(verdict(['\xe0', '\x80', '\x80'])) // overlong 3-byte
+    print(verdict(['\xf0', '\x80', '\x80', '\x80'])) // overlong 4-byte
+    // Valid UTF-8 that a `String` still cannot hold: the one row where the two
+    // verdicts differ, and the reason is NUL termination rather than UTF-8.
+    print(verdict(['h', '\x00', 'i']))
+
+    // ---- line and column, 1-based -------------------------------------------
+    let b = bytes("ab\ncd\n\nx")
+    print(lc(b, 0)) // 1:1 — the first byte
+    print(lc(b, 2)) // 1:3 — the LF itself
+    print(lc(b, 3)) // 2:1 — immediately after a newline
+    print(lc(b, 6)) // 3:1 — the empty line
+    print(lc(b, 7)) // 4:1 — the last byte
+    print(lc(b, 99)) // 4:2 — past the end reads as the end
+    // No newline anywhere.
+    print(lc(bytes("abcd"), 3)) // 1:4
+    // `\r\n`: one break, and the CR holds a column of its own.
+    let crlf = bytes("ab\r\ncd")
+    print(lc(crlf, 2)) // 1:3 — the CR
+    print(lc(crlf, 3)) // 1:4 — the LF
+    print(lc(crlf, 4)) // 2:1
+    // A multi-byte codepoint spans two columns, because the column counts BYTES.
+    print(lc(bytes("éx"), 1)) // 1:2 — inside `é`
+    print(lc(bytes("éx"), 2)) // 1:3 — the `x`, not column 2
+    return 0
+}
+
+/// The pins. Parity already runs `main` three ways; these assert the actual text,
+/// so a change is a diff against a literal rather than against whatever came out.
+test "the four UTF-8 widths decode to the same codepoints both ways" {
+    assertEq(cps("hi"), "104,105 | 104,105")
+    assertEq(cps("é"), "233 | 233")
+    assertEq(cps("€"), "8364 | 8364")
+    assertEq(cps("😀"), "128512 | 128512")
+    assertEq(cps("a€😀é"), "97,8364,128512,233 | 97,8364,128512,233")
+    assertEq(cps(""), " | ")
+    assertEq(cps("\u{ffff}\u{10000}"), "65535,65536 | 65535,65536")
+    assertEq(cps("\u{10ffff}"), "1114111 | 1114111")
+}
+
+test "the two validators agree on every malformed shape" {
+    assertEq(verdict(['\xc0', '\xaf']), "reject | reject: bytes are not valid UTF-8")
+    assertEq(verdict(['\x80']), "reject | reject: bytes are not valid UTF-8")
+    assertEq(verdict(['\xe2', '\x82']), "reject | reject: bytes are not valid UTF-8")
+    assertEq(verdict(['\xed', '\xa0', '\x80']), "reject | reject: bytes are not valid UTF-8")
+    assertEq(verdict(['\xf5', '\x80', '\x80', '\x80']), "reject | reject: bytes are not valid UTF-8")
+    assertEq(verdict(['\xf4', '\x90', '\x80', '\x80']), "reject | reject: bytes are not valid UTF-8")
+    assertEq(verdict(['\xe0', '\x80', '\x80']), "reject | reject: bytes are not valid UTF-8")
+    assertEq(verdict(['\xf0', '\x80', '\x80', '\x80']), "reject | reject: bytes are not valid UTF-8")
+    assertEq(verdict(['\xf4', '\x8f', '\xbf', '\xbf']), "accept 1114111 | accept 1114111")
+    assertEq(verdict([]), "accept  | accept ")
+    // The NUL row, stated rather than hidden: valid UTF-8, refused as a String.
+    assertEq(verdict(['h', '\x00', 'i']), "accept 104,0,105 | reject: bytes contain a NUL byte")
+}
+
+test "line and column match the builtins, and the column is in bytes" {
+    let b = bytes("ab\ncd\n\nx")
+    assertEq(lc(b, 0), "1:1 | 1:1")
+    assertEq(lc(b, 3), "2:1 | 2:1")
+    assertEq(lc(b, 7), "4:1 | 4:1")
+    assertEq(lc(b, 99), "4:2 | 4:2")
+    assertEq(lc(bytes("abcd"), 3), "1:4 | 1:4")
+    assertEq(lc(bytes("ab\r\ncd"), 4), "2:1 | 2:1")
+    assertEq(lc(bytes("éx"), 2), "1:3 | 1:3")
+}
