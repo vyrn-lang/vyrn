@@ -2540,3 +2540,31 @@ What is genuinely large is what is left after that: `Match` on strings is
 RFC-0046's DFA, and the function-value worklist is RFC-0023 plus RFC-0037's
 defunctionalization, which M2a already identified as the one place this module has
 a function table.
+
+### The runtime table registers itself (not a milestone)
+
+RFC-0078's census flagged the shape of `Rt`, the emitted runtime's function table,
+as a hazard: the indices were hand-written as `base + n` with a `count` that had to
+agree, so emission order was load-bearing, adding an entry renumbered every entry
+after it, and a misnumber only failed loudly where the two signatures differed.
+M2l's three cell functions had to get that right by care. So the numbering is now
+handed out — `Rt::slots` appends and returns what it appended, `count` is the
+length, and a struct literal that names every field means a field added and not
+registered is a compile error rather than an index of zero pointing at `write_all`.
+
+Order is still load-bearing, because a `call` carries an index; it is now
+*honestly* load-bearing. Every one of the 35 emit sites is preceded by
+`rt.next_is(m, rt.<helper>)`, which asserts that the function about to be written
+is the one the table reserved, and `runtime` asserts the total on the way out. A
+boundary check per group would have been cheaper and would have missed the case
+that matters: `read_file` and `read_file_bytes` are both `(i32, i32) -> ()`, and
+`malloc`, `strlen` and `charcount` are all `(i32) -> i32`, so exchanging two
+members of either set keeps the count right and produces a module that *validates*
+and then reads the wrong thing. Exchanging the two `read_file` declarations was
+tried: it now panics while compiling `fib`, which calls neither. A test pins the
+other half — one index per helper, dense from `base`, `count` equal to the number
+handed out.
+
+Pure refactor, and it is checked as one: `fib`, `mapdemo` and `freelist` emit
+byte-identical modules before and after, and the ladder is unchanged at 63/87 on
+both link shapes.

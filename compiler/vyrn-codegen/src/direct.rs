@@ -5479,6 +5479,96 @@ struct Rt {
 }
 
 impl Rt {
+    /// Hand out the index of every runtime function, in the order the bodies are
+    /// emitted below.
+    ///
+    /// The numbering has to precede the emission, because a body calls helpers
+    /// that do not exist yet — `print_str` calls `strlen`, `concat` calls
+    /// `malloc`. What it does NOT have to do is name numbers: `slot` appends and
+    /// gives back what it appended, so a new helper is one line here beside the
+    /// place its body is emitted, `count` is however many were handed out, and the
+    /// two cannot disagree. The hand-numbered version could: an entry inserted
+    /// mid-table renumbered every entry after it, and a `call` that came out
+    /// pointing at the wrong function only failed loudly where the two signatures
+    /// differed. Two helpers with the same wasm signature swapped silently, and
+    /// there are several such sets here: `read_file` and `read_file_bytes` are both
+    /// `(i32, i32) -> ()`, `malloc`, `strlen` and `charcount` are all
+    /// `(i32) -> i32`.
+    ///
+    /// The returned table is that record: name beside index, which is what the
+    /// consistency test checks and what a reader wanting the emission order reads.
+    fn slots(base: u32) -> (Rt, Vec<(&'static str, u32)>) {
+        let mut table: Vec<(&'static str, u32)> = Vec::new();
+        let mut slot = |name: &'static str| {
+            let i = base + table.len() as u32;
+            table.push((name, i));
+            i
+        };
+        // Every field is named, so a field added to `Rt` and forgotten here is a
+        // compile error rather than an index of zero pointing at `write_all`.
+        let mut rt = Rt {
+            write_all: slot("write_all"),
+            malloc: slot("malloc"),
+            strlen: slot("strlen"),
+            strcmp: slot("strcmp"),
+            trap: slot("trap"),
+            print_str: slot("print_str"),
+            print_i64: slot("print_i64"),
+            int_str: slot("int_str"),
+            bool_str: slot("bool_str"),
+            concat: slot("concat"),
+            trap_idx: slot("trap_idx"),
+            charcount: slot("charcount"),
+            utf8valid: slot("utf8valid"),
+            str_from_bytes: slot("str_from_bytes"),
+            slice: slot("slice"),
+            f64_str: slot("f64_str"),
+            starts: slot("starts"),
+            env_get: slot("env_get"),
+            str_i64: slot("str_i64"),
+            now_millis: slot("now_millis"),
+            mono_nanos: slot("mono_nanos"),
+            random_seed: slot("random_seed"),
+            args: slot("args"),
+            getbyte: slot("getbyte"),
+            read_line: slot("read_line"),
+            open_at: slot("open_at"),
+            read_all: slot("read_all"),
+            err3: slot("err3"),
+            read_file: slot("read_file"),
+            read_file_bytes: slot("read_file_bytes"),
+            write_file: slot("write_file"),
+            cell_new: slot("cell_new"),
+            cell_addr: slot("cell_addr"),
+            cell_release: slot("cell_release"),
+            map_find: slot("map_find"),
+            // Derived, not declared. The data segment addresses are filled in by
+            // `runtime` as it interns them.
+            count: 0,
+            msg_div0: 0,
+            msg_rem0: 0,
+            msg_divovf: 0,
+            msg_shift: 0,
+            msg_aoob: 0,
+            msg_soob: 0,
+            msg_oob_end: 0,
+        };
+        rt.count = table.len() as u32;
+        (rt, table)
+    }
+
+    /// Assert that the function about to be emitted is the one `want` reserved.
+    ///
+    /// The declared order and the emission order are two lists, and a `call`
+    /// carries an index — so this is the seam where they have to agree, and it is
+    /// checked at every helper rather than once at the end because a swap WITHIN
+    /// the runtime leaves the count right. That is the silent case: `read_file` and
+    /// `read_file_bytes` have the same wasm signature, so a module with the two
+    /// exchanged still validates and then reads the wrong thing.
+    fn next_is(&self, m: &Module, want: u32) {
+        assert_eq!(m.next_func(), want, "a runtime helper was emitted out of declared order");
+    }
+
     /// A string literal's address in the data segment, NUL-terminated because a
     /// Vyrn `String` is a `ptr` and everything downstream scans for the zero.
     fn intern(&self, m: &mut Module, s: &str) -> u32 {
@@ -5499,51 +5589,7 @@ fn word() -> MemArg {
 fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     let (fd_write, proc_exit) = (wasi.fd_write, wasi.proc_exit);
     let base = m.n_imports();
-    let mut rt = Rt {
-        write_all: base,
-        malloc: base + 1,
-        strlen: base + 2,
-        strcmp: base + 3,
-        trap: base + 4,
-        print_str: base + 5,
-        print_i64: base + 6,
-        int_str: base + 7,
-        bool_str: base + 8,
-        concat: base + 9,
-        trap_idx: base + 10,
-        charcount: base + 11,
-        utf8valid: base + 12,
-        str_from_bytes: base + 13,
-        slice: base + 14,
-        f64_str: base + 15,
-        starts: base + 16,
-        env_get: base + 17,
-        str_i64: base + 18,
-        now_millis: base + 19,
-        mono_nanos: base + 20,
-        random_seed: base + 21,
-        args: base + 22,
-        getbyte: base + 23,
-        read_line: base + 24,
-        open_at: base + 25,
-        read_all: base + 26,
-        err3: base + 27,
-        read_file: base + 28,
-        read_file_bytes: base + 29,
-        write_file: base + 30,
-        cell_new: base + 31,
-        cell_addr: base + 32,
-        cell_release: base + 33,
-        map_find: base + 34,
-        count: 35,
-        msg_div0: 0,
-        msg_rem0: 0,
-        msg_divovf: 0,
-        msg_shift: 0,
-        msg_aoob: 0,
-        msg_soob: 0,
-        msg_oob_end: 0,
-    };
+    let (mut rt, _table) = Rt::slots(base);
     let nl = rt.intern(m, "\n");
     let t = rt.intern(m, "true");
     let f = rt.intern(m, "false");
@@ -5569,6 +5615,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     // first of which arrived — so the retry is here rather than at three call
     // sites that would each have to remember it.
     let nw = 4;
+    rt.next_is(m, rt.write_all);
     m.func(
         &[ValType::I32, ValType::I32, ValType::I32],
         &[],
@@ -5617,6 +5664,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     // the AST), so a real allocator belongs here eventually; nothing observable
     // depends on it, because a free is not a thing a program can print.
     let p = 2;
+    rt.next_is(m, rt.malloc);
     if let Some(shim_malloc) = shim_malloc {
         m.func(&[ValType::I32], &[ValType::I32], &[], 0, |b| {
             // The shim takes an `unsigned long long`, so the size widens; a Vyrn
@@ -5655,6 +5703,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     }
 
     // strlen(s)
+    rt.next_is(m, rt.strlen);
     m.func(&[ValType::I32], &[ValType::I32], &[ValType::I32], 0, |b| {
         b.ins(&Instruction::LocalGet(0))
             .ins(&Instruction::LocalSet(p))
@@ -5679,6 +5728,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     // strcmp(a, b) — byte order, unsigned, which is what a Vyrn `String`
     // comparison is (RFC-0022) since a String is UTF-8 bytes.
     let (ca, cb) = (3, 4);
+    rt.next_is(m, rt.strcmp);
     m.func(
         &[ValType::I32, ValType::I32],
         &[ValType::I32],
@@ -5726,6 +5776,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     // would print wasmtime's wording, and parity compares stderr.
     let strlen = rt.strlen;
     let write_all = rt.write_all;
+    rt.next_is(m, rt.trap);
     m.func(&[ValType::I32], &[], &[], 0, |b| {
         b.ins(&Instruction::I32Const(2))
             .ins(&Instruction::LocalGet(0))
@@ -5737,6 +5788,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     });
 
     // print_str(s) — the bytes, then the newline.
+    rt.next_is(m, rt.print_str);
     m.func(&[ValType::I32], &[], &[], 0, |b| {
         b.ins(&Instruction::I32Const(1))
             .ins(&Instruction::LocalGet(0))
@@ -5749,6 +5801,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
             .ins(&Instruction::Call(write_all));
     });
 
+    rt.next_is(m, rt.print_i64);
     print_i64(m, write_all);
 
     // int_str(v, signed) — the same digit loop as `print_i64`, into a fresh
@@ -5756,6 +5809,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     // pointer is wherever they stopped.
     let (pp, neg) = (3, 4);
     let malloc = rt.malloc;
+    rt.next_is(m, rt.int_str);
     m.func(
         &[ValType::I64, ValType::I32],
         &[ValType::I32],
@@ -5815,6 +5869,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     );
 
     // bool_str(v) — the literal, not a copy of it. Nothing frees a String here.
+    rt.next_is(m, rt.bool_str);
     m.func(&[ValType::I32], &[ValType::I32], &[], 0, |b| {
         b.ins(&Instruction::LocalGet(0))
             .ins(&Instruction::If(BlockType::Result(ValType::I32)))
@@ -5826,6 +5881,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
 
     // concat(a, b)
     let (la, lb, r) = (3, 4, 5);
+    rt.next_is(m, rt.concat);
     m.func(
         &[ValType::I32, ValType::I32],
         &[ValType::I32],
@@ -5866,6 +5922,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     // Three writes rather than a `printf`: varargs are M3, and this is the only
     // runtime message with a number in it.
     let int_str = rt.int_str;
+    rt.next_is(m, rt.trap_idx);
     m.func(&[ValType::I32, ValType::I64, ValType::I32], &[], &[ValType::I32], 0, |b| {
         let s = 4; // params 0..2, the frame base 3, then ours
         let put = |b: &mut Frame, p: u32| {
@@ -5892,6 +5949,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     // A String is NUL-terminated and an interior NUL is rejected at construction,
     // so scanning to the zero is exact — the same argument `strlen` rests on.
     let n = 3;
+    rt.next_is(m, rt.charcount);
     m.func(&[ValType::I32], &[ValType::I64], &[ValType::I32, ValType::I32], 0, |b| {
         b.ins(&Instruction::Block(BlockType::Empty))
             .ins(&Instruction::Loop(BlockType::Empty))
@@ -5930,6 +5988,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     // loop never needs an early exit.
     let utf8d = m.data(&crate::utf8d_table(), 1);
     let (i, st) = (3, 4);
+    rt.next_is(m, rt.utf8valid);
     m.func(
         &[ValType::I32, ValType::I32],
         &[ValType::I32],
@@ -5986,6 +6045,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     // above, whose 3 is this function's base.
     let (buf, err, c, at_i) = (4, 5, 6, 7);
     let (utf8valid, malloc) = (rt.utf8valid, rt.malloc);
+    rt.next_is(m, rt.str_from_bytes);
     m.func(
         &[ValType::I32, ValType::I32, ValType::I32],
         &[],
@@ -6077,6 +6137,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     let split = rt.intern(m, "error: slice splits a UTF-8 character\n");
     let (strlen, trap) = (rt.strlen, rt.trap);
     let (slen, sub) = (5, 6);
+    rt.next_is(m, rt.slice);
     m.func(
         &[ValType::I32, ValType::I64, ValType::I64],
         &[ValType::I32],
@@ -6146,6 +6207,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
         },
     );
 
+    rt.next_is(m, rt.f64_str);
     float_str(m, malloc, nan, inf, ninf);
     io_runtime(m, &rt, wasi);
     cell_runtime(m, &rt);
@@ -6159,6 +6221,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
     // hit branches out of a block carrying the index in a local.
     let (i, found) = (3, 4);
     let strcmp = rt.strcmp;
+    rt.next_is(m, rt.map_find);
     m.func(
         &[ValType::I32, ValType::I32, ValType::I32],
         &[ValType::I32],
@@ -6196,6 +6259,9 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
         },
     );
 
+    // And the total: `count` is derived from the declarations, so this is the one
+    // place it meets the emission.
+    assert_eq!(m.next_func(), base + rt.count, "runtime function count");
     rt
 }
 
@@ -6241,6 +6307,7 @@ fn cell_runtime(m: &mut Module, rt: &Rt) {
     // `dest`, which is the aggregate ABI (M2b rule 3) rather than a special case:
     // a Ref is an aggregate, so it travels as the address of a caller's slot.
     let (s, p) = (2, 3);
+    rt.next_is(m, rt.cell_new);
     m.func(&[ValType::I32, ValType::I32], &[], &[ValType::I32, ValType::I32], 0, |b| {
         // Lazily allocate the slab on the first `cell`. Bump-allocated memory is
         // fresh wasm pages, which are zero — so the generations start at 0 and
@@ -6324,6 +6391,7 @@ fn cell_runtime(m: &mut Module, rt: &Rt) {
     // one without the other — `release` included, which calls this for the check
     // and drops the address.
     let base = 2;
+    rt.next_is(m, rt.cell_addr);
     m.func(&[ValType::I64, ValType::I64], &[ValType::I32], &[ValType::I32], 0, |b| {
         b.ins(&Instruction::I32Const(slab as i32))
             .ins(&Instruction::I32Load(word()))
@@ -6354,6 +6422,7 @@ fn cell_runtime(m: &mut Module, rt: &Rt) {
 
     // cell_release(slot) — bump the generation (invalidating every copy of the
     // reference) and push the slot for reuse.
+    rt.next_is(m, rt.cell_release);
     m.func(&[ValType::I64], &[], &[ValType::I32, ValType::I32], 0, |b| {
         let (sl, g) = (1, 2);
         b.ins(&Instruction::I32Const(slab as i32))
@@ -6439,6 +6508,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     let mono_ctr = m.reserve(8, 8);
 
     // starts(a, b) — whether NUL-terminated `a` begins with NUL-terminated `b`.
+    rt.next_is(m, rt.starts);
     m.func(&[ValType::I32, ValType::I32], &[ValType::I32], &[ValType::I32], 0, |b| {
         let c = 3; // params 0..1, the frame base 2, then ours
         b.ins(&Instruction::Block(BlockType::Result(ValType::I32)))
@@ -6480,6 +6550,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     // them is a few hundred bytes that nothing can observe.
     let (env_sizes, env_get_i) = (wasi.environ_sizes_get, wasi.environ_get);
     let starts = rt.starts;
+    rt.next_is(m, rt.env_get);
     m.func(
         &[ValType::I32],
         &[ValType::I32],
@@ -6557,6 +6628,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     // callers are `VYRN_FIXED_TIME` and `VYRN_FIXED_SEED`, which the harness writes
     // as bare decimals. A program that could pass arbitrary text here would need
     // the real thing.
+    rt.next_is(m, rt.str_i64);
     m.func(
         &[ValType::I32],
         &[ValType::I64],
@@ -6649,6 +6721,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     // the native shim's `tv_sec*1000 + tv_nsec/1e6` is the same floor division.
     // A failing clock reads 0, which is what `timespec_get` returning 0 gives.
     let clock_time_get = wasi.clock_time_get;
+    rt.next_is(m, rt.now_millis);
     m.func(&[], &[ValType::I64], &[ValType::I32], 8, |b| {
         let p = 1; // no params, the frame base 0, then ours
         b.ins(&Instruction::Block(BlockType::Result(ValType::I64)));
@@ -6670,6 +6743,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     // mono_nanos() — monotonic nanoseconds. Under a fixed clock the interpreter's
     // own base and step, so successive calls are byte-identical across backends;
     // otherwise `clock_time_get(MONOTONIC)`.
+    rt.next_is(m, rt.mono_nanos);
     m.func(&[], &[ValType::I64], &[ValType::I32], 8, |b| {
         let p = 1;
         b.ins(&Instruction::Block(BlockType::Result(ValType::I64)))
@@ -6707,6 +6781,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     // C leaves `v = 0` when `getentropy` fails, so pre-zeroing IS the error path
     // and there is no errno to check.
     let random_get = wasi.random_get;
+    rt.next_is(m, rt.random_seed);
     m.func(&[], &[ValType::I64], &[ValType::I32], 8, |b| {
         let p = 1;
         b.ins(&Instruction::Block(BlockType::Result(ValType::I64)));
@@ -6727,6 +6802,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     // exactly the buffer an `Array<String>` wants — the element stride IS
     // `of_ll("ptr")` — so dropping the program name is `+ 4` rather than a copy.
     let (args_sizes_get, args_get) = (wasi.args_sizes_get, wasi.args_get);
+    rt.next_is(m, rt.args);
     m.func(&[ValType::I32], &[], &[ValType::I32, ValType::I32], 8, |b| {
         let (cnt, ptrs) = (2, 3);
         b.slot(0).ins(&Instruction::I32Const(0)).ins(&Instruction::I32Store(word()));
@@ -6785,6 +6861,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     // fixture; a 4 KB buffer here would need its own invalidation story to stay
     // correct if anything else ever reads fd 0.
     let fd_read = wasi.fd_read;
+    rt.next_is(m, rt.getbyte);
     m.func(&[], &[ValType::I32], &[], 16, |b| {
         b.slot(0);
         b.slot(12);
@@ -6815,6 +6892,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     // the last of those is where the interpreter's `String::from_utf8` fails, so
     // the DFA decides it here rather than the caller.
     let getbyte = rt.getbyte;
+    rt.next_is(m, rt.read_line);
     m.func(
         &[ValType::I32],
         &[],
@@ -6936,6 +7014,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     // absolute path, and adding it means a string-prefix walk over
     // `fd_prestat_dir_name` for a case no example has.
     let (path_open, fd_prestat_get) = (wasi.path_open, wasi.fd_prestat_get);
+    rt.next_is(m, rt.open_at);
     m.func(
         &[ValType::I32, ValType::I32, ValType::I64],
         &[ValType::I32],
@@ -6991,6 +7070,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     // it is the same code for a regular file and for a pipe. The terminator is
     // there so a `String` result needs no second copy, and it is past `outlen`
     // bytes so a bytes result simply ignores it.
+    rt.next_is(m, rt.read_all);
     m.func(
         &[ValType::I32, ValType::I32],
         &[ValType::I32],
@@ -7079,6 +7159,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     // string the textual backend hands `__vyrn_snprintf`, so there is no second
     // wording to keep in step. Nothing frees, so the pieces are the interned
     // constants themselves.
+    rt.next_is(m, rt.err3);
     m.func(&[ValType::I32, ValType::I32, ValType::I32], &[ValType::I32], &[], 0, |b| {
         b.ins(&Instruction::LocalGet(0))
             .ins(&Instruction::LocalGet(1))
@@ -7149,6 +7230,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     // The NUL scan comes BEFORE the UTF-8 check and carries its own wording,
     // because a `String` is NUL-terminated: a file with one in it is not
     // representable rather than badly encoded, and the two messages differ.
+    rt.next_is(m, rt.read_file);
     m.func(
         &[ValType::I32, ValType::I32],
         &[],
@@ -7213,6 +7295,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     // The `Ok` payload is three words, so it does not fit the sum's two: it is
     // boxed, exactly as `Fn_::box_value` would box it, and the box IS the triple
     // rather than a copy of one built elsewhere.
+    rt.next_is(m, rt.read_file_bytes);
     m.func(
         &[ValType::I32, ValType::I32],
         &[],
@@ -7247,6 +7330,7 @@ fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi) {
     // A Vyrn `String` never contains a NUL (the readers above are why), so
     // `strlen` is its full length and there is no separate length to pass.
     let write_all = rt.write_all;
+    rt.next_is(m, rt.write_file);
     m.func(
         &[ValType::I32, ValType::I32, ValType::I32],
         &[],
@@ -7987,6 +8071,21 @@ mod tests {
     fn a_gap_names_the_construct_and_the_line() {
         let e: Result<(), String> = unsupported("`while`", 12);
         assert_eq!(e.unwrap_err(), "direct backend: no lowering for `while` at line 12");
+    }
+
+    /// The runtime table's invariant, checked rather than maintained by care:
+    /// one index per helper, all distinct, dense from `base`, and `count` equal to
+    /// however many were handed out. `runtime` asserts the other half — that the
+    /// bodies arrive at the indices declared here.
+    #[test]
+    fn every_runtime_helper_gets_its_own_index() {
+        let base = 7; // any offset; the imports are not always the same count
+        let (rt, table) = Rt::slots(base);
+        assert_eq!(table.len() as u32, rt.count, "count is the number of slots handed out");
+        let names: std::collections::HashSet<&str> = table.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names.len(), table.len(), "a name is registered twice");
+        let idx: Vec<u32> = table.iter().map(|(_, i)| *i).collect();
+        assert_eq!(idx, (base..base + rt.count).collect::<Vec<_>>(), "indices are dense and distinct");
     }
 
     fn cx() -> Cx {

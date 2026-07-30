@@ -336,6 +336,15 @@ impl Module {
         self.n_imports
     }
 
+    /// The index the next defined function will get.
+    ///
+    /// Emission order IS the numbering — indices are baked into every `call` — so
+    /// a lowering that reserved indices ahead of the bodies can check here that
+    /// the bodies arrived where it said they would.
+    pub fn next_func(&self) -> u32 {
+        self.n_imports + self.funcs.len()
+    }
+
     /// Export a defined function under `name` — `vyrn_entry`, and one per
     /// RFC-0012 `export extern fn` under its own `wasm-export-name`.
     pub fn export(&mut self, name: &str, func: u32) -> &mut Self {
