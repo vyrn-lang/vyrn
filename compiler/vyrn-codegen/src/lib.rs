@@ -26,6 +26,18 @@ use vyrn_frontend::own::DropKind;
 
 /// LLVM IR for the region/arena runtime (see the preamble comment in `emit`).
 ///
+/// Two ways out of a region and the difference is the free. `__vyrn_region_exit`
+/// pops the frame AND releases its chain, which is what a fall-through (and a
+/// `break`/`continue`, whose escapes RFC-0004's `region_store_guard` covers) wants.
+/// `__vyrn_region_pop` only pops, and it exists because a `return` out of a region
+/// can hand back a pointer INTO the frame it is leaving — the escape guard examines
+/// stores into named bindings, not return values, so `return a + b` is not covered
+/// by anything. Popping without freeing leaks that frame and cannot dangle, which
+/// is the trade RFC-0004's escape analysis has to be written before it can be
+/// improved on. Before this existed, `return` emitted neither call: the frame was
+/// never popped, so the 65th call to a function returning out of a region printed
+/// `error: region nesting exceeds 64` where every other engine printed an answer.
+///
 /// The arena stack is `thread_local` (RFC-0025): `region { .. }` is memory
 /// management, not an effect, so an isolated task may use it — and with tasks
 /// on real OS threads a shared stack would race. Per-thread stacks keep every
@@ -67,6 +79,14 @@ entry:
   store ptr %raw, ptr %slot
   %user = getelementptr i8, ptr %raw, i64 8
   ret ptr %user
+}
+
+define void @__vyrn_region_pop() {
+entry:
+  %sp = load i64, ptr @__vyrn_region_sp
+  %idx = sub i64 %sp, 1
+  store i64 %idx, ptr @__vyrn_region_sp
+  ret void
 }
 
 define void @__vyrn_region_exit() {
@@ -2376,12 +2396,20 @@ impl<'a> Gen<'a> {
     /// first), without popping the drop frames — used before an early `return`.
     /// The frames stay in place so the unwinding `gen_block`s see `terminated`
     /// and skip their own fall-through frees, so nothing is freed twice.
+    ///
+    /// Also balances the region stack, because every caller of this is a function
+    /// exit and a `return` (or a `?` propagation) can leave a region the same way
+    /// it leaves a block. `__vyrn_region_pop` and not `__vyrn_region_exit`: see
+    /// [`REGION_RUNTIME`] for why the returned value forbids the free.
     fn emit_all_drops(&mut self) {
         let frames: Vec<Vec<(String, DropKind)>> = self.drop_stack.iter().rev().cloned().collect();
         for frame in frames {
             for (slot, kind) in frame.iter().rev() {
                 self.emit_drop(slot, *kind);
             }
+        }
+        for _ in 0..self.region_depth {
+            self.emit("call void @__vyrn_region_pop()".into());
         }
     }
 
@@ -3185,7 +3213,7 @@ impl<'a> Gen<'a> {
                 //   it enters the outer aggregate, or a nested literal like
                 //   `[[1], [2, 3]]` lowers as a fixed 2-D C-array `[2 x [1 x i64]]`,
                 //   which is the wrong repr AND fails to build the moment two inner
-                //   literals differ in length. This was the only case handled.
+                //   literals differ in length.
                 // - A SIZED-INTEGER element (`Array<UInt8> = [65, 66]`) inferred
                 //   `Int` from the literal and emitted `[2 x i64]`, which the
                 //   consumer then read at the declared width: `store { ptr, i64,

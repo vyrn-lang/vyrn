@@ -2927,3 +2927,204 @@ fn main() -> Int64 {
     assert_eq!(rows[0].3, Some(1), "a failed validation exits 1");
 }
 
+/// Every edge that leaves a `region` balances the region stack NATIVELY, taken
+/// more often than the stack is deep.
+///
+/// RFC-0077 M2m's `every_exit_out_of_a_region_balances_and_the_65th_traps` is this
+/// test's shape and it measured the direct backend; this one measures the textual
+/// one, where `return` popped nothing at all. `Stmt::Region` emitted
+/// `@__vyrn_region_exit` on the fall-through path only, so a function returning out
+/// of a region consumed a slot per call: 70 calls printed `4900` under the
+/// interpreter and `error: region nesting exceeds 64`, exit 1, natively.
+///
+/// The fix is a pop that does NOT free (`@__vyrn_region_pop`), and the reason is in
+/// `REGION_RUNTIME`: `return a + b` can hand back a pointer into the frame it is
+/// leaving and RFC-0004's escape guard examines stores into named bindings, not
+/// return values. So reclamation on the return edge is deferred rather than
+/// attempted — it needs an escape analysis that does not exist, and this backend
+/// already frees nothing for `push`, for a cell payload or for `Stmt::Drop`.
+///
+/// `break` and `continue` were checked for the same hole and do not have it:
+/// `emit_loop_exit_cleanup` has unwound the regions opened inside a loop body since
+/// RFC-0060, and it can keep FREEING because `region_store_guard` does cover the
+/// stores those edges can make. `?` propagation did have it, and is covered here
+/// because it shares `emit_all_drops` with `return`.
+///
+/// Measured by sabotage, M2m's method: with the pop removed from `emit_all_drops`
+/// this traps at `error: region nesting exceeds 64` and prints nothing after the
+/// first two numbers, where the interpreter prints six.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_return_out_of_a_region_balances_the_region_stack_on_every_engine() {
+    let rows = three_engines(
+        "regionret",
+        "balance",
+        r#"
+fn viaReturn(n: Int64) -> Int64 {
+    region {
+        let a = n * 2
+        return a + 1
+    }
+    return 0
+}
+
+/// A region left by `return` from INSIDE a loop inside the region, so the return
+/// unwinds a loop and a region together.
+fn viaLoop(n: Int64) -> Int64 {
+    region {
+        let mut i = 0
+        while i < 10 {
+            if i == n % 10 {
+                return i
+            }
+            i = i + 1
+        }
+    }
+    return -1
+}
+
+/// Two regions open at the return, so one pop would not be enough.
+fn viaNested(n: Int64) -> Int64 {
+    region {
+        region {
+            return n + 1
+        }
+    }
+    return 0
+}
+
+/// `?` propagation out of a region: the same early-return edge, reached by an
+/// operator rather than by the keyword.
+fn viaTry(n: Int64) -> Option<Int64> {
+    region {
+        let half = if n % 2 == 0 { Some(n / 2) } else { None }
+        let h = half?
+        return Some(h + 1)
+    }
+    return None
+}
+
+/// A String built inside the region and returned out of it — the case that forbids
+/// the free. It must print, not crash.
+fn viaString(n: Int64) -> String {
+    region {
+        return "n=" + n.toString()
+    }
+    return ""
+}
+
+fn main() -> Int64 {
+    let mut a = 0
+    let mut i = 0
+    while i < 70 {
+        a = a + viaReturn(i)
+        i = i + 1
+    }
+    print(a)
+
+    let mut b = 0
+    let mut j = 0
+    while j < 200 {
+        b = b + viaLoop(j)
+        j = j + 1
+    }
+    print(b)
+
+    let mut c = 0
+    let mut k = 0
+    while k < 200 {
+        c = c + viaNested(k)
+        k = k + 1
+    }
+    print(c)
+
+    let mut d = 0
+    let mut m = 0
+    while m < 200 {
+        d = d + match viaTry(m) {
+            Some(v) => v,
+            None => 0,
+        }
+        m = m + 1
+    }
+    print(d)
+
+    let mut last = ""
+    let mut p = 0
+    while p < 200 {
+        last = viaString(p)
+        p = p + 1
+    }
+    print(last)
+
+    // `break` and `continue` out of a region, 200 turns each — the edges that
+    // already unwound, so a regression there fails here too.
+    let mut e = 0
+    let mut q = 0
+    while q < 200 {
+        q = q + 1
+        region {
+            if q % 2 == 0 {
+                continue
+            }
+            e = e + 1
+        }
+    }
+    print(e)
+
+    let mut f = 0
+    let mut r = 0
+    while r < 200 {
+        r = r + 1
+        let mut n = 0
+        while n < 5 {
+            region {
+                if n == 2 {
+                    break
+                }
+                f = f + 1
+            }
+            n = n + 1
+        }
+    }
+    print(f)
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "balance");
+    // The interpreter's own numbers, and every one of them requires the run to
+    // have got past 64 regions: 4900 is 70 returns, and the rest are 200 turns.
+    assert_eq!(rows[0].1, "4900\n900\n20100\n5050\nn=199\n100\n400\n", "the balanced answers");
+    assert_eq!(rows[0].2, "", "nothing traps once the stack balances");
+    assert_eq!(rows[0].3, Some(0), "exit 0");
+
+    // The depth bound itself still refuses at the same place, so the pop did not
+    // just disable the check. Recursive, because the depth is dynamic.
+    let rows = three_engines(
+        "regionret",
+        "deep",
+        r#"
+fn deep(n: Int64) -> Int64 {
+    if n == 0 {
+        return 0
+    }
+    let mut r = 0
+    region {
+        r = deep(n - 1) + 1
+    }
+    return r
+}
+
+fn main() -> Int64 {
+    print(deep(63))
+    print(deep(70))
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "deep");
+    assert_eq!(rows[0].1, "63\n", "63 nested regions are fine");
+    assert_eq!(rows[0].2, "error: region nesting exceeds 64\n", "the 65th is not");
+    assert_eq!(rows[0].3, Some(1));
+}
