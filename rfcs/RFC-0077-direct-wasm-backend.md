@@ -2128,8 +2128,10 @@ Three deliberate ceilings, marked in the code rather than left to be discovered:
   the harness writes as bare decimals.
 
 `write_all` also does not report a partial write, where the C `writeFile` returns
-status 1 on one. It is shared with `print`, no example can observe the difference,
-and giving it an errno would change four call sites to check one.
+status 1 on one. It is shared with `print` and the trap path, no example can
+observe the difference, and giving it a return value would make every one of its
+callers responsible for checking it — which is the shape of the M2b bug it was
+written to prevent.
 
 ### Nothing contradicted M0, M1, M2a–M2i
 
