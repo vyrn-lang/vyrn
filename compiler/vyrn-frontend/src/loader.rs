@@ -472,6 +472,28 @@ struct Module {
     /// The synthesized source text, for a module produced by a generator
     /// (RFC-0021); `None` for a module read from disk. Powers `vyrn emit-gen`.
     gen_source: Option<String>,
+    /// RFC-0078 M2b: this module entered the load by INJECTION — nothing imported
+    /// it; a builtin's desugar needs it. Its declarations are renamed to reserved
+    /// spellings (see [`RT_PREFIX`]) so they can neither collide with a user's
+    /// names nor be captured by them.
+    injected: bool,
+}
+
+/// The prefix every declaration of an INJECTED runtime module is renamed to
+/// (RFC-0078 M2b). `$` is not an identifier character in Vyrn — the lexer takes
+/// `is_alphanumeric() || '_'` — so no source can spell one of these names. That
+/// is the whole defence: a builtin desugar that calls `json$emit` cannot be
+/// captured by a program's own `fn emit`, and `link`'s program-wide uniqueness
+/// check cannot report a collision against a module the user never imported.
+pub const RT_PREFIX: &str = "json$";
+
+/// The module the `toJson` desugar links (RFC-0078 M2b): `std/json`'s value tree
+/// and its writer, which after M2a's split imports nothing.
+pub const RT_JSON_SPEC: &str = "std/json";
+
+/// The reserved spelling of an injected runtime declaration.
+pub fn rt_name(name: &str) -> String {
+    format!("{RT_PREFIX}{name}")
 }
 
 /// The synthesized source of every generator-produced module reachable from the
@@ -754,6 +776,7 @@ fn load_modules(
                 },
                 import_targets: Vec::new(),
                 gen_source: None,
+                injected: false,
             });
             stack.pop();
             states.insert(key.to_string(), true);
@@ -992,6 +1015,7 @@ fn load_modules(
             program,
             import_targets,
             gen_source,
+            injected: false,
         });
         Ok(())
     }
@@ -1019,6 +1043,59 @@ fn load_modules(
             }
         }
         return Err((diags, origins));
+    }
+
+    // RFC-0078 M2b: the INJECTED import. `toJson` compiles into a call to
+    // `std/json`'s writer, so a program that mentions the builtin links that
+    // module even though no line of it says so. The loader walks imports from the
+    // root, and this is the one thing that enters that worklist without one.
+    //
+    // Conditional on the mention: injecting unconditionally would put fifteen
+    // functions into every module and every wasm binary in the repo for a builtin
+    // most programs never use. `program_ref_names` is the same scan
+    // `resolve_aliases` uses, so "mentions `toJson`" means the same thing here as
+    // everywhere else — module-scope `let` initializers are outside it, and
+    // outside what a global may legally call anyway (no user calls, RFC-0013).
+    if modules
+        .iter()
+        .any(|m| program_ref_names(&m.program).contains("toJson"))
+    {
+        // A missing std root is not an error HERE: `toJson` keeps its own
+        // implementation until the desugar lands, and the diagnostic for a
+        // program that needs the runtime and cannot find it belongs to whoever
+        // needs it, not to a scan.
+        if let Ok(target) = resolve_spec(RT_JSON_SPEC, &root_key, opts) {
+            if !states.contains_key(&target) {
+                if let Err(mut diags) = visit(
+                    &target,
+                    None,
+                    opts,
+                    resolver,
+                    &mut modules,
+                    &mut states,
+                    &mut identities,
+                    &mut origins,
+                    &mut warnings,
+                    &mut stack,
+                    &root_key,
+                ) {
+                    if !origins.is_empty() {
+                        for d in &mut diags {
+                            origins.remap(d);
+                        }
+                    }
+                    return Err((diags, origins));
+                }
+            }
+            // Set AFTER the visit, and whether or not this load performed it: the
+            // program may ALSO import `std/json` by hand, in which case the module
+            // is already there and the reserved spellings apply to it either way.
+            // (They are transparent to a hand importer — `resolve_aliases` rewrites
+            // its references along with everything else.)
+            if let Some(m) = modules.iter_mut().find(|m| m.key == target) {
+                m.injected = true;
+            }
+        }
     }
 
     Ok((modules, root_key, origins, warnings))
@@ -1597,6 +1674,66 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         }
     };
 
+    // RFC-0078 M2b: an INJECTED module's every declaration is renamed to its
+    // reserved spelling, unconditionally rather than on collision. Two things fall
+    // out of that, and they are the reason the injection is safe at all:
+    //
+    //   * `link`'s program-wide uniqueness check cannot fire. A user's own
+    //     `fn emit` would otherwise be "defined in both `main.vyrn` and
+    //     `std/json.vyrn`" — an error naming a module they never imported and
+    //     cannot remove.
+    //   * the desugar's call cannot be captured. RFC-0022 resolves co-naming by
+    //     renaming the FOREIGN decl, so a bare `emit` in generated code would have
+    //     resolved to the user's function; `json$emit` resolves to one thing.
+    //
+    // Variants are renamed too, and they had to be: a program whose own enum has a
+    // `JStr` variant is rejected today the moment `std/json` is in the link
+    // ("function `JStr` is defined in `std/json.vyrn` but not imported here"),
+    // which injection would turn into an error about a module the user never
+    // mentioned.
+    let injected_key: Option<String> = modules
+        .iter()
+        .find(|m| m.injected)
+        .map(|m| m.key.clone());
+    // The injected module's variant names, for the importer rewrites in pass 2 —
+    // a variant is not an import name, so pass 2 would not otherwise reach it.
+    let mut injected_variants: HashMap<String, String> = HashMap::new();
+    if let Some(key) = &injected_key {
+        let m = modules.iter().find(|m| &m.key == key).expect("injected module");
+        let mut names: Vec<String> = Vec::new();
+        for t in &m.program.type_decls {
+            if t.line == 0 {
+                continue; // parser-injected builtins are in every module
+            }
+            names.push(t.name.clone());
+            if let Type::Enum(vs) = &t.base {
+                for v in vs {
+                    injected_variants.insert(v.name.clone(), rt_name(&v.name));
+                    names.push(v.name.clone());
+                }
+            }
+        }
+        for f in &m.program.functions {
+            names.push(f.name.clone());
+        }
+        for p in &m.program.protocols {
+            names.push(p.name.clone());
+        }
+        for c in &m.program.contracts {
+            names.push(c.name.clone());
+        }
+        for g in &m.program.globals {
+            names.push(g.name.clone());
+        }
+        // No `all_names` bookkeeping: `mint` only ever produces `x__fromN`, which
+        // has no `$` in it, so a reserved spelling is unreachable from there —
+        // and touching `all_names` here would defeat its lazy fill.
+        for n in names {
+            let reserved = rt_name(&n);
+            foreign_renames.insert((key.clone(), n), reserved);
+        }
+    }
+
     // Pass 1: alias collision checks + decide co-naming renames.
     for m in modules.iter() {
         let mine = module_decls.get(&m.key).cloned().unwrap_or_default();
@@ -1812,6 +1949,17 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                         .insert(n.original.clone(), resolved);
                 }
             }
+            // RFC-0078 M2b: a HAND importer of the injected module follows its
+            // variant renames too. Importing an enum brings its variants, and those
+            // are references rather than import names, so nothing above reaches
+            // them. Applied per importing module (not program-wide) so a module
+            // that does NOT import `std/json` keeps whatever `JObj` means to it.
+            if Some(target) == injected_key.as_ref() && !imp.names.is_empty() {
+                rewrites
+                    .entry(m.key.clone())
+                    .or_default()
+                    .extend(injected_variants.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
         }
     }
 
@@ -1827,6 +1975,28 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                 .map(|(n, _)| n.clone())
                 .collect();
             rename_decl_in_module(&mut tm.program, original, s, &ns_names);
+        }
+    }
+
+    // Pass 3b (RFC-0078 M2b): the injected module's enum VARIANT names in the
+    // declarations themselves. Pass 3 rewrote every reference to them (a
+    // constructor call and a `match` pattern both go through the rename map); the
+    // variant list lives in the decl's `Type::Enum` base, which no reference
+    // rewrite touches.
+    if let Some(key) = &injected_key {
+        if let Some(tm) = modules.iter_mut().find(|m| &m.key == key) {
+            for t in &mut tm.program.type_decls {
+                if t.line == 0 {
+                    continue;
+                }
+                if let Type::Enum(vs) = &mut t.base {
+                    for v in vs {
+                        if let Some(r) = injected_variants.get(&v.name) {
+                            v.name = r.clone();
+                        }
+                    }
+                }
+            }
         }
     }
 

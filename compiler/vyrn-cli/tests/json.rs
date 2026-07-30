@@ -48,6 +48,50 @@ fn std_jsonread_unit_tests_run_green() {
     unit_tests_green("std/jsonread.vyrn", "13 passed, 0 failed");
 }
 
+/// RFC-0078 M2b: the injected import is invisible. A program that mentions
+/// `toJson` links `std/json` without saying so, and that module's declarations
+/// must be unable to collide with the program's own or to capture the desugar's
+/// calls.
+///
+/// Every name in here is one `std/json` also declares — `emit`, `hex2`,
+/// `emitString`, the type `Json`, and an enum variant `JStr`, which is the one that
+/// bites hardest: before the reserved spellings, a variant-name clash with a module
+/// in the link was rejected outright ("function `JStr` is defined in
+/// `std/json.vyrn` but not imported here"), so injection would have turned a legal
+/// program into an error naming a module the user never mentioned.
+#[test]
+fn an_injected_runtime_module_cannot_collide_with_the_users_names() {
+    let dir = std::env::temp_dir().join("vyrn-m2b-inject");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("collide.vyrn");
+    std::fs::write(
+        &file,
+        "type Json = | Mine | JStr(String)\n\
+         type P = { n: Int64 }\n\
+         fn emit(x: Int64) -> String { return \"user emit \" + x.toString() }\n\
+         fn hex2(b: Int64) -> String { return \"user hex2\" }\n\
+         fn emitString(s: String) -> String { return \"user emitString\" }\n\
+         fn main() -> Int64 {\n\
+         print(emit(7))\n\
+         print(hex2(3))\n\
+         print(emitString(\"q\"))\n\
+         print(match JStr(\"v\") { Mine => \"mine\", JStr(s) => s })\n\
+         print(toJson(P { n: 5 }))\n\
+         return 0\n\
+         }\n",
+    )
+    .unwrap();
+    let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+    let combined =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "collision program failed:\n{combined}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"),
+        "user emit 7\nuser hex2\nuser emitString\nv\n{\"n\":5}\n",
+        "the user's own names must win, and `toJson` must still work:\n{combined}"
+    );
+}
+
 #[test]
 fn tojson_byte_pins_hold() {
     let example = repo_file("examples/jsonbytes.vyrn");
