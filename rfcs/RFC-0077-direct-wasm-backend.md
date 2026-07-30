@@ -3163,3 +3163,164 @@ it always was, now reported by the feature that actually stops them.
 `controlflow.vyrn` moved from `region` to `spawn`, which is the third example in
 that row and the reason the region row is gone while the spawn row grew. Nothing
 else moved: a region was nobody else's first blocker.
+
+---
+
+## M2n, as landed — `parse`, `lineAt` and `colAt`
+
+The two builtins RFC-0078 refused to route. **76 of 87 → 83 of 87**, seven
+examples: `argsdemo`, `input`, `numbytes`, `stringops` for `parse`; `pagesdemo`,
+`textbytes`, `vyxdemo` for the line/column pair. Nothing in the row is refused.
+
+### The row was two refusals of two different kinds, and each is the lowering's spec
+
+M2l read this as "three builtins with no lowering, and none of it is a routing
+question." That is right, but the two halves are refused for reasons that are not
+the same reason, and each reason is what its lowering had to be measured against.
+
+**`parse` is a SEMANTICS refusal.** `std/num`'s `parseInt64` is the same digit
+loop and *declines* where `parse` wraps, so RFC-0078 M4a refused to fold them: the
+overflow behaviour of every existing caller is the language. What the interpreter
+actually does — `parse_int` in `interp.rs`, twelve lines — is an optional `-`
+(never a `+`), then bytes that must ALL be ASCII digits, accumulated with
+`wrapping_mul(10)` and `wrapping_add`, negated with `wrapping_neg`. So there are
+exactly three declines and overflow is not one of them:
+
+- nothing after the sign, which is `""` and `"-"`;
+- any byte in the rest that is not a digit, which is `"+1"`, `" 1"`, `"1 "`,
+  `"1.5"`, `"1e3"`, `"abc"`, `"12a"` and `"--1"`;
+- and that is all.
+
+`parse("9223372036854775808")` is `Int64.min`, `parse("18446744073709551615")` is
+`-1`, `parse("99999999999999999999999999")` is `-2537764290115403777`. Every one of
+those rows is already a literal in `examples/numbytes.vyrn`, which RFC-0078 M4a
+wrote as a pin BEFORE moving anything — so this backend has an oracle rather than a
+record of what came out, and `parse` needed no test of its own.
+
+Deliberately not `str_i64` next door, which was the tempting reuse. That one reads
+`+` and stops at the first byte that is not a digit, because it is `strtoll` for an
+injected `VYRN_FIXED_TIME`; those are the opposite answers on exactly the inputs
+`numbytes` prints. M2j named it "not full `strtoll`" and the ceiling is still
+accurate — it just points away from here.
+
+**`lineAt`/`colAt` are a CACHE refusal**, and that is a different obligation: the
+loop is four lines and the reason it is a builtin is that it is O(offset) while a
+scanner asks once per node.
+
+### No cache, and the number that says so
+
+The interpreter memoizes a line-start table keyed on the array's `Rc` pointer. The
+native shim does not memoize at all — `__vyrn_line_at` counts LFs from byte 0 and
+`__vyrn_col_at` walks bytes backwards, on every call. This backend takes the
+shim's route, so the three engines are two implementations rather than three.
+
+Measured rather than argued, because RFC-0078 M4b(2)'s 122 ms of a 291 ms page
+compile is the number that makes this a real question. The page-compile shape, in
+Vyrn: a 23 KB buffer (eight times a big `.vyx`), a newline every 40 bytes, one
+`lineAt` and one `colAt` per node, 585 asks — the quadratic sweep a cache removes.
+
+| | one sweep |
+|---|---|
+| interpreter, memoized (binary search per ask) | ~0.4 ms |
+| direct wasm, uncached | **~3 ms** |
+
+Two facts settle it. The 122 ms was **generation**-time and is paid by whichever
+engine runs the generator; `vyrn build --target wasm` runs generators under the
+interpreter (`wasm-gen` is off by default in the CLI), so it is the memoized
+number. And a module emitted by this backend reaches these functions at run time
+only where compiled code calls them — `vyxdemo` and `pagesdemo` contain
+`std/vyx`'s scanner because codegen emits every function of a linked module whether
+it is called or not, and never call it. Both run at wasmtime's ~25 ms startup
+floor. The one example that does call the pair at run time is `textbytes`, over
+twelve short buffers.
+
+So the cache is worth ~2.6 ms on a buffer eight times the size of the file that
+motivated it, against per-buffer state in linear memory keyed on an address a bump
+allocator can recycle — which is the hazard the interpreter avoids by holding the
+`Rc` and this backend has no way to. Not a small change, and nothing measured wants
+it. M5's question stays M5's.
+
+### A column counts BYTES, and this backend now says so at both ends
+
+Confirmed against the interpreter (`off - lineStart + 1` over a byte table) and the
+shim (a backward byte walk): the `x` in `éx` is column 3. `std/vyx.vyrn:165`'s
+"chars since the last LF" is still wrong and still harmless, for RFC-0033's
+C-`#line` reason.
+
+`textbytes` sweeps the interesting middle — a CRLF, an empty line, past the end,
+and the `éx` row. The two cases it never reaches are the two whose lowering is a
+compare's SIGNEDNESS, and they have a test:
+`line_and_column_agree_with_the_interpreter_off_both_ends_of_the_buffer`.
+
+- **A negative offset.** The interpreter clamps with `.max(0)`; the shim does not
+  clamp below zero at all and agrees anyway because `i < off` and `i > 0` are
+  signed. Flipping `i64.le_s` to `i64.le_u` in `col_at` is one character and turns
+  `1:1` into `1:12` — a wrong answer with **no trap**, because the wrapped address
+  stayed in bounds. That is M2m's `=~` shape exactly, and it is why the test exists
+  rather than a comment claiming the path is covered.
+- **An empty buffer**, where the `off > len` clamp is the only thing between
+  `colAt` and a read below the allocation. Deleting it turns `1:1` into `1:6`.
+
+Both mutations were planted and both fail the test. Every row is compared against
+the interpreter AND spelled out, because two backends can be confidently wrong
+together.
+
+### Refused, specifically: a buffer whose elements are not bytes
+
+The checker accepts an `Array`, an `ArrayN` or a `SmallArray` of anything as
+`lineAt`'s first argument. `walk` hands all three over as one base-and-count, so
+the lowering was indifferent — and that is precisely where it must not be, because
+a wider element means the three engines read three different things. This backend
+refuses a stride other than 1, naming the element type.
+
+Refusing found a **latent divergence in the other two engines**, which is the
+fourth milestone running where looking at an untaken edge found a defect elsewhere:
+
+```
+let mut a: Array<Int64> = []
+a.push(1)
+a.push(10)
+print(lineAt(a, 2))     // interpreter: 2      native: 1
+```
+
+The interpreter takes `v as u8` of each *element* (so element 1 is an LF); native
+reads `unsigned char*` off the data pointer, where the same array is
+`01 00 00 00 00 00 00 00  0A ...` and byte 1 is zero. Not fixed here — deciding
+which answer is right is a language decision, and the right shape is probably the
+checker requiring `Array<UInt8>` rather than any array. Recorded because no example
+reaches it and nothing else would have looked.
+
+### Nothing contradicted M0, M1, M2a–M2m
+
+Every offset is still `layout::of_ll ∘ llt`: `parse_i64` writes the
+`{ i1, i64, i64 }` sum through `sum2`'s own field list, and the one place it spells
+its stores out rather than calling `sum2_write_to` is because the payload is
+already an `i64` rather than a word to zero-extend — the offsets still come from
+the same `Layout`. The `Option<Int64>` travels as the address of a shadow-stack
+slot the call site allocates, which is the hidden destination `readLine` gets and
+needed no new rule. All three helpers are one `block` with `br`s to it, so no body
+emits a `return`. Both branch positions were checked by running: `if c { parse(a) }
+else { parse(b) }` types through `peek`'s existing `parse` row, and the pair got
+one of its own — M2l's rule is that a builtin `call` types as it emits owes `peek`
+a row, and these are `call`'s newest two. `Fn_::coerce` took nothing new, for the
+fourth milestone running.
+
+Three indices came out of `Rt::slots` rather than being hand-numbered, and the
+`next_is` assertion at each of the three emit sites is the mechanism working as
+advertised: the additions are three appended lines in the declaration and one
+appended top-level `text_runtime`, with no existing index touched.
+
+### 83 of 87, regrouped
+
+| blocked on | n |
+|---|---|
+| the call `logger` | 2 |
+| a conversion from `Cargo`/`Config` to `T` | 2 |
+
+Four examples, two features, no long tail — and both are in flight beside this
+milestone. RFC-0008's leveled sink is the last builtin with no lowering; the
+generic-payload conversion is one row of the M2d seam's list.
+
+One bookkeeping note that is not this milestone's: **`controlflow.vyrn` passes and
+is not in `PASSING`**, and has been since `spawn` landed. The ladder prints
+`NEW controlflow.vyrn` on every run and nothing has claimed it.
