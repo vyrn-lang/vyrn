@@ -183,6 +183,9 @@ const PASSING: &[&str] = &[
     // lowering that emits the type and forgets the check passes every other
     // refinement example and fails this one (RFC-0077 M2d).
     "validate_fail.vyrn",
+    // Passes only with `logger` AND `parse`, which landed in two parallel
+    // worktrees — neither agent could see it pass, so neither listed it.
+    "vlog.vyrn",
     // The fallible form of the same construction (RFC-0077 M2k), and the one
     // example that proves a refinement's failure is a `None` rather than the trap
     // `validate_fail.vyrn` wants: `Age?(5)` prints `-1`.
