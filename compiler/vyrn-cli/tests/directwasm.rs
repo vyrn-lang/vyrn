@@ -63,6 +63,7 @@ const PASSING: &[&str] = &[
     "map.vyrn",
     "modify.vyrn",
     "modules.vyrn",
+    "option.vyrn",
     "ownership.vyrn",
     "patchdemo.vyrn",
     "protocol.vyrn",
@@ -82,6 +83,10 @@ const PASSING: &[&str] = &[
     // lowering that emits the type and forgets the check passes every other
     // refinement example and fails this one (RFC-0077 M2d).
     "validate_fail.vyrn",
+    // The fallible form of the same construction (RFC-0077 M2k), and the one
+    // example that proves a refinement's failure is a `None` rather than the trap
+    // `validate_fail.vyrn` wants: `Age?(5)` prints `-1`.
+    "validate.vyrn",
     "validation.vyrn",
 ];
 
@@ -1230,6 +1235,172 @@ fn main() -> Int64 {
         assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
         assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
     }
+}
+
+/// `?` reaches the epilogue, proved by the two things skipping it would break
+/// (RFC-0077 M2k).
+///
+/// M1's rule is that a body must not emit `return`: the shadow-stack release, and
+/// since M2f the `modify` copy-back, sit after the block every exit branches to.
+/// `?` is an early exit, so it is exactly the construct that can get this wrong,
+/// and both failures are invisible in a small program.
+///
+/// So: 20,000 calls that each propagate. A frame that is claimed and not released
+/// walks the stack pointer down past 0, where it wraps to `0xFFFFFFF8` and the
+/// next slot access is out of bounds — checked by ACTUALLY EMITTING
+/// `Instruction::Return` here once, which traps `out of bounds memory access`
+/// before the first `print`. And `s.n` counts the writes made BEFORE each
+/// propagation: 20,000 means every propagating call copied its `modify` parameter
+/// back, 0 would mean none did.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_propagating_early_exit_releases_its_frame_and_copies_modify_back() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-try");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+type Sink = { n: Int64 }
+
+fn bump(s: modify Sink, o: Option<Int64>) -> Option<Int64> {
+    s.n = s.n + 1
+    let v = o?
+    s.n = s.n + 100
+    return Some(v)
+}
+
+fn main() -> Int64 {
+    let mut s = Sink { n: 0 }
+    let mut i = 0
+    while i < 20000 {
+        bump(s, None)
+        i = i + 1
+    }
+    print(s.n)
+    bump(s, Some(7))
+    print(s.n)
+    return 0
+}
+";
+    let path = dir.join("try.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("try.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .env("VYRN_WASM_BACKEND", "direct")
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    assert_eq!(norm(&interp.stdout), "20000\n20101\n", "the interpreter moved");
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// `std/jsonread` through the direct backend (RFC-0077 M2k) — the claim that
+/// matters more than the two examples the milestone added.
+///
+/// The reader is the module RFC-0078 M3's `fromJson` is built on, and it was
+/// unbuildable here for exactly two reasons: `?` (six sites) and `if let`. So this
+/// is the thing that says M3 can land on all three engines at once rather than on
+/// the interpreter and the native build while wasm waits — and it says it by
+/// PARSING, not by compiling: a `?` that copied the wrong width, took the wrong
+/// `br`, or skipped the payload decode builds fine and gets a different answer.
+///
+/// The inputs are chosen for the parser's own control flow rather than for JSON
+/// coverage: a nested document (recursion through `?`, aggregates returned through
+/// the hidden destination), a surrogate pair (`readHex4`'s `?` twice in one
+/// expression, the only nested one in the module), and four rejections whose
+/// `line N, col M:` wording is an `Err` propagated out through six frames.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn the_json_reader_parses_the_same_on_the_direct_backend() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-jsonread");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+import { parseJson } from \"std/jsonread\"
+import { Json, emit } from \"std/json\"
+
+fn show(src: String) -> Int64 {
+    print(match parseJson(src) {
+        Ok(v) => emit(v),
+        Err(e) => \"err: \\{e}\",
+    })
+    return 0
+}
+
+fn main() -> Int64 {
+    show(\"{\\\"a\\\": [1, 2, {\\\"b\\\": null}], \\\"c\\\": \\\"hi\\\\u00e9\\\"}\")
+    show(\"  true \")
+    show(\"[1, 2,]\")
+    show(\"{\\\"k\\\": 1, \\\"k\\\": 2}\")
+    show(\"\\\"\\\\ud83d\\\\ude00\\\"\")
+    show(\"[1, 2\")
+    show(\"-0.5e+10\")
+    if let Ok(v) = parseJson(\"[]\") {
+        print(\"empty: \\{emit(v)}\")
+    }
+    return 0
+}
+";
+    let path = dir.join("jsonread.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("jsonread.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .env("VYRN_WASM_BACKEND", "direct")
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // Pinned, so a lowering that made both engines agree on nothing useful — an
+    // `Err` for every input, say — is still red.
+    assert_eq!(
+        norm(&interp.stdout),
+        "{\"a\":[1,2,{\"b\":null}],\"c\":\"hi\u{e9}\"}\n\
+         true\n\
+         err: line 1, col 7: trailing comma before ']'\n\
+         err: line 1, col 13: duplicate object key: k\n\
+         \"\u{1f600}\"\n\
+         err: line 1, col 6: unterminated array\n\
+         -0.5e+10\n\
+         empty: []\n",
+        "the reader moved"
+    );
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
 /// The construct a build failed on, with the source line dropped so the same gap

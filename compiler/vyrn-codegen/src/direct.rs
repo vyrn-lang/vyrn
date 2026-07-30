@@ -1029,6 +1029,46 @@ impl Fn_<'_> {
                 self.depth -= 1;
                 b.ins(&Instruction::End);
             }
+            // `if let PAT = e { .. } else { .. }` (RFC-0060). Not sugar the parser
+            // removed — it survives to every backend as its own node — but it IS
+            // sugar in shape: one tag test, the payload bound on the taken side,
+            // and no join at all, since the statement form carries no value. So it
+            // is `match_expr` with the arm chain replaced by a single `if`, reusing
+            // the same `tag_test` and `bind_payload`.
+            Stmt::IfLet { pattern, scrutinee, then_block, else_block, line } => {
+                let st = self.expr(m, b, scrutinee)?;
+                let sum = self
+                    .sum_of(&st)
+                    .ok_or_else(|| gap(&format!("an `if let` on `{st}`"), *line))?;
+                let Repr::Agg(sl) = self.cx.repr(&st, *line)? else {
+                    return unsupported("an `if let` on a non-aggregate", *line);
+                };
+                // A local of its own rather than shared scratch: the address has to
+                // survive the test AND the binds, and an `if let` nests — an inner
+                // one's scrutinee would take the same scratch slot back.
+                let addr = b.local(ValType::I32);
+                b.ins(&Instruction::LocalSet(addr));
+                self.tag_test(b, addr, &sum, pattern, *line)?;
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                let mark = self.scope.len();
+                for (i, (n, t)) in
+                    self.pattern_binds(&sum, pattern, *line)?.into_iter().enumerate()
+                {
+                    let place = self.bind_payload(b, addr, &sum, &sl, i, &t, *line)?;
+                    self.scope.push((n, place, t));
+                }
+                self.block(m, b, then_block)?;
+                // The binders are the then-arm's only: an `else` that could see
+                // them would be reading a payload the tag says is not there.
+                self.scope.truncate(mark);
+                if let Some(e) = else_block {
+                    b.ins(&Instruction::Else);
+                    self.block(m, b, e)?;
+                }
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+            }
             Stmt::While { cond, body, line } => {
                 // `block { loop { br_if 1 (!cond); body; br 0 } }` — the block is
                 // where `break` goes, the loop is where `continue` goes, and
@@ -1478,7 +1518,40 @@ impl Fn_<'_> {
         decl: &TypeDecl,
         line: usize,
     ) -> Result<(), String> {
-        let Some(pred) = decl.predicate.clone() else { return Ok(()) };
+        let Some(held) = self.predicate_holds(m, b, decl, line)? else { return Ok(()) };
+        // The message on stderr and exit 1 — `Rt::trap`, the same path the
+        // division and bounds checks take, because parity compares stderr and a
+        // wasm `unreachable` would print wasmtime's wording instead of ours.
+        let msg = self.cx.rt.intern(m, &crate::validation_message(decl));
+        let trap = self.cx.rt.trap;
+        b.ins(&Instruction::I32Eqz);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        b.ins(&Instruction::I32Const(msg as i32));
+        b.ins(&Instruction::Call(trap));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        b.ins(&Instruction::LocalGet(held));
+        Ok(())
+    }
+
+    /// Consume the value on the stack and leave `decl`'s `where` predicate's
+    /// answer (a Bool) there instead, giving the local the value was parked in —
+    /// or `None`, stack untouched, for a type with no refinement.
+    ///
+    /// Split out of [`Fn_::emit_validation`] because a fallible construction wants
+    /// the same answer without the trap (RFC-0077 M2k): two spellings of "run the
+    /// predicate" could disagree about what the predicate binds, and a `Age?(n)`
+    /// that read a different `value` than `Age(n)` does would be a `None` on one
+    /// backend only.
+    fn predicate_holds(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        decl: &TypeDecl,
+        line: usize,
+    ) -> Result<Option<u32>, String> {
+        let Some(pred) = decl.predicate.clone() else { return Ok(None) };
         let binds = crate::predicate_binds(decl);
         let mark = self.scope.len();
         // Whatever the value was parked in, so the flow can carry on with it.
@@ -1542,20 +1615,7 @@ impl Fn_<'_> {
         if self.cx.resolve(&cond) != Type::Bool {
             return unsupported("a `where` clause that is not a Bool", line);
         }
-        // The message on stderr and exit 1 — `Rt::trap`, the same path the
-        // division and bounds checks take, because parity compares stderr and a
-        // wasm `unreachable` would print wasmtime's wording instead of ours.
-        let msg = self.cx.rt.intern(m, &crate::validation_message(decl));
-        let trap = self.cx.rt.trap;
-        b.ins(&Instruction::I32Eqz);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        b.ins(&Instruction::I32Const(msg as i32));
-        b.ins(&Instruction::Call(trap));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(held));
-        Ok(())
+        Ok(Some(held))
     }
 
     /// Evaluate `e`, leaving its value (a scalar) or its address (an aggregate)
@@ -1735,6 +1795,10 @@ impl Fn_<'_> {
             }
             Expr::ArrayLit { elems, line } => self.array_lit(m, b, elems, *line)?,
             Expr::Match { scrutinee, arms, line } => self.match_expr(m, b, scrutinee, arms, *line)?,
+            Expr::Try { expr, line } => self.try_(m, b, expr, *line)?,
+            Expr::TryConstruct { name, args, line } => {
+                self.try_construct(m, b, name, args, *line)?
+            }
             Expr::Binary { op, lhs, rhs, line } => self.binary(m, b, *op, lhs, rhs, *line)?,
             Expr::Call { name, args, line } => self.call(m, b, name, args, *line)?,
             other => return unsupported(&expr_name(other), Expr::line(other)),
@@ -1801,6 +1865,7 @@ impl Fn_<'_> {
         line: usize,
     ) -> Result<Type, String> {
         let want = self.peek(then_e, line)?;
+        let want = self.join_ty(want);
         let r = self.cx.repr(&want, line)?;
         self.cond(m, b, cond, line)?;
         match &r {
@@ -1833,6 +1898,30 @@ impl Fn_<'_> {
             Repr::Unit => return unsupported("an `if` expression yielding Unit", line),
         }
         Ok(want)
+    }
+
+    /// The type a join carries, which is not always the one its first arm names.
+    ///
+    /// A REFINED type decays to its base here, and only here, because a join is
+    /// not a value boundary. The checker unifies `Some(a) => a` (an `Age`) with
+    /// `None => 0 - 1` (an `Int64`) at the base and asks nothing of the second
+    /// arm; a lowering that made `Age` the arms' target instead would send that
+    /// arm through M2d's seam and validate it against a refinement the language
+    /// never required, which is `error: validation failed for `Age`` here and
+    /// `-1` on the other two engines.
+    ///
+    /// Found by `validate.vyrn` becoming compilable in M2k, but the hole is
+    /// M2b's: a plain `match` on an `Option<Age>` had it all along, and no
+    /// example held one. The boundary the value really crosses — the `let`, the
+    /// `return`, the field — still validates, because that coercion is a
+    /// separate one outside the join.
+    fn join_ty(&self, t: Type) -> Type {
+        match &t {
+            Type::Named(n) if self.cx.types.get(n).is_some_and(|d| d.predicate.is_some()) => {
+                self.cx.resolve(&t)
+            }
+            _ => t,
+        }
     }
 
     /// The type an expression WILL have, without emitting anything.
@@ -3623,7 +3712,7 @@ impl Fn_<'_> {
         }
         let want = self.peek(&first.body, line);
         self.scope.truncate(mark);
-        let want = want?;
+        let want = self.join_ty(want?);
         let r = self.cx.repr(&want, line)?;
 
         let dest = match &r {
@@ -3638,26 +3727,7 @@ impl Fn_<'_> {
         self.depth += 1;
 
         for arm in arms {
-            // The tag test. `Option`/`Result` carry a one-byte tag; a user enum
-            // carries an i64 one.
-            b.ins(&Instruction::LocalGet(addr));
-            match (&sum, &arm.pattern) {
-                (Sum::Enum(vs), Pattern::Variant(name, _)) => {
-                    let tag = vs
-                        .iter()
-                        .position(|v| v.name == *name)
-                        .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?;
-                    b.ins(&Instruction::I64Load(word8()));
-                    b.ins(&Instruction::I64Const(tag as i64));
-                    b.ins(&Instruction::I64Eq);
-                }
-                (_, p) => {
-                    let one = matches!(p, Pattern::Some(_) | Pattern::Ok(_));
-                    b.ins(&Instruction::I32Load8U(byte()));
-                    b.ins(&Instruction::I32Const(i32::from(one)));
-                    b.ins(&Instruction::I32Eq);
-                }
-            }
+            self.tag_test(b, addr, &sum, &arm.pattern, line)?;
             b.ins(&Instruction::If(BlockType::Empty));
             self.depth += 1;
 
@@ -3692,6 +3762,196 @@ impl Fn_<'_> {
             b.slot(off);
         }
         Ok(want)
+    }
+
+    /// `e?` — unwrap `Some`/`Ok`, or carry the whole sum out of the function
+    /// (RFC-0005).
+    ///
+    /// The propagation is a `return` in everything but the instruction, and M1's
+    /// rule is that a body must not emit one: the epilogue that releases the
+    /// shadow-stack frame, and since M2f copies `modify` parameters back, sits
+    /// AFTER the block every exit branches to. So this writes the sum through
+    /// `dest` exactly as [`Stmt::Return`] does and takes the same `br` to the same
+    /// block — which is why `?` needs no reclamation of its own and cannot leak a
+    /// frame or skip a copy-back. (`drop` is a no-op in this backend, so the
+    /// textual emitter's `emit_all_drops` before its `ret` has nothing to answer.)
+    ///
+    /// The success path is the FALL-THROUGH, not an arm: the failing side branches
+    /// away, so there is nothing to join and no `peek` to get wrong. The `if` is
+    /// stack-neutral, so a destination address already sitting under the operand
+    /// stack — `let r: Rec = f(g()?)` puts one there — survives it, the same
+    /// property M2d needed for a validation.
+    fn try_(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        e: &Expr,
+        line: usize,
+    ) -> Result<Type, String> {
+        let st = self.expr(m, b, e)?;
+        // The success pattern's binder name is unread — `tag_test` and
+        // `bind_payload` both take the type from `sum`, not from the pattern — so
+        // it is spelled empty rather than invented. `?` on a user enum has no
+        // meaning at all, which is why `Sum::Enum` is not a case here.
+        let (sum, ok_ty, ok_pat) = match self.sum_of(&st) {
+            Some(Sum::Opt(t)) => (Sum::Opt(t.clone()), t, Pattern::Some(String::new())),
+            Some(Sum::Res(t, err)) => (Sum::Res(t.clone(), err), t, Pattern::Ok(String::new())),
+            _ => return unsupported(&format!("`?` on `{st}`"), line),
+        };
+        let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
+            return unsupported("`?` on a non-aggregate sum", line);
+        };
+        // The propagated value is the WHOLE sum, byte for byte, which is only
+        // sound if the two are the same shape — `{ i1, i64, i64 }` on both sides,
+        // differing at most in a payload half the failing tag says is not there.
+        // The textual backend gets this for free (`ret { i1, i64, i64 } %agg`); a
+        // memcpy has a width, so the width is checked rather than assumed.
+        let ret_ty = self.ret_ty.clone();
+        if self.sum_of(&ret_ty).is_none() || self.cx.ll(&ret_ty) != self.cx.ll(&st) {
+            return unsupported(
+                &format!("`?` on `{st}` in a function returning `{}`", self.ret_ty),
+                line,
+            );
+        }
+        let Repr::Agg(rl) = self.ret.clone() else {
+            return unsupported("`?` in a function whose return is not an aggregate", line);
+        };
+        let addr = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(addr));
+        self.tag_test(b, addr, &sum, &ok_pat, line)?;
+        b.ins(&Instruction::I32Eqz);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        b.ins(&Instruction::LocalGet(self.dest.expect("an aggregate return has a destination")));
+        b.ins(&Instruction::LocalGet(addr));
+        b.ins(&Instruction::I32Const(rl.size as i32));
+        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        b.ins(&Instruction::Br(self.depth));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        // Reusing `bind_payload` costs one local or slot that nothing else reads,
+        // and buys the four payload shapes (direct, extended, inline pair, boxed)
+        // already being right here because they are right in `match`.
+        let place = self.bind_payload(b, addr, &sum, &sl, 0, &ok_ty, line)?;
+        match place {
+            Place::Local(l) => {
+                b.ins(&Instruction::LocalGet(l));
+            }
+            Place::Slot(off) => {
+                b.slot(off);
+            }
+            Place::Static(_) => return unsupported("`?` yielding module state", line),
+        }
+        Ok(ok_ty)
+    }
+
+    /// `Age?(n)` — a validated construction whose refinement answers with a tag
+    /// instead of a trap, yielding `Option<Age>` (RFC-0003).
+    ///
+    /// This is the one flow that deliberately steps AROUND the M2d coercion seam,
+    /// and the reason is the whole point of the form: `expr_as(n, Age)` would emit
+    /// the validation that aborts. So the argument is evaluated at the refinement's
+    /// BASE type and the predicate's own answer becomes the tag — the same thing
+    /// the textual backend's `gen_try_construct` does, and it has to be the same
+    /// thing, because a value the two disagree about is a diverging `None`.
+    fn try_construct(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let decl = self
+            .cx
+            .types
+            .get(name)
+            .cloned()
+            .ok_or_else(|| gap(&format!("a fallible construction of `{name}`"), line))?;
+        if args.len() != 1 {
+            return unsupported(&format!("`{name}?` at this arity"), line);
+        }
+        let ty = Type::Option(Box::new(Type::Named(name.to_string())));
+        let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
+            return unsupported("a fallible construction of a non-aggregate Option", line);
+        };
+        let base = decl.base.clone();
+        self.expr_as(m, b, &args[0], &base)?;
+        // `predicate_holds` parks the value where the `where` clause binds it, so
+        // both halves of the answer are in locals before either store.
+        let (held, base_v) = match self.cx.repr(&base, line)? {
+            Repr::Scalar(v) => (self.predicate_holds(m, b, &decl, line)?, v),
+            // Only the record arm of `emit_validation` binds an aggregate base, and
+            // it binds by field — there is no single local to become the payload
+            // word. No corpus has one, and a guess here would be a silent `None`.
+            _ => {
+                return unsupported(
+                    &format!("a fallible construction over the aggregate base `{base}`"),
+                    line,
+                )
+            }
+        };
+        let held = match held {
+            Some(h) => h,
+            // No `where` clause at all: every value satisfies it, so the tag is a
+            // constant and the value still has to be parked to be stored.
+            None => {
+                let h = b.local(base_v);
+                b.ins(&Instruction::LocalSet(h));
+                b.ins(&Instruction::I32Const(1));
+                h
+            }
+        };
+        let tag = self.scratch(b, ValType::I32, 0);
+        b.ins(&Instruction::LocalSet(tag));
+        let off = b.alloc(l.size, l.align);
+        b.slot(off + l.fields[0]);
+        b.ins(&Instruction::LocalGet(tag));
+        b.ins(&Instruction::I32Store8(byte()));
+        b.slot(off + l.fields[1]);
+        b.ins(&Instruction::LocalGet(held));
+        self.encode_word2(b, &base, line)?;
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off + l.fields[2]);
+        b.ins(&Instruction::I64Const(0));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off);
+        Ok(ty)
+    }
+
+    /// Push whether the sum at `addr` is `pat`'s variant.
+    ///
+    /// `Option`/`Result` carry a one-byte tag; a user enum carries an i64 one.
+    /// Shared by `match`, `if let` and `?` because all three are the same probe —
+    /// a second spelling of it would be a second chance to read the tag at the
+    /// wrong width, which is silent rather than loud.
+    fn tag_test(
+        &self,
+        b: &mut Frame,
+        addr: u32,
+        sum: &Sum,
+        pat: &Pattern,
+        line: usize,
+    ) -> Result<(), String> {
+        b.ins(&Instruction::LocalGet(addr));
+        match (sum, pat) {
+            (Sum::Enum(vs), Pattern::Variant(name, _)) => {
+                let tag = vs
+                    .iter()
+                    .position(|v| v.name == *name)
+                    .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?;
+                b.ins(&Instruction::I64Load(word8()));
+                b.ins(&Instruction::I64Const(tag as i64));
+                b.ins(&Instruction::I64Eq);
+            }
+            (_, p) => {
+                let one = matches!(p, Pattern::Some(_) | Pattern::Ok(_));
+                b.ins(&Instruction::I32Load8U(byte()));
+                b.ins(&Instruction::I32Const(i32::from(one)));
+                b.ins(&Instruction::I32Eq);
+            }
+        }
+        Ok(())
     }
 
     /// Bind payload `i` of the matched variant out of the sum at `addr`.
