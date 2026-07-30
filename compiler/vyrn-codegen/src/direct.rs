@@ -1515,6 +1515,16 @@ impl Fn_<'_> {
                 return self.heapify(b, &inner, n, to, line);
             }
         }
+        // The same literal in a `SmallArray<T, N>` position stays OFF the heap: the
+        // elements are copied into the inline buffer and `cap` is set to `N`, which
+        // is the state discriminant (RFC-0056). The checker proved `len <= N`.
+        if let (Type::ArrayN(inner, len), Type::SmallArray(el, n)) =
+            (self.cx.resolve(from), self.cx.resolve(to))
+        {
+            if self.cx.ll(&inner) == self.cx.ll(&el) && len <= n {
+                return self.sa_from_fixed(b, &inner, len, to, n, line);
+            }
+        }
         // RFC-0002's record width subtyping: a wider record used as a narrower
         // one. A rebuild rather than a prefix, because the two field orders need
         // not agree — the shapes are the same length only by coincidence.
@@ -2119,7 +2129,7 @@ impl Fn_<'_> {
                 "at" | "@swapRemove" if args.len() == 2 => {
                     let a = self.peek(&args[0], line)?;
                     match self.cx.resolve(&a) {
-                        Type::Array(i) | Type::ArrayN(i, _) => *i,
+                        Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => *i,
                         Type::Str => Type::IntN { bits: 8, signed: false },
                         // `m[k]` is an honest lookup, so it is an `Option` where
                         // an array index is the element (RFC-0028).
@@ -2131,6 +2141,9 @@ impl Fn_<'_> {
                 "@keys" => Type::Array(Box::new(Type::Str)),
                 "push" | "@list" if !args.is_empty() => match self.peek(&args[0], line)? {
                     t => match self.cx.resolve(&t) {
+                        // A `SmallArray` push yields a `SmallArray`, inline state
+                        // or spilled — it never becomes a growable Array.
+                        Type::SmallArray(..) => self.cx.resolve(&t),
                         Type::ArrayN(i, _) => Type::Array(i),
                         _ => t,
                     },
@@ -2138,8 +2151,17 @@ impl Fn_<'_> {
                 "@pop" if args.len() == 1 => {
                     let a = self.peek(&args[0], line)?;
                     match self.cx.resolve(&a) {
-                        Type::Array(i) => Type::Option(i),
+                        Type::Array(i) | Type::SmallArray(i, _) => Type::Option(i),
                         other => return unsupported(&format!("a branch popping `{other}`"), line),
+                    }
+                }
+                "@toArray" if args.len() == 1 => {
+                    let a = self.peek(&args[0], line)?;
+                    match self.cx.resolve(&a) {
+                        Type::SmallArray(i, _) | Type::Array(i) => Type::Array(i),
+                        other => {
+                            return unsupported(&format!("a branch copying `{other}`"), line)
+                        }
                     }
                 }
                 // The generational reference (M2l). `cell` and `get` are inverses
@@ -2795,6 +2817,25 @@ impl Fn_<'_> {
             "@keys" if args.len() == 1 => return self.map_method(m, b, name, args, line),
             "at" if args.len() == 2 => return self.at(m, b, args, line),
             "push" if args.len() == 2 => return self.push(m, b, args, line),
+            // A `SmallArray` receiver takes the four-field path. Dispatched on
+            // `peek` rather than on an emitted type, because the receiver must not
+            // be evaluated twice — `sa_method` evaluates it itself, and for `pop`
+            // and `swapRemove` it needs the BINDING rather than a value.
+            "@pop" | "@swapRemove" | "@toArray"
+                if !args.is_empty()
+                    && matches!(
+                        self.peek(&args[0], line).map(|t| self.cx.resolve(&t)),
+                        Ok(Type::SmallArray(..))
+                    ) =>
+            {
+                let Ok(Type::SmallArray(inner, n)) =
+                    self.peek(&args[0], line).map(|t| self.cx.resolve(&t))
+                else {
+                    return unsupported(&format!("`{name}` on a non-SmallArray"), line);
+                };
+                let aty = Type::SmallArray(inner.clone(), n);
+                return self.sa_method(m, b, name, args, &aty, &inner, n, line);
+            }
             "@pop" if args.len() == 1 => return self.pop(b, args, line),
             "@swapRemove" if args.len() == 2 => return self.swap_remove(m, b, args, line),
             // `list([..])` is the explicit spelling of the contextual literal;
@@ -3083,6 +3124,12 @@ impl Fn_<'_> {
                 b.ins(&Instruction::Drop);
                 b.ins(&Instruction::I64Const(n as i64));
             }
+            // A `SmallArray` keeps its length in field 0 (RFC-0056) — the one that
+            // would have been read as a data pointer.
+            ("length", Type::SmallArray(..)) => {
+                let l = self.layout_of(base, line)?;
+                b.ins(&Instruction::I64Load(at(l.fields[0])));
+            }
             // `m.length` is the shared length of a Map's two parallel buffers,
             // field 2 — not field 1, which is where an Array keeps its own.
             ("length", Type::Map(..)) => {
@@ -3166,9 +3213,19 @@ impl Fn_<'_> {
                 b.ins(&Instruction::LocalSet(len));
                 Walk { data: addr, len, stride: 1, elem: Type::Int, byte: true }
             }
-            // A `SmallArray` is a four-field header with an inline buffer and
-            // two live states (RFC-0056); reading it as a triple would be a
-            // silent miscompile rather than a missing one.
+            // A `SmallArray` is a four-field header with an inline buffer and two
+            // live states (RFC-0056), and reading it as a triple would be a silent
+            // miscompile rather than a missing one — its FIRST field is a length
+            // where a growable array keeps a pointer. So the state branch happens
+            // here, once, and what comes out is an ordinary base-and-count: every
+            // element access downstream is indifferent to which buffer is live.
+            Type::SmallArray(inner, n) => {
+                let ty = self.cx.resolve(ty);
+                let l = self.layout_of(&ty, line)?;
+                let (sl, _cap, base) = self.sa_parts(b, addr, &l, n);
+                let stride = self.stride(&inner, line)?;
+                Walk { data: base, len: sl, stride, elem: *inner, byte: false }
+            }
             other => return unsupported(&format!("indexing `{other}`"), line),
         })
     }
@@ -3245,10 +3302,21 @@ impl Fn_<'_> {
     ) -> Result<Type, String> {
         let want = self.expect.last().map(|t| self.cx.resolve(t));
         let elem_want = match &want {
-            Some(Type::Array(i)) | Some(Type::ArrayN(i, _)) => Some((**i).clone()),
+            Some(Type::Array(i)) | Some(Type::ArrayN(i, _)) | Some(Type::SmallArray(i, _)) => {
+                Some((**i).clone())
+            }
             _ => None,
         };
+        // An empty `[]` in a `SmallArray<T, N>` position is the inline empty state,
+        // not the empty triple: `len` 0, `cap` N, `data` null (RFC-0056). Built here
+        // rather than through the `ArrayN` conversion because there is no fixed
+        // literal to convert — `[N x T]` with N = 0 is not a shape `llt` prints.
         if elems.is_empty() {
+            if let Some(Type::SmallArray(inner, n)) = want.clone() {
+                let sa = Type::SmallArray(inner.clone(), n);
+                self.sa_from_fixed(b, &inner, 0, &sa, n, line)?;
+                return Ok(sa);
+            }
             let Some(Type::Array(inner)) = want else {
                 return unsupported("an empty array literal with no expected `Array<T>` type", line);
             };
@@ -3343,6 +3411,10 @@ impl Fn_<'_> {
         line: usize,
     ) -> Result<Type, String> {
         let aty = self.expr(m, b, &args[0])?;
+        if let Type::SmallArray(inner, n) = self.cx.resolve(&aty) {
+            let ty = self.cx.resolve(&aty);
+            return self.sa_push(m, b, &ty, &inner, n, &args[1], line);
+        }
         let Type::Array(elem) = self.cx.resolve(&aty) else {
             return unsupported(&format!("`push` onto `{aty}`"), line);
         };
@@ -4780,6 +4852,354 @@ impl Fn_<'_> {
         }
         b.ins(&Instruction::LocalGet(found));
         Ok(Type::Bool)
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// `SmallArray<T, N>` (RFC-0056, RFC-0077 M2l)
+// ---------------------------------------------------------------------------
+
+/// A `SmallArray<T, N>` is `{ i64 len, i64 cap, ptr data, [N x T] inline }` with
+/// TWO live states: `cap == N` is inline (`data` is null and never read) and
+/// `cap > N` is spilled. M2c refused it, and the reason was exact — its first
+/// field is a length where a growable array's is a pointer, so reading one as a
+/// triple compiles, validates, and indexes garbage.
+///
+/// What made it affordable here is that the hazard is confined to ONE function.
+/// Every element access — `a[i]`, `a[i] = v`, `for x in a`, `.length` — goes
+/// through [`Walk`], and a `Walk` is a base pointer and a count. So the state
+/// branch lives in [`Fn_::walk`] and nothing downstream knows there are two
+/// states. Only the four operations that MUTATE the header (`push`, `pop`,
+/// `swapRemove`, `toArray`) need their own arms, and only `push` needs the spill.
+impl Fn_<'_> {
+    /// `(len, cap, base)` of the SmallArray whose header is at `hdr`.
+    ///
+    /// `base` is the inline field's address while `cap == N`, else `data`. This is
+    /// the branch RFC-0056 documents as the small-buffer trade-off, and the reason
+    /// its benches show a read-heavy loop losing to `Array`.
+    fn sa_parts(
+        &mut self,
+        b: &mut Frame,
+        hdr: u32,
+        l: &Layout,
+        n: usize,
+    ) -> (u32, u32, u32) {
+        let (len, cap, base) =
+            (b.local(ValType::I64), b.local(ValType::I64), b.local(ValType::I32));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[0])));
+        b.ins(&Instruction::LocalSet(len));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[1])));
+        b.ins(&Instruction::LocalSet(cap));
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Const(n as i64));
+        b.ins(&Instruction::I64Eq);
+        b.ins(&Instruction::If(BlockType::Result(ValType::I32)));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Const(l.fields[3] as i32));
+        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::Else);
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[2])));
+        b.ins(&Instruction::End);
+        b.ins(&Instruction::LocalSet(base));
+        (len, cap, base)
+    }
+
+    /// A contextual `[a, b, c]` (or `[]`) in a `SmallArray<T, N>` position: the
+    /// elements copied into the inline buffer, `cap == N`, `data` null.
+    ///
+    /// The checker proved `len <= N`, so the copy is unconditional and slots
+    /// `len..N` stay whatever the frame held — dead, because `len` bounds every
+    /// read.
+    fn sa_from_fixed(
+        &mut self,
+        b: &mut Frame,
+        inner: &Type,
+        len: usize,
+        want: &Type,
+        n: usize,
+        line: usize,
+    ) -> Result<(), String> {
+        // Nothing on the stack when `len` is 0: an empty `[]` has no fixed literal
+        // to have produced an address, and `array_lit` reaches here directly.
+        let src = b.local(ValType::I32);
+        if len > 0 {
+            b.ins(&Instruction::LocalSet(src));
+        }
+        let l = self.layout_of(want, line)?;
+        let off = b.alloc(l.size, l.align);
+        b.slot(off + l.fields[0]);
+        b.ins(&Instruction::I64Const(len as i64));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off + l.fields[1]);
+        b.ins(&Instruction::I64Const(n as i64));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off + l.fields[2]);
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::I32Store(word()));
+        if len > 0 {
+            b.slot(off + l.fields[3]);
+            b.ins(&Instruction::LocalGet(src));
+            b.ins(&Instruction::I32Const((self.stride(inner, line)? * len as u32) as i32));
+            b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        }
+        b.slot(off);
+        Ok(())
+    }
+
+    /// `xs.push(v)` on a `SmallArray<T, N>` — store into the live buffer, growing
+    /// at `len == cap`.
+    ///
+    /// From inline it allocates `2N` and copies the inline slots out; from a
+    /// spilled buffer it doubles. It never un-spills, so a `pop` below `N` stays on
+    /// the heap — smallvec semantics, and what the example prints.
+    ///
+    /// Returns the whole reshaped value, like the `Array` path: the parser turned
+    /// the statement into `xs = push(xs, v)`, so the write-back is an assignment.
+    fn sa_push(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        aty: &Type,
+        inner: &Type,
+        n: usize,
+        value: &Expr,
+        line: usize,
+    ) -> Result<Type, String> {
+        let l = self.layout_of(aty, line)?;
+        let stride = self.stride(inner, line)? as i32;
+        // A fresh copy of the header, because `push` yields a new value and must
+        // not write through the one it was handed.
+        let src = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(src));
+        let off = b.alloc(l.size, l.align);
+        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Const(l.size as i32));
+        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        let hdr = b.local(ValType::I32);
+        b.slot(off);
+        b.ins(&Instruction::LocalSet(hdr));
+
+        let (len, cap, base) = self.sa_parts(b, hdr, &l, n);
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Eq);
+        b.ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        let (nc, nb) = (b.local(ValType::I64), b.local(ValType::I32));
+        b.ins(&Instruction::LocalGet(cap));
+        b.ins(&Instruction::I64Const(2));
+        b.ins(&Instruction::I64Mul);
+        b.ins(&Instruction::LocalTee(nc));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::Call(self.cx.rt.malloc));
+        b.ins(&Instruction::LocalTee(nb));
+        // From the live buffer, whichever it was: this is the one place the two
+        // states converge, and `base` already picked.
+        b.ins(&Instruction::LocalGet(base));
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::LocalGet(nb));
+        b.ins(&Instruction::I32Store(word_at(l.fields[2])));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::LocalGet(nc));
+        b.ins(&Instruction::I64Store(at(l.fields[1])));
+        b.ins(&Instruction::LocalGet(nb));
+        b.ins(&Instruction::LocalSet(base));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+
+        let w = Walk { data: base, len, stride: stride as u32, elem: inner.clone(), byte: false };
+        self.elem_addr(b, &w, len);
+        let r = self.cx.repr(inner, line)?;
+        self.expr_as(m, b, value, inner)?;
+        match &r {
+            Repr::Scalar(_) => {
+                b.ins(&store_of(&self.cx.ll(inner)));
+            }
+            Repr::Agg(_) => {
+                b.ins(&Instruction::I32Const(stride));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            }
+            Repr::Unit => return unsupported("a SmallArray of Unit", line),
+        }
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::LocalGet(len));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Add);
+        b.ins(&Instruction::I64Store(at(l.fields[0])));
+        b.slot(off);
+        Ok(aty.clone())
+    }
+
+    /// `xs.pop()`, `xs.swapRemove(i)` and `xs.toArray()` on a `SmallArray`.
+    ///
+    /// The first two shrink the binding in place through its own header, so they
+    /// take the `Place` rather than a value — the same restriction the `Array`
+    /// forms have, and the checker's.
+    fn sa_method(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        args: &[Expr],
+        aty: &Type,
+        inner: &Type,
+        n: usize,
+        line: usize,
+    ) -> Result<Type, String> {
+        let l = self.layout_of(aty, line)?;
+        let stride = self.stride(inner, line)? as u32;
+        let hdr = b.local(ValType::I32);
+        if name == "@toArray" {
+            self.expr(m, b, &args[0])?;
+        } else {
+            let (place, _) = self.receiver(args, name.trim_start_matches('@'), line)?;
+            place
+                .addr(b, 0)
+                .ok_or_else(|| gap(&format!("`{name}` on a non-SmallArray binding"), line))?;
+        }
+        b.ins(&Instruction::LocalSet(hdr));
+        let (len, _cap, base) = self.sa_parts(b, hdr, &l, n);
+        let w = Walk { data: base, len, stride, elem: inner.clone(), byte: false };
+
+        match name {
+            // A fresh growable `Array<T>` holding a copy of the live elements —
+            // the one explicit conversion RFC-0056 has, and the interpreter's is
+            // the identity because both are `Val::Array`.
+            "@toArray" => {
+                let want = Type::Array(Box::new(inner.clone()));
+                let al = self.layout_of(&want, line)?;
+                let buf = b.local(ValType::I32);
+                b.ins(&Instruction::LocalGet(len));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::I32Const(stride as i32));
+                b.ins(&Instruction::I32Mul);
+                b.ins(&Instruction::I32Const(1));
+                b.ins(&Instruction::I32Add);
+                b.ins(&Instruction::Call(self.cx.rt.malloc));
+                b.ins(&Instruction::LocalTee(buf));
+                b.ins(&Instruction::LocalGet(base));
+                b.ins(&Instruction::LocalGet(len));
+                b.ins(&Instruction::I32WrapI64);
+                b.ins(&Instruction::I32Const(stride as i32));
+                b.ins(&Instruction::I32Mul);
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                let off = b.alloc(al.size, al.align);
+                b.slot(off + al.fields[0]);
+                b.ins(&Instruction::LocalGet(buf));
+                b.ins(&Instruction::I32Store(word()));
+                for f in [al.fields[1], al.fields[2]] {
+                    b.slot(off + f);
+                    b.ins(&Instruction::LocalGet(len));
+                    b.ins(&Instruction::I64Store(word8()));
+                }
+                b.slot(off);
+                Ok(want)
+            }
+            // `Option<T>`: `None` on empty, else the last element with the header
+            // shrunk. Never un-spills, exactly like the LLVM path.
+            "@pop" => {
+                let oty = Type::Option(Box::new(inner.clone()));
+                let Repr::Agg(ol) = self.cx.repr(&oty, line)? else {
+                    return unsupported("an `Option` that is not an aggregate", line);
+                };
+                let off = b.alloc(ol.size, ol.align);
+                b.slot(off);
+                b.ins(&Instruction::I32Const(0));
+                b.ins(&Instruction::I32Const(ol.size as i32));
+                b.ins(&Instruction::MemoryFill(0));
+                b.ins(&Instruction::LocalGet(len));
+                b.ins(&Instruction::I64Eqz);
+                b.ins(&Instruction::I32Eqz);
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                let last = b.local(ValType::I64);
+                b.ins(&Instruction::LocalGet(len));
+                b.ins(&Instruction::I64Const(1));
+                b.ins(&Instruction::I64Sub);
+                b.ins(&Instruction::LocalSet(last));
+                b.slot(off + ol.fields[0]);
+                b.ins(&Instruction::I32Const(1));
+                b.ins(&Instruction::I32Store8(byte()));
+                b.slot(off + ol.fields[1]);
+                self.elem_addr(b, &w, last);
+                match self.word2(inner)? {
+                    Word::Inline2 => {
+                        // The payload word IS the address here, so the two-word
+                        // copy has to be the destination's, not an encode.
+                        return unsupported("a `SmallArray` of two-word values", line);
+                    }
+                    Word::Boxed if matches!(self.cx.repr(inner, line)?, Repr::Agg(_)) => {
+                        self.box_value(b, inner, line)?;
+                    }
+                    _ => {
+                        b.ins(&load_of(&self.cx.ll(inner), 0, self.cx.signed(inner)));
+                        self.encode_word2(b, inner, line)?;
+                    }
+                }
+                b.ins(&Instruction::I64Store(word8()));
+                b.ins(&Instruction::LocalGet(hdr));
+                b.ins(&Instruction::LocalGet(last));
+                b.ins(&Instruction::I64Store(at(l.fields[0])));
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                b.slot(off);
+                Ok(oty)
+            }
+            // The removed element, with the last one moved into its place — for
+            // `i == len - 1` those are the same address, and the copy is a no-op.
+            _ => {
+                self.expr_as(m, b, &args[1], &Type::Int)?;
+                let idx = b.local(ValType::I64);
+                b.ins(&Instruction::LocalSet(idx));
+                self.bounds_check(b, &w, idx, false);
+                let r = self.cx.repr(inner, line)?;
+                let taken = self.place_for(b, &r, line)?;
+                match (taken, &r) {
+                    (Place::Local(loc), _) => {
+                        self.elem_addr(b, &w, idx);
+                        self.load_elem(b, &w, line)?;
+                        b.ins(&Instruction::LocalSet(loc));
+                    }
+                    (Place::Slot(o), Repr::Agg(el)) => {
+                        b.slot(o);
+                        self.elem_addr(b, &w, idx);
+                        b.ins(&Instruction::I32Const(el.size as i32));
+                        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                    }
+                    _ => return unsupported("a SmallArray of Unit", line),
+                }
+                let last = b.local(ValType::I64);
+                b.ins(&Instruction::LocalGet(len));
+                b.ins(&Instruction::I64Const(1));
+                b.ins(&Instruction::I64Sub);
+                b.ins(&Instruction::LocalSet(last));
+                self.elem_addr(b, &w, idx);
+                self.elem_addr(b, &w, last);
+                b.ins(&Instruction::I32Const(stride as i32));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                b.ins(&Instruction::LocalGet(hdr));
+                b.ins(&Instruction::LocalGet(last));
+                b.ins(&Instruction::I64Store(at(l.fields[0])));
+                match taken {
+                    Place::Local(loc) => b.ins(&Instruction::LocalGet(loc)),
+                    Place::Slot(o) => b.slot(o),
+                    Place::Static(_) => return unsupported("a static temporary", line),
+                };
+                Ok(inner.clone())
+            }
+        }
     }
 }
 

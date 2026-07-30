@@ -106,6 +106,11 @@ const PASSING: &[&str] = &[
     "schemaimport.vyrn",
     "server.vyrn",
     "sizedints.vyrn",
+    // RFC-0077 M2l: `SmallArray<T, N>` (RFC-0056). M2c refused it because its
+    // first field is a length where a growable array keeps a pointer; the state
+    // branch now lives in `walk`, so every element access is state-blind and only
+    // the four header-mutating operations have arms of their own.
+    "smallarray.vyrn",
     "statemod.vyrn",
     "strings.vyrn",
     // RFC-0078 M4c: `contains`/`startsWith`/`endsWith` are `std/strpred`. `slice`
