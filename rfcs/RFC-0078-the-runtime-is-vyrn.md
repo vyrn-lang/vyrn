@@ -11,8 +11,8 @@
   |---|---|
   | builtins the checker knows | 40 |
   | Rust implementations in the interpreter | 50 |
-  | C functions in the runtime shim | 80 |
-  | of those, the JSON DOM alone | 49 — but SHARED writer/reader, so M2 retires 11 and M3 the other 38 (see "M2, as landed") |
+  | C functions in the runtime shim | 80 — now 74, M2b having deleted six (see "M2b, as landed") |
+  | of those, the JSON DOM alone | 49 — but SHARED writer/reader, so M2 retired SIX (not 11: the parser's unescaper shares the buffer) and M3 takes the rest |
   | `std/json.vyrn` — a JSON reader and writer, in Vyrn | 752 lines |
   | interp + shim + textual emitter + direct emitter | 27,334 lines |
 
@@ -117,17 +117,15 @@ at any time.
   twelve WASI imports plus `__vyrn_malloc` is the starting list; confirm it
   against the interpreter's Rust arms, which may need primitives wasm does not.
 - **M2 — `toJson` through `std/json`.** The largest item, with its Vyrn
-  implementation already written and parity-tested. Success is 49 shim functions
-  deleted and `toJson` working on the direct backend without a line of new wasm
-  lowering. Bytes must be pinned before the swap, not compared after.
-  **Blocked, measured, not attempted — see "M2, as landed" and "M2a, as landed".
-  The library prerequisite is DONE: `std/json` is now the tree plus the writer,
-  importing nothing, and the reader lives in `std/jsonread`. What remains is three
-  compiler mechanisms — an injected import with `foreign_renames` seeded to
-  reserved spellings, synthesized per-type encoder functions in the linked
-  `Program`, and the type-directed walk as a shared AST builder — plus two escape
-  literals repinned. Number formatting is NOT among them (measured: `toString()`
-  already matches the shim byte for byte).**
+  implementation already written and parity-tested. Bytes must be pinned before the
+  swap, not compared after.
+  **DONE (M2a the library split, M2b the swap) — see the three notes below.** The
+  acceptance line as written was wrong twice: it is SIX shim functions, not 49
+  (49 is the writer/reader pair's total, and four of the eleven M2's own note
+  claimed are shared with the parser), and "no line of new wasm lowering" held for
+  `toJson` but needed two general fixes the direct backend was missing anyway. The
+  ladder went 39/81 -> 43/81. Number formatting needed nothing: `toString()` already
+  matches the shim byte for byte.
 - **M3 — `fromJson`.** The parser half, same shape, plus RFC-0018's `Issue`
   accumulation.
 - **M4 — the string and number tier.** `chars` (UTF-8 decode), `parse`, the `%f`
@@ -141,7 +139,8 @@ at any time.
 
 - Parity green throughout — every milestone is byte-identical on stdout, stderr
   and exit code, or it does not land.
-- The shim's function count falls, measurably, per milestone. It is 80 today.
+- The shim's function count falls, measurably, per milestone. It was 80 when this
+  was written; M2b took it to 74, and took eleven `declare` lines with it.
 - RFC-0077's ladder does not regress, and rises where a builtin becomes Vyrn.
 - No builtin has two *definitions*. Caches are allowed; second opinions are not.
 
@@ -404,3 +403,194 @@ M2's payoff is unchanged at 11 functions and now unblocked on the library side.
 links without the reader), parity green three ways over 81 examples, the RFC-0077
 ladder unchanged at 39/81, genwasm green, `doc --std --verify` clean with
 `docs/api/std/jsonread.md` added.
+
+---
+
+## M2b, as landed: the swap, and the three mechanisms it needed
+
+M2 is **done**. `toJson` renders through `std/json`'s `emit` on the interpreter,
+the native backend and both wasm backends, byte-identically, and no engine holds a
+JSON encoder any more. All three mechanisms M2a said did not exist now do, and two
+of the three are general — the next builtin RFC-0078 moves reuses them unchanged.
+
+### 1. The injected import, and why the reserved spellings are the whole trick
+
+A program whose `program_ref_names` contains `toJson` gets `std/json` visited after
+the root walk finishes. Conditional on the mention: injecting unconditionally would
+put fifteen functions into every binary in the repo for a builtin most programs
+never touch.
+
+Then every declaration of the injected module is renamed to a reserved spelling —
+`json$emit`, `json$Json`, `json$JStr` — **unconditionally rather than on
+collision**. `$` is not an identifier character (the lexer takes
+`is_alphanumeric() || '_'`), so no source can spell one, and that is the entire
+defence. It makes two failures unreachable rather than unlikely:
+
+- `link`'s program-wide uniqueness check cannot fire. A program with its own
+  `fn emit` would otherwise be "defined in both `main.vyrn` and `std/json.vyrn`" —
+  an error naming a module the user never imported and cannot remove.
+- the desugar's call cannot be captured. RFC-0022 resolves co-naming by renaming
+  the FOREIGN decl, so a generated call to a bare `emit` would have gone to the
+  user's function, silently.
+
+**Variants had to be renamed too, and that was not in M2a's plan.** A program whose
+own enum has a `JStr` variant is rejected TODAY the moment `std/json` is in the
+link — "function `JStr` is defined in `std/json.vyrn` but not imported here",
+reported against the module that declared it — so injection would have turned a
+legal program into an error about a module it never mentioned. Pass 3 already
+rewrote every *reference* (a constructor call and a `match` pattern both go through
+the rename map); what it did not touch is the variant list in the decl's own
+`Type::Enum`, and a hand importer's variant references, which are references rather
+than import names. Both are covered now, the second per importing module so a
+module that does not import `std/json` keeps whatever `JObj` means to it.
+
+The test is the collision: one program declaring `emit`, `hex2`, `emitString`, a
+type `Json` and a `JStr` variant, calling `toJson`, asserting the user's names win
+on every line and the builtin still answers.
+
+### 2. The shared walk generates SOURCE, and that was the right laziness
+
+`vyrn-frontend/src/jsonenc.rs` emits ordinary Vyrn text and hands it to the parser.
+Hand-building `Expr` trees is a hundred lines of noise per shape, and the generated
+text is inspectable when something goes wrong — which it did, twice, and both times
+the text was the diagnosis. The only thing it cannot spell is the injected module's
+own names, so the text uses `VyrnRt_` placeholders and one rename pass folds
+`VyrnRt_X` into `json$X`. One rule, and it also covers encoding a `Json` value.
+
+Each engine calls `jsonenc::encode_expr(arg, ty, line)` at the point where it
+already knows `ty` and lowers the result with its ordinary expression path. Five
+lines each. The direct wasm backend's whole `toJson` is:
+
+```rust
+"toJson" if args.len() == 1 => {
+    let ty = self.peek(&args[0], line)?;
+    let e = vyrn_frontend::jsonenc::encode_expr(args[0].clone(), &ty, line);
+    return self.expr(m, b, &e);
+}
+```
+
+### 3. Synthesized encoders, and where they could possibly go
+
+One function per distinct type, memoized on the type, because a self-referential
+type — `type Node = { kids: Array<Node> }`, which `toJson` encodes today — makes an
+inline AST walk non-terminating. Recursion becomes a call. It fixes evaluation order
+for free: the value is a parameter, so `toJson(f())` calls `f` once.
+
+The hard part was not building them; it was finding a place to put them, and this is
+the finding M2a was circling. Three stages could conceivably host it and each is
+missing exactly one half:
+
+| | knows a `toJson` argument's type | can add a function to the linked program |
+|---|---|---|
+| the loader | no — it has declarations, not expression types | yes |
+| the checker | **yes** | no — it walks `&Program`, and threading `&mut` through 427 KB to rewrite in place is not a refactor, it is a rewrite |
+| the engines | yes | no — all three build their function table ONCE, from a `&Program`, with borrowed lifetimes |
+
+So the checker COLLECTS (a `Vec<Type>`, the `StoredFnEffects` precedent) and
+`lib::check_and_synthesize` — between check and movecheck, the one point with both
+halves — appends. The engines then name the encoder for the type they computed, and
+they agree with the checker because the divergence M2a feared is unreachable:
+`toJson(Ok(1))` does not compile at all ("cannot infer the type of `Ok(..)`"), so a
+`Result` reaching `toJson` always has a real annotated type.
+
+`check_and_synthesize` has two callers, and the second was a bug: a generator
+re-loaded as its own root (RFC-0021) skipped the synthesis, so RFC-0076 compiled a
+module calling a function nobody emitted. `genwasm` caught it — the tier that exists
+to catch it.
+
+### Does generated AST clear the checker, movecheck and dropcheck?
+
+**Yes, with no carve-out anywhere.** This was M2a's open question and M2b's kill
+criterion, so it is worth stating precisely: the encoders are appended AFTER the
+check and BEFORE movecheck, so the checker never sees them (it produced the types
+they are built from) while movecheck, the ownership/drop analysis and all three
+lowerings treat them as source they cannot tell apart from the user's.
+
+The property that made it work is one measurement: **passing a record to a function
+does not consume it.** An encoder takes its value by parameter, and the caller's
+binding survives — `encPoint(p)`, then `p.name`, then `toJson(p)` all hold. Had
+parameters moved, the whole shape would have been unbuildable, since `toJson(x)`
+must not consume `x`.
+
+Two bugs only running could find, both in the first hour:
+
+- A placeholder written inline instead of through the registrar never reached the
+  rename map, so the RETURN type stayed unrenamed, lowered to `void`, and clang
+  rejected the caller with `call ptr @vyrn_json$emit({ i64, i64 } )` — an argument
+  that had vanished. It hid because the `Array` body happens to register the same
+  name, so any program encoding an array looked correct. Pinned by a test asserting
+  every encoder returns the tree type.
+- The generator path above.
+
+### The bytes: exactly the two rows M2 predicted
+
+`examples/jsonbytes.vyrn` pinned the whole surface BEFORE the swap, against the C.
+Two rows moved: `0x08` and `0x0c`, the long `\u0008`/`\u000c` becoming the short
+`\b`/`\f`. `std/json` won them because its `emit` has committed consumers
+(`std/tw`, `std/i18n`, `std/openapi` and their golden outputs) and the long form had
+no caller in the repo that could observe it. Everything else — 32 control bytes,
+raw multi-byte UTF-8, every sized integer at its bounds, `Float64`/`Float32`, `%f`'s
+six fixed places, declaration field order, the `None`-omission — is byte-identical,
+which is what pinning first buys: the diff is a statement about which writer won.
+
+### RFC-0077's ladder: 39/81 -> 43/81, and the two rows that were not `toJson`
+
+`domdemo`, `htmltree`, `patchdemo`, `jsonbytes`. Two things were needed and neither
+is `toJson` lowering:
+
+- `peek` could not type a `match` arm yielding a user enum variant. That is a
+  GENERAL gap — any such arm failed on the direct backend — and the fix is five
+  lines against the variant table, refusing an ambiguous name rather than guessing.
+- the generated code first spelled the `None`-field omission as `if let`, which is
+  one of RFC-0077's own unlowered rows, and would have put every example with an
+  `Option` field behind it. `push` returns the array, so
+  `fs = match v.f { Some(x) => fs.push(..), None => fs }` does the same job and asks
+  for nothing.
+
+### Corrections to the arithmetic above
+
+**The shim retires SIX functions, not eleven.** M2's note attributed the whole
+growable buffer to the encoder; the PARSER's string unescaper shares it, so
+`vsb_init`/`_ensure`/`_putc`/`_puts` stay, and `__vyrn_vj_num_text` stays because
+the parser builds nodes with it. What went is `vsb_escape`, `__vyrn_vj_write`,
+`__vyrn_vj_encode` and the three number constructors — the exported boundary from
+74 to 70.
+
+**Eleven `declare` lines went, though**, because the DOM BUILDERS are now
+unreferenced by anything either emitter writes; they survive inside the shim only
+as the C parser's internals. With them went the boundary's only sub-i32 argument
+(`declare ptr @__vyrn_vj_bool(i1)`, M0's named widening), so `imports_vs_shim`'s
+`i1` case becomes an assertion that none remains, and `shim_link`'s live link proof
+reads its bytes back through `__vyrn_charcount` instead of through the shim's JSON
+writer. The per-enum variant-name table went too: it existed so a nullary enum could
+read its name in O(1) from IR, and had no other reader.
+
+Deleted, in Rust: `encode_val`/`encode_variant` (142 lines) from the interpreter,
+`emit_encode` and its three friends (362 lines) from the textual emitter. The
+interpreter's arm is **gone rather than kept as a cache** — M5's question does not
+arise for `toJson`.
+
+### The one new seam, stated plainly
+
+`toJson` now needs a std root, because its serializer lives there. Every CLI command
+has one. `vyrn_frontend::run(source)` / `check(source)` — a single source with no
+resolver — does not, so five interpreter tests moved to the loader path with the
+real `std/json` text, and two codegen IR tests stopped calling a builtin they were
+only using to reach the IR they pin. Codegen refuses loudly (naming the type and the
+reason) rather than emitting a call to a function that is not there.
+
+Known limits, both pre-existing in effect: an ANONYMOUS enum has no source spelling
+(`Display` renders `enum { A | B }`), so it gets no encoder — and `Map` bodies use
+`v.keys()` and `v[k]`, neither of which the direct backend lowers yet, so a Map
+example stays blocked there for RFC-0077's reasons rather than this RFC's.
+
+### Gates, at this note
+
+1215 workspace tests (was 1213), parity green three ways over 81 examples including
+the two repinned rows, the RFC-0077 ladder at **43/81** (was 39), genwasm green,
+`doc --std --verify` clean. The shim is at 70 exported functions.
+
+**M3 (`fromJson`) inherits all three mechanisms.** The injected import and the
+shared-walk seam are general; what M3 adds is the reader (`std/jsonread`, which
+still wants `?` and `if let`) and RFC-0018's `Issue` accumulation. The remaining 38
+`__vyrn_vj_*` DOM functions fall with it.
