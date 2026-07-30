@@ -78,6 +78,10 @@ const PASSING: &[&str] = &[
     "fieldmut.vyrn",
     "fib.vyrn",
     "files.vyrn",
+    // RFC-0077 M2m: `=~` (RFC-0046). `finitekeys` and `twdemo` reach it only
+    // through a validated type's `where` clause — the finite-string types RFC-0020
+    // is built on — so the operator has no syntactic occurrence in either file.
+    "finitekeys.vyrn",
     "floats.vyrn",
     "fnvalstore.vyrn",
     "foreach.vyrn",
@@ -89,6 +93,7 @@ const PASSING: &[&str] = &[
     "generics.vyrn",
     "genref.vyrn",
     "htmltree.vyrn",
+    "i18ndemo.vyrn",
     "ifexpr.vyrn",
     "inlinewhere.vyrn",
     "jsonbytes.vyrn",
@@ -113,6 +118,10 @@ const PASSING: &[&str] = &[
     "protocol.vyrn",
     "record.vyrn",
     "reflection.vyrn",
+    // The one example that is `=~` as an ordinary Bool expression, and the one
+    // whose refinements are VIOLATED nowhere — so it says the walk agrees, and
+    // `validate_fail` next door says the walk is reached from a check that aborts.
+    "regex.vyrn",
     // The same feature reached through a generator rather than through `std/arrays`:
     // `clientInProcess`'s dispatchers take a `fn(RpcReply<T>)` callback, and the
     // argument is a named function whose parameter is an aggregate.
@@ -136,6 +145,12 @@ const PASSING: &[&str] = &[
     "templates.vyrn",
     "testing.vyrn",
     "tree.vyrn",
+    // The RFC-0039 Tailwind generator's `Tw` is a finite language of 781 DFA
+    // states, so its transition table is 799,744 bytes — of an 831,524-byte data
+    // section, and the largest static this backend emits anywhere. Its sibling
+    // `TwClass` (391 states) costs zero, because interning happens at the use site
+    // and every `TwClass` boundary in this file was proven at compile time.
+    "twdemo.vyrn",
     "utility.vyrn",
     // The one example whose refinement is VIOLATED at runtime, so it is the one
     // that proves the checks are emitted rather than that the bytes agree: a
@@ -502,6 +517,85 @@ fn main() -> Int64 {
     // and `twice<String>` are the same source and different code, and merging
     // them prints a plausible number where a string belongs.
     assert_eq!(norm(&interp.stdout), "42\nhi\ntrue\n", "the interpreter moved");
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// The three things the `=~` walk (RFC-0077 M2m) can get wrong that the whole
+/// corpus is blind to, because every `=~` in `examples/` and `std/` runs over
+/// ASCII.
+///
+/// The load of the input byte has to be **unsigned**. A signed one turns a UTF-8
+/// continuation byte into a negative table index, which reads memory *below* the
+/// transition table and answers wrongly — no trap, because the table sits in the
+/// middle of a live address space. Checked by breaking it: with `i32.load8_s`,
+/// `regex`, `finitekeys`, `i18ndemo` and `twdemo` all still pass, and the two
+/// non-ASCII lines here go false where the interpreter says true and true where it
+/// says false.
+///
+/// The other two are the zero-length walk — the answer is whether the START state
+/// accepts, which a do-while shape gets wrong and no example asks — and a
+/// non-match that keeps walking after it is already lost, which is what the dead
+/// state absorbing every remaining byte means.
+///
+/// Pinned against the interpreter's answer, not against a spelling written here:
+/// `Dfa::matches` is the third walk over the same table and the one the checker
+/// already trusts.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn the_dfa_walk_agrees_with_the_interpreter_on_what_no_example_reaches() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-regex");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+fn main() -> Int64 {
+    print(\"\" =~ \"a*\")
+    print(\"\" =~ \"a+\")
+    print(\"b\" =~ \"a*\")
+    print(\"é\" =~ \".\")
+    print(\"é\" =~ \"..\")
+    print(\"café\" =~ \"caf.\")
+    print(\"café\" =~ \"caf..\")
+    print(\"ünïcödé\" =~ \".*\")
+    print(\"abcXdefghijklmnop\" =~ \"[a-z]+\")
+    return 0
+}
+";
+    let path = dir.join("rx.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("rx.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .env("VYRN_WASM_BACKEND", "direct")
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // Spelled out so a change in what the LANGUAGE answers is a failure here too,
+    // not just a change in what the two engines answer together. `"é" =~ "."` is
+    // false because `.` is one BYTE and `é` is two — RFC-0046 runs a byte DFA, and
+    // that is the fact both non-ASCII lines are really pinning.
+    assert_eq!(
+        norm(&interp.stdout),
+        "true\nfalse\nfalse\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\n",
+        "the interpreter moved"
+    );
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
     assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
     assert_eq!(interp.status.code(), w.status.code(), "exit");

@@ -2658,6 +2658,48 @@ impl Fn_<'_> {
         })
     }
 
+    /// A `=~` pattern's DFA in the data segment: `(table, accept, start)`.
+    ///
+    /// Interned at the USE site rather than collected in a pre-pass. The textual
+    /// backend needs a pre-pass because an LLVM global has a name that has to
+    /// exist before the reference to it; a data address does not, and
+    /// [`Module::data`] already shares identical contents — so the two sites of
+    /// `value =~ "[a-z]+"` in `regex.vyrn` get one table because their bytes are
+    /// equal, not because something went looking for them. That also means the
+    /// generated code this backend compiles (RFC-0021 generators, RFC-0078's
+    /// rewrites) needs no walker of its own to be reachable.
+    ///
+    /// `compile` is the one source of the table — the same function the checker
+    /// proved the pattern with and the interpreter runs — so the three engines can
+    /// only disagree about the WALK, never about the language.
+    ///
+    /// ponytail: a complete 256-wide table of `u32` is **1 KB per state**, and
+    /// `twdemo`'s `Tw` is 781 states — 799,744 bytes, the largest static this
+    /// backend emits anywhere. That is the shape RFC-0046 chose and what the
+    /// textual backend emits too, so it is not a regression; if it ever matters,
+    /// byte equivalence classes (a 256-byte class map plus a `nclasses`-wide row)
+    /// would cut it by whatever the alphabet actually distinguishes, which for a
+    /// finite key set is a factor of ten or more. Interning at the use site already
+    /// takes the easy half: a pattern whose every boundary was proven at compile
+    /// time costs nothing at all, which is why `TwClass` is not in the module.
+    fn regex_dfa(
+        &mut self,
+        m: &mut Module,
+        pat: &str,
+        line: usize,
+    ) -> Result<(u32, u32, u32), String> {
+        // The checker compiled every pattern already; a failure here would be the
+        // two disagreeing, which is a gap rather than a panic.
+        let dfa = vyrn_frontend::regex::compile(pat)
+            .map_err(|e| gap(&format!("the pattern `{pat}` ({e})"), line))?;
+        let mut table = Vec::with_capacity(dfa.table.len() * 4);
+        for n in &dfa.table {
+            table.extend_from_slice(&n.to_le_bytes());
+        }
+        let accept: Vec<u8> = dfa.accepting.iter().map(|a| u8::from(*a)).collect();
+        Ok((m.data(&table, 4), m.data(&accept, 1), dfa.start))
+    }
+
     fn binary(
         &mut self,
         m: &mut Module,
@@ -2684,6 +2726,27 @@ impl Fn_<'_> {
             }
             self.depth -= 1;
             b.ins(&Instruction::End);
+            return Ok(Type::Bool);
+        }
+
+        // `s =~ "pat"` (RFC-0046): the pattern is a compile-time DFA, so the right
+        // operand is not a value and must not be evaluated. Handled before the
+        // operands for that reason alone.
+        if op == BinOp::Match {
+            let Expr::Str(pat) = rhs else {
+                // The checker requires a literal; this says so rather than
+                // evaluating a `String` no DFA was compiled for.
+                return unsupported("a `=~` pattern that is not a string literal", line);
+            };
+            let s = self.expr(m, b, lhs)?;
+            if self.cx.resolve(&s) != Type::Str {
+                return unsupported(&format!("`=~` on `{s}`"), line);
+            }
+            let (table, accept, start) = self.regex_dfa(m, pat, line)?;
+            b.ins(&Instruction::I32Const(table as i32));
+            b.ins(&Instruction::I32Const(start as i32));
+            b.ins(&Instruction::I32Const(accept as i32));
+            b.ins(&Instruction::Call(self.cx.rt.regex_run));
             return Ok(Type::Bool);
         }
 
@@ -6618,6 +6681,11 @@ struct Rt {
     /// is a function: `reserve`, `remove_at` and `keys_copy` are each reached from
     /// a single site and are a `malloc` plus a copy, so they are emitted there.
     map_find: u32,
+    /// RFC-0046's `=~` (M2m): walk a complete DFA over a NUL-terminated string.
+    /// One helper for every pattern in the module, because the pattern is entirely
+    /// in the table it is handed — which is the same split the textual backend's
+    /// `@__vyrn_regex_run` makes.
+    regex_run: u32,
     count: u32,
     msg_div0: u32,
     msg_rem0: u32,
@@ -6692,6 +6760,7 @@ impl Rt {
             cell_addr: slot("cell_addr"),
             cell_release: slot("cell_release"),
             map_find: slot("map_find"),
+            regex_run: slot("regex_run"),
             // Derived, not declared. The data segment addresses are filled in by
             // `runtime` as it interns them.
             count: 0,
@@ -7406,6 +7475,65 @@ fn runtime(m: &mut Module, wasi: &Wasi, shim_malloc: Option<u32>) -> Rt {
                 .ins(&Instruction::End)
                 .ins(&Instruction::End);
             b.ins(&Instruction::LocalGet(found));
+        },
+    );
+
+    // regex_run(s, table, start, accept) -> whether `s` matches in full.
+    //
+    // RFC-0046 compiles a `=~` pattern to a COMPLETE DFA — every state has all 256
+    // transitions and a dead state absorbs a non-match — so the walk has no
+    // conditional but the end of the string, and no anchoring to check: a full
+    // match is "the state the last byte left us in accepts". The pattern is
+    // entirely in the table, which is why one helper serves every pattern in the
+    // module, and why this reads the same as `@__vyrn_regex_run` in the textual
+    // backend and `Dfa::matches` in the interpreter. Three spellings of one walk is
+    // two too many, but the other two already existed; what matters is that the
+    // TABLE has one source (`vyrn_frontend::regex::compile`), so a disagreement
+    // would have to be in the walk rather than in the language.
+    let (st, ch) = (5, 6);
+    rt.next_is(m, rt.regex_run);
+    m.func(
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+        &[ValType::I32, ValType::I32],
+        0,
+        |b| {
+            b.ins(&Instruction::LocalGet(2)).ins(&Instruction::LocalSet(st));
+            b.ins(&Instruction::Block(BlockType::Empty)).ins(&Instruction::Loop(BlockType::Empty));
+            b.ins(&Instruction::LocalGet(0))
+                // UNSIGNED, and the whole corpus is ASCII so nothing here says so:
+                // a signed load turns a UTF-8 continuation byte into a negative
+                // table index, which reads memory below the table and answers
+                // wrongly rather than trapping. `the_dfa_walk_...` is the test.
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::LocalTee(ch))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::BrIf(1));
+            // table[st * 256 + ch], four bytes per entry: `st << 10` is the row.
+            b.ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::I32Const(10))
+                .ins(&Instruction::I32Shl)
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalGet(ch))
+                .ins(&Instruction::I32Const(2))
+                .ins(&Instruction::I32Shl)
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::LocalSet(st));
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::LocalSet(0))
+                .ins(&Instruction::Br(0))
+                .ins(&Instruction::End)
+                .ins(&Instruction::End);
+            b.ins(&Instruction::LocalGet(3))
+                .ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Load8U(byte()))
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::I32Ne);
         },
     );
 
