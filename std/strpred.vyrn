@@ -1,0 +1,142 @@
+/// std/strpred — the string predicates and `slice`, written in Vyrn
+/// (RFC-0078 M4b).
+///
+/// `contains`, `startsWith`, `endsWith`, `slice` and the `byteLength` field are
+/// builtins: three implementations each (Rust in the interpreter, C in the shim
+/// the textual emitter calls, hand-emitted wasm in the direct backend). RFC-0078
+/// lists them as writable in Vyrn *today*, and the reason is M4a's finding
+/// restated for strings — the irreducible primitive is not the operation, it is
+/// the **view**. `bytes(s) -> Array<UInt8>` and `s[i] -> UInt8` already give a
+/// `String` its byte reading, and `stringFromBytes(b)` gives the way back, so
+/// none of the five needs to know anything a Vyrn program cannot see.
+///
+/// Nothing here is a *swap*: the builtins still exist and are still what user
+/// code calls. These are the equivalence candidates, and
+/// `examples/strpredbytes.vyrn` is the proof — it runs each one beside the
+/// builtin it would replace, over the surface where two implementations can
+/// differ, and asserts they agree. When the swap lands, that example becomes the
+/// regression pin.
+///
+/// Every function is `V`-suffixed (`containsV`, `sliceV`, …) so the module can be
+/// imported into a program that also calls the builtin, which is exactly what the
+/// proof needs.
+///
+/// **Bytes, not characters.** A `String` is UTF-8 bytes and every offset and
+/// length here is a byte offset, matching the builtins. That is also why the
+/// predicates are safe to do byte-wise: UTF-8 is self-synchronizing — a needle's
+/// first byte is either ASCII or a lead byte, never a continuation byte, and every
+/// non-boundary offset in the haystack holds a continuation byte — so a valid
+/// needle cannot match at a non-boundary offset. The case that looks dangerous is
+/// unreachable rather than handled.
+///
+/// **The one place a builtin cannot be reproduced.** `slice` *traps* on a bad
+/// range (`error: slice index out of range`) or a cut inside a character
+/// (`error: slice splits a UTF-8 character`). Vyrn has no expression that aborts
+/// with a message — there is no `panic` and no `abort` — so `sliceV` returns
+/// `Option<String>` and `None` means "the builtin would trap here". A trapping
+/// wrapper is one line on top of that *if* the language ever grows the primitive;
+/// the honest view of a partial function is the `Option` either way, which is the
+/// house idiom for the rest of the standard library.
+
+/// The byte length of `s` — the `s.byteLength` field, as a function.
+///
+/// `bytes` hands over the byte view and an array knows its own length, so this
+/// is the whole thing.
+export fn byteLengthV(s: String) -> Int64 {
+    return bytes(s).length
+}
+
+/// Does `s` begin with `needle`? An empty needle is a prefix of everything
+/// (including `""`), matching the builtin.
+export fn startsWithV(s: String, needle: String) -> Bool {
+    let nl = byteLengthV(needle)
+    if nl > byteLengthV(s) {
+        return false
+    }
+    let mut j = 0
+    while j < nl {
+        if s[j] != needle[j] {
+            return false
+        }
+        j = j + 1
+    }
+    return true
+}
+
+/// Does `s` end with `needle`? An empty needle is a suffix of everything.
+export fn endsWithV(s: String, needle: String) -> Bool {
+    let off = byteLengthV(s) - byteLengthV(needle)
+    if off < 0 {
+        return false
+    }
+    let nl = byteLengthV(needle)
+    let mut j = 0
+    while j < nl {
+        if s[off + j] != needle[j] {
+            return false
+        }
+        j = j + 1
+    }
+    return true
+}
+
+/// Does `needle` occur anywhere in `s`? An empty needle occurs at 0, so this is
+/// `true` even for `""`.
+///
+/// The naive scan, which is what the builtin is too at these sizes.
+/// `std/strings`'s `indexOf` is the same loop returning the offset — this is
+/// spelled out rather than built on it so the module stays a leaf that imports
+/// nothing and reaches no builtin except the byte view.
+export fn containsV(s: String, needle: String) -> Bool {
+    let n = byteLengthV(s)
+    let nl = byteLengthV(needle)
+    if nl > n {
+        return false
+    }
+    let mut i = 0
+    while i + nl <= n {
+        let mut j = 0
+        while j < nl && s[i + j] == needle[j] {
+            j = j + 1
+        }
+        if j == nl {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// The bytes of `s` from `start` up to `end`, or `None` where the `slice` builtin
+/// would trap: `start < 0`, `end > s.byteLength`, `start > end`, or a cut point
+/// inside a multi-byte UTF-8 character.
+///
+/// The boundary check is not written out. A cut at a non-boundary offset either
+/// starts the range on a continuation byte or ends it on a truncated character,
+/// and both are invalid UTF-8 — so `stringFromBytes` refuses exactly the ranges
+/// the builtin's `is_char_boundary` pair refuses, and refusing is what `None`
+/// says. Both engines check the range before the boundary, and so does this.
+///
+/// One divergence, unreachable from ordinary source: `stringFromBytes` rejects a
+/// NUL byte (RFC-0014's rule), and `slice` does not, so slicing a String that
+/// contains a NUL yields `None` here and the substring there. No string literal
+/// can hold one — there is no `\0` escape — and `stringFromBytes` will not build
+/// one either, so the byte view is *not* a round trip only for a String no
+/// program can construct through it.
+export fn sliceV(s: String, start: Int64, end: Int64) -> Option<String> {
+    let n = byteLengthV(s)
+    if start < 0 || end > n || start > end {
+        return None
+    }
+    let b = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = start
+    while i < end {
+        out.push(b[i])
+        i = i + 1
+    }
+    return match stringFromBytes(out) {
+        Ok(v) => Some(v),
+        Err(e) => None,
+    }
+}

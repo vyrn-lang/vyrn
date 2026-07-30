@@ -1,0 +1,217 @@
+/// The string predicates and `slice`, proved against themselves (RFC-0078 M4b).
+///
+/// `contains`, `startsWith`, `endsWith`, `slice` and `byteLength` are builtins
+/// with three implementations each. `std/strpred` writes all five as ordinary
+/// Vyrn on the byte view (`bytes`, `s[i]`, `stringFromBytes`), and this example is
+/// the equivalence proof: **the builtin is the oracle**, called beside the Vyrn
+/// version in the same program, over the surface where two implementations of a
+/// substring search can disagree.
+///
+/// Every predicate row prints the builtin's three answers, then this module's, so
+/// a disagreement is a visible diff rather than a silent `false`. Printing from
+/// `main` puts it through parity, which means the Vyrn versions are checked
+/// interp == native == wasm as well as against the builtins. The `test` blocks at
+/// the bottom assert the agreement rather than describing it, so the proof holds
+/// before anything is swapped — and becomes the regression pin after.
+///
+/// Two things this file cannot show, both stated in `std/strpred`'s doc:
+///
+/// - **`slice`'s two traps.** `error: slice index out of range` and
+///   `error: slice splits a UTF-8 character` end the process, so the builtin can
+///   only be asked about legal ranges here. `sliceV` answers `None` for exactly
+///   those ranges instead, and `tests/strpred.rs` runs the trapping programs and
+///   checks the wording.
+/// - **A needle matching only at a non-boundary offset.** It cannot happen and it
+///   cannot be written: a valid needle begins with an ASCII or lead byte, a
+///   non-boundary offset holds a continuation byte, so the byte-wise scan is
+///   UTF-8-safe by construction rather than by a check. The row that *looks* like
+///   it — `"©"` (C2 A9) against `"é"` (C3 A9), same trailing byte — is the closest
+///   a String can get, and both implementations say no.
+
+import { byteLengthV, containsV, endsWithV, sliceV, startsWithV } from "std/strpred"
+
+fn bit(b: Bool) -> String {
+    return if b { "1" } else { "0" }
+}
+
+/// `contains startsWith endsWith`, the builtins' answers then `std/strpred`'s.
+/// Identical halves is the whole point; anything else is the bug.
+fn preds(h: String, n: String) -> String {
+    return bit(contains(h, n)) + bit(startsWith(h, n)) + bit(endsWith(h, n)) + " "
+    + bit(containsV(h, n)) + bit(startsWithV(h, n)) + bit(endsWithV(h, n))
+}
+
+/// The same three comparisons as one `Bool`, for the assertions.
+fn predsAgree(h: String, n: String) -> Bool {
+    if containsV(h, n) != contains(h, n) {
+        return false
+    }
+    if startsWithV(h, n) != startsWith(h, n) {
+        return false
+    }
+    if endsWithV(h, n) != endsWith(h, n) {
+        return false
+    }
+    return true
+}
+
+/// A range both can be asked about: the builtin's substring, then this module's.
+fn sl(s: String, a: Int64, b: Int64) -> String {
+    return slice(s, a, b) + " " + show(sliceV(s, a, b))
+}
+
+/// A range the builtin would TRAP on, so only `sliceV` can be asked.
+fn show(o: Option<String>) -> String {
+    return match o {
+        Some(v) => v,
+        None => "None",
+    }
+}
+
+/// `s.byteLength`, then `byteLengthV(s)`.
+fn bl(s: String) -> String {
+    return s.byteLength.toString() + " " + byteLengthV(s).toString()
+}
+
+fn main() -> Int64 {
+    // ---- the predicates, builtin then Vyrn ---------------------------------
+    print(preds("abc", "")) // an empty needle is in everything, at both ends
+    print(preds("", ""))
+    print(preds("", "a")) // needle longer than the haystack
+    print(preds("abc", "abcd"))
+    print(preds("abc", "abc")) // needle == haystack: all three true
+    print(preds("aaaa", "aaa")) // overlapping candidates
+    print(preds("aaa", "aaaa"))
+    print(preds("abcabc", "abc")) // two occurrences, one at each end
+    print(preds("abc", "b")) // interior only
+    print(preds("héllo", "é")) // a multi-byte needle on a boundary
+    print(preds("héllo", "hé"))
+    print(preds("héllo", "llo"))
+    print(preds("héllo", "h"))
+    // C2 A9 against C3 A9 — the same trailing byte, a different character. The
+    // closest a String can come to matching inside a codepoint.
+    print(preds("é", "©"))
+    print(preds("日本語", "本")) // three bytes, interior
+    print(preds("日本語", "語"))
+    print(preds("日本語", "日"))
+    print(preds("😀ok", "😀")) // four bytes, prefix
+    print(preds("😀ok", "k"))
+    print(preds("😀ok", "o"))
+
+    // ---- slice, on the ranges the builtin survives -------------------------
+    print(sl("hello", 0, 0)) // start == end, empty result
+    print(sl("hello", 5, 5)) // start == end at the very end
+    print(sl("hello", 0, 5)) // the whole string
+    print(sl("hello", 1, 3))
+    print(sl("héllo", 1, 3)) // exactly the two bytes of é
+    print(sl("héllo", 3, 6))
+    print(sl("日本語", 3, 6)) // exactly 本
+    print(sl("日本語", 0, 9))
+    print(sl("😀ok", 0, 4)) // exactly 😀
+    print(sl("", 0, 0)) // the empty string sliced to nothing
+
+    // ---- slice, on the ranges the builtin traps on -------------------------
+    // Each of these is `None` here and `error: slice ..` there; the pairing of
+    // the two is what `tests/strpred.rs` checks.
+    print(show(sliceV("hello", 3, 2))) // start > end
+    print(show(sliceV("hello", 0, 6))) // end past the length
+    print(show(sliceV("hello", 6, 6))) // start past the length
+    print(show(sliceV("hello", -1, 2))) // negative start
+    print(show(sliceV("hello", 0, -1))) // negative end (start > end catches it)
+    print(show(sliceV("héllo", 0, 2))) // end inside é
+    print(show(sliceV("héllo", 2, 6))) // start inside é
+    print(show(sliceV("日本語", 1, 2))) // both cuts inside 日
+
+    // ---- byteLength --------------------------------------------------------
+    print(bl("")) // 0
+    print(bl("abc")) // ASCII: bytes == characters
+    print(bl("héllo")) // 6 bytes, 5 characters
+    print(bl("日本語")) // 9 bytes, 3 characters
+    print(bl("😀")) // 4 bytes, 1 character
+    // A string that came back through the byte view rather than from a literal.
+    let mut raw: Array<UInt8> = []
+    raw.push(226)
+    raw.push(130)
+    raw.push(172) // E2 82 AC — the euro sign
+    raw.push(65)
+    let built = match stringFromBytes(raw) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    print(bl(built)) // 4
+    print(preds(built, "€"))
+    print(sl(built, 0, 3))
+    return 0
+}
+
+test "the predicates agree with the builtins over the whole surface" {
+    assert(predsAgree("abc", ""))
+    assert(predsAgree("", ""))
+    assert(predsAgree("", "a"))
+    assert(predsAgree("abc", "abcd"))
+    assert(predsAgree("abc", "abc"))
+    assert(predsAgree("aaaa", "aaa"))
+    assert(predsAgree("aaa", "aaaa"))
+    assert(predsAgree("abcabc", "abc"))
+    assert(predsAgree("abc", "b"))
+    assert(predsAgree("héllo", "é"))
+    assert(predsAgree("héllo", "hé"))
+    assert(predsAgree("héllo", "llo"))
+    assert(predsAgree("héllo", "h"))
+    assert(predsAgree("é", "©"))
+    assert(predsAgree("日本語", "本"))
+    assert(predsAgree("日本語", "語"))
+    assert(predsAgree("日本語", "日"))
+    assert(predsAgree("😀ok", "😀"))
+    assert(predsAgree("😀ok", "k"))
+    assert(predsAgree("😀ok", "o"))
+}
+
+test "the empty needle and the oversized needle are the two boundary answers" {
+    // An empty needle is a substring, a prefix AND a suffix — of the empty
+    // string too. A needle longer than the haystack is none of the three.
+    assertEq(preds("abc", ""), "111 111")
+    assertEq(preds("", ""), "111 111")
+    assertEq(preds("", "a"), "000 000")
+    assertEq(preds("abc", "abcd"), "000 000")
+    assertEq(preds("abc", "abc"), "111 111")
+    // Overlapping candidates: "aaa" is in "aaaa" at 0 and at 1, so it is both a
+    // prefix and a suffix; the reverse pair matches nothing at all.
+    assertEq(preds("aaaa", "aaa"), "111 111")
+    assertEq(preds("aaa", "aaaa"), "000 000")
+    // C2 A9 versus C3 A9: a matcher comparing only the last byte would say yes.
+    assertEq(preds("é", "©"), "000 000")
+}
+
+test "slice agrees with the builtin on every legal range" {
+    assertEq(sl("hello", 0, 0), " ")
+    assertEq(sl("hello", 5, 5), " ")
+    assertEq(sl("hello", 0, 5), "hello hello")
+    assertEq(sl("hello", 1, 3), "el el")
+    assertEq(sl("héllo", 1, 3), "é é")
+    assertEq(sl("日本語", 3, 6), "本 本")
+    assertEq(sl("😀ok", 0, 4), "😀 😀")
+    assertEq(sl("", 0, 0), " ")
+}
+
+test "sliceV declines exactly where the builtin traps" {
+    // The out-of-range trap, in each of its four shapes.
+    assertEq(show(sliceV("hello", 3, 2)), "None")
+    assertEq(show(sliceV("hello", 0, 6)), "None")
+    assertEq(show(sliceV("hello", 6, 6)), "None")
+    assertEq(show(sliceV("hello", -1, 2)), "None")
+    assertEq(show(sliceV("hello", 0, -1)), "None")
+    // The UTF-8 trap: a cut landing inside a character. It does NOT produce
+    // invalid UTF-8 — the builtin refuses the range outright, and so does this.
+    assertEq(show(sliceV("héllo", 0, 2)), "None")
+    assertEq(show(sliceV("héllo", 2, 6)), "None")
+    assertEq(show(sliceV("日本語", 1, 2)), "None")
+}
+
+test "byteLength counts bytes, not characters" {
+    assertEq(bl(""), "0 0")
+    assertEq(bl("abc"), "3 3")
+    assertEq(bl("héllo"), "6 6")
+    assertEq(bl("日本語"), "9 9")
+    assertEq(bl("😀"), "4 4")
+}

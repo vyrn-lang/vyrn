@@ -3,6 +3,7 @@
 - [std/args](std/args.md) — std/args — CLI argument parsing over `args()` (RFC-0061). A pure-Vyrn library,
 - [std/arrays](std/arrays.md) — std/arrays — higher-order array helpers (RFC-0023), written in Vyrn itself.
 - [std/bench](std/bench.md) — std/bench — the benchmarking harness helpers (RFC-0055).
+- [std/codecs](std/codecs.md) — std/codecs — hex, base64 and percent encoding, written in Vyrn (RFC-0078 M4b).
 - [std/connect](std/connect.md) — std/connect — Connect wire compatibility as a library (RFC-0038), built
 - [std/contract](std/contract.md) — std/contract — check a module against a module contract (RFC-0071).
 - [std/graphql](std/graphql.md) — std/graphql — the contract as a GraphQL SDL document (RFC-0038), a library
@@ -19,6 +20,8 @@
 - [std/scan](std/scan.md) — std/scan (RFC-0054) — one shared, comment- and string-aware cursor over
 - [std/storage](std/storage.md) — std/storage — crash-safe persistence (RFC-0044).
 - [std/strings](std/strings.md) — std/strings — string helpers, written in Vyrn itself on the `slice` builtin
+- [std/strpred](std/strpred.md) — std/strpred — the string predicates and `slice`, written in Vyrn
+- [std/text](std/text.md) — std/text — UTF-8 decoding and byte-offset line/column, written in Vyrn
 - [std/time](std/time.md) — std/time — wall-clock time at the host boundary (RFC-0043).
 - [std/tw](std/tw.md) — std/tw — theme-derived utility classes as a CHECKED TYPE (RFC-0032), a library
 - [std/ui](std/ui.md) — std/ui — the pages generator (RFC-0026 M3), file-based routing as a library

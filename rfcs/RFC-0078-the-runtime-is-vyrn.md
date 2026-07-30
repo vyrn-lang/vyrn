@@ -943,3 +943,128 @@ the primitive: the ruling on strictness (surrogate pairs, duplicate keys, the
 `json.parse` wording), and the `Option<T>`-returning decoder shape. Neither is a
 missing primitive, and `std/jsonread` can `import { parseFloat64 } from "std/num"`
 today.
+
+---
+
+## M4b(3), as landed: the predicates were already writable, and `slice` needs an abort
+
+`std/strpred` is `contains`, `startsWith`, `endsWith`, `slice` and `byteLength` —
+five builtins, three implementations each — written as 140 lines of ordinary Vyrn
+on nothing but the byte view. Nothing is swapped: the builtins still exist and are
+still what user code calls, and what landed is the equivalence proof, which is the
+order M2 established (pin first, or the test describes whatever came out).
+
+### M4a's question, asked of the string half, answers itself
+
+M4a's note said to check `chars` and `stringFromBytes` against "is the missing
+piece an operation or a VIEW?" before assuming a builtin, and observed that
+`bytes` may already be the string half's view. For these five it is, and there was
+nothing left to add: `bytes(s) -> Array<UInt8>`, `s[i] -> UInt8` and
+`stringFromBytes(b) -> Result<String, String>` are the whole substrate. **Zero new
+primitives.** That is the cheapest milestone in this RFC so far, and it is cheap
+because M4a already paid for the category.
+
+The predicates in particular were nearly written already: `std/strings`'s
+`indexOf` / `lastIndexOf` (RFC-0046) are the same byte-wise scan returning the
+offset, so `contains` has effectively existed in Vyrn since RFC-0046 and nobody
+noticed the builtin was redundant. `std/strpred` spells the loop out rather than
+importing `indexOf`, for one reason worth recording: `indexOf` reaches
+`s.byteLength`, which is one of the five builtins under replacement, so building
+on it would have produced exactly the half-Vyrn/half-builtin seam this document
+names as worse than either end state. The module imports nothing.
+
+### The UTF-8 hazard in a byte-wise search is unreachable, not handled
+
+The brief asked for "a needle that matches only at a non-boundary byte offset
+inside a multi-byte codepoint". **No such input exists, and the reason is a
+proof rather than a test.** UTF-8 is self-synchronizing: a valid needle's first
+byte is ASCII or a lead byte, never a continuation byte, and every non-boundary
+offset in a valid haystack holds a continuation byte. So a byte-wise scan over two
+valid `String`s cannot report a match inside a character — the case does not need
+a check. Nor can it be *written*: a needle consisting of a bare continuation byte
+is not constructible, since there is no such string literal and `stringFromBytes`
+refuses the bytes. The nearest thing a `String` can be is `"©"` (C2 A9) against
+`"é"` (C3 A9) — the same trailing byte, a different character — and it is pinned,
+`false` both ways.
+
+### `slice`'s two traps, and the one primitive that is genuinely missing
+
+Reproduced verbatim from the single source
+(`interp.rs`, `@.trap.slice*` in `codegen/lib.rs`, `direct.rs`'s interned strings),
+both rendered by the CLI as `error: <msg>` with exit code 1:
+
+| condition | message |
+|---|---|
+| `start < 0`, `end > byteLength`, or `start > end` | `error: slice index out of range` |
+| either cut point inside a multi-byte character | `error: slice splits a UTF-8 character` |
+
+The range is checked **first** on every engine, so a mid-character offset combined
+with an out-of-range one reports out-of-range; a negative `end` is caught by
+`start > end` rather than by a lower bound. Both are pinned.
+
+**A mid-codepoint boundary traps — it does not produce invalid UTF-8.** That was
+the brief's open question and it had to be run to answer: `slice` refuses the
+range outright rather than handing back a truncated character.
+
+Which is where the one real gap is. **Vyrn has no expression that aborts with a
+message** — no `panic`, no `abort` — so a Vyrn `slice` cannot be
+observationally equal to the builtin. `sliceV` returns `Option<String>` and `None`
+means "the builtin would trap here". Asked in M4a's terms, this gap is neither an
+operation nor a view: it is a *control* primitive, and it is irreducible in the
+same way memory growth is (every backend already has one — `exit`, `unreachable`).
+It also belongs on M1's list, which currently reads memory + syscalls +
+representation and has no entry for aborting. The `Option` is the honest shape for
+a partial function either way — it is the house idiom for the rest of `std/` — so a
+trapping wrapper is one line on top of `sliceV` the day the primitive exists, and
+M4b(3) does not need it.
+
+The boundary check is not written out, and that is the pleasing part: a cut at a
+non-boundary offset either starts the range on a continuation byte or ends it on a
+truncated character, both of which are invalid UTF-8, so `stringFromBytes` refuses
+exactly the ranges `is_char_boundary` refuses. `sliceV` gets the second trap's
+condition for free from the view.
+
+### One asymmetry in the byte view, worth naming before something trips on it
+
+`bytes` and `stringFromBytes` are **not** a round trip. `stringFromBytes` rejects a
+NUL byte (RFC-0014's rule) and `slice` does not, so `sliceV` of a NUL-containing
+`String` is `None` where `slice` returns the substring. It is unreachable from
+ordinary source — there is no `\0` escape (`unknown escape \0`), and
+`stringFromBytes` will not build such a string either — but the lexer does accept a
+raw NUL byte in a literal, so the divergence is reachable by a file no one would
+write rather than by no file at all. Any future *swap* of `slice` has to answer it;
+the proof only has to state it.
+
+### The proof shape: the builtin is the oracle, in the same process
+
+`examples/strpredbytes.vyrn` calls each Vyrn version beside the builtin it would
+replace and prints both answers on one line, so a disagreement is a visible diff
+rather than a silent `false`: 21 predicate rows (empty needle, needle longer than
+haystack, needle == haystack, overlapping `"aaa"` in `"aaaa"`, multi-byte needles at
+2/3/4 bytes at every position, the C2-A9/C3-A9 near-miss), ten legal slices
+(`start == end` at both ends, the whole string, exact character boundaries in 2-,
+3- and 4-byte characters, the empty string), eight trapping ranges through `sliceV`,
+and `byteLength` over empty/ASCII/multi-byte plus a string built by
+`stringFromBytes` rather than from a literal. Printing from `main` puts all of it
+through parity, so the Vyrn versions are checked interp == native == wasm as well as
+against the builtins; five `test` blocks assert the agreement.
+
+`tests/strpred.rs` covers the one thing a single program cannot, since a trap ends
+the process: one program per trapping range, printing `sliceV`'s answer and *then*
+calling the builtin, so a single run pins both halves of the pairing — stdout
+`None`, stderr the canonical message, exit 1 — over ten ranges across both traps.
+
+**No disagreement was found anywhere.** Every predicate row, every legal slice and
+every byte length matched on the first run, which is worth stating because it is the
+first milestone in this arc where pinning the boring rows first did *not* uncover a
+defect in some third engine. The five builtins agree with their Vyrn definitions
+exactly, so a swap would be observable only in `slice`'s trap — and only because
+Vyrn cannot trap.
+
+### Gates, at this note
+
+1222 workspace tests from this milestone's three rows (the suite reported 1227 with
+two sibling M4b modules present in the tree), `strpredbytes.vyrn` green three ways
+in parity, `doc --std --verify` clean with `docs/api/std/strpred.md` added. The
+shim is unchanged at 95 C definitions / 66 exported, and it should be: M4b(3)
+retires no builtin, it proves five of them redundant.
