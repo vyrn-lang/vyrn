@@ -1253,6 +1253,17 @@ fn emit_with(program: &Program, gen_host: bool) -> Result<String, String> {
     // wasm32 and i64 on x86-64 (an ABI clash). SmallArray never crosses
     // `extern`, so keeping the copy internal to generated code is sound.
     out.push_str("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
+    // Saturating float→int (RFC-0078 M4a). A bare `fptosi`/`fptoui` is POISON
+    // for an out-of-range or NaN operand, which is not a semantics any engine
+    // can agree with: the interpreter is Rust's `as` (saturating, NaN→0) and
+    // RFC-0077 M2h made the direct wasm backend match it, so native was the odd
+    // one out and `examples/numbytes.vyrn` caught it — `Int64(10^300)` was
+    // `Int64.min` natively and `Int64.max` in the other two. The saturating
+    // intrinsics ARE Rust's `as`, so this is a one-for-one substitution.
+    out.push_str("declare i64 @llvm.fptosi.sat.i64.f64(double)\n");
+    out.push_str("declare i64 @llvm.fptoui.sat.i64.f64(double)\n");
+    out.push_str("declare i64 @llvm.fptosi.sat.i64.f32(float)\n");
+    out.push_str("declare i64 @llvm.fptoui.sat.i64.f32(float)\n");
     // Worker threads (RFC-0025): `spawn f(args)` packs its evaluated arguments
     // into a heap frame and hands the shim a per-spawn-site thunk SYMBOL plus
     // that frame; the shim runs the thunk on a real OS thread natively (Win32 /
@@ -4898,9 +4909,22 @@ impl<'a> Gen<'a> {
                 let op = if from_unsigned { "uitofp" } else { "sitofp" };
                 self.emit(format!("{t} = {op} {fll} {v} to {tll}"));
             }
+            // Float→int, in the interpreter's two steps rather than one cast:
+            // saturate into 64 bits, then narrow by WRAPPING. That composition
+            // is why `UInt8(300.7)` is 44 and not 255 — `300.7 as u64` is 300
+            // and `300 as u8` wraps — and a single `fptoui .. to i8` agrees with
+            // it only by accident of the host instruction.
             (true, false) => {
+                let sfx = if fll == "double" { "f64" } else { "f32" };
                 let op = if to_unsigned { "fptoui" } else { "fptosi" };
-                self.emit(format!("{t} = {op} {fll} {v} to {tll}"));
+                let sat = self.fresh_tmp();
+                self.emit(format!(
+                    "{sat} = call i64 @llvm.{op}.sat.i64.{sfx}({fll} {v})"
+                ));
+                if tll == "i64" {
+                    return Ok((sat, to.clone()));
+                }
+                self.emit(format!("{t} = trunc i64 {sat} to {tll}"));
             }
             // Float↔Float of different widths (fll != tll guaranteed above):
             // f64→f32 rounds (`fptrunc`), f32→f64 is exact (`fpext`).
@@ -11110,7 +11134,9 @@ mod tests {
                    let g = Float64(n); let s = Int32(5000000000); \
                    print(g); return Int64(s); }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("fptosi double"), "float→int: {ir}");
+        // Saturating, not bare: a plain `fptosi` is poison out of range, and the
+        // interpreter's `as` saturates (RFC-0078 M4a).
+        assert!(ir.contains("@llvm.fptosi.sat.i64.f64(double"), "float→int: {ir}");
         assert!(ir.contains("sitofp i64"), "int→float: {ir}");
         assert!(ir.contains("trunc i64") && ir.contains("to i32"), "int→i32: {ir}");
         assert!(ir.contains("sext i32 ") && ir.contains("to i64"), "i32→int: {ir}");

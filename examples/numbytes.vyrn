@@ -1,0 +1,252 @@
+/// The exact bytes every number conversion produces — RFC-0078 M4a's pin.
+///
+/// M4a decides whether text -> number is a primitive each backend provides or a
+/// library written once in Vyrn, and then moves it. Either way the bytes have to
+/// be captured BEFORE the move: a test written afterwards proves whatever came
+/// out, not that the old answer and the new one agree. So this example is
+/// deliberately dull. It walks the whole surface where two implementations of a
+/// numeric conversion can disagree, prints it from `main` — which is what makes
+/// parity check interp == native == wasm on it — and pins the interesting rows as
+/// literals in the `test` blocks below.
+///
+/// It is weighted towards the shapes nobody looks at:
+///
+/// - `parse`'s FAILURES, and its non-failures. `"+1"`, `" 1"`, `"1 "`, `"1.5"`,
+///   `"007"` and `""` are all decisions rather than accidents, and `parse` wraps
+///   on overflow instead of returning `None` — which is the one row a reader would
+///   guess wrong.
+/// - the exact `UInt64` above `Int64.max`, which cannot come back through
+///   `parse`'s `Option<Int64>` at all. Pinned here as the wrapped value it
+///   actually produces, so the day it stops wrapping is a visible diff.
+/// - `%f`'s six places on the values that tell an exact formatter from a
+///   plausible one: the two exact ties (half-to-EVEN keeps the even `2` in
+///   `0.0078125` and rounds the odd `7` up in `0.0234375`), `10^300`'s 301 integer
+///   digits, a subnormal at the deepest the conversion goes, and the four spelled
+///   values `NaN` / `inf` / `-inf` / `-0.0`.
+/// - the saturating float -> integer conversions, which are the interpreter's
+///   Rust `as` semantics and not the hardware's.
+///
+/// Vyrn has no exponent literals, so the extreme values are built by
+/// multiplication. That is better than a literal would have been: every engine
+/// computes the same double by the same IEEE steps, and the mantissa that comes
+/// out is messy rather than round.
+
+/// Kept opaque so no engine can constant-fold a division by zero.
+fn opaque(x: Float64) -> Float64 {
+    return x
+}
+
+/// `10^n` by repeated multiplication.
+fn pow10(n: Int64) -> Float64 {
+    let mut x: Float64 = 1.0
+    let mut i: Int64 = 0
+    while i < n {
+        x = x * 10.0
+        i = i + 1
+    }
+    return x
+}
+
+/// `2^-n` by repeated halving — `halved(1074)` is the smallest subnormal.
+fn halved(n: Int64) -> Float64 {
+    let mut x: Float64 = 1.0
+    let mut i: Int64 = 0
+    while i < n {
+        x = x / 2.0
+        i = i + 1
+    }
+    return x
+}
+
+/// `parse`, rendered so a `None` is as visible as a value.
+fn p(s: String) -> String {
+    return match parse(s) {
+        Some(n) => n.toString(),
+        None => "None",
+    }
+}
+
+fn main() -> Int64 {
+    // ---- text -> Int64, including every way it declines ------------------
+    print(p("0"))
+    print(p("-0"))
+    print(p("42"))
+    print(p("-42"))
+    print(p("007"))
+    print(p("-007"))
+    print(p("9223372036854775807"))
+    print(p("-9223372036854775808"))
+    // Above `Int64.max`: `parse` WRAPS rather than declining.
+    print(p("9223372036854775808"))
+    print(p("18446744073709551615"))
+    print(p("99999999999999999999999999"))
+    // The declines.
+    print(p(""))
+    print(p("-"))
+    print(p("+1"))
+    print(p(" 1"))
+    print(p("1 "))
+    print(p("1.5"))
+    print(p("1e3"))
+    print(p("abc"))
+    print(p("12a"))
+    print(p("--1"))
+
+    // ---- number -> text, at the bounds of every width --------------------
+    let i8lo: Int8 = Int8(0 - 128)
+    let i8hi: Int8 = 127
+    let u8hi: UInt8 = 255
+    let i16lo: Int16 = Int16(0 - 32768)
+    let u32hi: UInt32 = 4294967295
+    let i64lo: Int64 = 0 - 9223372036854775807 - 1
+    let u64hi: UInt64 = 18446744073709551615
+    print(i8lo.toString())
+    print(i8hi.toString())
+    print(u8hi.toString())
+    print(i16lo.toString())
+    print(u32hi.toString())
+    print(i64lo.toString())
+    print(u64hi.toString())
+
+    // ---- Float64 -> text, on the values a shortcut gets wrong -------------
+    print(0.0078125.toString())
+    print(0.0234375.toString())
+    print(pow10(300).toString())
+    print((0.0 - pow10(300)).toString())
+    print(halved(1074).toString())
+    print(halved(1075).toString())
+    print((opaque(0.0) * (0.0 - 1.0)).toString())
+    print((1.0 / opaque(0.0)).toString())
+    print((0.0 - 1.0 / opaque(0.0)).toString())
+    print((opaque(0.0) / opaque(0.0)).toString())
+    print(9.9999995.toString())
+    print(123456789.123456789.toString())
+    let f: Float32 = 0.1
+    print(f.toString())
+    print((f * f).toString())
+
+    // ---- float -> integer, which saturates rather than trapping -----------
+    print(Int64(0.0 - 2.9).toString())
+    print(UInt8(300.7).toString())
+    print(Int64(pow10(300)).toString())
+    print(Int64(0.0 - pow10(300)).toString())
+    print(UInt64(0.0 - 1.5).toString())
+    print(Int64(opaque(0.0) / opaque(0.0)).toString())
+    print(Float32(pow10(300)).toString())
+
+    // ---- integer -> float, which rounds ----------------------------------
+    print(Float64(9223372036854775807).toString())
+    print(Float32(16777217).toString())
+    return 0
+}
+
+/// `parse` accepts an optional `-` and then digits, all of them, and nothing
+/// else. No sign `+`, no surrounding space, no radix point, no exponent.
+test "parse takes a minus and digits, and nothing else" {
+    assertEq(p("0"), "0")
+    assertEq(p("-0"), "0")
+    assertEq(p("42"), "42")
+    assertEq(p("-42"), "-42")
+    assertEq(p("007"), "7")
+    assertEq(p("-007"), "-7")
+    assertEq(p(""), "None")
+    assertEq(p("-"), "None")
+    assertEq(p("+1"), "None")
+    assertEq(p(" 1"), "None")
+    assertEq(p("1 "), "None")
+    assertEq(p("1.5"), "None")
+    assertEq(p("1e3"), "None")
+    assertEq(p("abc"), "None")
+    assertEq(p("12a"), "None")
+    assertEq(p("--1"), "None")
+}
+
+/// The row a reader would guess wrong: out of range is not a decline. `parse`
+/// accumulates with wrapping arithmetic, so a value above `Int64.max` comes back
+/// as a wrapped `Some`, not as `None` — which is why the exact `UInt64` case
+/// cannot be served by `parse` at all.
+test "parse wraps on overflow rather than declining" {
+    assertEq(p("9223372036854775807"), "9223372036854775807")
+    assertEq(p("-9223372036854775808"), "-9223372036854775808")
+    assertEq(p("9223372036854775808"), "-9223372036854775808")
+    assertEq(p("18446744073709551615"), "-1")
+    assertEq(p("99999999999999999999999999"), "-2537764290115403777")
+}
+
+/// `%f` is an EXACT decimal conversion of the double, rounded half-to-even at
+/// the sixth place. `0.0078125` and `0.0234375` are exact ties in opposite
+/// directions, so a half-UP implementation passes one and fails the other.
+///
+/// `9.9999995` is the case that shows why "exact" is the operative word: it
+/// *looks* like a tie and is not one — the nearest double is a hair below — so an
+/// implementation that rounds the literal's decimal digits says `10.000000` and
+/// an implementation that converts the double says `9.999999`.
+test "six decimals are the exact ones, rounded half to even" {
+    assertEq(0.0078125.toString(), "0.007812")
+    assertEq(0.0234375.toString(), "0.023438")
+    assertEq(9.9999995.toString(), "9.999999")
+    assertEq(123456789.123456789.toString(), "123456789.123457")
+}
+
+/// `10^300` is 301 integer digits of the exact value of the nearest double —
+/// not a `1` and three hundred zeros — so a wrong carry anywhere shows up as a
+/// wrong digit in the middle rather than at either end. `halved(1074)` is the
+/// smallest subnormal and still prints `0.000000`; `halved(1075)` is zero.
+test "the extremes keep every digit" {
+    assertEq(
+        pow10(300).toString(),
+        "1000000000000000201206451102982726528510718396098215168041874281451248363566"
+        + "0941273804370911208852185605358934485189371568149022546577356211033167392772"
+        + "7776193144531116603838203491427854077548432800993666474448696900069727411136"
+        + "1486849523430568151310289152823685865144042626214886587669241994282008576"
+        + ".000000",
+    )
+    assertEq(halved(1074).toString(), "0.000000")
+    assertEq(halved(1075).toString(), "0.000000")
+}
+
+/// The four values that are spelled rather than computed. `-0.0` keeps a sign no
+/// digit carries, and `NaN`/`inf`/`-inf` are words the platform's own `printf`
+/// would spell differently.
+test "the non-finite values and negative zero are spelled" {
+    assertEq((opaque(0.0) * (0.0 - 1.0)).toString(), "-0.000000")
+    assertEq((1.0 / opaque(0.0)).toString(), "inf")
+    assertEq((0.0 - 1.0 / opaque(0.0)).toString(), "-inf")
+    assertEq((opaque(0.0) / opaque(0.0)).toString(), "NaN")
+}
+
+/// Float -> integer saturates at `Int64`'s bounds and sends `NaN` to zero. That
+/// is Rust's `as`, which the interpreter is, and which the two compiled backends
+/// have to reproduce because a bare hardware truncation traps instead.
+///
+/// `UInt8(300.7)` is `44` rather than `255`, and that is the composition rather
+/// than a bug: the float truncates to `Int64` (saturating) and the narrowing to
+/// `UInt8` then WRAPS, exactly as `UInt8(300)` does. Pinned because a
+/// reimplementation that saturates the whole way would look more correct and
+/// would be a different language.
+test "float to integer saturates" {
+    assertEq(Int64(0.0 - 2.9).toString(), "-2")
+    assertEq(UInt8(300.7).toString(), "44")
+    assertEq(Int64(pow10(300)).toString(), "9223372036854775807")
+    assertEq(Int64(0.0 - pow10(300)).toString(), "-9223372036854775808")
+    assertEq(UInt64(0.0 - 1.5).toString(), "0")
+    assertEq(Int64(opaque(0.0) / opaque(0.0)).toString(), "0")
+    assertEq(Float32(pow10(300)).toString(), "inf")
+}
+
+/// Every width prints its own bounds, and `UInt64.max` is unsigned-exact rather
+/// than the `-1` a signed formatter would print.
+test "every integer width prints its bounds" {
+    let i8lo: Int8 = Int8(0 - 128)
+    let u8hi: UInt8 = 255
+    let i16lo: Int16 = Int16(0 - 32768)
+    let u32hi: UInt32 = 4294967295
+    let i64lo: Int64 = 0 - 9223372036854775807 - 1
+    let u64hi: UInt64 = 18446744073709551615
+    assertEq(i8lo.toString(), "-128")
+    assertEq(u8hi.toString(), "255")
+    assertEq(i16lo.toString(), "-32768")
+    assertEq(u32hi.toString(), "4294967295")
+    assertEq(i64lo.toString(), "-9223372036854775808")
+    assertEq(u64hi.toString(), "18446744073709551615")
+}
