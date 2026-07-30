@@ -38,6 +38,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use vyrn_frontend::ast::*;
+use vyrn_frontend::own::DropKind;
 use vyrn_frontend::types as ftypes;
 
 use crate::layout::{self, Layout};
@@ -231,6 +232,7 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
         mono: RefCell::new(Mono::default()),
         globals: HashMap::new(),
         externs,
+        droppable: vyrn_frontend::own::analyze(program).droppable,
     };
 
     // Every function the module will define, in the order they are defined, so a
@@ -437,6 +439,14 @@ struct Cx {
     /// bodies are skipped, but RFC-0043's host boundary is reached BY NAME, and
     /// what it returns is the declaration's business rather than this file's.
     externs: HashMap<String, Type>,
+    /// Per function, which `let` statements own a heap value and how to reclaim
+    /// it — `vyrn_frontend::own`'s answer, keyed by statement node address: the
+    /// same map, read with the same key, as the textual backend's `droppable`.
+    ///
+    /// Only `ReleaseRef` is acted on. Everything else it reports is a `free`, and
+    /// a bump allocator has no free — but a cell's SLOT comes out of a fixed slab
+    /// of 65536, so a release that never fires IS observable (M2l).
+    droppable: HashMap<String, HashMap<usize, DropKind>>,
 }
 
 impl Cx {
@@ -691,9 +701,11 @@ struct Fn_<'a> {
     /// wasm blocks open between here and the function's outermost one. A
     /// `return` is `br depth`.
     depth: u32,
-    /// (break target, continue target) per enclosing loop, as the depth each was
-    /// opened at; `br` distance is `depth - opened - 1`.
-    loops: Vec<(u32, u32)>,
+    /// (break target, continue target, release boundary) per enclosing loop. The
+    /// first two are the depth each was opened at, so `br` distance is
+    /// `depth - opened - 1`; the third is how many release frames were open when
+    /// the loop started, which is what a `break` has to unwind to.
+    loops: Vec<(u32, u32, usize)>,
     ret: Repr,
     ret_ty: Type,
     /// The wasm local holding the hidden aggregate-return pointer, if any.
@@ -702,6 +714,12 @@ struct Fn_<'a> {
     /// followed by the reads that consume it, so one pair suffices however
     /// deeply expressions nest.
     scratch: HashMap<(ValType, u8), u32>,
+    /// This function's `ReleaseRef` bindings, one frame per open block, released
+    /// on the block's exit — innermost first, newest first, the order the textual
+    /// backend's `drop_stack` uses.
+    releases: Vec<Vec<Place>>,
+    /// [`Cx::droppable`] for the function being lowered.
+    drops: HashMap<usize, DropKind>,
     /// The type a value is being built FOR, innermost last.
     ///
     /// `None` and `Some(x)` do not say what they are — an `Option<T>`'s `T`
@@ -724,6 +742,8 @@ fn top_level<'a>(cx: &'a Cx) -> Fn_<'a> {
         ret_ty: Type::Unit,
         dest: None,
         scratch: HashMap::new(),
+        releases: Vec::new(),
+        drops: HashMap::new(),
         expect: Vec::new(),
     }
 }
@@ -773,6 +793,8 @@ fn lower_fn(m: &mut Module, f: &Function, sig: &Sig, cx: &Cx) -> Result<(), Stri
         ret_ty: sig.ret_ty.clone(),
         dest,
         scratch: HashMap::new(),
+        releases: Vec::new(),
+        drops: cx.droppable.get(&f.name).cloned().unwrap_or_default(),
         expect: Vec::new(),
     };
 
@@ -890,10 +912,33 @@ impl Fn_<'_> {
 
     fn block(&mut self, m: &mut Module, b: &mut Frame, blk: &Block) -> Result<(), String> {
         let mark = self.scope.len();
+        self.releases.push(Vec::new());
         for s in &blk.stmts {
             self.stmt(m, b, s)?;
         }
+        // The fall-through exit. An early `return`/`break`/`continue` releases the
+        // same frames before its branch, so this runs after a branch only in code
+        // wasm has already marked unreachable.
+        let boundary = self.releases.len() - 1;
+        self.emit_releases_above(b, boundary)?;
+        self.releases.pop();
         self.scope.truncate(mark);
+        Ok(())
+    }
+
+    /// Release every cell owned by `self.releases[boundary..]`, innermost frame
+    /// first and newest binding first, WITHOUT popping the frames.
+    ///
+    /// Not popping is what makes an early exit safe: the frames stay so the
+    /// enclosing [`Fn_::block`] still emits its own copy, which lands after the
+    /// branch and is therefore unreachable rather than a second release.
+    fn emit_releases_above(&mut self, b: &mut Frame, boundary: usize) -> Result<(), String> {
+        let frames: Vec<Vec<Place>> = self.releases[boundary..].iter().rev().cloned().collect();
+        for frame in frames {
+            for p in frame.into_iter().rev() {
+                self.emit_release(b, p, 0)?;
+            }
+        }
         Ok(())
     }
 
@@ -966,6 +1011,14 @@ impl Fn_<'_> {
                     }
                 };
                 self.scope.push((name.clone(), place, bound));
+                // A non-escaping `cell(..)` is released when this block exits.
+                // The key is the statement's node address, which is `own`'s own
+                // identity for it — the textual backend reads the same map with
+                // the same key, so the two cannot disagree about which `let` owns
+                // a cell.
+                if self.drops.get(&(s as *const Stmt as usize)) == Some(&DropKind::ReleaseRef) {
+                    self.releases.last_mut().expect("a `let` outside any block").push(place);
+                }
             }
             Stmt::Assign { name, value, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
@@ -1015,6 +1068,12 @@ impl Fn_<'_> {
                         );
                     }
                 }
+                // Every open frame, before the branch. The value is already on the
+                // operand stack (or written through `dest`), and a release does not
+                // disturb it — M2d's note that a value may sit under a block.
+                // Ownership analysis has un-tracked anything the return escapes, so
+                // this cannot release what is being handed back.
+                self.emit_releases_above(b, 0)?;
                 b.ins(&Instruction::Br(self.depth));
             }
             Stmt::If { cond, then_block, else_block, line } => {
@@ -1083,7 +1142,7 @@ impl Fn_<'_> {
                 b.ins(&Instruction::I32Eqz);
                 let out = self.br_to(brk);
                 b.ins(&Instruction::BrIf(out));
-                self.loops.push((brk, cont));
+                self.loops.push((brk, cont, self.releases.len()));
                 self.block(m, b, body)?;
                 self.loops.pop();
                 let back = self.br_to(cont);
@@ -1141,7 +1200,7 @@ impl Fn_<'_> {
                 let cont = self.depth;
                 b.ins(&Instruction::Block(BlockType::Empty));
                 self.depth += 1;
-                self.loops.push((brk, cont));
+                self.loops.push((brk, cont, self.releases.len()));
                 self.block(m, b, body)?;
                 self.loops.pop();
                 self.depth -= 1;
@@ -1188,13 +1247,16 @@ impl Fn_<'_> {
                 }
             }
             Stmt::Break { line } => {
-                let &(brk, _) = self.loops.last().ok_or_else(|| gap("`break` outside a loop", *line))?;
+                let &(brk, _, boundary) =
+                    self.loops.last().ok_or_else(|| gap("`break` outside a loop", *line))?;
+                self.emit_releases_above(b, boundary)?;
                 let d = self.br_to(brk);
                 b.ins(&Instruction::Br(d));
             }
             Stmt::Continue { line } => {
-                let &(_, cont) =
+                let &(_, cont, boundary) =
                     self.loops.last().ok_or_else(|| gap("`continue` outside a loop", *line))?;
+                self.emit_releases_above(b, boundary)?;
                 let d = self.br_to(cont);
                 b.ins(&Instruction::Br(d));
             }
@@ -7015,6 +7077,7 @@ mod tests {
             mono: RefCell::new(Mono::default()),
             globals: HashMap::new(),
             externs: HashMap::new(),
+            droppable: HashMap::new(),
             // Every index 0: a `Cx` for a type-level test never emits a call, and
             // a field per runtime function would have to be edited for each new
             // one.

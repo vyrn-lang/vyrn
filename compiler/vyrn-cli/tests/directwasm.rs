@@ -38,6 +38,11 @@ use std::process::Command;
 const PASSING: &[&str] = &[
     "args.vyrn",
     "arrays.vyrn",
+    // RFC-0077 M2l: the INFERRED release. `own::analyze` is now read by this
+    // backend too, and its `ReleaseRef` bindings are released at block exit — a
+    // million allocations through 65536 slots, which is exactly what this example
+    // was written to prove.
+    "autorelease.vyrn",
     "autovalidate.vyrn",
     "benching.vyrn",
     "bits.vyrn",
