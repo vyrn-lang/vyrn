@@ -65,8 +65,13 @@ const PASSING: &[&str] = &[
     "files.vyrn",
     "floats.vyrn",
     "foreach.vyrn",
+    // RFC-0077 M2l: the generational slot table (RFC-0004 §4) is three emitted
+    // wasm functions over a lazily-allocated 65536-cell slab. `freelist` is the
+    // one that proves the release fires — 100,000 allocations through the slab.
+    "freelist.vyrn",
     "gendemo.vyrn",
     "generics.vyrn",
+    "genref.vyrn",
     "htmltree.vyrn",
     "ifexpr.vyrn",
     "inlinewhere.vyrn",
@@ -74,6 +79,7 @@ const PASSING: &[&str] = &[
     "jsoncodec.vyrn",
     "jsondecbytes.vyrn",
     "jsonschema.vyrn",
+    "linkedlist.vyrn",
     "map.vyrn",
     "modify.vyrn",
     "modules.vyrn",
@@ -96,6 +102,7 @@ const PASSING: &[&str] = &[
     "tagged.vyrn",
     "templates.vyrn",
     "testing.vyrn",
+    "tree.vyrn",
     "utility.vyrn",
     // The one example whose refinement is VIOLATED at runtime, so it is the one
     // that proves the checks are emitted rather than that the bytes agree: a
