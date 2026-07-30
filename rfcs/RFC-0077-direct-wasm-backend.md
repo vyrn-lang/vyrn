@@ -1,6 +1,6 @@
 # RFC-0077 — A Direct Wasm Backend: Stop Going Through LLVM
 
-- **Status:** Draft
+- **Status:** IMPLEMENTED (M0–M2p, M5; M3 and M4 struck — see their lines below)
 - **Depends on:** RFC-0076 (generators as wasm; the shared runtime shim and the
   memory map it established), RFC-0012 (the `extern` ABI), RFC-0037
   (defunctionalized closures — the reason *closures* need no function table),
@@ -161,9 +161,15 @@ invariants — statics below the halfway mark, no import the shim does not expor
   backend emits zero, in either link shape, because it cannot import a variadic
   function and so was never able to plan on one. There are no call shapes to
   generate wrappers from.
-- **M4 — the prelude.** The 1,080-line hand-written IR prelude moves into the C
-  shim, which RFC-0076 M6 already compiles once.
+- **M4 — the prelude. STRUCK; see "M5, as landed".** "The 1,080-line hand-written
+  IR prelude moves into the C shim" was the plan for a backend that reached the
+  shim. This one does not: M2b through M2h emitted a runtime of its own, M2i
+  measured the split making a module *larger* rather than smaller, and M2p's sweep
+  left the prelude's cost at 290 bytes of code in `fib.wasm`. Moving it into C
+  would reintroduce the clang dependency the criterion below forbids, to make
+  modules bigger. There is nothing left of the milestone to do.
 - **M5 — delete the LLVM wasm path.** Not before, and not left behind a flag.
+  Landed; see "M5, as landed".
 
 ## Acceptance
 
@@ -3764,3 +3770,188 @@ than a lowering:
   by this backend only as of this milestone — `--export-all` was covering for that.
   A page that calls anything but `_start` and an `export extern fn` is the one
   thing to check before the LLVM path goes.
+
+---
+
+## M5, as landed — the deletion
+
+`vyrn build --target wasm` is this backend, unconditionally. `VYRN_WASM_BACKEND`
+is gone, `direct-shim` with it, the `directwasm` tier is folded into `parity`, and
+M4 is struck. Every acceptance criterion is met.
+
+The interesting part of the milestone is not the deletion. It is that M2p's
+closing note — "the browser story ... is the one thing to check before the LLVM
+path goes" — was right, and checking it found **two** gaps rather than none.
+
+### The ladder was blind to RFC-0012 in both directions
+
+87 of 87, and `extern fn` imports had **no lowering at all**. `externdemo.vyrn`
+failed to build with "no lowering for the call `jsNow`" — `Cx::externs` held a
+return type and nothing else, for RFC-0043's three host-boundary names, and an
+ordinary extern call fell through to `Cx::sigs` and missed.
+
+Nothing in the repo could see it, and the reason is structural rather than an
+oversight. `externdemo.vyrn` is in `WASM_ONLY` because wasmtime supplies WASI and
+not `vyrn`, so there is no run to compare — and the harness excluded it from the
+*build* as well as from the comparison. So a lowering that did not exist cost
+nothing on any backend for the length of M2. `common/mod.rs` now says that
+alongside the exclusion, because the exclusion is what made it possible.
+
+The other half is the one M2p half-found. It named `export extern fn` as a sweep
+root and exported each one — and a `String` still could not cross **into** one,
+because `__vyrn_malloc` was not exported either. On the LLVM path that is
+`-Wl,--export=__vyrn_malloc` under exactly the condition it is emitted under here;
+without it every handler in `web/domdemo.html` throws. `+1` clicked and the count
+stayed 0. Not a missing feature — a demo where no button works.
+
+### Both were found by loading the page, and only a page can find them
+
+The pages were loaded before anything was deleted, which is the order the task
+required and the right one:
+
+- **`domdemo.html`** — the counter counts, the text input round-trips a typed
+  `String` through `onType`, the keyed list reorders, and the `Every(1s)`
+  subscription ticks, with nothing on the console. Nine `export extern fn`s driven
+  by name through `vyrn-dom.js`'s delegated listeners.
+- **`externdemo.html`** — `jsLog` receives a decoded `String`
+  (`t=1721000000.500000`, six decimals from `f64_str`), `jsNow` returns a
+  `Float64`, `jsAdd` round-trips two `Int64`s as BigInts. Then `externdemo2`
+  answers `vyrnAdd(40, 2) = 42` and `greet("world")` through the allocator.
+- **`eventloop.html`** — module state survives between host calls: the timer drives
+  `onTick()` and the count is Vyrn's own (RFC-0013).
+- **`index.html`** — `fib` exits 55; `files` degrades to RFC-0014's canonical `Err`
+  wording with no preopens; a division by zero reaches the page as
+  `error: division by zero`, exit 1.
+
+### The import ABI needed almost nothing, and that is M2h's doing
+
+Every conversion the textual backend's `to_extern_abi` performs is already done by
+the carrier invariant: a `Bool` and every sub-64-bit int ride an `i32`, correctly
+extended, which is exactly what the RFC-0012 ABI widens them to. So the whole loop
+is `String`, which crosses as a `(ptr, len)` **pair** — the asymmetry against an
+*export*, where a `String` parameter is a single pointer because the JS caller can
+allocate inside the module. The ABI table itself is `extern_abi_ll` mapped through
+`wasm::abi`: shared with the textual emitter rather than respelled, for the reason
+`SHIM_IMPORTS` was a list of names, and a wrong import signature is a misread
+argument rather than a link error.
+
+Two details are the classes this RFC keeps naming. Each String argument takes its
+**own** scratch number, because one local for two live values is M2g's bug and here
+it would hand the host a length off the wrong string. And a narrow-int result is
+renormalized, because the host returns an `i32` and a JS number out of range would
+otherwise be a carrier every other site reads as in-range.
+
+Declaring the imports is **not** the AST pre-scan M2e and M2j refused three times
+over. An `extern fn` *is* the import, one for one, with nothing for lowering to
+disagree with — and M2p's sweep drops the ones a program never calls, which is why
+`externdemo.wasm` imports its three `vyrn.*` and `proc_exit` and not even
+`fd_write`: its only output crosses the boundary.
+
+What is pinned in the repo is the half that was **absent**, on the module's bytes,
+for M2o's reason: a length-prefixed `vyrn`/`jsLog` pair (so the namespace and the
+name cannot be satisfied separately), and the allocator export present with a
+String-taking export and ABSENT without one — the negative case being the one that
+matters, since always exporting it would pass a one-sided test. The ABI *shapes*
+stay browser-verified, which is where RFC-0012 has always been checked; a
+`(ptr, len)` pair only means anything to a host that decodes it.
+
+### `direct-shim` is deleted, and its own milestones are the argument
+
+M2p left this as a question — "the question is whether that audit belongs to
+RFC-0076 rather than whether the shape survives" — and the answer is that the audit
+was never wired to the shape. `vyrn-codegen/tests/shim_link.rs` builds its own
+guest module out of `wasm::Module` and `import_memory`; it has never called
+`compile_linked`. So `Link`, `compile_linked` and `SHIM_IMPORTS` go and the
+68-signature audit is byte-for-byte what it was, as is RFC-0076's generator split.
+`wasm::Module::import_memory` and `SHIM_BASE` stay, for those two.
+
+Everything else about it had already argued itself out: M2i measured the split
+making a module *larger*, because M2b through M2h had emitted the runtime the shim
+would have supplied; M2j emptied `PASSING_SHIM` by serving RFC-0043's clock out of
+WASI directly; and M2i concluded the link "can never be the default" because it
+needs clang — which is this milestone's acceptance criterion. A shape that passes
+nothing, costs bytes, needs a C toolchain and gates no test is the thing this RFC
+opens by refusing.
+
+### The fold, and the gate that was not one
+
+`directwasm` measured the wasm column over the corpus, and after the deletion so
+does `parity`. Two gates over one corpus is how a number stops being about the
+thing it names.
+
+The part worth recording is what the fold exposed: **`directwasm` was never in
+CI.** The parity job runs `--test parity` and nothing else, so nineteen tests
+pinning the cases no example reaches — the bounds message, the DFA walk over a
+non-ASCII byte, a column off both ends of a buffer, a stale cell and a full slab,
+`readLine`'s three flavours of `None`, `f64_str`'s two exact ties and the 301
+digits of ten-to-the-300, a suppressed log call, the post-sweep renumbering — have
+been passing locally and gating nothing. They move across unchanged but for the
+flag, and the fold is the first time they are checked on a machine that is not this
+one.
+
+`PASSING`, `PASSING_SHIM`, `ladder` and `blocker` are deleted. A burndown list that
+has reached the whole corpus is a list of the whole corpus, and the tier that ran
+twice stops needing to.
+
+Parity: **87 checked, 0 failed, 25 tests, 51 s** — faster than the 65 s the double
+compile took, and it no longer sets `WASI_SYSROOT` or `WASI_BUILTINS` at all. CI
+keeps the same wasm-tools cache key as the gen-engine job (which still needs the
+sysroot for RFC-0076's C shim) and takes only the wasmtime out of it. The
+clang-needing native column is untouched.
+
+### M4 is struck
+
+Not deferred. Moving the prelude into the C shim would reintroduce the clang
+dependency the acceptance criterion above forbids, in order to make modules
+*bigger* — M2i measured that — and after the sweep the prelude's whole remaining
+cost is 290 bytes of code in `fib.wasm`. The narrow version M2i left of it ("reach
+the shim for the subsystems not worth re-emitting") named three candidates, and
+M2j, M2l and M2n emitted all three (WASI I/O, the generational slot table,
+`parse`/`lineAt`) without a shim. There is nothing left of the milestone.
+
+### The criterion, demonstrated
+
+"`vyrn build --target wasm` needs no clang, no wasi sysroot, no builtins archive"
+is the RFC's headline claim, so it was run rather than reasoned about, with a
+control:
+
+- `PATH` reduced to `C:\Windows\System32` — nothing named clang on it;
+- `CLANG` pointed at a stub that prints `POISONED CLANG WAS INVOKED` and exits 99.
+  An *existing* file, so `find_clang` returns it — pointing it at a **missing**
+  path is not a control, because `find_clang` falls back to
+  `C:\Program Files\LLVM\bin\clang.exe`, which is how the first attempt at this
+  proof quietly succeeded at the native build and proved nothing;
+- `tools/wasi-sysroot-25.0` and `tools/libclang_rt.builtins-wasm32-wasi-25.0`
+  renamed off disk, with `WASI_SYSROOT` and `WASI_BUILTINS` pointing at nothing.
+
+**Control:** the NATIVE build in that same shell invokes the stub and exits 1.
+**Criterion:** `--target wasm` builds **88 of the 89 examples** — the 89th is
+`validate_compile.vyrn`, the intentional compile error — leaves no `.ll` and no
+`.shim.c` anywhere, and `fib.wasm` is 1,438 bytes that wasmtime runs to exit 55.
+
+### Acceptance
+
+| criterion | status |
+|---|---|
+| parity green, interp == native == wasm, traps included, wasm column direct | 87 checked, 0 failed |
+| RFC-0076's cross-engine gate green | 1 passed (every generator byte-identical under both engines) |
+| `--target wasm` needs no clang, no sysroot, no builtins | demonstrated above, with a control |
+| `VYRN_WASM_BACKEND` does not survive | gone, and so is `direct-shim` |
+
+`cargo test --release`: 1,243 passed, 0 failed — the number this branch started at.
+`vyrn-codegen`, `vyrn-lsp` and `vyrn-genwasm` all build.
+
+### What the whole RFC cost, and what it removed
+
+The estimate was 3,500–5,500 lines against the 9,465 the emitter was. `direct.rs`
+is 10,507 lines including its own runtime, and the thing it replaced was not the
+emitter — `lib.rs` keeps every one of those lines for native. What went is 205
+lines of driver and backend plumbing, one environment variable, one link shape, one
+test tier, and the double compile: two compilers run back to back with the first
+one's output thrown away, on a target where clang was given no `-O` flag at all and
+was therefore never optimizing. A very expensive translator, as the problem
+statement put it.
+
+The measurement that motivated this, at the end of it: `fib.vyrn` to wasm is
+**1,438 bytes** where clang produced **277,438**, and the generation engine no
+longer declines on a machine without a C toolchain.
