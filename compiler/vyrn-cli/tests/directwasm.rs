@@ -192,6 +192,9 @@ const PASSING: &[&str] = &[
     "concurrency.vyrn",
     "parallel.vyrn",
     "region.vyrn",
+    "genericpayload.vyrn",
+    "logging.vyrn",
+    "controlflow.vyrn",
 ];
 
 /// The same, for the shim-linked shape (RFC-0077 M2i). A superset of [`PASSING`]
@@ -2253,4 +2256,294 @@ fn main() -> Int64 {
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
     assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
     assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// A generic enum whose type argument comes from a `match` arm that is not the
+/// FIRST one (RFC-0077 M2n).
+///
+/// `genericpayload.vyrn` is the corpus's only generic-payload example and it puts
+/// the concrete arm first, so a first-arm-wins rule passes it. This is the order
+/// that rule gets wrong — and the order the CHECKER only permits with an
+/// annotation, which is why no example has it: without one it refuses `Empty` as
+/// uninferable.
+///
+/// Two payload shapes, because they fail differently. A `Cargo` payload is
+/// `Word::Boxed`, so forgetting `T` refuses (`a conversion from Cargo to Unit`,
+/// which is exactly what this source produced with the arm scan removed). An
+/// `Int64` payload is `Word::Direct`, so the SAME mistake has no conversion to
+/// refuse — the word is an `i64` either way — and would read a pointer as a
+/// number. So the values are pinned, not just the agreement.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_generic_payload_is_typed_by_whichever_arm_knows_it() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-payload");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = r#"
+type Cargo = { weight: Int64, label: String }
+type Crate<T> = | Empty | Held(T)
+type Choice = | First | Second
+
+fn boxedPayload(p: Choice) -> Cargo {
+    let boxed: Crate<Cargo> = match p {
+        Second => Empty,
+        First => Held(Cargo { weight: 3, label: "three" }),
+    }
+    return match boxed {
+        Empty => Cargo { weight: 99, label: "fallback" },
+        Held(s) => s,
+    }
+}
+
+fn directPayload(p: Choice) -> Int64 {
+    let boxed: Crate<Int64> = match p {
+        Second => Empty,
+        First => Held(41),
+    }
+    return match boxed {
+        Empty => 0 - 1,
+        Held(n) => n + 1,
+    }
+}
+
+fn main() -> Int64 {
+    let a = boxedPayload(First)
+    print("boxed first: \{a.weight} \{a.label}")
+    let b = boxedPayload(Second)
+    print("boxed second: \{b.weight} \{b.label}")
+    print("direct first: \{directPayload(First)}")
+    print("direct second: \{directPayload(Second)}")
+    return 0
+}
+"#;
+    let path = dir.join("armorder.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("armorder.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .env("VYRN_WASM_BACKEND", "direct")
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    let want = "boxed first: 3 three\nboxed second: 99 fallback\n\
+                direct first: 42\ndirect second: -1\n";
+    assert_eq!(norm(&interp.stdout), want, "the interpreter moved");
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// RFC-0008's two sinks and three thresholds the corpus does not reach
+/// (RFC-0077 M2n).
+///
+/// `logging.vyrn` and `vlog.vyrn` are the only two logging examples and both write
+/// to `stderr`; `logging.vyrn` is the only one this backend can build at all, so
+/// `stdout`, `file(..)`, and every threshold but `debug` have no example.
+///
+/// The three cases are chosen for what would go unnoticed:
+///
+/// - **`stdout`.** The log line and `print` go to the SAME descriptor, so their
+///   interleaving is observable and a sink that quietly stayed on 2 would still
+///   look right in a test that only read stdout.
+/// - **`file(..)`.** A descriptor opened once and held, which `writeFile` cannot
+///   express. Run TWICE, because `path_open` without `TRUNC` appends and one run
+///   cannot tell the difference; the file's contents are compared against the
+///   interpreter's own `std::fs::File`, not against a spelling here.
+/// - **`level: error`.** Everything below the threshold is dropped, so the only
+///   log line in the file is the last one — and the `\{n}` in a suppressed
+///   message still runs, which is RFC-0008's Q4 and the half a fold could
+///   silently take away.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_log_sink_is_whichever_descriptor_the_config_named() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-logsink");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (what, src, want_out, want_err, want_file) in [
+        (
+            "stdout",
+            "logging { level: info, sink: stdout }\n\
+             \n\
+             fn side(n: Int64) -> Int64 {\n\
+             \x20   print(\"side \\{n}\")\n\
+             \x20   return n\n\
+             }\n\
+             \n\
+             fn main() -> Int64 {\n\
+             \x20   let log = logger(\"sink\")\n\
+             \x20   log.debug(\"dropped \\{side(1)}\")\n\
+             \x20   log.info(\"kept\")\n\
+             \x20   print(\"program output\")\n\
+             \x20   log.error(\"last\")\n\
+             \x20   return 0\n\
+             }\n",
+            // `side(1)` prints even though the `debug` line does not: the
+            // arguments of a suppressed call are still evaluated.
+            "side 1\n[INFO] sink: kept\nprogram output\n[ERROR] sink: last\n",
+            "",
+            None,
+        ),
+        (
+            "file",
+            "logging { level: debug, sink: file(\"sink.log\") }\n\
+             \n\
+             fn main() -> Int64 {\n\
+             \x20   let log = logger(\"sink\")\n\
+             \x20   log.trace(\"dropped\")\n\
+             \x20   log.debug(\"first\")\n\
+             \x20   log.warn(\"second\")\n\
+             \x20   print(\"program output\")\n\
+             \x20   return 0\n\
+             }\n",
+            "program output\n",
+            "",
+            Some("[DEBUG] sink: first\n[WARN] sink: second\n"),
+        ),
+        (
+            "threshold",
+            "logging { level: error, sink: file(\"sink.log\") }\n\
+             \n\
+             fn main() -> Int64 {\n\
+             \x20   let log = logger(\"sink\")\n\
+             \x20   log.trace(\"a\")\n\
+             \x20   log.debug(\"b\")\n\
+             \x20   log.info(\"c\")\n\
+             \x20   log.warn(\"d\")\n\
+             \x20   log.error(\"e\")\n\
+             \x20   return 0\n\
+             }\n",
+            "",
+            "",
+            Some("[ERROR] sink: e\n"),
+        ),
+    ] {
+        // Its own directory, because the file sink names a relative path and two
+        // cases writing one `sink.log` would read each other's run.
+        let dir = dir.join(what);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{what}.vyrn"));
+        std::fs::write(&path, src).unwrap();
+        let module = dir.join(format!("{what}.wasm"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .env("VYRN_WASM_BACKEND", "direct")
+            .output()
+            .expect("build wasm");
+        assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
+
+        let log = dir.join("sink.log");
+        let read_log = || std::fs::read_to_string(&log).unwrap_or_default().replace("\r\n", "\n");
+
+        // Twice each, so a sink that APPENDS where the interpreter truncates is a
+        // failure rather than a coincidence.
+        let _ = std::fs::remove_file(&log);
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let mut interp_cmd = vyrn();
+        interp_cmd.arg("run").arg(&path);
+        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let interp_log = read_log();
+
+        let _ = std::fs::remove_file(&log);
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg("--dir").arg(".").arg(&module);
+        run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+        let mut wasm_cmd = Command::new(&wasmtime);
+        wasm_cmd.arg("run").arg("--dir").arg(".").arg(&module);
+        let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+        let wasm_log = read_log();
+
+        assert_eq!(norm(&interp.stdout), want_out, "{what}: the interpreter moved (stdout)");
+        assert_eq!(runtime_err(&interp.stderr), want_err, "{what}: the interpreter moved (stderr)");
+        assert_eq!(interp_log, want_file.unwrap_or("").to_string(), "{what}: the interpreter moved (file)");
+        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(interp_log, wasm_log, "{what}: the log file");
+        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+    }
+}
+
+/// A suppressed log call emits **no write**, and the evidence is in the bytes
+/// (RFC-0077 M2n).
+///
+/// The threshold fold is the one part of RFC-0008 that a passing ladder cannot
+/// vouch for: a backend that emitted a runtime comparison instead would print the
+/// same lines and pass every assertion above. So this reads the module.
+///
+/// `[LEVEL] ` is interned at the emitting site and nowhere else, so its presence
+/// means a write exists and its absence means one does not — the same argument M2d
+/// makes about a validation's trap message. The suppressed call's own MESSAGE is
+/// asserted present, because its arguments are still evaluated (Q4): a fold that
+/// deleted the whole statement would pass a test that only looked for the prefix.
+#[test]
+fn a_suppressed_log_call_is_not_in_the_module() {
+    let dir = std::env::temp_dir().join("vyrn-directwasm-logfold");
+    std::fs::create_dir_all(&dir).unwrap();
+    // `warn`, so two levels below it and two at-or-above are in one program.
+    let src = "logging { level: warn, sink: stderr }\n\
+               \n\
+               fn main() -> Int64 {\n\
+               \x20   let log = logger(\"f\")\n\
+               \x20   log.trace(\"gone-trace\")\n\
+               \x20   log.debug(\"gone-debug\")\n\
+               \x20   log.info(\"gone-info\")\n\
+               \x20   log.warn(\"kept-warn\")\n\
+               \x20   log.error(\"kept-error\")\n\
+               \x20   return 0\n\
+               }\n";
+    let path = dir.join("fold.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("fold.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .env("VYRN_WASM_BACKEND", "direct")
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let bytes = std::fs::read(&module).unwrap();
+    let has = |needle: &str| {
+        bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
+    };
+    for lvl in ["[TRACE] ", "[DEBUG] ", "[INFO] "] {
+        assert!(!has(lvl), "{lvl} is in the module, so a suppressed call emitted a write");
+    }
+    for lvl in ["[WARN] ", "[ERROR] "] {
+        assert!(has(lvl), "{lvl} is NOT in the module, so an enabled call emitted nothing");
+    }
+    // The other half of Q4: the suppressed calls' arguments are still evaluated,
+    // so their strings are still there. Without this the test would also pass on a
+    // backend that dropped the statement whole.
+    for msg in ["gone-trace", "gone-debug", "gone-info", "kept-warn", "kept-error"] {
+        assert!(has(msg), "`{msg}` is not in the module: a suppressed call lost its argument");
+    }
 }

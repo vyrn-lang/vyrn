@@ -236,6 +236,11 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
         globals: HashMap::new(),
         externs,
         droppable: vyrn_frontend::own::analyze(program).droppable,
+        log_level: program.log_level,
+        log_sink: program.log_sink.clone(),
+        // Reserved only for a file sink, so every console-sink module — which is
+        // every example — is byte-for-byte what it was.
+        log_fd: matches!(program.log_sink, LogSink::File(_)).then(|| m.reserve(4, 4)),
     };
 
     // Every function the module will define, indexed before any body exists, so a
@@ -338,12 +343,43 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
         return unsupported("a `main` that does not return Int64", 0);
     }
     let main = main.index;
+    // RFC-0008's `file(..)` sink: a descriptor opened ONCE and held, which is what
+    // the native backend's `fopen`/`@__vyrn_log_file`/`fclose` around `vyrn_main`
+    // is — and the shape `writeFile` cannot express, since it opens, truncates and
+    // closes per call. `path_open` with CREAT|TRUNC is `fopen(path, "w")`, and M2j
+    // already put it in this module.
+    //
+    // A failure leaves -1 in the slot and every write is swallowed by `write_all`'s
+    // errno test, which is the interpreter's behaviour (`if let Some(f) = ..`) and
+    // RFC-0008's Q6 leaning. It is also what a browser gets: no preopens, so
+    // `open_at` returns -1 for every path and a page's file sink degrades to
+    // silence rather than trapping.
+    let log_open = cx.log_fd.map(|at| {
+        let LogSink::File(path) = &cx.log_sink else { unreachable!("log_fd implies a file sink") };
+        (at, cx.rt.intern(&mut m, path), cx.rt.open_at)
+    });
     let start = m.func(&[], &[], &[], 0, |b| {
+        // Before the initializers, because a top-level `let` may log — the same
+        // order `vyrn_entry` uses.
+        if let Some((at, path, open_at)) = log_open {
+            b.ins(&Instruction::I32Const(at as i32))
+                .ins(&Instruction::I32Const(path as i32))
+                .ins(&Instruction::I32Const(OFLAGS_CREAT_TRUNC))
+                .ins(&Instruction::I64Const(RIGHT_FD_WRITE))
+                .ins(&Instruction::Call(open_at))
+                .ins(&Instruction::I32Store(word()));
+        }
         if has_globals {
             b.ins(&Instruction::Call(init_index));
         }
-        b.ins(&Instruction::Call(main))
-            .ins(&Instruction::I64Const(255))
+        b.ins(&Instruction::Call(main));
+        if let Some((at, ..)) = log_open {
+            b.ins(&Instruction::I32Const(at as i32))
+                .ins(&Instruction::I32Load(word()))
+                .ins(&Instruction::Call(wasi.fd_close))
+                .ins(&Instruction::Drop);
+        }
+        b.ins(&Instruction::I64Const(255))
             .ins(&Instruction::I64And)
             .ins(&Instruction::I32WrapI64)
             .ins(&Instruction::Call(wasi.proc_exit));
@@ -579,6 +615,19 @@ struct Cx {
     /// a bump allocator has no free — but a cell's SLOT comes out of a fixed slab
     /// of 65536, so a release that never fires IS observable (M2l).
     droppable: HashMap<String, HashMap<usize, DropKind>>,
+    /// RFC-0008's threshold, as an ordinal. Compile-time, and that is the point:
+    /// with `logging { level: warn }` a `.debug(..)` call emits no write at all,
+    /// which is what makes a disabled log site cost nothing on every engine. A
+    /// runtime comparison here would be a behaviour change dressed as a lowering.
+    log_level: usize,
+    /// Where a log line goes. Compile-time-known, so the write names its
+    /// descriptor directly rather than looking one up.
+    log_sink: LogSink,
+    /// The four bytes holding the file sink's descriptor, when there is one —
+    /// [`LogSink::File`]'s answer to the native backend's `@__vyrn_log_file`.
+    /// `None` for a console sink, so a program that does not log to a file
+    /// reserves nothing and its module is unchanged.
+    log_fd: Option<u32>,
 }
 
 impl Cx {
@@ -2414,6 +2463,81 @@ impl Fn_<'_> {
         ))
     }
 
+    /// The fully-applied type an enum-variant construction produces.
+    ///
+    /// [`Fn_::applied_record`] for a variant instead of a record's fields, and the
+    /// same shared [`crate::applied_type`] — a generic enum's arguments come from
+    /// its PAYLOAD, because a bare constructor's use site is its payload (M2e).
+    /// `Ok(None)` when the name is not a variant, or is one two enums declare: an
+    /// ambiguity is the caller's to refuse, and both callers do.
+    ///
+    /// Naming only the enum, as `peek` used to, leaves the variant's payload the
+    /// declaration's own `Type::Param` — which is where "a conversion from `Cargo`
+    /// to `T`" came from. It is not solvable at the payload's own coercion, either:
+    /// by then the destination slot exists and its type is fixed.
+    fn applied_variant(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Option<Type>, String> {
+        let cands = match self.cx.variants.get(name) {
+            Some(c) if c.len() == 1 => c.clone(),
+            _ => return Ok(None),
+        };
+        let (e, _, declared) = cands.into_iter().next().unwrap();
+        let actual = self.arg_types(&declared, args, line)?;
+        let decl = self.cx.types.get(&e).cloned();
+        Ok(Some(crate::applied_type(decl.as_ref(), &e, &declared, &actual)))
+    }
+
+    /// Whether `t` is an instantiation with every type argument fixed, under this
+    /// body's substitution. [`crate::ty_is_concrete_app`] is the rule.
+    fn concrete_app(&self, t: &Type) -> bool {
+        crate::ty_is_concrete_app(t, &|a| self.cx.resolve(a))
+    }
+
+    /// The type a `match`'s arms agree on, without emitting anything.
+    ///
+    /// The FIRST arm answers, as it does for an `if`: [`Fn_::expr_as`] re-checks
+    /// every other arm against the answer, so a wrong guess is a compile error
+    /// rather than a miscompile. The one thing a later arm can add is a type
+    /// ARGUMENT — see [`crate::ty_is_concrete_app`] — so a non-applied answer is
+    /// upgraded by the first arm that has one, and the answer stops depending on
+    /// arm ORDER. `genericpayload.vyrn` puts the concrete arm first and the
+    /// param-free one last precisely so a first-arm-wins rule looks correct.
+    ///
+    /// A later arm `peek` cannot see forfeits the upgrade and nothing else: its own
+    /// `expr_as` refuses it later if it truly cannot be lowered. So the scan never
+    /// narrows what this backend reaches.
+    fn match_ty(&mut self, sum: &Sum, arms: &[MatchArm], line: usize) -> Result<Type, String> {
+        let first = arms.first().ok_or_else(|| gap("an empty `match`", line))?;
+        let ty = self.peek_arm(first, sum, line)?;
+        if self.concrete_app(&ty) {
+            return Ok(ty);
+        }
+        for arm in &arms[1..] {
+            if let Ok(t) = self.peek_arm(arm, sum, line) {
+                if self.concrete_app(&t) {
+                    return Ok(t);
+                }
+            }
+        }
+        Ok(ty)
+    }
+
+    /// One arm's type, with its bindings in scope. The place is a dummy: `peek`
+    /// reads types and never emits, so a scope frame it cannot mutate is enough.
+    fn peek_arm(&mut self, arm: &MatchArm, sum: &Sum, line: usize) -> Result<Type, String> {
+        let mark = self.scope.len();
+        for (n, t) in self.pattern_binds(sum, &arm.pattern, line)? {
+            self.scope.push((n, Place::Local(u32::MAX), t));
+        }
+        let got = self.peek(&arm.body, line);
+        self.scope.truncate(mark);
+        got
+    }
+
     /// Two arms meeting at one value — M0's destination-first rule.
     ///
     /// A scalar join is a `block (result T)` and needs nothing special. An
@@ -2510,6 +2634,32 @@ impl Fn_<'_> {
                 let t = &self.fn_binds[name].target;
                 Type::Fn(t.sig.params[t.ncaps..].to_vec(), Box::new(t.sig.ret_ty.clone()))
             }
+            // A nullary constructor (`None`, or an enum's `Empty`) parses as a bare
+            // name, so it is only distinguishable from a local by failing to be one
+            // — the same test, in the same order, that the emitting path makes.
+            // Without this a `match` whose FIRST arm is a param-free variant could
+            // not be typed at all, which is the arm order the checker demands an
+            // annotation for.
+            Expr::Var { name, .. }
+                if self.lookup(name, line).is_err()
+                    && (name == "None" || self.cx.variants.contains_key(name)) =>
+            {
+                match (name.as_str(), self.expected_sum()) {
+                    ("None", Some(t)) => t,
+                    ("None", None) => {
+                        return unsupported("a branch yielding `None` with no expected type", line)
+                    }
+                    _ => match self.applied_variant(name, &[], line)? {
+                        Some(t) => t,
+                        None => {
+                            return unsupported(
+                                &format!("a branch yielding the ambiguous variant `{name}`"),
+                                line,
+                            )
+                        }
+                    },
+                }
+            }
             Expr::Var { name, .. }
                 if self.lookup(name, line).is_err() && self.cx.sigs.contains_key(name) =>
             {
@@ -2541,24 +2691,14 @@ impl Fn_<'_> {
                 },
             },
             Expr::IfExpr { then_branch, .. } => self.peek(then_branch, line)?,
-            // A `match` is typed by its first arm, like an `if` expression —
-            // and like one, every other arm is checked against that.
+            // A `match` is typed by its arms — see [`Fn_::match_ty`], which is the
+            // same rule the emitting path uses.
             Expr::Match { scrutinee, arms, .. } => {
                 let st = self.peek(scrutinee, line)?;
                 let sum = self
                     .sum_of(&st)
                     .ok_or_else(|| gap(&format!("a `match` on `{st}`"), line))?;
-                let first = arms.first().ok_or_else(|| gap("an empty `match`", line))?;
-                let binds = self.pattern_binds(&sum, &first.pattern, line)?;
-                // `peek` does not emit, so a scope frame it cannot mutate is
-                // enough to type an arm that mentions its bindings.
-                let mark = self.scope.len();
-                for (n, t) in binds {
-                    self.scope.push((n, Place::Local(u32::MAX), t));
-                }
-                let got = self.peek(&first.body, line);
-                self.scope.truncate(mark);
-                got?
+                self.match_ty(&sum, arms, line)?
             }
             Expr::Unary { expr, .. } => self.peek(expr, line)?,
             Expr::Binary { op, lhs, .. } => match op {
@@ -2614,9 +2754,12 @@ impl Fn_<'_> {
                         None => return unsupported("the built-in `Value` enum", line),
                     }
                 }
-                // An arm that only prints: the join carries nothing, which the
-                // `match` lowering already handles — it just has to be told.
-                "print" => Type::Unit,
+                // An arm that only prints — or only logs: the join carries nothing,
+                // which the `match` lowering already handles, it just has to be
+                // told. Suppressed or not, a log call is `Unit` (RFC-0008), so the
+                // threshold cannot change a type.
+                "print" | "trace" | "debug" | "info" | "warn" | "error" => Type::Unit,
+                "logger" => Type::Logger,
                 "at" | "@swapRemove" if args.len() == 2 => {
                     let a = self.peek(&args[0], line)?;
                     match self.cx.resolve(&a) {
@@ -2728,15 +2871,16 @@ impl Fn_<'_> {
                     let (subst, _) = crate::solve_type_args(&f.type_params, &declared, &actual);
                     ftypes::substitute(&f.ret, &subst)
                 }
-                // A user enum's variant constructor in a branch (`One(a)`). Its type
-                // is the enum that declares the name; an ambiguous name — two enums
-                // with one variant spelling — is a gap rather than a guess, exactly
-                // as `sum_ctor` treats it when it emits.
+                // A user enum's variant constructor in a branch (`One(a)`). The
+                // fully APPLIED type, from the same shared rule `sum_ctor` uses
+                // when it emits — the bare enum name left a generic variant's
+                // payload a `Type::Param`, and a `match` on the result then bound
+                // it. An ambiguous name — two enums with one variant spelling — is
+                // a gap rather than a guess, exactly as `sum_ctor` treats it.
                 _ if self.cx.variants.contains_key(name) => {
-                    let cands = &self.cx.variants[name];
-                    match (cands.len(), cands.first()) {
-                        (1, Some((e, _, _))) => Type::Named(e.clone()),
-                        _ => {
+                    match self.applied_variant(name, args, line)? {
+                        Some(t) => t,
+                        None => {
                             return unsupported(
                                 &format!("a branch yielding the ambiguous variant `{name}`"),
                                 line,
@@ -3090,6 +3234,39 @@ impl Fn_<'_> {
                     }
                     _ => return unsupported(&format!("`print` of `{t}`"), line),
                 }
+                return Ok(Type::Unit);
+            }
+            // RFC-0008's facade. A `Logger` IS its name string — the handle has no
+            // other content — so `logger(name)` is the identity on a `ptr` and
+            // costs nothing at all.
+            "logger" if args.len() == 1 => {
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                return Ok(Type::Logger);
+            }
+            // The five levels, written subject-first, so `args` is the logger then
+            // the message (the parser's method sugar).
+            //
+            // Both arguments are evaluated WHATEVER the threshold says, because the
+            // interpreter evaluates them before it checks (RFC-0008 Q4, pinned), and
+            // then the write is emitted only if the level clears it. That test is
+            // the whole feature: with `logging { level: warn }` a `.debug(..)` call
+            // emits no `write_all` at all, which is why a disabled log site costs
+            // nothing on any engine. Making it a runtime comparison would turn a
+            // deleted call into a branch — RFC-0078's census names that mistake.
+            // (The five spellings are RESERVED by the checker, so no user function
+            // can reach this arm — the same reason the textual backend needs no
+            // guard either.)
+            "trace" | "debug" | "info" | "warn" | "error" if args.len() == 2 => {
+                self.expr_as(m, b, &args[0], &Type::Logger)?;
+                self.expr_as(m, b, &args[1], &Type::Str)?;
+                if log_level_ordinal(name).unwrap_or(0) < self.cx.log_level {
+                    // Below the threshold: the two values are the only thing this
+                    // site leaves behind, and `Unit` means nobody consumes them.
+                    b.ins(&Instruction::Drop);
+                    b.ins(&Instruction::Drop);
+                    return Ok(Type::Unit);
+                }
+                self.log_write(m, b, name, line)?;
                 return Ok(Type::Unit);
             }
             // String interpolation desugars to these two (parser), so they are
@@ -3662,6 +3839,83 @@ impl Fn_<'_> {
             return unsupported(&format!("the call `{name}` at this arity"), line);
         }
         self.emit_call(m, b, &sig, args)
+    }
+
+    /// One log line: `[LEVEL] name: message\n`, to the configured descriptor.
+    ///
+    /// Reached only when the level clears the threshold — a suppressed call never
+    /// gets here, which is what makes RFC-0008's fold a fold.
+    ///
+    /// Five `write_all`s rather than one assembled string, because `write_all` is
+    /// the ONE place bytes leave this module and the pieces are already where they
+    /// need to be: three are interned constants of known length, and the other two
+    /// are the `ptr`s a `String` is. Concatenating first would cost three `malloc`s
+    /// out of an allocator that never frees, to save four calls that are the same
+    /// syscall either way. There is nothing to interleave with — RFC-0008 bars
+    /// logging from a spawned task.
+    ///
+    /// The two `String`s are parked in scratch locals because each `write_all`
+    /// consumes three operands, so the second value cannot wait on the stack under
+    /// the first one's call.
+    fn log_write(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        level: &str,
+        line: usize,
+    ) -> Result<(), String> {
+        // Interned AT the use site, the way M2m interns a DFA table: `Module::data`
+        // shares identical contents, so five sites at one level get one string
+        // without anything having gone looking for them.
+        let prefix = format!("[{}] ", level.to_uppercase());
+        let (at, plen) = (self.cx.rt.intern(m, &prefix), prefix.len() as i32);
+        let colon = self.cx.rt.intern(m, ": ");
+        let nl = self.cx.rt.intern(m, "\n");
+        let (name, msg) = (self.scratch(b, ValType::I32, 7), self.scratch(b, ValType::I32, 8));
+        b.ins(&Instruction::LocalSet(msg));
+        b.ins(&Instruction::LocalSet(name));
+        let (write_all, strlen) = (self.cx.rt.write_all, self.cx.rt.strlen);
+        // The descriptor, decided at compile time: 2 and 1 are WASI's own stderr
+        // and stdout, and a file sink reads the one `_start` opened. There is no
+        // fourth case, and a sink this backend could not serve would be a gap
+        // rather than a default.
+        let fd = |b: &mut Frame| match self.cx.log_fd {
+            Some(at) => {
+                b.ins(&Instruction::I32Const(at as i32));
+                b.ins(&Instruction::I32Load(word()));
+            }
+            None => {
+                b.ins(&Instruction::I32Const(match self.cx.log_sink {
+                    LogSink::Stdout => 1,
+                    _ => 2,
+                }));
+            }
+        };
+        if self.cx.log_fd.is_none() && matches!(self.cx.log_sink, LogSink::File(_)) {
+            return unsupported("a `file(..)` log sink with no descriptor", line);
+        }
+        // A constant piece knows its own length. A `String` is a NUL-terminated
+        // `ptr`, so its length is a `strlen` of the same pointer — the pair
+        // `print_str` writes with, one level up.
+        let konst = |b: &mut Frame, p: u32, n: i32| {
+            fd(b);
+            b.ins(&Instruction::I32Const(p as i32))
+                .ins(&Instruction::I32Const(n))
+                .ins(&Instruction::Call(write_all));
+        };
+        konst(b, at, plen);
+        let string = |b: &mut Frame, l: u32| {
+            fd(b);
+            b.ins(&Instruction::LocalGet(l))
+                .ins(&Instruction::LocalGet(l))
+                .ins(&Instruction::Call(strlen))
+                .ins(&Instruction::Call(write_all));
+        };
+        string(b, name);
+        konst(b, colon, 2);
+        string(b, msg);
+        konst(b, nl, 1);
+        Ok(())
     }
 
     /// The expression `jsonSchema(T)` / `schemaOf(T)` stands for.
@@ -5521,17 +5775,16 @@ impl Fn_<'_> {
         let (ty, tag, payload) = match pick {
             Some(p) => p,
             None => {
-                let cands = self.cx.variants[name].clone();
-                if cands.len() != 1 {
-                    return unsupported(&format!("the ambiguous variant `{name}`"), line);
-                }
-                let (e, tag, declared) = cands.into_iter().next().unwrap();
+                let tag = match self.cx.variants.get(name) {
+                    Some(c) if c.len() == 1 => c[0].1,
+                    _ => return unsupported(&format!("the ambiguous variant `{name}`"), line),
+                };
                 // A generic enum has no type until a use site fixes it, and a
                 // bare constructor's use site is its PAYLOAD — the rule
                 // `Gen::applied_enum_type` gives the textual emitter, shared.
-                let actual = self.arg_types(&declared, args, line)?;
-                let decl = self.cx.types.get(&e).cloned();
-                let ty = crate::applied_type(decl.as_ref(), &e, &declared, &actual);
+                let Some(ty) = self.applied_variant(name, args, line)? else {
+                    return unsupported(&format!("the ambiguous variant `{name}`"), line);
+                };
                 // The payloads the APPLIED type declares, which for a generic
                 // enum are the solved ones rather than its parameters.
                 let payload = match self.cx.resolve(&ty) {
@@ -5597,19 +5850,11 @@ impl Fn_<'_> {
         let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
             return unsupported("a `match` on a non-aggregate", line);
         };
-        let first = arms.first().ok_or_else(|| gap("an empty `match`", line))?;
-
-        // The arms' common type, read off the first one with its bindings in
-        // scope. `expr_as` re-checks every arm against it, so a wrong guess here
-        // is a compile error rather than a miscompile. The place is a dummy:
-        // `peek` reads types and never emits.
-        let mark = self.scope.len();
-        for (n, t) in self.pattern_binds(&sum, &first.pattern, line)? {
-            self.scope.push((n, Place::Local(u32::MAX), t));
-        }
-        let want = self.peek(&first.body, line);
-        self.scope.truncate(mark);
-        let want = self.join_ty(want?);
+        // The arms' common type — [`Fn_::match_ty`], the same answer `peek` gives a
+        // `match` in a branch. `expr_as` re-checks every arm against it, so a wrong
+        // guess here is a compile error rather than a miscompile.
+        let want = self.match_ty(&sum, arms, line)?;
+        let want = self.join_ty(want);
         let r = self.cx.repr(&want, line)?;
 
         let dest = match &r {
@@ -9901,6 +10146,10 @@ mod tests {
             globals: HashMap::new(),
             externs: HashMap::new(),
             droppable: HashMap::new(),
+            // RFC-0008's defaults, which are `Program`'s: nothing here logs.
+            log_level: DEFAULT_LOG_LEVEL,
+            log_sink: LogSink::Stderr,
+            log_fd: None,
             // Every index 0: a `Cx` for a type-level test never emits a call, and
             // a field per runtime function would have to be edited for each new
             // one.

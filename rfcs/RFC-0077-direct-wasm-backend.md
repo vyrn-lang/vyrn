@@ -3166,7 +3166,7 @@ else moved: a region was nobody else's first blocker.
 
 ---
 
-## M2n, as landed — `parse`, `lineAt` and `colAt`
+## M2n, as landed — `parse` and line/column — `parse`, `lineAt` and `colAt`
 
 The two builtins RFC-0078 refused to route. **76 of 87 → 83 of 87**, seven
 examples: `argsdemo`, `input`, `numbytes`, `stringops` for `parse`; `pagesdemo`,
@@ -3324,3 +3324,215 @@ generic-payload conversion is one row of the M2d seam's list.
 One bookkeeping note that is not this milestone's: **`controlflow.vyrn` passes and
 is not in `PASSING`**, and has been since `spawn` landed. The ladder prints
 `NEW controlflow.vyrn` on every run and nothing has claimed it.
+
+## M2o, as landed — `logger` and a generic payload — the logger, and a payload that forgot its type
+
+RFC-0008's leveled logger, and the generic-payload conversion. **76/87 → 78/87**
+on both link shapes: `logging` and `genericpayload`. Two unrelated features, and
+the honest half of the milestone is that the row each one sat in was worth less
+than it said — `logger` was 2 examples and paid 1, the payload conversion was 2
+and paid 1, and in both cases the second example has a blocker behind it that the
+ladder could not see.
+
+(Numbered M2n because three parallel milestones already landed as "M2m"; the
+merge could not have known, and renaming theirs afterwards would break the
+references in their own commits.)
+
+### The census refused to route `logger`, and every reason it gave is why this was small
+
+RFC-0078's M5 census kept `logger` in the compiler because it is "a syscall three
+times over". Read from this side that is not a cost, it is the whole lowering:
+`write_all(fd, ptr, len)` has been the ONE place bytes leave this module since
+M2a, and a log line is five calls to it — three interned constants of known
+length, and two `ptr`s, because a `String` IS a NUL-terminated pointer. There is
+no format string to parse, no varargs to lack, and nothing to assemble. It is the
+textual backend's `fprintf(stream, "[%s] %s: %s\n", lvl, name, msg)` in the only
+shape a wasm module can have one.
+
+The alternative was considered and is worse: `concat` three times into one string
+and write it once costs three `malloc`s out of an allocator that never frees, to
+save four calls that are the same syscall either way. Nothing can interleave with
+a half-written line — RFC-0008 bars logging from a spawned task — so there is no
+atomicity to buy.
+
+The two `String`s are parked in scratch locals rather than left on the stack,
+because each `write_all` takes three operands and the second value cannot wait
+underneath the first one's call. Two locals, and `logger(name)` itself is the
+identity on a `ptr`: a handle has no content but its name, so it emits nothing.
+
+### The fold is the milestone, and the ladder cannot see it
+
+With `logging { level: warn }` a `.debug(..)` call emits **no write**. That is
+RFC-0008's Q3, and the thing RFC-0078's census names as the reason routing would
+be a language change — a deleted call becoming a runtime comparison is
+`byteLength`'s consteval argument in different clothing.
+
+A passing ladder says nothing about it. A backend that emitted the comparison
+prints exactly the same lines and passes every example. So the evidence is the
+module's bytes: `[LEVEL] ` is interned at the *emitting* site and nowhere else —
+M2m's DFA rule, and M2d's argument that a trap message only `emit_validation`
+interns is proof a check exists — so a prefix in the data section means a write
+exists and its absence means one does not. `logging.vyrn` contains `[DEBUG] `,
+`[INFO] ` and `[WARN] ` exactly once each and does not contain `[TRACE] ` or
+`[ERROR] ` at all.
+
+The test pins the other half in the same breath, and that half is what makes it a
+test rather than a tautology: the suppressed calls' own MESSAGES are asserted
+**present**. Arguments are still evaluated under suppression (Q4, so a message's
+side effects do not depend on a level), and without that assertion the test would
+also pass on a backend that deleted the statement whole.
+
+### The `file(..)` sink is a held descriptor, and M2j is why it could be
+
+A file sink is the one shape `writeFile` cannot express: `writeFile` opens,
+truncates and closes per call, and a log file is opened once and written many
+times. Natively that is a `FILE*` in `@__vyrn_log_file`, `fopen`ed in `@main` and
+`fclose`d after `vyrn_main`.
+
+M2j put `path_open` in this module directly, so the same shape is expressible
+here and is what landed: `_start` opens the path with `CREAT|TRUNC` —
+`fopen(path, "w")`, truncating — BEFORE the globals initializer, because a
+top-level `let` may log, which is the order `vyrn_entry` already used; the
+descriptor goes in four reserved bytes; `fd_close` runs after `main`. The
+reservation is made **only for a file sink**, so every console-sink module in the
+corpus is byte-for-byte what it was — this milestone changes no module that does
+not log to a file.
+
+What it does on a failure is decided rather than inherited. `open_at` gives -1,
+that is what the slot holds, and `write_all`'s errno test swallows every write. So
+a bad path is silence, which is the interpreter's `if let Some(f) = ..` and
+RFC-0008's Q6 leaning — and, the part worth recording, it is also the browser:
+`wasi-min.js` has no preopens, so `open_at` returns -1 for every path and a page's
+file sink degrades to silence instead of trapping. RFC-0014's graceful-degradation
+posture, reached for free.
+
+Verified by running: the log file is byte-identical to the interpreter's
+`std::fs::File`, and TWICE, because a `path_open` without `TRUNC` appends and one
+run cannot tell the two apart.
+
+### Neither sink nor threshold that matters has an example
+
+`logging.vyrn` and `vlog.vyrn` are the only logging examples, both write to
+`stderr`, and only the first builds here — so `stdout`, `file(..)` and every
+threshold but `debug` have no example at all. All three are running tests against
+the interpreter.
+
+The `stdout` case is the one worth naming. A log line and `print` go to the SAME
+descriptor, so their INTERLEAVING is observable — and a sink that quietly stayed
+on 2 would still look right to a test that read only stdout. The assertion is the
+full stream, in order, `print` and log lines together.
+
+### `peek` named the enum where the emitting path named the instantiation
+
+The payload gap was one line and it was in `peek`. A variant construction in a
+branch reported `Type::Named("Crate")`; `resolve` of a bare generic name gives the
+declaration's own `Held(T)`, so the payload's coercion was handed a `Type::Param`
+and refused "a conversion from `Cargo` to `T`". The emitting path — `sum_ctor` —
+had used the shared `applied_type` since M2e and was right all along; the two
+disagreed, and `peek`'s answer is the one a `match` on the result binds from.
+
+That is M2e's bug from the other end. There, a call reported its return type
+**resolved**, so `Pair<Int64, Int64>` no longer matched `Pair<A, B>`; here a
+construction reported it **unapplied**, so nothing had a `Cargo` to solve `T`
+from. Both are a type that stopped carrying what the next site needs, and both
+surfaced as a refusal only because a `Param` has no layout.
+
+`applied_variant` is that rule in one place, and `peek` had no BARE-NAME form to
+call it from either: `expr` distinguishes a nullary constructor from a local by
+failing to be one, and `peek` did not, so a `match` whose first arm is `Empty`
+could not be typed at all. Both forms route through the one function now.
+
+### The arm scan is order-independence, not this example
+
+`match_ty` is the first-arm peek — previously two copies, in `peek` and in
+`match_expr` — plus one upgrade: a non-applied answer is replaced by the first arm
+that has an applied one. `ty_is_concrete_app` moved out of `Gen` and both backends
+call it, for `solve_type_args`'s reason: an enum's layout is arity-wide
+(`enum_ll`), so two backends preferring different arms would not fail to link,
+they would encode a payload one way and read it the other.
+
+Measured rather than assumed, because the temptation was to claim the scan is what
+unblocked the example. It is not. With the scan removed `genericpayload.vyrn`
+still builds and emits a byte-identical module — it puts its concrete arm FIRST,
+so first-arm-wins is right about it. What the scan buys is that the answer stops
+depending on arm ORDER, and the flipped order refuses with "a conversion from
+`Cargo` to `Unit`" without it.
+
+The flipped order has no example because the **checker** refuses it: `Empty` first
+is uninferable without an annotation. So it is a test, and it pins VALUES rather
+than agreement, for a reason the two payload shapes make concrete. A `Cargo`
+payload is `Word::Boxed`, so a forgotten `T` has a conversion to refuse and is
+loud. An `Int64` payload is `Word::Direct` — the word is an `i64` either way — so
+the same mistake has nothing to refuse and would read a pointer as a number.
+
+### Two rows were mis-attributed, and the ladder cannot help it
+
+The emitter stops at the first gap, so an example is reported by whichever blocker
+its first-emitted function happens to hit. Both of this milestone's rows had a
+second one behind them:
+
+- **`storage.vyrn` was never blocked on the payload conversion.** It is blocked on
+  `renameFile`, and has been since M2j: `std/storage`'s `writeAtomic` is
+  `writeFile` then `renameFile`, and only the first has a lowering. Confirmed
+  against the base commit with a program that calls nothing but `writeAtomic`. The
+  `Config`-to-`T` message came from a generated decoder emitted earlier in the
+  module.
+- **`vlog.vyrn` was blocked on `logger` and is now blocked on `parse`**, which is
+  the row beside it in the same table.
+
+So "the call `logger` 2" and "a conversion from `Cargo`/`Config` to `T` 2" were
+each one example. Nothing about either fix is smaller than it looked; the rows
+were.
+
+### Refused, specifically
+
+**`renameFile`.** It is what `storage.vyrn` needs and it is not this milestone,
+for a reason of shape rather than size: it is a new syscall at the BOUNDARY.
+`path_rename` would join the twelve unconditional WASI imports, which renumbers
+the whole function index space and changes the bytes of every module in the corpus
+— including `fib.vyrn`'s pinned size. It also needs the preopen walk `open_at`
+does, and a second error class the corpus never reaches (`EXDEV`, "cannot rename
+`%s` across devices", distinct from "cannot write `%s`"). It belongs with
+`fsyncFile` and `listDir` as one RFC-0014 milestone rather than smuggled into a
+logging one.
+
+**A `Logger` anywhere but a local.** `llt_of` prints `ptr` for one so it would
+lower, but nothing in the corpus stores a logger in a record, an array or a
+module-state global, and RFC-0008's per-logger overrides — the thing that would
+give a handle content — are explicitly not implemented. Not claimed.
+
+### Nothing contradicted M0, M1, M2a–M2m
+
+The logger computes no offset at all: five `write_all`s over interned addresses
+and two `ptr` locals, so `layout::of_ll ∘ llt` has nothing to say and is not
+consulted. The payload half consults it only through `enum_ll`, whose shape is
+arity-wide and therefore identical across instantiations — which is exactly why
+the wrong instantiation was silent about layout and loud only at a coercion.
+Destination-first is untouched (a log call yields `Unit`; `match_ty` is the same
+answer `peek` already gave, from one function instead of two), no body emits a
+`return`, and `Type::Param` stayed unreachable — the payload fix is the one that
+stops one arriving. `Rt` gained nothing: a log write reuses `write_all` and
+`strlen`, so there is no new index and the count test needed no edit.
+
+The M2d seam took nothing new, which is the fourth milestone in a row. A `Logger`
+flows only to a `Logger`, so `from == to` and the `ll`-equality shortcut is
+correct rather than dangerous.
+
+The LLVM wasm path: the logger diff does not touch `lib.rs` at all, and the
+payload diff touches it only to make `ty_is_concrete_app` a free function with the
+same body behind the same call. emit-ir is byte-identical over `logging`, `vlog`,
+`storage`, `genericpayload`, `jsoncodec`, `enum` and `option`.
+
+### 78 of 87, regrouped
+
+| blocked on | n |
+|---|---|
+| the call `parse` | 5 |
+| the call `lineAt` | 3 |
+| the call `renameFile` | 1 |
+
+Three rows, each one builtin, and the two big ones are the pair RFC-0078 checked
+and deliberately refused to route (`parse` wraps where `parseInt64` declines;
+`lineAt`/`colAt` are a memoized table a Vyrn library cannot hold). `renameFile` is
+the third, refused above. There is no structural gap left in this corpus: every
+remaining example is one call away.
