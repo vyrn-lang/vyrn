@@ -36,3 +36,4 @@ editor/vscode/server/
 Thumbs.db
 .DS_Store
 tools/
+.claude/worktrees/
