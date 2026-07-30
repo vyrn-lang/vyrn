@@ -1907,13 +1907,10 @@ ladder is the tier that gates the acceptance criterion.
 
 ### What is left of M3 and M4
 
-- **M3 — varargs. Unchanged, and now the only thing standing between this backend
-  and the three functions it cannot import.** `printf`, `fprintf` and
-  `__vyrn_snprintf` are the whole of the boundary a linked module must decline.
-  Fixed-arity shim wrappers generated from the call shapes the emitter sees are
-  still the answer; they are what would make `logger` reachable through the shim,
-  and they are a prerequisite for anything that wants `%f` from C rather than from
-  `f64_str`.
+- **M3 — STRUCK.** See the M3 line above and "M2j, as landed": the direct
+  backend emits zero `printf`-family calls, cannot import a variadic function,
+  and therefore never had call shapes to generate wrappers from. This paragraph
+  contradicted that and is retained only as a marker of where it was.
 - **M4 — not the prelude any more.** What survives is the narrow version: reach
   the shim for the subsystems that are not worth re-emitting, which the M2i
   mechanism now makes a per-builtin decision instead of a milestone-sized move.
