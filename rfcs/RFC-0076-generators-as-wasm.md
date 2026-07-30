@@ -1,6 +1,6 @@
 # RFC-0076 — Generators as Wasm: Compile the Generator, Don't Interpret It
 
-- **Status:** Implemented — M1 through M5 shipped; see the milestone sections below.
+- **Status:** Implemented — M1 through M7 shipped; see the milestone sections below.
 - **Depends on:** RFC-0021 (`gen fn`, the comptime sandbox, the content-addressed
   generator cache), RFC-0012 (`extern` both directions, the String ABI),
   RFC-0014 (the WASI shim and its canonical error wording), RFC-0031
@@ -819,6 +819,185 @@ that `find_clang() == None` now costs one fewer compile per artifact, and that
 the 35 KB of C is compiled once per compiler build rather than once per
 generator module.
 
+## M7, as landed: generation stops needing clang
+
+RFC-0077 opens by naming a defect in THIS document's implementation:
+
+> `find_clang()` returning `None` makes the generation engine decline, so a
+> `.vyx` keystroke is 54 ms or 250 ms depending on whether someone installed a
+> C toolchain. Same compiler, same source, same semantics, four-fold difference
+> in behaviour from the environment. A language should not have that shape.
+
+RFC-0077 M5 removed clang from `vyrn build --target wasm` and proved it with a
+poisoned stub — and closed by claiming "the generation engine no longer declines
+on a machine without a C toolchain", which was not true of anything it had
+changed. `compile_to_wasm` was still calling `emit_gen_host` and shelling out. The
+defect outlived the milestone written to remove it, and the measurement was easy
+to take on the commit before this one:
+
+| pre-M7, `CLANG` = a stub that exits 99 | |
+|---|---|
+| `emit-gen examples/gendemo.vyrn` | `genwasm declined: POISONED CLANG WAS INVOKED` |
+| `.vyx` keystroke, median of 8 | **312 ms** against 72 ms with clang present |
+
+Four-fold, exactly as written, three milestones after the sentence promising it
+was gone.
+
+### What the milestone actually was
+
+`compile_to_wasm` now calls `direct::compile_gen_host`. The work was giving the
+direct backend a generator-host mode, and the surface is bounded — it is the same
+surface `-DVYRN_GEN_HOST` used to add, and the whole of it is imports:
+
+- **Ten `vyrn_gen` imports**, declared from `CODE_IMPORTS` — the same list, in the
+  same LLVM spelling, parsed by one new `wasm::declare_sig`. So `ptr` becomes `i32`
+  and `i1` becomes `i32` in exactly one place, which is what M0's `__vyrn_vj_bool`
+  finding was about and the only thing on this boundary that could have been got
+  wrong quietly.
+- **`listDir`** as one runtime helper: the host sorts and joins the entries with
+  `\n` (the interpreter's own recording encoding) and the guest splits them in
+  place, exactly as the C did, because an entry name cannot contain a newline.
+- **`readFile`/`readFileBytes`** reading through the resolver instead of
+  `path_open`, which matters for the reason M2 gave: in the LSP the resolver serves
+  UNSAVED buffers, so a guest that opened files itself would read different bytes
+  than the interpreter.
+
+Three things were smaller than the plan said. `Code` needed **no lowering work at
+all**: `llt_of` has answered `i64` for it behind a thread-local flag since M3a, and
+that flag simply gained a second reader — so the handle, and its free ride through
+`Option`/`Array` payloads, came with the milestone rather than in it. The two
+readers needed **no new runtime functions**, only a different `slurp`, because the
+open-and-slurp was already factored out of both; `gen_slurp` is the entire
+difference and the NUL rule, the UTF-8 check and the canonical wording are
+untouched. And the status alphabet needed no new agreement for the third time
+running (0 ok / 1 io / 3 embedded NUL), because the host answering it is the same
+host.
+
+### The result, with a control
+
+Run rather than reasoned about, in a shell with `PATH` cut to `C:\Windows\System32`,
+`CLANG` pointed at an **existing** stub that prints `POISONED CLANG WAS INVOKED` and
+exits 99 — existing, because pointing it at a missing path lets `find_clang` fall
+back to `C:\Program Files\LLVM\bin\clang.exe`, which is how M5's first attempt at
+this proof quietly succeeded and proved nothing — and with the wasi sysroot and the
+builtins archive renamed off disk.
+
+**Control:** `vyrn build examples/fib.vyrn` prints `POISONED CLANG WAS INVOKED` and
+`error: clang exited with exit code: 99`. The stub is reachable and it is fatal.
+
+**Criterion:** all **15** generator examples, **52** generator calls, emitted source
+byte-identical to the interpreter's, `genwasm run:` on every one, **zero declines**,
+and the stub never invoked. The `.vyx` keystroke in that same shell is **92 ms**
+against the 312 ms above.
+
+### The numbers
+
+`examples/bin`, generation cache cleared for every cold row, same machine, medians:
+
+| | before | after |
+|---|---|---|
+| cold `didOpen` of `app/routes/index.vyx` | 2,733 ms | **804 ms** |
+| `emit-gen server.vyrn`, wall | 2,298–2,567 ms | **429–443 ms** |
+| ... of which the compiler | clang 1,665 ms | emit **50 ms** |
+| ... of which cranelift | 308 ms | **122 ms** |
+| second session, artifacts on disk | 491 ms | 493 ms |
+| keystroke, median of 8 | 72–102 ms | 81–93 ms |
+| keystroke with no C toolchain | **312 ms** | **92 ms** |
+
+**3.4x on opening the first page of a session**, and 33x on the compile itself:
+1,665 ms of clang became 50 ms of emission. Cranelift halved too, which was not the
+milestone's aim — a directly-emitted generator module is smaller than the one clang
+produced, so there is less of it to compile. The keystroke and the warm-session
+number are unmoved, as they should be: both are artifact-cache hits, and this
+milestone is about what a MISS costs.
+
+The bottom row is the one the RFC-0077 quote is about. It used to be the only row
+where the environment showed through; now the four-fold difference is 0.
+
+### The fallback stayed honest, and then had nothing to do
+
+M1's design is that a generator the engine cannot serve is declined and the
+interpreter runs it — slower, never wrong. That is unchanged, and `VYRN_GENWASM_TRACE`
+still says why. It simply never fires: the direct backend reached 87 of 87 examples
+at RFC-0077 M2p, and a generator's module closure is ordinary Vyrn, so there was no
+residue to decline. Which is why the clang path is **deleted** rather than kept as a
+fallback — see below.
+
+### The correctness gate did the work, and one test was measuring the emitter
+
+`cargo test -p vyrn-cli --features wasm-gen --test genwasm -- --ignored` asserts every
+generator example emits byte-identical source under both engines and fails if the
+engine silently declined instead of running. It passed on the first run of the new
+backend, which is the outcome the whole discipline exists to produce: a second
+implementation of a macro system's execution engine, checked by the parity invariant
+rather than by hope. The recorded `reads` are unchanged, which is what the on-disk
+generation cache validates against, and `the_reflected_type_closure_is_recorded_identically_by_both_engines`
+is the test that says so.
+
+One test did move, and what it found is worth recording because it is not a bug in
+either engine. `a_runaway_generator_is_killed_under_both_engines` bounded its loop at
+10^9 iterations, and that exceeded the fuel budget only because clang at `-O0` spent
+enough wasm instructions per Vyrn statement to get there. The direct backend spends
+about 14, so the same generator **completed** under wasm while still dying under the
+interpreter — the test was measuring the emitter's efficiency, not the guardrail. At
+10^12 it measures the guardrail.
+
+The ratio itself was re-measured across the repo, because the module being metered is
+a different module — no wasi-libc startup in it, and none of clang's unoptimized code:
+
+| generator | steps | fuel | fuel/step |
+|---|---|---|---|
+| `std/rpc` | 645 | 265,191 | 411 |
+| `examples/gendemo` | 93 | 31,128 | 335 |
+| `std/ui` | 7,514 | 1,886,245 | 251 |
+| `std/tw` | 42,252 | 8,707,363 | 206 |
+| `std/vyx` | 33,427 | 2,506,554 | 75 |
+| `std/i18n` | 64,175 | 4,778,478 | 74 |
+
+The shape held: 411 worst against 448 before, and the string-heavy generators that
+dominate real work still sit at a quarter of it. So the 1,000x multiplier stays, and
+M5's argument for it is unchanged. What changed is that the same budget now burns out
+in **0.69 s** against 2.2 s interpreted, where M5 measured 1.6 s and 3.4 s.
+
+### The textual gen-host emitter is deleted, and the reason is a recorded lesson
+
+`emit_gen_host` had one caller. With it gone, everything the flag reached on the LLVM
+path is unreachable: the `Code` handle lowering and `gen_code_quote`, the `vyrn_gen`
+import declarations and their attribute groups, the M3b reflection redirects, the
+atom-stream primitives, `listDir`'s lowering and `@__vyrn_list_err` beside it. The C
+shim loses its `-DVYRN_GEN_HOST` half — the mediated read, the stash reader and
+`__vyrn_gen_list_dir`, three kilobytes the direct backend's own runtime replaces —
+and `shim_wasm` loses the parameter that selected it.
+
+Kept-as-a-fallback was the obvious alternative and it is the wrong one, for this
+repo's own recorded reason: **gated multiplicity stays true and ungated multiplicity
+rots.** `vyrn-codegen-llvm` was unbuildable twelve days after its third commit. A
+second generator-host emitter that no test can reach would rot identically, and it
+cannot be gated, because its gate WAS the generation engine. Nothing argues for
+keeping it either — the direct path declines nothing, so there is no case for clang
+to answer.
+
+787 lines out, 62 in. `read` folds into `CODE_IMPORTS` on the way: it was declared by
+the C rather than the IR only because the C was what called it, so now one list holds
+every signature on this boundary and one parser reads it.
+
+### Nothing contradicted M1-M6
+
+The host side is untouched: the same `serve`, the same `gen_scoped_path` mediation,
+the same read recording, the same `gen_module_interface_lit`, the same fuel metering
+and trap re-wording. The engine's `run_hosted` got SIMPLER rather than larger — a
+directly-emitted module is a WASI command with its own exported memory, which is the
+shape M6's split had as its fallback, so the split branch and the shim instantiation
+went with the split. `wasm::Module::import_memory` and `SHIM_BASE` stay for the
+boundary audit, which was never wired to either shape.
+
+The one thing worth noting about the memory map is that it needed nothing: a
+generator module is a standalone module, so the 64 KB shadow stack and the statics
+above it are the ordinary layout, and the 8 MB `STATICS_LIMIT` a split needed has
+nothing to bound. M2p's reachability sweep applies unchanged and does what was
+predicted of it — a gen-host import nothing calls is pruned, so `gendemo` imports
+`read` and `fetch` and not the `Code` arena at all.
+
 ## Milestones
 
 - **M1 — embed the runtime, one generator, no capabilities.** DONE. wasmtime as
@@ -848,6 +1027,13 @@ generator module.
   its own pre-compiled module the generated modules import, memory included,
   linked at instantiation. ~44 ms of clang per artifact, and a stack-layout trap
   found and closed — see above.
+- **M7 — generation without clang.** DONE. The engine compiles through RFC-0077's
+  direct wasm backend, which needed a generator-host mode and got one: ten
+  `vyrn_gen` imports, `listDir`, and the two readers going through the resolver.
+  1,665 ms of clang per `emit-gen` became 50 ms of emission, a cold `.vyx`
+  `didOpen` went 2,733 ms to 804 ms, and the keystroke stopped depending on
+  whether a C toolchain is installed — 312 ms to 92 ms with one poisoned. The
+  textual emitter's gen-host half is deleted, since its only caller was this.
 
 ## Acceptance
 
@@ -862,3 +1048,7 @@ generator module.
 - The `.vyx` keystroke is measured, before and after, on `examples/bin`.
 - The interpreter path still works with the wasm path disabled, and that
   configuration is exercised in CI.
+- Generation needs no C toolchain: no clang, no wasi sysroot, no builtins archive
+  (M7). Demonstrated with a control — a poisoned clang that the native build
+  invokes and dies on, while all 15 generator examples generate through the
+  engine anyway.

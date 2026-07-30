@@ -35,6 +35,18 @@ installed a C toolchain. Same compiler, same source, same semantics, four-fold
 difference in behaviour from the environment. A language should not have that
 shape.
 
+> **No longer true, and it took until RFC-0076 M7.** M5 below deleted the LLVM path
+> for `vyrn build --target wasm` and closed by saying "the generation engine no
+> longer declines on a machine without a C toolchain" — which was not true of
+> anything M5 changed. `compile_to_wasm` was still calling `emit_gen_host` and
+> shelling out, and with a poisoned clang the keystroke measured **312 ms** against
+> 72 ms, i.e. exactly the four-fold difference this paragraph names, three
+> milestones after it was declared gone. RFC-0076 M7 pointed the generation engine
+> at this backend and deleted the textual gen-host emitter: the keystroke with no C
+> toolchain is now **92 ms**, and a cold `.vyx` `didOpen` went from 2,733 ms to
+> 804 ms because 1,665 ms of clang per `emit-gen` became 50 ms of emission. Sixty
+> lines of import declarations were what stood between the two.
+
 **The double compile.** We run two compilers back to back and throw the first
 one's output away — the wasm bytes go straight into cranelift and are never read
 again except as a cache blob. And clang is given **no `-O` flag at all** on this
@@ -3953,5 +3965,14 @@ was therefore never optimizing. A very expensive translator, as the problem
 statement put it.
 
 The measurement that motivated this, at the end of it: `fib.vyrn` to wasm is
-**1,438 bytes** where clang produced **277,438**, and the generation engine no
-longer declines on a machine without a C toolchain.
+**1,438 bytes** where clang produced **277,438**.
+
+The last clause of that sentence used to read "and the generation engine no longer
+declines on a machine without a C toolchain", which was **false when it was
+written**: this milestone changed `vyrn build`, and the generation engine had its own
+call to clang. It became true one RFC over, in RFC-0076 M7, which pointed that engine
+at this backend — see the note under "The problem" above, and RFC-0076's own M7
+section. Recorded rather than quietly corrected, because the failure is worth naming:
+an acceptance criterion about `--target wasm` was read as a claim about every consumer
+of the wasm target, and the one consumer it missed was the one the opening paragraph
+was about.
