@@ -2809,3 +2809,121 @@ fn main() -> Int64 {
     assert_eq!(rows[0].1, "1\n0\n0\n0\n0\n0\n1\n1\n0\n", "IEEE 754: only `!=` is unordered");
 }
 
+/// A contextual array literal is built at the element type its slot DECLARES.
+///
+/// Inferring it from `elems[0]` instead made a bare integer literal an `Int`, so
+/// `Array<UInt8> = [65, 66]` emitted a `[2 x i64]` aggregate and the consumer then
+/// read it at the declared width. Three separate failures, and only the first was
+/// loud:
+///
+/// - `Array<T>` stored the aggregate into the `{ ptr, i64, i64 }` triple — a clang
+///   error, so native did not build while `vyrn run` and wasm printed `65`.
+/// - `SmallArray<T, N>` did `extractvalue [2 x i8]` off it — the same clang error,
+///   found by looking rather than by a report.
+/// - `Array<Age>` (RFC-0020) went SILENT instead: the `ArrayN -> Array` step
+///   reshapes whenever `llt` matches, `Age`'s `llt` IS `i64`, so no `where`
+///   predicate ran at all. `[20, 5]` into an `Array<Age>` trapped under the
+///   interpreter and under wasm and printed `20` and `5` natively.
+///
+/// `Array<Int64>` and an empty literal plus `push` always worked, which is why the
+/// corpus had nothing: `examples/textbytes.vyrn` carried a `buf(Array<Int64>) ->
+/// Array<UInt8>` helper for exactly this, documented as a workaround, and it is
+/// deleted now — its malformed table is spelled with byte literals in `main`.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_sized_integer_array_literal_is_built_at_its_declared_width() {
+    let rows = three_engines(
+        "sizedlit",
+        "widths",
+        r#"
+fn take(b: Array<UInt8>) -> Int64 {
+    let mut s = 0
+    for x in b {
+        s = s + Int64(x)
+    }
+    return s
+}
+
+/// A RUNTIME wrap, so the truncation is the backend's and not `consteval`'s. Two
+/// things the checker settles rather than this backend, both found by writing the
+/// row: an out-of-range LITERAL element is a compile error (`300` is not a `UInt8`),
+/// and a bare `Int64` element is not one either — `[n, n + 1]` is rejected with
+/// "array elements must share a type", so the conversion is written out.
+fn wrap(n: Int64) -> Array<UInt8> {
+    return [UInt8(n), UInt8(n + 1)]
+}
+
+fn main() -> Int64 {
+    // The reported shape: a `let` annotation.
+    let b: Array<UInt8> = [65, 66]
+    print(Int64(b[0]))
+    print(Int64(b[1]))
+    print(b.length)
+    // Sized-int elements narrower AND wider than a byte, signed and not. Each
+    // element is a bare literal, which is the whole bug: it inferred `Int`.
+    let i32s: Array<Int32> = [1, 2, 3]
+    print(Int64(i32s[1]))
+    let i8s: Array<Int8> = [127, 1]
+    print(Int64(i8s[0]) + Int64(i8s[1]))
+    let u16s: Array<UInt16> = [65535, 1]
+    print(Int64(u16s[0]))
+    // The wrap a sized slot performs is the wrap the interpreter performs.
+    let wrapped = wrap(300)
+    print(Int64(wrapped[0]))
+    print(Int64(wrapped[1]))
+    // An ARGUMENT position, not just a `let`.
+    print(take([1, 2, 3]))
+    // A `SmallArray` slot (RFC-0056), whose lowering read the same aggregate at
+    // the declared width from a different place.
+    let sa: SmallArray<UInt8, 4> = [65, 66]
+    print(Int64(sa[0]) + Int64(sa[1]))
+    print(sa.length)
+    // `Array<Int64>` and empty-plus-push always worked; here so a regression in
+    // the path that DID work is caught by the same test.
+    let plain: Array<Int64> = [7, 8]
+    print(plain[0] + plain[1])
+    let mut grown: Array<UInt8> = []
+    grown.push(9)
+    print(Int64(grown[0]))
+    // Nested growable elements — the one case the old code got right, because it
+    // was the one case that used the declared element type.
+    let nested: Array<Array<Int64>> = [[1], [2, 3]]
+    print(nested[1][1])
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "widths");
+    assert_eq!(
+        rows[0].1, "65\n66\n2\n2\n128\n65535\n44\n45\n6\n131\n2\n15\n9\n3\n",
+        "the interpreter's widths"
+    );
+
+    // The silent half: a validated element type, where the reshape skipped the
+    // predicate because the representation matched. Its own program because the
+    // expected outcome is a TRAP, and a trap ends the run.
+    let rows = three_engines(
+        "sizedlit",
+        "validated",
+        r#"
+type Age = Int64 where value >= 18
+
+fn mkAges(a: Int64, b: Int64) -> Array<Age> {
+    return [a, b]
+}
+
+fn main() -> Int64 {
+    let ok = mkAges(20, 30)
+    print(ok[0] + ok[1])
+    let bad = mkAges(20, 5)
+    print(bad[0])
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "validated");
+    assert_eq!(rows[0].1, "50\n", "the valid pair prints before the trap");
+    assert_eq!(rows[0].2, "error: validation failed for `Age`\n", "5 is not an `Age`");
+    assert_eq!(rows[0].3, Some(1), "a failed validation exits 1");
+}
+

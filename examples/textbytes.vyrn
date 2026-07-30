@@ -48,24 +48,6 @@ fn verdict(b: Array<UInt8>) -> String {
     return mine + " | " + theirs
 }
 
-/// A byte buffer from codepoint-free integers, because a `UInt8` array LITERAL
-/// does not survive the native backend.
-///
-/// This is a workaround and it is worth naming precisely: an array literal whose
-/// element type is a sized integer (`Array<UInt8>`, and `Array<Int32>` too) lowers
-/// in the textual emitter as a fixed-size `[n x i64]` aggregate and is then stored
-/// into, or passed as, the `{ ptr, i64, i64 }` heap-array triple — clang refuses
-/// the module. `Array<Int64>` literals are fine, and so is an empty literal plus
-/// `push`, which is what this does. Interpreted and wasm builds accept the literal,
-/// so parity is what found it; see "M4b, as landed" in RFC-0078.
-fn buf(cs: Array<Int64>) -> Array<UInt8> {
-    let mut out: Array<UInt8> = []
-    for c in cs {
-        out.push(UInt8(c))
-    }
-    return out
-}
-
 /// One line/column row, again both ways.
 fn lc(b: Array<UInt8>, off: Int64) -> String {
     return lineAtV(b, off).toString() + ":" + colAtV(b, off).toString() + " | " +
@@ -86,22 +68,27 @@ fn main() -> Int64 {
     print(cps("\u{10ffff}"))
 
     // ---- the malformed table ------------------------------------------------
-    // Decimal through `buf` rather than `['\xc0', '\xaf']`, for the native reason
-    // documented on `buf` — nothing here is about the spelling of a byte.
+    // Byte literals, spelled as bytes. These rows went through a decimal
+    // `Array<Int64>` and a `push` loop until RFC-0077 M2m's fourth defect landed:
+    // a contextual `Array<UInt8>` literal was built as `[n x i64]` and then read
+    // at the declared width, so clang refused the module while `vyrn run` and the
+    // direct backend printed the table. It is `main`'s rows that prove the fix,
+    // because the `test` block below was always legal — RFC-0015 keeps tests out
+    // of `build`, so they never reached the emitter that was wrong.
     print(verdict(bytes("héllo"))) // valid, for contrast
-    print(verdict(buf([]))) // the empty buffer is a valid empty String
-    print(verdict(buf([192, 175]))) // C0 AF — overlong '/'
-    print(verdict(buf([128]))) // 80 — lone continuation
-    print(verdict(buf([226, 130]))) // E2 82 — truncated 3-byte
-    print(verdict(buf([237, 160, 128]))) // ED A0 80 — a surrogate half
-    print(verdict(buf([245, 128, 128, 128]))) // F5 .. — above U+10FFFF
-    print(verdict(buf([244, 143, 191, 191]))) // F4 8F BF BF — U+10FFFF, legal
-    print(verdict(buf([244, 144, 128, 128]))) // F4 90 80 80 — one past it
-    print(verdict(buf([224, 128, 128]))) // E0 80 80 — overlong 3-byte
-    print(verdict(buf([240, 128, 128, 128]))) // F0 80 80 80 — overlong 4-byte
+    print(verdict([])) // the empty buffer is a valid empty String
+    print(verdict(['\xc0', '\xaf'])) // C0 AF — overlong '/'
+    print(verdict(['\x80'])) // 80 — lone continuation
+    print(verdict(['\xe2', '\x82'])) // E2 82 — truncated 3-byte
+    print(verdict(['\xed', '\xa0', '\x80'])) // ED A0 80 — a surrogate half
+    print(verdict(['\xf5', '\x80', '\x80', '\x80'])) // F5 .. — above U+10FFFF
+    print(verdict(['\xf4', '\x8f', '\xbf', '\xbf'])) // F4 8F BF BF — U+10FFFF, legal
+    print(verdict(['\xf4', '\x90', '\x80', '\x80'])) // F4 90 80 80 — one past it
+    print(verdict(['\xe0', '\x80', '\x80'])) // E0 80 80 — overlong 3-byte
+    print(verdict(['\xf0', '\x80', '\x80', '\x80'])) // F0 80 80 80 — overlong 4-byte
     // Valid UTF-8 that a `String` still cannot hold: the one row where the two
     // verdicts differ, and the reason is NUL termination rather than UTF-8.
-    print(verdict(buf([104, 0, 105])))
+    print(verdict(['h', '\x00', 'i']))
 
     // ---- line and column, 1-based -------------------------------------------
     let b = bytes("ab\ncd\n\nx")
@@ -137,9 +124,7 @@ test "the four UTF-8 widths decode to the codepoints the builtin gave" {
     assertEq(cps("\u{10ffff}"), "1114111")
 }
 
-/// Spelled with byte literals, which read better and are legal everywhere — a
-/// `test` block is never lowered natively (RFC-0015 keeps them out of `build`),
-/// so the `buf` workaround `main` needs does not apply here.
+/// The same table as `main`'s, asserted against literals.
 test "the two validators agree on every malformed shape" {
     assertEq(verdict(['\xc0', '\xaf']), "reject | reject: bytes are not valid UTF-8")
     assertEq(verdict(['\x80']), "reject | reject: bytes are not valid UTF-8")

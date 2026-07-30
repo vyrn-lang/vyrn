@@ -3175,23 +3175,36 @@ impl<'a> Gen<'a> {
                 if let Some(t) = &elem_expect {
                     self.expect.push(t.clone());
                 }
-                // When the enclosing storage boundary expects a GROWABLE element
-                // (an `Array<T>` or `Map<K,V>` — e.g. an `Array<Array<Int64>>`),
-                // every element literal must be lowered to that heap representation
-                // BEFORE it enters the outer aggregate. Otherwise a nested literal
-                // like `[[1], [2, 3]]` lowers as a fixed 2-D C-array `[2 x [1 x
-                // i64]]`, which is the wrong repr AND fails to build the moment two
-                // inner literals differ in length. Build the aggregate at the
-                // declared element type and coerce each element into it — the same
-                // declared-type coercion the enum-payload path uses. (A flat/scalar
-                // element type keeps the inferred-from-`elems[0]` path unchanged.)
-                let growable_elem = matches!(
-                    elem_expect.as_ref().map(|t| self.resolve(t)),
-                    Some(Type::Array(_)) | Some(Type::Map(_, _))
-                );
+                // When the enclosing storage boundary names the element type, the
+                // aggregate is built AT that type and every element is coerced into
+                // it. Inferring the element type from `elems[0]` instead is wrong in
+                // three separate ways, and each one was measured:
+                //
+                // - A GROWABLE element (an `Array<T>` or `Map<K,V>` — e.g. an
+                //   `Array<Array<Int64>>`) must reach its heap representation BEFORE
+                //   it enters the outer aggregate, or a nested literal like
+                //   `[[1], [2, 3]]` lowers as a fixed 2-D C-array `[2 x [1 x i64]]`,
+                //   which is the wrong repr AND fails to build the moment two inner
+                //   literals differ in length. This was the only case handled.
+                // - A SIZED-INTEGER element (`Array<UInt8> = [65, 66]`) inferred
+                //   `Int` from the literal and emitted `[2 x i64]`, which the
+                //   consumer then read at the declared width: `store { ptr, i64,
+                //   i64 } %t1` against an `[2 x i64]` for `Array<T>`, and
+                //   `extractvalue [2 x i8] %t1` for `SmallArray<T, N>`. Both are
+                //   clang errors — `vyrn run` and the direct wasm backend printed
+                //   `65`, native did not build at all.
+                // - A VALIDATED element (`Array<Age>`, RFC-0020) inferred `Int` too,
+                //   and there the failure was SILENT rather than loud: the reshape
+                //   below reinterprets the buffer whenever `llt` matches, and
+                //   `Age`'s `llt` IS `i64`, so no `where` predicate ran. `[20, 5]`
+                //   into an `Array<Age>` trapped under the interpreter and under
+                //   wasm and printed `20`/`5` natively.
+                //
+                // One expected type, coerced element-wise, answers all three: the
+                // outer `ArrayN -> Array`/`SmallArray` step then has `fi == ti` and
+                // is the pure reshape its comment already claims to be.
                 let build = (|| -> Result<(String, Type), String> {
-                    let (ety, first) = if growable_elem {
-                        let ety = elem_expect.clone().unwrap();
+                    let (ety, first) = if let Some(ety) = elem_expect.clone() {
                         let (v0, v0t) = self.gen_expr(&elems[0])?;
                         let (v0, _) = self.coerce(v0, &v0t, &ety)?;
                         (ety, v0)
