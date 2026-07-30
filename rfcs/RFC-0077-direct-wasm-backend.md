@@ -2160,3 +2160,164 @@ four small things. Every other row is exactly where M2h left it. The two worth 1
 between them — the `Map` family, and the five `peek` failures — are the same shape
 as everything M2b through M2f closed, which is to say small, named, and not
 control flow.
+
+## M2k, as landed
+
+`if let`, `?`, and `Age?(n)`. **45 of 81 standalone**, from 43 — and the
+milestone is not the two examples.
+
+### The result is `std/jsonread`, and it is why this row was next
+
+RFC-0078 M3 is `fromJson`, which needs `std/jsonread`, which was unbuildable here
+for exactly two constructs: `?` at six sites and `if let` at one. It now compiles
+under `VYRN_WASM_BACKEND=direct` and parses byte-identically to the interpreter —
+a nested document, a surrogate pair (`readHex4`'s `?` twice in one expression, the
+only nested one in the module), and four rejections whose `line N, col M:` wording
+comes out through six propagating frames. So M3 can land on all three engines at
+once rather than on the interpreter and the native build while wasm waits, which
+is a stronger claim than any number of examples.
+
+The examples, honestly, went the other way. The M2j table read `if let` 3, `?`, a
+fallible construction — 5. `option.vyrn` and `validate.vyrn` arrived; all four
+`if let` examples had a *second* blocker and moved to it (`argsdemo` to `parse` in
+a branch, `vyxdemo` to `lineAt`, `controlflow` to `region`, `vlog` to `fromJson`).
+A row of 5 was worth 2. That is the first time a row has been read as an upper
+bound and been wrong in this direction; M2h's was read as a lower bound and was
+right.
+
+### `if let` needed a lowering, and is still sugar
+
+The parser keeps it as `Stmt::IfLet` — `while let` is the construct that
+desugars, onto *it* — so there was no desugar to inherit. But it is sugar in
+shape: one tag test, the payload bound on the taken side, and no join at all,
+because the statement form carries no value. So it is `match_expr` with the arm
+chain replaced by a single `if`, over the same `pattern_binds` and `bind_payload`,
+and `peek` is not involved.
+
+The tag test itself is now one function the three probes share (`match`, `if let`,
+`?`); a second spelling of it would be a second chance to read the tag at the
+wrong width — one byte for `Option`/`Result`, eight for a user enum — which is the
+silent class, not a compile error.
+
+The scrutinee's address goes in a local of its own rather than in shared scratch,
+because it has to survive the test AND the binds, and an `if let` nests.
+
+### `?` routes to the epilogue, and that was the whole design
+
+M1's rule is that a body must not emit `return`: the shadow-stack release, and
+since M2f the `modify` copy-back, sit AFTER the block every exit branches to. `?`
+is an early return in everything but the instruction, so it writes the sum through
+`dest` exactly as `Stmt::Return` does and takes the same `br` to the same block.
+Nothing else was needed — `drop` is a no-op in this backend (the allocator never
+reuses), so the textual emitter's `emit_all_drops` before its `ret` has nothing to
+answer here.
+
+Three things fell out of that shape rather than being arranged:
+
+- **The success path is the fall-through, not an arm.** The failing side branches
+  away, so there is no join, no destination to allocate, and no `peek` to predict
+  wrong. `?` is the first value-producing construct in this backend that is not a
+  join.
+- **A value may sit beneath it**, which M2d already required of `if`: the test
+  consumes only the tag, so a destination address parked under the operand stack
+  by `let r: Rec = f(g()?)` is untouched.
+- **The propagated value is the whole sum, byte for byte.** That is only sound
+  because both sides are `{ i1, i64, i64 }`, differing at most in a payload half
+  the failing tag says is not there. The textual backend gets this free
+  (`ret { i1, i64, i64 } %agg`); a `memory.copy` has a width, so the width is
+  checked rather than assumed, and a `?` whose enclosing return is a different
+  shape is refused.
+
+**How the no-leak claim was checked**: 20,000 calls that each propagate, and the
+point is that a wrong lowering is loud. Emitting a real `Instruction::Return`
+there once traps `out of bounds memory access` before the first `print` — 20,000
+unreleased frames having walked the stack pointer past 0, which is the trap the
+memory map was laid out to get (M0). With the `br` it prints 20,000, and that
+number is the count of `modify` writes made *before* each propagation, so the same
+test says the copy-back happens on the failing path too. Both are in
+`tests/directwasm.rs`; neither is visible in a small program.
+
+### `Age?(n)` is the one flow that steps AROUND the M2d seam
+
+Every milestone since M2d has added a flow *ahead of* `Fn_::coerce`'s `ll`-equality
+shortcut — validation, substitution, integer resize. This is the opposite, and the
+reason is the whole point of the form: `expr_as(n, Age)` would emit the validation
+that aborts, and `Age?(n)` exists so that it does not. So the argument is
+evaluated at the refinement's **base** type and the predicate's own answer becomes
+the tag, which is exactly what `gen_try_construct` does — a value the two backends
+disagreed about would be a diverging `None`.
+
+`predicate_holds` is split out of `emit_validation` rather than written twice.
+Both need "run the `where` clause over the value"; only one of them traps. Two
+spellings could disagree about what the predicate *binds*, and an `Age?(n)` that
+read a different `value` than `Age(n)` does would be a `None` on one engine only.
+
+### The bug only running could catch, and it is M2b's
+
+`validate.vyrn` built, and then printed `error: validation failed for` Age where
+the interpreter prints `-1`. The `?` and the construction were both right; the
+`match` around them was not:
+
+```vyrn
+return match Age?(n) {
+    Some(a) => a,      // an Age
+    None => 0 - 1,     // an Int64
+}
+```
+
+`peek` typed the join by its first arm, correctly, as `Age` — and then every other
+arm was coerced *into* `Age`, through M2d's seam, and validated against a
+refinement the language never asked it to satisfy. The checker unifies those two
+arms at the base and asks nothing of the second one. **A join is not a value
+boundary.**
+
+So `join_ty` decays a refined type at the two sites that use `peek`'s answer as a
+coercion target (`join` and `match_expr`), and nothing else changes: the boundary
+the value really crosses — the `let`, the `return`, the field, the argument — still
+validates, because that coercion is a separate one outside the join.
+
+The hole is M2b's, not M2k's. A plain `match` on an `Option<Age>` has had it since
+n-way arms landed, and no example held one; `validate.vyrn` becoming compilable is
+what produced the first. This is the third time a milestone's new reach has exposed
+an older milestone's silent assumption (M2b's `peek` gap, M2f's missing copy-back,
+this), and all three were found by running.
+
+### Refused, specifically
+
+- **`?` whose enclosing return is not the same sum shape.** The propagation is a
+  fixed-width copy of the whole aggregate; a function returning something else is a
+  refusal naming both types, not a truncated copy.
+- **A fallible construction over an aggregate base.** Only `emit_validation`'s
+  record arm binds one, and it binds by *field* — there is no single local to
+  become the payload word. `word2` would have to box it and `bind_payload` unbox
+  it, which is mechanical, and a guess is a silent `None` rather than a trap.
+- **`?` on a user enum.** It has no meaning; `Sum::Enum` is simply not a case.
+- **The `peek` entries for `Try` and `TryConstruct`.** A branch *yielding* `x?` or
+  `Age?(n)` is two lines of `peek` away, and no example or std module has one. The
+  cost of being wrong is a named gap, so the two lines can wait for a caller.
+
+### Nothing contradicted M0, M1, M2a–M2j
+
+Every offset is still `layout::of_ll ∘ llt` — the sum `?` copies, the tag `if let`
+tests, the two words `Age?(n)` writes. Destination-first still holds where there is
+a destination, and `?` is the construct that showed the rule has an exception which
+costs nothing rather than a case that breaks it. `Type::Param` stayed unreachable,
+`Num`'s carrier invariant was not touched, and the LLVM wasm path is byte-for-byte
+unaffected (parity: 6 passed, unchanged).
+
+### 45 of 81, regrouped
+
+| blocked on | n |
+|---|---|
+| builtins with no lowering (`fromJson` 5, `parse` 2, `cell`/`chars`/`lineAt`/`logger`/`set`) | **12** |
+| `Match` on strings 4, a map literal 3, indexing a `Map` 2, indexing a `SmallArray` | 10 |
+| a branch yielding an unpeekable call (`get` 3, `fromJson`, `parse`) | 5 |
+| `spawn` 2, `region` 2 | 4 |
+| a `fn`-typed parameter (RFC-0023) 3, a lambda | 4 |
+| a conversion from `Cargo` to `T` | 1 |
+
+Control flow is off the list entirely. What is left is three groups: the `Map`
+family at 10, a builtins row at 12 that `fromJson` alone is 6 of, and eight things
+that are one gap each. `fromJson` is the next milestone by the same argument this
+one used — it is RFC-0078 M3's other half, and `std/jsonread` compiling is now the
+only reason it can be one.
