@@ -47,6 +47,7 @@ const PASSING: &[&str] = &[
     "eventloop.vyrn",
     "externdemo2.vyrn",
     "fib.vyrn",
+    "floats.vyrn",
     "foreach.vyrn",
     "gendemo.vyrn",
     "generics.vyrn",
@@ -62,9 +63,11 @@ const PASSING: &[&str] = &[
     "reflection.vyrn",
     "scan.vyrn",
     "schemaimport.vyrn",
+    "sizedints.vyrn",
     "statemod.vyrn",
     "strings.vyrn",
     "tagged.vyrn",
+    "templates.vyrn",
     "testing.vyrn",
     "utility.vyrn",
     // The one example whose refinement is VIOLATED at runtime, so it is the one
@@ -846,6 +849,137 @@ fn main() -> Int64 {
         assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
         assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
     }
+}
+
+/// The six decimals of a `Float64`, on the values that tell a correct formatter
+/// from a plausible one (RFC-0077 M2h).
+///
+/// `floats.vyrn` prints eleven floats and every one of them is small, finite and
+/// ordinary. What `%f` actually is, though, is an EXACT decimal conversion of the
+/// double, rounded half-to-EVEN at the sixth place — the interpreter's `{:.6}`
+/// and the native build's `printf("%f")` agree on that and nothing that computes
+/// six decimals in floating point does. So the cases here are the ones a
+/// shortcut gets wrong:
+///
+/// - `0.0078125` and `0.0234375` are exact ties. Half-to-even keeps the even `2`
+///   in the first and rounds the odd `7` up in the second, so a half-UP
+///   implementation passes one and fails the other.
+/// - `10^300` has 301 integer digits, which is why the numerator is a bignum and
+///   not a `u64`. Its digits are not `1` followed by zeros — they are the exact
+///   value of the nearest double — so a wrong carry anywhere in the doubling loop
+///   shows up as a wrong digit in the middle.
+/// - a subnormal reaches `k = 1074`, the deepest the multiply loop goes, and
+///   still has to print `0.000000` rather than run off the buffer.
+/// - `NaN`, `inf`, `-inf` and `-0.0` are all spelled rather than computed, and
+///   `-0.0` keeps a sign that no digit carries.
+/// - `Int64` of `10^300` saturates at `Int64.max`, because the interpreter is
+///   Rust's `as` and wasm's plain `trunc` would have trapped there.
+///
+/// Vyrn has no exponent literals, so the extreme values are built by
+/// multiplication — which is better than a literal would have been: both engines
+/// compute the same double by the same IEEE steps, and the mantissa that comes
+/// out is messy rather than round.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn six_decimals_of_a_float_are_the_exact_ones() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-floats");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+fn opaque(x: Float64) -> Float64 {
+    return x
+}
+
+fn pow10(n: Int64) -> Float64 {
+    let mut x: Float64 = 1.0
+    let mut i: Int64 = 0
+    while i < n {
+        x = x * 10.0
+        i = i + 1
+    }
+    return x
+}
+
+fn halved(n: Int64) -> Float64 {
+    let mut x: Float64 = 1.0
+    let mut i: Int64 = 0
+    while i < n {
+        x = x / 2.0
+        i = i + 1
+    }
+    return x
+}
+
+fn main() -> Int64 {
+    print(0.0078125)
+    print(0.0234375)
+    print(pow10(300))
+    print(0.0 - pow10(300))
+    print(halved(1074))
+    print(halved(1075))
+    print(opaque(0.0) * (0.0 - 1.0))
+    print(0.0 - 0.5)
+    print(1.0 / opaque(0.0))
+    print(0.0 - 1.0 / opaque(0.0))
+    print(opaque(0.0) / opaque(0.0))
+    print(9.9999995)
+    print(123456789.123456789)
+    let f: Float32 = 0.1
+    print(f)
+    print(f * f)
+    print(Int64(0.0 - 2.9))
+    print(UInt8(300.7))
+    print(Int64(pow10(300)))
+    print(Float32(pow10(300)))
+    return 0
+}
+";
+    // The exact decimal value of the double nearest 10^300, which is what both
+    // references print. Pinned whole because a carry bug in the doubling loop is
+    // a wrong digit in the middle rather than at either end.
+    const P300: &str = "\
+1000000000000000201206451102982726528510718396098215168041874281451248363566\
+0941273804370911208852185605358934485189371568149022546577356211033167392772\
+7776193144531116603838203491427854077548432800993666474448696900069727411136\
+1486849523430568151310289152823685865144042626214886587669241994282008576";
+    let path = dir.join("floats6.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("floats6.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .env("VYRN_WASM_BACKEND", "direct")
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    let want = format!(
+        "0.007812\n0.023438\n\
+         {P300}.000000\n-{P300}.000000\n\
+         0.000000\n0.000000\n-0.000000\n-0.500000\n\
+         inf\n-inf\nNaN\n\
+         9.999999\n123456789.123457\n\
+         0.100000\n0.010000\n\
+         -2\n44\n9223372036854775807\ninf\n"
+    );
+    assert_eq!(norm(&interp.stdout), want, "the interpreter moved");
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
 /// The construct a build failed on, with the source line dropped so the same gap
