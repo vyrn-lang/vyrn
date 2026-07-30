@@ -11,8 +11,8 @@
   |---|---|
   | builtins the checker knows | 40 |
   | Rust implementations in the interpreter | 50 |
-  | C functions in the runtime shim | 80 as first counted; **94 (65 exported, 29 static)** by the method M4a states and M4c reproduces. M2b took the exported boundary from 74 to 70; M3 deleted one `static`; M4c deleted one exported (`__vyrn_strncmp`). The number moves only when a milestone retires a builtin, which is the point of stating the method. |
-  | of those, the JSON DOM alone | 49 — but SHARED writer/reader, so M2 retired SIX (not 11: the parser's unescaper shares the buffer) and M3 takes **32** (not 38 — see "M3, as measured", which also states its counting method, since this row has now been wrong three times) |
+  | C functions in the runtime shim | 80 as first counted; 94 (65 exported, 29 static) by the method M4a states and M4c reproduces; **47 (35 exported, 12 static)** after M3's swap. M2b took the exported boundary from 74 to 70; M3-as-measured deleted one `static`; M4c deleted one exported (`__vyrn_strncmp`); M3-as-landed deleted **47** and halved the file. |
+  | of those, the JSON DOM alone | 49 as first claimed — but SHARED writer/reader, so M2 retired SIX (not 11: the parser's unescaper shares the buffer) and M3 retired **47** (not 38, and not the 32 M3-as-measured predicted: its `static` count was 5 where the section holds 17 — see "M3, as landed", which states the method that reproduces the 94 baseline) |
   | `std/json.vyrn` — a JSON reader and writer, in Vyrn | 752 lines |
   | interp + shim + textual emitter + direct emitter | 27,334 lines |
 
@@ -126,7 +126,16 @@ at any time.
   `toJson` but needed two general fixes the direct backend was missing anyway. The
   ladder went 39/81 -> 43/81. Number formatting needed nothing: `toString()` already
   matches the shim byte for byte.
-- **M3 — `fromJson`. BLOCKED ON M1, AND SEQUENCED AFTER M4 — see "M3, as
+- **M3 — `fromJson`. DONE — see "M3, as landed".** It reads through
+  `std/jsonread` and decodes through a per-type walk generated as Vyrn, on the
+  interpreter, native and both wasm backends, retiring **47** C functions (half the
+  shim) and raising RFC-0077's ladder 49/87 -> 54/87. The `Option<T>` decoder shape
+  the note below predicts does not exist in v0.1 (`Option<Option<U>>` is refused, and
+  a bare `Option<U>` IS a decode target), so a decoder answers in a 0-or-1
+  `Array<T>`. En route it found a leading-zero laxity in the C reader the strictness
+  ruling had not named, and a rounding-carry bug in M4a's own `parseFloat64`.
+  The historical analysis follows.
+  **BLOCKED ON M1, AND SEQUENCED AFTER M4 — see "M3, as
   measured".** Three things make it not a mirror of M2: `Float64` has no decode
   expression in Vyrn at all (`Float64("1.5")` is a check error, `parse` is
   `String -> Option<Int64>`), so text→number is a missing PRIMITIVE; a refined
@@ -157,11 +166,11 @@ at any time.
 - **M5 — the interpreter's fast paths become caches.** Each Rust arm either
   delegates to the Vyrn definition or is documented as an optimization that
   parity proves equivalent. The count of Rust arms should fall.
-  **Partly pre-empted, and narrowed — see "M4c, as landed".** M2b and M4c deleted
-  eleven Rust arms outright rather than keeping any of them as a cache, so what is
-  left for M5 is the caches that are DELIBERATE: `lineAt`/`colAt`'s memoized
-  line-start table, which a Vyrn library cannot hold because generators may not
-  touch module state.
+  **Partly pre-empted, and narrowed — see "M4c, as landed" and "M3, as landed".**
+  M2b, M4c and M3 deleted twelve Rust arms outright rather than keeping any of them
+  as a cache, so what is left for M5 is the caches that are DELIBERATE:
+  `lineAt`/`colAt`'s memoized line-start table, which a Vyrn library cannot hold
+  because generators may not touch module state.
 
 ## Acceptance
 
@@ -169,7 +178,8 @@ at any time.
   and exit code, or it does not land.
 - The shim's function count falls, measurably, per milestone. It was 80 when this
   was written; M2b took it to 74, and took eleven `declare` lines with it; M4c took
-  one more (`__vyrn_strncmp`) and two more `declare` lines. **A milestone that
+  one more (`__vyrn_strncmp`) and two more `declare` lines; **M3 took 47 and 22**,
+  which is the largest single drop and takes the file below half its size. **A milestone that
   retires no builtin reports a zero rather than a smaller number reached by counting
   differently** — M3, M4a and M4b each did, and each stated its method.
 - RFC-0077's ladder does not regress, and rises where a builtin becomes Vyrn.
@@ -1635,3 +1645,255 @@ resolved the NUL decoders in favour of Vyrn because C did not even agree with
 itself; here the surrogate case goes to Vyrn because C is wrong about JSON, and
 the duplicate-key case goes to Vyrn because strict is the ruling this project
 already made.
+
+---
+
+## M3, as landed: `fromJson` is Vyrn on all four paths, and the shim halved
+
+M3 is **done**, at the third attempt and after two milestones that existed to
+unblock it. `fromJson` reads through `std/jsonread` and decodes through a per-type
+walk generated as Vyrn, on the interpreter, the native backend and **both** wasm
+backends. No engine holds a JSON reader, a DOM, a number reader or a decode
+message assembler any more, and the C shim lost **half of itself**.
+
+Every one of the three things M3's own note said it needed turned out to be
+needed, and one of the three was wrong about what would work.
+
+### The shape M3 predicted is not the shape that works, and the reason is one line
+
+M3 said: "every decoder returns `Option<T>`, pushes its own issues, and a
+composite constructs only when all its parts are `Some`". The second half of that
+is exactly right and the first half **cannot be built**:
+
+```
+error: nested Option/Result is not supported in v0.1
+```
+
+A bare `Option<U>` **is** a decode target — `Array<Option<Int64>>` and
+`Map<String, Option<String>>` decode today, and so does an `Option<U>` enum
+payload — so an `Option`-returning decoder needs `Option<Option<U>>` for those,
+which the checker refuses outright. Measured, not argued.
+
+So a decoder returns **`Array<T>` with zero or one element**. One convention for
+every `T` including `T = Option<U>`, and it reads better than the shape it
+replaces:
+
+```vyrn
+for n in jsondec$dInt64(v, path, iss) { ... }   // runs iff a value was produced
+```
+
+`for` over the result *is* the "did it decode" test, so nothing is unwrapped
+anywhere. The cost is an allocation per decoded scalar, which is the trade this
+RFC says it is making ("not a performance project") and which parity, the ladder
+and the suite all absorbed without a measurable move.
+
+### Two halves again, and the untyped half is 441 lines of Vyrn
+
+Same split as M2b, mirrored:
+
+```
+read(s)          -> a `Json` tree                 [std/jsonread — not typed]
+decode(tree, T)  -> a value of T, plus `Issue`s   [needs the compiler]
+```
+
+`std/jsondec` is the *untyped* half: the kind names, the RFC-0018 `Issue`
+vocabulary, the path arithmetic, the tree accessors and the scalar decoders — every
+part of `fromJson` that is not directed by a type. It stands on `std/jsonread` for
+the reader and `std/num` for `parseInt64`/`parseUInt64`/`parseFloat64`/`parseFloat32`,
+which is M4a being spent exactly as M4a predicted.
+
+`vyrn-frontend/src/jsondec.rs` is `jsonenc.rs` run backwards and reuses both of its
+mechanisms unchanged: generated SOURCE handed to the parser (there is still no
+`Expr` printer, and writing one would be a second spelling of the language), and
+one function per distinct type so a self-referential type terminates — `Node = { n:
+Int64, kids: Array<Node> }` decodes three levels deep in the corpus.
+
+### The mechanism is one table row, which is what M4c bought
+
+`RT_MODULES` grew an entry for `std/jsondec`, and `std/json`'s `desugared` list
+grew `fromJson` because the `Json` tree the decoders walk is declared there. That is
+the whole loader change. Both are `desugared` rather than `routed` because both
+builtins need a type the table cannot express, and each engine routes at **its own
+builtin arm** — M4c's load-bearing choice, kept, and verified rather than assumed:
+
+```
+`fromJson`'s second argument must be a String, found Int64
+`fromJson` needs a declared type name; `Nope` is not a type
+`fromJson` cannot decode into `R` (not a codable type)
+```
+
+All three still name the builtin. `fromJson`'s diagnostics are richer and more
+user-facing than any codec's, so this mattered more here than at M4c.
+
+### The predicate sharing survived, and it moved down a crate to do it
+
+`emit_predicate_cond`'s comment claims to be the ONE place a predicate is lowered,
+shared with the RFC-0018 decode path. After M3 the decode path lowers nothing —
+so what is shared had to become the *structure*, and `predicate_binds` moved from
+`vyrn-codegen` to `vyrn_frontend::types`, the only crate both the emitters and the
+generator can see.
+
+A refined type's decoder calls a synthesized `Bool`-returning function whose
+**parameters are that same list** and whose **body is the `where` clause's own
+`Expr`**. So the accumulating `validate` check and the trapping one evaluate the
+identical expression with the identical bindings, and there is no second spelling
+of what `value` means. It is built as AST rather than printed for the same reason
+`jsondec` prints everything else: a predicate has no source form to print.
+
+Construction is the pleasing part. `out.push(b)` into an `Array<Age>` performs the
+validated coercion, which is the same boundary `Age(n)` goes through — and unlike
+`Age(n)` it also works for a refined RECORD base, where there is no `Name(value)`
+constructor form at all.
+
+### One capability that needed a new mechanism, and it is tiny
+
+Vyrn has **no anonymous record literal**: `{ c: 1 }` is not an expression, only
+`T { c: 1 }` is. A nested inline record type (`type A = { b: { c: Int64 } }`)
+decodes today and nothing in the repo writes one — so a decoder for it had no
+spelling to construct. A type *position* accepts the anonymous form perfectly well,
+so what is synthesized is one transparent `type` alias per shape, used for the
+literal and nothing else, appended beside the decoders. Six lines, and the row
+still decodes.
+
+### Accumulation order: preserved by construction, and proved by a reversal
+
+The load-bearing pin is the ORDER, and it holds because the generated walk visits a
+record's fields in declaration order and an array's elements in index order, which
+is what the IR walk and the interpreter's walk both did. `kids[1]`'s missing `name`
+is still reported before its out-of-range `age`.
+
+That is not an argument, though, so it is checked twice: the pin, and a mutation.
+Reversing the field walk in `jsondec.rs` produces
+`validate@kids[0].age | validate@kids[1].age | json.missing@kids[1].name` and the
+test names both sequences.
+
+### The strictness ruling, applied — and a FOURTH difference the ruling missed
+
+All three ruled rows behave as ruled: a surrogate pair decodes, a duplicate key is
+refused naming the key, and every parse error carries `line N, col M:`.
+
+The corpus found a fourth, which no one had looked for. **The C reader accepted a
+leading zero**: `{"v":01}` decoded as `1`. RFC 8259's number grammar is
+`0 | [1-9][0-9]*`, so `std/jsonread` is right and this lands as a fix in the same
+class as the surrogate case — C was **wrong about JSON**, not merely looser. Eleven
+rows of the corpus move on it.
+
+### The digest, the diff, and the one row that was a bug rather than the ruling
+
+The hazard M4c named applies here in full: with the C reader and the IR decoders
+gone, a differential test would be `x == x`. So `tests/jsondec.rs` is a PIN — one
+generated program over **825 decode inputs across seventeen target types**,
+asserted as a SHA-256 plus twenty-eight spot pins keyed by input rather than by
+index. Both digests were captured by running that corpus against a **copy of the
+pre-swap release binary** (`d41e521`) and against the post-swap one, then diffing
+line by line:
+
+| | |
+|---|---|
+| pre-swap (C `__vyrn_json_parse` + emitted IR) | `6f084f85a50e4ed402129ccb81167d4d932c5417d4eaafd45542c2717e11b8a5` |
+| post-swap (`std/jsonread` + generated Vyrn) | `d94e2486f1539d5f9aced50faa71800d5a9ea6e20439c27bbb5c79d2bfcae852` |
+| rows that changed | **212 of 825** |
+| rows that changed for any reason other than a parse error | **0** |
+
+The 212 are 196 rewordings, 11 leading zeros, 3 duplicate keys and 1 surrogate
+pair. No `json.type`, `json.missing` or `validate` row moved, no path moved, no
+order moved.
+
+**It was 213 on the first run, and the extra row was a real defect.** `Float64` of
+`9223372036854775808` came back as `4611686018427387904` — exactly half.
+`std/num`'s `ldexp` spilled a rounding carry out of the top mantissa bit into the
+exponent FIELD with an `|`, and `|` is idempotent: right for an even biased
+exponent, halved for an odd one. So `parseFloat64("1.9999999999999999999")` was
+`1.0` while `0.9999999999999999999` and `3.9999999999999999999` were both correct,
+which is why M4a's 302-input oracle — thorough about ties, subnormals and overflow —
+never saw it. Fixed here, with twelve inputs of the class added to `tests/numbers.rs`,
+where reverting the fix now makes **4 of 314 disagree with Rust's own parser**.
+
+That is the sixth milestone in a row where writing the boring pins first found
+something only running could catch, and the third where the defect was in the
+component nobody suspected. It is also the first time the defect was in **Vyrn
+code this RFC had already landed**, which is the honest cost of the thesis: a
+runtime in Vyrn is checked three ways, and it is still code someone has to get
+right.
+
+Five mutations were applied and each checked to fail: `dIntRange`'s upper bound off
+by one (the `Int8` pin), the field walk reversed (the order pin), `keyOf` accepting
+a multi-member object (the one-wire-form pin), `fieldPath` joining without the `.`
+(every nested path), and `unsigned_max(16)` widened by one — that last caught by
+**the digest alone**, which is what says the digest is load-bearing rather than
+decoration.
+
+### The count, with the method stated, because this row has now been wrong five times
+
+Counted with `git diff -U0` against `d41e521`, deletions only, classified by what
+the deleted line was. The shim is counted by M4a's method exactly — C function
+definitions inside the `RUNTIME_SHIM` raw literal, one-line definitions included,
+`static` treated as internal — which reproduces `d41e521`'s **94 / 65 / 29**, and
+that is how the method was checked rather than assumed.
+
+| | |
+|---|---|
+| LLVM-IR-emitting Rust deleted from `vyrn-codegen/src/lib.rs` | **1,282** — the two per-type decoder drivers, `emit_decode` and its seventeen friends, `push_issue`/`push_type_issue`/`str_g`, `build_issue_array`, `collect_codec_strings`/`gather_codec_strings`, and 22 `declare` lines |
+| C deleted from `RUNTIME_SHIM` | **341** |
+| Rust deleted from the interpreter | **386** — `decode_top`/`decode_val`/`decode_variant`/`run_predicate`/`issue_val`/`type_issue`, and `intn_from_num` |
+| C function definitions in the shim | **47 (35 exported, 12 static)**, was 94 (65, 29) |
+| **retired in this milestone, in C** | **47 — 30 exported, 17 static** |
+| `declare` lines at the boundary | 22 fewer; `shim_link`'s live census **55 -> 33** |
+
+**M3 predicted 32 and it was 47.** The difference is entirely in the `static` count
+and it is a counting error in M3's own note, not drift: M3 reported "27 exported, 5
+static" for the JSON section, but the section holds **17** statics — the eleven
+`vjp_*` recursive-descent functions, the three `vsb_*` growable-buffer functions,
+`__vyrn_dup`, `__vyrn_vj_new` and `__vyrn_vj_num_text`. The exported figure was
+close (27 predicted, 30 actual: `__vyrn_json_field_path`, `__vyrn_json_index_path`
+and `__vyrn_vj_kindname` were not on M3's list). Whoever counts next should say how,
+and should count the statics.
+
+Against that, **798 lines of Rust generator plus 441 lines of Vyrn** were added.
+The trade is not "less code" and should not be sold as one — 2,009 lines of
+implementation deleted against 1,239 added is a real reduction, but the point is
+**one definition instead of three**, plus a fourth the direct backend no longer
+owes.
+
+### RFC-0077's ladder: 49/87 -> 54/87
+
+`enumarray`, `enumcodec`, `jsoncodec`, `jsondecbytes` and `namespace`. The direct
+backend had no lowering for either `fromJson` row, so this is the RFC-0077
+relationship as arithmetic once more: two rows that would each have had to be
+hand-emitted in `wasm-encoder` became a library the backend already compiles, and
+every example whose only blocker was a decode came with them. **`jsondecbytes` is
+among them**, so the pin — failure shapes, paths and accumulation order included —
+is now checked interp == native == wasm == direct-wasm rather than three ways.
+
+`storage.vyrn` still fails there and now for a reason this milestone did not
+create: a branch yielding a call, which is RFC-0077's own row.
+
+### Two seams, stated plainly
+
+**A single-source program cannot decode.** `fromJson` needs a std root, exactly as
+`toJson` has since M2b, so `vyrn_frontend::run(source)` with no resolver refuses by
+name (`` `fromJson` needs the Vyrn runtime: no decoder for `U` ``). Nine interpreter
+tests and one loader test moved to the loader path with the real `std/` text; the
+codegen test that pinned `@__vyrn_dec_Shape` now pins the refusal instead.
+`loader::tests::run_multi` gained `check_and_synthesize` in place of a bare check,
+because since M2b a *linked* program is not a *runnable* one.
+
+**`Map` decode is still blocked on the direct backend**, for RFC-0077's reasons
+rather than this RFC's: the generated body uses `m[k] = v`, which that backend does
+not lower yet. Unchanged from before the swap.
+
+### Gates, at this note
+
+1,233 workspace tests (was 1,230 — the corpus, `std/jsondec`'s unit blocks, and the
+`jsondec` generator's own two), parity green three ways over 87 examples including
+the repinned `jsondecbytes`, the RFC-0077 ladder at **54/87** and its shim-linked
+shape likewise, genwasm green, `doc --std --verify` clean with
+`docs/api/std/jsondec.md` added, `vyrn-lsp` builds, `fmt --check` clean on every
+edited `.vyrn`. The shim is at **47 C definitions / 35 exported**.
+
+**What is left of this RFC.** M4b's remaining half is unchanged: `stringFromBytes`
+wants an `Array<UInt8> -> String` construction the way `floatFromBits` did, and
+`f64_str` stays where M4a left it. M5 is unchanged too — `lineAt`/`colAt`'s
+deliberate cache, and whether the language grows the abort primitive `slice` needs.
+`std/json`'s tree, `std/jsonread`, `std/jsondec` and `std/num` are now the entire
+JSON and number runtime, in Vyrn, and the shim has no opinion about either.
