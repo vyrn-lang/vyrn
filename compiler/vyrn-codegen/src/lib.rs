@@ -364,15 +364,6 @@ entry:
   ret ptr %buf
 }
 
-define ptr @__vyrn_list_err(ptr %path) {
-entry:
-  %plen = call i64 @__vyrn_strlen(ptr %path)
-  %bsz = add i64 %plen, 40
-  %buf = call ptr @__vyrn_malloc(i64 %bsz)
-  call i32 (ptr, i64, ptr, ...) @__vyrn_snprintf(ptr %buf, i64 %bsz, ptr @.io.listerr, ptr %path)
-  ret ptr %buf
-}
-
 define ptr @__vyrn_rename_err(ptr %to, i32 %status) {
 entry:
   %isx = icmp eq i32 %status, 2
@@ -570,11 +561,23 @@ pub(crate) fn set_gen_host(on: bool) {
     GEN_HOST.with(|g| g.set(on));
 }
 
-/// The `vyrn_gen` imports that make `Code` (RFC-0054) work as a handle: an IR
-/// declaration and the name it imports under (RFC-0076 M3a). Every one of them
-/// operates on the HOST's piece arena, which is what keeps the splice rules, the
-/// string escaping and the float formatting in a single implementation — the
-/// interpreter's — instead of a second one that agrees until it does not.
+/// Every `vyrn_gen` import a generator module makes: a signature in LLVM's spelling
+/// and the name it imports under, which [`wasm::declare_sig`] turns into the wasm
+/// one through [`wasm::abi`] — so `i1`, `i8` and `ptr` are widened in exactly one
+/// place and no signature on this boundary is written twice.
+///
+/// LLVM's spelling and not wasm's because these WERE `declare` lines: RFC-0076 M3a
+/// emitted them into the IR with `wasm-import-module` attributes, the way an
+/// RFC-0012 `extern` is emitted, and M7's direct backend imports the same set
+/// without a textual emitter in the way. Kept in this form because `wasm::boundary`
+/// reads the emitter's own `declare` lines the same way, and one parser over one
+/// spelling is what stops the two lists drifting.
+///
+/// The host side of every one of them is the interpreter's own code — the RFC-0054
+/// piece arena, `render_code`, the splice table, the real lexer, the real linker —
+/// which is what keeps the escaping, the identifier validation and the
+/// shortest-roundtrip float formatting byte-identical by construction rather than
+/// by testing.
 pub(crate) const CODE_IMPORTS: &[(&str, &str)] = &[
     ("i64 @__vyrn_code_text(ptr)", "text"),
     ("i64 @__vyrn_code_splice(i32, i64, ptr, i64)", "splice"),
@@ -592,22 +595,15 @@ pub(crate) const CODE_IMPORTS: &[(&str, &str)] = &[
     ("void @__vyrn_gen_reflect(i64, ptr)", "reflect"),
     ("i64 @__vyrn_gen_next_int()", "nextInt"),
     ("i64 @__vyrn_gen_next_str()", "nextStr"),
+    // RFC-0076 M2's mediated read, which `readFile`, `readFileBytes` and `listDir`
+    // are all served out of. It used to be declared by the C shim rather than the
+    // IR, because the shim was what called it; M7 has no shim, so it joins the
+    // list it always belonged to.
+    ("i64 @__vyrn_gen_read(ptr, i32)", "read"),
 ];
 
-/// The one `vyrn_gen` import the C shim declares for ITSELF under
-/// `-DVYRN_GEN_HOST` rather than taking from the IR: the mediated read, which the
-/// shim's `readFile`/`readFileBytes`/`listDir` are rewritten in terms of.
-///
-/// A directly-emitted generator module has no shim (RFC-0076 M7), so its runtime
-/// calls this import itself — and the signature is written here, beside the ones
-/// it joins, so [`wasm::declare_sig`] reads all of them off one list. Not folded
-/// into [`CODE_IMPORTS`] because the textual path must NOT declare it: the shim
-/// already does, with the same import module and name.
-pub(crate) const GEN_READ_IMPORT: (&str, &str) = ("i64 @__vyrn_gen_read(ptr, i32)", "read");
-
-/// `vyrn_gen.read`'s modes. Shared with the C shim's own `__vyrn_gen_slurp` and
-/// with the host that answers them, so the three spellings of "2 means listDir"
-/// are one.
+/// `vyrn_gen.read`'s modes, shared with the host that answers them so the two
+/// spellings of "2 means listDir" are one.
 pub const GEN_MODE_READ: i32 = 0;
 pub const GEN_MODE_READ_BYTES: i32 = 1;
 pub const GEN_MODE_LIST: i32 = 2;
@@ -650,20 +646,16 @@ pub const TAG_F64: i32 = 5;
 pub const TAG_F32: i32 = 6;
 
 /// Emit a complete LLVM IR module for `program`.
+///
+/// Native only, since RFC-0077 M5 deleted the wasm path — and since RFC-0076 M7
+/// there is no `emit_gen_host` beside it either: the generation engine reaches wasm
+/// through the direct backend, which needs no C toolchain, so the generator-host
+/// variant of THIS emitter had no caller left. The `Code` handle imports, the
+/// reflection redirects and `listDir`'s lowering went with it. A code quote outside
+/// generation is still the checker's error and this emitter still has no lowering
+/// for one, which is what it was before RFC-0076 M3a.
 pub fn emit(program: &Program) -> Result<String, String> {
-    emit_with(program, false)
-}
-
-/// Emit `program` to run as a generator under the wasm engine (RFC-0076 M2):
-/// same emitter, except `listDir` lowers to the host-import shim instead of
-/// being rejected. Paired with `-DVYRN_GEN_HOST` on the clang line, which swaps
-/// the read primitives for their resolver-backed imports.
-pub fn emit_gen_host(program: &Program) -> Result<String, String> {
-    emit_with(program, true)
-}
-
-fn emit_with(program: &Program, gen_host: bool) -> Result<String, String> {
-    set_gen_host(gen_host);
+    set_gen_host(false);
     let mut out = String::new();
     // module preamble: printf/abort + format strings (opaque-pointer style)
     out.push_str("; Vyrn v0.1 — generated LLVM IR (target: LLVM 15+)\n");
@@ -737,26 +729,6 @@ fn emit_with(program: &Program, gen_host: bool) -> Result<String, String> {
     out.push_str("declare ptr @__vyrn_read_line(ptr)\n");
     out.push_str("declare i32 @__vyrn_read_file(ptr, ptr, ptr)\n");
     out.push_str("declare i32 @__vyrn_read_file_bytes(ptr, ptr, ptr)\n");
-    let mut code_attr_groups = String::new();
-    if gen_host {
-        // RFC-0076 M2: only the generator-host shim defines this one.
-        out.push_str("declare i32 @__vyrn_gen_list_dir(ptr, ptr, ptr)\n");
-        // RFC-0076 M3a: the code-quote arena lives in the host, so every
-        // operation on a `Code` handle is an import from `vyrn_gen`. Declared
-        // here with their wasm-import attributes, the way an RFC-0012 `extern`
-        // is, rather than through the C shim: an unused `extern` in C emits
-        // nothing, so the shim would need a pass-through call per import just to
-        // keep the attributes alive. `fetch` is the M2 stash reader, shared —
-        // `render` answers with a length and the guest allocates.
-        for (i, (decl, import)) in CODE_IMPORTS.iter().enumerate() {
-            let grp = 200 + i;
-            out.push_str(&format!("declare {decl} #{grp}\n"));
-            code_attr_groups.push_str(&format!(
-                "attributes #{grp} = {{ \"wasm-import-module\"=\"vyrn_gen\" \
-                 \"wasm-import-name\"=\"{import}\" }}\n"
-            ));
-        }
-    }
     out.push_str("declare i32 @__vyrn_write_file(ptr, ptr)\n");
     // RFC-0044: atomic rename + fsync host primitives (implemented in the C shim
     // on every target, like the RFC-0043 clock — wasi lowers to path_rename /
@@ -1317,11 +1289,6 @@ fn emit_with(program: &Program, gen_host: bool) -> Result<String, String> {
         out.push('\n');
         out.push_str(&extern_attr_groups);
     }
-    if !code_attr_groups.is_empty() {
-        out.push('\n');
-        out.push_str(&code_attr_groups);
-    }
-
     Ok(out)
 }
 
@@ -5293,105 +5260,6 @@ impl<'a> Gen<'a> {
     /// nothing here knows what a piece is — which is the point: `render_code`
     /// and the splice table exist once, in the interpreter, and both engines run
     /// that one copy.
-    fn gen_code_quote(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
-        let code = Type::Named("Code".to_string());
-        match name {
-            // `raw(s)` IS `@codeText(s)` in the interpreter — a single verbatim
-            // text piece, no origin — so it is the same import here.
-            "@codeText" | "raw" => {
-                let (s, _) = self.gen_expr(&args[0])?;
-                let t = self.fresh_tmp();
-                self.emit(format!("{t} = call i64 @__vyrn_code_text(ptr {s})"));
-                Ok((t, code))
-            }
-            "rawAt" => {
-                let (s, _) = self.gen_expr(&args[0])?;
-                let (p, _) = self.gen_expr(&args[1])?;
-                let (l, _) = self.gen_expr(&args[2])?;
-                let (c, _) = self.gen_expr(&args[3])?;
-                let t = self.fresh_tmp();
-                self.emit(format!(
-                    "{t} = call i64 @__vyrn_code_raw_at(ptr {s}, ptr {p}, i64 {l}, i64 {c})"
-                ));
-                Ok((t, code))
-            }
-            // `render(c)` — the host renders and stashes; the guest asks for the
-            // length, allocates, and fetches, exactly as the M2 read path does.
-            "render" => {
-                let (h, _) = self.gen_expr(&args[0])?;
-                let len = self.fresh_tmp();
-                let sz = self.fresh_tmp();
-                let buf = self.fresh_tmp();
-                let end = self.fresh_tmp();
-                self.emit(format!("{len} = call i64 @__vyrn_code_render(i64 {h})"));
-                self.emit(format!("{sz} = add i64 {len}, 1"));
-                self.emit(format!("{buf} = call ptr @__vyrn_malloc(i64 {sz})"));
-                self.emit(format!("call void @__vyrn_gen_fetch(ptr {buf})"));
-                self.emit(format!("{end} = getelementptr i8, ptr {buf}, i64 {len}"));
-                self.emit(format!("store i8 0, ptr {end}"));
-                Ok((buf, Type::Str))
-            }
-            // The spliced value crosses as a TAG plus one 64-bit word (plus a
-            // pointer for a String), because the host needs the value itself and
-            // cannot chase a guest pointer to anything else. The tag names the
-            // interpreter `Val` the host rebuilds, and it is a compile-time
-            // constant: codegen knows the static type at every call site, so
-            // there is no runtime dispatch and no way to disagree about it.
-            "@codeSplice" => {
-                let (v, vty) = self.gen_expr(&args[0])?;
-                let (ctx, _) = self.gen_expr(&args[1])?;
-                let null = "null".to_string();
-                let zero = "0".to_string();
-                let (tag, bits, ptr) = match self.resolve(&vty) {
-                    Type::Str => (TAG_STR, zero, v),
-                    Type::Named(ref n) if n == "Code" => (TAG_CODE, v, null),
-                    Type::Bool => (TAG_BOOL, self.widen(&v, "zext i1", "i64"), null),
-                    Type::Int => (TAG_INT, v, null),
-                    // A sized integer arrives at its own width; the host renders
-                    // it signed or unsigned, so the extension must agree with the
-                    // tag (`sext` for signed, `zext` for unsigned) — at 64 bits
-                    // it is already the word.
-                    Type::IntN { bits: w, signed } => {
-                        let tag = if signed { TAG_INT } else { TAG_UINT };
-                        if w == 64 {
-                            (tag, v, null)
-                        } else {
-                            let op = format!("{} i{w}", if signed { "sext" } else { "zext" });
-                            (tag, self.widen(&v, &op, "i64"), null)
-                        }
-                    }
-                    // Floats cross as their bit pattern, which is lossless — the
-                    // shortest-roundtrip formatting (`{f:?}`) happens host-side.
-                    Type::Float => (TAG_F64, self.widen(&v, "bitcast double", "i64"), null),
-                    Type::Float32 => {
-                        let w = self.widen(&v, "bitcast float", "i32");
-                        (TAG_F32, self.widen(&w, "zext i32", "i64"), null)
-                    }
-                    other => {
-                        return Err(format!(
-                            "cannot splice {other} into a code quote (expected String, number, \
-                             Bool, or Code)"
-                        ))
-                    }
-                };
-                let t = self.fresh_tmp();
-                self.emit(format!(
-                    "{t} = call i64 @__vyrn_code_splice(i32 {tag}, i64 {bits}, ptr {ptr}, \
-                     i64 {ctx})"
-                ));
-                Ok((t, code))
-            }
-            _ => unreachable!("not a code-quote builtin: {name}"),
-        }
-    }
-
-    /// `<op> <v> to <to>` — the one-line conversions the splice ABI needs.
-    fn widen(&mut self, v: &str, op: &str, to: &str) -> String {
-        let t = self.fresh_tmp();
-        self.emit(format!("{t} = {op} {v} to {to}"));
-        t
-    }
-
     fn gen_call(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
         // RFC-0078 M4c: a builtin whose implementation IS a Vyrn function lowers as
         // a call to it. The loader injected the module (reserved `$` spellings, so
@@ -5795,149 +5663,15 @@ impl<'a> Gen<'a> {
             ));
             return Ok((r, Type::Int));
         }
-        // RFC-0054 code quotes as host handles (RFC-0076 M3a). `render`, `raw`
-        // and `rawAt` are common words and therefore SHADOWABLE — the checker's
-        // rule is that a user function of the same name wins (`examples/
-        // templates.vyrn` has one) — while the `@`-prefixed desugar names are
-        // unspellable and always ours. Off this path nothing changes: a code
-        // quote outside a generation context is still the checker's error.
-        if gen_host()
-            && (matches!(name, "@codeText" | "@codeSplice")
-                || (matches!(name, "render" | "raw" | "rawAt")
-                    && !self.funcs.contains_key(name)))
-        {
-            return self.gen_code_quote(name, args);
-        }
-        // RFC-0076 M3b — the builtins that return a value of a known named type.
-        // Each call site is redirected to the entry function the engine
-        // synthesized for it; the entry asks the host for the value and decodes
-        // it in ordinary Vyrn. `contractOf`'s argument is a contract NAME, so the
-        // entry is per-contract and nullary.
-        //
-        // The redirect is conditional on the entry existing, which is what keeps
-        // the shadowing rules intact without restating them: the engine emits an
-        // entry for `lex` only when no user function claims the name (`render`/
-        // `raw`/`rawAt` are handled the same way above), while `moduleInterface`
-        // and `contractOf` are reserved words and cannot be shadowed at all.
-        if gen_host() {
-            let entry = match name {
-                "moduleInterface" => Some(GEN_ENTRY_MODULE_INTERFACE.to_string()),
-                "lex" => Some(GEN_ENTRY_LEX.to_string()),
-                "contractOf" => match args.first() {
-                    Some(Expr::Var { name: cn, .. }) => {
-                        Some(format!("{GEN_ENTRY_CONTRACT_OF}{cn}"))
-                    }
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some(entry) = entry.filter(|e| self.funcs.contains_key(e.as_str())) {
-                // A contract name is a declaration, not an argument.
-                let fwd: &[Expr] = if name == "contractOf" { &[] } else { args };
-                return self.gen_call(&entry, fwd);
-            }
-            match name {
-                // The stream primitives the synthesized decoders call. `reflect`
-                // computes the value host-side and leaves it as atoms; the two
-                // `next` calls pull them back. Nothing about the value's shape is
-                // encoded here — the decoder walks the type, and so does the host.
-                GEN_REFLECT => {
-                    let (kind, _) = self.gen_expr(&args[0])?;
-                    let (arg, _) = self.gen_expr(&args[1])?;
-                    self.emit(format!(
-                        "call void @__vyrn_gen_reflect(i64 {kind}, ptr {arg})"
-                    ));
-                    return Ok((String::new(), Type::Unit));
-                }
-                GEN_NEXT_INT => {
-                    let t = self.fresh_tmp();
-                    self.emit(format!("{t} = call i64 @__vyrn_gen_next_int()"));
-                    return Ok((t, Type::Int));
-                }
-                // Length, then allocate, then fetch — the M2 stash protocol.
-                GEN_NEXT_STR => {
-                    let len = self.fresh_tmp();
-                    let sz = self.fresh_tmp();
-                    let buf = self.fresh_tmp();
-                    let end = self.fresh_tmp();
-                    self.emit(format!("{len} = call i64 @__vyrn_gen_next_str()"));
-                    self.emit(format!("{sz} = add i64 {len}, 1"));
-                    self.emit(format!("{buf} = call ptr @__vyrn_malloc(i64 {sz})"));
-                    self.emit(format!("call void @__vyrn_gen_fetch(ptr {buf})"));
-                    self.emit(format!("{end} = getelementptr i8, ptr {buf}, i64 {len}"));
-                    self.emit(format!("store i8 0, ptr {end}"));
-                    return Ok((buf, Type::Str));
-                }
-                _ => {}
-            }
-        }
         if name == "listDir" {
-            // RFC-0076 M2: on the generator-host path the listing comes from the
-            // loader's resolver (host-sorted, host-recorded) through the shim, so
-            // the one thing that made `std/i18n` uncompilable is lowered. Every
-            // other build keeps the error: the language still gives `listDir` no
-            // runtime meaning.
-            if !gen_host() {
-                return Err(format!(
-                    "`listDir` runs in the interpreter / at generation time (RFC-0021); it has no \
-                     native or wasm lowering in v1 — use it in a `gen fn` or under `vyrn run`"
-                ));
-            }
-            let (path, _) = self.gen_expr(&args[0])?;
-            let outp = self.fresh_alloca("ptr");
-            let lenp = self.fresh_alloca("i64");
-            let st = self.fresh_tmp();
-            self.emit(format!(
-                "{st} = call i32 @__vyrn_gen_list_dir(ptr {path}, ptr {outp}, ptr {lenp})"
+            // The language gives `listDir` no runtime meaning (RFC-0021). RFC-0076
+            // M2 lowered it behind `emit_gen_host` for the generation engine, and
+            // M7 moved that to the direct backend, so this emitter is back to the
+            // one thing it ever had to say about it.
+            return Err(format!(
+                "`listDir` runs in the interpreter / at generation time (RFC-0021); it has no \
+                 native or wasm lowering in v1 — use it in a `gen fn` or under `vyrn run`"
             ));
-            let isok = self.fresh_tmp();
-            self.emit(format!("{isok} = icmp eq i32 {st}, 0"));
-            let ok_l = self.fresh_label("ld.ok");
-            let err_l = self.fresh_label("ld.err");
-            let end_l = self.fresh_label("ld.end");
-            self.emit_term(format!("br i1 {isok}, label %{ok_l}, label %{err_l}"));
-            self.emit_label(&err_l);
-            let msg = self.fresh_tmp();
-            self.emit(format!("{msg} = call ptr @__vyrn_list_err(ptr {path})"));
-            let ew = self.fresh_tmp();
-            let e0 = self.fresh_tmp();
-            let e1 = self.fresh_tmp();
-            let e2 = self.fresh_tmp();
-            self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
-            self.emit(format!("{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"));
-            self.emit(format!("{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"));
-            self.emit(format!("{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"));
-            let err_end = self.cur_block.clone();
-            self.emit_term(format!("br label %{end_l}"));
-            self.emit_label(&ok_l);
-            // The names buffer is a `char**` of length n — the Array<String>
-            // triple, boxed into the Ok payload like `readFileBytes` does.
-            let buf = self.fresh_tmp();
-            let len = self.fresh_tmp();
-            self.emit(format!("{buf} = load ptr, ptr {outp}"));
-            self.emit(format!("{len} = load i64, ptr {lenp}"));
-            let a0 = self.fresh_tmp();
-            let a1 = self.fresh_tmp();
-            let a2 = self.fresh_tmp();
-            self.emit(format!("{a0} = insertvalue {{ ptr, i64, i64 }} undef, ptr {buf}, 0"));
-            self.emit(format!("{a1} = insertvalue {{ ptr, i64, i64 }} {a0}, i64 {len}, 1"));
-            self.emit(format!("{a2} = insertvalue {{ ptr, i64, i64 }} {a1}, i64 {len}, 2"));
-            let elem_ty = Type::Array(Box::new(Type::Str));
-            let (w0, w1) = self.encode_payload(&a2, &elem_ty);
-            let o0 = self.fresh_tmp();
-            let o1 = self.fresh_tmp();
-            let o2 = self.fresh_tmp();
-            self.emit(format!("{o0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"));
-            self.emit(format!("{o1} = insertvalue {{ i1, i64, i64 }} {o0}, i64 {w0}, 1"));
-            self.emit(format!("{o2} = insertvalue {{ i1, i64, i64 }} {o1}, i64 {w1}, 2"));
-            let ok_end = self.cur_block.clone();
-            self.emit_term(format!("br label %{end_l}"));
-            self.emit_label(&end_l);
-            let r = self.fresh_tmp();
-            self.emit(format!(
-                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_end} ], [ {o2}, %{ok_end} ]"
-            ));
-            return Ok((r, Type::Result(Box::new(elem_ty), Box::new(Type::Str))));
         }
         if name == "moduleInterface" {
             return Err(

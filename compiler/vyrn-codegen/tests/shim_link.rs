@@ -29,7 +29,7 @@ const ENV: &str = "env";
 fn tools() -> Option<(PathBuf, PathBuf)> {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     let wasmtime = vyrn_codegen::toolchain::find_wasmtime_from(here)?;
-    let shim = vyrn_codegen::toolchain::shim_wasm(false)?;
+    let shim = vyrn_codegen::toolchain::shim_wasm()?;
     Some((wasmtime, shim))
 }
 

@@ -132,12 +132,12 @@ fn wasi_imports(m: &mut Module) -> Wasi {
 /// the guest holds handles and pulls atoms — which is what makes the splice rules,
 /// the escaping and the float formatting single-sourced rather than agreed upon.
 ///
-/// This is exactly the surface the textual emitter adds under `-DVYRN_GEN_HOST`,
-/// declared from the same list of LLVM declarations so no signature is spelled
-/// twice: `read` mediates and stashes, `fetch` copies a stash into a buffer the
-/// GUEST allocated (the host must not allocate inside guest memory), the five
-/// `Code` operations work on arena handles, and `reflect`/`nextInt`/`nextStr` are
-/// M3b's one transfer.
+/// This is exactly the surface the textual emitter used to add under
+/// `-DVYRN_GEN_HOST`, declared from [`crate::CODE_IMPORTS`] — the same list, in the
+/// same LLVM spelling, so no signature on this boundary is written twice: `read`
+/// mediates and stashes, `fetch` copies a stash into a buffer the GUEST allocated
+/// (the host must not allocate inside guest memory), the five `Code` operations work
+/// on arena handles, and `reflect`/`nextInt`/`nextStr` are M3b's one transfer.
 #[derive(Clone, Copy)]
 struct Gen {
     read: u32,
@@ -154,7 +154,7 @@ struct Gen {
 
 fn gen_imports(m: &mut Module) -> Gen {
     let mut at: HashMap<&str, u32> = HashMap::new();
-    for (decl, name) in crate::CODE_IMPORTS.iter().chain(std::iter::once(&crate::GEN_READ_IMPORT)) {
+    for (decl, name) in crate::CODE_IMPORTS {
         let (params, results) = wasm::declare_sig(decl);
         at.insert(name, m.import("vyrn_gen", name, &params, &results));
     }
