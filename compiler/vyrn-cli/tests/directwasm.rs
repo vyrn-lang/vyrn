@@ -89,6 +89,11 @@ const PASSING: &[&str] = &[
     "jsoncodec.vyrn",
     "jsondecbytes.vyrn",
     "jsonschema.vyrn",
+    // RFC-0077 M2m: RFC-0023's higher-order specialization — the SECOND worklist
+    // M2e refused by name. A `fn`-typed parameter resolves at its call site to a
+    // lifted lambda, a named function or a forwarded parameter, and the callee is
+    // specialized per those targets. No function table: every target is an index.
+    "lambdas.vyrn",
     "linkedlist.vyrn",
     "map.vyrn",
     "mapdemo.vyrn",
@@ -102,6 +107,11 @@ const PASSING: &[&str] = &[
     "protocol.vyrn",
     "record.vyrn",
     "reflection.vyrn",
+    // The same feature reached through a generator rather than through `std/arrays`:
+    // `clientInProcess`'s dispatchers take a `fn(RpcReply<T>)` callback, and the
+    // argument is a named function whose parameter is an aggregate.
+    "rpc.vyrn",
+    "rpcsplit.vyrn",
     "scan.vyrn",
     "schemaimport.vyrn",
     "server.vyrn",
@@ -1503,6 +1513,152 @@ fn main() -> Int64 {
          -0.5e+10\n\
          empty: []\n",
         "the reader moved"
+    );
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// The RFC-0023 shapes the corpus does not reach (RFC-0077 M2m).
+///
+/// `lambdas`, `rpc` and `rpcsplit` between them exercise a scalar capture, a named
+/// function as a target, and a pass-through whose target has NO captures. Every
+/// other shape a `fn`-typed parameter has is invisible to the ladder, and each one
+/// here is silent when wrong rather than loud:
+///
+/// - An **aggregate capture**, and a callee parameter with the SAME NAME as it. A
+///   specialization's capture parameters are `@cap..`, which no Vyrn identifier can
+///   be; a spelling that could collide would bind `p` inside the lambda to the
+///   callee's own `p` and print a plausible number.
+/// - The same capture through **two boundaries** (`via` forwards its `fn`
+///   parameter to `on`), which is what says a forwarded target carries its
+///   captures rather than re-reading them.
+/// - An **aggregate parameter and an aggregate return** on the `fn` type: the
+///   argument is an address and the return a hidden leading destination, so the
+///   convention has to reach a target call, not just an ordinary one.
+/// - **Two distinct lambdas of the same shape** at two sites: two instances. One
+///   shared instance would print the first lambda's answer twice.
+/// - **One literal inside a generic body, two instantiations**: two lifted copies.
+///   Sharing one would hand the `Int64` copy a `String`.
+/// - A **Unit-returning** `fn` type over an expression body, which is the rpc
+///   callback shape written the short way: the value is a statement, not a return.
+/// - A **block-bodied** lambda, two `fn` parameters in one specialization, and a
+///   `fn` parameter called three times in a loop.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_fn_typed_parameter_specializes_to_whatever_the_call_site_resolved() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-ho");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+type Pt = { x: Int64, y: Int64 }
+
+fn on(p: Pt, f: fn(Pt) -> Pt) -> Pt {
+    return f(p)
+}
+
+/// A pass-through whose target carries captures, so they travel two boundaries.
+fn via(p: Pt, f: fn(Pt) -> Pt) -> Pt {
+    return on(p, f)
+}
+
+fn flip(p: Pt) -> Pt {
+    return Pt { x: p.y, y: p.x }
+}
+
+fn foldOver<T, A>(xs: Array<T>, init: A, f: fn(A, T) -> A) -> A {
+    let mut acc = init
+    for x in xs {
+        acc = f(acc, x)
+    }
+    return acc
+}
+
+/// One lambda literal, two instantiations, two lifted copies.
+fn countAll<T>(xs: Array<T>) -> Int64 {
+    return foldOver(xs, 0, |acc, x| acc + 1)
+}
+
+fn both(n: Int64, f: fn(Int64) -> Int64, g: fn(Int64) -> Int64) -> Int64 {
+    return f(n) * 100 + g(n)
+}
+
+fn thrice(n: Int64, f: fn(Int64) -> Int64) -> Int64 {
+    let mut acc = 0
+    let mut i = 0
+    while i < 3 {
+        acc = acc + f(n + i)
+        i = i + 1
+    }
+    return acc
+}
+
+fn each(xs: Array<Int64>, f: fn(Int64)) {
+    for x in xs {
+        f(x)
+    }
+}
+
+fn main() -> Int64 {
+    // An aggregate capture named exactly as `on`'s own first parameter is.
+    let p = Pt { x: 10, y: 20 }
+    let a = on(Pt { x: 1, y: 2 }, |q| Pt { x: q.x + p.x, y: q.y + p.y })
+    print(a.x * 100 + a.y)
+    let b = via(Pt { x: 3, y: 4 }, |q| Pt { x: q.x + p.x, y: q.y + p.y })
+    print(b.x * 100 + b.y)
+    let c = on(Pt { x: 5, y: 6 }, flip)
+    print(c.x * 100 + c.y)
+
+    let nums: Array<Int64> = [1, 2, 3]
+    print(foldOver(nums, 0, |acc, x| acc + x))
+    print(foldOver(nums, 0, |acc, x| acc + x * 10))
+    let words: Array<String> = [\"a\", \"b\"]
+    print(countAll(nums) + countAll(words))
+
+    let u = 2
+    let v = 5
+    print(both(3, |x| x + u, |x| x * v))
+    print(thrice(10, |x| { let d = x * 2 return d + 1 }))
+    // One literal reached twice at one site: one instance.
+    print(thrice(1, |x| x) + thrice(1, |x| x))
+
+    let tag = \"n=\"
+    each(nums, |x| print(\"\\{tag}\\{x}\"))
+    return 0
+}
+";
+    let path = dir.join("ho.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("ho.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .env("VYRN_WASM_BACKEND", "direct")
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    // Pinned to the INTERPRETER's answers, because two backends can be
+    // confidently wrong together — a merged specialization prints one lambda's
+    // result for both.
+    assert_eq!(
+        norm(&interp.stdout),
+        "1122\n1324\n605\n6\n60\n5\n515\n69\n12\nn=1\nn=2\nn=3\n",
+        "the interpreter moved"
     );
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
     assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");

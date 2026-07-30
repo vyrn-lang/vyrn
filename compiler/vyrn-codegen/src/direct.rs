@@ -36,6 +36,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use vyrn_frontend::ast::*;
 use vyrn_frontend::own::DropKind;
@@ -188,7 +189,7 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
     // textual driver skips them (`lib.rs`, step 1). Lowering an unspecializable
     // shell would fail the whole build over a function nothing calls.
     let mut generics: HashMap<String, Function> = HashMap::new();
-    let mut higher_order: HashMap<String, usize> = HashMap::new();
+    let mut higher_order: HashMap<String, Function> = HashMap::new();
     let mut user: Vec<&Function> = Vec::new();
     let mut externs: HashMap<String, Type> = HashMap::new();
     for f in &program.functions {
@@ -201,11 +202,11 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
             continue;
         }
         // RFC-0023: a function taking a `fn`-typed parameter exists only as
-        // higher-order specializations — a SECOND worklist, which this milestone
-        // does not build. Recorded by name so the ladder can say RFC-0023 rather
-        // than reporting the call as an unknown one.
+        // higher-order specializations, one per set of resolved targets. The shell
+        // has no first-order definition to emit — a `fn` parameter is not a value
+        // in the lowered code at all.
         if f.params.iter().any(|p| matches!(p.ty, Type::Fn(..))) {
-            higher_order.insert(f.name.clone(), f.line);
+            higher_order.insert(f.name.clone(), f.clone());
             continue;
         }
         if !f.type_params.is_empty() {
@@ -273,7 +274,7 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
 
     for f in &user {
         let sig = cx.sigs[&f.name].clone();
-        lower_fn(&mut m, f, &sig, &cx)?;
+        lower_fn(&mut m, f, &sig, &cx, HashMap::new())?;
     }
 
     // The initializers, in DECLARATION order — which the loader has already made
@@ -285,18 +286,27 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
         assert_eq!(init, init_index, "the globals initializer took an index a caller did not name");
     }
 
-    // Drain the specializations the bodies discovered. A specialization's body
-    // may discover more — including of a generic it is itself an instance of —
-    // so this reads `insts` afresh every turn rather than iterating a snapshot.
+    // Drain the specializations the bodies discovered. One body may discover more
+    // — a generic instance calling a generic, an RFC-0023 instance calling either,
+    // a lifted lambda doing any of it — so this reads `insts` afresh every turn
+    // rather than iterating a snapshot. That is what "the worklists feed each
+    // other" is here: appending to the list being read.
     loop {
-        let inst = {
+        let p = {
             let mono = cx.mono.borrow();
             mono.insts.get(mono.done).cloned()
         };
-        let Some(inst) = inst else { break };
-        let f = cx.generics[&inst.name].clone();
-        cx.subst = inst.subst;
-        lower_fn(&mut m, &f, &inst.sig, &cx)?;
+        let Some(p) = p else { break };
+        // The index was promised at discovery, and a wasm `call` names an index
+        // rather than a symbol — so a body arriving out of turn would renumber
+        // every call after it and the module would still validate.
+        assert_eq!(
+            m.next_func(),
+            p.sig.index,
+            "specialization queue out of order: a `call` already names a different index"
+        );
+        cx.subst = p.subst.clone();
+        lower_fn(&mut m, &p.f, &p.sig, &cx, p.binds.clone())?;
         cx.subst = HashMap::new();
         cx.mono.borrow_mut().done += 1;
     }
@@ -359,7 +369,7 @@ impl Repr {
 }
 
 /// What a call to a function needs to know about it.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Sig {
     index: u32,
     params: Vec<Type>,
@@ -373,19 +383,52 @@ struct Sig {
     ret_ty: Type,
 }
 
-/// One specialization of a generic function.
+/// What identifies a body discovered during emission, so that a second site
+/// reaching the same one reuses its function index instead of emitting a twin.
 ///
-/// The signature's parameter and return types are **already substituted**: a
-/// caller has its own `subst` and must not apply it to a callee's concrete types.
-#[derive(Clone)]
-struct Inst {
-    name: String,
-    type_args: Vec<Type>,
-    subst: HashMap<String, Type>,
-    sig: Sig,
+/// Deliberately the type arguments and targets THEMSELVES rather than a mangled
+/// name: `mangle_name` is the textual backend's symbol and it is not injective
+/// (every record mangles as `Rec`), so two distinct specializations can produce
+/// one symbol and the textual driver's `emitted.insert(sym)` silently skips the
+/// second. A wasm function has no symbol at all, so there is nothing to gain by
+/// narrowing the key to a string that could collide on the thing being
+/// distinguished.
+#[derive(Clone, PartialEq)]
+enum Key {
+    /// A generic instantiation (M2e): the callee and its type arguments.
+    Generic(String, Vec<Type>),
+    /// An RFC-0023 specialization: the callee, its type arguments, and the target
+    /// each `fn`-typed parameter resolved to. Two call sites passing the same
+    /// lambda to the same generic instance share one instance; passing a
+    /// different lambda is a different function, which is the whole of what
+    /// "monomorphized away" means.
+    Ho(String, Vec<Type>, Vec<FnTarget>),
+    /// A lifted lambda: the literal's own node address, the concrete shape it was
+    /// typed at (captures, parameters, return), and the substitution its body is
+    /// under. The address alone is not enough — one literal inside a generic body
+    /// lifts a distinct copy per instantiation, and the shape need not differ if
+    /// the type parameter is used only in a statement.
+    Lambda(usize, Vec<Type>, Vec<(String, Type)>),
 }
 
-/// The monomorphization worklist (RFC-0077 M2e).
+/// One body discovered while another was being emitted, with the function index
+/// it was promised.
+#[derive(Clone)]
+struct Pending {
+    key: Key,
+    /// The body to lower. An `Rc` rather than a clone per drain turn, because
+    /// [`Key::Lambda`] keys on a node address inside it and a fresh deep clone
+    /// every turn would move the addresses of anything nested.
+    f: Rc<Function>,
+    sig: Sig,
+    /// The monomorphization the body is lowered under; empty for a lifted lambda
+    /// outside any generic.
+    subst: HashMap<String, Type>,
+    /// RFC-0023: the target each `fn`-typed parameter is bound to, by name.
+    binds: HashMap<String, FnBinding>,
+}
+
+/// The specialization worklist (RFC-0077 M2e, widened by M2m).
 ///
 /// This RFC said "monomorphization runs before any instruction is emitted". It
 /// does not, in either backend: a specialization is *discovered* at a call site,
@@ -401,12 +444,51 @@ struct Inst {
 /// discovery and the bodies must be added in that same order. `insts` is
 /// append-only and `done` only moves forward — FIFO by construction, because a
 /// queue that could reorder would silently renumber every call in the module.
+///
+/// The textual driver runs **two** worklists that feed each other (a generic body
+/// may take `fn` parameters; a specialized instance may call generics) plus a
+/// dedup set for lifted lambdas, and drains each with `pop()`. It is right to:
+/// nothing there depends on the order, because every reference is a name. Here
+/// the order IS the numbering, so there is **one** queue holding all three kinds
+/// — which makes "they feed each other" a property of appending to the list you
+/// are reading rather than an alternation to get right.
 #[derive(Default)]
 struct Mono {
     /// Where the first specialization's function index lands.
     base: u32,
-    insts: Vec<Inst>,
+    insts: Vec<Pending>,
     done: usize,
+}
+
+/// What a `fn`-typed argument resolved to (RFC-0023): the function a call through
+/// that parameter goes to **directly**, and how many of its leading parameters are
+/// captures the outer call site supplies.
+///
+/// Captures first, then the `fn` type's own parameters — a lifted lambda's shape,
+/// and the shape a bare named function already has with zero captures. So calling
+/// a target is [`Fn_::emit_call`] with the captures prepended to the argument
+/// list, and no second call path exists to disagree with the first about the
+/// aggregate convention, `modify`, or coercion.
+///
+/// This is why the backend needs no function table. RFC-0037 defunctionalized
+/// closures, so nothing here is ever an address: a target is a compile-time
+/// function index, and M2a's measurement of zero indirect calls survives.
+#[derive(Clone, PartialEq)]
+struct FnTarget {
+    sig: Sig,
+    ncaps: usize,
+}
+
+/// A `fn`-typed parameter as seen from inside a specialization: its target, and
+/// the names of this instance's own leading capture parameters to forward.
+///
+/// The captures are values, fixed at the OUTER call site — RFC-0023's
+/// capture-timing lock. An instance that re-read them would be a closure over a
+/// mutable environment, which is a different language.
+#[derive(Clone)]
+struct FnBinding {
+    target: FnTarget,
+    cap_srcs: Vec<String>,
 }
 
 struct Cx {
@@ -420,9 +502,11 @@ struct Cx {
     /// Generic functions by name. They have no index and no body of their own —
     /// only specializations do — so a call to one is a discovery.
     generics: HashMap<String, Function>,
-    /// Functions with a `fn`-typed parameter (RFC-0023), and where each is
-    /// declared. Refused by name rather than by symptom.
-    higher_order: HashMap<String, usize>,
+    /// Functions with a `fn`-typed parameter (RFC-0023). Like a generic they have
+    /// no index and no body of their own — only specializations do — so a call to
+    /// one is a discovery, and the shell is skipped exactly as the textual driver
+    /// skips it.
+    higher_order: HashMap<String, Function>,
     /// Protocol method name → its protocol (RFC-0002 §5). A bounded generic is
     /// what protocols are for, so `x.show()` inside one has to resolve.
     protocol_methods: HashMap<String, String>,
@@ -488,45 +572,50 @@ impl Cx {
         Num::of(&self.resolve(ty)).is_some_and(|n| n.signed)
     }
 
-    /// The signature of `f` specialized at `type_args`, discovering it — and
-    /// handing out its function index — if this is the first site to ask.
+    /// The signature of a body discovered during emission, handing out its
+    /// function index if this is the first site to ask for it.
+    ///
+    /// `f` arrives already substituted, with its type parameters cleared: the
+    /// signature belongs to the SPECIALIZATION, not to whatever the discovering
+    /// body happens to be inside. [`Cx::signature`] then does the rest — a
+    /// representation per parameter, the `modify` flags — so an instance, a lifted
+    /// lambda and an ordinary function are all checked by one function.
+    fn enqueue(
+        &self,
+        key: Key,
+        f: Rc<Function>,
+        subst: HashMap<String, Type>,
+        binds: HashMap<String, FnBinding>,
+    ) -> Result<Sig, String> {
+        if let Some(p) = self.mono.borrow().insts.iter().find(|p| p.key == key) {
+            return Ok(p.sig.clone());
+        }
+        let s = self.signature(&f)?;
+        let mut mono = self.mono.borrow_mut();
+        let sig = Sig { index: mono.base + mono.insts.len() as u32, ..s };
+        mono.insts.push(Pending { key, f, sig: sig.clone(), subst, binds });
+        Ok(sig)
+    }
+
+    /// A generic instantiation (M2e): [`Cx::enqueue`] with no `fn` parameters.
     fn instantiate(
         &self,
         f: &Function,
         type_args: Vec<Type>,
         subst: HashMap<String, Type>,
     ) -> Result<Sig, String> {
-        // Keyed on the type arguments themselves rather than on a mangled name.
-        // `mangle_name` is the textual backend's SYMBOL, and it is not injective
-        // (every record mangles as `Rec`); a wasm function has no symbol at all,
-        // so there is nothing to gain by narrowing the key to a string that two
-        // distinct specializations could share.
-        if let Some(i) =
-            self.mono.borrow().insts.iter().find(|i| i.name == f.name && i.type_args == type_args)
-        {
-            return Ok(i.sig.clone());
-        }
-        // The signature is built under the SPECIALIZATION's substitution, not
-        // whatever the discovering body happens to be inside. `signature` then
-        // does the rest — the `modify` refusal, a representation per parameter —
-        // so an instance and an ordinary function are checked by one function.
         let mut sf = f.clone();
         sf.type_params.clear();
         for p in &mut sf.params {
             p.ty = ftypes::substitute(&p.ty, &subst);
         }
         sf.ret = ftypes::substitute(&f.ret, &subst);
-        let s = self.signature(&sf)?;
-
-        let mut mono = self.mono.borrow_mut();
-        let sig = Sig { index: mono.base + mono.insts.len() as u32, ..s };
-        mono.insts.push(Inst {
-            name: f.name.clone(),
-            type_args,
+        self.enqueue(
+            Key::Generic(f.name.clone(), type_args),
+            Rc::new(sf),
             subst,
-            sig: sig.clone(),
-        });
-        Ok(sig)
+            HashMap::new(),
+        )
     }
 
     fn repr(&self, ty: &Type, line: usize) -> Result<Repr, String> {
@@ -692,6 +781,32 @@ impl Place {
     }
 }
 
+/// An empty `Function` to fill in for a lifted lambda (RFC-0023).
+///
+/// A synthesized declaration rather than a bespoke lowering path: the captures
+/// become ordinary read parameters, so [`lower_fn`] emits it with no case of its
+/// own. The name is a reserved spelling no Vyrn identifier can be, which matters
+/// once — `Cx::droppable` is keyed by function name, and a lifted body must not
+/// inherit the enclosing function's release list (the textual backend takes the
+/// same map away for the same reason).
+fn f_shell(line: usize) -> Function {
+    Function {
+        name: "@lambda".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        type_bounds: HashMap::new(),
+        params: Vec::new(),
+        ret: Type::Unit,
+        body: Block { stmts: Vec::new() },
+        line,
+        is_extern: false,
+        is_export_extern: false,
+        is_gen: false,
+    }
+}
+
 /// One function being lowered.
 struct Fn_<'a> {
     cx: &'a Cx,
@@ -727,6 +842,11 @@ struct Fn_<'a> {
     /// read it back off here. Same mechanism the LLVM emitter uses, for the
     /// same reason.
     expect: Vec<Type>,
+    /// RFC-0023: inside a specialization, each `fn`-typed parameter's resolved
+    /// direct-call target. Empty in every ordinary function — which is what makes
+    /// calling a `fn` parameter a lookup here rather than a value on the stack,
+    /// and why no function table exists.
+    fn_binds: HashMap<String, FnBinding>,
 }
 
 /// A lowering context with nothing in scope and nothing to return to: what the
@@ -745,6 +865,7 @@ fn top_level<'a>(cx: &'a Cx) -> Fn_<'a> {
         releases: Vec::new(),
         drops: HashMap::new(),
         expect: Vec::new(),
+        fn_binds: HashMap::new(),
     }
 }
 
@@ -771,10 +892,21 @@ fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx) -> Result<u32,
     Ok(m.add(&[], &[], b))
 }
 
-/// Lower one body. `sig` is passed rather than looked up because a generic
-/// specialization has no entry in `Cx::sigs` — it is keyed on its type arguments,
-/// not on its name, and several instances share one `Function`.
-fn lower_fn(m: &mut Module, f: &Function, sig: &Sig, cx: &Cx) -> Result<(), String> {
+/// Lower one body. `sig` is passed rather than looked up because a specialization
+/// has no entry in `Cx::sigs` — it is keyed on its type arguments and its
+/// RFC-0023 targets, not on its name, and several instances share one `Function`.
+///
+/// `binds` is non-empty for an RFC-0023 specialization only, and its keys are the
+/// callee's `fn`-typed parameter names — which are NOT in `f.params`, because a
+/// specialization's synthesized signature replaces each of them with the capture
+/// parameters its target needs.
+fn lower_fn(
+    m: &mut Module,
+    f: &Function,
+    sig: &Sig,
+    cx: &Cx,
+    binds: HashMap<String, FnBinding>,
+) -> Result<(), String> {
     let sig = sig.clone();
     let (params, results) = cx.wasm_sig(&sig, f.line)?;
     let dest = sig.ret.agg().map(|_| 0u32);
@@ -796,6 +928,7 @@ fn lower_fn(m: &mut Module, f: &Function, sig: &Sig, cx: &Cx) -> Result<(), Stri
         releases: Vec::new(),
         drops: cx.droppable.get(&f.name).cloned().unwrap_or_default(),
         expect: Vec::new(),
+        fn_binds: binds,
     };
 
     // By-value parameter semantics: an aggregate arrives as the caller's
@@ -2193,6 +2326,13 @@ impl Fn_<'_> {
                 _ if self.cx.types.get(name).is_some_and(|d| d.predicate.is_some()) => {
                     Type::Named(name.clone())
                 }
+                // A branch yielding a call through a `fn`-typed parameter
+                // (RFC-0023). Exact rather than predicted: the target's signature
+                // is already resolved, so this asks it rather than answering for
+                // it — the property M2l's `peek` work was about.
+                _ if self.fn_binds.contains_key(name) => {
+                    self.fn_binds[name].target.sig.ret_ty.clone()
+                }
                 // A generic call in a branch: the same solve the emitting path
                 // does, so the join's destination is sized for the type the arm
                 // will actually produce.
@@ -2854,6 +2994,14 @@ impl Fn_<'_> {
             }
             _ => {}
         }
+        // Calling a `fn`-typed PARAMETER inside a specialization (RFC-0023): a
+        // direct call to the resolved target with this instance's own capture
+        // parameters prepended. No function pointer exists — the target is an
+        // index the discovering call site handed out, and the captures are values
+        // fixed at that site.
+        if let Some(bnd) = self.fn_binds.get(name).cloned() {
+            return self.target_call(m, b, &bnd, args, line);
+        }
         if let Some(t) = self.sum_ctor(m, b, name, args, line)? {
             return Ok(t);
         }
@@ -2885,11 +3033,15 @@ impl Fn_<'_> {
             let mangled = ftypes::impl_method_name(&proto, &key, name);
             return self.call(m, b, &mangled, args, line);
         }
-        // RFC-0023's higher-order specialization is a second worklist, and this
-        // milestone builds only the generic one. Refused by name so the ladder
-        // groups these as one feature rather than as N unknown calls.
-        if self.cx.higher_order.contains_key(name) {
-            return unsupported("a `fn`-typed parameter (RFC-0023 specialization)", line);
+        // A function with `fn`-typed parameters (RFC-0023): resolve each
+        // function-value argument to a direct-call target, specialize the callee
+        // per those targets, and call the specialization with the captures
+        // appended. The shell itself was never emitted.
+        if let Some(f) = self.cx.higher_order.get(name).cloned() {
+            if f.params.len() != args.len() {
+                return unsupported(&format!("the call `{name}` at this arity"), line);
+            }
+            return self.ho_call(m, b, &f, args, line);
         }
         // A generic callee: solve its type arguments, discover the specialization
         // (which is what hands out its function index), then call it like any
@@ -3098,6 +3250,356 @@ impl Fn_<'_> {
         // `Pair<A, B>`, so `firstOf(twice(41))` could not fix `A`. The textual
         // emitter returns the declared type for the same reason.
         Ok(sig.ret_ty.clone())
+    }
+
+    // ---- RFC-0023 higher-order specialization -----------------------------
+
+    /// A call to a function taking one or more `fn`-typed parameters.
+    ///
+    /// Every function-value argument is resolved to a **target** — a lifted
+    /// lambda, a named function, or a forwarded `fn` parameter — with its captures
+    /// materialized HERE, at the outer call site, which is RFC-0023's
+    /// capture-timing lock. The callee is then specialized per those targets and
+    /// called directly.
+    ///
+    /// Nothing is emitted until the specialization's signature exists, and that is
+    /// not fastidiousness: an aggregate return crosses as a hidden LEADING
+    /// pointer, so the first thing that goes on the operand stack depends on a
+    /// substitution the arguments have to be typed to solve. So the arguments are
+    /// PEEKED here and emitted once, by [`Fn_::emit_call`], from a synthesized
+    /// argument list — which is also what keeps the aggregate convention,
+    /// `modify`, and the M2d coercion seam from having a second implementation to
+    /// disagree with.
+    fn ho_call(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        f: &Function,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let generic = !f.type_params.is_empty();
+        let mut subst: HashMap<String, Type> = HashMap::new();
+        // Pass 1: the ordinary arguments, so a `map<T, U>` lambda sees a concrete
+        // `T`. Peek only — see the note above about emission order.
+        for (i, p) in f.params.iter().enumerate() {
+            if matches!(p.ty, Type::Fn(..)) {
+                continue;
+            }
+            self.expect.push(p.ty.clone());
+            let t = self.peek(&args[i], line);
+            self.expect.pop();
+            let aty = self.cx.sub(&t?);
+            if generic {
+                crate::solve_param(&p.ty, &aty, &mut subst);
+            }
+        }
+        // Pass 1.5: a type parameter may occur ONLY inside a `fn` parameter's own
+        // parameter list (`paramQuery(run: fn(P) -> T)` — RFC-0071 M2b), with no
+        // ordinary argument to pin it. Solve those from the target's DECLARED
+        // parameters, or `P` survives into the instance as a `Type::Param` — which
+        // `llt_of` prints as `void`, i.e. a signature with one fewer parameter
+        // rather than a diagnostic. The checker's `check_fn_arg` learned the same
+        // rule; this is its codegen half, and the textual backend's too.
+        if generic {
+            for (i, p) in f.params.iter().enumerate() {
+                let Type::Fn(dptys, _) = &p.ty else { continue };
+                if let Some(tptys) = self.fn_arg_param_types(&args[i]) {
+                    for (d, t) in dptys.iter().zip(&tptys) {
+                        crate::solve_param(d, t, &mut subst);
+                    }
+                }
+            }
+        }
+        // Pass 2: resolve each `fn`-typed argument to its target, and solve the
+        // outbound parameter (`U` in `map<T, U>`) from the target's own return.
+        let mut targets: Vec<FnTarget> = Vec::new();
+        let mut cap_tys: Vec<Vec<Type>> = Vec::new();
+        let mut cap_srcs: Vec<Vec<String>> = Vec::new();
+        for (i, p) in f.params.iter().enumerate() {
+            let Type::Fn(dptys, dret) = &p.ty else { continue };
+            let ptys: Vec<Type> =
+                dptys.iter().map(|t| ftypes::substitute(t, &subst)).collect();
+            let dret_sub = ftypes::substitute(dret, &subst);
+            let (target, srcs, tys) =
+                self.resolve_fn_arg(&args[i], &ptys, &dret_sub, line)?;
+            if generic {
+                crate::solve_param(dret, &target.sig.ret_ty, &mut subst);
+            }
+            targets.push(target);
+            cap_srcs.push(srcs);
+            cap_tys.push(tys);
+        }
+        let mut type_args = Vec::new();
+        for tp in &f.type_params {
+            match subst.get(tp) {
+                Some(t) => type_args.push(t.clone()),
+                None => {
+                    return unsupported(
+                        &format!("a generic type parameter `{tp}` the call `{}` does not fix", f.name),
+                        line,
+                    )
+                }
+            }
+        }
+        // The specialization's own signature: the ordinary parameters, then one
+        // capture parameter per capture per `fn` parameter, in `fn`-parameter
+        // order. A synthesized `Function` rather than a hand-built signature, so
+        // `lower_fn` lowers it with no case of its own — the prologue's by-value
+        // copy of an aggregate parameter is exactly what a captured record wants.
+        let mut sf = f.clone();
+        sf.type_params.clear();
+        sf.type_bounds.clear();
+        let mut params: Vec<Param> = Vec::new();
+        for p in &f.params {
+            if matches!(p.ty, Type::Fn(..)) {
+                continue;
+            }
+            params.push(Param {
+                name: p.name.clone(),
+                capability: p.capability,
+                ty: ftypes::substitute(&p.ty, &subst),
+            });
+        }
+        let mut binds: HashMap<String, FnBinding> = HashMap::new();
+        let fn_params = f.params.iter().filter(|p| matches!(p.ty, Type::Fn(..)));
+        for ((p, target), tys) in fn_params.zip(&targets).zip(&cap_tys) {
+            let mut srcs = Vec::new();
+            for t in tys {
+                // A reserved spelling: no Vyrn identifier can contain `@`, so an
+                // instance's capture parameter cannot shadow or be shadowed by
+                // anything the callee's body names.
+                let n = format!("@cap{}", params.len());
+                params.push(Param { name: n.clone(), capability: Capability::Read, ty: t.clone() });
+                srcs.push(n);
+            }
+            binds.insert(p.name.clone(), FnBinding { target: target.clone(), cap_srcs: srcs });
+        }
+        sf.params = params;
+        sf.ret = ftypes::substitute(&f.ret, &subst);
+        let sig = self.cx.enqueue(
+            Key::Ho(f.name.clone(), type_args, targets),
+            Rc::new(sf),
+            subst,
+            binds,
+        )?;
+        // Ordinary arguments in parameter order, then the capture values — read
+        // from the caller's own scope, which is what fixes them at this site.
+        let mut call_args: Vec<Expr> = f
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !matches!(p.ty, Type::Fn(..)))
+            .map(|(i, _)| args[i].clone())
+            .collect();
+        for srcs in &cap_srcs {
+            for s in srcs {
+                call_args.push(Expr::Var { name: s.clone(), line });
+            }
+        }
+        self.emit_call(m, b, &sig, &call_args)
+    }
+
+    /// A call through a `fn`-typed parameter: the target, with this instance's
+    /// capture parameters prepended to the argument list.
+    ///
+    /// The prepend is why there is one call path: a target's signature is
+    /// captures-then-parameters, so `emit_call` sees an ordinary call to an
+    /// ordinary function and every convention it already implements applies. The
+    /// arguments coerce into the TARGET's declared parameter types, not the `fn`
+    /// type's — a named target declaring `Age` where the signature says `Int64`
+    /// re-validates, which is what the textual backend's dispatcher does at the
+    /// same boundary.
+    fn target_call(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        bnd: &FnBinding,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let mut all: Vec<Expr> = bnd
+            .cap_srcs
+            .iter()
+            .map(|s| Expr::Var { name: s.clone(), line })
+            .collect();
+        all.extend(args.iter().cloned());
+        if all.len() != bnd.target.sig.params.len() {
+            return unsupported("a call through a `fn` parameter at another arity", line);
+        }
+        self.emit_call(m, b, &bnd.target.sig, &all)
+    }
+
+    /// Resolve one `fn`-typed argument to a call target, giving the names to read
+    /// its capture values from at THIS site and their types.
+    ///
+    /// Nothing is emitted: the captures are named, not loaded, because the call
+    /// they become arguments to has not started pushing operands yet.
+    fn resolve_fn_arg(
+        &mut self,
+        arg: &Expr,
+        ptys: &[Type],
+        expected_ret: &Type,
+        line: usize,
+    ) -> Result<(FnTarget, Vec<String>, Vec<Type>), String> {
+        match arg {
+            Expr::Lambda { params, body, line } => self.lift_lambda(arg, params, body, ptys, expected_ret, *line),
+            Expr::Var { name, .. } => {
+                // A pass-through `fn`-typed parameter: forward the target AND the
+                // captures, which are this instance's own capture parameters. The
+                // monomorphization threads through transitively and the inner
+                // instance never learns there was an outer one.
+                if let Some(bnd) = self.fn_binds.get(name) {
+                    let tys = bnd.target.sig.params[..bnd.target.ncaps].to_vec();
+                    return Ok((bnd.target.clone(), bnd.cap_srcs.clone(), tys));
+                }
+                // A stored function value (RFC-0037) flowing into a `fn`-typed
+                // parameter needs the signature's dispatcher, which this backend
+                // does not have. Refused by name so the two features stay
+                // distinguishable on the ladder.
+                if let Ok((_, ty)) = self.lookup(name, line) {
+                    if matches!(self.cx.resolve(&ty), Type::Fn(..)) {
+                        return unsupported(
+                            "a stored function value in a `fn`-typed parameter (RFC-0037)",
+                            line,
+                        );
+                    }
+                    return unsupported(&format!("`{name}` as a function value"), line);
+                }
+                // A named top-level function: called directly, no captures. A
+                // GENERIC or itself higher-order target is refused — the first has
+                // no index until something fixes its type arguments, and the second
+                // has no first-order definition at all.
+                match self.cx.sigs.get(name) {
+                    Some(sig) if sig.modify.iter().any(|m| *m) => unsupported(
+                        &format!("`{name}` as a function value (it takes a `modify` parameter)"),
+                        line,
+                    ),
+                    Some(sig) => Ok((FnTarget { sig: sig.clone(), ncaps: 0 }, Vec::new(), Vec::new())),
+                    None => unsupported(&format!("`{name}` as a function value"), line),
+                }
+            }
+            other => unsupported(
+                &format!("a `fn`-typed argument that is {}", expr_name(other)),
+                Expr::line(other),
+            ),
+        }
+    }
+
+    /// The DECLARED parameter types of a `fn`-typed argument's target, when the
+    /// argument names one. `None` for a lambda literal, whose parameters take their
+    /// types from the signature they flow into and so can solve nothing.
+    fn fn_arg_param_types(&self, arg: &Expr) -> Option<Vec<Type>> {
+        let Expr::Var { name, .. } = arg else { return None };
+        if let Some(bnd) = self.fn_binds.get(name) {
+            return Some(bnd.target.sig.params[bnd.target.ncaps..].to_vec());
+        }
+        if let Ok((_, ty)) = self.lookup(name, 0) {
+            return match self.cx.resolve(&ty) {
+                Type::Fn(ptys, _) => Some(ptys),
+                _ => None,
+            };
+        }
+        self.cx.sigs.get(name).map(|s| s.params.clone())
+    }
+
+    /// Lift a lambda literal to a top-level function: `(captures.., params..) ->
+    /// ret`, discovered and indexed here, its body lowered when the queue reaches
+    /// it.
+    ///
+    /// A synthesized `Function` rather than a bespoke lowering, so the captures are
+    /// ordinary read parameters — which is exactly the by-value snapshot RFC-0023
+    /// specifies, since `lower_fn`'s prologue already copies an aggregate parameter
+    /// into a slot of its own.
+    fn lift_lambda(
+        &mut self,
+        at: &Expr,
+        params: &[String],
+        body: &LambdaBody,
+        ptys: &[Type],
+        expected_ret: &Type,
+        line: usize,
+    ) -> Result<(FnTarget, Vec<String>, Vec<Type>), String> {
+        if params.len() != ptys.len() {
+            return unsupported("a lambda with the wrong number of parameters", line);
+        }
+        // The free locals, in first-seen order — the SHARED walk (`lib.rs`),
+        // because a capture list is part of the lifted function's signature and two
+        // backends disagreeing about its length would emit calls with the wrong
+        // number of arguments.
+        let cap_names = crate::lambda_captures(
+            body,
+            params.iter().cloned().collect(),
+            &|n| self.scope.iter().any(|(s, _, _)| s == n),
+        );
+        let mut cap_tys = Vec::new();
+        for cn in &cap_names {
+            let (_, t) = self.lookup(cn, line)?;
+            cap_tys.push(self.cx.sub(&t));
+        }
+        // The return type. Concrete when the `fn` type named one; otherwise it is
+        // what the lambda's own body produces, which is the outbound `U` a generic
+        // higher-order call solves from. A block body carries no expression to
+        // peek, so it is `Unit` — the textual backend's rule, and the same one.
+        let ret = match (expected_ret, body) {
+            (Type::Param(_), LambdaBody::Expr(e)) => {
+                let mark = self.scope.len();
+                for (pn, pt) in params.iter().zip(ptys) {
+                    self.scope.push((pn.clone(), Place::Local(u32::MAX), pt.clone()));
+                }
+                let got = self.peek(e, line);
+                self.scope.truncate(mark);
+                self.cx.sub(&got?)
+            }
+            (Type::Param(_), LambdaBody::Block(_)) => Type::Unit,
+            (t, _) => t.clone(),
+        };
+        // `LambdaBody::Expr` is a `return` of that expression — the same thing the
+        // block form writes by hand, so there is one body shape to lower. A
+        // Unit-returning signature is the exception and not a cosmetic one: `each(xs,
+        // |x| print(x))` has an expression body whose value the signature does not
+        // carry, so it is a statement rather than a return. The textual emitter
+        // reaches the same split by testing `llt(ret) == "void"`.
+        let block = match body {
+            LambdaBody::Block(b) => b.clone(),
+            LambdaBody::Expr(e) if self.cx.repr(&ret, line)? == Repr::Unit => {
+                Block { stmts: vec![Stmt::Expr((**e).clone())] }
+            }
+            LambdaBody::Expr(e) => Block {
+                stmts: vec![Stmt::Return { value: Some((**e).clone()), line }],
+            },
+        };
+        let mut sf = f_shell(line);
+        sf.params = cap_names
+            .iter()
+            .zip(&cap_tys)
+            .map(|(n, t)| Param { name: n.clone(), capability: Capability::Read, ty: t.clone() })
+            .chain(
+                params
+                    .iter()
+                    .zip(ptys)
+                    .map(|(n, t)| Param {
+                        name: n.clone(),
+                        capability: Capability::Read,
+                        ty: t.clone(),
+                    }),
+            )
+            .collect();
+        sf.ret = ret.clone();
+        sf.body = block;
+        // The key: the literal's node address, the concrete shape, AND the
+        // substitution the body is under. One literal inside a generic body lifts a
+        // distinct copy per instantiation, and the shape alone does not say so when
+        // the type parameter appears only in a statement.
+        let mut shape: Vec<Type> = cap_tys.clone();
+        shape.extend(ptys.iter().cloned());
+        shape.push(ret);
+        let mut under: Vec<(String, Type)> =
+            self.cx.subst.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        under.sort_by(|a, b| a.0.cmp(&b.0));
+        let key = Key::Lambda(at as *const Expr as usize, shape, under);
+        let sig = self.cx.enqueue(key, Rc::new(sf), self.cx.subst.clone(), HashMap::new())?;
+        Ok((FnTarget { sig, ncaps: cap_names.len() }, cap_names, cap_tys))
     }
 
     /// `.length` / `.byteLength`, neither of which is a field: the receiver's
