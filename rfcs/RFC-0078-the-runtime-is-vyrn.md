@@ -126,7 +126,14 @@ at any time.
   `toJson` but needed two general fixes the direct backend was missing anyway. The
   ladder went 39/81 -> 43/81. Number formatting needed nothing: `toString()` already
   matches the shim byte for byte.
-- **M3 — `fromJson`.** The parser half, same shape, plus RFC-0018's `Issue`
+- **M3 — `fromJson`. BLOCKED ON M1, AND SEQUENCED AFTER M4 — see "M3, as
+  measured".** Three things make it not a mirror of M2: `Float64` has no decode
+  expression in Vyrn at all (`Float64("1.5")` is a check error, `parse` is
+  `String -> Option<Int64>`), so text→number is a missing PRIMITIVE; a refined
+  type cannot hold a value that failed its own predicate, so an accumulating
+  decode needs decoders returning `Option<T>` rather than M2b's walk shape; and
+  the two readers disagree semantically, which needs a ruling before any swap.
+  The parser half, plus RFC-0018's `Issue`
   accumulation.
   **NOT DONE, and not "same shape" — see "M3, as measured" below.** The bytes are
   pinned (`examples/jsondecbytes.vyrn`, failure shapes included) but the swap is
