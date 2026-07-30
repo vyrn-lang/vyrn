@@ -57,11 +57,53 @@ fn gap(what: &str, line: usize) -> String {
     format!("direct backend: no lowering for {what} at line {line}")
 }
 
+/// Whether the emitted module stands alone or links against the shared runtime
+/// shim (RFC-0077 M2i).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Link {
+    /// One self-contained module: it defines its own memory, its own heap and its
+    /// own runtime. What `vyrn build --target wasm` produces, and the only shape
+    /// that needs no C toolchain to exist.
+    Standalone,
+    /// Memory and the C runtime come from RFC-0076's pre-compiled shim, linked at
+    /// instantiation — the same split its generator artifacts use, so one
+    /// `malloc` heap and one address space.
+    Shim,
+}
+
+/// The shim entry points this backend calls when there is a shim beside it.
+///
+/// NAMES only. Every signature comes from [`wasm::boundary`] — the textual
+/// emitter's own `declare` line for the same function, which is the side
+/// `tests/imports_vs_shim.rs` proves agrees with the C. Writing a signature down
+/// here would be a second chance to get one wrong, and a wrong import signature
+/// is a misread argument rather than a link error.
+const SHIM_IMPORTS: &[&str] = &[
+    "__vyrn_malloc",
+    // RFC-0043's host boundary. All three are real shim symbols on every target
+    // rather than `vyrn` host imports, which is what makes a clock example a
+    // three-way parity citizen — see `crate::host_boundary_extern`.
+    "__vyrn_now_millis",
+    "__vyrn_monotonic_nanos",
+    "__vyrn_random_seed",
+];
+
 /// Compile a whole program to a standalone `wasm32-wasi` module.
 pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
+    compile_linked(program, Link::Standalone)
+}
+
+/// Compile a whole program, choosing whether it stands alone or imports the
+/// shared shim.
+pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> {
     let mut m = Module::new();
+    if link == Link::Shim {
+        m.import_memory();
+    }
     // Imports first — they share the function index space with definitions, so
-    // `wasm::Module` panics if one arrives late.
+    // `wasm::Module` panics if one arrives late. Which is also why the shim's
+    // imports are a fixed list rather than discovered as bodies need them: an
+    // index handed out after the first definition would renumber every call.
     let fd_write = m.import(
         "wasi_snapshot_preview1",
         "fd_write",
@@ -69,8 +111,22 @@ pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
         &[ValType::I32],
     );
     let proc_exit = m.import("wasi_snapshot_preview1", "proc_exit", &[ValType::I32], &[]);
+    let mut shim: HashMap<&'static str, u32> = HashMap::new();
+    if link == Link::Shim {
+        for name in SHIM_IMPORTS {
+            let Some(Some((params, ret))) = wasm::boundary().get(*name) else {
+                return Err(format!("direct backend: `{name}` is not a boundary signature"));
+            };
+            // A `void` parameter is not a thing any `declare` has; a `void` result
+            // is, and is the empty result list.
+            let params: Vec<ValType> = params.iter().flatten().copied().collect();
+            let ret: Vec<ValType> = ret.iter().copied().collect();
+            let index = m.import("env", name, &params, &ret);
+            shim.insert(name, index);
+        }
+    }
 
-    let rt = runtime(&mut m, fd_write, proc_exit);
+    let rt = runtime(&mut m, fd_write, proc_exit, shim.get("__vyrn_malloc").copied());
 
     let types: HashMap<String, TypeDecl> =
         program.type_decls.iter().map(|t| (t.name.clone(), t.clone())).collect();
@@ -92,10 +148,14 @@ pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
     let mut generics: HashMap<String, Function> = HashMap::new();
     let mut higher_order: HashMap<String, usize> = HashMap::new();
     let mut user: Vec<&Function> = Vec::new();
+    let mut externs: HashMap<String, Type> = HashMap::new();
     for f in &program.functions {
         // An `extern` is an import; a `gen fn` (RFC-0021) runs only in the
         // compiler's own interpreter and may use builtins with no lowering at all.
         if f.is_extern || f.is_gen {
+            if f.is_extern {
+                externs.insert(f.name.clone(), f.ret.clone());
+            }
             continue;
         }
         // RFC-0023: a function taking a `fn`-typed parameter exists only as
@@ -129,6 +189,8 @@ pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
         subst: HashMap::new(),
         mono: RefCell::new(Mono::default()),
         globals: HashMap::new(),
+        shim,
+        externs,
     };
 
     // Every function the module will define, in the order they are defined, so a
@@ -331,6 +393,15 @@ struct Cx {
     /// [`Gen::lookup`] — the checker already forbids an initializer reading a
     /// global declared after it, so there is nothing for a partial view to catch.
     globals: HashMap<String, (Place, Type)>,
+    /// The shim's functions by symbol, when this module is linked against one
+    /// (RFC-0077 M2i). Empty for a standalone module, which is why every lowering
+    /// that wants one asks rather than assumes: the same construct is a call here
+    /// and a named gap there.
+    shim: HashMap<&'static str, u32>,
+    /// `extern fn` declarations by name, with the return type they declared. The
+    /// bodies are skipped, but RFC-0043's host boundary is reached BY NAME, and
+    /// what it returns is the declaration's business rather than this file's.
+    externs: HashMap<String, Type>,
 }
 
 impl Cx {
@@ -2340,6 +2411,29 @@ impl Fn_<'_> {
             let sig = self.cx.instantiate(&f, type_args, subst)?;
             return self.emit_call(m, b, &sig, args);
         }
+        // RFC-0043's host boundary. These three are not `vyrn` host imports like
+        // an ordinary RFC-0012 `extern`: the C shim defines them on every target,
+        // honouring `VYRN_FIXED_TIME`/`VYRN_FIXED_SEED`, which is what makes a
+        // clock example a three-way parity citizen instead of a browser-only one.
+        // So a linked module simply calls the symbol, and a standalone one has
+        // nowhere at all to get a clock — the name says which.
+        if let Some(sym) = crate::host_boundary_extern(name) {
+            let Some(&f) = self.cx.shim.get(sym) else {
+                return unsupported(&format!("the call `{name}` without a linked runtime shim"), line);
+            };
+            if !args.is_empty() {
+                return unsupported(&format!("the call `{name}` at this arity"), line);
+            }
+            // What it returns is the declaration's business, not this file's, and
+            // the boundary hands back an `i64`. Anything else spelled over one of
+            // these reserved names would read the wrong bytes silently.
+            let ret = self.cx.externs.get(name).cloned().unwrap_or(Type::Unit);
+            if self.cx.repr(&ret, line)? != Repr::Scalar(ValType::I64) {
+                return unsupported(&format!("`{name}` declared as returning `{ret}`"), line);
+            }
+            b.ins(&Instruction::Call(f));
+            return Ok(ret);
+        }
         let Some(sig) = self.cx.sigs.get(name).cloned() else {
             return unsupported(&format!("the call `{name}`"), line);
         };
@@ -3795,7 +3889,7 @@ fn word() -> MemArg {
     MemArg { offset: 0, align: 2, memory_index: 0 }
 }
 
-fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
+fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32, shim_malloc: Option<u32>) -> Rt {
     let base = m.n_imports();
     let mut rt = Rt {
         write_all: base,
@@ -3881,13 +3975,30 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
         },
     );
 
-    // malloc(n) — a bump allocator over `HEAP`, growing memory as it goes.
+    // malloc(n) — the shim's real allocator when there is a shim, and a bump
+    // pointer over `HEAP` when there is not.
     //
-    // ponytail: it never frees. Vyrn's ownership analysis knows exactly where
-    // every value dies (`Stmt::Drop` is already in the AST), so a real allocator
-    // belongs here eventually; nothing observable depends on it, because a free
-    // is not a thing a program can print.
+    // A wrapper rather than a rewrite of ~20 call sites, and the shape is the
+    // reason: the wrapper's signature is the one the emitted runtime already
+    // calls, so the whole difference between a standalone module and a linked one
+    // is these five instructions. It is also where the split proves itself — a
+    // pointer that came out of the shim's dlmalloc heap, written by us, read back
+    // by C, is shared linear memory or nothing.
+    //
+    // ponytail: the standalone bump allocator never frees. Vyrn's ownership
+    // analysis knows exactly where every value dies (`Stmt::Drop` is already in
+    // the AST), so a real allocator belongs here eventually; nothing observable
+    // depends on it, because a free is not a thing a program can print.
     let p = 2;
+    if let Some(shim_malloc) = shim_malloc {
+        m.func(&[ValType::I32], &[ValType::I32], &[], 0, |b| {
+            // The shim takes an `unsigned long long`, so the size widens; a Vyrn
+            // allocation is bounded by an i32 address space either way.
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I64ExtendI32U)
+                .ins(&Instruction::Call(shim_malloc));
+        });
+    } else {
     m.func(&[ValType::I32], &[ValType::I32], &[ValType::I32], 0, |b| {
         b.ins(&Instruction::GlobalGet(HEAP))
             .ins(&Instruction::LocalTee(p))
@@ -3914,6 +4025,7 @@ fn runtime(m: &mut Module, fd_write: u32, proc_exit: u32) -> Rt {
             .ins(&Instruction::End)
             .ins(&Instruction::LocalGet(p));
     });
+    }
 
     // strlen(s)
     m.func(&[ValType::I32], &[ValType::I32], &[ValType::I32], 0, |b| {

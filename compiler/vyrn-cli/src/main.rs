@@ -3252,8 +3252,37 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
     // A construct it cannot lower is an ERROR, never a fall-through to clang: the
     // burndown ladder counts what this backend can do, and a silent fallback
     // would make that number a statement about LLVM instead.
-    if wasm && std::env::var("VYRN_WASM_BACKEND").as_deref() == Ok("direct") {
-        return match vyrn_codegen::direct::compile(&program) {
+    //
+    // `direct-shim` is the RFC-0077 M2i shape: the module imports memory and the
+    // C runtime from RFC-0076's pre-compiled shim, which is written out beside it
+    // and linked at instantiation (`wasmtime run --preload env=<out>.shim.wasm`).
+    // Two files rather than one, and a C toolchain to produce the second, which is
+    // exactly why it is a third value of this switch and not the default.
+    let backend = std::env::var("VYRN_WASM_BACKEND");
+    let link = match backend.as_deref() {
+        Ok("direct") => Some(vyrn_codegen::direct::Link::Standalone),
+        Ok("direct-shim") => Some(vyrn_codegen::direct::Link::Shim),
+        _ => None,
+    };
+    if let (true, Some(link)) = (wasm, link) {
+        let shim_out = PathBuf::from(&out_path).with_extension("shim.wasm");
+        if link == vyrn_codegen::direct::Link::Shim {
+            // Before emitting, because a module that imports a shim nobody can
+            // supply is worse than no module: it validates and fails to start.
+            match vyrn_codegen::toolchain::shim_wasm(false) {
+                Some(shim) => {
+                    if let Err(e) = std::fs::copy(&shim, &shim_out) {
+                        eprintln!("error: cannot write {}: {e}", shim_out.display());
+                        return ExitCode::FAILURE;
+                    }
+                }
+                None => {
+                    eprintln!("error: no runtime shim (needs clang and a wasi sysroot)");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        return match vyrn_codegen::direct::compile_linked(&program, link) {
             Ok(bytes) => match std::fs::write(&out_path, bytes) {
                 Ok(()) => {
                     println!("wrote {out_path}");
