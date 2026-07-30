@@ -3536,3 +3536,231 @@ and deliberately refused to route (`parse` wraps where `parseInt64` declines;
 `lineAt`/`colAt` are a memoized table a Vyrn library cannot hold). `renameFile` is
 the third, refused above. There is no structural gap left in this corpus: every
 remaining example is one call away.
+
+---
+
+## M2p, as landed — the reachability sweep, and `renameFile`
+
+**87 of 87 standalone, and 87 of 87 linked.** Every example in the corpus compiles
+through the direct backend, runs under wasmtime, and agrees with the interpreter
+byte for byte, traps included. The ladder is finished.
+
+Two commits, in that order, and the order is the point: `renameFile` was refused
+at M2o for a reason the sweep dissolves.
+
+### The sweep is in the encoder, and it changed nothing about lowering
+
+M2j measured the cost of twelve unconditional WASI imports and about 2.3 KB of I/O
+runtime in every module, and named the fix as "a reachability sweep over the
+*finished* call graph, which is what a linker does and is not a second source of
+truth about what a program needs". That sentence is the whole design. An **AST
+pre-scan** was refused three times (M2j for imports, M2e for a standalone
+instantiation walker, and again by the region milestone) because it would be a
+second traversal obliged to agree with lowering about what lowering emits — the
+drift hazard `llt_of`, `layout ∘ llt` and `predicate_binds` exist to prevent. A
+sweep over the finished graph cannot drift: the graph **is** what was emitted.
+
+So the sweep is not a pass over the program. `wasm::Module` now holds imports,
+bodies and exports as plain data until `finish`, and `Module::sweep` walks the
+`Instruction::Call`s that are actually in the bodies, from the exports, and drops
+everything else. Nothing in `direct.rs` learned anything: the emitter still emits
+forty runtime helpers and thirteen imports whether a program reaches one or not,
+because it still cannot know until the bodies are walked. One line at the end of
+`compile_linked` is the entire integration.
+
+**Not two passes.** The task's framing offered emit-twice — cheap now that clang is
+gone — and M2m's `reserve_func`/`fill` as the alternative. It is neither: the only
+thing standing in the way of a single pass was that `Module::add` encoded each
+`Frame` to `wasm_encoder::Function` bytes on arrival, and an encoded body cannot
+have its call indices renumbered. Keeping the `Frame` until `finish` is a smaller
+change than emitting anything twice, and it deleted the eager type-section
+interning as a side effect — a signature only a pruned function used now costs
+nothing either. Emission stays exactly as many traversals as it was: one.
+
+**`Rt::slots` + `next_is` are untouched and still assert.** They are about the
+declared order agreeing with the emission order, and both still happen before
+anything is pruned. The sweep runs when nothing is being emitted any more, which
+is why the two mechanisms never see each other — and why adding `rename_file` to
+the middle of the runtime table needed no renumbering by hand.
+
+### Roots are the exports, which made `export extern fn` one
+
+Enumerated deliberately rather than assumed, because a missing root is a function
+gone from a module that needed it:
+
+- **`_start`.** WASI's entry point, and the only export this backend had.
+- **The globals initializer** (RFC-0013) is *not* a root and does not need to be:
+  `_start` calls it. When a program has no module state it is emitted, unreached,
+  and swept — two bytes back.
+- **`main`** is likewise not a root in its own right; `_start` calls it.
+- **`vyrn_entry`** does not exist here. It is the native/LLVM entry, and the
+  direct backend has never emitted one.
+- **RFC-0012 `export extern fn`** was the real gap, and it was not a sweep gap.
+  The direct backend exported `_start` and nothing else, so a JS caller had
+  nothing to call — `wasm-export-name` plus `--export-all` was doing this on the
+  LLVM path and no one had noticed the direct shape did not. One `m.export` per
+  `is_export_extern` fixes the feature and makes the root list and the callable
+  surface one list. Nine of them in `domdemo.vyrn`, two in `externdemo2.vyrn`.
+
+A function index appears in exactly two places — a `call` and an export — and
+`reachable` panics on `call_indirect`, `ref.func`, `return_call` and
+`return_call_indirect` rather than silently sweeping past one. There is no table
+today (M2m measured that: a defunctionalized `fn` value is a tag and a direct
+call), and if one ever arrives the sweep must be told before it prunes a target.
+
+### The numbers, and the one that is honest about itself
+
+Standalone shape, before and after the sweep:
+
+| | before | after |
+|---|---|---|
+| `fib.wasm` | 6,048 | **1,406** |
+| `mapdemo.wasm` | 49,948 | 31,814 |
+| `vyxdemo.wasm` | 100,816 | 16,231 |
+| `twdemo.wasm` | 902,171 | 836,639 |
+
+`fib.wasm` is the yardstick because it uses none of the runtime: 4,420 bytes of
+code became **290**, and the import section is 442 bytes to 70 in every module in
+the corpus. M2j's 5,167 had grown to 6,048 by M2o (the region counter's trap
+message, `parse`, `lineAt`/`colAt`, the logger), which is the shape of an
+unconditional runtime — it grows with every milestone whether the milestone is
+reachable or not. It does not any more.
+
+`vyxdemo` is the extreme because a page compile links `std/vyx`, `std/html` and
+`std/ui` and calls a small fraction of them: **84% of that module was unreachable
+code**. `twdemo` is the floor for the same reason in reverse — 836 KB of it is one
+DFA transition table, which is data.
+
+**The data pool is NOT swept, and that is the remaining ceiling.** `fib.wasm`'s 941
+bytes of data are 67% of what is left, and every byte is a trap or I/O message the
+program cannot reach. It is left because pruning it means deciding which
+`i32.const` in a body is a pool address and which is an integer that happens to
+look like one — a heuristic, where the call graph is a fact. The honest cost shows
+up in this milestone's second half: `renameFile`'s cross-device wording is interned
+whether reached or not, so every module is 32 bytes bigger than the table above
+(`fib.wasm` 1,406 to 1,438). Interning lazily at the use site would fix the class
+(the pool already deduplicates, so repeats are free), and it is a milestone of its
+own rather than smuggled into this one.
+
+### `renameFile` cost nothing structural, which was the whole bet
+
+M2o's refusal was three sentences and only one of them was about work:
+`path_rename` "would join the twelve unconditional WASI imports, which renumbers
+the whole function index space and changes the bytes of every module in the corpus
+— including `fib.vyrn`'s pinned size". After the sweep there are thirteen
+declarations and `fib.wasm` imports **two**. The renumbering objection is gone
+because the numbering is no longer a property of the corpus; the pinned-size
+objection is gone because the pin is now smaller than before the syscall was added.
+
+What was left was mechanical. `rename_file` is `open_at`'s preopen walk without the
+open — WASI has no rename relative to a working directory either — with both paths
+going through the SAME directory fd, which is also why the cross-device arm is
+nearly unreachable: a preopen is one mount. The two error classes come out of
+`IO_MESSAGES` like every other message here (`@.io.xdeverr` for `errno::xdev`,
+`@.io.writeerr` for anything else, both naming the TARGET), which is the same pair
+the interpreter picks between on `is_cross_device`.
+
+One number was worth reading rather than assuming: **preview1's `xdev` is 75**, and
+POSIX's `EXDEV` of 18 is `errno::dom` in WASI's own alphabetical list. A backend
+that carried the POSIX number over would have reported the wrong one of two
+plausible messages, on the arm nothing can reach — i.e. silently, forever.
+
+### `storage.vyrn` had a second blocker behind the first, again
+
+M2o found that `storage.vyrn`'s reported blocker was a decoder's and its real one
+was `renameFile`. There was a third: with the syscall lowered, it still failed with
+"a branch yielding `renameFile`", because **`peek` had no row for any of
+RFC-0014's I/O**. `writeAtomic` is
+
+    return match writeFile(tmp, content) {
+        Ok(done) => renameFile(tmp, path),
+        Err(why) => Err(why),
+    }
+
+and an arm's value is typed by `peek`. Nothing in the corpus had ever put an I/O
+call in a branch, so `writeFile` in an arm failed identically before this milestone
+— confirmed by writing one. M2l's rule is that a builtin `call` lowers owes `peek`
+a row; the fix is that both now read one `io_builtin_ty`, because two spellings of
+`Result<Bool, String>` are two chances to size a destination slot differently from
+the value written into it.
+
+That is the third milestone running where the ladder's blocker list under-counted
+by hiding one gap behind another. The emitter stops at the first gap, and there is
+no fix for that beyond reading it as a lower bound.
+
+### What ran, and what a passing run could not have caught
+
+The renumbering is checked by running, because a prune that forgets to rewrite a
+call still **validates** whenever the two signatures match — the silent case
+`Rt::next_is` exists for, arranged deliberately: four helpers of one signature, two
+of them unreachable and sitting between the two that are, so the surviving pair
+cannot keep its old indices. Mutating the rewrite out turns it red; 90, 91, 93, 94
+and 181 are each a specific mistake it would have printed instead of 7.
+
+`renameFile`'s edges are a running test pinning the interpreter's own answers,
+since `storage.vyrn` reaches the happy path only:
+
+- An **existing target is overwritten**, which POSIX `rename` and `path_rename`
+  both do and Windows C `rename` refuses — the semantic RFC-0044 exists for, and
+  the one a backend could plausibly get wrong in the safe-looking direction.
+- The **source is gone** afterwards, which is what says it moved rather than
+  copied.
+- Both reachable failures — a missing source, an unresolvable target — are
+  `cannot write` **about the target**, byte for byte what the interpreter says.
+
+Self-setting-up, because a rename is destructive and the interpreter and the wasm
+module run in the same directory one after the other. Three engines agree on all
+seven lines (interpreter, native, direct wasm).
+
+### Nothing contradicted M0, M1, M2a-M2o
+
+The sweep computes no offsets, allocates no slots and emits no instructions, so
+`layout::of_ll ∘ llt` has nothing to say about it. `rename_file` is the same
+`sum2_write_to` at the same offsets `writeFile` uses — the runtime writing a
+`Result` through a destination the caller allocated, i.e. M2b's aggregate rule with
+no case of its own. No body emits a `return`; the helper's early exits are `br` out
+of a labelled block, and its `Ok`/`Err` split is one `if`/`else` with the message
+selection an `if` **with a result type**, because a block that leaves a value on
+the stack must say so.
+
+The M2d seam took nothing new, which is the fifth milestone in a row. The M2i link
+shape needed no attention at all: its import list is `__vyrn_malloc` and it goes
+through the same `import`/`sweep` path, so `direct-shim` is 87/87 too — and if a
+program never allocates, the shim import is now pruned as well.
+
+The LLVM wasm path: **neither commit touches `lib.rs`**. The one shared thing this
+milestone reads is `IO_MESSAGES`, which RFC-0078 M4c had already made the single
+source, so there was no wording to write down twice.
+
+### 87 of 87
+
+| blocked on | n |
+|---|---|
+| — | 0 |
+
+The table is empty. M5 is now unblocked, and what it needs is a decision rather
+than a lowering:
+
+- **Delete the textual emitter's wasm path and `VYRN_WASM_BACKEND` with it**, so
+  `vyrn build --target wasm` is this backend unconditionally. The acceptance
+  criterion "needs no clang, no wasi sysroot, no builtins archive" is already true
+  of the direct shape and cannot be true of the other one.
+- **Fold the `directwasm` tier into `parity`**, since after the deletion the wasm
+  column IS this backend. `PASSING` and `PASSING_SHIM` stop being lists and become
+  the corpus; the tier that runs twice stops needing to.
+- **Decide what `direct-shim` is for.** It has passed nothing `direct` does not
+  since M2j, its import list is one function, and M2i already established that the
+  split makes a module larger. It is a live audit of the boundary signatures
+  (`tests/shim_link.rs`) and of shared-memory linking, which RFC-0076's generator
+  artifacts still use — so the question is whether that audit belongs to RFC-0076
+  rather than whether the shape survives.
+- **M4 is now optional, and probably struck.** "The 1,080-line prelude moves into
+  the C shim" was a plan for a backend that reached the shim. This one does not,
+  emits its own forty helpers, and now ships only the ones a program calls: the
+  prelude's remaining cost is 290 bytes in `fib.wasm`. Moving it into C would
+  reintroduce the clang dependency M5's acceptance criterion forbids.
+- **What M5 must not lose:** the browser story. `web/wasi-min.js` implements
+  exactly the preview1 set this backend imports, and RFC-0012's exports are named
+  by this backend only as of this milestone — `--export-all` was covering for that.
+  A page that calls anything but `_start` and an `export extern fn` is the one
+  thing to check before the LLVM path goes.
