@@ -1,0 +1,187 @@
+/// The exact bytes `toJson` produces — RFC-0078 M2's pin.
+///
+/// M2 rewires `toJson`'s serializer half from the C shim's `__vyrn_vj_encode` to
+/// `std/json`'s `emit`, which is the same JSON writer written in Vyrn. The bytes
+/// have to be captured BEFORE that swap: a test written afterwards proves whatever
+/// came out, not that the two writers agree. So this example is deliberately dull.
+/// It walks the whole surface where two JSON writers can legally disagree —
+/// escaping, number formatting, field order, the `None`-omission — prints it from
+/// `main`, which is what makes parity check interp == native == wasm on it, and
+/// pins the interesting rows as literals in the `test` blocks below.
+///
+/// The literals are what the C shim produces TODAY, before any rewiring. Two of
+/// them are rows where `std/json` legally disagrees (bytes 0x08 and 0x0c, which it
+/// spells `\b` and `\f` rather than the long `\u00XX` form). Pinning the current
+/// answer first is what turns the swap's diff into a statement about which writer
+/// won, rather than a test that quietly agrees with whatever landed.
+
+/// A string wrapper, so escaping is observed through a record field — the path a
+/// real `toJson` caller takes.
+type Esc = { s: String }
+
+/// Every numeric type `toJson` can encode, in one record, so a single line of
+/// output covers the whole number-formatting surface.
+type Nums = {
+    i: Int64,
+    i8v: Int8,
+    u8v: UInt8,
+    i16v: Int16,
+    u32v: UInt32,
+    u64v: UInt64,
+    f: Float64,
+    f32v: Float32,
+}
+
+/// Nesting, an array, an `Option` (omitted when `None`) and a `Bool`.
+type Nest = { name: String, tags: Array<String>, opt: Option<Int64>, on: Bool }
+
+/// `a<b>z`, so an escaped byte is observed with a literal byte on either side.
+fn ctl(b: UInt8) -> String {
+    let mut out: Array<UInt8> = []
+    out.push('a')
+    out.push(b)
+    out.push('z')
+    return match stringFromBytes(out) {
+        Ok(v) => v,
+        Err(e) => "<rejected: " + e + ">",
+    }
+}
+
+/// `toJson` of `a<b>z` for one control byte.
+fn ctlJson(b: UInt8) -> String {
+    return toJson(Esc { s: ctl(b) })
+}
+
+fn main() -> Int64 {
+    // Byte 0 is not reachable: `stringFromBytes` rejects NUL before a String can
+    // hold one (RFC-0014's NUL rule), which is also why the shim's NUL-terminated
+    // C strings never had to answer for truncation here. The rejection message is
+    // printed rather than skipped, so the reason stays visible in the output.
+    let mut c = 0
+    while c < 32 {
+        print(ctlJson(UInt8(c)))
+        c = c + 1
+    }
+    print(ctlJson(UInt8(127)))
+    print(toJson(Esc { s: "quote\" back\\ slash/ plain" }))
+    print(toJson(Esc { s: "utf8 ä € 𝄞 日本" }))
+    print(toJson(Esc { s: "" }))
+
+    let big: UInt64 = 18446744073709551615
+    let edges = Nums {
+        i: -9223372036854775807,
+        i8v: Int8(-128),
+        u8v: UInt8(255),
+        i16v: Int16(-32768),
+        u32v: UInt32(4294967295),
+        u64v: big,
+        f: 0.0,
+        f32v: Float32(1.5),
+    }
+    let opposite = Nums {
+        i: 0,
+        i8v: Int8(127),
+        u8v: UInt8(0),
+        i16v: Int16(32767),
+        u32v: UInt32(0),
+        u64v: UInt64(0),
+        f: -1.0 / 3.0,
+        f32v: Float32(-0.25),
+    }
+    let wide = Nums {
+        i: 1,
+        i8v: Int8(0),
+        u8v: UInt8(1),
+        i16v: Int16(0),
+        u32v: UInt32(1),
+        u64v: UInt64(1),
+        f: 1234567890.123456,
+        f32v: Float32(0.0),
+    }
+    print(toJson(edges))
+    print(toJson(opposite))
+    print(toJson(wide))
+
+    print(toJson(Nest { name: "n", tags: [], opt: None, on: false }))
+    print(toJson(Nest { name: "n", tags: ["a", "b"], opt: Some(7), on: true }))
+    return 0
+}
+
+test "escapes with a short form" {
+    assertEq(ctlJson(UInt8(9)), "{\"s\":\"a\\tz\"}")
+    assertEq(ctlJson(UInt8(10)), "{\"s\":\"a\\nz\"}")
+    assertEq(ctlJson(UInt8(13)), "{\"s\":\"a\\rz\"}")
+    assertEq(toJson(Esc { s: "q\"q" }), "{\"s\":\"q\\\"q\"}")
+    assertEq(toJson(Esc { s: "b\\b" }), "{\"s\":\"b\\\\b\"}")
+}
+
+test "escapes as \\u00XX, lowercase hex" {
+    assertEq(ctlJson(UInt8(1)), "{\"s\":\"a\\u0001z\"}")
+    assertEq(ctlJson(UInt8(11)), "{\"s\":\"a\\u000bz\"}")
+    assertEq(ctlJson(UInt8(27)), "{\"s\":\"a\\u001bz\"}")
+    assertEq(ctlJson(UInt8(31)), "{\"s\":\"a\\u001fz\"}")
+}
+
+test "0x08 and 0x0c are the two writers' only disagreement" {
+    // The shim's answer, pinned so the swap has to state its own rather than drift
+    // into one. `std/json` writes `\b` / `\f` here; both are valid JSON and both
+    // parse back to the same string.
+    assertEq(ctlJson(UInt8(8)), "{\"s\":\"a\\u0008z\"}")
+    assertEq(ctlJson(UInt8(12)), "{\"s\":\"a\\u000cz\"}")
+}
+
+test "leaves alone what JSON does not require escaping" {
+    // `/` is escapable but never required; multi-byte UTF-8 passes through raw.
+    assertEq(toJson(Esc { s: "a/b" }), "{\"s\":\"a/b\"}")
+    assertEq(toJson(Esc { s: "ä€" }), "{\"s\":\"ä€\"}")
+    assertEq(toJson(Esc { s: "" }), "{\"s\":\"\"}")
+}
+
+test "integers are exact and unsigned stays unsigned" {
+    let big: UInt64 = 18446744073709551615
+    let n = Nums {
+        i: -9223372036854775807,
+        i8v: Int8(-128),
+        u8v: UInt8(255),
+        i16v: Int16(-32768),
+        u32v: UInt32(4294967295),
+        u64v: big,
+        f: 0.0,
+        f32v: Float32(1.5),
+    }
+    assertEq(
+        toJson(n),
+        "{\"i\":-9223372036854775807,\"i8v\":-128,\"u8v\":255,\"i16v\":-32768,"
+        + "\"u32v\":4294967295,\"u64v\":18446744073709551615,"
+        + "\"f\":0.000000,\"f32v\":1.500000}",
+    )
+}
+
+test "floats are fixed-point %f, six places, never an exponent" {
+    let n = Nums {
+        i: 0,
+        i8v: Int8(0),
+        u8v: UInt8(0),
+        i16v: Int16(0),
+        u32v: UInt32(0),
+        u64v: UInt64(0),
+        f: -1.0 / 3.0,
+        f32v: Float32(-0.25),
+    }
+    assertEq(
+        toJson(n),
+        "{\"i\":0,\"i8v\":0,\"u8v\":0,\"i16v\":0,\"u32v\":0,\"u64v\":0,"
+        + "\"f\":-0.333333,\"f32v\":-0.250000}",
+    )
+}
+
+test "field order is declaration order, None omitted, no whitespace" {
+    assertEq(
+        toJson(Nest { name: "n", tags: [], opt: None, on: false }),
+        "{\"name\":\"n\",\"tags\":[],\"on\":false}",
+    )
+    assertEq(
+        toJson(Nest { name: "n", tags: ["a", "b"], opt: Some(7), on: true }),
+        "{\"name\":\"n\",\"tags\":[\"a\",\"b\"],\"opt\":7,\"on\":true}",
+    )
+}
