@@ -2685,3 +2685,127 @@ fn the_rfc_0012_host_boundary_is_named_in_the_module() {
         "the allocator is exported by a module with no String-taking export"
     );
 }
+
+/// Run one ad-hoc source under every engine and return `(interp, native, wasm)`
+/// as `(stdout, stderr, exit)` triples, normalized the way the corpus loop above
+/// normalizes.
+///
+/// The three pins that follow are all NATIVE defects, which the pins written for
+/// RFC-0077 M2 could not have caught: those compared the interpreter against the
+/// direct wasm backend, and on each of these three the two of them AGREED and
+/// native was alone. So this helper exists rather than a fourth copy of the
+/// build-and-compare block, and the wasm column comes along because it is free
+/// and because a pin that names only two engines is how a third drifts.
+#[allow(clippy::type_complexity)]
+fn three_engines(
+    tag: &str,
+    what: &str,
+    src: &str,
+) -> Vec<(&'static str, String, String, Option<i32>)> {
+    let dir = std::env::temp_dir().join(format!("vyrn-parity-{tag}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{what}.vyrn"));
+    std::fs::write(&path, src).unwrap();
+    let no_stdin = dir.join("no.stdin");
+
+    let mut out = Vec::new();
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let i = run_io(interp_cmd, &dir, &no_stdin);
+    out.push(("interp", norm(&i.stdout), runtime_err(&i.stderr), i.status.code()));
+
+    let exe = dir.join(format!("{what}.exe"));
+    let b = vyrn().arg("build").arg(&path).arg("-o").arg(&exe).output().expect("build native");
+    assert!(
+        b.status.success(),
+        "{what}: NATIVE BUILD FAILED\n{}{}",
+        norm(&b.stdout),
+        norm(&b.stderr)
+    );
+    let n = run_io(Command::new(&exe), &dir, &no_stdin);
+    out.push(("native", norm(&n.stdout), runtime_err(&n.stderr), n.status.code()));
+
+    if let Some(wasmtime) = wasmtime() {
+        let module = dir.join(format!("{what}.wasm"));
+        let b = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--target")
+            .arg("wasm")
+            .arg("-o")
+            .arg(&module)
+            .output()
+            .expect("build wasm");
+        assert!(b.status.success(), "{what}: wasm build: {}", norm(&b.stderr));
+        let mut c = Command::new(&wasmtime);
+        c.arg("run").arg(&module);
+        let w = run_io(c, &dir, &no_stdin);
+        out.push(("wasm", norm(&w.stdout), runtime_err(&w.stderr), w.status.code()));
+    }
+    out
+}
+
+/// Assert every engine agrees with the INTERPRETER, and that the interpreter said
+/// what is expected — two backends can be confidently wrong together, and on all
+/// three of the defects below exactly two were.
+fn all_agree(rows: &[(&str, String, String, Option<i32>)], what: &str) {
+    let (_, out, err, code) = &rows[0];
+    assert!(!out.is_empty() || !err.is_empty(), "{what}: no engine printed anything");
+    for (eng, o, e, c) in &rows[1..] {
+        assert_eq!(o, out, "{what}: {eng} stdout");
+        assert_eq!(e, err, "{what}: {eng} stderr");
+        assert_eq!(c, code, "{what}: {eng} exit");
+    }
+}
+
+
+/// `NaN != NaN` is TRUE, and native was the one engine that said otherwise.
+///
+/// IEEE 754 makes `!=` the UNORDERED comparison — the only one of the six whose
+/// answer is `true` when an operand is a NaN — and the interpreter (Rust's `f64`
+/// `!=`) and the direct wasm backend (`f64.ne`) both implement it. The textual
+/// emitter spelled it `fcmp one`, "ordered AND not equal", which is `false` for a
+/// NaN operand: `nan != nan` printed `1` under `vyrn run` and under wasmtime and
+/// `0` natively.
+///
+/// The other five arms are here because the same class could have hidden in any of
+/// them and no example compares against a NaN, so nothing would have said. They
+/// are all ordered on all three engines and all print `0` — which is what makes
+/// the `!=` rows load-bearing: they are the only two that are not `0`.
+///
+/// `zero / zero` rather than a NaN literal: the language has no NaN literal, and a
+/// runtime division is also what stops `consteval` folding the comparison away and
+/// answering with the compiler's arithmetic instead of the backend's.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_nan_is_not_equal_to_itself_on_every_engine() {
+    let rows = three_engines(
+        "nan",
+        "nancmp",
+        r#"
+fn main() -> Int64 {
+    let zero = 0.0
+    let nan = zero / zero
+    let one = 1.0
+    print(if nan != nan { 1 } else { 0 })
+    print(if nan == nan { 1 } else { 0 })
+    print(if nan < one { 1 } else { 0 })
+    print(if nan <= one { 1 } else { 0 })
+    print(if nan > one { 1 } else { 0 })
+    print(if nan >= one { 1 } else { 0 })
+    print(if one != nan { 1 } else { 0 })
+    // A NaN comparison must not poison an ordinary one, and `!=` on two ordinary
+    // floats must still be `!=`.
+    print(if one != 2.0 { 1 } else { 0 })
+    print(if one != 1.0 { 1 } else { 0 })
+    return 0
+}
+"#,
+    );
+    all_agree(&rows, "nancmp");
+    // Spelled out as well as compared, because "all three engines say 0" is what
+    // the bug looked like: the interpreter is the reference, so its answer is
+    // asserted against IEEE 754 rather than against the other two.
+    assert_eq!(rows[0].1, "1\n0\n0\n0\n0\n0\n1\n1\n0\n", "IEEE 754: only `!=` is unordered");
+}
+

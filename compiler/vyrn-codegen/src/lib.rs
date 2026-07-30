@@ -4032,12 +4032,19 @@ impl<'a> Gen<'a> {
                 BinOp::Sub => format!("{t} = fsub {f} {l}, {r}"),
                 BinOp::Mul => format!("{t} = fmul {f} {l}, {r}"),
                 BinOp::Div => format!("{t} = fdiv {f} {l}, {r}"),
+                // The ordered/unordered choice is IEEE 754's, and it is the same
+                // choice wasm's `f64.lt`..`f64.ne` and Rust's `f64` operators make,
+                // so all three engines agree arm for arm: the four relational ops
+                // and `==` are ORDERED (a NaN operand makes them false), and `!=`
+                // is UNORDERED — `NaN != NaN` is TRUE. `one` here read
+                // "ordered AND not equal", which made native the only engine
+                // printing `0` for `nan != nan` (RFC-0077 M2h measured it).
                 BinOp::Lt => format!("{t} = fcmp olt {f} {l}, {r}"),
                 BinOp::LtEq => format!("{t} = fcmp ole {f} {l}, {r}"),
                 BinOp::Gt => format!("{t} = fcmp ogt {f} {l}, {r}"),
                 BinOp::GtEq => format!("{t} = fcmp oge {f} {l}, {r}"),
                 BinOp::Eq => format!("{t} = fcmp oeq {f} {l}, {r}"),
-                BinOp::NotEq => format!("{t} = fcmp one {f} {l}, {r}"),
+                BinOp::NotEq => format!("{t} = fcmp une {f} {l}, {r}"),
                 BinOp::Rem
                 | BinOp::And
                 | BinOp::Or
