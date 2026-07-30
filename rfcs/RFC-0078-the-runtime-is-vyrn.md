@@ -120,12 +120,14 @@ at any time.
   implementation already written and parity-tested. Success is 49 shim functions
   deleted and `toJson` working on the direct backend without a line of new wasm
   lowering. Bytes must be pinned before the swap, not compared after.
-  **Blocked, measured, not attempted — see "M2, as landed". Needs, in order: the
-  writer in its own module (`import { emit } from "std/json"` links the whole
-  file, and the READER wants `?` and `if let`, which are RFC-0077's own rows); an
-  implicit link aliased to `@`-names, because RFC-0022 resolves a co-naming
-  collision by renaming the FOREIGN decl, so a user's own `emit` would silently
-  capture the desugar's call; and two escape literals repinned.**
+  **Blocked, measured, not attempted — see "M2, as landed" and "M2a, as landed".
+  The library prerequisite is DONE: `std/json` is now the tree plus the writer,
+  importing nothing, and the reader lives in `std/jsonread`. What remains is three
+  compiler mechanisms — an injected import with `foreign_renames` seeded to
+  reserved spellings, synthesized per-type encoder functions in the linked
+  `Program`, and the type-directed walk as a shared AST builder — plus two escape
+  literals repinned. Number formatting is NOT among them (measured: `toString()`
+  already matches the shim byte for byte).**
 - **M3 — `fromJson`.** The parser half, same shape, plus RFC-0018's `Issue`
   accumulation.
 - **M4 — the string and number tier.** `chars` (UTF-8 decode), `parse`, the `%f`
@@ -314,3 +316,91 @@ rather than a second definition.
 including the new one, the RFC-0077 ladder unchanged at 39/81, genwasm green. The
 shim is still at 80 functions: M2's payoff is real, but it is 11, and it is not
 collectable until the writer has a module of its own.
+
+---
+
+## M2a, as landed: the writer has its module, and the split had to run backwards
+
+The prerequisite the note above asked for is done. What it asked for *specifically*
+— a new leaf module holding the writer, re-exported by `std/json` — is not what
+landed, because re-export does not exist and is not cheap.
+
+### There is no re-export, so the split inverted
+
+`link` accepts `import { X } from "M"` only when `X` is **declared** in `M` and
+exported (`loader.rs:2442`, against an `owner` map keyed by decl name). An imported
+name is not a declaration, so a module cannot pass a name through. Wrapper
+functions would cover `emit`/`emitPretty`/`jsonEq`, but not the `Json` and
+`JsonField` *types*: an alias `type Json = JsonW` registers no variants (`link`
+harvests those from `Type::Enum` in the decl's own base), so `JObj(..)` would stop
+resolving at every consumer. Adding a real `export … from` form is parser plus
+checker plus LSP work to avoid editing six import lines.
+
+So `std/json` **keeps** the tree and the writer and now imports nothing, and the
+reader moved out to `std/jsonread`, which imports the tree. Same one-directional
+layering, same property `toJson` needs — a serializing caller links the writer
+alone — reached by moving the half with fewer consumers. `emit`, `emitPretty`,
+`jsonEq`, `Json` and `JsonField` still come from `std/json` unchanged, so no
+generator's JSON output moves; only `parseJson`'s home changed, costing four std
+modules and the two generated-module import lines in `std/openapi` / `std/ui` one
+extra import each.
+
+Proven rather than asserted, on the real module rather than a lifted spike: a
+program whose only import is `import { Json, JsonField, emit } from "std/json"`
+compiles under `VYRN_WASM_BACKEND=direct` and wasmtime prints the same bytes as the
+interpreter. The reader is no longer in the link, so its `?` and `if let` are no
+longer M2's problem.
+
+### Two measurements that shrink what is left
+
+**Number formatting needs nothing at all — not even M4.** The note above said
+numbers "stay exactly where they are, in the compiler". Measured, they do not have
+to: `toString()` on every numeric type already produces byte-identical text to the
+shim's `__vyrn_vj_int` / `__vyrn_vj_uint` / `__vyrn_vj_float`, including
+`18446744073709551615` unsigned-exact and `%f`'s six fixed places (`1.500000`,
+`-0.333333`). `JNum(x.toString())` is the whole number story, so M4's `f64_str` is
+**not** a prerequisite for M2 in either direction.
+
+**The aliasing mechanism already exists, and it is one map.** The note said the
+implicit import "has to alias to `@`-prefixed internal names" without saying how.
+`resolve_aliases`'s `foreign_renames` is keyed by `(module, name)` and mints ONE
+program-wide symbol, which every selective importer and every `ns.member` then
+resolves to — so seeding it with reserved spellings for the writer's exports is the
+whole mechanism, not a new import form.
+
+The hazard it defends against is now measured with a symbol name rather than
+argued. A program that declares its own `fn emit` while a sibling module imports
+`std/json`'s emits **`@vyrn_emit` for the user's and `@vyrn_emit__from0` for
+`std/json`'s** — the FOREIGN decl is the one that moved. A desugar referencing a
+bare `emit` would have called the user's function.
+
+### What M2 still needs, in order
+
+Three mechanisms that do not exist, which is why M2 is still not attempted:
+
+1. **An injected import.** The loader walks imports from the root; a module the
+   user never mentioned has to enter that worklist. Plus the `foreign_renames`
+   seeding above, including the `Json` enum's variant names.
+2. **Synthesized encoder functions in the linked `Program`.** Self-referential types
+   make the AST walk non-terminating without them — the AST analogue of the IR's
+   `__vyrn_enc_{n}`, which exists for exactly that reason. They are
+   declaration-directed, so `link` knows enough to build them; the open question is
+   whether generated AST clears the checker, movecheck and dropcheck as written.
+3. **The type-directed walk as a shared AST builder.** `schemaOf` is the precedent
+   but a weaker one than it looks: it is directed by a type *name*, which the
+   frontend has, whereas `toJson(x)` needs the static type of an arbitrary
+   expression. The lazy version of the precedent is a frontend
+   `json_encode_expr(expr, ty) -> Expr` that all three engines call at the point
+   where each already knows `ty` — one definition of the walk, three five-line call
+   sites, and no wasm lowering.
+
+`emit_encode` and its `__vyrn_vj_*` calls therefore stay, and the shim stays at 80.
+M2's payoff is unchanged at 11 functions and now unblocked on the library side.
+
+### Gates, at this note
+
+1213 workspace tests (was 1212 — `tests/json.rs` now runs both modules, since
+`vyrn test` runs one module's blocks and the point of the split is that the writer
+links without the reader), parity green three ways over 81 examples, the RFC-0077
+ladder unchanged at 39/81, genwasm green, `doc --std --verify` clean with
+`docs/api/std/jsonread.md` added.
