@@ -1,0 +1,140 @@
+/// Codecs in Vyrn — `std/codecs` against the builtins it is a candidate to
+/// replace (RFC-0078 M4b).
+///
+/// `hexEncode`, `base64Encode`, `urlEncode` and their inverses are pure byte
+/// transforms with no C shim at all: the interpreter holds one copy in Rust and
+/// the textual emitter prints another as hand-written LLVM IR. `std/codecs` is
+/// the same six functions written once, in ordinary Vyrn, over `bytes` and
+/// `stringFromBytes`.
+///
+/// This example is the three-way half of that proof. `tests/codecs.rs` compares
+/// the Vyrn versions against the builtins over a wide corpus on the interpreter;
+/// what it cannot show is that the *Vyrn* implementation lowers identically, so
+/// here every row prints its value AND `mine == builtin`, and parity runs the
+/// whole file on the interpreter, the native backend and wasm. A row that reads
+/// `false` on one engine and `true` on another is the failure this file exists to
+/// catch.
+///
+/// The NUL rows are deliberately absent: a decoded `0x00` is `None` here and
+/// `Some` from the builtin, whose two engines then disagree with each other
+/// (interpreter keeps the byte, native truncates the `char*` at it). That
+/// divergence is pinned in `std/codecs`'s own `test` blocks and in
+/// `tests/codecs.rs`, where it can be stated rather than printed.
+
+import {
+    base64DecodeV,
+    base64EncodeV,
+    hexDecodeV,
+    hexEncodeV,
+    urlDecodeV,
+    urlEncodeV,
+} from "std/codecs"
+
+/// Every ASCII byte a `String` can hold, `0x01` through `0x7F` — which is the
+/// encoders' whole input alphabet on one line, since they work a byte at a time.
+fn asciiSweep() -> String {
+    let mut b: Array<UInt8> = []
+    let mut i = 1
+    while i < 128 {
+        b.push(UInt8(i))
+        i = i + 1
+    }
+    return match stringFromBytes(b) {
+        Ok(s) => s,
+        Err(e) => "unreachable",
+    }
+}
+
+/// An `Option<String>` as printable text, so a `None` is visible rather than a
+/// blank line.
+fn show(o: Option<String>) -> String {
+    return match o {
+        Some(s) => s,
+        None => "None",
+    }
+}
+
+/// Whether the two decoders agree, compared through `show` so `None` participates.
+fn agree(mine: Option<String>, oracle: Option<String>) -> Bool {
+    return show(mine) == show(oracle)
+}
+
+fn main() -> Int64 {
+    // ---- hex ---------------------------------------------------------------
+    print(hexEncodeV("Hi")) // 4869
+    print(hexEncodeV("Hi") == hexEncode("Hi")) // true
+    print(hexEncodeV("")) //
+    print(hexEncodeV("café ☕")) // the UTF-8 bytes, not the code points
+    print(hexEncodeV("café ☕") == hexEncode("café ☕")) // true
+    // Every ASCII byte at once: 127 bytes, 254 digits, one comparison.
+    print(hexEncodeV(asciiSweep()) == hexEncode(asciiSweep())) // true
+    print(hexEncodeV(asciiSweep()).byteLength) // 254
+    print(show(hexDecodeV("4869"))) // Hi
+    print(agree(hexDecodeV("4869"), hexDecode("4869"))) // true
+    // Mixed case reads back; odd length, non-hex and non-UTF-8 do not.
+    print(show(hexDecodeV("C3a9"))) // é
+    print(agree(hexDecodeV("C3a9"), hexDecode("C3a9"))) // true
+    print(show(hexDecodeV("486"))) // None
+    print(agree(hexDecodeV("486"), hexDecode("486"))) // true
+    print(show(hexDecodeV("zz"))) // None
+    print(agree(hexDecodeV("zz"), hexDecode("zz"))) // true
+    print(show(hexDecodeV("80"))) // None  (a lone continuation byte)
+    print(agree(hexDecodeV("80"), hexDecode("80"))) // true
+
+    // ---- base64: the three residues -----------------------------------------
+    print(base64EncodeV("")) //
+    print(base64EncodeV("A")) // QQ==
+    print(base64EncodeV("AB")) // QUI=
+    print(base64EncodeV("ABC")) // QUJD
+    print(base64EncodeV("A") == base64Encode("A")) // true
+    print(base64EncodeV("AB") == base64Encode("AB")) // true
+    print(base64EncodeV("ABC") == base64Encode("ABC")) // true
+    // The two alphabet entries above 61 — `+` and `/` — and the sweep.
+    print(base64EncodeV("~~~")) // fn5+
+    print(base64EncodeV("ÿÿ")) // w7/Dvw==
+    print(base64EncodeV(asciiSweep()) == base64Encode(asciiSweep())) // true
+    print(show(base64DecodeV("SGVsbG8="))) // Hello
+    print(agree(base64DecodeV("SGVsbG8="), base64Decode("SGVsbG8="))) // true
+    // A full round trip through multi-byte text.
+    print(show(base64DecodeV(base64EncodeV("café ☕")))) // café ☕
+    // Refusals: a length that is not a multiple of four, a digit outside the
+    // alphabet, `=X`, padding before the final group, non-UTF-8 bytes.
+    print(show(base64DecodeV("QQ="))) // None
+    print(agree(base64DecodeV("QQ="), base64Decode("QQ="))) // true
+    print(show(base64DecodeV("QQ*="))) // None
+    print(agree(base64DecodeV("QQ*="), base64Decode("QQ*="))) // true
+    print(show(base64DecodeV("Q=QQ"))) // None
+    print(agree(base64DecodeV("Q=QQ"), base64Decode("Q=QQ"))) // true
+    print(show(base64DecodeV("QQ==QQ=="))) // None
+    print(agree(base64DecodeV("QQ==QQ=="), base64Decode("QQ==QQ=="))) // true
+    print(show(base64DecodeV("////"))) // None
+    print(agree(base64DecodeV("////"), base64Decode("////"))) // true
+
+    // ---- percent encoding ---------------------------------------------------
+    print(urlEncodeV("aZ09-_.~")) // aZ09-_.~   (the unreserved set, untouched)
+    print(urlEncodeV("name=a b&x")) // name%3Da%20b%26x
+    print(urlEncodeV("a+b")) // a%2Bb   (`+` is reserved, not a space)
+    print(urlEncodeV("é")) // %C3%A9   (uppercase hex)
+    print(urlEncodeV("name=a b&x") == urlEncode("name=a b&x")) // true
+    print(urlEncodeV(asciiSweep()) == urlEncode(asciiSweep())) // true
+    print(show(urlDecodeV("%C3%A9"))) // é
+    print(agree(urlDecodeV("%C3%A9"), urlDecode("%C3%A9"))) // true
+    print(show(urlDecodeV("%c3%a9"))) // é   (either case decodes)
+    print(show(urlDecodeV("a+b"))) // a+b  (no `+` special case in either direction)
+    print(agree(urlDecodeV("a+b"), urlDecode("a+b"))) // true
+    print(show(urlDecodeV("%"))) // None
+    print(agree(urlDecodeV("%"), urlDecode("%"))) // true
+    print(show(urlDecodeV("%4"))) // None
+    print(agree(urlDecodeV("%4"), urlDecode("%4"))) // true
+    print(show(urlDecodeV("%zz"))) // None
+    print(agree(urlDecodeV("%zz"), urlDecode("%zz"))) // true
+    print(show(urlDecodeV("%80"))) // None
+    print(agree(urlDecodeV("%80"), urlDecode("%80"))) // true
+
+    // ---- the round trip that has to hold for every codec --------------------
+    let s = "Hello, Vyrn! ☕ 100% — é"
+    print(show(hexDecodeV(hexEncodeV(s))) == s) // true
+    print(show(base64DecodeV(base64EncodeV(s))) == s) // true
+    print(show(urlDecodeV(urlEncodeV(s))) == s) // true
+    return 0
+}

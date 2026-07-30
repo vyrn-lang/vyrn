@@ -1068,3 +1068,116 @@ two sibling M4b modules present in the tree), `strpredbytes.vyrn` green three wa
 in parity, `doc --std --verify` clean with `docs/api/std/strpred.md` added. The
 shim is unchanged at 95 C definitions / 66 exported, and it should be: M4b(3)
 retires no builtin, it proves five of them redundant.
+
+---
+
+## M4b(1), as landed: the codecs needed nothing, and the builtin they answer to is wrong
+
+`hexEncode`, `hexDecode`, `base64Encode`, `base64Decode`, `urlEncode` and
+`urlDecode` are now written in Vyrn, in `std/codecs` (350 lines), and proved equal
+to the builtins over 6,354 comparisons. Nothing is swapped: the builtins still
+exist, the Vyrn versions carry a `V` suffix, and the equivalence is a committed
+test rather than a claim made after a deletion.
+
+### The decision: no primitive, no ruling, no mechanism
+
+M4a needed two primitives (`floatBits` / `floatFromBits`). M3 needs a semantic
+ruling before it can move. These six needed **neither**, and that is the finding
+worth the milestone: `bytes(s)`, `stringFromBytes(..)`, RFC-0045's bitwise
+operators and a `while` loop are the entire toolkit. Every one of the six was
+written first-try and its hand-picked pins passed on the first run — the only
+milestone here so far where the language was already sufficient.
+
+They are also the cheapest possible test of M2b's injection mechanism when the
+swap is taken, because they need **no type-directed part at all**. `toJson` needed
+a shared AST walk and synthesized per-type encoders because it reads a value's
+static type; `hexEncode(s)` is `String -> String`. The compiler part of the swap
+is an injected import and a renamed call, which M2b already built and which
+nothing else has to be written for.
+
+Measured rather than assumed, the way M2a measured the writer split: a program
+whose only import is `std/codecs` compiles under `VYRN_WASM_BACKEND=direct` and
+wasmtime prints what the interpreter prints. The module imports nothing, so its
+layering is trivially clean. Meanwhile the direct backend refuses
+`examples/codecbytes.vyrn` at `hexEncode` — "no lowering for the call" — which is
+the RFC-0077 relationship in one line: six unlowered builtin rows, or a library
+that already runs.
+
+### The proof shape: the builtin as oracle, before any deletion
+
+`tests/codecs.rs` generates one Vyrn program that calls **both** implementations on
+every input in a corpus and prints a line only where they disagree — 282 encoder
+inputs and 1,554 decoder inputs, 6,354 comparisons. The corpus is the surface where
+two codecs can differ: every byte a `String` can hold, all three base64 padding
+residues, every alphabet digit, every printable ASCII byte in each of a group's
+four positions, `=X` and padding before the final group, odd hex lengths, non-hex
+digits, both hex cases, truncated and non-hex percent escapes, every `%XX` in both
+cases, the unreserved set, and decoded bytes that are not UTF-8.
+
+Two details are deliberate. Payloads are rendered through the *builtin* `hexEncode`
+so a mismatch line is ASCII and the test's own reporting does not depend on the
+code under test. And the expected divergence is recognised **by rule** rather than
+by an enumerated allow-list, so a new divergence cannot hide inside a stale list;
+the test also asserts the class is non-empty, so the rule is exercised rather than
+vacuous. Mutation-checked: making `urlEncode`'s hex lowercase produces 86
+disagreements, so the harness bites.
+
+Because the comparison is written as "both, on the same input", it does not have to
+be rewritten when the swap lands. With the builtins gone it becomes the regression
+pin for what replaced them.
+
+### The finding: decoding a NUL is a latent parity bug in the builtin
+
+One class of disagreement, and it is the builtin's. A decoder whose bytes contain
+`0x00` — `hexDecode("00")`, `base64Decode("AA==")`, `urlDecode("%00")` — answers
+`Some` today, and **answers it differently on each engine**:
+
+| engine | `hexDecode("00")` |
+|---|---|
+| interpreter | `Some` of a Rust `String` holding the NUL byte |
+| native | `Some` of a `char*` that `__vyrn_strlen` truncates at that byte |
+
+The IR decoders write a NUL terminator and return a pointer; the interpreter keeps
+a length-carrying `String`. No example decodes a NUL, so parity has never looked at
+the row, which is the fifth milestone in a row where writing the boring pins first
+found something only running could catch. `std/codecs` returns `None`, because
+RFC-0014 forbids a NUL inside a `String` and `stringFromBytes` enforces it — and
+`None` is the answer that is the same on all three engines. **So the swap is a bug
+fix, not just a deletion**, and it is pinned as a divergence in
+`std/codecs.vyrn`'s own `test` block rather than papered over.
+
+A smaller thing the corpus settled: "every byte 0..255" is not reachable through an
+encoder at all. `0x00` is forbidden, and `0xC0`, `0xC1` and `0xF5`..`0xFF` cannot
+appear in valid UTF-8 — so the full byte range is only an input to the *decoders*,
+where the corpus does hit all 256.
+
+### What the swap will retire, counted
+
+Nothing in C, and that is the point: these six are the only builtins with **no C
+shim implementation at all**. What they have instead is ~494 lines of hand-written
+LLVM IR in `vyrn-codegen` (six codec functions plus `__vyrn_hexdigit`,
+`__vyrn_hexdigit_uc` and `__vyrn_hexval`; `__vyrn_utf8valid` stays, since
+`stringFromBytes` and `chars` call it too) and 159 lines of Rust in `interp.rs`.
+653 lines of duplication against 350 lines of Vyrn, and a third implementation the
+direct backend would otherwise owe.
+
+Counting the shim by M4a's stated method — C function definitions in
+`RUNTIME_SHIM`, `static` treated as internal:
+
+| | |
+|---|---|
+| C function definitions in the shim | 95 (66 exported, 29 static) |
+| deleted in this milestone | **0** |
+
+Unchanged, and it must be: M4b(1) moved no builtin. A milestone that retires none
+reports a zero.
+
+### Gates, at this note
+
+`std/codecs`'s four `test` blocks, the example's rows on the interpreter and the
+6,354-comparison oracle are three new workspace rows; the suite reported 1230
+passed / 0 failed with all three sibling M4b modules present in the tree.
+`examples/codecbytes.vyrn` is green three ways in parity (interp == native ==
+wasm). `doc --std --verify` clean with `docs/api/std/codecs.md` added. The
+RFC-0077 ladder is untouched — no builtin moved, and the example calls the ones
+the direct backend has not lowered.
