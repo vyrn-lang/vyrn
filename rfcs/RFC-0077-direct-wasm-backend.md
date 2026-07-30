@@ -83,7 +83,8 @@ A spike measured the shape of the job rather than guessing at it:
   a thunk symbol (`call @__vyrn_spawn(ptr @__vyrn_task_*, ptr)`) and the shim
   calls it, which in wasm needs a table element, `ref.func` and `call_indirect`.
   Bounded and enumerable — 9 sites across 3 examples, all syntactic — but a
-  milestone that had assumed this away would have discovered it at the end.
+  milestone that had assumed this away would have discovered it at the end. M2m
+  lowered both function-value features and added none: it is still only `spawn`.
 - **No generics** — *wrong, and M2e is where it was corrected.* Monomorphization
   does not run before any instruction is emitted, in either backend: a
   specialization is **discovered** at a call site as a side effect of emitting
@@ -91,7 +92,9 @@ A spike measured the shape of the job rather than guessing at it:
   direct backend cannot consume monomorphized code; it needs the same
   interleaved shape, and it needs one more thing the textual one does not,
   because a wasm call names a function *index* rather than a symbol. See
-  "M2e, as landed".
+  "M2e, as landed" — and "M2m, as landed", where the second (higher-order)
+  worklist arrived and turned out to be the same one, while RFC-0037's dispatchers
+  turned the index discipline into an encoder reservation.
 - **A small, fixed boundary.** 58 external symbols in the largest real artifact:
   48 `__vyrn_*`, 9 libc, 1 intrinsic.
 - **The traversal is reused.** Monomorphization, defunctionalization, drop
@@ -549,6 +552,11 @@ milestone that assumed it would have discovered that at the end instead of here.
 
 The design survives. No relooper, no reconstruction of joins, one small table
 whose contents are a compile-time list.
+
+**Cashed in M2m.** Both function-value features are lowered now and neither needed
+a table: an RFC-0023 target is a compile-time function index, and an RFC-0037
+stored value is a tag the signature's dispatcher switches on. The nine sites here
+are still exactly `spawn`'s.
 
 ---
 
@@ -2568,3 +2576,184 @@ handed out.
 Pure refactor, and it is checked as one: `fib`, `mapdemo` and `freelist` emit
 byte-identical modules before and after, and the ladder is unchanged at 63/87 on
 both link shapes.
+
+## M2m, as landed
+
+**Function values, both halves.** RFC-0023's higher-order specialization — the
+second worklist M2e refused by name — and RFC-0037's stored `fn` values by
+defunctionalization. **63/87 → 68/87**: `lambdas`, `rpc`, `rpcsplit`, `closures2`,
+`fnvalstore`.
+
+The five are the whole row, and unlike the last three milestones the row was worth
+exactly what it said. Nothing here is refused.
+
+### The function table is still unnecessary, and now it is measured for both halves
+
+M2a's pre-flight found zero indirect calls and read that as RFC-0037's
+defunctionalization holding. It does, and this milestone is where it was cashed:
+
+- A `fn`-typed parameter's target is a compile-time function **index** — a lifted
+  lambda, a named function, or a forwarded parameter — resolved at the call site
+  that specializes the callee.
+- A stored value is `{ i64 tag, i64 payload }`, and every call through one is ONE
+  direct call to the signature's dispatcher, which switches on the tag and
+  direct-calls the target.
+
+So the emitted module has no table, no `ref.func` and no `call_indirect` for
+either feature. The nine function-addresses-as-values M2a found are still exactly
+`spawn`'s, and still the only ones.
+
+### One queue, and then the thing that could not be queued
+
+The textual driver runs **two** worklists that feed each other plus a dedup set
+for lifted lambdas, and drains each with `pop()`. It is right to: nothing there
+depends on order, because every reference is a name.
+
+Here the order was the numbering, so the three kinds of discovered body — a
+generic instantiation, an RFC-0023 specialization, a lifted lambda — went into
+**one** append-only queue. "They feed each other" then costs nothing to arrange:
+it is appending to the list you are reading, and M2e's FIFO invariant covers all
+three instead of one.
+
+Then RFC-0037's dispatcher broke the invariant outright, and that is the finding.
+A dispatcher switches over every construction of its signature **anywhere in the
+module**, so its body is complete only after the last body is walked — while its
+index has to be callable from the middle of that walk. No ordering discipline can
+arrange that. The alternatives were both worse: a pre-scan for constructions is
+the second-traversal-that-must-agree M2e refused an instantiation walker over, and
+an inline switch per call site would silently miss a variant registered later.
+
+So `wasm::Module::reserve_func`/`fill` landed, and **every** index in the module
+became a reservation — user functions, the globals initializer, specializations,
+lambdas, dispatchers. M2e's note that "`insts` is append-only and `done` only
+moves forward — FIFO by construction" is therefore superseded rather than
+extended: the discipline is replaced by the mechanism it was standing in for, and
+an out-of-turn body is now impossible instead of asserted against. That is the one
+place this milestone contradicts an earlier one.
+
+### Both new bodies are synthesized `Function`s, which is why there is no new lowering
+
+A lifted lambda is a `Function` whose captures are ordinary **read** parameters. An
+RFC-0023 specialization is the callee's `Function` with each `fn` parameter
+replaced by its target's capture parameters. Both then go through `lower_body`
+unchanged, and that is not tidiness — three things fall out of it:
+
+- M0's by-value parameter copy IS the capture snapshot. An aggregate capture
+  arrives as an address and the prologue copies it into a slot; RFC-0023 specifies
+  exactly that, so it cost nothing.
+- A target's signature is captures-then-parameters, so **calling** a target is
+  `emit_call` with the captures prepended to the argument list. The aggregate
+  convention, `modify`, and the M2d coercion seam have no second implementation to
+  disagree with.
+- A dispatcher is therefore a target with **one** capture, which is why a stored
+  value flowing into a `fn`-typed parameter needed no third mechanism: the capture
+  the specialization receives is the enum itself.
+
+An instance's capture parameters are named `@cap..`, which no Vyrn identifier can
+be. That matters once and silently: `on(p, |q| .. p.x ..)` where the callee's own
+first parameter is also `p` binds the lambda's `p` to the capture, and a spelling
+that could collide would bind it to the callee's and print a plausible number.
+
+### What is shared, and one shared rule that was missing an arm
+
+Two more free functions both backends call:
+
+- **`lambda_captures`** — the capture WALK. A capture list is part of a lifted
+  function's signature, so two backends disagreeing about its length or its order
+  emit calls with the wrong number of arguments. Only "is this name an enclosing
+  local?" is per-backend, and it is one closure.
+- **`normalize_fn_sig`** — which spellings are one signature. It decides which
+  constructions a dispatcher covers, so two backends grouping differently would
+  give one of them a dispatcher missing a variant: a defensive trap where a call
+  belongs, reached only by the spelling nobody wrote a test for.
+
+And `solve_param` — the unification rule M2e made shared — **had no `Type::Fn`
+arm**. So a generic record holding a `fn` whose parameter is the record's own type
+parameter (`Deferred<P, T> = { run: fn(P) -> T }`, the `std/ui` `ParamQuery` shape)
+solved nothing from its field and `applied_type` filled both in with `Unit`. The
+direct backend then registered a variant under `fn(Unit) -> Unit` and dispatched
+under `fn(User) -> String`, so `fnvalstore` built and hit the defensive arm. The
+textual backend survived it by accident: it pushes the *unsubstituted* field type
+as the expected one and its own `normalize_sig` re-applies the ambient
+substitution, so the `Param`s were fixed on the way past. Adding the arm is
+`emit-ir` byte-identical across all 89 examples, which is what says it was a gap
+rather than a decision.
+
+### The bug only running could catch
+
+`each(xs, |x| print(x))` — a **Unit-returning** `fn` type over an expression body.
+The lifted lambda synthesized `return print(x)`, and the return path correctly
+refused a value the signature does not carry. It is a statement rather than a
+return, which is the split the textual emitter reaches by testing
+`llt(ret) == "void"`. Ninth consecutive milestone whose real bug was found by
+executing something.
+
+### Refused, specifically
+
+- A **generic or itself-higher-order function as a target**: the first has no index
+  until something fixes its type arguments, the second has no first-order
+  definition at all.
+- A **target taking a `modify` parameter**. A `fn` type cannot carry a capability,
+  so passing one would change the ABI silently — the callee would be handed a value
+  where it expects an address.
+- A `fn`-typed argument that is neither a lambda nor a name, and a call through a
+  stored value whose receiver is not a name. That is RFC-0037's own surface
+  (calls-by-name-only), so it is a refusal with no source to refuse.
+
+### What the ladder cannot see, and therefore has tests
+
+Two running tests, both pinning the **interpreter's** answers rather than comparing
+two backends:
+
+`a_fn_typed_parameter_specializes_to_whatever_the_call_site_resolved` — an
+aggregate capture whose name collides with the callee's own parameter, the same
+capture forwarded through two boundaries, an aggregate parameter and return on the
+`fn` type, two distinct lambdas of one shape at two sites (two instances, not
+one), one literal inside a generic body under two instantiations (two lifted
+copies, or the `Int64` copy gets a `String`), a block-bodied lambda, two `fn`
+parameters in one specialization, and the Unit-returning signature above.
+
+`a_stored_function_value_dispatches_by_signature_not_by_spelling` — a
+Unit-signature slot holding a value-returning function (the dispatcher has to drop
+the result), an aggregate return from a lifted lambda through a dispatcher's own
+hidden destination, and `Make` against the bare `fn(Int64) -> Pt`, which must be
+one enum or a tag built under one spelling falls through the other's switch.
+
+### Nothing else contradicted M0, M1, M2a–M2l
+
+Every offset is still `layout::of_ll ∘ llt` — the `{ i64, i64 }` a stored value is,
+the capture block's fields, the sum payload a `fn` rides inline in (`Word::Inline2`
+already said "a `Ref` or a stored `fn`", so `Option<Transform>` needed nothing).
+Destination-first holds at the dispatcher too, where the aggregate result travels
+through the dispatcher's own destination parameter with the call sitting on top of
+it — M2d's "a value may sit beneath an `if`" applied to a call rather than to a
+check. No body emits a `return`: a dispatcher is a chain of nested `if`/`else`
+whose innermost `else` is the defensive arm, and its `unreachable` is what
+satisfies a result-typed chain without any arm branching out. `Type::Param` stayed
+unreachable, and the LLVM wasm path is byte-for-byte unaffected.
+
+`Fn_::coerce` took nothing new, which is the third milestone in a row. A `fn` value
+flowing between fn-typed spellings really is a re-tag only in the textual emitter,
+and here it is not even that: two spellings normalize to one signature, so the two
+`ll`s are equal and the seam's shortcut is correct rather than dangerous.
+
+### The size
+
+`fib.vyrn` is unchanged at 5,167 bytes — nothing here is in the emitted runtime.
+`lambdas` is 8,162, `closures2` 10,812 and `fnvalstore` 11,183, which is the
+per-program cost of one function per lambda plus one dispatcher per signature.
+
+### 68 of 87, regrouped
+
+| blocked on | n |
+|---|---|
+| `Match` on strings | 4 |
+| the call `parse` | 4 |
+| the call `lineAt` 3, the call `logger` 2 | 5 |
+| `spawn` 2, `region` 2 | 4 |
+| a conversion from `Cargo`/`Config` to `T` | 2 |
+
+Five rows, no long tail, and the function-value row is gone. What remains is the
+three builtins RFC-0078 checked and deliberately refused to route (9 examples), the
+two control-flow features this RFC scoped out from the start (4), RFC-0046's DFA
+(4), and one generic-payload conversion twice.

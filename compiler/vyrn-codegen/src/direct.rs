@@ -231,18 +231,29 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
         protocol_methods,
         subst: HashMap::new(),
         mono: RefCell::new(Mono::default()),
+        fnvals: RefCell::new(Vec::new()),
+        dispatch: RefCell::new(Dispatch::default()),
         globals: HashMap::new(),
         externs,
         droppable: vyrn_frontend::own::analyze(program).droppable,
     };
 
-    // Every function the module will define, in the order they are defined, so a
-    // call can name an index before the callee's body exists. Recursion and
-    // forward references both need this; there is no fixup pass.
-    let first = m.n_imports() + rt.count;
-    for (i, f) in user.iter().enumerate() {
+    // Every function the module will define, indexed before any body exists, so a
+    // call can name a callee that has not been emitted. Recursion and forward
+    // references both need this; there is no fixup pass.
+    //
+    // A RESERVATION rather than an index computed from the emission order. Through
+    // M2l the order WAS the numbering, and keeping the two in step was a discipline
+    // — `Mono::insts` append-only, `done` only forward, FIFO by construction, and
+    // an assertion at every drain. RFC-0037's dispatchers cannot satisfy any such
+    // discipline (their bodies are complete only after the last body is walked), so
+    // the discipline is replaced by the mechanism it was standing in for: an index
+    // is handed out by the encoder and the body is filled whenever it exists. An
+    // out-of-turn body is now impossible rather than asserted against.
+    for f in user.iter() {
         let s = cx.signature(f)?;
-        cx.sigs.insert(f.name.clone(), Sig { index: first + i as u32, ..s });
+        let (wp, wr) = cx.wasm_sig(&s, f.line)?;
+        cx.sigs.insert(f.name.clone(), Sig { index: m.reserve_func(&wp, &wr), ..s });
     }
 
     // Module state (RFC-0013), before any body: a top-level `let` is one fixed
@@ -263,14 +274,10 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
         cx.globals.insert(g.name.clone(), (Place::Static(m.reserve(l.size, l.align)), ty));
     }
 
-    // The initializer sits between the ordinary definitions and the
-    // specializations, because an index is only ever handed out ahead of a body
-    // that will be added in the same order. Specializations come last, since all
-    // of those are indexed before any body is walked and none can be discovered
-    // late.
-    let init_index = first + user.len() as u32;
+    // The initializer's index, reserved like every other so nothing depends on
+    // where in the sequence it lands.
     let has_globals = !program.globals.is_empty();
-    cx.mono.borrow_mut().base = init_index + u32::from(has_globals);
+    let init_index = m.reserve_func(&[], &[]);
 
     for f in &user {
         let sig = cx.sigs[&f.name].clone();
@@ -280,35 +287,44 @@ pub fn compile_linked(program: &Program, link: Link) -> Result<Vec<u8>, String> 
     // The initializers, in DECLARATION order — which the loader has already made
     // linker order, dependencies first, so `statemod`'s diamond initializes its
     // shared store before either arm reads it. One function, called once from
-    // `_start`, so nothing runs per call and nothing runs twice.
-    if has_globals {
-        let init = lower_globals_init(&mut m, program, &cx)?;
-        assert_eq!(init, init_index, "the globals initializer took an index a caller did not name");
-    }
+    // `_start`, so nothing runs per call and nothing runs twice. Filled even when
+    // the program has no module state, because a reservation nobody fills is not a
+    // module — and an empty body is two bytes.
+    let init = lower_globals_init(&mut m, program, &cx)?;
+    m.fill(init_index, init);
 
-    // Drain the specializations the bodies discovered. One body may discover more
-    // — a generic instance calling a generic, an RFC-0023 instance calling either,
-    // a lifted lambda doing any of it — so this reads `insts` afresh every turn
-    // rather than iterating a snapshot. That is what "the worklists feed each
-    // other" is here: appending to the list being read.
+    // Drain what the bodies discovered, and then the dispatchers the drain
+    // discovered, until neither has anything left. One body may discover more of
+    // either — a generic instance calling a generic, an RFC-0023 instance calling
+    // either, a lifted lambda doing any of it, any of them calling a stored `fn`
+    // value — so this reads both lists afresh every turn rather than iterating a
+    // snapshot. That is what "the worklists feed each other" is here: appending to
+    // the list being read.
     loop {
         let p = {
             let mono = cx.mono.borrow();
             mono.insts.get(mono.done).cloned()
         };
-        let Some(p) = p else { break };
-        // The index was promised at discovery, and a wasm `call` names an index
-        // rather than a symbol — so a body arriving out of turn would renumber
-        // every call after it and the module would still validate.
-        assert_eq!(
-            m.next_func(),
-            p.sig.index,
-            "specialization queue out of order: a `call` already names a different index"
-        );
-        cx.subst = p.subst.clone();
-        lower_fn(&mut m, &p.f, &p.sig, &cx, p.binds.clone())?;
-        cx.subst = HashMap::new();
-        cx.mono.borrow_mut().done += 1;
+        if let Some(p) = p {
+            cx.subst = p.subst.clone();
+            let body = lower_body(&mut m, &p.f, &p.sig, &cx, p.binds.clone())?;
+            cx.subst = HashMap::new();
+            m.fill(p.sig.index, body);
+            cx.mono.borrow_mut().done += 1;
+            continue;
+        }
+        // A dispatcher's body is the one thing that cannot be written when its
+        // index is handed out: it switches over every construction of its
+        // signature ANYWHERE in the module, so it is only complete once the last
+        // body is walked. Hence `Module::reserve_func` — see [`Fn_::dispatcher`].
+        let d = {
+            let disp = cx.dispatch.borrow();
+            disp.sigs.get(disp.done).cloned()
+        };
+        let Some((sig_ty, dsig)) = d else { break };
+        let body = lower_dispatcher(&mut m, &cx, &sig_ty, &dsig)?;
+        m.fill(dsig.index, body);
+        cx.dispatch.borrow_mut().done += 1;
     }
 
     // `_start`: WASI's entry point. The exit code is `main & 255`, the same
@@ -454,9 +470,37 @@ struct Pending {
 /// are reading rather than an alternation to get right.
 #[derive(Default)]
 struct Mono {
-    /// Where the first specialization's function index lands.
-    base: u32,
     insts: Vec<Pending>,
+    done: usize,
+}
+
+/// One source a stored `fn` value can come from (RFC-0037): a lifted lambda, a
+/// named function, or a `fn`-typed parameter inside a specialization.
+///
+/// Defunctionalization: a stored value is `{ i64 tag, i64 payload }` where the tag
+/// indexes THIS list globally and the payload is a heap block of captures (0 when
+/// there are none). Every call goes through the signature's dispatcher, which
+/// switches on the tag and makes a DIRECT call — so no function pointer exists
+/// anywhere, and M2a's measurement of zero indirect calls holds for stored values
+/// as much as for `fn` parameters.
+#[derive(Clone)]
+struct FnVal {
+    /// The normalized signature this variant belongs to. Two spellings of one
+    /// signature must land here as one type, or a dispatcher misses a variant —
+    /// which is [`crate::normalize_fn_sig`]'s whole job.
+    sig: Type,
+    target: FnTarget,
+}
+
+/// The dispatchers, and how far the driver has got through them.
+///
+/// Separate from [`Mono`] because a dispatcher is not discovered from a body being
+/// walked, it is discovered from a SIGNATURE being called through — and its body
+/// cannot be written until every body has been walked, since a construction
+/// anywhere in the module adds a variant to it.
+#[derive(Default)]
+struct Dispatch {
+    sigs: Vec<(Type, Sig)>,
     done: usize,
 }
 
@@ -514,6 +558,10 @@ struct Cx {
     /// function.
     subst: HashMap<String, Type>,
     mono: RefCell<Mono>,
+    /// RFC-0037's variant registry, module-global so a tag means the same thing in
+    /// every body that builds one.
+    fnvals: RefCell<Vec<FnVal>>,
+    dispatch: RefCell<Dispatch>,
     /// Module state (RFC-0013): name → its fixed address and declared type. Every
     /// body sees all of them, which is the textual backend's `globals` fallback in
     /// [`Gen::lookup`] — the checker already forbids an initializer reading a
@@ -582,6 +630,7 @@ impl Cx {
     /// lambda and an ordinary function are all checked by one function.
     fn enqueue(
         &self,
+        m: &mut Module,
         key: Key,
         f: Rc<Function>,
         subst: HashMap<String, Type>,
@@ -591,8 +640,9 @@ impl Cx {
             return Ok(p.sig.clone());
         }
         let s = self.signature(&f)?;
+        let (wp, wr) = self.wasm_sig(&s, f.line)?;
+        let sig = Sig { index: m.reserve_func(&wp, &wr), ..s };
         let mut mono = self.mono.borrow_mut();
-        let sig = Sig { index: mono.base + mono.insts.len() as u32, ..s };
         mono.insts.push(Pending { key, f, sig: sig.clone(), subst, binds });
         Ok(sig)
     }
@@ -600,6 +650,7 @@ impl Cx {
     /// A generic instantiation (M2e): [`Cx::enqueue`] with no `fn` parameters.
     fn instantiate(
         &self,
+        m: &mut Module,
         f: &Function,
         type_args: Vec<Type>,
         subst: HashMap<String, Type>,
@@ -611,6 +662,7 @@ impl Cx {
         }
         sf.ret = ftypes::substitute(&f.ret, &subst);
         self.enqueue(
+            m,
             Key::Generic(f.name.clone(), type_args),
             Rc::new(sf),
             subst,
@@ -881,7 +933,7 @@ fn top_level<'a>(cx: &'a Cx) -> Fn_<'a> {
 ///
 /// No wrapping `block`, because there is no `return` to route: an initializer is
 /// an expression.
-fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx) -> Result<u32, String> {
+fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx) -> Result<Frame, String> {
     let mut b = Frame::new(0, &[], 0);
     let mut f = top_level(cx);
     for g in &program.globals {
@@ -889,7 +941,7 @@ fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx) -> Result<u32,
         let r = cx.repr(&ty, g.line)?;
         f.store_into(m, &mut b, place, &r, &g.init, &ty)?;
     }
-    Ok(m.add(&[], &[], b))
+    Ok(b)
 }
 
 /// Lower one body. `sig` is passed rather than looked up because a specialization
@@ -907,8 +959,21 @@ fn lower_fn(
     cx: &Cx,
     binds: HashMap<String, FnBinding>,
 ) -> Result<(), String> {
+    let body = lower_body(m, f, sig, cx, binds)?;
+    m.fill(sig.index, body);
+    Ok(())
+}
+
+/// The body itself, before it is installed at the index reserved for it.
+fn lower_body(
+    m: &mut Module,
+    f: &Function,
+    sig: &Sig,
+    cx: &Cx,
+    binds: HashMap<String, FnBinding>,
+) -> Result<Frame, String> {
     let sig = sig.clone();
-    let (params, results) = cx.wasm_sig(&sig, f.line)?;
+    let (params, _results) = cx.wasm_sig(&sig, f.line)?;
     let dest = sig.ret.agg().map(|_| 0u32);
     let shift = dest.map_or(0, |_| 1);
 
@@ -1028,8 +1093,161 @@ fn lower_fn(
         }
     }
 
-    m.add(&params, &results, b);
-    Ok(())
+    Ok(b)
+}
+
+/// One signature's dispatcher (RFC-0037): switch on the tag, unpack the
+/// variant's capture block, and DIRECT-call the target.
+///
+/// This is the body that cannot be written when its index is handed out — a
+/// construction anywhere in the module adds a variant — which is the whole reason
+/// `wasm::Module::reserve_func` exists.
+///
+/// A chain of nested `if`/`else` rather than a `block` and a `br_table`: the
+/// innermost `else` is the defensive arm, and its `unreachable` is what satisfies a
+/// result-typed chain without any arm having to branch out. That also keeps M1's
+/// rule (no `return` in a body) true by construction.
+fn lower_dispatcher(
+    m: &mut Module,
+    cx: &Cx,
+    sig_ty: &Type,
+    dsig: &Sig,
+) -> Result<Frame, String> {
+    let Type::Fn(ptys, ret) = sig_ty else {
+        return unsupported("a dispatcher for a non-function type", 0);
+    };
+    let (params, _) = cx.wasm_sig(dsig, 0)?;
+    let mut b = Frame::new(params.len(), &[], 0);
+    let mut f = top_level(cx);
+
+    // param 0 is the aggregate-return destination when there is one, then the fn
+    // value's address, then the signature's own parameters.
+    let dest = dsig.ret.agg().map(|_| 0u32);
+    let shift = u32::from(dest.is_some());
+    let fv = shift;
+    for (i, pty) in ptys.iter().enumerate() {
+        let local = shift + 1 + i as u32;
+        // An aggregate parameter arrives as an address in a wasm local, which is
+        // the one thing `Place` cannot name (M2f) — so it is copied into a slot of
+        // its own exactly as `lower_body`'s prologue does, which is also the
+        // by-value copy the convention owes.
+        let place = match cx.repr(pty, 0)? {
+            Repr::Agg(l) => {
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
+                b.ins(&Instruction::LocalGet(local));
+                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                Place::Slot(off)
+            }
+            Repr::Scalar(_) => Place::Local(local),
+            Repr::Unit => return unsupported("a Unit parameter of a stored `fn`", 0),
+        };
+        f.scope.push((format!("@a{i}"), place, pty.clone()));
+    }
+    let args: Vec<Expr> =
+        (0..ptys.len()).map(|i| Expr::Var { name: format!("@a{i}"), line: 0 }).collect();
+
+    let fl = layout::of_ll(&cx.ll(sig_ty)).map_err(|e| format!("direct backend: {e}"))?;
+    let tag = b.local(ValType::I64);
+    let pl = b.local(ValType::I32);
+    b.ins(&Instruction::LocalGet(fv));
+    b.ins(&Instruction::I64Load(at(fl.fields[0])));
+    b.ins(&Instruction::LocalSet(tag));
+    b.ins(&Instruction::LocalGet(fv));
+    b.ins(&Instruction::I64Load(at(fl.fields[1])));
+    b.ins(&Instruction::I32WrapI64);
+    b.ins(&Instruction::LocalSet(pl));
+
+    let variants: Vec<(usize, FnVal)> = cx
+        .fnvals
+        .borrow()
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| v.sig == *sig_ty)
+        .map(|(i, v)| (i, v.clone()))
+        .collect();
+    let arm_ty = match &dsig.ret {
+        Repr::Scalar(v) => BlockType::Result(*v),
+        _ => BlockType::Empty,
+    };
+    for (i, v) in &variants {
+        b.ins(&Instruction::LocalGet(tag));
+        b.ins(&Instruction::I64Const(*i as i64));
+        b.ins(&Instruction::I64Eq);
+        b.ins(&Instruction::If(arm_ty));
+        f.depth += 1;
+        let mark = f.scope.len();
+        // The capture block, copied off the heap into a frame slot so each capture
+        // has a `Place`. The copy is what the textual backend's `load {block_ll}`
+        // is, and it is also the by-value read a capture is.
+        let cap_tys = v.target.sig.params[..v.target.ncaps].to_vec();
+        let mut all: Vec<Expr> = Vec::new();
+        if !cap_tys.is_empty() {
+            let bl = f.cap_block(&cap_tys)?;
+            let blk = b.alloc(bl.size, bl.align);
+            b.slot(blk);
+            b.ins(&Instruction::LocalGet(pl));
+            b.ins(&Instruction::I32Const(bl.size as i32));
+            b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            for (ci, ct) in cap_tys.iter().enumerate() {
+                let at_off = blk + bl.fields[ci];
+                let place = match cx.repr(ct, 0)? {
+                    Repr::Scalar(vt) => {
+                        let loc = b.local(vt);
+                        b.slot(at_off);
+                        b.ins(&load_of(&cx.ll(ct), 0, cx.signed(ct)));
+                        b.ins(&Instruction::LocalSet(loc));
+                        Place::Local(loc)
+                    }
+                    Repr::Agg(_) => Place::Slot(at_off),
+                    Repr::Unit => return unsupported("a captured Unit value", 0),
+                };
+                f.scope.push((format!("@c{ci}"), place, ct.clone()));
+                all.push(Expr::Var { name: format!("@c{ci}"), line: 0 });
+            }
+        }
+        all.extend(args.iter().cloned());
+        // An aggregate result is written through OUR destination, so it goes on the
+        // stack under the call — M2d's "a value may sit beneath an `if`" applied to
+        // the call rather than to a check.
+        if let Some(d) = dest {
+            b.ins(&Instruction::LocalGet(d));
+        }
+        let got = f.emit_call(m, &mut b, &v.target.sig, &all)?;
+        match (&dsig.ret, cx.repr(&got, 0)?) {
+            // The target's declared result may differ from the signature's — a
+            // named source's validated scalar, a wider record — so it crosses the
+            // M2d seam like any other flow.
+            (Repr::Scalar(_), _) => f.coerce(m, &mut b, None, &got, ret, 0)?,
+            (Repr::Agg(l), Repr::Agg(_)) => {
+                f.coerce(m, &mut b, None, &got, ret, 0)?;
+                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+            }
+            // A Unit-signature slot may hold a value-returning function: the
+            // result is discarded, exactly as a Unit-returning lambda's is.
+            (Repr::Unit, Repr::Scalar(_) | Repr::Agg(_)) => {
+                b.ins(&Instruction::Drop);
+            }
+            (Repr::Unit, Repr::Unit) => {}
+            _ => return unsupported("a stored `fn` whose result shape is not its signature's", 0),
+        }
+        f.scope.truncate(mark);
+        b.ins(&Instruction::Else);
+    }
+    // Unreachable by construction — a tag only ever comes from a registered
+    // construction — so this is the defensive arm, with the wording the textual
+    // backend's `@.fnval.bad` carries.
+    let msg = cx.rt.intern(m, "error: internal: invalid function value\n");
+    b.ins(&Instruction::I32Const(msg as i32));
+    b.ins(&Instruction::Call(cx.rt.trap));
+    b.ins(&Instruction::Unreachable);
+    for _ in &variants {
+        f.depth -= 1;
+        b.ins(&Instruction::End);
+    }
+    Ok(b)
 }
 
 impl Fn_<'_> {
@@ -1866,6 +2084,22 @@ impl Fn_<'_> {
                 b.ins(&Instruction::I32Const(at as i32));
                 Type::Str
             }
+            // A lambda in a value position (RFC-0037): the slot's declared
+            // signature types it, and there is nothing else that could.
+            Expr::Lambda { line, .. } => {
+                let Some(sig) = self.expected_fn_sig() else {
+                    return unsupported("a lambda with no expected function type", *line);
+                };
+                self.fnval_lambda(m, b, e, &sig)?
+            }
+            // A `fn`-typed parameter used as a VALUE rather than called
+            // (RFC-0037 × RFC-0023) — stored into a Map, an Array, a record field,
+            // or captured. Its target and captures are statically known here, so it
+            // materializes the same aggregate a lambda source would.
+            Expr::Var { name, line } if self.fn_binds.contains_key(name) => {
+                let bnd = self.fn_binds[name].clone();
+                self.fnval_binding(m, b, &bnd, *line)?
+            }
             // A nullary constructor (`None`, or an enum's `Empty`) parses as a
             // bare name, so it is only distinguishable from a local by failing
             // to be one.
@@ -1877,6 +2111,13 @@ impl Fn_<'_> {
                     Some(t) => t,
                     None => return unsupported(&format!("the name `{name}`"), *line),
                 }
+            }
+            // A bare function name as a value (RFC-0037): the empty-payload
+            // variant, which is the whole of `let f = double`.
+            Expr::Var { name, line }
+                if self.lookup(name, *line).is_err() && self.cx.sigs.contains_key(name) =>
+            {
+                self.fnval_named(m, b, name, *line)?
             }
             Expr::Var { name, line } => {
                 let (place, t) = self.lookup(name, *line)?;
@@ -2158,6 +2399,20 @@ impl Fn_<'_> {
             Expr::Float(_) => Type::Float,
             Expr::Bool(_) => Type::Bool,
             Expr::Str(_) => Type::Str,
+            // A `fn`-typed parameter or a bare function name used as a VALUE
+            // (RFC-0023 × RFC-0037): its type is the target's signature, which is
+            // also what a generic record field solves its parameters from —
+            // `Deferred { run: run }` fixes `P` and `T` from exactly this.
+            Expr::Var { name, .. } if self.fn_binds.contains_key(name) => {
+                let t = &self.fn_binds[name].target;
+                Type::Fn(t.sig.params[t.ncaps..].to_vec(), Box::new(t.sig.ret_ty.clone()))
+            }
+            Expr::Var { name, .. }
+                if self.lookup(name, line).is_err() && self.cx.sigs.contains_key(name) =>
+            {
+                let sig = &self.cx.sigs[name];
+                Type::Fn(sig.params.clone(), Box::new(sig.ret_ty.clone()))
+            }
             Expr::Var { name, .. } => self.lookup(name, line)?.1,
             Expr::Field { expr, field, .. } => {
                 let base = self.peek(expr, line)?;
@@ -2333,6 +2588,29 @@ impl Fn_<'_> {
                 _ if self.fn_binds.contains_key(name) => {
                     self.fn_binds[name].target.sig.ret_ty.clone()
                 }
+                // A branch yielding a call through a STORED function value
+                // (RFC-0037). `runChain`'s `match m(x) { .. }` peeks its scrutinee,
+                // so this is reached by the shape the feature exists for.
+                _ if matches!(
+                    self.lookup(name, line)
+                        .ok()
+                        .map(|(_, t)| crate::normalize_fn_sig(&self.cx.sub(&t), &self.cx.types)),
+                    Some(Type::Fn(..))
+                ) =>
+                {
+                    let (_, t) = self.lookup(name, line)?;
+                    match crate::normalize_fn_sig(&self.cx.sub(&t), &self.cx.types) {
+                        Type::Fn(_, ret) => *ret,
+                        _ => unreachable!("guarded above"),
+                    }
+                }
+                // A branch yielding a call to a function with `fn`-typed parameters
+                // (RFC-0023): the same three solving passes the emitting path runs,
+                // minus the lifting and the index.
+                _ if self.cx.higher_order.contains_key(name) => {
+                    let f = self.cx.higher_order[name].clone();
+                    self.peek_ho(&f, args, line)?
+                }
                 // A generic call in a branch: the same solve the emitting path
                 // does, so the join's destination is sized for the type the arm
                 // will actually produce.
@@ -2369,6 +2647,12 @@ impl Fn_<'_> {
                     Some(s) => s.ret_ty.clone(),
                     None => return unsupported(&format!("a branch yielding `{name}`"), line),
                 },
+            },
+            // A lambda is whatever signature the position names; there is nothing
+            // else it could be typed by (RFC-0037).
+            Expr::Lambda { line, .. } => match self.expected_fn_sig() {
+                Some(t) => t,
+                None => return unsupported("a lambda with no expected function type", *line),
             },
             other => return unsupported(&format!("a branch yielding {}", expr_name(other)), line),
         })
@@ -3002,6 +3286,17 @@ impl Fn_<'_> {
         if let Some(bnd) = self.fn_binds.get(name).cloned() {
             return self.target_call(m, b, &bnd, args, line);
         }
+        // A call through a stored function value (RFC-0037): one direct call to
+        // the signature's dispatcher. The receiver is always a NAME — a `let`, a
+        // `for` variable, a `match` binding, a field read into a local — which is
+        // the surface RFC-0037 defines.
+        if let Ok((_, ty)) = self.lookup(name, line) {
+            let norm = crate::normalize_fn_sig(&self.cx.sub(&ty), &self.cx.types);
+            if matches!(norm, Type::Fn(..)) {
+                let recv = Expr::Var { name: name.to_string(), line };
+                return self.fnval_call(m, b, &recv, &norm, args, line);
+            }
+        }
         if let Some(t) = self.sum_ctor(m, b, name, args, line)? {
             return Ok(t);
         }
@@ -3072,7 +3367,7 @@ impl Fn_<'_> {
                     }
                 }
             }
-            let sig = self.cx.instantiate(&f, type_args, subst)?;
+            let sig = self.cx.instantiate(m, &f, type_args, subst)?;
             return self.emit_call(m, b, &sig, args);
         }
         // RFC-0043's host boundary. These three are not `vyrn` host imports like
@@ -3322,7 +3617,7 @@ impl Fn_<'_> {
                 dptys.iter().map(|t| ftypes::substitute(t, &subst)).collect();
             let dret_sub = ftypes::substitute(dret, &subst);
             let (target, srcs, tys) =
-                self.resolve_fn_arg(&args[i], &ptys, &dret_sub, line)?;
+                self.resolve_fn_arg(m, &args[i], &ptys, &dret_sub, line)?;
             if generic {
                 crate::solve_param(dret, &target.sig.ret_ty, &mut subst);
             }
@@ -3378,6 +3673,7 @@ impl Fn_<'_> {
         sf.params = params;
         sf.ret = ftypes::substitute(&f.ret, &subst);
         let sig = self.cx.enqueue(
+            m,
             Key::Ho(f.name.clone(), type_args, targets),
             Rc::new(sf),
             subst,
@@ -3437,13 +3733,16 @@ impl Fn_<'_> {
     /// they become arguments to has not started pushing operands yet.
     fn resolve_fn_arg(
         &mut self,
+        m: &mut Module,
         arg: &Expr,
         ptys: &[Type],
         expected_ret: &Type,
         line: usize,
     ) -> Result<(FnTarget, Vec<String>, Vec<Type>), String> {
         match arg {
-            Expr::Lambda { params, body, line } => self.lift_lambda(arg, params, body, ptys, expected_ret, *line),
+            Expr::Lambda { params, body, line } => {
+                self.lift_lambda(m, arg, params, body, ptys, expected_ret, *line)
+            }
             Expr::Var { name, .. } => {
                 // A pass-through `fn`-typed parameter: forward the target AND the
                 // captures, which are this instance's own capture parameters. The
@@ -3454,15 +3753,21 @@ impl Fn_<'_> {
                     return Ok((bnd.target.clone(), bnd.cap_srcs.clone(), tys));
                 }
                 // A stored function value (RFC-0037) flowing into a `fn`-typed
-                // parameter needs the signature's dispatcher, which this backend
-                // does not have. Refused by name so the two features stay
-                // distinguishable on the ladder.
+                // parameter: the target is the signature's DISPATCHER and the
+                // "capture" is the enum itself, which is why this needs no third
+                // mechanism — a dispatcher is a target with one capture, and the
+                // specialization dispatches internally. v1's zero-cost path for a
+                // direct lambda or named argument is untouched; those never reach
+                // this arm.
                 if let Ok((_, ty)) = self.lookup(name, line) {
-                    if matches!(self.cx.resolve(&ty), Type::Fn(..)) {
-                        return unsupported(
-                            "a stored function value in a `fn`-typed parameter (RFC-0037)",
-                            line,
-                        );
+                    let norm = crate::normalize_fn_sig(&self.cx.sub(&ty), &self.cx.types);
+                    if matches!(norm, Type::Fn(..)) {
+                        let dsig = self.dispatcher(m, &norm, line)?;
+                        return Ok((
+                            FnTarget { sig: dsig, ncaps: 1 },
+                            vec![name.clone()],
+                            vec![norm],
+                        ));
                     }
                     return unsupported(&format!("`{name}` as a function value"), line);
                 }
@@ -3476,6 +3781,119 @@ impl Fn_<'_> {
                         line,
                     ),
                     Some(sig) => Ok((FnTarget { sig: sig.clone(), ncaps: 0 }, Vec::new(), Vec::new())),
+                    None => unsupported(&format!("`{name}` as a function value"), line),
+                }
+            }
+            other => unsupported(
+                &format!("a `fn`-typed argument that is {}", expr_name(other)),
+                Expr::line(other),
+            ),
+        }
+    }
+
+    /// What a lambda literal returns: concrete when the `fn` type named it, and
+    /// otherwise what the body produces — which is the outbound `U` a generic
+    /// higher-order call solves from. A block body carries no expression to peek, so
+    /// it is `Unit`, the textual backend's rule and the same one.
+    ///
+    /// One function because both the lifting path and [`Fn_::peek`] need the answer
+    /// and a `peek` that guessed differently would size a join's destination for a
+    /// type the arm does not produce.
+    fn lambda_ret(
+        &mut self,
+        params: &[String],
+        body: &LambdaBody,
+        ptys: &[Type],
+        expected_ret: &Type,
+        line: usize,
+    ) -> Result<Type, String> {
+        Ok(match (expected_ret, body) {
+            (Type::Param(_), LambdaBody::Expr(e)) => {
+                let mark = self.scope.len();
+                for (pn, pt) in params.iter().zip(ptys) {
+                    self.scope.push((pn.clone(), Place::Local(u32::MAX), pt.clone()));
+                }
+                let got = self.peek(e, line);
+                self.scope.truncate(mark);
+                self.cx.sub(&got?)
+            }
+            (Type::Param(_), LambdaBody::Block(_)) => Type::Unit,
+            (t, _) => t.clone(),
+        })
+    }
+
+    /// The return type of a call to a function with `fn`-typed parameters, WITHOUT
+    /// resolving its targets — which is what makes it usable from [`Fn_::peek`],
+    /// where nothing may be emitted and no index may be handed out.
+    ///
+    /// It runs the same three solving passes [`Fn_::ho_call`] does, in the same
+    /// order, and reads a target's return from the same two places
+    /// ([`Fn_::fn_arg_ret`]); what it skips is lifting and enqueueing. A wrong
+    /// answer here is a compile error rather than a miscompile, because `expr_as`
+    /// re-checks what the arm actually produced (M2b).
+    fn peek_ho(&mut self, f: &Function, args: &[Expr], line: usize) -> Result<Type, String> {
+        if f.params.len() != args.len() {
+            return unsupported(&format!("the call `{}` at this arity", f.name), line);
+        }
+        let generic = !f.type_params.is_empty();
+        let mut subst: HashMap<String, Type> = HashMap::new();
+        for (i, p) in f.params.iter().enumerate() {
+            if matches!(p.ty, Type::Fn(..)) {
+                continue;
+            }
+            self.expect.push(p.ty.clone());
+            let t = self.peek(&args[i], line);
+            self.expect.pop();
+            let aty = self.cx.sub(&t?);
+            if generic {
+                crate::solve_param(&p.ty, &aty, &mut subst);
+            }
+        }
+        if generic {
+            for (i, p) in f.params.iter().enumerate() {
+                let Type::Fn(dptys, _) = &p.ty else { continue };
+                if let Some(tptys) = self.fn_arg_param_types(&args[i]) {
+                    for (d, t) in dptys.iter().zip(&tptys) {
+                        crate::solve_param(d, t, &mut subst);
+                    }
+                }
+            }
+            for (i, p) in f.params.iter().enumerate() {
+                let Type::Fn(dptys, dret) = &p.ty else { continue };
+                let ptys: Vec<Type> =
+                    dptys.iter().map(|t| ftypes::substitute(t, &subst)).collect();
+                let want = ftypes::substitute(dret, &subst);
+                let got = self.fn_arg_ret(&args[i], &ptys, &want, line)?;
+                crate::solve_param(dret, &got, &mut subst);
+            }
+        }
+        Ok(ftypes::substitute(&f.ret, &subst))
+    }
+
+    /// What a `fn`-typed argument's target returns, read rather than resolved.
+    fn fn_arg_ret(
+        &mut self,
+        arg: &Expr,
+        ptys: &[Type],
+        expected_ret: &Type,
+        line: usize,
+    ) -> Result<Type, String> {
+        match arg {
+            Expr::Lambda { params, body, line } => {
+                self.lambda_ret(params, body, ptys, expected_ret, *line)
+            }
+            Expr::Var { name, .. } => {
+                if let Some(bnd) = self.fn_binds.get(name) {
+                    return Ok(bnd.target.sig.ret_ty.clone());
+                }
+                if let Ok((_, ty)) = self.lookup(name, line) {
+                    return match crate::normalize_fn_sig(&self.cx.sub(&ty), &self.cx.types) {
+                        Type::Fn(_, ret) => Ok(*ret),
+                        _ => unsupported(&format!("`{name}` as a function value"), line),
+                    };
+                }
+                match self.cx.sigs.get(name) {
+                    Some(sig) => Ok(sig.ret_ty.clone()),
                     None => unsupported(&format!("`{name}` as a function value"), line),
                 }
             }
@@ -3511,8 +3929,10 @@ impl Fn_<'_> {
     /// ordinary read parameters — which is exactly the by-value snapshot RFC-0023
     /// specifies, since `lower_fn`'s prologue already copies an aggregate parameter
     /// into a slot of its own.
+    #[allow(clippy::too_many_arguments)]
     fn lift_lambda(
         &mut self,
+        m: &mut Module,
         at: &Expr,
         params: &[String],
         body: &LambdaBody,
@@ -3537,23 +3957,7 @@ impl Fn_<'_> {
             let (_, t) = self.lookup(cn, line)?;
             cap_tys.push(self.cx.sub(&t));
         }
-        // The return type. Concrete when the `fn` type named one; otherwise it is
-        // what the lambda's own body produces, which is the outbound `U` a generic
-        // higher-order call solves from. A block body carries no expression to
-        // peek, so it is `Unit` — the textual backend's rule, and the same one.
-        let ret = match (expected_ret, body) {
-            (Type::Param(_), LambdaBody::Expr(e)) => {
-                let mark = self.scope.len();
-                for (pn, pt) in params.iter().zip(ptys) {
-                    self.scope.push((pn.clone(), Place::Local(u32::MAX), pt.clone()));
-                }
-                let got = self.peek(e, line);
-                self.scope.truncate(mark);
-                self.cx.sub(&got?)
-            }
-            (Type::Param(_), LambdaBody::Block(_)) => Type::Unit,
-            (t, _) => t.clone(),
-        };
+        let ret = self.lambda_ret(params, body, ptys, expected_ret, line)?;
         // `LambdaBody::Expr` is a `return` of that expression — the same thing the
         // block form writes by hand, so there is one body shape to lower. A
         // Unit-returning signature is the exception and not a cosmetic one: `each(xs,
@@ -3598,8 +4002,252 @@ impl Fn_<'_> {
             self.cx.subst.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         under.sort_by(|a, b| a.0.cmp(&b.0));
         let key = Key::Lambda(at as *const Expr as usize, shape, under);
-        let sig = self.cx.enqueue(key, Rc::new(sf), self.cx.subst.clone(), HashMap::new())?;
+        let sig = self.cx.enqueue(m, key, Rc::new(sf), self.cx.subst.clone(), HashMap::new())?;
         Ok((FnTarget { sig, ncaps: cap_names.len() }, cap_names, cap_tys))
+    }
+
+    // ---- RFC-0037 stored function values ----------------------------------
+
+    /// The `fn` type a value is being built FOR, normalized. `None` when the
+    /// position does not name one, which is what makes a bare `let f = double`
+    /// take the function's own signature instead.
+    fn expected_fn_sig(&self) -> Option<Type> {
+        let top = self.expect.last()?;
+        match crate::normalize_fn_sig(&self.cx.sub(top), &self.cx.types) {
+            t @ Type::Fn(..) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Register a variant (deduped on signature + target) and give its tag.
+    ///
+    /// The tag is an index into the MODULE-GLOBAL list, matching the textual
+    /// backend: a tag has to mean the same thing in every body that builds one,
+    /// and the dispatcher filters by signature rather than renumbering.
+    fn register_fnval(&self, sig: &Type, target: &FnTarget) -> i64 {
+        let mut v = self.cx.fnvals.borrow_mut();
+        if let Some(i) = v.iter().position(|x| x.sig == *sig && x.target == *target) {
+            return i as i64;
+        }
+        v.push(FnVal { sig: sig.clone(), target: target.clone() });
+        (v.len() - 1) as i64
+    }
+
+    /// The LLVM shape of a capture block: the captures packed by value, in order.
+    fn cap_block(&self, cap_tys: &[Type]) -> Result<Layout, String> {
+        let ll = format!(
+            "{{ {} }}",
+            cap_tys.iter().map(|t| self.cx.ll(t)).collect::<Vec<_>>().join(", ")
+        );
+        layout::of_ll(&ll).map_err(|e| format!("direct backend: {e}"))
+    }
+
+    /// Build a stored function value: `{ i64 tag, i64 payload }` in a frame slot.
+    ///
+    /// The payload is 0 when there are no captures, and otherwise a heap block
+    /// holding them BY VALUE — read here, at the construction site, which is
+    /// RFC-0023's capture-timing lock applied to a value that outlives its scope.
+    /// The block is never freed, the same safe leak every boxed enum payload
+    /// already is.
+    fn build_fnval(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        sig_ty: &Type,
+        target: FnTarget,
+        cap_srcs: &[String],
+        line: usize,
+    ) -> Result<Type, String> {
+        let cap_tys = target.sig.params[..target.ncaps].to_vec();
+        if cap_tys.len() != cap_srcs.len() {
+            return unsupported("a function value whose captures do not match its target", line);
+        }
+        let tag = self.register_fnval(sig_ty, &target);
+        let Repr::Agg(l) = self.cx.repr(sig_ty, line)? else {
+            return unsupported("a function value that is not an aggregate", line);
+        };
+        let off = b.alloc(l.size, l.align);
+        // The payload first, because building the block needs scratch the tag
+        // store would otherwise be sitting on top of.
+        let payload = if cap_tys.is_empty() {
+            None
+        } else {
+            let bl = self.cap_block(&cap_tys)?;
+            let p = b.local(ValType::I32);
+            b.ins(&Instruction::I32Const(bl.size as i32));
+            b.ins(&Instruction::Call(self.cx.rt.malloc));
+            b.ins(&Instruction::LocalSet(p));
+            for (i, (name, ty)) in cap_srcs.iter().zip(&cap_tys).enumerate() {
+                let src = Expr::Var { name: name.clone(), line };
+                b.ins(&Instruction::LocalGet(p));
+                if bl.fields[i] != 0 {
+                    b.ins(&Instruction::I32Const(bl.fields[i] as i32));
+                    b.ins(&Instruction::I32Add);
+                }
+                self.expr_as(m, b, &src, ty)?;
+                match self.cx.repr(ty, line)? {
+                    Repr::Scalar(_) => {
+                        b.ins(&store_of(&self.cx.ll(ty)));
+                    }
+                    Repr::Agg(fl) => {
+                        b.ins(&Instruction::I32Const(fl.size as i32));
+                        b.ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                    }
+                    Repr::Unit => return unsupported("a captured Unit value", line),
+                }
+            }
+            Some(p)
+        };
+        b.slot(off + l.fields[0]);
+        b.ins(&Instruction::I64Const(tag));
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off + l.fields[1]);
+        match payload {
+            Some(p) => {
+                b.ins(&Instruction::LocalGet(p));
+                b.ins(&Instruction::I64ExtendI32U);
+            }
+            None => {
+                b.ins(&Instruction::I64Const(0));
+            }
+        }
+        b.ins(&Instruction::I64Store(word8()));
+        b.slot(off);
+        Ok(sig_ty.clone())
+    }
+
+    /// A stored value from a lambda literal: lift the body through the SAME
+    /// [`Fn_::lift_lambda`] the RFC-0023 argument path uses, typed exactly by the
+    /// slot's signature. One lifting rule, so storing a lambda and passing one
+    /// cannot disagree about its captures or its parameter types.
+    fn fnval_lambda(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        e: &Expr,
+        sig_ty: &Type,
+    ) -> Result<Type, String> {
+        let Expr::Lambda { params, body, line } = e else {
+            return unsupported("a function value from a non-lambda", Expr::line(e));
+        };
+        let Type::Fn(ptys, ret) = sig_ty else {
+            return unsupported("a lambda in a non-function position", *line);
+        };
+        // The expected-type stack must not leak into the lifted body: its own
+        // storage boundaries push their own types.
+        let saved = std::mem::take(&mut self.expect);
+        let r = self.lift_lambda(m, e, params, body, ptys, ret, *line);
+        self.expect = saved;
+        let (target, srcs, _) = r?;
+        self.build_fnval(m, b, sig_ty, target, &srcs, *line)
+    }
+
+    /// A stored value from a bare function name: the empty-payload variant. The
+    /// signature is the slot's when a position names one, else the function's own.
+    fn fnval_named(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        line: usize,
+    ) -> Result<Type, String> {
+        let Some(sig) = self.cx.sigs.get(name).cloned() else {
+            return unsupported(&format!("`{name}` as a function value"), line);
+        };
+        if sig.modify.iter().any(|x| *x) {
+            return unsupported(
+                &format!("`{name}` as a function value (it takes a `modify` parameter)"),
+                line,
+            );
+        }
+        let own = crate::normalize_fn_sig(
+            &Type::Fn(sig.params.clone(), Box::new(sig.ret_ty.clone())),
+            &self.cx.types,
+        );
+        let sig_ty = self.expected_fn_sig().unwrap_or(own);
+        self.build_fnval(m, b, &sig_ty, FnTarget { sig, ncaps: 0 }, &[], line)
+    }
+
+    /// A stored value from a `fn`-typed PARAMETER (RFC-0037 × RFC-0023): inside a
+    /// specialization the parameter's target and captures are both statically
+    /// known, so storing it materializes exactly the aggregate a lambda or named
+    /// source builds. Storing a `fn` parameter therefore behaves exactly as calling
+    /// one — for any signature, scalar or aggregate captures alike.
+    fn fnval_binding(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        bnd: &FnBinding,
+        line: usize,
+    ) -> Result<Type, String> {
+        let t = &bnd.target;
+        let own = crate::normalize_fn_sig(
+            &Type::Fn(t.sig.params[t.ncaps..].to_vec(), Box::new(t.sig.ret_ty.clone())),
+            &self.cx.types,
+        );
+        let sig_ty = self.expected_fn_sig().unwrap_or(own);
+        self.build_fnval(m, b, &sig_ty, t.clone(), &bnd.cap_srcs, line)
+    }
+
+    /// The dispatcher for one signature, reserving its index the first time
+    /// anything calls through a value of that signature.
+    ///
+    /// Its Vyrn-level shape is `fn(fv: <sig>, a0: P0, ..) -> R`, i.e. the fn value
+    /// prepended to the signature's own parameters — which is exactly
+    /// captures-then-parameters with one capture. So a dispatcher IS a [`FnTarget`]
+    /// with `ncaps == 1`, and a stored value flowing into a `fn`-typed parameter
+    /// needs no third mechanism: the "capture" the RFC-0023 instance receives is
+    /// the enum itself.
+    fn dispatcher(
+        &mut self,
+        m: &mut Module,
+        sig_ty: &Type,
+        line: usize,
+    ) -> Result<Sig, String> {
+        if let Some((_, s)) = self.cx.dispatch.borrow().sigs.iter().find(|(t, _)| t == sig_ty) {
+            return Ok(s.clone());
+        }
+        let Type::Fn(ptys, ret) = sig_ty else {
+            return unsupported("a dispatcher for a non-function type", line);
+        };
+        let mut params = vec![sig_ty.clone()];
+        params.extend(ptys.iter().cloned());
+        let s = Sig {
+            index: 0,
+            modify: vec![false; params.len()],
+            params,
+            ret: self.cx.repr(ret, line)?,
+            ret_ty: (**ret).clone(),
+        };
+        let (wp, wr) = self.cx.wasm_sig(&s, line)?;
+        let sig = Sig { index: m.reserve_func(&wp, &wr), ..s };
+        self.cx.dispatch.borrow_mut().sigs.push((sig_ty.clone(), sig.clone()));
+        Ok(sig)
+    }
+
+    /// A call through a stored function value: ONE direct call to the signature's
+    /// dispatcher, with the value as its leading argument. The switch and the
+    /// direct calls live inside it, so the RFC-0037 invariant holds verbatim — no
+    /// function pointer exists anywhere in the module.
+    fn fnval_call(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        recv: &Expr,
+        sig_ty: &Type,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let Type::Fn(ptys, _) = sig_ty else {
+            return unsupported("a call through a non-function value", line);
+        };
+        if args.len() != ptys.len() {
+            return unsupported("a call through a stored `fn` value at another arity", line);
+        }
+        let dsig = self.dispatcher(m, sig_ty, line)?;
+        let mut all = vec![recv.clone()];
+        all.extend(args.iter().cloned());
+        self.emit_call(m, b, &dsig, &all)
     }
 
     /// `.length` / `.byteLength`, neither of which is a field: the receiver's
@@ -8600,6 +9248,8 @@ mod tests {
             protocol_methods: HashMap::new(),
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),
+            fnvals: RefCell::new(Vec::new()),
+            dispatch: RefCell::new(Dispatch::default()),
             globals: HashMap::new(),
             externs: HashMap::new(),
             droppable: HashMap::new(),

@@ -51,6 +51,11 @@ const PASSING: &[&str] = &[
     // RFC-0078 M4c: the six codec builtins are `std/codecs` now, so this backend
     // compiles them as ordinary Vyrn rather than owing six hand-emitted lowerings.
     "codecbytes.vyrn",
+    // RFC-0077 M2m: RFC-0037's stored function values, by defunctionalization —
+    // one closed enum per signature, one variant per source, every call a tag test
+    // and a DIRECT call. `closures2` is the whole surface; `fnvalstore` is the
+    // shape where the source is a `fn`-typed parameter.
+    "closures2.vyrn",
     "consume.vyrn",
     "domdemo.vyrn",
     "ecs.vyrn",
@@ -74,6 +79,7 @@ const PASSING: &[&str] = &[
     "fib.vyrn",
     "files.vyrn",
     "floats.vyrn",
+    "fnvalstore.vyrn",
     "foreach.vyrn",
     // RFC-0077 M2l: the generational slot table (RFC-0004 §4) is three emitted
     // wasm functions over a lazily-allocated 65536-cell slab. `freelist` is the
@@ -1658,6 +1664,96 @@ fn main() -> Int64 {
     assert_eq!(
         norm(&interp.stdout),
         "1122\n1324\n605\n6\n60\n5\n515\n69\n12\nn=1\nn=2\nn=3\n",
+        "the interpreter moved"
+    );
+    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(interp.status.code(), w.status.code(), "exit");
+}
+
+/// The RFC-0037 shapes `closures2` and `fnvalstore` do not reach (RFC-0077 M2m).
+///
+/// Between them those two are most of the stored-`fn` surface — a record capture,
+/// a `Validation<Record>` payload, storage in a Map, an Array, a record field and
+/// module state, an aggregate return through `Middleware`, a stored value flowing
+/// into a `fn`-typed parameter, and a trap inside a closure. Three things they do
+/// not have, each silent when wrong:
+///
+/// - A **Unit-signature slot holding a value-returning function**. The dispatcher
+///   has to drop the result; leaving it on the stack is a module wasmtime refuses,
+///   but dropping the wrong one is not.
+/// - An **aggregate return from a lifted lambda** through a dispatcher, where the
+///   result travels through the dispatcher's own hidden destination rather than as
+///   a value.
+/// - **Two spellings of one signature.** `Make` and the bare `fn(Int64) -> Pt`
+///   must register and dispatch as ONE enum, or a tag built under one spelling
+///   falls through the other's switch to the defensive arm — which is exactly what
+///   `normalize_fn_sig` is shared with the textual backend for.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn a_stored_function_value_dispatches_by_signature_not_by_spelling() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-fnval");
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "\
+type Pt = { x: Int64, y: Int64 }
+
+type Sink = fn(Int64)
+
+type Make = fn(Int64) -> Pt
+
+fn shout(n: Int64) -> Int64 {
+    print(\"shout \\{n}\")
+    return n * 2
+}
+
+fn origin(n: Int64) -> Pt {
+    return Pt { x: n, y: 0 - n }
+}
+
+fn main() -> Int64 {
+    let s: Sink = shout
+    s(4)
+    let mk: Make = origin
+    let a = mk(3)
+    print(a.x * 100 + a.y)
+    let lam: Make = |n| Pt { x: n + 1, y: n + 2 }
+    let b = lam(10)
+    print(b.x * 100 + b.y)
+    let raw: fn(Int64) -> Pt = lam
+    let c = raw(20)
+    print(c.x * 100 + c.y)
+    return 0
+}
+";
+    let path = dir.join("fnval.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("fnval.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .env("VYRN_WASM_BACKEND", "direct")
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let mut interp_cmd = vyrn();
+    interp_cmd.arg("run").arg(&path);
+    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let mut wasm_cmd = Command::new(&wasmtime);
+    wasm_cmd.arg("run").arg(&module);
+    let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
+
+    assert_eq!(
+        norm(&interp.stdout),
+        "shout 4\n297\n1112\n2122\n",
         "the interpreter moved"
     );
     assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");

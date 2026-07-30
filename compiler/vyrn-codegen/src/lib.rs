@@ -4519,6 +4519,32 @@ impl<'a> Gen<'a> {
     }
 }
 
+/// Deep-normalize a stored-fn signature (RFC-0037) so structurally identical
+/// spellings — a `type Transform = fn(Int64) -> Int64` alias, a validated scalar,
+/// transformer sugar — register and dispatch as ONE synthesized enum.
+/// `Ref`/`Task` interiors are left resolved: they cannot hold fn values, and
+/// recursing would cycle.
+///
+/// Shared with the direct wasm backend, because it decides which constructions a
+/// dispatcher covers. Two backends grouping differently would give one of them a
+/// dispatcher missing a variant — a defensive trap where a call belongs, reached
+/// only by the spelling nobody wrote a test for.
+pub(crate) fn normalize_fn_sig(t: &Type, types: &HashMap<String, TypeDecl>) -> Type {
+    let norm = |x: &Type| normalize_fn_sig(x, types);
+    match vyrn_frontend::types::resolve(t, types) {
+        Type::Fn(ps, r) => Type::Fn(ps.iter().map(norm).collect(), Box::new(norm(&r))),
+        Type::Array(i) => Type::Array(Box::new(norm(&i))),
+        Type::ArrayN(i, n) => Type::ArrayN(Box::new(norm(&i)), n),
+        Type::Option(i) => Type::Option(Box::new(norm(&i))),
+        Type::Result(a, b) => Type::Result(Box::new(norm(&a)), Box::new(norm(&b))),
+        Type::Map(k, v) => Type::Map(Box::new(norm(&k)), Box::new(norm(&v))),
+        Type::Record(fs) => Type::Record(
+            fs.iter().map(|f| Field { name: f.name.clone(), ty: norm(&f.ty) }).collect(),
+        ),
+        other => other,
+    }
+}
+
 /// The captured (free) local variables of a lambda body (RFC-0023), in
 /// first-seen order: names read in the body that are neither the lambda's own
 /// parameters/locals nor module state nor functions — i.e. bindings that live in
@@ -4797,34 +4823,11 @@ impl<'a> Gen<'a> {
 
     // ---- stored function values by defunctionalization (RFC-0037) --------
 
-    /// Deep-normalize a stored-fn signature so structurally identical
-    /// spellings (aliases, validated scalars, transformer sugar) register and
-    /// dispatch as ONE synthesized enum. `Ref`/`Task` interiors are left as
-    /// resolved (they cannot hold fn values, and recursing would cycle).
+    /// Deep-normalize a stored-fn signature so structurally identical spellings
+    /// register and dispatch as ONE synthesized enum — [`normalize_fn_sig`],
+    /// under this body's substitution.
     fn normalize_sig(&self, t: &Type) -> Type {
-        match self.resolve(t) {
-            Type::Fn(ps, r) => Type::Fn(
-                ps.iter().map(|p| self.normalize_sig(p)).collect(),
-                Box::new(self.normalize_sig(&r)),
-            ),
-            Type::Array(i) => Type::Array(Box::new(self.normalize_sig(&i))),
-            Type::ArrayN(i, n) => Type::ArrayN(Box::new(self.normalize_sig(&i)), n),
-            Type::Option(i) => Type::Option(Box::new(self.normalize_sig(&i))),
-            Type::Result(a, b) => Type::Result(
-                Box::new(self.normalize_sig(&a)),
-                Box::new(self.normalize_sig(&b)),
-            ),
-            Type::Map(k, v) => Type::Map(
-                Box::new(self.normalize_sig(&k)),
-                Box::new(self.normalize_sig(&v)),
-            ),
-            Type::Record(fs) => Type::Record(
-                fs.iter()
-                    .map(|f| Field { name: f.name.clone(), ty: self.normalize_sig(&f.ty) })
-                    .collect(),
-            ),
-            other => other,
-        }
+        normalize_fn_sig(&vyrn_frontend::types::substitute(t, self.subst), self.types)
     }
 
     /// The expected fn type currently in scope for a lambda literal / bare
@@ -8249,6 +8252,17 @@ pub(crate) fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Ty
             solve_param(pv, av, subst);
         }
         (Type::Ref(p), Type::Ref(a)) => solve_param(p, a, subst),
+        // A `fn` type (RFC-0023/RFC-0037), parameter-wise then on the return.
+        // Without this a generic record holding a `fn` whose parameter is the
+        // record's own type parameter — `Deferred<P, T> = { run: fn(P) -> T }`,
+        // the `std/ui` `ParamQuery` shape — solves NOTHING from its field, and
+        // `applied_type` fills both in with `Unit`.
+        (Type::Fn(pp, pr), Type::Fn(ap, ar)) if pp.len() == ap.len() => {
+            for (p, a) in pp.iter().zip(ap) {
+                solve_param(p, a, subst);
+            }
+            solve_param(pr, ar, subst);
+        }
         _ => {}
     }
 }

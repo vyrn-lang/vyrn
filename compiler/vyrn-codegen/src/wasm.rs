@@ -153,7 +153,12 @@ pub struct Module {
     import_memory: bool,
     n_imports: u32,
     funcs: FunctionSection,
-    code: CodeSection,
+    /// One entry per defined function, in index order: its parameter count (so a
+    /// body handed over later can be checked against the signature it was
+    /// reserved with) and the encoded body, `None` while a reservation is
+    /// outstanding. A `Vec` rather than a [`CodeSection`] built as we go, because
+    /// [`Module::reserve_func`] hands out an index whose body arrives afterwards.
+    bodies: Vec<(usize, Option<Function>)>,
     exports: ExportSection,
     /// The single data segment, packed at [`DATA_BASE`]; `pool_at` deduplicates
     /// identical contents, which is what makes it a string pool.
@@ -178,7 +183,7 @@ impl Module {
             import_memory: false,
             n_imports: 0,
             funcs: FunctionSection::new(),
-            code: CodeSection::new(),
+            bodies: Vec::new(),
             exports: ExportSection::new(),
             pool: Vec::new(),
             pool_at: HashMap::new(),
@@ -296,37 +301,32 @@ impl Module {
     pub fn add(&mut self, params: &[ValType], results: &[ValType], f: Frame) -> u32 {
         let t = self.ty(params, results);
         self.funcs.function(t);
-        debug_assert_eq!(f.base, params.len() as u32, "frame built for a different signature");
-
-        let mut decl = vec![ValType::I32]; // the frame base
-        decl.extend(f.locals.iter().copied());
-        let mut out = Function::new_with_locals_types(decl);
-        let frame = round_up(f.frame, FRAME_ALIGN);
-        // Claim the frame. Subtracting past 0 wraps to near `0xFFFFFFFF`, where
-        // every access is out of bounds — the trap `--stack-first` buys, and the
-        // reason the stack is at the BOTTOM of memory rather than above the data
-        // it would otherwise overwrite.
-        if frame != 0 {
-            out.instruction(&Instruction::GlobalGet(SP))
-                .instruction(&Instruction::I32Const(frame as i32))
-                .instruction(&Instruction::I32Sub)
-                .instruction(&Instruction::LocalTee(f.base))
-                .instruction(&Instruction::GlobalSet(SP));
-        }
-        for i in &f.body {
-            out.instruction(i);
-        }
-        // Release it: adding back to the base is the same value the prologue
-        // found, without a second local to hold it.
-        if frame != 0 {
-            out.instruction(&Instruction::LocalGet(f.base))
-                .instruction(&Instruction::I32Const(frame as i32))
-                .instruction(&Instruction::I32Add)
-                .instruction(&Instruction::GlobalSet(SP));
-        }
-        out.instruction(&Instruction::End);
-        self.code.function(&out);
+        self.bodies.push((params.len(), Some(encode(f, params.len()))));
         self.n_imports + self.funcs.len() - 1
+    }
+
+    /// Reserve a function index whose body arrives later, giving that index.
+    ///
+    /// Everything else in this backend hands out an index at discovery and adds
+    /// the body in the same order — FIFO by construction, which is cheaper than a
+    /// mechanism and covers every case but one. RFC-0037's per-signature
+    /// dispatcher switches over every construction of that signature ANYWHERE in
+    /// the module, so its body is only complete once the last body is walked,
+    /// while its index has to be callable from the middle of that walk. No
+    /// ordering discipline can arrange that; a reservation can.
+    pub fn reserve_func(&mut self, params: &[ValType], results: &[ValType]) -> u32 {
+        let t = self.ty(params, results);
+        self.funcs.function(t);
+        self.bodies.push((params.len(), None));
+        self.n_imports + self.funcs.len() - 1
+    }
+
+    /// Supply the body of a function [`Module::reserve_func`] handed out.
+    pub fn fill(&mut self, index: u32, f: Frame) {
+        let i = (index - self.n_imports) as usize;
+        let (nparams, body) = &mut self.bodies[i];
+        assert!(body.is_none(), "function {index} filled twice");
+        *body = Some(encode(f, *nparams));
     }
 
     /// How many functions this module imports — the offset a defined
@@ -406,6 +406,14 @@ impl Module {
             data.active(0, &ConstExpr::i32_const(DATA_BASE as i32), self.pool.iter().copied());
         }
 
+        let mut code = CodeSection::new();
+        for (i, (_, body)) in self.bodies.iter().enumerate() {
+            let body = body
+                .as_ref()
+                .unwrap_or_else(|| panic!("function {i} was reserved and never filled"));
+            code.function(body);
+        }
+
         let mut m = wasm_encoder::Module::new();
         m.section(&self.types);
         if !self.imports.is_empty() {
@@ -417,12 +425,45 @@ impl Module {
         }
         m.section(&globals);
         m.section(&self.exports);
-        m.section(&self.code);
+        m.section(&code);
         if !data.is_empty() {
             m.section(&data);
         }
         m.finish()
     }
+}
+
+/// One finished body, with the shadow-stack prologue and epilogue around it.
+fn encode(f: Frame, n_params: usize) -> Function {
+    debug_assert_eq!(f.base, n_params as u32, "frame built for a different signature");
+    let mut decl = vec![ValType::I32]; // the frame base
+    decl.extend(f.locals.iter().copied());
+    let mut out = Function::new_with_locals_types(decl);
+    let frame = round_up(f.frame, FRAME_ALIGN);
+    // Claim the frame. Subtracting past 0 wraps to near `0xFFFFFFFF`, where
+    // every access is out of bounds — the trap `--stack-first` buys, and the
+    // reason the stack is at the BOTTOM of memory rather than above the data
+    // it would otherwise overwrite.
+    if frame != 0 {
+        out.instruction(&Instruction::GlobalGet(SP))
+            .instruction(&Instruction::I32Const(frame as i32))
+            .instruction(&Instruction::I32Sub)
+            .instruction(&Instruction::LocalTee(f.base))
+            .instruction(&Instruction::GlobalSet(SP));
+    }
+    for i in &f.body {
+        out.instruction(i);
+    }
+    // Release it: adding back to the base is the same value the prologue
+    // found, without a second local to hold it.
+    if frame != 0 {
+        out.instruction(&Instruction::LocalGet(f.base))
+            .instruction(&Instruction::I32Const(frame as i32))
+            .instruction(&Instruction::I32Add)
+            .instruction(&Instruction::GlobalSet(SP));
+    }
+    out.instruction(&Instruction::End);
+    out
 }
 
 /// The module's `__stack_pointer`. Index 0 because the encoder defines its
@@ -664,6 +705,33 @@ mod tests {
             assert_eq!(b.alloc(8, 8), 8);
             assert_eq!(b.alloc(1, 1), 16);
         });
+    }
+
+    /// A reservation is callable from a body emitted before it, which is the one
+    /// thing ordering discipline cannot give (RFC-0037's dispatchers).
+    #[test]
+    fn a_reserved_index_is_callable_before_its_body_exists() {
+        let mut m = Module::new();
+        let later = m.reserve_func(&[], &[ValType::I32]);
+        let caller = m.func(&[], &[ValType::I32], &[], 0, |b| {
+            b.ins(&Instruction::Call(later));
+        });
+        assert_eq!(later, 0, "the reservation took the first index");
+        assert_eq!(caller, 1);
+        let mut f = Frame::new(0, &[], 0);
+        f.ins(&Instruction::I32Const(7));
+        m.fill(later, f);
+        m.export("vyrn_entry", caller);
+        // Two bodies out, in index order rather than in the order they arrived.
+        assert_eq!(section_ids(&m.finish()), vec![1, 3, 5, 6, 7, 10]);
+    }
+
+    #[test]
+    #[should_panic(expected = "reserved and never filled")]
+    fn a_reservation_nobody_filled_is_not_a_module() {
+        let mut m = Module::new();
+        m.reserve_func(&[], &[]);
+        m.finish();
     }
 
     #[test]
