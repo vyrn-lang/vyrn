@@ -78,15 +78,54 @@ const PASSING: &[&str] = &[
     "validation.vyrn",
 ];
 
+/// The same, for the shim-linked shape (RFC-0077 M2i). A superset of [`PASSING`]
+/// by construction — the two emissions differ in five instructions plus whatever
+/// only a shim can supply — so it is written as one, and the tier fails if a
+/// standalone pass stops passing here.
+const PASSING_SHIM: &[&str] = &[
+    // RFC-0043's host boundary is three shim symbols, so this is the whole of
+    // what reaching the shim bought: a clock, a monotonic counter and a seed.
+    "clock.vyrn",
+];
+
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored --nocapture"]
 fn examples_through_the_direct_wasm_backend() {
+    ladder("direct", PASSING);
+}
+
+/// The same corpus through the same backend, emitting the RFC-0077 M2i shape: one
+/// module that imports memory and the C runtime from RFC-0076's shared shim,
+/// linked at instantiation by `wasmtime --preload`.
+///
+/// A second tier rather than a flag on the first, for the reason this RFC keeps
+/// giving: this repo has watched an ungated second backend rot to unbuildable in
+/// twelve days, and a shim-importing emission that nothing runs would rot the same
+/// way. It costs one more pass over 78 examples, and unlike the first tier it
+/// needs clang and a wasi sysroot, because the shim is C.
+#[test]
+#[ignore = "needs wasmtime + clang + a wasi sysroot; run explicitly with --ignored --nocapture"]
+fn examples_through_the_direct_wasm_backend_against_the_shared_shim() {
+    if vyrn_codegen::toolchain::shim_wasm(false).is_none() {
+        eprintln!("SKIP: no runtime shim (needs clang and a wasi sysroot)");
+        return;
+    }
+    // Written as the delta rather than a second full list: the two emissions
+    // differ in five instructions plus whatever only a shim can supply, so a
+    // standalone pass that stops passing here is a regression in the LINK.
+    let mut passing: Vec<&str> = PASSING.iter().chain(PASSING_SHIM).copied().collect();
+    passing.sort();
+    ladder("direct-shim", &passing);
+}
+
+fn ladder(backend: &str, passing: &[&str]) {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime (set VYRN_WASMTIME or unpack one under <repo>/tools/)");
         return;
     };
+    let shim = backend == "direct-shim";
     let dir = examples_dir();
-    let out_dir = std::env::temp_dir().join("vyrn-directwasm");
+    let out_dir = std::env::temp_dir().join(format!("vyrn-{backend}"));
     std::fs::create_dir_all(&out_dir).unwrap();
 
     let mut names: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -126,7 +165,7 @@ fn examples_through_the_direct_wasm_backend() {
             .arg("wasm")
             .arg("-o")
             .arg(&module)
-            .env("VYRN_WASM_BACKEND", "direct")
+            .env("VYRN_WASM_BACKEND", backend)
             .output()
             .expect("build wasm");
         if !build.status.success() {
@@ -142,6 +181,13 @@ fn examples_through_the_direct_wasm_backend() {
         wasm_cmd.arg("run").arg("--dir").arg(".");
         wasm_cmd.arg("--env").arg(format!("VYRN_FIXED_TIME={FIXED_TIME}"));
         wasm_cmd.arg("--env").arg(format!("VYRN_FIXED_SEED={FIXED_SEED}"));
+        if shim {
+            // The shim is a module, not a library: `--preload` puts it in the
+            // linker under the `env` namespace the imports name, and wasmtime
+            // resolves the two at instantiation.
+            let side = module.with_extension("shim.wasm");
+            wasm_cmd.arg("--preload").arg(format!("env={}", side.display()));
+        }
         wasm_cmd.arg(&module).args(&prog_args);
         let w = run_io(wasm_cmd, &dir, &stdin_fixture);
 
@@ -150,7 +196,7 @@ fn examples_through_the_direct_wasm_backend() {
         let (i_code, w_code) = (interp.status.code(), w.status.code());
         if i_out == w_out && i_err == w_err && i_code == w_code {
             passed.push(name.clone());
-            if !PASSING.contains(&name.as_str()) {
+            if !passing.contains(&name.as_str()) {
                 eprintln!("NEW   {name}  — passes; add it to PASSING");
             }
             continue;
@@ -163,14 +209,14 @@ fn examples_through_the_direct_wasm_backend() {
              stderr {i_err:?} vs {w_err:?}"
         );
         blocked.entry("built, but DIVERGED from the interpreter".into()).or_default().push(name.clone());
-        if PASSING.contains(&name.as_str()) {
+        if passing.contains(&name.as_str()) {
             regressions.push(format!("{name}: {detail}"));
         } else {
             eprintln!("diff  {name}  {detail}");
         }
     }
 
-    for name in PASSING {
+    for name in passing {
         if !passed.iter().any(|p| p == name) && !regressions.iter().any(|r| r.starts_with(name)) {
             regressions.push(format!(
                 "{name}: was passing, now blocked on {}",
@@ -183,7 +229,7 @@ fn examples_through_the_direct_wasm_backend() {
         }
     }
 
-    eprintln!("\ndirect wasm backend: {}/{considered} examples pass", passed.len());
+    eprintln!("\n{backend}: {}/{considered} examples pass", passed.len());
     for (why, who) in &blocked {
         eprintln!("  {:3}  {why}", who.len());
         eprintln!("       {}", who.join(", "));
@@ -191,7 +237,7 @@ fn examples_through_the_direct_wasm_backend() {
 
     assert!(
         regressions.is_empty(),
-        "examples in PASSING no longer pass:\n{}",
+        "examples in the {backend} PASSING list no longer pass:\n{}",
         regressions.join("\n")
     );
 }
