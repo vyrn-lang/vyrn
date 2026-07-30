@@ -1,6 +1,11 @@
 # RFC-0078 — The Runtime Is Vyrn
 
-- **Status:** Draft
+- **Status:** **Complete as scoped** (M1–M5 landed). The claim "everything above
+  the primitive core is written in Vyrn" now holds for everything the core turned
+  out not to contain; the core itself is stated in "M1 + M5, as landed" and two
+  named language decisions — a raw-memory view, and an abort primitive — are what
+  a *larger* core would need. Neither is opened here, and neither is this RFC's to
+  make.
 - **Depends on:** RFC-0014 (the I/O builtins and their canonical wording),
   RFC-0018 / RFC-0059 (`fromJson`/`toJson`, and `std/json`, which already
   implements JSON *in Vyrn*), RFC-0077 (the direct wasm backend, which is what
@@ -9,8 +14,8 @@
 
   | | |
   |---|---|
-  | builtins the checker knows | 40 |
-  | Rust implementations in the interpreter | 50 |
+  | builtins the checker knows | 40 as first counted; **42** reserved names still have a Rust implementation, plus 4 shadowable gen-only ones (RFC-0054) — see the census |
+  | Rust implementations in the interpreter | 50 as first counted; **62 by the census's stated method** at M1+M5, which is a larger number for a smaller core: it counts the 13 `@`-prefixed desugars and the 11 pre-dispatch guards that a count of *builtins* does not. The comparable figure is 42. |
   | C functions in the runtime shim | 80 as first counted; 94 (65 exported, 29 static) by the method M4a states and M4c reproduces; **47 (35 exported, 12 static)** after M3's swap. M2b took the exported boundary from 74 to 70; M3-as-measured deleted one `static`; M4c deleted one exported (`__vyrn_strncmp`); M3-as-landed deleted **47** and halved the file. |
   | of those, the JSON DOM alone | 49 as first claimed — but SHARED writer/reader, so M2 retired SIX (not 11: the parser's unescaper shares the buffer) and M3 retired **47** (not 38, and not the 32 M3-as-measured predicted: its `static` count was 5 where the section holds 17 — see "M3, as landed", which states the method that reproduces the 94 baseline) |
   | `std/json.vyrn` — a JSON reader and writer, in Vyrn | 752 lines |
@@ -116,6 +121,12 @@ at any time.
   single declaration both backends and the interpreter read. RFC-0077 M2j's
   twelve WASI imports plus `__vyrn_malloc` is the starting list; confirm it
   against the interpreter's Rust arms, which may need primitives wasm does not.
+  **DONE, jointly with M5 — see "M1 + M5, as landed".** It needed every later
+  milestone first: the starting list was short by three *categories*, not by three
+  entries, and each was found by a milestone walking into it. The single
+  declaration is a table checked against the code by a test rather than a list
+  that can rot, and the census's one finding is that **one** of the 62 remaining
+  Rust arms has no reason to be a primitive at all.
 - **M2 — `toJson` through `std/json`.** The largest item, with its Vyrn
   implementation already written and parity-tested. Bytes must be pinned before the
   swap, not compared after.
@@ -171,6 +182,13 @@ at any time.
   as a cache, so what is left for M5 is the caches that are DELIBERATE:
   `lineAt`/`colAt`'s memoized line-start table, which a Vyrn library cannot hold
   because generators may not touch module state.
+  **DONE as scoped, jointly with M1 — see "M1 + M5, as landed".** The count fell
+  before M5 was taken, so what M5 could still contribute was not another deletion
+  but the *statement* that the remainder is justified. There is exactly one
+  deliberate cache (`lineAt`/`colAt`), it is documented as one, and parity proves
+  it agrees with `std/text`'s `lineAtV`/`colAtV` at every offset of twelve buffers.
+  Two builtins are refused on a measured cost (`@str`, `@concat`) and one is
+  refused for no reason at all, which is the finding.
 
 ## Acceptance
 
@@ -1897,3 +1915,311 @@ wants an `Array<UInt8> -> String` construction the way `floatFromBits` did, and
 deliberate cache, and whether the language grows the abort primitive `slice` needs.
 `std/json`'s tree, `std/jsonread`, `std/jsondec` and `std/num` are now the entire
 JSON and number runtime, in Vyrn, and the shim has no opinion about either.
+
+---
+
+## M1 + M5, as landed: the census, and the boundary it defines
+
+M1 was "name the primitives" and was never taken as its own milestone, because
+every later one discovered a piece of the answer. M5 was "the interpreter's fast
+paths become caches, and the count of Rust arms should fall" — and the count
+fell before M5 was reached, twelve arms at a time, in M2b, M4c and M3.
+
+So what was actually missing was neither: it was a **census**. A single statement
+of why each remaining builtin is a builtin, checkable against the code. That is
+what landed. Nothing moved, and that is the honest result rather than a shortfall
+— two candidates were checked for movement and both are refused with reasons, and
+the one arm that has no reason is named as a finding rather than swapped in a
+milestone whose job was to draw the boundary.
+
+### The census is a test, not a table in a document
+
+`vyrn-frontend/tests/primitives.rs` holds the census as a `const` beside an
+extractor that reads `interp.rs`, and asserts the two agree. A new Rust arm
+without a row fails the suite naming the builtin; a row whose arm was routed into
+Vyrn fails the other way. `nothing_is_both_censused_and_routed` walks
+`RT_MODULES` and asserts no name is in both lists, which is this RFC's acceptance
+criterion — "no builtin has two *definitions*" — as an assertion rather than a
+sentence. It is the precedent M4c set with
+`every_route_is_spelled_with_its_modules_prefix` (which pins the route table and
+asserts `slice`/`lineAt` absent), one level up.
+
+Both tests were mutation-checked: deleting the `alen` row fails
+`the_census_is_the_code` naming `alen`, and adding a bogus `("parse", …)` route to
+`RT_MODULES` fails `nothing_is_both_censused_and_routed` naming `parse`.
+
+### The method, because this document has been wrong about a count five times
+
+The census covers every builtin the **interpreter** implements in Rust on the
+`Expr::Call` path, which is where M5's "count of Rust arms" lives. Two regions of
+`interp.rs`, both located by content rather than by line number:
+
+- the `if name == "…"` guards between `Expr::Call { name, args, line } => {` and
+  `match name.as_str() {` — the builtins handled *before* the arguments are
+  evaluated, because they need the AST (`schemaOf`) or must write back through a
+  binding (`@pop`);
+- the arms of `match name.as_str() {`, up to its `_ => {` fallthrough.
+
+A name counts once, so `"lineAt" | "colAt"` is two and `"trace" | … | "error"` is
+five. That yields **62**: 51 arm names in 46 arms, plus 11 guards.
+
+**62 is a larger number than the 50 this document opened with, and the core is
+smaller.** The difference is entirely method, and stating it is the point:
+
+| | |
+|---|---|
+| reserved builtin names with a Rust implementation | **42** |
+| shadowable gen-only surface builtins (`raw`, `rawAt`, `render`, `lex` — RFC-0054) | 4 |
+| `@`-prefixed internal desugars no source can spell | 13 |
+| the compiler's own sum constructors (`Some`, `Ok`, `Err`) | 3 |
+| **total** | **62** |
+
+The comparable figure against the header table's 50 is **42**. Three things are
+deliberately outside the scan and are named so their absence is not read as an
+omission: `byteLength` is an `Expr::Field` read rather than a call (its refusal is
+M4c's and is pinned in `vyrn-cli/tests/codecs.rs`); `hostNowMillis` /
+`hostMonotonicNanos` / `hostRandomSeed` are `extern` declarations, not builtins,
+and are already the arrangement this RFC argues for — `std/time` and `std/random`
+are Vyrn above a named syscall; and numeric conversions (`Int32(x)`) are resolved
+by `numeric_conv_target` as part of the type system.
+
+### The taxonomy, which was discovered rather than designed
+
+Each of the first seven categories was found by a milestone hitting it. The last
+two are not reasons to *be* a primitive — they are the honest labels for arms that
+are movable and were not moved.
+
+| # | category | count | what makes it irreducible |
+|---|---|---|---|
+| 1 | **Memory** | 16 | `__vyrn_malloc` cannot be written without a memory-growth primitive, and every container standing on it — `Array`, `Map`, `SmallArray`, the slot table — needs a **raw-memory view** the language does not have. The largest row, and the first open question below is what it waits on. |
+| 2 | **Syscall** | 15 | RFC-0077 M2j measured a directly-emitted module's whole import list: twelve WASI functions. You cannot write `fd_write` in terms of itself. |
+| 3 | **Representation (a view, not an operation)** | 4 | M4a's central finding. Nothing could construct a `Float64` from anything but another number, so every text-to-float route had to be a builtin; give Vyrn the *bits* and the operation stops needing to be primitive. `bytes` is the same thing for `String` and `stringFromBytes` is its inverse. |
+| 4 | **Control** | 4 | M4b(3)'s finding. Vyrn has no `panic` and no `abort`, so no Vyrn implementation of a *trapping* builtin can be observationally equal. `@join` is the same shape one step over: an expression that waits for another task is not spellable either. The second open question is this row's. |
+| 5 | **Compiler-directed** | 17 | Needs the static type of an arbitrary expression, the module graph, or the compiler's own lexer and AST. |
+| 6 | **A cache, with a stated reason** | 2 | M5's own row, and the only one. |
+| 7 | **The semantics differ observably** | 1 | Moving it is a language change, not a mechanical move. |
+| 8 | **Movable, refused on a measured cost** | 2 | Each is owed its own milestone with its own pin, because the blast radius is every program rather than the programs that mention a builtin. |
+| 9 | **No reason at all** | 1 | The finding. |
+
+And the rows themselves. The evidence column is one line each; the authority is
+the test, which carries the same text beside the category.
+
+**1. Memory (16).** `array` `push` `at` `alen` `afree` `@list` `@toArray` `@pop`
+`@swapRemove` — `Array`, its heap triple and the two mutators that write back
+through a binding; `@has` `@keys` `@remove` — `Map` (RFC-0028); `cell` `get` `set`
+`release` — the slot table's allocation and generation-checked access. `at` and
+`@swapRemove` also trap, so they are on row 4's list of things that would need the
+abort primitive *as well as* the memory view.
+
+**2. Syscall (15).** `print` (fd_write, stdout); `logger` `trace` `debug` `info`
+`warn` `error` (RFC-0008 — fd_write on the configured sink); `args`
+(args_sizes_get + args_get); `readLine` (fd_read, stdin); `readFile`
+`readFileBytes` `writeFile` `renameFile` `fsyncFile` `listDir` (path_open, fd_read,
+fd_write, path_rename, fd_sync, fd_readdir). Worth noticing rather than acting on:
+a single `fdWrite(fd, Array<UInt8>)` view would make **seven** of these fifteen a
+Vyrn library, since `print` and the logger are the same syscall twice. It is not
+proposed here, because a builtin that lets any program write to any descriptor is
+an escape from RFC-0014's I/O story rather than a view of a value, and RFC-0014's
+canonical error wording is single-sourced in the compiler precisely so the OS's
+text can never reach a user.
+
+**3. Representation (4).** `bytes` — `String -> Array<UInt8>`, what all four
+runtime modules stand on; `stringFromBytes` — the inverse; `floatBits`
+`floatFromBits` — M4a's two IEEE-754 bit views, one instruction each. Plus
+`byteLength`, which the scan cannot see because it is a field read.
+
+**4. Control (4).** `slice` (two traps), `assert`, `assertEq` (RFC-0015 — a
+failing assertion traps the test), `@join`.
+
+**5. Compiler-directed (17).** `toJson` `fromJson` — and these are the design in
+one row: only the *walk* needs the compiler, and the writer, reader and decoders
+are Vyrn (`std/json`, `std/jsonread`, `std/jsondec`); `moduleInterface` (the
+module graph); `schemaOf` `contractOf` `jsonSchema` (reflection over a
+declaration); `value` (boxes a scalar into the interpolation enum by its type);
+`blackBox` (an optimizer barrier is a backend property, and the identity in an
+interpreter that does not optimize); `raw` `rawAt` `render` `lex` `@codeText`
+`@codeSplice` (RFC-0054 code quotes — `lex` is the compiler's own lexer);
+`Some` `Ok` `Err` (constructors of the compiler's own `Option` and `Result`).
+
+**6. Cache (2).** `lineAt` `colAt`.
+
+**7. Semantics (1).** `parse`.
+
+**8. Measured (2).** `@str` `@concat`.
+
+**9. Unjustified (1).** `@charCount`.
+
+### What was checked for movement, and refused
+
+Two candidates, both plausible on paper, both refused — and in both cases the
+category *is* the reason.
+
+**`logger` is a syscall, three times over.** The five level methods lower to
+`fprintf` on a stream, and there is no expression in Vyrn that writes anywhere but
+stdout: `print` is the only output the language has, and the logger's whole point
+(RFC-0008) is that logs are *not* on stdout. That alone is the wall. Two further
+costs, recorded so a later attempt does not rediscover them: the threshold is
+**folded at compile time** — with `logging { level: warn }`, a `.debug(..)` call
+emits no write at all, and routing would turn a deleted call into a runtime
+comparison, which is `byteLength`'s consteval argument in different clothing; and
+the `file(..)` sink is a `FILE*` opened once in `@main` and held in a global, while
+`writeFile` opens, truncates and closes, so Vyrn cannot express "append to a held
+handle" either. `logger` itself is the identity (a handle is its name string) and
+could move alone — which would be exactly the half-Vyrn, half-C builtin this
+document names as worse than either end state.
+
+**`stringFromBytes` is not waiting for a view — it IS the view.** M4b(2) left it
+as the last unmoved text builtin and predicted it "wants a primitive or a view the
+way `floatFromBits` did". Asked in M4a's terms the answer is that the prediction
+resolves to a tautology: `stringFromBytes` is the *only* `Array<UInt8> -> String`
+construction in the language, so a Vyrn implementation would have to call itself.
+Its validation half genuinely is expressible — `std/text`'s `decodeUtf8` is the
+proof, and it is checked against `stringFromBytes` over ~1,400 malformed buffers —
+but a builtin whose validation is Vyrn and whose construction is C has two halves
+and a seam. Splitting it would mean adding an *unchecked* `Array<UInt8> -> String`,
+which is the raw-memory escape hatch under a different name: it can build a
+`String` that is not valid UTF-8, and the whole point of `bytes`/`stringFromBytes`
+being a pair is that one direction is total and the other is validated.
+
+So `stringFromBytes` belongs on the representation row beside `floatFromBits`, and
+M4b's "remaining half" is closed as a refusal rather than left open. What is
+genuinely still open from M4b is `f64_str`, and it is row 8's.
+
+### The one arm that fits no category
+
+**`@charCount`.** `s.charCount()` (RFC-0058) counts Unicode scalar values as the
+bytes where `(b & 0xC0) != 0x80`. It is implemented **three times**: a Rust arm in
+`interp.rs`, `__vyrn_charcount` in the C shim, and ~30 lines of hand-emitted
+`wasm-encoder` in `direct.rs`. It needs no primitive (`s.byteLength` and `s[i]`
+are the whole substrate — the same substrate `std/strpred` is built on), it does
+not trap, it is not folded by `consteval` the way `byteLength` is, and it is not
+hot: **there is exactly one caller in the repository**, `examples/bytecount.vyrn`.
+
+It is not moved here, and the reason is scope rather than difficulty — a census
+that swaps a builtin is two milestones in one, and this one's job was to draw the
+boundary. Priced, so whoever takes it does not have to:
+
+- `std/text` gains a `charCountV` (five lines) and `RT_MODULES` gains one route
+  pair on `std/text`, which is already injected for `chars`.
+- Three implementations delete: the interpreter's arm, `gen_call`'s two-line
+  lowering plus its `declare`, and `direct.rs`'s emitted loop. The shim goes
+  **47 to 46**.
+- Two tests need a new witness rather than a fix: `wasm.rs`'s
+  `the_boundary_census_is_the_declare_lines` uses `__vyrn_charcount` as its
+  signature example, and `string_char_count_lowers_to_charcount_shim` pins the IR
+  that would stop being emitted.
+- **The one real hazard is `direct.rs`'s `Rt` table**, where every runtime
+  function is `base + n` and the emission order must match. Removing
+  `charcount: base + 11` renumbers thirty-two entries, and a misnumbering only
+  fails loudly where the signatures happen to differ. That is a different risk
+  class from a table row, and it is why this is a follow-up rather than a
+  postscript.
+- **The pin already exists.** `examples/bytecount.vyrn` prints `byteLength`
+  beside `charCount()` and is in the parity corpus, so the bytes are pinned
+  interp == native == wasm before any swap — the discipline M2 established, for
+  once satisfied for free.
+
+### The final boundary, stated
+
+RFC-0078 opened with "everything above the primitive core is written in Vyrn."
+The core turned out to be, exactly:
+
+> **The allocator; the twelve WASI syscalls; four representation views (`bytes`,
+> `stringFromBytes`, `floatBits`, `floatFromBits`, plus `byteLength` as a field);
+> and the compiler parts — a static type, the module graph, or the compiler's own
+> lexer.**
+
+Everything else that remains in Rust is there for a reason this document now
+names: two trap (plus two more that trap on top of needing memory), one waits for
+a task, two are the interpreter's one deliberate cache, one has different
+semantics from its library twin, two are refused on a measured cost, and one has
+no reason at all.
+
+**What the core does NOT contain, and did when this was written:** JSON — reader,
+writer, DOM, decoder, number reader and message assembler; UTF-8 decoding; text to
+number, in every width, correctly rounded; six encodings; three string
+predicates. Those are `std/json`, `std/jsonread`, `std/jsondec`, `std/num`,
+`std/codecs`, `std/text` and `std/strpred` — 2,000-odd lines of ordinary Vyrn,
+checked three and four ways by the same suite that checks user code, where there
+were previously three or four implementations each.
+
+The claim holds **as scoped**. It does not hold in the sense a reader might hope
+for, and the difference is one row of the census: the containers are not Vyrn, and
+`Array` is the most-used type in the language. That is not an oversight or a
+deferral — it is a language decision this RFC deliberately does not make.
+
+### Two open language questions, recorded and not decided
+
+Both are language-identity decisions. Each belongs in its own RFC, and each now
+has accumulated evidence rather than an opinion.
+
+**A. A raw-memory view.** `Array`, `Map`, `SmallArray`, the slot table and the
+allocator would be Vyrn if the language could name raw memory — 16 of the 62
+census rows, the single largest category, and the one that stands between "the
+runtime is Vyrn" and "the runtime is Vyrn including the parts every program
+touches". The evidence for it is that this is what "self-hosted" actually
+requires, and that M4a's finding generalizes: the irreducible primitive keeps
+turning out to be a missing *view* rather than a missing operation, and a raw
+memory view is the last one. The evidence against it is the pitch. Vyrn's claim is
+that ownership, drops and validation are *checked* — refinement types are
+trustworthy precisely because validation happens at every value boundary
+(M3 measured that a Vyrn program cannot even spell a value that failed its own
+predicate, which is why the accumulating decoder needed a different shape). A raw
+pointer view is an escape hatch from all three at once, and the `stringFromBytes`
+refusal above is the same question in miniature: an unchecked
+`Array<UInt8> -> String` would move one builtin and would also make invalid UTF-8
+constructible. Anyone opening this should carry that as the framing: the question
+is not "can the containers be Vyrn" — they can — it is **what a checked language
+gives up to write its own allocator, and whether an `unsafe`-shaped region is a
+price worth paying for a row of the census.**
+
+**B. An abort primitive.** `panic`/`abort` — an expression of type `Never` that
+terminates with a message on stderr and a nonzero exit. It unblocks `slice`
+directly (M4b(3) wrote `sliceV` returning `Option<String>` and proved it equal to
+the builtin everywhere except the trap, over ten ranges in ten processes, so the
+swap is one wrapper line the day the primitive exists) and `assert`/`assertEq`
+with it. It also makes the *other* trapping builtins expressible in principle:
+`at` and `@swapRemove` trap on an out-of-range index, and division by zero,
+overflow and the region-depth limit all trap today from the compiler's own
+`@.trap.*` globals. The evidence for it is that every backend already has one —
+`proc_exit`, `unreachable`, `exit` — so this is naming a capability rather than
+building one, and that M4b(3) identified it as a third *kind* of primitive
+(neither operation nor view, but **control**) which M1's list had no row for. The
+evidence against it is smaller but real: `Option` is the house idiom for a partial
+function throughout `std/`, an abort expression invites `slice(s, i, j)!`-shaped
+code where a `match` is better, and the canonical trap wording is currently
+single-sourced in the compiler where nothing can drift from it — a user-callable
+`panic("...")` puts arbitrary text on the channel parity compares byte for byte.
+Anyone opening this should decide the wording question first, because it is the
+one that touches every existing pin.
+
+### The count, with the method stated
+
+Counted by M4a's method exactly — C function definitions inside the
+`RUNTIME_SHIM` raw literal, one-line definitions included, `static` treated as
+internal — which reproduces this commit's parent at 47 / 35 / 12, and that is how
+the method was checked rather than assumed. The regex is "a line beginning at
+column 0 with an identifier and ending in `) {`", which counts *definitions*: the
+platform-conditional pairs (`__vyrn_read_file`, `__vyrn_spawn`,
+`__vyrn_task_main`) count twice, as they have in every figure since M3.
+
+| | |
+|---|---|
+| C function definitions in the shim | **47 (35 exported, 12 static)** |
+| deleted in this milestone | **0** |
+
+Unchanged, and it must be: M1+M5 moved no builtin. **A milestone that retires none
+reports a zero rather than a smaller number reached by counting differently** —
+this is the fifth in this RFC to do so, and the first where the zero is the
+*result* rather than a side effect, since the milestone's product is the statement
+that the remainder is justified.
+
+### Gates, at this note
+
+1,236 workspace tests (was 1,233 — the census's three), parity green three ways
+over 87 examples, the RFC-0077 ladder unchanged at **54/87**, genwasm green,
+`doc --std --verify` clean, `vyrn-lsp` builds. No `.vyrn` file changed, so
+`fmt --check` is untouched. No engine, no shim and no std module was edited: the
+whole milestone is a test, a status line and this note, which is the correct
+footprint for a milestone whose product is a statement about the code rather than
+a change to it.
