@@ -1,6 +1,6 @@
 # RFC-0079 — Failure Is a Value, and Crashing Is the Caller's Call
 
-- **Status:** **Accepted.** M1 shipped; M2–M3 not yet started.
+- **Status:** **Accepted.** M1 and M2 shipped; M3 not yet started.
 - **Depends on:** RFC-0078 (which recorded this as open language question **B**
   and refused to decide it), RFC-0009 (`Validation`/`Issue` — the existing error
   model, and why this is not it), RFC-0060 (divergence-aware movecheck, which
@@ -188,7 +188,7 @@ panic NOT taken. Two things the plan above did not say:
 `panic` joins the RFC-0078 census as a `Control` row (61 → 62), which is the row
 `slice` leaves at M3.
 
-### M2 — `??`
+### M2 — `??` — **shipped**
 
 **This section was drafted as "parser sugar, and nothing else… zero backend
 work", desugaring to `match a { Ok(v) => v, Err(_) => b }`. That is impossible,
@@ -262,6 +262,55 @@ yields an unwrapped `T`, so `(a ?? b) ?? c` applies `??` to a non-sum.
 
 M2 must land **after** M1, not beside it: four of the five files it touches are
 M1's.
+
+**As landed.** The pattern-pair design held exactly as written — the two patterns
+are `Pattern::Success`/`Pattern::Failure` in `ast.rs`, the parser builds the
+`match`, and no engine gained a node. `vyrn-cli/tests/nullish.rs` covers both
+sums, chaining, precedence, and short-circuiting via an observable side effect;
+`nullish_and_panic_say_the_same_bytes_on_all_three_engines` in `parity.rs` covers
+the composition and asserts the wasm column actually ran, because
+`three_engines` skips it silently when `wasmtime()` finds nothing.
+
+Six things above were wrong, four of them cheaper than stated and two of them
+stated backwards:
+
+- **The precedence example contradicts the precedence rule.** "Looser than
+  comparison" and "`a ?? 0 == c` parses as `(a ?? 0) == c`" cannot both hold —
+  the second describes `??` binding *tighter* than `==`. The rule won, so
+  `a ?? 0 == c` is `a ?? (0 == c)`. That grouping is a type error on an
+  `Option<Int64>`, so the reading that is not wanted fails loudly at the check
+  rather than quietly at runtime, which is what makes the choice safe.
+- **No table shift was needed.** "Every tier from 3 up shifts by one" assumed
+  `??` had to sit *in* `binop`'s table. It does not — it is not a `BinOp`, it is
+  handled by hand in `binary()` and recurses at its own binding power for right
+  associativity. Sharing power 3 with `EqEq` and shifting nothing was checked
+  case by case against every `min_bp` the loop passes and produces the identical
+  parse. Seventeen edited rows, zero behaviour change, so the rows stayed.
+- **`binding_type` needed no change**, because `Success`/`Failure` resolve to the
+  concrete tag string (`want[0]`/`want[1]`) before it is called.
+- **Three sites the list above missed**, all of them one line: `tag_test` in the
+  direct backend (beside `pattern_binds` — it decides tag 1 vs tag 0),
+  `movecheck::pattern_bindings`, and the loader's two binder-scoping walks.
+  `check_match`'s sibling `pattern_binders` (`if let`/`while let`) needed an
+  exhaustiveness arm only, spelled `unreachable!` — `??` desugars to a `match`
+  and nothing else.
+- **`vyrn fmt` cost zero rows, not one.** The default spacing rule already emits
+  `a ?? b` and re-lex equality already held. The row that was really added is in
+  `token_name_and_text` — the RFC-0054 `lex()` builtin's table, not fmt's.
+- **The `(x?)?` migration note is moot.** The spelling it worried about needs a
+  `Result<Option<T>, E>`, and nested sums are refused outright ("nested
+  Option/Result is not supported in v0.1"), so `Try(Try(x))` was unreachable on
+  every type, not merely unused. The munch takes nothing away.
+
+And one detail that is true but buys less than it claims: **`Failure`'s binder
+does not stop a leak**, because nothing drops a `match` arm's payload binder.
+`own.rs` makes only `let` bindings droppable, so a hand-written `Err(e)` arm does
+not free `e` either — a discarded error payload is the same safe leak in both
+spellings. The binder is still the right shape (it keeps the two arms symmetric,
+and the checker's per-arm binding seam is where the `Option` path opts out), and
+what it actually guarantees is pinned as such: `??` emits exactly the frees the
+`match` a user would write by hand emits. When arm binders become droppable, both
+spellings gain it together, which is the whole reason `??` is a `match`.
 
 ### M3 — `slice` becomes Vyrn
 
