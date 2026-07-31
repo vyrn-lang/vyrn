@@ -56,12 +56,23 @@ use std::collections::{BTreeMap, BTreeSet};
 /// they are the honest labels for the arms that are movable and were not moved.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Why {
-    /// **Memory.** `__vyrn_malloc` is irreducible (you cannot write the allocator
-    /// without a memory-growth primitive), and so is every container built on it:
-    /// `Array`, `Map`, `SmallArray` and the slot table need a **raw-memory view**
-    /// the language does not have. This is the largest row, and the one open
-    /// language question of the two blocks it — see RFC-0078's "A raw-memory
-    /// view".
+    /// **Memory.** `__vyrn_malloc` is irreducible: you cannot write the allocator
+    /// without a memory-growth primitive, which is the same argument `Syscall`
+    /// makes and is not a deferral.
+    ///
+    /// This row said the containers standing on it — `Array`, `Map`,
+    /// `SmallArray`, the slot table — "need a **raw-memory view** the language
+    /// does not have", and pointed at RFC-0078's open question A. **RFC-0082
+    /// withdrew that question.** What forces `unsafe` in Rust's `Vec` is
+    /// uninitialized capacity being observable (`set_len`, which is why
+    /// `MaybeUninit` exists), not pointers; `Array` owns `len` and `cap` together
+    /// and never exposes spare capacity, so containers over it are ordinary safe
+    /// Vyrn. `examples/slottable.vyrn` is a generation-checked slot table written
+    /// that way.
+    ///
+    /// So these rows are **not** blocked on a language feature. M2 measured the
+    /// actual cost of moving them — ~18x on the interpreter — and that number,
+    /// not a missing primitive, is why they are still here.
     Memory,
     /// **Syscall.** RFC-0077 M2j measured a directly-emitted module's entire
     /// import list as twelve WASI functions plus `__vyrn_malloc`. You cannot write

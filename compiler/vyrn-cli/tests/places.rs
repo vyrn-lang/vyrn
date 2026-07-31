@@ -17,7 +17,11 @@ use common::*;
 fn body_of(src: &str, name: &str) -> String {
     let dir = std::env::temp_dir().join("vyrn-places");
     std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join(format!("{name}.vyrn"));
+    // Two tests here both emit `fn bump`, and cargo runs them concurrently, so
+    // the file name has to be unique per call and not per function.
+    static NTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let nth = NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file = dir.join(format!("{name}-{nth}.vyrn"));
     std::fs::write(&file, src).unwrap();
     let out = vyrn().arg("emit-ir").arg(&file).output().expect("vyrn emit-ir");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -125,6 +129,232 @@ fn a_nested_field_chain_allocates_nothing_either() {
     );
     let calls = allocating_calls(&body);
     assert!(calls.is_empty(), "{}\nin:\n{body}", calls.join("\n"));
+}
+
+/// The interpreter timing the two ratios below are built from: the fastest of
+/// three `vyrn run`s of `src`, which must print `expect`.
+fn best_of_3(dir: &std::path::Path, name: &str, src: &str, expect: &str) -> std::time::Duration {
+    let file = dir.join(format!("{name}.vyrn"));
+    std::fs::write(&file, src).unwrap();
+    (0..3)
+        .map(|_| {
+            let t = std::time::Instant::now();
+            let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), expect);
+            t.elapsed()
+        })
+        .min()
+        .unwrap()
+}
+
+/// The interpreter's half, which this file could not see at all until RFC-0082
+/// M2 — and that is precisely why a quadratic shipped: the IR assertions above
+/// are true, the compiled backends really do write through one buffer, and the
+/// interpreter was copying the whole vector on every write anyway.
+///
+/// There is no emitted code to count here, so the pin is a RATIO between two
+/// programs that differ in one token: whether the array lives in a record field
+/// or in a local. Both do N writes. Same machine, same interpreter, same
+/// process floor, so a loaded box slows both and the ratio holds; what does not
+/// hold is a copy per write, which measured 660x at this N before the fix
+/// against 1.4x after. The threshold is deliberately far from both.
+#[test]
+fn the_interpreter_does_not_copy_the_array_once_per_write() {
+    const N: usize = 32_000;
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // The array is built as a local in BOTH, then handed to the record: `push`
+    // through a field is a separate quadratic (RFC-0082 M2's "as landed") and
+    // measuring it here would hide the one this test is for.
+    let build = format!(
+        "let mut xs: Array<Int64> = []\n\
+         let mut i = 0\n\
+         while i < {N} {{ xs.push(0)  i = i + 1 }}\n\
+         let mut k = 0\n"
+    );
+    let plain = format!(
+        "fn main() -> Int64 {{\n{build}\
+         while k < {N} {{ xs[k] = k  k = k + 1 }}\n\
+         print(xs[{N} - 1])\n\
+         return 0\n}}\n"
+    );
+    let field = format!(
+        "type T = {{ xs: Array<Int64> }}\n\
+         fn main() -> Int64 {{\n{build}\
+         let mut t = T {{ xs: xs }}\n\
+         while k < {N} {{ t.xs[k] = k  k = k + 1 }}\n\
+         print(t.xs[{N} - 1])\n\
+         return 0\n}}\n"
+    );
+
+    let plain = best_of_3(&dir, "interp-plain", &plain, "31999");
+    let field = best_of_3(&dir, "interp-field", &field, "31999");
+    assert!(
+        field.as_secs_f64() < 4.0 * plain.as_secs_f64(),
+        "an index assignment through a field is copying the array: \
+         {field:?} against {plain:?} for the same {N} writes on a local"
+    );
+}
+
+/// The same ratio for `push`, which is the OTHER quadratic M2 found and left:
+/// `t.xs.push(v)` desugars to `t.xs = push(t.xs, v)`, so the general path read
+/// the field into a second `Rc` while the field still held the first, and the
+/// `push` builtin's `make_mut` copied the whole vector per append.
+///
+/// One token apart again — whether the array being appended to lives in a record
+/// field or in a local — and the same N appends. 449x at this N before the fix
+/// (8.90 s against 19.8 ms), 1.1x after. A ratio and not a duration because the
+/// claim is a complexity class and a loaded box slows both sides equally.
+#[test]
+fn the_interpreter_does_not_copy_the_array_once_per_append() {
+    const N: usize = 32_000;
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let local = format!(
+        "fn main() -> Int64 {{\n\
+         let mut xs: Array<Int64> = []\n\
+         let mut i = 0\n\
+         while i < {N} {{ xs.push(i)  i = i + 1 }}\n\
+         print(xs[{N} - 1])\n\
+         return 0\n}}\n"
+    );
+    let field = format!(
+        "type T = {{ xs: Array<Int64> }}\n\
+         fn main() -> Int64 {{\n\
+         let mut t = T {{ xs: [] }}\n\
+         let mut i = 0\n\
+         while i < {N} {{ t.xs.push(i)  i = i + 1 }}\n\
+         print(t.xs[{N} - 1])\n\
+         return 0\n}}\n"
+    );
+    let local = best_of_3(&dir, "interp-push-local", &local, "31999");
+    let field = best_of_3(&dir, "interp-push-field", &field, "31999");
+    assert!(
+        field.as_secs_f64() < 4.0 * local.as_secs_f64(),
+        "a push through a field is copying the array: \
+         {field:?} against {local:?} for the same {N} appends on a local"
+    );
+}
+
+/// The third quadratic, and the one behaviour cannot see either: `coerce`
+/// rebuilt a whole array at every typed boundary even when the element type can
+/// neither change a value nor reject one, so `rows[i][j] = v` paid for the inner
+/// row's LENGTH on every store (RFC-0082 M2 finding 3, closed in M3 by the
+/// short-circuit the field-store validation needed anyway).
+///
+/// The ratio is between two grids with the same number of WRITES and different
+/// row lengths — 40x4000 against 1600x100, 160,000 stores either way. A cost
+/// proportional to the row is the only thing that can tell them apart: 15.2x
+/// before (6,950 ms against 457), 1.0x after (272 against 268).
+#[test]
+fn the_interpreter_does_not_rebuild_a_row_per_element_store() {
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+    let grid = |rows: usize, cols: usize| {
+        format!(
+            "fn main() -> Int64 {{\n\
+             let mut rows: Array<Array<Int64>> = []\n\
+             let mut r = 0\n\
+             while r < {rows} {{\n\
+             let mut row: Array<Int64> = []\n\
+             let mut c = 0\n\
+             while c < {cols} {{ row.push(0)  c = c + 1 }}\n\
+             rows.push(row)\n\
+             r = r + 1\n\
+             }}\n\
+             let mut i = 0\n\
+             while i < {rows} {{\n\
+             let mut j = 0\n\
+             while j < {cols} {{ rows[i][j] = 1  j = j + 1 }}\n\
+             i = i + 1\n\
+             }}\n\
+             print(rows[{rows} - 1][{cols} - 1])\n\
+             return 0\n}}\n"
+        )
+    };
+    let short = best_of_3(&dir, "interp-grid-short", &grid(1600, 100), "1");
+    let long = best_of_3(&dir, "interp-grid-long", &grid(40, 4000), "1");
+    assert!(
+        long.as_secs_f64() < 4.0 * short.as_secs_f64(),
+        "an element store is rebuilding its row: {long:?} for 40x4000 against \
+         {short:?} for 1600x100 — the same 160,000 writes"
+    );
+}
+
+/// The same store, with a VALIDATED element type — the half that had to be paid
+/// for and was nearly paid twice. M3 made a field write coerce (so a runtime
+/// value entering `t.xs: Array<Age>` is checked at all), and the write-back
+/// every place desugar ends with then re-proved the whole array per store:
+/// 13,467 ms for 8,000 writes against 76 for the same loop on `Array<Int64>`.
+///
+/// A variable already OF the field's type is skipped, which is what the compiled
+/// backends do (`validation_required` is `None` when `from == to`). So the
+/// predicate costs a constant per store, not a scan — and the ratio says so
+/// without depending on the machine.
+#[test]
+fn a_validated_element_type_costs_a_constant_per_store() {
+    const N: usize = 8_000;
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = |decl: &str, elem: &str| {
+        format!(
+            "{decl}type T = {{ xs: Array<{elem}> }}\n\
+             fn main() -> Int64 {{\n\
+             let mut t = T {{ xs: [] }}\n\
+             let mut i = 0\n\
+             while i < {N} {{ t.xs.push(i + 18)  i = i + 1 }}\n\
+             let mut k = 0\n\
+             while k < {N} {{ t.xs[k] = k + 18  k = k + 1 }}\n\
+             print(t.xs[{N} - 1])\n\
+             return 0\n}}\n"
+        )
+    };
+    let expect = (N + 17).to_string();
+    let plain = best_of_3(&dir, "interp-store-plain", &prog("", "Int64"), &expect);
+    let validated = best_of_3(
+        &dir,
+        "interp-store-validated",
+        &prog("type Age = Int64 where value >= 18\n", "Age"),
+        &expect,
+    );
+    assert!(
+        validated.as_secs_f64() < 4.0 * plain.as_secs_f64(),
+        "a validated element type is re-validating the whole array per store: \
+         {validated:?} against {plain:?} for the same {N} writes"
+    );
+}
+
+/// `vyrn test` is a RECOVERABLE trap: a trapping test is reported and the next
+/// one runs. M1 recorded that its stale field was unobservable "because traps
+/// abort" and that a recoverable trap would have to revisit the desugar — this
+/// is that trap, and it was already there. Taking the container out of MODULE
+/// state would leave a `Val::Unit` behind that outlives the failed test, and the
+/// next one reads `at of non-Array/Int64`: a value no program can otherwise
+/// produce. So globals keep the copy, and this is the test that says so.
+#[test]
+fn a_trapping_test_does_not_leave_a_hole_in_module_state() {
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("trap-hole.vyrn");
+    std::fs::write(
+        &file,
+        "type T = { xs: Array<Int64> }\n\
+         let mut gt: T = T { xs: [1, 2, 3] }\n\
+         fn main() -> Int64 { print(gt.xs[0])  return 0 }\n\
+         test \"traps mid-write\" { gt.xs[99] = 7 }\n\
+         test \"still sees an array\" { assertEq(gt.xs[0], 1) }\n",
+    )
+    .unwrap();
+    let out = vyrn().arg("test").arg(&file).output().expect("vyrn test");
+    let all = String::from_utf8_lossy(&out.stdout).to_string()
+        + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        all.contains("still sees an array\" ... ok"),
+        "the field must survive the trapped test as an array:\n{all}"
+    );
 }
 
 /// The receiver forms that have no place to write back to keep failing, and say

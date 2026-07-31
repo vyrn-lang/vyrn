@@ -1487,13 +1487,18 @@ impl<'a> Interp<'a> {
             if let Some(t) = &g.ty {
                 v = self.coerce(v, t)?;
             }
-            self.globals.borrow_mut().insert(
-                g.name.clone(),
-                Slot {
-                    v,
-                    ty: g.ty.clone(),
-                },
-            );
+            // Infer the type when there is no annotation, exactly as `Stmt::Let`
+            // does for a local: an unannotated `let mut g = T { xs: [] }` is a
+            // record whose field types are the only hook a later `g.xs.push(v)`
+            // has to validate against, and without this the interpreter accepted
+            // a value both compiled backends trapped on (RFC-0082 M3).
+            let ty = match &g.ty {
+                Some(t) => Some(t.clone()),
+                None => self.type_of(&g.init, &scope),
+            };
+            self.globals
+                .borrow_mut()
+                .insert(g.name.clone(), Slot { v, ty });
         }
         Ok(())
     }
@@ -1900,6 +1905,98 @@ impl<'a> Interp<'a> {
         Ok(())
     }
 
+    /// The move-out half of a place desugar (RFC-0082): TAKE the container out
+    /// of its home rather than copying it, leaving `Val::Unit` behind until the
+    /// write-back at the end of the same statement group restores it.
+    ///
+    /// `t.xs[k] = v` desugars to `let mut t.xs[] = t.xs` / `t.xs[][k] = v` /
+    /// `t.xs = t.xs[]`. Reading the field the ordinary way CLONES the
+    /// `Rc<Vec<Val>>` to refcount 2, so the `Rc::make_mut` in `Stmt::IndexSet`
+    /// deep-copies the whole vector on every write: measured 23.9 s at
+    /// N = 32,000 against 0.05 s for the same loop on a plain array variable —
+    /// quadratic. Both compiled backends were always fine, because there the
+    /// same three statements copy a `{ptr,len,cap}` header into an alloca and
+    /// write through the *same* buffer, so this fix is interpreter-only.
+    ///
+    /// Sound only because the desugar hoists every operand that could read a
+    /// place ahead of the move (`place_receiver` and its callers): before that,
+    /// `t.xs[t.xs.length - 1] = 99` read the field while it was out and only
+    /// got the right answer because the copy was still there. Once hoisted, the
+    /// only thing that can happen between take and write-back is a trap.
+    ///
+    /// **Locals only, and that restriction is load-bearing.** M1 recorded that
+    /// its equivalent hole was unobservable because every trap aborts, and that
+    /// a recoverable trap would have to revisit it. Vyrn already has one:
+    /// `vyrn test` catches a trapping test and runs the next, so a hole left in
+    /// MODULE state outlives it, and a later test reads `Val::Unit` where an
+    /// array should be — `at of non-Array/Int64`, a value no program can
+    /// otherwise produce. A local cannot outlive that boundary: its frame is
+    /// popped on the way out and never read again, and a `modify` parameter's
+    /// write-back does not run on the error path either (checked: the caller's
+    /// record is intact). So a global keeps the copy — and stays quadratic,
+    /// like `store.xs.push(v)` already is.
+    ///
+    /// Returns `Ok(None)` for any shape it does not recognise, having mutated
+    /// nothing, so the general path produces the usual value or the usual error.
+    fn take_place(
+        &self,
+        name: &str,
+        value: &Expr,
+        scope: &mut Vec<Frame>,
+    ) -> Result<Option<Val>, Ctrl> {
+        if !is_place_temp(name) {
+            return Ok(None);
+        }
+        // The two place shapes: a record field (`r.a`) and an array element
+        // (`rows[i]`). Both bases are plain variables by construction — the
+        // desugar is recursive, so an outer level has already moved its own
+        // container into a temp.
+        let (parent, taken): (&String, Box<dyn FnOnce(&mut Slot) -> Option<Val>>) = match value {
+            Expr::Field { expr, field, .. } => {
+                let Expr::Var { name: parent, .. } = expr.as_ref() else {
+                    return Ok(None);
+                };
+                (
+                    parent,
+                    Box::new(move |s: &mut Slot| match &mut s.v {
+                        Val::Record(map) => map
+                            .get_mut(field)
+                            .map(|slot| std::mem::replace(slot, Val::Unit)),
+                        _ => None,
+                    }),
+                )
+            }
+            Expr::Call { name: f, args, .. } if f == "at" && args.len() == 2 => {
+                let Expr::Var { name: parent, .. } = &args[0] else {
+                    return Ok(None);
+                };
+                // The index is itself a hoisted temp, a literal or a variable,
+                // so evaluating it here cannot reach the place being taken.
+                let Val::Int(idx) = self.expr(&args[1], scope)? else {
+                    return Ok(None);
+                };
+                (
+                    parent,
+                    Box::new(move |s: &mut Slot| match &mut s.v {
+                        // Out of bounds falls through so `at`'s own wording traps.
+                        Val::Array(items) if idx >= 0 && (idx as usize) < items.len() => {
+                            let items = std::rc::Rc::make_mut(items);
+                            Some(std::mem::replace(&mut items[idx as usize], Val::Unit))
+                        }
+                        _ => None,
+                    }),
+                )
+            }
+            _ => return Ok(None),
+        };
+        for frame in scope.iter_mut().rev() {
+            if let Some(s) = frame.get_mut(parent) {
+                return Ok(taken(s));
+            }
+        }
+        Ok(None) // a global: not in any frame, so leave it to the copying path
+    }
+
     fn stmt(&self, stmt: &Stmt, scope: &mut Vec<Frame>) -> Result<Flow, Ctrl> {
         // Generation step budget (RFC-0021): a runaway generator fails loudly
         // instead of hanging the build. Only active inside a generation run.
@@ -1914,7 +2011,10 @@ impl<'a> Interp<'a> {
             Stmt::Let {
                 name, value, ty, ..
             } => {
-                let mut v = self.expr(value, scope)?;
+                let mut v = match self.take_place(name, value, scope)? {
+                    Some(taken) => taken,
+                    None => self.expr(value, scope)?,
+                };
                 // An annotation coerces the initializer (sized-int wrapping,
                 // automatic validation) and is remembered so reassignments run
                 // through the same coercion.
@@ -2104,7 +2204,148 @@ impl<'a> Interp<'a> {
             Stmt::SetField {
                 name, field, value, ..
             } => {
-                let v = self.expr(value, scope)?;
+                // `t.xs.push(v)` on a LOCAL record: append IN PLACE — the same
+                // fix as `xs.push(v)` above, one level down.
+                //
+                // The statement desugars to `t.xs = push(t.xs, v)`, so the
+                // general path evaluates `t.xs` into a second `Rc` while the
+                // field still holds the first, and `push`'s `Rc::make_mut` then
+                // copies the whole vector: measured 135 / 310 / 1,705 / 10,704 ms
+                // at N = 4,000 → 32,000 against a flat 45 / 44 / 49 / 49 for the
+                // same loop on a plain local. Quadratic, on the most common
+                // container operation there is. Both compiled backends were
+                // always flat (~44 native, ~50 wasm at every N), so this is
+                // interpreter-only like the take below it.
+                //
+                // This is NOT `take_place`'s take, and deliberately not: there
+                // the desugar had already split the statement in three and the
+                // container HAD to live in a temp, so the move-out leaves
+                // `Val::Unit` behind for the rest of the group. Here the whole
+                // mutation is one statement, so the snapshot does that job. The
+                // field's `Rc` is cloned BEFORE the item is evaluated, and the
+                // field's own reference is dropped after — which is what puts
+                // the refcount back to 1 and makes the append O(1), and what
+                // keeps the general path's order: a callee that reaches the same
+                // field mid-statement (`t.xs.push(f(t))` with `f` taking
+                // `t: modify T`) mutates its own copy and loses the write, which
+                // is what all three engines do today.
+                //
+                // Locals only, exactly as the take is, and for the reason spelled
+                // out on `take_place`: between dropping the field's reference and
+                // storing the grown array back, an out-of-memory reserve can
+                // escape, and only a local's frame is guaranteed popped by the
+                // one boundary — `vyrn test` — that recovers from a trap. A
+                // global keeps the copy and stays quadratic.
+                //
+                // The slot is inspected BEFORE the item is evaluated, so a shape
+                // this cannot handle falls through having evaluated nothing.
+                //
+                // The field's declared type is what the value is coerced — and
+                // therefore VALIDATED — into, on both paths. This statement had
+                // no coercion at all until RFC-0082 M3: `t.xs.push(n)` on an
+                // `xs: Array<Age>` accepted a runtime 5 under the interpreter
+                // while both compiled backends trapped, because they coerce at
+                // this store (`emit_validation` inside codegen's own `coerce`)
+                // and nothing here did. `None` when the record binding's type is
+                // unknown — there is then nothing to check against.
+                let fty = self.field_ty(name, field, scope);
+                let mut pushed = None;
+                if let Expr::Call { name: fname, args, .. } = value {
+                    if fname == "push"
+                        && args.len() == 2
+                        && matches!(&args[0], Expr::Field { expr, field: f, .. }
+                            if f == field
+                                && matches!(expr.as_ref(), Expr::Var { name: n, .. } if n == name))
+                    {
+                        // Appending one element only requires THAT element to be
+                        // validated, so the fast path coerces the item and leaves
+                        // the rest alone — the general path's whole-array coerce
+                        // would re-prove every element on every push. A fixed or
+                        // small array carries a capacity only the general path
+                        // enforces, so those fall through, exactly as the local
+                        // `xs.push(v)` path above bails on them.
+                        let elem_ty = match &fty {
+                            None => Some(None),
+                            Some(t) => match crate::types::resolve(t, &self.type_map) {
+                                Type::Array(i) => Some(Some(*i)),
+                                _ => None,
+                            },
+                        };
+                        let snap = elem_ty.and_then(|e| {
+                            scope
+                                .iter()
+                                .rev()
+                                .find_map(|fr| fr.get(name))
+                                .and_then(|s| match &s.v {
+                                    Val::Record(map) => match map.get(field) {
+                                        Some(Val::Array(elems)) => Some((elems.clone(), e)),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                })
+                        });
+                        if let Some((mut arr, elem_ty)) = snap {
+                            let item = self.expr(&args[1], scope)?;
+                            // Validate before anything is disturbed: a trap here
+                            // must leave the record exactly as it was, which is
+                            // what the backends do (they check the pushed element
+                            // before the field store).
+                            let item = match &elem_ty {
+                                Some(t) => self.coerce(item, t)?,
+                                None => item,
+                            };
+                            // Drop the field's own reference to the array. What
+                            // it holds now is discarded either way: unchanged it
+                            // is the snapshot, and changed it is a mid-statement
+                            // write the general path also overwrites.
+                            for fr in scope.iter_mut().rev() {
+                                let Some(slot) = fr.get_mut(name) else { continue };
+                                if let Val::Record(map) = &mut slot.v {
+                                    if let Some(cur) = map.get_mut(field) {
+                                        *cur = Val::Unit;
+                                    }
+                                }
+                                break;
+                            }
+                            let elems = std::rc::Rc::make_mut(&mut arr);
+                            reserve_vec(elems, 1)?;
+                            elems.push(item);
+                            pushed = Some(Val::Array(arr));
+                        }
+                    }
+                }
+                // The write-back is the ordinary one: the fast path only decided
+                // what value the field gets (and already coerced its element).
+                let v = match pushed {
+                    Some(v) => v,
+                    None => {
+                        let v = self.expr(value, scope)?;
+                        // A plain variable ALREADY of the field's type holds
+                        // values that passed their own boundary, so re-proving
+                        // them is pure cost — and it is the write-back every
+                        // place desugar ends with (`t.xs[i] = v` becomes
+                        // `.. t.xs = t.xs[]`), so it lands once per store:
+                        // 8,000 writes into an `Array<Age>` field measured
+                        // 13,467 ms re-validating against 76 ms not. This is
+                        // the compiled backends' own rule, not a shortcut of
+                        // the interpreter's — `validation_required` returns
+                        // `None` when `from == to`, so they emit nothing here
+                        // either. Deliberately variables only: `push(t.xs, v)`
+                        // is ALSO statically `Array<Age>` and its element has
+                        // been validated by nothing at this point (the
+                        // backends validate it inside `push`; the fast path
+                        // above does, for a local).
+                        let known = matches!(value, Expr::Var { name: n, .. }
+                            if scope.iter().rev().find_map(|f| f.get(n).map(|s| s.ty.clone()))
+                                .unwrap_or_else(|| self.globals.borrow().get(n)
+                                    .and_then(|s| s.ty.clone()))
+                                .as_ref() == fty.as_ref());
+                        match &fty {
+                            Some(t) if !known => self.coerce(v, t)?,
+                            _ => v,
+                        }
+                    }
+                };
                 for frame in scope.iter_mut().rev() {
                     if let Some(Slot {
                         v: Val::Record(map),
@@ -3978,6 +4219,16 @@ impl<'a> Interp<'a> {
     /// is exhaustive — record fields, Option/Result payloads, and array
     /// elements are coerced (and therefore validated) recursively.
     fn coerce(&self, v: Val, ty: &Type) -> Result<Val, Ctrl> {
+        // A container whose element type can neither change a value nor reject
+        // one is rebuilt for nothing, and every typed boundary rebuilds it
+        // again: `rows[i][j] = v` on an `Array<Array<Int64>>` desugars to a
+        // move-out and a move-back, so the field/element write-backs re-walked
+        // the whole grid per store — 65,304 ms for a 400x400 fill against 99 ms
+        // with this short-circuit (RFC-0082 M2, finding 3). Values are handed
+        // back untouched, so this is not an optimization the semantics can see.
+        if self.coercion_is_identity(ty, 0) {
+            return Ok(v);
+        }
         match (ty, v) {
             (Type::IntN { bits, signed }, Val::Int(n)) => Ok(Val::IntN {
                 v: wrap_intn(n, *bits, *signed),
@@ -4092,6 +4343,57 @@ impl<'a> Interp<'a> {
                 named => named,
             }))),
             (_, v) => Ok(v),
+        }
+    }
+
+    /// The declared type of `name.field`, resolved the same way the checker's
+    /// `Stmt::SetField` resolves it (the record binding's type, then that
+    /// record's field). `None` when the binding has no remembered type — a
+    /// record value is otherwise type-erased, so there is no other hook.
+    fn field_ty(&self, name: &str, field: &str, scope: &[Frame]) -> Option<Type> {
+        let ty = scope
+            .iter()
+            .rev()
+            .find_map(|f| f.get(name).map(|s| s.ty.clone()))
+            .unwrap_or_else(|| self.globals.borrow().get(name).and_then(|s| s.ty.clone()))?;
+        crate::types::record_fields(&ty, &self.type_map)?
+            .into_iter()
+            .find(|f| f.name == field)
+            .map(|f| f.ty)
+    }
+
+    /// Whether coercing INTO `ty` is the identity: no width to wrap to, no
+    /// predicate to run, and nothing nested that has either. Conservative —
+    /// anything unrecognized (a type transformer, a generic application, a
+    /// `Param`) answers `false` and takes the ordinary walk, which is only
+    /// slower, never wrong.
+    ///
+    /// `depth` guards a self-referential named type (`type Tree = { kids:
+    /// Array<Tree> }`): the value walk in `coerce` terminates because values are
+    /// finite, but a type walk does not. `crate::types::resolve` bounds itself
+    /// the same way.
+    fn coercion_is_identity(&self, ty: &Type, depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        let d = depth + 1;
+        match ty {
+            Type::Int | Type::Float | Type::Bool | Type::Str | Type::Unit => true,
+            Type::Named(n) => match self.types.get(n.as_str()) {
+                // An unknown name coerces to itself in the walk below.
+                None => true,
+                Some(decl) => decl.predicate.is_none() && self.coercion_is_identity(&decl.base, d),
+            },
+            Type::Option(i) | Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => {
+                self.coercion_is_identity(i, d)
+            }
+            Type::Result(ok, err) => {
+                self.coercion_is_identity(ok, d) && self.coercion_is_identity(err, d)
+            }
+            Type::Map(_, val) => self.coercion_is_identity(val, d),
+            Type::Record(fields) => fields.iter().all(|f| self.coercion_is_identity(&f.ty, d)),
+            // `IntN` wraps, `Float32` rounds, `Fn` adopts a signature.
+            _ => false,
         }
     }
 
@@ -5605,6 +5907,48 @@ mod tests {
             run(xf).unwrap_err(),
             "validation failed: `Range` violates its `where` clause"
         );
+    }
+
+    /// The boundary that was NOT validated: a field STORE (RFC-0082 M3).
+    ///
+    /// `Stmt::SetField` never coerced, so every spelling that writes through a
+    /// record field let a runtime value into a validated element type while both
+    /// compiled backends trapped — the one hole in "a Vyrn program cannot even
+    /// spell a value that failed its own predicate". A literal is folded by
+    /// `consteval` at compile time on all three engines, which is why only a
+    /// runtime value reaches it and why nothing said for so long.
+    #[test]
+    fn a_field_store_validates_like_every_other_boundary() {
+        let head = "type Age = Int64 where value >= 18 \
+                    type T = { xs: Array<Age> } \
+                    fn rt(n: Int64) -> Int64 { return n - 1 } ";
+        // `t.xs.push(v)` — the in-place append fast path.
+        let push = format!(
+            "{head} fn main() -> Int64 {{ let mut t = T {{ xs: [] }} \
+             t.xs.push(rt(6)) return t.xs[0] }}"
+        );
+        assert_eq!(run(&push).unwrap_err(), "validation failed for `Age`");
+        // The same, through a `modify` parameter rather than the local.
+        let param = format!(
+            "{head} fn add(t: modify T) {{ t.xs.push(rt(6)) }} \
+             fn main() -> Int64 {{ let mut t = T {{ xs: [] }} add(t) return t.xs[0] }}"
+        );
+        assert_eq!(run(&param).unwrap_err(), "validation failed for `Age`");
+        // And through module state, whose slot type is inferred from the
+        // initializer for exactly this reason.
+        let global = format!(
+            "{head} let mut g = T {{ xs: [] }} \
+             fn main() -> Int64 {{ g.xs.push(rt(6)) return g.xs[0] }}"
+        );
+        assert_eq!(run(&global).unwrap_err(), "validation failed for `Age`");
+        // Valid values still flow through all three.
+        let ok = format!(
+            "{head} let mut g = T {{ xs: [] }} \
+             fn add(t: modify T) {{ t.xs.push(rt(21)) }} \
+             fn main() -> Int64 {{ let mut t = T {{ xs: [] }} add(t) g.xs.push(rt(31)) \
+             return t.xs[0] + g.xs[0] }}"
+        );
+        assert_eq!(run(&ok).unwrap(), 50);
     }
 
     #[test]

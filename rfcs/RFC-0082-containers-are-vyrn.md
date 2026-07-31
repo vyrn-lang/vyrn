@@ -2,9 +2,11 @@
 
 - **Status:** **Accepted**, **M1 shipped** (see "As landed"), **M2 stopped at its
   own gate** — the port is blocked twice over and the gate failed anyway; M3 and
-  M4 are **withdrawn**. Milestones are gated on measurement the way RFC-0081's
-  were: nothing is deleted until a number says it should be, and here a number
-  said stop.
+  M4 are **withdrawn**. The two interpreter quadratics M2 found instead of the
+  port — the write `t.xs[k] = v` and the append `t.xs.push(v)` — are both
+  **fixed** (M2's "As landed"). Milestones are gated on measurement the way
+  RFC-0081's were: nothing is deleted until a number says it should be, and here
+  a number said stop.
 - **Depends on:** RFC-0078 (the census, and question **A**, which this
   reframes), RFC-0011 (`a[i] = v` element store, and the `a[i].field = v`
   desugar this extends), RFC-0028 (`Map<String, V>`), RFC-0056 (`SmallArray`),
@@ -349,6 +351,250 @@ because the field still holds a copy. Making the interpreter's move a real move
 requires the desugar to rewrite reads of the field inside the index and value
 expressions to read the temp — which is a change to the desugar in all three
 engines, not an interpreter patch, and it is its own RFC.
+
+##### As landed — the take, and two more quadratics underneath it
+
+Two parts, in this order. **The desugar hoists** every operand that can reach a
+place — the index, the value, a nested index, a mutating call's arguments — into
+its own temp *before* the move-out, so nothing reads the container while it is
+gone. **The interpreter then takes**: `let mut t.xs[] = t.xs` replaces the field
+with `Val::Unit` and hands over the `Rc`, so `Rc::make_mut` in `IndexSet` sees
+refcount 1 and writes through. Neither compiled backend changed, and that was
+checked rather than assumed: `places.rs`'s IR assertions are byte-for-byte the
+same before and after, because hoisting adds statements that lower to the same
+loads and both backends already wrote through one buffer.
+
+Isolated `t.xs[k] = v`, best of 3, milliseconds, three engines (process floor
+~35 ms):
+
+| N | interp before | interp after | native | wasm |
+|---|---|---|---|---|
+| 4,000 | 95 | 42 | 27 → 33 | 39 → 42 |
+| 8,000 | 276 | 46 | 30 → 31 | 40 → 41 |
+| 16,000 | 981 | 58 | 28 → 34 | 37 → 42 |
+| 32,000 | 9,942 | 75 | 28 → 39 | 39 → 41 |
+| 64,000 | 39,116 | 114 | 30 → 34 | 42 → 44 |
+
+The after column matches `xs[k] = v` on a plain local (38 / 43 / 45 / 57 / 71) to
+within noise. That is the complexity class changing, not a constant.
+
+**The self-referential cases are the pin, and the M2 spec was right about them**:
+`examples/placeorder.vyrn` runs `99`, `8`, `f`/`g` once each left to right, a
+nested index evaluated once, a two-deep place and a call reaching module state —
+byte-identical on three engines. The complexity class is pinned in `places.rs` by
+a *ratio*: the same N writes, once on a local and once through a field, must land
+within 4x of each other. Before, that ratio was 503x. There is no IR to count for
+the interpreter, which is exactly why this shipped.
+
+Four things this milestone found that the diagnosis above did not:
+
+1. **Vyrn already has the recoverable trap the M1 note said would force a
+   revisit.** `vyrn test` catches a trapping test and runs the next one, so a
+   hole left in *module state* outlives the trap and the next test reads
+   `at of non-Array/Int64` — a value no program can otherwise produce. The take
+   is therefore **locals only**: a local's frame is popped on the error path and
+   never read again, and a `modify` parameter's write-back does not run either
+   (checked). A global keeps the copy and stays quadratic. Pinned by
+   `a_trapping_test_does_not_leave_a_hole_in_module_state`.
+2. **The measurement above was two quadratics, not one.** M2's program built its
+   array with `t.xs.push(0)` in a loop, and `push` through a field is its own
+   quadratic — 138 / 481 / 1,582 / 8,186 ms at N = 4,000 → 32,000, untouched by
+   this fix and fixed by the next one (below).
+   `Stmt::Assign` has an in-place fast path for `xs.push(v)` on a local;
+   `Stmt::SetField` has none, and the `push` builtin clones its argument
+   unconditionally so the take alone would not help. That is the non-monotonic
+   998 / 886 ms at N = 2,000 / 8,000 in the table at the top of this RFC: at those
+   sizes both programs were mostly compile floor.
+3. **`rows[i][j] = v` is still quadratic, for a third reason.** The write-back
+   `rows[i] = rows[]` coerces into the declared element type, and `coerce` on an
+   array **rebuilds the whole vector** even when the element type cannot change a
+   value. Confirmed by probe: short-circuiting `coerce` for `Array<Int64>` takes
+   the nested loop from 786 / 2,613 / 16,633 / 65,304 ms to 44 / 50 / 67 / 99 at
+   N = 8,000 → 64,000. Not fixed here — a general `coercion_free` predicate
+   decides when automatic validation may be skipped, and that is a validation
+   change, not a places change. (Fixed below, with finding 6: it turned out to
+   be the same change, because a field store that validates cannot afford it.)
+4. **A nested index was evaluated twice.** `place_receiver` cloned the index
+   expression into both the load and the write-back, so `rows[f()][0] = 1` called
+   `f` twice — visible in the baseline binary, and fixed by the hoist that
+   soundness needed anyway.
+
+The trap caveat is unchanged in shape and narrower in scope: between the take and
+the write-back only a trap can escape (every `?` and every call now runs during
+the hoists), the field is `Val::Unit` for that instant, and no locals survive the
+one boundary that recovers.
+
+##### As landed — the append, which needed the take's rule and not its take
+
+Finding 2 above, fixed. `t.xs.push(v)` desugars to `t.xs = push(t.xs, v)`, so the
+general path read the field into a *second* `Rc` while the field still held the
+first, and the `push` builtin's `Rc::make_mut` copied the whole vector on every
+append. Isolated, best of 3, milliseconds, three engines (process floor ~45):
+
+| N | interp before | interp after | native | wasm |
+|---|---|---|---|---|
+| 4,000 | 135 | 44 | 44 → 40 | 49 → 50 |
+| 8,000 | 310 | 48 | 44 → 39 | 49 → 54 |
+| 16,000 | 1,705 | 55 | 44 → 46 | 49 → 49 |
+| 32,000 | 10,704 | 57 | 47 → 47 | 55 → 51 |
+
+`xs.push(i)` on a plain local is 45 / 44 / 49 / 49 before and 45 / 45 / 52 / 52
+after — the same numbers as the field column now is, which is the point: process
+floor either side, and the class changed. Both compiled backends were flat at
+every N before *and* after, so the whole cliff was the interpreter's, again.
+
+That the backends did not change was checked and not assumed, and the check needed
+a correction: the `.exe` embeds a timestamp and the direct wasm backend's DATA
+section is not reproducible across compiler builds — a dead `panic` string from
+`std/num` is interned or not depending on the compiler binary's own layout, which
+reproduces from adding an unused function to `interp.rs` and has nothing to do
+with this change. The emitted LLVM IR is byte-identical, and so is the wasm
+**code** section (10) along with every other section but the pool and the
+heap-base global derived from its length.
+
+**The take was the wrong tool here, and that is the finding.** `take_place`
+exists because the index-store desugar had already split the statement in three,
+so the container HAD to live in a temp and the move-out has to leave `Val::Unit`
+behind it. An append is one statement, so the array never has to leave the
+record: the fast path clones the field's `Rc` *before* the item is evaluated,
+drops the field's own reference *after*, and grows the now-unshared snapshot.
+Dropping that reference is what makes the append O(1); cloning it first is what
+keeps the general path's evaluation order, and that is not academic —
+`t.xs.push(f(t))` with `f` taking `t: modify T` reaches the same field
+mid-statement, and its write is discarded by all three engines both before and
+after. Taking early would have made that program trap on `push of non-Array
+Unit`; appending in place without the snapshot would have made it print `2`
+where every engine prints `1`.
+
+**The locals-only rule is reused, not re-derived, and it is weaker here on
+purpose.** The only escape between dropping the field's reference and storing the
+grown array back is an out-of-memory `reserve`, and locals are the exact scope in
+which `vyrn test`'s recovery cannot observe a hole (finding 1). A global keeps the
+copy and stays quadratic — the same sentence as the take, and the same
+`store.xs.push(v)` it already named.
+
+Pinned by `the_interpreter_does_not_copy_the_array_once_per_append` in
+`places.rs`, the sibling of the write ratio and deliberately the same shape: N
+appends onto a local against N appends through a field, within 4x. On the pre-fix
+binary that ratio is 449x (8.90 s against 19.8 ms) and the test fails; after, it
+is 1.1x. The two ratios now share one `best_of_3`.
+
+Two more things this found, neither fixed here (finding 6 is fixed in the section
+after this one; finding 5 is still open):
+
+5. **`rows[i].push(v)` — an append through an array ELEMENT — is the same
+   quadratic and is still there**: 275 / 735 / 3,307 ms at N = 4,000 → 16,000.
+   It desugars to `Stmt::IndexSet` rather than `SetField`, so it is a third
+   receiver form and a third copy of the same twenty lines. Left until something
+   measures it in a real program: `t.xs.push(v)` is what the corpus writes.
+6. **The interpreter does not validate an append through a field at all**, and
+   both compiled backends do. `type Age = Int64 where value >= 18` with
+   `t.xs: Array<Age>` and `t.xs.push(5)` prints `5` under `vyrn run` and traps
+   with `validation failed for `Age`` under native and wasm — two engines against
+   one, so the interpreter is the wrong one. This predates the fix above and
+   survives it unchanged (`Stmt::SetField`'s general path never coerced, and the
+   fast path was written to match it rather than to quietly change it): the
+   element type would have to be resolved through the record's declared type,
+   which is the same `coerce`-and-validation question finding 3 is, and it is not
+   a places change either. No example reaches it, which is why parity is green.
+
+##### As landed — findings 6 and 3, which really were one change
+
+Finding 6 was the more serious of the two by a wide margin: the interpreter
+accepted a value that failed its own predicate, so RFC-0078 M3's "a Vyrn program
+cannot even spell a value that failed its own predicate" was false as written for
+a whole class of program. `Stmt::SetField` was the only typed boundary in the
+interpreter with no coercion behind it, and coercion is where automatic
+validation lives.
+
+The fix is the field's declared type, resolved the way the checker's own
+`SetField` resolves it (the binding's type, then that record's field). The append
+fast path coerces just the pushed element; the general path coerces the value.
+Module state needed one more thing: an unannotated global kept `ty: None`, unlike
+an unannotated local, whose `Stmt::Let` has inferred its type since RFC-0018 so
+`toJson` can order fields. A global record therefore had no field types to check
+against at all, and `g.xs.push(v)` was the last spelling still diverging after
+the local and `modify` ones were fixed. Globals now infer the same way.
+
+The audit around it mattered more than the fix. Five sibling spellings, three of
+which nobody had reason to believe were correct:
+
+| spelling | before |
+|---|---|
+| `t.xs.push(v)` on a local | **diverged** — interp printed 5 |
+| `t.xs.push(v)` through a `modify` parameter | **diverged** |
+| `g.xs.push(v)` on module state | **diverged** |
+| `t.xs[i] = v` | correct — the desugar's temp is typed by inference, and `IndexSet` coerces its element |
+| `xs.push(v)` on a local | correct — `Stmt::Assign` coerces through the binding's declared type |
+| `rows[i].push(v)` | correct — `IndexSet` coerces into the element type |
+| `t.m[k] = v` on a `Map` field | correct — the map path coerces into `V` |
+
+Finding 3 is closed by the same change, and not as a bonus — as a prerequisite.
+A field store that coerces lands on the write-back every place desugar ends with
+(`t.xs[i] = v` is `let mut t.xs[] = t.xs .. t.xs = t.xs[]`), so the container
+would be re-walked once per store. `coerce` now returns the value untouched when
+coercing into a type can neither change it nor reject it — no width to wrap to,
+no predicate to run, nothing nested with either. Measured on 160,000 element
+stores, varying only the row length so the number of writes is constant:
+
+| grid | before | after |
+|---|---|---|
+| 1600 x 100 | 457 | 268 |
+| 400 x 400 | 964 | 265 |
+| 100 x 1600 | 2,902 | 269 |
+| 40 x 4,000 | 6,950 | 272 |
+
+The before column is the row length; the after column is not. Pinned by
+`the_interpreter_does_not_rebuild_a_row_per_element_store` in `places.rs`, a
+ratio between the first and last rows for the reason the other two ratios there
+are ratios.
+
+That leaves the case the short-circuit cannot help, which is the one the
+validation is FOR: `t.xs[i] = v` where the elements really are validated. 8,000
+stores through an `Array<Age>` field measured **13,467 ms** with the whole-array
+coerce on the write-back, against 76 for `Array<Int64>`. So a plain variable
+already OF the field's type is skipped — its values passed their own boundary on
+the way in, and this is the compiled backends' own rule rather than an
+interpreter shortcut: `validation_required` answers `None` when `from == to`,
+which is why native emits no element loop at a field store at all. Variables
+only, deliberately — `push(t.xs, v)` is statically `Array<Age>` too, and its
+element has been validated by nothing at that point. 13,467 → 79 ms, and
+`a_validated_element_type_costs_a_constant_per_store` says so.
+
+The validation itself is cheap where it now runs: 32,000 appends through a field
+cost 88 ms into `Array<Age>` against 79 into `Array<Int64>`.
+
+`examples/validate_store.vyrn` is the corpus's half — a local, a `modify`
+parameter and module state, valid stores printing before an invalid one traps.
+Its absence is exactly why this survived: no example pushed a runtime value into
+a validated array through a field, and a literal is folded by `consteval` before
+any engine runs.
+
+Finding 5 is still open and still quadratic — 206 / 402 / 1,648 ms at
+N = 4,000 → 16,000, down from 275 / 735 / 3,307 because the short-circuit removes
+the coerce but not the `push` builtin's clone, which is what makes it quadratic.
+
+7. **The audit found a second, unrelated validation divergence, and this one is
+   the textual backend's.** A validated payload inside an `Option` or a `Result`
+   is never checked natively: `let a: Option<Age> = Some(rt(6))` prints and exits
+   0 under `vyrn build`, and traps under `vyrn run` and under wasm. One engine
+   against two, so native is the wrong one — the mirror image of finding 6, found
+   only because the field audit asked what else a value can flow into. It reaches
+   through every spelling tried: a `let`, a return, a record literal, a field
+   store, and `Ok(..)` as well as `Some(..)`.
+
+   The seam is exact and small. `Some`/`Ok`/`Err` push the expected payload type
+   so the payload is *typed* by it (RFC-0037), and then never coerce into it; the
+   outer `coerce` cannot make up the difference because `validation_required`
+   looks at the `Option` and not through it. Four lines at each constructor fix
+   every case above — and were tried, and are not in this commit.
+   `result_array_payload_rematerializes_on_coerce` fails with them: coercing the
+   payload at construction reshapes an `ArrayN` literal into the growable
+   `Array` at the source, so the outer tag-branch `rebox_sum` it pins no longer
+   fires for that shape. That is plausibly an improvement and it is certainly a
+   change to what a *correct* program compiles to, which is not a thing to do at
+   the end of somebody else's milestone. Whoever takes it should decide first
+   whether `rebox_sum` still has a caller, because the answer may be no.
 
 ### M3 — `Map` over `Array` — **withdrawn**
 

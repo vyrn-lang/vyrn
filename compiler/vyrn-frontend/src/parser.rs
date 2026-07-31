@@ -650,17 +650,26 @@ fn is_index_field_chain(e: &Expr) -> bool {
 /// desugar is why this milestone touches no backend — the alternative was a
 /// second addressing mode in three of them.
 ///
-/// Returns the receiver name plus the statements that must bracket the
-/// mutation: `pre` before it, `post` after it, both outermost-first/-last so an
-/// arbitrarily deep chain (`r.inner.a[i] = v`) nests correctly. A base that is
+/// Returns the receiver name plus three statement lists: `hoists` and `moves`
+/// before the mutation, `post` after it, `moves`/`post` outermost-first/-last so
+/// an arbitrarily deep chain (`r.inner.a[i] = v`) nests correctly. A base that is
 /// neither (a call result, a temporary) yields `None` and keeps today's error.
-fn place_receiver(base: &Expr, line: usize) -> Option<(String, Vec<Stmt>, Vec<Stmt>)> {
+///
+/// `hoists` is the split M2 forced. Every move-out is a *take* in the
+/// interpreter (see `Interp::take_place`), so nothing may read the place while
+/// it is out; callers put their own operand evaluations there too, and the whole
+/// group runs strictly `hoists` then `moves` then mutation then `post`. Hoists
+/// are emitted left-to-right and moves are pure place reads, so source
+/// evaluation order is preserved: in `rows[f()][g()] = h()` the hoists are
+/// `f()`, `g()`, `h()` in that order — and `f()` now runs ONCE, where before it
+/// was cloned into both the load and the write-back.
+fn place_receiver(base: &Expr, line: usize) -> Option<(String, Vec<Stmt>, Vec<Stmt>, Vec<Stmt>)> {
     match base {
         // Already a slot: nothing to move, and the common case stays a single
         // statement.
-        Expr::Var { name, .. } => Some((name.clone(), Vec::new(), Vec::new())),
+        Expr::Var { name, .. } => Some((name.clone(), Vec::new(), Vec::new(), Vec::new())),
         Expr::Field { expr, field, .. } => {
-            let (parent, mut pre, mut post) = place_receiver(expr, line)?;
+            let (parent, hoists, mut pre, mut post) = place_receiver(expr, line)?;
             // Unspellable (contains `[`), like the `a[i].f = v` element temp:
             // it cannot collide with a real identifier and is filtered out of
             // the symbol/completion index, but reads naturally if it surfaces
@@ -692,14 +701,24 @@ fn place_receiver(base: &Expr, line: usize) -> Option<(String, Vec<Stmt>, Vec<St
                     line,
                 },
             );
-            Some((tmp, pre, post))
+            Some((tmp, hoists, pre, post))
         }
         // `rows[i][j] = v` — an element that is itself a container. Same shape
-        // as `a[i].push(v)`, which has always written back this way; the index
-        // is evaluated on both the read and the store, as in `a[i].f = v`.
+        // as `a[i].push(v)`, which has always written back this way. The index
+        // is hoisted into its own temp because the load and the write-back both
+        // need it and it must be evaluated exactly once.
         Expr::Call { name, args, .. } if name == "at" && args.len() == 2 => {
-            let (parent, mut pre, mut post) = place_receiver(&args[0], line)?;
+            let (parent, mut hoists, mut pre, mut post) = place_receiver(&args[0], line)?;
             let tmp = format!("{parent}[]");
+            let idx = format!("{tmp}idx");
+            hoists.push(Stmt::Let {
+                name: idx.clone(),
+                mutable: false,
+                ty: None,
+                value: args[1].clone(),
+                line,
+            });
+            let index = Expr::Var { name: idx, line };
             let load = Expr::Call {
                 name: "at".to_string(),
                 args: vec![
@@ -707,7 +726,7 @@ fn place_receiver(base: &Expr, line: usize) -> Option<(String, Vec<Stmt>, Vec<St
                         name: parent.clone(),
                         line,
                     },
-                    args[1].clone(),
+                    index.clone(),
                 ],
                 line,
             };
@@ -722,7 +741,7 @@ fn place_receiver(base: &Expr, line: usize) -> Option<(String, Vec<Stmt>, Vec<St
                 0,
                 Stmt::IndexSet {
                     name: parent,
-                    index: args[1].clone(),
+                    index,
                     value: Expr::Var {
                         name: tmp.clone(),
                         line,
@@ -730,10 +749,56 @@ fn place_receiver(base: &Expr, line: usize) -> Option<(String, Vec<Stmt>, Vec<St
                     line,
                 },
             );
-            Some((tmp, pre, post))
+            Some((tmp, hoists, pre, post))
         }
         _ => None,
     }
+}
+
+/// Does evaluating `e` reach a *place* — a record field or an array element?
+///
+/// A place desugar takes its container out of its home, so any operand that
+/// could read one has to be evaluated before the move (RFC-0082 M2:
+/// `t.xs[t.xs.length - 1] = 99` and `u.xs[0] = u.xs[2] + 5` are the cases that
+/// caught this). Hoisting *everything* would be simpler but is not free —
+/// `t.rows[k] = []` would become `let @v = []`, and an empty array literal has
+/// no type without its context — so literals, variables and their combinations
+/// stay in place. A call is assumed to reach a place: it can read a module-level
+/// record the same statement is mutating.
+fn reads_place(e: &Expr) -> bool {
+    match e {
+        Expr::Int(_)
+        | Expr::Byte(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Str(_)
+        | Expr::Var { .. } => false,
+        Expr::Unary { expr, .. } => reads_place(expr),
+        Expr::Binary { lhs, rhs, .. } => reads_place(lhs) || reads_place(rhs),
+        Expr::ArrayLit { elems, .. } => elems.iter().any(reads_place),
+        Expr::MapLit { entries, .. } => {
+            entries.iter().any(|(k, v)| reads_place(k) || reads_place(v))
+        }
+        _ => true,
+    }
+}
+
+/// Bind `e` to a temp so it is evaluated *before* the move-out, and hand back
+/// the expression the mutation should use instead. Operands that cannot reach a
+/// place are left alone, so `t.xs[k] = k * 2` still desugars to three statements
+/// rather than five.
+fn hoist_operand(e: Expr, name: String, hoists: &mut Vec<Stmt>, line: usize) -> Expr {
+    if !reads_place(&e) {
+        return e;
+    }
+    hoists.push(Stmt::Let {
+        name: name.clone(),
+        mutable: false,
+        ty: None,
+        value: e,
+        line,
+    });
+    Expr::Var { name, line }
 }
 
 /// `r.a.pop()`, `rows[i].swapRemove(j)`, `r.m.remove(k)` — the mutating methods
@@ -755,12 +820,20 @@ fn hoist_mutating_receiver(e: &mut Expr, line: usize) -> Option<(Vec<Stmt>, Vec<
     if !matches!(name.as_str(), "@pop" | "@swapRemove" | "@remove") {
         return None;
     }
-    let (recv, pre, post) = place_receiver(args.first()?, line)?;
+    let (recv, mut hoists, pre, post) = place_receiver(args.first()?, line)?;
     if pre.is_empty() {
         return None; // already a plain variable — nothing to move
     }
+    // `r.a.swapRemove(r.a.length - 1)` reads the field the move-out empties, so
+    // the remaining arguments are evaluated first, like an index assignment's.
+    for (n, arg) in args.iter_mut().enumerate().skip(1) {
+        let tmp = format!("{recv}[]arg{n}");
+        let taken = std::mem::replace(arg, Expr::Int(0));
+        *arg = hoist_operand(taken, tmp, &mut hoists, line);
+    }
     args[0] = Expr::Var { name: recv, line };
-    Some((pre, post))
+    hoists.extend(pre);
+    Some((hoists, post))
 }
 
 impl Parser {
@@ -2995,19 +3068,36 @@ impl Parser {
                             // The array may live in a slot already, or in a
                             // record field / array element that `place_receiver`
                             // moves out and back around the store (RFC-0082 M1).
-                            if let Some((recv, mut pre, post)) = place_receiver(&args[0], line) {
+                            if let Some((recv, mut hoists, moves, post)) =
+                                place_receiver(&args[0], line)
+                            {
                                 let index = args[1].clone();
                                 self.advance(); // eat `=`
                                 let value = self.expr()?;
                                 self.eat_semi();
-                                pre.push(Stmt::IndexSet {
+                                // With a move-out in play the index and the value
+                                // must be evaluated before it, in source order
+                                // (RFC-0082 M2). Nothing moves when the base is
+                                // already a slot, so `a[i] = v` stays one
+                                // statement.
+                                let (index, value) = if moves.is_empty() {
+                                    (index, value)
+                                } else {
+                                    let i =
+                                        hoist_operand(index, format!("{recv}[]idx"), &mut hoists, line);
+                                    let v =
+                                        hoist_operand(value, format!("{recv}[]val"), &mut hoists, line);
+                                    (i, v)
+                                };
+                                hoists.extend(moves);
+                                hoists.push(Stmt::IndexSet {
                                     name: recv,
                                     index,
                                     value,
                                     line,
                                 });
-                                pre.extend(post);
-                                return Ok(self.spliced(pre));
+                                hoists.extend(post);
+                                return Ok(self.spliced(hoists));
                             }
                             return Err(Diagnostic::error(
                                 line,
@@ -3031,9 +3121,9 @@ impl Parser {
                     if let Expr::Field { expr, field, .. } = &e {
                         if let Expr::Call { name, args, .. } = expr.as_ref() {
                             if name == "at" && args.len() == 2 {
-                                if let Some((recv, mut pre, post)) = place_receiver(&args[0], line)
+                                if let Some((recv, mut hoists, mut pre, post)) =
+                                    place_receiver(&args[0], line)
                                 {
-                                    let index = args[1].clone();
                                     let field = field.clone();
                                     self.advance(); // eat `=`
                                     let value = self.expr()?;
@@ -3045,6 +3135,21 @@ impl Parser {
                                     // naturally if it surfaces in a SetField
                                     // diagnostic ("record `ps[]` has no field ..").
                                     let tmp = format!("{recv}[]");
+                                    // The element load and the store back both
+                                    // need the index, and it must run once, so it
+                                    // is hoisted whether or not it reads a place;
+                                    // the value is hoisted because the element is
+                                    // TAKEN out of the array in the interpreter
+                                    // (RFC-0082 M2) — `a[i].f = a[i].g` would
+                                    // otherwise read the hole.
+                                    let index = hoist_operand(
+                                        args[1].clone(),
+                                        format!("{tmp}idx"),
+                                        &mut hoists,
+                                        line,
+                                    );
+                                    let value =
+                                        hoist_operand(value, format!("{tmp}val"), &mut hoists, line);
                                     // `let mut @tmp = a[i]`, `@tmp.f = v`, then
                                     // `a[i] = @tmp` — inside whatever move-out /
                                     // move-back `place_receiver` asked for.
@@ -3080,8 +3185,9 @@ impl Parser {
                                         },
                                         line,
                                     });
-                                    pre.extend(post);
-                                    return Ok(self.spliced(pre));
+                                    hoists.extend(pre);
+                                    hoists.extend(post);
+                                    return Ok(self.spliced(hoists));
                                 }
                                 return Err(Diagnostic::error(
                                     line,
@@ -5251,6 +5357,68 @@ mod tests {
         ] {
             assert!(joined.contains(needle), "missing {needle} in\n{joined}");
         }
+    }
+
+    /// The soundness half of RFC-0082 M2's fix. The interpreter TAKES the field
+    /// rather than copying it, so anything the mutation's operands could read
+    /// must be evaluated *before* the move-out — that ordering is the whole
+    /// reason `t.xs[t.xs.length - 1] = 99` still answers `99`. Behaviour cannot
+    /// distinguish "hoisted" from "evaluated in place while a copy happens to
+    /// still be there"; the statement order can.
+    #[test]
+    fn an_index_assign_through_a_field_hoists_its_operands_before_the_move() {
+        let p = parse_src(
+            "fn main() -> Int64 { let mut s: S = S { xs: [1, 2] }  s.xs[f()] = g()  return 0 }",
+        );
+        let stmts = &p.functions[0].body.stmts;
+        let shape: Vec<String> = stmts[1..=4].iter().map(|s| format!("{s:?}")).collect();
+        assert!(
+            shape[0].starts_with(r#"Let { name: "s.xs[][]idx""#) && shape[0].contains(r#""f""#),
+            "the index runs first, into its own temp: {shape:#?}"
+        );
+        assert!(
+            shape[1].starts_with(r#"Let { name: "s.xs[][]val""#) && shape[1].contains(r#""g""#),
+            "then the value, left to right: {shape:#?}"
+        );
+        assert!(
+            shape[2].starts_with(r#"Let { name: "s.xs[]""#),
+            "only then is the field moved out: {shape:#?}"
+        );
+        assert!(
+            shape[3].starts_with(r#"IndexSet { name: "s.xs[]""#)
+                && !shape[3].contains(r#"name: "f""#)
+                && !shape[3].contains(r#"name: "g""#),
+            "the store names only temps, so it re-evaluates nothing: {shape:#?}"
+        );
+    }
+
+    /// `t.xs[k] = v` on trivial operands stays three statements — hoisting
+    /// everything would also be sound but would cost two bindings on the shape
+    /// users actually write, and would give `t.rows[k] = []` an empty array
+    /// literal with no context to type it.
+    #[test]
+    fn a_literal_index_and_value_are_not_hoisted() {
+        let p = parse_src(
+            "fn main() -> Int64 { let mut s: S = S { xs: [1, 2] }  s.xs[0] = 9  return 0 }",
+        );
+        assert_eq!(p.functions[0].body.stmts.len(), 5, "let + 3 + return");
+    }
+
+    /// The index of a nested index assignment is needed by the load and by the
+    /// write-back, so it gets a temp: before RFC-0082 M2 it was cloned into
+    /// both and `rows[f()][0] = 1` called `f` twice.
+    #[test]
+    fn a_nested_index_assign_evaluates_its_index_once() {
+        let p = parse_src(
+            "fn main() -> Int64 { let mut rows: Array<Array<Int64>> = []  rows[f()][0] = 1  return 0 }",
+        );
+        let dump = format!("{:?}", p.functions[0].body.stmts);
+        assert_eq!(
+            dump.matches(r#"Call { name: "f""#).count(),
+            1,
+            "`f()` must appear once in the desugar:\n{dump}"
+        );
+        assert!(dump.contains(r#"Let { name: "rows[]idx""#), "{dump}");
     }
 
     #[test]
