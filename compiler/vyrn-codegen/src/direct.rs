@@ -8146,6 +8146,8 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
     // here eventually; nothing observable depends on it, because a free is not a
     // thing a program can print.
     let p = 2;
+    let trap = rt.trap;
+    let oom = rt.intern(m, "error: out of memory\n");
     rt.next_is(m, rt.malloc);
     m.func(&[ValType::I32], &[ValType::I32], &[ValType::I32], 0, |b| {
         b.ins(&Instruction::GlobalGet(HEAP))
@@ -8167,7 +8169,24 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
             .ins(&Instruction::BrIf(1))
             .ins(&Instruction::I32Const(1))
             .ins(&Instruction::MemoryGrow(0))
-            .ins(&Instruction::Drop)
+            // A grow that fails returns -1 and leaves `memory.size` where it was,
+            // so dropping the result re-tests the same condition and grows again
+            // — forever, with no output. Not academic: a browser
+            // `WebAssembly.Memory` is routinely constructed with a `maximum`, and
+            // the browser is a first-class target, so the capped memory is the
+            // normal case and the hang is what a user would see. Uncapped it was
+            // masked, badly: growth ran to the 4 GiB ceiling and the wrapped bump
+            // pointer trapped out of bounds instead.
+            //
+            // The wording is the native shim's `__vyrn_alloc_check`
+            // (`toolchain.rs`), not new words, because parity compares stderr byte
+            // for byte across the three engines.
+            .ins(&Instruction::I32Const(-1))
+            .ins(&Instruction::I32Eq)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::I32Const(oom as i32))
+            .ins(&Instruction::Call(trap))
+            .ins(&Instruction::End)
             .ins(&Instruction::Br(0))
             .ins(&Instruction::End)
             .ins(&Instruction::End)

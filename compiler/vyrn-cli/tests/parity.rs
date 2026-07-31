@@ -3613,3 +3613,93 @@ fn main() -> Int64 {
          the JSON rather than one that produced nothing"
     );
 }
+
+/// A `malloc` that cannot grow linear memory TRAPS, in the native shim's words
+/// (RFC-0081).
+///
+/// `memory.grow` returns the previous page count, or -1. The growth loop dropped
+/// that result, so a refused grow left `memory.size` unchanged, the loop condition
+/// still failed, and it asked again — forever, with nothing on either channel.
+/// Uncapped that never showed: growth ran to the 4 GiB ceiling and the wrapped
+/// bump pointer trapped `out of bounds memory access` instead, which is the trap
+/// the test above was reading. A browser `WebAssembly.Memory` is routinely
+/// constructed with a `maximum`, and the browser is a first-class target, so the
+/// capped memory is the case that matters and the hang is what a user would see.
+///
+/// Capping it from the CLI is the awkward part: `-O memory-reservation` sets the
+/// initial reservation and growth past it still succeeds, and
+/// `-O pooling-max-memory-size` is ignored unless the pooling allocator is the one
+/// allocating — hence both flags. The alternative was emitting a `maximum` on the
+/// memory declaration, rejected because it would change what every module says in
+/// order to test one of them.
+///
+/// `-W timeout` is what keeps a regression from *hanging* the suite: without it a
+/// returned `drop` blocks `output()` and the run reads as stuck rather than as
+/// broken. It cannot make this test pass, either — a timed-out run is wasmtime's
+/// own `wasm trap: interrupt` on exit 3, and the assertions below are an exact
+/// message on exit 1.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn a_malloc_that_cannot_grow_memory_traps_instead_of_growing_forever() {
+    let Some(wasmtime) = wasmtime() else {
+        eprintln!("SKIP: no wasmtime");
+        return;
+    };
+    let dir = std::env::temp_dir().join("vyrn-directwasm-oom");
+    std::fs::create_dir_all(&dir).unwrap();
+    // Doubling, so the cap is reached in ~25 allocations rather than by a loop
+    // whose trip count would have to be tuned to the cap.
+    let src = "\
+fn main() -> Int64 {
+    let mut s = \"x\"
+    let mut i = 0
+    while i < 40 {
+        s = s + s
+        i = i + 1
+    }
+    print(i)
+    return 0
+}
+";
+    let path = dir.join("oom.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let module = dir.join("oom.wasm");
+    let build = vyrn()
+        .arg("build")
+        .arg(&path)
+        .arg("--target")
+        .arg("wasm")
+        .arg("-o")
+        .arg(&module)
+        .output()
+        .expect("build wasm");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let out = Command::new(&wasmtime)
+        .arg("run")
+        .arg("-W")
+        .arg("timeout=20s")
+        .arg("-O")
+        .arg("pooling-allocator=y")
+        .arg("-O")
+        .arg("pooling-max-memory-size=16777216")
+        .arg(&module)
+        .output()
+        .expect("run wasmtime");
+
+    assert_eq!(
+        norm(&out.stderr),
+        "error: out of memory\n",
+        "a refused grow must trap; `wasm trap: interrupt` here means the loop is \
+         spinning again"
+    );
+    assert_eq!(out.status.code(), Some(1), "exit 1, like every trap");
+    assert!(out.stdout.is_empty(), "the loop never completes, so nothing is printed");
+    // Parity compares stderr byte for byte, so the wasm wording is not a spelling
+    // chosen here — it is the one `__vyrn_alloc_check` already prints for the same
+    // failure on native.
+    assert!(
+        vyrn_codegen::toolchain::RUNTIME_SHIM.contains("\"error: out of memory\\n\""),
+        "the native shim no longer prints what this asserts"
+    );
+}
