@@ -143,7 +143,11 @@ fn compute_roles(items: &[Triv]) -> Vec<Roles> {
                 // before an integer literal (`n<10`) is a comparison, not a generic.
                 let tight_before = !items[idx].space_before;
                 let tight_after = next_idx.map(|n| !items[n].space_before).unwrap_or(false);
-                let prev_ok = matches!(prev, Some(Tok::Ident(_)) | Some(Tok::Gt));
+                // `impl<T> P for C<T>` (RFC-0080 M1) opens a generic straight
+                // after a KEYWORD, the one place the "previous token is a name"
+                // rule does not reach. No comparison can follow `impl`, so this
+                // costs no ambiguity.
+                let prev_ok = matches!(prev, Some(Tok::Ident(_)) | Some(Tok::Gt) | Some(Tok::Impl));
                 let next_ok = matches!(next, Some(Tok::Ident(_)));
                 if tight_before && tight_after && prev_ok && next_ok {
                     roles[idx].generic_angle = true;

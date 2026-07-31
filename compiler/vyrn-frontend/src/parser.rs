@@ -569,12 +569,24 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     // (`P__Key__method`), so type checking, monomorphization, and lowering treat
     // it like any function; protocol-method *calls* resolve to these names by the
     // receiver's type. Impls on unsupported targets are left for the checker.
+    //
+    // Two impls for the same (protocol, type constructor) flatten to the same
+    // mangled name; only the first is kept. The second is not silently dropped —
+    // the checker rejects the overlap by name and line (RFC-0080 M1) — but
+    // flattening both as well would add a `function `Show__Option__show` defined
+    // twice` that names an internal symbol the user never wrote.
     let mut flat = Vec::new();
+    let mut seen: std::collections::HashSet<String> = Default::default();
     for imp in &program.impls {
         if let Some(key) = crate::types::type_key(&imp.ty) {
             for m in &imp.methods {
                 let mut f = m.clone();
                 f.name = crate::types::impl_method_name(&imp.protocol, &key, &m.name);
+                if !seen.insert(f.name.clone()) {
+                    continue;
+                }
+                f.type_params = imp.type_params.clone();
+                f.type_bounds = imp.type_bounds.clone();
                 flat.push(f);
             }
         }
@@ -1397,9 +1409,15 @@ impl Parser {
 
     /// `impl P for T { fn m(self, ..) -> R { .. } .. }` — a type's methods for a
     /// protocol. Each method's `self` receiver is typed to `T`.
+    ///
+    /// `impl<T> P for C<T>` (RFC-0080 M1) binds type variables in the head; they
+    /// are in scope for the target type and every method signature and body, so
+    /// they parse as [`Type::Param`] exactly as a `fn f<T>`'s do.
     fn impl_block(&mut self) -> Result<ImplBlock, Diagnostic> {
         let line = self.line();
         self.eat(&Tok::Impl)?;
+        let (type_params, type_bounds) = self.type_param_binder()?;
+        self.type_params = type_params.clone();
         let protocol = self.expect_ident()?;
         self.eat(&Tok::For)?;
         let ty = self.type_()?;
@@ -1410,11 +1428,17 @@ impl Parser {
             if *self.peek() == Tok::RBrace {
                 break;
             }
-            methods.push(self.impl_method(&ty)?);
+            let mut m = self.impl_method(&ty)?;
+            m.type_params = type_params.clone();
+            m.type_bounds = type_bounds.clone();
+            methods.push(m);
         }
         self.eat(&Tok::RBrace)?;
+        self.type_params.clear();
         Ok(ImplBlock {
             protocol,
+            type_params,
+            type_bounds,
             ty,
             methods,
             line,
@@ -1881,15 +1905,15 @@ impl Parser {
         Ok(Type::Record(result?))
     }
 
-    /// `[gen] fn name<...>(params) -> Ret { body }`. `is_gen` is set by the
-    /// caller when a contextual `gen` modifier preceded `fn` (RFC-0021); the
-    /// function parses identically otherwise.
-    fn function(&mut self, is_gen: bool) -> Result<Function, Diagnostic> {
-        let line = self.line();
-        self.eat(&Tok::Fn)?;
-        let name = self.expect_ident()?;
-
-        // optional generic parameters with bounds: `<T: Ord, U>`
+    /// An optional `<T: Bound + Other, U>` binder. Shared by `fn` and by
+    /// `impl<..>` (RFC-0080 M1) so the two spell generics identically — an impl
+    /// binder that dropped bounds would leave the body unable to call anything
+    /// on its own type variable, which is most of what a generic impl is for.
+    /// Returns empty when no `<` follows.
+    #[allow(clippy::type_complexity)]
+    fn type_param_binder(
+        &mut self,
+    ) -> Result<(Vec<String>, std::collections::HashMap<String, Vec<String>>), Diagnostic> {
         let mut type_params = Vec::new();
         let mut type_bounds: std::collections::HashMap<String, Vec<String>> = Default::default();
         if *self.peek() == Tok::Lt {
@@ -1918,6 +1942,19 @@ impl Parser {
             }
             self.eat(&Tok::Gt)?;
         }
+        Ok((type_params, type_bounds))
+    }
+
+    /// `[gen] fn name<...>(params) -> Ret { body }`. `is_gen` is set by the
+    /// caller when a contextual `gen` modifier preceded `fn` (RFC-0021); the
+    /// function parses identically otherwise.
+    fn function(&mut self, is_gen: bool) -> Result<Function, Diagnostic> {
+        let line = self.line();
+        self.eat(&Tok::Fn)?;
+        let name = self.expect_ident()?;
+
+        // optional generic parameters with bounds: `<T: Ord, U>`
+        let (type_params, type_bounds) = self.type_param_binder()?;
         // these names parse as Type::Param within this function's signature/body
         self.type_params = type_params.clone();
 

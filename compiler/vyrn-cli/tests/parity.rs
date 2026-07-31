@@ -68,7 +68,7 @@ fn examples_interp_native_parity() {
             skipped += 1;
             continue;
         }
-        if let Some((_, why)) = EXPECTED_CHECK_FAILURE.iter().find(|(n, _)| *n == name) {
+        if let Some((_, why, _)) = EXPECTED_CHECK_FAILURE.iter().find(|(n, ..)| *n == name) {
             eprintln!("SKIP  {name}  (expected check failure: {why})");
             skipped += 1;
             continue;
@@ -419,7 +419,7 @@ fn subdir_server_examples_native_build() {
 #[test]
 fn expected_check_failures_do_fail() {
     let dir = examples_dir();
-    for (name, _why) in EXPECTED_CHECK_FAILURE {
+    for (name, _why, needle) in EXPECTED_CHECK_FAILURE {
         let path = dir.join(name);
         let out = vyrn().arg("check").arg(&path).output().expect("run check");
         assert!(
@@ -428,8 +428,8 @@ fn expected_check_failures_do_fail() {
         );
         let err = norm(&out.stderr) + &norm(&out.stdout);
         assert!(
-            err.contains("does not satisfy"),
-            "{name}: expected a validation diagnostic, got:\n{err}"
+            err.contains(needle),
+            "{name}: expected a diagnostic containing {needle:?}, got:\n{err}"
         );
     }
 }

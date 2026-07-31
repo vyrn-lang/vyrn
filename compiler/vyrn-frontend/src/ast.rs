@@ -475,6 +475,13 @@ pub enum ContractMemberKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplBlock {
     pub protocol: String,
+    /// `impl<T> P for C<T>` — the type variables the head binds (RFC-0080 M1).
+    /// Empty for a concrete impl. Each method inherits them, so the flattened
+    /// impl function is an ordinary generic function and the existing
+    /// monomorphization path specializes it per receiver instantiation.
+    pub type_params: Vec<String>,
+    /// Bounds per bound variable, e.g. `impl<T: Show> Show for Option<T>`.
+    pub type_bounds: std::collections::HashMap<String, Vec<String>>,
     pub ty: Type,
     pub methods: Vec<Function>,
     pub line: usize,
