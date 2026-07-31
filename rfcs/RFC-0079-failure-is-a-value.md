@@ -173,23 +173,78 @@ non-ASCII byte and a `\{}` interpolation, proving the bytes agree.
 
 ### M2 — `??`
 
-Parser sugar, and nothing else. `a ?? b` desugars to
+**This section was drafted as "parser sugar, and nothing else… zero backend
+work", desugaring to `match a { Ok(v) => v, Err(_) => b }`. That is impossible,
+and the correction is worth more than the original.** `Pattern` (`ast.rs`) is
+exactly `Some | None | Ok | Err | Variant` — **there is no wildcard pattern**, so
+`Err(_)` cannot be spelled, and `check_match` computes its expected tags
+*by name* from the scrutinee's type. The parser holds no type information at all,
+so it cannot choose between the `Option` shape and the `Result` shape.
 
-```vyrn
-match a { Ok(v) => v, Err(_) => b }      // Result
-match a { Some(v) => v, None => b }      // Option
+The existing `?` does not solve this problem; it *avoids* it. `Expr::Try` is a
+single type-agnostic node: the parser never picks a shape, the checker matches on
+`Type::Option` / `Type::Result` to type the result, and every engine lowers it on
+the representation the two sums **share** — both carry a tag in the interpreter,
+and both are `{ i1, i64, i64 }` in codegen, so `gen_try` branches on field 0
+without ever asking which sum it has.
+
+So `??` keeps the instinct — desugar to `match`, and inherit drops, ownership,
+validation and short-circuiting from it rather than restating any of them — and
+pays for it with **two type-agnostic patterns**, unspellable in source and
+produced only by this desugar:
+
+```rust
+Pattern::Success(String)   // the tag-1 arm: Some | Ok
+Pattern::Failure(String)   // the tag-0 arm: None | Err
 ```
 
-which means **zero backend work** and short-circuiting that is correct by
-construction — `b` sits in an arm that only the failing tag reaches. Both engines
-and both backends already lower `match`, so `??` inherits drops, ownership and
-validation from it rather than restating them.
+The parser then emits, with no type knowledge:
 
-Precedence: binds tighter than `||` and looser than comparison, so
-`a ?? b == c` parses as `(a ?? b) == c`. Right-associative, so `a ?? b ?? c` is
-`a ?? (b ?? c)`.
+```
+a ?? b   →   Expr::Match { scrutinee: a, arms: [Success(@v) => @v, Failure(@e) => b] }
+```
 
-M2 is independent of M1 and can land in either order; only M3 needs both.
+Every site that must learn the two patterns is inside an existing dispatch:
+`check_match`'s expected-tag pair and `binding_type`; `match_pattern` in the
+interpreter (shared by `match`, `if let` and `while let`); `pattern_is_one` and
+`pattern_binding` in the textual backend; `pattern_binds` in the direct backend.
+Roughly fifteen lines across four files.
+
+**The alternative was priced and rejected.** An `Expr::Nullish` node mirroring
+`Expr::Try` needs four real lowerings *plus* about twelve one-line arms in
+Expr-traversal helpers — drop analysis, escape analysis, predicate summaries.
+That scattered-obligation shape is precisely what produced "`?` out of a region
+had two lowerings and one was wrong for six weeks". `Expr::Match` is already
+traversed everywhere, so the pattern-pair route adds no traversal obligation at
+all.
+
+Three details that are easy to miss:
+
+- **`Pattern::Failure` needs a real binder on the `Result` path**, or the error
+  payload leaks. On the `Option` path it binds nothing, which is what
+  `check_match`'s existing per-arm `Option<&str>` binding seam is for.
+- **`??` is maximal-munch, and that silently re-reads an existing spelling.**
+  Today `x??` lexes as two `Tok::Question` and parses as `Try(Try(x))` — legal
+  for a `Result<Option<T>, E>` in an `Option`-returning function. Afterwards that
+  spelling must be written `(x?)?`. There are zero occurrences across `std/`,
+  `examples/` and `compiler/`, so it costs nothing now; it is recorded here so it
+  is not discovered later.
+- **`vyrn fmt` costs one row** in the token-to-text table, which is what keeps
+  RFC-0017's re-lex-equality invariant intact.
+
+Precedence: binds tighter than `||` and `&&`, looser than comparison, so
+`a ?? 0 == c` parses as `(a ?? 0) == c`. The binding-power table in `binop` is
+flat and contiguous — `OrOr = 1`, `AndAnd = 2`, `EqEq = 3` — so there is **no
+room** between `&&` and `==`, and every tier from 3 up shifts by one. That is
+mechanical but it is not the one-line table insert this section originally
+implied. `??` is also right-associative (`a ?? b ?? c` is `a ?? (b ?? c)`), which
+the left-associative `binary()` loop cannot express as written; the standard fix
+is to recurse at the same binding power rather than at `bp + 1`. Left
+associativity is not merely unidiomatic here, it fails to typecheck: `a ?? b`
+yields an unwrapped `T`, so `(a ?? b) ?? c` applies `??` to a non-sum.
+
+M2 must land **after** M1, not beside it: four of the five files it touches are
+M1's.
 
 ### M3 — `slice` becomes Vyrn
 
