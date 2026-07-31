@@ -157,7 +157,6 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("floatFromBits", View, "RFC-0078 M4a: the other direction"),
     // ---- Control: abort, and waiting -----------------------------------------
     ("panic", Control, "RFC-0079: the abort itself, and the only irreducible row here"),
-    ("slice", Control, "traps twice (out of range, splits a UTF-8 character)"),
     ("assert", Control, "RFC-0015: traps the current test"),
     ("assertEq", Control, "RFC-0015: traps, rendering both sides"),
     ("@join", Control, "waits for a task (the interpreter's are eager, so identity)"),
@@ -290,10 +289,11 @@ fn the_census_is_the_code() {
     // 51 in 46 arms plus 11 guards. It is here so a change to the boundary is a
     // visible edit rather than a silently different census. 62 -> 61 when
     // `@charCount` — the census's one `Unjustified` row — became `std/text`'s
-    // `charCountV`, and 61 -> 62 when RFC-0079 M1 added `panic`. That is the one
-    // direction this number is allowed to move for a good reason: the row it
-    // joins is the row `slice` leaves at M3, and the abort has to exist first.
-    assert_eq!(found.len(), 62, "the primitive core changed size");
+    // `charCountV`, 61 -> 62 when RFC-0079 M1 added `panic`, and 62 -> 61 when M3
+    // spent that abort on `slice`. The net of the whole RFC is one primitive
+    // traded for one primitive, and the one that left had three implementations
+    // where the one that arrived has three lines.
+    assert_eq!(found.len(), 61, "the primitive core changed size");
 }
 
 /// RFC-0078's acceptance criterion: "No builtin has two *definitions*."
@@ -326,16 +326,22 @@ fn nothing_is_both_censused_and_routed() {
 /// bytes there is, which is why M4b(2)'s "wants a primitive the way
 /// `floatFromBits` did" resolves to "it already is one".
 ///
-/// The other four are M4c's, restated where the reason can be found: `slice` is
-/// blocked on the abort primitive, `lineAt`/`colAt` are the cache, and `parse`
-/// wraps where `std/num` refuses.
+/// The other three are M4c's, restated where the reason can be found:
+/// `lineAt`/`colAt` are the cache, and `parse` wraps where `std/num` refuses.
+/// M4c's fourth refusal was `slice`, "blocked on the abort primitive" — RFC-0079
+/// M3 unblocked it by removing the need to abort rather than by supplying one, so
+/// its row is gone and `nothing_is_both_censused_and_routed` is what now enforces
+/// that it cannot come back as a second definition.
 #[test]
 fn the_refusals_keep_their_reasons() {
     let by_name: BTreeMap<&str, Why> = CENSUS.iter().map(|(n, w, _)| (*n, *w)).collect();
+    assert!(
+        !by_name.contains_key("slice"),
+        "`slice` is `std/strpred`'s `sliceV` since RFC-0079 M3 — a census row for it          is a Rust implementation nobody reaches"
+    );
     for (name, why) in [
         ("logger", Syscall),
         ("stringFromBytes", View),
-        ("slice", Control),
         ("lineAt", Cache),
         ("colAt", Cache),
         ("parse", Semantics),

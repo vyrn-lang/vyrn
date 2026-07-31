@@ -4310,12 +4310,13 @@ impl<'a> Checker<'a> {
             return Ok(Type::Bool);
         }
 
-        // built-in: slice(s, start, end) -> String (RFC-0046). A byte-range
-        // substring — the primitive `std/strings` builds on. `start`/`end` are
-        // byte offsets (Int64). O(1) validated at runtime: a cut inside a
-        // multi-byte UTF-8 character traps (`error: slice splits a UTF-8
-        // character`), an out-of-range offset traps like an array OOB
-        // (`error: slice index out of range`).
+        // built-in: slice(s, start, end) (RFC-0046, routed by RFC-0079 M3). A
+        // byte-range substring — the primitive `std/strings` builds on.
+        // `start`/`end` are byte offsets (Int64), and the RESULT is whatever
+        // `std/strpred`'s `sliceV` says it is (`Result<String, SliceError>`),
+        // read out of the link below rather than restated here: the error enum is
+        // a std declaration, and a second spelling of it in the checker is exactly
+        // the multiplicity this routing exists to remove.
         if name == "slice" {
             if args.len() != 3 {
                 return Err(format!(
@@ -4341,7 +4342,18 @@ impl<'a> Checker<'a> {
                     ));
                 }
             }
-            return Ok(Type::Str);
+            // The engines refuse a routed builtin by name when its module is not in
+            // the link; the checker can say the same thing earlier and with a line
+            // number, and it has to — there is no return type to invent, since the
+            // one that exists names a type only the link supplies.
+            let rt = crate::loader::routed_builtin("slice").expect("`slice` is routed");
+            return match self.sigs.get(rt) {
+                Some((_, ret)) => Ok(ret.clone()),
+                None => Err(format!(
+                    "line {line}: `slice` is implemented in Vyrn and its module is not in \
+                     the link — a std root is needed to call it"
+                )),
+            };
         }
 
         // The two IEEE-754 bit views (RFC-0078 M4a). `floatBits` is a `Float64`

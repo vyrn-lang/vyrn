@@ -15,23 +15,29 @@
 /// - `containsV`, `startsWithV` and `endsWithV` ARE the builtins now: every engine
 ///   calls them, and `strstr` plus two `strncmp` shapes are gone from the emitted
 ///   IR along with three Rust one-liners.
-/// - **`slice` traps** — `error: slice index out of range` or
-///   `error: slice splits a UTF-8 character` — and Vyrn has no expression that aborts
-///   with a message. There is no `panic` and no `abort`, so `sliceV` returns
-///   `Option<String>` and `None` means "the builtin would trap here". Routing it
-///   would change observable behaviour, which is a language decision (a *control*
-///   primitive — neither an operation nor a view) and not a milestone's to make. A
-///   trapping wrapper is one line on top of `sliceV` the day the primitive exists.
+/// - **`sliceV` IS `slice` now too** (RFC-0079 M3). It was refused by M4c because
+///   the builtin TRAPPED — `error: slice index out of range` or
+///   `error: slice splits a UTF-8 character` — and Vyrn had no expression that
+///   aborts, so the Vyrn version could only say `None` where the builtin ended the
+///   process. RFC-0079 removed the need for an abort instead of adding one:
+///   `slice` returns `Result<String, SliceError>`, the caller decides, and the
+///   three hand-written implementations (a Rust arm, ~50 lines of emitted IR and a
+///   wasm runtime function) are gone. The `Option` shape was the thing that made
+///   RFC-0078's "the swap is one wrapper line" estimate wrong — it collapsed two
+///   distinguishable failures into one `None`; the enum below is what makes it
+///   right.
 /// - **`byteLength` is a VIEW**, not an operation: it is `strlen`, two instructions
 ///   on every engine, and `consteval` folds it so a refinement predicate like
 ///   `String where value.byteLength >= 3` can be proved at compile time. Routing it
 ///   would make an O(1) read an O(n) heap copy and take that folding away — the
 ///   opposite trade from the one this RFC exists to make.
 ///
-/// Every function is still `V`-suffixed. For the three routed ones the suffix is
+/// Every function is still `V`-suffixed, and for the four routed ones the suffix is
 /// now just a second spelling of the same function (the builtin resolves to it
-/// after linking); for `sliceV` and `byteLengthV` it is what keeps them callable
-/// beside the builtins they are proved against, which
+/// after linking). `sliceV` in particular keeps its name rather than becoming a
+/// bare `slice`: `slice` is a RESERVED word, so a module cannot declare it, which
+/// is the whole reason this convention exists. For `byteLengthV` the suffix is
+/// what keeps it callable beside the builtin it is proved against, which
 /// `examples/strpredbytes.vyrn` still does.
 ///
 /// **Bytes, not characters.** A `String` is UTF-8 bytes and every offset and
@@ -119,26 +125,59 @@ export fn containsV(s: String, needle: String) -> Bool {
     return false
 }
 
-/// The bytes of `s` from `start` up to `end`, or `None` where the `slice` builtin
-/// would trap: `start < 0`, `end > s.byteLength`, `start > end`, or a cut point
-/// inside a multi-byte UTF-8 character.
+/// The two ways a byte range fails to name a substring, each carrying the offset
+/// that failed — `std/`'s first error enum (RFC-0079 §1), and the shape the house
+/// pattern is meant to take: a small per-operation enum, not one shared error type.
+/// `Issue` (RFC-0009) is a different job — it models field validation accumulated
+/// across a value — and is not being replaced.
 ///
-/// The boundary check is not written out. A cut at a non-boundary offset either
-/// starts the range on a continuation byte or ends it on a truncated character,
-/// and both are invalid UTF-8 — so `stringFromBytes` refuses exactly the ranges
-/// the builtin's `is_char_boundary` pair refuses, and refusing is what `None`
-/// says. Both engines check the range before the boundary, and so does this.
+/// This is strictly more than the builtin could say. `slice` had two fixed strings
+/// and no way to name the index; `sliceV` had one `None` for both. A caller that
+/// wants neither writes `?? panic("…")` or `?? fallback`.
+export type SliceError = | OutOfRange(Int64) | SplitsCharacter(Int64)
+
+/// The bytes of `s` from `start` up to `end`. `start`/`end` are BYTE offsets, and
+/// both must land on a UTF-8 character boundary.
+///
+/// `OutOfRange(i)` when `start < 0`, `end > s.byteLength` or `start > end`, `i`
+/// being the offset that failed the check — `start` for a negative start, `end`
+/// for the other two, since an `end` that precedes its `start` is the one that is
+/// too small. `SplitsCharacter(i)` when cut point `i` lands on a UTF-8
+/// continuation byte. The range is checked BEFORE the boundary, which is the order
+/// the three deleted implementations used and the order
+/// `examples/strpredbytes.vyrn` pins.
+///
+/// The boundary check IS written out, unlike the `Option` version this replaces.
+/// That one let `stringFromBytes` refuse the invalid bytes and reported `None`,
+/// which was enough while both failures collapsed to one answer; naming the
+/// offending offset needs the cut points tested individually. It is the same test
+/// the deleted lowerings open-coded — `(b & 0xC0) == 0x80` — and `std/text`'s
+/// `charCountV` spells it the same way. A cut AT `s.byteLength` is a boundary by
+/// definition and is not read: `s[n]` is out of bounds here, where the builtins
+/// could read the NUL terminator.
 ///
 /// One divergence, unreachable from ordinary source: `stringFromBytes` rejects a
-/// NUL byte (RFC-0014's rule), and `slice` does not, so slicing a String that
-/// contains a NUL yields `None` here and the substring there. No string literal
-/// can hold one — there is no `\0` escape — and `stringFromBytes` will not build
-/// one either, so the byte view is *not* a round trip only for a String no
-/// program can construct through it.
-export fn sliceV(s: String, start: Int64, end: Int64) -> Option<String> {
+/// NUL byte (RFC-0014's rule), and the builtin did not, so slicing a String that
+/// contains a NUL fails here and returned the substring there. No string literal
+/// can hold one — there is no `\0` escape, and the lexer rejects a raw NUL — and
+/// `stringFromBytes` will not build one either, so the byte view is *not* a round
+/// trip only for a String no program can construct through it. That arm reuses
+/// `SplitsCharacter` rather than inventing a third variant for a case no program
+/// can reach, and the boundary checks above are what make the two cut points the
+/// only honest thing left to name.
+export fn sliceV(s: String, start: Int64, end: Int64) -> Result<String, SliceError> {
     let n = byteLengthV(s)
-    if start < 0 || end > n || start > end {
-        return None
+    if start < 0 {
+        return Err(OutOfRange(start))
+    }
+    if end > n || start > end {
+        return Err(OutOfRange(end))
+    }
+    if start < n && (Int64(s[start]) & 192) == 128 {
+        return Err(SplitsCharacter(start))
+    }
+    if end < n && (Int64(s[end]) & 192) == 128 {
+        return Err(SplitsCharacter(end))
     }
     let b = bytes(s)
     let mut out: Array<UInt8> = []
@@ -148,7 +187,7 @@ export fn sliceV(s: String, start: Int64, end: Int64) -> Option<String> {
         i = i + 1
     }
     return match stringFromBytes(out) {
-        Ok(v) => Some(v),
-        Err(e) => None,
+        Ok(v) => Ok(v),
+        Err(e) => Err(SplitsCharacter(start)),
     }
 }

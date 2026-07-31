@@ -6,30 +6,32 @@
 /// of `strstr`/`strncmp` IR. So those rows are **pinned as literals** here — a
 /// comparison against the builtin would be the same function on both sides.
 ///
-/// `slice` and `byteLength` did NOT move, for reasons in `std/strpred`'s doc and in
-/// RFC-0078's M4c note, so their rows are still a live oracle: the builtin's answer
-/// printed beside `sliceV`'s / `byteLengthV`'s, and a `test` block asserting they
-/// agree. That asymmetry is the file's shape — two refused builtins keep their
-/// oracle, three routed ones become pins.
+/// **`slice` moved too** — RFC-0079 M3, and it is a pin now for the same reason the
+/// predicates are. Its refusal was that it TRAPPED, so `sliceV` could only answer
+/// `None` where the builtin ended the process; `slice` returns
+/// `Result<String, SliceError>` today, `sliceV` IS that function, and asking both
+/// would be asking one function twice. What replaced the oracle is better than the
+/// oracle was: the failing ranges are VALUES now, so they print in the same process
+/// as the legal ones and go through parity with them, and each names WHICH cut
+/// failed and at which byte — neither of which a trap with two fixed strings could
+/// say.
 ///
-/// Printing from `main` puts all of it through parity, so the routed predicates are
+/// `byteLength` did NOT move (it is a VIEW that folds at compile time), so its row
+/// is still a live oracle: the builtin's answer printed beside `byteLengthV`'s, and
+/// a `test` block asserting they agree.
+///
+/// Printing from `main` puts all of it through parity, so the routed builtins are
 /// checked interp == native == wasm as well as against the literals.
 ///
-/// Two things this file cannot show, both stated in `std/strpred`'s doc:
-///
-/// - **`slice`'s two traps.** `error: slice index out of range` and
-///   `error: slice splits a UTF-8 character` end the process, so the builtin can
-///   only be asked about legal ranges here. `sliceV` answers `None` for exactly
-///   those ranges instead, and `tests/strpred.rs` runs the trapping programs and
-///   checks the wording.
-/// - **A needle matching only at a non-boundary offset.** It cannot happen and it
-///   cannot be written: a valid needle begins with an ASCII or lead byte, a
-///   non-boundary offset holds a continuation byte, so the byte-wise scan is
-///   UTF-8-safe by construction rather than by a check. The row that *looks* like
-///   it — `"©"` (C2 A9) against `"é"` (C3 A9), same trailing byte — is the closest
-///   a String can get, and both implementations say no.
+/// One thing this file cannot show, and it is stated in `std/strpred`'s doc: **a
+/// needle matching only at a non-boundary offset.** It cannot happen and it cannot
+/// be written — a valid needle begins with an ASCII or lead byte, a non-boundary
+/// offset holds a continuation byte, so the byte-wise scan is UTF-8-safe by
+/// construction rather than by a check. The row that *looks* like it — `"©"`
+/// (C2 A9) against `"é"` (C3 A9), same trailing byte — is the closest a String can
+/// get, and both implementations say no.
 
-import { byteLengthV, sliceV } from "std/strpred"
+import { byteLengthV, SliceError } from "std/strpred"
 
 fn bit(b: Bool) -> String {
     return if b { "1" } else { "0" }
@@ -43,16 +45,17 @@ fn preds(h: String, n: String) -> String {
     return bit(contains(h, n)) + bit(startsWith(h, n)) + bit(endsWith(h, n))
 }
 
-/// A range both can be asked about: the builtin's substring, then this module's.
+/// `slice`'s answer, failures included. The variant and the offending byte offset
+/// are rendered because they are the part that is new: the deleted builtin had
+/// `error: slice index out of range` and `error: slice splits a UTF-8 character`
+/// and no way to name an index, and the old `Option` had one `None` for both.
 fn sl(s: String, a: Int64, b: Int64) -> String {
-    return slice(s, a, b) + " " + show(sliceV(s, a, b))
-}
-
-/// A range the builtin would TRAP on, so only `sliceV` can be asked.
-fn show(o: Option<String>) -> String {
-    return match o {
-        Some(v) => v,
-        None => "None",
+    return match slice(s, a, b) {
+        Ok(v) => v,
+        Err(e) => match e {
+            OutOfRange(i) => "OutOfRange(\{i})",
+            SplitsCharacter(i) => "SplitsCharacter(\{i})",
+        },
     }
 }
 
@@ -86,7 +89,7 @@ fn main() -> Int64 {
     print(preds("😀ok", "k"))
     print(preds("😀ok", "o"))
 
-    // ---- slice, on the ranges the builtin survives -------------------------
+    // ---- slice, on the ranges the deleted builtin survived ------------------
     print(sl("hello", 0, 0)) // start == end, empty result
     print(sl("hello", 5, 5)) // start == end at the very end
     print(sl("hello", 0, 5)) // the whole string
@@ -98,17 +101,20 @@ fn main() -> Int64 {
     print(sl("😀ok", 0, 4)) // exactly 😀
     print(sl("", 0, 0)) // the empty string sliced to nothing
 
-    // ---- slice, on the ranges the builtin traps on -------------------------
-    // Each of these is `None` here and `error: slice ..` there; the pairing of
-    // the two is what `tests/strpred.rs` checks.
-    print(show(sliceV("hello", 3, 2))) // start > end
-    print(show(sliceV("hello", 0, 6))) // end past the length
-    print(show(sliceV("hello", 6, 6))) // start past the length
-    print(show(sliceV("hello", -1, 2))) // negative start
-    print(show(sliceV("hello", 0, -1))) // negative end (start > end catches it)
-    print(show(sliceV("héllo", 0, 2))) // end inside é
-    print(show(sliceV("héllo", 2, 6))) // start inside é
-    print(show(sliceV("日本語", 1, 2))) // both cuts inside 日
+    // ---- slice, on the ranges that used to end the process -----------------
+    // Every one of these was `error: slice ..` and exit 1 before RFC-0079 M3, so
+    // it needed a process of its own and no engine could be compared against
+    // another on it. They are ordinary printed values now.
+    print(sl("hello", 3, 2)) // start > end
+    print(sl("hello", 0, 6)) // end past the length
+    print(sl("hello", 6, 6)) // start past the length
+    print(sl("hello", -1, 2)) // negative start
+    print(sl("hello", 0, -1)) // negative end (start > end catches it)
+    print(sl("héllo", 0, 2)) // end inside é
+    print(sl("héllo", 2, 6)) // start inside é
+    print(sl("日本語", 1, 2)) // both cuts inside 日
+    print(sl("😀ok", 0, 2)) // inside the four-byte 😀
+    print(sl("héllo", 2, 99)) // the range is checked BEFORE the boundary
 
     // ---- byteLength --------------------------------------------------------
     print(bl("")) // 0
@@ -170,29 +176,41 @@ test "the routed predicates answer what the C and Rust ones answered" {
     assertEq(preds("😀ok", "o"), "100")
 }
 
-test "slice agrees with the builtin on every legal range" {
-    assertEq(sl("hello", 0, 0), " ")
-    assertEq(sl("hello", 5, 5), " ")
-    assertEq(sl("hello", 0, 5), "hello hello")
-    assertEq(sl("hello", 1, 3), "el el")
-    assertEq(sl("héllo", 1, 3), "é é")
-    assertEq(sl("日本語", 3, 6), "本 本")
-    assertEq(sl("😀ok", 0, 4), "😀 😀")
-    assertEq(sl("", 0, 0), " ")
+test "slice answers what the deleted lowerings answered on every legal range" {
+    // Captured from the builtin BEFORE M3 routed it, which is what makes these
+    // pins rather than an equivalence check: `sliceV` and `slice` are one
+    // function now, so the two-column rows became one.
+    assertEq(sl("hello", 0, 0), "")
+    assertEq(sl("hello", 5, 5), "")
+    assertEq(sl("hello", 0, 5), "hello")
+    assertEq(sl("hello", 1, 3), "el")
+    assertEq(sl("héllo", 1, 3), "é")
+    assertEq(sl("日本語", 3, 6), "本")
+    assertEq(sl("😀ok", 0, 4), "😀")
+    assertEq(sl("", 0, 0), "")
 }
 
-test "sliceV declines exactly where the builtin traps" {
-    // The out-of-range trap, in each of its four shapes.
-    assertEq(show(sliceV("hello", 3, 2)), "None")
-    assertEq(show(sliceV("hello", 0, 6)), "None")
-    assertEq(show(sliceV("hello", 6, 6)), "None")
-    assertEq(show(sliceV("hello", -1, 2)), "None")
-    assertEq(show(sliceV("hello", 0, -1)), "None")
-    // The UTF-8 trap: a cut landing inside a character. It does NOT produce
-    // invalid UTF-8 — the builtin refuses the range outright, and so does this.
-    assertEq(show(sliceV("héllo", 0, 2)), "None")
-    assertEq(show(sliceV("héllo", 2, 6)), "None")
-    assertEq(show(sliceV("日本語", 1, 2)), "None")
+test "slice names which cut failed and at which byte" {
+    // `error: slice index out of range`, in each of its five shapes — and the
+    // offset each clause blames: `start` for a negative start, `end` for the two
+    // that compare the pair, since an `end` that precedes its `start` is the one
+    // that is too small.
+    assertEq(sl("hello", 3, 2), "OutOfRange(2)")
+    assertEq(sl("hello", 0, 6), "OutOfRange(6)")
+    assertEq(sl("hello", 6, 6), "OutOfRange(6)")
+    assertEq(sl("hello", -1, 2), "OutOfRange(-1)")
+    assertEq(sl("hello", 0, -1), "OutOfRange(-1)")
+    // `error: slice splits a UTF-8 character`. It does NOT produce invalid UTF-8
+    // — the range is refused outright, as it always was — and the START cut is
+    // reported first when both are bad.
+    assertEq(sl("héllo", 0, 2), "SplitsCharacter(2)")
+    assertEq(sl("héllo", 2, 6), "SplitsCharacter(2)")
+    assertEq(sl("日本語", 1, 2), "SplitsCharacter(1)")
+    assertEq(sl("😀ok", 0, 2), "SplitsCharacter(2)")
+    // The range is checked BEFORE the boundary, which is why a mid-character
+    // start with an out-of-range end reports the range. All three deleted
+    // implementations did that, and so does the one that replaced them.
+    assertEq(sl("héllo", 2, 99), "OutOfRange(99)")
 }
 
 test "byteLength counts bytes, not characters" {

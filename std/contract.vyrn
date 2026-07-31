@@ -76,7 +76,7 @@ fn trimSpaces(s: String) -> String {
     while end > start && b[end - 1] == ' ' {
         end = end - 1
     }
-    return slice(s, start, end)
+    return slice(s, start, end) ?? panic("trimSpaces: both offsets came from scanning `s` for ASCII spaces")
 }
 
 /// Whether `name` is a contract member's implicit TYPE PARAMETER: a single
@@ -110,7 +110,7 @@ fn headOf(spelling: String) -> String {
     let mut i = 0
     while i < b.length {
         if b[i] == '<' {
-            return trimSpaces(slice(spelling, 0, i))
+            return trimSpaces(slice(spelling, 0, i) ?? panic("headOf: the cut is at an ASCII `<`"))
         }
         i = i + 1
     }
@@ -145,10 +145,10 @@ fn argsOf(spelling: String) -> Array<String> {
         } else if b[j] == '>' {
             depth = depth - 1
             if depth == 0 {
-                out.push(trimSpaces(slice(spelling, start, j)))
+                out.push(trimSpaces(slice(spelling, start, j) ?? panic("argsOf: the cut is at an ASCII `<`, `>` or `,`")))
             }
         } else if b[j] == ',' && depth == 1 {
-            out.push(trimSpaces(slice(spelling, start, j)))
+            out.push(trimSpaces(slice(spelling, start, j) ?? panic("argsOf: the cut is at an ASCII `<`, `>` or `,`")))
             start = j + 1
         }
         j = j + 1

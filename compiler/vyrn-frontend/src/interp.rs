@@ -2857,30 +2857,14 @@ impl<'a> Interp<'a> {
                         Val::Str(s) => Ok(Val::Array(std::rc::Rc::new(lex_tokens(s)))),
                         _ => Err("`lex` of non-String".into()),
                     },
-                    // (`contains`, `startsWith` and `endsWith` are `std/strpred` —
-                    // RFC-0078 M4c. Three Rust one-liners, but three DEFINITIONS,
-                    // and the direct wasm backend owed a fourth.)
-                    // `slice(s, start, end)` (RFC-0046): the byte-range substring.
-                    // O(1)-validated — an out-of-range offset or a cut inside a
-                    // multi-byte UTF-8 character traps with the canonical wording
-                    // (`is_char_boundary` is the two-continuation-byte check the
-                    // codegen open-codes; both cut points already-valid UTF-8 need
-                    // no whole-slice revalidation). Trap strings mirror the
-                    // `@.trap.slice*` codegen globals, byte-for-byte via the CLI.
-                    "slice" => match (&vals[0], &vals[1], &vals[2]) {
-                        (Val::Str(s), Val::Int(start), Val::Int(end)) => {
-                            let len = s.len() as i64;
-                            if *start < 0 || *end > len || *start > *end {
-                                return Err("slice index out of range".into());
-                            }
-                            let (a, b) = (*start as usize, *end as usize);
-                            if !s.is_char_boundary(a) || !s.is_char_boundary(b) {
-                                return Err("slice splits a UTF-8 character".into());
-                            }
-                            Ok(Val::Str(std::rc::Rc::new(s[a..b].to_string())))
-                        }
-                        _ => Err("slice of non-String/Int".into()),
-                    },
+                    // (`contains`, `startsWith`, `endsWith` and — since RFC-0079 M3
+                    // — `slice` are `std/strpred`. The predicates were three Rust
+                    // one-liners, but three DEFINITIONS, and the direct wasm backend
+                    // owed a fourth. `slice` was the expensive one: `is_char_boundary`
+                    // here, an open-coded continuation-byte pair in the emitted IR,
+                    // and a third in the direct backend's runtime, all four of them
+                    // agreeing only because a test said so. It returns its failure
+                    // now, so the whole range check is `sliceV`'s.)
                     // `bytes` decodes the UTF-8 bytes as UInt8 (RFC-0014 M2) —
                     // the irreducible VIEW every Vyrn string routine is built on.
                     "bytes" => match &vals[0] {

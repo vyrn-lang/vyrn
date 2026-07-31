@@ -572,11 +572,17 @@ pub const RT_MODULES: &[RtModule] = &[
         desugared: &[],
         routes: &[("chars", "text$charsV"), ("@charCount", "text$charCountV")],
     },
-    // RFC-0078 M4b(3)/M4c: the three string predicates. `slice` is not here — it
-    // TRAPS, and Vyrn has no expression that aborts, so `sliceV` returns
-    // `Option<String>` and a swap would change observable behaviour. `byteLength`
-    // is not here either: it is a VIEW (`strlen`), it folds at compile time inside
-    // refinement predicates, and the byte view is what this module is built on.
+    // RFC-0078 M4b(3)/M4c: the three string predicates — and `slice`, which M4c
+    // refused and RFC-0079 M3 took. The refusal was "it TRAPS, and Vyrn has no
+    // expression that aborts, so `sliceV` can only answer `None` where the builtin
+    // ends the process". M3 did not add the abort to `slice`; it made the failure a
+    // VALUE (`Result<String, SliceError>`) and let the caller choose, which deleted
+    // an interpreter arm, ~50 lines of emitted IR and a wasm runtime function
+    // instead of adding a fourth copy of the range check.
+    //
+    // `byteLength` is still not here: it is a VIEW (`strlen`), it folds at compile
+    // time inside refinement predicates, and the byte view is what this module is
+    // built on.
     RtModule {
         spec: "std/strpred",
         prefix: "strpred$",
@@ -585,6 +591,7 @@ pub const RT_MODULES: &[RtModule] = &[
             ("contains", "strpred$containsV"),
             ("startsWith", "strpred$startsWithV"),
             ("endsWith", "strpred$endsWithV"),
+            ("slice", "strpred$sliceV"),
         ],
     },
 ];
@@ -3819,8 +3826,15 @@ mod tests {
             }
         }
         assert!(routed_builtin("print").is_none());
-        assert!(routed_builtin("slice").is_none(), "`slice` traps; RFC-0078 M4c refused it");
         assert!(routed_builtin("lineAt").is_none(), "`lineAt` keeps its interpreter cache");
+        // RFC-0079 M3: `slice` was the one refusal on this list that a language
+        // change could retire, and it did. The row is inverted rather than deleted
+        // — the reason it moved is the milestone.
+        assert_eq!(
+            routed_builtin("slice"),
+            Some("strpred$sliceV"),
+            "`slice` returns its failure now; RFC-0079 M3 routed it"
+        );
     }
 
     pub(super) fn map(entries: &[(&str, &str)]) -> MapResolver {

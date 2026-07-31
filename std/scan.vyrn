@@ -200,13 +200,26 @@ export fn skipWs(sc: modify Scanner) -> Unit {
     }
 }
 
+/// Why every `slice` below is `?? panic(walked())` and not a `match`.
+///
+/// A cursor position in this module is 0, `sc.src.byteLength`, or the offset of a
+/// byte some loop above compared against an ASCII constant — a quote, a delimiter,
+/// a comment marker, a word byte. A multi-byte UTF-8 character has no ASCII byte
+/// in it, so no loop can stop inside one, and `start` is always a position the
+/// same walk produced earlier. So `slice` cannot fail here, and the eight call
+/// sites share one reason rather than inventing eight; the `Err` arm has nothing
+/// to put in it, which is exactly the shape RFC-0079 says to spell `?? panic`.
+fn walked() -> String {
+    return "std/scan: the range came from walking this same string"
+}
+
 /// Consume a `[A-Za-z0-9_]+` run and return it (empty string if none here).
 export fn ident(sc: modify Scanner) -> String {
     let start = sc.pos
     while !atEnd(sc) && isWordByte(peek(sc)) {
         advance(sc)
     }
-    return slice(sc.src, start, sc.pos)
+    return slice(sc.src, start, sc.pos) ?? panic(walked())
 }
 
 fn isQuoteByte(sc: Scanner, b: Int64) -> Bool {
@@ -231,7 +244,7 @@ export fn quotedString(sc: modify Scanner) -> Option<String> {
                 advance(sc) // the escaped byte, whatever it is
             }
         } else if b == open {
-            let inner = slice(sc.src, start, sc.pos)
+            let inner = slice(sc.src, start, sc.pos) ?? panic(walked())
             advance(sc) // closing quote
             return Some(inner)
         } else {
@@ -239,7 +252,7 @@ export fn quotedString(sc: modify Scanner) -> Option<String> {
         }
     }
     // Unterminated: return what we have (generators scan work-in-progress text).
-    return Some(slice(sc.src, start, sc.pos))
+    return Some(slice(sc.src, start, sc.pos) ?? panic(walked()))
 }
 
 /// Skip one lexical unit: a quoted string (whole), a line comment (to EOL), or a
@@ -270,11 +283,11 @@ export fn until(sc: modify Scanner, stop: Int64) -> String {
     while !atEnd(sc) {
         let b = peek(sc)
         if b == stop && !isQuoteByte(sc, b) {
-            return slice(sc.src, start, sc.pos)
+            return slice(sc.src, start, sc.pos) ?? panic(walked())
         }
         skipUnit(sc)
     }
-    return slice(sc.src, start, sc.pos)
+    return slice(sc.src, start, sc.pos) ?? panic(walked())
 }
 
 /// Like `until`, but stops at the first top-level occurrence of the multi-byte
@@ -283,11 +296,11 @@ export fn untilStr(sc: modify Scanner, stop: String) -> String {
     let start = sc.pos
     while !atEnd(sc) {
         if looksAt(sc, stop) {
-            return slice(sc.src, start, sc.pos)
+            return slice(sc.src, start, sc.pos) ?? panic(walked())
         }
         skipUnit(sc)
     }
-    return slice(sc.src, start, sc.pos)
+    return slice(sc.src, start, sc.pos) ?? panic(walked())
 }
 
 /// Assuming the cursor is at byte `open`, consume the balanced region through the
@@ -317,7 +330,7 @@ export fn balanced(sc: modify Scanner, open: Int64, close: Int64) -> String {
         } else if b == close {
             depth = depth - 1
             if depth == 0 {
-                let inner = slice(sc.src, start, sc.pos)
+                let inner = slice(sc.src, start, sc.pos) ?? panic(walked())
                 advance(sc) // outermost close
                 return inner
             }
@@ -326,7 +339,7 @@ export fn balanced(sc: modify Scanner, open: Int64, close: Int64) -> String {
             advance(sc)
         }
     }
-    return slice(sc.src, start, sc.pos)
+    return slice(sc.src, start, sc.pos) ?? panic(walked())
 }
 
 // ===========================================================================

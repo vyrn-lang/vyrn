@@ -2755,9 +2755,39 @@ impl Fn_<'_> {
                 self.depth -= 1;
                 b.ins(&Instruction::End);
             }
+            // Both branches diverge (RFC-0079): there is no value to join, no
+            // destination to allocate, and nothing for the enclosing block to
+            // read — so the branches are emitted as statements and the stack is
+            // taken polymorphic afterwards, which is the shape `panic` itself
+            // takes. A plain Unit `if` in value position is still a gap.
+            Repr::Unit if matches!(want, Type::Never) => {
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                self.expr_as(m, b, then_e, &want)?;
+                b.ins(&Instruction::Else);
+                self.expr_as(m, b, else_e, &want)?;
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+            }
             Repr::Unit => return unsupported("an `if` expression yielding Unit", line),
         }
+        self.diverged(b, &want);
         Ok(want)
+    }
+
+    /// A join whose every arm diverged (RFC-0079) leaves the enclosing stack with
+    /// nothing on it, and unlike a bare `panic` the `end` of its own block has
+    /// already restored a non-polymorphic stack. One `unreachable` says so.
+    ///
+    /// M1 pinned every join shape with the panic NOT taken, which is the case
+    /// where the surviving arm supplies the value. `std/strings`'s `substring` is
+    /// the other one — a nested `match` with a `panic` in BOTH arms, in value
+    /// position — and it read as "expected i32 but nothing on stack" in wasmtime
+    /// and as an empty `phi` operand on the textual path.
+    fn diverged(&self, b: &mut Frame, want: &Type) {
+        if matches!(want, Type::Never) {
+            b.ins(&Instruction::Unreachable);
+        }
     }
 
     /// The type a join carries, which is not always the one its first arm names.
@@ -2904,7 +2934,7 @@ impl Fn_<'_> {
                     self.gen_peek(n, args).expect("guarded above")
                 }
                 "panic" => Type::Never,
-                "@str" | "@concat" | "jsonSchema" | "slice" | "toJson" => Type::Str,
+                "@str" | "@concat" | "jsonSchema" | "toJson" => Type::Str,
                 "floatBits" => Type::IntN { bits: 64, signed: false },
                 "floatFromBits" => Type::Float,
                 "stringFromBytes" => Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
@@ -3941,13 +3971,10 @@ impl Fn_<'_> {
                 b.slot(off);
                 return Ok(ty);
             }
-            "slice" if args.len() == 3 => {
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                self.expr_as(m, b, &args[1], &Type::Int)?;
-                self.expr_as(m, b, &args[2], &Type::Int)?;
-                b.ins(&Instruction::Call(self.cx.rt.slice));
-                return Ok(Type::Str);
-            }
+            // (`slice` was here, three `expr_as` and a call into `rt.slice`. The
+            // arm was cheap; the RUNTIME FUNCTION behind it was a third copy of the
+            // range check, and RFC-0079 M3 deleted both — `slice` routes into
+            // `std/strpred`'s `sliceV` at the top of this dispatch now.)
             // RFC-0014's input I/O. Every one of these is a runtime function that
             // writes its whole result through a slot allocated here — the same
             // hidden destination an aggregate-returning Vyrn call gets, which is
@@ -6452,6 +6479,7 @@ impl Fn_<'_> {
         if let Some((off, _)) = dest {
             b.slot(off);
         }
+        self.diverged(b, &want);
         Ok(want)
     }
 
@@ -7729,7 +7757,6 @@ struct Rt {
     trap_idx: u32,
     utf8valid: u32,
     str_from_bytes: u32,
-    slice: u32,
     f64_str: u32,
     // RFC-0014 input I/O and RFC-0043's host boundary, served straight from WASI
     // (M2j) rather than through the shim — a standalone module has no shim, and
@@ -7854,7 +7881,6 @@ impl Rt {
             trap_idx: slot("trap_idx"),
             utf8valid: slot("utf8valid"),
             str_from_bytes: slot("str_from_bytes"),
-            slice: slot("slice"),
             f64_str: slot("f64_str"),
             starts: slot("starts"),
             env_get: slot("env_get"),
@@ -8424,87 +8450,13 @@ fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
         },
     );
 
-    // slice(s, from, to) — RFC-0046's byte-range substring, with the two traps
-    // that make it safe rather than merely fast.
-    //
-    // Both bounds are SIGNED against the byte length, and both cut points must
-    // land on a leading byte: slicing a multi-byte character in half would produce
-    // a `String` that is not UTF-8, which every later check assumes it cannot be.
-    // `to == len` reads the terminator, which is 0 and therefore never a
-    // continuation byte — the reason no special case is needed at the end.
-    let oob = rt.intern(m, "error: slice index out of range\n");
-    let split = rt.intern(m, "error: slice splits a UTF-8 character\n");
-    let (strlen, trap) = (rt.strlen, rt.trap);
-    let (slen, sub) = (5, 6);
-    rt.next_is(m, rt.slice);
-    m.func(
-        &[ValType::I32, ValType::I64, ValType::I64],
-        &[ValType::I32],
-        &[ValType::I32, ValType::I32, ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::Call(strlen))
-                .ins(&Instruction::LocalSet(slen));
-            // from < 0 || to > len || from > to
-            b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::I64LtS)
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::LocalGet(slen))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::I64GtS)
-                .ins(&Instruction::I32Or)
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I64GtS)
-                .ins(&Instruction::I32Or)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(oob as i32))
-                .ins(&Instruction::Call(trap))
-                .ins(&Instruction::End);
-            let cont = |b: &mut Frame, which: u32| {
-                b.ins(&Instruction::LocalGet(0))
-                    .ins(&Instruction::LocalGet(which))
-                    .ins(&Instruction::I32WrapI64)
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I32Load8U(byte()))
-                    .ins(&Instruction::I32Const(0xC0))
-                    .ins(&Instruction::I32And)
-                    .ins(&Instruction::I32Const(0x80))
-                    .ins(&Instruction::I32Eq);
-            };
-            cont(b, 1);
-            cont(b, 2);
-            b.ins(&Instruction::I32Or)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(split as i32))
-                .ins(&Instruction::Call(trap))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I64Sub)
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::LocalSet(sub))
-                .ins(&Instruction::LocalGet(sub))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::Call(malloc))
-                .ins(&Instruction::LocalTee(buf))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(sub))
-                .ins(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 })
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(sub))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::LocalGet(buf));
-        },
-    );
+    // (`slice` was emitted here — 60 instructions: a signed three-clause bounds
+    // test, a continuation-byte probe at each cut point, two interned trap strings
+    // and a `memory.copy`. RFC-0079 M3 deleted it along with the interpreter's arm
+    // and the textual emitter's branch; `std/strpred`'s `sliceV` is the one range
+    // check now. Removing a slot is a one-line deletion in `slots` because the
+    // table hands indices out in field order — the second removal it has seen,
+    // after `charcount`.)
 
     rt.next_is(m, rt.f64_str);
     float_str(m, malloc, nan, inf, ninf);
