@@ -239,6 +239,94 @@ fn the_interpreter_does_not_copy_the_array_once_per_append() {
     );
 }
 
+/// The third quadratic, and the one behaviour cannot see either: `coerce`
+/// rebuilt a whole array at every typed boundary even when the element type can
+/// neither change a value nor reject one, so `rows[i][j] = v` paid for the inner
+/// row's LENGTH on every store (RFC-0082 M2 finding 3, closed in M3 by the
+/// short-circuit the field-store validation needed anyway).
+///
+/// The ratio is between two grids with the same number of WRITES and different
+/// row lengths — 40x4000 against 1600x100, 160,000 stores either way. A cost
+/// proportional to the row is the only thing that can tell them apart: 15.2x
+/// before (6,950 ms against 457), 1.0x after (272 against 268).
+#[test]
+fn the_interpreter_does_not_rebuild_a_row_per_element_store() {
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+    let grid = |rows: usize, cols: usize| {
+        format!(
+            "fn main() -> Int64 {{\n\
+             let mut rows: Array<Array<Int64>> = []\n\
+             let mut r = 0\n\
+             while r < {rows} {{\n\
+             let mut row: Array<Int64> = []\n\
+             let mut c = 0\n\
+             while c < {cols} {{ row.push(0)  c = c + 1 }}\n\
+             rows.push(row)\n\
+             r = r + 1\n\
+             }}\n\
+             let mut i = 0\n\
+             while i < {rows} {{\n\
+             let mut j = 0\n\
+             while j < {cols} {{ rows[i][j] = 1  j = j + 1 }}\n\
+             i = i + 1\n\
+             }}\n\
+             print(rows[{rows} - 1][{cols} - 1])\n\
+             return 0\n}}\n"
+        )
+    };
+    let short = best_of_3(&dir, "interp-grid-short", &grid(1600, 100), "1");
+    let long = best_of_3(&dir, "interp-grid-long", &grid(40, 4000), "1");
+    assert!(
+        long.as_secs_f64() < 4.0 * short.as_secs_f64(),
+        "an element store is rebuilding its row: {long:?} for 40x4000 against \
+         {short:?} for 1600x100 — the same 160,000 writes"
+    );
+}
+
+/// The same store, with a VALIDATED element type — the half that had to be paid
+/// for and was nearly paid twice. M3 made a field write coerce (so a runtime
+/// value entering `t.xs: Array<Age>` is checked at all), and the write-back
+/// every place desugar ends with then re-proved the whole array per store:
+/// 13,467 ms for 8,000 writes against 76 for the same loop on `Array<Int64>`.
+///
+/// A variable already OF the field's type is skipped, which is what the compiled
+/// backends do (`validation_required` is `None` when `from == to`). So the
+/// predicate costs a constant per store, not a scan — and the ratio says so
+/// without depending on the machine.
+#[test]
+fn a_validated_element_type_costs_a_constant_per_store() {
+    const N: usize = 8_000;
+    let dir = std::env::temp_dir().join("vyrn-places");
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = |decl: &str, elem: &str| {
+        format!(
+            "{decl}type T = {{ xs: Array<{elem}> }}\n\
+             fn main() -> Int64 {{\n\
+             let mut t = T {{ xs: [] }}\n\
+             let mut i = 0\n\
+             while i < {N} {{ t.xs.push(i + 18)  i = i + 1 }}\n\
+             let mut k = 0\n\
+             while k < {N} {{ t.xs[k] = k + 18  k = k + 1 }}\n\
+             print(t.xs[{N} - 1])\n\
+             return 0\n}}\n"
+        )
+    };
+    let expect = (N + 17).to_string();
+    let plain = best_of_3(&dir, "interp-store-plain", &prog("", "Int64"), &expect);
+    let validated = best_of_3(
+        &dir,
+        "interp-store-validated",
+        &prog("type Age = Int64 where value >= 18\n", "Age"),
+        &expect,
+    );
+    assert!(
+        validated.as_secs_f64() < 4.0 * plain.as_secs_f64(),
+        "a validated element type is re-validating the whole array per store: \
+         {validated:?} against {plain:?} for the same {N} writes"
+    );
+}
+
 /// `vyrn test` is a RECOVERABLE trap: a trapping test is reported and the next
 /// one runs. M1 recorded that its stale field was unobservable "because traps
 /// abort" and that a recoverable trap would have to revisit the desugar — this
