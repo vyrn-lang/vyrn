@@ -393,6 +393,17 @@ Six things the plan above did not have right.
   library `panic` is deterministic text, so all three engines print it identically
   — but the correct claim is "**no failure in `std/` has two authors**", not "no
   failure in `std/` crashes".
+- **The routed `slice` must not be written on `bytes(s)`**, and the RFC never
+  looked. `bytes(s)` and `byteLengthV(s)` each allocate a copy of the WHOLE
+  string, and `std/scan` calls `slice` once per token — so a scanner over a large
+  source would copy that source once per token, which is quadratic and is the
+  shape of the 240x string-append bug RFC-0076 found. `s[i]` and `s.byteLength`
+  are the O(1) reads `startsWithV`/`containsV` already use. Measured, `vyrn check`
+  with the gen cache off, min of 8, builtin → `bytes(s)` → `s[i]`: `twdemo`
+  67 → 81 → 68 ms, `vyxdemo` 67 → 78 → 66 ms, `shelf`'s client 160 → 171 →
+  159 ms. So the milestone costs nothing measurable, and the part that *looks*
+  expensive — `stringFromBytes` re-walking the UTF-8 DFA over bytes the boundary
+  check already proved valid — does not show up at all.
 - **The other ~23 sites are correct by construction for ONE reason**, not
   twenty-three. Every cut in `std/scan`, `std/contract` and the rest of
   `std/strings` is at 0, at `byteLength`, or at an offset the same walk found by
