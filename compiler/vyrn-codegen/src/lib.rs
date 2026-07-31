@@ -7548,13 +7548,18 @@ impl<'a> Gen<'a> {
 /// Whether a pattern matches the tag-1 variant (`Some`/`Ok`). Only used on the
 /// Option/Result path; user-enum variants go through `gen_match_enum`.
 fn pattern_is_one(p: &Pattern) -> bool {
-    matches!(p, Pattern::Some(_) | Pattern::Ok(_))
+    matches!(p, Pattern::Some(_) | Pattern::Ok(_) | Pattern::Success(_))
 }
 
 /// The name a pattern binds its payload to, if any.
 fn pattern_binding(p: &Pattern) -> Option<&str> {
     match p {
         Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => Some(b),
+        // `??`'s pair (RFC-0079). `Failure` binds on the `Option` path too, where
+        // the payload type is the `Type::Int` placeholder `gen_match` passes for
+        // a tag-0 `Option` arm: a dead `alloca`+`store` of a word nothing reads,
+        // which is cheaper than teaching this type-free helper about types.
+        Pattern::Success(b) | Pattern::Failure(b) => Some(b),
         // Variants route through gen_match_enum, not this Option/Result helper.
         Pattern::Variant(_, b) => b.first().map(|s| s.as_str()),
         Pattern::None => None,

@@ -3282,3 +3282,78 @@ fn main() -> Int64 {
     assert_eq!(rows[0].2, "", "nothing panicked");
     assert_eq!(rows[0].3, Some(0), "exit 0");
 }
+
+/// `??` on both sums, on all three engines (RFC-0079 M2).
+///
+/// `??` desugars in the parser to a `match` over two type-agnostic patterns, so
+/// what this pins is not an operator — it is that the desugar's `Success`/
+/// `Failure` pair resolves to the SAME tag on all three engines. Each of them
+/// reads the tag its own way (an enum arm in the interpreter, an `i1` in the
+/// textual backend, a one-byte load in the direct one), and a pair that agreed
+/// on `Option` while disagreeing on `Result` would be silent in two columns out
+/// of three.
+///
+/// The last line is the composition the whole RFC is for: `x ?? panic("…")` is
+/// `unwrap`, spelled by the person who knows why, with no primitive of its own.
+/// It runs LAST because it ends the process — everything above it has already
+/// printed by then, which is what makes the stdout assertion load-bearing.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
+fn nullish_and_panic_say_the_same_bytes_on_all_three_engines() {
+    let rows = three_engines(
+        "nullish",
+        "both",
+        r#"
+fn half(n: Int64) -> Option<Int64> {
+    if n % 2 == 0 {
+        return Some(n / 2)
+    }
+    return None
+}
+
+fn toNum(s: String) -> Result<Int64, String> {
+    if s == "one" {
+        return Ok(1)
+    }
+    return Err("bad «\{s}»")
+}
+
+fn main() -> Int64 {
+    print(half(10) ?? -1)
+    print(half(7) ?? -1)
+    print(toNum("one") ?? -1)
+    print(toNum("två") ?? -1)
+    print(half(7) ?? half(4) ?? -1)
+    print(half(8) ?? panic("not taken"))
+    print(toNum("one") ?? panic("not taken either"))
+    print(toNum("tvä") ?? panic("no number in «tvä»"))
+    return 0
+}
+"#,
+    );
+    // The wasm column is OPTIONAL in `three_engines` — it is skipped when
+    // `wasmtime()` finds nothing, and a green run that never built a module has
+    // fooled a reader before. This case says so out loud.
+    assert_eq!(
+        rows.len(),
+        3,
+        "wasmtime did not resolve, so wasm was never tested: {:?}",
+        rows.iter().map(|r| r.0).collect::<Vec<_>>()
+    );
+    all_agree(&rows, "both");
+    assert_eq!(
+        rows[0].1,
+        "5\n-1\n1\n-1\n2\n4\n1\n",
+        "both sums unwrap, the chain is right-associative, and an untaken `panic` costs nothing"
+    );
+    // The discarded `Err` payload — a fresh interpolated String on each failing
+    // call — appears on NEITHER channel. `Failure`'s binder exists so the payload
+    // is bound and goes nowhere, not so it can be read.
+    assert!(!rows[0].1.contains("bad «"), "an error payload reached stdout");
+    assert_eq!(
+        rows[0].2,
+        "error: no number in «tvä»\n",
+        "the only text on stderr is the reason the caller wrote"
+    );
+    assert_eq!(rows[0].3, Some(1), "exit 1, like every trap");
+}

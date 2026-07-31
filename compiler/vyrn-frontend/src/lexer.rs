@@ -86,6 +86,10 @@ pub enum Tok {
     OrOr,       // ||
     Bang,       // !
     Question,   // ?
+    /// `??` (RFC-0079). Maximal munch, so the pre-0079 spelling `x??` — two
+    /// postfix `?` on a `Result<Option<T>, E>` — must now be written `(x?)?`.
+    /// There were zero occurrences across `std/`, `examples/` and `compiler/`.
+    QuestionQuestion, // ??
     Pipe,       // |
     Amp,        // &
     Caret,      // ^  (bitwise xor, RFC-0045)
@@ -178,6 +182,7 @@ pub fn token_name_and_text(tok: &Tok) -> (String, String) {
         Tok::OrOr => p("||"),
         Tok::Bang => p("!"),
         Tok::Question => p("?"),
+        Tok::QuestionQuestion => p("??"),
         Tok::Pipe => p("|"),
         Tok::Amp => p("&"),
         Tok::Caret => p("^"),
@@ -270,6 +275,7 @@ fn two_char_op(a: char, b: char) -> Option<Tok> {
         ('>', '=') => Some(Tok::GtEq),
         ('&', '&') => Some(Tok::AndAnd),
         ('|', '|') => Some(Tok::OrOr),
+        ('?', '?') => Some(Tok::QuestionQuestion),
         ('<', '<') => Some(Tok::Shl),
         ('>', '>') => Some(Tok::Shr),
         _ => None,
@@ -1133,6 +1139,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                 ('>', '=') => Some(Tok::GtEq),
                 ('&', '&') => Some(Tok::AndAnd),
                 ('|', '|') => Some(Tok::OrOr),
+                ('?', '?') => Some(Tok::QuestionQuestion),
                 ('<', '<') => Some(Tok::Shl),
                 ('>', '>') => Some(Tok::Shr),
                 _ => None,

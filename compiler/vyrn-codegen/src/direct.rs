@@ -6356,6 +6356,13 @@ impl Fn_<'_> {
             (Sum::Opt(_), Pattern::None) => vec![],
             (Sum::Res(t, _), Pattern::Ok(n)) => vec![(n.clone(), t.clone())],
             (Sum::Res(_, e), Pattern::Err(n)) => vec![(n.clone(), e.clone())],
+            // `??`'s type-agnostic pair (RFC-0079) — the sum decides which side
+            // each names, which is the same thing `try_` does one screen down.
+            (Sum::Opt(t), Pattern::Success(n)) | (Sum::Res(t, _), Pattern::Success(n)) => {
+                vec![(n.clone(), t.clone())]
+            }
+            (Sum::Opt(_), Pattern::Failure(_)) => vec![],
+            (Sum::Res(_, e), Pattern::Failure(n)) => vec![(n.clone(), e.clone())],
             (Sum::Enum(vs), Pattern::Variant(name, binds)) => {
                 let v = vs
                     .iter()
@@ -6636,7 +6643,7 @@ impl Fn_<'_> {
                 b.ins(&Instruction::I64Eq);
             }
             (_, p) => {
-                let one = matches!(p, Pattern::Some(_) | Pattern::Ok(_));
+                let one = matches!(p, Pattern::Some(_) | Pattern::Ok(_) | Pattern::Success(_));
                 b.ins(&Instruction::I32Load8U(byte()));
                 b.ins(&Instruction::I32Const(i32::from(one)));
                 b.ins(&Instruction::I32Eq);

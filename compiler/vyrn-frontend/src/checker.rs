@@ -3217,6 +3217,16 @@ impl<'a> Checker<'a> {
                 Pattern::None => ("None", None),
                 Pattern::Ok(b) => ("Ok", Some(b)),
                 Pattern::Err(b) => ("Err", Some(b)),
+                // The `??` desugar's two patterns (RFC-0079): they take whichever
+                // tag the scrutinee's own shape names, which is the one thing the
+                // parser could not do. `Failure` binds only on the `Result` path
+                // — an `Option`'s tag-0 has no payload — which is exactly what
+                // this per-arm `Option<&str>` seam is for.
+                Pattern::Success(b) => (want[0], Some(b)),
+                Pattern::Failure(b) => (
+                    want[1],
+                    matches!(sty, Type::Result(..)).then_some(b.as_str()),
+                ),
                 Pattern::Variant(n, _) => {
                     return Err(format!(
                         "line {line}: pattern `{n}` does not match scrutinee of type {sty}"
@@ -3450,6 +3460,11 @@ impl<'a> Checker<'a> {
             Pattern::None => ("None", None),
             Pattern::Ok(b) => ("Ok", Some(b.clone())),
             Pattern::Err(b) => ("Err", Some(b.clone())),
+            // `??` desugars to a `match`, never to an `if let`/`while let`, so
+            // these cannot reach here.
+            Pattern::Success(_) | Pattern::Failure(_) => {
+                unreachable!("the `??` patterns are produced only inside a `match`")
+            }
             Pattern::Variant(n, _) => {
                 return Err(format!(
                     "line {line}: pattern `{n}` does not match scrutinee of type {sty}"

@@ -3646,6 +3646,15 @@ impl<'a> Interp<'a> {
             (Pattern::None, Val::Option(None)) => Some(vec![]),
             (Pattern::Ok(b), Val::Result(true, v)) => Some(vec![(b.clone(), (**v).clone())]),
             (Pattern::Err(b), Val::Result(false, v)) => Some(vec![(b.clone(), (**v).clone())]),
+            // The `??` desugar's type-agnostic pair (RFC-0079): tag first, sum
+            // second, which is the whole point of having them.
+            (Pattern::Success(b), Val::Option(Some(v)) | Val::Result(true, v)) => {
+                Some(vec![(b.clone(), (**v).clone())])
+            }
+            (Pattern::Failure(b), Val::Result(false, v)) => {
+                Some(vec![(b.clone(), (**v).clone())])
+            }
+            (Pattern::Failure(_), Val::Option(None)) => Some(vec![]),
             (Pattern::Variant(n, binds), Val::Enum(vn, payload)) if n == vn => {
                 Some(binds.iter().cloned().zip(payload.iter().cloned()).collect())
             }

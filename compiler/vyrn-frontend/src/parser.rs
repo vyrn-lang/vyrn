@@ -3042,9 +3042,34 @@ impl Parser {
         })
     }
 
+    /// `??`'s binding power: tighter than `&&`/`||`, looser than comparison.
+    ///
+    /// It shares the number with `EqEq` rather than displacing every tier from 3
+    /// up, because `??` is *not* a `BinOp` — it is handled by hand in [`binary`]
+    /// and recurses at its own binding power (right associativity), so a tighter
+    /// operator on its right is absorbed either way. Shifting the table would
+    /// have edited seventeen rows and changed no parse; this was checked case by
+    /// case against `min_bp` before the rows were left alone.
+    const NULLISH_BP: u8 = 3;
+
     fn binary(&mut self, min_bp: u8) -> Result<Expr, Diagnostic> {
         let mut lhs = self.unary()?;
-        while let Some((op, bp)) = Self::binop(self.peek()) {
+        loop {
+            if *self.peek() == Tok::QuestionQuestion && Self::NULLISH_BP >= min_bp {
+                let line = self.line();
+                self.advance();
+                // Right-associative: `a ?? b ?? c` is `a ?? (b ?? c)`. Left
+                // associativity is not merely unidiomatic here, it cannot
+                // typecheck — `a ?? b` yields an unwrapped `T`, and `??` needs a
+                // sum. Recursing at the same binding power rather than `bp + 1`
+                // is the standard way to say that in a Pratt loop.
+                let rhs = self.binary(Self::NULLISH_BP)?;
+                lhs = Self::nullish(lhs, rhs, line);
+                continue;
+            }
+            let Some((op, bp)) = Self::binop(self.peek()) else {
+                break;
+            };
             if bp < min_bp {
                 break;
             }
@@ -3060,6 +3085,32 @@ impl Parser {
             };
         }
         Ok(lhs)
+    }
+
+    /// `a ?? b` (RFC-0079) — desugar to the `match` that spells it, using the
+    /// two type-agnostic patterns so the parser never has to know whether `a` is
+    /// an `Option` or a `Result`. Binder names are `@`-prefixed (the same rule
+    /// the storage desugar follows) so they can never collide with a user
+    /// identifier, and nesting shadows harmlessly because only the `Success` arm
+    /// reads one.
+    fn nullish(lhs: Expr, rhs: Expr, line: usize) -> Expr {
+        Expr::Match {
+            scrutinee: Box::new(lhs),
+            arms: vec![
+                MatchArm {
+                    pattern: Pattern::Success("@v".to_string()),
+                    body: Expr::Var {
+                        name: "@v".to_string(),
+                        line,
+                    },
+                },
+                MatchArm {
+                    pattern: Pattern::Failure("@e".to_string()),
+                    body: rhs,
+                },
+            ],
+            line,
+        }
     }
 
     fn unary(&mut self) -> Result<Expr, Diagnostic> {

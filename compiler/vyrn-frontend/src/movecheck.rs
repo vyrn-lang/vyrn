@@ -549,6 +549,7 @@ impl MoveCheck<'_> {
 pub fn pattern_bindings(p: &Pattern) -> Vec<&str> {
     match p {
         Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => vec![b],
+        Pattern::Success(b) | Pattern::Failure(b) => vec![b],
         Pattern::Variant(_, binds) => binds.iter().map(|s| s.as_str()).collect(),
         Pattern::None => vec![],
     }

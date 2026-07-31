@@ -2606,7 +2606,11 @@ impl NsResolver<'_> {
                                 inner.insert(b.clone());
                             }
                         }
-                        Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => {
+                        Pattern::Some(b)
+                        | Pattern::Ok(b)
+                        | Pattern::Err(b)
+                        | Pattern::Success(b)
+                        | Pattern::Failure(b) => {
                             inner.insert(b.clone());
                         }
                         Pattern::None => {}
@@ -3268,7 +3272,11 @@ fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(St
                             inner.insert(b.clone());
                         }
                     }
-                    Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => {
+                    Pattern::Some(b)
+                    | Pattern::Ok(b)
+                    | Pattern::Err(b)
+                    | Pattern::Success(b)
+                    | Pattern::Failure(b) => {
                         inner.insert(b.clone());
                     }
                     Pattern::None => {}

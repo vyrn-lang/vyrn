@@ -1023,6 +1023,17 @@ pub enum Pattern {
     Err(String),
     /// A user-enum variant pattern: `Circle(r)`, `Rect(w, h)`, or `Empty`.
     Variant(String, Vec<String>),
+    /// The tag-1 arm — `Some` *or* `Ok`, whichever the scrutinee turns out to
+    /// be. Unspellable in source; produced only by the `??` desugar (RFC-0079),
+    /// which runs in the parser and so has no type information to choose with.
+    /// This is the same trick `Expr::Try` plays for `?`, moved into `Pattern` so
+    /// `??` can reach `match` and inherit its drops, ownership, validation and
+    /// short-circuiting instead of restating any of them.
+    Success(String),
+    /// The tag-0 arm — `None` *or* `Err`. Carries a binder so a `Result`'s error
+    /// payload is bound rather than dropped on the floor; on the `Option` path
+    /// the checker binds nothing, since there is no payload.
+    Failure(String),
 }
 
 impl Expr {
