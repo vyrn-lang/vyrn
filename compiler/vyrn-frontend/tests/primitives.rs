@@ -190,8 +190,8 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // interpreter's `{:.6}` — kept deliberately as the differential ORACLE, not
     // as a third peer, since exact decimal formatting cannot be pinned
     // exhaustively over 2^64 inputs.
-    ("@str", Measured, "integer rendering; the float case is `std/num`'s `f64Str` (RFC-0081)"),
-    ("@concat", Measured, "every string concatenation and every interpolation in the repo"),
+    ("@str", Measured, "integer rendering: a Vyrn digit loop is 150 ns against 60 ns (2.5x), on every print"),
+    ("@concat", Measured, "9.7x native / 11x wasm (580 ns against 60 ns): a Vyrn join must revalidate UTF-8"),
     // ---- The one finding, and it is CLOSED -----------------------------------
     // (`@charCount` was here, as `Unjustified`: "three implementations of a
     // four-line loop, for ONE caller". It is `std/text`'s `charCountV` now, so the
@@ -371,4 +371,41 @@ fn the_refusals_keep_their_reasons() {
         .map(|(n, ..)| *n)
         .collect();
     assert!(unjustified.is_empty(), "{unjustified:?} is in the interpreter with no reason given");
+}
+
+/// `Measured` claims a number was taken. This checks one was written down.
+///
+/// The category means "movable, and refused on a *measured* cost" — and for most
+/// of this census's life neither row carried a measurement. `@str`'s said "511
+/// lines in direct.rs, three engines, every print", which is a description of the
+/// code and a guess about the cost; RFC-0081 measured it and the guess was wrong
+/// by enough to delete two of the three implementations. `@concat`'s said "every
+/// string concatenation and every interpolation in the repo", which is a
+/// description of the call sites.
+///
+/// So the failure mode is not prose drifting in general — prose cannot be checked
+/// — it is *this* category asserting evidence that does not exist. A row claiming
+/// a measurement must cite one: some digit followed by `ns`, `ms` or `x`.
+///
+/// What this deliberately does NOT check is whether the number is still true.
+/// Nothing can. `@str`'s row cited 511 deleted lines for two milestones while the
+/// suite stayed green, because [`the_census_is_the_code`] pairs arms with rows and
+/// never reads the reasons at all. This closes the half that is mechanizable and
+/// names the half that is not.
+#[test]
+fn a_measured_refusal_cites_its_measurement() {
+    for (name, why, reason) in CENSUS.iter().filter(|(_, w, _)| *w == Measured) {
+        let cites_a_number = reason.as_bytes().windows(2).any(|w| {
+            w[0].is_ascii_digit() && (w[1] == b'x' || w[1] == b'n' || w[1] == b'm')
+        }) || reason.contains(" ns")
+            || reason.contains(" ms");
+        assert!(
+            cites_a_number,
+            "`{name}` is {why:?} — the category asserts a cost was measured, so the \
+             reason has to carry the number (`580 ns`, `9.7x`). Refusing on a \
+             description of the call sites is how both rows sat unmeasured until \
+             RFC-0081 measured one and deleted two implementations. Reason was: \
+             {reason:?}"
+        );
+    }
 }
