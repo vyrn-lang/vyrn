@@ -172,6 +172,18 @@ open. The current rejection is pinned by `parser.rs`
 `index_assign_on_a_record_field_array_is_rejected` so the behavior can't drift while
 undecided.
 
+> **RESOLVED (RFC-0082 M1).** The design question is answered the way the note
+> guessed: `[i] =` gained the write-back, as a desugar. `r.xs[i] = v`,
+> `r.xs[i].f = v`, `r.xs.pop()` and the nested and element-of-element chains all
+> move the container's header out into a temp, mutate it, and move it back —
+> which is exactly what the caller was being told to write by hand. It cost no
+> backend change and it is a move, not a copy, pinned structurally in
+> `vyrn-cli/tests/places.rs`. The pinning test above is now
+> `index_assign_through_a_record_field_is_a_move`, which pins the emitted
+> statements instead of the refusal. The inconsistency the note names is gone in
+> the direction it feared: what still cannot write back is a *call result*, which
+> has no place to write back to at all.
+
 ### Durability caveats (the std/storage evidence)
 
 > **RESOLVED (RFC-0044, Implemented).** The crash-mid-write corruption window

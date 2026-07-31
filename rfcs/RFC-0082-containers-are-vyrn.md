@@ -1,0 +1,394 @@
+# RFC-0082 — Containers Are Vyrn: `Array` Is the Primitive
+
+- **Status:** **Accepted**, **M1 shipped** (see "As landed"), **M2 stopped at its
+  own gate** — the port is blocked twice over and the gate failed anyway; M3 and
+  M4 are **withdrawn**. Milestones are gated on measurement the way RFC-0081's
+  were: nothing is deleted until a number says it should be, and here a number
+  said stop.
+- **Depends on:** RFC-0078 (the census, and question **A**, which this
+  reframes), RFC-0011 (`a[i] = v` element store, and the `a[i].field = v`
+  desugar this extends), RFC-0028 (`Map<String, V>`), RFC-0056 (`SmallArray`),
+  RFC-0079 (`panic`, so a Vyrn container can trap), RFC-0081 (the measurement
+  discipline, and "unreferenced multiplicity" as the actual objection)
+- **Supersedes:** RFC-0078's open language question **A**, "a raw-memory view".
+  That question is withdrawn rather than answered — see below.
+
+## The question this replaces
+
+RFC-0078 recorded that `Array`, `Map`, `SmallArray`, the slot table and the
+allocator "would be Vyrn if the language could name raw memory — 16 of the 62
+census rows", and framed the decision as **"what a checked language gives up to
+write its own allocator, and whether an `unsafe`-shaped region is a price worth
+paying for a row of the census."**
+
+That framing is wrong, and the reason is worth stating precisely because it was
+believed for four RFCs.
+
+## Why Rust needs `unsafe` for `Vec`, and why Vyrn does not
+
+The operation that forces `unsafe` in `Vec` is **`set_len`**: it asserts that
+memory is initialized when the type system cannot see that it is. That is the
+entire reason `MaybeUninit` exists — a `Vec` holding uninitialized elements is
+undefined behaviour under most safe operations, including being dropped. The
+unsafety is not "pointers"; it is **uninitialized capacity being observable**.
+
+Vyrn's `Array` never exposes that state. It owns `len` and `cap` together, every
+read is checked against `len`, and spare capacity is allocated but unreadable —
+there is no `set_len` to be unsafe. This is the arrangement Java, C# and Go use:
+collections are ordinary safe code over an array primitive, and nobody reaches
+for pointers to write one.
+
+So `Array<T>` is *already* the right primitive, and the containers standing on it
+were never blocked on a memory view. They were blocked on something much smaller.
+
+## The demonstration
+
+A generation-checked slot table — Vale's whole mechanism, and four of the sixteen
+census rows — in ordinary Vyrn over `Array<T>`. It ran even before M1, with the
+move-out / mutate / move-back written by hand:
+
+```vyrn
+    if t.free.length > 0 {
+        let mut fr = t.free          // the workaround, four times over
+        let i = fr[fr.length - 1]
+        fr.pop()
+        t.free = fr
+        let mut sl = t.slots
+        let mut s = sl[i]
+        s.val = v
+        s.live = true
+        sl[i] = s
+        t.slots = sl
+        return Handle { slot: i, gen: s.gen }
+    }
+```
+
+Since M1 that is what the compiler writes, and the source says what it means:
+
+```vyrn
+type Slot = { gen: Int64, val: Int64, live: Bool }
+type Handle = { slot: Int64, gen: Int64 }
+type Table = { slots: Array<Slot>, free: Array<Int64> }
+
+fn newCell(t: modify Table, v: Int64) -> Handle {
+    if t.free.length > 0 {
+        let i = t.free[t.free.length - 1]
+        t.free.pop()
+        t.slots[i].val = v
+        t.slots[i].live = true
+        return Handle { slot: i, gen: t.slots[i].gen }
+    }
+    t.slots.push(Slot { gen: 1, val: v, live: true })
+    return Handle { slot: t.slots.length - 1, gen: 1 }
+}
+
+fn fetch(t: Table, h: Handle) -> Option<Int64> {
+    if h.slot < 0 || h.slot >= t.slots.length { return None }
+    let s = t.slots[h.slot]
+    if !s.live || s.gen != h.gen { return None }
+    return Some(s.val)
+}
+```
+
+Output, with `recycle` bumping the generation and pushing the slot on the free
+list: `42` live, `-1` after release, `7` for the reused slot, `-1` for the old
+handle *while that slot is live again*, `99` untouched. No pointers, no `unsafe`,
+no capability, no new primitive. The whole thing is `examples/slottable.vyrn`,
+byte-identical on all three engines.
+
+## The real blocker, pinned
+
+| | |
+|---|---|
+| `a[0] = 9`, plain array variable | works |
+| `r.a[0] = 9`, array in a record field | **refused** — "must be a plain array variable" |
+| reading `r.a[0]`, and `r.a.push(v)` | work |
+
+A container *is* a record holding arrays, so every container hits this on its
+first line. Two smaller gaps ride along: `pop` also demands a plain array
+receiver, and `cell` / `get` / `release` are reserved names.
+
+*(M1 closed the first two rows and `pop`, and found a third row this table
+missed: `rows[i][j] = v` was refused too, while `rows[i].push(v)` was not. The
+reserved names are still reserved.)*
+
+**The workaround is a move, not a copy — on the compiled backends only, and this
+paragraph originally said it without the qualifier.** Moving the array out of the
+field, mutating, and moving it back is O(1) per write natively and on wasm:
+57 / 53 / 65 ms at N = 5,000 / 10,000 / 20,000, flat as N quadruples.
+
+Those numbers were taken with `vyrn build` and the resulting executable — **the
+native path — and then stated as a property of the language.** They are false on
+the interpreter, which is the dev loop. Measured there, the same program is
+quadratic: 998 ms / 886 ms / **29,881 ms** at N = 2,000 / 8,000 / 32,000, against
+a flat 58 / 65 ms for `xs[k] = v` on a plain variable. M2 found this and named the
+mechanism; see its "As landed", item 5. The claim that the whole RFC turns on is
+therefore **half true**, and the half that is false is the half a user meets
+first.
+
+So the blocker is **ergonomic, not a capability gap**, and the fix is a desugar
+rather than a language-identity decision.
+
+## What this costs, compared with what it replaced
+
+The raw-memory design carried three costs, and all three are gone:
+
+- **No `unsafe`.** Nothing acquires the power to violate ownership, drops or
+  validation.
+- **No capability or module-path gate**, so **no ecosystem ceiling**: a
+  third-party container gets exactly the substrate `std` gets. The version of
+  this RFC with a `std/`-only memory import would have made `std/array.vyrn`
+  readable Vyrn that users were forbidden to imitate — a visible ceiling where
+  today's is invisible.
+- **No heap simulation in the interpreter.** `Array` stays `Rc<Vec<Val>>` there.
+  This was the largest measured risk in the raw-memory design: the interpreter is
+  180x a Rust one-liner on hot paths (RFC-0081), and array indexing is far hotter
+  than float formatting. It does not arise, because `Array` is not being moved.
+
+## Milestones
+
+### M1 — `r.a[i] = v` — **shipped**
+
+Desugar an index assignment whose base is a field access into the move-out /
+mutate / move-back that is legal today, exactly as `a[i].field = v` already
+desugars through a temp (RFC-0011). Extend `pop` and the other plain-array-
+receiver builtins the same way.
+
+M1 is independently useful and ships alone: it removes a wart every user who
+puts an array in a record hits, whether or not any container ever moves.
+
+Pin: the slot table above, written the *natural* way, byte-identical on three
+engines — and a test that the desugar is a move, since a copy would be correct
+and quadratic. Prefer a structural assertion over timing.
+
+#### As landed
+
+One function, `place_receiver` in the parser, and no backend change at all —
+LLVM, the interpreter and the direct wasm backend never learn that a field is
+involved. It is recursive rather than one-level, which made it *shorter* than
+the special case and picked up two shapes the spec did not ask for:
+
+- `r.inner.a[i] = v` — an array two records deep.
+- `rows[i][j] = v` — an element of an element. This was refused before, even
+  though `rows[i].push(v)` was not, so the wart was wider than "a record field"
+  and the table at the top of this RFC understated it.
+
+The pin is `examples/slottable.vyrn` (three engines, `42 / -1 / 7 / -1 / 99` as
+predicted) plus `vyrn-cli/tests/places.rs`, which asserts the emitted IR for a
+field index-assign, a field `pop` and a two-deep chain contains **no call
+outside the trap path** — no `malloc`, no `memcpy`, no per-element loop. The
+negative control is the same function doing `s.xs.push(i)`, which does emit one.
+
+**That pin covers two engines of three, and M2 found the third is a copy.** See
+M2's fifth finding: the interpreter's write-through is O(len) per write, so the
+"O(1) per write, not a copy" claim below is true of LLVM and the direct wasm
+backend and false of the interpreter. The claim is not wrong about the *desugar*
+— it is wrong about how many engines the desugar's shape survives into.
+
+Four things the spec got wrong or did not see:
+
+1. **`pop` is not "the same way".** `a[i] = v` is a statement, so the move-back
+   has an obvious home. `pop`/`swapRemove`/`remove` mutate *and* return a value,
+   so they live inside an expression and the move-back has nowhere safe to go in
+   general: in `if r.a.pop() == None { .. r.a .. }` the branch body would read
+   the field before the write-back landed. They are therefore hoisted only when
+   the mutating call **is** the whole statement — `r.a.pop()` alone, or
+   `let x = r.a.pop()`. Everything else keeps the old error. `match r.a.pop() {
+   .. }` is the case a user will hit; it needs the mutation to name a place the
+   backends can address, not a bigger desugar, and that is M2's problem if M2
+   needs it.
+2. **`push` was left alone**, so `r.inner.a.push(v)` is still refused while
+   `r.inner.a[i] = v` works. `push` already writes back at one level via a
+   single `SetField`; routing it through `place_receiver` would turn the common
+   `r.a.push(v)` from one statement into three to buy a case nobody has asked
+   for.
+3. **The trap question resolves trivially**, but only because traps abort: with
+   the array moved out, an out-of-bounds `r.a[99] = v` leaves the field stale for
+   the instant before `exit(1)`, and nothing can observe it. If Vyrn ever gains a
+   recoverable trap, this desugar has to be revisited — RFC-0079's `panic` does
+   not, today.
+4. **`cell` / `get` / `release` are still reserved**, which the RFC noted as a
+   gap "riding along" and M1 did not close. `examples/slottable.vyrn` says
+   `newCell` / `fetch` / `recycle`. It is a naming collision with the `Ref`
+   builtins, not a capability gap, but a container library written in Vyrn cannot
+   spell its own operations the obvious way until it is resolved.
+
+### M2 — the slot table in Vyrn
+
+The smallest container, four census rows, and the one already demonstrated.
+**Delete nothing.** Land it beside the builtin and measure all three engines plus
+the example corpus, the way RFC-0081 M1 did.
+
+Gate: the interpreter's number. `cell`/`get`/`set`/`release` are not as hot as
+array indexing, but they are hotter than float formatting was, and RFC-0081 found
+the interpreter 180x on an arithmetic loop. If that number is bad here, M3 and M4
+do not happen and M2 still paid for itself by replacing an assumption with a
+measurement.
+
+#### As landed — **the port did not happen, and the gate failed**
+
+M2 asked two questions before writing anything. Both answered *no*, independently,
+and the gate then failed on a proxy measurement. Nothing was ported and nothing
+was deleted. What follows is the measurement that replaced the assumption.
+
+**1. `Ref<T>` cannot become a Vyrn record.** Not because a record is the wrong
+shape — `{ slot: Int64, gen: Int64 }` is byte-for-byte the `{ i64, i64 }` the two
+compiled backends already use — but because **the slab is type-erased and the
+Vyrn one cannot be**. Natively the payload is `malloc`'d and the slab is
+`[65536 x ptr]`, so one global table serves every `T`; in the interpreter it is
+`Vec<CellSlot>` holding a heterogeneous `Val`. A Vyrn table is `Array<Slot<T>>`,
+one per `T`, and `examples/genref.vyrn` alone instantiates `Ref<Int64>`,
+`Ref<String>` and `Ref<Ref<Int64>>` in one program. Vyrn has no generic module
+state to hold them — `let mut cells: Array<Slot<T>> = []` is `unknown type
+\`T\``, because a module-level `let` has no `<T>` to bind. Nor can a `routes` row
+express it: a route is a rename whose "argument types are fixed", and
+`cell(v: T) -> Ref<T>` is type-directed in exactly the way `charCountV` is not.
+
+Threading the table explicitly — what `examples/slottable.vyrn` does — is not the
+same API and does not answer the question: `cell(v)` takes no table, and `get(r)`
+takes only `r`, so **the ambient slab is part of the type's contract**, not an
+implementation detail behind it.
+
+Three more things a Vyrn record would silently drop, recorded because they are
+the real cost of ever revisiting this: `own.rs` maps `Type::Ref(_)` to
+`DropKind::ReleaseRef`, and `examples/autorelease.vyrn` runs a million
+allocations through 65,536 slots *because* that auto-release fires — a plain
+record gets none of it; `set` has a bespoke escape rule in `own.rs` and a
+`region_store_guard` in the checker; and `Type::Ref` is what breaks the size
+cycle for `Node = { value, next: Option<Ref<Node>> }`.
+
+**2. The table cannot be module state — a generator would break.** `cell`/`get`/
+`set`/`release` are *not* in `COMPTIME_FORBIDDEN`, and a `gen fn` really does use
+them: a generator allocating a cell, mutating it and reading it back at
+generation time compiles and prints `42` today. The moment that slab is a
+module-level `let`, `check_comptime_purity` rejects it — the diagnostic is
+already exact, and it would name a `std/` internal:
+
+> `gen fn g` is not comptime-pure: it reaches `poke` (via g -> poke), which reads
+> or writes module state
+
+So the second pre-question is not "is module state plausible here" but "is
+`cell` allowed in a generator", and it is.
+
+**3. The gate, measured on a proxy.** The port is blocked, but the number the
+gate wants — *what does a container written in Vyrn over `Array<T>` cost* — is
+measurable without it, because `examples/slottable.vyrn` is that container. The
+workload is `examples/freelist.vyrn`'s, unchanged in shape: build a 5-node list,
+sum it, free it, N times. Best of 3, milliseconds, floor in parentheses (a
+`print` and exit: interp 10 ms, native 5 ms, wasm 13 ms).
+
+| N (cells) | interp builtin | interp Vyrn | native builtin | native Vyrn | wasm builtin | wasm Vyrn |
+|---|---|---|---|---|---|---|
+| 25,000 | 124 | 2,009 | 6 | 9 | 15 | 18 |
+| 100,000 | 449 | 7,873 | 8 | 19 | 19 | 26 |
+| 400,000 | 1,751 | 31,456 | 17 | 59 | 33 | 58 |
+
+Floor-subtracted, that is **~18x on the interpreter**, ~4.5x native, ~2.3x wasm,
+and flat in N at all three. Byte-identical output (`15`) on all three engines at
+every size.
+
+**18x fails the gate.** RFC-0081's 180x was an arithmetic loop and 6.2x was a
+print-heavy program; this sits far nearer the bad end, and unlike `charCountV` it
+would be paid by `Ref`, which is a *memory primitive* rather than a formatting
+one. **M3 and M4 are withdrawn**, not deferred: `Map` over `Array` is the same
+shape with a hotter access pattern, and `@pop`/`@swapRemove` are operations on
+the primitive whose whole value is being one instruction.
+
+**4. What the 18x is not.** It is not the ambient-slab difference dressed up: the
+Vyrn version threads a `Table` parameter and does its bounds/live/generation
+checks in Vyrn while the builtin does them in Rust, and that is exactly the
+comparison — it is what the census row would cost. The stale-handle rejection,
+which is the entire point of the generation, is byte-identical on all three
+engines both ways: the Vyrn table answers `-1` and the builtin traps with
+`error: reference used after release` and exit 1, and all three engines agree on
+both.
+
+**5. The finding that outranks the gate: the interpreter's write-through is a
+copy.** The freelist workload's table never exceeds five slots, which is
+precisely the case a copying desugar survives — so M2 ran the other shape, N
+cells live at once, and the interpreter fell off a cliff the compiled backends
+never saw. At N = 4,000, floor-subtracted:
+
+| | builtin | Vyrn table |
+|---|---|---|
+| interp | 5 ms | 23,943 ms |
+| native | ~0 ms | ~0 ms |
+| wasm | 3 ms | 2 ms |
+
+**~5,000x on the interpreter, indistinguishable on both compiled backends.** That
+asymmetry names the cause exactly. Isolated to one statement, `t.xs[k] = v` in a
+loop against `xs[k] = v` on a plain variable:
+
+| N | plain `xs[k] = v` | field `t.xs[k] = v` |
+|---|---|---|
+| 2,000 | 0.026 s | 0.118 s |
+| 8,000 | 0.029 s | 0.747 s |
+| 32,000 | 0.051 s | 20.6 s |
+
+The plain column is flat (it is all process floor); the field column is
+quadratic. The mechanism is three lines: M1's desugar emits `let mut t.xs[] =
+t.xs`, which in the interpreter clones the `Rc<Vec<Val>>` to refcount 2, so the
+`Rc::make_mut` in `Stmt::IndexSet` (`interp.rs`) **deep-copies the whole vector
+on every write**, and the write-back drops the original. In the compiled backends
+the same three statements copy a `{ ptr, len, cap }` header into an alloca and
+write through the *same* buffer — the aliasing is benign and free, which is why
+`places.rs` correctly finds no `memcpy` there.
+
+This is **not an M1 regression**: the pre-M1 hand-written `let mut p = t.xs; p[k]
+= v; t.xs = p` measures identically (0.106 s vs 0.111 s at N = 2,000), because it
+is the same three statements. M1 made a quadratic idiom *reachable by writing the
+obvious thing*, and the RFC's claim that the workaround is "O(1) per write,
+measured" was measured on the compiled path only.
+
+**The fix is not small, and M2 deliberately did not attempt it.** The obvious
+repair — have the interpreter *take* the field instead of cloning it — is
+unsound as the desugar stands, because the clone is load-bearing for correctness:
+`t.xs[t.xs.length - 1] = 99` and `u.xs[0] = u.xs[2] + 5` both read the field
+while it is moved out, and both give the right answer today (`99`, `8`) only
+because the field still holds a copy. Making the interpreter's move a real move
+requires the desugar to rewrite reads of the field inside the index and value
+expressions to read the temp — which is a change to the desugar in all three
+engines, not an interpreter patch, and it is its own RFC.
+
+### M3 — `Map` over `Array` — **withdrawn**
+
+Three rows. `Map<String, V>` is `String`-keyed, and `std/hash` already exists, so
+this needs nothing new — except a number it cannot get. Withdrawn on M2's gate:
+18x on the interpreter for a colder access pattern than a hash map's, and M2's
+fifth finding makes a large live table the worst case rather than the ordinary
+one.
+
+### M4 — `Array`'s derived operations — **withdrawn**
+
+`@list`, `@toArray`, `@pop`, `@swapRemove` — four rows that are operations *on*
+the primitive rather than the primitive. Withdrawn on the same gate, and more
+plainly: these are single instructions whose entire value is being single
+instructions.
+
+## What stays primitive, and why that is the honest end state
+
+`array`, `push`, `at`, `alen`, `afree` — the growable buffer itself. Five rows,
+not sixteen. You cannot write the thing that allocates memory in terms of itself,
+which is the same argument the `Syscall` category makes and is not a deferral.
+
+If every milestone lands, "the runtime is Vyrn" holds for every container a
+program touches, and the irreducible core is a buffer and a syscall table.
+
+**M2 says that end state is not reached, and the honest count is sixteen minus
+one.** M1 landed and is worth having on its own terms; every container row after
+it stayed Rust. The claim this RFC actually established is the *negative* one it
+set out to establish — containers do not need a raw-memory view, and
+`examples/slottable.vyrn` proves it — and that claim is unaffected by the gate.
+What the gate added is the second half: they do not need one, *and they should
+not be written that way anyway*, because the interpreter charges ~18x for the
+privilege and the language cannot give a `std/` table the ambient, type-erased,
+generation-checked slab that `Ref<T>` actually is.
+
+## What this does not decide
+
+**Whether a raw-memory view should ever exist** for its own sake — FFI struct
+layouts, SIMD alignment, zero-copy over foreign buffers. Those are real and this
+RFC does not serve them. It only withdraws the claim that *containers* need one.
+
+**`Array` itself in Vyrn.** That needs the raw view, and the interpreter cost
+measured in RFC-0081 suggests it would be expensive. Not proposed.
