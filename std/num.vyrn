@@ -483,6 +483,201 @@ export fn parseUInt64(s: String) -> Option<UInt64> {
     return Some(acc)
 }
 
+/// A `Float64` as the fixed six decimal places every engine prints — `%f`, and
+/// exactly `%f`, computed rather than approximated (RFC-0081 M1).
+///
+/// This is `parseFloat64` run backwards, and it is here for the reason that
+/// direction is: today the same six places are produced three times, by Rust's
+/// `{:.6}`, by C's `printf("%f")` and by 511 hand-written lines of wasm, and
+/// those three are not one algorithm written three times but three algorithms
+/// that must agree byte for byte. Nothing structural holds them together.
+///
+/// The value is `M × 2^E` with `M < 2^53`, so `x × 10^6` is the exact integer
+/// `M × 10^6 × 2^E` when `E >= 0`, and `M × 10^6 × 5^k / 10^k` with `k = -E` when
+/// it is not — one multiply loop with two parameters, and in the second case the
+/// last `k` digits are the fraction to round away. Nothing computes with a
+/// `Float64`: `floatBits` is the only place one is touched, which is what makes
+/// the six places exact rather than plausible.
+///
+/// Base 10^6 limbs, which is the wasm backend's choice and for its reason: the
+/// `× 10^6` the six places need is then a zero limb at the bottom rather than a
+/// second pass. What is NOT its choice is the chunking — it multiplies by two or
+/// by five `reps` times, and `reps` reaches 1074 for a subnormal. Here a whole
+/// chunk of the power goes in per pass, the largest that keeps
+/// `limb × mul + carry` inside an `Int64`. That is the same trick `halveBy` plays
+/// in the other direction and worth the same: it is what makes the loop's cost
+/// the size of the ANSWER rather than of the exponent.
+export fn f64Str(x: Float64) -> String {
+    let bits = floatBits(x)
+    let neg = (bits >> 63) != 0
+    let mut mant = Int64(bits & 4503599627370495) // 2^52 - 1: the fraction field
+    let ef = Int64((bits >> 52) & 2047)
+    if ef == 2047 {
+        // Interned words rather than whatever the platform says: `{:.6}` prints
+        // these three and UCRT's `%f` would say `-nan(ind)`, which is why the
+        // native build selects a format string on `fcmp uno`.
+        if mant != 0 {
+            return "NaN"
+        }
+        if neg {
+            return "-inf"
+        }
+        return "inf"
+    }
+    // `M × 2^E`: a subnormal has no implicit bit and a fixed exponent.
+    let mut e = -1074
+    if ef != 0 {
+        mant = mant + 4503599627370496
+        e = ef - 1075
+    }
+    if mant == 0 {
+        // Zero would otherwise multiply nothing by five a thousand times. Its
+        // sign survives: `{:.6}` of `-0.0` is `-0.000000`, and so is `%f`'s.
+        e = 0
+    }
+    let mut k = 0
+    let mut mul = 2
+    let mut reps = e
+    if e < 0 {
+        reps = 0 - e
+        k = reps
+        mul = 5
+    }
+    let m6 = 1000000
+    // Least significant limb first, with a zero at the bottom — that zero IS the
+    // `× 10^6`.
+    let mut limbs: Array<Int64> = [0]
+    let mut v = mant
+    while v > 0 {
+        limbs.push(v % m6)
+        v = v / m6
+    }
+    // The largest power of the multiplier that keeps a limb product inside an
+    // `Int64`: `999999 × 5^18` is 3.8e18 against the 9.2e18 ceiling, and
+    // `999999 × 2^40` is 1.1e18.
+    let mut per = 40
+    if mul == 5 {
+        per = 18
+    }
+    while reps > 0 {
+        let mut take = per
+        if take > reps {
+            take = reps
+        }
+        let mut m = 1
+        let mut i = 0
+        while i < take {
+            m = m * mul
+            i = i + 1
+        }
+        let mut carry = 0
+        let mut j = 0
+        // Hoisted: the length does not change inside the pass, and re-reading it
+        // per limb is the difference between one bounds check and two.
+        let n = limbs.length
+        while j < n {
+            let t = limbs[j] * m + carry
+            limbs[j] = t % m6
+            carry = t / m6
+            j = j + 1
+        }
+        // A chunk's carry is wider than one limb, unlike a single doubling's.
+        while carry > 0 {
+            limbs.push(carry % m6)
+            carry = carry / m6
+        }
+        reps = reps - take
+    }
+    // Six digits per limb, most significant limb first, behind a pad of zeros.
+    // The pad is what removes every edge case from what follows: there is always
+    // a digit before the one being examined, always a seventh kept digit for the
+    // point to sit after, and always a spare zero for a rounding carry to land
+    // in. Leading zeros cost nothing — they are stripped at the end.
+    let mut pad = k + 7 - limbs.length * 6
+    if pad < 0 {
+        pad = 0
+    }
+    pad = pad + 1
+    let mut d: Array<Int64> = []
+    let mut i = 0
+    while i < pad {
+        d.push(0)
+        i = i + 1
+    }
+    let mut j = limbs.length - 1
+    while j >= 0 {
+        let limb = limbs[j]
+        let mut p = 100000
+        while p > 0 {
+            d.push((limb / p) % 10)
+            p = p / 10
+        }
+        j = j - 1
+    }
+    // Everything left of `ke` is kept; the `k` digits from it on are the fraction
+    // below the sixth place.
+    let ke = d.length - k
+    // Half to EVEN, which is what all three references do: greater than five
+    // rounds up, less rounds down, and an exact half goes to the even kept digit.
+    // `0.0078125` is the value that tells those two rules apart.
+    let mut up = false
+    if k > 0 {
+        if d[ke] > 5 {
+            up = true
+        } else if d[ke] == 5 {
+            let mut q = ke + 1
+            while q < d.length {
+                if d[q] != 0 {
+                    up = true
+                    break
+                }
+                q = q + 1
+            }
+            if !up {
+                up = d[ke - 1] % 2 == 1
+            }
+        }
+    }
+    if up {
+        let mut q = ke - 1
+        while q >= 0 {
+            if d[q] == 9 {
+                d[q] = 0
+                q = q - 1
+            } else {
+                d[q] = d[q] + 1
+                break
+            }
+        }
+    }
+    // Seven digits minimum, so the point always has an integer digit in front of
+    // it; past that the integer part's leading zeros go.
+    let mut st = 0
+    while st < ke - 7 && d[st] == 0 {
+        st = st + 1
+    }
+    let mut out: Array<UInt8> = []
+    if neg {
+        out.push('-')
+    }
+    let mut c = st
+    while c < ke - 6 {
+        out.push(UInt8(48 + d[c]))
+        c = c + 1
+    }
+    out.push('.')
+    while c < ke {
+        out.push(UInt8(48 + d[c]))
+        c = c + 1
+    }
+    // ASCII by construction, so the `Err` arm is unreachable (`std/codecs:ascii`,
+    // inlined rather than imported so this module keeps importing nothing).
+    return match stringFromBytes(out) {
+        Ok(s) => s,
+        Err(e) => "",
+    }
+}
+
 test "integers round-trip exactly, and refuse what does not fit" {
     assertEq(match parseInt64("0") { Some(v) => v.toString(), None => "None" }, "0")
     assertEq(match parseInt64("-42") { Some(v) => v.toString(), None => "None" }, "-42")
@@ -598,6 +793,50 @@ test "the mantissa bits are the correctly rounded ones" {
         match parseFloat64("1.8e308") { Some(v) => floatBits(v).toString(), None => "None" },
         "9218868437227405312",
     )
+}
+
+/// `f64Str` against the bytes the three builtin implementations already produce
+/// (RFC-0081 M1). Every value here is one they were made to agree on, so a
+/// disagreement is this function's; the randomized half of the comparison lives
+/// in `tests/numbers.rs`, where the builtin itself is the oracle on every engine.
+test "the six places are the exact ones, rounded half to even" {
+    assertEq(f64Str(0.0), "0.000000")
+    assertEq(f64Str(1.5), "1.500000")
+    assertEq(f64Str(-1.5), "-1.500000")
+    assertEq(f64Str(0.1), "0.100000")
+    assertEq(f64Str(123456789.123456789), "123456789.123457")
+    // The two exact ties, which are the whole reason this cannot be computed in
+    // floating point: half-to-even keeps the even `2` and rounds the odd `7` up.
+    assertEq(f64Str(0.0078125), "0.007812")
+    assertEq(f64Str(0.0234375), "0.023438")
+    // A carry that runs the whole way out of the number.
+    assertEq(f64Str(0.9999999), "1.000000")
+    assertEq(f64Str(-0.9999999), "-1.000000")
+    // The sign of a zero survives, which is what `{:.6}` and `%f` both do.
+    assertEq(f64Str(floatFromBits(9223372036854775808)), "-0.000000")
+}
+
+test "the extremes print as the backends spell them" {
+    // 301 integer digits, the first eighteen of which are the ones the double
+    // actually holds and the rest of which are exact consequences of its
+    // exponent — the shape no floating-point formatter reproduces.
+    let big = match parseFloat64("1e300") { Some(v) => f64Str(v), None => "None" }
+    assertEq(big.charCount(), 308)
+    assertEq(match slice(big, 0, 20) { Ok(s) => s, Err(e) => "" }, "10000000000000000525")
+    assertEq(match slice(big, 301, 308) { Ok(s) => s, Err(e) => "" }, ".000000")
+    // The smallest positive double: 1074 halvings deep, and every one of them
+    // below the sixth place.
+    assertEq(match parseFloat64("5e-324") { Some(v) => f64Str(v), None => "None" }, "0.000000")
+    assertEq(match parseFloat64("1e400") { Some(v) => f64Str(v), None => "None" }, "inf")
+    assertEq(match parseFloat64("-1e400") { Some(v) => f64Str(v), None => "None" }, "-inf")
+    // No NaN literal, and a runtime division is also what stops `consteval`
+    // folding this into the compiler's arithmetic instead of the engine's.
+    let zero = 0.0
+    assertEq(f64Str(zero / zero), "NaN")
+    // A `Float32` widens rather than having a path of its own: the builtin
+    // formats `*f as f64`, so the six places are the double's.
+    let small: Float32 = 0.1
+    assertEq(f64Str(Float64(small)), small.toString())
 }
 
 test "single precision rounds once, not twice" {

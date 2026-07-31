@@ -1349,6 +1349,85 @@ fn main() -> Int64 {
     assert_eq!(interp.status.code(), w.status.code(), "exit");
 }
 
+/// `std/num:f64Str` against the builtin `@str` on every engine (RFC-0081 M1).
+///
+/// The test above pins the six places on values someone chose. This one is the
+/// differential: 400 doubles from a fixed generator, each formatted twice —
+/// once by the Vyrn function and once by whatever that engine's `@str` is — and
+/// compared inside the program, so each engine's answer is checked against ITS
+/// OWN reference. That matters here more than anywhere else in this file,
+/// because the three references are not one implementation compiled three ways:
+/// they are Rust's `{:.6}`, C's `printf("%f")` and 511 lines of hand-written
+/// wasm, and M1 exists to find out whether one Vyrn function can replace all
+/// three.
+///
+/// Raw bit patterns for half of it, which is how the corpus reaches subnormals,
+/// both zeros, every exponent and the three non-finite spellings — none of which
+/// a literal in this language can name. The other half forces the exponent into
+/// the range programs actually print, because a rounding bug in the everyday
+/// magnitudes is the one that would be seen.
+///
+/// The mismatch count is printed rather than asserted so a disagreement arrives
+/// as a diff naming the value, and so an engine that produced nothing at all
+/// fails rather than passing quietly.
+#[test]
+#[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test directwasm -- --ignored"]
+fn the_vyrn_float_formatter_agrees_with_every_engines_own() {
+    let rows = three_engines(
+        "f64str",
+        "f64str",
+        r#"
+import { f64Str } from "std/num"
+
+fn main() -> Int64 {
+    let mut s: UInt64 = 11400714819323198485
+    let mut bad = 0
+    let mut n = 0
+    while n < 200 {
+        s = s * 6364136223846793005 + 1442695040888963407
+        let x = floatFromBits(s)
+        let a = f64Str(x)
+        let b = x.toString()
+        if a != b {
+            print("MISMATCH raw \{n} builtin=\{b} f64Str=\{a}")
+            bad = bad + 1
+        }
+        // The same bits with the exponent field replaced: an everyday magnitude,
+        // sign and mantissa still arbitrary.
+        let e2: UInt64 = 990 + (s >> 40) % 64
+        let y = floatFromBits((s & 4503599627370495) | (e2 << 52) | ((s >> 63) << 63))
+        let c = f64Str(y)
+        let d = y.toString()
+        if c != d {
+            print("MISMATCH scaled \{n} builtin=\{d} f64Str=\{c}")
+            bad = bad + 1
+        }
+        n = n + 1
+    }
+    print("\{bad} mismatches of \{n * 2}")
+    // Printed as bytes as well, so the engines are compared against each other
+    // and not only each against its own reference.
+    print(f64Str(0.0078125))
+    print(f64Str(0.0234375))
+    print(f64Str(floatFromBits(9223372036854775808)))
+    print(f64Str(floatFromBits(1)))
+    return 0
+}
+"#,
+    );
+    assert!(
+        rows.iter().any(|(e, _, _, _)| *e == "wasm"),
+        "no wasm column: wasmtime did not resolve, so this proved nothing about the 511 lines"
+    );
+    for (eng, out, _, _) in &rows {
+        assert!(
+            out.contains("0 mismatches of 400"),
+            "{eng} disagrees with its own `@str`:\n{out}"
+        );
+    }
+    all_agree(&rows, "f64str");
+}
+
 /// The RFC-0014 semantics the corpus cannot reach, over raw WASI (RFC-0077 M2j).
 ///
 /// Three examples moved to `PASSING` this milestone and between them they exercise
