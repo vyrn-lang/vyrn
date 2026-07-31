@@ -29,6 +29,13 @@
 //!                                        `--std` documents the std library; `--verify` exits 1 on drift.
 //!   vyrn new     <name>                 Scaffold a project (vyrn.json + src/main.vyrn).
 //!   vyrn deps                           Print the resolved module graph.
+//!   vyrn why     --contract <file>      Print the contract governing a module (RFC-0071)
+//!                                        and every export's status against it.
+//!
+//! `--deny-warnings` (or `VYRN_DENY_WARNINGS=1`) turns any load warning into a
+//! failure — the switch CI opts into so a build that compiled with something
+//! left to say cannot quietly pass. Without it warnings are printed and nothing
+//! else changes: never an exit code, never a byte of the program's own output.
 //!
 //! The file argument is optional whenever a `vyrn.json` manifest (found by
 //! walking up from the current directory) declares a `"main"`. The manifest's
@@ -37,14 +44,34 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+// The C shim and clang discovery live in `vyrn-codegen`, which both this driver
+// and the excluded `vyrn-genwasm` can see (RFC-0076 M4). The wasi-sysroot and
+// builtins lookups are still there, but this driver no longer needs them: after
+// RFC-0077 M5 nothing here compiles C for wasm — the generator engine does.
+use vyrn_codegen::toolchain::{find_clang, RUNTIME_SHIM};
+
+/// RFC-0076: generators compiled to wasm instead of interpreted. Behind a
+/// feature so the default build keeps its zero external dependencies.
 mod remote;
 
-const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
+const USAGE: &str = "usage: vyrn <run|check|emit-ir|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn routes [file.vyrn]   (the resolved wire table: every derived and pinned path, with its source)\n\
+       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [alias] | vyrn vendor [--check] | vyrn deps";
 
 /// `--offline` flag or `VYRN_OFFLINE=1`: never touch the network; a lock+cache
 /// miss is a hard error instead.
 fn offline(args: &[String]) -> bool {
     args.iter().any(|a| a == "--offline") || std::env::var("VYRN_OFFLINE").is_ok()
+}
+
+/// `--deny-warnings` flag or `VYRN_DENY_WARNINGS=1` (RFC-0071 M2b): a load that
+/// produced warnings fails instead of proceeding — the switch CI opts into so a
+/// build that compiled with something left to say cannot quietly pass.
+///
+/// Spelled and stripped exactly like `--offline`: a global flag, normalized into
+/// the environment so every nested construction sees it, and removed from the
+/// argument vector before any command parses its own options.
+fn deny_warnings() -> bool {
+    std::env::var("VYRN_DENY_WARNINGS").is_ok()
 }
 
 fn main() -> ExitCode {
@@ -62,6 +89,13 @@ fn main() -> ExitCode {
 }
 
 fn real_main() -> ExitCode {
+    // RFC-0076. Installed before anything can load a module, since generation
+    // happens deep inside the load. `VYRN_NO_WASM_GEN=1` forces the
+    // interpreter — the configuration the acceptance criteria compare against.
+    #[cfg(feature = "wasm-gen")]
+    if std::env::var("VYRN_NO_WASM_GEN").is_err() {
+        vyrn_genwasm::install();
+    }
     let mut args: Vec<String> = std::env::args().collect();
     let is_offline = offline(&args);
     if is_offline {
@@ -69,6 +103,10 @@ fn real_main() -> ExitCode {
         std::env::set_var("VYRN_OFFLINE", "1");
     }
     args.retain(|a| a != "--offline");
+    if args.iter().any(|a| a == "--deny-warnings") {
+        std::env::set_var("VYRN_DENY_WARNINGS", "1");
+    }
+    args.retain(|a| a != "--deny-warnings");
     if args.len() < 2 {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
@@ -84,6 +122,9 @@ fn real_main() -> ExitCode {
     }
     if cmd == "deps" {
         return deps();
+    }
+    if cmd == "why" {
+        return why_cmd(&args[2..]);
     }
     if cmd == "add" {
         return add(&args[2..], is_offline);
@@ -102,6 +143,9 @@ fn real_main() -> ExitCode {
     }
     if cmd == "dev" {
         return dev_cmd(&args[2..]);
+    }
+    if cmd == "routes" {
+        return routes_cmd(args.get(2).map(|s| s.as_str()));
     }
 
     // The remaining commands take an optional file; without one, the manifest
@@ -299,6 +343,10 @@ struct Manifest {
     dir: String,
     main: Option<String>,
     dependencies: Vec<(String, String)>,
+    /// RFC-0072 M1: the declared audience vocabulary, or `None` when the
+    /// manifest has no `audience` key — which leaves every module universal and
+    /// every import legal, exactly as before this key existed.
+    audience: Option<vyrn_frontend::audience::AudienceMap>,
 }
 
 /// Find `vyrn.json` by walking up from `start` (a directory).
@@ -330,10 +378,13 @@ fn find_manifest(start: &Path) -> Option<Manifest> {
                     .collect(),
                 _ => Vec::new(),
             };
+            let slash_dir = dir.to_string_lossy().replace('\\', "/");
+            let audience = vyrn_frontend::audience::from_manifest(&text, &slash_dir);
             return Some(Manifest {
-                dir: dir.to_string_lossy().replace('\\', "/"),
+                dir: slash_dir,
                 main,
                 dependencies,
+                audience,
             });
         }
         dir = dir.parent()?.to_path_buf();
@@ -360,6 +411,7 @@ fn load_options(root: &str) -> vyrn_frontend::loader::LoadOptions {
     if let Some(m) = start.and_then(|d| find_manifest(&d)) {
         opts.aliases = m.dependencies.into_iter().collect();
         opts.alias_base = m.dir;
+        opts.audience = m.audience;
     }
     opts
 }
@@ -397,6 +449,459 @@ fn scaffold(name: &str) -> ExitCode {
     }
     println!("created {name}/ (vyrn.json, src/main.vyrn) — try: cd {name} && vyrn run");
     ExitCode::SUCCESS
+}
+
+/// `vyrn why --contract <file>` (RFC-0071 M4) — which contract governs a module,
+/// and what it has to say about every one of that module's exports.
+///
+/// The point of a declared convention over a scanned one is that you can ask.
+/// This is that question at the command line: the role that attached the
+/// contract, the contract's own site, and one line per member and per export —
+/// satisfied (at which of the declared shapes), missing, defaulted, the wrong
+/// shape, or unknown with a did-you-mean.
+///
+/// Every answer comes from `vyrn_frontend::contracts`, the same module the LSP
+/// asks; the CLI only prints. Exits 1 when the file is in no role — "no contract
+/// governs this" is a real answer, but not the one you asked for.
+fn why_cmd(args: &[String]) -> ExitCode {
+    const USAGE: &str = "usage: vyrn why <file> | vyrn why --contract <file>";
+    let mut file: Option<String> = None;
+    let mut contract = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--contract" => {
+                contract = true;
+                i += 1;
+            }
+            other if !other.starts_with('-') => {
+                file = Some(other.to_string());
+                i += 1;
+            }
+            other => {
+                eprintln!("error: unknown `vyrn why` option `{other}`");
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(file) = file else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    };
+    if !contract {
+        return why_audience(&file);
+    }
+    let path = match Path::new(&file).canonicalize() {
+        Ok(p) => p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/"),
+        Err(e) => {
+            eprintln!("error: cannot read {file}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let Some(dir) = Path::new(&path).parent().map(|p| p.to_path_buf()) else {
+        eprintln!("error: {file} has no directory");
+        return ExitCode::from(2);
+    };
+    let opts = load_options(&path);
+
+    // The app root: the nearest `vyrn.json` upward, else the file's own
+    // directory. Roles hang off a project, so a loose file simply has none.
+    let app_dir = find_manifest(&dir)
+        .map(|m| PathBuf::from(m.dir))
+        .unwrap_or_else(|| dir.clone());
+    let roots = contract_roots(&app_dir);
+    let roles = match std::fs::read_to_string(app_dir.join("vyrn.json"))
+        .ok()
+        .map(|t| vyrn_frontend::contracts::roles_from_manifest(&t))
+        .filter(|r| !r.is_empty())
+    {
+        Some(declared) => declared,
+        None => vyrn_frontend::contracts::discovered_roles(&roots, &opts, &FsResolver),
+    };
+    let Some(role) = vyrn_frontend::contracts::role_for(&path, &roles) else {
+        println!("{path}");
+        println!("  no contract: this file is in no role");
+        if roles.is_empty() {
+            println!("  (the project declares no `roles` in vyrn.json, and no generator call site names a directory containing it)");
+        } else {
+            for r in &roles {
+                println!("  role: {} -> {}:{}", r.scope, r.module, r.contract);
+            }
+        }
+        return ExitCode::FAILURE;
+    };
+    let manifest = app_dir.join("vyrn.json").to_string_lossy().replace('\\', "/");
+    let Some(view) =
+        vyrn_frontend::contracts::load_role_contract(role, &manifest, &opts, &FsResolver)
+    else {
+        eprintln!("error: cannot resolve contract `{}:{}`", role.module, role.contract);
+        return ExitCode::FAILURE;
+    };
+
+    // A `.vyx` is not a module; its `<script>` is. Everything downstream is the
+    // same question over the same ordinary Vyrn.
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let source = if path.ends_with(".vyx") {
+        vyx_script_body(&raw).unwrap_or_default()
+    } else {
+        raw
+    };
+
+    println!("{path}");
+    println!("  role: {}", role.scope);
+    println!("  contract: {} ({})", view.name, view.module);
+    println!("  declared in: {}", view.file);
+    let mut objections = 0;
+    for e in vyrn_frontend::contracts::contract_status(&view, &source) {
+        use vyrn_frontend::contracts::MemberStatus::*;
+        let line = match &e.status {
+            Satisfied { shape } => {
+                let of = view.member(&e.name).map(|m| m.shapes.len()).unwrap_or(1);
+                format!("ok        {}: shape {} of {} — {}", e.name, shape + 1, of, e.want)
+            }
+            Defaulted => format!("default   {}: absent, optional — {}", e.name, e.want),
+            Missing => {
+                objections += 1;
+                format!("MISSING   {}: required — {}", e.name, e.want)
+            }
+            Mismatched { found } => {
+                objections += 1;
+                format!("MISMATCH  {}: wanted {}, found `{found}`", e.name, e.want)
+            }
+            Unknown { did_you_mean: Some(near) } => {
+                objections += 1;
+                format!("UNKNOWN   {}: not named by the contract — did you mean `{near}`?", e.name)
+            }
+            Unknown { did_you_mean: None } => {
+                objections += 1;
+                format!("UNKNOWN   {}: not named by the contract (it is closed)", e.name)
+            }
+            OpenMatched => format!("ok        {}: matches the open rule — {}", e.name, e.want),
+            OpenMismatched { found } => {
+                objections += 1;
+                format!("MISMATCH  {}: the open rule wants {}, found `{found}`", e.name, e.want)
+            }
+        };
+        println!("  {line}");
+    }
+    if objections > 0 {
+        // `why` answers a question; it is not a gate. The generator that
+        // consumes the module runs the same check at load time and FAILS on it
+        // — which is why a `.vyrn` page listing its router entry point here
+        // (`page`/`respond`, which `Page` does not name) still builds today.
+        println!("  — {objections} objection(s); the generator that consumes this module is the gate");
+    }
+    ExitCode::SUCCESS
+}
+
+/// `vyrn routes [file]` (RFC-0072 M3) — the resolved wire table, with where each
+/// path came from.
+///
+/// A derived path is not written down anywhere, which is the point and also the
+/// risk: a rule you cannot inspect is a rule you have to simulate in your head.
+/// So the generator that MOUNTS the surface also emits one `//@route` directive
+/// per route, and this command reads them back. There is exactly one producer of
+/// the table — the same division RFC-0071 M4 drew between the LSP and
+/// `vyrn_frontend::contracts` — so the printed table and the mounted router
+/// cannot disagree.
+///
+/// The `source` column reads `convention` or `override`, so drift shows up in
+/// review instead of in production.
+fn routes_cmd(file: Option<&str>) -> ExitCode {
+    let path = match file.map(|s| s.to_string()).or_else(manifest_main) {
+        Some(p) => p,
+        None => {
+            eprintln!("error: no input file, and no vyrn.json with a `main` found");
+            eprintln!("usage: vyrn routes [file]");
+            return ExitCode::from(2);
+        }
+    };
+    let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let source = match std::fs::read_to_string(&root_key) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {root_key}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let opts = load_options(&root_key);
+    let resolver = make_resolver(&root_key);
+    let result = vyrn_frontend::loader::generated_modules(&source, &root_key, &opts, &resolver);
+    let _ = save_lock(&resolver);
+    let mods = match result {
+        Ok(m) => m,
+        Err(diags) => {
+            for d in &diags {
+                let f = d.file.as_deref().unwrap_or(&root_key);
+                eprintln!("{}:{}:{}: {}", f, d.line, d.col, d.message);
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    // `(method, path, procedure, source)`, de-duplicated: a page or api
+    // directory reached through two roots generates the same table twice.
+    let mut rows: Vec<(String, String, String, String)> = Vec::new();
+    for (_, src) in &mods {
+        for line in src.lines() {
+            let Some(rest) = line.strip_prefix("//@route ") else { continue };
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            if f.len() < 4 {
+                continue;
+            }
+            let row = (f[0].to_string(), f[1].to_string(), f[2].to_string(), f[3].to_string());
+            if !rows.contains(&row) {
+                rows.push(row);
+            }
+        }
+    }
+    if rows.is_empty() {
+        println!("(no derived routes in {root_key})");
+        return ExitCode::SUCCESS;
+    }
+    rows.sort_by(|a, b| a.1.cmp(&b.1));
+    let w0 = rows.iter().map(|r| r.0.len()).max().unwrap_or(6).max("method".len());
+    let w1 = rows.iter().map(|r| r.1.len()).max().unwrap_or(4).max("path".len());
+    let w2 = rows.iter().map(|r| r.2.len()).max().unwrap_or(9).max("procedure".len());
+    println!("{:w0$}  {:w1$}  {:w2$}  source", "method", "path", "procedure");
+    for (method, path, proc, src) in &rows {
+        println!("{method:w0$}  {path:w1$}  {proc:w2$}  {src}");
+    }
+    ExitCode::SUCCESS
+}
+
+/// `vyrn why <file>` (RFC-0072 M1) — the audience of a module, the path segment
+/// that decided it, and every import chain that reaches it.
+///
+/// "What is bundled where" is the question the audience rule exists to answer,
+/// and a rule you can only observe by building is a convention you have to
+/// trust. This is that answer at the shell, from the same
+/// `vyrn_frontend::audience` the loader enforces with — not a second reading of
+/// the tree that could drift from it.
+///
+/// It REPORTS; it does not gate (the RFC-0071 M4 convention). Exit 0 whenever it
+/// could answer, 2 only when the file cannot be read.
+fn why_audience(file: &str) -> ExitCode {
+    let path = match Path::new(file).canonicalize() {
+        Ok(p) => p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/"),
+        Err(e) => {
+            eprintln!("error: cannot read {file}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let Some(dir) = Path::new(&path).parent().map(|p| p.to_path_buf()) else {
+        eprintln!("error: {file} has no directory");
+        return ExitCode::from(2);
+    };
+    let manifest = find_manifest(&dir);
+    let app_dir = manifest
+        .as_ref()
+        .map(|m| PathBuf::from(&m.dir))
+        .unwrap_or_else(|| dir.clone());
+    let app_slash = app_dir.to_string_lossy().replace('\\', "/");
+    let map = manifest.as_ref().and_then(|m| m.audience.clone());
+
+    println!("{path}");
+    match &map {
+        Some(map) => {
+            let v = vyrn_frontend::audience::audience_of(&path, map);
+            println!("  audience: {} — {}", v.audience.phrase(), v.because());
+        }
+        None => {
+            println!(
+                "  audience: universal — this project declares no `audience` in vyrn.json, \
+                 so every module is universal and no import is rejected"
+            );
+        }
+    }
+
+    // The import graph, read straight off the sources: no load, no generators,
+    // no build. A file whose audience you are asking about may well be the one
+    // that does not compile.
+    let edges = project_imports(&app_dir);
+    let chains = import_chains(&path, &edges);
+    if chains.is_empty() {
+        println!("  imported by: nothing in this project reaches it");
+    } else {
+        println!("  imported by:");
+        for chain in &chains {
+            let pretty: Vec<String> = chain
+                .iter()
+                .map(|p| rel_to(p, &app_slash))
+                .collect();
+            println!("    {}", pretty.join(" -> "));
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// `path` relative to `base`, for printing.
+fn rel_to(path: &str, base: &str) -> String {
+    path.strip_prefix(base)
+        .map(|r| r.trim_start_matches('/').to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// Every `importer -> imported` edge in a project, resolved with the loader's
+/// own `resolve_spec`.
+///
+/// A GENERATOR import contributes edges too: `pages("./routes")` is how a page
+/// reaches the bundle, and a chain that stopped at the generator call would miss
+/// the only edge anybody is actually asking about. The generator's first string
+/// argument is resolved the same way an import path is, then read as a directory
+/// when it is one.
+fn project_imports(app_dir: &Path) -> Vec<(String, String)> {
+    let files = project_sources(app_dir);
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (path, source) in &files {
+        let opts = load_options(path);
+        let body = if path.ends_with(".vyx") {
+            vyx_script_body(source).unwrap_or_default()
+        } else {
+            source.clone()
+        };
+        let Ok(tokens) = vyrn_frontend::lexer::lex(&body) else { continue };
+        let (program, _) = vyrn_frontend::parser::parse_accum(tokens);
+        for imp in &program.imports {
+            use vyrn_frontend::ast::{Expr, ImportSource};
+            let spec = match &imp.source {
+                ImportSource::Path(s) => s.clone(),
+                ImportSource::Generator { args, .. } => match args.first() {
+                    Some(Expr::Str(s)) => s.clone(),
+                    _ => continue,
+                },
+            };
+            let Ok(resolved) = vyrn_frontend::loader::resolve_spec(&spec, path, &opts) else {
+                continue;
+            };
+            let stripped = resolved.strip_suffix(".vyrn").unwrap_or(&resolved).to_string();
+            if Path::new(&stripped).is_dir() {
+                // A generator pointed at a directory reaches every source in it.
+                for (kid, _) in &files {
+                    if kid.starts_with(&format!("{stripped}/")) {
+                        out.push((path.clone(), kid.clone()));
+                    }
+                }
+            } else {
+                out.push((path.clone(), resolved));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Every `.vyrn` / `.vyx` source under `app_dir`, as `(slash path, text)`.
+/// Build output and vendored trees are not the project.
+fn project_sources(app_dir: &Path) -> Vec<(String, String)> {
+    fn walk(dir: &Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.filter_map(|e| e.ok()) {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            if p.is_dir() {
+                if name.starts_with('.') || name == "vendor" || name == "node_modules" {
+                    continue;
+                }
+                walk(&p, out);
+            } else if matches!(p.extension().and_then(|x| x.to_str()), Some("vyrn") | Some("vyx")) {
+                if let Ok(text) = std::fs::read_to_string(&p) {
+                    let key = p.to_string_lossy().replace('\\', "/");
+                    let key = key.trim_start_matches("//?/").to_string();
+                    out.push((key, text));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(app_dir, &mut out);
+    out.sort();
+    out
+}
+
+/// Every import chain reaching `target`, each starting at a module nothing else
+/// imports (a composition root). Walks the edges BACKWARD from the target, so
+/// the answer is "how does anything get here", not "what does this reach".
+fn import_chains(target: &str, edges: &[(String, String)]) -> Vec<Vec<String>> {
+    const MAX_CHAINS: usize = 24;
+    const MAX_DEPTH: usize = 12;
+    let mut out: Vec<Vec<String>> = Vec::new();
+    // Depth-first backward walk, carrying the path built so far (target-last).
+    fn back(
+        node: &str,
+        edges: &[(String, String)],
+        seen: &mut Vec<String>,
+        out: &mut Vec<Vec<String>>,
+    ) {
+        if out.len() >= MAX_CHAINS || seen.len() >= MAX_DEPTH {
+            return;
+        }
+        let importers: Vec<&String> = edges
+            .iter()
+            .filter(|(_, to)| to == node)
+            .map(|(from, _)| from)
+            .filter(|from| !seen.iter().any(|s| s == *from))
+            .collect();
+        if importers.is_empty() {
+            let mut chain = seen.clone();
+            chain.reverse();
+            out.push(chain);
+            return;
+        }
+        for from in importers {
+            seen.push(from.clone());
+            back(from, edges, seen, out);
+            seen.pop();
+        }
+    }
+    let mut seen = vec![target.to_string()];
+    back(target, edges, &mut seen, &mut out);
+    // A target nothing imports yields the one-element chain of itself, which is
+    // not an answer to "imported by".
+    out.retain(|c| c.len() > 1);
+    out
+}
+
+/// The `.vyrn` modules role discovery reads: the manifest's entry points plus
+/// every `.vyrn` directly in the app directory. Generator imports live in an
+/// app's ROOT modules by construction, so this stays a shallow scan.
+fn contract_roots(app_dir: &Path) -> Vec<(String, String)> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(app_dir.join("vyrn.json")) {
+        if let Ok(doc) = vyrn_frontend::schema::parse_json(&text) {
+            for key in ["main", "server", "client"] {
+                if let Some(vyrn_frontend::schema::Json::Str(p)) = doc.get(key) {
+                    paths.push(app_dir.join(p));
+                }
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(app_dir) {
+        for e in entries.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) == Some("vyrn") {
+                paths.push(p);
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .filter_map(|p| {
+            let src = std::fs::read_to_string(&p).ok()?;
+            Some((p.to_string_lossy().replace('\\', "/"), src))
+        })
+        .collect()
+}
+
+/// The `<script> … </script>` body of a `.vyx`, which is ordinary Vyrn.
+fn vyx_script_body(text: &str) -> Option<String> {
+    let open = text.find("<script")?;
+    let start = text[open..].find('>')? + open + 1;
+    let close = text[start..].find("</script>")? + start;
+    Some(text[start..close].to_string())
 }
 
 /// `vyrn deps` — print the resolved module graph of the project's main.
@@ -997,18 +1502,46 @@ fn save_lock(resolver: &remote::RemoteResolver) -> Result<(), ExitCode> {
 }
 
 /// Load + check a root file through the module loader, printing diagnostics
-/// (with their originating file) on failure.
+/// (with their originating file) on failure and WARNINGS on success.
+///
+/// This is the toolchain's single load site — every command that *builds a
+/// program* arrives here (`check`, `run`, `emit-ir`, `build`, `test`, `bench`,
+/// `serve`, `dev`), so warnings need exactly one print site to reach all of
+/// them. The three that do not are the three that never call `load`: `fmt` is a
+/// token-stream rewriter, `doc` renders `module_doc` over sources, and
+/// `emit-gen` prints the generated text itself — where a `//@warning` directive
+/// is already visible verbatim.
+///
+/// They print BEFORE the caller does anything else, which puts them ahead of the
+/// `serving …` / `dev: serving …` banner and ahead of the program's own output.
+/// That is deliberate: a warning is about the compile, so it belongs with the
+/// compile, and printing it first means it can never interleave with a served
+/// request's log lines or be scrolled off by a long-running host. They go to
+/// stderr, so `vyrn run`'s stdout stays exactly the program's.
+///
+/// Stderr is a different matter and worth stating plainly: `vyrn run` compiles
+/// and runs in ONE process, so a warning shares the stream with the program's
+/// own stderr, while a native or wasm run executes an already-built artifact and
+/// never compiles. The parity harness therefore compares the program's stderr
+/// with compile-time diagnostics filtered out (`parity::runtime_err`) — the
+/// invariant is that the PROGRAM behaves identically on all three backends, and a
+/// warning is about the compile.
 fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program, ExitCode> {
     // Strip Windows' verbatim prefix (`\\?\C:\..`) — it survives neither the
     // slash normalization nor readable diagnostics.
     let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
-    let result = vyrn_frontend::load(source, &root_key, &opts, &resolver);
+    let (result, warnings) = vyrn_frontend::load_warned(source, &root_key, &opts, &resolver);
     // Pins are kept even when a later stage fails — fetched is pinned.
     save_lock(&resolver)?;
     match result {
-        Ok(p) => Ok(p),
+        Ok(p) => {
+            if print_warnings(&warnings, &root_key) {
+                return Err(ExitCode::FAILURE);
+            }
+            Ok(p)
+        }
         Err(diags) => {
             for d in &diags {
                 let file = d.file.as_deref().unwrap_or(&root_key);
@@ -1020,6 +1553,30 @@ fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program,
             Err(ExitCode::FAILURE)
         }
     }
+}
+
+/// Print a load's warnings to stderr, in the same `file:line:col:` shape errors
+/// use with a `warning: ` marker. Returns whether the run should FAIL — only
+/// under `--deny-warnings`, and never otherwise (RFC-0071 M2b).
+fn print_warnings(warnings: &[vyrn_frontend::diagnostics::Diagnostic], root_key: &str) -> bool {
+    if warnings.is_empty() {
+        return false;
+    }
+    for d in warnings {
+        let file = d.file.as_deref().unwrap_or(root_key);
+        eprintln!("{}:{}:{}: warning: {}", file, d.line, d.col, d.message);
+        if let Some(note) = &d.note {
+            eprintln!("  note: {note}");
+        }
+    }
+    if deny_warnings() {
+        eprintln!(
+            "error: {} warning(s) — refused by --deny-warnings",
+            warnings.len()
+        );
+        return true;
+    }
+    false
 }
 
 /// `vyrn add <specifier> [--name alias]` — fetch + pin a remote module and
@@ -1249,876 +1806,6 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
     }
 }
 
-/// The portable half of the runtime: `stderr`/`stdout` are C macros with no
-/// linkable symbol, so the emitted IR calls these two functions instead. The
-/// shim is compiled by clang next to the IR on every target — MSVC, glibc,
-/// and wasi-libc alike.
-const RUNTIME_SHIM: &str = r#"
-/* MSVC's UCRT deprecates fopen in favor of fopen_s; the portable spelling is
-   intentional (glibc and wasi-libc have no fopen_s), so silence the advisory. */
-#define _CRT_SECURE_NO_WARNINGS
-/* rand_s (a UCRT CSPRNG) needs this defined before <stdlib.h> on MSVC/UCRT; it
-   is the native Windows seed source (RFC-0043). Harmless elsewhere. */
-#define _CRT_RAND_S
-#include <errno.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#if !defined(_WIN32)
-/* getentropy: the POSIX/wasi seed CSPRNG (glibc >= 2.25 and wasi-libc). */
-#include <unistd.h>
-#include <sys/random.h>
-#endif
-#if defined(_WIN32)
-/* _commit / _fileno for fsync (RFC-0044). MoveFileExA gives the atomic overwrite
-   the C `rename` refuses on Windows (it fails when the target exists); declared
-   here (not via the heavy <windows.h>, which would leak min/max macros into the
-   codec below) and satisfied from kernel32. */
-#include <io.h>
-__declspec(dllimport) int __stdcall MoveFileExA(const char*, const char*, unsigned long);
-__declspec(dllimport) unsigned long __stdcall GetLastError(void);
-#pragma comment(lib, "kernel32")
-#define VYRN_MOVEFILE_REPLACE_EXISTING 0x1u
-#define VYRN_ERROR_NOT_SAME_DEVICE 17u
-#endif
-
-void* __vyrn_stderr(void) { return stderr; }
-void* __vyrn_stdout(void) { return stdout; }
-
-/* size_t-clean wrappers: the IR always passes/returns 64-bit sizes, so these
-   adapt on ILP32 targets (wasm32) and are transparent on LP64/LLP64. */
-unsigned long long __vyrn_strlen(const char* s) { return (unsigned long long)strlen(s); }
-
-/* charCount (RFC-0058): the number of Unicode scalar values in a validated UTF-8
-   string = the count of non-continuation bytes (those where (b & 0xC0) != 0x80).
-   Byte-identical to the interpreter's loop. Strings are NUL-terminated (interior
-   NUL is rejected at construction), so `strlen`-style iteration is exact. */
-unsigned long long __vyrn_charcount(const char* s) {
-    unsigned long long n = 0;
-    for (const unsigned char* p = (const unsigned char*)s; *p; p++) {
-        if ((*p & 0xC0) != 0x80) n++;
-    }
-    return n;
-}
-
-/* Allocation failure is a trap, not a null dereference: the emitted IR never
-   null-checks (every alloc site would need a branch), so the single choke
-   point checks instead. The size guard matters on ILP32 (wasm32): without it
-   a 64-bit request silently truncates in the (size_t) cast, and a huge size
-   could wrap to a tiny allocation - a buffer overflow, not an error. */
-static void* __vyrn_alloc_check(void* p, unsigned long long n) {
-    if (p == NULL && n > 0) {
-        fputs("error: out of memory\n", stderr);
-        exit(1);
-    }
-    return p;
-}
-void* __vyrn_malloc(unsigned long long n) {
-    if (n > (unsigned long long)(size_t)-1) {
-        fputs("error: out of memory\n", stderr);
-        exit(1);
-    }
-    return __vyrn_alloc_check(malloc((size_t)n), n);
-}
-void* __vyrn_realloc(void* p, unsigned long long n) {
-    if (n > (unsigned long long)(size_t)-1) {
-        fputs("error: out of memory\n", stderr);
-        exit(1);
-    }
-    return __vyrn_alloc_check(realloc(p, (size_t)n), n);
-}
-int __vyrn_strncmp(const char* a, const char* b, unsigned long long n) {
-    return strncmp(a, b, (size_t)n);
-}
-
-/* ---- Map<String, V> runtime (RFC-0028) ---------------------------------- */
-/* A Map lowers to { char** keys, char* vals, i64 len, i64 cap } — two parallel
-   growable buffers sharing one length/capacity, in first-insertion order. The
-   value buffer is raw bytes with a per-entry stride `esz` (the value type's
-   size, passed by the caller). Keys are stored by pointer (no copy — matching
-   the array element-store convention). Lookup is a linear strcmp scan. */
-typedef struct { char** keys; char* vals; long long len, cap; } VMap;
-/* Index of `key`, or -1. Operates on a raw keys buffer so read paths (`at`,
-   `has`) can call it with values extracted from an SSA aggregate. */
-long long __vyrn_map_find(char** keys, long long len, const char* key) {
-    long long i;
-    for (i = 0; i < len; i++) if (strcmp(keys[i], key) == 0) return i;
-    return -1;
-}
-/* Ensure room for one more entry, growing both buffers (cap 0 -> 4, else 2x). */
-void __vyrn_map_reserve(VMap* m, long long esz) {
-    if (m->len + 1 > m->cap) {
-        m->cap = m->cap ? m->cap * 2 : 4;
-        m->keys = (char**)__vyrn_realloc(m->keys, (unsigned long long)m->cap * sizeof(char*));
-        m->vals = (char*)__vyrn_realloc(m->vals, (unsigned long long)m->cap * (unsigned long long)esz);
-    }
-}
-/* Remove entry `i`, shifting later entries down so first-insertion order is
-   preserved for the survivors (remove-then-insert therefore moves a key end). */
-void __vyrn_map_remove_at(VMap* m, long long i, long long esz) {
-    long long rest = m->len - i - 1;
-    if (rest > 0) {
-        memmove(m->keys + i, m->keys + i + 1, (size_t)(rest * (long long)sizeof(char*)));
-        memmove(m->vals + i * esz, m->vals + (i + 1) * esz, (size_t)(rest * esz));
-    }
-    m->len--;
-}
-/* A snapshot copy of the key pointers (for `keys()`), owned by the fresh
-   Array<String>; the map may then be mutated without disturbing the snapshot. */
-char** __vyrn_map_keys_copy(char** keys, long long len) {
-    char** r = (char**)__vyrn_malloc((unsigned long long)(len ? len : 1) * sizeof(char*));
-    long long i;
-    for (i = 0; i < len; i++) r[i] = keys[i];
-    return r;
-}
-int __vyrn_snprintf(char* buf, unsigned long long n, const char* fmt, ...) {
-    va_list ap;
-    int r;
-    va_start(ap, fmt);
-    r = vsnprintf(buf, (size_t)n, fmt, ap);
-    va_end(ap);
-    return r;
-}
-
-/* ---- input I/O (RFC-0014) ----------------------------------------------- */
-/* argv is stashed by `main` and served to `args()` as argv[1..]. wasi-libc
-   populates argv identically on the wasm target (the host provides args_get). */
-static int __vyrn_argc = 0;
-static char** __vyrn_argv = 0;
-long long __vyrn_args_count(void) {
-    return (long long)(__vyrn_argc > 1 ? __vyrn_argc - 1 : 0);
-}
-const char* __vyrn_args_get(long long i) { return __vyrn_argv[i + 1]; }
-
-/* readLine: one line from stdin as a malloc'd, NUL-terminated buffer with its
-   trailing \r?\n stripped; *outlen is its byte length. Returns NULL at EOF (no
-   bytes) and also for a line containing an embedded NUL byte, which cannot live
-   in a NUL-terminated Vyrn String (the parity-safe rule, RFC-0014). The codegen
-   validates UTF-8 (via the shared DFA); an invalid line reads as None too. */
-char* __vyrn_read_line(unsigned long long* outlen) {
-    int c = getchar();
-    if (c == EOF) return 0;
-    unsigned long long cap = 64, len = 0;
-    char* buf = (char*)__vyrn_malloc(cap);
-    int had_nul = 0;
-    while (c != EOF && c != '\n') {
-        if (c == 0) had_nul = 1;
-        if (len + 2 >= cap) { cap *= 2; buf = (char*)__vyrn_realloc(buf, cap); }
-        buf[len++] = (char)c;
-        c = getchar();
-    }
-    if (len > 0 && buf[len - 1] == '\r') len--;
-    buf[len] = '\0';
-    if (had_nul) { free(buf); return 0; }
-    *outlen = len;
-    return buf;
-}
-
-/* readFile: whole file into a malloc'd, NUL-terminated buffer (*out, *outlen).
-   Status: 0 ok, 1 io-error (missing/permission/directory/read error), 3 the
-   file contains an embedded NUL byte. UTF-8 validation (status 2) is done by
-   the codegen after this returns, reusing the shared DFA. A read loop (not
-   fseek/ftell) keeps it portable across regular files, pipes, and wasi-libc. */
-int __vyrn_read_file(const char* path, char** out, unsigned long long* outlen) {
-    FILE* f = fopen(path, "rb");
-    if (f == 0) return 1;
-    unsigned long long cap = 1024, len = 0;
-    char* buf = (char*)__vyrn_malloc(cap);
-    for (;;) {
-        if (len + 1 >= cap) { cap *= 2; buf = (char*)__vyrn_realloc(buf, cap); }
-        size_t got = fread(buf + len, 1, (size_t)(cap - len - 1), f);
-        len += (unsigned long long)got;
-        if (got == 0) break;
-    }
-    int bad = ferror(f);
-    fclose(f);
-    if (bad) { free(buf); return 1; }
-    buf[len] = '\0';
-    for (unsigned long long k = 0; k < len; k++) {
-        if (buf[k] == 0) { free(buf); return 3; }
-    }
-    *out = buf;
-    *outlen = len;
-    return 0;
-}
-
-/* readFileBytes (M2): binary read, no UTF-8/NUL checks. Status 0 ok / 1 io. */
-int __vyrn_read_file_bytes(const char* path, char** out, unsigned long long* outlen) {
-    FILE* f = fopen(path, "rb");
-    if (f == 0) return 1;
-    unsigned long long cap = 1024, len = 0;
-    char* buf = (char*)__vyrn_malloc(cap);
-    for (;;) {
-        if (len + 1 >= cap) { cap *= 2; buf = (char*)__vyrn_realloc(buf, cap); }
-        size_t got = fread(buf + len, 1, (size_t)(cap - len), f);
-        len += (unsigned long long)got;
-        if (got == 0) break;
-    }
-    int bad = ferror(f);
-    fclose(f);
-    if (bad) { free(buf); return 1; }
-    *out = buf;
-    *outlen = len;
-    return 0;
-}
-
-/* writeFile: create/truncate + write all bytes. Status 0 ok / 1 io-error. A
-   Vyrn String is NUL-terminated and never contains a NUL, so strlen is its
-   full length. */
-int __vyrn_write_file(const char* path, const char* contents) {
-    FILE* f = fopen(path, "wb");
-    if (f == 0) return 1;
-    size_t n = strlen(contents);
-    size_t wrote = fwrite(contents, 1, n, f);
-    int bad = (wrote != n);
-    if (fclose(f) != 0) bad = 1;
-    return bad ? 1 : 0;
-}
-
-/* renameFile: atomically move `from` over `to` (RFC-0044). Status 0 ok / 1 io /
-   2 cross-device. POSIX/wasi `rename` replaces atomically and reports EXDEV;
-   Windows C `rename` refuses an existing target, so MoveFileExA(REPLACE_EXISTING)
-   is used and ERROR_NOT_SAME_DEVICE maps to the cross-device status. */
-int __vyrn_rename_file(const char* from, const char* to) {
-#if defined(_WIN32)
-    if (MoveFileExA(from, to, VYRN_MOVEFILE_REPLACE_EXISTING) != 0) return 0;
-    return GetLastError() == VYRN_ERROR_NOT_SAME_DEVICE ? 2 : 1;
-#else
-    if (rename(from, to) == 0) return 0;
-    return errno == EXDEV ? 2 : 1;
-#endif
-}
-
-/* fsyncFile: flush a file's data to stable storage (RFC-0044, the optional
-   power-durability step). Open, sync the descriptor, close. Status 0 ok / 1 io.
-   wasi-libc lowers fsync to fd_sync. */
-int __vyrn_fsync_file(const char* path) {
-    /* read+write (not "rb"): flushing buffers needs write access on Windows
-       (_commit → FlushFileBuffers); "rb+" opens an existing file without
-       truncating it. */
-    FILE* f = fopen(path, "rb+");
-    if (f == 0) return 1;
-    int rc = 0;
-#if defined(_WIN32)
-    if (_commit(_fileno(f)) != 0) rc = 1;
-#else
-    if (fsync(fileno(f)) != 0) rc = 1;
-#endif
-    fclose(f);
-    return rc;
-}
-
-/* ---- time & randomness at the host boundary (RFC-0043) ------------------ */
-/* now()/monotonic()/randomSeed() are host INPUTS, not part of the deterministic
-   core. Each honors an injected value (VYRN_FIXED_TIME / VYRN_FIXED_SEED) so the
-   parity harness can fix the clock and seed identically in every backend; the
-   interpreter reads the same env. Absent the env vars they read the real host.
-   These symbols are compiled on EVERY target (native + wasi), so a clock/random
-   program links and runs under wasmtime with no `vyrn` host page: timespec_get /
-   clock_gettime / getentropy lower to WASI clock_time_get / random_get. */
-
-/* Wall clock, epoch milliseconds (UTC). timespec_get(TIME_UTC) is the portable
-   spelling across UCRT, glibc, and wasi-libc. */
-long long __vyrn_now_millis(void) {
-    const char* e = getenv("VYRN_FIXED_TIME");
-    if (e && e[0]) return strtoll(e, 0, 10);
-    struct timespec ts;
-    if (timespec_get(&ts, TIME_UTC) == 0) return 0;
-    return (long long)ts.tv_sec * 1000 + (long long)(ts.tv_nsec / 1000000);
-}
-
-/* Monotonic nanoseconds. Under a fixed clock: a fixed base plus a deterministic
-   per-call increment, so successive calls are byte-identical across backends
-   (the interpreter mirrors this base/step exactly: 1e9 + n*1e6). */
-static long long __vyrn_mono_ctr = 0;
-long long __vyrn_monotonic_nanos(void) {
-    const char* e = getenv("VYRN_FIXED_TIME");
-    if (e && e[0]) {
-        long long v = 1000000000LL + __vyrn_mono_ctr * 1000000LL;
-        __vyrn_mono_ctr++;
-        return v;
-    }
-#if defined(_WIN32)
-    /* UCRT has no clock_gettime(CLOCK_MONOTONIC); the wall clock in ns is an
-       adequate elapsed source (never exercised under the fixed-clock harness). */
-    struct timespec ts;
-    timespec_get(&ts, TIME_UTC);
-    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
-#endif
-}
-
-/* An unpredictable Int64 seed from the host CSPRNG. */
-long long __vyrn_random_seed(void) {
-    const char* e = getenv("VYRN_FIXED_SEED");
-    if (e && e[0]) return strtoll(e, 0, 10);
-#if defined(_WIN32)
-    unsigned int a = 0, b = 0;
-    rand_s(&a);
-    rand_s(&b);
-    return (long long)(((unsigned long long)a << 32) ^ (unsigned long long)b);
-#else
-    unsigned long long v = 0;
-    if (getentropy(&v, sizeof v) != 0) v = 0;
-    return (long long)v;
-#endif
-}
-
-/* ---- JSON codec runtime (RFC-0018) -------------------------------------- */
-/* A tagged JSON DOM plus a parser, canonical encoder, and a decode-side issue
-   accumulator. The per-type encode/decode functions are GENERATED as LLVM IR
-   (see vyrn-codegen); this shim owns the parity-critical string work — number
-   formatting, escaping, and the parser error wording — so the native output is
-   byte-identical to the interpreter's `crate::codec`. */
-
-enum { VJ_NULL = 0, VJ_BOOL = 1, VJ_NUM = 2, VJ_STR = 3, VJ_ARR = 4, VJ_OBJ = 5 };
-typedef struct VJ VJ;
-typedef struct { char* key; VJ* val; } VJMember;
-struct VJ {
-    int kind;
-    int bval;                                   /* VJ_BOOL */
-    char* text;                                 /* VJ_NUM verbatim / VJ_STR bytes */
-    int is_int;                                 /* VJ_NUM: integer syntax? */
-    VJ** items; unsigned long long nitems, capitems;   /* VJ_ARR */
-    VJMember* mem; unsigned long long nmem, capmem;     /* VJ_OBJ */
-};
-
-static char* __vyrn_dup(const char* s) {
-    unsigned long long n = strlen(s);
-    char* r = (char*)__vyrn_malloc(n + 1);
-    memcpy(r, s, n + 1);
-    return r;
-}
-static VJ* __vyrn_vj_new(int kind) {
-    VJ* v = (VJ*)__vyrn_malloc(sizeof(VJ));
-    v->kind = kind; v->bval = 0; v->text = 0; v->is_int = 0;
-    v->items = 0; v->nitems = 0; v->capitems = 0;
-    v->mem = 0; v->nmem = 0; v->capmem = 0;
-    return v;
-}
-VJ* __vyrn_vj_obj(void) { return __vyrn_vj_new(VJ_OBJ); }
-VJ* __vyrn_vj_arr(void) { return __vyrn_vj_new(VJ_ARR); }
-VJ* __vyrn_vj_null(void) { return __vyrn_vj_new(VJ_NULL); }
-VJ* __vyrn_vj_bool(int b) { VJ* v = __vyrn_vj_new(VJ_BOOL); v->bval = b ? 1 : 0; return v; }
-static VJ* __vyrn_vj_num_text(const char* t, int is_int) {
-    VJ* v = __vyrn_vj_new(VJ_NUM); v->text = __vyrn_dup(t); v->is_int = is_int; return v;
-}
-VJ* __vyrn_vj_int(long long x) {
-    char buf[32]; __vyrn_snprintf(buf, 32, "%lld", x); return __vyrn_vj_num_text(buf, 1);
-}
-VJ* __vyrn_vj_uint(unsigned long long x) {
-    char buf[32]; __vyrn_snprintf(buf, 32, "%llu", x); return __vyrn_vj_num_text(buf, 1);
-}
-VJ* __vyrn_vj_float(double x) {
-    /* NaN renders as `NaN` (matching the interpreter's Rust formatting). */
-    if (x != x) return __vyrn_vj_num_text("NaN", 0);
-    char buf[512]; __vyrn_snprintf(buf, 512, "%f", x); return __vyrn_vj_num_text(buf, 0);
-}
-VJ* __vyrn_vj_str(const char* s) { VJ* v = __vyrn_vj_new(VJ_STR); v->text = __vyrn_dup(s); return v; }
-void __vyrn_vj_push(VJ* a, VJ* c) {
-    if (a->nitems + 1 > a->capitems) {
-        a->capitems = a->capitems ? a->capitems * 2 : 4;
-        a->items = (VJ**)__vyrn_realloc(a->items, a->capitems * sizeof(VJ*));
-    }
-    a->items[a->nitems++] = c;
-}
-void __vyrn_vj_set(VJ* o, const char* key, VJ* c) {
-    if (o->nmem + 1 > o->capmem) {
-        o->capmem = o->capmem ? o->capmem * 2 : 4;
-        o->mem = (VJMember*)__vyrn_realloc(o->mem, o->capmem * sizeof(VJMember));
-    }
-    o->mem[o->nmem].key = __vyrn_dup(key);
-    o->mem[o->nmem].val = c;
-    o->nmem++;
-}
-
-/* ---- growable byte buffer (encoder) ------------------------------------- */
-typedef struct { char* p; unsigned long long len, cap; } VSB;
-static void vsb_init(VSB* s) { s->cap = 64; s->len = 0; s->p = (char*)__vyrn_malloc(s->cap); s->p[0] = 0; }
-static void vsb_ensure(VSB* s, unsigned long long extra) {
-    if (s->len + extra + 1 > s->cap) {
-        while (s->len + extra + 1 > s->cap) s->cap *= 2;
-        s->p = (char*)__vyrn_realloc(s->p, s->cap);
-    }
-}
-static void vsb_putc(VSB* s, char c) { vsb_ensure(s, 1); s->p[s->len++] = c; s->p[s->len] = 0; }
-static void vsb_puts(VSB* s, const char* t) {
-    unsigned long long n = strlen(t); vsb_ensure(s, n); memcpy(s->p + s->len, t, n); s->len += n; s->p[s->len] = 0;
-}
-static void vsb_escape(VSB* s, const char* t) {
-    vsb_putc(s, '"');
-    for (const unsigned char* q = (const unsigned char*)t; *q; q++) {
-        unsigned char c = *q;
-        if (c == '"') vsb_puts(s, "\\\"");
-        else if (c == '\\') vsb_puts(s, "\\\\");
-        else if (c == '\n') vsb_puts(s, "\\n");
-        else if (c == '\t') vsb_puts(s, "\\t");
-        else if (c == '\r') vsb_puts(s, "\\r");
-        else if (c < 0x20) { char b[8]; __vyrn_snprintf(b, 8, "\\u%04x", (unsigned)c); vsb_puts(s, b); }
-        else vsb_putc(s, (char)c);
-    }
-    vsb_putc(s, '"');
-}
-static void __vyrn_vj_write(VSB* s, VJ* v) {
-    unsigned long long i;
-    switch (v->kind) {
-        case VJ_NULL: vsb_puts(s, "null"); break;
-        case VJ_BOOL: vsb_puts(s, v->bval ? "true" : "false"); break;
-        case VJ_NUM: vsb_puts(s, v->text); break;
-        case VJ_STR: vsb_escape(s, v->text); break;
-        case VJ_ARR:
-            vsb_putc(s, '[');
-            for (i = 0; i < v->nitems; i++) { if (i) vsb_putc(s, ','); __vyrn_vj_write(s, v->items[i]); }
-            vsb_putc(s, ']');
-            break;
-        default: /* VJ_OBJ */
-            vsb_putc(s, '{');
-            for (i = 0; i < v->nmem; i++) {
-                if (i) vsb_putc(s, ',');
-                vsb_escape(s, v->mem[i].key);
-                vsb_putc(s, ':');
-                __vyrn_vj_write(s, v->mem[i].val);
-            }
-            vsb_putc(s, '}');
-            break;
-    }
-}
-char* __vyrn_vj_encode(VJ* v) { VSB s; vsb_init(&s); __vyrn_vj_write(&s, v); return s.p; }
-
-/* ---- parser (byte positions; wording mirrors crate::codec) -------------- */
-typedef struct { const char* b; unsigned long long i, n; char* err; } VJP;
-static void vjp_err_pos(VJP* p, const char* what) {
-    char buf[64]; __vyrn_snprintf(buf, 64, "%s at position %llu", what, p->i);
-    p->err = __vyrn_dup(buf);
-}
-static void vjp_err_end(VJP* p) { p->err = __vyrn_dup("unexpected end of input"); }
-static void vjp_ws(VJP* p) {
-    while (p->i < p->n) {
-        char c = p->b[p->i];
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') p->i++; else break;
-    }
-}
-static int vjp_hex(unsigned char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-static VJ* vjp_value(VJP* p);
-static char* vjp_string(VJP* p) {
-    p->i++;                                     /* opening quote */
-    VSB s; vsb_init(&s);
-    for (;;) {
-        if (p->i >= p->n) { vjp_err_end(p); return 0; }
-        unsigned char c = (unsigned char)p->b[p->i];
-        if (c == '"') { p->i++; return s.p; }
-        if (c == '\\') {
-            p->i++;
-            if (p->i >= p->n) { vjp_err_end(p); return 0; }
-            char e = p->b[p->i];
-            if (e == '"') vsb_putc(&s, '"');
-            else if (e == '\\') vsb_putc(&s, '\\');
-            else if (e == '/') vsb_putc(&s, '/');
-            else if (e == 'n') vsb_putc(&s, '\n');
-            else if (e == 't') vsb_putc(&s, '\t');
-            else if (e == 'r') vsb_putc(&s, '\r');
-            else if (e == 'b') vsb_putc(&s, '\b');
-            else if (e == 'f') vsb_putc(&s, '\f');
-            else if (e == 'u') {
-                unsigned int cp = 0; int k;
-                for (k = 0; k < 4; k++) {
-                    p->i++;
-                    if (p->i >= p->n) { vjp_err_end(p); return 0; }
-                    int h = vjp_hex((unsigned char)p->b[p->i]);
-                    if (h < 0) { vjp_err_pos(p, "unexpected character"); return 0; }
-                    cp = cp * 16 + (unsigned)h;
-                }
-                if (cp >= 0xD800 && cp <= 0xDFFF) { vjp_err_pos(p, "unexpected character"); return 0; }
-                if (cp < 0x80) vsb_putc(&s, (char)cp);
-                else if (cp < 0x800) {
-                    vsb_putc(&s, (char)(0xC0 | (cp >> 6)));
-                    vsb_putc(&s, (char)(0x80 | (cp & 0x3F)));
-                } else {
-                    vsb_putc(&s, (char)(0xE0 | (cp >> 12)));
-                    vsb_putc(&s, (char)(0x80 | ((cp >> 6) & 0x3F)));
-                    vsb_putc(&s, (char)(0x80 | (cp & 0x3F)));
-                }
-            } else { vjp_err_pos(p, "unexpected character"); return 0; }
-            p->i++;
-        } else if (c < 0x20) { vjp_err_pos(p, "unexpected character"); return 0; }
-        else { vsb_putc(&s, (char)c); p->i++; }
-    }
-}
-static int vjp_isdigit(VJP* p) { return p->i < p->n && p->b[p->i] >= '0' && p->b[p->i] <= '9'; }
-static VJ* vjp_num(VJP* p) {
-    unsigned long long start = p->i;
-    int is_int = 1;
-    if (p->i < p->n && p->b[p->i] == '-') p->i++;
-    if (!vjp_isdigit(p)) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
-    while (vjp_isdigit(p)) p->i++;
-    if (p->i < p->n && p->b[p->i] == '.') {
-        is_int = 0; p->i++;
-        if (!vjp_isdigit(p)) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
-        while (vjp_isdigit(p)) p->i++;
-    }
-    if (p->i < p->n && (p->b[p->i] == 'e' || p->b[p->i] == 'E')) {
-        is_int = 0; p->i++;
-        if (p->i < p->n && (p->b[p->i] == '+' || p->b[p->i] == '-')) p->i++;
-        if (!vjp_isdigit(p)) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
-        while (vjp_isdigit(p)) p->i++;
-    }
-    unsigned long long len = p->i - start;
-    char* t = (char*)__vyrn_malloc(len + 1);
-    memcpy(t, p->b + start, len); t[len] = 0;
-    return __vyrn_vj_num_text(t, is_int);
-}
-static VJ* vjp_lit(VJP* p, const char* word, VJ* v) {
-    for (const char* w = word; *w; w++) {
-        if (p->i >= p->n) { vjp_err_end(p); return 0; }
-        if (p->b[p->i] != *w) { vjp_err_pos(p, "unexpected character"); return 0; }
-        p->i++;
-    }
-    return v;
-}
-static VJ* vjp_obj(VJP* p) {
-    p->i++;                                     /* '{' */
-    VJ* o = __vyrn_vj_obj();
-    vjp_ws(p);
-    if (p->i < p->n && p->b[p->i] == '}') { p->i++; return o; }
-    for (;;) {
-        vjp_ws(p);
-        if (!(p->i < p->n && p->b[p->i] == '"')) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
-        char* k = vjp_string(p);
-        if (!k) return 0;
-        vjp_ws(p);
-        if (!(p->i < p->n && p->b[p->i] == ':')) { if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character"); return 0; }
-        p->i++;
-        vjp_ws(p);
-        VJ* v = vjp_value(p);
-        if (!v) return 0;
-        __vyrn_vj_set(o, k, v);
-        vjp_ws(p);
-        if (p->i < p->n && p->b[p->i] == ',') { p->i++; continue; }
-        if (p->i < p->n && p->b[p->i] == '}') { p->i++; return o; }
-        if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character");
-        return 0;
-    }
-}
-static VJ* vjp_arr(VJP* p) {
-    p->i++;                                     /* '[' */
-    VJ* a = __vyrn_vj_arr();
-    vjp_ws(p);
-    if (p->i < p->n && p->b[p->i] == ']') { p->i++; return a; }
-    for (;;) {
-        vjp_ws(p);
-        VJ* v = vjp_value(p);
-        if (!v) return 0;
-        __vyrn_vj_push(a, v);
-        vjp_ws(p);
-        if (p->i < p->n && p->b[p->i] == ',') { p->i++; continue; }
-        if (p->i < p->n && p->b[p->i] == ']') { p->i++; return a; }
-        if (p->i >= p->n) vjp_err_end(p); else vjp_err_pos(p, "unexpected character");
-        return 0;
-    }
-}
-static VJ* vjp_value(VJP* p) {
-    if (p->i >= p->n) { vjp_err_end(p); return 0; }
-    char c = p->b[p->i];
-    if (c == '{') return vjp_obj(p);
-    if (c == '[') return vjp_arr(p);
-    if (c == '"') { char* s = vjp_string(p); if (!s) return 0; return __vyrn_vj_str(s); }
-    if (c == 't') return vjp_lit(p, "true", __vyrn_vj_bool(1));
-    if (c == 'f') return vjp_lit(p, "false", __vyrn_vj_bool(0));
-    if (c == 'n') return vjp_lit(p, "null", __vyrn_vj_null());
-    if (c == '-' || (c >= '0' && c <= '9')) return vjp_num(p);
-    vjp_err_pos(p, "unexpected character");
-    return 0;
-}
-VJ* __vyrn_json_parse(const char* src, char** errout) {
-    VJP p; p.b = src; p.i = 0; p.n = strlen(src); p.err = 0;
-    vjp_ws(&p);
-    VJ* v = vjp_value(&p);
-    if (!v) { *errout = p.err; return 0; }
-    vjp_ws(&p);
-    if (p.i != p.n) { vjp_err_pos(&p, "trailing characters"); *errout = p.err; return 0; }
-    return v;
-}
-
-/* ---- decode-side accessors + issue accumulator -------------------------- */
-int __vyrn_vj_kind(VJ* v) { return v->kind; }
-VJ* __vyrn_vj_get(VJ* o, const char* key) {
-    unsigned long long i;
-    for (i = 0; i < o->nmem; i++) if (strcmp(o->mem[i].key, key) == 0) return o->mem[i].val;
-    return 0;
-}
-int __vyrn_vj_bool_get(VJ* v) { return v->bval; }
-long long __vyrn_vj_len(VJ* a) { return (long long)a->nitems; }
-VJ* __vyrn_vj_at(VJ* a, long long i) { return a->items[i]; }
-/* An array element, or a fresh `null` node when `i` is out of range — the
-   RFC-0024 tuple-payload decode treats a short array's missing slots as null. */
-VJ* __vyrn_vj_at_or_null(VJ* a, long long i) {
-    if (i < 0 || (unsigned long long)i >= a->nitems) return __vyrn_vj_null();
-    return a->items[i];
-}
-/* Object member count / i-th key / i-th value — the RFC-0024 payload-enum
-   decode enforces "exactly one key" and reads it back. */
-long long __vyrn_vj_obj_len(VJ* o) { return (long long)o->nmem; }
-const char* __vyrn_vj_obj_key(VJ* o, long long i) { return o->mem[i].key; }
-VJ* __vyrn_vj_obj_at(VJ* o, long long i) { return o->mem[i].val; }
-const char* __vyrn_vj_str_get(VJ* v) { return v->text; }
-/* Parse a number node into an integer target: 0 ok (*out set), 1 rejected
-   (non-integer syntax, or out of range for the width/signedness). */
-int __vyrn_vj_asint(VJ* v, int bits, int is_signed, long long* out) {
-    if (v->kind != VJ_NUM || !v->is_int) return 1;
-    char* end;
-    if (is_signed) {
-        errno = 0;
-        long long x = strtoll(v->text, &end, 10);
-        if (errno != 0 || *end != 0) return 1;
-        if (bits < 64) {
-            long long mx = (1LL << (bits - 1)) - 1;
-            long long mn = -(1LL << (bits - 1));
-            if (x < mn || x > mx) return 1;
-        }
-        *out = x;
-        return 0;
-    }
-    if (v->text[0] == '-') return 1;
-    errno = 0;
-    unsigned long long x = strtoull(v->text, &end, 10);
-    if (errno != 0 || *end != 0) return 1;
-    if (bits < 64) {
-        unsigned long long mx = (1ULL << bits) - 1ULL;
-        if (x > mx) return 1;
-    }
-    *out = (long long)x;
-    return 0;
-}
-double __vyrn_vj_asfloat(VJ* v) { return strtod(v->text, 0); }
-const char* __vyrn_vj_kindname(int kind) {
-    switch (kind) {
-        case VJ_NULL: return "null";
-        case VJ_BOOL: return "boolean";
-        case VJ_NUM: return "number";
-        case VJ_STR: return "string";
-        case VJ_ARR: return "array";
-        default: return "object";
-    }
-}
-/* `expected <what>, found <kind>` — the runtime half of a `json.type` Issue. */
-char* __vyrn_json_type_msg(const char* expected, int kind) {
-    const char* found = __vyrn_vj_kindname(kind);
-    unsigned long long n = strlen("expected , found ") + strlen(expected) + strlen(found) + 1;
-    char* r = (char*)__vyrn_malloc(n);
-    __vyrn_snprintf(r, n, "expected %s, found %s", expected, found);
-    return r;
-}
-char* __vyrn_json_field_path(const char* parent, const char* field) {
-    if (parent[0] == 0) return __vyrn_dup(field);
-    unsigned long long n = strlen(parent) + 1 + strlen(field) + 1;
-    char* r = (char*)__vyrn_malloc(n);
-    __vyrn_snprintf(r, n, "%s.%s", parent, field);
-    return r;
-}
-char* __vyrn_json_index_path(const char* parent, long long i) {
-    unsigned long long n = strlen(parent) + 2 + 24 + 1;
-    char* r = (char*)__vyrn_malloc(n);
-    __vyrn_snprintf(r, n, "%s[%lld]", parent, i);
-    return r;
-}
-typedef struct { char* key; char* path; char* message; } VIssue;
-typedef struct { VIssue* items; unsigned long long n, cap; } VIssues;
-VIssues* __vyrn_issues_new(void) {
-    VIssues* s = (VIssues*)__vyrn_malloc(sizeof(VIssues));
-    s->items = 0; s->n = 0; s->cap = 0; return s;
-}
-void __vyrn_issues_push(VIssues* s, const char* key, const char* path, const char* message) {
-    if (s->n + 1 > s->cap) {
-        s->cap = s->cap ? s->cap * 2 : 4;
-        s->items = (VIssue*)__vyrn_realloc(s->items, s->cap * sizeof(VIssue));
-    }
-    s->items[s->n].key = __vyrn_dup(key);
-    s->items[s->n].path = __vyrn_dup(path);
-    s->items[s->n].message = __vyrn_dup(message);
-    s->n++;
-}
-long long __vyrn_issues_len(VIssues* s) { return (long long)s->n; }
-const char* __vyrn_issue_key(VIssues* s, long long i) { return s->items[i].key; }
-const char* __vyrn_issue_path(VIssues* s, long long i) { return s->items[i].path; }
-const char* __vyrn_issue_msg(VIssues* s, long long i) { return s->items[i].message; }
-
-/* ---- worker threads (RFC-0025) ------------------------------------------ */
-/* `spawn f(args)` lowers to __vyrn_spawn(thunk, frame): the IR packs the
-   already-evaluated arguments (behind a leading result slot) into a heap frame
-   and passes a per-callee thunk that loads them, calls the isolated task
-   function, and stores the result back into the frame. The task is isolated
-   (checker-enforced, transitively: no I/O, no module state, no shared cells,
-   no `drop`), so ANY schedule produces byte-identical program output — the
-   threads below are pure wall-clock optimization. `t.join()` lowers to
-   __vyrn_join: block until completion, return the frame (the IR loads the
-   result from its leading slot).
-
-   One shared IR, three behaviors, all byte-identical:
-     - native: a real OS thread per task (Win32 / pthreads);
-     - VYRN_SEQUENTIAL_SPAWN=1 (native): the thunk runs inline at the spawn
-       point — the old eager path, a debugging escape hatch;
-     - wasm (__wasi__): no threads exist; the thunk always runs inline.
-
-   Locked trap protocol: a trapping task performs the standard trap protocol
-   itself (one fputs of the canonical `error: ...` line to stderr, then
-   exit(1)) from whichever thread it runs on — same wording, same exit code,
-   printed once; exit() flushes stdout so no output is lost. Tasks that were
-   never joined are joined at process exit (below, in spawn order): the eager
-   semantics ran every task, so a trap in a leaked task must not be lost.
-
-   Ownership: task records and frames are never freed — a task may be joined
-   more than once (join is idempotent), and the count is bounded by the number
-   of spawns (the "unproven ownership leaks, which is always safe" rule). */
-#if defined(__wasi__)
-typedef struct VTask { void* frame; } VTask;
-void* __vyrn_spawn(void (*thunk)(void*), void* frame) {
-    VTask* t = (VTask*)__vyrn_malloc(sizeof(VTask));
-    t->frame = frame;
-    thunk(frame); /* eager: single-threaded target */
-    return t;
-}
-void* __vyrn_join(void* task) { return ((VTask*)task)->frame; }
-static void __vyrn_join_all(void) {}
-#else
-#ifdef _WIN32
-#include <windows.h>
-typedef struct VTask {
-    void (*thunk)(void*);
-    void* frame;
-    HANDLE done; /* manual-reset event, signaled when the task completed */
-    struct VTask* next;
-} VTask;
-static DWORD WINAPI __vyrn_task_main(LPVOID p) {
-    VTask* t = (VTask*)p;
-    t->thunk(t->frame);
-    SetEvent(t->done);
-    return 0;
-}
-static SRWLOCK __vyrn_task_lock = SRWLOCK_INIT;
-static void __vyrn_tasks_acquire(void) { AcquireSRWLockExclusive(&__vyrn_task_lock); }
-static void __vyrn_tasks_release(void) { ReleaseSRWLockExclusive(&__vyrn_task_lock); }
-static void __vyrn_task_wait(VTask* t) { WaitForSingleObject(t->done, INFINITE); }
-#else
-#include <pthread.h>
-typedef struct VTask {
-    void (*thunk)(void*);
-    void* frame;
-    pthread_mutex_t mu;
-    pthread_cond_t cv;
-    int done;
-    struct VTask* next;
-} VTask;
-static void* __vyrn_task_main(void* p) {
-    VTask* t = (VTask*)p;
-    t->thunk(t->frame);
-    pthread_mutex_lock(&t->mu);
-    t->done = 1;
-    pthread_cond_broadcast(&t->cv);
-    pthread_mutex_unlock(&t->mu);
-    return 0;
-}
-static pthread_mutex_t __vyrn_task_lock = PTHREAD_MUTEX_INITIALIZER;
-static void __vyrn_tasks_acquire(void) { pthread_mutex_lock(&__vyrn_task_lock); }
-static void __vyrn_tasks_release(void) { pthread_mutex_unlock(&__vyrn_task_lock); }
-static void __vyrn_task_wait(VTask* t) {
-    pthread_mutex_lock(&t->mu);
-    while (!t->done) pthread_cond_wait(&t->cv, &t->mu);
-    pthread_mutex_unlock(&t->mu);
-}
-#endif
-/* Registry of every spawned task, appended in spawn order (a task may itself
-   spawn — the list is append-only under the lock, so the exit-time walk below
-   observes children its waits allowed to be registered). */
-static VTask* __vyrn_task_head = 0;
-static VTask* __vyrn_task_tail = 0;
-
-void* __vyrn_spawn(void (*thunk)(void*), void* frame) {
-    int started = 0;
-    VTask* t = (VTask*)__vyrn_malloc(sizeof(VTask));
-    t->thunk = thunk;
-    t->frame = frame;
-    t->next = 0;
-#ifdef _WIN32
-    t->done = CreateEvent(0, TRUE, FALSE, 0);
-#else
-    pthread_mutex_init(&t->mu, 0);
-    pthread_cond_init(&t->cv, 0);
-    t->done = 0;
-#endif
-    {
-        const char* seq = getenv("VYRN_SEQUENTIAL_SPAWN");
-        if (!(seq && seq[0] == '1' && seq[1] == 0)) {
-#ifdef _WIN32
-            HANDLE th = CreateThread(0, 0, __vyrn_task_main, t, 0, 0);
-            if (th != 0) { CloseHandle(th); started = 1; } /* completion is t->done */
-#else
-            pthread_t th;
-            pthread_attr_t at;
-            pthread_attr_init(&at);
-            pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-            started = (pthread_create(&th, &at, __vyrn_task_main, t) == 0);
-            pthread_attr_destroy(&at);
-#endif
-        }
-    }
-    if (!started) {
-        /* sequential mode, or thread creation failed: the eager path (run at
-           the spawn point, on this thread) — the same bytes, by isolation. */
-        __vyrn_task_main(t);
-    }
-    __vyrn_tasks_acquire();
-    if (__vyrn_task_tail) __vyrn_task_tail->next = t; else __vyrn_task_head = t;
-    __vyrn_task_tail = t;
-    __vyrn_tasks_release();
-    return t;
-}
-
-void* __vyrn_join(void* task) {
-    VTask* t = (VTask*)task;
-    __vyrn_task_wait(t); /* idempotent; safe from any number of joiners */
-    return t->frame;
-}
-
-/* Join every task that is still outstanding when the program returns from
-   `main` — under eager semantics every spawned task ran, so a leaked task's
-   work (and, if it traps, its canonical trap + exit(1)) must still happen. */
-static void __vyrn_join_all(void) {
-    __vyrn_tasks_acquire();
-    VTask* t = __vyrn_task_head;
-    __vyrn_tasks_release();
-    while (t) {
-        __vyrn_task_wait(t);
-        __vyrn_tasks_acquire();
-        t = t->next;
-        __vyrn_tasks_release();
-    }
-}
-#endif
-
-/* The real C entry point: every target's crt (MSVC, glibc, wasi-libc) knows
-   how to call a plain C main; the IR only exports vyrn_entry. argv is stashed
-   for `args()` (RFC-0014). Outstanding tasks are joined before the exit code
-   is returned (RFC-0025). */
-extern int vyrn_entry(void);
-int main(int argc, char** argv) {
-    __vyrn_argc = argc;
-    __vyrn_argv = argv;
-    int code = vyrn_entry();
-    __vyrn_join_all();
-    return code;
-}
-"#;
-
 /// C trap stubs for the program's `extern` imports (RFC-0012), one per `extern
 /// fn`, appended to the shim on the **native** target only. Each defines the
 /// import symbol (`__vyrn_extern_<name>`, matching codegen) as a function that
@@ -2148,8 +1835,9 @@ fn extern_trap_stubs(program: &vyrn_frontend::ast::Program) -> String {
     s
 }
 
-/// `vyrn build <file.vyrn> [-o out] [--target wasm]` — emit IR, then invoke
-/// clang to link a native executable (or a `wasm32-wasi` module).
+/// `vyrn build <file.vyrn> [-o out] [--target wasm]` — a native executable via
+/// textual IR and clang, or a `wasm32-wasi` module emitted directly (RFC-0077 M5:
+/// no clang, no wasi sysroot, no builtins archive).
 /// `vyrn test [file] [--name <substring>]` (RFC-0015) — load + check the root
 /// file, then run its `test` blocks under the interpreter in declaration order.
 /// Prints `test "name" ... ok` / `... FAILED: <message>` per test and a
@@ -3277,7 +2965,13 @@ fn dev_serve_one(
     match call_handle(req) {
         Ok(resp) => {
             eprintln!("{method} {path} -> {}", resp.status);
-            write_response(stream, resp.status, &resp.content_type, resp.body.as_bytes());
+            write_response_vary(
+                stream,
+                resp.status,
+                &resp.content_type,
+                &resp.vary,
+                resp.body.as_bytes(),
+            );
         }
         Err(msg) => {
             eprintln!("error: {msg}");
@@ -3313,7 +3007,13 @@ fn serve_one(
             match call_handle(req) {
                 Ok(resp) => {
                     eprintln!("{method} {path} -> {}", resp.status);
-                    write_response(stream, resp.status, &resp.content_type, resp.body.as_bytes());
+                    write_response_vary(
+                        stream,
+                        resp.status,
+                        &resp.content_type,
+                        &resp.vary,
+                        resp.body.as_bytes(),
+                    );
                 }
                 Err(msg) => {
                     // Canonical trap wording to stderr, then a generic 500.
@@ -3378,9 +3078,14 @@ fn parse_request(
         return Err(ParseError::Bad);
     }
 
-    // Headers: `name: value`, name compared case-insensitively.
+    // Headers: `name: value`, name compared case-insensitively. Every field is
+    // kept for the program (RFC-0072 M4), lowercased HERE — the one place a
+    // header name crosses from the wire into a Vyrn `Map`, whose lookup is exact.
+    // Repeated fields join with `", "`, which RFC 9110 §5.3 makes equivalent to
+    // sending them separately.
     let mut content_length: usize = 0;
     let mut chunked = false;
+    let mut headers: Vec<(String, String)> = Vec::new();
     for line in lines {
         if line.is_empty() {
             continue;
@@ -3392,6 +3097,13 @@ fn parse_request(
             content_length = value.parse::<usize>().map_err(|_| ParseError::Bad)?;
         } else if lname == "transfer-encoding" && value.to_ascii_lowercase().contains("chunked") {
             chunked = true;
+        }
+        match headers.iter_mut().find(|(n, _)| *n == lname) {
+            Some((_, prev)) => {
+                prev.push_str(", ");
+                prev.push_str(value);
+            }
+            None => headers.push((lname, value.to_string())),
         }
     }
     if chunked {
@@ -3416,7 +3128,7 @@ fn parse_request(
     // decoding would silently corrupt it).
     let body = String::from_utf8(body).map_err(|_| ParseError::Bad)?;
 
-    Ok(vyrn_frontend::interp::ServeRequest { method, path: target, body })
+    Ok(vyrn_frontend::interp::ServeRequest { method, path: target, headers, body })
 }
 
 /// A minimal status-code → reason-phrase table. Unknown codes get an empty
@@ -3455,71 +3167,33 @@ fn reason_phrase(status: i64) -> &'static str {
 /// `Connection: close`, blank line, body. Errors are ignored — the peer may
 /// have hung up, and one dropped connection must not fault the server.
 fn write_response(stream: &mut std::net::TcpStream, status: i64, content_type: &str, body: &[u8]) {
+    write_response_vary(stream, status, content_type, "", body)
+}
+
+/// [`write_response`] plus a `Vary` field (RFC-0072 M4). `vary` empty writes no
+/// header at all, so a response that does not negotiate stays byte-identical to
+/// what this host wrote before the field existed.
+fn write_response_vary(
+    stream: &mut std::net::TcpStream,
+    status: i64,
+    content_type: &str,
+    vary: &str,
+    body: &[u8],
+) {
     use std::io::Write;
     let reason = reason_phrase(status);
+    let vary_line = if vary.is_empty() {
+        String::new()
+    } else {
+        format!("Vary: {vary}\r\n")
+    };
     let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{vary_line}Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(body);
     let _ = stream.flush();
-}
-
-/// The dev-tree wasi sysroot, if one exists: the first `tools/wasi-sysroot-*`
-/// directory found walking up from `start` (sorted, so the pick is
-/// deterministic when several versions are unpacked side by side).
-fn tools_wasi_sysroot_from(start: &Path) -> Option<std::path::PathBuf> {
-    for dir in start.ancestors() {
-        let tools = dir.join("tools");
-        if !tools.is_dir() {
-            continue;
-        }
-        let mut hits: Vec<std::path::PathBuf> = std::fs::read_dir(&tools)
-            .ok()?
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.is_dir()
-                    && p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.starts_with("wasi-sysroot"))
-            })
-            .collect();
-        hits.sort();
-        if let Some(hit) = hits.into_iter().next() {
-            return Some(hit);
-        }
-    }
-    None
-}
-
-/// Auto-discovered wasi sysroot for the running exe (see
-/// [`tools_wasi_sysroot_from`]); `None` when no `tools/` convention applies.
-fn discovered_wasi_sysroot() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    tools_wasi_sysroot_from(exe.parent()?)
-}
-
-/// `libclang_rt.builtins-wasm32.a` from a `libclang_rt.builtins-wasm32-wasi-*`
-/// directory next to the sysroot (the wasi-sdk release-artifact layout),
-/// version-agnostic and deterministic (sorted).
-fn builtins_near_sysroot(sysroot: &Path) -> Option<std::path::PathBuf> {
-    let parent = sysroot.parent()?;
-    let mut hits: Vec<std::path::PathBuf> = std::fs::read_dir(parent)
-        .ok()?
-        .flatten()
-        .map(|e| e.path().join("libclang_rt.builtins-wasm32.a"))
-        .filter(|p| {
-            p.exists()
-                && p.parent()
-                    .and_then(|d| d.file_name())
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("libclang_rt.builtins-wasm32"))
-        })
-        .collect();
-    hits.sort();
-    hits.into_iter().next()
 }
 
 fn build(path: &str, rest: &[String]) -> ExitCode {
@@ -3558,14 +3232,6 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let ir = match vyrn_codegen::emit(&program) {
-        Ok(ir) => ir,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
     // default output name: <stem> (+ .exe on Windows, .wasm for wasm)
     let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("a");
     let out_path = out.unwrap_or_else(|| {
@@ -3578,6 +3244,43 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         }
     });
 
+    // `--target wasm` is the direct backend (RFC-0077 M5), unconditionally. No
+    // clang, no wasi sysroot, no builtins archive, no `.ll` and no `.shim.c` — the
+    // module is written straight out.
+    //
+    // There is no switch here on purpose. The LLVM wasm path was kept beside this
+    // one behind `VYRN_WASM_BACKEND` for the length of M2, and the flag was given a
+    // deletion milestone at the same time it was introduced, because this repo has
+    // already watched an ungated second backend rot to unbuildable in twelve days
+    // (`vyrn-codegen-llvm`, b1eef04). Native keeps the textual-IR route below, with
+    // its own parity column; wasm has this one, with its own.
+    if wasm {
+        return match vyrn_codegen::direct::compile(&program) {
+            Ok(bytes) => match std::fs::write(&out_path, bytes) {
+                Ok(()) => {
+                    println!("wrote {out_path}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: cannot write {out_path}: {e}");
+                    ExitCode::FAILURE
+                }
+            },
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    let ir = match vyrn_codegen::emit(&program) {
+        Ok(ir) => ir,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     // write IR + the portable stream shim next to the output so failures are
     // inspectable
     let ll_path = PathBuf::from(&out_path).with_extension("ll");
@@ -3585,15 +3288,12 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         eprintln!("error: cannot write {}: {e}", ll_path.display());
         return ExitCode::FAILURE;
     }
-    // The portable shim, plus (native only) a trap stub per `extern` import
-    // (RFC-0012). On wasm the stubs are OMITTED so each `extern` resolves to the
-    // host page's `vyrn` import namespace; on native there is no host, so the
-    // stub satisfies the symbol by printing the canonical "not available on this
-    // target" message and exiting — the same wording the interpreter traps with.
-    let mut shim = RUNTIME_SHIM.to_string();
-    if !wasm {
-        shim.push_str(&extern_trap_stubs(&program));
-    }
+    // The portable shim, plus a trap stub per `extern` import (RFC-0012). Native
+    // has no host to supply one, so the stub satisfies the symbol by printing the
+    // canonical "not available on this target" message and exiting — the same
+    // wording the interpreter traps with. On wasm an `extern` resolves to the host
+    // page's `vyrn` import namespace, which the direct backend declares itself.
+    let shim = RUNTIME_SHIM.to_string() + &extern_trap_stubs(&program);
     let shim_path = PathBuf::from(&out_path).with_extension("shim.c");
     if let Err(e) = std::fs::write(&shim_path, &shim) {
         eprintln!("error: cannot write {}: {e}", shim_path.display());
@@ -3618,71 +3318,9 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         .arg(&out_path)
         // our IR carries no target triple; clang supplies the target's — don't warn.
         .arg("-Wno-override-module");
-    if !wasm && !cfg!(windows) {
-        // Worker threads (RFC-0025): pthreads. Win32 threads need no flag and
-        // wasm builds get the shim's inline (sequential) path instead.
+    if !cfg!(windows) {
+        // Worker threads (RFC-0025): pthreads. Win32 threads need no flag.
         cmd.arg("-pthread");
-    }
-    if wasm {
-        // wasm32-wasi: the same IR, compiled against wasi-libc. The sysroot
-        // comes from $WASI_SYSROOT (a wasi-sdk checkout's `share/wasi-sysroot`),
-        // else is auto-discovered from the dev-tree convention: a `tools/`
-        // directory holding `wasi-sysroot-*` in an ancestor of the running exe
-        // (`<repo>/tools/…` with vyrn.exe at `<repo>/compiler/target/<p>/`).
-        let sysroot = match std::env::var("WASI_SYSROOT") {
-            Ok(s) if Path::new(&s).exists() => s,
-            _ => match discovered_wasi_sysroot() {
-                Some(p) => p.to_string_lossy().into_owned(),
-                None => {
-                    eprintln!(
-                        "error: `--target wasm` needs the wasi-libc sysroot. Download wasi-sdk \
-                         (github.com/WebAssembly/wasi-sdk, or just its wasi-sysroot artifact) \
-                         and set WASI_SYSROOT to its wasi-sysroot directory, or unpack it \
-                         under <repo>/tools/."
-                    );
-                    return ExitCode::FAILURE;
-                }
-            },
-        };
-        cmd.arg("--target=wasm32-wasip1").arg(format!("--sysroot={sysroot}"));
-        // clang's own wasm32 compiler-rt builtins are not bundled with the
-        // Windows LLVM installer; wasi-sdk ships them as a separate archive.
-        // Accept it via $WASI_BUILTINS (path to libclang_rt.builtins-wasm32.a)
-        // or find a `libclang_rt.builtins-wasm32-wasi-*` dir next to the sysroot.
-        let builtins = std::env::var("WASI_BUILTINS")
-            .ok()
-            .filter(|b| Path::new(b).exists())
-            .or_else(|| {
-                let near = builtins_near_sysroot(Path::new(&sysroot));
-                near.map(|p| p.to_string_lossy().into_owned())
-            });
-        match builtins {
-            Some(b) => {
-                cmd.arg("-nodefaultlibs").arg(&b).arg("-lc");
-            }
-            None => {
-                eprintln!(
-                    "error: wasm builtins not found — set WASI_BUILTINS to \
-                     libclang_rt.builtins-wasm32.a (from the wasi-sdk release artifact \
-                     libclang_rt.builtins-wasm32-wasi-*.tar.gz), or unpack that archive \
-                     next to the sysroot under <repo>/tools/."
-                );
-                return ExitCode::FAILURE;
-            }
-        }
-        // `export extern fn` (RFC-0012 M2) — the functions themselves export via
-        // their `wasm-export-name` attribute (a GC root, no flag needed). But if
-        // any takes a `String` parameter, the JS shim must allocate the argument
-        // buffer inside the module before calling in, so the module's own
-        // allocator has to be reachable. `__vyrn_malloc` lives in the C shim (no
-        // IR attribute to hang off), so force-export it with a linker flag.
-        let needs_malloc_export = program.functions.iter().any(|f| {
-            f.is_export_extern
-                && f.params.iter().any(|p| matches!(p.ty, vyrn_frontend::ast::Type::Str))
-        });
-        if needs_malloc_export {
-            cmd.arg("-Wl,--export=__vyrn_malloc");
-        }
     }
     let status = cmd.status();
     match status {
@@ -3699,35 +3337,6 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// Locate a clang executable: `$CLANG`, then PATH, then the default Windows
-/// install location.
-fn find_clang() -> Option<PathBuf> {
-    if let Ok(c) = std::env::var("CLANG") {
-        let p = PathBuf::from(c);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    // Trust PATH: if `clang --version` runs, use the bare name.
-    if Command::new("clang")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        return Some(PathBuf::from("clang"));
-    }
-    if cfg!(windows) {
-        let default = PathBuf::from(r"C:\Program Files\LLVM\bin\clang.exe");
-        if default.exists() {
-            return Some(default);
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -3852,34 +3461,5 @@ mod tests {
     fn min_table_rejects_a_non_report() {
         let doc = vyrn_frontend::schema::parse_json(r#"{"nope":1}"#).unwrap();
         assert!(bench_min_table(&doc).is_none());
-    }
-
-    /// The dev-tree toolchain discovery: `tools/wasi-sysroot-*` found from any
-    /// ancestor of the starting dir, builtins found version-agnostically next
-    /// to the sysroot, and both absent on a layout without the convention.
-    #[test]
-    fn wasi_toolchain_discovery_walks_the_tools_convention() {
-        let root = std::env::temp_dir()
-            .join(format!("vyrn_tools_probe_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let sysroot = root.join("tools/wasi-sysroot-25.0");
-        let builtins_dir = root.join("tools/libclang_rt.builtins-wasm32-wasi-25.0");
-        let deep = root.join("compiler/target/release");
-        std::fs::create_dir_all(&sysroot).unwrap();
-        std::fs::create_dir_all(&builtins_dir).unwrap();
-        std::fs::create_dir_all(&deep).unwrap();
-        std::fs::write(builtins_dir.join("libclang_rt.builtins-wasm32.a"), b"x").unwrap();
-
-        let found = tools_wasi_sysroot_from(&deep).expect("sysroot discovered from exe dir");
-        assert_eq!(found, sysroot);
-        let b = builtins_near_sysroot(&found).expect("builtins discovered next to sysroot");
-        assert!(b.ends_with("libclang_rt.builtins-wasm32.a"));
-
-        // No convention → no discovery (never invent a path).
-        let bare = root.join("elsewhere/deeper");
-        std::fs::create_dir_all(&bare).unwrap();
-        let _ = std::fs::remove_dir_all(root.join("tools"));
-        assert!(tools_wasi_sysroot_from(&bare).is_none());
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

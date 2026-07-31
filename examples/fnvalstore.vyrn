@@ -62,6 +62,31 @@ fn makeHandlers(cb: UserSink) -> Handlers {
     return Handlers { onSave: cb }
 }
 
+/// A GENERIC record holding a `fn` whose PARAMETER type is a type parameter —
+/// the `std/ui` `ParamQuery<P, T>` shape (RFC-0071 M2b).
+type Deferred<P, T> = { run: fn(P) -> T }
+
+/// `run` is the only place `P` occurs, so nothing pins it before this call. Until
+/// RFC-0071 M2c the generic solver read the target's RETURN only, so `P` reached
+/// codegen as a bare type parameter — which lowers to `void`: an `alloca void`, a
+/// `void` argument, and a dispatcher keyed on a signature nothing registers. The
+/// interpreter was unaffected, so it showed up as a native-only divergence.
+fn defer<P, T>(run: fn(P) -> T) -> Deferred<P, T> {
+    return Deferred { run: run }
+}
+
+/// Run a deferred call over its argument.
+fn force<P, T>(d: Deferred<P, T>, p: P) -> T {
+    let f = d.run
+    return f(p)
+}
+
+/// A named function whose parameter is a record — the target `defer` must solve
+/// `P` from.
+fn greet(u: User) -> String {
+    return "deferred: \{u.name}"
+}
+
 /// The captured value is a RECORD (`tag`): the lambda flows into `onUser`, whose
 /// `cb` param is then stored — so the stored fn-value's capture block is a
 /// non-scalar record, boxed by value at the store site.
@@ -173,6 +198,10 @@ fn main() -> Int64 {
         None => print("no local sink"),
     }
     drop local
+
+    // A type parameter that occurs ONLY inside a `fn` parameter's own parameter
+    // list, solved from the named target and crossing a function boundary.
+    print(force(defer(greet), User { id: 9, name: "ada" })) // deferred: ada
 
     return 0
 }

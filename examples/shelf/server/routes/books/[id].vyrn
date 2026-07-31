@@ -1,0 +1,37 @@
+/// GET /books/:id — a dynamic route with data. The [id] segment is parsed as
+/// Int64 (a non-integer 404s first); the query fetches the real book and the page
+/// server-renders it. A missing id (or the reserved 999) yields the router's 422.
+///
+/// RFC-0071: `data` is a declared member of the `std/ui:Page` contract; its
+/// `ParamQuery` return TYPE is what says the deferred call takes this route's
+/// `Params`.
+import { detailPage } from "../../view"
+import { byId } from "../../api/books"
+import { Book, IdReq } from "../../../shared/wire"
+import { Html } from "std/html"
+import { ParamQuery, paramQuery } from "std/ui"
+
+export type Params = { id: Int64 }
+export type Data = { found: Book }
+
+/// The book this route names.
+export fn data() -> ParamQuery<Params, Validation<Data>> {
+    return paramQuery(fetchBook)
+}
+
+fn fetchBook(p: Params) -> Validation<Data> {
+    if p.id == 999 {
+        return Invalid([Issue { key: "book.reserved", path: "id", message: "id 999 is reserved and cannot be shown" }])
+    }
+    if p.id < 0 {
+        return Invalid([Issue { key: "book.notFound", path: "id", message: "no book with id \{p.id}" }])
+    }
+    return match byId(IdReq { id: p.id }) {
+        Ok(b) => Valid(Data { found: b }),
+        Err(why) => Invalid([Issue { key: "book.notFound", path: "id", message: why }]),
+    }
+}
+
+export fn page(p: Params, d: Data) -> Html {
+    return detailPage(d.found)
+}

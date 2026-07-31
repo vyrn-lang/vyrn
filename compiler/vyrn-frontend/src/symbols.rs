@@ -338,18 +338,30 @@ fn analyze_inner(
     // RFC-0033 origin maps for the linked program, plus the diagnostics that
     // remap into a generator input file (published against that file's URI).
     let mut origins = crate::origin::OriginMaps::default();
+    let mut graph: crate::loader::ModuleGraph = Vec::new();
     let mut remapped: Vec<Diagnostic> = Vec::new();
     let checked: Option<crate::ast::Program> = if parse_failed {
         None
     } else {
         match (&linker, program.imports.is_empty()) {
             (Some((root_path, opts, resolver)), false) => {
-                let (loaded, o) =
+                let (loaded, o, load_warnings, g) =
                     crate::loader::load_with_origins(source, root_path, opts, *resolver);
+                graph = g;
                 // RFC-0053: the maps come back even when the load FAILED (they
                 // need no successful parse), so a `.vyx` whose template stopped
                 // lexing still knows its owner and still gets its squiggle.
                 origins = o;
+                // RFC-0071 M2b: a warning is already positioned at the input file
+                // the generator named, so it routes exactly like a remapped error
+                // — published against that file's URI, at the line the user wrote.
+                for d in load_warnings {
+                    if d.from_generated {
+                        remapped.push(d);
+                    } else {
+                        diags.push(adopt_foreign(d));
+                    }
+                }
                 match loaded {
                     Ok(linked) => Some(linked),
                     Err(load_diags) => {
@@ -379,7 +391,17 @@ fn analyze_inner(
     // give unannotated lets a real type on hover (`let x: Int`).
     let let_types = match &checked {
         Some(prog) => {
-            let (check_diags, let_types) = checker::check_accum_with_let_types(prog);
+            // The LSP re-checks on every keystroke, and all but the edited
+            // module are byte-identical to last time — reuse their diagnostics
+            // when no signature moved. Effects are not needed here (the workers
+            // gate uses the full check), which is why the reusing entry does not
+            // return them.
+            let hashes = crate::loader::last_module_hashes();
+            let (check_diags, let_types) = if hashes.is_empty() {
+                checker::check_accum_with_let_types(prog)
+            } else {
+                checker::check_accum_reusing(prog, &hashes)
+            };
             let mut checked_diags = check_diags;
             checked_diags.extend(movecheck::check_accum(prog));
             // RFC-0033: a diagnostic at an origin-governed line in a synthesized
@@ -413,7 +435,7 @@ fn analyze_inner(
     // RFC-0027: namespace bindings and their reachable exports (for `ns.`
     // completion and `ns.member` hover / go-to-definition). Needs the linker to
     // resolve each namespace import to its source module.
-    let namespaces = index_namespaces(source, &program, linker);
+    let namespaces = index_namespaces(&graph, &program, linker);
     let locals = index_locals(&program, &tok_info, &let_types);
 
     // Protocol/impl member tables for `.foo` completion (RFC-0002 §5). Impls
@@ -895,6 +917,35 @@ fn enclosing_fn_line(analysis: &Analysis, cursor_line: usize) -> Option<usize> {
         .iter()
         .any(|&l| l == seg_start)
         .then_some(seg_start)
+}
+
+/// Whether the 1-based `(line, col)` cursor sits at **module scope** in
+/// `source` — outside every brace-delimited body.
+///
+/// RFC-0071 M4 needs this: a contract member is a declaration a module makes, so
+/// `head`/`data` are offered where a declaration can go and nowhere else. The
+/// answer is the brace depth of the token stream before the cursor, which is
+/// exact (the lexer already knows a `{` inside a string is not a brace) and
+/// costs one lex — no parse, no check, so it is affordable per keystroke and
+/// works on a buffer that does not parse yet.
+pub fn at_module_scope(source: &str, line: usize, col: usize) -> bool {
+    let Ok(tokens) = lexer::lex(source) else {
+        // A buffer that does not lex has no reliable structure; the caller's
+        // fallback (offer nothing extra) is the safe answer.
+        return false;
+    };
+    let mut depth: i64 = 0;
+    for t in &tokens {
+        if (t.line, t.col) >= (line, col) {
+            break;
+        }
+        match t.tok {
+            Tok::LBrace => depth += 1,
+            Tok::RBrace => depth -= 1,
+            _ => {}
+        }
+    }
+    depth <= 0
 }
 
 /// All top-level symbols as completion items. The client filters by the prefix
@@ -1727,7 +1778,7 @@ fn index_imported_symbols(root: &ast::Program, linked: &ast::Program) -> Vec<Sym
 /// then parsed for its exported decls — so members show ORIGINAL names (not the
 /// loader's collision-rename symbols) with correct source lines for jumping in.
 fn index_namespaces(
-    source: &str,
+    graph: &crate::loader::ModuleGraph,
     root: &ast::Program,
     linker: Option<(
         &str,
@@ -1745,10 +1796,10 @@ fn index_namespaces(
     // carrying each module's synthesized source, since a namespace may name a
     // GENERATED module (`import * as t from i18n("./strings")`) whose key is a
     // banner no resolver can read (RFC-0051 §2).
-    let Ok(graph) = crate::loader::module_graph_with_sources(source, root_path, opts, resolver)
-    else {
-        return Vec::new();
-    };
+    // The graph comes from the load `analyze_inner` already performed — deriving
+    // it here meant a second complete load, generators included, per keystroke.
+    let _ = resolver;
+    let _ = opts;
     let root_key = crate::loader::normalize(root_path);
     let Some((_, targets, _)) = graph.iter().find(|(k, _, _)| *k == root_key) else {
         return Vec::new();
@@ -2485,11 +2536,12 @@ pub struct SemToken {
 /// Contextual reserved words (`value`/`list` in a `where` clause) are excluded so
 /// they are never mis-coloured. Kept in sync with the checker's `RESERVED` list.
 static MACRO_BUILTINS: &[&str] = &[
-    "print", "len", "concat", "slice", "bytes", "chars", "hexEncode", "hexDecode",
+    "print", "len", "concat", "slice", "bytes", "chars", "floatBits", "floatFromBits", "hexEncode",
+    "hexDecode",
     "base64Encode", "base64Decode", "urlEncode", "urlDecode", "args", "readLine",
     "readFile", "writeFile", "renameFile", "fsyncFile", "readFileBytes",
-    "stringFromBytes", "listDir", "moduleInterface", "schemaOf", "jsonSchema",
-    "toJson", "fromJson", "assert", "assertEq", "cell", "array", "parse", "str",
+    "stringFromBytes", "listDir", "moduleInterface", "schemaOf", "contractOf", "jsonSchema",
+    "toJson", "fromJson", "assert", "assertEq", "cell", "array", "parse", "str", "panic",
 ];
 
 /// Option / result constructors — builtin enum-like variants, coloured as

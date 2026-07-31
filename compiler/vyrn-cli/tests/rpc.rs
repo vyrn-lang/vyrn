@@ -1,5 +1,7 @@
-//! Integration tests for typed RPC (RFC-0019) — the `std/rpc` generators driven
-//! through the real `vyrn` binary against the `examples/fullstack` contract.
+//! Integration tests for typed RPC (RFC-0019 + RFC-0072) — the `std/rpc`
+//! generators driven through the real `vyrn` binary against the
+//! `examples/fullstack` api directory. The wire pins are the DERIVED paths
+//! (`/_/<module>/<name>`): nothing in the tree declares a route.
 //!
 //! Three surfaces:
 //!   * `serve` the fullstack server root and assert the wire behavior of the
@@ -127,7 +129,7 @@ fn get(port: u16, path: &str) -> (String, String) {
 #[test]
 fn rpc_ok_encodes_the_typed_result() {
     let s = start_server();
-    let (status, body) = post(s.port, "/rpc/getUser", "{\"id\":7}");
+    let (status, body) = post(s.port, "/_/users/byId", "{\"id\":7}");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(body, "{\"id\":7,\"name\":\"user7\",\"age\":30}");
 }
@@ -136,7 +138,7 @@ fn rpc_ok_encodes_the_typed_result() {
 fn rpc_invalid_payload_is_422_with_exact_issue_bytes() {
     let s = start_server();
     // age 200 fails `Age = Int64 where value <= 130` during decode.
-    let (status, body) = post(s.port, "/rpc/createUser", "{\"name\":\"Bob\",\"age\":200}");
+    let (status, body) = post(s.port, "/_/users/create", "{\"name\":\"Bob\",\"age\":200}");
     assert_eq!(status, "HTTP/1.1 422 Unprocessable Entity");
     assert_eq!(
         body,
@@ -149,7 +151,7 @@ fn rpc_result_ok_is_200_with_tagged_ok() {
     // A `Result`-returning procedure (RFC-0024): an application-level success is
     // a 200 carrying the externally-tagged `{"Ok":true}` — never a 422.
     let s = start_server();
-    let (status, body) = post(s.port, "/rpc/deleteUser", "{\"id\":5}");
+    let (status, body) = post(s.port, "/_/users/del", "{\"id\":5}");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(body, "{\"Ok\":true}");
 }
@@ -159,7 +161,7 @@ fn rpc_result_err_is_200_with_tagged_err() {
     // An application-level refusal is ALSO a 200, carrying `{"Err":".."}` — the
     // status distinguishes transport/validation from application outcome.
     let s = start_server();
-    let (status, body) = post(s.port, "/rpc/deleteUser", "{\"id\":0}");
+    let (status, body) = post(s.port, "/_/users/del", "{\"id\":0}");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(body, "{\"Err\":\"cannot delete the root user\"}");
 }
@@ -169,7 +171,7 @@ fn rpc_result_invalid_request_is_still_422() {
     // A malformed REQUEST (id is not an integer) is a decode failure: 422 with
     // the server's issues — 422 stays reserved for request validation.
     let s = start_server();
-    let (status, body) = post(s.port, "/rpc/deleteUser", "{\"id\":\"nope\"}");
+    let (status, body) = post(s.port, "/_/users/del", "{\"id\":\"nope\"}");
     assert_eq!(status, "HTTP/1.1 422 Unprocessable Entity");
     assert_eq!(
         body,
@@ -180,9 +182,9 @@ fn rpc_result_invalid_request_is_still_422() {
 #[test]
 fn rpc_schema_registry_reflects_result_oneof() {
     let s = start_server();
-    let (_status, body) = get(s.port, "/rpc/$schema");
-    // deleteUser's response schema is the RFC-0024 Ok/Err oneOf.
-    assert!(body.contains("\"name\":\"deleteUser\""), "deleteUser in registry:\n{body}");
+    let (_status, body) = get(s.port, "/_/$schema");
+    // users/del's response schema is the RFC-0024 Ok/Err oneOf.
+    assert!(body.contains("\"name\":\"users/del\""), "users/del in registry:\n{body}");
     assert!(
         body.contains("\"properties\":{\"Ok\":{\"type\":\"boolean\"}}"),
         "Ok arm reflected:\n{body}"
@@ -196,14 +198,14 @@ fn rpc_schema_registry_reflects_result_oneof() {
 #[test]
 fn rpc_wrong_method_is_405() {
     let s = start_server();
-    let (status, _) = get(s.port, "/rpc/getUser");
+    let (status, _) = get(s.port, "/_/users/byId");
     assert_eq!(status, "HTTP/1.1 405 Method Not Allowed");
 }
 
 #[test]
 fn rpc_unknown_procedure_is_404() {
     let s = start_server();
-    let (status, _) = post(s.port, "/rpc/nope", "{}");
+    let (status, _) = post(s.port, "/_/nope", "{}");
     assert_eq!(status, "HTTP/1.1 404 Not Found");
 }
 
@@ -218,14 +220,17 @@ fn rpc_non_rpc_path_falls_through_to_pages() {
 #[test]
 fn rpc_schema_registry_lists_every_procedure() {
     let s = start_server();
-    let (status, body) = get(s.port, "/rpc/$schema");
+    let (status, body) = get(s.port, "/_/$schema");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert!(body.starts_with("{\"procedures\":["), "registry shape:\n{body}");
-    assert!(body.contains("\"name\":\"getUser\""), "getUser in registry");
-    assert!(body.contains("\"name\":\"createUser\""), "createUser in registry");
-    // getUser's request carries the id property; createUser's request carries a
-    // `$ref` to the validated Age (its `where` becomes a JSON Schema bound).
-    assert!(body.contains("\"required\":[\"id\"]"), "getUser request schema");
+    assert!(body.contains("\"name\":\"users/byId\""), "users/byId in registry");
+    assert!(body.contains("\"name\":\"users/create\""), "users/create in registry");
+    // Every entry is keyed by its wire PATH as well as its name, because under a
+    // derived scheme the path is what a caller has.
+    assert!(body.contains("\"path\":\"/_/users/byId\""), "the derived path in the registry");
+    // users/byId's request carries the id property; users/create's request carries
+    // a `$ref` to the validated Age (its `where` becomes a JSON Schema bound).
+    assert!(body.contains("\"required\":[\"id\"]"), "users/byId request schema");
     assert!(body.contains("\"maximum\":130"), "Age bound reflected into the schema");
 }
 
@@ -233,12 +238,15 @@ fn rpc_schema_registry_lists_every_procedure() {
 
 #[test]
 fn emit_gen_client_shows_stubs_and_dispatchers() {
-    let client = repo_file("examples/fullstack/client.vyrn");
+    let client = repo_file("examples/fullstack/client/boot.vyrn");
     let out = vyrn().arg("emit-gen").arg(&client).output().expect("emit-gen");
     assert!(out.status.success(), "emit-gen failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let src = String::from_utf8_lossy(&out.stdout);
     // The single shared transport, declared once.
-    assert!(src.contains("extern fn vyrnRpcCall(name: String, body: String) -> Int64"), "{src}");
+    assert!(
+        src.contains("extern fn vyrnRpcCall(proc: String, path: String, body: String) -> Int64"),
+        "{src}"
+    );
     // The RFC-0068 structured-reply surface: the wire issue shape and the reply
     // enum (a `Rejected` arm, since the prelude `Validation` already owns `Invalid`).
     assert!(
@@ -251,32 +259,32 @@ fn emit_gen_client_shows_stubs_and_dispatchers() {
     // Each stub takes (req, cb: fn(RpcReply<Ret>)) and records the callback under
     // the call id (RFC-0040 §2); the completion dispatcher routes the reply to it.
     assert!(
-        src.contains("export fn getUser(req: GetUserReq, cb: fn(RpcReply<User>))"),
-        "getUser stub:\n{src}"
+        src.contains("export fn usersById(req: GetUserReq, cb: fn(RpcReply<User>))"),
+        "users/byId stub:\n{src}"
     );
     assert!(
-        src.contains("let mut rpcPendingGetUser: Map<String, fn(RpcReply<User>)> = [:]"),
-        "getUser pending map:\n{src}"
+        src.contains("let mut rpcPendingUsersById: Map<String, fn(RpcReply<User>)> = [:]"),
+        "users/byId pending map:\n{src}"
     );
     assert!(
-        src.contains("export extern fn vyrnRpcDoneGetUser(id: Int64, status: Int64, body: String)"),
-        "getUser dispatcher:\n{src}"
+        src.contains("export extern fn vyrnRpcDoneUsersById(id: Int64, status: Int64, body: String)"),
+        "users/byId dispatcher:\n{src}"
     );
     assert!(
-        src.contains("Some(cb) => rpcDeliverGetUser(key, cb, rpcUnifyGetUser(status, body))"),
-        "getUser dispatch routes to the pending callback:\n{src}"
+        src.contains("Some(cb) => rpcDeliverUsersById(key, cb, rpcUnifyUsersById(status, body))"),
+        "users/byId dispatch routes to the pending callback:\n{src}"
     );
     // 2xx decodes to `Done`; 422 parses issues to `Rejected`; a decode/transport
     // fault is `Failed` — the locked transport wording rides the `Failed` arm.
     assert!(src.contains("Valid(v) => Done(v),"), "2xx -> Done:\n{src}");
     assert!(src.contains("Valid(bag) => Rejected(bag.issues),"), "422 -> Rejected:\n{src}");
     assert!(
-        src.contains("Failed(\"procedure `getUser` is unreachable\")"),
+        src.contains("Failed(\"procedure `usersById` is unreachable\")"),
         "unreachable wording on the Failed arm:\n{src}"
     );
     // No `on<Proc>` convention survives (clean break).
-    assert!(!src.contains("onGetUser"), "no on<Proc> emission:\n{src}");
-    assert!(src.contains("export extern fn vyrnRpcDoneCreateUser("), "createUser dispatcher");
+    assert!(!src.contains("onUsersById"), "no on<Proc> emission:\n{src}");
+    assert!(src.contains("export extern fn vyrnRpcDoneUsersCreate("), "users/create dispatcher");
     // The contract types are re-emitted verbatim (not imported).
     assert!(src.contains("export type User = { id: Int64, name: Username, age: Age }"), "{src}");
 }

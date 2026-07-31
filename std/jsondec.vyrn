@@ -1,0 +1,441 @@
+/// std/jsondec (RFC-0078 M3) — the untyped half of `fromJson`, in Vyrn.
+///
+/// `fromJson(T, s)` is two halves, exactly as `toJson` is (RFC-0078 M2b):
+///
+///   read(s)          -> a `Json` tree                 [std/jsonread — not typed]
+///   decode(tree, T)  -> a value of T, plus `Issue`s   [needs the compiler]
+///
+/// The second half is generated per target type by `vyrn-frontend`'s `jsondec`
+/// and calls into this module for everything that is NOT type-directed: the kind
+/// names, the `Issue` vocabulary, the path arithmetic, the tree accessors and the
+/// scalar decoders. So the compiler part is a walk over a declaration and nothing
+/// else — no parser, no number conversion, no message assembly, on any engine.
+///
+/// # The 0-or-1 array is the decode result convention
+///
+/// RFC-0018 decode ACCUMULATES: it does not stop at the first problem, so a
+/// decoder must report a failure and keep walking, and a composite must construct
+/// only once every part succeeded (a refined type cannot hold a value that failed
+/// its own predicate — there is no zeroed slot a Vyrn program can spell).
+///
+/// RFC-0078 M3 predicted `Option<T>` for that. It cannot be: a bare `Option<U>`
+/// IS a decode target (`Array<Option<Int64>>` decodes today), and `Option<Option<U>>`
+/// is rejected by the checker — "nested Option/Result is not supported in v0.1".
+/// So every decoder returns `Array<T>` with **zero or one** element: empty means
+/// "no value, and the issue is already recorded". One convention for every T,
+/// including `T = Option<U>`.
+///
+/// # Wording
+///
+/// Every message here is RFC-0018's, byte for byte. A parse error's is
+/// `std/jsonread`'s `line N, col M: <reason>` — RFC-0078's strictness ruling
+/// replaced the C reader's 0-based `at position N`.
+
+import { Json, JsonField } from "std/json"
+import { parseJson } from "std/jsonread"
+import { parseInt64, parseUInt64, parseFloat64, parseFloat32 } from "std/num"
+
+// ===========================================================================
+// The tree, read-only
+// ===========================================================================
+
+/// The JSON kind name used in `expected <X>, found <kind>`.
+export fn kindName(v: Json) -> String {
+    return match v {
+        JNull => "null",
+        JBool(b) => "boolean",
+        JNum(t) => "number",
+        JStr(s) => "string",
+        JArr(a) => "array",
+        JObj(f) => "object",
+    }
+}
+
+/// True for `null` — the wire form of an absent `Option`.
+export fn isNull(v: Json) -> Bool {
+    return match v {
+        JNull => true,
+        JBool(b) => false,
+        JNum(t) => false,
+        JStr(s) => false,
+        JArr(a) => false,
+        JObj(f) => false,
+    }
+}
+
+/// An object's fields in document order, or `[]` for anything else.
+export fn fieldsOf(v: Json) -> Array<JsonField> {
+    return match v {
+        JObj(fs) => fs,
+        JNull => [],
+        JBool(b) => [],
+        JNum(t) => [],
+        JStr(s) => [],
+        JArr(a) => [],
+    }
+}
+
+/// An array's items, or `[]` for anything else.
+export fn itemsOf(v: Json) -> Array<Json> {
+    return match v {
+        JArr(items) => items,
+        JNull => [],
+        JBool(b) => [],
+        JNum(t) => [],
+        JStr(s) => [],
+        JObj(f) => [],
+    }
+}
+
+/// A number's raw source text, or `""` for anything else.
+export fn numText(v: Json) -> String {
+    return match v {
+        JNum(t) => t,
+        JNull => "",
+        JBool(b) => "",
+        JStr(s) => "",
+        JArr(a) => "",
+        JObj(f) => "",
+    }
+}
+
+/// Whether an object carries `key` at all (a present `null` is still present).
+export fn hasField(fs: Array<JsonField>, key: String) -> Bool {
+    for f in fs {
+        if f.key == key {
+            return true
+        }
+    }
+    return false
+}
+
+/// The value of `key`, or `JNull` when absent. First occurrence wins — which
+/// `std/jsonread` makes unreachable, since it rejects a duplicate key outright.
+export fn fieldAt(fs: Array<JsonField>, key: String) -> Json {
+    for f in fs {
+        if f.key == key {
+            return f.value
+        }
+    }
+    return JNull
+}
+
+/// Element `i`, or `JNull` when the index is past the end — a short tuple
+/// payload decodes its missing members against `null` and fails there.
+export fn elemAt(items: Array<Json>, i: Int64) -> Json {
+    if i < 0 || i >= items.length {
+        return JNull
+    }
+    return items[i]
+}
+
+/// A bare string's content (a nullary enum variant's wire form), or `""`. No
+/// variant can be named `""`, so the sentinel cannot collide with a real tag.
+export fn tagOf(v: Json) -> String {
+    return match v {
+        JStr(s) => s,
+        JNull => "",
+        JBool(b) => "",
+        JNum(t) => "",
+        JArr(a) => "",
+        JObj(f) => "",
+    }
+}
+
+/// The single key of a one-member object (a payload variant's wire form), or
+/// `""` — including for an object with zero or two or more members, which is the
+/// "exactly one wire form per value" rule.
+export fn keyOf(v: Json) -> String {
+    let fs = fieldsOf(v)
+    if fs.length != 1 {
+        return ""
+    }
+    return fs[0].key
+}
+
+/// The single value of a one-member object, or `JNull`.
+export fn valOf(v: Json) -> Json {
+    let fs = fieldsOf(v)
+    if fs.length != 1 {
+        return JNull
+    }
+    return fs[0].value
+}
+
+// ===========================================================================
+// The Issue vocabulary (RFC-0018 — locked wording)
+// ===========================================================================
+
+/// `json.type`: `expected <what>, found <kind>`.
+export fn pushType(iss: modify Array<Issue>, path: String, expected: String, found: String) -> Unit {
+    iss.push(Issue {
+            key: "json.type",
+            path: path,
+            message: "expected " + expected + ", found " + found,
+        })
+}
+
+/// ``json.missing``: ``missing required field `name` ``.
+export fn pushMissing(iss: modify Array<Issue>, path: String, field: String) -> Unit {
+    iss.push(Issue {
+            key: "json.missing",
+            path: path,
+            message: "missing required field `" + field + "`",
+        })
+}
+
+/// `validate`: a refined type's `where` clause did not hold. The message is the
+/// compiler's own canonical validation wording, passed in rather than built here
+/// so the trap path and this path cannot word it differently.
+export fn pushValidate(iss: modify Array<Issue>, path: String, message: String) -> Unit {
+    iss.push(Issue { key: "validate", path: path, message: message })
+}
+
+/// A dotted path extended by a record field (or an enum tag).
+export fn fieldPath(parent: String, field: String) -> String {
+    if parent == "" {
+        return field
+    }
+    return parent + "." + field
+}
+
+/// A path extended by an array index.
+export fn indexPath(parent: String, i: Int64) -> String {
+    return parent + "[" + i.toString() + "]"
+}
+
+// ===========================================================================
+// The document
+// ===========================================================================
+
+/// Parse `src` into a one-element array, or record the single `json.parse` Issue
+/// and return `[]`. The wording is `std/jsonread`'s `line N, col M: <reason>`.
+export fn readDoc(src: String, iss: modify Array<Issue>) -> Array<Json> {
+    // `out.push(j)` rather than the literal `[j]`: a one-element array LITERAL
+    // lowers in the textual emitter as a fixed-size `[1 x T]` aggregate and is
+    // then phi'd against the `{ ptr, i64, i64 }` heap triple, which clang
+    // refuses (RFC-0078 M4b(2) recorded the same defect for a sized-integer
+    // literal). An empty literal plus `push` is the shape that lowers.
+    let mut out: Array<Json> = []
+    return match parseJson(src) {
+        Ok(j) => out.push(j),
+        Err(e) => pushParse(iss, e),
+    }
+}
+
+fn pushParse(iss: modify Array<Issue>, e: String) -> Array<Json> {
+    iss.push(Issue { key: "json.parse", path: "", message: e })
+    return []
+}
+
+// ===========================================================================
+// Scalars
+// ===========================================================================
+
+/// A JSON string as a `String`.
+export fn dStr(v: Json, path: String, iss: modify Array<Issue>) -> Array<String> {
+    let mut out: Array<String> = []
+    let k = kindName(v)
+    if k != "string" {
+        pushType(iss, path, "string", k)
+        return out
+    }
+    out.push(tagOf(v))
+    return out
+}
+
+/// A JSON boolean as a `Bool`.
+export fn dBool(v: Json, path: String, iss: modify Array<Issue>) -> Array<Bool> {
+    let mut out: Array<Bool> = []
+    let k = kindName(v)
+    if k != "boolean" {
+        pushType(iss, path, "boolean", k)
+        return out
+    }
+    out.push(boolOf(v))
+    return out
+}
+
+/// A boolean's value, or `false` for anything else (the kind is checked first).
+fn boolOf(v: Json) -> Bool {
+    return match v {
+        JBool(b) => b,
+        JNull => false,
+        JNum(t) => false,
+        JStr(s) => false,
+        JArr(a) => false,
+        JObj(f) => false,
+    }
+}
+
+/// A JSON integer-syntax number as an exact `Int64`. A fractional or exponent
+/// form, or a magnitude outside `Int64`, is `expected integer` — never a value
+/// rounded through a `Float64`.
+export fn dInt64(v: Json, path: String, iss: modify Array<Issue>) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let k = kindName(v)
+    if k != "number" {
+        pushType(iss, path, "integer", k)
+        return out
+    }
+    if let Some(n) = parseInt64(numText(v)) {
+        out.push(n)
+        return out
+    }
+    pushType(iss, path, "integer", "number")
+    return out
+}
+
+/// The same, restricted to `[lo, hi]` — the sized signed integers.
+export fn dIntRange(
+    v: Json,
+    path: String,
+    iss: modify Array<Issue>,
+    lo: Int64,
+    hi: Int64,
+) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let k = kindName(v)
+    if k != "number" {
+        pushType(iss, path, "integer", k)
+        return out
+    }
+    if let Some(n) = parseInt64(numText(v)) {
+        if n >= lo && n <= hi {
+            out.push(n)
+            return out
+        }
+    }
+    pushType(iss, path, "integer", "number")
+    return out
+}
+
+/// A JSON integer-syntax number as an exact `UInt64`, restricted to `[0, hi]` —
+/// the case the `parse` builtin cannot serve at all, since its `Option<Int64>`
+/// has no room above `Int64.max` (RFC-0078 M4a).
+export fn dUIntMax(
+    v: Json,
+    path: String,
+    iss: modify Array<Issue>,
+    hi: UInt64,
+) -> Array<UInt64> {
+    let mut out: Array<UInt64> = []
+    let k = kindName(v)
+    if k != "number" {
+        pushType(iss, path, "integer", k)
+        return out
+    }
+    if let Some(n) = parseUInt64(numText(v)) {
+        if n <= hi {
+            out.push(n)
+            return out
+        }
+    }
+    pushType(iss, path, "integer", "number")
+    return out
+}
+
+/// A JSON number as a `Float64`, correctly rounded (`std/num`). Integer syntax is
+/// accepted: `1` decodes into a `Float64` target as `1.0`.
+export fn dFloat64(v: Json, path: String, iss: modify Array<Issue>) -> Array<Float64> {
+    let mut out: Array<Float64> = []
+    let k = kindName(v)
+    if k != "number" {
+        pushType(iss, path, "number", k)
+        return out
+    }
+    if let Some(f) = parseFloat64(numText(v)) {
+        out.push(f)
+        return out
+    }
+    pushType(iss, path, "number", "number")
+    return out
+}
+
+/// A JSON number as a `Float32`, rounded to single precision DIRECTLY rather
+/// than through a `Float64` — decimal -> `Float64` -> `Float32` rounds twice and
+/// is wrong near a `Float32` tie (RFC-0078 M4a).
+export fn dFloat32(v: Json, path: String, iss: modify Array<Issue>) -> Array<Float32> {
+    let mut out: Array<Float32> = []
+    let k = kindName(v)
+    if k != "number" {
+        pushType(iss, path, "number", k)
+        return out
+    }
+    if let Some(f) = parseFloat32(numText(v)) {
+        out.push(f)
+        return out
+    }
+    pushType(iss, path, "number", "number")
+    return out
+}
+
+// ===========================================================================
+// Tests — the untyped half, on its own. The typed half is generated, so its
+// pins live in `examples/jsondecbytes.vyrn` where parity can see them.
+// ===========================================================================
+
+test "kind names are RFC-0018's" {
+    assertEq(kindName(JNull), "null")
+    assertEq(kindName(JBool(true)), "boolean")
+    assertEq(kindName(JNum("1")), "number")
+    assertEq(kindName(JStr("a")), "string")
+    assertEq(kindName(JArr([])), "array")
+    assertEq(kindName(JObj([])), "object")
+}
+
+test "a decode result is zero or one element" {
+    let mut iss: Array<Issue> = []
+    assertEq(dInt64(JNum("42"), "", iss).length, 1)
+    assertEq(dInt64(JNum("1.5"), "", iss).length, 0)
+    assertEq(iss.length, 1)
+    assertEq(iss[0].key, "json.type")
+    assertEq(iss[0].message, "expected integer, found number")
+}
+
+test "integers decode exactly, never through a Float64" {
+    let mut iss: Array<Issue> = []
+    assertEq(dInt64(JNum("9007199254740993"), "", iss)[0], 9007199254740993)
+    assertEq(dUIntMax(JNum("18446744073709551615"), "", iss, 18446744073709551615)[0], 18446744073709551615)
+    assertEq(iss.length, 0)
+}
+
+test "a sized integer out of range is a type issue, not a wrap" {
+    let mut iss: Array<Issue> = []
+    assertEq(dIntRange(JNum("128"), "i8v", iss, 0 - 128, 127).length, 0)
+    assertEq(dUIntMax(JNum("-1"), "u32v", iss, 4294967295).length, 0)
+    assertEq(iss.length, 2)
+    assertEq(iss[0].path, "i8v")
+    assertEq(iss[1].path, "u32v")
+}
+
+test "paths compose the way RFC-0018 spells them" {
+    assertEq(fieldPath("", "sur"), "sur")
+    assertEq(fieldPath("kids[1]", "name"), "kids[1].name")
+    assertEq(indexPath("kids", 1), "kids[1]")
+}
+
+test "a parse error is one issue, keyed json.parse, worded line/col" {
+    let mut iss: Array<Issue> = []
+    assertEq(readDoc("{ bad", iss).length, 0)
+    assertEq(iss.length, 1)
+    assertEq(iss[0].key, "json.parse")
+    assertEq(iss[0].path, "")
+    assertEq(iss[0].message, "line 1, col 3: expected a string key")
+}
+
+test "the one-wire-form-per-value accessors" {
+    // A one-member object names a payload variant; anything else is ""; a bare
+    // string names a nullary one.
+    assertEq(keyOf(JObj([JsonField { key: "Circle", value: JNum("3") }])), "Circle")
+    assertEq(keyOf(JObj([])), "")
+    assertEq(
+        keyOf(JObj([
+                    JsonField { key: "a", value: JNull },
+                    JsonField { key: "b", value: JNull },
+                ])),
+        "",
+    )
+    assertEq(tagOf(JStr("Dot")), "Dot")
+    assertEq(tagOf(JObj([])), "")
+}

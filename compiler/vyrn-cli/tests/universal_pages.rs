@@ -1,14 +1,18 @@
 //! Integration tests for RFC-0069 universal pages — the pastebin's `handle`
-//! driven through a real `vyrn serve`, exercising both channels of the page
-//! router:
+//! driven through a real `vyrn serve`, exercising both representations the page
+//! router negotiates at ONE url (RFC-0072 M4):
 //!
-//!   * an UNMARKED request is served as HTML exactly as before (the soft-nav
-//!     document channel is byte-for-byte unchanged);
-//!   * a MARKED request (`?__vyrn=data`) is answered with the
+//!   * a DOCUMENT request is served as HTML exactly as before — byte-for-byte
+//!     unchanged whether it states `Accept: text/html`, states nothing at all, or
+//!     states a browser's full navigation `Accept`;
+//!   * a request stating `Accept: application/json` is answered with the
 //!     `{page, title, props[, params]}` JSON payload, running `load()` exactly
 //!     as SSR would — the home list, a paste's `load()` props round-trip, the
 //!     static `/about` payload, the `@error` payload on a miss, and the
 //!     non-client `/raw/*` route falling back to its real (non-JSON) response.
+//!
+//! The payload carries `Vary: Accept`, and no response anywhere names the
+//! language or the framework — both are asserted here against the real wire.
 //!
 //! The store is file-backed (`data/pastes.json` relative to the process cwd), so
 //! the server runs in a fresh temp dir — an empty store the test seeds through
@@ -114,6 +118,15 @@ fn spawn_bin_server() -> Result<u16, String> {
         .arg("--port")
         .arg(port.to_string())
         .current_dir(&dir)
+        // EVERY stdio explicitly, `stdin` included. The server outlives this
+        // process by design (see the `mem::forget` below), and a child that
+        // inherits the console keeps the test runner's own stdout pipe OPEN after
+        // `cargo test` has exited — so a `cargo test … | tail` never sees EOF and
+        // hangs forever on a suite that already PASSED. That cost hours three
+        // times before it was understood, and it hid a real failure while it did
+        // it. `parity.rs` has always spelled `stdin(Stdio::null())` and has never
+        // hung; this suite did not, and did. Do not drop any of these three.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -152,6 +165,33 @@ fn get(port: u16, path: &str) -> (String, String, String) {
     request(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
 }
 
+/// A GET stating what representation it wants (RFC-0072 M4) — the whole wire
+/// difference between a page's document and its data payload.
+fn get_accept(port: u16, path: &str, accept: &str) -> (String, String, String) {
+    request(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: {accept}\r\nConnection: close\r\n\r\n"),
+    )
+}
+
+/// The JSON representation of a page.
+fn get_data(port: u16, path: &str) -> (String, String, String) {
+    get_accept(port, path, "application/json")
+}
+
+fn header(headers: &str, name: &str) -> String {
+    for line in headers.lines() {
+        let (n, v) = match line.split_once(':') {
+            Some(p) => p,
+            None => continue,
+        };
+        if n.trim().eq_ignore_ascii_case(name) {
+            return v.trim().to_string();
+        }
+    }
+    String::new()
+}
+
 fn post(port: u16, path: &str, body: &str) -> (String, String, String) {
     request(
         port,
@@ -163,19 +203,14 @@ fn post(port: u16, path: &str, body: &str) -> (String, String, String) {
 }
 
 fn content_type(headers: &str) -> String {
-    for line in headers.lines() {
-        if let Some(v) = line.strip_prefix("Content-Type:").or_else(|| line.strip_prefix("content-type:")) {
-            return v.trim().to_string();
-        }
-    }
-    String::new()
+    header(headers, "content-type")
 }
 
 /// Seed one paste through the RPC surface; return its server-assigned id.
 fn create_paste(port: u16, title: &str, body: &str, lang: &str) -> String {
     let req = format!("{{\"title\":\"{title}\",\"body\":\"{body}\",\"lang\":\"{lang}\"}}");
-    let (status, _h, resp) = post(port, "/rpc/createPaste", &req);
-    assert_eq!(status, "HTTP/1.1 200 OK", "createPaste failed: {resp}");
+    let (status, _h, resp) = post(port, "/_/pastes/create", &req);
+    assert_eq!(status, "HTTP/1.1 200 OK", "pastes/create failed: {resp}");
     // Result procedure → 200 `{"Ok":{...paste...}}`. Pull the id field.
     let key = "\"id\":\"";
     let i = resp.find(key).expect("paste id in create response") + key.len();
@@ -185,11 +220,34 @@ fn create_paste(port: u16, title: &str, body: &str, lang: &str) -> String {
 
 // ---- the document channel is unchanged -------------------------------------
 
+/// The claim RFC-0072 M4 has to make good on: turning the query marker into
+/// content negotiation must not move a single byte of the document channel. A GET
+/// stating `Accept: text/html`, a GET stating nothing, and a GET sending a real
+/// browser's navigation `Accept` must all produce the SAME response — status,
+/// headers and body — and no `Vary` header, since the document is what this URL
+/// answers by default.
 #[test]
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
-fn unmarked_about_is_html() {
+fn every_document_accept_is_byte_identical() {
     let port = bin_port();
-    let (status, headers, body) = get(port, "/about");
+    const BROWSER: &str = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
+    for path in ["/about", "/", "/p/nope404"] {
+        let bare = get(port, path);
+        for accept in ["text/html", BROWSER, "*/*", "text/html,application/json"] {
+            let stated = get_accept(port, path, accept);
+            assert_eq!(bare.0, stated.0, "{path} status moved under Accept: {accept}");
+            assert_eq!(bare.2, stated.2, "{path} body moved under Accept: {accept}");
+            assert_eq!(content_type(&stated.1), "text/html", "{path} @ {accept}");
+            assert_eq!(header(&stated.1, "vary"), "", "a document must not Vary: {path} @ {accept}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
+fn document_about_is_html() {
+    let port = bin_port();
+    let (status, headers, body) = get_accept(port, "/about", "text/html");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "text/html");
     // The full themed page (shell + body), not a JSON payload.
@@ -236,7 +294,7 @@ fn unmarked_missing_paste_is_404_html() {
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn marked_about_is_the_exact_static_payload() {
     let port = bin_port();
-    let (status, headers, body) = get(port, "/about?__vyrn=data");
+    let (status, headers, body) = get_data(port, "/about");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "application/json");
     // A static page: empty props, empty params, the url-pattern title/id.
@@ -248,7 +306,7 @@ fn marked_about_is_the_exact_static_payload() {
 fn marked_home_payload_carries_the_loaded_list() {
     let port = bin_port();
     let id = create_paste(port, "hello", "world", "text");
-    let (status, headers, body) = get(port, "/?__vyrn=data");
+    let (status, headers, body) = get_data(port, "/");
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "application/json");
     assert!(body.starts_with("{\"page\":\"/\",\"title\":"), "unexpected payload:\n{body}");
@@ -263,7 +321,7 @@ fn marked_home_payload_carries_the_loaded_list() {
 fn marked_paste_props_round_trip_through_the_wire_codec() {
     let port = bin_port();
     let id = create_paste(port, "deep title", "the body text", "text");
-    let (status, headers, body) = get(port, &format!("/p/{id}?__vyrn=data"));
+    let (status, headers, body) = get_data(port, &format!("/p/{id}"));
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(content_type(&headers), "application/json");
     assert!(body.starts_with("{\"page\":\"/p/:id\","), "unexpected payload:\n{body}");
@@ -279,7 +337,7 @@ fn marked_paste_props_round_trip_through_the_wire_codec() {
 #[ignore = "generates the full bin app cold (minutes in a debug build) - run with the parity tier: cargo test --test universal_pages -- --ignored"]
 fn marked_missing_paste_is_the_error_payload() {
     let port = bin_port();
-    let (status, headers, body) = get(port, "/p/ghost?__vyrn=data");
+    let (status, headers, body) = get_data(port, "/p/ghost");
     // A miss on the DATA channel is a 200 carrying the @error payload (the client
     // renders the themed error page); the document channel still 404s.
     assert_eq!(status, "HTTP/1.1 200 OK");
@@ -295,7 +353,7 @@ fn marked_non_client_route_falls_back_to_its_real_response() {
     let id = create_paste(port, "raw", "raw body content", "text");
     // /raw/[id] is a `.vyrn` respond page — NOT in the client bundle. A marked
     // request must NOT be answered as JSON, so the client hard-navs to it.
-    let (status, headers, body) = get(port, &format!("/raw/{id}?__vyrn=data"));
+    let (status, headers, body) = get_data(port, &format!("/raw/{id}"));
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert!(!content_type(&headers).contains("application/json"), "raw route must not be JSON: {}", content_type(&headers));
     assert!(body.contains("raw body content"));

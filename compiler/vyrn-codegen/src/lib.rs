@@ -12,9 +12,11 @@
 //! Local variables use `alloca`/`load`/`store` (LLVM's `mem2reg` promotes them
 //! to SSA registers), which keeps the emitter simple. `&&`/`||` short-circuit
 //! via branches + `phi`, matching the interpreter in [`vyrn_frontend::interp`].
-//!
-//! The Inkwell (in-memory LLVM) backend in the excluded `vyrn-codegen-llvm`
-//! crate will eventually replace this; both must agree with the interpreter.
+
+pub mod direct;
+pub mod layout;
+pub mod toolchain;
+pub mod wasm;
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -23,6 +25,18 @@ use vyrn_frontend::ast::*;
 use vyrn_frontend::own::DropKind;
 
 /// LLVM IR for the region/arena runtime (see the preamble comment in `emit`).
+///
+/// Two ways out of a region and the difference is the free. `__vyrn_region_exit`
+/// pops the frame AND releases its chain, which is what a fall-through (and a
+/// `break`/`continue`, whose escapes RFC-0004's `region_store_guard` covers) wants.
+/// `__vyrn_region_pop` only pops, and it exists because a `return` out of a region
+/// can hand back a pointer INTO the frame it is leaving — the escape guard examines
+/// stores into named bindings, not return values, so `return a + b` is not covered
+/// by anything. Popping without freeing leaks that frame and cannot dangle, which
+/// is the trade RFC-0004's escape analysis has to be written before it can be
+/// improved on. Before this existed, `return` emitted neither call: the frame was
+/// never popped, so the 65th call to a function returning out of a region printed
+/// `error: region nesting exceeds 64` where every other engine printed an answer.
 ///
 /// The arena stack is `thread_local` (RFC-0025): `region { .. }` is memory
 /// management, not an effect, so an isolated task may use it — and with tasks
@@ -65,6 +79,14 @@ entry:
   store ptr %raw, ptr %slot
   %user = getelementptr i8, ptr %raw, i64 8
   ret ptr %user
+}
+
+define void @__vyrn_region_pop() {
+entry:
+  %sp = load i64, ptr @__vyrn_region_sp
+  %idx = sub i64 %sp, 1
+  store i64 %idx, ptr @__vyrn_region_sp
+  ret void
 }
 
 define void @__vyrn_region_exit() {
@@ -186,49 +208,17 @@ entry:
 
 ";
 
-/// Text-encoding runtime (hex / base64 / url) plus the shared helpers: a strict
-/// UTF-8 validator (Björn Höhrmann's DFA — matches Rust's `from_utf8`) used by the
-/// decoders, and hex-digit conversions. The `@__vyrn_utf8d` and `@__vyrn_b64alpha`
-/// tables are emitted separately (generated in `emit`). Decoders return the
-/// Option aggregate `{ i1 tag, i64 word0, i64 word1 }` (word0 = `ptrtoint` of the
-/// result string on `Some`; all-zero on `None`).
+/// The strict UTF-8 validator: Björn Höhrmann's DFA over the `@__vyrn_utf8d`
+/// table, which is emitted separately in `emit` and shared with the direct wasm
+/// backend (RFC-0077 M2g). It matches Rust's `from_utf8` exactly, which is what
+/// makes `stringFromBytes` the single gate on what a `String` may hold.
+///
+/// It used to have company: the hex, base64 and percent codecs were ~520 lines of
+/// hand-written IR here, with the hex-digit helpers and the base64 alphabet table.
+/// RFC-0078 M4c routed those six builtins to `std/codecs`, so what remains is the
+/// primitive the Vyrn implementations are written ON — through `stringFromBytes` —
+/// rather than one of the operations they duplicated.
 const ENCODING_RUNTIME: &str = "\
-define i8 @__vyrn_hexdigit(i8 %n) {
-  %lt = icmp ult i8 %n, 10
-  %d0 = add i8 %n, 48
-  %da = add i8 %n, 87
-  %r = select i1 %lt, i8 %d0, i8 %da
-  ret i8 %r
-}
-
-define i8 @__vyrn_hexdigit_uc(i8 %n) {
-  %lt = icmp ult i8 %n, 10
-  %d0 = add i8 %n, 48
-  %da = add i8 %n, 55
-  %r = select i1 %lt, i8 %d0, i8 %da
-  ret i8 %r
-}
-
-define i32 @__vyrn_hexval(i8 %c) {
-  %cz = zext i8 %c to i32
-  %d0 = icmp uge i32 %cz, 48
-  %d9 = icmp ule i32 %cz, 57
-  %isd = and i1 %d0, %d9
-  %la = icmp uge i32 %cz, 97
-  %lf = icmp ule i32 %cz, 102
-  %isl = and i1 %la, %lf
-  %ua = icmp uge i32 %cz, 65
-  %uf = icmp ule i32 %cz, 70
-  %isu = and i1 %ua, %uf
-  %vd = sub i32 %cz, 48
-  %vl = sub i32 %cz, 87
-  %vu = sub i32 %cz, 55
-  %r1 = select i1 %isd, i32 %vd, i32 -1
-  %r2 = select i1 %isl, i32 %vl, i32 %r1
-  %r3 = select i1 %isu, i32 %vu, i32 %r2
-  ret i32 %r3
-}
-
 define i1 @__vyrn_utf8valid(ptr %s, i64 %len) {
 entry:
   br label %loop
@@ -256,497 +246,14 @@ fin:
   ret i1 %ok
 }
 
-define ptr @__vyrn_hex_encode(ptr %s) {
-entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
-  %outlen = mul i64 %len, 2
-  %sz = add i64 %outlen, 1
-  %out = call ptr @__vyrn_malloc(i64 %sz)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %entry ], [ %i2, %body ]
-  %done = icmp uge i64 %i, %len
-  br i1 %done, label %fin, label %body
-body:
-  %bp = getelementptr i8, ptr %s, i64 %i
-  %b = load i8, ptr %bp
-  %hi = lshr i8 %b, 4
-  %lo = and i8 %b, 15
-  %hc = call i8 @__vyrn_hexdigit(i8 %hi)
-  %lc = call i8 @__vyrn_hexdigit(i8 %lo)
-  %o = mul i64 %i, 2
-  %op0 = getelementptr i8, ptr %out, i64 %o
-  store i8 %hc, ptr %op0
-  %o1 = add i64 %o, 1
-  %op1 = getelementptr i8, ptr %out, i64 %o1
-  store i8 %lc, ptr %op1
-  %i2 = add i64 %i, 1
-  br label %loop
-fin:
-  %ep = getelementptr i8, ptr %out, i64 %outlen
-  store i8 0, ptr %ep
-  ret ptr %out
-}
-
-define {i1, i64, i64} @__vyrn_hex_decode(ptr %s) {
-entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
-  %odd = and i64 %len, 1
-  %isodd = icmp ne i64 %odd, 0
-  br i1 %isodd, label %none, label %ok0
-ok0:
-  %outlen = lshr i64 %len, 1
-  %sz = add i64 %outlen, 1
-  %out = call ptr @__vyrn_malloc(i64 %sz)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %ok0 ], [ %i2, %cont ]
-  %done = icmp uge i64 %i, %outlen
-  br i1 %done, label %valid, label %body
-body:
-  %hidx = mul i64 %i, 2
-  %lidx = add i64 %hidx, 1
-  %hip = getelementptr i8, ptr %s, i64 %hidx
-  %hc = load i8, ptr %hip
-  %lop = getelementptr i8, ptr %s, i64 %lidx
-  %lc = load i8, ptr %lop
-  %hv = call i32 @__vyrn_hexval(i8 %hc)
-  %lv = call i32 @__vyrn_hexval(i8 %lc)
-  %hbad = icmp slt i32 %hv, 0
-  %lbad = icmp slt i32 %lv, 0
-  %bad = or i1 %hbad, %lbad
-  br i1 %bad, label %none, label %cont
-cont:
-  %hv8 = trunc i32 %hv to i8
-  %lv8 = trunc i32 %lv to i8
-  %hsh = shl i8 %hv8, 4
-  %byte = or i8 %hsh, %lv8
-  %op = getelementptr i8, ptr %out, i64 %i
-  store i8 %byte, ptr %op
-  %i2 = add i64 %i, 1
-  br label %loop
-valid:
-  %ep = getelementptr i8, ptr %out, i64 %outlen
-  store i8 0, ptr %ep
-  %v = call i1 @__vyrn_utf8valid(ptr %out, i64 %outlen)
-  br i1 %v, label %some, label %none
-some:
-  %w0 = ptrtoint ptr %out to i64
-  %s0 = insertvalue {i1, i64, i64} undef, i1 1, 0
-  %s1 = insertvalue {i1, i64, i64} %s0, i64 %w0, 1
-  %s2 = insertvalue {i1, i64, i64} %s1, i64 0, 2
-  ret {i1, i64, i64} %s2
-none:
-  %n0 = insertvalue {i1, i64, i64} undef, i1 0, 0
-  %n1 = insertvalue {i1, i64, i64} %n0, i64 0, 1
-  %n2 = insertvalue {i1, i64, i64} %n1, i64 0, 2
-  ret {i1, i64, i64} %n2
-}
-
-define ptr @__vyrn_url_encode(ptr %s) {
-entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
-  %cap = mul i64 %len, 3
-  %sz = add i64 %cap, 1
-  %out = call ptr @__vyrn_malloc(i64 %sz)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %entry ], [ %i2, %cont ]
-  %o = phi i64 [ 0, %entry ], [ %o2, %cont ]
-  %done = icmp uge i64 %i, %len
-  br i1 %done, label %fin, label %body
-body:
-  %bp = getelementptr i8, ptr %s, i64 %i
-  %b = load i8, ptr %bp
-  %bz = zext i8 %b to i32
-  %alnum_l = icmp uge i32 %bz, 97
-  %alnum_lh = icmp ule i32 %bz, 122
-  %isl = and i1 %alnum_l, %alnum_lh
-  %alnum_u = icmp uge i32 %bz, 65
-  %alnum_uh = icmp ule i32 %bz, 90
-  %isu = and i1 %alnum_u, %alnum_uh
-  %dig_l = icmp uge i32 %bz, 48
-  %dig_h = icmp ule i32 %bz, 57
-  %isdig = and i1 %dig_l, %dig_h
-  %isdash = icmp eq i32 %bz, 45
-  %isund = icmp eq i32 %bz, 95
-  %isdot = icmp eq i32 %bz, 46
-  %istil = icmp eq i32 %bz, 126
-  %u1 = or i1 %isl, %isu
-  %u2 = or i1 %u1, %isdig
-  %u3 = or i1 %u2, %isdash
-  %u4 = or i1 %u3, %isund
-  %u5 = or i1 %u4, %isdot
-  %unres = or i1 %u5, %istil
-  br i1 %unres, label %plain, label %pct
-plain:
-  %pp = getelementptr i8, ptr %out, i64 %o
-  store i8 %b, ptr %pp
-  %op1 = add i64 %o, 1
-  br label %cont
-pct:
-  %hi = lshr i8 %b, 4
-  %lo = and i8 %b, 15
-  %hc = call i8 @__vyrn_hexdigit_uc(i8 %hi)
-  %lc = call i8 @__vyrn_hexdigit_uc(i8 %lo)
-  %p0 = getelementptr i8, ptr %out, i64 %o
-  store i8 37, ptr %p0
-  %o_1 = add i64 %o, 1
-  %p1 = getelementptr i8, ptr %out, i64 %o_1
-  store i8 %hc, ptr %p1
-  %o_2 = add i64 %o, 2
-  %p2 = getelementptr i8, ptr %out, i64 %o_2
-  store i8 %lc, ptr %p2
-  %op3 = add i64 %o, 3
-  br label %cont
-cont:
-  %o2 = phi i64 [ %op1, %plain ], [ %op3, %pct ]
-  %i2 = add i64 %i, 1
-  br label %loop
-fin:
-  %ep = getelementptr i8, ptr %out, i64 %o
-  store i8 0, ptr %ep
-  ret ptr %out
-}
-
-define {i1, i64, i64} @__vyrn_url_decode(ptr %s) {
-entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
-  %sz = add i64 %len, 1
-  %out = call ptr @__vyrn_malloc(i64 %sz)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %entry ], [ %inext, %cont ]
-  %o = phi i64 [ 0, %entry ], [ %onext, %cont ]
-  %done = icmp uge i64 %i, %len
-  br i1 %done, label %valid, label %body
-body:
-  %bp = getelementptr i8, ptr %s, i64 %i
-  %b = load i8, ptr %bp
-  %ispct = icmp eq i8 %b, 37
-  br i1 %ispct, label %pct, label %plain
-plain:
-  %pp = getelementptr i8, ptr %out, i64 %o
-  store i8 %b, ptr %pp
-  %o_p = add i64 %o, 1
-  %i_p = add i64 %i, 1
-  br label %cont
-pct:
-  %i1 = add i64 %i, 1
-  %i2 = add i64 %i, 2
-  %room = icmp ult i64 %i2, %len
-  br i1 %room, label %pctok, label %none
-pctok:
-  %hip = getelementptr i8, ptr %s, i64 %i1
-  %hc = load i8, ptr %hip
-  %lop = getelementptr i8, ptr %s, i64 %i2
-  %lc = load i8, ptr %lop
-  %hv = call i32 @__vyrn_hexval(i8 %hc)
-  %lv = call i32 @__vyrn_hexval(i8 %lc)
-  %hbad = icmp slt i32 %hv, 0
-  %lbad = icmp slt i32 %lv, 0
-  %bad = or i1 %hbad, %lbad
-  br i1 %bad, label %none, label %pctstore
-pctstore:
-  %hv8 = trunc i32 %hv to i8
-  %lv8 = trunc i32 %lv to i8
-  %hsh = shl i8 %hv8, 4
-  %byte = or i8 %hsh, %lv8
-  %pp2 = getelementptr i8, ptr %out, i64 %o
-  store i8 %byte, ptr %pp2
-  %o_pc = add i64 %o, 1
-  %i_pc = add i64 %i, 3
-  br label %cont
-cont:
-  %onext = phi i64 [ %o_p, %plain ], [ %o_pc, %pctstore ]
-  %inext = phi i64 [ %i_p, %plain ], [ %i_pc, %pctstore ]
-  br label %loop
-valid:
-  %ep = getelementptr i8, ptr %out, i64 %o
-  store i8 0, ptr %ep
-  %v = call i1 @__vyrn_utf8valid(ptr %out, i64 %o)
-  br i1 %v, label %some, label %none
-some:
-  %w0 = ptrtoint ptr %out to i64
-  %s0 = insertvalue {i1, i64, i64} undef, i1 1, 0
-  %s1 = insertvalue {i1, i64, i64} %s0, i64 %w0, 1
-  %s2 = insertvalue {i1, i64, i64} %s1, i64 0, 2
-  ret {i1, i64, i64} %s2
-none:
-  %n0 = insertvalue {i1, i64, i64} undef, i1 0, 0
-  %n1 = insertvalue {i1, i64, i64} %n0, i64 0, 1
-  %n2 = insertvalue {i1, i64, i64} %n1, i64 0, 2
-  ret {i1, i64, i64} %n2
-}
-
-define i8 @__vyrn_b64char(i64 %idx) {
-  %p = getelementptr i8, ptr @__vyrn_b64alpha, i64 %idx
-  %c = load i8, ptr %p
-  ret i8 %c
-}
-
-define ptr @__vyrn_b64_encode(ptr %s) {
-entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
-  %p2 = add i64 %len, 2
-  %grp = udiv i64 %p2, 3
-  %outlen = mul i64 %grp, 4
-  %sz = add i64 %outlen, 1
-  %out = call ptr @__vyrn_malloc(i64 %sz)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %entry ], [ %i3, %body ]
-  %o = phi i64 [ 0, %entry ], [ %o4, %body ]
-  %rem = sub i64 %len, %i
-  %has3 = icmp uge i64 %rem, 3
-  br i1 %has3, label %body, label %tail
-body:
-  %b0p = getelementptr i8, ptr %s, i64 %i
-  %b0 = load i8, ptr %b0p
-  %i1 = add i64 %i, 1
-  %b1p = getelementptr i8, ptr %s, i64 %i1
-  %b1 = load i8, ptr %b1p
-  %i2 = add i64 %i, 2
-  %b2p = getelementptr i8, ptr %s, i64 %i2
-  %b2 = load i8, ptr %b2p
-  %z0 = zext i8 %b0 to i64
-  %z1 = zext i8 %b1 to i64
-  %z2 = zext i8 %b2 to i64
-  %s0 = shl i64 %z0, 16
-  %s1 = shl i64 %z1, 8
-  %n01 = or i64 %s0, %s1
-  %n = or i64 %n01, %z2
-  %d0 = lshr i64 %n, 18
-  %d0m = and i64 %d0, 63
-  %d1 = lshr i64 %n, 12
-  %d1m = and i64 %d1, 63
-  %d2 = lshr i64 %n, 6
-  %d2m = and i64 %d2, 63
-  %d3m = and i64 %n, 63
-  %c0 = call i8 @__vyrn_b64char(i64 %d0m)
-  %c1 = call i8 @__vyrn_b64char(i64 %d1m)
-  %c2 = call i8 @__vyrn_b64char(i64 %d2m)
-  %c3 = call i8 @__vyrn_b64char(i64 %d3m)
-  %o0p = getelementptr i8, ptr %out, i64 %o
-  store i8 %c0, ptr %o0p
-  %oo1 = add i64 %o, 1
-  %o1p = getelementptr i8, ptr %out, i64 %oo1
-  store i8 %c1, ptr %o1p
-  %oo2 = add i64 %o, 2
-  %o2p = getelementptr i8, ptr %out, i64 %oo2
-  store i8 %c2, ptr %o2p
-  %oo3 = add i64 %o, 3
-  %o3p = getelementptr i8, ptr %out, i64 %oo3
-  store i8 %c3, ptr %o3p
-  %i3 = add i64 %i, 3
-  %o4 = add i64 %o, 4
-  br label %loop
-tail:
-  %is1 = icmp eq i64 %rem, 1
-  br i1 %is1, label %one, label %tail2
-one:
-  %t0p = getelementptr i8, ptr %s, i64 %i
-  %t0 = load i8, ptr %t0p
-  %tz0 = zext i8 %t0 to i64
-  %tn = shl i64 %tz0, 16
-  %e0 = lshr i64 %tn, 18
-  %e0m = and i64 %e0, 63
-  %e1 = lshr i64 %tn, 12
-  %e1m = and i64 %e1, 63
-  %ec0 = call i8 @__vyrn_b64char(i64 %e0m)
-  %ec1 = call i8 @__vyrn_b64char(i64 %e1m)
-  %e0p = getelementptr i8, ptr %out, i64 %o
-  store i8 %ec0, ptr %e0p
-  %eo1 = add i64 %o, 1
-  %e1p = getelementptr i8, ptr %out, i64 %eo1
-  store i8 %ec1, ptr %e1p
-  %eo2 = add i64 %o, 2
-  %e2p = getelementptr i8, ptr %out, i64 %eo2
-  store i8 61, ptr %e2p
-  %eo3 = add i64 %o, 3
-  %e3p = getelementptr i8, ptr %out, i64 %eo3
-  store i8 61, ptr %e3p
-  br label %fin
-tail2:
-  %is2 = icmp eq i64 %rem, 2
-  br i1 %is2, label %two, label %fin
-two:
-  %f0p = getelementptr i8, ptr %s, i64 %i
-  %f0 = load i8, ptr %f0p
-  %fi1 = add i64 %i, 1
-  %f1p = getelementptr i8, ptr %s, i64 %fi1
-  %f1 = load i8, ptr %f1p
-  %fz0 = zext i8 %f0 to i64
-  %fz1 = zext i8 %f1 to i64
-  %fs0 = shl i64 %fz0, 16
-  %fs1 = shl i64 %fz1, 8
-  %fn = or i64 %fs0, %fs1
-  %g0 = lshr i64 %fn, 18
-  %g0m = and i64 %g0, 63
-  %g1 = lshr i64 %fn, 12
-  %g1m = and i64 %g1, 63
-  %g2 = lshr i64 %fn, 6
-  %g2m = and i64 %g2, 63
-  %gc0 = call i8 @__vyrn_b64char(i64 %g0m)
-  %gc1 = call i8 @__vyrn_b64char(i64 %g1m)
-  %gc2 = call i8 @__vyrn_b64char(i64 %g2m)
-  %g0p = getelementptr i8, ptr %out, i64 %o
-  store i8 %gc0, ptr %g0p
-  %go1 = add i64 %o, 1
-  %g1p = getelementptr i8, ptr %out, i64 %go1
-  store i8 %gc1, ptr %g1p
-  %go2 = add i64 %o, 2
-  %g2p = getelementptr i8, ptr %out, i64 %go2
-  store i8 %gc2, ptr %g2p
-  %go3 = add i64 %o, 3
-  %g3p = getelementptr i8, ptr %out, i64 %go3
-  store i8 61, ptr %g3p
-  br label %fin
-fin:
-  %ep = getelementptr i8, ptr %out, i64 %outlen
-  store i8 0, ptr %ep
-  ret ptr %out
-}
-
-define i32 @__vyrn_b64val(i8 %c) {
-  %cz = zext i8 %c to i32
-  %ua = icmp uge i32 %cz, 65
-  %uz = icmp ule i32 %cz, 90
-  %isu = and i1 %ua, %uz
-  %la = icmp uge i32 %cz, 97
-  %lz = icmp ule i32 %cz, 122
-  %isl = and i1 %la, %lz
-  %da = icmp uge i32 %cz, 48
-  %dz = icmp ule i32 %cz, 57
-  %isd = and i1 %da, %dz
-  %isp = icmp eq i32 %cz, 43
-  %iss = icmp eq i32 %cz, 47
-  %vu = sub i32 %cz, 65
-  %vl = sub i32 %cz, 71
-  %vd = add i32 %cz, 4
-  %r1 = select i1 %isu, i32 %vu, i32 -1
-  %r2 = select i1 %isl, i32 %vl, i32 %r1
-  %r3 = select i1 %isd, i32 %vd, i32 %r2
-  %r4 = select i1 %isp, i32 62, i32 %r3
-  %r5 = select i1 %iss, i32 63, i32 %r4
-  ret i32 %r5
-}
-
-define {i1, i64, i64} @__vyrn_b64_decode(ptr %s) {
-entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
-  %m4 = and i64 %len, 3
-  %notmul4 = icmp ne i64 %m4, 0
-  %empty = icmp eq i64 %len, 0
-  br i1 %notmul4, label %none, label %ok0
-ok0:
-  %cap = mul i64 %len, 1
-  %sz = add i64 %cap, 1
-  %out = call ptr @__vyrn_malloc(i64 %sz)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %ok0 ], [ %i4, %store ]
-  %o = phi i64 [ 0, %ok0 ], [ %onext, %store ]
-  %done = icmp uge i64 %i, %len
-  br i1 %done, label %valid, label %body
-body:
-  %c0p = getelementptr i8, ptr %s, i64 %i
-  %c0 = load i8, ptr %c0p
-  %ci1 = add i64 %i, 1
-  %c1p = getelementptr i8, ptr %s, i64 %ci1
-  %c1 = load i8, ptr %c1p
-  %ci2 = add i64 %i, 2
-  %c2p = getelementptr i8, ptr %s, i64 %ci2
-  %c2 = load i8, ptr %c2p
-  %ci3 = add i64 %i, 3
-  %c3p = getelementptr i8, ptr %s, i64 %ci3
-  %c3 = load i8, ptr %c3p
-  %isLast4 = add i64 %i, 4
-  %islast = icmp eq i64 %isLast4, %len
-  %pad2 = icmp eq i8 %c2, 61
-  %pad3 = icmp eq i8 %c3, 61
-  %anypad = or i1 %pad2, %pad3
-  %padnotlast = and i1 %anypad, %islast
-  %padbad1 = xor i1 %islast, true
-  %badpadpos = and i1 %anypad, %padbad1
-  br i1 %badpadpos, label %none, label %chkpad
-chkpad:
-  %pad2only = and i1 %pad2, %pad3
-  %pad2butnot3 = xor i1 %pad3, true
-  %illegal = and i1 %pad2, %pad2butnot3
-  br i1 %illegal, label %none, label %vals
-vals:
-  %v0 = call i32 @__vyrn_b64val(i8 %c0)
-  %v1 = call i32 @__vyrn_b64val(i8 %c1)
-  %v2raw = call i32 @__vyrn_b64val(i8 %c2)
-  %v3raw = call i32 @__vyrn_b64val(i8 %c3)
-  %v2 = select i1 %pad2, i32 0, i32 %v2raw
-  %v3 = select i1 %pad3, i32 0, i32 %v3raw
-  %b0bad = icmp slt i32 %v0, 0
-  %b1bad = icmp slt i32 %v1, 0
-  %b2bad = icmp slt i32 %v2, 0
-  %b3bad = icmp slt i32 %v3, 0
-  %e01 = or i1 %b0bad, %b1bad
-  %e23 = or i1 %b2bad, %b3bad
-  %anybad = or i1 %e01, %e23
-  br i1 %anybad, label %none, label %store
-store:
-  %z0 = zext i32 %v0 to i64
-  %z1 = zext i32 %v1 to i64
-  %z2 = zext i32 %v2 to i64
-  %z3 = zext i32 %v3 to i64
-  %sh0 = shl i64 %z0, 18
-  %sh1 = shl i64 %z1, 12
-  %sh2 = shl i64 %z2, 6
-  %n01 = or i64 %sh0, %sh1
-  %n012 = or i64 %n01, %sh2
-  %n = or i64 %n012, %z3
-  %ob0 = lshr i64 %n, 16
-  %ob0t = trunc i64 %ob0 to i8
-  %op0 = getelementptr i8, ptr %out, i64 %o
-  store i8 %ob0t, ptr %op0
-  %o1 = add i64 %o, 1
-  %ob1 = lshr i64 %n, 8
-  %ob1t = trunc i64 %ob1 to i8
-  %op1 = getelementptr i8, ptr %out, i64 %o1
-  store i8 %ob1t, ptr %op1
-  %o2 = add i64 %o, 2
-  %ob2t = trunc i64 %n to i8
-  %op2 = getelementptr i8, ptr %out, i64 %o2
-  store i8 %ob2t, ptr %op2
-  %keep1 = xor i1 %pad3, true
-  %keep1n = zext i1 %keep1 to i64
-  %keep2 = xor i1 %pad2, true
-  %keep2n = zext i1 %keep2 to i64
-  %oplus = add i64 %o, 1
-  %oplus2 = add i64 %oplus, %keep1n
-  %onext = add i64 %oplus2, %keep2n
-  %i4 = add i64 %i, 4
-  br label %loop
-valid:
-  %ep = getelementptr i8, ptr %out, i64 %o
-  store i8 0, ptr %ep
-  %v = call i1 @__vyrn_utf8valid(ptr %out, i64 %o)
-  br i1 %v, label %some, label %none
-some:
-  %w0 = ptrtoint ptr %out to i64
-  %s0 = insertvalue {i1, i64, i64} undef, i1 1, 0
-  %s1 = insertvalue {i1, i64, i64} %s0, i64 %w0, 1
-  %s2 = insertvalue {i1, i64, i64} %s1, i64 0, 2
-  ret {i1, i64, i64} %s2
-none:
-  %n0 = insertvalue {i1, i64, i64} undef, i1 0, 0
-  %n1 = insertvalue {i1, i64, i64} %n0, i64 0, 1
-  %n2 = insertvalue {i1, i64, i64} %n1, i64 0, 2
-  ret {i1, i64, i64} %n2
-}
-
 ";
 
-/// `bytes(s)` / `chars(s)`: build an `Array<UInt8>` ({ptr,len,cap}, i8 stride —
-/// RFC-0014 M2) of a string's raw UTF-8 bytes, or an `Array<Int>` of its decoded
-/// Unicode code points (a two-pass UTF-8 decode — count leaders, then decode
-/// each 1–4 byte sequence).
+/// `bytes(s)`: an `Array<UInt8>` ({ptr,len,cap}, i8 stride — RFC-0014 M2) of a
+/// string's raw UTF-8 bytes. The VIEW every Vyrn string routine is written on, and
+/// irreducible for that reason (RFC-0078 M4a's category).
+///
+/// `chars(s)` shared this block until RFC-0078 M4c: its two-pass decoder was 82
+/// lines of IR and is now `std/text`'s `decodeUtf8`.
 const STRING_RUNTIME: &str = "\
 define {ptr, i64, i64} @__vyrn_str_bytes(ptr %s) {
 entry:
@@ -771,109 +278,12 @@ ret:
   ret {ptr, i64, i64} %r2
 }
 
-; Copy %n bytes from %src into %dst (the `slice` builtin's body — RFC-0046).
-; Both cut points are already validated at the call site (bounds + UTF-8
-; boundary), so this is an unconditional byte copy; the caller NUL-terminates.
-define void @__vyrn_bytecopy(ptr %dst, ptr %src, i64 %n) {
-entry:
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %entry ], [ %i2, %body ]
-  %done = icmp uge i64 %i, %n
-  br i1 %done, label %ret, label %body
-body:
-  %sp = getelementptr i8, ptr %src, i64 %i
-  %b = load i8, ptr %sp
-  %dp = getelementptr i8, ptr %dst, i64 %i
-  store i8 %b, ptr %dp
-  %i2 = add i64 %i, 1
-  br label %loop
-ret:
-  ret void
-}
-
-define {ptr, i64, i64} @__vyrn_str_chars(ptr %s) {
-entry:
-  %len = call i64 @__vyrn_strlen(ptr %s)
-  br label %cloop
-cloop:
-  %ci = phi i64 [ 0, %entry ], [ %ci2, %cbody ]
-  %cn = phi i64 [ 0, %entry ], [ %cn2, %cbody ]
-  %cdone = icmp uge i64 %ci, %len
-  br i1 %cdone, label %alloc, label %cbody
-cbody:
-  %cbp = getelementptr i8, ptr %s, i64 %ci
-  %cb = load i8, ptr %cbp
-  %cmask = and i8 %cb, -64
-  %iscont = icmp eq i8 %cmask, -128
-  %inc = select i1 %iscont, i64 0, i64 1
-  %cn2 = add i64 %cn, %inc
-  %ci2 = add i64 %ci, 1
-  br label %cloop
-alloc:
-  %sz = mul i64 %cn, 8
-  %data = call ptr @__vyrn_malloc(i64 %sz)
-  br label %dloop
-dloop:
-  %di = phi i64 [ 0, %alloc ], [ %di2, %store ]
-  %dj = phi i64 [ 0, %alloc ], [ %dj2, %store ]
-  %ddone = icmp uge i64 %di, %len
-  br i1 %ddone, label %ret, label %dbody
-dbody:
-  %b0p = getelementptr i8, ptr %s, i64 %di
-  %b0 = load i8, ptr %b0p
-  %b0z = zext i8 %b0 to i64
-  %c1 = icmp ult i64 %b0z, 128
-  br i1 %c1, label %L1, label %m2
-L1:
-  br label %have
-m2:
-  %c2 = icmp ult i64 %b0z, 224
-  br i1 %c2, label %L2, label %m3
-L2:
-  %cp2 = and i64 %b0z, 31
-  br label %have
-m3:
-  %c3 = icmp ult i64 %b0z, 240
-  br i1 %c3, label %L3, label %L4
-L3:
-  %cp3 = and i64 %b0z, 15
-  br label %have
-L4:
-  %cp4 = and i64 %b0z, 7
-  br label %have
-have:
-  %L = phi i64 [ 1, %L1 ], [ 2, %L2 ], [ 3, %L3 ], [ 4, %L4 ]
-  %cp0 = phi i64 [ %b0z, %L1 ], [ %cp2, %L2 ], [ %cp3, %L3 ], [ %cp4, %L4 ]
-  br label %kloop
-kloop:
-  %k = phi i64 [ 1, %have ], [ %k2, %kbody ]
-  %cp = phi i64 [ %cp0, %have ], [ %cpn, %kbody ]
-  %kdone = icmp uge i64 %k, %L
-  br i1 %kdone, label %store, label %kbody
-kbody:
-  %ki = add i64 %di, %k
-  %kp = getelementptr i8, ptr %s, i64 %ki
-  %kb = load i8, ptr %kp
-  %kbz = zext i8 %kb to i64
-  %kbits = and i64 %kbz, 63
-  %cpsh = shl i64 %cp, 6
-  %cpn = or i64 %cpsh, %kbits
-  %k2 = add i64 %k, 1
-  br label %kloop
-store:
-  %dp = getelementptr i64, ptr %data, i64 %dj
-  store i64 %cp, ptr %dp
-  %dj2 = add i64 %dj, 1
-  %di2 = add i64 %di, %L
-  br label %dloop
-ret:
-  %r0 = insertvalue {ptr, i64, i64} undef, ptr %data, 0
-  %r1 = insertvalue {ptr, i64, i64} %r0, i64 %cn, 1
-  %r2 = insertvalue {ptr, i64, i64} %r1, i64 %cn, 2
-  ret {ptr, i64, i64} %r2
-}
-
+; (The byte-copy helper was here — the `slice` builtin's copy loop, and `slice`
+; was its only caller. RFC-0079 M3 routed `slice` into `std/strpred`, where the
+; copy is a `while` over the byte view, so the helper went with the lowering
+; rather than staying as an unreferenced definition every module still carries.
+; Its name is not spelled in this comment on purpose: the test that asserts it is
+; gone reads the emitted text.)
 ";
 
 /// The `=~` regex runner: run a complete DFA (transition table + accepting bytes,
@@ -1018,6 +428,48 @@ fn extern_symbol(name: &str) -> String {
 /// WASI clocks/random, so no `vyrn` host page is needed. Returns the shim symbol
 /// for the recognized Vyrn extern name. Matched by name (like the I/O builtins);
 /// these `host*` names are reserved.
+/// The RFC-0014 I/O error wording, canonical Vyrn strings and NEVER OS text, so
+/// every backend produces byte-identical `Err` payloads. `%s` is the path.
+///
+/// One list because parity compares these bytes. The textual emitter interns them
+/// as `@.io.<name>` globals and renders them with `__vyrn_snprintf`; the direct
+/// wasm backend has no `snprintf` (RFC-0077 M2j) and splits each format on its
+/// `%s` instead — so a message reworded here changes both, and neither can hold a
+/// private copy that drifts.
+pub const IO_MESSAGES: &[(&str, &str)] = &[
+    ("readerr", "cannot read `%s`"),
+    ("writeerr", "cannot write `%s`"),
+    ("utf8err", "`%s` is not valid UTF-8"),
+    // `listDir` (RFC-0021), reachable from a compiled module only on the
+    // generator-host path (RFC-0076 M2) — the wording still lives here, with the
+    // rest, rather than in the shim that renders it.
+    ("listerr", "cannot list `%s`"),
+    ("nulerr", "`%s` contains a NUL byte"),
+    // RFC-0044: a cross-device (`EXDEV`) rename — surfaced distinctly instead of
+    // silently degrading to copy. Ordinary not-found/permission rename failures
+    // reuse `writeerr` (rewriting the destination).
+    ("xdeverr", "cannot rename `%s` across devices"),
+    // Byte-bridge errors (M2, no path): fixed payloads for `stringFromBytes`.
+    ("bnul", "bytes contain a NUL byte"),
+    ("butf8", "bytes are not valid UTF-8"),
+];
+
+/// One [`IO_MESSAGES`] entry by name. Panics on an unknown key, because every
+/// caller names a literal and a typo is a wrong payload rather than a miss.
+pub fn io_message(name: &str) -> &'static str {
+    IO_MESSAGES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, m)| *m)
+        .unwrap_or_else(|| panic!("no I/O message named `{name}`"))
+}
+
+/// The two halves of an [`io_message`] around its `%s`, for a backend that
+/// concatenates rather than formatting.
+pub fn io_message_parts(name: &str) -> (&'static str, &'static str) {
+    io_message(name).split_once("%s").unwrap_or_else(|| panic!("`{name}` has no `%s`"))
+}
+
 pub fn host_boundary_extern(name: &str) -> Option<&'static str> {
     match name {
         "hostNowMillis" => Some("__vyrn_now_millis"),
@@ -1032,7 +484,11 @@ pub fn host_boundary_extern(name: &str) -> Option<&'static str> {
 /// floats stay `double`/`float`, `String` returns as a bare `ptr`, `Unit` is a
 /// missing result. `String` *parameters* are handled separately (they cross as
 /// a `(ptr, len)` pair). The checker guarantees no other type reaches here.
-fn extern_abi_ll(ty: &Type) -> &'static str {
+///
+/// Shared with the direct wasm backend, which maps the answer through
+/// [`wasm::abi`] rather than keeping a second table: an ABI written down twice is
+/// a misread argument on one backend, not a link error.
+pub(crate) fn extern_abi_ll(ty: &Type) -> &'static str {
     match ty {
         Type::Int => "i64",
         Type::IntN { bits: 64, .. } => "i64",
@@ -1084,8 +540,127 @@ fn drain_ho(
     }
 }
 
+thread_local! {
+    /// RFC-0076 M2: whether this module is being emitted to run as a GENERATOR
+    /// under the wasm engine, where `listDir` is a host import backed by the
+    /// loader's resolver. An ordinary build must keep rejecting it (the language
+    /// gives `listDir` no runtime lowering), so the flag gates exactly that one
+    /// branch.
+    ///
+    /// A thread-local rather than a `Gen` field because `Gen` is constructed at
+    /// nine sites inside [`emit_with`] and not one of them has an opinion.
+    static GEN_HOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether this thread is emitting a generator-host module.
+///
+/// RFC-0076 M7 gave the flag a second reader: the DIRECT wasm backend emits the
+/// same surface without clang, and `llt_of`'s `Code` arm is shared between them,
+/// so the flag has to be the one both ask rather than a parameter one of them
+/// threads.
+pub(crate) fn gen_host() -> bool {
+    GEN_HOST.with(|g| g.get())
+}
+
+pub(crate) fn set_gen_host(on: bool) {
+    GEN_HOST.with(|g| g.set(on));
+}
+
+/// Every `vyrn_gen` import a generator module makes: a signature in LLVM's spelling
+/// and the name it imports under, which [`wasm::declare_sig`] turns into the wasm
+/// one through [`wasm::abi`] — so `i1`, `i8` and `ptr` are widened in exactly one
+/// place and no signature on this boundary is written twice.
+///
+/// LLVM's spelling and not wasm's because these WERE `declare` lines: RFC-0076 M3a
+/// emitted them into the IR with `wasm-import-module` attributes, the way an
+/// RFC-0012 `extern` is emitted, and M7's direct backend imports the same set
+/// without a textual emitter in the way. Kept in this form because `wasm::boundary`
+/// reads the emitter's own `declare` lines the same way, and one parser over one
+/// spelling is what stops the two lists drifting.
+///
+/// The host side of every one of them is the interpreter's own code — the RFC-0054
+/// piece arena, `render_code`, the splice table, the real lexer, the real linker —
+/// which is what keeps the escaping, the identifier validation and the
+/// shortest-roundtrip float formatting byte-identical by construction rather than
+/// by testing.
+pub(crate) const CODE_IMPORTS: &[(&str, &str)] = &[
+    ("i64 @__vyrn_code_text(ptr)", "text"),
+    ("i64 @__vyrn_code_splice(i32, i64, ptr, i64)", "splice"),
+    ("i64 @__vyrn_code_raw_at(ptr, ptr, i64, i64)", "rawAt"),
+    ("i64 @__vyrn_code_concat(i64, i64)", "concat"),
+    ("i64 @__vyrn_code_render(i64)", "render"),
+    // The M2 stash reader: `render` answers with a length and the guest
+    // allocates, because the host must not allocate inside guest memory.
+    ("void @__vyrn_gen_fetch(ptr)", "fetch"),
+    // RFC-0076 M3b — structured host results. `reflect` asks the host for a
+    // value of a known named type (`lex`, `moduleInterface`, `contractOf`) and
+    // leaves it as a flat atom stream; `nextInt`/`nextStr` pull the atoms back in
+    // the order the decoder walks the type. `nextStr` answers with a length and
+    // the guest allocates, exactly as `render` does.
+    ("void @__vyrn_gen_reflect(i64, ptr)", "reflect"),
+    ("i64 @__vyrn_gen_next_int()", "nextInt"),
+    ("i64 @__vyrn_gen_next_str()", "nextStr"),
+    // RFC-0076 M2's mediated read, which `readFile`, `readFileBytes` and `listDir`
+    // are all served out of. It used to be declared by the C shim rather than the
+    // IR, because the shim was what called it; M7 has no shim, so it joins the
+    // list it always belonged to.
+    ("i64 @__vyrn_gen_read(ptr, i32)", "read"),
+];
+
+/// `vyrn_gen.read`'s modes, shared with the host that answers them so the two
+/// spellings of "2 means listDir" are one.
+pub const GEN_MODE_READ: i32 = 0;
+pub const GEN_MODE_READ_BYTES: i32 = 1;
+pub const GEN_MODE_LIST: i32 = 2;
+
+/// `@__vyrn_gen_reflect`'s kinds — which builtin the host is answering
+/// (RFC-0076 M3b). The argument is the module path, the contract NAME, or the
+/// source to lex.
+pub const REFLECT_MODULE_INTERFACE: i64 = 0;
+pub const REFLECT_CONTRACT_OF: i64 = 1;
+pub const REFLECT_LEX: i64 = 2;
+
+/// The generator-host entry points the ENGINE synthesizes and this emitter calls
+/// (RFC-0076 M3b).
+///
+/// Each is an ordinary Vyrn function the engine appends to the wrapper program:
+/// it asks the host to compute the value, then decodes it by walking the static
+/// type. Codegen only redirects the builtin's call site to it, so the decode is
+/// compiled by the ordinary emitter rather than hand-written as IR — the arrays,
+/// the records and the Options are the ones every other Vyrn program gets.
+pub const GEN_ENTRY_MODULE_INTERFACE: &str = "__vyrnGenModuleInterface";
+pub const GEN_ENTRY_LEX: &str = "__vyrnGenLex";
+/// Suffixed with the contract's name: the argument is a declaration, not a value.
+pub const GEN_ENTRY_CONTRACT_OF: &str = "__vyrnGenContractOf_";
+/// The atom-stream primitives the synthesized decoders are written against.
+pub const GEN_REFLECT: &str = "__vyrnGenReflect";
+pub const GEN_NEXT_INT: &str = "__vyrnGenNextInt";
+pub const GEN_NEXT_STR: &str = "__vyrnGenNextStr";
+
+/// `@__vyrn_code_splice`'s value tags — which interpreter `Val` the host is to
+/// rebuild from the word it was handed. Exactly the set the splice rule accepts
+/// (`interp::gen_code_splice`), no more: the checker has already rejected
+/// anything else by the time codegen sees the call. `pub` so the host reads the
+/// same numbering it is emitted against, rather than a second copy of it.
+pub const TAG_STR: i32 = 0;
+pub const TAG_CODE: i32 = 1;
+pub const TAG_BOOL: i32 = 2;
+pub const TAG_INT: i32 = 3;
+pub const TAG_UINT: i32 = 4;
+pub const TAG_F64: i32 = 5;
+pub const TAG_F32: i32 = 6;
+
 /// Emit a complete LLVM IR module for `program`.
+///
+/// Native only, since RFC-0077 M5 deleted the wasm path — and since RFC-0076 M7
+/// there is no `emit_gen_host` beside it either: the generation engine reaches wasm
+/// through the direct backend, which needs no C toolchain, so the generator-host
+/// variant of THIS emitter had no caller left. The `Code` handle imports, the
+/// reflection redirects and `listDir`'s lowering went with it. A code quote outside
+/// generation is still the checker's error and this emitter still has no lowering
+/// for one, which is what it was before RFC-0076 M3a.
 pub fn emit(program: &Program) -> Result<String, String> {
+    set_gen_host(false);
     let mut out = String::new();
     // module preamble: printf/abort + format strings (opaque-pointer style)
     out.push_str("; Vyrn v0.1 — generated LLVM IR (target: LLVM 15+)\n");
@@ -1094,12 +669,17 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // matching the interpreter.
     out.push_str("declare void @exit(i32)\n");
     out.push_str("declare i32 @strcmp(ptr, ptr)\n");
-    out.push_str("declare i32 @__vyrn_strncmp(ptr, ptr, i64)\n");
-    out.push_str("declare ptr @strstr(ptr, ptr)\n");
+    // (`declare i32 @__vyrn_strncmp` and `declare ptr @strstr` went with the string
+    // predicates — RFC-0078 M4c. Neither had another caller, so the shim lost an
+    // exported function and the boundary lost two declarations.)
     // Heap + string runtime (dynamic strings). Allocations are not yet freed —
     // the reclamation strategy is RFC-0004's open question.
     out.push_str("declare i64 @__vyrn_strlen(ptr)\n");
-    out.push_str("declare i64 @__vyrn_charcount(ptr)\n");
+    // (`declare i64 @__vyrn_charcount` went with `charCount` — RFC-0078's census
+    // called it the one builtin with no justification, and `std/text`'s
+    // `charCountV` is the same byte scan in Vyrn.)
+    out.push_str("declare i64 @__vyrn_line_at(ptr, i64, i64)\n");
+    out.push_str("declare i64 @__vyrn_col_at(ptr, i64, i64)\n");
     out.push_str("declare ptr @__vyrn_malloc(i64)\n");
     out.push_str("declare ptr @__vyrn_realloc(ptr, i64)\n");
     out.push_str("declare void @free(ptr)\n");
@@ -1112,6 +692,17 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // wasm32 and i64 on x86-64 (an ABI clash). SmallArray never crosses
     // `extern`, so keeping the copy internal to generated code is sound.
     out.push_str("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
+    // Saturating float→int (RFC-0078 M4a). A bare `fptosi`/`fptoui` is POISON
+    // for an out-of-range or NaN operand, which is not a semantics any engine
+    // can agree with: the interpreter is Rust's `as` (saturating, NaN→0) and
+    // RFC-0077 M2h made the direct wasm backend match it, so native was the odd
+    // one out and `examples/numbytes.vyrn` caught it — `Int64(10^300)` was
+    // `Int64.min` natively and `Int64.max` in the other two. The saturating
+    // intrinsics ARE Rust's `as`, so this is a one-for-one substitution.
+    out.push_str("declare i64 @llvm.fptosi.sat.i64.f64(double)\n");
+    out.push_str("declare i64 @llvm.fptoui.sat.i64.f64(double)\n");
+    out.push_str("declare i64 @llvm.fptosi.sat.i64.f32(float)\n");
+    out.push_str("declare i64 @llvm.fptoui.sat.i64.f32(float)\n");
     // Worker threads (RFC-0025): `spawn f(args)` packs its evaluated arguments
     // into a heap frame and hands the shim a per-spawn-site thunk SYMBOL plus
     // that frame; the shim runs the thunk on a real OS thread natively (Win32 /
@@ -1151,47 +742,21 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // fd_sync, so a storage program is a three-way parity citizen).
     out.push_str("declare i32 @__vyrn_rename_file(ptr, ptr)\n");
     out.push_str("declare i32 @__vyrn_fsync_file(ptr)\n");
-    // JSON codec runtime (RFC-0018): the DOM builders/accessors, the parser,
-    // the canonical encoder, and the decode-side issue accumulator live in the
-    // C shim; the per-type encode/decode logic is generated as IR below.
-    out.push_str("declare ptr @__vyrn_vj_obj()\n");
-    out.push_str("declare ptr @__vyrn_vj_arr()\n");
-    out.push_str("declare ptr @__vyrn_vj_null()\n");
-    out.push_str("declare ptr @__vyrn_vj_bool(i1)\n");
-    out.push_str("declare ptr @__vyrn_vj_int(i64)\n");
-    out.push_str("declare ptr @__vyrn_vj_uint(i64)\n");
-    out.push_str("declare ptr @__vyrn_vj_float(double)\n");
-    out.push_str("declare ptr @__vyrn_vj_str(ptr)\n");
-    out.push_str("declare void @__vyrn_vj_push(ptr, ptr)\n");
-    out.push_str("declare void @__vyrn_vj_set(ptr, ptr, ptr)\n");
-    out.push_str("declare ptr @__vyrn_vj_encode(ptr)\n");
-    out.push_str("declare ptr @__vyrn_json_parse(ptr, ptr)\n");
-    out.push_str("declare i32 @__vyrn_vj_kind(ptr)\n");
-    out.push_str("declare i32 @__vyrn_vj_bool_get(ptr)\n");
-    out.push_str("declare ptr @__vyrn_vj_get(ptr, ptr)\n");
-    out.push_str("declare i64 @__vyrn_vj_len(ptr)\n");
-    out.push_str("declare ptr @__vyrn_vj_at(ptr, i64)\n");
-    out.push_str("declare ptr @__vyrn_vj_at_or_null(ptr, i64)\n");
-    out.push_str("declare i64 @__vyrn_vj_obj_len(ptr)\n");
-    out.push_str("declare ptr @__vyrn_vj_obj_key(ptr, i64)\n");
-    out.push_str("declare ptr @__vyrn_vj_obj_at(ptr, i64)\n");
-    out.push_str("declare ptr @__vyrn_vj_str_get(ptr)\n");
+    // The JSON codec runtime is GONE from this boundary (RFC-0078 M2b then M3):
+    // `toJson` renders through `std/json`'s `emit` and `fromJson` reads through
+    // `std/jsonread` with a generated per-type walk, both of them Vyrn. So nothing
+    // this file emits builds, reads or serializes a DOM, nothing accumulates an
+    // Issue through a C list, and the twenty-two declares that used to sit here
+    // went with the C they named.
     // Map<String, V> runtime (RFC-0028).
-    out.push_str("declare i64 @__vyrn_map_find(ptr, i64, ptr)\n");
-    out.push_str("declare void @__vyrn_map_reserve(ptr, i64)\n");
-    out.push_str("declare void @__vyrn_map_remove_at(ptr, i64, i64)\n");
-    out.push_str("declare ptr @__vyrn_map_keys_copy(ptr, i64)\n");
-    out.push_str("declare i32 @__vyrn_vj_asint(ptr, i32, i32, ptr)\n");
-    out.push_str("declare double @__vyrn_vj_asfloat(ptr)\n");
-    out.push_str("declare ptr @__vyrn_json_type_msg(ptr, i32)\n");
-    out.push_str("declare ptr @__vyrn_json_field_path(ptr, ptr)\n");
-    out.push_str("declare ptr @__vyrn_json_index_path(ptr, i64)\n");
-    out.push_str("declare ptr @__vyrn_issues_new()\n");
-    out.push_str("declare void @__vyrn_issues_push(ptr, ptr, ptr, ptr)\n");
-    out.push_str("declare i64 @__vyrn_issues_len(ptr)\n");
-    out.push_str("declare ptr @__vyrn_issue_key(ptr, i64)\n");
-    out.push_str("declare ptr @__vyrn_issue_path(ptr, i64)\n");
-    out.push_str("declare ptr @__vyrn_issue_msg(ptr, i64)\n");
+    out.push_str("declare i64 @__vyrn_map_find(ptr, i64, ptr)
+");
+    out.push_str("declare void @__vyrn_map_reserve(ptr, i64)
+");
+    out.push_str("declare void @__vyrn_map_remove_at(ptr, i64, i64)
+");
+    out.push_str("declare ptr @__vyrn_map_keys_copy(ptr, i64)
+");
     // `extern` imports (RFC-0012): each body-less `extern fn` becomes a wasm
     // import from the fixed `vyrn` namespace. We emit ONE target-neutral IR —
     // a `declare` carrying the wasm-import attributes plus a real `call` at each
@@ -1241,18 +806,17 @@ pub fn emit(program: &Program) -> Result<String, String> {
         "@.trap.soob = private unnamed_addr constant [40 x i8] \
          c\"error: string index %lld out of bounds\\0A\\00\"\n",
     );
-    // `slice(s, start, end)` traps (RFC-0046), single-sourced here beside the
-    // other index traps: an out-of-range offset mirrors the array-OOB wording,
-    // and a cut inside a multi-byte UTF-8 character gets its own message. Both
-    // are byte-identical to the interpreter's `slice index out of range` /
-    // `slice splits a UTF-8 character` as the CLI renders them (`error: ..`).
+    // (`@.trap.sliceoob` and `@.trap.slicesplit` were here. RFC-0079 M3 made
+    // `slice` return its failure instead of ending the process, so the catalogue
+    // SHRANK by two rows rather than growing — which is the trade RFC-0078's
+    // `@abort(kind)` design would have made in the other direction. A caller that
+    // still wants to die writes `?? panic("…")` and owns the wording.)
+    // `panic(msg)` (RFC-0079): the caller owns the text, the compiler owns the
+    // frame. It is a format rather than three `fputs` because the catalogue
+    // above already prints through `fprintf` for the traps that interpolate,
+    // and `%s` is safe here — a Vyrn `String` cannot contain a NUL (RFC-0014).
     out.push_str(
-        "@.trap.sliceoob = private unnamed_addr constant [33 x i8] \
-         c\"error: slice index out of range\\0A\\00\"\n",
-    );
-    out.push_str(
-        "@.trap.slicesplit = private unnamed_addr constant [39 x i8] \
-         c\"error: slice splits a UTF-8 character\\0A\\00\"\n\n",
+        "@.panic.fmt = private unnamed_addr constant [11 x i8] c\"error: %s\\0A\\00\"\n\n",
     );
 
     // ---- region / arena runtime (RFC-0004 §4) ---------------------------
@@ -1270,16 +834,14 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // generation check instead of dangling.
     out.push_str(CELL_RUNTIME);
     out.push_str(STRING_RUNTIME);
-    // Encoding tables + runtime (hex/base64/url + the UTF-8 validator DFA).
+    // The UTF-8 validator DFA table, then the validator. (The base64 alphabet
+    // table went with the codecs -- RFC-0078 M4c; `std/codecs` builds it from a
+    // string literal instead.)
     let utf8d = utf8d_table();
     let table_body = utf8d.iter().map(|b| format!("i8 {b}")).collect::<Vec<_>>().join(", ");
     out.push_str(&format!(
         "@__vyrn_utf8d = private unnamed_addr constant [364 x i8] [{table_body}]\n"
     ));
-    out.push_str(
-        "@__vyrn_b64alpha = private unnamed_addr constant [64 x i8] \
-         c\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\"\n",
-    );
     out.push_str(ENCODING_RUNTIME);
     out.push_str(REGEX_RUNTIME);
     // `%lld\n` for i64 — `%ld` would be 32-bit under the Windows/MSVC ABI where
@@ -1314,12 +876,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
         if t.predicate.is_none() {
             continue;
         }
-        let msg = if matches!(t.base, Type::Record(_)) {
-            format!("error: validation failed: `{}` violates its `where` clause\n", t.name)
-        } else {
-            format!("error: validation failed for `{}`\n", t.name)
-        };
-        let (escaped, len) = llvm_str(&msg);
+        let (escaped, len) = llvm_str(&validation_message(t));
         out.push_str(&format!(
             "@.trap.verr.{} = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n",
             t.name
@@ -1349,26 +906,12 @@ pub fn emit(program: &Program) -> Result<String, String> {
     out.push_str("@.fmt.nan = private unnamed_addr constant [5 x i8] c\"NaN\\0A\\00\"\n");
     out.push_str("@.str.nan = private unnamed_addr constant [4 x i8] c\"NaN\\00\"\n");
 
-    // Input-I/O error wording (RFC-0014): canonical Vyrn strings, NEVER OS text,
-    // so every backend produces byte-identical `Err` payloads. `%s` is the path;
-    // the message is built at runtime (`@__vyrn_read_err`/`@__vyrn_write_err`).
+    // Input-I/O error wording (RFC-0014), from the one list both backends read.
     // These are payload strings (no trailing newline — unlike the trap globals).
-    for (name, msg) in [
-        ("@.io.readerr", "cannot read `%s`"),
-        ("@.io.writeerr", "cannot write `%s`"),
-        ("@.io.utf8err", "`%s` is not valid UTF-8"),
-        ("@.io.nulerr", "`%s` contains a NUL byte"),
-        // RFC-0044: a cross-device (`EXDEV`) rename — surfaced distinctly instead
-        // of silently degrading to copy. Ordinary not-found/permission rename
-        // failures reuse `@.io.writeerr` (rewriting the destination).
-        ("@.io.xdeverr", "cannot rename `%s` across devices"),
-        // Byte-bridge errors (M2, no path): fixed payloads for `stringFromBytes`.
-        ("@.io.bnul", "bytes contain a NUL byte"),
-        ("@.io.butf8", "bytes are not valid UTF-8"),
-    ] {
+    for (name, msg) in IO_MESSAGES {
         let (escaped, len) = llvm_str(msg);
         out.push_str(&format!(
-            "{name} = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n"
+            "@.io.{name} = private unnamed_addr constant [{len} x i8] c\"{escaped}\"\n"
         ));
     }
     out.push_str(IO_RUNTIME);
@@ -1397,15 +940,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
     for g in &program.globals {
         collect_strings_expr(&g.init, &mut literals, &type_map);
     }
-    // JSON codec (RFC-0018): every constant the generated encode/decode
-    // functions reference — field keys, enum variant names, `expected <what>`
-    // phrases, `json.missing`/`validate` messages, and the fixed Issue keys —
-    // must be in the pool before the functions are emitted.
-    for s in collect_codec_strings(program, &type_map) {
-        if !literals.contains(&s) {
-            literals.push(s);
-        }
-    }
     for (i, s) in literals.iter().enumerate() {
         let name = format!("@.str.{i}");
         let (escaped, len) = llvm_str(s);
@@ -1414,26 +948,10 @@ pub fn emit(program: &Program) -> Result<String, String> {
         ));
         str_globals.insert(s.clone(), name);
     }
-    // JSON codec (RFC-0018): a per-enum table of variant-name string pointers,
-    // indexed by tag, so `toJson` on an enum reads its name in O(1).
-    for t in &program.type_decls {
-        if let Type::Enum(vs) = &vyrn_frontend::types::resolve(&Type::Named(t.name.clone()), &type_map)
-        {
-            if vyrn_frontend::codec::encodable(&Type::Named(t.name.clone()), &type_map).is_err() {
-                continue;
-            }
-            let elems: Vec<String> = vs
-                .iter()
-                .map(|v| format!("ptr {}", str_globals[&v.name]))
-                .collect();
-            out.push_str(&format!(
-                "@.enumnames.{} = private unnamed_addr constant [{} x ptr] [{}]\n",
-                t.name,
-                vs.len(),
-                elems.join(", ")
-            ));
-        }
-    }
+    // The per-enum variant-name table went with RFC-0078 M2b. It existed so
+    // `toJson` on a nullary enum could read the name in O(1) from IR; the encoder
+    // is synthesized Vyrn now, and its nullary arm is an ordinary `JStr("Guest")`
+    // over the string pool above — so the table had no other reader.
     out.push('\n');
 
     // Compile every distinct `=~` pattern to a DFA and emit its transition table
@@ -1739,147 +1257,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
         }
     }
 
-    // JSON codec (RFC-0018): a per-record-type encoder/decoder, synthesized
-    // like `emit_validation`. Generated for every codable named record type so
-    // nested/recursive references resolve to a call (textual order is
-    // immaterial to LLVM). Enums, options, arrays, and validated scalars are
-    // handled inline by the emitters, so they need no standalone function.
-    for t in &program.type_decls {
-        let named = Type::Named(t.name.clone());
-        if !matches!(vyrn_frontend::types::resolve(&named, &types), Type::Record(_)) {
-            continue;
-        }
-        let decl = types[&t.name].clone();
-        // Encoder: `@__vyrn_enc_T({llt} %v) -> ptr`.
-        if vyrn_frontend::codec::encodable(&named, &types).is_ok() {
-            let fields = match vyrn_frontend::types::resolve(&named, &types) {
-                Type::Record(fs) => fs,
-                _ => unreachable!(),
-            };
-            let mut gen = Gen::new(
-                &ret_types, &param_types, &param_caps, &types, &variants, &str_globals,
-                &empty_subst, &funcs, droppable_map, &regex_globals,
-            );
-            gen.protocol_methods = protocol_methods.clone();
-            let ll = gen.llt(&named);
-            let obj = gen.fresh_tmp();
-            gen.emit(format!("{obj} = call ptr @__vyrn_vj_obj()"));
-            for (i, f) in fields.iter().enumerate() {
-                let fv = gen.fresh_tmp();
-                gen.emit(format!("{fv} = extractvalue {ll} %arg0, {i}"));
-                gen.emit_encode_field(&obj, &fv, f)?;
-            }
-            gen.emit_term(format!("ret ptr {obj}"));
-            writeln!(out, "define ptr @__vyrn_enc_{}({ll} %arg0) {{", t.name).unwrap();
-            out.push_str("entry:\n");
-            for a in &gen.allocas {
-                out.push_str(a);
-                out.push('\n');
-            }
-            for b in &gen.body {
-                out.push_str(b);
-                out.push('\n');
-            }
-            out.push_str("}\n\n");
-        }
-        // Decoder: `@__vyrn_dec_T(ptr %vj, ptr %path, ptr %issues) -> {llt}`.
-        if vyrn_frontend::codec::decodable(&named, &types).is_ok() {
-            let mut gen = Gen::new(
-                &ret_types, &param_types, &param_caps, &types, &variants, &str_globals,
-                &empty_subst, &funcs, droppable_map, &regex_globals,
-            );
-            gen.protocol_methods = protocol_methods.clone();
-            let ll = gen.llt(&named);
-            let rec_decl = TypeDecl {
-                base: vyrn_frontend::types::resolve(&named, &types),
-                ..decl.clone()
-            };
-            let r = gen.emit_decode_record_body("%arg0", "%arg1", "%arg2", &rec_decl)?;
-            gen.emit_term(format!("ret {ll} {r}"));
-            writeln!(
-                out,
-                "define {ll} @__vyrn_dec_{}(ptr %arg0, ptr %arg1, ptr %arg2) {{",
-                t.name
-            )
-            .unwrap();
-            out.push_str("entry:\n");
-            for a in &gen.allocas {
-                out.push_str(a);
-                out.push('\n');
-            }
-            for b in &gen.body {
-                out.push_str(b);
-                out.push('\n');
-            }
-            out.push_str("}\n\n");
-        }
-    }
-
-    // JSON codec v2 (RFC-0024): a per-enum encode/decode function for every
-    // codable named PAYLOAD enum, so a self-referential payload (through a
-    // record/array/its own type) resolves to a call — the record precedent.
-    // Pure-nullary enums keep their inline string encoding (no function).
-    for t in &program.type_decls {
-        if !t.type_params.is_empty() {
-            continue; // generic enums monomorphize at concrete use sites (inline)
-        }
-        let named = Type::Named(t.name.clone());
-        let vs = match vyrn_frontend::types::resolve(&named, &types) {
-            Type::Enum(vs) if vs.iter().any(|v| !v.payload.is_empty()) => vs,
-            _ => continue,
-        };
-        // Encoder: `@__vyrn_enc_T({ll} %arg0) -> ptr`.
-        if vyrn_frontend::codec::encodable(&named, &types).is_ok() {
-            let mut gen = Gen::new(
-                &ret_types, &param_types, &param_caps, &types, &variants, &str_globals,
-                &empty_subst, &funcs, droppable_map, &regex_globals,
-            );
-            gen.protocol_methods = protocol_methods.clone();
-            let ll = gen.llt(&named);
-            let r = gen.emit_encode_enum_body("%arg0", &vs, &ll)?;
-            gen.emit_term(format!("ret ptr {r}"));
-            writeln!(out, "define ptr @__vyrn_enc_{}({ll} %arg0) {{", t.name).unwrap();
-            out.push_str("entry:\n");
-            for a in &gen.allocas {
-                out.push_str(a);
-                out.push('\n');
-            }
-            for b in &gen.body {
-                out.push_str(b);
-                out.push('\n');
-            }
-            out.push_str("}\n\n");
-        }
-        // Decoder: `@__vyrn_dec_T(ptr %vj, ptr %path, ptr %issues) -> {ll}`.
-        if vyrn_frontend::codec::decodable(&named, &types).is_ok() {
-            let mut gen = Gen::new(
-                &ret_types, &param_types, &param_caps, &types, &variants, &str_globals,
-                &empty_subst, &funcs, droppable_map, &regex_globals,
-            );
-            gen.protocol_methods = protocol_methods.clone();
-            let ll = gen.llt(&named);
-            let expected = vyrn_frontend::codec::enum_expected(&vs);
-            let r = gen.emit_decode_enum_payload("%arg0", "%arg1", "%arg2", &vs, &ll, &expected)?;
-            gen.emit_term(format!("ret {ll} {r}"));
-            writeln!(
-                out,
-                "define {ll} @__vyrn_dec_{}(ptr %arg0, ptr %arg1, ptr %arg2) {{",
-                t.name
-            )
-            .unwrap();
-            out.push_str("entry:\n");
-            for a in &gen.allocas {
-                out.push_str(a);
-                out.push('\n');
-            }
-            for b in &gen.body {
-                out.push_str(b);
-                out.push('\n');
-            }
-            out.push_str("}\n\n");
-        }
-    }
-
     // The module-state initializer function (RFC-0013), defined after the user
     // functions (textual order is immaterial to LLVM).
     out.push_str(&globals_init_ir);
@@ -1918,7 +1295,6 @@ pub fn emit(program: &Program) -> Result<String, String> {
         out.push('\n');
         out.push_str(&extern_attr_groups);
     }
-
     Ok(out)
 }
 
@@ -2036,6 +1412,13 @@ struct Gen<'a> {
     /// Signatures called through a stored value anywhere in the module — each
     /// gets one synthesized dispatcher `@__vyrn_fndispatch_<sig>` at the end.
     fnval_dispatch: Vec<Type>,
+    /// Local `String` accumulators of the function being emitted that may be
+    /// appended to in place (from `append_candidates`, recomputed per body).
+    append_ok: std::collections::HashSet<String>,
+    /// Variable slot -> its `(len, cap)` shadow slots, for the in-place append
+    /// path. An entry exists only for a `let`-declared local `String` in
+    /// `append_ok`; its presence is what licenses the fast path.
+    str_append: HashMap<String, (String, String)>,
 }
 
 /// One variant of a synthesized stored-function enum (RFC-0037): a source
@@ -2144,6 +1527,8 @@ impl<'a> Gen<'a> {
             expect: Vec::new(),
             fnval_variants: Vec::new(),
             fnval_dispatch: Vec::new(),
+            append_ok: std::collections::HashSet::new(),
+            str_append: HashMap::new(),
         }
     }
 
@@ -2194,92 +1579,24 @@ impl<'a> Gen<'a> {
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
-        let mut subst: HashMap<String, Type> = HashMap::new();
-        for (d, a) in declared.iter().zip(arg_tys) {
-            solve_param(d, a, &mut subst);
-        }
-        let args = decl
-            .type_params
-            .iter()
-            .map(|p| subst.get(p).cloned().unwrap_or(Type::Unit))
-            .collect();
-        Type::App(enum_name.to_string(), args)
+        applied_type(Some(decl), enum_name, &declared, arg_tys)
     }
 
     /// Whether `t` is a generic enum instantiation whose type arguments are all
-    /// concretely known (no `Unit` placeholder, no unresolved `Param`). Used to
-    /// pick the most-informative arm type when reconciling a `match`.
+    /// concretely known. [`ty_is_concrete_app`] is the rule; this is the
+    /// substitution this emitter is in.
     fn ty_is_concrete_app(&self, t: &Type) -> bool {
-        matches!(t, Type::App(_, args)
-            if !args.is_empty()
-                && args.iter().all(|a| !matches!(self.resolve(a), Type::Unit | Type::Param(_))))
+        ty_is_concrete_app(t, &|a| self.resolve(a))
     }
 
     /// The LLVM type string for `ty`. Records lower to a `{ .. }` literal struct.
+    ///
+    /// Substitution is this emitter's (it knows the monomorphization it is in);
+    /// the shape rules themselves are [`llt_of`], because RFC-0077's direct wasm
+    /// backend needs the same answers and two matches on `Type` would be two
+    /// sources of truth for one fact.
     fn llt(&self, ty: &Type) -> String {
-        match self.resolve(ty) {
-            Type::Int => "i64".into(),
-            Type::IntN { bits, .. } => format!("i{bits}"),
-            Type::Float => "double".into(),
-            Type::Float32 => "float".into(),
-            Type::Bool => "i1".into(),
-            Type::Str => "ptr".into(),
-            Type::Unit => "void".into(),
-            // Option/Result both lower to { tag, payload }; payload is i64.
-            // { tag, word0, word1 } — two payload words so a `Ref` (which is two
-            // words) fits inline without a heap box.
-            Type::Option(_) | Type::Result(..) => "{ i1, i64, i64 }".into(),
-            // A generational reference is { i64 slot, i64 generation } for any T
-            // (the payload is boxed), so it is a fixed-size handle.
-            Type::Ref(_) => "{ i64, i64 }".into(),
-            // A growable array is { ptr data, i64 len, i64 cap }.
-            Type::Array(_) => "{ ptr, i64, i64 }".into(),
-            // A `Map<String, V>` (RFC-0028) is two parallel growable buffers
-            // sharing one length/capacity: { ptr keys, ptr values, i64 len,
-            // i64 cap }. Keys are `ptr` (String); values are `llt(V)`-stride.
-            Type::Map(..) => "{ ptr, ptr, i64, i64 }".into(),
-            // A fixed-size array lowers to the LLVM value aggregate [N x T].
-            Type::ArrayN(inner, n) => format!("[{n} x {}]", self.llt(&inner)),
-            // A small-buffer array (RFC-0056) lowers to
-            // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — `cap` is the
-            // state discriminant (`cap == N` inline; `cap > N` spilled onto
-            // `data`). Every element access branches on it to pick the base.
-            Type::SmallArray(inner, n) => {
-                format!("{{ i64, i64, ptr, [{n} x {}] }}", self.llt(&inner))
-            }
-            // A task handle (RFC-0025) is an opaque `ptr` to the shim's task
-            // record (thread handle + heap frame); `t.join()` blocks on it and
-            // loads the result from the frame's leading slot.
-            Type::Task(_) => "ptr".into(),
-            // A logger handle is a `ptr` to its name string.
-            Type::Logger => "ptr".into(),
-            Type::Record(fields) => {
-                let inner: Vec<String> = fields.iter().map(|f| self.llt(&f.ty)).collect();
-                format!("{{ {} }}", inner.join(", "))
-            }
-            // A user enum is { i64 tag, i64 payload0, ... } — one payload slot per
-            // the widest variant (payloads are i64 in native).
-            Type::Enum(vs) => {
-                let arity = vs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
-                enum_ll(arity)
-            }
-            // Unreachable after `resolve` (Named/App/transformers/params reduced away).
-            Type::Named(_) | Type::App(..) | Type::Omit(..) | Type::Pick(..) | Type::Merge(..)
-            | Type::Partial(..) | Type::Param(_) => "void".into(),
-            // A bare integer type argument (RFC-0056) never stands alone as a
-            // runtime type — `SmallArray` consumes it before lowering.
-            Type::ConstInt(_) => "void".into(),
-            // A stored function value (RFC-0037) is a synthesized closed enum:
-            // `{ i64 tag, i64 payload }` — tag selects the source (one variant
-            // per named function / lifted lambda), payload is 0 or a pointer to
-            // the malloc'd capture block. v1 `fn`-typed PARAMETERS never reach
-            // `llt` (they monomorphize away before lowering).
-            Type::Fn(..) => "{ i64, i64 }".into(),
-            // `Err` is the checker's recovery sentinel; a program with any `Err`
-            // already has diagnostics and never reaches codegen. Lower to void
-            // as a defensive fallback (never observed in practice).
-            Type::Err => "void".into(),
-        }
+        llt_of(&vyrn_frontend::types::substitute(ty, self.subst), self.types)
     }
 
     /// Coerce a value of type `from` to type `to`, emitting a field-by-field
@@ -2301,13 +1618,9 @@ impl<'a> Gen<'a> {
         to: &Type,
     ) -> Result<(String, Type), String> {
         if self.string_flow_proven(expr, to) {
-            if let Type::Named(n) = to {
-                if let Some(decl) = self.types.get(n).cloned() {
-                    if decl.predicate.is_some() {
-                        let (v, _) = self.coerce(op, from, &decl.base)?;
-                        return Ok((v, to.clone()));
-                    }
-                }
+            if let Some(base) = validation_required(from, to, self.types).map(|d| d.base.clone()) {
+                let (v, _) = self.coerce(op, from, &base)?;
+                return Ok((v, to.clone()));
             }
         }
         self.coerce(op, from, to)
@@ -2325,21 +1638,22 @@ impl<'a> Gen<'a> {
     }
 
     fn coerce(&mut self, op: String, from: &Type, to: &Type) -> Result<(String, Type), String> {
+        // A `Never` (RFC-0079) is `poison` in a block the `panic` already left
+        // through `unreachable`. There is nothing to reconcile — and running a
+        // validation here would emit a live-looking check over a value that does
+        // not exist. `poison` is valid at `to` as it stands.
+        if matches!(from, Type::Never) {
+            return Ok((op, to.clone()));
+        }
         // AUTOMATIC VALIDATION: a value flowing into a predicated named type
         // coerces to its base, then runs the `where` predicate inline and traps
         // with the canonical message — mirroring the interpreter's `coerce`.
-        // The exact same named type skips the check (it was validated when it
-        // was constructed/coerced originally).
-        if let Type::Named(n) = to {
-            if from != to {
-                if let Some(decl) = self.types.get(n).cloned() {
-                    if decl.predicate.is_some() {
-                        let (v, _) = self.coerce(op, from, &decl.base)?;
-                        self.emit_validation(&decl, &v)?;
-                        return Ok((v, to.clone()));
-                    }
-                }
-            }
+        // Whether that is required is [`validation_required`]'s call, not this
+        // site's, because the direct wasm backend has to reach the same verdict.
+        if let Some(decl) = validation_required(from, to, self.types).cloned() {
+            let (v, _) = self.coerce(op, from, &decl.base)?;
+            self.emit_validation(&decl, &v)?;
+            return Ok((v, to.clone()));
         }
         // A function value flowing between fn-typed spellings (RFC-0037): the
         // structural form and any named alias share the `{ i64, i64 }` enum
@@ -2550,6 +1864,128 @@ impl<'a> Gen<'a> {
         self.emit(format!("call ptr @strcpy(ptr {buf}, ptr {a})"));
         self.emit(format!("call ptr @strcat(ptr {buf}, ptr {b})"));
         buf
+    }
+
+    /// The `(len, cap)` shadow slots of a local String accumulator, created on
+    /// demand. A Vyrn String is a bare NUL-terminated pointer with no header, so
+    /// growing one in place needs its length and capacity kept beside the slot.
+    ///
+    /// `cap == 0` means "this pointer was not allocated by the append path" — a
+    /// literal in .rodata, a concat result, a call result — so it may not be
+    /// `realloc`'d and `len` says nothing; the next append copies it into a
+    /// fresh owned buffer first. Every other write to the variable stores 0 back
+    /// into `cap`, and the entry block zeroes it, so the invariant holds on
+    /// every path (including the second trip through a loop that re-runs the
+    /// `let`).
+    fn str_append_shadow(&mut self, slot: &str) -> (String, String) {
+        if let Some(pair) = self.str_append.get(slot) {
+            return pair.clone();
+        }
+        let len = self.fresh_alloca("i64");
+        let cap = self.fresh_alloca("i64");
+        self.allocas.push(format!("  store i64 0, ptr {cap}"));
+        self.str_append
+            .insert(slot.to_string(), (len.clone(), cap.clone()));
+        (len, cap)
+    }
+
+    /// Append `val` to the String in `slot`, in place, growing geometrically.
+    /// `emit_str_concat` allocates and copies both halves every time, which
+    /// makes `out = out + piece` in a loop quadratic in the result — the shape
+    /// every generator is written in. Three steps, each re-reading the shadow
+    /// slots so no phi is needed (mem2reg folds them away):
+    /// take ownership of the buffer if it is not ours, reserve room, copy.
+    fn emit_str_append(&mut self, slot: &str, val: &str) {
+        let (lens, caps) = self.str_append_shadow(slot);
+        let vlen = self.fresh_tmp();
+        self.emit(format!("{vlen} = call i64 @__vyrn_strlen(ptr {val})"));
+
+        // Step 1: `cap == 0` — copy the borrowed buffer into one we own.
+        let own_l = self.fresh_label("app.own");
+        let have_l = self.fresh_label("app.have");
+        let cap0 = self.fresh_tmp();
+        let owned = self.fresh_tmp();
+        self.emit(format!("{cap0} = load i64, ptr {caps}"));
+        self.emit(format!("{owned} = icmp ne i64 {cap0}, 0"));
+        self.emit_term(format!("br i1 {owned}, label %{have_l}, label %{own_l}"));
+        self.emit_label(&own_l);
+        let ob = self.fresh_tmp();
+        let ol = self.fresh_tmp();
+        self.emit(format!("{ob} = load ptr, ptr {slot}"));
+        self.emit(format!("{ol} = call i64 @__vyrn_strlen(ptr {ob})"));
+        let need0 = self.fresh_tmp();
+        let need0n = self.fresh_tmp();
+        let big0 = self.fresh_tmp();
+        let c0 = self.fresh_tmp();
+        self.emit(format!("{need0} = add i64 {ol}, {vlen}"));
+        self.emit(format!("{need0n} = add i64 {need0}, 1"));
+        self.emit(format!("{big0} = icmp ugt i64 {need0n}, 32"));
+        self.emit(format!("{c0} = select i1 {big0}, i64 {need0n}, i64 32"));
+        let nb0 = self.fresh_tmp();
+        self.emit(format!("{nb0} = call ptr @__vyrn_malloc(i64 {c0})"));
+        self.emit(format!(
+            "call void @llvm.memcpy.p0.p0.i64(ptr {nb0}, ptr {ob}, i64 {ol}, i1 false)"
+        ));
+        self.emit(format!("store ptr {nb0}, ptr {slot}"));
+        self.emit(format!("store i64 {ol}, ptr {lens}"));
+        self.emit(format!("store i64 {c0}, ptr {caps}"));
+        self.emit_term(format!("br label %{have_l}"));
+
+        // Step 2: reserve `len + vlen + 1` bytes, doubling so N appends are O(N).
+        self.emit_label(&have_l);
+        let grow_l = self.fresh_label("app.grow");
+        let copy_l = self.fresh_label("app.copy");
+        let len1 = self.fresh_tmp();
+        let cap1 = self.fresh_tmp();
+        let need = self.fresh_tmp();
+        let needn = self.fresh_tmp();
+        let short = self.fresh_tmp();
+        self.emit(format!("{len1} = load i64, ptr {lens}"));
+        self.emit(format!("{cap1} = load i64, ptr {caps}"));
+        self.emit(format!("{need} = add i64 {len1}, {vlen}"));
+        self.emit(format!("{needn} = add i64 {need}, 1"));
+        self.emit(format!("{short} = icmp ugt i64 {needn}, {cap1}"));
+        self.emit_term(format!("br i1 {short}, label %{grow_l}, label %{copy_l}"));
+        self.emit_label(&grow_l);
+        let dbl = self.fresh_tmp();
+        let usedbl = self.fresh_tmp();
+        let nc = self.fresh_tmp();
+        self.emit(format!("{dbl} = shl i64 {cap1}, 1"));
+        self.emit(format!("{usedbl} = icmp ugt i64 {dbl}, {needn}"));
+        self.emit(format!("{nc} = select i1 {usedbl}, i64 {dbl}, i64 {needn}"));
+        let gb = self.fresh_tmp();
+        let nb1 = self.fresh_tmp();
+        self.emit(format!("{gb} = load ptr, ptr {slot}"));
+        self.emit(format!("{nb1} = call ptr @__vyrn_realloc(ptr {gb}, i64 {nc})"));
+        self.emit(format!("store ptr {nb1}, ptr {slot}"));
+        self.emit(format!("store i64 {nc}, ptr {caps}"));
+        self.emit_term(format!("br label %{copy_l}"));
+
+        // Step 3: copy the operand's bytes AND its NUL over the old terminator.
+        self.emit_label(&copy_l);
+        let buf = self.fresh_tmp();
+        let len2 = self.fresh_tmp();
+        let dst = self.fresh_tmp();
+        let n1 = self.fresh_tmp();
+        let nlen = self.fresh_tmp();
+        self.emit(format!("{buf} = load ptr, ptr {slot}"));
+        self.emit(format!("{len2} = load i64, ptr {lens}"));
+        self.emit(format!("{dst} = getelementptr i8, ptr {buf}, i64 {len2}"));
+        self.emit(format!("{n1} = add i64 {vlen}, 1"));
+        self.emit(format!(
+            "call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr {val}, i64 {n1}, i1 false)"
+        ));
+        self.emit(format!("{nlen} = add i64 {len2}, {vlen}"));
+        self.emit(format!("store i64 {nlen}, ptr {lens}"));
+    }
+
+    /// Invalidate the append shadow after any other write to `slot`: the
+    /// variable now holds a pointer this path did not allocate.
+    fn str_append_reset(&mut self, slot: &str) {
+        if let Some((_, cap)) = self.str_append.get(slot) {
+            let cap = cap.clone();
+            self.emit(format!("store i64 0, ptr {cap}"));
+        }
     }
 
     /// Copy a fixed `[N x T]` aggregate value `v` (type `arr_ty`) into a fresh
@@ -2849,6 +2285,8 @@ impl<'a> Gen<'a> {
         self.cur_fn_name = f.name.clone();
         self.lambda_counter = 0;
         self.droppable = self.droppable_map.get(&f.name).cloned().unwrap_or_default();
+        self.append_ok = append_candidates(&f.body);
+        self.str_append.clear();
         self.modify_copyout.clear();
         let ret = self.llt(&f.ret);
         // A `modify` parameter is received by pointer (call-by-value-result).
@@ -2951,12 +2389,20 @@ impl<'a> Gen<'a> {
     /// first), without popping the drop frames — used before an early `return`.
     /// The frames stay in place so the unwinding `gen_block`s see `terminated`
     /// and skip their own fall-through frees, so nothing is freed twice.
+    ///
+    /// Also balances the region stack, because every caller of this is a function
+    /// exit and a `return` (or a `?` propagation) can leave a region the same way
+    /// it leaves a block. `__vyrn_region_pop` and not `__vyrn_region_exit`: see
+    /// [`REGION_RUNTIME`] for why the returned value forbids the free.
     fn emit_all_drops(&mut self) {
         let frames: Vec<Vec<(String, DropKind)>> = self.drop_stack.iter().rev().cloned().collect();
         for frame in frames {
             for (slot, kind) in frame.iter().rev() {
                 self.emit_drop(slot, *kind);
             }
+        }
+        for _ in 0..self.region_depth {
+            self.emit("call void @__vyrn_region_pop()".into());
         }
     }
 
@@ -3082,6 +2528,14 @@ impl<'a> Gen<'a> {
                 let ll = self.llt(&bty);
                 let slot = self.declare(name, &bty);
                 self.emit(format!("store {ll} {v}, ptr {slot}"));
+                // A String accumulator gets its append shadow here, at the one
+                // declaration site, and starts every execution of this `let`
+                // unowned — including the second trip through an enclosing loop,
+                // where the slot has just been re-stored with the initializer.
+                if bty == Type::Str && self.append_ok.contains(name.as_str()) {
+                    self.str_append_shadow(&slot);
+                    self.str_append_reset(&slot);
+                }
                 // If ownership analysis proved this heap binding non-escaping,
                 // schedule it to be reclaimed when its block exits.
                 if let Some(&kind) = self.droppable.get(&key) {
@@ -3091,6 +2545,26 @@ impl<'a> Gen<'a> {
             }
             Stmt::Assign { name, value, .. } => {
                 let (slot, tty) = self.lookup(name).ok_or_else(|| format!("unbound `{name}`"))?;
+                // `s = s + a + b` on an eligible local String: grow the buffer
+                // instead of building a new one (see `emit_str_append`). Only
+                // outside a `region` — arena memory cannot be `realloc`'d — and
+                // only for a slot that owns a shadow, which is exactly a `let`
+                // -declared local that `append_candidates` cleared. Operands are
+                // evaluated left to right, as the general path would.
+                if self.region_depth == 0 && self.str_append.contains_key(&slot) {
+                    if let Some(parts) = self_append_spine(name, value) {
+                        self.expect.push(tty.clone());
+                        let vals: Result<Vec<String>, String> = parts
+                            .iter()
+                            .map(|p| self.gen_expr(p).map(|(v, _)| v))
+                            .collect();
+                        self.expect.pop();
+                        for v in vals? {
+                            self.emit_str_append(&slot, &v);
+                        }
+                        return Ok(());
+                    }
+                }
                 self.expect.push(tty.clone());
                 let r = self.gen_expr(value);
                 self.expect.pop();
@@ -3098,6 +2572,7 @@ impl<'a> Gen<'a> {
                 let (v, _) = self.coerce(v, &vty, &tty)?;
                 let ll = self.llt(&tty);
                 self.emit(format!("store {ll} {v}, ptr {slot}"));
+                self.str_append_reset(&slot);
                 Ok(())
             }
             Stmt::SetField { name, field, value, .. } => {
@@ -3721,23 +3196,36 @@ impl<'a> Gen<'a> {
                 if let Some(t) = &elem_expect {
                     self.expect.push(t.clone());
                 }
-                // When the enclosing storage boundary expects a GROWABLE element
-                // (an `Array<T>` or `Map<K,V>` — e.g. an `Array<Array<Int64>>`),
-                // every element literal must be lowered to that heap representation
-                // BEFORE it enters the outer aggregate. Otherwise a nested literal
-                // like `[[1], [2, 3]]` lowers as a fixed 2-D C-array `[2 x [1 x
-                // i64]]`, which is the wrong repr AND fails to build the moment two
-                // inner literals differ in length. Build the aggregate at the
-                // declared element type and coerce each element into it — the same
-                // declared-type coercion the enum-payload path uses. (A flat/scalar
-                // element type keeps the inferred-from-`elems[0]` path unchanged.)
-                let growable_elem = matches!(
-                    elem_expect.as_ref().map(|t| self.resolve(t)),
-                    Some(Type::Array(_)) | Some(Type::Map(_, _))
-                );
+                // When the enclosing storage boundary names the element type, the
+                // aggregate is built AT that type and every element is coerced into
+                // it. Inferring the element type from `elems[0]` instead is wrong in
+                // three separate ways, and each one was measured:
+                //
+                // - A GROWABLE element (an `Array<T>` or `Map<K,V>` — e.g. an
+                //   `Array<Array<Int64>>`) must reach its heap representation BEFORE
+                //   it enters the outer aggregate, or a nested literal like
+                //   `[[1], [2, 3]]` lowers as a fixed 2-D C-array `[2 x [1 x i64]]`,
+                //   which is the wrong repr AND fails to build the moment two inner
+                //   literals differ in length.
+                // - A SIZED-INTEGER element (`Array<UInt8> = [65, 66]`) inferred
+                //   `Int` from the literal and emitted `[2 x i64]`, which the
+                //   consumer then read at the declared width: `store { ptr, i64,
+                //   i64 } %t1` against an `[2 x i64]` for `Array<T>`, and
+                //   `extractvalue [2 x i8] %t1` for `SmallArray<T, N>`. Both are
+                //   clang errors — `vyrn run` and the direct wasm backend printed
+                //   `65`, native did not build at all.
+                // - A VALIDATED element (`Array<Age>`, RFC-0020) inferred `Int` too,
+                //   and there the failure was SILENT rather than loud: the reshape
+                //   below reinterprets the buffer whenever `llt` matches, and
+                //   `Age`'s `llt` IS `i64`, so no `where` predicate ran. `[20, 5]`
+                //   into an `Array<Age>` trapped under the interpreter and under
+                //   wasm and printed `20`/`5` natively.
+                //
+                // One expected type, coerced element-wise, answers all three: the
+                // outer `ArrayN -> Array`/`SmallArray` step then has `fi == ti` and
+                // is the pure reshape its comment already claims to be.
                 let build = (|| -> Result<(String, Type), String> {
-                    let (ety, first) = if growable_elem {
-                        let ety = elem_expect.clone().unwrap();
+                    let (ety, first) = if let Some(ety) = elem_expect.clone() {
                         let (v0, v0t) = self.gen_expr(&elems[0])?;
                         let (v0, _) = self.coerce(v0, &v0t, &ety)?;
                         (ety, v0)
@@ -3876,7 +3364,6 @@ impl<'a> Gen<'a> {
         let rfields = self
             .record_fields(&Type::Named(name.to_string()))
             .ok_or_else(|| format!("`{name}` is not a record type"))?;
-        let type_params = self.types.get(name).map(|d| d.type_params.clone()).unwrap_or_default();
 
         // Emit each field value in declared order; infer generic parameters.
         let mut solved: HashMap<String, Type> = HashMap::new();
@@ -3896,16 +3383,16 @@ impl<'a> Gen<'a> {
             vals.push((v, vty));
         }
 
-        // The concrete result type (generic parameters filled in).
-        let result_ty = if type_params.is_empty() {
-            Type::Named(name.to_string())
-        } else {
-            let args = type_params
-                .iter()
-                .map(|tp| solved.get(tp).cloned().unwrap_or(Type::Unit))
-                .collect();
-            Type::App(name.to_string(), args)
-        };
+        // The concrete result type (generic parameters filled in), by the same
+        // shared rule an enum variant's construction uses. `solved` above is the
+        // incremental form of it, kept because each field's own type needs it
+        // while the fields are still being emitted.
+        let result_ty = applied_type(
+            self.types.get(name),
+            name,
+            &rfields.iter().map(|f| f.ty.clone()).collect::<Vec<_>>(),
+            &vals.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
+        );
         let ll = self.llt(&result_ty);
 
         let mut cur = "undef".to_string();
@@ -3978,14 +3465,15 @@ impl<'a> Gen<'a> {
         // tag == 1 arm (Some / Ok)
         self.emit_label(&one_l);
         let one_arm = arms.iter().find(|a| pattern_is_one(&a.pattern)).unwrap();
-        let (one_val, ty) = self.gen_arm_body(&sv, one_arm, &one_ty)?;
+        let (one_val, one_t) = self.gen_arm_body(&sv, one_arm, &one_ty)?;
         let one_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
 
         // tag == 0 arm (None / Err)
         self.emit_label(&zero_l);
         let zero_arm = arms.iter().find(|a| !pattern_is_one(&a.pattern)).unwrap();
-        let (zero_val, _) = self.gen_arm_body(&sv, zero_arm, &zero_ty)?;
+        let (zero_val, zero_t) = self.gen_arm_body(&sv, zero_arm, &zero_ty)?;
+        let ty = join_never(one_t, zero_t);
         let zero_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
 
@@ -3994,7 +3482,7 @@ impl<'a> Gen<'a> {
         self.emit_label(&end_l);
         let ll = self.llt(&ty);
         if ll == "void" {
-            return Ok((String::new(), ty));
+            return Ok((void_merge_value(&ty), ty));
         }
         let res = self.fresh_tmp();
         self.emit(format!(
@@ -4025,7 +3513,7 @@ impl<'a> Gen<'a> {
 
         // then branch
         self.emit_label(&then_l);
-        let (then_val, ty) = self.gen_expr(then_branch)?;
+        let (then_val, then_t) = self.gen_expr(then_branch)?;
         // The predecessor of the join is the CURRENT block — a nested if/match in
         // the branch body may have moved us past `then_l`.
         let then_end = self.cur_block.clone();
@@ -4033,7 +3521,8 @@ impl<'a> Gen<'a> {
 
         // else branch
         self.emit_label(&else_l);
-        let (else_val, _) = self.gen_expr(else_branch)?;
+        let (else_val, else_t) = self.gen_expr(else_branch)?;
+        let ty = join_never(then_t, else_t);
         let else_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
 
@@ -4041,7 +3530,7 @@ impl<'a> Gen<'a> {
         self.emit_label(&end_l);
         let ll = self.llt(&ty);
         if ll == "void" {
-            return Ok((String::new(), ty));
+            return Ok((void_merge_value(&ty), ty));
         }
         let res = self.fresh_tmp();
         self.emit(format!(
@@ -4086,7 +3575,11 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("switch i64 {tag}, label %{default_l} [ {cases} ]"));
 
         let mut incoming: Vec<(String, String)> = Vec::new();
-        let mut ty = Type::Unit;
+        // Seeded `Never`, not `Unit`: a match whose EVERY arm diverges is itself
+        // divergent, and the first arm that answers overwrites this on the next
+        // line down. Seeding `Unit` reported "no value" for a match that is in
+        // value position, which is how an enclosing `phi` got an empty operand.
+        let mut ty = Type::Never;
         for (arm, (idx, lbl)) in arms.iter().zip(&arm_labels) {
             self.emit_label(lbl);
             self.scope.push(Vec::new());
@@ -4113,7 +3606,12 @@ impl<'a> Gen<'a> {
             // type instead of the bare `Type::Param` (which lowers to an invalid
             // `alloca void`). Every instantiation shares one LLVM layout, so this
             // never disturbs the `phi` below — only the reported type.
-            if !(self.ty_is_concrete_app(&ty) && !self.ty_is_concrete_app(&t)) {
+            // A `panic` arm (RFC-0079) reports `Never` and answers nothing: it
+            // is `poison` in the `phi`, and the arms that produce a value decide
+            // the type.
+            if !matches!(t, Type::Never)
+                && !(self.ty_is_concrete_app(&ty) && !self.ty_is_concrete_app(&t))
+            {
                 ty = t;
             }
             self.scope.pop();
@@ -4131,7 +3629,7 @@ impl<'a> Gen<'a> {
         // Unit-typed arms (side effects only) have no value — `phi void` is
         // invalid IR, so skip the merge entirely.
         if ll == "void" {
-            return Ok((String::new(), ty));
+            return Ok((void_merge_value(&ty), ty));
         }
         let res = self.fresh_tmp();
         let phi = incoming
@@ -4544,6 +4042,15 @@ impl<'a> Gen<'a> {
             return Ok((t, Type::Bool));
         }
 
+        // `Code + Code` concatenates fragments, origins carried (RFC-0054). Both
+        // sides are handles, so the concatenation happens in the host's arena
+        // (RFC-0076 M3a) and this is one import call.
+        if op == BinOp::Add && matches!(self.resolve(&lty), Type::Named(ref n) if n == "Code") {
+            let t = self.fresh_tmp();
+            self.emit(format!("{t} = call i64 @__vyrn_code_concat(i64 {l}, i64 {r})"));
+            return Ok((t, lty));
+        }
+
         // `a + b` on two Strings is concatenation (replacing `concat`): the same
         // heap allocation, region routing, and drop analysis.
         if op == BinOp::Add && self.resolve(&lty) == Type::Str {
@@ -4570,12 +4077,19 @@ impl<'a> Gen<'a> {
                 BinOp::Sub => format!("{t} = fsub {f} {l}, {r}"),
                 BinOp::Mul => format!("{t} = fmul {f} {l}, {r}"),
                 BinOp::Div => format!("{t} = fdiv {f} {l}, {r}"),
+                // The ordered/unordered choice is IEEE 754's, and it is the same
+                // choice wasm's `f64.lt`..`f64.ne` and Rust's `f64` operators make,
+                // so all three engines agree arm for arm: the four relational ops
+                // and `==` are ORDERED (a NaN operand makes them false), and `!=`
+                // is UNORDERED — `NaN != NaN` is TRUE. `one` here read
+                // "ordered AND not equal", which made native the only engine
+                // printing `0` for `nan != nan` (RFC-0077 M2h measured it).
                 BinOp::Lt => format!("{t} = fcmp olt {f} {l}, {r}"),
                 BinOp::LtEq => format!("{t} = fcmp ole {f} {l}, {r}"),
                 BinOp::Gt => format!("{t} = fcmp ogt {f} {l}, {r}"),
                 BinOp::GtEq => format!("{t} = fcmp oge {f} {l}, {r}"),
                 BinOp::Eq => format!("{t} = fcmp oeq {f} {l}, {r}"),
-                BinOp::NotEq => format!("{t} = fcmp one {f} {l}, {r}"),
+                BinOp::NotEq => format!("{t} = fcmp une {f} {l}, {r}"),
                 BinOp::Rem
                 | BinOp::And
                 | BinOp::Or
@@ -4732,9 +4246,22 @@ impl<'a> Gen<'a> {
                 let op = if from_unsigned { "uitofp" } else { "sitofp" };
                 self.emit(format!("{t} = {op} {fll} {v} to {tll}"));
             }
+            // Float→int, in the interpreter's two steps rather than one cast:
+            // saturate into 64 bits, then narrow by WRAPPING. That composition
+            // is why `UInt8(300.7)` is 44 and not 255 — `300.7 as u64` is 300
+            // and `300 as u8` wraps — and a single `fptoui .. to i8` agrees with
+            // it only by accident of the host instruction.
             (true, false) => {
+                let sfx = if fll == "double" { "f64" } else { "f32" };
                 let op = if to_unsigned { "fptoui" } else { "fptosi" };
-                self.emit(format!("{t} = {op} {fll} {v} to {tll}"));
+                let sat = self.fresh_tmp();
+                self.emit(format!(
+                    "{sat} = call i64 @llvm.{op}.sat.i64.{sfx}({fll} {v})"
+                ));
+                if tll == "i64" {
+                    return Ok((sat, to.clone()));
+                }
+                self.emit(format!("{t} = trunc i64 {sat} to {tll}"));
             }
             // Float↔Float of different widths (fll != tll guaranteed above):
             // f64→f32 rounds (`fptrunc`), f32→f64 is exact (`fpext`).
@@ -4860,6 +4387,22 @@ impl<'a> Gen<'a> {
         let mut capture_ops: Vec<String> = Vec::new();
         for (i, p) in callee.params.iter().enumerate() {
             let Type::Fn(dptys, dret) = &p.ty else { continue };
+            // RFC-0071 M2b/M2c: a type parameter may occur ONLY inside a `fn`
+            // parameter's own parameter list (`paramQuery(run: fn(P) -> T)`), with
+            // no ordinary argument to pin it in pass 1. Solve those from the
+            // target's declared parameters, exactly as the return is solved below
+            // — otherwise `P` survives as a `Type::Param` into the instance, and a
+            // `Type::Param` lowers to `void`: an `alloca void`, a `void` argument,
+            // and a dispatcher keyed on a signature no construction registers.
+            // The checker's `check_fn_arg` learned the same rule; this is its
+            // codegen half.
+            if generic {
+                if let Some(tptys) = self.fn_arg_param_types(&args[i]) {
+                    for (d, t) in dptys.iter().zip(&tptys) {
+                        solve_param(d, t, &mut call_subst);
+                    }
+                }
+            }
             // The parameter's `fn` type with type parameters filled in from pass 1.
             let ptys: Vec<Type> = dptys
                 .iter()
@@ -4914,6 +4457,26 @@ impl<'a> Gen<'a> {
             self.emit(format!("{t} = call {retll} @{sym}({})", arg_ops.join(", ")));
             Ok((t, ret_ty))
         }
+    }
+
+    /// The DECLARED parameter types of a `fn`-typed argument's target, when the
+    /// argument names one: a top-level function, a forwarded `fn` parameter, or a
+    /// stored function value. `None` for a lambda literal, whose parameters take
+    /// their types from the signature they flow into and so can solve nothing.
+    fn fn_arg_param_types(&self, arg: &Expr) -> Option<Vec<Type>> {
+        let Expr::Var { name, .. } = arg else {
+            return None;
+        };
+        if let Some(b) = self.fn_bindings.get(name) {
+            return Some(b.param_tys.clone());
+        }
+        if let Some((_, ty)) = self.lookup(name) {
+            if let Type::Fn(ptys, _) = self.normalize_sig(&ty) {
+                return Some(ptys);
+            }
+            return None;
+        }
+        self.param_types.get(name).cloned()
     }
 
     /// Resolve one `fn`-typed argument to a call target (RFC-0023), emitting any
@@ -4990,146 +4553,193 @@ impl<'a> Gen<'a> {
     }
 
     /// The captured (free) local variables of a lambda body (RFC-0023), in
-    /// first-seen order: names read in the body that are neither the lambda's own
-    /// parameters/locals nor module state nor functions — i.e. bindings that live
-    /// in the enclosing local scope.
+    /// first-seen order.
+    ///
+    /// The walk itself is [`lambda_captures`], shared with the direct wasm
+    /// backend: a capture LIST is part of a lifted lambda's signature, so two
+    /// backends that disagreed about its length or its order would emit calls
+    /// with the wrong number of arguments — the same class of two-sources-of-truth
+    /// bug `llt_of` and `predicate_binds` exist to prevent. Only "is this name an
+    /// enclosing local?" is per-backend, and it is one closure.
     fn lambda_captures(
         &self,
         body: &LambdaBody,
         locals: std::collections::HashSet<String>,
     ) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut locals = locals;
-        match body {
-            LambdaBody::Expr(e) => self.captures_of_expr(e, &mut locals, &mut out, &mut seen),
-            LambdaBody::Block(b) => self.captures_of_block(b, &mut locals, &mut out, &mut seen),
-        }
-        out
+        lambda_captures(body, locals, &|name| {
+            self.scope.iter().any(|f| f.iter().any(|(n, _, _)| n == name))
+        })
     }
+}
 
-    fn captures_of_block(
-        &self,
-        b: &Block,
-        locals: &mut std::collections::HashSet<String>,
-        out: &mut Vec<String>,
-        seen: &mut std::collections::HashSet<String>,
-    ) {
-        for s in &b.stmts {
-            match s {
-                Stmt::Let { name, value, .. } => {
-                    self.captures_of_expr(value, locals, out, seen);
-                    locals.insert(name.clone());
-                }
-                Stmt::Assign { value, .. }
-                | Stmt::SetField { value, .. }
-                | Stmt::Expr(value)
-                | Stmt::Return { value: Some(value), .. } => {
-                    self.captures_of_expr(value, locals, out, seen)
-                }
-                Stmt::IndexSet { index, value, .. } => {
-                    self.captures_of_expr(index, locals, out, seen);
-                    self.captures_of_expr(value, locals, out, seen);
-                }
-                Stmt::If { cond, then_block, else_block, .. } => {
-                    self.captures_of_expr(cond, locals, out, seen);
-                    self.captures_of_block(then_block, &mut locals.clone(), out, seen);
-                    if let Some(eb) = else_block {
-                        self.captures_of_block(eb, &mut locals.clone(), out, seen);
-                    }
-                }
-                Stmt::IfLet { pattern, scrutinee, then_block, else_block, .. } => {
-                    self.captures_of_expr(scrutinee, locals, out, seen);
-                    let mut inner = locals.clone();
-                    for b in vyrn_frontend::movecheck::pattern_bindings(pattern) {
-                        inner.insert(b.to_string());
-                    }
-                    self.captures_of_block(then_block, &mut inner, out, seen);
-                    if let Some(eb) = else_block {
-                        self.captures_of_block(eb, &mut locals.clone(), out, seen);
-                    }
-                }
-                Stmt::While { cond, body, .. } => {
-                    self.captures_of_expr(cond, locals, out, seen);
-                    self.captures_of_block(body, &mut locals.clone(), out, seen);
-                }
-                Stmt::ForIn { var, iter, body, .. } => {
-                    self.captures_of_expr(iter, locals, out, seen);
-                    let mut inner = locals.clone();
-                    inner.insert(var.clone());
-                    self.captures_of_block(body, &mut inner, out, seen);
-                }
-                Stmt::Region { body, .. } => {
-                    self.captures_of_block(body, &mut locals.clone(), out, seen)
-                }
-                Stmt::Return { value: None, .. }
-                | Stmt::Drop { .. }
-                | Stmt::Break { .. }
-                | Stmt::Continue { .. } => {}
-            }
-        }
+/// Deep-normalize a stored-fn signature (RFC-0037) so structurally identical
+/// spellings — a `type Transform = fn(Int64) -> Int64` alias, a validated scalar,
+/// transformer sugar — register and dispatch as ONE synthesized enum.
+/// `Ref`/`Task` interiors are left resolved: they cannot hold fn values, and
+/// recursing would cycle.
+///
+/// Shared with the direct wasm backend, because it decides which constructions a
+/// dispatcher covers. Two backends grouping differently would give one of them a
+/// dispatcher missing a variant — a defensive trap where a call belongs, reached
+/// only by the spelling nobody wrote a test for.
+pub(crate) fn normalize_fn_sig(t: &Type, types: &HashMap<String, TypeDecl>) -> Type {
+    let norm = |x: &Type| normalize_fn_sig(x, types);
+    match vyrn_frontend::types::resolve(t, types) {
+        Type::Fn(ps, r) => Type::Fn(ps.iter().map(norm).collect(), Box::new(norm(&r))),
+        Type::Array(i) => Type::Array(Box::new(norm(&i))),
+        Type::ArrayN(i, n) => Type::ArrayN(Box::new(norm(&i)), n),
+        Type::Option(i) => Type::Option(Box::new(norm(&i))),
+        Type::Result(a, b) => Type::Result(Box::new(norm(&a)), Box::new(norm(&b))),
+        Type::Map(k, v) => Type::Map(Box::new(norm(&k)), Box::new(norm(&v))),
+        Type::Record(fs) => Type::Record(
+            fs.iter().map(|f| Field { name: f.name.clone(), ty: norm(&f.ty) }).collect(),
+        ),
+        other => other,
     }
+}
 
-    fn captures_of_expr(
-        &self,
-        e: &Expr,
-        locals: &mut std::collections::HashSet<String>,
-        out: &mut Vec<String>,
-        seen: &mut std::collections::HashSet<String>,
-    ) {
-        match e {
-            Expr::Var { name, .. } => {
-                if locals.contains(name) || seen.contains(name) {
-                    return;
-                }
-                // Only an enclosing LOCAL slot is a capture — module state and
-                // functions/variants are reached directly by the lifted function.
-                let is_local = self.scope.iter().any(|f| f.iter().any(|(n, _, _)| n == name));
-                if is_local {
-                    seen.insert(name.clone());
-                    out.push(name.clone());
-                }
+/// The captured (free) local variables of a lambda body (RFC-0023), in
+/// first-seen order: names read in the body that are neither the lambda's own
+/// parameters/locals nor module state nor functions — i.e. bindings that live in
+/// the enclosing local scope, which is what `is_local` answers.
+pub(crate) fn lambda_captures(
+    body: &LambdaBody,
+    locals: std::collections::HashSet<String>,
+    is_local: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut locals = locals;
+    match body {
+        LambdaBody::Expr(e) => captures_of_expr(e, &mut locals, &mut out, &mut seen, is_local),
+        LambdaBody::Block(b) => captures_of_block(b, &mut locals, &mut out, &mut seen, is_local),
+    }
+    out
+}
+
+fn captures_of_block(
+    b: &Block,
+    locals: &mut std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+    is_local: &dyn Fn(&str) -> bool,
+) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let { name, value, .. } => {
+                captures_of_expr(value, locals, out, seen, is_local);
+                locals.insert(name.clone());
             }
-            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-                self.captures_of_expr(expr, locals, out, seen)
+            Stmt::Assign { value, .. }
+            | Stmt::SetField { value, .. }
+            | Stmt::Expr(value)
+            | Stmt::Return { value: Some(value), .. } => {
+                captures_of_expr(value, locals, out, seen, is_local)
             }
-            Expr::Binary { lhs, rhs, .. } => {
-                self.captures_of_expr(lhs, locals, out, seen);
-                self.captures_of_expr(rhs, locals, out, seen);
+            Stmt::IndexSet { index, value, .. } => {
+                captures_of_expr(index, locals, out, seen, is_local);
+                captures_of_expr(value, locals, out, seen, is_local);
             }
-            Expr::Call { args, .. }
-            | Expr::Spawn { args, .. }
-            | Expr::TryConstruct { args, .. }
-            | Expr::ArrayLit { elems: args, .. } => {
-                for a in args {
-                    self.captures_of_expr(a, locals, out, seen);
-                }
-            }
-            Expr::Match { scrutinee, arms, .. } => {
-                self.captures_of_expr(scrutinee, locals, out, seen);
-                for arm in arms {
-                    let mut inner = locals.clone();
-                    for b in vyrn_frontend::pattern_bindings(&arm.pattern) {
-                        inner.insert(b.to_string());
-                    }
-                    self.captures_of_expr(&arm.body, &mut inner, out, seen);
-                }
-            }
-            Expr::IfExpr { cond, then_branch, else_branch, .. } => {
-                self.captures_of_expr(cond, locals, out, seen);
-                self.captures_of_expr(then_branch, locals, out, seen);
-                if let Some(eb) = else_branch {
-                    self.captures_of_expr(eb, locals, out, seen);
+            Stmt::If { cond, then_block, else_block, .. } => {
+                captures_of_expr(cond, locals, out, seen, is_local);
+                captures_of_block(then_block, &mut locals.clone(), out, seen, is_local);
+                if let Some(eb) = else_block {
+                    captures_of_block(eb, &mut locals.clone(), out, seen, is_local);
                 }
             }
-            Expr::StructLit { fields, .. } => {
-                for (_, v) in fields {
-                    self.captures_of_expr(v, locals, out, seen);
+            Stmt::IfLet { pattern, scrutinee, then_block, else_block, .. } => {
+                captures_of_expr(scrutinee, locals, out, seen, is_local);
+                let mut inner = locals.clone();
+                for b in vyrn_frontend::movecheck::pattern_bindings(pattern) {
+                    inner.insert(b.to_string());
+                }
+                captures_of_block(then_block, &mut inner, out, seen, is_local);
+                if let Some(eb) = else_block {
+                    captures_of_block(eb, &mut locals.clone(), out, seen, is_local);
                 }
             }
-            _ => {}
+            Stmt::While { cond, body, .. } => {
+                captures_of_expr(cond, locals, out, seen, is_local);
+                captures_of_block(body, &mut locals.clone(), out, seen, is_local);
+            }
+            Stmt::ForIn { var, iter, body, .. } => {
+                captures_of_expr(iter, locals, out, seen, is_local);
+                let mut inner = locals.clone();
+                inner.insert(var.clone());
+                captures_of_block(body, &mut inner, out, seen, is_local);
+            }
+            Stmt::Region { body, .. } => {
+                captures_of_block(body, &mut locals.clone(), out, seen, is_local)
+            }
+            Stmt::Return { value: None, .. }
+            | Stmt::Drop { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. } => {}
         }
     }
+}
+
+fn captures_of_expr(
+    e: &Expr,
+    locals: &mut std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+    is_local: &dyn Fn(&str) -> bool,
+) {
+    match e {
+        Expr::Var { name, .. } => {
+            if locals.contains(name) || seen.contains(name) {
+                return;
+            }
+            // Only an enclosing LOCAL slot is a capture — module state and
+            // functions/variants are reached directly by the lifted function.
+            if is_local(name) {
+                seen.insert(name.clone());
+                out.push(name.clone());
+            }
+        }
+        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+            captures_of_expr(expr, locals, out, seen, is_local)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            captures_of_expr(lhs, locals, out, seen, is_local);
+            captures_of_expr(rhs, locals, out, seen, is_local);
+        }
+        Expr::Call { args, .. }
+        | Expr::Spawn { args, .. }
+        | Expr::TryConstruct { args, .. }
+        | Expr::ArrayLit { elems: args, .. } => {
+            for a in args {
+                captures_of_expr(a, locals, out, seen, is_local);
+            }
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            captures_of_expr(scrutinee, locals, out, seen, is_local);
+            for arm in arms {
+                let mut inner = locals.clone();
+                for b in vyrn_frontend::pattern_bindings(&arm.pattern) {
+                    inner.insert(b.to_string());
+                }
+                captures_of_expr(&arm.body, &mut inner, out, seen, is_local);
+            }
+        }
+        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            captures_of_expr(cond, locals, out, seen, is_local);
+            captures_of_expr(then_branch, locals, out, seen, is_local);
+            if let Some(eb) = else_branch {
+                captures_of_expr(eb, locals, out, seen, is_local);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields {
+                captures_of_expr(v, locals, out, seen, is_local);
+            }
+        }
+        _ => {}
+    }
+}
+
+impl<'a> Gen<'a> {
 
     /// Emit a monomorphized top-level function for a lambda literal (RFC-0023):
     /// `@__vyrn_lambda_...(<captures>, <params>) -> <ret>`. Returns (symbol,
@@ -5173,6 +4783,11 @@ impl<'a> Gen<'a> {
         let saved_droppable = std::mem::take(&mut self.droppable);
         let saved_modify = std::mem::take(&mut self.modify_copyout);
         let saved_bindings = std::mem::take(&mut self.fn_bindings);
+        // The lifted body is a different function: the enclosing one's append
+        // candidates say nothing about its locals, and its shadow slots would
+        // be allocas of the outer frame.
+        let saved_append_ok = std::mem::take(&mut self.append_ok);
+        let saved_str_append = std::mem::take(&mut self.str_append);
         self.tmp = 0;
         self.label = 0;
 
@@ -5252,6 +4867,8 @@ impl<'a> Gen<'a> {
         self.droppable = saved_droppable;
         self.modify_copyout = saved_modify;
         self.fn_bindings = saved_bindings;
+        self.append_ok = saved_append_ok;
+        self.str_append = saved_str_append;
 
         self.lambda_defs.push((sym.clone(), def));
         Ok((sym, ret_ty))
@@ -5259,34 +4876,11 @@ impl<'a> Gen<'a> {
 
     // ---- stored function values by defunctionalization (RFC-0037) --------
 
-    /// Deep-normalize a stored-fn signature so structurally identical
-    /// spellings (aliases, validated scalars, transformer sugar) register and
-    /// dispatch as ONE synthesized enum. `Ref`/`Task` interiors are left as
-    /// resolved (they cannot hold fn values, and recursing would cycle).
+    /// Deep-normalize a stored-fn signature so structurally identical spellings
+    /// register and dispatch as ONE synthesized enum — [`normalize_fn_sig`],
+    /// under this body's substitution.
     fn normalize_sig(&self, t: &Type) -> Type {
-        match self.resolve(t) {
-            Type::Fn(ps, r) => Type::Fn(
-                ps.iter().map(|p| self.normalize_sig(p)).collect(),
-                Box::new(self.normalize_sig(&r)),
-            ),
-            Type::Array(i) => Type::Array(Box::new(self.normalize_sig(&i))),
-            Type::ArrayN(i, n) => Type::ArrayN(Box::new(self.normalize_sig(&i)), n),
-            Type::Option(i) => Type::Option(Box::new(self.normalize_sig(&i))),
-            Type::Result(a, b) => Type::Result(
-                Box::new(self.normalize_sig(&a)),
-                Box::new(self.normalize_sig(&b)),
-            ),
-            Type::Map(k, v) => Type::Map(
-                Box::new(self.normalize_sig(&k)),
-                Box::new(self.normalize_sig(&v)),
-            ),
-            Type::Record(fs) => Type::Record(
-                fs.iter()
-                    .map(|f| Field { name: f.name.clone(), ty: self.normalize_sig(&f.ty) })
-                    .collect(),
-            ),
-            other => other,
-        }
+        normalize_fn_sig(&vyrn_frontend::types::substitute(t, self.subst), self.types)
     }
 
     /// The expected fn type currently in scope for a lambda literal / bare
@@ -5646,6 +5240,8 @@ impl<'a> Gen<'a> {
         self.cur_fn_name = inst.name.clone();
         self.lambda_counter = 0;
         self.droppable = self.droppable_map.get(&inst.name).cloned().unwrap_or_default();
+        self.append_ok = append_candidates(&callee.body);
+        self.str_append.clear();
         self.fn_ret = vyrn_frontend::types::substitute(&callee.ret, &self.subst_clone());
         self.fn_bindings.clear();
 
@@ -5711,7 +5307,28 @@ impl<'a> Gen<'a> {
         self.subst.clone()
     }
 
+    /// Lower one code-quote operation (RFC-0054) to its `vyrn_gen` host import
+    /// (RFC-0076 M3a). A `Code` value is an i64 handle into the host's arena and
+    /// nothing here knows what a piece is — which is the point: `render_code`
+    /// and the splice table exist once, in the interpreter, and both engines run
+    /// that one copy.
     fn gen_call(&mut self, name: &str, args: &[Expr]) -> Result<(String, Type), String> {
+        // RFC-0078 M4c: a builtin whose implementation IS a Vyrn function lowers as
+        // a call to it. The loader injected the module (reserved `$` spellings, so
+        // nothing can collide with or capture them) and this emitter holds no
+        // implementation of its own — the ~520 lines of hand-written IR the six
+        // codecs used to need are gone, and so is the UTF-8 decoder `chars` had.
+        if let Some(rt) = vyrn_frontend::loader::routed_builtin(name) {
+            if !self.funcs.contains_key(rt) {
+                // Loudly, and naming the reason — the same refusal `toJson` makes
+                // when its serializer is not in the link (RFC-0078 M2b).
+                return Err(format!(
+                    "`{name}` is implemented in Vyrn (`{rt}`) and its module is not in the link \
+                     — a std root is needed to compile a call to it"
+                ));
+            }
+            return self.gen_call(rt, args);
+        }
         // Calling a `fn`-typed parameter inside a specialized instance (RFC-0023):
         // a direct call to the monomorphized target with the captured values (this
         // instance's own extra parameters) prepended. No function pointer exists.
@@ -5785,26 +5402,58 @@ impl<'a> Gen<'a> {
             };
             return self.gen_expr(&Expr::Str(json));
         }
-        // `toJson(x)` (RFC-0018): encode `x` into a JSON DOM node, then render it
-        // canonically via the shim's stringifier (which owns escaping + number
-        // formatting, so the bytes match the interpreter's `scalar_to_string`).
+        // `toJson(x)` (RFC-0078 M2b): the type-directed half is a shared AST
+        // builder, and the serializer is `std/json`'s `emit` — Vyrn, injected into
+        // the link. So there is no encoder here at all: the call becomes an
+        // ordinary expression and lowers like any other. This is what `schemaOf`
+        // does one size up, and it is why the direct backend needed no lowering of
+        // its own.
         if name == "toJson" {
+            let line = Expr::line(&args[0]);
+            // Lowered here rather than inside the built expression, so the argument
+            // is evaluated exactly once and its static type comes from the lowering
+            // that already computes it (this backend has no type-only peek). The
+            // binding's name has a `$` in it, so it cannot shadow anything a
+            // program can spell.
             let (v, vty) = self.gen_expr(&args[0])?;
-            let node = self.emit_encode(&v, &vty)?;
-            let s = self.fresh_tmp();
-            self.emit(format!("{s} = call ptr @__vyrn_vj_encode(ptr {node})"));
-            return Ok((s, Type::Str));
+            let enc = vyrn_frontend::jsonenc::enc_name(&vty);
+            if !self.funcs.contains_key(enc.as_str()) {
+                return Err(format!(
+                    "`toJson` on `{vty}`: the JSON runtime is not linked. It is injected \
+                     into any program that mentions `toJson` (RFC-0078 M2b), so this is a \
+                     program built without a std root, or one whose argument type the \
+                     checker did not see"
+                ));
+            }
+            let ll = self.llt(&vty);
+            let slot = self.declare("json$arg", &vty);
+            self.emit(format!("store {ll} {v}, ptr {slot}"));
+            let arg = Expr::Var {
+                name: "json$arg".to_string(),
+                line,
+            };
+            let e = vyrn_frontend::jsonenc::encode_expr(arg, &vty, line);
+            return self.gen_expr(&e);
         }
-        // `fromJson(TypeName, s)` (RFC-0018): parse, decode, and package into a
-        // `Validation<T>` — `Valid(T)` if no Issue accumulated, else
-        // `Invalid([Issue])` built from the shim's issue list.
+        // `fromJson(TypeName, s)` (RFC-0078 M3): the type-directed half is a shared
+        // AST builder and the reader is `std/jsonread` — Vyrn, injected into the
+        // link. So there is no decoder here at all, and no `__vyrn_vj_*` DOM: the
+        // call becomes an ordinary expression and lowers like any other.
         if name == "fromJson" {
+            let line = Expr::line(&args[1]);
             let tn = match args.first() {
                 Some(Expr::Var { name: tn, .. }) if self.types.contains_key(tn) => tn.clone(),
                 _ => return Err("`fromJson` needs a declared type name".to_string()),
             };
-            let (s, _) = self.gen_expr(&args[1])?;
-            return self.gen_from_json(&tn, &s);
+            let target = Type::Named(tn);
+            let top = vyrn_frontend::jsondec::top_name(&target);
+            if !self.funcs.contains_key(top.as_str()) {
+                return Err(format!(
+                    "`fromJson` into `{target}`: the JSON runtime is not linked. It is                      injected into any program that mentions `fromJson` (RFC-0078 M3), so                      this is a program built without a std root"
+                ));
+            }
+            let e = vyrn_frontend::jsondec::decode_expr(&target, args[1].clone(), line);
+            return self.gen_expr(&e);
         }
         // Numeric conversion `Int32(x)`, `Float64(x)`, ...
         if let Some(target) = vyrn_frontend::types::numeric_conv_target(name) {
@@ -5847,6 +5496,26 @@ impl<'a> Gen<'a> {
                 "{out} = call {llty} asm sideeffect \"\", \"=r,0\"({llty} {v})"
             ));
             return Ok((out, ty));
+        }
+        // RFC-0079: `panic(msg)` — the message, then `exit(1)`, which is the
+        // trap path [`Emitter::trap_if`] takes minus the branch. The block ends
+        // in `unreachable` and a fresh (dead) one opens, so whatever the caller
+        // does with the "value" — `phi` it into a join, coerce it, drop it —
+        // lands in code no execution reaches. `poison` is that value: valid at
+        // every LLVM type, which is what makes a panicking `match` arm need no
+        // special case in the merge.
+        if name == "panic" {
+            let (v, _) = self.gen_expr(&args[0])?;
+            let e = self.fresh_tmp();
+            self.emit(format!("{e} = call ptr @__vyrn_stderr()"));
+            self.emit(format!(
+                "call i32 (ptr, ptr, ...) @fprintf(ptr {e}, ptr @.panic.fmt, ptr {v})"
+            ));
+            self.emit("call void @exit(i32 1)".into());
+            self.emit_term("unreachable".into());
+            let dead = self.fresh_label("panic.dead");
+            self.emit_label(&dead);
+            return Ok(("poison".to_string(), Type::Never));
         }
         if name == "print" {
             let (v, ty) = self.gen_expr(&args[0])?;
@@ -5944,37 +5613,30 @@ impl<'a> Gen<'a> {
 
         // (`len(String)` was removed; a String's byte length is the `.length`
         // field, lowered at `Expr::Field` via `@__vyrn_strlen`.)
-        // Text encodings. Encoders return a fresh String; decoders return the
-        // Option<String> aggregate (runtime helpers do the work + UTF-8 checking).
-        if matches!(name, "hexEncode" | "base64Encode" | "urlEncode") {
+        // (The six text encodings are `std/codecs` — RFC-0078 M4c. They were the
+        // only builtins with no C shim at all: ~520 lines of hand-written IR here,
+        // routed above and deleted from `ENCODING_RUNTIME`.)
+        // The IEEE-754 bit views (RFC-0078 M4a): a `bitcast`, which costs no
+        // instruction at all — the value is already in the right 64 bits and
+        // only the register class changes.
+        if matches!(name, "floatBits" | "floatFromBits") {
             let (v, _) = self.gen_expr(&args[0])?;
-            let helper = match name {
-                "hexEncode" => "@__vyrn_hex_encode",
-                "base64Encode" => "@__vyrn_b64_encode",
-                _ => "@__vyrn_url_encode",
-            };
             let t = self.fresh_tmp();
-            self.emit(format!("{t} = call ptr {helper}(ptr {v})"));
-            return Ok((t, Type::Str));
-        }
-        if matches!(name, "hexDecode" | "base64Decode" | "urlDecode") {
-            let (v, _) = self.gen_expr(&args[0])?;
-            let helper = match name {
-                "hexDecode" => "@__vyrn_hex_decode",
-                "base64Decode" => "@__vyrn_b64_decode",
-                _ => "@__vyrn_url_decode",
+            let (fll, tll, ty) = if name == "floatBits" {
+                ("double", "i64", Type::IntN { bits: 64, signed: false })
+            } else {
+                ("i64", "double", Type::Float)
             };
-            let t = self.fresh_tmp();
-            self.emit(format!("{t} = call {{ i1, i64, i64 }} {helper}(ptr {v})"));
-            return Ok((t, Type::Option(Box::new(Type::Str))));
+            self.emit(format!("{t} = bitcast {fll} {v} to {tll}"));
+            return Ok((t, ty));
         }
-        // bytes(s) / chars(s): decode a string into an Array<UInt8> of bytes
-        // (i8 stride — RFC-0014 M2) or an Array<Int> of Unicode code points
-        // (runtime helpers do the UTF-8 work).
-        if matches!(name, "bytes" | "chars") {
+        // bytes(s): a string's raw UTF-8 bytes as an Array<UInt8> (i8 stride —
+        // RFC-0014 M2). The VIEW, which is irreducible: `std/codecs`, `std/text`
+        // and `std/strpred` are all written on it. (`chars` used to share this arm
+        // and is now `std/text`'s `charsV` — RFC-0078 M4c.)
+        if matches!(name, "bytes") {
             let (v, _) = self.gen_expr(&args[0])?;
-            let helper =
-                if name == "bytes" { "@__vyrn_str_bytes" } else { "@__vyrn_str_chars" };
+            let helper = "@__vyrn_str_bytes";
             let t = self.fresh_tmp();
             self.emit(format!("{t} = call {{ ptr, i64, i64 }} {helper}(ptr {v})"));
             let elem = if name == "bytes" {
@@ -6045,7 +5707,39 @@ impl<'a> Gen<'a> {
         // enumeration (mediated through the loader's resolver). Neither has a
         // native/wasm lowering in v1 — a program that reaches one at runtime gets
         // a clear compile error rather than a link failure.
+        // `lineAt(bytes, off)` / `colAt(bytes, off)`: the buffer is `{ ptr, i64,
+        // i64 }` and `UInt8` is i8-stride, so the data pointer and length go
+        // straight to a C helper.
+        //
+        // The interpreter memoizes a line-start table per buffer (a scanner asks
+        // once per node, and counting from byte 0 each time is quadratic); the
+        // native helper counts directly. Same answer, which is what parity
+        // requires — the cache is an optimization, not a semantic.
+        //
+        // These need a lowering at all because a library that calls them is
+        // COMPILED as a module: `std/vyx` reaches them only from generator code,
+        // but codegen emits every function in a linked module regardless. That is
+        // why `listDir`/`moduleInterface` can stay comptime-only — they appear
+        // directly inside `gen fn` bodies — and these cannot.
+        if name == "lineAt" || name == "colAt" {
+            let (av, _) = self.gen_expr(&args[0])?;
+            let (ov, _) = self.gen_expr(&args[1])?;
+            let dptr = self.fresh_tmp();
+            let dlen = self.fresh_tmp();
+            let r = self.fresh_tmp();
+            self.emit(format!("{dptr} = extractvalue {{ ptr, i64, i64 }} {av}, 0"));
+            self.emit(format!("{dlen} = extractvalue {{ ptr, i64, i64 }} {av}, 1"));
+            let helper = if name == "lineAt" { "__vyrn_line_at" } else { "__vyrn_col_at" };
+            self.emit(format!(
+                "{r} = call i64 @{helper}(ptr {dptr}, i64 {dlen}, i64 {ov})"
+            ));
+            return Ok((r, Type::Int));
+        }
         if name == "listDir" {
+            // The language gives `listDir` no runtime meaning (RFC-0021). RFC-0076
+            // M2 lowered it behind `emit_gen_host` for the generation engine, and
+            // M7 moved that to the direct backend, so this emitter is back to the
+            // one thing it ever had to say about it.
             return Err(format!(
                 "`listDir` runs in the interpreter / at generation time (RFC-0021); it has no \
                  native or wasm lowering in v1 — use it in a `gen fn` or under `vyrn run`"
@@ -6055,6 +5749,16 @@ impl<'a> Gen<'a> {
             return Err(
                 "`moduleInterface` is compile-time reflection (RFC-0021) — it is only available \
                  during generation, never at runtime"
+                    .to_string(),
+            );
+        }
+        // `contractOf(Name)` is the same kind of thing on the *expectation* side
+        // (RFC-0071): a module contract is comptime-only and nothing about it
+        // survives into the emitted module, so there is nothing to lower.
+        if name == "contractOf" {
+            return Err(
+                "`contractOf` is compile-time reflection (RFC-0071) — a module contract is only \
+                 available during generation, never at runtime"
                     .to_string(),
             );
         }
@@ -6360,130 +6064,17 @@ impl<'a> Gen<'a> {
             ));
             return Ok((r, Type::Result(Box::new(Type::Str), Box::new(Type::Str))));
         }
-        // `@charCount` (from `s.charCount()`, RFC-0058): the number of Unicode
-        // scalar values = the count of non-continuation bytes, via the runtime
-        // shim `__vyrn_charcount` (byte-identical to the interpreter).
-        if name == "@charCount" {
-            let (s, _) = self.gen_expr(&args[0])?;
-            let n = self.fresh_tmp();
-            self.emit(format!("{n} = call i64 @__vyrn_charcount(ptr {s})"));
-            return Ok((n, Type::Int));
-        }
-        // contains(a, b): strstr(a, b) != null.
-        if name == "contains" {
-            let (a, _) = self.gen_expr(&args[0])?;
-            let (b, _) = self.gen_expr(&args[1])?;
-            let p = self.fresh_tmp();
-            let r = self.fresh_tmp();
-            self.emit(format!("{p} = call ptr @strstr(ptr {a}, ptr {b})"));
-            self.emit(format!("{r} = icmp ne ptr {p}, null"));
-            return Ok((r, Type::Bool));
-        }
-        // startsWith(a, b): strncmp(a, b, strlen(b)) == 0.
-        if name == "startsWith" {
-            let (a, _) = self.gen_expr(&args[0])?;
-            let (b, _) = self.gen_expr(&args[1])?;
-            let lb = self.fresh_tmp();
-            let c = self.fresh_tmp();
-            let r = self.fresh_tmp();
-            self.emit(format!("{lb} = call i64 @__vyrn_strlen(ptr {b})"));
-            self.emit(format!("{c} = call i32 @__vyrn_strncmp(ptr {a}, ptr {b}, i64 {lb})"));
-            self.emit(format!("{r} = icmp eq i32 {c}, 0"));
-            return Ok((r, Type::Bool));
-        }
-        // endsWith(a, b): b fits in a AND strncmp(a + (|a|-|b|), b, |b|) == 0.
-        if name == "endsWith" {
-            let (a, _) = self.gen_expr(&args[0])?;
-            let (b, _) = self.gen_expr(&args[1])?;
-            let la = self.fresh_tmp();
-            let lb = self.fresh_tmp();
-            self.emit(format!("{la} = call i64 @__vyrn_strlen(ptr {a})"));
-            self.emit(format!("{lb} = call i64 @__vyrn_strlen(ptr {b})"));
-            let fits = self.fresh_tmp();
-            self.emit(format!("{fits} = icmp uge i64 {la}, {lb}"));
-            let cmp_l = self.fresh_label("ew.cmp");
-            let no_l = self.fresh_label("ew.no");
-            let end_l = self.fresh_label("ew.end");
-            self.emit_term(format!("br i1 {fits}, label %{cmp_l}, label %{no_l}"));
-            self.emit_label(&cmp_l);
-            let off = self.fresh_tmp();
-            let p = self.fresh_tmp();
-            let c = self.fresh_tmp();
-            let eq = self.fresh_tmp();
-            self.emit(format!("{off} = sub i64 {la}, {lb}"));
-            self.emit(format!("{p} = getelementptr i8, ptr {a}, i64 {off}"));
-            self.emit(format!("{c} = call i32 @__vyrn_strncmp(ptr {p}, ptr {b}, i64 {lb})"));
-            self.emit(format!("{eq} = icmp eq i32 {c}, 0"));
-            let cmp_end = self.cur_block.clone();
-            self.emit_term(format!("br label %{end_l}"));
-            self.emit_label(&no_l);
-            self.emit_term(format!("br label %{end_l}"));
-            self.emit_label(&end_l);
-            let r = self.fresh_tmp();
-            self.emit(format!("{r} = phi i1 [ {eq}, %{cmp_end} ], [ false, %{no_l} ]"));
-            return Ok((r, Type::Bool));
-        }
-        // slice(s, start, end) -> String (RFC-0046): the byte-range substring.
-        // Validated O(1) — no whole-slice UTF-8 revalidation: bounds are checked,
-        // then the single byte at each cut point must not be a UTF-8 continuation
-        // byte (`(b & 0xC0) == 0x80`, the same test `chars` uses). Reading `s[len]`
-        // (the NUL terminator, 0) is safe and never a continuation byte, so the
-        // whole-string / empty-tail cases fall through. Routed like `concat`:
-        // the copy buffer is region-arena'd inside a `region`, else malloc'd.
-        if name == "slice" {
-            let (s, _) = self.gen_expr(&args[0])?;
-            let (start, _) = self.gen_expr(&args[1])?;
-            let (end, _) = self.gen_expr(&args[2])?;
-            let len = self.fresh_tmp();
-            self.emit(format!("{len} = call i64 @__vyrn_strlen(ptr {s})"));
-            // Bounds: start < 0 || end > len || start > end.
-            let c1 = self.fresh_tmp();
-            let c2 = self.fresh_tmp();
-            let c3 = self.fresh_tmp();
-            let o1 = self.fresh_tmp();
-            let oob = self.fresh_tmp();
-            self.emit(format!("{c1} = icmp slt i64 {start}, 0"));
-            self.emit(format!("{c2} = icmp sgt i64 {end}, {len}"));
-            self.emit(format!("{c3} = icmp sgt i64 {start}, {end}"));
-            self.emit(format!("{o1} = or i1 {c1}, {c2}"));
-            self.emit(format!("{oob} = or i1 {o1}, {c3}"));
-            self.trap_if(&oob, "@.trap.sliceoob", "slice.oob");
-            // UTF-8 boundary: neither cut point may land on a continuation byte.
-            let sp = self.fresh_tmp();
-            let bs = self.fresh_tmp();
-            let ms = self.fresh_tmp();
-            let cs = self.fresh_tmp();
-            self.emit(format!("{sp} = getelementptr i8, ptr {s}, i64 {start}"));
-            self.emit(format!("{bs} = load i8, ptr {sp}"));
-            self.emit(format!("{ms} = and i8 {bs}, -64"));
-            self.emit(format!("{cs} = icmp eq i8 {ms}, -128"));
-            let ep = self.fresh_tmp();
-            let be = self.fresh_tmp();
-            let me = self.fresh_tmp();
-            let ce = self.fresh_tmp();
-            self.emit(format!("{ep} = getelementptr i8, ptr {s}, i64 {end}"));
-            self.emit(format!("{be} = load i8, ptr {ep}"));
-            self.emit(format!("{me} = and i8 {be}, -64"));
-            self.emit(format!("{ce} = icmp eq i8 {me}, -128"));
-            let split = self.fresh_tmp();
-            self.emit(format!("{split} = or i1 {cs}, {ce}"));
-            self.trap_if(&split, "@.trap.slicesplit", "slice.split");
-            // Copy the byte range into a fresh NUL-terminated buffer.
-            let sublen = self.fresh_tmp();
-            let tot = self.fresh_tmp();
-            self.emit(format!("{sublen} = sub i64 {end}, {start}"));
-            self.emit(format!("{tot} = add i64 {sublen}, 1"));
-            let buf = self.heap_alloc(&tot);
-            let srcp = self.fresh_tmp();
-            self.emit(format!("{srcp} = getelementptr i8, ptr {s}, i64 {start}"));
-            self.emit(format!(
-                "call void @__vyrn_bytecopy(ptr {buf}, ptr {srcp}, i64 {sublen})"
-            ));
-            let nulp = self.fresh_tmp();
-            self.emit(format!("{nulp} = getelementptr i8, ptr {buf}, i64 {sublen}"));
-            self.emit(format!("store i8 0, ptr {nulp}"));
-            return Ok((buf, Type::Str));
-        }
+        // (`contains`, `startsWith` and `endsWith` are `std/strpred` — RFC-0078
+        // M4c. They were `strstr` and two `strncmp` shapes here, ~50 lines with a
+        // `phi` in one of them, and are now routed at the top of `gen_call`.
+        // `@charCount` is `std/text`'s `charCountV` for the same reason and by the
+        // same mechanism — it was one `call i64 @__vyrn_charcount` here.)
+        // (`slice` was here too — RFC-0079 M3, and it was the biggest of these:
+        // a bounds test, an open-coded continuation-byte pair at each cut point,
+        // two trap globals and an arena-aware copy, none of which the interpreter
+        // or the direct backend could share a line of. It is `std/strpred`'s
+        // `sliceV` now, routed at the top of `gen_call`, and the range check
+        // exists once.)
         // concat(String, String) -> String. Heap-allocated. Routing is decided
         // lexically: inside a `region` the buffer is drawn from the arena (freed
         // when the region exits); outside, it comes from `malloc` and is freed by
@@ -7529,16 +7120,15 @@ impl<'a> Gen<'a> {
                 arg_tys.push(vyrn_frontend::types::substitute(&vty, self.subst));
                 arg_vals.push(v);
             }
-            // Bind each type parameter from the matching argument.
-            let mut call_subst: HashMap<String, Type> = HashMap::new();
-            for (p, aty) in callee.params.iter().zip(&arg_tys) {
-                solve_param(&p.ty, aty, &mut call_subst);
-            }
-            let type_args: Vec<Type> = callee
-                .type_params
-                .iter()
-                .map(|tp| call_subst.get(tp).cloned().unwrap_or(Type::Unit))
-                .collect();
+            // Bind each type parameter from the matching argument. An unsolved
+            // one becomes `Unit` here — see `solve_type_args`.
+            let (call_subst, solved) = solve_type_args(
+                &callee.type_params,
+                &callee.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
+                &arg_tys,
+            );
+            let type_args: Vec<Type> =
+                solved.into_iter().map(|t| t.unwrap_or(Type::Unit)).collect();
             let sym = mangle_name(name, &type_args);
 
             // Coerce args to their (substituted) parameter types.
@@ -7701,15 +7291,13 @@ impl<'a> Gen<'a> {
                 arg_tys.push(vyrn_frontend::types::substitute(&vty, self.subst));
                 arg_vals.push(v);
             }
-            let mut call_subst: HashMap<String, Type> = HashMap::new();
-            for (p, aty) in callee.params.iter().zip(&arg_tys) {
-                solve_param(&p.ty, aty, &mut call_subst);
-            }
-            let type_args: Vec<Type> = callee
-                .type_params
-                .iter()
-                .map(|tp| call_subst.get(tp).cloned().unwrap_or(Type::Unit))
-                .collect();
+            let (call_subst, solved) = solve_type_args(
+                &callee.type_params,
+                &callee.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
+                &arg_tys,
+            );
+            let type_args: Vec<Type> =
+                solved.into_iter().map(|t| t.unwrap_or(Type::Unit)).collect();
             let sym = mangle_name(name, &type_args);
             let mut pairs = Vec::new();
             for ((p, v), aty) in callee.params.iter().zip(arg_vals).zip(&arg_tys) {
@@ -7845,24 +7433,10 @@ impl<'a> Gen<'a> {
     /// cross-field predicate references them by name). Shared by explicit
     /// construction (`Age(n)`) and every automatic-validation coercion.
     fn emit_validation(&mut self, decl: &TypeDecl, v: &str) -> Result<(), String> {
-        let Some(pred) = decl.predicate.clone() else { return Ok(()) };
-        self.scope.push(Vec::new());
-        if let Type::Record(fields) = &decl.base.clone() {
-            let rec_ll = self.llt(&decl.base);
-            for (i, f) in fields.iter().enumerate() {
-                let ext = self.fresh_tmp();
-                self.emit(format!("{ext} = extractvalue {rec_ll} {v}, {i}"));
-                let slot = self.declare(&f.name, &f.ty);
-                let fll = self.llt(&f.ty);
-                self.emit(format!("store {fll} {ext}, ptr {slot}"));
-            }
-        } else {
-            let base_ll = self.llt(&decl.base);
-            let slot = self.declare("value", &decl.base);
-            self.emit(format!("store {base_ll} {v}, ptr {slot}"));
+        if decl.predicate.is_none() {
+            return Ok(());
         }
-        let (cond, _) = self.gen_expr(&pred)?;
-        self.scope.pop();
+        let cond = self.emit_predicate_cond(decl, v)?;
         let nok = self.fresh_tmp();
         self.emit(format!("{nok} = xor i1 {cond}, true"));
         self.trap_if(&nok, &format!("@.trap.verr.{}", decl.name), "vfail");
@@ -7870,1426 +7444,48 @@ impl<'a> Gen<'a> {
     }
 
     /// Lower a refined type's `where` predicate to an `i1` (true = holds),
-    /// binding the value under check: a record base binds each field name; a
-    /// scalar base binds `value`. This is the ONE place a predicate is lowered
-    /// — both the trap path (`emit_validation`) and the JSON decode `validate`
-    /// path (RFC-0018) derive from it, so the two never drift.
+    /// binding the value under check as [`predicate_binds`] says to. This is the
+    /// ONE place a predicate is lowered to LLVM — the trap path
+    /// (`emit_validation`) and the JSON decode `validate` path (RFC-0018) both
+    /// derive from it, so the two never drift.
     fn emit_predicate_cond(&mut self, decl: &TypeDecl, v: &str) -> Result<String, String> {
         let pred = decl.predicate.clone().expect("predicate present");
+        let rec_ll = self.llt(&decl.base);
         self.scope.push(Vec::new());
-        if let Type::Record(fields) = &decl.base.clone() {
-            let rec_ll = self.llt(&decl.base);
-            for (i, f) in fields.iter().enumerate() {
-                let ext = self.fresh_tmp();
-                self.emit(format!("{ext} = extractvalue {rec_ll} {v}, {i}"));
-                let slot = self.declare(&f.name, &f.ty);
-                let fll = self.llt(&f.ty);
-                self.emit(format!("store {fll} {ext}, ptr {slot}"));
-            }
-        } else {
-            let base_ll = self.llt(&decl.base);
-            let slot = self.declare("value", &decl.base);
-            self.emit(format!("store {base_ll} {v}, ptr {slot}"));
+        for (name, ty, field) in predicate_binds(decl) {
+            let val = match field {
+                Some(i) => {
+                    let ext = self.fresh_tmp();
+                    self.emit(format!("{ext} = extractvalue {rec_ll} {v}, {i}"));
+                    ext
+                }
+                None => v.to_string(),
+            };
+            let slot = self.declare(&name, &ty);
+            let ll = self.llt(&ty);
+            self.emit(format!("store {ll} {val}, ptr {slot}"));
         }
         let (cond, _) = self.gen_expr(&pred)?;
         self.scope.pop();
         Ok(cond)
-    }
-
-    // ---- JSON codec (RFC-0018): per-type encode/decode IR ---------------
-    // The parity-critical string work (number formatting, escaping, parse
-    // errors, message assembly) lives in the C shim; these emitters walk the
-    // static type, producing the DOM (encode) or consuming it (decode) and
-    // accumulating `Issue`s through the shim's accumulator.
-
-    /// A pooled string-literal global's symbol (every codec constant is seeded
-    /// into the pool up front by `collect_codec_strings`).
-    fn str_g(&self, s: &str) -> Result<String, String> {
-        self.str_globals.get(s).cloned().ok_or_else(|| format!("codec string not pooled: {s:?}"))
-    }
-
-    /// Widen a sized integer to `i64` for the `vj_int`/`vj_uint` builders.
-    fn widen_i64(&mut self, val: &str, bits: u8, signed: bool) -> String {
-        if bits >= 64 {
-            return val.to_string();
-        }
-        let t = self.fresh_tmp();
-        let ext = if signed { "sext" } else { "zext" };
-        self.emit(format!("{t} = {ext} i{bits} {val} to i64"));
-        t
-    }
-
-    /// Emit IR that encodes a value `val` of type `ty` into a JSON DOM node
-    /// (`VJ*`), returning the register holding it.
-    fn emit_encode(&mut self, val: &str, ty: &Type) -> Result<String, String> {
-        // A named record routes to its generated encoder (recursion-safe); a
-        // named enum reads its variant name from the per-enum name table.
-        if let Type::Named(n) = ty {
-            match self.resolve(ty) {
-                Type::Record(_) if self.types.contains_key(n) => {
-                    let ll = self.llt(ty);
-                    let r = self.fresh_tmp();
-                    self.emit(format!("{r} = call ptr @__vyrn_enc_{n}({ll} {val})"));
-                    return Ok(r);
-                }
-                Type::Enum(vs) => {
-                    // A pure-nullary enum reads its variant name from the table in
-                    // O(1) — byte-identical to the payload-less RFC-0018 encoding.
-                    // A payload-bearing enum routes to its generated encoder (a tag
-                    // switch), so a self-referential payload resolves to a call.
-                    if vs.iter().all(|v| v.payload.is_empty()) {
-                        let ll = self.llt(ty);
-                        let tag = self.fresh_tmp();
-                        self.emit(format!("{tag} = extractvalue {ll} {val}, 0"));
-                        let gep = self.fresh_tmp();
-                        let count = vs.len();
-                        self.emit(format!(
-                            "{gep} = getelementptr [{count} x ptr], ptr @.enumnames.{n}, i64 0, i64 {tag}"
-                        ));
-                        let name = self.fresh_tmp();
-                        self.emit(format!("{name} = load ptr, ptr {gep}"));
-                        let r = self.fresh_tmp();
-                        self.emit(format!("{r} = call ptr @__vyrn_vj_str(ptr {name})"));
-                        return Ok(r);
-                    }
-                    let ll = self.llt(ty);
-                    let r = self.fresh_tmp();
-                    self.emit(format!("{r} = call ptr @__vyrn_enc_{n}({ll} {val})"));
-                    return Ok(r);
-                }
-                _ => {}
-            }
-        }
-        match self.resolve(ty) {
-            Type::Int => {
-                let r = self.fresh_tmp();
-                self.emit(format!("{r} = call ptr @__vyrn_vj_int(i64 {val})"));
-                Ok(r)
-            }
-            Type::IntN { bits, signed } => {
-                let w = self.widen_i64(val, bits, signed);
-                let fname = if signed { "int" } else { "uint" };
-                let r = self.fresh_tmp();
-                self.emit(format!("{r} = call ptr @__vyrn_vj_{fname}(i64 {w})"));
-                Ok(r)
-            }
-            Type::Float => {
-                let r = self.fresh_tmp();
-                self.emit(format!("{r} = call ptr @__vyrn_vj_float(double {val})"));
-                Ok(r)
-            }
-            Type::Float32 => {
-                let d = self.fresh_tmp();
-                self.emit(format!("{d} = fpext float {val} to double"));
-                let r = self.fresh_tmp();
-                self.emit(format!("{r} = call ptr @__vyrn_vj_float(double {d})"));
-                Ok(r)
-            }
-            Type::Bool => {
-                let r = self.fresh_tmp();
-                self.emit(format!("{r} = call ptr @__vyrn_vj_bool(i1 {val})"));
-                Ok(r)
-            }
-            Type::Str => {
-                let r = self.fresh_tmp();
-                self.emit(format!("{r} = call ptr @__vyrn_vj_str(ptr {val})"));
-                Ok(r)
-            }
-            Type::Enum(vs) => {
-                // Anonymous enum (rare): encode inline via a tag switch (RFC-0024
-                // wire tagging — nullary bare string, payload object/array).
-                let ll = self.llt(ty);
-                self.emit_encode_enum_body(val, &vs, &ll)
-            }
-            Type::Result(t, e) => self.emit_encode_result(val, &t, &e),
-            Type::Record(fields) => {
-                // Anonymous record: build the object inline (no recursion risk).
-                let ll = self.llt(ty);
-                let obj = self.fresh_tmp();
-                self.emit(format!("{obj} = call ptr @__vyrn_vj_obj()"));
-                for (i, f) in fields.iter().enumerate() {
-                    let fv = self.fresh_tmp();
-                    self.emit(format!("{fv} = extractvalue {ll} {val}, {i}"));
-                    self.emit_encode_field(&obj, &fv, f)?;
-                }
-                Ok(obj)
-            }
-            Type::Option(inner) => {
-                // A bare Option: Some -> encode the payload, None -> `null`.
-                let tag = self.fresh_tmp();
-                self.emit(format!("{tag} = extractvalue {{ i1, i64, i64 }} {val}, 0"));
-                let slot = self.fresh_alloca("ptr");
-                let some_l = self.fresh_label("enc.opt.some");
-                let none_l = self.fresh_label("enc.opt.none");
-                let done_l = self.fresh_label("enc.opt.done");
-                self.emit_term(format!("br i1 {tag}, label %{some_l}, label %{none_l}"));
-                self.emit_label(&some_l);
-                let w0 = self.fresh_tmp();
-                let w1 = self.fresh_tmp();
-                self.emit(format!("{w0} = extractvalue {{ i1, i64, i64 }} {val}, 1"));
-                self.emit(format!("{w1} = extractvalue {{ i1, i64, i64 }} {val}, 2"));
-                let iv = self.decode_payload(&w0, &w1, &inner);
-                let c = self.emit_encode(&iv, &inner)?;
-                self.emit(format!("store ptr {c}, ptr {slot}"));
-                self.emit_term(format!("br label %{done_l}"));
-                self.emit_label(&none_l);
-                let nul = self.fresh_tmp();
-                self.emit(format!("{nul} = call ptr @__vyrn_vj_null()"));
-                self.emit(format!("store ptr {nul}, ptr {slot}"));
-                self.emit_term(format!("br label %{done_l}"));
-                self.emit_label(&done_l);
-                let r = self.fresh_tmp();
-                self.emit(format!("{r} = load ptr, ptr {slot}"));
-                Ok(r)
-            }
-            Type::Array(inner) => {
-                let ell = self.llt(&inner);
-                let data = self.fresh_tmp();
-                let len = self.fresh_tmp();
-                self.emit(format!("{data} = extractvalue {{ ptr, i64, i64 }} {val}, 0"));
-                self.emit(format!("{len} = extractvalue {{ ptr, i64, i64 }} {val}, 1"));
-                let arr = self.fresh_tmp();
-                self.emit(format!("{arr} = call ptr @__vyrn_vj_arr()"));
-                let idx = self.fresh_alloca("i64");
-                self.emit(format!("store i64 0, ptr {idx}"));
-                let cond_l = self.fresh_label("enc.arr.cond");
-                let body_l = self.fresh_label("enc.arr.body");
-                let done_l = self.fresh_label("enc.arr.done");
-                self.emit_term(format!("br label %{cond_l}"));
-                self.emit_label(&cond_l);
-                let i = self.fresh_tmp();
-                self.emit(format!("{i} = load i64, ptr {idx}"));
-                let more = self.fresh_tmp();
-                self.emit(format!("{more} = icmp slt i64 {i}, {len}"));
-                self.emit_term(format!("br i1 {more}, label %{body_l}, label %{done_l}"));
-                self.emit_label(&body_l);
-                let ep = self.fresh_tmp();
-                self.emit(format!("{ep} = getelementptr {ell}, ptr {data}, i64 {i}"));
-                let ev = self.fresh_tmp();
-                self.emit(format!("{ev} = load {ell}, ptr {ep}"));
-                let c = self.emit_encode(&ev, &inner)?;
-                self.emit(format!("call void @__vyrn_vj_push(ptr {arr}, ptr {c})"));
-                let ni = self.fresh_tmp();
-                self.emit(format!("{ni} = add i64 {i}, 1"));
-                self.emit(format!("store i64 {ni}, ptr {idx}"));
-                self.emit_term(format!("br label %{cond_l}"));
-                self.emit_label(&done_l);
-                Ok(arr)
-            }
-            // A `Map<String, V>` (RFC-0028) encodes as a JSON object: keys in
-            // insertion order, each value via V's codec.
-            Type::Map(_, mv) => {
-                let vll = self.llt(&mv);
-                let keys = self.fresh_tmp();
-                let vals = self.fresh_tmp();
-                let len = self.fresh_tmp();
-                self.emit(format!("{keys} = extractvalue {{ ptr, ptr, i64, i64 }} {val}, 0"));
-                self.emit(format!("{vals} = extractvalue {{ ptr, ptr, i64, i64 }} {val}, 1"));
-                self.emit(format!("{len} = extractvalue {{ ptr, ptr, i64, i64 }} {val}, 2"));
-                let obj = self.fresh_tmp();
-                self.emit(format!("{obj} = call ptr @__vyrn_vj_obj()"));
-                let idx = self.fresh_alloca("i64");
-                self.emit(format!("store i64 0, ptr {idx}"));
-                let cond_l = self.fresh_label("enc.map.cond");
-                let body_l = self.fresh_label("enc.map.body");
-                let done_l = self.fresh_label("enc.map.done");
-                self.emit_term(format!("br label %{cond_l}"));
-                self.emit_label(&cond_l);
-                let i = self.fresh_tmp();
-                self.emit(format!("{i} = load i64, ptr {idx}"));
-                let more = self.fresh_tmp();
-                self.emit(format!("{more} = icmp slt i64 {i}, {len}"));
-                self.emit_term(format!("br i1 {more}, label %{body_l}, label %{done_l}"));
-                self.emit_label(&body_l);
-                let kp = self.fresh_tmp();
-                let k = self.fresh_tmp();
-                self.emit(format!("{kp} = getelementptr ptr, ptr {keys}, i64 {i}"));
-                self.emit(format!("{k} = load ptr, ptr {kp}"));
-                let vp = self.fresh_tmp();
-                let ev = self.fresh_tmp();
-                self.emit(format!("{vp} = getelementptr {vll}, ptr {vals}, i64 {i}"));
-                self.emit(format!("{ev} = load {vll}, ptr {vp}"));
-                let c = self.emit_encode(&ev, &mv)?;
-                self.emit(format!("call void @__vyrn_vj_set(ptr {obj}, ptr {k}, ptr {c})"));
-                let ni = self.fresh_tmp();
-                self.emit(format!("{ni} = add i64 {i}, 1"));
-                self.emit(format!("store i64 {ni}, ptr {idx}"));
-                self.emit_term(format!("br label %{cond_l}"));
-                self.emit_label(&done_l);
-                Ok(obj)
-            }
-            Type::ArrayN(inner, n) => {
-                let ell = self.llt(&inner);
-                let aggty = format!("[{n} x {ell}]");
-                let arr = self.fresh_tmp();
-                self.emit(format!("{arr} = call ptr @__vyrn_vj_arr()"));
-                for i in 0..n {
-                    let ev = self.fresh_tmp();
-                    self.emit(format!("{ev} = extractvalue {aggty} {val}, {i}"));
-                    let c = self.emit_encode(&ev, &inner)?;
-                    self.emit(format!("call void @__vyrn_vj_push(ptr {arr}, ptr {c})"));
-                }
-                Ok(arr)
-            }
-            other => Err(format!("toJson: cannot encode {other:?}")),
-        }
-    }
-
-    /// Encode one enum/Result variant to its RFC-0024 wire form, returning the
-    /// `VJ*` register: nullary is a bare string; a single payload is
-    /// `{"Tag":<value>}`; two or more is `{"Tag":[v1,...]}`.
-    fn emit_encode_wire_variant(
-        &mut self,
-        name: &str,
-        payloads: &[(String, Type)],
-    ) -> Result<String, String> {
-        let nameg = self.str_g(name)?;
-        if payloads.is_empty() {
-            let r = self.fresh_tmp();
-            self.emit(format!("{r} = call ptr @__vyrn_vj_str(ptr {nameg})"));
-            return Ok(r);
-        }
-        let obj = self.fresh_tmp();
-        self.emit(format!("{obj} = call ptr @__vyrn_vj_obj()"));
-        if payloads.len() == 1 {
-            let (pv, pty) = &payloads[0];
-            let c = self.emit_encode(pv, pty)?;
-            self.emit(format!("call void @__vyrn_vj_set(ptr {obj}, ptr {nameg}, ptr {c})"));
-        } else {
-            let arr = self.fresh_tmp();
-            self.emit(format!("{arr} = call ptr @__vyrn_vj_arr()"));
-            for (pv, pty) in payloads {
-                let c = self.emit_encode(pv, pty)?;
-                self.emit(format!("call void @__vyrn_vj_push(ptr {arr}, ptr {c})"));
-            }
-            self.emit(format!("call void @__vyrn_vj_set(ptr {obj}, ptr {nameg}, ptr {arr})"));
-        }
-        Ok(obj)
-    }
-
-    /// Encode a payload enum aggregate `val` (type `ll`) by switching on its tag
-    /// and emitting each variant's wire form. Returns the `VJ*` register.
-    fn emit_encode_enum_body(
-        &mut self,
-        val: &str,
-        vs: &[EnumVariant],
-        ll: &str,
-    ) -> Result<String, String> {
-        let tag = self.fresh_tmp();
-        self.emit(format!("{tag} = extractvalue {ll} {val}, 0"));
-        let slot = self.fresh_alloca("ptr");
-        let done = self.fresh_label("enc.enum.done");
-        let dflt = self.fresh_label("enc.enum.dflt");
-        let mut cases = Vec::new();
-        let mut labels = Vec::new();
-        for i in 0..vs.len() {
-            let l = self.fresh_label("enc.enum.case");
-            cases.push(format!("i64 {i}, label %{l}"));
-            labels.push(l);
-        }
-        self.emit_term(format!("switch i64 {tag}, label %{dflt} [ {} ]", cases.join(" ")));
-        for (i, l) in labels.iter().enumerate() {
-            self.emit_label(l);
-            let v = &vs[i];
-            let mut payloads = Vec::new();
-            for (pi, pty) in v.payload.iter().enumerate() {
-                let raw = self.fresh_tmp();
-                self.emit(format!("{raw} = extractvalue {ll} {val}, {}", pi + 1));
-                let pv = self.unbox_payload(&raw, pty);
-                payloads.push((pv, pty.clone()));
-            }
-            let c = self.emit_encode_wire_variant(&v.name, &payloads)?;
-            self.emit(format!("store ptr {c}, ptr {slot}"));
-            self.emit_term(format!("br label %{done}"));
-        }
-        self.emit_label(&dflt);
-        let nul = self.fresh_tmp();
-        self.emit(format!("{nul} = call ptr @__vyrn_vj_null()"));
-        self.emit(format!("store ptr {nul}, ptr {slot}"));
-        self.emit_term(format!("br label %{done}"));
-        self.emit_label(&done);
-        let r = self.fresh_tmp();
-        self.emit(format!("{r} = load ptr, ptr {slot}"));
-        Ok(r)
-    }
-
-    /// Encode a `Result<T, E>` value `val` (`{ i1, i64, i64 }`) as `{"Ok":<T>}` /
-    /// `{"Err":<E>}` (RFC-0024).
-    fn emit_encode_result(&mut self, val: &str, t: &Type, e: &Type) -> Result<String, String> {
-        let tag = self.fresh_tmp();
-        let w0 = self.fresh_tmp();
-        let w1 = self.fresh_tmp();
-        self.emit(format!("{tag} = extractvalue {{ i1, i64, i64 }} {val}, 0"));
-        self.emit(format!("{w0} = extractvalue {{ i1, i64, i64 }} {val}, 1"));
-        self.emit(format!("{w1} = extractvalue {{ i1, i64, i64 }} {val}, 2"));
-        let slot = self.fresh_alloca("ptr");
-        let ok_l = self.fresh_label("enc.res.ok");
-        let err_l = self.fresh_label("enc.res.err");
-        let done_l = self.fresh_label("enc.res.done");
-        self.emit_term(format!("br i1 {tag}, label %{ok_l}, label %{err_l}"));
-        self.emit_label(&ok_l);
-        let okv = self.decode_payload(&w0, &w1, t);
-        let okc = self.emit_encode_wire_variant("Ok", &[(okv, t.clone())])?;
-        self.emit(format!("store ptr {okc}, ptr {slot}"));
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&err_l);
-        let errv = self.decode_payload(&w0, &w1, e);
-        let errc = self.emit_encode_wire_variant("Err", &[(errv, e.clone())])?;
-        self.emit(format!("store ptr {errc}, ptr {slot}"));
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&done_l);
-        let r = self.fresh_tmp();
-        self.emit(format!("{r} = load ptr, ptr {slot}"));
-        Ok(r)
-    }
-
-    /// Encode one record field into `obj`, honoring the None-field omission for
-    /// an `Option`-typed field (Some -> set the decoded payload; None -> omit).
-    fn emit_encode_field(&mut self, obj: &str, fv: &str, f: &Field) -> Result<(), String> {
-        let key = self.str_g(&f.name)?;
-        if let Type::Option(inner) = self.resolve(&f.ty) {
-            let tag = self.fresh_tmp();
-            self.emit(format!("{tag} = extractvalue {{ i1, i64, i64 }} {fv}, 0"));
-            let set_l = self.fresh_label("enc.fld.set");
-            let skip_l = self.fresh_label("enc.fld.skip");
-            self.emit_term(format!("br i1 {tag}, label %{set_l}, label %{skip_l}"));
-            self.emit_label(&set_l);
-            let w0 = self.fresh_tmp();
-            let w1 = self.fresh_tmp();
-            self.emit(format!("{w0} = extractvalue {{ i1, i64, i64 }} {fv}, 1"));
-            self.emit(format!("{w1} = extractvalue {{ i1, i64, i64 }} {fv}, 2"));
-            let iv = self.decode_payload(&w0, &w1, &inner);
-            let c = self.emit_encode(&iv, &inner)?;
-            self.emit(format!("call void @__vyrn_vj_set(ptr {obj}, ptr {key}, ptr {c})"));
-            self.emit_term(format!("br label %{skip_l}"));
-            self.emit_label(&skip_l);
-        } else {
-            let c = self.emit_encode(fv, &f.ty)?;
-            self.emit(format!("call void @__vyrn_vj_set(ptr {obj}, ptr {key}, ptr {c})"));
-        }
-        Ok(())
-    }
-
-    /// Push a decode `Issue` into the shim's accumulator with a constant key and
-    /// message and a (runtime) path register.
-    fn push_issue(&mut self, issues: &str, key: &str, path: &str, msg: &str) -> Result<(), String> {
-        let kg = self.str_g(key)?;
-        let mg = self.str_g(msg)?;
-        self.emit(format!(
-            "call void @__vyrn_issues_push(ptr {issues}, ptr {kg}, ptr {path}, ptr {mg})"
-        ));
-        Ok(())
-    }
-
-    /// Push a `json.type` Issue whose message (`expected X, found <kind>`) is
-    /// assembled at runtime from a constant `expected` phrase and the node kind.
-    fn push_type_issue(
-        &mut self,
-        issues: &str,
-        path: &str,
-        expected: &str,
-        kind: &str,
-    ) -> Result<(), String> {
-        let kg = self.str_g("json.type")?;
-        let eg = self.str_g(expected)?;
-        let msg = self.fresh_tmp();
-        self.emit(format!("{msg} = call ptr @__vyrn_json_type_msg(ptr {eg}, i32 {kind})"));
-        self.emit(format!(
-            "call void @__vyrn_issues_push(ptr {issues}, ptr {kg}, ptr {path}, ptr {msg})"
-        ));
-        Ok(())
-    }
-
-    /// Emit IR that decodes DOM node `vj` (assumed non-null) into a value of
-    /// type `ty`, accumulating Issues under `path`. Returns the value register.
-    fn emit_decode(
-        &mut self,
-        vj: &str,
-        path: &str,
-        issues: &str,
-        ty: &Type,
-    ) -> Result<String, String> {
-        // A named record routes to its generated decoder; a named validated
-        // scalar decodes its base then runs the `where` clause (accumulating a
-        // `validate` Issue) — but only if the base decoded cleanly.
-        if let Type::Named(n) = ty {
-            match self.resolve(ty) {
-                Type::Record(_) if self.types.contains_key(n) => {
-                    let ll = self.llt(ty);
-                    let r = self.fresh_tmp();
-                    self.emit(format!(
-                        "{r} = call {ll} @__vyrn_dec_{n}(ptr {vj}, ptr {path}, ptr {issues})"
-                    ));
-                    return Ok(r);
-                }
-                Type::Enum(vs) => {
-                    // A pure-nullary enum decodes inline (string matching,
-                    // byte-identical to RFC-0018). A payload enum routes to its
-                    // generated decoder so self-referential payloads call back.
-                    if vs.iter().all(|v| v.payload.is_empty()) {
-                        return self.emit_decode_enum(vj, path, issues, ty);
-                    }
-                    let ll = self.llt(ty);
-                    let r = self.fresh_tmp();
-                    self.emit(format!(
-                        "{r} = call {ll} @__vyrn_dec_{n}(ptr {vj}, ptr {path}, ptr {issues})"
-                    ));
-                    return Ok(r);
-                }
-                _ => {
-                    let decl = self.types.get(n).cloned().unwrap();
-                    let before = self.fresh_tmp();
-                    self.emit(format!("{before} = call i64 @__vyrn_issues_len(ptr {issues})"));
-                    let base_val = self.emit_decode(vj, path, issues, &decl.base)?;
-                    if decl.predicate.is_some() {
-                        self.emit_validate_check(issues, path, &decl, &base_val, &before)?;
-                    }
-                    return Ok(base_val);
-                }
-            }
-        }
-        match self.resolve(ty) {
-            Type::Int => self.emit_decode_int(vj, path, issues, 64, true),
-            Type::IntN { bits, signed } => self.emit_decode_int(vj, path, issues, bits, signed),
-            Type::Float => self.emit_decode_float(vj, path, issues, false),
-            Type::Float32 => self.emit_decode_float(vj, path, issues, true),
-            Type::Bool => self.emit_decode_bool(vj, path, issues),
-            Type::Str => self.emit_decode_str(vj, path, issues),
-            Type::Enum(_) => self.emit_decode_enum(vj, path, issues, ty),
-            Type::Result(t, e) => self.emit_decode_result(vj, path, issues, &t, &e),
-            Type::Option(inner) => self.emit_decode_option(vj, path, issues, &inner),
-            Type::Array(inner) => self.emit_decode_array(vj, path, issues, &inner),
-            Type::Map(_, val) => self.emit_decode_map(vj, path, issues, &val),
-            Type::Record(_) => {
-                // Anonymous record decode target: inline via a temporary decl.
-                let tmp = TypeDecl {
-                    name: String::new(),
-                    exported: false,
-                    module: None,
-                    doc: None,
-                    type_params: Vec::new(),
-                    base: self.resolve(ty),
-                    predicate: None,
-                    line: 0,
-                };
-                self.emit_decode_record_body(vj, path, issues, &tmp)
-            }
-            other => Err(format!("fromJson: cannot decode {other:?}")),
-        }
-    }
-
-    /// After a validated type's base decoded, run its predicate and push a
-    /// `validate` Issue if it is false — but skip the check when the base decode
-    /// already accumulated an Issue (mirrors the interpreter's `?`-guarded walk).
-    fn emit_validate_check(
-        &mut self,
-        issues: &str,
-        path: &str,
-        decl: &TypeDecl,
-        base_val: &str,
-        before: &str,
-    ) -> Result<(), String> {
-        let after = self.fresh_tmp();
-        self.emit(format!("{after} = call i64 @__vyrn_issues_len(ptr {issues})"));
-        let clean = self.fresh_tmp();
-        self.emit(format!("{clean} = icmp eq i64 {before}, {after}"));
-        let chk_l = self.fresh_label("dec.val.chk");
-        let done_l = self.fresh_label("dec.val.done");
-        self.emit_term(format!("br i1 {clean}, label %{chk_l}, label %{done_l}"));
-        self.emit_label(&chk_l);
-        let cond = self.emit_predicate_cond(decl, base_val)?;
-        let bad = self.fresh_tmp();
-        self.emit(format!("{bad} = xor i1 {cond}, true"));
-        let push_l = self.fresh_label("dec.val.push");
-        self.emit_term(format!("br i1 {bad}, label %{push_l}, label %{done_l}"));
-        self.emit_label(&push_l);
-        let msg = vyrn_frontend::codec::validate_message(decl);
-        self.push_issue(issues, "validate", path, &msg)?;
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&done_l);
-        Ok(())
-    }
-
-    fn emit_decode_int(
-        &mut self,
-        vj: &str,
-        path: &str,
-        issues: &str,
-        bits: u8,
-        signed: bool,
-    ) -> Result<String, String> {
-        let outp = self.fresh_alloca("i64");
-        let sflag = if signed { 1 } else { 0 };
-        let rc = self.fresh_tmp();
-        self.emit(format!(
-            "{rc} = call i32 @__vyrn_vj_asint(ptr {vj}, i32 {bits}, i32 {sflag}, ptr {outp})"
-        ));
-        let bad = self.fresh_tmp();
-        self.emit(format!("{bad} = icmp ne i32 {rc}, 0"));
-        let ill = if bits >= 64 { "i64".to_string() } else { format!("i{bits}") };
-        let slot = self.fresh_alloca(&ill);
-        self.emit(format!("store {ill} 0, ptr {slot}"));
-        let bad_l = self.fresh_label("dec.int.bad");
-        let ok_l = self.fresh_label("dec.int.ok");
-        let done_l = self.fresh_label("dec.int.done");
-        self.emit_term(format!("br i1 {bad}, label %{bad_l}, label %{ok_l}"));
-        self.emit_label(&bad_l);
-        let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
-        self.push_type_issue(issues, path, "integer", &kind)?;
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&ok_l);
-        let v = self.fresh_tmp();
-        self.emit(format!("{v} = load i64, ptr {outp}"));
-        let stored = if bits >= 64 {
-            v.clone()
-        } else {
-            let t = self.fresh_tmp();
-            self.emit(format!("{t} = trunc i64 {v} to i{bits}"));
-            t
-        };
-        self.emit(format!("store {ill} {stored}, ptr {slot}"));
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&done_l);
-        let r = self.fresh_tmp();
-        self.emit(format!("{r} = load {ill}, ptr {slot}"));
-        Ok(r)
-    }
-
-    fn emit_decode_float(
-        &mut self,
-        vj: &str,
-        path: &str,
-        issues: &str,
-        single: bool,
-    ) -> Result<String, String> {
-        let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
-        let isnum = self.fresh_tmp();
-        self.emit(format!("{isnum} = icmp eq i32 {kind}, 2"));
-        let ell = if single { "float" } else { "double" };
-        let slot = self.fresh_alloca(ell);
-        self.emit(format!("store {ell} 0.0, ptr {slot}"));
-        let ok_l = self.fresh_label("dec.flt.ok");
-        let bad_l = self.fresh_label("dec.flt.bad");
-        let done_l = self.fresh_label("dec.flt.done");
-        self.emit_term(format!("br i1 {isnum}, label %{ok_l}, label %{bad_l}"));
-        self.emit_label(&bad_l);
-        self.push_type_issue(issues, path, "number", &kind)?;
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&ok_l);
-        let d = self.fresh_tmp();
-        self.emit(format!("{d} = call double @__vyrn_vj_asfloat(ptr {vj})"));
-        let stored = if single {
-            let t = self.fresh_tmp();
-            self.emit(format!("{t} = fptrunc double {d} to float"));
-            t
-        } else {
-            d.clone()
-        };
-        self.emit(format!("store {ell} {stored}, ptr {slot}"));
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&done_l);
-        let r = self.fresh_tmp();
-        self.emit(format!("{r} = load {ell}, ptr {slot}"));
-        Ok(r)
-    }
-
-    fn emit_decode_bool(&mut self, vj: &str, path: &str, issues: &str) -> Result<String, String> {
-        let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
-        let isbool = self.fresh_tmp();
-        self.emit(format!("{isbool} = icmp eq i32 {kind}, 1"));
-        let slot = self.fresh_alloca("i1");
-        self.emit(format!("store i1 false, ptr {slot}"));
-        let ok_l = self.fresh_label("dec.bool.ok");
-        let bad_l = self.fresh_label("dec.bool.bad");
-        let done_l = self.fresh_label("dec.bool.done");
-        self.emit_term(format!("br i1 {isbool}, label %{ok_l}, label %{bad_l}"));
-        self.emit_label(&bad_l);
-        self.push_type_issue(issues, path, "boolean", &kind)?;
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&ok_l);
-        let b = self.fresh_tmp();
-        self.emit(format!("{b} = call i32 @__vyrn_vj_bool_get(ptr {vj})"));
-        let bt = self.fresh_tmp();
-        self.emit(format!("{bt} = icmp ne i32 {b}, 0"));
-        self.emit(format!("store i1 {bt}, ptr {slot}"));
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&done_l);
-        let r = self.fresh_tmp();
-        self.emit(format!("{r} = load i1, ptr {slot}"));
-        Ok(r)
-    }
-
-    fn emit_decode_str(&mut self, vj: &str, path: &str, issues: &str) -> Result<String, String> {
-        let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
-        let isstr = self.fresh_tmp();
-        self.emit(format!("{isstr} = icmp eq i32 {kind}, 3"));
-        let slot = self.fresh_alloca("ptr");
-        self.emit(format!("store ptr null, ptr {slot}"));
-        let ok_l = self.fresh_label("dec.str.ok");
-        let bad_l = self.fresh_label("dec.str.bad");
-        let done_l = self.fresh_label("dec.str.done");
-        self.emit_term(format!("br i1 {isstr}, label %{ok_l}, label %{bad_l}"));
-        self.emit_label(&bad_l);
-        self.push_type_issue(issues, path, "string", &kind)?;
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&ok_l);
-        let s = self.fresh_tmp();
-        self.emit(format!("{s} = call ptr @__vyrn_vj_str_get(ptr {vj})"));
-        self.emit(format!("store ptr {s}, ptr {slot}"));
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&done_l);
-        let r = self.fresh_tmp();
-        self.emit(format!("{r} = load ptr, ptr {slot}"));
-        Ok(r)
-    }
-
-    fn emit_decode_enum(
-        &mut self,
-        vj: &str,
-        path: &str,
-        issues: &str,
-        ty: &Type,
-    ) -> Result<String, String> {
-        let vs = match self.resolve(ty) {
-            Type::Enum(vs) => vs,
-            _ => return Err("emit_decode_enum on non-enum".to_string()),
-        };
-        let ll = self.llt(ty);
-        let expected = vyrn_frontend::codec::enum_expected(&vs);
-        // A payload enum has the richer RFC-0024 wire form (object tags); a
-        // pure-nullary enum is the byte-identical RFC-0018 string form.
-        if vs.iter().any(|v| !v.payload.is_empty()) {
-            return self.emit_decode_enum_payload(vj, path, issues, &vs, &ll, &expected);
-        }
-        let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
-        let isstr = self.fresh_tmp();
-        self.emit(format!("{isstr} = icmp eq i32 {kind}, 3"));
-        let slot = self.fresh_alloca(&ll);
-        self.emit(format!("store {ll} zeroinitializer, ptr {slot}"));
-        let str_l = self.fresh_label("dec.enum.str");
-        let notstr_l = self.fresh_label("dec.enum.notstr");
-        let done_l = self.fresh_label("dec.enum.done");
-        self.emit_term(format!("br i1 {isstr}, label %{str_l}, label %{notstr_l}"));
-        self.emit_label(&notstr_l);
-        self.push_type_issue(issues, path, &expected, &kind)?;
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&str_l);
-        let s = self.fresh_tmp();
-        self.emit(format!("{s} = call ptr @__vyrn_vj_str_get(ptr {vj})"));
-        // Sequential strcmp against each variant name.
-        for (i, v) in vs.iter().enumerate() {
-            let g = self.str_g(&v.name)?;
-            let cmp = self.fresh_tmp();
-            self.emit(format!("{cmp} = call i32 @strcmp(ptr {s}, ptr {g})"));
-            let eq = self.fresh_tmp();
-            self.emit(format!("{eq} = icmp eq i32 {cmp}, 0"));
-            let hit_l = self.fresh_label("dec.enum.hit");
-            let next_l = self.fresh_label("dec.enum.next");
-            self.emit_term(format!("br i1 {eq}, label %{hit_l}, label %{next_l}"));
-            self.emit_label(&hit_l);
-            let e = self.fresh_tmp();
-            self.emit(format!("{e} = insertvalue {ll} zeroinitializer, i64 {i}, 0"));
-            self.emit(format!("store {ll} {e}, ptr {slot}"));
-            self.emit_term(format!("br label %{done_l}"));
-            self.emit_label(&next_l);
-        }
-        // No variant matched.
-        self.push_type_issue(issues, path, &expected, &kind)?;
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&done_l);
-        let r = self.fresh_tmp();
-        self.emit(format!("{r} = load {ll}, ptr {slot}"));
-        Ok(r)
-    }
-
-    /// The RFC-0024 payload-enum decoder: a bare string is a nullary variant; a
-    /// one-key object `{"Tag":..}` names a payload variant (single payload direct,
-    /// tuple payload as an array). Any other shape / unknown key is the locked
-    /// expected-one-of `json.type` Issue. Returns the enum aggregate register.
-    fn emit_decode_enum_payload(
-        &mut self,
-        vj: &str,
-        path: &str,
-        issues: &str,
-        vs: &[EnumVariant],
-        ll: &str,
-        expected: &str,
-    ) -> Result<String, String> {
-        let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
-        let slot = self.fresh_alloca(ll);
-        self.emit(format!("store {ll} zeroinitializer, ptr {slot}"));
-        let isstr = self.fresh_tmp();
-        self.emit(format!("{isstr} = icmp eq i32 {kind}, 3"));
-        let str_l = self.fresh_label("dec.penum.str");
-        let notstr_l = self.fresh_label("dec.penum.notstr");
-        let obj_l = self.fresh_label("dec.penum.obj");
-        let key_l = self.fresh_label("dec.penum.key");
-        let mismatch_l = self.fresh_label("dec.penum.mismatch");
-        let done_l = self.fresh_label("dec.penum.done");
-        self.emit_term(format!("br i1 {isstr}, label %{str_l}, label %{notstr_l}"));
-        // Shared mismatch: `expected one of ..., found <kind>` (kind is still live).
-        self.emit_label(&mismatch_l);
-        self.push_type_issue(issues, path, expected, &kind)?;
-        self.emit_term(format!("br label %{done_l}"));
-        // String → a nullary variant.
-        self.emit_label(&str_l);
-        let s = self.fresh_tmp();
-        self.emit(format!("{s} = call ptr @__vyrn_vj_str_get(ptr {vj})"));
-        for (i, v) in vs.iter().enumerate() {
-            if !v.payload.is_empty() {
-                continue; // a payload variant as a bare string is a mismatch
-            }
-            let g = self.str_g(&v.name)?;
-            let cmp = self.fresh_tmp();
-            self.emit(format!("{cmp} = call i32 @strcmp(ptr {s}, ptr {g})"));
-            let eq = self.fresh_tmp();
-            self.emit(format!("{eq} = icmp eq i32 {cmp}, 0"));
-            let hit_l = self.fresh_label("dec.penum.shit");
-            let next_l = self.fresh_label("dec.penum.snext");
-            self.emit_term(format!("br i1 {eq}, label %{hit_l}, label %{next_l}"));
-            self.emit_label(&hit_l);
-            let e = self.fresh_tmp();
-            self.emit(format!("{e} = insertvalue {ll} zeroinitializer, i64 {i}, 0"));
-            self.emit(format!("store {ll} {e}, ptr {slot}"));
-            self.emit_term(format!("br label %{done_l}"));
-            self.emit_label(&next_l);
-        }
-        self.emit_term(format!("br label %{mismatch_l}"));
-        // Not a string → must be a single-key object.
-        self.emit_label(&notstr_l);
-        let isobj = self.fresh_tmp();
-        self.emit(format!("{isobj} = icmp eq i32 {kind}, 5"));
-        self.emit_term(format!("br i1 {isobj}, label %{obj_l}, label %{mismatch_l}"));
-        self.emit_label(&obj_l);
-        let n = self.fresh_tmp();
-        self.emit(format!("{n} = call i64 @__vyrn_vj_obj_len(ptr {vj})"));
-        let one = self.fresh_tmp();
-        self.emit(format!("{one} = icmp eq i64 {n}, 1"));
-        self.emit_term(format!("br i1 {one}, label %{key_l}, label %{mismatch_l}"));
-        self.emit_label(&key_l);
-        let key = self.fresh_tmp();
-        self.emit(format!("{key} = call ptr @__vyrn_vj_obj_key(ptr {vj}, i64 0)"));
-        let valj = self.fresh_tmp();
-        self.emit(format!("{valj} = call ptr @__vyrn_vj_obj_at(ptr {vj}, i64 0)"));
-        for (i, v) in vs.iter().enumerate() {
-            if v.payload.is_empty() {
-                continue; // a nullary variant spelled as an object is a mismatch
-            }
-            let g = self.str_g(&v.name)?;
-            let cmp = self.fresh_tmp();
-            self.emit(format!("{cmp} = call i32 @strcmp(ptr {key}, ptr {g})"));
-            let eq = self.fresh_tmp();
-            self.emit(format!("{eq} = icmp eq i32 {cmp}, 0"));
-            let hit_l = self.fresh_label("dec.penum.phit");
-            let next_l = self.fresh_label("dec.penum.pnext");
-            self.emit_term(format!("br i1 {eq}, label %{hit_l}, label %{next_l}"));
-            self.emit_label(&hit_l);
-            let child = self.fresh_tmp();
-            self.emit(format!("{child} = call ptr @__vyrn_json_field_path(ptr {path}, ptr {g})"));
-            self.emit_decode_enum_payload_arm(&valj, &child, issues, i, &v.payload, ll, slot.as_str(), &done_l)?;
-            self.emit_label(&next_l);
-        }
-        self.emit_term(format!("br label %{mismatch_l}"));
-        self.emit_label(&done_l);
-        let r = self.fresh_tmp();
-        self.emit(format!("{r} = load {ll}, ptr {slot}"));
-        Ok(r)
-    }
-
-    /// Decode the payload(s) of a matched payload variant (`tag` index `idx`) from
-    /// `valj` at `child` path, build the enum aggregate, store it, and jump to
-    /// `done_l`. A single payload decodes directly; two or more read a JSON array
-    /// positionally (missing slots decode from `null`, a length mismatch surfaces
-    /// as the element's own type Issue at `child[i]`).
-    #[allow(clippy::too_many_arguments)]
-    fn emit_decode_enum_payload_arm(
-        &mut self,
-        valj: &str,
-        child: &str,
-        issues: &str,
-        idx: usize,
-        payload: &[Type],
-        ll: &str,
-        slot: &str,
-        done_l: &str,
-    ) -> Result<(), String> {
-        if payload.len() == 1 {
-            let iv = self.emit_decode(valj, child, issues, &payload[0])?;
-            let bx = self.box_payload(&iv, &payload[0]);
-            let a = self.fresh_tmp();
-            let b = self.fresh_tmp();
-            self.emit(format!("{a} = insertvalue {ll} zeroinitializer, i64 {idx}, 0"));
-            self.emit(format!("{b} = insertvalue {ll} {a}, i64 {bx}, 1"));
-            self.emit(format!("store {ll} {b}, ptr {slot}"));
-            self.emit_term(format!("br label %{done_l}"));
-            return Ok(());
-        }
-        // Tuple payload: the value must be a JSON array.
-        let kv = self.fresh_tmp();
-        self.emit(format!("{kv} = call i32 @__vyrn_vj_kind(ptr {valj})"));
-        let isarr = self.fresh_tmp();
-        self.emit(format!("{isarr} = icmp eq i32 {kv}, 4"));
-        let ok_l = self.fresh_label("dec.penum.tok");
-        let bad_l = self.fresh_label("dec.penum.tbad");
-        self.emit_term(format!("br i1 {isarr}, label %{ok_l}, label %{bad_l}"));
-        self.emit_label(&bad_l);
-        self.push_type_issue(issues, child, "array", &kv)?;
-        let z = self.fresh_tmp();
-        self.emit(format!("{z} = insertvalue {ll} zeroinitializer, i64 {idx}, 0"));
-        self.emit(format!("store {ll} {z}, ptr {slot}"));
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&ok_l);
-        let mut cur = self.fresh_tmp();
-        self.emit(format!("{cur} = insertvalue {ll} zeroinitializer, i64 {idx}, 0"));
-        for (j, pty) in payload.iter().enumerate() {
-            let node = self.fresh_tmp();
-            self.emit(format!("{node} = call ptr @__vyrn_vj_at_or_null(ptr {valj}, i64 {j})"));
-            let ipath = self.fresh_tmp();
-            self.emit(format!("{ipath} = call ptr @__vyrn_json_index_path(ptr {child}, i64 {j})"));
-            let iv = self.emit_decode(&node, &ipath, issues, pty)?;
-            let bx = self.box_payload(&iv, pty);
-            let next = self.fresh_tmp();
-            self.emit(format!("{next} = insertvalue {ll} {cur}, i64 {bx}, {}", j + 1));
-            cur = next;
-        }
-        self.emit(format!("store {ll} {cur}, ptr {slot}"));
-        self.emit_term(format!("br label %{done_l}"));
-        Ok(())
-    }
-
-    /// Decode a `Result<T, E>` from `{"Ok":<T>}` / `{"Err":<E>}` (RFC-0024) into a
-    /// `{ i1, i64, i64 }` aggregate. Any other shape is the locked expected-one-of
-    /// (`one of \`Ok\`, \`Err\``) `json.type` Issue.
-    fn emit_decode_result(
-        &mut self,
-        vj: &str,
-        path: &str,
-        issues: &str,
-        t: &Type,
-        e: &Type,
-    ) -> Result<String, String> {
-        let expected = vyrn_frontend::codec::result_expected();
-        let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
-        let slot = self.fresh_alloca("{ i1, i64, i64 }");
-        self.emit(format!("store {{ i1, i64, i64 }} zeroinitializer, ptr {slot}"));
-        let isobj = self.fresh_tmp();
-        self.emit(format!("{isobj} = icmp eq i32 {kind}, 5"));
-        let obj_l = self.fresh_label("dec.res.obj");
-        let key_l = self.fresh_label("dec.res.key");
-        let mismatch_l = self.fresh_label("dec.res.mismatch");
-        let done_l = self.fresh_label("dec.res.done");
-        self.emit_term(format!("br i1 {isobj}, label %{obj_l}, label %{mismatch_l}"));
-        self.emit_label(&mismatch_l);
-        self.push_type_issue(issues, path, &expected, &kind)?;
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&obj_l);
-        let n = self.fresh_tmp();
-        self.emit(format!("{n} = call i64 @__vyrn_vj_obj_len(ptr {vj})"));
-        let one = self.fresh_tmp();
-        self.emit(format!("{one} = icmp eq i64 {n}, 1"));
-        self.emit_term(format!("br i1 {one}, label %{key_l}, label %{mismatch_l}"));
-        self.emit_label(&key_l);
-        let key = self.fresh_tmp();
-        self.emit(format!("{key} = call ptr @__vyrn_vj_obj_key(ptr {vj}, i64 0)"));
-        let valj = self.fresh_tmp();
-        self.emit(format!("{valj} = call ptr @__vyrn_vj_obj_at(ptr {vj}, i64 0)"));
-        // Two arms: `Ok` (tag 1) and `Err` (tag 0).
-        for (is_ok, name, arm_ty) in [(1, "Ok", t), (0, "Err", e)] {
-            let g = self.str_g(name)?;
-            let cmp = self.fresh_tmp();
-            self.emit(format!("{cmp} = call i32 @strcmp(ptr {key}, ptr {g})"));
-            let eq = self.fresh_tmp();
-            self.emit(format!("{eq} = icmp eq i32 {cmp}, 0"));
-            let hit_l = self.fresh_label("dec.res.hit");
-            let next_l = self.fresh_label("dec.res.next");
-            self.emit_term(format!("br i1 {eq}, label %{hit_l}, label %{next_l}"));
-            self.emit_label(&hit_l);
-            let child = self.fresh_tmp();
-            self.emit(format!("{child} = call ptr @__vyrn_json_field_path(ptr {path}, ptr {g})"));
-            let iv = self.emit_decode(&valj, &child, issues, arm_ty)?;
-            let (w0, w1) = self.encode_payload(&iv, arm_ty);
-            let a = self.fresh_tmp();
-            let b = self.fresh_tmp();
-            let c = self.fresh_tmp();
-            self.emit(format!("{a} = insertvalue {{ i1, i64, i64 }} undef, i1 {is_ok}, 0"));
-            self.emit(format!("{b} = insertvalue {{ i1, i64, i64 }} {a}, i64 {w0}, 1"));
-            self.emit(format!("{c} = insertvalue {{ i1, i64, i64 }} {b}, i64 {w1}, 2"));
-            self.emit(format!("store {{ i1, i64, i64 }} {c}, ptr {slot}"));
-            self.emit_term(format!("br label %{done_l}"));
-            self.emit_label(&next_l);
-        }
-        self.emit_term(format!("br label %{mismatch_l}"));
-        self.emit_label(&done_l);
-        let r = self.fresh_tmp();
-        self.emit(format!("{r} = load {{ i1, i64, i64 }}, ptr {slot}"));
-        Ok(r)
-    }
-
-    fn emit_decode_option(
-        &mut self,
-        vj: &str,
-        path: &str,
-        issues: &str,
-        inner: &Type,
-    ) -> Result<String, String> {
-        let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
-        let isnull = self.fresh_tmp();
-        self.emit(format!("{isnull} = icmp eq i32 {kind}, 0"));
-        let slot = self.fresh_alloca("{ i1, i64, i64 }");
-        let none_l = self.fresh_label("dec.opt.none");
-        let some_l = self.fresh_label("dec.opt.some");
-        let done_l = self.fresh_label("dec.opt.done");
-        self.emit_term(format!("br i1 {isnull}, label %{none_l}, label %{some_l}"));
-        self.emit_label(&none_l);
-        self.emit(format!("store {{ i1, i64, i64 }} {{ i1 0, i64 0, i64 0 }}, ptr {slot}"));
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&some_l);
-        let iv = self.emit_decode(vj, path, issues, inner)?;
-        let (w0, w1) = self.encode_payload(&iv, inner);
-        let a = self.fresh_tmp();
-        let b = self.fresh_tmp();
-        let c = self.fresh_tmp();
-        self.emit(format!("{a} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"));
-        self.emit(format!("{b} = insertvalue {{ i1, i64, i64 }} {a}, i64 {w0}, 1"));
-        self.emit(format!("{c} = insertvalue {{ i1, i64, i64 }} {b}, i64 {w1}, 2"));
-        self.emit(format!("store {{ i1, i64, i64 }} {c}, ptr {slot}"));
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&done_l);
-        let r = self.fresh_tmp();
-        self.emit(format!("{r} = load {{ i1, i64, i64 }}, ptr {slot}"));
-        Ok(r)
-    }
-
-    fn emit_decode_array(
-        &mut self,
-        vj: &str,
-        path: &str,
-        issues: &str,
-        inner: &Type,
-    ) -> Result<String, String> {
-        let ell = self.llt(inner);
-        let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
-        let isarr = self.fresh_tmp();
-        self.emit(format!("{isarr} = icmp eq i32 {kind}, 4"));
-        let slot = self.fresh_alloca("{ ptr, i64, i64 }");
-        self.emit(format!(
-            "store {{ ptr, i64, i64 }} {{ ptr null, i64 0, i64 0 }}, ptr {slot}"
-        ));
-        let ok_l = self.fresh_label("dec.arr.ok");
-        let bad_l = self.fresh_label("dec.arr.bad");
-        let done_l = self.fresh_label("dec.arr.done");
-        self.emit_term(format!("br i1 {isarr}, label %{ok_l}, label %{bad_l}"));
-        self.emit_label(&bad_l);
-        self.push_type_issue(issues, path, "array", &kind)?;
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&ok_l);
-        let n = self.fresh_tmp();
-        self.emit(format!("{n} = call i64 @__vyrn_vj_len(ptr {vj})"));
-        // buffer = n * sizeof(elem)
-        let szp = self.fresh_tmp();
-        let sz = self.fresh_tmp();
-        self.emit(format!("{szp} = getelementptr {ell}, ptr null, i64 {n}"));
-        self.emit(format!("{sz} = ptrtoint ptr {szp} to i64"));
-        let buf = self.fresh_tmp();
-        self.emit(format!("{buf} = call ptr @__vyrn_malloc(i64 {sz})"));
-        let idx = self.fresh_alloca("i64");
-        self.emit(format!("store i64 0, ptr {idx}"));
-        let cond_l = self.fresh_label("dec.arr.cond");
-        let body_l = self.fresh_label("dec.arr.body");
-        let fill_l = self.fresh_label("dec.arr.fill");
-        self.emit_term(format!("br label %{cond_l}"));
-        self.emit_label(&cond_l);
-        let i = self.fresh_tmp();
-        self.emit(format!("{i} = load i64, ptr {idx}"));
-        let more = self.fresh_tmp();
-        self.emit(format!("{more} = icmp slt i64 {i}, {n}"));
-        self.emit_term(format!("br i1 {more}, label %{body_l}, label %{fill_l}"));
-        self.emit_label(&body_l);
-        let node = self.fresh_tmp();
-        self.emit(format!("{node} = call ptr @__vyrn_vj_at(ptr {vj}, i64 {i})"));
-        let childpath = self.fresh_tmp();
-        self.emit(format!(
-            "{childpath} = call ptr @__vyrn_json_index_path(ptr {path}, i64 {i})"
-        ));
-        let ev = self.emit_decode(&node, &childpath, issues, inner)?;
-        let ep = self.fresh_tmp();
-        self.emit(format!("{ep} = getelementptr {ell}, ptr {buf}, i64 {i}"));
-        self.emit(format!("store {ell} {ev}, ptr {ep}"));
-        let ni = self.fresh_tmp();
-        self.emit(format!("{ni} = add i64 {i}, 1"));
-        self.emit(format!("store i64 {ni}, ptr {idx}"));
-        self.emit_term(format!("br label %{cond_l}"));
-        self.emit_label(&fill_l);
-        let a = self.fresh_tmp();
-        let b = self.fresh_tmp();
-        let c = self.fresh_tmp();
-        self.emit(format!("{a} = insertvalue {{ ptr, i64, i64 }} undef, ptr {buf}, 0"));
-        self.emit(format!("{b} = insertvalue {{ ptr, i64, i64 }} {a}, i64 {n}, 1"));
-        self.emit(format!("{c} = insertvalue {{ ptr, i64, i64 }} {b}, i64 {n}, 2"));
-        self.emit(format!("store {{ ptr, i64, i64 }} {c}, ptr {slot}"));
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&done_l);
-        let r = self.fresh_tmp();
-        self.emit(format!("{r} = load {{ ptr, i64, i64 }}, ptr {slot}"));
-        Ok(r)
-    }
-
-    /// Decode a JSON object into a `Map<String, V>` (RFC-0028): document order
-    /// becomes insertion order; each value validates as `V` at path
-    /// `field.<key>`. Duplicate keys mirror the record decoder's first-wins
-    /// policy (`__vyrn_vj_get`): a repeated key is skipped. Returns the map
-    /// aggregate `{ ptr keys, ptr vals, i64 len, i64 cap }`.
-    fn emit_decode_map(
-        &mut self,
-        vj: &str,
-        path: &str,
-        issues: &str,
-        val: &Type,
-    ) -> Result<String, String> {
-        let vll = self.llt(val);
-        let esz = self.fresh_tmp();
-        self.emit(format!(
-            "{esz} = ptrtoint ptr getelementptr ({vll}, ptr null, i64 1) to i64"
-        ));
-        let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
-        let isobj = self.fresh_tmp();
-        self.emit(format!("{isobj} = icmp eq i32 {kind}, 5"));
-        let slot = self.fresh_alloca("{ ptr, ptr, i64, i64 }");
-        self.emit(format!(
-            "store {{ ptr, ptr, i64, i64 }} {{ ptr null, ptr null, i64 0, i64 0 }}, ptr {slot}"
-        ));
-        let ok_l = self.fresh_label("dec.map.ok");
-        let bad_l = self.fresh_label("dec.map.bad");
-        let done_l = self.fresh_label("dec.map.done");
-        self.emit_term(format!("br i1 {isobj}, label %{ok_l}, label %{bad_l}"));
-        self.emit_label(&bad_l);
-        self.push_type_issue(issues, path, "object", &kind)?;
-        self.emit_term(format!("br label %{done_l}"));
-        self.emit_label(&ok_l);
-        let n = self.fresh_tmp();
-        self.emit(format!("{n} = call i64 @__vyrn_vj_obj_len(ptr {vj})"));
-        let idx = self.fresh_alloca("i64");
-        self.emit(format!("store i64 0, ptr {idx}"));
-        let cond_l = self.fresh_label("dec.map.cond");
-        let body_l = self.fresh_label("dec.map.body");
-        self.emit_term(format!("br label %{cond_l}"));
-        self.emit_label(&cond_l);
-        let i = self.fresh_tmp();
-        self.emit(format!("{i} = load i64, ptr {idx}"));
-        let more = self.fresh_tmp();
-        self.emit(format!("{more} = icmp slt i64 {i}, {n}"));
-        self.emit_term(format!("br i1 {more}, label %{body_l}, label %{done_l}"));
-        self.emit_label(&body_l);
-        let key = self.fresh_tmp();
-        self.emit(format!("{key} = call ptr @__vyrn_vj_obj_key(ptr {vj}, i64 {i})"));
-        let node = self.fresh_tmp();
-        self.emit(format!("{node} = call ptr @__vyrn_vj_obj_at(ptr {vj}, i64 {i})"));
-        let childpath = self.fresh_tmp();
-        self.emit(format!(
-            "{childpath} = call ptr @__vyrn_json_field_path(ptr {path}, ptr {key})"
-        ));
-        let ev = self.emit_decode(&node, &childpath, issues, val)?;
-        // First-wins: only append when the key is not already present.
-        let hdr = self.fresh_tmp();
-        let keys = self.fresh_tmp();
-        let len = self.fresh_tmp();
-        self.emit(format!("{hdr} = load {{ ptr, ptr, i64, i64 }}, ptr {slot}"));
-        self.emit(format!("{keys} = extractvalue {{ ptr, ptr, i64, i64 }} {hdr}, 0"));
-        self.emit(format!("{len} = extractvalue {{ ptr, ptr, i64, i64 }} {hdr}, 2"));
-        let fidx = self.fresh_tmp();
-        self.emit(format!(
-            "{fidx} = call i64 @__vyrn_map_find(ptr {keys}, i64 {len}, ptr {key})"
-        ));
-        let absent = self.fresh_tmp();
-        self.emit(format!("{absent} = icmp slt i64 {fidx}, 0"));
-        let ins_l = self.fresh_label("dec.map.ins");
-        let next_l = self.fresh_label("dec.map.next");
-        self.emit_term(format!("br i1 {absent}, label %{ins_l}, label %{next_l}"));
-        self.emit_label(&ins_l);
-        self.emit(format!("call void @__vyrn_map_reserve(ptr {slot}, i64 {esz})"));
-        let hdr2 = self.fresh_tmp();
-        let keys2 = self.fresh_tmp();
-        let vals2 = self.fresh_tmp();
-        self.emit(format!("{hdr2} = load {{ ptr, ptr, i64, i64 }}, ptr {slot}"));
-        self.emit(format!("{keys2} = extractvalue {{ ptr, ptr, i64, i64 }} {hdr2}, 0"));
-        self.emit(format!("{vals2} = extractvalue {{ ptr, ptr, i64, i64 }} {hdr2}, 1"));
-        let kep = self.fresh_tmp();
-        self.emit(format!("{kep} = getelementptr ptr, ptr {keys2}, i64 {len}"));
-        self.emit(format!("store ptr {key}, ptr {kep}"));
-        let vep = self.fresh_tmp();
-        self.emit(format!("{vep} = getelementptr {vll}, ptr {vals2}, i64 {len}"));
-        self.emit(format!("store {vll} {ev}, ptr {vep}"));
-        let nl = self.fresh_tmp();
-        self.emit(format!("{nl} = add i64 {len}, 1"));
-        let lenp = self.fresh_tmp();
-        self.emit(format!(
-            "{lenp} = getelementptr {{ ptr, ptr, i64, i64 }}, ptr {slot}, i64 0, i32 2"
-        ));
-        self.emit(format!("store i64 {nl}, ptr {lenp}"));
-        self.emit_term(format!("br label %{next_l}"));
-        self.emit_label(&next_l);
-        let ni = self.fresh_tmp();
-        self.emit(format!("{ni} = add i64 {i}, 1"));
-        self.emit(format!("store i64 {ni}, ptr {idx}"));
-        self.emit_term(format!("br label %{cond_l}"));
-        self.emit_label(&done_l);
-        let r = self.fresh_tmp();
-        self.emit(format!("{r} = load {{ ptr, ptr, i64, i64 }}, ptr {slot}"));
-        Ok(r)
-    }
-
-    /// The body of a record decoder: check the node is an object, decode each
-    /// field (honoring Option absent-or-null and required-field-missing), then
-    /// run the record's cross-field `where` clause if all fields decoded
-    /// cleanly. `decl.base` must be a `Record`. Returns the record value.
-    fn emit_decode_record_body(
-        &mut self,
-        vj: &str,
-        path: &str,
-        issues: &str,
-        decl: &TypeDecl,
-    ) -> Result<String, String> {
-        let fields = match &decl.base {
-            Type::Record(fs) => fs.clone(),
-            _ => return Err("emit_decode_record_body on non-record".to_string()),
-        };
-        let ll = self.llt(&decl.base);
-        let res = self.fresh_alloca(&ll);
-        self.emit(format!("store {ll} zeroinitializer, ptr {res}"));
-        let before = self.fresh_tmp();
-        self.emit(format!("{before} = call i64 @__vyrn_issues_len(ptr {issues})"));
-        // Node must be an object.
-        let kind = self.fresh_tmp();
-        self.emit(format!("{kind} = call i32 @__vyrn_vj_kind(ptr {vj})"));
-        let isobj = self.fresh_tmp();
-        self.emit(format!("{isobj} = icmp eq i32 {kind}, 5"));
-        let obj_l = self.fresh_label("dec.rec.obj");
-        let bad_l = self.fresh_label("dec.rec.bad");
-        let ret_l = self.fresh_label("dec.rec.ret");
-        self.emit_term(format!("br i1 {isobj}, label %{obj_l}, label %{bad_l}"));
-        self.emit_label(&bad_l);
-        self.push_type_issue(issues, path, "object", &kind)?;
-        self.emit_term(format!("br label %{ret_l}"));
-        self.emit_label(&obj_l);
-        for (i, f) in fields.iter().enumerate() {
-            self.emit_decode_field(vj, path, issues, &res, &ll, i, f)?;
-        }
-        // Cross-field predicate, only if the fields decoded cleanly.
-        if decl.predicate.is_some() {
-            let rec_val = self.fresh_tmp();
-            self.emit(format!("{rec_val} = load {ll}, ptr {res}"));
-            self.emit_validate_check(issues, path, decl, &rec_val, &before)?;
-        }
-        self.emit_term(format!("br label %{ret_l}"));
-        self.emit_label(&ret_l);
-        let r = self.fresh_tmp();
-        self.emit(format!("{r} = load {ll}, ptr {res}"));
-        Ok(r)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn emit_decode_field(
-        &mut self,
-        vj: &str,
-        path: &str,
-        issues: &str,
-        res: &str,
-        rec_ll: &str,
-        i: usize,
-        f: &Field,
-    ) -> Result<(), String> {
-        let key = self.str_g(&f.name)?;
-        let child = self.fresh_tmp();
-        self.emit(format!(
-            "{child} = call ptr @__vyrn_json_field_path(ptr {path}, ptr {key})"
-        ));
-        let node = self.fresh_tmp();
-        self.emit(format!("{node} = call ptr @__vyrn_vj_get(ptr {vj}, ptr {key})"));
-        let absent = self.fresh_tmp();
-        self.emit(format!("{absent} = icmp eq ptr {node}, null"));
-        let fll = self.llt(&f.ty);
-        let fp = self.fresh_tmp();
-        self.emit(format!("{fp} = getelementptr {rec_ll}, ptr {res}, i64 0, i32 {i}"));
-        if let Type::Option(_) = self.resolve(&f.ty) {
-            // Absent -> None; present -> emit_decode (which maps null -> None).
-            let none_l = self.fresh_label("dec.fld.none");
-            let present_l = self.fresh_label("dec.fld.present");
-            let done_l = self.fresh_label("dec.fld.done");
-            self.emit_term(format!("br i1 {absent}, label %{none_l}, label %{present_l}"));
-            self.emit_label(&none_l);
-            self.emit(format!(
-                "store {fll} {{ i1 0, i64 0, i64 0 }}, ptr {fp}"
-            ));
-            self.emit_term(format!("br label %{done_l}"));
-            self.emit_label(&present_l);
-            let fv = self.emit_decode(&node, &child, issues, &f.ty)?;
-            self.emit(format!("store {fll} {fv}, ptr {fp}"));
-            self.emit_term(format!("br label %{done_l}"));
-            self.emit_label(&done_l);
-        } else {
-            let missing_l = self.fresh_label("dec.fld.missing");
-            let present_l = self.fresh_label("dec.fld.present");
-            let done_l = self.fresh_label("dec.fld.done");
-            self.emit_term(format!("br i1 {absent}, label %{missing_l}, label %{present_l}"));
-            self.emit_label(&missing_l);
-            let msg = vyrn_frontend::codec::missing_message(&f.name);
-            self.push_issue(issues, "json.missing", &child, &msg)?;
-            self.emit_term(format!("br label %{done_l}"));
-            self.emit_label(&present_l);
-            let fv = self.emit_decode(&node, &child, issues, &f.ty)?;
-            self.emit(format!("store {fll} {fv}, ptr {fp}"));
-            self.emit_term(format!("br label %{done_l}"));
-            self.emit_label(&done_l);
-        }
-        Ok(())
-    }
-
-    /// Orchestrate `fromJson`: parse, decode into `tn`, and package the result
-    /// as `Validation<T>` — `Valid(T)` when no Issue accumulated, else
-    /// `Invalid([Issue])` materialized from the shim's issue list.
-    fn gen_from_json(&mut self, tn: &str, s: &str) -> Result<(String, Type), String> {
-        let target = Type::Named(tn.to_string());
-        let vll = enum_ll(1); // Validation<T> = { i64 tag, i64 payload }
-        let empty = self.str_g("")?;
-        let valid_tag = self.variants.get("Valid").map(|(t, _)| *t).unwrap_or(0);
-        let invalid_tag = self.variants.get("Invalid").map(|(t, _)| *t).unwrap_or(1);
-
-        let issues = self.fresh_tmp();
-        self.emit(format!("{issues} = call ptr @__vyrn_issues_new()"));
-        let errslot = self.fresh_alloca("ptr");
-        let vj = self.fresh_tmp();
-        self.emit(format!("{vj} = call ptr @__vyrn_json_parse(ptr {s}, ptr {errslot})"));
-        let failed = self.fresh_tmp();
-        self.emit(format!("{failed} = icmp eq ptr {vj}, null"));
-        let resslot = self.fresh_alloca(&vll);
-        let fail_l = self.fresh_label("fj.parsefail");
-        let ok_l = self.fresh_label("fj.parseok");
-        let valid_l = self.fresh_label("fj.valid");
-        let invalid_l = self.fresh_label("fj.invalid");
-        let done_l = self.fresh_label("fj.done");
-        self.emit_term(format!("br i1 {failed}, label %{fail_l}, label %{ok_l}"));
-
-        // parse failure -> single json.parse Issue (message from the shim).
-        self.emit_label(&fail_l);
-        let err = self.fresh_tmp();
-        self.emit(format!("{err} = load ptr, ptr {errslot}"));
-        let pk = self.str_g("json.parse")?;
-        self.emit(format!(
-            "call void @__vyrn_issues_push(ptr {issues}, ptr {pk}, ptr {empty}, ptr {err})"
-        ));
-        self.emit_term(format!("br label %{invalid_l}"));
-
-        // parse ok -> decode, then branch on whether any Issue accumulated.
-        self.emit_label(&ok_l);
-        let val = self.emit_decode(&vj, &empty, &issues, &target)?;
-        let n = self.fresh_tmp();
-        self.emit(format!("{n} = call i64 @__vyrn_issues_len(ptr {issues})"));
-        let clean = self.fresh_tmp();
-        self.emit(format!("{clean} = icmp eq i64 {n}, 0"));
-        self.emit_term(format!("br i1 {clean}, label %{valid_l}, label %{invalid_l}"));
-
-        // Valid(val)
-        self.emit_label(&valid_l);
-        let boxed = self.box_payload(&val, &target);
-        let v0 = self.fresh_tmp();
-        let v1 = self.fresh_tmp();
-        self.emit(format!("{v0} = insertvalue {vll} undef, i64 {valid_tag}, 0"));
-        self.emit(format!("{v1} = insertvalue {vll} {v0}, i64 {boxed}, 1"));
-        self.emit(format!("store {vll} {v1}, ptr {resslot}"));
-        self.emit_term(format!("br label %{done_l}"));
-
-        // Invalid([Issue]) — build the Vyrn Array<Issue> from the shim's list.
-        self.emit_label(&invalid_l);
-        let arr = self.build_issue_array(&issues)?;
-        let issue_arr_ty = Type::Array(Box::new(Type::Named("Issue".to_string())));
-        let boxed_arr = self.box_payload(&arr, &issue_arr_ty);
-        let i0 = self.fresh_tmp();
-        let i1 = self.fresh_tmp();
-        self.emit(format!("{i0} = insertvalue {vll} undef, i64 {invalid_tag}, 0"));
-        self.emit(format!("{i1} = insertvalue {vll} {i0}, i64 {boxed_arr}, 1"));
-        self.emit(format!("store {vll} {i1}, ptr {resslot}"));
-        self.emit_term(format!("br label %{done_l}"));
-
-        self.emit_label(&done_l);
-        let r = self.fresh_tmp();
-        self.emit(format!("{r} = load {vll}, ptr {resslot}"));
-        Ok((r, Type::App("Validation".to_string(), vec![target])))
-    }
-
-    /// Materialize the shim's issue list into a Vyrn `Array<Issue>` value
-    /// (`{ ptr, i64, i64 }` of `{ ptr, ptr, ptr }` records).
-    fn build_issue_array(&mut self, issues: &str) -> Result<String, String> {
-        let n = self.fresh_tmp();
-        self.emit(format!("{n} = call i64 @__vyrn_issues_len(ptr {issues})"));
-        let szp = self.fresh_tmp();
-        let bytes = self.fresh_tmp();
-        self.emit(format!("{szp} = getelementptr {{ ptr, ptr, ptr }}, ptr null, i64 {n}"));
-        self.emit(format!("{bytes} = ptrtoint ptr {szp} to i64"));
-        let buf = self.fresh_tmp();
-        self.emit(format!("{buf} = call ptr @__vyrn_malloc(i64 {bytes})"));
-        let idx = self.fresh_alloca("i64");
-        self.emit(format!("store i64 0, ptr {idx}"));
-        let cond_l = self.fresh_label("iss.cond");
-        let body_l = self.fresh_label("iss.body");
-        let done_l = self.fresh_label("iss.done");
-        self.emit_term(format!("br label %{cond_l}"));
-        self.emit_label(&cond_l);
-        let i = self.fresh_tmp();
-        self.emit(format!("{i} = load i64, ptr {idx}"));
-        let more = self.fresh_tmp();
-        self.emit(format!("{more} = icmp slt i64 {i}, {n}"));
-        self.emit_term(format!("br i1 {more}, label %{body_l}, label %{done_l}"));
-        self.emit_label(&body_l);
-        let k = self.fresh_tmp();
-        let p = self.fresh_tmp();
-        let m = self.fresh_tmp();
-        self.emit(format!("{k} = call ptr @__vyrn_issue_key(ptr {issues}, i64 {i})"));
-        self.emit(format!("{p} = call ptr @__vyrn_issue_path(ptr {issues}, i64 {i})"));
-        self.emit(format!("{m} = call ptr @__vyrn_issue_msg(ptr {issues}, i64 {i})"));
-        let is0 = self.fresh_tmp();
-        let is1 = self.fresh_tmp();
-        let is2 = self.fresh_tmp();
-        self.emit(format!("{is0} = insertvalue {{ ptr, ptr, ptr }} undef, ptr {k}, 0"));
-        self.emit(format!("{is1} = insertvalue {{ ptr, ptr, ptr }} {is0}, ptr {p}, 1"));
-        self.emit(format!("{is2} = insertvalue {{ ptr, ptr, ptr }} {is1}, ptr {m}, 2"));
-        let slot = self.fresh_tmp();
-        self.emit(format!("{slot} = getelementptr {{ ptr, ptr, ptr }}, ptr {buf}, i64 {i}"));
-        self.emit(format!("store {{ ptr, ptr, ptr }} {is2}, ptr {slot}"));
-        let ni = self.fresh_tmp();
-        self.emit(format!("{ni} = add i64 {i}, 1"));
-        self.emit(format!("store i64 {ni}, ptr {idx}"));
-        self.emit_term(format!("br label %{cond_l}"));
-        self.emit_label(&done_l);
-        let a0 = self.fresh_tmp();
-        let a1 = self.fresh_tmp();
-        let a2 = self.fresh_tmp();
-        self.emit(format!("{a0} = insertvalue {{ ptr, i64, i64 }} undef, ptr {buf}, 0"));
-        self.emit(format!("{a1} = insertvalue {{ ptr, i64, i64 }} {a0}, i64 {n}, 1"));
-        self.emit(format!("{a2} = insertvalue {{ ptr, i64, i64 }} {a1}, i64 {n}, 2"));
-        Ok(a2)
     }
 }
 
 /// Whether a pattern matches the tag-1 variant (`Some`/`Ok`). Only used on the
 /// Option/Result path; user-enum variants go through `gen_match_enum`.
 fn pattern_is_one(p: &Pattern) -> bool {
-    matches!(p, Pattern::Some(_) | Pattern::Ok(_))
+    matches!(p, Pattern::Some(_) | Pattern::Ok(_) | Pattern::Success(_))
 }
 
 /// The name a pattern binds its payload to, if any.
 fn pattern_binding(p: &Pattern) -> Option<&str> {
     match p {
         Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => Some(b),
+        // `??`'s pair (RFC-0079). `Failure` binds on the `Option` path too, where
+        // the payload type is the `Type::Int` placeholder `gen_match` passes for
+        // a tag-0 `Option` arm: a dead `alloca`+`store` of a word nothing reads,
+        // which is cheaper than teaching this type-free helper about types.
+        Pattern::Success(b) | Pattern::Failure(b) => Some(b),
         // Variants route through gen_match_enum, not this Option/Result helper.
         Pattern::Variant(_, b) => b.first().map(|s| s.as_str()),
         Pattern::None => None,
@@ -9315,7 +7511,11 @@ fn llvm_str(s: &str) -> (String, usize) {
 /// by a 108-entry (9 states × 12 classes) transition table. State 0 is ACCEPT,
 /// 12 is REJECT. Used by `@__vyrn_utf8valid` so the native decoders reject exactly
 /// what Rust's `String::from_utf8` rejects (overlong forms, surrogates, > U+10FFFF).
-fn utf8d_table() -> Vec<u8> {
+///
+/// Shared with the direct wasm backend (RFC-0077 M2g), which puts the same bytes
+/// in a data segment and walks them with the same two loads. A second table would
+/// have been a second answer to "is this valid UTF-8", free to drift by a byte.
+pub(crate) fn utf8d_table() -> Vec<u8> {
     let mut t = vec![0u8; 256];
     for b in 0x80..=0x8F {
         t[b] = 1;
@@ -9360,6 +7560,192 @@ fn utf8d_table() -> Vec<u8> {
     ];
     t.extend_from_slice(&trans);
     t
+}
+
+/// If `value` is `name + e1 + e2 + …` — a `+` chain whose left spine bottoms
+/// out in a bare `name` — the appended operands in written order. The chain
+/// matters: `out + a + ", "` parses as `Add(Add(Var(out), a), ", ")`, so the
+/// accumulator sits at the far end of the spine, not under the top `+`.
+fn self_append_spine<'e>(name: &str, value: &'e Expr) -> Option<Vec<&'e Expr>> {
+    let mut parts: Vec<&Expr> = Vec::new();
+    let mut cur = value;
+    while let Expr::Binary { op: BinOp::Add, lhs, rhs, .. } = cur {
+        parts.push(rhs);
+        cur = lhs;
+    }
+    match cur {
+        Expr::Var { name: n, .. } if n == name && !parts.is_empty() => {
+            parts.reverse();
+            Some(parts)
+        }
+        _ => None,
+    }
+}
+
+/// The local `String` accumulators of one function body that `s = s + …` may
+/// grow IN PLACE (see `Gen::emit_str_append`).
+///
+/// In-place growth reallocates, so every other holder of the old pointer is
+/// invalidated — `let copy = out` before an append must keep reading "a". The
+/// interpreter is safe here because `Rc::make_mut` clones a shared buffer;
+/// native code has no refcount, so eligibility is decided statically and the
+/// rule is a WHITELIST: a name qualifies only if every occurrence of it in the
+/// function is a use that provably cannot retain the pointer — the root of a
+/// self-append, a `.field` read (a String's fields are byte/char counts),
+/// an operand of the interpolation desugar (which copies), or a tail
+/// `return`. Anything else — another `let`, any user call, a record
+/// field, an array element, a lambda body, an unrecognized builtin — bans the
+/// name. An unknown callee is therefore ineligible by construction, so a new
+/// retaining builtin cannot silently make this unsound.
+fn append_candidates(body: &Block) -> std::collections::HashSet<String> {
+    let mut targets = std::collections::HashSet::new();
+    let mut banned = std::collections::HashSet::new();
+    scan_append_block(body, &mut targets, &mut banned, false);
+    targets.retain(|n| !banned.contains(n));
+    targets
+}
+
+/// Walk a block collecting append targets and banned names. `strict` marks a
+/// lambda body: everything inside one is banned outright, because a capture
+/// copies the pointer into a value that outlives the append.
+fn scan_append_block(
+    b: &Block,
+    targets: &mut std::collections::HashSet<String>,
+    banned: &mut std::collections::HashSet<String>,
+    strict: bool,
+) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let { value, .. } => ban_append_expr(value, banned, strict),
+            Stmt::Assign { name, value, .. } => match self_append_spine(name, value) {
+                Some(parts) if !strict => {
+                    targets.insert(name.clone());
+                    // The accumulator may not appear on the right as well:
+                    // `out = out + out` would read a buffer the realloc moved.
+                    for p in parts {
+                        ban_append_expr(p, banned, strict);
+                    }
+                }
+                _ => ban_append_expr(value, banned, strict),
+            },
+            Stmt::SetField { value, .. } | Stmt::Expr(value) => {
+                ban_append_expr(value, banned, strict)
+            }
+            Stmt::IndexSet { index, value, .. } => {
+                ban_append_expr(index, banned, strict);
+                ban_append_expr(value, banned, strict);
+            }
+            // Returning the accumulator hands off the buffer at the point the
+            // frame dies — nothing can append after it.
+            Stmt::Return { value: Some(e), .. } => ban_append_read(e, banned, strict),
+            // `drop s` frees the buffer; leave that path on the general lowering.
+            Stmt::Drop { name, .. } => {
+                banned.insert(name.clone());
+            }
+            Stmt::If { cond, then_block, else_block, .. } => {
+                ban_append_expr(cond, banned, strict);
+                scan_append_block(then_block, targets, banned, strict);
+                if let Some(eb) = else_block {
+                    scan_append_block(eb, targets, banned, strict);
+                }
+            }
+            Stmt::IfLet { scrutinee, then_block, else_block, .. } => {
+                ban_append_expr(scrutinee, banned, strict);
+                scan_append_block(then_block, targets, banned, strict);
+                if let Some(eb) = else_block {
+                    scan_append_block(eb, targets, banned, strict);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                ban_append_expr(cond, banned, strict);
+                scan_append_block(body, targets, banned, strict);
+            }
+            Stmt::ForIn { iter, body, .. } => {
+                ban_append_expr(iter, banned, strict);
+                scan_append_block(body, targets, banned, strict);
+            }
+            Stmt::Region { body, .. } => scan_append_block(body, targets, banned, strict),
+            Stmt::Return { value: None, .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        }
+    }
+}
+
+/// A position that does not retain its operand: a bare variable there is fine.
+fn ban_append_read(e: &Expr, banned: &mut std::collections::HashSet<String>, strict: bool) {
+    if strict || !matches!(e, Expr::Var { .. }) {
+        ban_append_expr(e, banned, strict);
+    }
+}
+
+/// Ban every variable `e` mentions in a position that might retain it. The
+/// match is exhaustive on purpose: a new `Expr` variant must be classified
+/// rather than silently fall into a permissive default.
+fn ban_append_expr(e: &Expr, banned: &mut std::collections::HashSet<String>, strict: bool) {
+    match e {
+        Expr::Var { name, .. } => {
+            banned.insert(name.clone());
+        }
+        // A String's fields are `byteLength`/`charCount` — an Int, not a borrow.
+        Expr::Field { expr, .. } => ban_append_read(expr, banned, strict),
+        // The two copying builtins the interpolation desugar emits: `@str`
+        // strdups its argument, `@concat` builds a fresh buffer from both
+        // halves. Only these two, because the lexer cannot produce a leading
+        // `@` — no local binding can shadow the name and turn the call into a
+        // dispatch through a stored function value that keeps what it is given.
+        // (`print` is spellable, and `let print = f` does exactly that.)
+        Expr::Call { name, args, .. } if matches!(name.as_str(), "@str" | "@concat") => {
+            for a in args {
+                ban_append_read(a, banned, strict);
+            }
+        }
+        Expr::Call { args, .. }
+        | Expr::Spawn { args, .. }
+        | Expr::TryConstruct { args, .. }
+        | Expr::ArrayLit { elems: args, .. } => {
+            for a in args {
+                ban_append_expr(a, banned, strict);
+            }
+        }
+        Expr::Unary { expr, .. } | Expr::Try { expr, .. } => {
+            ban_append_expr(expr, banned, strict)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            ban_append_expr(lhs, banned, strict);
+            ban_append_expr(rhs, banned, strict);
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            ban_append_expr(scrutinee, banned, strict);
+            for arm in arms {
+                ban_append_expr(&arm.body, banned, strict);
+            }
+        }
+        Expr::IfExpr { cond, then_branch, else_branch, .. } => {
+            ban_append_expr(cond, banned, strict);
+            ban_append_expr(then_branch, banned, strict);
+            if let Some(eb) = else_branch {
+                ban_append_expr(eb, banned, strict);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields {
+                ban_append_expr(v, banned, strict);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                ban_append_expr(k, banned, strict);
+                ban_append_expr(v, banned, strict);
+            }
+        }
+        // A capture outlives the append, so nothing a lambda touches is eligible.
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(e) => ban_append_expr(e, banned, true),
+            LambdaBody::Block(b) => {
+                scan_append_block(b, &mut std::collections::HashSet::new(), banned, true)
+            }
+        },
+        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
+    }
 }
 
 /// Collect distinct `=~` pattern literals (first-seen order) from a block.
@@ -9624,7 +8010,7 @@ fn collect_strings_expr(e: &Expr, out: &mut Vec<String>, types: &HashMap<String,
 /// Bind type parameters by matching a (possibly generic) parameter type against
 /// a concrete argument type. Mirrors the checker's `unify`, minus error checks
 /// (the checker already validated the call).
-fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
+pub(crate) fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
     match (pty, aty) {
         (Type::Param(t), _) => {
             subst.entry(t.clone()).or_insert_with(|| aty.clone());
@@ -9649,8 +8035,117 @@ fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
             solve_param(pv, av, subst);
         }
         (Type::Ref(p), Type::Ref(a)) => solve_param(p, a, subst),
+        // A `fn` type (RFC-0023/RFC-0037), parameter-wise then on the return.
+        // Without this a generic record holding a `fn` whose parameter is the
+        // record's own type parameter — `Deferred<P, T> = { run: fn(P) -> T }`,
+        // the `std/ui` `ParamQuery` shape — solves NOTHING from its field, and
+        // `applied_type` fills both in with `Unit`.
+        (Type::Fn(pp, pr), Type::Fn(ap, ar)) if pp.len() == ap.len() => {
+            for (p, a) in pp.iter().zip(ap) {
+                solve_param(p, a, subst);
+            }
+            solve_param(pr, ar, subst);
+        }
         _ => {}
     }
+}
+
+/// The type arguments a construction or call site instantiates a generic with:
+/// `declared` are the parametric types (a function's parameters, an enum
+/// variant's payloads, a record's fields), `actual` the concrete types supplied
+/// for them. Each declared type parameter comes back `Some` if the match fixed
+/// it and `None` if nothing did.
+///
+/// This is **the rule**, shared rather than reimplemented (RFC-0077 M2e). Two
+/// backends solving one site differently would specialize *different* functions
+/// for the same source, and nothing in this repo compares the two backends'
+/// instantiation sets — it is a disagreement no test would name.
+///
+/// What each backend does with a `None` is its own business, which is why this
+/// reports rather than decides. The LLVM emitter has always substituted `Unit`
+/// and let it lower to `void`; the direct backend refuses, because a `void` in a
+/// wasm signature is not a diagnostic, it is a different function.
+pub(crate) fn solve_type_args(
+    type_params: &[String],
+    declared: &[Type],
+    actual: &[Type],
+) -> (HashMap<String, Type>, Vec<Option<Type>>) {
+    let mut subst: HashMap<String, Type> = HashMap::new();
+    for (d, a) in declared.iter().zip(actual) {
+        solve_param(d, a, &mut subst);
+    }
+    let args = type_params.iter().map(|p| subst.get(p).cloned()).collect();
+    (subst, args)
+}
+
+/// The concrete type a construction site of `name` produces: the bare
+/// [`Type::Named`] when the declaration takes no parameters, and otherwise a
+/// [`Type::App`] with each parameter solved from what was supplied. An unsolved
+/// parameter becomes `Unit`, which is what this has always done for enums.
+pub(crate) fn applied_type(
+    decl: Option<&TypeDecl>,
+    name: &str,
+    declared: &[Type],
+    actual: &[Type],
+) -> Type {
+    let named = || Type::Named(name.to_string());
+    let Some(decl) = decl.filter(|d| !d.type_params.is_empty()) else { return named() };
+    let (_, args) = solve_type_args(&decl.type_params, declared, actual);
+    Type::App(name.to_string(), args.into_iter().map(|a| a.unwrap_or(Type::Unit)).collect())
+}
+
+/// Whether `t` is a generic instantiation whose every type argument is known —
+/// no `Unit` placeholder [`applied_type`] put there, no unresolved `Param`.
+///
+/// **The arm-reconciliation rule** (RFC-0077 M2m). Every arm of a `match` yields
+/// the same enum, but they do not all know its type arguments: an arm whose
+/// payload mentions the parameter fixes it (`Held(c)` is a `Crate<Cargo>`), and a
+/// param-free one cannot (`Empty` is a `Crate<Unit>`). Preferring the applied
+/// answer is what lets a downstream `match` recover the concrete payload instead
+/// of a bare `Type::Param` — which the textual backend lowers to an invalid
+/// `alloca void` and the direct one refuses as "a conversion from `Cargo` to `T`".
+///
+/// Shared rather than spelled twice, for `solve_type_args`'s reason: two backends
+/// preferring different arms would report two different types for one expression,
+/// and the enum's LAYOUT is the same either way (`enum_ll` is arity-wide), so the
+/// disagreement would surface as a payload encoded one way and read the other.
+/// The type a two-arm join carries when one arm may be a `panic` (RFC-0079).
+///
+/// `Never` names an arm that left through `unreachable` and reached the merge
+/// only as a `poison` incoming, so it contributes no type — the other arm
+/// answers. Both arms `Never` keeps `Never`, whose `llt` is `void`, and the
+/// merge's existing "nothing to `phi`" case takes it from there.
+fn join_never(a: Type, b: Type) -> Type {
+    if matches!(a, Type::Never) {
+        b
+    } else {
+        a
+    }
+}
+
+/// What a merge whose LLVM type is `void` hands back to whatever encloses it.
+///
+/// `Unit` has nothing to hand back and never did. `Never` — every arm diverged —
+/// is different in exactly one way that matters: the merge is still in VALUE
+/// position, so an enclosing `phi` wants an operand for it. `poison` is that
+/// operand, valid at every LLVM type, and it is the same answer a single `panic`
+/// arm already gives (RFC-0079 M1). Returning the empty string here instead
+/// emitted `phi ptr [ %t12, %a ], [ , %b ]`, which clang rejects — found by
+/// `std/strings`'s `substring`, whose `Err` arm is a nested `match` with a `panic`
+/// in BOTH of its arms. M1 pinned every join shape with the panic not taken; a
+/// join with no surviving arm at all was the shape it did not have.
+fn void_merge_value(ty: &Type) -> String {
+    if matches!(ty, Type::Never) {
+        "poison".to_string()
+    } else {
+        String::new()
+    }
+}
+
+pub(crate) fn ty_is_concrete_app(t: &Type, resolve: &dyn Fn(&Type) -> Type) -> bool {
+    matches!(t, Type::App(_, args)
+        if !args.is_empty()
+            && args.iter().all(|a| !matches!(resolve(a), Type::Unit | Type::Param(_))))
 }
 
 /// The mangled LLVM symbol for a generic instantiation, e.g. `vyrn_id__Int`.
@@ -9706,98 +8201,144 @@ fn mangle_ty(t: &Type) -> String {
             ps.iter().map(mangle_ty).collect::<String>(),
             mangle_ty(r)
         ),
-        // Checker recovery sentinel; never reaches codegen in a valid program.
+        // Neither is a type a monomorphization can be keyed on: `Err` is the
+        // checker's recovery sentinel and never reaches codegen, and `Never`
+        // (RFC-0079) is unspellable in a signature, so no type argument is one.
+        Type::Never => "Never".into(),
         Type::Err => "Err".into(),
     }
 }
 
-/// Every string constant the generated JSON codec functions (RFC-0018) will
-/// reference: field keys, enum variant names, `expected <what>` phrases,
-/// `json.missing`/`validate` messages, and the fixed Issue keys. Seeded into
-/// the module string pool before the functions are emitted so `str_g` resolves.
-fn collect_codec_strings(program: &Program, types: &HashMap<String, TypeDecl>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for k in ["", "json.parse", "json.type", "json.missing", "validate"] {
-        out.push(k.to_string());
+/// The declaration whose `where` predicate a value flowing from `from` into `to`
+/// must satisfy, if any (RFC-0003's automatic validation).
+///
+/// The ONE copy of that decision, for the reason [`llt_of`] is the one copy of
+/// the shape rules: RFC-0077's direct wasm backend asks the same question, and a
+/// second spelling of it would fork the semantics silently — a flow one backend
+/// checks and the other does not is a wrong program on exactly one target.
+///
+/// The exactly-same named type is not a boundary crossing: it was checked when
+/// it was built, so re-running the predicate would be work that cannot fail.
+///
+/// One exemption is deliberately NOT here, because it needs the expression
+/// rather than the two types: [`vyrn_frontend::finite::string_flow_proven`],
+/// RFC-0020's containment proof. Both backends call that function themselves on
+/// the same AST — the consteval precedent — so it is single-sourced too, just
+/// one layer out.
+pub(crate) fn validation_required<'t>(
+    from: &Type,
+    to: &Type,
+    types: &'t HashMap<String, TypeDecl>,
+) -> Option<&'t TypeDecl> {
+    let Type::Named(n) = to else { return None };
+    if from == to {
+        return None;
     }
-    let mut seen: Vec<String> = Vec::new();
-    for t in &program.type_decls {
-        gather_codec_strings(&Type::Named(t.name.clone()), types, &mut out, &mut seen);
-    }
-    // Also cover types that appear only in a function signature — a bare
-    // `Result<T, E>` return (RFC-0024) is `toJson`'d without ever being a named
-    // type_decl, so its `Ok`/`Err`/payload strings must still be pooled.
-    for f in &program.functions {
-        for p in &f.params {
-            gather_codec_strings(&p.ty, types, &mut out, &mut seen);
-        }
-        gather_codec_strings(&f.ret, types, &mut out, &mut seen);
-    }
-    out.sort();
-    out.dedup();
-    out
+    types.get(n).filter(|d| d.predicate.is_some())
 }
 
-fn push_uniq(out: &mut Vec<String>, s: String) {
-    if !out.contains(&s) {
-        out.push(s);
+/// The message a `where` violation prints. A record base gets the cross-field
+/// wording, because what violated it is not one value.
+///
+/// Byte-identical across interp, native and wasm — parity compares stderr — so
+/// it is built here rather than spelled at each of the places that trap.
+pub(crate) fn validation_message(decl: &TypeDecl) -> String {
+    if matches!(decl.base, Type::Record(_)) {
+        format!("error: validation failed: `{}` violates its `where` clause\n", decl.name)
+    } else {
+        format!("error: validation failed for `{}`\n", decl.name)
     }
 }
 
-/// Walk a type collecting the codec's constant strings. `seen` breaks cycles
-/// (a record reachable through `Array<Self>`).
-fn gather_codec_strings(
-    ty: &Type,
-    types: &HashMap<String, TypeDecl>,
-    out: &mut Vec<String>,
-    seen: &mut Vec<String>,
-) {
-    push_uniq(out, vyrn_frontend::codec::expected_name(ty, types));
-    if let Type::Named(n) = ty {
-        if seen.contains(n) {
-            return;
-        }
-        if let Some(d) = types.get(n) {
-            seen.push(n.clone());
-            if d.predicate.is_some() {
-                push_uniq(out, vyrn_frontend::codec::validate_message(d));
-            }
-            gather_codec_strings(&d.base, types, out, seen);
-        }
-        return;
-    }
+/// What a `where` predicate has in scope, re-exported from the frontend.
+///
+/// It moved there in RFC-0078 M3: the JSON decode path now synthesizes a
+/// `Bool`-returning Vyrn function whose PARAMETERS are this structure, and the
+/// frontend is the only crate both it and the two lowerings can see. This file had
+/// three copies of the walk before RFC-0077 M2d wanted a fourth; it has none now.
+pub(crate) use vyrn_frontend::types::predicate_binds;
+
+/// The LLVM shape of a Vyrn type: the ONE match that turns a type into a memory
+/// layout, so `Gen::llt` and RFC-0077's direct wasm backend cannot come to
+/// different conclusions about the same value. `layout::of_ll` parses what this
+/// prints, which is what keeps size and offset arithmetic downstream of lowering
+/// rather than beside it.
+///
+/// `ty` is resolved here but NOT substituted — a caller inside a monomorphized
+/// body substitutes first (`Gen::llt` does), because only it knows which
+/// instantiation it is in.
+pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
     match vyrn_frontend::types::resolve(ty, types) {
+        Type::Int => "i64".into(),
+        Type::IntN { bits, .. } => format!("i{bits}"),
+        Type::Float => "double".into(),
+        Type::Float32 => "float".into(),
+        Type::Bool => "i1".into(),
+        Type::Str => "ptr".into(),
+        // `Never` (RFC-0079) carries no value, so it lowers like `Unit`: a
+        // statement-position `panic` has nothing to drop, and a `void` join is
+        // already the "no value to merge" case both merges test for.
+        Type::Unit | Type::Never => "void".into(),
+        // Option/Result both lower to { tag, payload }; payload is i64.
+        // { tag, word0, word1 } — two payload words so a `Ref` (which is two
+        // words) fits inline without a heap box.
+        Type::Option(_) | Type::Result(..) => "{ i1, i64, i64 }".into(),
+        // A generational reference is { i64 slot, i64 generation } for any T
+        // (the payload is boxed), so it is a fixed-size handle.
+        Type::Ref(_) => "{ i64, i64 }".into(),
+        // A growable array is { ptr data, i64 len, i64 cap }.
+        Type::Array(_) => "{ ptr, i64, i64 }".into(),
+        // A `Map<String, V>` (RFC-0028) is two parallel growable buffers
+        // sharing one length/capacity: { ptr keys, ptr values, i64 len,
+        // i64 cap }. Keys are `ptr` (String); values are `llt(V)`-stride.
+        Type::Map(..) => "{ ptr, ptr, i64, i64 }".into(),
+        // A fixed-size array lowers to the LLVM value aggregate [N x T].
+        Type::ArrayN(inner, n) => format!("[{n} x {}]", llt_of(&inner, types)),
+        // A small-buffer array (RFC-0056) lowers to
+        // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — `cap` is the
+        // state discriminant (`cap == N` inline; `cap > N` spilled onto
+        // `data`). Every element access branches on it to pick the base.
+        Type::SmallArray(inner, n) => {
+            format!("{{ i64, i64, ptr, [{n} x {}] }}", llt_of(&inner, types))
+        }
+        // A task handle (RFC-0025) is an opaque `ptr` to the shim's task
+        // record (thread handle + heap frame); `t.join()` blocks on it and
+        // loads the result from the frame's leading slot.
+        Type::Task(_) => "ptr".into(),
+        // A logger handle is a `ptr` to its name string.
+        Type::Logger => "ptr".into(),
         Type::Record(fields) => {
-            for f in &fields {
-                push_uniq(out, f.name.clone());
-                push_uniq(out, vyrn_frontend::codec::missing_message(&f.name));
-                gather_codec_strings(&f.ty, types, out, seen);
-            }
+            let inner: Vec<String> = fields.iter().map(|f| llt_of(&f.ty, types)).collect();
+            format!("{{ {} }}", inner.join(", "))
         }
+        // A user enum is { i64 tag, i64 payload0, ... } — one payload slot per
+        // the widest variant (payloads are i64 in native).
         Type::Enum(vs) => {
-            for v in &vs {
-                push_uniq(out, v.name.clone());
-                // A tuple payload decodes from a JSON array — its mismatch Issue
-                // reads `expected array, found <kind>` (RFC-0024).
-                if v.payload.len() >= 2 {
-                    push_uniq(out, "array".to_string());
-                }
-                for p in &v.payload {
-                    gather_codec_strings(p, types, out, seen);
-                }
-            }
+            let arity = vs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
+            enum_ll(arity)
         }
-        // `Result<T, E>` on the wire is a two-variant payload enum (RFC-0024).
-        Type::Result(t, e) => {
-            push_uniq(out, "Ok".to_string());
-            push_uniq(out, "Err".to_string());
-            gather_codec_strings(&t, types, out, seen);
-            gather_codec_strings(&e, types, out, seen);
-        }
-        Type::Option(inner) | Type::Array(inner) | Type::ArrayN(inner, _) => {
-            gather_codec_strings(&inner, types, out, seen);
-        }
-        _ => {}
+        // RFC-0076 M3a: on the generator-host path `Code` (RFC-0054) is an
+        // opaque i64 HANDLE into the host's piece arena — the one `Named`
+        // that survives `resolve` undeclared. i64 is also what makes it
+        // travel for free: `box_payload` passes an i64 through, so a `Code`
+        // in an Option/Array needs no case of its own.
+        Type::Named(ref n) if n == "Code" && gen_host() => "i64".into(),
+        // Unreachable after `resolve` (Named/App/transformers/params reduced away).
+        Type::Named(_) | Type::App(..) | Type::Omit(..) | Type::Pick(..) | Type::Merge(..)
+        | Type::Partial(..) | Type::Param(_) => "void".into(),
+        // A bare integer type argument (RFC-0056) never stands alone as a
+        // runtime type — `SmallArray` consumes it before lowering.
+        Type::ConstInt(_) => "void".into(),
+        // A stored function value (RFC-0037) is a synthesized closed enum:
+        // `{ i64 tag, i64 payload }` — tag selects the source (one variant
+        // per named function / lifted lambda), payload is 0 or a pointer to
+        // the malloc'd capture block. v1 `fn`-typed PARAMETERS never reach
+        // `llt` (they monomorphize away before lowering).
+        Type::Fn(..) => "{ i64, i64 }".into(),
+        // `Err` is the checker's recovery sentinel; a program with any `Err`
+        // already has diagnostics and never reaches codegen. Lower to void
+        // as a defensive fallback (never observed in practice).
+        Type::Err => "void".into(),
     }
 }
 
@@ -9823,6 +8364,63 @@ fn sanitize(name: &str) -> String {
 mod tests {
     use super::*;
     use vyrn_frontend::check;
+
+    // ---- the layout engine's link to lowering (RFC-0077 M0) -------------
+
+    /// [`layout::SHAPES`] is what the clang comparison is run against, so it is
+    /// only worth anything if it is what `llt` prints. Assert that here — in the
+    /// one place `Gen` is reachable — so a new case in `llt` cannot quietly
+    /// escape the layout check that stands between it and a silent miscompile.
+    #[test]
+    fn llt_prints_the_shapes_the_layout_engine_was_verified_on() {
+        let (rt, pt, pc, ty, va, sg, sb, fs, dm, rg) = Default::default();
+        let g = Gen::new(&rt, &pt, &pc, &ty, &va, &sg, &sb, &fs, &dm, &rg);
+        let rec = |fs: &[Type]| {
+            Type::Record(
+                fs.iter()
+                    .enumerate()
+                    .map(|(i, t)| Field { name: format!("f{i}"), ty: t.clone() })
+                    .collect(),
+            )
+        };
+        let i8t = Type::IntN { bits: 8, signed: false };
+        let cases: &[(&str, Type)] = &[
+            ("Int64", Type::Int),
+            ("Int32", Type::IntN { bits: 32, signed: true }),
+            ("Int16", Type::IntN { bits: 16, signed: true }),
+            ("Int8", i8t.clone()),
+            ("Bool", Type::Bool),
+            ("Float64", Type::Float),
+            ("Float32", Type::Float32),
+            ("String", Type::Str),
+            ("Option/Result", Type::Option(Box::new(Type::Int))),
+            ("Option/Result", Type::Result(Box::new(Type::Int), Box::new(Type::Str))),
+            ("Array", Type::Array(Box::new(Type::Str))),
+            ("Map", Type::Map(Box::new(Type::Str), Box::new(Type::Int))),
+            ("Ref", Type::Ref(Box::new(Type::Int))),
+            ("Fn", Type::Fn(Vec::new(), Box::new(Type::Int))),
+            ("RecordEmpty", rec(&[])),
+            ("RecordMixed", rec(&[Type::Bool, Type::Str, Type::Int, i8t.clone(), Type::Float])),
+            ("ArrayN_i64", Type::ArrayN(Box::new(Type::Int), 4)),
+            ("ArrayN_i8", Type::ArrayN(Box::new(i8t.clone()), 3)),
+            ("SmallArray_i64", Type::SmallArray(Box::new(Type::Int), 4)),
+            ("SmallArray_i8", Type::SmallArray(Box::new(i8t), 3)),
+            ("SmallArray_str", Type::SmallArray(Box::new(Type::Str), 2)),
+        ];
+        for (name, ty) in cases {
+            let want = layout::SHAPES
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("{name} missing from layout::SHAPES"))
+                .1;
+            assert_eq!(&g.llt(ty), want, "llt({name}) drifted from layout::SHAPES");
+        }
+        // The enum arities, which come from the same helper `llt` calls.
+        for (name, arity) in [("Enum0", 0), ("Enum1", 1), ("Enum3", 3)] {
+            let want = layout::SHAPES.iter().find(|(n, _)| *n == name).unwrap().1;
+            assert_eq!(enum_ll(arity), want, "enum_ll({arity}) drifted");
+        }
+    }
 
     // ---- blackBox / benchmarking barrier (RFC-0055) ---------------------
 
@@ -9868,31 +8466,40 @@ mod tests {
 
     // ---- payload enums on the wire (RFC-0024) ---------------------------
 
+    /// A payload enum earns NO codec IR in either direction, and the call site
+    /// refuses by name when the runtime is not linked.
+    ///
+    /// This test used to pin `@__vyrn_dec_Shape` and its `@__vyrn_vj_at_or_null`
+    /// tuple read. RFC-0078 M2b retired the encode half and M3 the decode half:
+    /// `fromJson` is now `std/jsonread` plus a per-type walk generated as Vyrn, so
+    /// this file writes no codec IR at all and holds no DOM. What is pinned is the
+    /// absence, plus the refusal — a single-source program has no resolver, so the
+    /// runtime module cannot be injected into it, and codegen must say so rather
+    /// than emit a call to a function nobody defined. The bytes are pinned three
+    /// ways by `examples/jsondecbytes.vyrn` instead.
     #[test]
-    fn payload_enum_gets_per_type_codec_functions() {
-        let src = "type Shape = | Circle(Int64) | Rect(Int64, Int64) | Nothing \
-                   fn f(s: Shape) -> String { return toJson(s) } \
-                   fn g(s: String) -> Validation<Shape> { return fromJson(Shape, s) } \
-                   fn main() -> Int64 { return 0 }";
-        let ir = emit(&check(src).unwrap()).unwrap();
-        // A payload enum earns standalone encode/decode functions (recursion-safe)
-        // and the call sites route to them.
-        assert!(ir.contains("define ptr @__vyrn_enc_Shape("), "enc fn:\n{ir}");
-        assert!(ir.contains("@__vyrn_dec_Shape("), "dec fn:\n{ir}");
-        // The tuple payload reads a JSON array element.
-        assert!(ir.contains("@__vyrn_vj_at_or_null"), "tuple element access:\n{ir}");
+    fn payload_enum_gets_no_codec_ir_and_fromjson_refuses_by_name() {
+        let src = "type Shape = | Circle(Int64) | Rect(Int64, Int64) | Nothing                    fn g(s: String) -> Validation<Shape> { return fromJson(Shape, s) }                    fn main() -> Int64 { return 0 }";
+        let err = emit(&check(src).unwrap()).unwrap_err();
+        assert!(err.contains("`fromJson` into `Shape`"), "names the type: {err}");
+        assert!(err.contains("RFC-0078 M3"), "names the reason: {err}");
     }
 
+    /// A payload-LESS enum earns no codec function and no variant-name table.
+    ///
+    /// This used to pin the inline string encoding a nullary enum got inside
+    /// `emit_encode`, whose O(1) name lookup read `@.enumnames.Role`. RFC-0078 M2b
+    /// moved that encoding into a synthesized Vyrn `match` whose nullary arm is an
+    /// ordinary `JStr("Guest")` over the string pool — which left the table with no
+    /// reader at all, so it went too. What is pinned now is its absence.
     #[test]
-    fn pure_nullary_enum_keeps_inline_string_encoding() {
-        // Regression pin: a payload-LESS enum must NOT get a codec function — it
-        // reads its variant name from the O(1) table (byte-identical to RFC-0018).
+    fn pure_nullary_enum_gets_no_codec_ir() {
         let src = "type Role = | Guest | Admin \
-                   fn f(r: Role) -> String { return toJson(r) } \
-                   fn main() -> Int64 { return 0 }";
+                   fn f(r: Role) -> Int64 { return match r { Guest => 0, Admin => 1 } } \
+                   fn main() -> Int64 { return f(Guest) }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(!ir.contains("@__vyrn_enc_Role("), "no codec fn for a nullary enum:\n{ir}");
-        assert!(ir.contains("@.enumnames.Role"), "name table present:\n{ir}");
+        assert!(!ir.contains("@.enumnames."), "the name table had one reader:\n{ir}");
     }
 
     // ---- function values (RFC-0023) -------------------------------------
@@ -10479,6 +9086,44 @@ mod tests {
     }
 
     #[test]
+    fn string_accumulator_appends_in_place() {
+        // `out = out + piece` on a local String whose every other use is a
+        // non-retaining read grows one buffer (`realloc` + `memcpy`) instead of
+        // allocating a fresh one per iteration.
+        let src = "fn main() -> Int64 { let mut out = \"\"; let mut i = 0; \
+                   while i < 4 { out = out + \"x\"; i = i + 1; } \
+                   print(\"\\{out}\"); return out.byteLength; }";
+        let ir = emit(&check(src).unwrap()).unwrap();
+        assert!(ir.contains("app.own"), "takes ownership of the buffer once: {ir}");
+        assert!(ir.contains("call ptr @__vyrn_realloc"), "grows in place: {ir}");
+        assert!(
+            ir.contains("call void @llvm.memcpy.p0.p0.i64"),
+            "copies the operand in: {ir}"
+        );
+    }
+
+    #[test]
+    fn string_accumulator_not_appended_when_aliased_or_in_region() {
+        // An alias taken before the append must keep reading the old contents,
+        // so a `let` that copies the variable disqualifies it...
+        let aliased = "fn main() -> Int64 { let mut out = \"a\"; let copy = out; \
+                       out = out + \"b\"; print(copy); return out.byteLength; }";
+        let ir = emit(&check(aliased).unwrap()).unwrap();
+        assert!(!ir.contains("app.own"), "aliased accumulator stays copying: {ir}");
+        // ...and so does any user call, which may store what it is handed.
+        let escaped = "fn keep(s: String) -> Int64 { return s.byteLength; } \
+                       fn main() -> Int64 { let mut out = \"a\"; out = out + \"b\"; \
+                       return keep(out); }";
+        let ir = emit(&check(escaped).unwrap()).unwrap();
+        assert!(!ir.contains("app.own"), "escaping accumulator stays copying: {ir}");
+        // Region memory comes from an arena that cannot be `realloc`'d.
+        let regioned = "fn main() -> Int64 { region { let mut out = \"a\"; \
+                        out = out + \"b\"; print(\"\\{out}\"); } return 0; }";
+        let ir = emit(&check(regioned).unwrap()).unwrap();
+        assert!(!ir.contains("app.own"), "region accumulator stays copying: {ir}");
+    }
+
+    #[test]
     fn contextual_array_literal_lowers_to_heap_triple() {
         // A literal in an `Array<T>` slot is malloc'd into the `{ptr,len,cap}`
         // triple (like `list([..])`), then `.length` reads field 1.
@@ -10494,7 +9139,9 @@ mod tests {
                    let g = Float64(n); let s = Int32(5000000000); \
                    print(g); return Int64(s); }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("fptosi double"), "float→int: {ir}");
+        // Saturating, not bare: a plain `fptosi` is poison out of range, and the
+        // interpreter's `as` saturates (RFC-0078 M4a).
+        assert!(ir.contains("@llvm.fptosi.sat.i64.f64(double"), "float→int: {ir}");
         assert!(ir.contains("sitofp i64"), "int→float: {ir}");
         assert!(ir.contains("trunc i64") && ir.contains("to i32"), "int→i32: {ir}");
         assert!(ir.contains("sext i32 ") && ir.contains("to i64"), "i32→int: {ir}");
@@ -10733,15 +9380,13 @@ mod tests {
         assert!(ir.contains("call i64 @__vyrn_strlen"), "str .byteLength → strlen: {ir}");
     }
 
-    #[test]
-    fn string_char_count_lowers_to_charcount_shim() {
-        let src = "fn main() -> Int64 { let s = \"hi\"; return s.charCount(); }";
-        let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(
-            ir.contains("call i64 @__vyrn_charcount"),
-            "str .charCount() → charcount shim: {ir}"
-        );
-    }
+    // (`string_char_count_lowers_to_charcount_shim` pinned
+    // `call i64 @__vyrn_charcount`, which is no longer emitted: RFC-0078's census
+    // found `charCount` the one builtin with no justification for being one, and it
+    // is `std/text`'s `charCountV`. Its witness moved to
+    // `a_routed_builtin_without_its_module_refuses_by_name` with the other ten.
+    // `string_byte_length_lowers_to_strlen` above is the contrast that matters:
+    // `byteLength` is a VIEW and stays.)
 
     #[test]
     fn string_index_lowers_to_byte_load() {
@@ -10754,52 +9399,99 @@ mod tests {
         assert!(ir.contains("@.trap.soob"), "bounds-checked: {ir}");
     }
 
+    /// RFC-0079 M3: `slice_lowers_with_both_traps` pinned the lowering that is
+    /// gone — two trap globals, a continuation-byte mask at each cut point and a
+    /// `@__vyrn_bytecopy` call. What replaces it is the ABSENCE, checked on a
+    /// module that reaches the string runtime, because a deleted lowering whose
+    /// dead globals stay behind is the shape RFC-0078 exists to catch.
+    ///
+    /// The refusal-by-name that every OTHER routed builtin gets (below) is not
+    /// available to `slice`: its return type names a `std/strpred` declaration, so
+    /// the checker refuses first and `check(src)` never yields a program to emit.
+    /// `slice_without_its_module_refuses_at_the_check` in `vyrn-frontend` is that
+    /// half.
     #[test]
-    fn slice_lowers_with_both_traps() {
-        // `slice(s, a, b)` (RFC-0046): bounds + UTF-8 boundary checks, then a
-        // byte copy into a fresh NUL-terminated buffer. Both canonical traps and
-        // the copy helper are present.
-        let src = "fn main() -> Int64 { let s = \"hello\"; let x = slice(s, 1, 3); return 0; }";
-        let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("@.trap.sliceoob"), "out-of-range trap: {ir}");
-        assert!(ir.contains("@.trap.slicesplit"), "mid-codepoint trap: {ir}");
-        assert!(ir.contains("call void @__vyrn_bytecopy"), "byte copy: {ir}");
-        // The O(1) UTF-8 boundary test reuses the continuation-byte mask.
-        assert!(ir.contains("and i8") && ir.contains(", -128"), "boundary check: {ir}");
-        assert!(exit_calls(&ir) > exit_baseline(), "slice emits runtime traps: {ir}");
+    fn the_slice_lowering_and_its_traps_are_gone() {
+        let ir =
+            emit(&check("fn main() -> Int64 { return bytes(\"hi\").length }").unwrap()).unwrap();
+        assert!(!ir.contains("@.trap.sliceoob"), "the out-of-range trap survived: {ir}");
+        assert!(!ir.contains("@.trap.slicesplit"), "the mid-codepoint trap survived: {ir}");
+        assert!(!ir.contains("@__vyrn_bytecopy"), "the copy helper survived: {ir}");
     }
 
+    /// RFC-0078 M4c: the three tests that used to pin `@__vyrn_hex_encode`,
+    /// `@__vyrn_str_chars` and `@strstr` are gone with the lowerings they pinned.
+    /// What replaces them is the refusal, because these `check(source)` helpers take
+    /// a bare source with no resolver and therefore have no runtime module to link —
+    /// the seam M2b named for `toJson`, now shared by ten more builtins.
+    ///
+    /// Loudly rather than silently: an emitter that dropped the call, or emitted one
+    /// to a function nobody defines, is the failure mode this pins against.
     #[test]
-    fn encodings_lower_to_runtime() {
-        let ir = emit(&check("fn main() -> Int64 { \
-            let a = hexEncode(\"x\"); let b = base64Encode(\"x\"); let c = urlEncode(\"x\"); \
-            let d = hexDecode(\"41\"); return 0; }").unwrap()).unwrap();
-        assert!(ir.contains("call ptr @__vyrn_hex_encode"), "hexEncode: {ir}");
-        assert!(ir.contains("call ptr @__vyrn_b64_encode"), "base64Encode: {ir}");
-        assert!(ir.contains("call ptr @__vyrn_url_encode"), "urlEncode: {ir}");
-        assert!(ir.contains("call { i1, i64, i64 } @__vyrn_hex_decode"), "hexDecode: {ir}");
-        // The strict UTF-8 validator DFA + its 364-byte table are present.
+    fn a_routed_builtin_without_its_module_refuses_by_name() {
+        for (src, builtin, reserved) in [
+            (
+                "fn main() -> Int64 { let a = hexEncode(\"x\"); return 0 }",
+                "hexEncode",
+                "codecs$hexEncodeV",
+            ),
+            (
+                "fn main() -> Int64 { let a = base64Decode(\"QQ==\"); return 0 }",
+                "base64Decode",
+                "codecs$base64DecodeV",
+            ),
+            ("fn main() -> Int64 { return chars(\"hi\").length }", "chars", "text$charsV"),
+            (
+                "fn f(s: String) -> Bool { return contains(s, \"x\") } \
+                 fn main() -> Int64 { return 0 }",
+                "contains",
+                "strpred$containsV",
+            ),
+            (
+                "fn f(s: String) -> Bool { return endsWith(s, \"x\") } \
+                 fn main() -> Int64 { return 0 }",
+                "endsWith",
+                "strpred$endsWithV",
+            ),
+            // `@charCount` is spelled with the `@` because the parser produces it:
+            // `s.charCount()` is method-only, so the AST call name — and the string
+            // every engine routes on — is the internal one.
+            (
+                "fn main() -> Int64 { return \"hi\".charCount() }",
+                "@charCount",
+                "text$charCountV",
+            ),
+        ] {
+            let e = emit(&check(src).unwrap()).unwrap_err();
+            assert!(e.contains(builtin) && e.contains(reserved), "{builtin}: {e}");
+        }
+    }
+
+    /// `bytes` did NOT move, and neither did the UTF-8 validator it shares with
+    /// `stringFromBytes` — both are the irreducible VIEW the Vyrn implementations are
+    /// written on, so both are still emitted. The codecs' own IR, by contrast, is
+    /// gone from the module rather than merely unreferenced.
+    #[test]
+    fn the_byte_view_and_the_validator_stay_in_the_runtime() {
+        let ir =
+            emit(&check("fn main() -> Int64 { return bytes(\"hi\").length }").unwrap()).unwrap();
+        assert!(ir.contains("call { ptr, i64, i64 } @__vyrn_str_bytes"), "bytes → helper: {ir}");
+        assert!(ir.contains("@__vyrn_str_bytes(ptr %s)"), "helper emitted: {ir}");
         assert!(ir.contains("@__vyrn_utf8valid"), "validator: {ir}");
         assert!(ir.contains("@__vyrn_utf8d = private"), "DFA table: {ir}");
-    }
-
-    #[test]
-    fn chars_and_bytes_lower_to_runtime() {
-        let ir = emit(&check("fn main() -> Int64 { return chars(\"hi\").length + bytes(\"hi\").length; }").unwrap()).unwrap();
-        assert!(ir.contains("call { ptr, i64, i64 } @__vyrn_str_chars"), "chars → decoder: {ir}");
-        assert!(ir.contains("call { ptr, i64, i64 } @__vyrn_str_bytes"), "bytes → helper: {ir}");
-        // The UTF-8 decoder is defined in the module.
-        assert!(ir.contains("@__vyrn_str_chars(ptr %s)"), "decoder emitted: {ir}");
-    }
-
-    #[test]
-    fn string_methods_lower_to_libc() {
-        let c = emit(&check("fn f(s: String) -> Bool { return contains(s, \"x\"); } \
-                             fn main() -> Int64 { return 0; }").unwrap()).unwrap();
-        assert!(c.contains("call ptr @strstr"), "contains → strstr: {c}");
-        let s = emit(&check("fn f(s: String) -> Bool { return startsWith(s, \"x\"); } \
-                             fn main() -> Int64 { return 0; }").unwrap()).unwrap();
-        assert!(s.contains("call i32 @__vyrn_strncmp"), "startsWith → strncmp: {s}");
+        for dead in [
+            "@__vyrn_hex_encode",
+            "@__vyrn_b64_encode",
+            "@__vyrn_url_encode",
+            "@__vyrn_hex_decode",
+            "@__vyrn_hexdigit",
+            "@__vyrn_hexval",
+            "@__vyrn_b64alpha",
+            "@__vyrn_str_chars",
+            "@strstr",
+        ] {
+            assert!(!ir.contains(dead), "`{dead}` should have gone with M4c: {ir}");
+        }
     }
 
     #[test]

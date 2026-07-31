@@ -61,6 +61,36 @@
 // byte ARRAY (not a String), so `substring` is not a drop-in.
 import { joinWith, trim, fromBytesOr } from "std/strings"
 import { includes } from "std/arrays"
+// RFC-0071: `components` checks the surface it emits against the `Component`
+// contract below, rather than trusting that it built what it meant to. `Html` is
+// named by the contract, so it is imported as an ordinary type here — the
+// generated module's own `std/html` import is separate, emitted text.
+import { checkContract } from "std/contract"
+import { Html } from "std/html"
+
+// ===========================================================================
+// The `Component` contract (RFC-0071 M2).
+//
+// What the generator actually requires of a `.vyx` component is a `<template>`
+// with exactly one root; the `<script>` is optional, and every name in it —
+// `props`, helpers, imports — is module-PRIVATE by construction
+// (`vyxBuildModule` copies helpers verbatim and exports nothing but the view it
+// synthesizes itself). So a component has no hand-written export surface at all,
+// and there is no name here to misspell the way `head` and `load` could be.
+//
+// The truthful contract is therefore the TOTAL one: every export of a components
+// module is a view returning `Html`, and there is nothing to enumerate. Views
+// take zero, one or four props depending on the component, which is why the open
+// rule is written `fn *(..)` — arity is not part of what this promise says.
+// ===========================================================================
+
+/// What a components module exports (RFC-0071): one view per component, each
+/// returning `Html`. Names are the application's vocabulary — a widget is called
+/// whatever its file is called — so the contract is OPEN and constrains shape.
+export contract Component {
+    /// A component's view function.
+    fn *(..) -> Html
+}
 
 // ===========================================================================
 // Byte / string helpers — all comptime-pure, legal in a `gen fn` and its callees.
@@ -128,28 +158,14 @@ fn vyxAppend(arr: Array<String>, s: String) -> Array<String> {
 
 /// The 1-based line number of byte offset `off` within `ba` (newlines before it).
 fn vyxLineAt(ba: Array<UInt8>, off: Int64) -> Int64 {
-    let mut line = 1
-    let mut i = 0
-    while i < off && i < ba.length {
-        if ba[i] == '\n' {
-            line = line + 1
-        }
-        i = i + 1
-    }
-    return line
+    return lineAt(ba, off)
 }
 
 /// The 1-based column of byte offset `off` within `ba` (chars since the last LF).
 /// RFC-0033 origin directives are 1-based; this feeds their `:col` field so a
 /// diagnostic in a template pass-through maps to the exact `.vyx` column.
 fn vyxColAt(ba: Array<UInt8>, off: Int64) -> Int64 {
-    let mut col = 1
-    let mut i = off
-    while i > 0 && ba[i - 1] != '\n' {
-        col = col + 1
-        i = i - 1
-    }
-    return col
+    return colAt(ba, off)
 }
 
 /// The byte offset of the first non-whitespace byte in `ba[from..)`, so a
@@ -2391,6 +2407,37 @@ fn vyxCompNames(comps: Array<VyxComp>) -> Array<String> {
 // The generator.
 // ===========================================================================
 
+/// An empty `Schema` — the reflection a contract check reads is names and type
+/// spellings, and a component's props carry no validation refinement.
+fn vyxNoSchema() -> Schema {
+    return Schema { name: "", base: "", doc: None, min: None, max: None, multipleOf: None, minLength: None, maxLength: None, pattern: None }
+}
+
+/// The export surface `vyxBuildModule` is about to emit, as the reflection a
+/// contract check reads: one view function per component, taking its declared
+/// props (plus `children` when the template has a `<slot/>`) and returning
+/// `Html`. Mirrors `vyxEmitSignature` exactly — it describes the same signature.
+///
+/// A components module is generated, so this is the only place its surface
+/// exists before it is text; checking it here is the difference between the
+/// generator believing it emitted views and knowing it did.
+gen fn vyxEmittedInterface(comps: Array<VyxComp>) -> ModuleInterface {
+    let mut fns: Array<FnInfo> = []
+    for c in comps {
+        let mut ps: Array<ParamInfo> = []
+        let mut i = 0
+        while i < c.propNames.length {
+            ps.push(ParamInfo { name: c.propNames[i], spelling: c.propTypes[i], schema: vyxNoSchema() })
+            i = i + 1
+        }
+        if c.takesChildren {
+            ps.push(ParamInfo { name: "children", spelling: "Array<Html>", schema: vyxNoSchema() })
+        }
+        fns.push(FnInfo { name: c.fnName, params: ps, ret: "Html", retSchema: vyxNoSchema() })
+    }
+    return ModuleInterface { functions: fns, types: [] }
+}
+
 /// Assemble the synthesized module from the compiled components, or return the
 /// accumulated generation diagnostics. The PURE tail shared by `components` /
 /// `componentsThemed` — the `listDir` / `readFile` I/O stays in the `gen fn`
@@ -2402,6 +2449,15 @@ gen fn vyxFinish(comps: Array<VyxComp>, err: String, themed: Bool, theme: String
     }
     if err != "" {
         return err
+    }
+    // RFC-0071: the surface this is about to emit, checked against the contract
+    // that describes it. An issue is a load diagnostic like any other.
+    let mut contractErr = ""
+    for iss in checkContract(vyxEmittedInterface(comps), contractOf(Component)) {
+        contractErr = contractErr + "VYX_CONTRACT__" + vyxIdentOf(iss.key) + "__" + vyxIdentOf(iss.path) + "\n"
+    }
+    if contractErr != "" {
+        return contractErr
     }
     return vyxBuildModule(comps, themed, theme)
 }
@@ -2470,12 +2526,13 @@ export gen fn componentsThemed(dir: String, theme: String) -> String {
 // ===========================================================================
 // `.vyx` pages (RFC-0039 §4) — a `.vyx` PAGE has a `<script>` with a `params { … }`
 // block (bracket-segment binding, the page analogue of `props`), plain helper fns,
-// imports, and optionally `fn load(<params>) -> Validation<Data>` (+ `type Data`);
-// its `<template>` is the page body. `std/ui`'s `pages` reads the file itself
+// imports, and optionally an `export fn data() -> Query<T>` accessor (+ `type
+// Data`) — the `data` member of the `std/ui:Page` contract, RFC-0071. Its
+// `<template>` is the page body. `std/ui`'s `pages` reads the file itself
 // (comptime builtins in its gen body) and calls the pure `vyxBuildPageModule`
 // core here, which synthesizes a page module exporting `page`/`Params`/`load`/
-// `Data` — exactly the shape the router already consumes. `load` and `Data` are
-// auto-exported so the router reaches them through the page's namespace.
+// `Data` — exactly the shape the router already consumes. `load` there is the
+// generated wrapper around `data`, not a name the author writes.
 // ===========================================================================
 
 /// The shape `std/ui` needs to route a `.vyx` page: its `params` fields (parallel
@@ -2485,83 +2542,165 @@ export gen fn componentsThemed(dir: String, theme: String) -> String {
 /// params fault.
 type VyxPageShape = { paramNames: Array<String>, paramTypes: Array<String>, hasLoad: Bool, loadHasParams: Bool, loadLazy: Bool, loadRet: String, layoutNone: Bool, err: String }
 
-/// Strip a leading `lazy ` marker (RFC-0070) from a trimmed line so the existing
-/// `fn load` / `export fn load` scanners match a `lazy fn load()` loader. The
-/// marker is not valid Vyrn — it records page laziness (`vyxScriptLoadIsLazy`) and
-/// is removed before the loader reaches the compiled module.
-fn vyxUnlazy(t: String) -> String {
-    if t.startsWith("lazy ") {
-        return trim(vyxSlice(bytes(t), 5, bytes(t).length))
-    }
-    return t
+// ---- the RFC-0071 declaration forms ----------------------------------------
+// `head` and `data` are members of the `std/ui:Page` contract. A `.vyx` page is
+// not a module — its `<script>` is compiled INTO one — so the accessors are
+// still read out of source text here; what changes is that the names they carry
+// are DECLARED, so a misspelling is the contract's `unknown export` rather than
+// a page that renders empty.
+//
+// RFC-0071 M2c deleted the forms these replaced. There is no `head { … }` block
+// on the page path (layouts and error pages, which have no contract to declare,
+// keep theirs) and no `fn load` / `lazy fn load` scanner at all: `vyxUnlazy`,
+// `vyxScriptLoadIsLazy`, `vyxScriptHasLoad`, `vyxScriptLoadHasParams` and
+// `vyxScriptLoadRet` are gone, and with them the last place a page's routing
+// shape was read from a statement rather than a signature.
+
+/// Whether the trimmed line `t` declares `fn <name>(` — with or without a
+/// leading `export`. Unlike the `startsWith("fn load")` test it replaced, this
+/// requires the whole name, so `fn dataFor()` is not mistaken for `fn data()`.
+fn vyxIsDeclOf(t: String, name: String) -> Bool {
+    let bare = if t.startsWith("export ") { trim(vyxSlice(bytes(t), 7, bytes(t).length)) } else { t }
+    return bare.startsWith("fn " + name + "(") || bare.startsWith("fn " + name + " (")
 }
 
-/// Whether the loader is marked `lazy` (RFC-0070): a statement-leading
-/// `lazy fn load` / `lazy export fn load`. A lazy page renders its shell + a
-/// skeleton instantly on a client soft nav, then fills in the data — the loaded
-/// value reaches the view wrapped as `PageData<T>` (`Loading | Ready(T)`).
-fn vyxScriptLoadIsLazy(script: String) -> Bool {
+/// The declaration line of `fn <name>` in `script`, trimmed ("" when absent).
+fn vyxDeclLine(script: String, name: String) -> String {
     for line in vyxLines(script) {
         let t = trim(line)
-        if t.startsWith("lazy fn load") || t.startsWith("lazy export fn load") {
-            return true
-        }
-    }
-    return false
-}
-
-/// Whether the script text declares a statement-leading `fn load` (or
-/// `export fn load`, optionally `lazy`-marked) — the page's optional loader.
-fn vyxScriptHasLoad(script: String) -> Bool {
-    for line in vyxLines(script) {
-        let t = vyxUnlazy(trim(line))
-        if t.startsWith("fn load") || t.startsWith("export fn load") {
-            return true
-        }
-    }
-    return false
-}
-
-/// Whether the loader takes a `Params` argument (`fn load(p: Params)`) or is a
-/// zero-parameter static loader (`fn load()`, RFC-0069 §0). Scans the `(…)` of the
-/// `fn load` line: any non-blank content means it takes params. "false" when there
-/// is no loader.
-fn vyxScriptLoadHasParams(script: String) -> Bool {
-    for line in vyxLines(script) {
-        let t = vyxUnlazy(trim(line))
-        if t.startsWith("fn load") || t.startsWith("export fn load") {
-            let tb = bytes(t)
-            let open = vyxFind(tb, bytes("("), 0)
-            let close = vyxFind(tb, bytes(")"), 0)
-            if open < 0 || close <= open {
-                return false
-            }
-            return trim(vyxSlice(tb, open + 1, close)).byteLength > 0
-        }
-    }
-    return false
-}
-
-/// The loader's declared return-type spelling — the text between `->` and the
-/// opening `{` of the `fn load(…)` line (RFC-0041 §3: `Validation<Data>` vs
-/// `Result<Data, PageError>`, or, RFC-0069 §0, a plain `T`). "" when there is no
-/// loader.
-fn vyxScriptLoadRet(script: String) -> String {
-    for line in vyxLines(script) {
-        let t = vyxUnlazy(trim(line))
-        if t.startsWith("fn load") || t.startsWith("export fn load") {
-            let tb = bytes(t)
-            let arrow = vyxFind(tb, bytes("->"), 0)
-            if arrow < 0 {
-                return ""
-            }
-            let brace = vyxFind(tb, bytes("{"), arrow)
-            let end = if brace < 0 { tb.length } else { brace }
-            return trim(vyxSlice(tb, arrow + 2, end))
+        if vyxIsDeclOf(t, name) {
+            return t
         }
     }
     return ""
 }
+
+/// Whether the script declares the RFC-0071 accessor `fn <name>()`.
+fn vyxScriptHasDecl(script: String, name: String) -> Bool {
+    return vyxDeclLine(script, name).byteLength > 0
+}
+
+/// The declared return-type spelling of `fn <name>` — the text between `->` and
+/// the opening `{` ("" when absent or untyped).
+fn vyxDeclRet(script: String, name: String) -> String {
+    let t = vyxDeclLine(script, name)
+    if t.byteLength == 0 {
+        return ""
+    }
+    let tb = bytes(t)
+    let arrow = vyxFind(tb, bytes("->"), 0)
+    if arrow < 0 {
+        return ""
+    }
+    let brace = vyxFind(tb, bytes("{"), arrow)
+    let end = if brace < 0 { tb.length } else { brace }
+    return trim(vyxSlice(tb, arrow + 2, end))
+}
+
+/// Which alternative signature of the `std/ui:Page` contract's `data` member a
+/// return-type spelling names — the same 0..3 `matchedMember` reports, or
+/// `0 - 1` when the spelling is not a data type at all (RFC-0071 M2b):
+///
+///   0  `Query<T>`            blocking, no params
+///   1  `Lazy<T>`             render-then-fill, no params
+///   2  `ParamQuery<P, T>`    blocking, deferred call takes `Params`
+///   3  `ParamLazy<P, T>`     render-then-fill, deferred call takes `Params`
+///
+/// Both facts the router needs — laziness and params-ness — are now read from
+/// the DECLARED TYPE. Laziness used to be read from `data`'s body (the `lazy(…)`
+/// call), which was the last source scan in the page pipeline; the `.vyx` file is
+/// not a module, so this reads its declaration rather than a `moduleInterface`,
+/// but it reads a *declaration* either way and a misspelled type is an error.
+export fn vyxDataForm(ret: String) -> Int64 {
+    if ret.startsWith("Query<") {
+        return 0
+    }
+    if ret.startsWith("Lazy<") {
+        return 1
+    }
+    if ret.startsWith("ParamQuery<") {
+        return 2
+    }
+    if ret.startsWith("ParamLazy<") {
+        return 3
+    }
+    return 0 - 1
+}
+
+/// Whether a `data` form renders lazily (RFC-0070).
+export fn vyxDataFormIsLazy(form: Int64) -> Bool {
+    return form == 1 || form == 3
+}
+
+/// Whether a `data` form's deferred call takes the page's `Params`.
+export fn vyxDataFormHasParams(form: Int64) -> Bool {
+    return form == 2 || form == 3
+}
+
+/// The `std/ui` runner that turns a `data` form into the loaded value.
+export fn vyxDataRunner(form: Int64) -> String {
+    if form == 1 {
+        return "runLazy"
+    }
+    if form == 2 {
+        return "runParamQuery"
+    }
+    if form == 3 {
+        return "runParamLazy"
+    }
+    return "runQuery"
+}
+
+/// The DATA type a `data` return-type spelling carries ("" when `ret` is not one
+/// of the four). This is what the page's synthesized `load()` returns, so
+/// `Query<Result<Paste, PageError>>` still routes through the `Result` failure
+/// path unchanged, and `ParamQuery<Params, Result<Paste, PageError>>` routes
+/// identically — the data is the LAST type argument, because the params type
+/// comes first when there is one.
+///
+/// EXPORTED so `std/ui` reads a `.vyrn` page's `data` return the same way, rather
+/// than keeping a second copy of the rule.
+export fn vyxQueryDataType(ret: String) -> String {
+    if vyxDataForm(ret) < 0 {
+        return ""
+    }
+    let ba = bytes(ret)
+    let open = vyxFind(ba, bytes("<"), 0)
+    if open < 0 {
+        return ""
+    }
+    // The matching `>` at generic depth 0, and the last depth-1 comma before it:
+    // `ParamQuery<Params, Result<Paste, PageError>>` cuts after `Params, `, not
+    // after `Result<Paste, `.
+    let mut depth = 0
+    let mut i = open
+    let mut close = ba.length
+    let mut lastComma = 0 - 1
+    while i < ba.length {
+        if ba[i] == '<' {
+            depth = depth + 1
+        } else if ba[i] == '>' {
+            depth = depth - 1
+            if depth == 0 {
+                close = i
+                i = ba.length
+            }
+        } else if ba[i] == ',' && depth == 1 {
+            lastComma = i
+        }
+        i = i + 1
+    }
+    let start = if lastComma >= 0 { lastComma + 1 } else { open + 1 }
+    return trim(vyxSlice(ba, start, close))
+}
+
+// `vyxDeclBody` lived here: the brace-matched source of a declaration, "the body
+// a scan must read to learn something the signature does not say". Its only
+// caller was `vyxScriptDataIsLazy`, and RFC-0071 M2b moved laziness into the
+// return type, so there is nothing left the signature does not say. Both are
+// gone. `vyxScriptLoadHasParams` and `vyxScriptLoadRet` lived here too and went
+// the same way in M2c: params-ness and the data type both come off `data`'s
+// declared return type now, so neither has a line to scan.
 
 /// The loaded-data type spelling carried by a loader's return type (RFC-0041 §3):
 /// the inner type of `Validation<T>` or the FIRST type argument of
@@ -2572,8 +2711,8 @@ fn vyxLoaderDataType(loadRet: String) -> String {
     if loadRet.byteLength == 0 {
         return ""
     }
-    // RFC-0069 §0: a plain loader (`fn load() -> Array<Paste>`) carries its data
-    // type directly — only the `Validation<…>`/`Result<…>` wrappers are unwrapped.
+    // RFC-0069 §0: a plain query (`Query<Array<Paste>>`) carries its data type
+    // directly — only the `Validation<…>`/`Result<…>` wrappers are unwrapped.
     if loadRet.startsWith("Validation<") == false && loadRet.startsWith("Result<") == false {
         return loadRet
     }
@@ -2649,6 +2788,133 @@ fn vyxIsLayoutLine(line: String) -> Bool {
     return rest.startsWith("=")
 }
 
+/// How a page declares its data: whether it has a `data` accessor at all, and
+/// the three facts its declared return type carries.
+type VyxDataShape = { hasData: Bool, hasParams: Bool, lazy: Bool, ret: String, err: String }
+
+/// Read a page `<script>`'s `data` declaration.
+///
+/// EVERY derived fact comes from the DECLARED RETURN TYPE (RFC-0071 M2b):
+/// `Lazy`/`ParamLazy` say the page renders-then-fills, `Param*` says the deferred
+/// call takes the route params, and the last type argument is the data. Nothing
+/// is read from the body, so a page cannot say one thing in its signature and
+/// another in its statements.
+fn vyxDataShapeOf(script: String) -> VyxDataShape {
+    if vyxScriptHasDecl(script, "data") == false {
+        return VyxDataShape { hasData: false, hasParams: false, lazy: false, ret: "", err: "" }
+    }
+    let declared = vyxDeclRet(script, "data")
+    let form = vyxDataForm(declared)
+    let mut err = ""
+    if form < 0 {
+        // A `data` that returns something else is not a near-miss the contract
+        // can interpret — name it here rather than emit a module whose `load()`
+        // calls a runner that does not exist.
+        err = vyxErrDetail("VYX_DATA_RETURN", "vyx_page", 0, declared)
+    }
+    return VyxDataShape {
+        hasData: true,
+        hasParams: vyxDataFormHasParams(form),
+        lazy: vyxDataFormIsLazy(form),
+        ret: vyxQueryDataType(declared),
+        err: err,
+    }
+}
+
+/// The parameter type spellings of a `fn` declaration line — the text after each
+/// depth-0 `:` inside `( … )`.
+fn vyxDeclParamTypes(t: String) -> Array<String> {
+    let tb = bytes(t)
+    let open = vyxFind(tb, bytes("("), 0)
+    let mut out: Array<String> = []
+    if open < 0 {
+        return out
+    }
+    let mut depth = 0
+    let mut start = open + 1
+    let mut i = open
+    while i < tb.length {
+        let b = tb[i]
+        if b == '(' || b == '<' || b == '[' {
+            depth = depth + 1
+        } else if b == ')' || b == '>' || b == ']' {
+            depth = depth - 1
+            if depth == 0 {
+                let part = trim(vyxSlice(tb, start, i))
+                if part.byteLength > 0 {
+                    out.push(vyxAfterColon(part))
+                }
+                i = tb.length
+            }
+        } else if b == ',' && depth == 1 {
+            out.push(vyxAfterColon(trim(vyxSlice(tb, start, i))))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// The text after a parameter's `:` (`p: Params` => `Params`); the whole string
+/// when there is none.
+fn vyxAfterColon(part: String) -> String {
+    let pb = bytes(part)
+    let mut i = 0
+    while i < pb.length {
+        if pb[i] == ':' {
+            return trim(vyxSlice(pb, i + 1, pb.length))
+        }
+        i = i + 1
+    }
+    return part
+}
+
+/// The PUBLIC surface a `.vyx` page's `<script>` declares — its statement-leading
+/// `export fn` declarations — as the reflection a contract check reads.
+///
+/// A `.vyx` file is not a module (it is compiled INTO one), so there is no
+/// `moduleInterface` to ask; this is the equivalent, read from the source the
+/// author wrote. Everything NOT marked `export` is a private helper and is
+/// outside the contract entirely, which is exactly RFC-0071's rule.
+export gen fn vyxPageInterface(source: String) -> ModuleInterface {
+    let ba = bytes(source)
+    let scriptSec = vyxSection(ba, "script", true)
+    let mut fns: Array<FnInfo> = []
+    if scriptSec.found == false {
+        return ModuleInterface { functions: fns, types: [] }
+    }
+    for line in vyxLines(vyxSlice(ba, scriptSec.start, scriptSec.end)) {
+        let t = trim(line)
+        if t.startsWith("export fn ") {
+            let bare = trim(vyxSlice(bytes(t), 7, bytes(t).length))
+            let bb = bytes(bare)
+            let open = vyxFind(bb, bytes("("), 0)
+            if open > 3 {
+                let name = trim(vyxSlice(bb, 3, open))
+                let mut ps: Array<ParamInfo> = []
+                for spelling in vyxDeclParamTypes(bare) {
+                    ps.push(ParamInfo { name: "", spelling: spelling, schema: vyxNoSchema() })
+                }
+                fns.push(FnInfo { name: name, params: ps, ret: vyxRetOfDecl(bare), retSchema: vyxNoSchema() })
+            }
+        }
+    }
+    return ModuleInterface { functions: fns, types: [] }
+}
+
+/// The declared return-type spelling of a `fn` declaration line ("" for Unit),
+/// matching how `FnInfo.ret` spells an absent return.
+fn vyxRetOfDecl(t: String) -> String {
+    let tb = bytes(t)
+    let arrow = vyxFind(tb, bytes("->"), 0)
+    if arrow < 0 {
+        return ""
+    }
+    let brace = vyxFind(tb, bytes("{"), arrow)
+    let end = if brace < 0 { tb.length } else { brace }
+    return trim(vyxSlice(tb, arrow + 2, end))
+}
+
 /// Reflect a `.vyx` page's `<script>` — its `params` fields and loader presence.
 /// EXPORTED so `std/ui` learns the page's routing shape without duplicating the
 /// scanner. (`err` is set on a malformed `params` block.)
@@ -2664,7 +2930,7 @@ export gen fn vyxPageShape(source: String) -> VyxPageShape {
     }
     let script = vyxSlice(ba, scriptSec.start, scriptSec.end)
     let sb = bytes(script)
-    let loadRet = vyxScriptLoadRet(script)
+    let ds = vyxDataShapeOf(script)
     let layoutNone = vyxScriptLayoutNone(script)
     let pb = vyxFindKwBlock(sb, "params")
     let mut names: Array<String> = []
@@ -2694,28 +2960,65 @@ export gen fn vyxPageShape(source: String) -> VyxPageShape {
             }
         }
     }
-    return VyxPageShape { paramNames: names, paramTypes: types, hasLoad: vyxScriptHasLoad(script), loadHasParams: vyxScriptLoadHasParams(script), loadLazy: vyxScriptLoadIsLazy(script), loadRet: loadRet, layoutNone: layoutNone, err: "" }
+    return VyxPageShape { paramNames: names, paramTypes: types, hasLoad: ds.hasData, loadHasParams: ds.hasParams, loadLazy: ds.lazy, loadRet: ds.ret, layoutNone: layoutNone, err: ds.err }
 }
 
-/// Prefix `export ` onto a statement-leading `fn load` / `type Data` line so the
-/// synthesized page module exports them (the router reaches them through the
-/// page's namespace). Lines already `export`ed pass through.
+/// The private name a page's contract accessor is compiled under.
+///
+/// `head` and `data` are the names the page's *author* writes; the module the
+/// router consumes has its own `head(p, d) -> Array<Html>` and its own `data`
+/// prop, so the accessors are renamed on the way in and the generated wrappers
+/// call them. Nothing else in the page can see the new name, which is why it is
+/// spelled out of the way.
+fn vyxAccessorName(name: String) -> String {
+    return "uiPg" + vyxUpperFirst(name)
+}
+
+/// `name` with an upper-case first byte (`data` => `Data`) — the mirror of
+/// `vyxLowerFirst`.
+fn vyxUpperFirst(s: String) -> String {
+    let ba = bytes(s)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    for b in ba {
+        if i == 0 && b >= 'a' && b <= 'z' {
+            out.push(b - 32)
+        } else {
+            out.push(b)
+        }
+        i = i + 1
+    }
+    return fromBytesOr(out, s)
+}
+
+/// A contract accessor's declaration line, rewritten to its private name and
+/// stripped of `export` — `export fn head() -> Head {` => `fn uiPgHead() -> Head {`.
+fn vyxRenameAccessor(t: String, name: String) -> String {
+    let bare = if t.startsWith("export ") { trim(vyxSlice(bytes(t), 7, bytes(t).length)) } else { t }
+    let bb = bytes(bare)
+    let open = vyxFind(bb, bytes("("), 0)
+    if open < 0 {
+        return bare
+    }
+    return "fn " + vyxAccessorName(name) + vyxSlice(bb, open, bb.length)
+}
+
+/// Prefix `export ` onto a statement-leading `type Data` line so the synthesized
+/// page module exports it (the router reaches it through the page's namespace),
+/// and rename the RFC-0071 `head` / `data` accessors to their private names —
+/// the module's own `head`/`load` exports are the wrappers built around them.
+/// Lines already `export`ed pass through.
 fn vyxAutoExportPageDecls(script: String) -> String {
     let mut out = ""
     for line in vyxLines(script) {
         let t = trim(line)
-        let tl = vyxUnlazy(t)
         if vyxIsLayoutLine(line) {
             // The `layout="none"` opt-out directive is consumed by the router
             // shape; it is not valid Vyrn, so it never reaches the module.
-        } else if tl.startsWith("fn load") {
-            if t.startsWith("lazy ") {
-                // RFC-0070: drop the `lazy ` marker (not valid Vyrn — laziness is
-                // page metadata) and export the loader.
-                out = out + "export " + tl + "\n"
-            } else {
-                out = out + "export " + line + "\n"
-            }
+        } else if vyxIsDeclOf(t, "head") {
+            out = out + vyxRenameAccessor(t, "head") + "\n"
+        } else if vyxIsDeclOf(t, "data") {
+            out = out + vyxRenameAccessor(t, "data") + "\n"
         } else if t.startsWith("type Data") {
             out = out + "export " + line + "\n"
         } else {
@@ -2833,6 +3136,76 @@ fn vyxEmitHeadFns(head: VyxHead, sig: String, prelude: String) -> String {
     return out
 }
 
+// `vyxDeprecatedNote` and `vyxDeprecatedLine` lived here — the `//@deprecated`
+// directive the loader lifted into a warning, and the source scan that found the
+// line to point it at. RFC-0071 M2c deleted the forms they announced, so both
+// went with them. The warning CHANNEL they used (M2b Part A) stays: a compiler
+// wants a way to say "this compiled, but", whether or not anything says it today.
+
+/// The argument list the page's `head` accessor is called with, given the
+/// parameter TYPES it declared (RFC-0071 M2b's alternative signatures).
+///
+/// The house rule is that head takes what the view takes, so the four shapes are
+/// `()`, `(d)`, `(p)` and `(p, d)`. The two one-argument shapes are distinguished
+/// by the declared type: a page's route parameters are always its own `Params`,
+/// and nothing else can be. That is a question about a declaration, which is the
+/// difference between this and the block-scanning it replaces.
+///
+/// `hasLoad` and `hasParams` say what the wrapper actually HAS to give — a page
+/// with no loader has no `d`, so asking for one is a page error, not a silent
+/// empty head.
+fn vyxHeadCallArgs(ptypes: Array<String>, hasParams: Bool, hasLoad: Bool) -> String {
+    if ptypes.length == 0 {
+        return ""
+    }
+    if ptypes.length == 1 {
+        if ptypes[0] == "Params" {
+            return if hasParams { "p" } else { "" }
+        }
+        return if hasLoad { "d" } else { "" }
+    }
+    if hasParams && hasLoad {
+        return "p, d"
+    }
+    return ""
+}
+
+/// Whether the page's `head` accessor asks for more than the page can give: a
+/// `d` with no loader, a `p` with no params, or an arity past two. Reported as a
+/// page error rather than compiled into a call that would not typecheck inside
+/// generated text the author never sees.
+fn vyxHeadArgsOk(ptypes: Array<String>, hasParams: Bool, hasLoad: Bool) -> Bool {
+    if ptypes.length == 0 {
+        return true
+    }
+    if ptypes.length == 1 {
+        if ptypes[0] == "Params" {
+            return hasParams
+        }
+        return hasLoad
+    }
+    if ptypes.length == 2 {
+        return hasParams && hasLoad
+    }
+    return false
+}
+
+/// Emit the module's `head`/`headTitle` from the page's RFC-0071 `head(…)`
+/// accessor. `sig` is the wrapper's own parameter list (the router's call shape,
+/// unchanged, which is what keeps a migrated page's SSR bytes identical); `args`
+/// is what the accessor itself is handed.
+fn vyxEmitAccessorHeadFns(sig: String, args: String) -> String {
+    let call = vyxAccessorName("head") + "(" + args + ")"
+    let mut out = "export fn head(" + sig + ") -> Array<Html> {\n    return headHtml(" + call + ")\n}\n"
+    return out + vyxEmitAccessorHeadTitle(sig, args)
+}
+
+/// Emit just `headTitle(<sig>)` from the `head(…)` accessor (the client bundle's
+/// dataless-page slice, RFC-0069 M4).
+fn vyxEmitAccessorHeadTitle(sig: String, args: String) -> String {
+    return "export fn headTitle(" + sig + ") -> String {\n    return headTitleOf(" + vyxAccessorName("head") + "(" + args + "))\n}\n"
+}
+
 /// Emit just the `headTitle(<sig>) -> String` function — the title-only slice of
 /// `vyxEmitHeadFns`. The CLIENT bundle keeps this alone for a DATALESS page (RFC-0069
 /// M4) so the host can resolve a page's title with no network round-trip; the page's
@@ -2894,8 +3267,14 @@ fn vyxWordUsed(corpus: String, name: String) -> Bool {
     return false
 }
 
-/// `script` with the statement-leading `fn load(…) { … }` (or `export fn load`)
-/// removed, brace-matched. Unchanged when there is no loader.
+/// Whether the trimmed line `t` opens the page's `data()` accessor — the one
+/// declaration the client bundle strips, because its work is the server's.
+fn vyxIsDataDecl(t: String) -> Bool {
+    return vyxIsDeclOf(t, "data")
+}
+
+/// `script` with the statement-leading `data()` accessor removed, brace-matched.
+/// Unchanged when there is none.
 gen fn vyxStripLoadFn(script: String) -> String {
     let sb = bytes(script)
     let n = sb.length
@@ -2903,8 +3282,8 @@ gen fn vyxStripLoadFn(script: String) -> String {
     let mut lineStart = 0
     while i <= n {
         if i == n || sb[i] == '\n' {
-            let line = vyxUnlazy(trim(vyxSlice(sb, lineStart, i)))
-            if line.startsWith("fn load") || line.startsWith("export fn load") {
+            let line = trim(vyxSlice(sb, lineStart, i))
+            if vyxIsDataDecl(line) {
                 let brace = vyxFind(sb, bytes("{"), lineStart)
                 if brace >= 0 {
                     let end = vyxMatchCurly(sb, brace)
@@ -2916,32 +3295,6 @@ gen fn vyxStripLoadFn(script: String) -> String {
         i = i + 1
     }
     return script
-}
-
-/// The source text of the statement-leading `fn load(…) { … }` block ("" when
-/// there is no loader) — the set of names it references decides which now-dead
-/// imports the client prune may drop (only load-only names, never a name the load
-/// never used, so an enum-variant import like `Locale` for `En`/`Uk` survives).
-gen fn vyxLoadBody(script: String) -> String {
-    let sb = bytes(script)
-    let n = sb.length
-    let mut i = 0
-    let mut lineStart = 0
-    while i <= n {
-        if i == n || sb[i] == '\n' {
-            let line = vyxUnlazy(trim(vyxSlice(sb, lineStart, i)))
-            if line.startsWith("fn load") || line.startsWith("export fn load") {
-                let brace = vyxFind(sb, bytes("{"), lineStart)
-                if brace >= 0 {
-                    let end = vyxMatchCurly(sb, brace)
-                    return vyxSlice(sb, lineStart, end)
-                }
-            }
-            lineStart = i + 1
-        }
-        i = i + 1
-    }
-    return ""
 }
 
 /// Whether `name` is CALLED (`name(`) anywhere in `corpus`, as a whole token — the
@@ -2985,6 +3338,103 @@ fn vyxImportIsRelative(line: String) -> Bool {
     }
     let after = vyxSlice(bytes(line), idx + 6, bytes(line).length)
     return after.startsWith("./") || after.startsWith("../")
+}
+
+/// Whether `name` occurs in `corpus` as a whole identifier (not as a substring
+/// of a longer one). Deliberately blind to whether it is CALLED: a helper may be
+/// passed by name as a function value (`paramQuery(fetchPaste)`), and a
+/// call-shaped test would miss that and declare it dead.
+fn vyxMentionsIdent(corpus: String, name: String) -> Bool {
+    let cb = bytes(corpus)
+    let nb = bytes(name)
+    if nb.length == 0 {
+        return false
+    }
+    let mut i = 0
+    while i >= 0 {
+        let at = vyxFind(cb, nb, i)
+        if at < 0 {
+            return false
+        }
+        let beforeOk = at == 0 || vyxIsIdentByte(cb[at - 1]) == false
+        let end = at + nb.length
+        let afterOk = end >= cb.length || vyxIsIdentByte(cb[end]) == false
+        if beforeOk && afterOk {
+            return true
+        }
+        i = at + 1
+    }
+    return false
+}
+
+/// `script` with the PRIVATE helper functions nothing left in it mentions
+/// removed — the client bundle's counterpart of import pruning (RFC-0069 §1).
+///
+/// The client keeps the view only, so `load` (or the `data` accessor) has already
+/// been cut. Before RFC-0071 that cut took the whole fetch with it, because the
+/// fetch was written inline in `load`'s body. A `data` accessor hands its work to
+/// a named function instead (`paramQuery(fetchPaste)` — a closure cannot annotate
+/// its parameter, so the deferred call is a declaration), and that function would
+/// otherwise survive into the browser bundle still calling the server-side
+/// contract. Removing it is not an optimization: `vyxClientHelperViolation` would
+/// refuse the page, and it would be right to.
+///
+/// Only NON-exported helpers are candidates, so the page's contract accessors and
+/// the router's entry points are never touched. Iterated to a fixed point, so a
+/// chain of helpers used only by the loader goes away together.
+gen fn vyxStripDeadHelpers(script: String, keep: String) -> String {
+    let mut cur = script
+    let mut rounds = 0
+    while rounds < 16 {
+        let next = vyxStripDeadHelpersOnce(cur, keep)
+        if next == cur {
+            return cur
+        }
+        cur = next
+        rounds = rounds + 1
+    }
+    return cur
+}
+
+/// One pass of [`vyxStripDeadHelpers`]: remove the first private helper nothing
+/// else mentions, or return `script` unchanged when there is none.
+gen fn vyxStripDeadHelpersOnce(script: String, keep: String) -> String {
+    let sb = bytes(script)
+    let n = sb.length
+    let mut i = 0
+    let mut lineStart = 0
+    while i <= n {
+        if i == n || sb[i] == '\n' {
+            let t = trim(vyxSlice(sb, lineStart, i))
+            if t.startsWith("fn ") {
+                let name = vyxDeclNameOf(t)
+                let brace = vyxFind(sb, bytes("{"), lineStart)
+                if name.byteLength > 0 && brace >= 0 {
+                    let end = vyxMatchCurly(sb, brace)
+                    let rest = vyxSlice(sb, 0, lineStart) + vyxSlice(sb, end, n)
+                    if vyxMentionsIdent(rest + " " + keep, name) == false {
+                        return rest
+                    }
+                }
+            }
+            lineStart = i + 1
+        }
+        i = i + 1
+    }
+    return script
+}
+
+/// The declared name of a `fn <name>(` line ("" when the line is not one).
+fn vyxDeclNameOf(t: String) -> String {
+    if t.startsWith("fn ") == false {
+        return ""
+    }
+    let tb = bytes(t)
+    let open = vyxFind(tb, bytes("("), 0)
+    if open <= 3 {
+        return ""
+    }
+    return trim(vyxSlice(tb, 3, open))
 }
 
 /// The name of an inline helper call that cannot run client-side (RFC-0069 §0): a
@@ -3044,10 +3494,18 @@ fn vyxLastIdent(s: String) -> String {
 }
 
 /// Whether an import binding `name` is dead in the client bundle: it must have been
-/// used by the (now-stripped) `load` AND be unused everywhere else. A name the load
-/// never referenced is NEVER dropped — the prune only removes what stripping `load`
-/// orphaned, so an import kept for a side effect the usage scan can't see (an enum
-/// variant imported via its type) always survives.
+/// used by the ORIGINAL script AND be unused everywhere that remains. A name the
+/// original body never referenced is NEVER dropped — the prune only removes what
+/// stripping the loader orphaned, so an import kept for a side effect the usage scan
+/// can't see (an enum variant imported via its type) always survives.
+///
+/// `loadBody` is the whole pre-strip body rather than the `data` declaration alone,
+/// because RFC-0071 M2b made a `data` accessor hand its work to a NAMED helper: the
+/// import the server call actually names appears in the HELPER, which
+/// [`vyxStripDeadHelpers`] then removes. Scanning only the accessor left every such
+/// import in the client bundle — which is how `examples/bin` shipped its paste store,
+/// its persistence layer and its file paths to the browser until RFC-0072 M5 put an
+/// audience rule in front of the same edge and it finally had a name.
 fn vyxImportNameDead(name: String, corpus: String, loadBody: String) -> Bool {
     return vyxWordUsed(loadBody, name) && vyxWordUsed(corpus, name) == false
 }
@@ -3094,6 +3552,20 @@ fn vyxStripLineComment(line: String) -> String {
         return line
     }
     return vyxSlice(lb, 0, idx)
+}
+
+/// `script` with its `import` lines dropped and the rest comment-stripped: what the
+/// page's own code referenced before the client strip ran. An imported name that
+/// appears ONLY on import lines was never used by the page, so the prune must leave
+/// it alone (see [`vyxImportNameDead`]).
+fn vyxNonImportBody(script: String) -> String {
+    let mut out = ""
+    for line in vyxLines(script) {
+        if trim(line).startsWith("import ") == false {
+            out = out + vyxStripLineComment(line) + " "
+        }
+    }
+    return out
 }
 
 /// The lines of `lines` except index `skip`, comment-stripped and space-joined —
@@ -3253,7 +3725,7 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     }
 
     // Pull the `params { … }` fields; the rest of the script (imports + helpers,
-    // incl. load/Data) stays, with load/Data auto-exported.
+    // incl. the `data` accessor and `Data`) stays, with `Data` auto-exported.
     let sb = bytes(script)
     let pb = vyxFindKwBlock(sb, "params")
     let mut paramFields = ""
@@ -3263,26 +3735,27 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
         paramFields = trim(vyxSlice(sb, pb.braceAt + 1, end - 1))
         restScript = vyxSlice(sb, 0, pb.kwAt) + vyxSlice(sb, end, sb.length)
     }
-    // Pull the `head { … }` block (RFC-0041 §2) out of the remaining script — its
-    // entries become the module's `head()`/`headTitle()`, and it must not reach
-    // the compiled body as pass-through source.
-    let hs = vyxStripHead(restScript, "vyx_page")
-    if hs.head.err != "" {
-        return hs.head.err
+    // RFC-0071 M2c: a PAGE has no `head { … }` block. Its head is the `head()`
+    // accessor, wrapped below; a leftover block reaches the compiled body as
+    // pass-through source and fails to parse there. `vyxStripHead` survives for
+    // layouts and error pages, which declare no contract to be a member of.
+    let hasHeadFn = vyxScriptHasDecl(script, "head")
+    let ds = vyxDataShapeOf(script)
+    if ds.err != "" {
+        return ds.err
     }
-    restScript = hs.rest
-    let hasLoad = vyxScriptHasLoad(script)
+    let hasLoad = ds.hasData
     // The `data` prop's type is the loader's data type — the inner of
     // `Validation<Data>` or the first arg of `Result<T, PageError>` (RFC-0041 §3),
     // so a page can load straight into a wire type with no `type Data` alias.
-    let dataType = vyxLoaderDataType(vyxScriptLoadRet(script))
-    // RFC-0070: a `lazy fn load()` page renders its shell + a skeleton instantly on a
+    let dataType = vyxLoaderDataType(ds.ret)
+    // RFC-0070: a lazy page renders its shell + a skeleton instantly on a
     // client soft nav, so its VIEW receives the loaded value wrapped as
     // `PageData<T>` (`Loading | Ready(T)`). The view (template + helpers) matches on
     // `data`; the loader still returns the raw `T`, and the `page` entry wraps
     // `Ready(d)` for SSR (the server always has data, so the `Loading` arm never
     // renders server-side — SSR bytes are byte-identical to a non-lazy page).
-    let lazy = hasLoad && vyxScriptLoadIsLazy(script)
+    let lazy = ds.lazy
     // The `data` prop type as the view sees it: `PageData<T>` for a lazy page, the
     // raw `T` otherwise.
     let viewDataType = if lazy { "PageData<" + dataType + ">" } else { dataType }
@@ -3291,8 +3764,14 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     // name they still reference alive). `dataType`/`hasLoad` were read above from
     // the ORIGINAL script, so the client `page(d: Data)` signature stays correct.
     if client {
-        let loadBody = vyxLoadBody(restScript)
+        // The whole pre-strip body: the loader AND the helpers it reached, since
+        // the import a server call names lives in the helper, not the accessor.
+        let loadBody = vyxNonImportBody(restScript)
         restScript = vyxStripLoadFn(restScript)
+        // RFC-0071 M2b: a `data` accessor hands its work to a NAMED function, so
+        // cutting the accessor leaves that function behind — dead in the browser
+        // and still calling the server contract. Cut what nothing mentions.
+        restScript = vyxStripDeadHelpers(restScript, templateBody + " " + dataType + " " + paramFields)
         restScript = vyxPruneClientImports(restScript, templateBody + " " + dataType + " " + paramFields, loadBody)
         // A page still calling an app-module helper inline (a contract query mid-
         // view) cannot render client-side — surface the actionable diagnostic
@@ -3365,8 +3844,38 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     // constructor table exactly once) into scope. Generated modules collect imports
     // separately (order-independent), so prepending is safe.
     let mut out = if lazy { "import { PageData } from \"std/ui\"\n" + moduleStr } else { moduleStr }
+    // RFC-0071: the accessor forms are wrapped, not called directly by the
+    // router — `head(…)` returns a `Head` value and `data()` one of the four
+    // query types, and `std/ui` turns each into the shape the router already
+    // consumes. The client bundle keeps the view only, so it needs neither
+    // wrapper's runtime.
+    if hasHeadFn && client == false {
+        out = "import { headHtml, headTitleOf } from \"std/ui\"\n" + out
+    }
+    if hasHeadFn && client {
+        out = "import { headTitleOf } from \"std/ui\"\n" + out
+    }
+    // Which runner the wrapper calls is decided by `data`'s DECLARED RETURN TYPE
+    // (RFC-0071 M2b), not by anything in its body.
+    let runner = vyxDataRunner(vyxDataForm(vyxDeclRet(script, "data")))
+    if ds.hasData && client == false {
+        out = "import { " + runner + " } from \"std/ui\"\n" + out
+    }
     if paramFields.byteLength > 0 {
         out = out + "export type Params = { " + paramFields + " }\n"
+    }
+    // The loader the router calls, synthesized from the `data()` accessor: one
+    // runner call over the deferred call the page declared. A `Param*` query's
+    // deferred call takes the route params, so the wrapper takes them too and
+    // the router calls `load(p)` — exactly the shape a hand-written
+    // `fn load(p: Params)` used to produce, which is why migrating one changed no
+    // SSR bytes. `load` is now purely this generated seam.
+    if ds.hasData && client == false {
+        if ds.hasParams {
+            out = out + "export fn load(p: Params) -> " + ds.ret + " {\n    return " + runner + "(" + vyxAccessorName("data") + "(), p)\n}\n"
+        } else {
+            out = out + "export fn load() -> " + ds.ret + " {\n    return " + runner + "(" + vyxAccessorName("data") + "())\n}\n"
+        }
     }
     // The page entry the router calls, forwarding the Params fields (and the
     // loaded Data when there is a loader) into the compiled body. Its signature
@@ -3402,6 +3911,14 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
     if hasLoad {
         prelude = prelude + "    let data = d\n"
     }
+    // RFC-0071 M2b: which of `head`'s four alternative signatures the page chose,
+    // read off the parameter TYPES it declared. The wrapper's own signature is
+    // fixed by the router; only what it FORWARDS varies.
+    let headTypes = vyxDeclParamTypes(vyxDeclLine(script, "head"))
+    if hasHeadFn && vyxHeadArgsOk(headTypes, paramNames.length > 0, hasLoad) == false {
+        return vyxErrDetail("VYX_HEAD_SIGNATURE", "vyx_page", 0, joinWith(headTypes, "_"))
+    }
+    let headArgs = vyxHeadCallArgs(headTypes, paramNames.length > 0, hasLoad)
     // The client bundle omits head/headTitle (RFC-0069 §1): the title travels in
     // the payload and head assets go through v2's additive head machinery. In its
     // place the client module exports `clientRender` (the host entry).
@@ -3422,10 +3939,10 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
         // on the loaded data and travels in the payload, so it stays omitted (keeping
         // it could also un-prune a load-only head import).
         if hasLoad == false {
-            out = out + vyxEmitHeadTitleFn(hs.head, sig, prelude)
+            out = out + if hasHeadFn { vyxEmitAccessorHeadTitle(sig, headArgs) } else { vyxEmitHeadTitleFn(vyxNoHead(), sig, prelude) }
         }
     } else {
-        out = out + vyxEmitHeadFns(hs.head, sig, prelude)
+        out = out + if hasHeadFn { vyxEmitAccessorHeadFns(sig, headArgs) } else { vyxEmitHeadFns(vyxNoHead(), sig, prelude) }
         // RFC-0069 §2: a loader page exports a TYPED props encoder so the server data
         // payload serializes the loaded data where its concrete type is in scope —
         // `toJson` on a `Result`/`Validation` match-bound value cannot infer its type,
@@ -3962,14 +4479,16 @@ test "a same-name-different-spec import conflict names both files" {
 
 // ---- RFC-0039 §4: .vyx pages ------------------------------------------------
 
-test "a .vyx page shape reports its params and loader" {
-    let src = "<script>\nparams { id: String }\nexport fn load(p: Params) -> Validation<Data> { return valid }\ntype Data = { title: String }\n</script>\n<template><h1>{{ data.title }}</h1></template>"
+test "a .vyx page shape reports its params and its data query" {
+    let src = "<script>\nparams { id: String }\nexport fn data() -> ParamQuery<Params, Validation<Data>> { return q }\ntype Data = { title: String }\n</script>\n<template><h1>{{ data.title }}</h1></template>"
     let shape = vyxPageShape(src)
     assertEq(shape.err, "")
     assertEq(shape.paramNames.length, 1)
     assertEq(shape.paramNames[0], "id")
     assertEq(shape.paramTypes[0], "String")
     assert(shape.hasLoad)
+    assert(shape.loadHasParams)
+    assertEq(shape.loadRet, "Validation<Data>")
 }
 
 test "a .vyx page module exports Params and a page fn binding the segment" {
@@ -3981,12 +4500,15 @@ test "a .vyx page module exports Params and a page fn binding the segment" {
     assert(out.contains("return uiPageBody(p.id)"))
 }
 
-test "a .vyx page with a loader forwards Data and auto-exports load and Data" {
-    let src = "<script>\nparams { id: Int64 }\nfn load(p: Params) -> Validation<Data> { return valid }\ntype Data = { title: String }\n</script>\n<template><h1>{{ data.title }}</h1></template>"
+test "a .vyx page with data forwards Data and wraps the query in load" {
+    let src = "<script>\nparams { id: Int64 }\nexport fn data() -> ParamQuery<Params, Validation<Data>> { return paramQuery(fetch) }\ntype Data = { title: String }\n</script>\n<template><h1>{{ data.title }}</h1></template>"
     let out = vyxBuildPageModule(src, "./routes/book", false, "")
     assert(out.contains("export fn page(p: Params, d: Data) -> Html"))
     assert(out.contains("return uiPageBody(p.id, d)"))
-    assert(out.contains("export fn load(p: Params)"))
+    // `load` is the generated seam the router calls, not something the page
+    // wrote: one `runParamQuery` over the query the page declared (RFC-0071).
+    assert(out.contains("export fn load(p: Params) -> Validation<Data>"))
+    assert(out.contains("runParamQuery("))
     assert(out.contains("export type Data"))
 }
 

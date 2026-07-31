@@ -61,6 +61,7 @@ cargo build       # builds the `vyrn` binary
 | `vyrn-codegen`  | emits **textual LLVM IR** (a string; no LLVM libs to produce it) |
 | `vyrn-cli`      | the `vyrn` driver |
 | `vyrn-lsp`      | Language Server Protocol server (excluded — pulls `lsp-server`/`lsp-types`; see below) |
+| `vyrn-genwasm`  | RFC-0076: runs `gen fn` generators as compiled wasm (excluded — pulls `wasmtime`; optional in both `vyrn-cli` and `vyrn-lsp`, feature `wasm-gen`) |
 
 ## Running programs
 
@@ -162,43 +163,6 @@ clang fib.ll -o fib.exe
 > with `\r\n`; the interpreter (`vyrn run`) uses `\n`. Same text, same exit codes
 > — a benign line-ending artifact, not a semantic difference.
 
-## The Inkwell backend (works — needs an external LLVM 22 dev install)
-
-`vyrn-codegen-llvm/` is the "proper" backend the design chose (Rust + Inkwell):
-it builds an LLVM module in memory and writes an object file directly. It is
-kept **excluded** from the default workspace only so the commands above never
-require an LLVM install — but it **builds, links, and runs** against a full LLVM
-22 dev SDK. Its tests emit verified IR, write native object files, and — end to
-end — link with `clang` into an exe whose exit code matches the interpreter
-(`fib(10)=55`).
-
-```bash
-cd vyrn-codegen-llvm
-cargo test --features llvm22-1      # env + link flags come from .cargo/config.toml
-```
-
-**Scope:** only the v0.1 subset — `Int64`/`Bool`/arithmetic/`if`/`while`/`print`/
-`Option`/`Result`/validated types. Records, enums, generics, strings, `Ref`,
-arrays, and `spawn` return explicit "unsupported" errors. The text-IR backend in
-`vyrn-codegen` is the full reference native backend; this one is a proof that the
-in-memory LLVM path the design chose is viable.
-
-> **What it took to build on Windows** (all wired into `.cargo/config.toml`,
-> `build.rs`, and `.llvm-stublib/`, so `cargo test --features llvm22-1` "just
-> works" once LLVM 22 is at `C:\Program Files\LLVM`):
-> 1. **inkwell 0.9.0** (`llvm22-1`) — earlier 0.5 capped at LLVM 18; 0.9 removes
->    the version wall.
-> 2. **A full LLVM dev SDK**, not the `winget` compiler package — you need
->    `llvm-config`, the full `llvm-c/*.h` headers, and the static libs.
-> 3. **A short-path `CFLAGS` override** — `llvm-config --cflags` returns a path
->    with a space (`C:\Program Files`) that cc-rs splits; the 8.3 name
->    (`C:\PROGRA~1`) avoids it.
-> 4. **Static CRT + Windows SDK lib dirs** — LLVM's libs are `/MT`; mixing with
->    Rust's default `/MD` crashes on cross-heap frees. `+crt-static` fixes it and
->    pulls the system libs static, so the SDK lib dirs must be on the search path.
-> 5. **An empty `xml2s.lib` stub** — `--system-libs` lists libxml2 but the
->    redistributable omits it; unused, so the linker dead-strips the stub.
-
 ## Editor support — diagnostics + symbol query + LSP (core API)
 
 Structured diagnostics and a symbol query are **core** responsibilities of the
@@ -277,12 +241,12 @@ check; a failed runtime validation exits with code 1 (native prints
 
 ```
 compiler/
-├── Cargo.toml              workspace (excludes vyrn-codegen-llvm and vyrn-lsp)
+├── Cargo.toml              workspace (excludes vyrn-lsp, vyrn-genwasm)
 ├── vyrn-frontend/          lexer, parser, ast, checker, movecheck, interp, types, diagnostics (+ tests)
 ├── vyrn-codegen/           textual LLVM IR emitter (+ unit tests)
 ├── vyrn-cli/               vyrn: run | check | emit-ir | emit-gen | build
 ├── vyrn-lsp/               LSP server (excluded — pulls lsp-server/lsp-types)
-└── vyrn-codegen-llvm/      Inkwell backend (works; excluded — needs LLVM 22 dev SDK)
+├── vyrn-genwasm/           wasm generation engine (excluded — pulls wasmtime; feature `wasm-gen`)
 
 editor/vscode/             VS Code extension: extension.js (LSP client) + TextMate grammar
 ```

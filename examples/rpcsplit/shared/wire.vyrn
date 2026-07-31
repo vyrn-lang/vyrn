@@ -1,0 +1,17 @@
+/// Wire types for the split in-process RPC demo (RFC-0031) — a universal leaf
+/// module of pure validated types that both the store and the procedure module
+/// import. Reflection reaches every type below through the procedure module's
+/// reachable type closure, so `clientInProcess("./rpcsplit/server/api")` imports
+/// them from HERE, not from the module whose signature merely names them.
+
+/// An item id (positive).
+export type Id = Int64 where value >= 1
+
+/// A stored item.
+export type Item = { id: Id, label: String }
+
+/// The one-field request.
+export type GetReq = { id: Id }
+
+/// An application outcome (RFC-0024): `Ok(item)` or an `Err` message.
+export type ItemResult = Result<Item, String>

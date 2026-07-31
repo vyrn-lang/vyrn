@@ -9,6 +9,71 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+
+/// A fast, non-cryptographic hasher for the interpreter's own maps.
+///
+/// Scope frames are `name -> Slot`, and a variable reference hashes its name on
+/// every read — measured at ~150-235 ns per reference, which dominates every
+/// interpreted program. Rust's default hasher is SipHash, chosen to resist
+/// hash-flooding from untrusted keys; these keys are identifiers from the
+/// program being run, so that protection buys nothing and costs the hot path.
+/// FxHash (the algorithm rustc uses on its own interned strings) is a multiply
+/// and a rotate per 8 bytes.
+#[derive(Default, Clone, Copy)]
+pub struct FxHasher {
+    hash: u64,
+}
+
+impl FxHasher {
+    const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(Self::SEED);
+    }
+}
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_ne_bytes(c.try_into().unwrap()));
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut buf = [0u8; 8];
+            buf[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_ne_bytes(buf));
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct FxBuild;
+
+impl std::hash::BuildHasher for FxBuild {
+    type Hasher = FxHasher;
+    #[inline]
+    fn build_hasher(&self) -> FxHasher {
+        FxHasher::default()
+    }
+}
+
+/// The interpreter's scope frame: identifiers to slots, hashed cheaply.
+type Frame = HashMap<String, Slot, FxBuild>;
 use std::io::Write as _;
 
 use crate::ast::*;
@@ -55,7 +120,12 @@ pub enum Val {
     /// precision at each step, matching the native backend's `float` ops.
     Float32(f32),
     Bool(bool),
-    Str(String),
+    /// Copy-on-write, like [`Val::Array`]. Generators pass multi-KB source
+    /// buffers by value all day; cloning one per reference and per call is the
+    /// largest remaining copy in the interpreter. `Rc<String>` rather than
+    /// `Rc<str>` so `Rc::make_mut` can still append in place — the accumulator
+    /// fast path depends on growing a string without reallocating it.
+    Str(std::rc::Rc<String>),
     Unit,
     /// An optional (RFC-0005): `Some(v)` or `None`.
     Option(Option<Box<Val>>),
@@ -73,7 +143,15 @@ pub enum Val {
         gen: u64,
     },
     /// A growable array (`Vec`). Used linearly; `push` returns a new value.
-    Array(Vec<Val>),
+    /// Copy-on-write, and — just as importantly — an IDENTITY.
+    ///
+    /// Cloning is O(1), so passing an array to a function no longer copies it.
+    /// The pointer also gives builtins a cheap, exact key for per-buffer caches:
+    /// `lineAt`/`colAt` memoize a line-start table on it, which hashing the
+    /// contents per call could not do (that cost more than the scan it replaced).
+    /// A cache that stores the `Rc` keeps the allocation alive, so an address
+    /// cannot be recycled under a live cache entry.
+    Array(std::rc::Rc<Vec<Val>>),
     /// A growable, insertion-ordered dictionary (RFC-0028): a `Vec` of
     /// `(key, value)` pairs kept in first-insertion order — an update rewrites
     /// the pair in place, a remove shifts later pairs down, a fresh insert
@@ -143,6 +221,21 @@ pub fn render_code(pieces: &[CodePiece]) -> String {
     out
 }
 
+/// [`code_splice`] as a trap message rather than a `Ctrl`.
+///
+/// Public, and a free function, for the same reason [`gen_scoped_path`] is: the
+/// wasm generation engine (RFC-0076) lowers `Code` to a handle into a host-side
+/// arena and applies the splice rule host-side. It must be THIS rule — the
+/// escaping, the identifier validation and the shortest-roundtrip float
+/// formatting are not things a second implementation would reproduce, they are
+/// things it would eventually disagree with.
+pub fn gen_code_splice(val: &Val, ctx: i64) -> Result<Vec<CodePiece>, String> {
+    code_splice(val, ctx).map_err(|c| match c {
+        Ctrl::Err(m) => m,
+        Ctrl::Return(_) => "internal: `?` propagated out of a code splice".to_string(),
+    })
+}
+
 /// Apply the RFC-0054 splice rule for a value in a hole of grammatical context
 /// `ctx` (`0` expression, `1` identifier fragment, `2` standalone identifier /
 /// type), yielding the code pieces to splice. A `String` is DATA, never code:
@@ -179,7 +272,7 @@ fn code_splice(val: &Val, ctx: i64) -> Result<Vec<CodePiece>, Ctrl> {
         1 => match val {
             Val::Str(s) => {
                 if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                    text(s.clone())
+                    text(s.to_string())
                 } else {
                     Err(format!(
                         "cannot splice {s:?} as an identifier fragment: not `[A-Za-z0-9_]+`"
@@ -197,7 +290,7 @@ fn code_splice(val: &Val, ctx: i64) -> Result<Vec<CodePiece>, Ctrl> {
         _ => match val {
             Val::Str(s) => {
                 if is_bare_identifier(s) {
-                    text(s.clone())
+                    text(s.to_string())
                 } else {
                     Err(format!(
                         "cannot splice {s:?} as an identifier: not a valid non-keyword identifier"
@@ -269,27 +362,59 @@ fn is_bare_identifier(s: &str) -> bool {
 /// work-in-progress text). Every other token carries the canonical token-name
 /// string plus its 1-based line/col.
 fn lex_tokens(source: &str) -> Vec<Val> {
-    let token_val = |kind: &str, text: &str, line: usize, col: usize| {
-        let mut r = HashMap::new();
-        r.insert("kind".to_string(), Val::Str(kind.to_string()));
-        r.insert("text".to_string(), Val::Str(text.to_string()));
-        r.insert("line".to_string(), Val::Int(line as i64));
-        r.insert("col".to_string(), Val::Int(col as i64));
-        Val::Record(r)
-    };
+    lexed(source)
+        .into_iter()
+        .map(|(kind, text, line, col)| {
+            let mut r = HashMap::new();
+            r.insert("kind".to_string(), Val::Str(std::rc::Rc::new(kind)));
+            r.insert("text".to_string(), Val::Str(std::rc::Rc::new(text)));
+            r.insert("line".to_string(), Val::Int(line));
+            r.insert("col".to_string(), Val::Int(col));
+            Val::Record(r)
+        })
+        .collect()
+}
+
+/// The same token list as an `Array<Token>` record *literal* — what the wasm
+/// generation engine (RFC-0076 M3b) encodes for the guest.
+///
+/// Both this and [`lex_tokens`] read one [`lexed`], so the two engines cannot
+/// disagree about which tokens `lex` yields, only about how the value is built.
+pub fn gen_lex_tokens_lit(source: &str) -> Expr {
+    Expr::ArrayLit {
+        elems: lexed(source)
+            .into_iter()
+            .map(|(kind, text, line, col)| Expr::StructLit {
+                name: "Token".to_string(),
+                fields: vec![
+                    ("kind".to_string(), Expr::Str(kind)),
+                    ("text".to_string(), Expr::Str(text)),
+                    ("line".to_string(), Expr::Int(line)),
+                    ("col".to_string(), Expr::Int(col)),
+                ],
+                line: 0,
+            })
+            .collect(),
+        line: 0,
+    }
+}
+
+/// The compiler's real lexer over `source`, as `(kind, text, line, col)` rows —
+/// the one place the `lex` builtin's token list is decided.
+fn lexed(source: &str) -> Vec<(String, String, i64, i64)> {
     match crate::lexer::lex(source) {
         Ok(toks) => toks
             .iter()
             .filter(|t| !matches!(t.tok, crate::lexer::Tok::Eof))
             .map(|t| {
                 let (kind, text) = crate::lexer::token_name_and_text(&t.tok);
-                token_val(&kind, &text, t.line, t.col)
+                (kind, text, t.line as i64, t.col as i64)
             })
             .collect(),
         Err(d) => {
             // Non-fatal: attribute the unlexable input as one `error` token at the
             // diagnostic's position.
-            vec![token_val("error", &d.message, d.line, d.col)]
+            vec![("error".to_string(), d.message, d.line as i64, d.col as i64)]
         }
     }
 }
@@ -372,7 +497,7 @@ fn scalar_to_string(v: &Val) -> String {
         Val::Float(f) => format!("{f:.6}"),
         Val::Float32(f) => format!("{:.6}", *f as f64),
         Val::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-        Val::Str(s) => s.clone(),
+        Val::Str(s) => (**s).clone(),
         other => format!("{other:?}"),
     }
 }
@@ -390,40 +515,6 @@ fn wrap_intn(v: i64, bits: u8, signed: bool) -> i64 {
         m | !mask // set the high bits (sign extension)
     } else {
         m
-    }
-}
-
-/// Decode a JSON number into a sized-integer target (RFC-0018): the token must
-/// be integer syntax AND fit the target's width/signedness exactly (never
-/// through `f64`). Returns the `i64` bit pattern (as stored in `Val::IntN`), or
-/// `None` for a non-integral or out-of-range value.
-fn intn_from_num(n: &crate::codec::Num, bits: u8, signed: bool) -> Option<i64> {
-    if !n.is_int {
-        return None;
-    }
-    if signed {
-        let v = n.text.parse::<i64>().ok()?;
-        let (min, max) = if bits >= 64 {
-            (i64::MIN, i64::MAX)
-        } else {
-            let m = 1i64 << (bits - 1);
-            (-m, m - 1)
-        };
-        if v < min || v > max {
-            return None;
-        }
-        Some(wrap_intn(v, bits, signed))
-    } else {
-        let v = n.text.parse::<u64>().ok()?;
-        let max = if bits >= 64 {
-            u64::MAX
-        } else {
-            (1u64 << bits) - 1
-        };
-        if v > max {
-            return None;
-        }
-        Some(wrap_intn(v as i64, bits, signed))
     }
 }
 
@@ -486,165 +577,9 @@ fn convert_val(v: Val, target: &Type) -> Val {
     }
 }
 
-// ---- text encodings (hex / base64 / url) --------------------------------
-// Hand-rolled so the algorithm is identical to the native runtime (parity).
-// Encoders take a string's UTF-8 bytes → ASCII text. Decoders parse back to
-// bytes, then require the result to be valid UTF-8 (else `None`).
-
-const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-fn hex_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for b in s.bytes() {
-        out.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        out.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
-    }
-    out
-}
-
-fn hex_val(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn hex_decode(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    if b.len() % 2 != 0 {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(b.len() / 2);
-    let mut i = 0;
-    while i < b.len() {
-        bytes.push((hex_val(b[i])? << 4) | hex_val(b[i + 1])?);
-        i += 2;
-    }
-    String::from_utf8(bytes).ok()
-}
-
-fn base64_encode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = String::new();
-    let mut i = 0;
-    while i + 3 <= b.len() {
-        let n = ((b[i] as u32) << 16) | ((b[i + 1] as u32) << 8) | (b[i + 2] as u32);
-        out.push(B64[(n >> 18) as usize & 63] as char);
-        out.push(B64[(n >> 12) as usize & 63] as char);
-        out.push(B64[(n >> 6) as usize & 63] as char);
-        out.push(B64[n as usize & 63] as char);
-        i += 3;
-    }
-    let rem = b.len() - i;
-    if rem == 1 {
-        let n = (b[i] as u32) << 16;
-        out.push(B64[(n >> 18) as usize & 63] as char);
-        out.push(B64[(n >> 12) as usize & 63] as char);
-        out.push('=');
-        out.push('=');
-    } else if rem == 2 {
-        let n = ((b[i] as u32) << 16) | ((b[i + 1] as u32) << 8);
-        out.push(B64[(n >> 18) as usize & 63] as char);
-        out.push(B64[(n >> 12) as usize & 63] as char);
-        out.push(B64[(n >> 6) as usize & 63] as char);
-        out.push('=');
-    }
-    out
-}
-
-fn b64_val(c: u8) -> Option<u8> {
-    match c {
-        b'A'..=b'Z' => Some(c - b'A'),
-        b'a'..=b'z' => Some(c - b'a' + 26),
-        b'0'..=b'9' => Some(c - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    }
-}
-
-fn base64_decode(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    if b.len() % 4 != 0 {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        let c0 = b64_val(b[i])?;
-        let c1 = b64_val(b[i + 1])?;
-        // The last group may carry one or two `=` pad characters.
-        let p2 = b[i + 2] == b'=';
-        let p3 = b[i + 3] == b'=';
-        let c2 = if p2 { 0 } else { b64_val(b[i + 2])? };
-        let c3 = if p3 { 0 } else { b64_val(b[i + 3])? };
-        // Padding is only legal in the final group, and `=X` (pad then data) is not.
-        if (p2 || p3) && i + 4 != b.len() {
-            return None;
-        }
-        if p2 && !p3 {
-            return None;
-        }
-        let n = ((c0 as u32) << 18) | ((c1 as u32) << 12) | ((c2 as u32) << 6) | c3 as u32;
-        bytes.push((n >> 16) as u8);
-        if !p2 {
-            bytes.push((n >> 8) as u8);
-        }
-        if !p3 {
-            bytes.push(n as u8);
-        }
-        i += 4;
-    }
-    String::from_utf8(bytes).ok()
-}
-
-/// Unreserved URL characters (RFC 3986): everything else is percent-encoded.
-fn url_unreserved(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'~')
-}
-
-fn url_encode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        if url_unreserved(b) {
-            out.push(b as char);
-        } else {
-            out.push('%');
-            out.push(
-                char::from_digit((b >> 4) as u32, 16)
-                    .unwrap()
-                    .to_ascii_uppercase(),
-            );
-            out.push(
-                char::from_digit((b & 0xf) as u32, 16)
-                    .unwrap()
-                    .to_ascii_uppercase(),
-            );
-        }
-    }
-    out
-}
-
-fn url_decode(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    let mut bytes = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' {
-            if i + 2 >= b.len() {
-                return None;
-            }
-            bytes.push((hex_val(b[i + 1])? << 4) | hex_val(b[i + 2])?);
-            i += 3;
-        } else {
-            bytes.push(b[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(bytes).ok()
-}
+// (The hex / base64 / percent codecs lived here — 159 lines of Rust duplicating
+// the textual emitter's hand-written IR. RFC-0078 M4c routed the six builtins to
+// `std/codecs`, so the interpreter holds no definition of them at all.)
 
 /// Parse a base-10 integer with strict, backend-matched semantics: an optional
 /// leading `-`, then one or more ASCII digits, and nothing else (no whitespace,
@@ -760,7 +695,7 @@ where
                 continue;
             }
         }
-        let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+        let mut scope: Vec<Frame> = vec![Frame::default()];
         // Any `Ctrl::Err` is a FAILED test (including a failed `assert`); a bare
         // `?`-propagated `Ctrl::Return` (a test may use `?`) simply ends it.
         let result: Result<(), String> = match interp.block(&t.body, &mut scope) {
@@ -828,7 +763,7 @@ where
                 continue;
             }
         }
-        let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+        let mut scope: Vec<Frame> = vec![Frame::default()];
         let result: Result<(), String> = match interp.block(&b.body, &mut scope) {
             Ok(_) => Ok(()),
             Err(Ctrl::Return(_)) => Ok(()),
@@ -850,6 +785,10 @@ where
 pub struct ServeRequest {
     pub method: String,
     pub path: String,
+    /// The request's header block, in wire order, with names ALREADY LOWERCASED
+    /// (RFC-0072 M4). Case folding happens here, at the edge, so the `Map` the
+    /// program sees has one spelling per header and an exact lookup is correct.
+    pub headers: Vec<(String, String)>,
     pub body: String,
 }
 
@@ -859,6 +798,8 @@ pub struct ServeResponse {
     pub status: i64,
     pub content_type: String,
     pub body: String,
+    /// The `Vary` header to write, or `""` for none (RFC-0072 M4).
+    pub vary: String,
 }
 
 /// Run a served program (RFC-0016) under the interpreter: build ONE interpreter,
@@ -917,10 +858,17 @@ where
 /// interpreter, and read the `Response` record back out — the shared body of
 /// [`serve`] (one interpreter) and [`serve_pool`] (one per worker, RFC-0025).
 fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeResponse, String> {
+    let headers = Val::Map(
+        req.headers
+            .into_iter()
+            .map(|(k, v)| (k, Val::Str(std::rc::Rc::new(v))))
+            .collect(),
+    );
     let request = Val::Record(HashMap::from([
-        ("method".to_string(), Val::Str(req.method)),
-        ("path".to_string(), Val::Str(req.path)),
-        ("body".to_string(), Val::Str(req.body)),
+        ("method".to_string(), Val::Str(std::rc::Rc::new(req.method))),
+        ("path".to_string(), Val::Str(std::rc::Rc::new(req.path))),
+        ("headers".to_string(), headers),
+        ("body".to_string(), Val::Str(std::rc::Rc::new(req.body))),
     ]));
     match interp.call("handle", &[request]) {
         Ok(Val::Record(map)) => {
@@ -930,17 +878,22 @@ fn handle_request(interp: &Interp<'_>, req: ServeRequest) -> Result<ServeRespons
                 _ => return Err("handle returned a Response without an Int64 `status`".into()),
             };
             let content_type = match map.get("contentType") {
-                Some(Val::Str(s)) => s.clone(),
+                Some(Val::Str(s)) => (**s).clone(),
                 _ => return Err("handle returned a Response without a String `contentType`".into()),
             };
             let body = match map.get("body") {
-                Some(Val::Str(s)) => s.clone(),
+                Some(Val::Str(s)) => (**s).clone(),
                 _ => return Err("handle returned a Response without a String `body`".into()),
+            };
+            let vary = match map.get("vary") {
+                Some(Val::Str(s)) => (**s).clone(),
+                _ => return Err("handle returned a Response without a String `vary`".into()),
             };
             Ok(ServeResponse {
                 status,
                 content_type,
                 body,
+                vary,
             })
         }
         Ok(other) => Err(format!(
@@ -1066,6 +1019,142 @@ pub struct GenInputs<'a> {
     /// Step budget and output-size cap (guardrails).
     pub fuel: u64,
     pub max_output: usize,
+    /// A fingerprint of the generator's own module closure — its keys and the
+    /// content hashes the loader hashes them by anyway — or `None` when the
+    /// closure contains something no resolver can re-read (a generated module),
+    /// so no honest fingerprint exists.
+    ///
+    /// The interpreter ignores it. It is here for an engine that CACHES a
+    /// compiled artifact (RFC-0076 M5): keying on this instead of on the whole
+    /// program's `Debug` output turns a 1.1–1.9 ms hash of 4,536 lines into a
+    /// string compare, and the loader already computed every part of it.
+    pub sources_fingerprint: Option<String>,
+}
+
+/// Resolve a mediated path argument against the importer's directory, then
+/// enforce that it stays under one of the generator's declared input roots (its
+/// constant path args). Returns the resolved resolver key, or the scoping trap
+/// message.
+///
+/// Public, and a free function, because the wasm generation engine (RFC-0076)
+/// mediates its host imports with exactly this rule. Two implementations of a
+/// sandbox boundary is one too many.
+pub fn gen_scoped_path(importer_dir: &str, allowed: &[String], arg: &str) -> Result<String, String> {
+    let joined = if importer_dir.is_empty() {
+        arg.to_string()
+    } else {
+        format!("{importer_dir}/{arg}")
+    };
+    let resolved = crate::loader::normalize(&joined);
+    let ok = allowed
+        .iter()
+        .any(|root| resolved == *root || resolved.starts_with(&format!("{root}/")));
+    if !ok {
+        return Err(format!(
+            "generator read `{arg}` escapes its declared inputs ({}) — a generator may only \
+             read under its constant path arguments",
+            allowed.join(", ")
+        ));
+    }
+    Ok(resolved)
+}
+
+/// `moduleInterface(path)` (RFC-0021): read the referenced module through the
+/// resolver, link it to follow its reachable type closure (RFC-0031), and build
+/// the `ModuleInterface` record literal for its exported surface. Every module
+/// the link touched is appended to `reads`, which is what makes editing a
+/// closure type's DEFINING file miss the generator cache even though its path
+/// was never a generator argument.
+///
+/// Public, and a free function, for the same reason [`gen_scoped_path`] is: the
+/// wasm generation engine (RFC-0076 M3b) serves its `moduleInterface` import
+/// from here. Reflection is compiler machinery — a second implementation would
+/// be a second answer, and a second set of recorded reads is a stale cache hit.
+pub fn gen_module_interface_lit(
+    resolver: &dyn crate::loader::ModuleResolver,
+    opts: &crate::loader::LoadOptions,
+    importer_dir: &str,
+    allowed: &[String],
+    reads: &mut Vec<(String, Vec<u8>)>,
+    path: &str,
+) -> Result<Expr, String> {
+    // Resolve like a module specifier (`.vyrn` appended), scoped like readFile.
+    let spec = if path.ends_with(".vyrn") || path.ends_with(".json") {
+        path.to_string()
+    } else {
+        format!("{path}.vyrn")
+    };
+    let resolved = gen_scoped_path(importer_dir, allowed, &spec)?;
+    let source = resolver
+        .read(&resolved)
+        .map_err(|e| format!("moduleInterface cannot read `{path}`: {e}"))?;
+    reads.push((resolved.clone(), source.clone().into_bytes()));
+
+    // Follow the reflected module's imports to build the reachable type closure
+    // (RFC-0031): link it into one program so a type declared in an imported
+    // module is still visible to the closure walk. Every module the link reads is
+    // recorded through a proxy resolver, so a closure type's defining FILE joins
+    // the generator's cache inputs — editing `types.vyrn` must miss the cache
+    // even though its path was never a generator argument.
+    let rec = crate::loader::RecordingResolver::new(resolver);
+    let program = crate::loader::load(&source, &resolved, opts, &rec).map_err(|diags| {
+        let d = diags.first();
+        let where_ = d
+            .and_then(|d| d.file.clone())
+            .map(|f| format!(" ({f})"))
+            .unwrap_or_default();
+        let msg = d
+            .map(|d| d.message.clone())
+            .unwrap_or_else(|| "load failed".to_string());
+        format!("moduleInterface `{path}`{where_}: {msg}")
+    })?;
+    for (p, s) in rec.into_reads() {
+        // The root module was already recorded above; skip the duplicate.
+        if p != resolved {
+            reads.push((p, s.into_bytes()));
+        }
+    }
+
+    // Import specifier per declaring module, so a generator that must SHARE a
+    // closure type's identity (rpcServer/rpcInProcess) can import it from the
+    // module that declares it (RFC-0031). The reflected module's own types
+    // (`module == None`) keep the generator's own argument spelling; a foreign
+    // type gets a specifier relative to the real importing file's directory.
+    let mut specifiers: HashMap<Option<String>, String> = HashMap::new();
+    specifiers.insert(None, path.to_string());
+    for t in &program.type_decls {
+        if let Some(key) = &t.module {
+            specifiers.entry(Some(key.clone())).or_insert_with(|| {
+                crate::loader::import_specifier(importer_dir, key, opts.std_root.as_deref())
+            });
+        }
+    }
+    Ok(crate::schema_reflect::module_interface_lit(
+        &program,
+        &specifiers,
+    ))
+}
+
+/// An alternative engine for running a generator (RFC-0076).
+///
+/// The frontend defines this seam and nothing more: compiling a generator to
+/// wasm needs codegen and clang, which only the driver has, so the driver
+/// installs an engine and the frontend stays free of external dependencies.
+///
+/// Returning `None` means "not served" — not an error. Every generator the wasm
+/// path cannot yet handle falls through to the interpreter, which stays the
+/// reference the alternative is checked against.
+pub type GenEngine =
+    dyn Fn(&Program, &str, &[crate::consteval::ConstVal], &GenInputs<'_>) -> Option<Result<GenOutput, String>>
+        + Send
+        + Sync;
+
+static GEN_ENGINE: std::sync::OnceLock<Box<GenEngine>> = std::sync::OnceLock::new();
+
+/// Install the alternative generation engine. Called once, by the driver, before
+/// any load. A second call is ignored rather than racing.
+pub fn set_gen_engine(engine: Box<GenEngine>) {
+    let _ = GEN_ENGINE.set(engine);
 }
 
 /// Run `fn_name` in `program` as a **generation target** (RFC-0021): under the
@@ -1077,6 +1166,23 @@ pub struct GenInputs<'a> {
 /// ordinary Vyrn code — the ONLY differences from a normal call are the mediated
 /// `readFile`/`listDir`/`moduleInterface` and the step/size guardrails.
 pub fn generate(
+    program: &Program,
+    fn_name: &str,
+    args: &[crate::consteval::ConstVal],
+    inputs: GenInputs<'_>,
+) -> Result<GenOutput, String> {
+    // RFC-0076: an installed engine gets first refusal; `None` falls through.
+    if let Some(engine) = GEN_ENGINE.get() {
+        if let Some(out) = engine(program, fn_name, args, &inputs) {
+            return out;
+        }
+    }
+    generate_interpreted(program, fn_name, args, inputs)
+}
+
+/// The tree-walking generation path — the reference implementation, and the
+/// fallback whenever an installed engine declines.
+pub fn generate_interpreted(
     program: &Program,
     fn_name: &str,
     args: &[crate::consteval::ConstVal],
@@ -1105,11 +1211,11 @@ pub fn generate(
             ConstVal::Int(n) => Val::Int(*n),
             ConstVal::Bool(b) => Val::Bool(*b),
             ConstVal::Float(f) => Val::Float(*f),
-            ConstVal::Str(s) => Val::Str(s.clone()),
+            ConstVal::Str(s) => Val::Str(std::rc::Rc::new(s.clone())),
         })
         .collect();
     let source = match interp.call(fn_name, &vals) {
-        Ok(Val::Str(s)) => s,
+        Ok(Val::Str(s)) => (*s).clone(),
         // A `gen fn` may return `Code` directly (RFC-0054); render it here.
         Ok(Val::Code(pieces)) => render_code(&pieces),
         Ok(other) => {
@@ -1128,6 +1234,16 @@ pub fn generate(
         ));
     }
     let reads = interp.gen.as_ref().unwrap().reads.borrow().clone();
+    // `VYRN_GEN_STEPS=1` — what this generator actually spent of its budget. The
+    // wasm engine meters in wasm instructions instead (RFC-0076 M5), and the
+    // multiplier between the two units is only defensible if both sides can be
+    // measured on the same run; this is the interpreted half of that pair.
+    if std::env::var("VYRN_GEN_STEPS").is_ok() {
+        eprintln!(
+            "gen steps {fn_name}: {}",
+            inputs.fuel - interp.gen.as_ref().unwrap().fuel.get()
+        );
+    }
     Ok(GenOutput { source, reads })
 }
 
@@ -1163,6 +1279,12 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         .iter()
         .map(|t| (t.name.clone(), t.clone()))
         .collect();
+    // Module contracts (RFC-0071), for the `contractOf(Name)` reflection.
+    let contracts: HashMap<&str, &ContractDecl> = program
+        .contracts
+        .iter()
+        .map(|c| (c.name.as_str(), c))
+        .collect();
     // Enum variant names, so constructor uses (Var/Call) can be recognized.
     let mut variants: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for t in &program.type_decls {
@@ -1184,6 +1306,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
     let interp = Interp {
         funcs,
         types,
+        contracts,
         type_map,
         variants,
         droppable,
@@ -1207,7 +1330,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
             .flatten()
             .collect(),
         region_depth: std::cell::Cell::new(0),
-        globals: RefCell::new(HashMap::new()),
+        globals: RefCell::new(Frame::default()),
         args: prog_args.to_vec(),
         mono_counter: std::cell::Cell::new(0),
         gen: None,
@@ -1218,6 +1341,9 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
 struct Interp<'a> {
     funcs: HashMap<&'a str, &'a Function>,
     types: HashMap<&'a str, &'a TypeDecl>,
+    /// Module contracts (RFC-0071), keyed by name — the source `contractOf`
+    /// reflects. Comptime-only, so this is read by exactly one builtin.
+    contracts: HashMap<&'a str, &'a ContractDecl>,
     /// Owned type map for `resolve`/codec (RFC-0018 JSON codec).
     type_map: HashMap<String, TypeDecl>,
     variants: std::collections::HashSet<&'a str>,
@@ -1246,7 +1372,7 @@ struct Interp<'a> {
     /// bottoms out on this. Populated once (in declaration order) before
     /// `main`; variable reads/writes fall back to it when the local scope misses.
     /// Slot-typed so reassignments coerce (and auto-validate) exactly like locals.
-    globals: RefCell<HashMap<String, Slot>>,
+    globals: RefCell<Frame>,
     /// The program's command-line arguments (RFC-0014 `args()`), argv[1..].
     args: Vec<String>,
     /// Per-call counter for the fixed monotonic clock (RFC-0043): under
@@ -1300,6 +1426,16 @@ impl Slot {
     }
 }
 
+thread_local! {
+    /// Line-start offsets per buffer, for `lineAt`/`colAt`.
+    /// `array pointer -> (the array, its line-start offsets)`. The array is held
+    /// so the address stays valid and unique for as long as the entry lives.
+    #[allow(clippy::type_complexity)]
+    static LINE_STARTS: std::cell::RefCell<
+        std::collections::HashMap<usize, (std::rc::Rc<Vec<Val>>, std::rc::Rc<Vec<usize>>)>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 impl<'a> Interp<'a> {
     /// Initialize module state (RFC-0013) once, in declaration order, before
     /// `main` (or, under `vyrn test`, before the first test). Each initializer
@@ -1308,7 +1444,7 @@ impl<'a> Interp<'a> {
     /// remembered so later assignments coerce.
     fn init_globals(&self, program: &Program) -> Result<(), Ctrl> {
         for g in &program.globals {
-            let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+            let mut scope: Vec<Frame> = vec![Frame::default()];
             let mut v = self.expr(&g.init, &mut scope)?;
             if let Some(t) = &g.ty {
                 v = self.coerce(v, t)?;
@@ -1331,24 +1467,7 @@ impl<'a> Interp<'a> {
     /// (its constant path args). Returns the resolved key or a scoping trap.
     fn gen_scoped_path(&self, arg: &str) -> Result<String, Ctrl> {
         let g = self.gen.as_ref().expect("gen context");
-        let joined = if g.importer_dir.is_empty() {
-            arg.to_string()
-        } else {
-            format!("{}/{arg}", g.importer_dir)
-        };
-        let resolved = crate::loader::normalize(&joined);
-        let ok = g
-            .allowed
-            .iter()
-            .any(|root| resolved == *root || resolved.starts_with(&format!("{root}/")));
-        if !ok {
-            return Err(Ctrl::Err(format!(
-                "generator read `{arg}` escapes its declared inputs ({}) — a generator may only \
-                 read under its constant path arguments",
-                g.allowed.join(", ")
-            )));
-        }
-        Ok(resolved)
+        gen_scoped_path(&g.importer_dir, &g.allowed, arg).map_err(Ctrl::Err)
     }
 
     /// Mediated `readFile` (RFC-0021): read through the resolver, record the
@@ -1364,14 +1483,14 @@ impl<'a> Interp<'a> {
                 if content.as_bytes().contains(&0) {
                     return Ok(Val::Result(
                         false,
-                        Box::new(Val::Str(format!("`{path}` contains a NUL byte"))),
+                        Box::new(Val::Str(std::rc::Rc::new(format!("`{path}` contains a NUL byte")))),
                     ));
                 }
-                Ok(Val::Result(true, Box::new(Val::Str(content))))
+                Ok(Val::Result(true, Box::new(Val::Str(std::rc::Rc::new(content)))))
             }
             Err(_) => Ok(Val::Result(
                 false,
-                Box::new(Val::Str(format!("cannot read `{path}`"))),
+                Box::new(Val::Str(std::rc::Rc::new(format!("cannot read `{path}`")))),
             )),
         }
     }
@@ -1391,12 +1510,12 @@ impl<'a> Interp<'a> {
                     .push((format!("{resolved}/"), names.join("\n").into_bytes()));
                 Ok(Val::Result(
                     true,
-                    Box::new(Val::Array(names.into_iter().map(Val::Str).collect())),
+                    Box::new(Val::Array(std::rc::Rc::new(names.into_iter().map(|n| Val::Str(std::rc::Rc::new(n))).collect()))),
                 ))
             }
             Err(_) => Ok(Val::Result(
                 false,
-                Box::new(Val::Str(format!("cannot list `{path}`"))),
+                Box::new(Val::Str(std::rc::Rc::new(format!("cannot list `{path}`")))),
             )),
         }
     }
@@ -1410,69 +1529,21 @@ impl<'a> Interp<'a> {
                 "`moduleInterface` is only available during generation".to_string(),
             ));
         }
-        // Resolve like a module specifier (`.vyrn` appended), scoped like readFile.
-        let spec = if path.ends_with(".vyrn") || path.ends_with(".json") {
-            path.to_string()
-        } else {
-            format!("{path}.vyrn")
-        };
-        let resolved = self.gen_scoped_path(&spec)?;
         let g = self.gen.as_ref().unwrap();
-        let source = g
-            .resolver
-            .read(&resolved)
-            .map_err(|e| Ctrl::Err(format!("moduleInterface cannot read `{path}`: {e}")))?;
-        g.reads
-            .borrow_mut()
-            .push((resolved.clone(), source.clone().into_bytes()));
-
-        // Follow the reflected module's imports to build the reachable type
-        // closure (RFC-0031): link it into one program so a type declared in an
-        // imported module is still visible to the closure walk. Every module the
-        // link reads is recorded through a proxy resolver, so a closure type's
-        // defining FILE joins the generator's cache inputs — editing `types.vyrn`
-        // must miss the cache even though its path was never a generator argument.
-        let rec = crate::loader::RecordingResolver::new(g.resolver);
-        let program = crate::loader::load(&source, &resolved, g.opts, &rec).map_err(|diags| {
-            let d = diags.first();
-            let where_ = d
-                .and_then(|d| d.file.clone())
-                .map(|f| format!(" ({f})"))
-                .unwrap_or_default();
-            let msg = d
-                .map(|d| d.message.clone())
-                .unwrap_or_else(|| "load failed".to_string());
-            Ctrl::Err(format!("moduleInterface `{path}`{where_}: {msg}"))
-        })?;
-        for (p, s) in rec.into_reads() {
-            // The root module was already recorded above; skip the duplicate.
-            if p != resolved {
-                g.reads.borrow_mut().push((p, s.into_bytes()));
-            }
-        }
-
-        // Import specifier per declaring module, so a generator that must SHARE a
-        // closure type's identity (rpcServer/rpcInProcess) can import it from the
-        // module that declares it (RFC-0031). The reflected module's own types
-        // (`module == None`) keep the generator's own argument spelling; a foreign
-        // type gets a specifier relative to the real importing file's directory.
-        let mut specifiers: HashMap<Option<String>, String> = HashMap::new();
-        specifiers.insert(None, path.to_string());
-        for t in &program.type_decls {
-            if let Some(key) = &t.module {
-                specifiers.entry(Some(key.clone())).or_insert_with(|| {
-                    crate::loader::import_specifier(
-                        &g.importer_dir,
-                        key,
-                        g.opts.std_root.as_deref(),
-                    )
-                });
-            }
-        }
-        Ok(crate::schema_reflect::module_interface_lit(
-            &program,
-            &specifiers,
-        ))
+        let mut reads = Vec::new();
+        let r = gen_module_interface_lit(
+            g.resolver,
+            g.opts,
+            &g.importer_dir,
+            &g.allowed,
+            &mut reads,
+            path,
+        );
+        // Recorded whether or not the reflection succeeded: the root module is
+        // read before the link can fail, and a read that happened is a cache
+        // input either way.
+        g.reads.borrow_mut().extend(reads);
+        r.map_err(Ctrl::Err)
     }
 
     fn call(&self, name: &str, args: &[Val]) -> Result<Val, Ctrl> {
@@ -1537,7 +1608,7 @@ impl<'a> Interp<'a> {
         &self,
         params: &[String],
         body: &LambdaBody,
-        scope: &[HashMap<String, Slot>],
+        scope: &[Frame],
         param_tys: Vec<Type>,
         ret: Type,
     ) -> Val {
@@ -1562,7 +1633,7 @@ impl<'a> Interp<'a> {
     /// Look up `name` in the local scope — or module state (RFC-0037) — and
     /// return a clone if it is a function value: the dispatch step for a call
     /// through a `fn`-typed parameter or any stored fn-typed binding.
-    fn lookup_fnval(&self, scope: &[HashMap<String, Slot>], name: &str) -> Option<FnVal> {
+    fn lookup_fnval(&self, scope: &[Frame], name: &str) -> Option<FnVal> {
         for frame in scope.iter().rev() {
             if let Some(slot) = frame.get(name) {
                 return match &slot.v {
@@ -1587,7 +1658,7 @@ impl<'a> Interp<'a> {
     fn eval_fn_arg(
         &self,
         arg: &Expr,
-        scope: &mut Vec<HashMap<String, Slot>>,
+        scope: &mut Vec<Frame>,
         fnty: &Type,
     ) -> Result<Val, Ctrl> {
         let (ptys, ret) = match fnty {
@@ -1623,14 +1694,14 @@ impl<'a> Interp<'a> {
                 param_tys,
                 ret,
             } => {
-                let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+                let mut scope: Vec<Frame> = vec![Frame::default()];
                 // The captured environment is the outer (read-only) frame.
                 for (k, v) in captures {
                     scope[0].insert(k.clone(), Slot::untyped(v.clone()));
                 }
                 // Then the lambda's own parameters shadow captures, coerced to the
                 // signature's parameter types (sized-int wrapping / validation).
-                scope.push(HashMap::new());
+                scope.push(Frame::default());
                 for (i, p) in params.iter().enumerate() {
                     let v = args.get(i).cloned().unwrap_or(Val::Unit);
                     let v = match param_tys.get(i) {
@@ -1686,7 +1757,7 @@ impl<'a> Interp<'a> {
                 "extern `{name}` is not available on this target"
             )));
         }
-        let mut scope: Vec<HashMap<String, Slot>> = vec![HashMap::new()];
+        let mut scope: Vec<Frame> = vec![Frame::default()];
         for (p, v) in f.params.iter().zip(args) {
             // Coerce each argument to its parameter type (sized-int wrapping,
             // and automatic validation into predicated types).
@@ -1735,8 +1806,8 @@ impl<'a> Interp<'a> {
         Ok(v)
     }
 
-    fn block(&self, block: &Block, scope: &mut Vec<HashMap<String, Slot>>) -> Result<Flow, Ctrl> {
-        scope.push(HashMap::new());
+    fn block(&self, block: &Block, scope: &mut Vec<Frame>) -> Result<Flow, Ctrl> {
+        scope.push(Frame::default());
         // Values reclaimed when this frame exits (normally or via `return`),
         // mirroring the native backend's block-exit drops. Only a reference
         // release is observable here (the slab slot is recycled and stale
@@ -1791,7 +1862,7 @@ impl<'a> Interp<'a> {
         Ok(())
     }
 
-    fn stmt(&self, stmt: &Stmt, scope: &mut Vec<HashMap<String, Slot>>) -> Result<Flow, Ctrl> {
+    fn stmt(&self, stmt: &Stmt, scope: &mut Vec<Frame>) -> Result<Flow, Ctrl> {
         // Generation step budget (RFC-0021): a runaway generator fails loudly
         // instead of hanging the build. Only active inside a generation run.
         if let Some(g) = &self.gen {
@@ -1830,6 +1901,131 @@ impl<'a> Interp<'a> {
                 Ok(Flow::Normal)
             }
             Stmt::Assign { name, value, .. } => {
+                // `xs.push(v)` on a local Array: append IN PLACE.
+                //
+                // `push` clones the whole array to return a grown copy, and the
+                // statement form desugars to `xs = push(xs, v)`, so building an
+                // array is quadratic: 3,000 pushes measured 251 ms against
+                // 19,270 ms for 30,000. std/vyx builds its output as
+                // `Array<UInt8>` buffers, which is what makes compiling one .vyx
+                // page cost seconds.
+                //
+                // When the binding is DECLARED (`let mut out: Array<UInt8> = []`)
+                // the general path also re-coerces the whole array on every push,
+                // re-validating every element already proven valid. Appending one
+                // element only requires that element to be checked, so the item is
+                // coerced to the element type and the rest left alone — the same
+                // guarantee without the rescan.
+                //
+                // The slot is inspected BEFORE the item is evaluated, so a shape
+                // this cannot handle falls through to the general path having
+                // evaluated nothing. Safe for a local: no callee can reach it, so
+                // evaluating the item cannot change what was just inspected.
+                if let Expr::Call { name: fname, args, .. } = value {
+                    if fname == "push"
+                        && args.len() == 2
+                        && matches!(&args[0], Expr::Var { name: n, .. } if n == name)
+                    {
+                        let shape = scope.iter().rev().find_map(|f| f.get(name)).and_then(|s| {
+                            if !matches!(s.v, Val::Array(_)) {
+                                return None;
+                            }
+                            match &s.ty {
+                                None => Some(None),
+                                Some(t) => match crate::types::resolve(t, &self.type_map) {
+                                    Type::Array(i) => Some(Some(*i)),
+                                    // ArrayN/SmallArray carry a capacity the
+                                    // general path enforces; leave those alone.
+                                    _ => None,
+                                },
+                            }
+                        });
+                        if let Some(elem_ty) = shape {
+                            let item = self.expr(&args[1], scope)?;
+                            let item = match &elem_ty {
+                                Some(t) => self.coerce(item, t)?,
+                                None => item,
+                            };
+                            for frame in scope.iter_mut().rev() {
+                                if let Some(slot) = frame.get_mut(name) {
+                                    if let Val::Array(elems) = &mut slot.v {
+                                        std::rc::Rc::make_mut(elems).push(item);
+                                        return Ok(Flow::Normal);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                // `s = s + a + b + …` on an untyped local String: append IN PLACE.
+                //
+                // String `+` allocates a fresh String and copies both operands,
+                // so accumulating in a loop is quadratic in the result — 40,000
+                // appends measured 8.9 s against 1.1 s for 20,000. Every
+                // generator builds its output this way (`out = out + …` appears
+                // 56 times in std/vyx and 98 in std/ui).
+                //
+                // The chain matters: `out + a + ", "` parses as
+                // `Add(Add(Var(out), a), ", ")`, so the target sits at the far
+                // end of the left spine, not directly under the top `+`. Walking
+                // the spine is what makes this fire on real code rather than only
+                // on the single-append shape.
+                //
+                // Three guards keep it unobservable. The binding must be a LOCAL,
+                // so nothing evaluated on the right can reach it and no alias
+                // exists. It must have no declared type, so the coercion — and
+                // the automatic validation riding on it — that the general path
+                // performs is not being skipped. And the spine must bottom out in
+                // a plain `Var` naming the assignment target, whose old value is
+                // dead the instant this statement completes. Operands are
+                // evaluated left to right, exactly as the general path would.
+                if let Expr::Binary { op: BinOp::Add, .. } = value {
+                    let mut spine: Vec<&Expr> = Vec::new();
+                    let mut cur = value;
+                    while let Expr::Binary { op: BinOp::Add, lhs, rhs, .. } = cur {
+                        spine.push(rhs);
+                        cur = lhs;
+                    }
+                    let rooted = matches!(cur, Expr::Var { name: n, .. } if n == name);
+                    let appendable = rooted
+                        && scope
+                            .iter()
+                            .rev()
+                            .find_map(|f| f.get(name))
+                            .is_some_and(|s| s.ty.is_none() && matches!(s.v, Val::Str(_)));
+                    if appendable {
+                        spine.reverse();
+                        let mut parts: Vec<String> = Vec::with_capacity(spine.len());
+                        for e in spine {
+                            match self.expr(e, scope)? {
+                                Val::Str(t) => parts.push((*t).clone()),
+                                // Not a String after all — rebuild through the
+                                // general path rather than guess.
+                                _ => {
+                                    parts.clear();
+                                    break;
+                                }
+                            }
+                        }
+                        if !parts.is_empty() {
+                            for frame in scope.iter_mut().rev() {
+                                if let Some(slot) = frame.get_mut(name) {
+                                    if let Val::Str(head) = &mut slot.v {
+                                        // Copy-on-write: grows in place while the
+                                        // accumulator is unshared, which is the
+                                        // whole point of `Rc<String>` over `Rc<str>`.
+                                        let head = std::rc::Rc::make_mut(head);
+                                        for t in &parts {
+                                            head.push_str(t);
+                                        }
+                                        return Ok(Flow::Normal);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 let v = self.expr(value, scope)?;
                 // Reassignment flows through the binding's declared type — the
                 // same coercion (and automatic validation) as the original let.
@@ -1929,7 +2125,7 @@ impl<'a> Interp<'a> {
                                 v: Val::Map(pairs), ..
                             }) = frame.get_mut(name)
                             {
-                                insert_pair(pairs, k, v);
+                                insert_pair(pairs, (*k).clone(), v);
                                 return Ok(Flow::Normal);
                             }
                         }
@@ -1937,7 +2133,7 @@ impl<'a> Interp<'a> {
                             v: Val::Map(pairs), ..
                         }) = self.globals.borrow_mut().get_mut(name)
                         {
-                            insert_pair(pairs, k, v);
+                            insert_pair(pairs, (*k).clone(), v);
                             return Ok(Flow::Normal);
                         }
                         return Err(format!("index-assignment to unbound map `{name}`").into());
@@ -1976,7 +2172,7 @@ impl<'a> Interp<'a> {
                         if idx < 0 || idx as usize >= items.len() {
                             return Err(format!("array index {idx} out of bounds").into());
                         }
-                        items[idx as usize] = v;
+                        std::rc::Rc::make_mut(items)[idx as usize] = v;
                         return Ok(Flow::Normal);
                     }
                 }
@@ -1988,7 +2184,7 @@ impl<'a> Interp<'a> {
                     if idx < 0 || idx as usize >= items.len() {
                         return Err(format!("array index {idx} out of bounds").into());
                     }
-                    items[idx as usize] = v;
+                    std::rc::Rc::make_mut(items)[idx as usize] = v;
                     return Ok(Flow::Normal);
                 }
                 Err(format!("index-assignment to unbound array `{name}`").into())
@@ -2012,7 +2208,7 @@ impl<'a> Interp<'a> {
                 let sv = self.expr(scrutinee, scope)?;
                 match Self::match_pattern(pattern, &sv) {
                     Some(binds) => {
-                        scope.push(HashMap::new());
+                        scope.push(Frame::default());
                         for (n, v) in binds {
                             scope.last_mut().unwrap().insert(n, Slot::untyped(v));
                         }
@@ -2060,17 +2256,17 @@ impl<'a> Interp<'a> {
                 let items = match self.expr(iter, scope)? {
                     Val::Array(items) => items,
                     // Iterating a String yields each byte as an Int.
-                    Val::Str(s) => s.as_bytes().iter().map(|b| Val::Int(*b as i64)).collect(),
+                    Val::Str(s) => s.as_bytes().iter().map(|b| Val::Int(*b as i64)).collect::<Vec<_>>().into(),
                     other => return Err(format!("`for` expected an array, found {other:?}").into()),
                 };
-                for item in items {
+                for item in items.iter() {
                     // Fresh frame per iteration holding the loop variable; the
                     // body's own inner frame nests inside it.
-                    scope.push(HashMap::new());
+                    scope.push(Frame::default());
                     scope
                         .last_mut()
                         .unwrap()
-                        .insert(var.clone(), Slot::untyped(item));
+                        .insert(var.clone(), Slot::untyped(item.clone()));
                     let flow = self.block(body, scope);
                     scope.pop();
                     match flow? {
@@ -2120,7 +2316,7 @@ impl<'a> Interp<'a> {
         }
     }
 
-    fn expr(&self, expr: &Expr, scope: &mut Vec<HashMap<String, Slot>>) -> Result<Val, Ctrl> {
+    fn expr(&self, expr: &Expr, scope: &mut Vec<Frame>) -> Result<Val, Ctrl> {
         match expr {
             Expr::Int(n) => Ok(Val::Int(*n)),
             // A byte literal (RFC-0057) is an integer value at runtime — the
@@ -2129,7 +2325,7 @@ impl<'a> Interp<'a> {
             Expr::Byte(b) => Ok(Val::Int(*b as i64)),
             Expr::Float(x) => Ok(Val::Float(*x)),
             Expr::Bool(b) => Ok(Val::Bool(*b)),
-            Expr::Str(s) => Ok(Val::Str(s.clone())),
+            Expr::Str(s) => Ok(Val::Str(std::rc::Rc::new(s.clone()))),
             // A lambda literal: a `fn`-typed call argument (RFC-0023) or a
             // storage-position source (RFC-0037). Captures snapshot HERE (the
             // evaluation site — the capture-timing lock); the parameter/return
@@ -2207,6 +2403,58 @@ impl<'a> Interp<'a> {
                 let r = self.expr(rhs, scope)?;
                 self.binop(*op, l, r)
             }
+            // `xs[i]` on a local Array or String, read WITHOUT copying `xs`.
+            //
+            // `xs[i]` parses as `at(xs, i)`, and evaluating the `xs` argument
+            // clones the whole collection so the index can throw it away: an
+            // array read cost ~24 us against ~0.7 us for a loop doing no array
+            // work, and the gap scaled with the collection's LENGTH rather than
+            // the number of reads. std/vyx scans its input byte by byte this way,
+            // which is most of what made compiling a .vyx page cost seconds.
+            //
+            // The guard matches only when it will succeed — a local holding an
+            // Array or a String — so there is no fallback to get wrong. An
+            // earlier version fell back to `self.call("at", ..)`, which is not
+            // where that builtin is dispatched; every Map and record receiver
+            // took the fallback and died with "unknown function `at`". Parity
+            // caught it, which is what parity is for.
+            //
+            // Restricted to a local receiver so nothing evaluated for the index
+            // can reach it — the same reason the in-place append above is safe.
+            Expr::Call { name, args, .. }
+                if name == "at"
+                    && args.len() == 2
+                    && matches!(&args[0], Expr::Var { .. })
+                    && {
+                        let Expr::Var { name: v, .. } = &args[0] else { unreachable!() };
+                        scope
+                            .iter()
+                            .rev()
+                            .find_map(|f| f.get(v))
+                            .is_some_and(|s| matches!(s.v, Val::Array(_) | Val::Str(_)))
+                    } =>
+            {
+                let Expr::Var { name: v, .. } = &args[0] else { unreachable!() };
+                let idx = self.expr(&args[1], scope)?;
+                let i = match &idx {
+                    Val::Int(i) => *i,
+                    Val::IntN { v, .. } => *v,
+                    other => return Err(format!("index must be an integer, found {other:?}").into()),
+                };
+                let slot = scope.iter().rev().find_map(|f| f.get(v)).expect("guarded above");
+                match &slot.v {
+                    Val::Array(elems) => elems
+                        .get(i as usize)
+                        .cloned()
+                        .ok_or_else(|| Ctrl::from(format!("array index {i} out of bounds"))),
+                    Val::Str(st) => st
+                        .as_bytes()
+                        .get(i as usize)
+                        .map(|b| Val::IntN { v: *b as i64, bits: 8, signed: false })
+                        .ok_or_else(|| Ctrl::from(format!("string index {i} out of bounds"))),
+                    _ => unreachable!("guarded above"),
+                }
+            }
             Expr::Call { name, args, line } => {
                 // Calling a `fn`-typed parameter (RFC-0023): `f(x)` where `f` is a
                 // local bound to a function value. Resolved before the builtins so
@@ -2274,6 +2522,19 @@ impl<'a> Interp<'a> {
                 // `jsonSchema(TypeName)` renders the declared type as a JSON Schema
                 // string at compile time — computed from the declaration, so both
                 // backends produce identical bytes.
+                // `contractOf(Name)` reflects a module contract at compile time
+                // (RFC-0071) — its argument is a contract name, not a value, so
+                // build and evaluate its `ContractInfo` literal exactly the way
+                // `schemaOf` builds a `Schema`.
+                if name == "contractOf" {
+                    if let Some(Expr::Var { name: cn, .. }) = args.first() {
+                        if let Some(decl) = self.contracts.get(cn.as_str()) {
+                            let cl = crate::schema_reflect::contract_info_lit(decl);
+                            return self.expr(&cl, scope);
+                        }
+                    }
+                    return Err("`contractOf` needs a declared contract name".into());
+                }
                 if name == "jsonSchema" {
                     if let Some(Expr::Var { name: tn, .. }) = args.first() {
                         if self.types.contains_key(tn.as_str()) {
@@ -2286,7 +2547,7 @@ impl<'a> Interp<'a> {
                                     .map(|(k, v)| (k.to_string(), (*v).clone()))
                                     .collect();
                             let js = crate::types::json_schema_string(&owned[tn.as_str()], &owned);
-                            return Ok(Val::Str(js));
+                            return Ok(Val::Str(std::rc::Rc::new(js)));
                         }
                     }
                     return Err("`jsonSchema` needs a declared type name".into());
@@ -2295,13 +2556,11 @@ impl<'a> Interp<'a> {
                 // JSON. The argument's static type drives record field order and
                 // the None-field omission, so infer it alongside the value.
                 if name == "toJson" {
-                    let v = self.expr(&args[0], scope)?;
                     let ty = self
                         .type_of(&args[0], scope)
                         .ok_or("`toJson` could not determine the argument's type")?;
-                    let mut out = String::new();
-                    self.encode_val(&v, &ty, &mut out)?;
-                    return Ok(Val::Str(out));
+                    let e = crate::jsonenc::encode_expr(args[0].clone(), &ty, *line);
+                    return self.expr(&e, scope);
                 }
                 // `fromJson(TypeName, s)` (RFC-0018) — type-directed decode into
                 // `Validation<T>`. Never traps; every problem is an accumulated
@@ -2315,16 +2574,16 @@ impl<'a> Interp<'a> {
                         }
                         _ => return Err("`fromJson` needs a declared type name".into()),
                     };
-                    let s = match self.expr(&args[1], scope)? {
-                        Val::Str(s) => s,
-                        other => {
-                            return Err(format!(
-                                "`fromJson`'s second argument must be a String, found {other:?}"
-                            )
-                            .into())
-                        }
-                    };
-                    return Ok(self.decode_top(&tn, &s));
+                    let target = Type::Named(tn);
+                    let e = crate::jsondec::decode_expr(&target, args[1].clone(), *line);
+                    let top = crate::jsondec::top_name(&target);
+                    if !self.funcs.contains_key(top.as_str()) {
+                        return Err(format!(
+                            "`fromJson` needs the Vyrn runtime: no decoder for `{target}`                              (is a std library root reachable?)"
+                        )
+                        .into());
+                    }
+                    return self.expr(&e, scope);
                 }
                 // `a.pop()` (RFC-0011) — remove and return the last element as
                 // `Option<T>` (`None` on empty), mutating the receiver in place.
@@ -2338,7 +2597,7 @@ impl<'a> Interp<'a> {
                                 ..
                             }) = frame.get_mut(recv)
                             {
-                                let popped = items.pop();
+                                let popped = std::rc::Rc::make_mut(items).pop();
                                 return Ok(Val::Option(popped.map(Box::new)));
                             }
                         }
@@ -2347,7 +2606,7 @@ impl<'a> Interp<'a> {
                             ..
                         }) = self.globals.borrow_mut().get_mut(recv)
                         {
-                            let popped = items.pop();
+                            let popped = std::rc::Rc::make_mut(items).pop();
                             return Ok(Val::Option(popped.map(Box::new)));
                         }
                     }
@@ -2378,7 +2637,7 @@ impl<'a> Interp<'a> {
                             if idx < 0 || idx as usize >= items.len() {
                                 return Err(format!("array index {idx} out of bounds").into());
                             }
-                            return Ok(items.swap_remove(idx as usize));
+                            return Ok(std::rc::Rc::make_mut(items).swap_remove(idx as usize));
                         }
                     }
                     if let Some(Slot {
@@ -2389,7 +2648,7 @@ impl<'a> Interp<'a> {
                         if idx < 0 || idx as usize >= items.len() {
                             return Err(format!("array index {idx} out of bounds").into());
                         }
-                        return Ok(items.swap_remove(idx as usize));
+                        return Ok(std::rc::Rc::make_mut(items).swap_remove(idx as usize));
                     }
                     return Err("`swapRemove` needs a mutable array binding".into());
                 }
@@ -2410,7 +2669,7 @@ impl<'a> Interp<'a> {
                         }
                     };
                     let remove_from = |pairs: &mut Vec<(String, Val)>| -> bool {
-                        if let Some(i) = pairs.iter().position(|(k, _)| k == &key) {
+                        if let Some(i) = pairs.iter().position(|(k, _)| k.as_str() == key.as_str()) {
                             pairs.remove(i);
                             true
                         } else {
@@ -2461,7 +2720,30 @@ impl<'a> Interp<'a> {
                 // reserved, so a same-named user function wins (RFC-0054).
                 let shadowed = matches!(name.as_str(), "render" | "rawAt" | "raw" | "lex")
                     && self.funcs.contains_key(name.as_str());
+                // RFC-0078 M4c: a builtin whose implementation IS a Vyrn function
+                // is a call to it, and nothing else. The loader injected the module
+                // and renamed its declarations to reserved `$` spellings no source
+                // can write; the builtin's own name is reserved too, so there is no
+                // shadowing question to answer — and the interpreter holds no second
+                // definition to drift from.
+                if let Some(rt) = crate::loader::routed_builtin(name) {
+                    if !self.funcs.contains_key(rt) {
+                        return Err(format!(
+                            "`{name}` is implemented in Vyrn and its module is not in the link \
+                             — a std root is needed to call it"
+                        )
+                        .into());
+                    }
+                    return self.call(rt, &vals);
+                }
                 match name.as_str() {
+                    // RFC-0079: `panic(msg)` is a trap whose text the caller
+                    // wrote. Same channel as every `@.trap.*` — the CLI prefixes
+                    // `error: ` and the newline — so nothing here formats it.
+                    "panic" => match &vals[0] {
+                        Val::Str(s) => Err(Ctrl::Err((**s).clone())),
+                        other => Err(Ctrl::Err(format!("{other:?}"))),
+                    },
                     "print" => {
                         match &vals[0] {
                             Val::Int(n) => println!("{n}"),
@@ -2493,11 +2775,11 @@ impl<'a> Interp<'a> {
                         // Drop calls below the configured threshold (RFC-0008).
                         if log_level_ordinal(name).unwrap_or(0) >= self.log_level {
                             let lname = match &vals[0] {
-                                Val::Str(s) => s.clone(),
+                                Val::Str(s) => (**s).clone(),
                                 other => format!("{other:?}"),
                             };
                             let msg = match &vals[1] {
-                                Val::Str(s) => s.clone(),
+                                Val::Str(s) => (**s).clone(),
                                 other => format!("{other:?}"),
                             };
                             let line = format!("[{}] {lname}: {msg}", name.to_uppercase());
@@ -2516,7 +2798,7 @@ impl<'a> Interp<'a> {
                     // `@concat` — internal spelling produced by interpolation
                     // (the surface form is `a + b`, handled in `binop`).
                     "@concat" => match (&vals[0], &vals[1]) {
-                        (Val::Str(a), Val::Str(b)) => Ok(Val::Str(format!("{a}{b}"))),
+                        (Val::Str(a), Val::Str(b)) => Ok(Val::Str(std::rc::Rc::new(format!("{a}{b}")))),
                         _ => Err("@concat of non-Strings".into()),
                     },
                     // RFC-0054 code quotes. `@codeText`/`@codeSplice` are the
@@ -2529,7 +2811,7 @@ impl<'a> Interp<'a> {
                     // unit-testable at runtime (RFC-0021: a `gen fn` is callable for
                     // testing).
                     "@codeText" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Code(vec![CodePiece::Text(s.clone())])),
+                        Val::Str(s) => Ok(Val::Code(vec![CodePiece::Text((**s).clone())])),
                         _ => Err("@codeText of non-String".into()),
                     },
                     "@codeSplice" => {
@@ -2540,16 +2822,16 @@ impl<'a> Interp<'a> {
                         Ok(Val::Code(code_splice(&vals[0], ctx)?))
                     }
                     "raw" if !shadowed => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Code(vec![CodePiece::Text(s.clone())])),
+                        Val::Str(s) => Ok(Val::Code(vec![CodePiece::Text((**s).clone())])),
                         _ => Err("`raw` of non-String".into()),
                     },
                     "rawAt" if !shadowed => {
                         let text = match &vals[0] {
-                            Val::Str(s) => s.clone(),
+                            Val::Str(s) => (**s).clone(),
                             _ => return Err("`rawAt` text must be a String".into()),
                         };
                         let path = match &vals[1] {
-                            Val::Str(s) => s.clone(),
+                            Val::Str(s) => (**s).clone(),
                             _ => return Err("`rawAt` path must be a String".into()),
                         };
                         let line = match &vals[2] {
@@ -2568,48 +2850,23 @@ impl<'a> Interp<'a> {
                         }]))
                     }
                     "render" if !shadowed => match &vals[0] {
-                        Val::Code(pieces) => Ok(Val::Str(render_code(pieces))),
+                        Val::Code(pieces) => Ok(Val::Str(std::rc::Rc::new(render_code(pieces)))),
                         _ => Err("`render` of non-Code".into()),
                     },
                     "lex" if !shadowed => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Array(lex_tokens(s))),
+                        Val::Str(s) => Ok(Val::Array(std::rc::Rc::new(lex_tokens(s)))),
                         _ => Err("`lex` of non-String".into()),
                     },
-                    "contains" => match (&vals[0], &vals[1]) {
-                        (Val::Str(a), Val::Str(b)) => Ok(Val::Bool(a.contains(b.as_str()))),
-                        _ => Err("contains of non-Strings".into()),
-                    },
-                    "startsWith" => match (&vals[0], &vals[1]) {
-                        (Val::Str(a), Val::Str(b)) => Ok(Val::Bool(a.starts_with(b.as_str()))),
-                        _ => Err("startsWith of non-Strings".into()),
-                    },
-                    "endsWith" => match (&vals[0], &vals[1]) {
-                        (Val::Str(a), Val::Str(b)) => Ok(Val::Bool(a.ends_with(b.as_str()))),
-                        _ => Err("endsWith of non-Strings".into()),
-                    },
-                    // `slice(s, start, end)` (RFC-0046): the byte-range substring.
-                    // O(1)-validated — an out-of-range offset or a cut inside a
-                    // multi-byte UTF-8 character traps with the canonical wording
-                    // (`is_char_boundary` is the two-continuation-byte check the
-                    // codegen open-codes; both cut points already-valid UTF-8 need
-                    // no whole-slice revalidation). Trap strings mirror the
-                    // `@.trap.slice*` codegen globals, byte-for-byte via the CLI.
-                    "slice" => match (&vals[0], &vals[1], &vals[2]) {
-                        (Val::Str(s), Val::Int(start), Val::Int(end)) => {
-                            let len = s.len() as i64;
-                            if *start < 0 || *end > len || *start > *end {
-                                return Err("slice index out of range".into());
-                            }
-                            let (a, b) = (*start as usize, *end as usize);
-                            if !s.is_char_boundary(a) || !s.is_char_boundary(b) {
-                                return Err("slice splits a UTF-8 character".into());
-                            }
-                            Ok(Val::Str(s[a..b].to_string()))
-                        }
-                        _ => Err("slice of non-String/Int".into()),
-                    },
-                    // `bytes` decodes the UTF-8 bytes as UInt8 (RFC-0014 M2);
-                    // `chars` the code points as Int64.
+                    // (`contains`, `startsWith`, `endsWith` and — since RFC-0079 M3
+                    // — `slice` are `std/strpred`. The predicates were three Rust
+                    // one-liners, but three DEFINITIONS, and the direct wasm backend
+                    // owed a fourth. `slice` was the expensive one: `is_char_boundary`
+                    // here, an open-coded continuation-byte pair in the emitted IR,
+                    // and a third in the direct backend's runtime, all four of them
+                    // agreeing only because a test said so. It returns its failure
+                    // now, so the whole range check is `sliceV`'s.)
+                    // `bytes` decodes the UTF-8 bytes as UInt8 (RFC-0014 M2) —
+                    // the irreducible VIEW every Vyrn string routine is built on.
                     "bytes" => match &vals[0] {
                         Val::Str(s) => Ok(Val::Array(
                             s.bytes()
@@ -2618,21 +2875,18 @@ impl<'a> Interp<'a> {
                                     bits: 8,
                                     signed: false,
                                 })
-                                .collect(),
+                                .collect::<Vec<_>>().into(),
                         )),
                         _ => Err("bytes of non-String".into()),
                     },
-                    "chars" => match &vals[0] {
-                        Val::Str(s) => {
-                            Ok(Val::Array(s.chars().map(|c| Val::Int(c as i64)).collect()))
-                        }
-                        _ => Err("chars of non-String".into()),
-                    },
+                    // (`chars` is `std/text`'s `charsV` — RFC-0078 M4c. Rust's
+                    // `str::chars` here against a two-pass decoder in 82 lines of
+                    // emitted IR; one Vyrn `decodeUtf8` replaces both.)
                     // Input I/O (RFC-0014). Error payloads are canonical Vyrn
                     // wording (never Rust `io::Error` text) — kept byte-identical
                     // to the codegen's format strings so all three backends agree.
                     "args" => Ok(Val::Array(
-                        self.args.iter().map(|s| Val::Str(s.clone())).collect(),
+                        self.args.iter().map(|s| Val::Str(std::rc::Rc::new(s.clone()))).collect::<Vec<_>>().into(),
                     )),
                     "readLine" => {
                         use std::io::BufRead;
@@ -2662,7 +2916,7 @@ impl<'a> Interp<'a> {
                             return Ok(Val::Option(None));
                         }
                         match String::from_utf8(buf) {
-                            Ok(s) => Ok(Val::Option(Some(Box::new(Val::Str(s))))),
+                            Ok(s) => Ok(Val::Option(Some(Box::new(Val::Str(std::rc::Rc::new(s)))))),
                             // Not valid UTF-8: not representable as a String → None
                             // (native rejects the same way via the UTF-8 DFA).
                             Err(_) => Ok(Val::Option(None)),
@@ -2678,7 +2932,7 @@ impl<'a> Interp<'a> {
                         if self.gen.is_some() {
                             return self.gen_read_file(&path);
                         }
-                        match std::fs::read(&path) {
+                        match std::fs::read(path.as_str()) {
                             Ok(bytes) => {
                                 // NUL first: a NUL byte IS valid UTF-8, but cannot
                                 // survive in a NUL-terminated String, so it is
@@ -2687,20 +2941,20 @@ impl<'a> Interp<'a> {
                                 if bytes.contains(&0) {
                                     return Ok(Val::Result(
                                         false,
-                                        Box::new(Val::Str(format!("`{path}` contains a NUL byte"))),
+                                        Box::new(Val::Str(std::rc::Rc::new(format!("`{path}` contains a NUL byte")))),
                                     ));
                                 }
                                 match String::from_utf8(bytes) {
-                                    Ok(s) => Ok(Val::Result(true, Box::new(Val::Str(s)))),
+                                    Ok(s) => Ok(Val::Result(true, Box::new(Val::Str(std::rc::Rc::new(s))))),
                                     Err(_) => Ok(Val::Result(
                                         false,
-                                        Box::new(Val::Str(format!("`{path}` is not valid UTF-8"))),
+                                        Box::new(Val::Str(std::rc::Rc::new(format!("`{path}` is not valid UTF-8")))),
                                     )),
                                 }
                             }
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(format!("cannot read `{path}`"))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot read `{path}`")))),
                             )),
                         }
                     }
@@ -2714,7 +2968,7 @@ impl<'a> Interp<'a> {
                         if self.gen.is_some() {
                             return self.gen_list_dir(&path);
                         }
-                        match std::fs::read_dir(&path) {
+                        match std::fs::read_dir(path.as_str()) {
                             Ok(entries) => {
                                 let mut names: Vec<String> = entries
                                     .filter_map(|e| e.ok())
@@ -2723,12 +2977,12 @@ impl<'a> Interp<'a> {
                                 names.sort();
                                 Ok(Val::Result(
                                     true,
-                                    Box::new(Val::Array(names.into_iter().map(Val::Str).collect())),
+                                    Box::new(Val::Array(std::rc::Rc::new(names.into_iter().map(|n| Val::Str(std::rc::Rc::new(n))).collect()))),
                                 ))
                             }
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(format!("cannot list `{path}`"))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot list `{path}`")))),
                             )),
                         }
                     }
@@ -2759,11 +3013,11 @@ impl<'a> Interp<'a> {
                                 return Err(format!("writeFile of non-String {other:?}").into())
                             }
                         };
-                        match std::fs::write(&path, contents.as_bytes()) {
+                        match std::fs::write(path.as_str(), contents.as_bytes()) {
                             Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(format!("cannot write `{path}`"))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot write `{path}`")))),
                             )),
                         }
                     }
@@ -2785,7 +3039,7 @@ impl<'a> Interp<'a> {
                                 return Err(format!("renameFile of non-String {other:?}").into())
                             }
                         };
-                        match std::fs::rename(&from, &to) {
+                        match std::fs::rename(from.as_str(), to.as_str()) {
                             Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
                             Err(e) => {
                                 let msg = if is_cross_device(&e) {
@@ -2793,7 +3047,7 @@ impl<'a> Interp<'a> {
                                 } else {
                                     format!("cannot write `{to}`")
                                 };
-                                Ok(Val::Result(false, Box::new(Val::Str(msg))))
+                                Ok(Val::Result(false, Box::new(Val::Str(std::rc::Rc::new(msg)))))
                             }
                         }
                     }
@@ -2811,13 +3065,13 @@ impl<'a> Interp<'a> {
                         // intact. A missing file is an error (`cannot write`).
                         let synced = std::fs::OpenOptions::new()
                             .write(true)
-                            .open(&path)
+                            .open(path.as_str())
                             .and_then(|f| f.sync_all());
                         match synced {
                             Ok(()) => Ok(Val::Result(true, Box::new(Val::Bool(true)))),
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(format!("cannot write `{path}`"))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot write `{path}`")))),
                             )),
                         }
                     }
@@ -2829,7 +3083,7 @@ impl<'a> Interp<'a> {
                                 return Err(format!("readFileBytes of non-String {other:?}").into())
                             }
                         };
-                        match std::fs::read(&path) {
+                        match std::fs::read(path.as_str()) {
                             Ok(bytes) => Ok(Val::Result(
                                 true,
                                 Box::new(Val::Array(
@@ -2840,19 +3094,19 @@ impl<'a> Interp<'a> {
                                             bits: 8,
                                             signed: false,
                                         })
-                                        .collect(),
+                                        .collect::<Vec<_>>().into(),
                                 )),
                             )),
                             Err(_) => Ok(Val::Result(
                                 false,
-                                Box::new(Val::Str(format!("cannot read `{path}`"))),
+                                Box::new(Val::Str(std::rc::Rc::new(format!("cannot read `{path}`")))),
                             )),
                         }
                     }
                     "stringFromBytes" => match &vals[0] {
                         Val::Array(elems) => {
                             let mut bytes = Vec::with_capacity(elems.len());
-                            for e in elems {
+                            for e in elems.iter() {
                                 match e {
                                     Val::IntN { v, .. } => bytes.push(*v as u8),
                                     Val::Int(v) => bytes.push(*v as u8),
@@ -2868,44 +3122,39 @@ impl<'a> Interp<'a> {
                             if bytes.contains(&0) {
                                 return Ok(Val::Result(
                                     false,
-                                    Box::new(Val::Str("bytes contain a NUL byte".to_string())),
+                                    Box::new(Val::Str(std::rc::Rc::new("bytes contain a NUL byte".to_string()))),
                                 ));
                             }
                             match String::from_utf8(bytes) {
-                                Ok(s) => Ok(Val::Result(true, Box::new(Val::Str(s)))),
+                                Ok(s) => Ok(Val::Result(true, Box::new(Val::Str(std::rc::Rc::new(s))))),
                                 Err(_) => Ok(Val::Result(
                                     false,
-                                    Box::new(Val::Str("bytes are not valid UTF-8".to_string())),
+                                    Box::new(Val::Str(std::rc::Rc::new("bytes are not valid UTF-8".to_string()))),
                                 )),
                             }
                         }
                         other => Err(format!("stringFromBytes of non-Array {other:?}").into()),
                     },
-                    // Text encodings: encoders return a String; decoders return
-                    // `Option<String>` (None on malformed input or non-UTF-8 result).
-                    "hexEncode" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Str(hex_encode(s))),
-                        _ => Err("hexEncode of non-String".into()),
+                    // The IEEE-754 bit views (RFC-0078 M4a): a reinterpretation,
+                    // not a conversion. `UInt64` is carried as an `IntN` whose
+                    // `v` holds the raw pattern, so both directions are one
+                    // `to_bits`/`from_bits` and nothing rounds.
+                    "floatBits" => match &vals[0] {
+                        Val::Float(f) => Ok(Val::IntN {
+                            v: f.to_bits() as i64,
+                            bits: 64,
+                            signed: false,
+                        }),
+                        other => Err(format!("floatBits of non-Float64 {other:?}").into()),
                     },
-                    "base64Encode" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Str(base64_encode(s))),
-                        _ => Err("base64Encode of non-String".into()),
+                    "floatFromBits" => match &vals[0] {
+                        Val::IntN { v, .. } => Ok(Val::Float(f64::from_bits(*v as u64))),
+                        Val::Int(v) => Ok(Val::Float(f64::from_bits(*v as u64))),
+                        other => Err(format!("floatFromBits of non-UInt64 {other:?}").into()),
                     },
-                    "urlEncode" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Str(url_encode(s))),
-                        _ => Err("urlEncode of non-String".into()),
-                    },
-                    "hexDecode" | "base64Decode" | "urlDecode" => {
-                        let out = match &vals[0] {
-                            Val::Str(s) => match name.as_str() {
-                                "hexDecode" => hex_decode(s),
-                                "base64Decode" => base64_decode(s),
-                                _ => url_decode(s),
-                            },
-                            _ => return Err(format!("{name} of non-String").into()),
-                        };
-                        Ok(Val::Option(out.map(|s| Box::new(Val::Str(s)))))
-                    }
+                    // (The six text encodings are `std/codecs` — RFC-0078 M4c.
+                    // They were 159 lines of Rust here and are now a routed call,
+                    // handled above.)
                     // `@str` (from `x.toString()` and interpolation) must render
                     // exactly as `print` does: signed IntN by value, unsigned as
                     // `u64`, Float to 6 decimals.
@@ -2915,17 +3164,8 @@ impl<'a> Interp<'a> {
                         | Val::Float(_)
                         | Val::Float32(_)
                         | Val::Bool(_)
-                        | Val::Str(_) => Ok(Val::Str(scalar_to_string(&vals[0]))),
+                        | Val::Str(_) => Ok(Val::Str(std::rc::Rc::new(scalar_to_string(&vals[0])))),
                         other => Err(format!("str of unsupported value {other:?}").into()),
-                    },
-                    // `@charCount` (from `s.charCount()`, RFC-0058): the number of
-                    // Unicode scalar values = the count of non-continuation bytes
-                    // (`b & 0xC0 != 0x80`) of the validated UTF-8 string.
-                    "@charCount" => match &vals[0] {
-                        Val::Str(s) => Ok(Val::Int(
-                            s.as_bytes().iter().filter(|b| (*b & 0xC0) != 0x80).count() as i64,
-                        )),
-                        other => Err(format!("charCount of non-String {other:?}").into()),
                     },
                     "parse" => match &vals[0] {
                         Val::Str(s) => Ok(Val::Option(parse_int(s).map(|n| Box::new(Val::Int(n))))),
@@ -2946,11 +3186,73 @@ impl<'a> Interp<'a> {
                         self.cell_release(slot, gen)?;
                         Ok(Val::Unit)
                     }
-                    "array" => Ok(Val::Array(Vec::new())),
+                    // `lineAt(bytes, off)` / `colAt(bytes, off)`, 1-based.
+                    //
+                    // Memoized on the buffer's contents: a scanner asks once per
+                    // node over the same buffer, and counting newlines from byte
+                    // 0 each time is quadratic. Hashing the buffer per call is
+                    // linear and ~1 us for a source file, against the ~0.7 ms a
+                    // rescan cost.
+                    "lineAt" | "colAt" => match (&vals[0], &vals[1]) {
+                        (Val::Array(elems), off) => {
+                            let off = match off {
+                                Val::Int(i) => *i,
+                                Val::IntN { v, .. } => *v,
+                                other => {
+                                    return Err(format!("offset must be an integer, found {other:?}").into())
+                                }
+                            }
+                            .max(0) as usize;
+                            let byte_of = |v: &Val| -> u8 {
+                                match v {
+                                    Val::Int(i) => *i as u8,
+                                    Val::IntN { v, .. } => *v as u8,
+                                    _ => 0,
+                                }
+                            };
+                            // Keyed by the array's IDENTITY, not its contents.
+                            // Hashing 3,000 elements per call cost more than the
+                            // scan this replaces; the pointer is O(1). The cache
+                            // holds the `Rc`, so the allocation stays alive and
+                            // its address cannot be recycled under a live entry.
+                            let key = std::rc::Rc::as_ptr(elems) as usize;
+                            let starts = LINE_STARTS.with(|c| {
+                                if let Some((_, hit)) = c.borrow().get(&key) {
+                                    return hit.clone();
+                                }
+                                let mut v: Vec<usize> = vec![0];
+                                for (i, e) in elems.iter().enumerate() {
+                                    if byte_of(e) == 10u8 {
+                                        v.push(i + 1);
+                                    }
+                                }
+                                let rc = std::rc::Rc::new(v);
+                                let mut m = c.borrow_mut();
+                                // ponytail: bounded crudely; a scanner touches a
+                                // handful of buffers, not thousands.
+                                if m.len() > 64 {
+                                    m.clear();
+                                }
+                                m.insert(key, (elems.clone(), rc.clone()));
+                                rc
+                            });
+                            // The last line start at or before `off`.
+                            let idx = starts.partition_point(|&s| s <= off).saturating_sub(1);
+                            Ok(Val::Int(if name == "lineAt" {
+                                idx as i64 + 1
+                            } else {
+                                (off.min(elems.len()) - starts[idx]) as i64 + 1
+                            }))
+                        }
+                        (other, _) => {
+                            Err(format!("{name} takes an Array<UInt8>, found {other:?}").into())
+                        }
+                    },
+                    "array" => Ok(Val::Array(std::rc::Rc::new(Vec::new()))),
                     "push" => match &vals[0] {
                         Val::Array(elems) => {
                             let mut next = elems.clone();
-                            next.push(vals[1].clone());
+                            std::rc::Rc::make_mut(&mut next).push(vals[1].clone());
                             Ok(Val::Array(next))
                         }
                         other => Err(format!("push of non-Array {other:?}").into()),
@@ -2976,7 +3278,7 @@ impl<'a> Interp<'a> {
                         (Val::Map(pairs), Val::Str(k)) => Ok(Val::Option(
                             pairs
                                 .iter()
-                                .find(|(pk, _)| pk == k)
+                                .find(|(pk, _)| pk.as_str() == k.as_str())
                                 .map(|(_, v)| Box::new(v.clone())),
                         )),
                         _ => Err("at of non-Array/Int64".into()),
@@ -2984,7 +3286,7 @@ impl<'a> Interp<'a> {
                     // `m.has(k)` (RFC-0028) — membership test.
                     "@has" => match (&vals[0], &vals[1]) {
                         (Val::Map(pairs), Val::Str(k)) => {
-                            Ok(Val::Bool(pairs.iter().any(|(pk, _)| pk == k)))
+                            Ok(Val::Bool(pairs.iter().any(|(pk, _)| pk.as_str() == k.as_str())))
                         }
                         _ => Err("`has` needs a Map and a String key".into()),
                     },
@@ -2992,7 +3294,7 @@ impl<'a> Interp<'a> {
                     // insertion order (safe to mutate the map while iterating it).
                     "@keys" => match &vals[0] {
                         Val::Map(pairs) => Ok(Val::Array(
-                            pairs.iter().map(|(k, _)| Val::Str(k.clone())).collect(),
+                            pairs.iter().map(|(k, _)| Val::Str(std::rc::Rc::new(k.clone()))).collect::<Vec<_>>().into(),
                         )),
                         other => Err(format!("`keys` needs a Map, found {other:?}").into()),
                     },
@@ -3154,7 +3456,7 @@ impl<'a> Interp<'a> {
                         let mut env = vec![map
                             .iter()
                             .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
-                            .collect::<HashMap<_, _>>()];
+                            .collect::<Frame>()];
                         match self.expr(pred, &mut env)? {
                             Val::Bool(true) => {}
                             Val::Bool(false) => {
@@ -3174,6 +3476,31 @@ impl<'a> Interp<'a> {
                     }
                 }
                 Ok(Val::Record(map))
+            }
+            // `xs.length` on a local Array or Map, read WITHOUT copying `xs` —
+            // same reason as the index peephole above. A scan loop mentions it in
+            // its condition on every iteration, so cloning the collection just to
+            // ask how long it is costs as much as the scan itself. The guard
+            // matches only when it will succeed, so nothing needs a fallback.
+            Expr::Field { expr, field, .. }
+                if field == "length"
+                    && matches!(&**expr, Expr::Var { .. })
+                    && {
+                        let Expr::Var { name: v, .. } = &**expr else { unreachable!() };
+                        scope
+                            .iter()
+                            .rev()
+                            .find_map(|f| f.get(v))
+                            .is_some_and(|s| matches!(s.v, Val::Array(_) | Val::Map(_)))
+                    } =>
+            {
+                let Expr::Var { name: v, .. } = &**expr else { unreachable!() };
+                let slot = scope.iter().rev().find_map(|f| f.get(v)).expect("guarded above");
+                Ok(match &slot.v {
+                    Val::Array(items) => Val::Int(items.len() as i64),
+                    Val::Map(pairs) => Val::Int(pairs.len() as i64),
+                    _ => unreachable!("guarded above"),
+                })
             }
             Expr::Field { expr, field, .. } => {
                 let v = self.expr(expr, scope)?;
@@ -3210,7 +3537,7 @@ impl<'a> Interp<'a> {
                 for e in elems {
                     vals.push(self.expr(e, scope)?);
                 }
-                Ok(Val::Array(vals))
+                Ok(Val::Array(std::rc::Rc::new(vals)))
             }
             // A map literal (RFC-0028): evaluate entries in written order as
             // insertions — a repeated key updates in place (keeps its slot).
@@ -3226,10 +3553,10 @@ impl<'a> Interp<'a> {
                         }
                     };
                     let v = self.expr(ve, scope)?;
-                    if let Some(slot) = pairs.iter_mut().find(|(pk, _)| pk == &k) {
+                    if let Some(slot) = pairs.iter_mut().find(|(pk, _)| pk.as_str() == k.as_str()) {
                         slot.1 = v;
                     } else {
-                        pairs.push((k, v));
+                        pairs.push(((*k).clone(), v));
                     }
                 }
                 Ok(Val::Map(pairs))
@@ -3258,7 +3585,7 @@ impl<'a> Interp<'a> {
             None => return Ok(true),
             Some(p) => p,
         };
-        let mut scope = vec![HashMap::from([(
+        let mut scope = vec![Frame::from_iter([(
             "value".to_string(),
             Slot::untyped(v.clone()),
         )])];
@@ -3277,13 +3604,13 @@ impl<'a> Interp<'a> {
         &self,
         sv: Val,
         arms: &[MatchArm],
-        scope: &mut Vec<HashMap<String, Slot>>,
+        scope: &mut Vec<Frame>,
     ) -> Result<Val, Ctrl> {
         for arm in arms {
             let Some(bindings) = Self::match_pattern(&arm.pattern, &sv) else {
                 continue;
             };
-            scope.push(HashMap::new());
+            scope.push(Frame::default());
             for (name, val) in bindings {
                 scope.last_mut().unwrap().insert(name, Slot::untyped(val));
             }
@@ -3303,6 +3630,15 @@ impl<'a> Interp<'a> {
             (Pattern::None, Val::Option(None)) => Some(vec![]),
             (Pattern::Ok(b), Val::Result(true, v)) => Some(vec![(b.clone(), (**v).clone())]),
             (Pattern::Err(b), Val::Result(false, v)) => Some(vec![(b.clone(), (**v).clone())]),
+            // The `??` desugar's type-agnostic pair (RFC-0079): tag first, sum
+            // second, which is the whole point of having them.
+            (Pattern::Success(b), Val::Option(Some(v)) | Val::Result(true, v)) => {
+                Some(vec![(b.clone(), (**v).clone())])
+            }
+            (Pattern::Failure(b), Val::Result(false, v)) => {
+                Some(vec![(b.clone(), (**v).clone())])
+            }
+            (Pattern::Failure(_), Val::Option(None)) => Some(vec![]),
             (Pattern::Variant(n, binds), Val::Enum(vn, payload)) if n == vn => {
                 Some(binds.iter().cloned().zip(payload.iter().cloned()).collect())
             }
@@ -3534,7 +3870,7 @@ impl<'a> Interp<'a> {
             },
             (Val::Str(a), Val::Str(b)) => match op {
                 // `a + b` concatenates (replacing `concat`) — a fresh String.
-                Add => Ok(Val::Str(format!("{a}{b}"))),
+                Add => Ok(Val::Str(std::rc::Rc::new(format!("{a}{b}")))),
                 Eq => Ok(Val::Bool(a == b)),
                 NotEq => Ok(Val::Bool(a != b)),
                 // Ordering is byte-wise lexicographic (UTF-8 byte order — Rust's
@@ -3614,7 +3950,7 @@ impl<'a> Interp<'a> {
                                 let mut env = vec![map
                                     .iter()
                                     .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
-                                    .collect::<HashMap<_, _>>()];
+                                    .collect::<Frame>()];
                                 match self.expr(pred, &mut env)? {
                                     Val::Bool(b) => b,
                                     other => {
@@ -3661,10 +3997,10 @@ impl<'a> Interp<'a> {
             | (Type::ArrayN(inner, _), Val::Array(items))
             | (Type::SmallArray(inner, _), Val::Array(items)) => {
                 let mut out = Vec::with_capacity(items.len());
-                for it in items {
-                    out.push(self.coerce(it, inner)?);
+                for it in items.iter() {
+                    out.push(self.coerce(it.clone(), inner)?);
                 }
-                Ok(Val::Array(out))
+                Ok(Val::Array(std::rc::Rc::new(out)))
             }
             // A `Map<String, V>` coerces (and thus validates) every value into
             // `V` — the boundary re-validation for a predicated value type.
@@ -3712,7 +4048,7 @@ impl<'a> Interp<'a> {
     /// map). Covers the forms a codable value flows through: bindings/params,
     /// record literals, field access, `Some(..)`, indexing, numeric
     /// conversions, and user-function results.
-    fn type_of(&self, e: &Expr, scope: &[HashMap<String, Slot>]) -> Option<Type> {
+    fn type_of(&self, e: &Expr, scope: &[Frame]) -> Option<Type> {
         match e {
             Expr::Var { name, .. } => {
                 for frame in scope.iter().rev() {
@@ -3795,481 +4131,6 @@ impl<'a> Interp<'a> {
         None
     }
 
-    /// Encode a value to canonical JSON (RFC-0018), driven by its static type:
-    /// record fields in declaration order, `None` fields omitted, a bare `None`
-    /// as `null`, numbers via the canonical `scalar_to_string` rendering, and
-    /// the minimal escaping table.
-    fn encode_val(&self, v: &Val, ty: &Type, out: &mut String) -> Result<(), Ctrl> {
-        match crate::types::resolve(ty, &self.type_map) {
-            Type::Record(fields) => {
-                out.push('{');
-                let mut first = true;
-                if let Val::Record(map) = v {
-                    for f in &fields {
-                        let fv = match map.get(&f.name) {
-                            Some(x) => x,
-                            None => continue,
-                        };
-                        // A `None` record field is omitted entirely.
-                        if matches!(fv, Val::Option(None)) {
-                            continue;
-                        }
-                        if !first {
-                            out.push(',');
-                        }
-                        first = false;
-                        out.push('"');
-                        crate::codec::escape_into(&f.name, out);
-                        out.push_str("\":");
-                        self.encode_val(fv, &f.ty, out)?;
-                    }
-                }
-                out.push('}');
-            }
-            Type::Array(inner) | Type::ArrayN(inner, _) => {
-                out.push('[');
-                if let Val::Array(items) = v {
-                    for (i, it) in items.iter().enumerate() {
-                        if i > 0 {
-                            out.push(',');
-                        }
-                        self.encode_val(it, &inner, out)?;
-                    }
-                }
-                out.push(']');
-            }
-            // A `Map<String, V>` encodes as a JSON object (RFC-0028): keys
-            // JSON-escaped, values via V's codec, in insertion order.
-            Type::Map(_, val) => {
-                out.push('{');
-                if let Val::Map(pairs) = v {
-                    for (i, (k, pv)) in pairs.iter().enumerate() {
-                        if i > 0 {
-                            out.push(',');
-                        }
-                        out.push('"');
-                        crate::codec::escape_into(k, out);
-                        out.push_str("\":");
-                        self.encode_val(pv, &val, out)?;
-                    }
-                }
-                out.push('}');
-            }
-            Type::Option(inner) => match v {
-                Val::Option(Some(x)) => self.encode_val(x, &inner, out)?,
-                Val::Option(None) => out.push_str("null"),
-                other => self.encode_val(other, &inner, out)?,
-            },
-            Type::Str => {
-                out.push('"');
-                if let Val::Str(s) = v {
-                    crate::codec::escape_into(s, out);
-                }
-                out.push('"');
-            }
-            Type::Enum(vs) => {
-                // RFC-0024 wire tagging: a nullary variant is a bare string
-                // (byte-identical to the payload-less encoding); one payload is
-                // `{"Tag":<value>}`; two+ is `{"Tag":[v1,v2,...]}`.
-                if let Val::Enum(name, payloads) = v {
-                    let variant = vs.iter().find(|vt| &vt.name == name);
-                    let ptys = variant.map(|vt| vt.payload.as_slice()).unwrap_or(&[]);
-                    self.encode_variant(name, payloads, ptys, out)?;
-                }
-            }
-            Type::Result(t, e) => {
-                // `Result<T, E>` on the wire (RFC-0024): `{"Ok":<T>}` / `{"Err":<E>}`.
-                if let Val::Result(is_ok, payload) = v {
-                    let (tag, pty) = if *is_ok { ("Ok", &*t) } else { ("Err", &*e) };
-                    self.encode_variant(
-                        tag,
-                        std::slice::from_ref(&**payload),
-                        std::slice::from_ref(pty),
-                        out,
-                    )?;
-                }
-            }
-            Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool => {
-                out.push_str(&scalar_to_string(v));
-            }
-            other => {
-                return Err(format!("toJson: cannot encode type {other}").into());
-            }
-        }
-        Ok(())
-    }
-
-    /// Encode one enum/Result variant to its RFC-0024 wire form: a nullary
-    /// variant is a bare JSON string; a single payload is `{"Tag":<value>}`; two
-    /// or more payloads is `{"Tag":[v1,v2,...]}`.
-    fn encode_variant(
-        &self,
-        tag: &str,
-        payloads: &[Val],
-        ptys: &[Type],
-        out: &mut String,
-    ) -> Result<(), Ctrl> {
-        if ptys.is_empty() {
-            out.push('"');
-            crate::codec::escape_into(tag, out);
-            out.push('"');
-            return Ok(());
-        }
-        out.push('{');
-        out.push('"');
-        crate::codec::escape_into(tag, out);
-        out.push_str("\":");
-        if ptys.len() == 1 {
-            let pv = payloads.first().unwrap_or(&Val::Unit);
-            self.encode_val(pv, &ptys[0], out)?;
-        } else {
-            out.push('[');
-            for (i, pty) in ptys.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                let pv = payloads.get(i).unwrap_or(&Val::Unit);
-                self.encode_val(pv, pty, out)?;
-            }
-            out.push(']');
-        }
-        out.push('}');
-        Ok(())
-    }
-
-    /// Decode `s` into `Validation<tn>` (RFC-0018). Never traps; a parse error
-    /// or any accumulated `Issue` yields `Invalid([Issue])`.
-    fn decode_top(&self, tn: &str, s: &str) -> Val {
-        let json = match crate::codec::parse(s) {
-            Ok(j) => j,
-            Err(e) => {
-                let issue = self.issue_val("json.parse", "", &e.0);
-                return Val::Enum("Invalid".to_string(), vec![Val::Array(vec![issue])]);
-            }
-        };
-        let mut issues = Vec::new();
-        let target = Type::Named(tn.to_string());
-        let v = self.decode_val(&json, &target, "", &mut issues);
-        if issues.is_empty() {
-            Val::Enum("Valid".to_string(), vec![v.unwrap_or(Val::Unit)])
-        } else {
-            Val::Enum("Invalid".to_string(), vec![Val::Array(issues)])
-        }
-    }
-
-    /// Walk a parsed JSON node against a target type, building the value and
-    /// accumulating `Issue`s. Returns `None` when this node produced no value
-    /// (a structural failure) — the caller keeps going so every problem is
-    /// reported at once.
-    fn decode_val(
-        &self,
-        json: &crate::codec::JsonV,
-        ty: &Type,
-        path: &str,
-        issues: &mut Vec<Val>,
-    ) -> Option<Val> {
-        use crate::codec::JsonV;
-        // A named type decodes against its base, then runs its `where` clause
-        // (accumulating a `validate` Issue instead of trapping).
-        if let Type::Named(n) = ty {
-            let decl = self.type_map.get(n)?.clone();
-            let base_val = self.decode_val(json, &decl.base, path, issues)?;
-            if decl.predicate.is_some() {
-                let holds = self.run_predicate(&decl, &base_val).unwrap_or(false);
-                if !holds {
-                    issues.push(self.issue_val(
-                        "validate",
-                        path,
-                        &crate::codec::validate_message(&decl),
-                    ));
-                }
-            }
-            return Some(base_val);
-        }
-        match ty {
-            Type::Record(fields) => {
-                let obj_fields = match json {
-                    JsonV::Obj(fs) => fs,
-                    _ => {
-                        issues.push(self.type_issue(path, "object", json));
-                        return None;
-                    }
-                };
-                let get = |k: &str| obj_fields.iter().find(|(fk, _)| fk == k).map(|(_, v)| v);
-                let mut map = HashMap::new();
-                for f in fields {
-                    let child = crate::codec::field_path(path, &f.name);
-                    let ft = crate::types::resolve(&f.ty, &self.type_map);
-                    if let Type::Option(inner) = ft {
-                        // Absent OR null -> None; otherwise Some(decode).
-                        let val = match get(&f.name) {
-                            None | Some(JsonV::Null) => Val::Option(None),
-                            Some(j) => match self.decode_val(j, &inner, &child, issues) {
-                                Some(x) => Val::Option(Some(Box::new(x))),
-                                None => Val::Option(None),
-                            },
-                        };
-                        map.insert(f.name.clone(), val);
-                    } else {
-                        match get(&f.name) {
-                            None => {
-                                issues.push(self.issue_val(
-                                    "json.missing",
-                                    &child,
-                                    &crate::codec::missing_message(&f.name),
-                                ));
-                            }
-                            Some(j) => {
-                                if let Some(fv) = self.decode_val(j, &f.ty, &child, issues) {
-                                    map.insert(f.name.clone(), fv);
-                                }
-                            }
-                        }
-                    }
-                }
-                Some(Val::Record(map))
-            }
-            Type::Array(inner) => {
-                let items = match json {
-                    JsonV::Arr(items) => items,
-                    _ => {
-                        issues.push(self.type_issue(path, "array", json));
-                        return None;
-                    }
-                };
-                let mut out = Vec::new();
-                for (i, it) in items.iter().enumerate() {
-                    let child = crate::codec::index_path(path, i);
-                    if let Some(ev) = self.decode_val(it, inner, &child, issues) {
-                        out.push(ev);
-                    }
-                }
-                Some(Val::Array(out))
-            }
-            // A `Map<String, V>` decodes any JSON object (RFC-0028): document
-            // order becomes insertion order; each value is validated as `V` at
-            // path `field.<key>`. Duplicate keys mirror the record decoder's
-            // first-wins policy (`JsonV::get`/`__vyrn_vj_get`): the first
-            // occurrence's slot and value are kept.
-            Type::Map(_, val) => {
-                let obj_fields = match json {
-                    JsonV::Obj(fs) => fs,
-                    _ => {
-                        issues.push(self.type_issue(path, "object", json));
-                        return None;
-                    }
-                };
-                let mut pairs: Vec<(String, Val)> = Vec::new();
-                for (k, jv) in obj_fields {
-                    let child = crate::codec::field_path(path, k);
-                    if let Some(v) = self.decode_val(jv, val, &child, issues) {
-                        if !pairs.iter().any(|(pk, _)| pk == k) {
-                            pairs.push((k.clone(), v));
-                        }
-                    }
-                }
-                Some(Val::Map(pairs))
-            }
-            Type::Int => match json {
-                JsonV::Num(n) => match n.as_i64() {
-                    Some(i) => Some(Val::Int(i)),
-                    None => {
-                        issues.push(self.type_issue(path, "integer", json));
-                        None
-                    }
-                },
-                _ => {
-                    issues.push(self.type_issue(path, "integer", json));
-                    None
-                }
-            },
-            Type::IntN { bits, signed } => {
-                let ok = match json {
-                    JsonV::Num(n) => intn_from_num(n, *bits, *signed),
-                    _ => None,
-                };
-                match ok {
-                    Some(v) => Some(Val::IntN {
-                        v,
-                        bits: *bits,
-                        signed: *signed,
-                    }),
-                    None => {
-                        issues.push(self.type_issue(path, "integer", json));
-                        None
-                    }
-                }
-            }
-            Type::Float => match json {
-                JsonV::Num(n) => Some(Val::Float(n.as_f64())),
-                _ => {
-                    issues.push(self.type_issue(path, "number", json));
-                    None
-                }
-            },
-            Type::Float32 => match json {
-                JsonV::Num(n) => Some(Val::Float32(n.as_f64() as f32)),
-                _ => {
-                    issues.push(self.type_issue(path, "number", json));
-                    None
-                }
-            },
-            Type::Bool => match json {
-                JsonV::Bool(b) => Some(Val::Bool(*b)),
-                _ => {
-                    issues.push(self.type_issue(path, "boolean", json));
-                    None
-                }
-            },
-            Type::Str => match json {
-                JsonV::Str(s) => Some(Val::Str(s.clone())),
-                _ => {
-                    issues.push(self.type_issue(path, "string", json));
-                    None
-                }
-            },
-            Type::Enum(vs) => {
-                let expected = crate::codec::enum_expected(vs);
-                self.decode_variant(json, vs, &expected, path, issues)
-            }
-            Type::Result(t, e) => {
-                // `Result<T, E>` decodes from `{"Ok":<T>}` / `{"Err":<E>}`
-                // (RFC-0024) — a two-variant payload enum with single payloads.
-                let vs = vec![
-                    EnumVariant {
-                        name: "Ok".to_string(),
-                        payload: vec![(**t).clone()],
-                    },
-                    EnumVariant {
-                        name: "Err".to_string(),
-                        payload: vec![(**e).clone()],
-                    },
-                ];
-                let expected = crate::codec::result_expected();
-                self.decode_variant(json, &vs, &expected, path, issues)
-                    .map(|ev| match ev {
-                        Val::Enum(name, mut ps) => {
-                            Val::Result(name == "Ok", Box::new(ps.pop().unwrap_or(Val::Unit)))
-                        }
-                        other => other,
-                    })
-            }
-            Type::Option(inner) => match json {
-                JsonV::Null => Some(Val::Option(None)),
-                _ => self
-                    .decode_val(json, inner, path, issues)
-                    .map(|x| Val::Option(Some(Box::new(x)))),
-            },
-            _ => None,
-        }
-    }
-
-    /// Decode a payload enum / `Result` from its RFC-0024 wire form. A bare
-    /// string is a nullary variant; a one-key object `{"Tag":..}` names a payload
-    /// variant (single payload direct, tuple payload as an array). Exactly one
-    /// wire form per value: a payload variant as a bare string, a nullary variant
-    /// as an object, an unknown key, or a multi/zero-key object all fail with the
-    /// locked expected-one-of `json.type` Issue.
-    fn decode_variant(
-        &self,
-        json: &crate::codec::JsonV,
-        vs: &[EnumVariant],
-        expected: &str,
-        path: &str,
-        issues: &mut Vec<Val>,
-    ) -> Option<Val> {
-        use crate::codec::JsonV;
-        let mismatch = |me: &Self, issues: &mut Vec<Val>| {
-            issues.push(me.issue_val(
-                "json.type",
-                path,
-                &crate::codec::type_message(expected, json.kind()),
-            ));
-            None
-        };
-        match json {
-            JsonV::Str(s) => match vs.iter().find(|v| &v.name == s) {
-                Some(v) if v.payload.is_empty() => Some(Val::Enum(s.clone(), Vec::new())),
-                _ => mismatch(self, issues),
-            },
-            JsonV::Obj(members) => {
-                if members.len() != 1 {
-                    return mismatch(self, issues);
-                }
-                let (key, val) = &members[0];
-                match vs.iter().find(|v| &v.name == key) {
-                    Some(v) if !v.payload.is_empty() => {
-                        let child = crate::codec::field_path(path, key);
-                        let ptys = &v.payload;
-                        if ptys.len() == 1 {
-                            let pv = self.decode_val(val, &ptys[0], &child, issues);
-                            Some(Val::Enum(key.clone(), vec![pv.unwrap_or(Val::Unit)]))
-                        } else {
-                            let items = match val {
-                                JsonV::Arr(items) => items.clone(),
-                                _ => {
-                                    issues.push(self.type_issue(&child, "array", val));
-                                    return None;
-                                }
-                            };
-                            let mut payloads = Vec::new();
-                            for (i, pty) in ptys.iter().enumerate() {
-                                let node = items.get(i).cloned().unwrap_or(JsonV::Null);
-                                let ipath = crate::codec::index_path(&child, i);
-                                let iv = self.decode_val(&node, pty, &ipath, issues);
-                                payloads.push(iv.unwrap_or(Val::Unit));
-                            }
-                            Some(Val::Enum(key.clone(), payloads))
-                        }
-                    }
-                    _ => mismatch(self, issues),
-                }
-            }
-            _ => mismatch(self, issues),
-        }
-    }
-
-    /// Run a refined type's predicate as a boolean (no trap), for decode's
-    /// accumulating `validate` check. Mirrors `coerce`'s predicate evaluation:
-    /// a record base binds field names; a scalar base binds `value`.
-    fn run_predicate(&self, decl: &TypeDecl, v: &Val) -> Result<bool, Ctrl> {
-        let Some(pred) = &decl.predicate else {
-            return Ok(true);
-        };
-        if matches!(decl.base, Type::Record(_)) {
-            if let Val::Record(map) = v {
-                let mut env = vec![map
-                    .iter()
-                    .map(|(k, val)| (k.clone(), Slot::untyped(val.clone())))
-                    .collect::<HashMap<_, _>>()];
-                return match self.expr(pred, &mut env)? {
-                    Val::Bool(b) => Ok(b),
-                    _ => Ok(false),
-                };
-            }
-            return Ok(true);
-        }
-        self.validates(decl, v)
-    }
-
-    /// Build an `Issue { key, path, message }` record value.
-    fn issue_val(&self, key: &str, path: &str, message: &str) -> Val {
-        let mut m = HashMap::new();
-        m.insert("key".to_string(), Val::Str(key.to_string()));
-        m.insert("path".to_string(), Val::Str(path.to_string()));
-        m.insert("message".to_string(), Val::Str(message.to_string()));
-        Val::Record(m)
-    }
-
-    /// A `json.type` Issue: `expected <what>, found <kind>`.
-    fn type_issue(&self, path: &str, expected: &str, json: &crate::codec::JsonV) -> Val {
-        self.issue_val(
-            "json.type",
-            path,
-            &crate::codec::type_message(expected, json.kind()),
-        )
-    }
-
     fn as_ref(&self, v: &Val) -> Result<(usize, u64), Ctrl> {
         match v {
             Val::Ref { slot, gen } => Ok((*slot, *gen)),
@@ -4342,6 +4203,65 @@ mod tests {
     use super::{code_splice, lex_tokens, render_code, CodePiece, Ctrl, Val};
     use crate::run;
 
+    /// Run a single-source program that uses `toJson`, with `std/json` reachable.
+    ///
+    /// Since RFC-0078 M2b, `toJson`'s serializer IS that module's `emit`: the
+    /// builtin is a type-directed walk plus a call into Vyrn, and the module enters
+    /// the link by injection. `crate::run` takes a bare source with no resolver, so
+    /// it has no runtime library to inject — these tests go through the loader, with
+    /// the real `std/json` text so nothing here can drift from what ships.
+    /// RFC-0078 M4c widened it: `std/codecs`, `std/text` and `std/strpred` are
+    /// injected the same way for the thirteen builtins they implement, so every
+    /// runtime module is mapped here rather than one per helper.
+    fn run_json(src: &str) -> Result<i64, String> {
+        let files = crate::loader::MapResolver(
+            [
+                (
+                    "std/json.vyrn".to_string(),
+                    include_str!("../../../std/json.vyrn").to_string(),
+                ),
+                (
+                    "std/codecs.vyrn".to_string(),
+                    include_str!("../../../std/codecs.vyrn").to_string(),
+                ),
+                (
+                    "std/text.vyrn".to_string(),
+                    include_str!("../../../std/text.vyrn").to_string(),
+                ),
+                (
+                    "std/strpred.vyrn".to_string(),
+                    include_str!("../../../std/strpred.vyrn").to_string(),
+                ),
+                // RFC-0078 M3: `fromJson`'s untyped half, and the two modules it
+                // stands on. `std/jsondec` imports `std/jsonread` and `std/num`, and
+                // the loader resolves those like any other import, so all three have
+                // to be here even though only one is injected by name.
+                (
+                    "std/jsondec.vyrn".to_string(),
+                    include_str!("../../../std/jsondec.vyrn").to_string(),
+                ),
+                (
+                    "std/jsonread.vyrn".to_string(),
+                    include_str!("../../../std/jsonread.vyrn").to_string(),
+                ),
+                (
+                    "std/num.vyrn".to_string(),
+                    include_str!("../../../std/num.vyrn").to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let opts = crate::loader::LoadOptions {
+            std_root: Some("std".into()),
+            ..Default::default()
+        };
+        let program = crate::load(src, "main.vyrn", &opts, &files)
+            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("
+"))?;
+        crate::interp::run(&program)
+    }
+
     #[test]
     fn arithmetic_and_return() {
         assert_eq!(run("fn main() -> Int64 { return 2 + 3 * 4; }").unwrap(), 14);
@@ -4374,7 +4294,7 @@ mod tests {
                        let err = Box { s: Nothing, r: Err(\"boom\"), tags: [], opt: None } \
                        return same(ok) + same(err) \
                    }";
-        assert_eq!(run(src).unwrap(), 0);
+        assert_eq!(run_json(src).unwrap(), 0);
     }
 
     // ---- testing (RFC-0015) ---------------------------------------------
@@ -4445,7 +4365,7 @@ mod tests {
         );
         // "alpha\nbeta" is 10 bytes.
         assert_eq!(run(&src).unwrap(), 10);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.as_str());
     }
 
     #[test]
@@ -4487,7 +4407,7 @@ mod tests {
     #[test]
     fn rfc0044_write_atomic_replaces_and_leaves_no_tmp() {
         let path = temp_path("wa-ok");
-        std::fs::write(&path, "OLD").unwrap();
+        std::fs::write(path.as_str(), "OLD").unwrap();
         let src = format!(
             "fn writeAtomic(path: String, content: String) -> Result<Bool, String> {{ \
                  let tmp = \"\\{{path}}.tmp\" \
@@ -4498,9 +4418,9 @@ mod tests {
                      Ok(b) => 1, Err(e) => 0 }} }}"
         );
         assert_eq!(run(&src).unwrap(), 1);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "BRANDNEW");
+        assert_eq!(std::fs::read_to_string(path.as_str()).unwrap(), "BRANDNEW");
         assert!(!std::path::Path::new(&format!("{path}.tmp")).exists());
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.as_str());
     }
 
     /// THE atomicity proof: when the temp write FAILS, `writeAtomic` never touches
@@ -4512,7 +4432,7 @@ mod tests {
         let path = temp_path("wa-tear");
         let tmp = format!("{path}.tmp");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::write(&path, "ORIGINAL").unwrap();
+        std::fs::write(path.as_str(), "ORIGINAL").unwrap();
         std::fs::create_dir(&tmp).unwrap(); // writeFile("<path>.tmp") now fails
         let src = format!(
             "fn writeAtomic(path: String, content: String) -> Result<Bool, String> {{ \
@@ -4526,9 +4446,9 @@ mod tests {
         // The write reports failure...
         assert_eq!(run(&src).unwrap(), 0);
         // ...and — the point — the original target is untouched.
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ORIGINAL");
+        assert_eq!(std::fs::read_to_string(path.as_str()).unwrap(), "ORIGINAL");
         let _ = std::fs::remove_dir_all(&tmp);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.as_str());
     }
 
     /// `load(TypeName, path)` distinguishes the three honest outcomes: a missing
@@ -4560,7 +4480,7 @@ mod tests {
             outcome(&good),
         );
         // Missing=1, Corrupt=2, Loaded(41)=141.
-        assert_eq!(run(&src).unwrap(), 1_002_141);
+        assert_eq!(run_json(&src).unwrap(), 1_002_141);
         let _ = std::fs::remove_file(&good);
         let _ = std::fs::remove_file(&bad);
     }
@@ -4585,7 +4505,7 @@ mod tests {
                  return g * 100 + m * 10 + c }}"
         );
         // good=7, missing=9(default), corrupt=9(default) -> 799.
-        assert_eq!(run(&src).unwrap(), 799);
+        assert_eq!(run_json(&src).unwrap(), 799);
         let _ = std::fs::remove_file(&good);
         let _ = std::fs::remove_file(&bad);
     }
@@ -4595,7 +4515,7 @@ mod tests {
     #[test]
     fn rfc0044_fsync_file_ok_and_missing() {
         let path = temp_path("fs-ok");
-        std::fs::write(&path, "durable").unwrap();
+        std::fs::write(path.as_str(), "durable").unwrap();
         let src = format!(
             "fn main() -> Int64 {{ \
                  let a = match fsyncFile(\"{path}\") {{ Ok(b) => 1, Err(e) => 0 }} \
@@ -4603,7 +4523,7 @@ mod tests {
                  return a * 10 + b }}"
         );
         assert_eq!(run(&src).unwrap(), 11);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.as_str());
     }
 
     #[test]
@@ -4665,7 +4585,7 @@ mod tests {
     #[test]
     fn read_file_bytes_reads_binary() {
         let path = temp_path("binary");
-        std::fs::write(&path, [0u8, 1, 2, 0xFF, 0]).unwrap();
+        std::fs::write(path.as_str(), [0u8, 1, 2, 0xFF, 0]).unwrap();
         let src = format!(
             "fn main() -> Int64 {{ \
                  return match readFileBytes(\"{path}\") {{ \
@@ -4675,7 +4595,7 @@ mod tests {
         );
         // Binary read: NUL and invalid-UTF-8 bytes are fine, all 5 come back.
         assert_eq!(run(&src).unwrap(), 5);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.as_str());
     }
 
     #[test]
@@ -5164,7 +5084,7 @@ mod tests {
         // An injection attempt: a String value carrying Vyrn syntax becomes an
         // escaped string LITERAL, never code (splice-rule safety by construction).
         let evil = "ev\"; dropTables(); \"";
-        let pieces = code_splice(&Val::Str(evil.to_string()), 0).unwrap();
+        let pieces = code_splice(&Val::Str(std::rc::Rc::new(evil.to_string())), 0).unwrap();
         assert_eq!(pieces.len(), 1);
         match &pieces[0] {
             CodePiece::Text(t) => {
@@ -5194,7 +5114,7 @@ mod tests {
     #[test]
     fn splice_bad_identifier_names_the_problem() {
         // `a b` (a space) in identifier position is a comptime error.
-        let err = code_splice(&Val::Str("a b".to_string()), 2).unwrap_err();
+        let err = code_splice(&Val::Str(std::rc::Rc::new("a b".to_string())), 2).unwrap_err();
         let msg = match err {
             Ctrl::Err(s) => s,
             _ => panic!("expected Err"),
@@ -5206,10 +5126,10 @@ mod tests {
     #[test]
     fn splice_keyword_is_rejected_in_identifier_position() {
         // A keyword is not a valid standalone identifier.
-        assert!(code_splice(&Val::Str("fn".to_string()), 2).is_err());
+        assert!(code_splice(&Val::Str(std::rc::Rc::new("fn".to_string())), 2).is_err());
         // A valid identifier is accepted verbatim.
         assert_eq!(
-            code_splice(&Val::Str("greet".to_string()), 2).unwrap(),
+            code_splice(&Val::Str(std::rc::Rc::new("greet".to_string())), 2).unwrap(),
             vec![CodePiece::Text("greet".to_string())]
         );
     }
@@ -5219,10 +5139,10 @@ mod tests {
         // A fragment (ctx 1) merges with adjacent word chars, so a leading digit
         // is fine; a space or symbol is not.
         assert_eq!(
-            code_splice(&Val::Str("123".to_string()), 1).unwrap(),
+            code_splice(&Val::Str(std::rc::Rc::new("123".to_string())), 1).unwrap(),
             vec![CodePiece::Text("123".to_string())]
         );
-        assert!(code_splice(&Val::Str("a-b".to_string()), 1).is_err());
+        assert!(code_splice(&Val::Str(std::rc::Rc::new("a-b".to_string())), 1).is_err());
     }
 
     #[test]
@@ -5263,7 +5183,7 @@ mod tests {
         let toks = lex_tokens("// props here\nlet x = 1");
         assert!(
             !toks.iter().any(|t| matches!(t, Val::Record(r)
-                if matches!(r.get("text"), Some(Val::Str(s)) if s == "props"))),
+                if matches!(r.get("text"), Some(Val::Str(s)) if s.as_str() == "props"))),
             "a comment's words must not leak as tokens"
         );
         // `</script>` inside a string is one string token, not markup.
@@ -5271,8 +5191,8 @@ mod tests {
         assert_eq!(toks.len(), 1);
         match &toks[0] {
             Val::Record(r) => {
-                assert_eq!(r.get("kind"), Some(&Val::Str("string".to_string())));
-                assert_eq!(r.get("text"), Some(&Val::Str("</script>".to_string())));
+                assert_eq!(r.get("kind"), Some(&Val::Str(std::rc::Rc::new("string".to_string()))));
+                assert_eq!(r.get("text"), Some(&Val::Str(std::rc::Rc::new("</script>".to_string()))));
             }
             other => panic!("expected a record token, got {other:?}"),
         }
@@ -5282,7 +5202,7 @@ mod tests {
             .iter()
             .filter_map(|t| match t {
                 Val::Record(r) => match r.get("text") {
-                    Some(Val::Str(s)) => Some(s.clone()),
+                    Some(Val::Str(s)) => Some((**s).clone()),
                     _ => None,
                 },
                 _ => None,
@@ -5297,7 +5217,7 @@ mod tests {
         let toks = lex_tokens("let x = \\");
         assert!(toks
             .iter()
-            .any(|t| matches!(t, Val::Record(r) if r.get("kind") == Some(&Val::Str("error".to_string())))));
+            .any(|t| matches!(t, Val::Record(r) if r.get("kind") == Some(&Val::Str(std::rc::Rc::new("error".to_string()))))));
     }
 
     #[test]
@@ -5405,10 +5325,12 @@ mod tests {
         // "café": 5 UTF-8 bytes but 4 code points; `é` is U+00E9 = 233.
         let bytes = "fn main() -> Int64 { return bytes(\"caf\\u{e9}\").length; }";
         assert_eq!(run(bytes).unwrap(), 5);
+        // `chars` is `std/text` since RFC-0078 M4c, so it needs the loader path.
+        // `bytes` and `byteLength` are the views that stayed, so `run` still serves them.
         let chars = "fn main() -> Int64 { return chars(\"caf\\u{e9}\").length; }";
-        assert_eq!(run(chars).unwrap(), 4);
+        assert_eq!(run_json(chars).unwrap(), 4);
         let cp = "fn main() -> Int64 { return chars(\"caf\\u{e9}\")[3]; }";
-        assert_eq!(run(cp).unwrap(), 233);
+        assert_eq!(run_json(cp).unwrap(), 233);
     }
 
     #[test]
@@ -5417,9 +5339,9 @@ mod tests {
         let len = "fn main() -> Int64 { return \"\\u{1F600}\".byteLength; }"; // 4 bytes
         assert_eq!(run(len).unwrap(), 4);
         let one = "fn main() -> Int64 { return chars(\"\\u{1F600}\").length; }"; // 1 char
-        assert_eq!(run(one).unwrap(), 1);
+        assert_eq!(run_json(one).unwrap(), 1);
         let val = "fn main() -> Int64 { return chars(\"\\u{1F600}\")[0]; }";
-        assert_eq!(run(val).unwrap(), 128512);
+        assert_eq!(run_json(val).unwrap(), 128512);
     }
 
     #[test]
@@ -5437,40 +5359,24 @@ mod tests {
         );
     }
 
+    /// The six codecs, end to end (checker + loader + interpreter), on the routed
+    /// path (RFC-0078 M4c). There are no Rust helpers left to unit-test: the
+    /// implementation is `std/codecs`, so what is worth asserting here is that the
+    /// builtin still answers through the injected module — a round trip, and the
+    /// three refusals the deleted helper tests covered.
     #[test]
-    fn encoding_helpers_roundtrip() {
-        use super::{base64_decode, base64_encode, hex_decode, hex_encode, url_decode, url_encode};
-        assert_eq!(hex_encode("Hi"), "4869");
-        assert_eq!(hex_decode("4869").as_deref(), Some("Hi"));
-        assert_eq!(base64_encode("Hello"), "SGVsbG8=");
-        assert_eq!(base64_decode("SGVsbG8=").as_deref(), Some("Hello"));
-        assert_eq!(url_encode("a b&c"), "a%20b%26c");
-        assert_eq!(url_decode("a%20b%26c").as_deref(), Some("a b&c"));
-        // A UTF-8 round-trip through base64.
-        assert_eq!(
-            base64_decode(&base64_encode("café")).as_deref(),
-            Some("café")
-        );
+    fn encoding_builtins_route_through_std_codecs() {
+        let src = "fn main() -> Int64 {                    let d = base64Decode(base64Encode(\"hey\"))                    if match d { Some(s) => s, None => \"\" } != \"hey\" { return 1 }                    if hexEncode(\"Hi\") != \"4869\" { return 2 }                    if urlEncode(\"a b&c\") != \"a%20b%26c\" { return 3 }                    if match hexDecode(\"zz\") { Some(s) => 1, None => 0 } != 0 { return 4 }                    if match base64Decode(\"bad\") { Some(s) => 1, None => 0 } != 0 { return 5 }                    if match urlDecode(\"%ZZ\") { Some(s) => 1, None => 0 } != 0 { return 6 }                    return 0 }";
+        assert_eq!(run_json(src).unwrap(), 0);
     }
 
+    /// The seam M2b named, restated for M4c's builtins: a bare source with no
+    /// resolver has no runtime library to inject, so a routed builtin refuses
+    /// loudly instead of silently answering from a second definition.
     #[test]
-    fn encoding_rejects_bad_input() {
-        use super::{base64_decode, hex_decode, url_decode};
-        assert_eq!(hex_decode("zz"), None); // non-hex
-        assert_eq!(hex_decode("abc"), None); // odd length
-        assert_eq!(hex_decode("ff"), None); // 0xFF is not valid UTF-8
-        assert_eq!(base64_decode("bad"), None); // length not a multiple of 4
-        assert_eq!(base64_decode("////"), None); // decodes to non-UTF-8 bytes
-        assert_eq!(url_decode("%ZZ"), None); // bad percent escape
-    }
-
-    #[test]
-    fn encoding_builtins_in_program() {
-        // Exercised end-to-end (checker + interp) with an Option result.
-        let src = "fn main() -> Int64 { \
-                   let d = base64Decode(base64Encode(\"hey\")); \
-                   return match d { Some(s) => s.byteLength, None => 0 }; }";
-        assert_eq!(run(src).unwrap(), 3);
+    fn a_routed_builtin_without_a_std_root_refuses_by_name() {
+        let e = run("fn main() -> Int64 { return hexEncode(\"hi\").byteLength }").unwrap_err();
+        assert!(e.contains("implemented in Vyrn"), "{e}");
     }
 
     #[test]
@@ -5483,15 +5389,17 @@ mod tests {
 
     #[test]
     fn string_predicate_methods() {
-        let c = "fn main() -> Int64 { if contains(\"hello\", \"ell\") { return 1; } return 0; }";
-        assert_eq!(run(c).unwrap(), 1);
-        let s = "fn main() -> Int64 { if startsWith(\"hello\", \"he\") { return 1; } return 0; }";
-        assert_eq!(run(s).unwrap(), 1);
-        let e = "fn main() -> Int64 { if endsWith(\"hello\", \"lo\") { return 1; } return 0; }";
-        assert_eq!(run(e).unwrap(), 1);
+        // Routed to `std/strpred` since RFC-0078 M4c, so this goes through the
+        // loader — `run` has no resolver and therefore no module to inject.
+        let c = "fn main() -> Int64 { if contains(\"hello\", \"ell\") { return 1 } return 0 }";
+        assert_eq!(run_json(c).unwrap(), 1);
+        let s = "fn main() -> Int64 { if startsWith(\"hello\", \"he\") { return 1 } return 0 }";
+        assert_eq!(run_json(s).unwrap(), 1);
+        let e = "fn main() -> Int64 { if endsWith(\"hello\", \"lo\") { return 1 } return 0 }";
+        assert_eq!(run_json(e).unwrap(), 1);
         // `endsWith` guards against a suffix longer than the string.
-        let g = "fn main() -> Int64 { if endsWith(\"hi\", \"ahoy\") { return 1; } return 0; }";
-        assert_eq!(run(g).unwrap(), 0);
+        let g = "fn main() -> Int64 { if endsWith(\"hi\", \"ahoy\") { return 1 } return 0 }";
+        assert_eq!(run_json(g).unwrap(), 0);
     }
 
     #[test]
@@ -6413,7 +6321,7 @@ mod tests {
                        let p = P { name: \"a\\\"b\", age: 30, ok: true } \
                        if toJson(p) == \"{\\\"name\\\":\\\"a\\\\\\\"b\\\",\\\"age\\\":30,\\\"ok\\\":true}\" { return 1; } \
                        return 0; }";
-        assert_eq!(run(src).unwrap(), 1);
+        assert_eq!(run_json(src).unwrap(), 1);
     }
 
     #[test]
@@ -6423,7 +6331,7 @@ mod tests {
                        let p = P { name: \"x\", nick: None } \
                        if toJson(p) == \"{\\\"name\\\":\\\"x\\\"}\" { return 1; } \
                        return 0; }";
-        assert_eq!(run(src).unwrap(), 1);
+        assert_eq!(run_json(src).unwrap(), 1);
     }
 
     #[test]
@@ -6438,7 +6346,7 @@ mod tests {
                            Invalid(iss) => 0 - iss.length, \
                        }; }";
         // age 36 + name length 3 = 39.
-        assert_eq!(run(src).unwrap(), 39);
+        assert_eq!(run_json(src).unwrap(), 39);
     }
 
     #[test]
@@ -6450,7 +6358,7 @@ mod tests {
                            Valid(w) => w.n - 9007199254740992, \
                            Invalid(iss) => 0 - iss.length, \
                        }; }";
-        assert_eq!(run(src).unwrap(), 1);
+        assert_eq!(run_json(src).unwrap(), 1);
     }
 
     #[test]
@@ -6461,7 +6369,7 @@ mod tests {
                            Valid(u) => match u.nick { Some(s) => 2, None => 1, }, \
                            Invalid(iss) => 0 - iss.length, \
                        }; }";
-        assert_eq!(run(src).unwrap(), 1);
+        assert_eq!(run_json(src).unwrap(), 1);
     }
 
     #[test]
@@ -6473,7 +6381,7 @@ mod tests {
                            Invalid(iss) => eq(iss[0].key, \"json.missing\") + eq(iss[0].path, \"age\") \
                                + eq(iss[0].message, \"missing required field `age`\"), \
                        }; }";
-        assert_eq!(run(&format!("{EQ}{src}")).unwrap(), 3);
+        assert_eq!(run_json(&format!("{EQ}{src}")).unwrap(), 3);
     }
 
     #[test]
@@ -6485,7 +6393,7 @@ mod tests {
                            Invalid(iss) => eq(iss[0].key, \"json.type\") + eq(iss[0].path, \"age\") \
                                + eq(iss[0].message, \"expected integer, found string\"), \
                        }; }";
-        assert_eq!(run(&format!("{EQ}{src}")).unwrap(), 3);
+        assert_eq!(run_json(&format!("{EQ}{src}")).unwrap(), 3);
     }
 
     #[test]
@@ -6499,7 +6407,7 @@ mod tests {
                            Valid(u) => 0, \
                            Invalid(iss) => iss.length, \
                        }; }";
-        assert_eq!(run(src).unwrap(), 2);
+        assert_eq!(run_json(src).unwrap(), 2);
     }
 
     #[test]
@@ -6512,7 +6420,7 @@ mod tests {
                            Invalid(iss) => eq(iss[0].key, \"validate\") + eq(iss[0].path, \"age\") \
                                + eq(iss[0].message, \"validation failed for `Age`\"), \
                        }; }";
-        assert_eq!(run(&format!("{EQ}{src}")).unwrap(), 3);
+        assert_eq!(run_json(&format!("{EQ}{src}")).unwrap(), 3);
     }
 
     #[test]
@@ -6524,7 +6432,7 @@ mod tests {
                            Invalid(iss) => iss.length + eq(iss[0].key, \"json.parse\") + eq(iss[0].path, \"\"), \
                        }; }";
         // one parse issue + key match + path match = 3.
-        assert_eq!(run(&format!("{EQ}{src}")).unwrap(), 3);
+        assert_eq!(run_json(&format!("{EQ}{src}")).unwrap(), 3);
     }
 
     #[test]
@@ -6538,7 +6446,7 @@ mod tests {
                            return match fromJson(P, s) { Valid(q) => 1, Invalid(iss) => 0, }; \
                        } \
                        return 5; }";
-        assert_eq!(run(src).unwrap(), 1);
+        assert_eq!(run_json(src).unwrap(), 1);
     }
 
     // ---- function values (RFC-0023) -------------------------------------

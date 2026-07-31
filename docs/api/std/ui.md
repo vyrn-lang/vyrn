@@ -24,7 +24,8 @@ A page module EXPORTS:
   - `type Params = { id: Int64, … }` when it has `[bracket]` segments — the
     field NAMES must match the segments exactly (checked via `moduleInterface`
     at generation time). v1 supports `Int64` params only.
-  - optionally `fn load(p: Params) -> Validation<Data>` and then
+  - optionally `fn data() -> ParamQuery<Params, Validation<Data>>` (the `data`
+    member of the `Page` contract below, RFC-0071) and then
     `fn page(p: Params, d: Data) -> Html`. On `Invalid` the synthesized router
     renders an error page (422) built with `std/html`, listing the issues.
 
@@ -77,6 +78,373 @@ fn badRequest(message: String) -> PageError
 
 A 400 `PageError`.
 
+## PageData
+
+```vyrn
+type PageData = Loading | Ready(T)
+```
+
+The data a lazy page's view is rendered over: `Loading` before the data has
+arrived (client nav only), `Ready(T)` once it has (always, server-side).
+
+## Meta
+
+```vyrn
+type Meta = { name: String, content: String }
+```
+
+One `<meta name=… content=…>` a page contributes to the document head.
+
+## Head
+
+```vyrn
+type Head = { title: Option<String>, stylesheets: Array<String>, modules: Array<String>, scripts: Array<String>, meta: Array<Meta> }
+```
+
+What a page contributes to the document head.
+
+Exactly what the `head { … }` block could express — a title, stylesheet
+links, module and classic script includes — plus `meta`, which the block
+could not. Build one from `noHead()` and the `with*` combinators:
+
+    export fn head() -> Head {
+        return withModule(noHead(), "/app.js")
+    }
+
+Elements are emitted stylesheets-then-modules-then-scripts-then-meta, each
+group in the order it was added.
+
+## noHead
+
+```vyrn
+fn noHead() -> Head
+```
+
+The empty head — no title, no includes. The default for a page that declares
+no `head`, and the base every `with*` combinator builds on.
+
+## withTitle
+
+```vyrn
+fn withTitle(h: Head, title: String) -> Head
+```
+
+`h` with the document title set. The page's title wins over its layouts'.
+
+## withStylesheet
+
+```vyrn
+fn withStylesheet(h: Head, href: String) -> Head
+```
+
+`h` with a `<link rel="stylesheet" href=…>` appended.
+
+## withModule
+
+```vyrn
+fn withModule(h: Head, src: String) -> Head
+```
+
+`h` with a `<script type="module" src=…>` appended.
+
+## withScript
+
+```vyrn
+fn withScript(h: Head, src: String) -> Head
+```
+
+`h` with a classic `<script src=…>` appended.
+
+## withMeta
+
+```vyrn
+fn withMeta(h: Head, name: String, content: String) -> Head
+```
+
+`h` with a `<meta name=… content=…>` appended.
+
+## headHtml
+
+```vyrn
+fn headHtml(h: Head) -> Array<Html>
+```
+
+A head's elements, in the document order `document(title, head, body)` emits.
+Byte-identical to what the `head { … }` block compiled to, element for
+element — which is what keeps a migrated page's SSR bytes unchanged.
+
+## headTitleOf
+
+```vyrn
+fn headTitleOf(h: Head) -> String
+```
+
+A head's document title, or "" when it declares none — the spelling
+`uiFirst` composes through the layout chain.
+
+## Query
+
+```vyrn
+type Query = { run: fn() -> T }
+```
+
+A page's data: the call that produces it, deferred until the router asks.
+
+    export fn data() -> Query<Array<Paste>> {
+        return query(|| listPastes().pastes)
+    }
+
+The page BLOCKS on this — the document is not sent until the data lands. For
+render-then-fill, return a [`Lazy`] instead.
+
+## Lazy
+
+```vyrn
+type Lazy = { run: fn() -> T }
+```
+
+A page's data when the page renders LAZILY (RFC-0070): the shell paints
+instantly on a client soft nav and the data region fills in when the payload
+lands.
+
+    export fn data() -> Lazy<Array<Paste>> {
+        return lazy(query(|| listPastes().pastes))
+    }
+
+This is a DISTINCT TYPE rather than a flag on `Query`, and that is the whole
+point (RFC-0071 M2b). Laziness decides the *view's* type (`PageData<T>` versus
+`T`), so the generator has to know it at generation time; a runtime `lazy`
+field meant reading the `lazy(…)` call out of `data`'s body — a source scan,
+which is the practice this RFC exists to end. As a type it is reflection.
+
+## ParamQuery
+
+```vyrn
+type ParamQuery = { run: fn(P) -> T }
+```
+
+A page's data when it depends on the route parameters: the deferred call
+receives the page's own `Params`.
+
+    export fn data() -> ParamQuery<Params, Result<Paste, PageError>> {
+        return paramQuery(|p: Params| fetch(p.id))
+    }
+
+`Params` is declared per page, in the page's own module, which is exactly why
+`std/ui` cannot name it — so it is an open member type parameter, resolved at
+the use site (RFC-0071 M2b).
+
+## ParamLazy
+
+```vyrn
+type ParamLazy = { run: fn(P) -> T }
+```
+
+[`ParamQuery`] rendered lazily — the params-taking counterpart of [`Lazy`].
+
+## query
+
+```vyrn
+fn query<T>(run: fn() -> T) -> Query<T>
+```
+
+A query over `run`, resolved before the page renders.
+
+## lazy
+
+```vyrn
+fn lazy<T>(q: Query<T>) -> Lazy<T>
+```
+
+`q` marked lazy: the page renders its shell and a skeleton first, then fills
+the data region in. The server always has the data, so SSR is unaffected.
+
+## paramQuery
+
+```vyrn
+fn paramQuery<P, T>(run: fn(P) -> T) -> ParamQuery<P, T>
+```
+
+A query whose deferred call receives the page's route parameters.
+
+## paramLazy
+
+```vyrn
+fn paramLazy<P, T>(q: ParamQuery<P, T>) -> ParamLazy<P, T>
+```
+
+`q` marked lazy — the params-taking counterpart of [`lazy`].
+
+## runQuery
+
+```vyrn
+fn runQuery<T>(q: Query<T>) -> T
+```
+
+Run a query, producing the page's data.
+
+## runLazy
+
+```vyrn
+fn runLazy<T>(q: Lazy<T>) -> T
+```
+
+Run a lazy query. Identical to [`runQuery`] — laziness is about how the
+document is delivered, never about whether the data is fetched.
+
+## runParamQuery
+
+```vyrn
+fn runParamQuery<P, T>(q: ParamQuery<P, T>, p: P) -> T
+```
+
+Run a params-taking query over this request's parameters.
+
+## runParamLazy
+
+```vyrn
+fn runParamLazy<P, T>(q: ParamLazy<P, T>, p: P) -> T
+```
+
+Run a lazy params-taking query.
+
+## noQuery
+
+```vyrn
+fn noQuery() -> Query<Unit>
+```
+
+The absent query — the default for a page that declares no `data`, and the
+value a generator substitutes when it finds none. A page with no data has
+nothing to produce, which is what `Query<Unit>` says.
+
+## uiNoView
+
+```vyrn
+fn uiNoView() -> Html
+```
+
+The absent view — the default that makes `page` an optional member. A page
+exports `page` or `respond`, never both and never neither, so neither default
+is ever substituted; they exist so that a page writing one is not reported
+for omitting the other.
+
+## uiNoRespond
+
+```vyrn
+fn uiNoRespond() -> Response
+```
+
+The absent raw response. See [`uiNoView`].
+
+## uiDataQuery
+
+```vyrn
+fn uiDataQuery() -> Int64
+```
+
+The `data` member's alternative-signature indices, as `matchedMember` reports
+them — named once here so the generator never spells a bare 2 (RFC-0071 M2b).
+Declaration order in `contract Page` is the contract; these four functions are
+the only thing that has to move if it changes.
+
+## uiDataLazy
+
+```vyrn
+fn uiDataLazy() -> Int64
+```
+
+`fn data() -> Lazy<T>` — no params, render-then-fill.
+
+## uiDataParamQuery
+
+```vyrn
+fn uiDataParamQuery() -> Int64
+```
+
+`fn data() -> ParamQuery<P, T>` — params, blocking.
+
+## uiDataParamLazy
+
+```vyrn
+fn uiDataParamLazy() -> Int64
+```
+
+`fn data() -> ParamLazy<P, T>` — params, render-then-fill.
+
+## uiWantsData
+
+```vyrn
+fn uiWantsData(req: Request) -> Bool
+```
+
+Whether `req` asked for a page's DATA representation rather than its document
+(RFC-0072 M4).
+
+The rule: JSON wins only when the client NAMED `application/json` and did not
+also name `text/html`. The document is the DEFAULT representation, so a browser
+navigation (`text/html,application/xhtml+xml,…,*/*;q=0.8`), a bare `*/*`, and a
+missing `Accept` all get HTML — which is also what keeps an ordinary `GET`
+byte-identical to what it answered before this milestone.
+
+Full q-value ranking is deliberately not implemented. It would be a second
+content-negotiation engine to keep honest against the first, and no client that
+reaches this router separates these two types by weight alone: a document
+navigation never names `application/json`, and `vyrn-nav` sends it alone.
+
+## uiPayload
+
+```vyrn
+fn uiPayload(page: String, title: String, props: String, params: String) -> String
+```
+
+Assemble a page data payload. `props`/`params` are already JSON (a `toJson`
+result, or the literal `null`); `page`/`title` are JSON-encoded here.
+
+## uiErrorPayload
+
+```vyrn
+fn uiErrorPayload(status: Int64, props: String) -> String
+```
+
+The `@error` data payload — the page the client renders on a load miss. Carries
+a `title` so vyrn-nav v3 sets `document.title` on a client-rendered error.
+
+## uiDataResponse
+
+```vyrn
+fn uiDataResponse(body: String) -> Response
+```
+
+Wrap a payload body in a `200 application/json` `Response`. A negotiated request
+is a DATA fetch: it always answers 200 (the payload's `page`/`status` describe
+what to render), while the DOCUMENT channel still returns a real 404 etc.
+
+`vary: "Accept"` is what makes one URL with two representations safe to cache:
+without it a shared cache would store whichever came first and hand a page's
+JSON to a browser asking for its HTML.
+
+## uiDataMiss
+
+```vyrn
+fn uiDataMiss() -> Response
+```
+
+The data response for a true miss (no route matched): the themed error page's
+payload at 404.
+
+## uiErrorResponseOf
+
+```vyrn
+fn uiErrorResponseOf(e: PageError) -> Response
+```
+
+The `@error` data response for a load failure. Takes the `PageError` as a TYPED
+parameter so `toJson`/field access see its concrete type — a `PageError` bound
+directly from a `Result` match arm (`Err(e)`) otherwise loses its type for
+`toJson` (RFC-0069 §2), the same reason the loaded data goes through the page's
+own `encodeProps`.
+
 ## pages
 
 ```vyrn
@@ -96,3 +464,20 @@ fn pagesThemed(dir: String, theme: String) -> String
 page in `dir` compiles its template classes against `theme` (a static class is
 proven `⊆ Tw` at compile time, a dynamic one coerces at runtime). `.vyrn` pages
 are unaffected. `theme` resolves relative to the importing module, like `dir`.
+
+## pagesClient
+
+```vyrn
+fn pagesClient(dir: String) -> String
+```
+
+`pagesClient(dir)` — synthesize the CLIENT page bundle from `dir` (RFC-0069 §1).
+
+## pagesClientThemed
+
+```vyrn
+fn pagesClientThemed(dir: String, theme: String) -> String
+```
+
+`pagesClientThemed(dir, theme)` — the themed client bundle (RFC-0069 §1); the
+server side uses `pagesThemed`, this its client counterpart.

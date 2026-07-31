@@ -11,24 +11,26 @@ trap path (one canonical `error: ...` wording on stderr, exit 1, everywhere)
 and the canonical I/O error strings (RFC-0014). The whole corpus is kept
 canonical by `vyrn fmt` (RFC-0017) and re-verified by the parity harness.
 The permanent corpus harness is
-`cargo test -p vyrn-cli --test parity -- --ignored` (needs clang; the wasm
-column runs when `tools/` holds a wasi-sysroot + wasmtime, or via
-`$WASI_SYSROOT`/`$VYRN_WASMTIME`; the known-divergent list is empty and must
-stay that way).
+`cargo test -p vyrn-cli --test parity -- --ignored` (needs clang for the NATIVE
+column, and a `wasmtime` for the wasm one — `tools/` or `$VYRN_WASMTIME`; the
+known-divergent list is empty and must stay that way).
 
-**WebAssembly**: `vyrn build prog.vyrn --target wasm` compiles the same
-LLVM IR against wasi-libc (`--target=wasm32-wasip1`). The runtime is
-libc-portable: stream handles and all size_t-sensitive calls (`strlen`,
-`malloc`, `realloc`, `strncmp`, `snprintf`) route through a tiny embedded C
-shim with 64-bit-clean prototypes, and the C `main` lives in the shim (the IR
-exports `vyrn_entry`), so MSVC, glibc, and wasi-libc all link the same module.
+**WebAssembly**: `vyrn build prog.vyrn --target wasm` emits the module
+**directly** — no LLVM, no clang, no wasi sysroot, no builtins archive
+(RFC-0077). The native target keeps the textual-IR route through clang, where the
+runtime stays libc-portable: stream handles and all size_t-sensitive calls
+(`strlen`, `malloc`, `realloc`, `strncmp`, `snprintf`) route through a tiny
+embedded C shim with 64-bit-clean prototypes, and the C `main` lives in the shim
+(the IR exports `vyrn_entry`), so MSVC and glibc link the same module. A wasm
+module instead carries its own ~40-function runtime, of which it keeps only what
+its own code reaches: `fib.wasm` is 1.4 KB where the clang path produced 277 KB.
 Exit codes are portable in 0..126 (WASI's constraint). **The browser demo
 ships** (`web/`): a hand-rolled WASI preview1 shim (`wasi-min.js`, zero
 dependencies) runs any `vyrn`-built module in a page — a compute-only vyrn
-module imports five preview1 functions (`fd_write`, `fd_fdstat_get`,
-`fd_close`, `fd_seek`, `proc_exit`); a module using input (RFC-0014) pulls in
-seven more (`args_get`, `args_sizes_get`, `fd_read`, `fd_fdstat_set_flags`,
-`fd_prestat_get`, `fd_prestat_dir_name`, `path_open`), which the shim serves
+module imports exactly two preview1 functions (`fd_write`, `proc_exit`); a module
+using input (RFC-0014) pulls in `args_get`, `args_sizes_get`, `fd_read`,
+`fd_close`, `fd_prestat_get`, `path_open` and `path_rename`, and a clock or
+random one `clock_time_get`, `random_get` and the `environ_*` pair, which the shim serves
 with *graceful degradation* — no argv, stdin at EOF, no filesystem — so
 `args()` is empty, `readLine()` is `None`, and `readFile` yields its canonical
 `Err` in-page instead of crashing. stdout/stderr stream into the page, and

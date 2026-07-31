@@ -3,14 +3,19 @@
 The same `vyrn build --target wasm` module that runs under wasmtime, executed
 in a browser by a hand-rolled WASI preview1 shim
 ([wasi-min.js](wasi-min.js)) — no frameworks, no toolchain in the page, zero
-dependencies (the project's no-crates ethos, applied to JS).
+dependencies (the project's no-crates ethos, applied to JS). Since RFC-0077 M5
+there is no toolchain on the *building* side either: `--target wasm` emits the
+module directly, so a page's worth of demos needs neither clang nor a WASI
+sysroot.
 
-A compute-only vyrn module imports five preview1 functions — `fd_write`,
-`fd_fdstat_get`, `fd_close`, `fd_seek`, `proc_exit`. A module using input
-(RFC-0014: `args`/`readLine`/`readFile`/`writeFile`) additionally pulls in
-`args_get`, `args_sizes_get`, `fd_read`, `fd_fdstat_set_flags`,
-`fd_prestat_get`, `fd_prestat_dir_name`, and `path_open` — twelve in total,
-which is the whole shim surface. The seven input syscalls get **graceful
+A compute-only vyrn module imports exactly two preview1 functions — `fd_write`
+and `proc_exit`. A module using input (RFC-0014: `args`/`readLine`/`readFile`/
+`writeFile`/`renameFile`) additionally pulls in `args_get`, `args_sizes_get`,
+`fd_read`, `fd_close`, `fd_prestat_get`, `path_open` and `path_rename`; a clock
+or random one adds `clock_time_get`, `random_get` and the `environ_*` pair
+(RFC-0043's injected fixed values). Thirteen are declared and the module keeps
+only the ones its own code reaches, so the count above is a fact about each
+module rather than about the backend. The input syscalls get **graceful
 degradation**, not file access: a page has no argv, no stdin, and no
 filesystem, so `args()` returns an empty array, `readLine()` returns `None`
 (immediate EOF), and `readFile`/`writeFile` return their canonical `Err`
@@ -26,8 +31,8 @@ binary.
 ## Run it
 
 ```powershell
-# 1. Build the demo modules (needs clang + the WASI sysroot, same as any
-#    `vyrn build --target wasm`; auto-detects ..\tools\wasi-sysroot-*):
+# 1. Build the demo modules (needs nothing but a built `vyrn` — RFC-0077 M5
+#    emits wasm directly, so no clang and no WASI sysroot):
 .\web\build.ps1
 
 # 2. Serve the directory (any static server; wasm needs http, not file://):
@@ -168,7 +173,14 @@ no framework, nothing new in the shim.
   (RFC-0040 §2), so the callback you passed at the call site runs with a decoded
   `Validation<T>`. The proc→dispatcher name is the shared convention:
   `vyrnRpcDone` + the procedure name with its first letter uppercased
-  (`getUser` → `vyrnRpcDoneGetUser`). A network failure reports **status 0**,
+  (`getUser` → `vyrnRpcDoneGetUser`). A module built with the DIRECTORY generator
+  (`client("./server/api")`, RFC-0072 M3) imports the same extern with the
+  procedure and its derived path as separate arguments —
+  `vyrnRpcCall(proc, path, body)` — because a derived or pinned path no longer
+  says which dispatcher owns the reply, and inverting the path template in the
+  host would be a second implementation of the derivation rule. The transport
+  dispatches on arity, so one runtime serves both. A network failure reports
+  **status 0**,
   which the generated unifier turns into an `rpc.transport` "unreachable" `Issue`.
   `runVyrnRpc(bytes, { baseUrl })` wires it onto `runVyrn` in one call.
 

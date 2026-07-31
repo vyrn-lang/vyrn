@@ -3,19 +3,26 @@
 - [std/args](std/args.md) — std/args — CLI argument parsing over `args()` (RFC-0061). A pure-Vyrn library,
 - [std/arrays](std/arrays.md) — std/arrays — higher-order array helpers (RFC-0023), written in Vyrn itself.
 - [std/bench](std/bench.md) — std/bench — the benchmarking harness helpers (RFC-0055).
+- [std/codecs](std/codecs.md) — std/codecs — hex, base64 and percent encoding, written in Vyrn (RFC-0078 M4b).
 - [std/connect](std/connect.md) — std/connect — Connect wire compatibility as a library (RFC-0038), built
+- [std/contract](std/contract.md) — std/contract — check a module against a module contract (RFC-0071).
 - [std/graphql](std/graphql.md) — std/graphql — the contract as a GraphQL SDL document (RFC-0038), a library
 - [std/hash](std/hash.md) — std/hash — non-cryptographic byte hashing (RFC-0045).
 - [std/html](std/html.md) — std/html — the view tree and the string renderer (RFC-0026 M1).
 - [std/i18n](std/i18n.md) — std/i18n — typed translations as a library (RFC-0020 M2), built entirely on
-- [std/json](std/json.md) — std/json (RFC-0059) — one shared JSON value tree with a STRICT reader and a
+- [std/json](std/json.md) — std/json (RFC-0059) — the shared JSON value tree and its canonical writer,
+- [std/jsondec](std/jsondec.md) — std/jsondec (RFC-0078 M3) — the untyped half of `fromJson`, in Vyrn.
+- [std/jsonread](std/jsonread.md) — std/jsonread (RFC-0059, split out by RFC-0078 M2a) — the STRICT JSON reader,
 - [std/math](std/math.md) — std/math — numeric helpers, written in Vyrn itself. Being ordinary Vyrn,
+- [std/num](std/num.md) — std/num — text -> number, written in Vyrn (RFC-0078 M4a).
 - [std/openapi](std/openapi.md) — std/openapi — the contract as an OpenAPI 3.1 document (RFC-0038), a library
 - [std/random](std/random.md) — std/random — deterministic pseudo-randomness with a host-seeded escape
 - [std/rpc](std/rpc.md) — std/rpc — Typed RPC as a library (RFC-0019), built entirely on RFC-0021
 - [std/scan](std/scan.md) — std/scan (RFC-0054) — one shared, comment- and string-aware cursor over
 - [std/storage](std/storage.md) — std/storage — crash-safe persistence (RFC-0044).
 - [std/strings](std/strings.md) — std/strings — string helpers, written in Vyrn itself on the `slice` builtin
+- [std/strpred](std/strpred.md) — std/strpred — the string predicates and `slice`, written in Vyrn
+- [std/text](std/text.md) — std/text — UTF-8 decoding and byte-offset line/column, written in Vyrn
 - [std/time](std/time.md) — std/time — wall-clock time at the host boundary (RFC-0043).
 - [std/tw](std/tw.md) — std/tw — theme-derived utility classes as a CHECKED TYPE (RFC-0032), a library
 - [std/ui](std/ui.md) — std/ui — the pages generator (RFC-0026 M3), file-based routing as a library

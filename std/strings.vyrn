@@ -1,7 +1,7 @@
 /// std/strings — string helpers, written in Vyrn itself on the `slice` builtin
 /// (RFC-0046) and `bytes()`. A `String` is UTF-8 bytes; indices and lengths are
 /// BYTE offsets, and `slice` keeps every result on a codepoint boundary (a cut
-/// inside a multi-byte character traps). The case and whitespace helpers are
+/// inside a multi-byte character is refused). The case and whitespace helpers are
 /// ASCII-only by necessity — a real Unicode case fold or whitespace class would
 /// need tables this library does not carry; non-ASCII bytes pass through
 /// unchanged, so multi-byte text is never corrupted (documented per function).
@@ -12,6 +12,23 @@
 /// `import { .. } from "std/strings"` plus those builtins covers the surface.
 /// `indexOf`/`lastIndexOf` return an honest `Option<Int64>` (the house idiom —
 /// no `-1` sentinel), `None` when the needle is absent.
+///
+/// **`slice` returns `Result<String, SliceError>`** since RFC-0079 M3, so every
+/// call below says what it knows. Nearly all of them cut at an offset this module
+/// just found by scanning `s` — at an ASCII byte, or at a needle match, and a
+/// valid UTF-8 needle can only match on a character boundary (the
+/// self-synchronizing argument in `std/strpred`'s doc) — so they take
+/// `?? panic("…")` with the reason written out, and `grep -n "?? panic"` over this
+/// file is the list of ranges claimed to be correct by construction. The three
+/// that can genuinely receive a bad range — `substring`, `padStart`, `padEnd` —
+/// say so in their own words.
+
+/// `substring` matches on the two variants by name, and a variant of an INJECTED
+/// runtime module is renamed to a reserved spelling unless the module is imported
+/// by hand (`strpred$OutOfRange`). So this import is not decoration: it is what
+/// makes `OutOfRange` and `SplitsCharacter` writable here. The `slice` call itself
+/// needs no import — it is a builtin, routed.
+import { SliceError } from "std/strpred"
 
 /// `stringFromBytes(b)` where the bytes are KNOWN to be valid UTF-8 — an ASCII
 /// transform of, or an ASCII-boundary slice/rebuild of, already-valid text — so
@@ -54,11 +71,31 @@ export fn joinWith(parts: Array<String>, sep: String) -> String {
     return out
 }
 
-/// A byte-range substring — a friendly alias of the `slice` builtin. `start`/`end`
-/// are byte offsets; a cut inside a multi-byte UTF-8 character or an out-of-range
-/// offset traps (RFC-0046).
+/// A byte-range substring, and the ONE place in `std/` that turns a `SliceError`
+/// into a crash. `start`/`end` are byte offsets; an out-of-range offset or a cut
+/// inside a multi-byte UTF-8 character ends the process (RFC-0046, RFC-0079 M3).
+///
+/// This is what `slice` used to be, and it is deliberately still here rather than
+/// pushed onto the ten callers: every one of them computes its offsets from a
+/// scan of the same String and cannot pass a bad range, so returning
+/// `Result<String, SliceError>` from here would relocate the crash into ten places
+/// that have nothing to put in an `Err` arm. A caller that CAN receive a bad range
+/// calls `slice` and matches — that is the whole point of the return type.
+///
+/// The message says more than the trap it replaces did: the builtin had two fixed
+/// strings and no way to name the offset, and the enum carries it.
 export fn substring(s: String, start: Int64, end: Int64) -> String {
-    return slice(s, start, end)
+    return match slice(s, start, end) {
+        Ok(v) => v,
+        Err(e) => match e {
+            OutOfRange(i) => panic(
+                "substring: byte offset \{i} is out of range for a String of \{s.byteLength} bytes"
+            ),
+            SplitsCharacter(i) => panic(
+                "substring: byte offset \{i} is inside a multi-byte UTF-8 character"
+            ),
+        },
+    }
 }
 
 /// ASCII whitespace: space, tab, LF, CR. (A Unicode whitespace class is out of
@@ -120,8 +157,8 @@ export fn lastIndexOf(s: String, needle: String) -> Option<Int64> {
 /// Split `s` on every occurrence of `sep`. Adjacent/leading/trailing separators
 /// yield empty segments (like Rust/JS). An EMPTY separator returns `[s]` unsplit:
 /// per-byte "char" splitting would cut multi-byte UTF-8 characters (a `slice`
-/// trap), so it is deliberately not done — iterate codepoints another way if you
-/// need them.
+/// failure), so it is deliberately not done — iterate codepoints another way if
+/// you need them.
 export fn split(s: String, sep: String) -> Array<String> {
     let sl = sep.byteLength
     let mut out: Array<String> = []
@@ -137,14 +174,14 @@ export fn split(s: String, sep: String) -> Array<String> {
             j = j + 1
         }
         if j == sl {
-            out.push(slice(s, start, i))
+            out.push(slice(s, start, i) ?? panic("split: a cut at a separator match"))
             start = i + sl
             i = i + sl
         } else {
             i = i + 1
         }
     }
-    out.push(slice(s, start, s.byteLength))
+    out.push(slice(s, start, s.byteLength) ?? panic("split: the tail after the last separator"))
     return out
 }
 
@@ -162,13 +199,13 @@ export fn lines(s: String) -> Array<String> {
             if end > start && s[end - 1] == 13 {
                 end = end - 1
             }
-            out.push(slice(s, start, end))
+            out.push(slice(s, start, end) ?? panic("lines: a cut at an ASCII LF or CR"))
             start = i + 1
         }
         i = i + 1
     }
     if start < s.byteLength {
-        out.push(slice(s, start, s.byteLength))
+        out.push(slice(s, start, s.byteLength) ?? panic("lines: the tail after the last newline"))
     }
     return out
 }
@@ -188,7 +225,7 @@ export fn splitWhitespace(s: String) -> Array<String> {
             i = i + 1
         }
         if i > start {
-            out.push(slice(s, start, i))
+            out.push(slice(s, start, i) ?? panic("splitWhitespace: a run bounded by ASCII spaces"))
         }
     }
     return out
@@ -200,7 +237,7 @@ export fn trimStart(s: String) -> String {
     while a < s.byteLength && isAsciiSpace(s[a]) {
         a = a + 1
     }
-    return slice(s, a, s.byteLength)
+    return slice(s, a, s.byteLength) ?? panic("trimStart: `a` walked past ASCII spaces only")
 }
 
 /// `s` with trailing ASCII whitespace removed.
@@ -209,7 +246,7 @@ export fn trimEnd(s: String) -> String {
     while b > 0 && isAsciiSpace(s[b - 1]) {
         b = b - 1
     }
-    return slice(s, 0, b)
+    return slice(s, 0, b) ?? panic("trimEnd: `b` walked back over ASCII spaces only")
 }
 
 /// `s` with leading AND trailing ASCII whitespace removed.
@@ -222,7 +259,7 @@ export fn trim(s: String) -> String {
     while b > a && isAsciiSpace(s[b - 1]) {
         b = b - 1
     }
-    return slice(s, a, b)
+    return slice(s, a, b) ?? panic("trim: `a` and `b` walked over ASCII spaces only")
 }
 
 /// `s` lowercased over ASCII `A`–`Z`. Non-ASCII bytes pass through unchanged (a
@@ -270,20 +307,21 @@ export fn replace(s: String, from: String, to: String) -> String {
             j = j + 1
         }
         if j == fl {
-            out = out + slice(s, start, i) + to
+            out = out + (slice(s, start, i) ?? panic("replace: a cut at a needle match")) + to
             start = i + fl
             i = i + fl
         } else {
             i = i + 1
         }
     }
-    out = out + slice(s, start, s.byteLength)
+    out = out + (slice(s, start, s.byteLength) ?? panic("replace: the tail after the last match"))
     return out
 }
 
 /// `s` left-padded with `fill` to at least `len` BYTES. `fill` should be ASCII
 /// (typically a single character such as `" "` or `"0"`); a multi-byte `fill`
-/// that does not tile the padding width evenly traps on a codepoint boundary.
+/// that does not tile the padding width evenly panics on a codepoint boundary —
+/// the one failure here a caller can actually cause, and the `panic` says so.
 /// A `s` already `len` bytes or longer is returned unchanged.
 export fn padStart(s: String, len: Int64, fill: String) -> String {
     if s.byteLength >= len || fill.byteLength == 0 {
@@ -293,7 +331,8 @@ export fn padStart(s: String, len: Int64, fill: String) -> String {
     while pad.byteLength < len - s.byteLength {
         pad = pad + fill
     }
-    return slice(pad, 0, len - s.byteLength) + s
+    return (slice(pad, 0, len - s.byteLength)
+        ?? panic("padStart: `fill` is multi-byte and does not tile the padding width")) + s
 }
 
 /// `s` right-padded with `fill` to at least `len` BYTES (see `padStart` for the
@@ -306,7 +345,8 @@ export fn padEnd(s: String, len: Int64, fill: String) -> String {
     while pad.byteLength < len - s.byteLength {
         pad = pad + fill
     }
-    return s + slice(pad, 0, len - s.byteLength)
+    return s + (slice(pad, 0, len - s.byteLength)
+        ?? panic("padEnd: `fill` is multi-byte and does not tile the padding width"))
 }
 
 /// The lowercase 16-digit hex of a `UInt64` (e.g. a hash fingerprint). Integer
@@ -327,4 +367,74 @@ export fn toHex(n: UInt64) -> String {
         }
     }
     return fromBytesOr(out, "")
+}
+
+/// The Damerau–Levenshtein edit distance between `a` and `b`, in BYTES —
+/// insertions, deletions, substitutions, and transpositions of *adjacent*
+/// characters, each costing 1. This is the optimal-string-alignment variant
+/// (a substring is edited at most once), which is the standard basis for a
+/// "did you mean" suggestion and is what RFC-0071's `≤ 2` threshold means.
+///
+/// Byte-wise, like every other function here: for ASCII identifiers — the only
+/// thing anyone computes a did-you-mean over — that is exactly character-wise,
+/// and for multi-byte text it still orders near from far, it just counts UTF-8
+/// bytes rather than codepoints.
+export fn editDistance(a: String, b: String) -> Int64 {
+    let x = bytes(a)
+    let y = bytes(b)
+    let n = x.length
+    let m = y.length
+    if n == 0 {
+        return m
+    }
+    if m == 0 {
+        return n
+    }
+    // The (n+1) x (m+1) matrix, row-major with row stride `w`.
+    let w = m + 1
+    let mut d: Array<Int64> = []
+    let mut k = 0
+    while k < (n + 1) * w {
+        d.push(0)
+        k = k + 1
+    }
+    let mut i = 0
+    while i <= n {
+        d[i * w] = i
+        i = i + 1
+    }
+    let mut j = 0
+    while j <= m {
+        d[j] = j
+        j = j + 1
+    }
+    let mut r = 1
+    while r <= n {
+        let mut c = 1
+        while c <= m {
+            let mut cost = 1
+            if x[r - 1] == y[c - 1] {
+                cost = 0
+            }
+            let mut best = d[(r - 1) * w + c] + 1
+            let ins = d[r * w + c - 1] + 1
+            if ins < best {
+                best = ins
+            }
+            let sub = d[(r - 1) * w + c - 1] + cost
+            if sub < best {
+                best = sub
+            }
+            if r > 1 && c > 1 && x[r - 1] == y[c - 2] && x[r - 2] == y[c - 1] {
+                let tr = d[(r - 2) * w + c - 2] + 1
+                if tr < best {
+                    best = tr
+                }
+            }
+            d[r * w + c] = best
+            c = c + 1
+        }
+        r = r + 1
+    }
+    return d[n * w + m]
 }

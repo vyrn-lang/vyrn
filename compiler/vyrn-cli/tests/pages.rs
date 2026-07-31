@@ -64,7 +64,12 @@ fn emit_gen_shows_the_synthesized_router() {
     assert!(src.contains("import * as p0 from \"./pages/index\""), "namespace page import:\n{src}");
     assert!(src.contains("p0.page()"), "namespaced static page call:\n{src}");
     assert!(src.contains(".Params { "), "namespaced Params construction:\n{src}");
-    assert!(src.contains(".load(p)"), "namespaced load call:\n{src}");
+    // RFC-0071: a `.vyrn` page's data is its declared `data` member, run through
+    // the runner its return TYPE named — `p<idx>.load(p)` is gone with the name
+    // match it came from.
+    assert!(src.contains("runParamQuery("), "the declared query's runner:\n{src}");
+    assert!(src.contains(".data()"), "namespaced data call:\n{src}");
+    assert!(!src.contains(".load(p)"), "no name-matched loader call:\n{src}");
     assert!(src.contains(".page(p, d)"), "namespaced loader page call:\n{src}");
     // The obsolete co-naming dummies are gone.
     assert!(!src.contains("fn page() -> Int64"), "no page dummy:\n{src}");
@@ -112,23 +117,35 @@ fn params_segment_mismatch_fails_naming_the_file() {
     assert!(err.contains("users"), "diagnostic names the file:\n{err}");
 }
 
-/// RFC-0033 (second producer): a page whose `page` returns the wrong type
-/// passes generation-time inspection (which checks arity, not the return type),
-/// but the check error in the synthesized router's dispatch glue is reported
-/// against the PAGE module — proving origin maps aren't `.vyx`-shaped.
+/// RFC-0033 (second producer): a page whose view takes the wrong type passes
+/// generation-time inspection, but the check error in the synthesized router's
+/// dispatch glue is reported against the PAGE module — proving origin maps
+/// aren't `.vyx`-shaped.
+///
+/// The mismatch is between what `data` produces and what `page` accepts. A
+/// contract member's type parameters are OPEN (RFC-0071 M1), so `fn page(d: T)
+/// -> Html` admits any parameter type and the contract check cannot object —
+/// which is exactly the class of error that has to survive into the generated
+/// glue to be caught at all. (Before RFC-0072 M2 this test used a wrong RETURN
+/// type; `Page` now names `page`, so that one is caught at the declaration.)
 #[test]
 fn page_type_error_remaps_to_the_page_module() {
     let dir = scratch("uiremap");
-    // A static page whose `page()` returns `Int64` — `document(…, page())`
-    // requires `Html`, so the router fails to type-check.
-    write(&dir.join("pages/index.vyrn"), "export fn page() -> Int64 { return 0 }\n");
+    write(
+        &dir.join("pages/index.vyrn"),
+        "import { el, Html } from \"std/html\"\n\
+         import { query, Query } from \"std/ui\"\n\
+         export type Data = { n: Int64 }\n\
+         fn fetch() -> Data {\n    return Data { n: 1 }\n}\n\
+         export fn data() -> Query<Data> {\n    return query(fetch)\n}\n\
+         export fn page(d: String) -> Html {\n    return el(\"main\", [], [])\n}\n",
+    );
     write(&dir.join("app.vyrn"), APP);
     let out = vyrn().arg("check").arg(dir.join("app.vyrn")).output().expect("check");
-    assert!(!out.status.success(), "a wrong page return type must fail to load");
+    assert!(!out.status.success(), "a wrong view parameter type must fail to load");
     let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     // Reported against the page module (region-level, line 1), not the router.
     assert!(err.contains("pages/index.vyrn:1:1:"), "remapped to the page file:\n{err}");
-    assert!(err.contains("expects Html"), "carries the checker message:\n{err}");
     assert!(err.contains("note: in generated code"), "keeps the generated note:\n{err}");
 }
 
@@ -168,14 +185,14 @@ fn string_segment_and_respond_route_end_to_end() {
         &dir.join("pages/raw/[id].vyrn"),
         "export type Params = { id: String }\n\
          export fn respond(p: Params) -> Response {\n\
-         return Response { status: 200, contentType: \"text/plain; charset=utf-8\", body: \"raw:\" + p.id }\n\
+         return Response { status: 200, contentType: \"text/plain; charset=utf-8\", body: \"raw:\" + p.id, vary: \"\" }\n\
          }\n",
     );
     write(
         &dir.join("app.vyrn"),
         "import { pages } from \"std/ui\"\n\
          import { route } from pages(\"./pages\")\n\
-         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, body: \"\" }) }\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, headers: [:], body: \"\" }) }\n\
          fn main() -> Int64 {\n\
          let a = h(\"/p/deadbeef\")\n\
          print(\"P:\\{a.status}:\\{a.body.byteLength}\")\n\
@@ -194,7 +211,7 @@ fn string_segment_and_respond_route_end_to_end() {
 }
 
 /// A `.vyx` page (RFC-0039 §4) routes through `pagesThemed`: its `params {}`
-/// block binds the bracket segment, its `fn load` runs, its template classes are
+/// block binds the bracket segment, its `data` query runs, its template classes are
 /// theme-checked, and a non-integer `Int64` segment 404s before user code.
 #[test]
 fn vyx_page_with_loader_routes_through_pages_themed() {
@@ -206,8 +223,12 @@ fn vyx_page_with_loader_routes_through_pages_themed() {
     write(
         &dir.join("pages/book/[id].vyx"),
         "<script>\n\
+         import { ParamQuery, paramQuery } from \"std/ui\"\n\
          params { id: Int64 }\n\
-         fn load(p: Params) -> Validation<Data> {\n\
+         export fn data() -> ParamQuery<Params, Validation<Data>> {\n\
+         return paramQuery(fetch)\n\
+         }\n\
+         fn fetch(p: Params) -> Validation<Data> {\n\
          return Valid(Data { title: \"Book #\" + p.id.toString() })\n\
          }\n\
          type Data = { title: String }\n\
@@ -224,7 +245,7 @@ fn vyx_page_with_loader_routes_through_pages_themed() {
         &dir.join("app.vyrn"),
         "import { pagesThemed } from \"std/ui\"\n\
          import { route } from pagesThemed(\"./pages\", \"./theme.json\")\n\
-         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, body: \"\" }) }\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, headers: [:], body: \"\" }) }\n\
          fn main() -> Int64 {\n\
          let a = h(\"/\")\n\
          print(\"home:\\{a.status}\")\n\
@@ -287,8 +308,12 @@ fn imported_params_type_works_via_the_closure() {
     write(
         &dir.join("pages/users/[id].vyrn"),
         "import { el, text, Html } from \"std/html\"\n\
+         import { ParamQuery, paramQuery } from \"std/ui\"\n\
          import { Params, Data } from \"../../shared\"\n\
-         export fn load(p: Params) -> Validation<Data> {\n\
+         export fn data() -> ParamQuery<Params, Validation<Data>> {\n\
+             return paramQuery(fetch)\n\
+         }\n\
+         fn fetch(p: Params) -> Validation<Data> {\n\
              return Valid(Data { label: \"user\\{p.id}\" })\n\
          }\n\
          export fn page(p: Params, d: Data) -> Html {\n\
@@ -300,7 +325,7 @@ fn imported_params_type_works_via_the_closure() {
         "import { pages } from \"std/ui\"\n\
          import { route } from pages(\"./pages\")\n\
          fn main() -> Int64 {\n\
-             let r = route(Request { method: \"GET\", path: \"/users/7\", body: \"\" })\n\
+             let r = route(Request { method: \"GET\", path: \"/users/7\", headers: [:], body: \"\" })\n\
              print(\"\\{r.status}\")\n\
              return 0\n\
          }\n",
@@ -325,7 +350,8 @@ fn imported_params_type_works_via_the_closure() {
 // ---- RFC-0041: layouts, head, error pages ----------------------------------
 
 /// A `routes/layout.vyx` wraps every page body (its `<slot/>`), a page/layout
-/// `head { … }` block threads `<link>`/`<script>`/dynamic `<title>` into the
+/// A layout's `head { … }` block and a page's `head(d)` member thread
+/// `<link>`/`<script>`/dynamic `<title>` into the
 /// document head, a `load -> Result<Data, PageError>` failure renders the nearest
 /// `error.vyx` at the carried status, a `Validation` failure folds into a 422
 /// error page, and `layout="none"` opts a page out of the shell.
@@ -344,10 +370,12 @@ fn layout_head_and_error_pages_route_end_to_end() {
     write(
         &dir.join("pages/p/[id].vyx"),
         "<script>\n\
-         import { PageError, notFound } from \"std/ui\"\n\
+         import { Head, PageError, ParamQuery, noHead, withTitle, paramQuery, notFound } from \"std/ui\"\n\
          params { id: String }\n\
-         head {\n    title: data.name\n}\n\
-         fn load(p: Params) -> Result<Data, PageError> {\n\
+         export fn head(d: Data) -> Head {\n    return withTitle(noHead(), d.name)\n}\n\
+         export fn data() -> ParamQuery<Params, Result<Data, PageError>> {\n\
+         return paramQuery(fetch)\n}\n\
+         fn fetch(p: Params) -> Result<Data, PageError> {\n\
          if p.id == \"good\" {\n    return Ok(Data { name: \"Good One\" })\n}\n\
          return Err(notFound(\"no id \" + p.id))\n}\n\
          type Data = { name: String }\n\
@@ -357,8 +385,11 @@ fn layout_head_and_error_pages_route_end_to_end() {
     // A Validation loader → 422 folded into a PageError.
     write(
         &dir.join("pages/v/[id].vyx"),
-        "<script>\nparams { id: Int64 }\n\
-         fn load(p: Params) -> Validation<Data> {\n\
+        "<script>\nimport { ParamQuery, paramQuery } from \"std/ui\"\n\
+         params { id: Int64 }\n\
+         export fn data() -> ParamQuery<Params, Validation<Data>> {\n\
+         return paramQuery(fetch)\n}\n\
+         fn fetch(p: Params) -> Validation<Data> {\n\
          if p.id > 0 {\n    return Valid(Data { n: p.id })\n}\n\
          return Invalid([Issue { key: \"id.pos\", path: \"id\", message: \"must be positive\" }])\n}\n\
          type Data = { n: Int64 }\n</script>\n\
@@ -378,7 +409,7 @@ fn layout_head_and_error_pages_route_end_to_end() {
         &dir.join("app.vyrn"),
         "import { pagesThemed } from \"std/ui\"\n\
          import { route } from pagesThemed(\"./pages\", \"./theme.json\")\n\
-         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, body: \"\" }) }\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, headers: [:], body: \"\" }) }\n\
          fn main() -> Int64 {\n\
          let a = h(\"/\")\n\
          print(\"home:\\{a.status}:\\{a.body.contains(\"class=\\\"shell\\\"\")}:\\{a.body.contains(\"/style.css\")}\")\n\
@@ -421,6 +452,115 @@ fn a_layout_without_a_slot_is_a_diagnostic() {
     assert!(err.contains("VYX_LAYOUT_NO_SLOT"), "no-slot diagnostic:\n{err}");
 }
 
+// ---- RFC-0071: the `Page` contract's declaration forms ---------------------
+
+/// The `head`/`data` members of `std/ui:Page`, written as the declarations they
+/// now are, routed end to end. There is no second form to route beside them:
+/// RFC-0071 M2c deleted the block and the name-match.
+#[test]
+fn the_page_contract_members_route_end_to_end() {
+    let dir = scratch("contractforms");
+    // A page on the new form: `head()` returns a `Head`, `data()` a `Query<T>`.
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Head, Query, noHead, withTitle, withStylesheet, query } from \"std/ui\"\n\
+         export fn head() -> Head {\n\
+         return withStylesheet(withTitle(noHead(), \"Home\"), \"/style.css\")\n}\n\
+         export fn data() -> Query<Array<String>> {\n\
+         return query(names)\n}\n\
+         fn names() -> Array<String> {\n    return [\"a\", \"b\"]\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ data.length }}</h1>\n</template>\n",
+    );
+    write(
+        &dir.join("app.vyrn"),
+        "import { pages } from \"std/ui\"\n\
+         import { route } from pages(\"./pages\")\n\
+         fn h(path: String) -> Response { return route(Request { method: \"GET\", path: path, headers: [:], body: \"\" }) }\n\
+         fn main() -> Int64 {\n\
+         let a = h(\"/\")\n\
+         print(\"new:\\{a.status}:\\{a.body.contains(\"<title>Home</title>\")}:\\{a.body.contains(\"/style.css\")}:\\{a.body.contains(\"<h1>2</h1>\")}\")\n\
+         return 0\n\
+         }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "contract-form app must run:\n{combined}");
+    // The declared `head()` supplies both the title and the stylesheet, and the
+    // declared `data()` reaches the view as the `data` prop.
+    assert!(combined.contains("new:200:true:true:true"), "declaration forms:\n{combined}");
+}
+
+/// THE acceptance criterion (RFC-0071): a misspelled member is an ERROR, where it
+/// used to be a page that compiled clean and silently rendered with no data.
+///
+/// `laod` is the RFC's own example and it lands in the *not close* row —
+/// Damerau-Levenshtein `laod`→`data` is 3, and `load` is no longer a member for
+/// it to be one transposition from. It is still reported, which is the whole
+/// point: a closed contract has no silent path.
+#[test]
+fn a_misspelled_page_export_is_an_error() {
+    let dir = scratch("laod");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Query, query } from \"std/ui\"\n\
+         export fn laod() -> Query<Array<String>> {\n\
+         return query(one)\n}\n\
+         fn one() -> Array<String> {\n    return [\"a\"]\n}\n\
+         </script>\n\
+         <template>\n<h1>home</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    assert!(!out.status.success(), "a misspelled member must fail the load");
+    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(err.contains("PAGES_CONTRACT"), "contract diagnostic:\n{err}");
+    assert!(err.contains("contract_unknown"), "unknown-export class:\n{err}");
+    assert!(err.contains("laod"), "names the offending export:\n{err}");
+}
+
+/// A near-miss within the did-you-mean threshold names the member it meant.
+#[test]
+fn a_near_miss_page_export_names_the_member_it_meant() {
+    let dir = scratch("dta");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Query, query } from \"std/ui\"\n\
+         export fn dta() -> Query<Array<String>> {\n\
+         return query(one)\n}\n\
+         fn one() -> Array<String> {\n    return [\"a\"]\n}\n\
+         </script>\n\
+         <template>\n<h1>home</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    assert!(!out.status.success(), "a near-miss member must fail the load");
+    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(err.contains("didYouMean"), "did-you-mean class:\n{err}");
+    assert!(err.contains("dta"), "names the offending export:\n{err}");
+}
+
+/// A private helper is outside the contract — a page needs local helpers, and the
+/// closed rule applies to its PUBLIC surface only.
+#[test]
+fn a_private_page_helper_is_outside_the_contract() {
+    let dir = scratch("privhelper");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         fn shown() -> String {\n    return \"home\"\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ shown() }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "a private helper must not trip the contract:\n{combined}");
+}
+
 // ---- the demo runs green ---------------------------------------------------
 
 #[test]
@@ -431,4 +571,268 @@ fn demo_tests_run_green() {
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "demo tests failed:\n{combined}");
     assert!(combined.contains("5 passed, 0 failed"), "expected 5 green tests:\n{combined}");
+}
+
+// ===========================================================================
+// RFC-0071 M2b — multi-shape `head`, laziness in the type, and params in the
+// query. These are the two capabilities M2 shipped WITHOUT, and the reason
+// `bin/routes/p/[id].vyx` could not migrate: its <title> is its loaded data's
+// title, and its data depends on its route parameters.
+// ===========================================================================
+
+/// A page whose `head` reads the LOADED DATA — the shape the `head { … }` block
+/// could express and a zero-argument `fn head()` could not.
+#[test]
+fn head_can_take_the_pages_loaded_data() {
+    let dir = scratch("headdata");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Head, Query, noHead, withTitle, query } from \"std/ui\"\n\
+         export fn head(d: String) -> Head {\n    return withTitle(noHead(), d)\n}\n\
+         export fn data() -> Query<String> {\n    return query(title)\n}\n\
+         fn title() -> String {\n    return \"from the data\"\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ data }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let src = String::from_utf8_lossy(&out.stdout).to_string();
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "must generate:\n{err}");
+    // The wrapper's own signature is the router's, unchanged; what varies is
+    // what it FORWARDS to the accessor.
+    assert!(src.contains("return headHtml(uiPgHead(d))"), "head is handed the data:\n{src}");
+    assert!(src.contains("return headTitleOf(uiPgHead(d))"), "and so is headTitle:\n{src}");
+}
+
+/// A page whose `head` takes BOTH the params and the data — the fourth shape.
+#[test]
+fn head_can_take_params_and_data_together() {
+    let dir = scratch("headboth");
+    write(
+        &dir.join("pages/u/[id].vyx"),
+        "<script>\n\
+         import { Head, ParamQuery, noHead, withTitle, paramQuery } from \"std/ui\"\n\
+         params { id: Int64 }\n\
+         export fn head(p: Params, d: Int64) -> Head {\n    return withTitle(noHead(), d.toString())\n}\n\
+         export fn data() -> ParamQuery<Params, Int64> {\n    return paramQuery(twice)\n}\n\
+         fn twice(p: Params) -> Int64 {\n    return p.id * 2\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ data }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let src = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "must generate:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(src.contains("return headHtml(uiPgHead(p, d))"), "both are forwarded:\n{src}");
+}
+
+/// A `head` asking for what the page cannot give is an error, not an empty head.
+#[test]
+fn a_head_asking_for_data_a_dataless_page_lacks_is_reported() {
+    let dir = scratch("headnodata");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Head, noHead, withTitle } from \"std/ui\"\n\
+         export fn head(d: String) -> Head {\n    return withTitle(noHead(), d)\n}\n\
+         </script>\n\
+         <template>\n<h1>x</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "a head with nothing to read must be refused");
+    assert!(err.contains("VYX_HEAD_SIGNATURE"), "naming the offense:\n{err}");
+}
+
+/// Laziness is read off the RETURN TYPE, not out of `data`'s body — the last
+/// source scan in the page pipeline, deleted rather than renamed.
+#[test]
+fn laziness_comes_from_the_declared_type() {
+    let dir = scratch("lazytype");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Lazy, PageData, query, lazy } from \"std/ui\"\n\
+         export fn data() -> Lazy<Int64> {\n    return lazy(query(seven))\n}\n\
+         fn seven() -> Int64 {\n    return 7\n}\n\
+         fn shown(d: PageData<Int64>) -> String {\n\
+         return match d {\n        Loading => \"...\",\n        Ready(n) => n.toString(),\n    }\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ shown(data) }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let src = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "must generate:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(src.contains("runLazy(uiPgData())"), "the lazy runner:\n{src}");
+    // A lazy page's view is over `PageData<T>` and the server renders `Ready(d)`.
+    assert!(src.contains("Ready(d)"), "the view is wrapped for SSR:\n{src}");
+}
+
+/// The same shape declared `Query` is NOT lazy: nothing is read from the body,
+/// so the two differ only in the declaration.
+#[test]
+fn a_query_return_is_not_lazy_however_its_body_is_written() {
+    let dir = scratch("lazytypeno");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Query, query } from \"std/ui\"\n\
+         export fn data() -> Query<Int64> {\n    return query(seven)\n}\n\
+         fn seven() -> Int64 {\n    return 7\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ data }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let src = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "must generate:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(src.contains("runQuery(uiPgData())"), "the blocking runner:\n{src}");
+    assert!(!src.contains("runLazy"), "and not the lazy one:\n{src}");
+    assert!(!src.contains("PageData<"), "the view is over the raw type:\n{src}");
+}
+
+/// A `data` whose deferred call takes the page's own `Params` routes exactly as
+/// a `fn load(p: Params)` did — which is what makes migrating one free.
+#[test]
+fn a_param_query_routes_like_a_params_loader() {
+    let dir = scratch("paramquery");
+    write(
+        &dir.join("pages/u/[id].vyx"),
+        "<script>\n\
+         import { ParamQuery, paramQuery } from \"std/ui\"\n\
+         params { id: Int64 }\n\
+         export fn data() -> ParamQuery<Params, Int64> {\n    return paramQuery(twice)\n}\n\
+         fn twice(p: Params) -> Int64 {\n    return p.id * 2\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ data }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("emit-gen").arg(dir.join("app.vyrn")).output().expect("emit-gen");
+    let src = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "must generate:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        src.contains("export fn load(p: Params) -> Int64"),
+        "the wrapper takes the params:\n{src}"
+    );
+    assert!(src.contains("runParamQuery(uiPgData(), p)"), "and hands them over:\n{src}");
+    assert!(src.contains(".load(p)"), "so the router calls it exactly as before:\n{src}");
+}
+
+/// `data` returning something that is not one of the four query types is named,
+/// not compiled into a call to a runner that does not exist.
+#[test]
+fn a_data_returning_a_non_query_is_reported() {
+    let dir = scratch("baddata");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         export fn data() -> Int64 {\n    return 7\n}\n\
+         </script>\n\
+         <template>\n<h1>x</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "must be refused");
+    assert!(err.contains("VYX_DATA_RETURN"), "naming the offense:\n{err}");
+}
+
+// ---- the old page forms are gone (RFC-0071 M2c) ---------------------------
+
+/// `head { … }` in a PAGE is no longer a form. The scanner that lifted it out of
+/// the `<script>` ran only on the page path and is gone, so the block reaches the
+/// compiled body as source and fails there — loudly, which is the point.
+///
+/// Layouts and error pages keep their block: `Page` is a contract about pages,
+/// and a layout has none to be a member of.
+#[test]
+fn a_head_block_in_a_page_is_no_longer_a_form() {
+    let dir = scratch("nohreadblock");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         head {\n    title: \"Old\"\n}\n\
+         </script>\n\
+         <template>\n<h1>hi</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "a page head block must be refused:\n{err}");
+}
+
+/// A layout's `head { … }` still works — the half of the scanner that has a
+/// reason to live. This is what stops the deletion above from being a regression.
+#[test]
+fn a_layout_head_block_still_works() {
+    let dir = scratch("layouthead");
+    write(
+        &dir.join("pages/layout.vyx"),
+        "<script>\n\
+         head {\n    title: \"Shell\"\n    stylesheet \"/theme.css\"\n}\n\
+         </script>\n\
+         <template>\n<div><slot /></div>\n</template>\n",
+    );
+    write(&dir.join("pages/index.vyx"), "<template>\n<h1>home</h1>\n</template>\n");
+    write(
+        &dir.join("app.vyrn"),
+        "import { pages } from \"std/ui\"\n\
+         import { route } from pages(\"./pages\")\n\
+         fn main() -> Int64 {\n\
+         let r = route(Request { method: \"GET\", path: \"/\", headers: [:], body: \"\" })\n\
+         print(\"lay:\\{r.status}:\\{r.body.contains(\"<title>Shell</title>\")}:\\{r.body.contains(\"/theme.css\")}\")\n\
+         return 0\n\
+         }\n",
+    );
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let combined = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "layout head must still build:\n{combined}");
+    assert!(combined.contains("lay:200:true:true"), "layout head threads through:\n{combined}");
+}
+
+/// `export fn load` in a `.vyx` page is now an unknown export against a CLOSED
+/// contract — not a deprecated form, and not a silent no-data page either. The
+/// name-match that used to find it is gone.
+#[test]
+fn an_exported_load_in_a_vyx_page_is_an_unknown_export() {
+    let dir = scratch("loadgone");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         export fn load() -> Int64 {\n    return 7\n}\n\
+         </script>\n\
+         <template>\n<h1>hi</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let err = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "must be refused:\n{err}");
+    assert!(err.contains("PAGES_CONTRACT"), "as a contract issue naming `load`:\n{err}");
+    assert!(err.contains("load"), "naming the export:\n{err}");
+}
+
+/// Nothing warns any more. The warning CHANNEL survives (M2b Part A, exercised by
+/// `tests/warnings.rs`); its deprecation producer does not.
+#[test]
+fn a_page_on_the_declaration_forms_is_silent() {
+    let dir = scratch("nodep");
+    write(
+        &dir.join("pages/index.vyx"),
+        "<script>\n\
+         import { Head, Query, noHead, withTitle, query } from \"std/ui\"\n\
+         export fn head() -> Head {\n    return withTitle(noHead(), \"New\")\n}\n\
+         export fn data() -> Query<Int64> {\n    return query(seven)\n}\n\
+         fn seven() -> Int64 {\n    return 7\n}\n\
+         </script>\n\
+         <template>\n<h1>{{ data }}</h1>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let out = vyrn().arg("run").arg(dir.join("app.vyrn")).output().expect("run");
+    let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+    assert!(out.status.success(), "must build:\n{err}");
+    assert!(!err.contains("warning:"), "nothing to say:\n{err}");
 }

@@ -1,0 +1,30 @@
+[package]
+name = "vyrn-genwasm"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "RFC-0076: runs `gen fn` generators as compiled wasm in an embedded wasmtime."
+
+# NOT part of the default workspace (see ../Cargo.toml `exclude`), for the same
+# reason `vyrn-lsp` is not: an embedded `wasmtime` is heavy, and neither crate is
+# needed to build or test the language. Both consumers depend on this one
+# OPTIONALLY, behind a feature spelled `wasm-gen` in each — off by default in
+# `vyrn-cli`, on by default in `vyrn-lsp`, which is the long-lived process the
+# engine pays off in.
+[dependencies]
+vyrn-frontend = { path = "../vyrn-frontend" }
+vyrn-codegen = { path = "../vyrn-codegen" }
+wasmtime = { version = "47", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "std",
+    # Cranelift compiles a module's functions on a thread pool. It is a wasmtime
+    # DEFAULT feature, so `default-features = false` silently turned it off and
+    # every artifact was compiled single-threaded — measured at 1,055 ms across a
+    # cold open's five artifacts against 250 ms with it on.
+    "parallel-compilation",
+] }
+
+[lib]
+name = "vyrn_genwasm"
+path = "src/lib.rs"

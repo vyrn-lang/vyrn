@@ -1,0 +1,222 @@
+/// The string predicates and `slice` (RFC-0078 M4b(3), converted by M4c).
+///
+/// `contains`, `startsWith` and `endsWith` ARE `std/strpred` now: M4b(3) proved the
+/// Vyrn versions equal to the builtins with the builtin as the oracle, and M4c
+/// routed the three builtins into the module, deleting the Rust arms and ~50 lines
+/// of `strstr`/`strncmp` IR. So those rows are **pinned as literals** here — a
+/// comparison against the builtin would be the same function on both sides.
+///
+/// **`slice` moved too** — RFC-0079 M3, and it is a pin now for the same reason the
+/// predicates are. Its refusal was that it TRAPPED, so `sliceV` could only answer
+/// `None` where the builtin ended the process; `slice` returns
+/// `Result<String, SliceError>` today, `sliceV` IS that function, and asking both
+/// would be asking one function twice. What replaced the oracle is better than the
+/// oracle was: the failing ranges are VALUES now, so they print in the same process
+/// as the legal ones and go through parity with them, and each names WHICH cut
+/// failed and at which byte — neither of which a trap with two fixed strings could
+/// say.
+///
+/// `byteLength` did NOT move (it is a VIEW that folds at compile time), so its row
+/// is still a live oracle: the builtin's answer printed beside `byteLengthV`'s, and
+/// a `test` block asserting they agree.
+///
+/// Printing from `main` puts all of it through parity, so the routed builtins are
+/// checked interp == native == wasm as well as against the literals.
+///
+/// One thing this file cannot show, and it is stated in `std/strpred`'s doc: **a
+/// needle matching only at a non-boundary offset.** It cannot happen and it cannot
+/// be written — a valid needle begins with an ASCII or lead byte, a non-boundary
+/// offset holds a continuation byte, so the byte-wise scan is UTF-8-safe by
+/// construction rather than by a check. The row that *looks* like it — `"©"`
+/// (C2 A9) against `"é"` (C3 A9), same trailing byte — is the closest a String can
+/// get, and both implementations say no.
+
+import { byteLengthV, SliceError } from "std/strpred"
+
+fn bit(b: Bool) -> String {
+    return if b { "1" } else { "0" }
+}
+
+/// `contains startsWith endsWith` as three bits. One call per builtin, and after
+/// M4c one call per `std/strpred` function — the same thing said twice would print
+/// the same digit twice, so the row is three bits and the `test` block below pins
+/// every one of them.
+fn preds(h: String, n: String) -> String {
+    return bit(contains(h, n)) + bit(startsWith(h, n)) + bit(endsWith(h, n))
+}
+
+/// `slice`'s answer, failures included. The variant and the offending byte offset
+/// are rendered because they are the part that is new: the deleted builtin had
+/// `error: slice index out of range` and `error: slice splits a UTF-8 character`
+/// and no way to name an index, and the old `Option` had one `None` for both.
+fn sl(s: String, a: Int64, b: Int64) -> String {
+    return match slice(s, a, b) {
+        Ok(v) => v,
+        Err(e) => match e {
+            OutOfRange(i) => "OutOfRange(\{i})",
+            SplitsCharacter(i) => "SplitsCharacter(\{i})",
+        },
+    }
+}
+
+/// `s.byteLength`, then `byteLengthV(s)`.
+fn bl(s: String) -> String {
+    return s.byteLength.toString() + " " + byteLengthV(s).toString()
+}
+
+fn main() -> Int64 {
+    // ---- the predicates, builtin then Vyrn ---------------------------------
+    print(preds("abc", "")) // an empty needle is in everything, at both ends
+    print(preds("", ""))
+    print(preds("", "a")) // needle longer than the haystack
+    print(preds("abc", "abcd"))
+    print(preds("abc", "abc")) // needle == haystack: all three true
+    print(preds("aaaa", "aaa")) // overlapping candidates
+    print(preds("aaa", "aaaa"))
+    print(preds("abcabc", "abc")) // two occurrences, one at each end
+    print(preds("abc", "b")) // interior only
+    print(preds("héllo", "é")) // a multi-byte needle on a boundary
+    print(preds("héllo", "hé"))
+    print(preds("héllo", "llo"))
+    print(preds("héllo", "h"))
+    // C2 A9 against C3 A9 — the same trailing byte, a different character. The
+    // closest a String can come to matching inside a codepoint.
+    print(preds("é", "©"))
+    print(preds("日本語", "本")) // three bytes, interior
+    print(preds("日本語", "語"))
+    print(preds("日本語", "日"))
+    print(preds("😀ok", "😀")) // four bytes, prefix
+    print(preds("😀ok", "k"))
+    print(preds("😀ok", "o"))
+
+    // ---- slice, on the ranges the deleted builtin survived ------------------
+    print(sl("hello", 0, 0)) // start == end, empty result
+    print(sl("hello", 5, 5)) // start == end at the very end
+    print(sl("hello", 0, 5)) // the whole string
+    print(sl("hello", 1, 3))
+    print(sl("héllo", 1, 3)) // exactly the two bytes of é
+    print(sl("héllo", 3, 6))
+    print(sl("日本語", 3, 6)) // exactly 本
+    print(sl("日本語", 0, 9))
+    print(sl("😀ok", 0, 4)) // exactly 😀
+    print(sl("", 0, 0)) // the empty string sliced to nothing
+
+    // ---- slice, on the ranges that used to end the process -----------------
+    // Every one of these was `error: slice ..` and exit 1 before RFC-0079 M3, so
+    // it needed a process of its own and no engine could be compared against
+    // another on it. They are ordinary printed values now.
+    print(sl("hello", 3, 2)) // start > end
+    print(sl("hello", 0, 6)) // end past the length
+    print(sl("hello", 6, 6)) // start past the length
+    print(sl("hello", -1, 2)) // negative start
+    print(sl("hello", 0, -1)) // negative end (start > end catches it)
+    print(sl("héllo", 0, 2)) // end inside é
+    print(sl("héllo", 2, 6)) // start inside é
+    print(sl("日本語", 1, 2)) // both cuts inside 日
+    print(sl("😀ok", 0, 2)) // inside the four-byte 😀
+    print(sl("héllo", 2, 99)) // the range is checked BEFORE the boundary
+
+    // ---- byteLength --------------------------------------------------------
+    print(bl("")) // 0
+    print(bl("abc")) // ASCII: bytes == characters
+    print(bl("héllo")) // 6 bytes, 5 characters
+    print(bl("日本語")) // 9 bytes, 3 characters
+    print(bl("😀")) // 4 bytes, 1 character
+    // A string that came back through the byte view rather than from a literal.
+    let mut raw: Array<UInt8> = []
+    raw.push(226)
+    raw.push(130)
+    raw.push(172) // E2 82 AC — the euro sign
+    raw.push(65)
+    let built = match stringFromBytes(raw) {
+        Ok(v) => v,
+        Err(e) => "",
+    }
+    print(bl(built)) // 4
+    print(preds(built, "€"))
+    print(sl(built, 0, 3))
+    return 0
+}
+
+test "the routed predicates answer what the C and Rust ones answered" {
+    // Every row of `main`'s predicate block, as a literal. Captured from the
+    // builtins BEFORE M4c routed them, which is what makes this a pin: an
+    // assertion that the two implementations agree would now compare a
+    // function with itself.
+    // an empty needle is a substring, a prefix AND a suffix
+    assertEq(preds("abc", ""), "111")
+    // of the empty string too
+    assertEq(preds("", ""), "111")
+    // a needle longer than the haystack is none of the three
+    assertEq(preds("", "a"), "000")
+    assertEq(preds("abc", "abcd"), "000")
+    // needle == haystack
+    assertEq(preds("abc", "abc"), "111")
+    // overlapping candidates: at 0 and at 1, so prefix and suffix
+    assertEq(preds("aaaa", "aaa"), "111")
+    assertEq(preds("aaa", "aaaa"), "000")
+    // two occurrences, one at each end
+    assertEq(preds("abcabc", "abc"), "111")
+    // interior only
+    assertEq(preds("abc", "b"), "100")
+    // a multi-byte needle on a boundary
+    assertEq(preds("héllo", "é"), "100")
+    assertEq(preds("héllo", "hé"), "110")
+    assertEq(preds("héllo", "llo"), "101")
+    assertEq(preds("héllo", "h"), "110")
+    // C2 A9 against C3 A9 — a matcher comparing the last byte says yes
+    assertEq(preds("é", "©"), "000")
+    // three bytes, interior
+    assertEq(preds("日本語", "本"), "100")
+    assertEq(preds("日本語", "語"), "101")
+    assertEq(preds("日本語", "日"), "110")
+    // four bytes, prefix
+    assertEq(preds("😀ok", "😀"), "110")
+    assertEq(preds("😀ok", "k"), "101")
+    assertEq(preds("😀ok", "o"), "100")
+}
+
+test "slice answers what the deleted lowerings answered on every legal range" {
+    // Captured from the builtin BEFORE M3 routed it, which is what makes these
+    // pins rather than an equivalence check: `sliceV` and `slice` are one
+    // function now, so the two-column rows became one.
+    assertEq(sl("hello", 0, 0), "")
+    assertEq(sl("hello", 5, 5), "")
+    assertEq(sl("hello", 0, 5), "hello")
+    assertEq(sl("hello", 1, 3), "el")
+    assertEq(sl("héllo", 1, 3), "é")
+    assertEq(sl("日本語", 3, 6), "本")
+    assertEq(sl("😀ok", 0, 4), "😀")
+    assertEq(sl("", 0, 0), "")
+}
+
+test "slice names which cut failed and at which byte" {
+    // `error: slice index out of range`, in each of its five shapes — and the
+    // offset each clause blames: `start` for a negative start, `end` for the two
+    // that compare the pair, since an `end` that precedes its `start` is the one
+    // that is too small.
+    assertEq(sl("hello", 3, 2), "OutOfRange(2)")
+    assertEq(sl("hello", 0, 6), "OutOfRange(6)")
+    assertEq(sl("hello", 6, 6), "OutOfRange(6)")
+    assertEq(sl("hello", -1, 2), "OutOfRange(-1)")
+    assertEq(sl("hello", 0, -1), "OutOfRange(-1)")
+    // `error: slice splits a UTF-8 character`. It does NOT produce invalid UTF-8
+    // — the range is refused outright, as it always was — and the START cut is
+    // reported first when both are bad.
+    assertEq(sl("héllo", 0, 2), "SplitsCharacter(2)")
+    assertEq(sl("héllo", 2, 6), "SplitsCharacter(2)")
+    assertEq(sl("日本語", 1, 2), "SplitsCharacter(1)")
+    assertEq(sl("😀ok", 0, 2), "SplitsCharacter(2)")
+    // The range is checked BEFORE the boundary, which is why a mid-character
+    // start with an out-of-range end reports the range. All three deleted
+    // implementations did that, and so does the one that replaced them.
+    assertEq(sl("héllo", 2, 99), "OutOfRange(99)")
+}
+
+test "byteLength counts bytes, not characters" {
+    assertEq(bl(""), "0 0")
+    assertEq(bl("abc"), "3 3")
+    assertEq(bl("héllo"), "6 6")
+    assertEq(bl("日本語"), "9 9")
+    assertEq(bl("😀"), "4 4")
+}

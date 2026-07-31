@@ -13,6 +13,11 @@ pub struct Program {
     /// Protocol declarations (RFC-0002 §5 / traits): a named set of method
     /// signatures a type can implement and a generic can be bounded by.
     pub protocols: Vec<ProtocolDecl>,
+    /// Module contract declarations (RFC-0071): a named set of exports a module
+    /// may have. `contract` is to a module what `protocol` is to a type.
+    /// Comptime-only — nothing about a contract reaches the emitted program
+    /// except through the `contractOf(Name)` reflection literal.
+    pub contracts: Vec<ContractDecl>,
     /// `impl P for T { .. }` blocks — a type's methods for a protocol.
     pub impls: Vec<ImplBlock>,
     /// Top-level `let [mut] name [: Type] = initializer` module-state bindings
@@ -262,6 +267,208 @@ pub struct MethodSig {
     pub line: usize,
 }
 
+/// A module contract declaration (RFC-0071): the exports a module may have,
+/// with their types, optionality, and documentation.
+///
+/// `contract Page { let head: Head = Head { } … }` is to a *module* what
+/// [`ProtocolDecl`] is to a *type*, and the implementation deliberately mirrors
+/// it: a named, exportable, importable declaration carrying member signatures
+/// and nothing else. Contracts are comptime-only — the checker validates their
+/// member types, `contractOf(Page)` reflects one into a `ContractInfo` record,
+/// and `std/contract:checkContract` does the actual comparing in ordinary Vyrn
+/// code. The compiler knows nothing about any particular contract.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContractDecl {
+    pub name: String,
+    /// `export contract ..` — importable from other modules (RFC-0010).
+    pub exported: bool,
+    /// Source module for diagnostics; `None` for the root. Set by the loader.
+    pub module: Option<String>,
+    /// `///` documentation (markdown), attached by the parser; `None` if absent.
+    pub doc: Option<String>,
+    pub members: Vec<ContractMember>,
+    pub line: usize,
+}
+
+impl ContractDecl {
+    /// The open rule (`fn *(..) -> ..`), if this contract has one. A contract
+    /// without one is **closed**: an export it does not name is a diagnostic.
+    pub fn open_rule(&self) -> Option<&ContractMember> {
+        self.members.iter().find(|m| m.is_open_rule())
+    }
+}
+
+/// One member of a [`ContractDecl`].
+///
+/// Member type parameters are open **per member** (RFC-0071): `let data:
+/// Query<T>` admits any instantiation of `Query`. See
+/// [`ContractMember::type_params`] for how they are recognized.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContractMember {
+    /// The export's name, or [`OPEN_RULE_NAME`] (`"*"`) for the open rule.
+    pub name: String,
+    /// `///` documentation (markdown). Retained because the LSP surfaces it on
+    /// completion and hover (RFC-0071 M4).
+    pub doc: Option<String>,
+    pub kind: ContractMemberKind,
+    pub line: usize,
+}
+
+/// The member name that marks a contract's open rule (`fn *(..) -> ..`).
+pub const OPEN_RULE_NAME: &str = "*";
+
+impl ContractMember {
+    /// Whether this member is the open rule rather than a named export.
+    pub fn is_open_rule(&self) -> bool {
+        self.name == OPEN_RULE_NAME
+    }
+    /// Whether the module may omit this export (it has a default).
+    ///
+    /// Both member forms carry one (RFC-0071 M2): a value member defaults to a
+    /// value, a function member to the value its call would have produced
+    /// (`fn head() -> Head = noHead()` reads "absent means `noHead()`"), which is
+    /// what a generator substitutes when the module says nothing.
+    pub fn default(&self) -> Option<&Expr> {
+        match &self.kind {
+            ContractMemberKind::Value { default, .. } | ContractMemberKind::Fn { default, .. } => {
+                default.as_deref()
+            }
+        }
+    }
+    /// Whether the module may omit this export (it has a default).
+    pub fn optional(&self) -> bool {
+        self.default().is_some()
+    }
+    /// The member's type spelling, as `checkContract` compares it: a value
+    /// member spells its type, a function member spells `fn(A, B) -> R`.
+    pub fn spelling(&self) -> String {
+        match &self.kind {
+            ContractMemberKind::Value { ty, .. } => ty.to_string(),
+            // Reuse the ordinary `Type::Fn` spelling (`fn(A, B) -> R`, with a
+            // `Unit` return omitted) so a contract member and a stored function
+            // value are described in exactly the same words.
+            ContractMemberKind::Fn {
+                params,
+                ret,
+                variadic: true,
+                ..
+            } => {
+                let _ = params;
+                format!("fn(..){}", ret_suffix(ret))
+            }
+            ContractMemberKind::Fn { params, ret, .. } => {
+                Type::Fn(params.clone(), Box::new(ret.clone())).to_string()
+            }
+        }
+    }
+    /// The type parameters this member binds. RFC-0071 makes them implicit and
+    /// per-member; the parser marks them at parse time (see
+    /// [`crate::parser`]'s contract-member handling) so they arrive here already
+    /// as [`Type::Param`]. This collects them for diagnostics and reflection.
+    pub fn type_params(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut push = |t: &Type| collect_params(t, &mut out);
+        match &self.kind {
+            ContractMemberKind::Value { ty, .. } => push(ty),
+            ContractMemberKind::Fn { params, ret, .. } => {
+                for p in params {
+                    push(p);
+                }
+                push(ret);
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
+/// Collect every [`Type::Param`] name appearing anywhere in `ty`.
+fn collect_params(ty: &Type, out: &mut Vec<String>) {
+    match ty {
+        Type::Param(n) => out.push(n.clone()),
+        Type::App(_, args) => {
+            for a in args {
+                collect_params(a, out);
+            }
+        }
+        Type::Option(a)
+        | Type::Ref(a)
+        | Type::Array(a)
+        | Type::Task(a)
+        | Type::Partial(a)
+        | Type::ArrayN(a, _)
+        | Type::SmallArray(a, _)
+        | Type::Omit(a, _)
+        | Type::Pick(a, _) => collect_params(a, out),
+        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+            collect_params(a, out);
+            collect_params(b, out);
+        }
+        Type::Record(fields) => {
+            for f in fields {
+                collect_params(&f.ty, out);
+            }
+        }
+        Type::Enum(variants) => {
+            for v in variants {
+                for p in &v.payload {
+                    collect_params(p, out);
+                }
+            }
+        }
+        Type::Fn(params, ret) => {
+            for p in params {
+                collect_params(p, out);
+            }
+            collect_params(ret, out);
+        }
+        _ => {}
+    }
+}
+
+/// ` -> R` for a member's return type, or "" for `Unit` — the same elision
+/// `Type::Fn`'s own spelling uses, so both forms read alike in a diagnostic.
+fn ret_suffix(ret: &Type) -> String {
+    if *ret == Type::Unit {
+        String::new()
+    } else {
+        format!(" -> {ret}")
+    }
+}
+
+/// What a [`ContractMember`] declares.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContractMemberKind {
+    /// `let name: Type [= default]` — a value export. A `default` makes the
+    /// member **optional**: the module may omit it and the generator uses the
+    /// default instead.
+    Value {
+        ty: Type,
+        default: Option<Box<Expr>>,
+    },
+    /// `fn name(params) -> Ret [= default]` — a function export. Parameter
+    /// *names* are not part of the contract (only arity and types are), exactly
+    /// as in [`MethodSig`].
+    ///
+    /// The `default` is an expression of the member's RETURN type, not of its
+    /// function type: `fn head() -> Head = noHead()` reads "a module that does
+    /// not export `head` has `noHead()` for its head", which is the question a
+    /// generator actually asks. It makes the member **optional**.
+    Fn {
+        params: Vec<Type>,
+        ret: Type,
+        default: Option<Box<Expr>>,
+        /// `fn *(..) -> R` — the parameter list is `..`, so the member
+        /// constrains the RETURN type only and admits any arity. Legal on the
+        /// open rule alone: a named member's arity is part of what its name
+        /// promises, while an open rule describes a family of exports whose
+        /// shapes genuinely differ (a components module's views take 0, 1 or 4
+        /// props, and enumerating that would say nothing).
+        variadic: bool,
+    },
+}
+
 /// `impl P for T { fn m(self, ..) { .. } }` — the methods a type provides for a
 /// protocol. Each method is an ordinary [`Function`] whose first parameter is the
 /// `self` receiver (typed to `ty`).
@@ -446,6 +653,17 @@ pub enum Type {
     /// every use is monomorphized away, so no function value exists at runtime in
     /// any backend and this type has no runtime lowering (`llt` never sees it).
     Fn(Vec<Type>, Box<Type>),
+    /// The type of an expression that never produces a value (RFC-0079). The
+    /// only thing that has it is `panic(msg)`, which writes the message and
+    /// exits 1, so no context downstream of one ever runs. It is the bottom
+    /// type: `assignable(Never, _)` is true and the reverse is not, which is
+    /// what lets `match x { A => panic(".."), B => 5 }` be an `Int64`.
+    ///
+    /// Unspellable in a signature — RFC-0079 leaves divergent functions open —
+    /// so it arises only from that one call. Both backends lower it to `void`
+    /// and neither produces a value for it: the textual one has already left
+    /// through `unreachable` and the direct one through wasm's `unreachable`.
+    Never,
     /// A compile-time "type-check failed here" sentinel used for inside-body
     /// error recovery (RFC-0006 accumulation). When a `let` initializer or a
     /// sub-expression fails to type-check, the binding / hole is filled with
@@ -515,6 +733,7 @@ impl std::fmt::Display for Type {
                 }
                 Ok(())
             }
+            Type::Never => write!(f, "Never"),
             Type::Err => write!(f, "<type error>"),
         }
     }
@@ -804,6 +1023,17 @@ pub enum Pattern {
     Err(String),
     /// A user-enum variant pattern: `Circle(r)`, `Rect(w, h)`, or `Empty`.
     Variant(String, Vec<String>),
+    /// The tag-1 arm — `Some` *or* `Ok`, whichever the scrutinee turns out to
+    /// be. Unspellable in source; produced only by the `??` desugar (RFC-0079),
+    /// which runs in the parser and so has no type information to choose with.
+    /// This is the same trick `Expr::Try` plays for `?`, moved into `Pattern` so
+    /// `??` can reach `match` and inherit its drops, ownership, validation and
+    /// short-circuiting instead of restating any of them.
+    Success(String),
+    /// The tag-0 arm — `None` *or* `Err`. Carries a binder so a `Result`'s error
+    /// payload is bound rather than dropped on the floor; on the `Option` path
+    /// the checker binds nothing, since there is no payload.
+    Failure(String),
 }
 
 impl Expr {

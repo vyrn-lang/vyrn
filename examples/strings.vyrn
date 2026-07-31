@@ -1,9 +1,11 @@
 /// std/strings — the string library (RFC-0046), exercised as a three-way parity
 /// citizen. Every op runs identically under interp, native, and wasm. The tail
-/// of `main` deliberately slices INTO a multi-byte UTF-8 character, so the run
-/// ends in the canonical `error: slice splits a UTF-8 character` trap (exit 1) —
-/// byte-identical across all three backends, the same trap protocol the array
-/// and shift traps use.
+/// of `main` deliberately slices INTO a multi-byte UTF-8 character, twice: once
+/// through `slice`, which RETURNS that failure since RFC-0079 M3 and therefore
+/// prints, and once through `substring`, which is `std/strings`'s trapping form
+/// and ends the run (exit 1) with `error: substring: byte offset 2 is inside a
+/// multi-byte UTF-8 character` — its own wording rather than the compiler's,
+/// byte-identical across all three backends the same way every trap is.
 ///
 /// Multi-byte UTF-8 (`é` is two bytes) runs through `lines`/`slice`/`indexOf`/
 /// `substring` throughout, proving the byte-offset ops stay codepoint-safe.
@@ -79,8 +81,19 @@ fn main() -> Int64 {
     print("repeat: \{repeat("ab", 3)}") // ababab
     print("hex: \{toHex(255)}") // 00000000000000ff
 
-    // ---- the mid-codepoint trap (canonical wording) --------------------------
-    // Byte 2 is inside `é` (bytes 1..2) — this cut splits a UTF-8 character.
+    // ---- a cut inside a codepoint, both ways ---------------------------------
+    // Byte 2 is inside `é` (bytes 1..2). `slice` RETURNS that failure since
+    // RFC-0079 M3 (the `Err` carries which cut and at which byte — see
+    // `examples/strpredbytes.vyrn`, which renders both), so this row prints
+    // rather than ending the run, which is what lets three engines be compared
+    // on it at all.
+    print(match slice(s, 0, 2) {
+            Ok(v) => v,
+            Err(e) => "slice declined: the cut is inside a character",
+        })
+    // `substring` is the trapping form, and it is the last line for that reason.
+    // The wording is its own now, not the compiler's `error: slice splits a
+    // UTF-8 character`: the message names the function and the byte.
     print("about to split a codepoint...")
     print(substring(s, 0, 2))
     return 0

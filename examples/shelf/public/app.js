@@ -51,7 +51,7 @@ async function bootApp(mountEl) {
     badBtn.textContent = "force server 422 (raw wire: empty title, bad url)";
     badBtn.className = "raw422";
     badBtn.onclick = async () => {
-      const res = await fetch("/rpc/addBook", {
+      const res = await fetch("/_/books/add", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: "", url: "nope", tags: ["waaaaaaaaaaaaaaaaaaaaaaaaay-too-long"] }),

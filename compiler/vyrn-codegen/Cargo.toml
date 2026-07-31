@@ -2,10 +2,19 @@
 name = "vyrn-codegen"
 version = "0.0.0"
 edition = "2021"
-description = "Emits textual LLVM IR for the Vyrn v0 subset. No external deps; feed output to clang/llc."
+description = "Emits code for Vyrn: textual LLVM IR today, wasm directly (in progress)."
 
 [dependencies]
 vyrn-frontend = { path = "../vyrn-frontend" }
+# The direct wasm backend, which replaces `--target wasm`'s trip through clang.
+# Section framing and LEB128 are not where the interesting bugs live, and this is
+# the Bytecode Alliance's own encoder — the same org as the `wasmtime` this repo
+# already runs generators on, so it tracks the format from the same source.
+#
+# It is the first external crate in the default resolve. The property that
+# matters — `cargo build` and `cargo test` with no LLVM, no clang, no wasi
+# sysroot — is untouched by it; see ../Cargo.toml.
+wasm-encoder = "0.221"
 
 [lib]
 name = "vyrn_codegen"

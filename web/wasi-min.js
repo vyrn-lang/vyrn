@@ -6,7 +6,9 @@
 // stdio path): fd_write, fd_close, fd_seek, fd_fdstat_get, proc_exit. A module
 // using input (RFC-0014: args/readLine/readFile/writeFile) additionally pulls
 // in args_get, args_sizes_get, fd_read, fd_fdstat_set_flags, fd_prestat_get,
-// fd_prestat_dir_name, and path_open. Those get GRACEFUL DEGRADATION, not file
+// fd_prestat_dir_name, path_open, and — from the RFC-0077 direct backend, which
+// reads the RFC-0043 injected clock itself instead of through the C shim's
+// `getenv` — environ_sizes_get and environ_get. Those get GRACEFUL DEGRADATION, not file
 // access: the page has no argv and no filesystem, so `args()` sees zero
 // arguments, `readLine()` sees immediate EOF (`None`), and `readFile`/
 // `writeFile` fail with their canonical `Err` payloads — the module loads and
@@ -244,6 +246,18 @@ export async function runVyrn(wasmBytes, hooks = {}) {
       return ERRNO_SUCCESS;
     },
     args_get: () => ERRNO_SUCCESS, // argc is 0, so there is nothing to write
+    // A page has no environment either. Only the RFC-0077 direct backend asks:
+    // its standalone modules read `VYRN_FIXED_TIME`/`VYRN_FIXED_SEED` themselves
+    // rather than through the C shim's `getenv`, so an empty environment is what
+    // sends them to `clock_time_get`/`random_get` — where hooks.fixedTime and
+    // hooks.fixedSeed above are the page's own injection point.
+    environ_sizes_get: (countPtr, bufSizePtr) => {
+      const view = new DataView(memory.buffer);
+      view.setUint32(countPtr, 0, true);
+      view.setUint32(bufSizePtr, 0, true);
+      return ERRNO_SUCCESS;
+    },
+    environ_get: () => ERRNO_SUCCESS, // the count is 0, so there is nothing to write
     // Reading stdin yields immediate EOF (0 bytes) → `readLine()` is `None`.
     fd_read: (fd, _iovsPtr, _iovsLen, nreadPtr) => {
       if (fd !== 0) return ERRNO_BADF;

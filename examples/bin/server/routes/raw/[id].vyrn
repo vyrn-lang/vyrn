@@ -1,0 +1,21 @@
+/// GET /raw/[id] — the exact paste bytes as text/plain; respond owns the content
+/// type and status outright.
+import { byId } from "../../api/pastes"
+import { IdReq, Paste } from "../../../shared/wire/paste"
+
+export type Params = { id: String }
+
+export fn respond(p: Params) -> Response {
+    return match byId(IdReq { id: p.id }) {
+        Ok(paste) => rawOk(paste),
+        Err(why) => rawMissing(),
+    }
+}
+
+fn rawOk(p: Paste) -> Response {
+    return Response { status: 200, contentType: "text/plain; charset=utf-8", body: p.body, vary: "" }
+}
+
+fn rawMissing() -> Response {
+    return Response { status: 404, contentType: "text/plain; charset=utf-8", body: "not found", vary: "" }
+}

@@ -10,8 +10,12 @@
 //! output. The structured fields are additive metadata for tooling (the LSP) that
 //! wants ranges rather than a single line of text.
 
-/// How serious a diagnostic is. Only `Error` is produced by the front end today;
-/// `Warning` is reserved for future lints.
+/// How serious a diagnostic is.
+///
+/// An `Error` fails the load; a `Warning` rides a load that SUCCEEDED
+/// (RFC-0071 M2b). The two therefore travel on different channels — errors in
+/// the `Err` arm of [`crate::load`], warnings alongside the program — because a
+/// warning must never change an exit code or a byte of program output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Error,
@@ -67,6 +71,19 @@ impl Diagnostic {
             message,
             note: None,
             from_generated: false,
+        }
+    }
+
+    /// Build a WARNING diagnostic for `stage` at `(line, col)` — a problem that
+    /// does not fail the load (RFC-0071 M2b).
+    ///
+    /// A warning is advice about a program that compiled, so it is carried
+    /// beside the [`crate::ast::Program`] rather than in place of it, and every
+    /// consumer prints it without touching an exit code.
+    pub fn warning(line: usize, col: usize, stage: &'static str, message: String) -> Self {
+        Diagnostic {
+            severity: Severity::Warning,
+            ..Diagnostic::error(line, col, stage, message)
         }
     }
 

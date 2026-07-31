@@ -1,0 +1,147 @@
+/// Codecs in Vyrn — the six codec builtins, which ARE `std/codecs` (RFC-0078
+/// M4b(1) proved the equivalence; M4c routed the builtins into it).
+///
+/// `hexEncode`, `base64Encode`, `urlEncode` and their inverses had no C shim at
+/// all: the interpreter held one copy of each in Rust and the textual emitter
+/// printed another as ~520 lines of hand-written LLVM IR. Both are gone. What every
+/// engine calls now is `std/codecs` — one definition, in ordinary Vyrn, over
+/// `bytes` and `stringFromBytes`.
+///
+/// This file is the three-way half of the pin, and it calls the BUILTIN spelling on
+/// purpose. Parity runs the whole thing on the interpreter, the native backend and
+/// wasm, so "the routed builtin answers the same on all three engines" is the
+/// statement `main` makes. It used to print `mine == builtin` beside each value;
+/// after the swap those are the same function, so a comparison row would read
+/// `true` by construction and the rows are the values instead.
+///
+/// The `test` block pins the rows as literals. Every literal was captured from the
+/// C/Rust builtins BEFORE the swap (`tests/codecs.rs` carries the whole 6,354-check
+/// transcript as a digest, with the pre-swap one recorded beside it), which is what
+/// makes them a pin rather than a description of whatever came out.
+///
+/// The NUL rows are deliberately absent here and pinned in `std/codecs`'s own
+/// `test` block instead: a decoded `0x00` is `None` now, where the builtin answered
+/// `Some` and its engines then disagreed with each other — the interpreter kept the
+/// byte in a Rust `String`, native truncated the `char*` at it. That is the swap's
+/// one behavioural change, measured at 16 of 6,354 rows, and it is a fix.
+
+/// Every ASCII byte a `String` can hold, `0x01` through `0x7F` — which is the
+/// encoders' whole input alphabet on one line, since they work a byte at a time.
+fn asciiSweep() -> String {
+    let mut b: Array<UInt8> = []
+    let mut i = 1
+    while i < 128 {
+        b.push(UInt8(i))
+        i = i + 1
+    }
+    return match stringFromBytes(b) {
+        Ok(s) => s,
+        Err(e) => "unreachable",
+    }
+}
+
+/// An `Option<String>` as printable text, so a `None` is visible rather than a
+/// blank line.
+fn show(o: Option<String>) -> String {
+    return match o {
+        Some(s) => s,
+        None => "None",
+    }
+}
+
+fn main() -> Int64 {
+    // ---- hex ---------------------------------------------------------------
+    print(hexEncode("Hi")) // 4869
+    print(hexEncode("")) //
+    print(hexEncode("café ☕")) // the UTF-8 bytes, not the code points
+    // Every ASCII byte at once: 127 bytes, 254 digits.
+    print(hexEncode(asciiSweep()).byteLength) // 254
+    print(show(hexDecode("4869"))) // Hi
+    // Mixed case reads back; odd length, non-hex and non-UTF-8 do not.
+    print(show(hexDecode("C3a9"))) // é
+    print(show(hexDecode("486"))) // None
+    print(show(hexDecode("zz"))) // None
+    print(show(hexDecode("80"))) // None  (a lone continuation byte)
+
+    // ---- base64: the three residues -----------------------------------------
+    print(base64Encode("")) //
+    print(base64Encode("A")) // QQ==
+    print(base64Encode("AB")) // QUI=
+    print(base64Encode("ABC")) // QUJD
+    // The two alphabet entries above 61 — `+` and `/` — and the sweep.
+    print(base64Encode("~~~")) // fn5+
+    print(base64Encode("ÿÿ")) // w7/Dvw==
+    print(base64Encode(asciiSweep()).byteLength) // 172
+    print(show(base64Decode("SGVsbG8="))) // Hello
+    // A full round trip through multi-byte text.
+    print(show(base64Decode(base64Encode("café ☕")))) // café ☕
+    // Refusals: a length that is not a multiple of four, a digit outside the
+    // alphabet, `=X`, padding before the final group, non-UTF-8 bytes.
+    print(show(base64Decode("QQ="))) // None
+    print(show(base64Decode("QQ*="))) // None
+    print(show(base64Decode("Q=QQ"))) // None
+    print(show(base64Decode("QQ==QQ=="))) // None
+    print(show(base64Decode("////"))) // None
+
+    // ---- percent encoding ---------------------------------------------------
+    print(urlEncode("aZ09-_.~")) // aZ09-_.~   (the unreserved set, untouched)
+    print(urlEncode("name=a b&x")) // name%3Da%20b%26x
+    print(urlEncode("a+b")) // a%2Bb   (`+` is reserved, not a space)
+    print(urlEncode("é")) // %C3%A9   (uppercase hex)
+    print(show(urlDecode("%C3%A9"))) // é
+    print(show(urlDecode("%c3%a9"))) // é   (either case decodes)
+    print(show(urlDecode("a+b"))) // a+b  (no `+` special case in either direction)
+    print(show(urlDecode("%"))) // None
+    print(show(urlDecode("%4"))) // None
+    print(show(urlDecode("%zz"))) // None
+    print(show(urlDecode("%80"))) // None
+
+    // ---- the round trip that has to hold for every codec --------------------
+    let s = "Hello, Vyrn! ☕ 100% — é"
+    print(show(hexDecode(hexEncode(s))) == s) // true
+    print(show(base64Decode(base64Encode(s))) == s) // true
+    print(show(urlDecode(urlEncode(s))) == s) // true
+    return 0
+}
+
+/// The rows above, as literals. Captured against the pre-swap builtins.
+test "the routed codecs answer what the C and Rust ones answered" {
+    assertEq(hexEncode("Hi"), "4869")
+    assertEq(hexEncode(""), "")
+    assertEq(hexEncode("café ☕"), "636166c3a920e29895")
+    assertEq(hexEncode(asciiSweep()).byteLength, 254)
+    assertEq(show(hexDecode("4869")), "Hi")
+    assertEq(show(hexDecode("C3a9")), "é")
+    assertEq(show(hexDecode("486")), "None")
+    assertEq(show(hexDecode("zz")), "None")
+    assertEq(show(hexDecode("80")), "None")
+}
+
+test "base64 pads at all three residues, and refuses misplaced padding" {
+    assertEq(base64Encode(""), "")
+    assertEq(base64Encode("A"), "QQ==")
+    assertEq(base64Encode("AB"), "QUI=")
+    assertEq(base64Encode("ABC"), "QUJD")
+    assertEq(base64Encode("~~~"), "fn5+")
+    assertEq(base64Encode("ÿÿ"), "w7/Dvw==")
+    assertEq(show(base64Decode("SGVsbG8=")), "Hello")
+    assertEq(show(base64Decode("QQ=")), "None")
+    assertEq(show(base64Decode("QQ*=")), "None")
+    assertEq(show(base64Decode("Q=QQ")), "None")
+    assertEq(show(base64Decode("QQ==QQ==")), "None")
+    assertEq(show(base64Decode("////")), "None")
+}
+
+test "percent-encoding keeps the unreserved set and nothing else" {
+    assertEq(urlEncode("aZ09-_.~"), "aZ09-_.~")
+    assertEq(urlEncode("name=a b&x"), "name%3Da%20b%26x")
+    assertEq(urlEncode("a+b"), "a%2Bb")
+    assertEq(urlEncode("é"), "%C3%A9")
+    assertEq(show(urlDecode("%C3%A9")), "é")
+    assertEq(show(urlDecode("%c3%a9")), "é")
+    assertEq(show(urlDecode("a+b")), "a+b")
+    assertEq(show(urlDecode("%")), "None")
+    assertEq(show(urlDecode("%4")), "None")
+    assertEq(show(urlDecode("%zz")), "None")
+    assertEq(show(urlDecode("%80")), "None")
+}

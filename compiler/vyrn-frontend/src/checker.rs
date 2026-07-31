@@ -26,10 +26,78 @@ use crate::diagnostics::Diagnostic;
 /// does not suppress errors in the others. Inside a single function body the
 /// check is still first-error (recovery there is the same class of work as
 /// parser recovery, and is deferred).
+/// Like [`check_accum_with_let_types`], but reuses the diagnostics of modules
+/// that have not changed since the last call.
+///
+/// `module_hashes` is `module key -> content hash` from the load that produced
+/// `program` ([`crate::loader::last_module_hashes`]). A function's check is
+/// reused only when BOTH hold: its module's content hash is what it was, and the
+/// SIGNATURE FINGERPRINT — every type declaration and function signature in the
+/// linked program — is what it was. The second condition is what makes this
+/// sound: a function's diagnostics depend on its own body plus everything it can
+/// refer to, so an edit that changes any signature invalidates every reuse, while
+/// an edit inside a body changes no signature and invalidates only that body.
+///
+/// The ROOT module carries no key (`module: None`), so the file being edited is
+/// never reused — only the libraries behind it.
+///
+/// Returns diagnostics and inferred `let` types. It deliberately does NOT return
+/// [`StoredFnEffects`]: those accumulate during body checks, and a reused body
+/// contributes none. Callers that need effects must use the full check.
+pub fn check_accum_reusing(
+    program: &Program,
+    module_hashes: &std::collections::HashMap<String, String>,
+) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
+    let (out, let_types, _, _, _) = check_accum_inner(program, Some(module_hashes));
+    (out, let_types)
+}
+
+thread_local! {
+    /// Reused function diagnostics for ONE signature fingerprint:
+    /// `(module key, module hash, fn name) -> diagnostics`.
+    ///
+    /// Keyed by fingerprint at the top rather than inside the entry key, because
+    /// a fingerprint change invalidates every entry anyway — so the whole map is
+    /// dropped and rebuilt, and nothing needs an eviction policy.
+    ///
+    /// It used to be one flat map cleared whenever it passed 4,096 entries. That
+    /// worked on a project with 813 functions and silently did NOTHING on one
+    /// with 4,801: the cache blew its own bound while filling, cleared, and hit
+    /// zero times. An arbitrary cap on a per-program table is a scaling cliff
+    /// disguised as memory hygiene.
+    static CHECK_MEMO: std::cell::RefCell<(u64, HashMap<(String, String, String), Vec<Diagnostic>>)> =
+        std::cell::RefCell::new((0, HashMap::new()));
+}
+
+/// A cheap hash over everything a function body may refer to by name: every type
+/// declaration and every function signature. Bodies are deliberately excluded —
+/// that is the whole point, since a body edit must not invalidate other modules.
+fn signature_fingerprint(
+    types: &HashMap<String, TypeDecl>,
+    sigs: &HashMap<String, (Vec<Type>, Type)>,
+) -> u64 {
+    let mut parts: Vec<String> = Vec::with_capacity(types.len() + sigs.len());
+    for (n, t) in types {
+        parts.push(format!("t{n}={:?}|{:?}", t.base, t.predicate));
+    }
+    for (n, (ps, r)) in sigs {
+        parts.push(format!("f{n}={ps:?}->{r:?}"));
+    }
+    parts.sort_unstable();
+    let mut h: u64 = 0xcbf29ce484222325;
+    for p in &parts {
+        for b in p.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
 pub fn check_accum_with_let_types(
     program: &Program,
 ) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
-    let (out, let_types, _) = check_accum_full(program);
+    let (out, let_types, _, _, _) = check_accum_full(program);
     (out, let_types)
 }
 
@@ -40,6 +108,18 @@ pub fn stored_fn_effects(program: &Program) -> StoredFnEffects {
     check_accum_full(program).2
 }
 
+/// Diagnostics AND the static types the JSON builtins need synthesized for
+/// (RFC-0078 M2b, M3): every `toJson` argument's type, and every `fromJson`
+/// target. `lib::check_and_synthesize` needs both before any engine builds its
+/// function table. One pass: a second full check to collect them would double
+/// every load.
+pub fn check_accum_with_json_types(
+    program: &Program,
+) -> (Vec<Diagnostic>, Vec<Type>, Vec<Type>) {
+    let (out, _, _, json, jdec) = check_accum_full(program);
+    (out, json, jdec)
+}
+
 /// The full checking pass: diagnostics, the inferred-`let`-type table, and the
 /// RFC-0037 stored-function-value collection.
 fn check_accum_full(
@@ -48,6 +128,21 @@ fn check_accum_full(
     Vec<Diagnostic>,
     HashMap<(usize, String), Type>,
     StoredFnEffects,
+    Vec<Type>,
+    Vec<Type>,
+) {
+    check_accum_inner(program, None)
+}
+
+fn check_accum_inner(
+    program: &Program,
+    reuse: Option<&std::collections::HashMap<String, String>>,
+) -> (
+    Vec<Diagnostic>,
+    HashMap<(usize, String), Type>,
+    StoredFnEffects,
+    Vec<Type>,
+    Vec<Type>,
 ) {
     let mut out = Vec::new();
 
@@ -106,6 +201,8 @@ fn check_accum_full(
         "slice",
         "bytes",
         "chars",
+        "floatBits",
+        "floatFromBits",
         "hexEncode",
         "hexDecode",
         "base64Encode",
@@ -121,6 +218,8 @@ fn check_accum_full(
         "readFileBytes",
         "stringFromBytes",
         "listDir",
+        "lineAt",
+        "colAt",
         "moduleInterface",
         "trace",
         "debug",
@@ -130,6 +229,7 @@ fn check_accum_full(
         "value",
         "list",
         "schemaOf",
+        "contractOf",
         "jsonSchema",
         "toJson",
         "fromJson",
@@ -139,6 +239,7 @@ fn check_accum_full(
         "assert",
         "assertEq",
         "blackBox",
+        "panic",
         "Int",
         "Int64",
         "Int32",
@@ -380,11 +481,21 @@ fn check_accum_full(
         .map(|f| f.name.clone())
         .collect();
 
+    // Contract registry (RFC-0071): name -> declaration. Contracts are
+    // comptime-only, so the checker's whole interest in them is (a) validating
+    // their member types and (b) typing `contractOf(Name)` as `ContractInfo`.
+    let contracts: HashMap<String, ContractDecl> = program
+        .contracts
+        .iter()
+        .map(|c| (c.name.clone(), c.clone()))
+        .collect();
+
     let checker = Checker {
         sigs: &sigs,
         caps: &caps,
         spawn_safe: &spawn_safe,
         types: &types,
+        contracts: &contracts,
         variants: &variants,
         generics: &generics,
         all_bounds: &all_bounds,
@@ -405,6 +516,8 @@ fn check_accum_full(
         stored_sources: RefCell::new(Vec::new()),
         stored_calls: RefCell::new(Vec::new()),
         spawn_sites: RefCell::new(Vec::new()),
+        json_types: RefCell::new(Vec::new()),
+        json_dec_types: RefCell::new(Vec::new()),
     };
 
     // 2b. Module state (RFC-0013): check each initializer in declaration order,
@@ -417,6 +530,18 @@ fn check_accum_full(
     for t in &program.type_decls {
         if let Err(s) = checker.check_type_decl(t) {
             out.push(Diagnostic::from_rendered(s, "check"));
+        }
+    }
+
+    // 3b. Validate each contract decl (RFC-0071): every member type must name
+    //     something real, and a default must have the member's type. A contract
+    //     whose members are unchecked would be a second silent path — exactly
+    //     the failure mode the RFC exists to remove.
+    for c in &program.contracts {
+        for s in checker.check_contract_decl(c) {
+            let mut d = Diagnostic::from_rendered(s, "check");
+            d.file = c.module.clone();
+            out.push(d);
         }
     }
 
@@ -440,6 +565,7 @@ fn check_accum_full(
     let is_library = program.functions.iter().map(|f| f.exported).any(|e| e)
         || program.type_decls.iter().any(|t| t.exported)
         || program.protocols.iter().any(|p| p.exported)
+        || program.contracts.iter().any(|c| c.exported)
         || !program.tests.is_empty()
         || !program.benches.is_empty()
         || has_served_handle;
@@ -466,7 +592,29 @@ fn check_accum_full(
     //    check is still first-error). `function` returns the first as `Err`
     //    (preserving the historical single-error `check()` surface) and leaves
     //    the rest in the sink, which we drain here.
+    // Only meaningful when reuse was asked for; computed once for the whole pass.
+    let sig_fp = reuse.map(|_| signature_fingerprint(&types, &sigs));
+
+
     for f in &program.functions {
+        // Reusable only if this function's module is known AND unchanged.
+        let memo_key = match (reuse, sig_fp, f.module.as_ref()) {
+            (Some(hashes), Some(_), Some(mk)) => hashes
+                .get(mk)
+                .map(|mh| (mk.clone(), mh.clone(), f.name.clone())),
+            _ => None,
+        };
+        if let Some(k) = &memo_key {
+            if let Some(cached) = CHECK_MEMO.with(|m| {
+                let m = m.borrow();
+                if Some(m.0) == sig_fp { m.1.get(k).cloned() } else { None }
+            }) {
+                out.extend(cached);
+                continue;
+            }
+        }
+        let produced_from = out.len();
+
         // Signature validation (params/return) runs outside `function()`, so make
         // it gen-aware here too — a `Code` type in a `gen fn` signature is legal.
         *checker.in_gen.borrow_mut() = f.is_gen;
@@ -532,6 +680,20 @@ fn check_accum_full(
             d.file = f.module.clone();
             out.push(d);
         }
+        if let Some(k) = memo_key {
+            let produced = out[produced_from..].to_vec();
+            if let Some(fp) = sig_fp {
+                CHECK_MEMO.with(|m| {
+                    let mut m = m.borrow_mut();
+                    // A new fingerprint means every existing entry is stale.
+                    if m.0 != fp {
+                        m.0 = fp;
+                        m.1.clear();
+                    }
+                    m.1.insert(k, produced);
+                });
+            }
+        }
     }
 
     // 6. Check test bodies (RFC-0015). Each is checked as a Unit-returning
@@ -588,7 +750,11 @@ fn check_accum_full(
     }
 
     let let_types = checker.let_types.borrow().clone();
-    (out, let_types, effects)
+    let mut json_types = checker.json_types.borrow().clone();
+    json_types.dedup_by_key(|t| format!("{t:?}"));
+    let mut json_dec_types = checker.json_dec_types.borrow().clone();
+    json_dec_types.dedup_by_key(|t| format!("{t:?}"));
+    (out, let_types, effects, json_types, json_dec_types)
 }
 
 /// Check every `test` body (RFC-0015). Duplicate names per module are reported;
@@ -726,6 +892,9 @@ struct Checker<'a> {
     /// Functions that may be run as a concurrent task (`spawn`) — isolated/pure.
     spawn_safe: &'a std::collections::HashSet<String>,
     types: &'a HashMap<String, TypeDecl>,
+    /// Module contracts (RFC-0071): name -> declaration. Comptime-only — used to
+    /// validate member types and to resolve `contractOf(Name)`.
+    contracts: &'a HashMap<String, ContractDecl>,
     variants: &'a HashMap<String, VariantInfo>,
     /// Generic functions: name -> type-parameter names.
     generics: &'a HashMap<String, Vec<String>>,
@@ -800,6 +969,15 @@ struct Checker<'a> {
     /// after checking against the stored-closure-extended fixpoint (RFC-0037):
     /// (caller, callee, line).
     spawn_sites: RefCell<Vec<(String, String, usize)>>,
+    /// RFC-0078 M2b: the static type of every `toJson(x)` argument in the program.
+    /// This is the ONE place in the pipeline that knows it — the loader can add
+    /// functions to a linked program but not type an expression, and the engines
+    /// type expressions but build their function tables once, from a `&Program`.
+    /// So the checker collects, and `lib::load_warned` synthesizes the encoders.
+    json_types: RefCell<Vec<Type>>,
+    /// RFC-0078 M3: the target type of every `fromJson(T, s)` in the program, for
+    /// the same reason and synthesized at the same point — the decoders.
+    json_dec_types: RefCell<Vec<Type>>,
 }
 
 /// What an enum variant name resolves to.
@@ -892,6 +1070,13 @@ impl<'a> Checker<'a> {
         // it should flow through without manufacturing a second diagnostic. This
         // is what keeps inside-body error recovery cascade-free.
         if matches!(from, Type::Err) || matches!(to, Type::Err) {
+            return true;
+        }
+        // `Never` (RFC-0079) is the bottom type: a `panic` produces no value, so
+        // it fits wherever a value is wanted. One direction only — a `String` is
+        // not a `Never`, and making it one would let a panic-typed context
+        // swallow a real value.
+        if matches!(from, Type::Never) {
             return true;
         }
         // A transparent alias to `Result`/`Option` (RFC-0024, e.g. `type
@@ -1297,6 +1482,88 @@ impl<'a> Checker<'a> {
                 Ok(())
             }
             _ => self.ensure_type_exists(ty, line),
+        }
+    }
+
+    /// Validate a module contract's members (RFC-0071). Returns every problem
+    /// found — contracts are declarations, so a mistake in one is reported the
+    /// same way a mistake in a `type` is, not swallowed.
+    ///
+    /// Three rules, all local to the declaration:
+    ///
+    /// * every member type must name something that exists (a member's implicit
+    ///   type parameters — `T` in `Query<T>` — already arrived as
+    ///   [`Type::Param`] from the parser, so a *typo* is still an unknown type);
+    /// * an optional member's default must actually have the member's type,
+    ///   because that default is what a module gets when it omits the export —
+    ///   a `fn` member's default is checked against its RETURN type, which is
+    ///   what `fn head() -> Head = noHead()` says;
+    /// * the open rule may not be optional or valueless — it describes a shape
+    ///   for arbitrarily-named exports, so a default would have nothing to
+    ///   attach to (rejected in the parser, where the `=` is seen).
+    fn check_contract_decl(&self, c: &ContractDecl) -> Vec<String> {
+        let mut errs = Vec::new();
+        for m in &c.members {
+            let where_ = format!("contract `{}` member `{}`", c.name, m.name);
+            match &m.kind {
+                ContractMemberKind::Value { ty, default } => {
+                    if let Err(e) = self.ensure_type_exists(ty, m.line) {
+                        errs.push(e);
+                        continue;
+                    }
+                    self.check_member_default(default.as_deref(), ty, &where_, m.line, &mut errs);
+                }
+                ContractMemberKind::Fn {
+                    params,
+                    ret,
+                    default,
+                    ..
+                } => {
+                    for p in params {
+                        if let Err(e) = self.ensure_type_exists(p, m.line) {
+                            errs.push(e);
+                        }
+                    }
+                    if *ret != Type::Unit {
+                        if let Err(e) = self.ensure_type_exists(ret, m.line) {
+                            errs.push(e);
+                            continue;
+                        }
+                    }
+                    self.check_member_default(default.as_deref(), ret, &where_, m.line, &mut errs);
+                }
+            }
+        }
+        errs
+    }
+
+    /// Check a contract member's default against the type it stands in for.
+    ///
+    /// The default is checked exactly like a module-state initializer: an empty
+    /// scope (a contract sees no bindings) and the member type as the expected
+    /// type. The one exception is a member type that mentions an implicit type
+    /// parameter (`Query<T>`): the member admits *any* instantiation, so no
+    /// concrete default can equal it, and demanding one would make the whole
+    /// open-type-parameter rule unusable. The expression is still checked — an
+    /// undeclared `noQuurey()` is still an error — just not compared.
+    fn check_member_default(
+        &self,
+        default: Option<&Expr>,
+        ty: &Type,
+        where_: &str,
+        line: usize,
+        errs: &mut Vec<String>,
+    ) {
+        let Some(d) = default else { return };
+        let scope: Vec<HashMap<String, Binding>> = vec![HashMap::new()];
+        let open = type_mentions_param(ty);
+        let expected = if open { None } else { Some(ty) };
+        match self.expr(d, &scope, expected, None) {
+            Err(e) => errs.push(e),
+            Ok(vty) if !open && !self.coercible(&vty, ty) => errs.push(format!(
+                "line {line}: {where_} defaults to {vty}, but is declared `{ty}`"
+            )),
+            Ok(_) => {}
         }
     }
 
@@ -2140,8 +2407,12 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Expr(e) => {
-                self.expr(e, scope, None, Some(ret))?;
-                Ok(false)
+                // A `panic` statement is `Never`-typed, so it satisfies the
+                // return-path check the way a `return` does (RFC-0079): the
+                // statements after it are unreachable and a function whose body
+                // ends in one owes no value.
+                let t = self.expr(e, scope, None, Some(ret))?;
+                Ok(matches!(t, Type::Never))
             }
             Stmt::Region { body, .. } => {
                 // Record the frame count at entry so the escape guard can tell
@@ -2946,6 +3217,16 @@ impl<'a> Checker<'a> {
                 Pattern::None => ("None", None),
                 Pattern::Ok(b) => ("Ok", Some(b)),
                 Pattern::Err(b) => ("Err", Some(b)),
+                // The `??` desugar's two patterns (RFC-0079): they take whichever
+                // tag the scrutinee's own shape names, which is the one thing the
+                // parser could not do. `Failure` binds only on the `Result` path
+                // — an `Option`'s tag-0 has no payload — which is exactly what
+                // this per-arm `Option<&str>` seam is for.
+                Pattern::Success(b) => (want[0], Some(b)),
+                Pattern::Failure(b) => (
+                    want[1],
+                    matches!(sty, Type::Result(..)).then_some(b.as_str()),
+                ),
                 Pattern::Variant(n, _) => {
                     return Err(format!(
                         "line {line}: pattern `{n}` does not match scrutinee of type {sty}"
@@ -3179,6 +3460,11 @@ impl<'a> Checker<'a> {
             Pattern::None => ("None", None),
             Pattern::Ok(b) => ("Ok", Some(b.clone())),
             Pattern::Err(b) => ("Err", Some(b.clone())),
+            // `??` desugars to a `match`, never to an `if let`/`while let`, so
+            // these cannot reach here.
+            Pattern::Success(_) | Pattern::Failure(_) => {
+                unreachable!("the `??` patterns are produced only inside a `match`")
+            }
             Pattern::Variant(n, _) => {
                 return Err(format!(
                     "line {line}: pattern `{n}` does not match scrutinee of type {sty}"
@@ -3527,6 +3813,27 @@ impl<'a> Checker<'a> {
             return Ok(t);
         }
 
+        // RFC-0079: `panic(msg) -> Never`. The reason is written by the caller,
+        // at the site that knows it — the compiler owns only the `error: `
+        // prefix and the newline, so a panic line is indistinguishable from a
+        // trap line and the channel stays uniform.
+        if name == "panic" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `panic` takes 1 String argument, got {}",
+                    args.len()
+                ));
+            }
+            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
+            if matches!(t, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if t != Type::Str {
+                return Err(format!("line {line}: `panic` needs a String, found {t}"));
+            }
+            return Ok(Type::Never);
+        }
+
         // built-in: print(Int|Bool) -> Unit
         if name == "print" {
             if args.len() != 1 {
@@ -3652,6 +3959,66 @@ impl<'a> Checker<'a> {
         // through the loader's resolver and scoped to the generator's path args;
         // at runtime it lists the real filesystem. Canonical error `cannot list
         // \`p\``.
+        // `lineAt(bytes, off)` / `colAt(bytes, off)` — the 1-based line and
+        // column of a byte offset in a UTF-8 buffer (RFC-0033 origin directives
+        // are 1-based, and this is what feeds them).
+        //
+        // A builtin rather than a library loop because the obvious loop is
+        // quadratic: counting newlines from byte 0 on every call is O(offset),
+        // and a scanner asks once per node. `std/vyx` spent 122 ms of a 291 ms
+        // page compile in exactly that shape. The interpreter memoizes a
+        // line-start table per buffer, which a Vyrn library cannot do —
+        // generators may not touch module state (comptime purity), so the cache
+        // has to live below them. Any generator gets it, not just std.
+        if name == "lineAt" || name == "colAt" {
+            if args.len() != 2 {
+                return Err(format!(
+                    "line {line}: `{name}` takes 2 arguments (bytes, offset), got {}",
+                    args.len()
+                ));
+            }
+            // The buffer must be a BYTE buffer, not any array. Two reasons, and
+            // they point the same way:
+            //
+            // - The engines disagreed on anything else. The interpreter reads
+            //   `v as u8` per *element*, so `[1, 10]: Array<Int64>` looks like the
+            //   bytes `01 0a`; native hands the `{ ptr, i64, i64 }` data pointer to
+            //   `__vyrn_line_at` as `unsigned char*`, where element 1 starts at
+            //   byte 8 and byte 1 is the zero padding of `01 00 00 …`. RFC-0077's
+            //   M2n note found `lineAt([1, 10], 2)` answering 2 interpreted and 1
+            //   native, and refused to pick a winner — correctly, because a line
+            //   number over an `Array<Int64>` is nonsense in both readings. So this
+            //   rejects the call instead of answering it.
+            // - `ArrayN`/`SmallArray` were never lowerable here anyway: the native
+            //   emitter `extractvalue`s a `{ ptr, i64, i64 }`, which is the growable
+            //   `Array` layout alone (`[N x T]` and `{ i64, i64, ptr, [N x T] }` are
+            //   different aggregates). Accepting them was a front-end promise no
+            //   backend kept.
+            //
+            // `bytes(s)` produces exactly `Array<UInt8>`, and that is what every
+            // real caller passes (`std/vyx`'s scanner, `std/text`'s oracles). The
+            // element goes through `base` so a validated newtype over `UInt8` — same
+            // byte, same stride — still counts.
+            let b = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
+            let is_bytes = match &b {
+                Type::Array(el) => {
+                    matches!(self.base(el), Type::IntN { bits: 8, signed: false })
+                }
+                _ => false,
+            };
+            if !matches!(b, Type::Err) && !is_bytes {
+                return Err(format!(
+                    "line {line}: `{name}` needs an `Array<UInt8>` buffer, found {b}"
+                ));
+            }
+            let o = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
+            if !matches!(o, Type::Err | Type::Int) {
+                return Err(format!(
+                    "line {line}: `{name}`'s offset must be an `Int64`"
+                ));
+            }
+            return Ok(Type::Int);
+        }
         if name == "listDir" {
             if args.len() != 1 {
                 return Err(format!(
@@ -3943,12 +4310,13 @@ impl<'a> Checker<'a> {
             return Ok(Type::Bool);
         }
 
-        // built-in: slice(s, start, end) -> String (RFC-0046). A byte-range
-        // substring — the primitive `std/strings` builds on. `start`/`end` are
-        // byte offsets (Int64). O(1) validated at runtime: a cut inside a
-        // multi-byte UTF-8 character traps (`error: slice splits a UTF-8
-        // character`), an out-of-range offset traps like an array OOB
-        // (`error: slice index out of range`).
+        // built-in: slice(s, start, end) (RFC-0046, routed by RFC-0079 M3). A
+        // byte-range substring — the primitive `std/strings` builds on.
+        // `start`/`end` are byte offsets (Int64), and the RESULT is whatever
+        // `std/strpred`'s `sliceV` says it is (`Result<String, SliceError>`),
+        // read out of the link below rather than restated here: the error enum is
+        // a std declaration, and a second spelling of it in the checker is exactly
+        // the multiplicity this routing exists to remove.
         if name == "slice" {
             if args.len() != 3 {
                 return Err(format!(
@@ -3974,7 +4342,51 @@ impl<'a> Checker<'a> {
                     ));
                 }
             }
-            return Ok(Type::Str);
+            // The engines refuse a routed builtin by name when its module is not in
+            // the link; the checker can say the same thing earlier and with a line
+            // number, and it has to — there is no return type to invent, since the
+            // one that exists names a type only the link supplies.
+            let rt = crate::loader::routed_builtin("slice").expect("`slice` is routed");
+            return match self.sigs.get(rt) {
+                Some((_, ret)) => Ok(ret.clone()),
+                None => Err(format!(
+                    "line {line}: `slice` is implemented in Vyrn and its module is not in \
+                     the link — a std root is needed to call it"
+                )),
+            };
+        }
+
+        // The two IEEE-754 bit views (RFC-0078 M4a). `floatBits` is a `Float64`
+        // read as its 64 raw bits and `floatFromBits` is the inverse — not a
+        // numeric conversion, which rounds, but a reinterpretation, which is
+        // one instruction on every engine (`f64::to_bits`,
+        // `bitcast double to i64`, `i64.reinterpret_f64`).
+        //
+        // They are here because they are irreducible. Given them, decimal ->
+        // binary and binary -> decimal are ordinary Vyrn (`std/num`); without
+        // them there is no expression in the language that can BUILD a
+        // `Float64` from anything but another number, which is what blocked
+        // RFC-0078 M3.
+        if name == "floatBits" || name == "floatFromBits" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `{name}` takes 1 argument, got {}",
+                    args.len()
+                ));
+            }
+            let (want, got) = if name == "floatBits" {
+                (Type::Float, Type::IntN { bits: 64, signed: false })
+            } else {
+                (Type::IntN { bits: 64, signed: false }, Type::Float)
+            };
+            let t = self.base(&self.expr(&args[0], scope, Some(&want), fn_ret)?);
+            if matches!(t, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if t != want {
+                return Err(format!("line {line}: `{name}` needs a {want}, found {t}"));
+            }
+            return Ok(got);
         }
 
         // Text encodings. Encoders: String -> String. Decoders: String ->
@@ -4529,6 +4941,30 @@ impl<'a> Checker<'a> {
                 _ => return Err(format!("line {line}: `schemaOf` needs a type name")),
             }
         }
+        // built-in: contractOf(ContractName) -> ContractInfo — compile-time
+        // reflection of a module contract (RFC-0071). Shaped exactly like
+        // `schemaOf`: the argument is a *declaration name*, not a value, and the
+        // result is an ordinary record, so `std/contract:checkContract` can
+        // compare a contract against a `moduleInterface` in plain Vyrn code.
+        if name == "contractOf" {
+            if args.len() != 1 {
+                return Err(format!(
+                    "line {line}: `contractOf` takes 1 argument (a contract name), got {}",
+                    args.len()
+                ));
+            }
+            match &args[0] {
+                Expr::Var { name: cn, .. } if self.contracts.contains_key(cn) => {
+                    return Ok(Type::Named("ContractInfo".to_string()))
+                }
+                Expr::Var { name: cn, .. } => {
+                    return Err(format!(
+                        "line {line}: `contractOf` needs a declared contract name;                          `{cn}` is not a contract"
+                    ))
+                }
+                _ => return Err(format!("line {line}: `contractOf` needs a contract name")),
+            }
+        }
         // built-in: jsonSchema(TypeName) -> String — compile-time rendering of a
         // declared type as a JSON Schema (draft 2020-12) document. Like `schemaOf`,
         // the argument is a *type name*; the string is computed from the declaration.
@@ -4569,6 +5005,9 @@ impl<'a> Checker<'a> {
                     "line {line}: `toJson` cannot encode `{off}` (not a codable type)"
                 ));
             }
+            // RFC-0078 M2b: record the argument type so the encoder for it exists
+            // in the linked program by the time an engine lowers this call.
+            self.json_types.borrow_mut().push(at);
             return Ok(Type::Str);
         }
         // built-in: fromJson(TypeName, s) -> Validation<T> (RFC-0018) —
@@ -4603,6 +5042,9 @@ impl<'a> Checker<'a> {
                     "line {line}: `fromJson`'s second argument must be a String, found {sty}"
                 ));
             }
+            // RFC-0078 M3: record the target so its decoder exists in the linked
+            // program by the time an engine lowers this call.
+            self.json_dec_types.borrow_mut().push(target.clone());
             return Ok(Type::App("Validation".to_string(), vec![target]));
         }
         // built-in: value(x) -> Value — box a scalar into the interpolation value
@@ -4937,6 +5379,31 @@ impl<'a> Checker<'a> {
         Ok(ret.clone())
     }
 
+    /// Solve a `fn` parameter's own parameter type against the function value's,
+    /// then report what the caller will actually pass (RFC-0071 M2b).
+    ///
+    /// Pass 1 of the generic call binds every type parameter reachable from an
+    /// ordinary argument, which used to be enough because a `fn` parameter's
+    /// types were always pinned by something else first (`map<T, U>(xs: Array<T>,
+    /// f: fn(T) -> U)` learns `T` from `xs`). `paramQuery(run: fn(P) -> T)` has no
+    /// such argument: the function value it is handed is the ONLY place `P`
+    /// occurs, so without solving here the call cannot typecheck at all — the
+    /// parameter stays `P` and every comparison against it fails.
+    ///
+    /// A unification failure is deliberately swallowed: the assignability check
+    /// that follows produces the message a reader wants (two concrete types),
+    /// where `unify` would report a type-parameter conflict.
+    fn solve_fn_param(
+        &self,
+        want: &Type,
+        actual: &Type,
+        subst: &mut HashMap<String, Type>,
+        line: usize,
+    ) -> Type {
+        let _ = self.unify(want, actual, subst, line);
+        crate::types::substitute(want, subst)
+    }
+
     /// Check a `fn`-typed argument (RFC-0023): a lambda literal, a named
     /// top-level function, or a pass-through `fn`-typed parameter. `expected_fn`
     /// is the parameter's `fn(P..) -> R` type with its parameter types already
@@ -5063,6 +5530,7 @@ impl<'a> Checker<'a> {
                         ));
                     }
                     for (a, b) in vptys.iter().zip(&ptys) {
+                        let b = &self.solve_fn_param(b, a, subst, line);
                         if !self.assignable(a, b) && !self.assignable(b, a) {
                             return Err(format!(
                                 "line {line}: `{vn}` has parameter type {a}, but `{callee}` \
@@ -5098,6 +5566,7 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 for (a, b) in sig.0.iter().zip(&ptys) {
+                    let b = &self.solve_fn_param(b, a, subst, line);
                     if !self.assignable(b, a) {
                         return Err(format!(
                             "line {line}: `{vn}` expects a {a} argument, but `{callee}` will \
@@ -5592,8 +6061,10 @@ impl<'a> Checker<'a> {
         subst: &mut HashMap<String, Type>,
         line: usize,
     ) -> Result<(), String> {
-        // A recovered `Err` unifies with anything (no spurious mismatch).
-        if matches!(pty, Type::Err) || matches!(aty, Type::Err) {
+        // A recovered `Err` unifies with anything (no spurious mismatch), and so
+        // does a `Never` (RFC-0079) — `f(panic(".."))` places no demand on `T`,
+        // and binding `T = Never` would fix the parameter to a type no value has.
+        if matches!(pty, Type::Err) || matches!(aty, Type::Err) || matches!(aty, Type::Never) {
             return Ok(());
         }
         match pty {
@@ -5653,6 +6124,23 @@ impl<'a> Checker<'a> {
                 Type::Ref(a) => self.unify(inner, a, subst, line),
                 _ => Err(format!("line {line}: expected {pty}, found {aty}")),
             },
+            // A generic function type binds its parameters through the function
+            // value's own signature — `{ run: fn() -> T }` learns `T` from a
+            // `fn() -> Array<Paste>` exactly as `Array<T>` learns it from an
+            // element. Only engaged when the pattern actually mentions a type
+            // parameter: two concrete function types keep the assignability rule
+            // below, which is the one every stored-closure check already uses.
+            Type::Fn(pps, pr) if type_mentions_param(pty) => {
+                match crate::types::resolve(aty, self.types) {
+                    Type::Fn(aps, ar) if aps.len() == pps.len() => {
+                        for (p, a) in pps.iter().zip(&aps) {
+                            self.unify(p, a, subst, line)?;
+                        }
+                        self.unify(pr, &ar, subst, line)
+                    }
+                    _ => Err(format!("line {line}: expected {pty}, found {aty}")),
+                }
+            }
             // A generic `Map<String, V>` binds `V` from the value type. A
             // transparent named alias to a map resolves first.
             Type::Map(pk, pv) => match crate::types::resolve(aty, self.types) {
@@ -5839,6 +6327,65 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
     }
 }
 
+/// Whether `ty` mentions a type parameter anywhere inside it.
+///
+/// A contract member's type parameters are implicit and open per member
+/// (RFC-0071), so a type that mentions one describes a *family* of types rather
+/// than one type — which is why a default cannot be compared against it.
+fn type_mentions_param(ty: &Type) -> bool {
+    let mut found = false;
+    walk_type(ty, &mut |t| {
+        if matches!(t, Type::Param(_)) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Apply `f` to `ty` and to every type nested inside it.
+fn walk_type(ty: &Type, f: &mut impl FnMut(&Type)) {
+    f(ty);
+    match ty {
+        Type::Option(a)
+        | Type::Ref(a)
+        | Type::Array(a)
+        | Type::Task(a)
+        | Type::Partial(a)
+        | Type::ArrayN(a, _)
+        | Type::SmallArray(a, _)
+        | Type::Omit(a, _)
+        | Type::Pick(a, _) => walk_type(a, f),
+        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+            walk_type(a, f);
+            walk_type(b, f);
+        }
+        Type::App(_, args) => {
+            for a in args {
+                walk_type(a, f);
+            }
+        }
+        Type::Record(fields) => {
+            for fl in fields {
+                walk_type(&fl.ty, f);
+            }
+        }
+        Type::Enum(variants) => {
+            for v in variants {
+                for p in &v.payload {
+                    walk_type(p, f);
+                }
+            }
+        }
+        Type::Fn(params, ret) => {
+            for p in params {
+                walk_type(p, f);
+            }
+            walk_type(ret, f);
+        }
+        _ => {}
+    }
+}
+
 /// Whether a type contains a directly nested `Option`/`Result` (the v0.1
 /// prohibition), anywhere inside it.
 fn has_nested_wrap(ty: &Type) -> bool {
@@ -5927,6 +6474,8 @@ const SPAWN_FORBIDDEN: &[&str] = &[
     "readFileBytes",
     "stringFromBytes",
     "listDir",
+    "lineAt",
+    "colAt",
 ];
 
 /// Whether a type may appear in an `extern` signature (RFC-0012 ABI). The scalar
@@ -6122,6 +6671,15 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
     const HINT: &str = "generators run at compile time — they may not use `extern`, `spawn`, \
                         module state, `writeFile`, `readLine`, `args`, `readFileBytes`, or logging \
                         sinks";
+    // Whether a function violates purity on its own, and the call edges out of
+    // it, computed ONCE per function and shared by every generator's search.
+    // Both are functions of the body alone — nothing about them depends on which
+    // generator reached it — but `seen` is per-generator, so overlapping call
+    // graphs (every std generator bottoms out in the same std helpers) re-walked
+    // the same bodies once per generator, and twice on each visit: once for
+    // `direct`, once to expand its edges.
+    let mut facts: HashMap<String, (Option<String>, Vec<String>)> = HashMap::new();
+
     for g in gen_fns {
         // BFS the call graph from this generator to the nearest direct violation.
         let mut queue: std::collections::VecDeque<Vec<&str>> =
@@ -6131,7 +6689,11 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
         while let Some(path) = queue.pop_front() {
             let cur = *path.last().unwrap();
             let Some(f) = fn_map.get(cur) else { continue };
-            if let Some(reason) = direct(f) {
+            if !facts.contains_key(cur) {
+                facts.insert(cur.to_string(), (direct(f), expand(fn_calls(&f.body))));
+            }
+            let (violation, edges) = &facts[cur];
+            if let Some(reason) = violation.clone() {
                 let msg = if path.len() == 1 {
                     format!(
                         "line {}: `gen fn {}` is not comptime-pure: it {reason} ({HINT})",
@@ -6150,7 +6712,7 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
                 out.push(d);
                 break;
             }
-            for callee in expand(fn_calls(&f.body)) {
+            for callee in edges.clone() {
                 if let Some(next) = fn_map.get(callee.as_str()) {
                     if seen.insert(next.name.as_str()) {
                         let mut np: Vec<&str> = path.clone();
@@ -6757,7 +7319,12 @@ fn init_restrictions(
 }
 
 /// The names of every function/builtin called (or spawned) anywhere in a block.
-fn fn_calls(b: &Block) -> std::collections::HashSet<String> {
+/// Every function name called anywhere in `b`.
+///
+/// Public because RFC-0076's wasm engine needs the same question the
+/// comptime-purity check asks — "what does this reach?" — to decide whether a
+/// generator touches a capability it cannot yet serve. One walker, one answer.
+pub fn fn_calls(b: &Block) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     calls_block(b, &mut out);
     out
@@ -7286,13 +7853,16 @@ mod tests {
         assert!(e.contains("`stringFromBytes` needs an Array<UInt8>"), "{e}");
     }
 
+    /// `slice`'s ARGUMENT diagnostics, which stayed in the checker when RFC-0079
+    /// M3 routed the builtin: the three-argument shape is fixed, and saying so by
+    /// name is better than "no function `strpred$sliceV`".
+    ///
+    /// Its RESULT is not checked here and cannot be — see
+    /// `slice_without_its_module_refuses_at_the_check` below. The return type is
+    /// `std/strpred`'s, so a bare source has nothing to read it from;
+    /// `examples/strpredbytes.vyrn` is where the type is exercised.
     #[test]
     fn slice_builtin_signature() {
-        // slice(String, Int64, Int64) -> String (RFC-0046).
-        assert!(check_src(
-            "fn main() -> Int64 { let x: String = slice(\"hello\", 1, 3) return x.byteLength }"
-        )
-        .is_ok());
         let e = check_src("fn main() -> Int64 { let x = slice(\"hi\") return 0 }").unwrap_err();
         assert!(e.contains("`slice` takes 3 arguments"), "{e}");
         let e = check_src("fn main() -> Int64 { let x = slice(42, 0, 1) return 0 }").unwrap_err();
@@ -7300,6 +7870,25 @@ mod tests {
         let e =
             check_src("fn main() -> Int64 { let x = slice(\"hi\", \"a\", 1) return 0 }").unwrap_err();
         assert!(e.contains("`slice` needs Int64 offsets"), "{e}");
+    }
+
+    /// The seam every routed builtin has, and `slice` is the first one to reach it
+    /// at CHECK time rather than at emit (RFC-0079 M3).
+    ///
+    /// The other eleven are typed by a fixed answer the checker can write down —
+    /// `Bool`, `Result<String, String>` — so a bare source with no resolver checks
+    /// clean and each engine refuses by name when it lowers the call. `slice`
+    /// answers `Result<String, SliceError>`, and `SliceError` is a `std/strpred`
+    /// declaration: there is no type to invent, so the refusal moves one phase
+    /// earlier and gains a line number. Loudly rather than silently, which is the
+    /// same requirement `a_routed_builtin_without_its_module_refuses_by_name`
+    /// states for the rest.
+    #[test]
+    fn slice_without_its_module_refuses_at_the_check() {
+        let e =
+            check_src("fn main() -> Int64 { let x = slice(\"hi\", 0, 1) return 0 }").unwrap_err();
+        assert!(e.contains("`slice` is implemented in Vyrn"), "{e}");
+        assert!(e.contains("a std root is needed"), "{e}");
     }
 
     #[test]
@@ -9571,5 +10160,108 @@ mod tests {
              drop grid\n\
              return n }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    // ---- module contracts (RFC-0071) ---------------------------------------
+
+    #[test]
+    fn contract_members_may_name_declared_types_and_open_type_params() {
+        let src = "type Head = { title: String }\n\
+                   contract Page {\n\
+                   let head: Head = Head { title: \"\" }\n\
+                   let data: Array<T>\n\
+                   fn load(id: Int64) -> String\n\
+                   fn *(input: String) -> String\n\
+                   }\n\
+                   fn main() -> Int64 { return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn a_misspelled_member_type_is_an_error_not_a_type_parameter() {
+        // The whole point of the single-letter rule: `Haed` is still a type the
+        // checker must resolve, so a typo in a contract is caught like any other.
+        let src = "type Head = { title: String }\n\
+                   contract Page { let head: Haed }\n\
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("unknown type `Haed`"), "{e}");
+    }
+
+    #[test]
+    fn a_default_must_have_the_members_declared_type() {
+        let src = "type Head = { title: String }\n\
+                   contract Page { let head: Head = \"Title\" }\n\
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("head"), "{e}");
+    }
+
+    #[test]
+    fn contract_of_types_as_contract_info() {
+        let src = "contract Page { let head: String = \"\" }\n\
+                   fn main() -> Int64 { let c = contractOf(Page)  print(c.name)  return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn contract_of_rejects_a_name_that_is_not_a_contract() {
+        let src = "type Page = { a: Int64 }\n\
+                   fn main() -> Int64 { let c = contractOf(Page)  return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(e.contains("is not a contract"), "{e}");
+    }
+
+    #[test]
+    fn a_module_that_only_exports_a_contract_is_a_library() {
+        // No `main` required — an exported contract is a public surface, exactly
+        // like an exported `type` or `protocol`.
+        let src = "export contract Page { let head: String = \"\" }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    #[test]
+    fn line_at_and_col_at_demand_a_byte_buffer() {
+        // The shape every real caller passes.
+        assert!(
+            check_src(
+                "fn main() -> Int64 { let b = bytes(\"a\\nb\")  print(lineAt(b, 2))  \
+                 print(colAt(b, 2))  return 0 }"
+            )
+            .is_ok()
+        );
+        // The program RFC-0077 M2n could not pick an answer for: interpreted it
+        // said 2 (one `u8` per element), native it said 1 (byte 1 of `01 00 00 …`
+        // is zero). It is now refused instead.
+        for name in ["lineAt", "colAt"] {
+            let e = check_src(&format!(
+                "fn main() -> Int64 {{ let mut a: Array<Int64> = []  a.push(1)  a.push(10)  \
+                 print({name}(a, 2))  return 0 }}"
+            ))
+            .unwrap_err();
+            assert_eq!(
+                e,
+                format!("line 1: `{name}` needs an `Array<UInt8>` buffer, found Array<Int64>")
+            );
+        }
+        // Not an array at all.
+        let s = check_src("fn main() -> Int64 { print(lineAt(\"ab\", 1))  return 0 }").unwrap_err();
+        assert_eq!(
+            s,
+            "line 1: `lineAt` needs an `Array<UInt8>` buffer, found String"
+        );
+        // A `SmallArray` of bytes is refused too, and deliberately: the native
+        // emitter reads a `{ ptr, i64, i64 }`, which a `SmallArray`'s
+        // `{ i64, i64, ptr, [N x T] }` is not. Front end and backend now agree
+        // on one accepted shape.
+        let sa = check_src(
+            "fn main() -> Int64 { let mut a: SmallArray<UInt8, 4> = []  a.push('x')  \
+             print(lineAt(a, 0))  return 0 }",
+        )
+        .unwrap_err();
+        assert!(
+            sa.contains("`lineAt` needs an `Array<UInt8>` buffer"),
+            "{sa}"
+        );
     }
 }

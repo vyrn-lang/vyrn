@@ -1,0 +1,327 @@
+/// std/text — UTF-8 decoding and byte-offset line/column, written in Vyrn
+/// (RFC-0078 M4b).
+///
+/// Four builtins live here as ordinary Vyrn: `chars` (a `String`'s codepoints),
+/// `charCount` (how many of them there are), `lineAt` and `colAt` (the 1-based line
+/// and column of a byte offset). **`chars` and `charCount` are retired** — RFC-0078
+/// M4c routed `chars` into `charsV`, deleting Rust's `str::chars` from the
+/// interpreter and 82 lines of two-pass decoder from the textual emitter, and the
+/// census that followed routed `charCount` into `charCountV`, deleting a Rust arm,
+/// a C shim function, a line of emitted IR and ~30 lines of hand-written
+/// `wasm-encoder`. `lineAt` and `colAt` are NOT: the interpreter memoizes a
+/// line-start table per buffer and a Vyrn library cannot (a generator may not touch
+/// module state — comptime purity), so retiring them is a decision about that cache,
+/// which is M5's question rather than this milestone's. They stay builtins and
+/// `lineAtV`/`colAtV` stay the thing they are proved against.
+///
+/// `tests/text.rs` is what proves it: the `chars` half is now a pinned digest over
+/// ~2,000 codepoints (a comparison against the builtin would compare `charsV` with
+/// itself), while the malformed table and the line/column table are still live
+/// oracles against `stringFromBytes` and `lineAt`/`colAt`, neither of which moved.
+/// `charCount` needed no new digest and that is the interesting part: `charCountV`
+/// is a byte scan and `charsV` is a full decode, so the two are independent
+/// implementations of one fact, and `chars`'s side of that comparison is already
+/// pinned to the pre-swap C and Rust.
+///
+/// **M4a's question, asked again.** The finding worth carrying from the number
+/// tier was that the irreducible primitive is a missing VIEW rather than a
+/// missing operation: nothing could read a `Float64`'s bits, so every text ->
+/// float route had to be a builtin. The string half needs no new view at all.
+/// `bytes(s)` already exposes a `String` as its UTF-8 bytes and `stringFromBytes`
+/// is the validated inverse, so decoding is expressible today — which is why this
+/// file needs no compiler change of any kind, unlike `std/num`, which needed two.
+///
+/// **The validator is not duplicated, it is inverted.** `stringFromBytes` walks
+/// Björn Höhrmann's DFA (`utf8d_table`, shared between the textual and direct
+/// wasm backends since RFC-0077 M2g) to decide validity and throws the
+/// codepoints away. `decodeUtf8` below decides the same question by first-byte
+/// dispatch and keeps them. The two must agree on every byte string, and the test
+/// asserts exactly that rather than trusting the tables to match.
+///
+/// **One deliberate disagreement, and it is not about UTF-8.** `stringFromBytes`
+/// rejects an interior NUL *before* it looks at UTF-8 (RFC-0014's rule: a Vyrn
+/// `String` is NUL-terminated, so it could not carry one). `0x00` is perfectly
+/// valid UTF-8, so `decodeUtf8` accepts it and returns codepoint 0. That is a
+/// difference in what a `String` can hold, not in what UTF-8 means, and it is
+/// pinned as its own row rather than hidden.
+
+/// The Unicode scalar values of `b`, or `None` if `b` is not valid UTF-8.
+///
+/// Rejects exactly what `String::from_utf8` and the DFA reject, by the standard
+/// first-byte table: overlong forms (`0xC0`/`0xC1`, and `0xE0`/`0xF0` whose
+/// continuation is too low), the surrogate range (`0xED 0xA0..0xBF`), anything
+/// above U+10FFFF (`0xF4 0x90..`, and `0xF5..0xFF`), a lone continuation byte,
+/// and a sequence truncated by the end of the buffer.
+///
+/// NOT a validator plus a decoder: the ranges that make a form overlong are the
+/// same ranges the codepoint arithmetic uses, so checking and building are one
+/// pass. Bails at the first bad byte — a partial decode has no caller, and
+/// `stringFromBytes`, the oracle, is all-or-nothing too.
+export fn decodeUtf8(b: Array<UInt8>) -> Option<Array<Int64>> {
+    let n = b.length
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        let b0 = Int64(b[i])
+        if b0 < 128 {
+            out.push(b0)
+            i = i + 1
+        } else {
+            // `w` is the sequence width (0 = this byte cannot start one), and
+            // `lo`/`hi` bound the FIRST continuation byte. Those bounds are the
+            // whole of the overlong and out-of-range story: 0xE0 demands 0xA0+
+            // (below that the value fits in two bytes), 0xED stops at 0x9F (above
+            // it is a surrogate), 0xF0 demands 0x90+ and 0xF4 stops at 0x8F (past
+            // U+10FFFF).
+            let mut w = 0
+            let mut lo = 128
+            let mut hi = 191
+            if b0 >= 194 && b0 <= 223 {
+                w = 2
+            } else if b0 == 224 {
+                w = 3
+                lo = 160
+            } else if b0 == 237 {
+                w = 3
+                hi = 159
+            } else if (b0 >= 225 && b0 <= 236) || b0 == 238 || b0 == 239 {
+                w = 3
+            } else if b0 == 240 {
+                w = 4
+                lo = 144
+            } else if b0 == 244 {
+                w = 4
+                hi = 143
+            } else if b0 >= 241 && b0 <= 243 {
+                w = 4
+            }
+            // A width of 0 covers 0x80..0xC1 (a lone continuation, and the two
+            // overlong two-byte leads) and 0xF5..0xFF.
+            if w == 0 || i + w > n {
+                return None
+            }
+            let c1 = Int64(b[i + 1])
+            if c1 < lo || c1 > hi {
+                return None
+            }
+            let mut cp = 0
+            if w == 2 {
+                cp = (b0 - 192) * 64 + (c1 - 128)
+            } else if w == 3 {
+                let c2 = Int64(b[i + 2])
+                if c2 < 128 || c2 > 191 {
+                    return None
+                }
+                cp = (b0 - 224) * 4096 + (c1 - 128) * 64 + (c2 - 128)
+            } else {
+                let c2 = Int64(b[i + 2])
+                let c3 = Int64(b[i + 3])
+                if c2 < 128 || c2 > 191 || c3 < 128 || c3 > 191 {
+                    return None
+                }
+                cp = (b0 - 240) * 262144 + (c1 - 128) * 4096 + (c2 - 128) * 64 + (c3 - 128)
+            }
+            out.push(cp)
+            i = i + w
+        }
+    }
+    return Some(out)
+}
+
+/// The codepoints of `s` — the `chars` builtin, in Vyrn.
+///
+/// The `None` arm is unreachable and that is a property of the language rather
+/// than an assumption: a `String` is validated UTF-8 at every boundary that can
+/// build one, and `stringFromBytes` is the only route from arbitrary bytes. So
+/// `chars` never sees a malformed input, which is why the malformed table below
+/// is pinned against `stringFromBytes` instead.
+export fn charsV(s: String) -> Array<Int64> {
+    return match decodeUtf8(bytes(s)) {
+        Some(cs) => cs,
+        None => [],
+    }
+}
+
+/// The number of Unicode scalar values in `s` — the `charCount` builtin, in Vyrn.
+///
+/// A UTF-8 continuation byte is exactly `0b10xxxxxx`, so every OTHER byte starts a
+/// scalar and the count is a byte scan with no allocation. `examples/encoding.vyrn`
+/// proved the same answer as `chars(s).length`, which is a shorter body and a worse
+/// one: it builds an `Array<Int64>` the caller throws away.
+///
+/// RFC-0078's census found this the only builtin with no justification for being
+/// one — no primitive (`byteLength` and `s[i]` are the whole substrate, the same
+/// substrate `std/strpred` is built on), no trap, no `consteval` fold, and one
+/// caller in the repository. It had four implementations: a Rust arm, a C shim
+/// function, a line of emitted IR and ~30 lines of hand-written `wasm-encoder`.
+export fn charCountV(s: String) -> Int64 {
+    let n = s.byteLength
+    let mut count = 0
+    let mut i = 0
+    while i < n {
+        if (Int64(s[i]) & 192) != 128 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+/// The 1-based line number of byte offset `off` in `b` — the `lineAt` builtin, in
+/// Vyrn. One more than the number of LF bytes before `off`; an offset past the
+/// end reads as the end, and a negative one as 0.
+///
+/// This is the shape the builtin exists to avoid: `lineAt` is a builtin BECAUSE
+/// the obvious loop is O(off) and a scanner asks once per node, which cost
+/// `std/vyx` 122 ms of a 291 ms page compile. The interpreter memoizes a
+/// line-start table per buffer; the native shim counts directly, exactly like
+/// this. So the Vyrn version is not slower than every engine — it is slower than
+/// one of them, and identical to the other.
+export fn lineAtV(b: Array<UInt8>, off: Int64) -> Int64 {
+    let mut end = off
+    if end > b.length {
+        end = b.length
+    }
+    let mut line = 1
+    let mut i = 0
+    while i < end {
+        if b[i] == 10 {
+            line = line + 1
+        }
+        i = i + 1
+    }
+    return line
+}
+
+/// The 1-based column of byte offset `off` in `b` — the `colAt` builtin, in Vyrn.
+///
+/// **The column counts BYTES, not codepoints**, and that was measured off the
+/// builtin rather than assumed: both the interpreter (`off - lineStart + 1`) and
+/// the shim (a backward walk to the LF) count bytes, so the byte after `é` on an
+/// otherwise empty line is column 3 and not column 2. `std/vyx`'s wrapper
+/// documents it as "chars since the last LF", which is wrong for any non-ASCII
+/// line; RFC-0033 origin directives feed a C-style `#line`, where byte columns
+/// are the convention anyway.
+export fn colAtV(b: Array<UInt8>, off: Int64) -> Int64 {
+    let mut i = off
+    if i > b.length {
+        i = b.length
+    }
+    let mut col = 1
+    while i > 0 && b[i - 1] != 10 {
+        col = col + 1
+        i = i - 1
+    }
+    return col
+}
+
+/// The codepoints as text, for pinning: a decode is only interesting at the exact
+/// scalar values, and `%s` of the rebuilt string would hide a wrong one that
+/// still renders.
+export fn showCps(a: Array<Int64>) -> String {
+    let mut out = ""
+    let mut first = true
+    for c in a {
+        if first {
+            out = out + c.toString()
+        } else {
+            out = out + "," + c.toString()
+        }
+        first = false
+    }
+    return out
+}
+
+test "ascii and the three multi-byte widths decode to the builtin's codepoints" {
+    assertEq(showCps(charsV("hi")), "104,105")
+    // 2-byte (é U+00E9), 3-byte (€ U+20AC), 4-byte (😀 U+1F600, astral).
+    assertEq(showCps(charsV("é")), "233")
+    assertEq(showCps(charsV("€")), "8364")
+    assertEq(showCps(charsV("😀")), "128512")
+    assertEq(showCps(charsV("a€😀é")), "97,8364,128512,233")
+    assertEq(showCps(charsV("")), "")
+    // U+FFFF and U+10000, the boundary between three bytes and four.
+    assertEq(showCps(charsV("\u{ffff}\u{10000}")), "65535,65536")
+}
+
+/// The malformed table, which is where two decoders differ silently. Same cases
+/// RFC-0077 M2g pinned for `stringFromBytes`, so the expected answers are already
+/// known-good on all three engines.
+test "every malformed shape the validator distinguishes is refused" {
+    assertEq(match decodeUtf8(['\xc0', '\xaf']) { Some(cs) => "?", None => "reject" }, "reject")
+    assertEq(match decodeUtf8(['\x80']) { Some(cs) => "?", None => "reject" }, "reject")
+    assertEq(
+        match decodeUtf8(['\xed', '\xa0', '\x80']) { Some(cs) => "?", None => "reject" },
+        "reject",
+    )
+    assertEq(
+        match decodeUtf8(['\xf5', '\x80', '\x80', '\x80']) { Some(cs) => "?", None => "reject" },
+        "reject",
+    )
+    assertEq(match decodeUtf8(['\xe2', '\x82']) { Some(cs) => "?", None => "reject" }, "reject")
+    // The last legal codepoint, and the first illegal one one above it.
+    assertEq(
+        match decodeUtf8(['\xf4', '\x8f', '\xbf', '\xbf']) {
+            Some(cs) => showCps(cs),
+            None => "reject",
+        },
+        "1114111",
+    )
+    assertEq(
+        match decodeUtf8(['\xf4', '\x90', '\x80', '\x80']) { Some(cs) => "?", None => "reject" },
+        "reject",
+    )
+    // NUL is valid UTF-8 and `stringFromBytes` still refuses it — the one
+    // disagreement, and it is RFC-0014's rule rather than a decoding question.
+    assertEq(
+        match decodeUtf8(['h', '\x00', 'i']) { Some(cs) => showCps(cs), None => "reject" },
+        "104,0,105",
+    )
+    assertEq(
+        match stringFromBytes(['h', '\x00', 'i']) { Ok(s) => "ok", Err(e) => e },
+        "bytes contain a NUL byte",
+    )
+}
+
+/// `charCount`'s rows, as literals captured from `examples/bytecount.vyrn` on all
+/// three engines BEFORE the builtin was routed here — the pin-before-you-swap
+/// discipline, and it was already satisfied because that example is in the parity
+/// corpus. `byteLength` is printed beside each one because the whole point of the
+/// RFC-0058 split is that the two answers differ, and a row where they agree
+/// (ASCII) cannot tell a scan from a `strlen`.
+test "a scalar count is not a byte count, except on ASCII" {
+    assertEq(charCountV("").toString() + "/" + "".byteLength.toString(), "0/0")
+    assertEq(charCountV("hello").toString() + "/" + "hello".byteLength.toString(), "5/5")
+    assertEq(charCountV("héllo").toString() + "/" + "héllo".byteLength.toString(), "5/6")
+    assertEq(charCountV("☕").toString() + "/" + "☕".byteLength.toString(), "1/3")
+    assertEq(charCountV("😀").toString() + "/" + "😀".byteLength.toString(), "1/4")
+    // All four widths in one string, so a scan that mishandles the TRANSITION
+    // between two sequences is caught: 4 scalars, 1 + 2 + 3 + 4 = 10 bytes.
+    assertEq(charCountV("aé€😀").toString() + "/" + "aé€😀".byteLength.toString(), "4/10")
+    // The two implementations of the same fact, which is what `tests/text.rs`
+    // sweeps ~900 buffers of: a byte scan and a full decode.
+    assertEq(charCountV("aé€😀"), charsV("aé€😀").length)
+}
+
+test "line and column are 1-based, and the column counts bytes" {
+    let b = bytes("ab\ncd\n\nx")
+    assertEq(lineAtV(b, 0).toString() + ":" + colAtV(b, 0).toString(), "1:1")
+    assertEq(lineAtV(b, 3).toString() + ":" + colAtV(b, 3).toString(), "2:1")
+    assertEq(lineAtV(b, 7).toString() + ":" + colAtV(b, 7).toString(), "4:1")
+    // Past the end reads as the end; the builtin clamps and so does this.
+    assertEq(lineAtV(b, 99).toString() + ":" + colAtV(b, 99).toString(), "4:2")
+    assertEq(lineAtV(b, 99), lineAt(b, 99))
+    assertEq(colAtV(b, 99), colAt(b, 99))
+    // No newline at all: one line, columns straight across.
+    let flat = bytes("abcd")
+    assertEq(lineAtV(flat, 3).toString() + ":" + colAtV(flat, 3).toString(), "1:4")
+    // `\r\n` is one line break, and the CR occupies a column of its own.
+    let crlf = bytes("ab\r\ncd")
+    assertEq(lineAtV(crlf, 2).toString() + ":" + colAtV(crlf, 2).toString(), "1:3")
+    assertEq(lineAtV(crlf, 4).toString() + ":" + colAtV(crlf, 4).toString(), "2:1")
+    // A multi-byte codepoint spans two columns: `é` is bytes 0..2, so the byte
+    // after it is column 3 and the codepoint after it is the second character.
+    let acc = bytes("éx")
+    assertEq(colAtV(acc, 2).toString(), "3")
+    assertEq(colAtV(acc, 2), colAt(acc, 2))
+}

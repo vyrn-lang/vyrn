@@ -4,6 +4,87 @@ use crate::ast::*;
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{Tok, Token};
 
+/// Whether `name`, written in a contract member's type, is one of that member's
+/// implicit type parameters (RFC-0071) rather than a named type.
+///
+/// The rule is the corpus's own generic-naming convention, made load-bearing: a
+/// **single uppercase ASCII letter, optionally followed by digits** (`T`, `R`,
+/// `T1`). This is what lets `let data: Query<T>` stay open per member with no
+/// declaration site, and — the property that matters — it keeps a *typo* closed:
+/// `Haed` is two letters longer than the rule allows, so it is still a named
+/// type the checker must resolve, and a misspelling is still an error.
+pub fn is_member_type_param(name: &str) -> bool {
+    let mut cs = name.chars();
+    match cs.next() {
+        Some(c) if c.is_ascii_uppercase() => cs.all(|c| c.is_ascii_digit()),
+        _ => false,
+    }
+}
+
+/// Rewrite every `Named(n)` in `ty` for which [`is_member_type_param`] holds
+/// into a [`Type::Param`], recursively. Applied to each contract member's types
+/// right after parsing them.
+fn mark_member_type_params(ty: &mut Type) {
+    match ty {
+        Type::Named(n) => {
+            if is_member_type_param(n) {
+                *ty = Type::Param(std::mem::take(n));
+            }
+        }
+        Type::App(_, args) => {
+            for a in args {
+                mark_member_type_params(a);
+            }
+        }
+        Type::Option(a)
+        | Type::Ref(a)
+        | Type::Array(a)
+        | Type::Task(a)
+        | Type::Partial(a)
+        | Type::ArrayN(a, _)
+        | Type::SmallArray(a, _)
+        | Type::Omit(a, _)
+        | Type::Pick(a, _) => mark_member_type_params(a),
+        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+            mark_member_type_params(a);
+            mark_member_type_params(b);
+        }
+        Type::Record(fields) => {
+            for f in fields {
+                mark_member_type_params(&mut f.ty);
+            }
+        }
+        Type::Enum(variants) => {
+            for v in variants {
+                for p in &mut v.payload {
+                    mark_member_type_params(p);
+                }
+            }
+        }
+        Type::Fn(params, ret) => {
+            for p in params {
+                mark_member_type_params(p);
+            }
+            mark_member_type_params(ret);
+        }
+        _ => {}
+    }
+}
+
+/// Whether the cursor sits on a `contract Name {` declaration starter.
+///
+/// `contract` is a **contextual** starter — a plain identifier everywhere else —
+/// exactly like `gen`/`extern`/`test`/`bench`. This is not a stylistic choice:
+/// `std/rpc`, `std/connect`, `std/openapi` and `std/graphql` all take a
+/// parameter literally named `contract` (`gen fn rpcServer(contract: String)`),
+/// and reserving the word would have broken every one of them.
+fn at_contract_decl(tokens: &[Token], pos: usize) -> bool {
+    let at = |i: usize| tokens.get(i).map(|t| &t.tok);
+    matches!(at(pos), Some(Tok::Ident(n)) if n == "contract")
+        && matches!(at(pos + 1), Some(Tok::Ident(_)))
+        && matches!(at(pos + 2), Some(Tok::LBrace))
+}
+
 /// Parse a token stream into a [`Program`].
 ///
 /// Returns the *first* parse error (the historical single-error surface). For
@@ -323,6 +404,93 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         predicate: None,
         line: 0,
     });
+    // Contract reflection (RFC-0071): `contractOf(Name)` returns the declared
+    // shape of a module contract — `moduleInterface`'s counterpart on the
+    // *expectation* side, so `std/contract:checkContract(iface, contractOf(P))`
+    // compares two ordinary records in ordinary Vyrn code and the compiler stays
+    // ignorant of any particular contract. Injected like `ModuleInterface` so a
+    // generator can name them without an import.
+    //   MemberInfo   { name, kind, spelling, params, ret, optional, variadic, doc }
+    //   ContractInfo { name, module, doc, open, members: Array<MemberInfo> }
+    // `kind` is `"let"` or `"fn"`; `name` is `"*"` for the open rule; `spelling`
+    // is the member's whole type (`Head`, or `fn(Int64) -> String`) so a
+    // comparison against `FnInfo`/`TypeInfo` spellings is a string comparison.
+    // `variadic` marks an open rule written `fn *(..) -> R`, which constrains the
+    // return type only.
+    program.type_decls.push(TypeDecl {
+        name: "MemberInfo".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        base: Type::Record(vec![
+            Field {
+                name: "name".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "kind".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "spelling".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "params".to_string(),
+                ty: Type::Array(Box::new(Type::Str)),
+            },
+            Field {
+                name: "ret".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "optional".to_string(),
+                ty: Type::Bool,
+            },
+            Field {
+                name: "variadic".to_string(),
+                ty: Type::Bool,
+            },
+            Field {
+                name: "doc".to_string(),
+                ty: Type::Option(Box::new(Type::Str)),
+            },
+        ]),
+        predicate: None,
+        line: 0,
+    });
+    program.type_decls.push(TypeDecl {
+        name: "ContractInfo".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        base: Type::Record(vec![
+            Field {
+                name: "name".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "module".to_string(),
+                ty: Type::Str,
+            },
+            Field {
+                name: "doc".to_string(),
+                ty: Type::Option(Box::new(Type::Str)),
+            },
+            Field {
+                name: "open".to_string(),
+                ty: Type::Bool,
+            },
+            Field {
+                name: "members".to_string(),
+                ty: Type::Array(Box::new(Type::Named("MemberInfo".to_string()))),
+            },
+        ]),
+        predicate: None,
+        line: 0,
+    });
     // The server surface (RFC-0016): the `Request` handed to `handle` and the
     // `Response` it returns. Ordinary records (no `where`), injected like
     // `Schema`/`Issue` so every program can name them without a `use` and
@@ -330,6 +498,15 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     // boundary. `path` carries the query string as sent; `body` is the raw
     // request body (`""` when absent). Users construct them freely — `main`
     // calling `handle` directly is the parity story.
+    //
+    // `headers` (RFC-0072 M4) carries the request's header block. RFC 9110 makes
+    // field names case-insensitive, and a `Map<String, String>` lookup is exact,
+    // so the NAMES ARE LOWERCASED WHERE THE REQUEST IS BUILT — the host lowercases
+    // as it parses the wire, and a hand-written `Request` literal writes lowercase
+    // keys. Normalizing at construction rather than at lookup keeps the map itself
+    // canonical: iterating it yields one spelling per header, and no reader has to
+    // remember a helper to be correct. Duplicate field lines join with `", "` per
+    // RFC 9110 §5.3.
     program.type_decls.push(TypeDecl {
         name: "Request".to_string(),
         exported: false,
@@ -344,6 +521,10 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             Field {
                 name: "path".to_string(),
                 ty: Type::Str,
+            },
+            Field {
+                name: "headers".to_string(),
+                ty: Type::Map(Box::new(Type::Str), Box::new(Type::Str)),
             },
             Field {
                 name: "body".to_string(),
@@ -370,6 +551,14 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             },
             Field {
                 name: "body".to_string(),
+                ty: Type::Str,
+            },
+            // The `Vary` response header (RFC-0072 M4). A response whose body
+            // depends on a request header must say which, or a shared cache will
+            // serve one audience's copy to the other — a page's HTML to a client
+            // asking for its JSON payload. `""` emits no header.
+            Field {
+                name: "vary".to_string(),
                 ty: Type::Str,
             },
         ]),
@@ -561,6 +750,7 @@ impl Parser {
         let mut type_decls = Vec::new();
         let mut functions = Vec::new();
         let mut protocols = Vec::new();
+        let mut contracts = Vec::new();
         let mut impls = Vec::new();
         let mut globals = Vec::new();
         let mut tests = Vec::new();
@@ -590,9 +780,12 @@ impl Parser {
                 // recognized only when `fn` follows it.
                 let is_export_gen = matches!(self.peek(), Tok::Ident(n) if n == "gen")
                     && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
+                // `export contract Name { .. }` (RFC-0071) — also contextual.
+                let is_export_contract = at_contract_decl(&self.tokens, self.pos);
                 if !matches!(self.peek(), Tok::Fn | Tok::Type | Tok::Protocol)
                     && !is_export_extern
                     && !is_export_gen
+                    && !is_export_contract
                 {
                     // `export let` gets its own named diagnostic (RFC-0029):
                     // module state is legal in any module but never exportable —
@@ -601,8 +794,8 @@ impl Parser {
                         "module state is not exportable — export accessor functions \
                          (a top-level `let` is module-private in every module)"
                     } else {
-                        "`export` must be followed by `fn`, `type`, `protocol`, `extern fn`, or \
-                         `gen fn`"
+                        "`export` must be followed by `fn`, `type`, `protocol`, `contract`, \
+                         `extern fn`, or `gen fn`"
                     };
                     errors.push(Diagnostic::error(
                         self.line(),
@@ -677,6 +870,23 @@ impl Parser {
                         self.sync_to_decl();
                     }
                 },
+                // `contract Name { .. }` — a module contract (RFC-0071).
+                // Contextual, recognized only as `contract <Ident> {`, so a
+                // parameter or variable named `contract` is unharmed (std/rpc,
+                // std/connect, std/openapi and std/graphql all have one).
+                Tok::Ident(_) if at_contract_decl(&self.tokens, self.pos) => {
+                    match self.contract_decl() {
+                        Ok(mut c) => {
+                            c.doc = doc;
+                            c.exported = exported;
+                            contracts.push(c);
+                        }
+                        Err(d) => {
+                            errors.push(d);
+                            self.sync_to_decl();
+                        }
+                    }
+                }
                 Tok::Impl => match self.impl_block() {
                     Ok(i) => impls.push(i),
                     Err(d) => {
@@ -787,8 +997,8 @@ impl Parser {
                         self.col(),
                         "parse",
                         format!(
-                            "expected `fn`, `type`, `protocol`, `impl`, `let`, or `logging` at \
-                             top level, found {other:?}"
+                            "expected `fn`, `type`, `protocol`, `contract`, `impl`, `let`, or \
+                             `logging` at top level, found {other:?}"
                         ),
                     ));
                     self.advance(); // consume the stray token so progress is guaranteed
@@ -807,6 +1017,7 @@ impl Parser {
                 type_decls,
                 functions,
                 protocols,
+                contracts,
                 impls,
                 globals,
                 tests,
@@ -875,6 +1086,8 @@ impl Parser {
                 {
                     return
                 }
+                // `contract Name { .. }` is a top-level starter (RFC-0071).
+                Tok::Ident(_) if depth == 0 && at_contract_decl(&self.tokens, self.pos) => return,
                 _ => {
                     self.advance();
                 }
@@ -932,6 +1145,254 @@ impl Parser {
             methods,
             line,
         })
+    }
+
+    /// `contract Name { let m: T = d  fn m(a: T) -> R  fn *(a: T) -> R }` — a
+    /// module contract (RFC-0071): the exports a module may have.
+    ///
+    /// Deliberately shaped like [`Self::protocol_decl`] — the parallel between
+    /// "what a type provides" and "what a module exports" is the whole point of
+    /// the feature. Two things differ:
+    ///
+    /// * member `///` docs are **retained** (the LSP surfaces them on completion
+    ///   and hover in M4), where a protocol method's are still discarded;
+    /// * member type parameters are implicit and bound *per member*, so they are
+    ///   recognized by spelling rather than declared — see
+    ///   [`is_member_type_param`].
+    fn contract_decl(&mut self) -> Result<ContractDecl, Diagnostic> {
+        let line = self.line();
+        self.advance(); // the contextual `contract` identifier
+        let name = self.expect_ident()?;
+        self.eat(&Tok::LBrace)?;
+        let mut members: Vec<ContractMember> = Vec::new();
+        while *self.peek() != Tok::RBrace && *self.peek() != Tok::Eof {
+            let doc = self.take_docs();
+            if *self.peek() == Tok::RBrace {
+                break; // trailing docs before the closing brace
+            }
+            let mline = self.line();
+            let member = match self.peek() {
+                Tok::Let => self.contract_value_member(doc, mline)?,
+                Tok::Fn => self.contract_fn_member(doc, mline)?,
+                other => {
+                    return Err(Diagnostic::error(
+                        self.line(),
+                        self.col(),
+                        "parse",
+                        format!(
+                            "expected `let` or `fn` in contract `{name}`, found {other:?} \
+                             (a contract member is `let name: Type [= default]`, \
+                             `fn name(..) -> T [= default]`, or the open rule `fn *(..) -> T`)"
+                        ),
+                    ))
+                }
+            };
+            // RFC-0071 M2b: a NAME may repeat — the repeats are ALTERNATIVE
+            // SIGNATURES, and a module satisfies the member by matching any one
+            // of them. `head` needs this: a page's shape genuinely varies (data,
+            // params, both, neither), and one signature per member left a real
+            // page unable to write `head` at all.
+            //
+            // Two things are still rejected, because neither is an alternative:
+            // a second OPEN RULE (a contract has at most one total rule), and a
+            // name declared at both member forms (a `let` and a `fn` of one name
+            // are a contradiction, not a choice).
+            if let Some(prev) = members.iter().find(|m| m.name == member.name) {
+                if member.is_open_rule() {
+                    return Err(Diagnostic::error(
+                        member.line,
+                        self.col(),
+                        "parse",
+                        format!(
+                            "contract `{name}` already has an open rule (line {}) — \
+                             a contract has at most one",
+                            prev.line
+                        ),
+                    ));
+                }
+                let same_form = matches!(
+                    (&prev.kind, &member.kind),
+                    (ContractMemberKind::Value { .. }, ContractMemberKind::Value { .. })
+                        | (ContractMemberKind::Fn { .. }, ContractMemberKind::Fn { .. })
+                );
+                if !same_form {
+                    return Err(Diagnostic::error(
+                        member.line,
+                        self.col(),
+                        "parse",
+                        format!(
+                            "contract `{name}` declares `{}` as both a value and a function \
+                             (line {}) — alternative signatures are alternatives, not a \
+                             change of member form",
+                            member.name, prev.line
+                        ),
+                    ));
+                }
+                if matches!(member.kind, ContractMemberKind::Value { .. }) {
+                    return Err(Diagnostic::error(
+                        member.line,
+                        self.col(),
+                        "parse",
+                        format!(
+                            "contract `{name}` already declares `{}` (line {}) — only \
+                             `fn` members may have alternative signatures",
+                            member.name, prev.line
+                        ),
+                    ));
+                }
+            }
+            members.push(member);
+        }
+        self.eat(&Tok::RBrace)?;
+        Ok(ContractDecl {
+            name,
+            exported: false,
+            module: None,
+            doc: None,
+            members,
+            line,
+        })
+    }
+
+    /// `let name: Type [= default]` inside a contract. A default makes the
+    /// member optional.
+    fn contract_value_member(
+        &mut self,
+        doc: Option<String>,
+        line: usize,
+    ) -> Result<ContractMember, Diagnostic> {
+        self.eat(&Tok::Let)?;
+        let name = self.expect_ident()?;
+        if *self.peek() != Tok::Colon {
+            return Err(Diagnostic::error(
+                self.line(),
+                self.col(),
+                "parse",
+                format!(
+                    "contract member `{name}` needs a type: write `let {name}: Type` \
+                     (a contract states the shape of an export, so the type is never inferred)"
+                ),
+            ));
+        }
+        self.eat(&Tok::Colon)?;
+        let ty = self.contract_member_type()?;
+        let default = if *self.peek() == Tok::Eq {
+            self.advance();
+            Some(Box::new(self.expr()?))
+        } else {
+            None
+        };
+        self.eat_semi();
+        Ok(ContractMember {
+            name,
+            doc,
+            kind: ContractMemberKind::Value { ty, default },
+            line,
+        })
+    }
+
+    /// `fn name(a: T, ..) -> R [= default]` — or the open rule
+    /// `fn *(a: T, ..) -> R` — inside a contract. Parameter names are parsed but
+    /// not retained: a contract constrains arity and types, never spelling (same
+    /// rule as [`MethodSig`]).
+    ///
+    /// The default (RFC-0071 M2) is an expression of the member's RETURN type, so
+    /// `fn head() -> Head = noHead()` reads as the sentence it looks like. It
+    /// makes the member optional, exactly as a `let` member's default does.
+    fn contract_fn_member(
+        &mut self,
+        doc: Option<String>,
+        line: usize,
+    ) -> Result<ContractMember, Diagnostic> {
+        self.eat(&Tok::Fn)?;
+        let name = if *self.peek() == Tok::Star {
+            self.advance();
+            OPEN_RULE_NAME.to_string()
+        } else {
+            self.expect_ident()?
+        };
+        self.eat(&Tok::LParen)?;
+        // `fn *(..) -> R` — the open rule may leave its parameters open, so it
+        // constrains the return type only. `..` is two `.` tokens; there is no
+        // dedicated one, and nothing else can follow `(` in this position.
+        let variadic = *self.peek() == Tok::Dot && self.tokens.get(self.pos + 1).map(|t| &t.tok) == Some(&Tok::Dot);
+        if variadic {
+            if name != OPEN_RULE_NAME {
+                return Err(Diagnostic::error(
+                    self.line(),
+                    self.col(),
+                    "parse",
+                    format!(
+                        "contract member `{name}` cannot take `(..)` — only the open rule \
+                         `fn *(..)` may leave its parameters open, because a named member's \
+                         arity is part of what the name promises"
+                    ),
+                ));
+            }
+            self.advance();
+            self.advance();
+        }
+        let mut params = Vec::new();
+        while !variadic && *self.peek() != Tok::RParen {
+            let _pname = self.expect_ident()?;
+            self.eat(&Tok::Colon)?;
+            params.push(self.contract_member_type()?);
+            if *self.peek() == Tok::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.eat(&Tok::RParen)?;
+        let ret = if *self.peek() == Tok::Arrow {
+            self.advance();
+            self.contract_member_type()?
+        } else {
+            Type::Unit
+        };
+        let default = if *self.peek() == Tok::Eq {
+            if name == OPEN_RULE_NAME {
+                // The open rule describes a SHAPE for arbitrarily-named exports;
+                // there is no name whose absence a default could stand in for.
+                return Err(Diagnostic::error(
+                    self.line(),
+                    self.col(),
+                    "parse",
+                    "a contract's open rule cannot have a default — it describes the shape of \
+                     exports whose names the contract does not know, so there is no absent \
+                     member for a default to supply"
+                        .to_string(),
+                ));
+            }
+            self.advance();
+            Some(Box::new(self.expr()?))
+        } else {
+            None
+        };
+        self.eat_semi();
+        Ok(ContractMember {
+            name,
+            doc,
+            kind: ContractMemberKind::Fn {
+                params,
+                ret,
+                default,
+                variadic,
+            },
+            line,
+        })
+    }
+
+    /// A type written in a contract member, with the member's implicit type
+    /// parameters marked. RFC-0071 leaves them undeclared (`let data: Query<T>`
+    /// admits any instantiation), so there is no list to consult: the parser
+    /// recognizes them by spelling via [`is_member_type_param`] and rewrites
+    /// them to [`Type::Param`], which is exactly what an explicitly-declared
+    /// `<T>` would have produced.
+    fn contract_member_type(&mut self) -> Result<Type, Diagnostic> {
+        let mut ty = self.type_()?;
+        mark_member_type_params(&mut ty);
+        Ok(ty)
     }
 
     /// `impl P for T { fn m(self, ..) -> R { .. } .. }` — a type's methods for a
@@ -2567,23 +3028,64 @@ impl Parser {
             Tok::LtEq => (BinOp::LtEq, 4),
             Tok::Gt => (BinOp::Gt, 4),
             Tok::GtEq => (BinOp::GtEq, 4),
-            Tok::Pipe => (BinOp::BitOr, 5),
-            Tok::Caret => (BinOp::BitXor, 6),
-            Tok::Amp => (BinOp::BitAnd, 7),
-            Tok::Shl => (BinOp::Shl, 8),
-            Tok::Shr => (BinOp::Shr, 8),
-            Tok::Plus => (BinOp::Add, 9),
-            Tok::Minus => (BinOp::Sub, 9),
-            Tok::Star => (BinOp::Mul, 10),
-            Tok::Slash => (BinOp::Div, 10),
-            Tok::Percent => (BinOp::Rem, 10),
+            // 5 is `??` — see `NULLISH_BP`, which is not a `BinOp` and so does
+            // not appear in this table. Every tier below is shifted up one to
+            // leave it that slot.
+            Tok::Pipe => (BinOp::BitOr, 6),
+            Tok::Caret => (BinOp::BitXor, 7),
+            Tok::Amp => (BinOp::BitAnd, 8),
+            Tok::Shl => (BinOp::Shl, 9),
+            Tok::Shr => (BinOp::Shr, 9),
+            Tok::Plus => (BinOp::Add, 10),
+            Tok::Minus => (BinOp::Sub, 10),
+            Tok::Star => (BinOp::Mul, 11),
+            Tok::Slash => (BinOp::Div, 11),
+            Tok::Percent => (BinOp::Rem, 11),
             _ => return None,
         })
     }
 
+    /// `??`'s binding power: tighter than comparison, looser than the bitwise
+    /// and arithmetic tiers. Swift's placement, and it is placement rather than
+    /// taste — both neighbours were measured.
+    ///
+    /// **Looser than arithmetic** so `opt ?? x + 1` is `opt ?? (x + 1)`: the
+    /// right side is the fallback *value*, and a fallback that stops before its
+    /// own `+ 1` would be surprising.
+    ///
+    /// **Tighter than comparison** so `flag ?? b == c` is `(flag ?? b) == c`.
+    /// This one is load-bearing rather than cosmetic. It first shipped at `3`,
+    /// tied with `EqEq`, on the argument that the unwanted reading fails at the
+    /// type check — and that argument is false whenever the types happen to
+    /// agree. Measured, with `flag: Option<Bool>` and `b`/`c` both `Bool`, both
+    /// readings typecheck and disagree: `(flag ?? b) == c` prints 1 where
+    /// `flag ?? (b == c)` prints 0. A silently-wrong parse is not a diagnostic.
+    ///
+    /// Its slot is 5, which is why the table below starts the bitwise family at
+    /// 6. `??` is not a `BinOp` — it is handled by hand in [`binary`] and
+    /// recurses at its own binding power for right associativity — but sharing a
+    /// number with `BitOr` would make it bind asymmetrically against `|`, since
+    /// the table's left-associative arm recurses at `bp + 1`.
+    const NULLISH_BP: u8 = 5;
+
     fn binary(&mut self, min_bp: u8) -> Result<Expr, Diagnostic> {
         let mut lhs = self.unary()?;
-        while let Some((op, bp)) = Self::binop(self.peek()) {
+        loop {
+            if *self.peek() == Tok::QuestionQuestion && Self::NULLISH_BP >= min_bp {
+                let line = self.line();
+                self.advance();
+                // Right-associative: `a ?? b ?? c` is `a ?? (b ?? c)`. Left
+                // associativity is not merely unidiomatic here, it cannot
+                // typecheck — `a ?? b` yields an unwrapped `T`, and `??` needs a
+                // sum. Recursing at the same binding power rather than `bp + 1`
+                // is the standard way to say that in a Pratt loop.
+                let rhs = self.binary(Self::NULLISH_BP)?;
+                lhs = Self::nullish(lhs, rhs, line);
+                continue;
+            }
+            let Some((op, bp)) = Self::binop(self.peek()) else {
+                break;
+            };
             if bp < min_bp {
                 break;
             }
@@ -2599,6 +3101,32 @@ impl Parser {
             };
         }
         Ok(lhs)
+    }
+
+    /// `a ?? b` (RFC-0079) — desugar to the `match` that spells it, using the
+    /// two type-agnostic patterns so the parser never has to know whether `a` is
+    /// an `Option` or a `Result`. Binder names are `@`-prefixed (the same rule
+    /// the storage desugar follows) so they can never collide with a user
+    /// identifier, and nesting shadows harmlessly because only the `Success` arm
+    /// reads one.
+    fn nullish(lhs: Expr, rhs: Expr, line: usize) -> Expr {
+        Expr::Match {
+            scrutinee: Box::new(lhs),
+            arms: vec![
+                MatchArm {
+                    pattern: Pattern::Success("@v".to_string()),
+                    body: Expr::Var {
+                        name: "@v".to_string(),
+                        line,
+                    },
+                },
+                MatchArm {
+                    pattern: Pattern::Failure("@e".to_string()),
+                    body: rhs,
+                },
+            ],
+            line,
+        }
     }
 
     fn unary(&mut self) -> Result<Expr, Diagnostic> {
@@ -4700,5 +5228,139 @@ mod tests {
                 .any(|d| d.message.contains("single expression in each")),
             "{errors:?}"
         );
+    }
+
+    // ---- module contracts (RFC-0071) ---------------------------------------
+
+    #[test]
+    fn contract_parses_value_fn_and_open_rule_members() {
+        let src = "export contract Page {
+                   /// The page's data.
+                   let data: Array<T>
+                   /// Head contributions.
+                   let head: String = \"\"
+                   /// The loader.
+                   fn load(id: Int64) -> String
+                   fn *(input: String) -> String
+                   }";
+        let p = parse_src(src);
+        let c = &p.contracts[0];
+        assert_eq!(c.name, "Page");
+        assert!(c.exported);
+        assert_eq!(c.members.len(), 4);
+
+        // A member type parameter is open per member: `T` is a Param, not a
+        // named type the checker would demand a declaration for.
+        assert!(matches!(
+            &c.members[0].kind,
+            ContractMemberKind::Value {
+                ty: Type::Array(inner),
+                default: None,
+            } if **inner == Type::Param("T".to_string())
+        ));
+        assert_eq!(c.members[0].type_params(), vec!["T".to_string()]);
+        assert!(!c.members[0].optional());
+
+        // A default makes the member optional.
+        assert!(c.members[1].optional());
+        assert_eq!(c.members[1].spelling(), "String");
+
+        // Function members spell like an ordinary fn type.
+        assert_eq!(c.members[2].spelling(), "fn(Int64) -> String");
+        assert!(!c.members[2].optional());
+
+        // The open rule is a member named `*`.
+        assert!(c.members[3].is_open_rule());
+        assert!(c.open_rule().is_some());
+    }
+
+    #[test]
+    fn contract_member_docs_are_retained() {
+        // The LSP surfaces these on completion and hover (RFC-0071 M4), so —
+        // unlike a protocol method's — they must survive parsing.
+        let src = "contract P {
+                   /// What this page's data is.
+                   let data: String
+                   }";
+        let p = parse_src(src);
+        assert_eq!(
+            p.contracts[0].members[0].doc.as_deref(),
+            Some("What this page's data is.")
+        );
+    }
+
+    #[test]
+    fn contract_is_a_contextual_keyword_not_a_reserved_word() {
+        // `std/rpc`, `std/connect`, `std/openapi` and `std/graphql` every one of
+        // them take a parameter literally named `contract`. Reserving the word
+        // would have broken all four, so `contract` starts a declaration only in
+        // `contract <Ident> {` position.
+        let src = "fn f(contract: String) -> String {
+                   let contract2 = contract
+                   return contract2
+                   }";
+        let p = parse_src(src);
+        assert_eq!(p.functions[0].params[0].name, "contract");
+        assert!(p.contracts.is_empty());
+    }
+
+    #[test]
+    fn contract_without_an_open_rule_is_closed() {
+        let p = parse_src("contract P { let a: String }");
+        assert!(p.contracts[0].open_rule().is_none());
+    }
+
+    #[test]
+    fn duplicate_contract_members_are_rejected() {
+        let (_, errors) = parse_accum(lex("contract P { let a: String  let a: Int64 }").unwrap());
+        assert!(
+            errors.iter().any(|d| d.message.contains("already declares `a`")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_second_open_rule_is_rejected() {
+        let (_, errors) =
+            parse_accum(lex("contract P { fn *(a: String) -> String  fn *(b: Int64) -> Int64 }").unwrap());
+        assert!(
+            errors.iter().any(|d| d.message.contains("already has an open rule")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_contract_member_must_declare_its_type() {
+        let (_, errors) = parse_accum(lex("contract P { let a = 1 }").unwrap());
+        assert!(
+            errors.iter().any(|d| d.message.contains("needs a type")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_broken_contract_recovers_to_the_next_declaration() {
+        // Parser recovery must see `contract` as a top-level starter, or a
+        // declaration after a broken one would be swallowed.
+        let (p, errors) =
+            parse_accum(lex("fn a() -> Int64 { return 0 }
+contract P { let x }
+contract Q { let y: String }
+").unwrap());
+        assert!(!errors.is_empty());
+        assert_eq!(p.contracts.len(), 1);
+        assert_eq!(p.contracts[0].name, "Q");
+    }
+
+    #[test]
+    fn member_type_parameters_are_single_uppercase_letters_only() {
+        // The rule that keeps `Query<T>` open while keeping `Haed` a typo.
+        assert!(is_member_type_param("T"));
+        assert!(is_member_type_param("R"));
+        assert!(is_member_type_param("T1"));
+        assert!(!is_member_type_param("Head"));
+        assert!(!is_member_type_param("Ta"));
+        assert!(!is_member_type_param("t"));
+        assert!(!is_member_type_param(""));
     }
 }

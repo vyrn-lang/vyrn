@@ -1,0 +1,309 @@
+/// The browser client root: the create island that hydrates #app on the home
+/// page. It holds the draft form state, validates the draft with fromJson, fires
+/// the typed pastesCreate stub with a completion callback, and on success asks the
+/// host to soft-navigate to the new paste via the takeNav extern.
+import { client } from "std/rpc"
+import * as api from client("../server/api")
+import { componentsThemed } from "std/vyx"
+import { createForm } from componentsThemed("../app/widgets", "../theme.json")
+import { Html, toHtmlString, diff } from "std/html"
+// RFC-0069 §1: the universal page bundle — the same app/routes/ tree compiled for the
+// client, exporting renderPage(payloadJson) so a soft nav renders the next page
+// itself (vyrn-nav v3) instead of fetching HTML.
+import { pagesClientThemed } from "std/ui"
+import { renderPage, resolvePage } from pagesClientThemed("../app/routes", "../theme.json")
+
+/// An unvalidated mirror of CreateReq — constructing it never traps, so a bad
+/// draft can be encoded and run through fromJson to surface Issues instead.
+type RawCreate = { title: String, body: String, lang: String }
+
+// ---- client view state (module state) --------------------------------------
+
+let mut draftTitle: String = ""
+let mut draftBody: String = ""
+let mut draftLang: String = "text"
+
+/// The current rejection, structured so the form attaches each issue to its field
+/// (RFC-0068). A client-side prevalidation and a server 422 both land here as the
+/// SAME `Array<RpcIssue>`, so the form renders one shape whichever side rejected.
+let mut issues: Array<api.RpcIssue> = []
+
+/// The soft-nav target after a successful create, or "" for none. takeNav hands
+/// it to the host, which clears it.
+let mut navTarget: String = ""
+
+/// The retained previous view, for the patch protocol.
+let mut lastTree: Html = Empty
+
+// ---- helpers ---------------------------------------------------------------
+
+/// Wrap a single non-field message (a transport `Failed`, or an app-level `Err`
+/// carried on a 200) as a form-level issue (empty path), so it renders through the
+/// SAME field-attached path — an empty path matches no field, so the form shows it
+/// on its form-level line.
+fn oneIssue(msg: String) -> Array<api.RpcIssue> {
+    return [api.RpcIssue { key: "app", path: "", message: msg }]
+}
+
+// ---- the view --------------------------------------------------------------
+
+fn view() -> Html {
+    return createForm(draftTitle, draftLang, draftBody, issues)
+}
+
+// ---- RPC completion callback ------------------------------------------------
+
+/// Passed to api.pastesCreate at the call site. The home list and paste view are
+/// server-rendered, so pastes/recent and pastes/byId need no client callback.
+fn onPastesCreate(res: api.RpcReply<api.PasteResult>) {
+    match res {
+        Done(r) => afterCreate(r),
+        Rejected(iss) => setIssues(iss),
+        Failed(msg) => setIssues(oneIssue(msg)),
+    }
+}
+fn afterCreate(r: api.PasteResult) {
+    match r {
+        Ok(p) => goToPaste(p),
+        Err(why) => setIssues(oneIssue(why)),
+    }
+}
+fn goToPaste(p: api.Paste) {
+    navTarget = "/p/\{p.id}"
+}
+fn setIssues(s: Array<api.RpcIssue>) {
+    issues = s
+}
+
+// ---- event handlers (exported to JS, one String arg) ------------------------
+
+export extern fn setDraftTitle(arg: String) {
+    draftTitle = arg
+}
+export extern fn setDraftBody(arg: String) {
+    draftBody = arg
+}
+export extern fn setDraftLang(arg: String) {
+    draftLang = arg
+}
+
+/// Validate the draft with fromJson; valid => fire the typed stub, invalid =>
+/// surface the Issues in the form.
+export extern fn submitCreate(arg: String) {
+    let raw = RawCreate { title: draftTitle, body: draftBody, lang: draftLang }
+    match fromJson(api.CreateReq, toJson(raw)) {
+        Valid(req) => api.pastesCreate(req, onPastesCreate),
+        Invalid(iss) => setIssues(api.rpcIssuesFrom(iss)),
+    }
+}
+
+/// Hand the pending soft-nav target to the host and clear it. The host polls this
+/// after each render; a non-empty result triggers a navigation.
+export extern fn takeNav() -> String {
+    let target = navTarget
+    navTarget = ""
+    return target
+}
+
+/// The boot view as JSON for the host.
+export extern fn vyrnView() -> String {
+    return toJson(view())
+}
+
+/// The patch loop: only changed nodes cross the extern boundary.
+export extern fn vyrnPatch() -> String {
+    let next = view()
+    let ops = diff(lastTree, next)
+    lastTree = next
+    return toJson(ops)
+}
+
+/// The universal-page host entry (RFC-0069 §3): vyrn-nav v3 hands the JSON payload
+/// (`{page, title, props[, params]}`) here on a soft nav; the return is the next
+/// page's std/html tree as JSON for vyrn-dom to paint, or the sentinel
+/// "__vyrn_fallback__" telling the host to fall back to the v2 HTML swap.
+export extern fn vyrnRenderPage(payloadJson: String) -> String {
+    return renderPage(payloadJson)
+}
+
+/// The universal-page resolver (RFC-0069 M4): vyrn-nav v3 resolves a nav target
+/// against the bundle BEFORE any network. The return is `{found, hasData, page,
+/// title}` JSON — a known page with no `load()` navigates with ZERO fetch (the host
+/// renders it immediately with null props), a data page fetches its payload, an
+/// unknown path falls through to the v2 HTML swap.
+export extern fn vyrnResolvePage(path: String) -> String {
+    return resolvePage(path)
+}
+
+fn main() -> Int64 {
+    return 0
+}
+
+test "submitCreate surfaces accumulated Issues for an invalid draft (no trap)" {
+    let raw = RawCreate { title: "t", body: "", lang: "klingon" }
+    match fromJson(api.CreateReq, toJson(raw)) {
+        Valid(req) => assert(false),
+        Invalid(iss) => assert(iss.length >= 1),
+    }
+}
+
+test "a valid draft decodes to a CreateReq" {
+    let raw = RawCreate { title: "hi", body: "some body", lang: "vyrn" }
+    match fromJson(api.CreateReq, toJson(raw)) {
+        Valid(req) => assertEq(req.lang, "vyrn"),
+        Invalid(iss) => assert(false),
+    }
+}
+
+test "createForm renders the heading and save button (a .vyx view snapshot)" {
+    let html = toHtmlString(createForm("", "text", "", []))
+    // The labels resolve inside the widget (its own i18n import, default En).
+    assert(html.contains("New paste"))
+    assert(html.contains("Create paste"))
+}
+
+test "createForm attaches the localized body issue under its field, not the leaked type name" {
+    // A real prevalidation of an empty body, mapped to the one RpcIssue shape.
+    let raw = RawCreate { title: "t", body: "", lang: "text" }
+    let iss = match fromJson(api.CreateReq, toJson(raw)) {
+        Valid(req) => api.rpcIssuesFrom([]),
+        Invalid(is) => api.rpcIssuesFrom(is),
+    }
+    assert(iss.length >= 1)
+    let html = toHtmlString(createForm("t", "text", "", iss))
+    // Localized + field-attached (the widget's own i18n import, default En).
+    assert(html.contains("Body can't be empty"))
+    // The wire-canonical leaked type name never reaches the UI for a known path.
+    assert(html.contains("validation failed for `Body`") == false)
+}
+
+test "a bad lang value attaches its own localized message under the language field" {
+    let iss = api.rpcIssuesFrom([Issue { key: "validate", path: "lang", message: "validation failed for `Lang`" }])
+    let html = toHtmlString(createForm("t", "klingon", "b", iss))
+    assert(html.contains("Choose a supported language"))
+    assert(html.contains("validation failed for `Lang`") == false)
+}
+
+test "an issue at an unknown path falls back to its wire message (form-level, never nothing)" {
+    let iss = api.rpcIssuesFrom([Issue { key: "validate", path: "mystery", message: "unmapped problem" }])
+    let html = toHtmlString(createForm("t", "text", "b", iss))
+    // An unknown path is no field's span; it degrades to today's wire text.
+    assert(html.contains("unmapped problem"))
+}
+
+// ---- RFC-0069 §1/§3: the universal-page bundle's renderPage dispatch -----------
+
+test "renderPage dispatches the home page (/) from its Array<Paste> props" {
+    let payload = "{\"page\":\"/\",\"title\":\"x\",\"props\":[{\"id\":\"a\",\"title\":\"hi\",\"body\":\"b\",\"lang\":\"text\",\"created\":1}]}"
+    let out = renderPage(payload)
+    assert(out.contains("__vyrn_fallback__") == false)
+    // The rendered tree carries the paste title from the decoded props.
+    assert(out.contains("hi"))
+}
+
+test "renderPage dispatches /p/:id from its Paste props + route params" {
+    let payload = "{\"page\":\"/p/:id\",\"title\":\"t\",\"props\":{\"id\":\"a\",\"title\":\"deep\",\"body\":\"b\",\"lang\":\"text\",\"created\":1},\"params\":{\"id\":\"a\"}}"
+    let out = renderPage(payload)
+    assert(out.contains("__vyrn_fallback__") == false)
+    assert(out.contains("deep"))
+}
+
+test "renderPage dispatches the static /about page (empty props)" {
+    let out = renderPage("{\"page\":\"/about\",\"title\":\"About\",\"props\":null}")
+    assert(out.contains("__vyrn_fallback__") == false)
+    assert(out.contains("About"))
+}
+
+test "renderPage renders the @error payload client-side (themed 404)" {
+    let payload = "{\"page\":\"@error\",\"title\":\"Error\",\"props\":{\"status\":404,\"message\":\"no such paste\"}}"
+    let out = renderPage(payload)
+    assert(out.contains("__vyrn_fallback__") == false)
+    assert(out.contains("404"))
+    assert(out.contains("no such paste"))
+}
+
+test "renderPage falls back on an unknown page id" {
+    assertEq(renderPage("{\"page\":\"/nope\",\"title\":\"\",\"props\":null}"), "__vyrn_fallback__")
+}
+
+test "renderPage falls back on malformed payload JSON" {
+    assertEq(renderPage("not json at all"), "__vyrn_fallback__")
+}
+
+// ---- RFC-0069 M4: resolvePage — script-driven, zero-fetch nav ------------------
+
+test "resolvePage marks the dataless /about page (hasData false, empty title)" {
+    let r = resolvePage("/about")
+    assert(r.contains("\"found\":true"))
+    assert(r.contains("\"hasData\":false"))
+    assert(r.contains("\"page\":\"/about\""))
+    // /about declares no title block, so it resolves to "" — the host keeps the
+    // layout default rather than overwriting document.title with "/about".
+    assert(r.contains("\"title\":\"\""))
+}
+
+test "resolvePage marks the home page as a data page (hasData true)" {
+    let r = resolvePage("/")
+    assert(r.contains("\"found\":true"))
+    assert(r.contains("\"hasData\":true"))
+    assert(r.contains("\"page\":\"/\""))
+}
+
+test "resolvePage matches a dynamic /p/:id path as a data page" {
+    let r = resolvePage("/p/abc123")
+    assert(r.contains("\"found\":true"))
+    assert(r.contains("\"hasData\":true"))
+    assert(r.contains("\"page\":\"/p/:id\""))
+}
+
+test "resolvePage strips the query before matching" {
+    let r = resolvePage("/about?ref=nav&page=2")
+    assert(r.contains("\"found\":true"))
+    assert(r.contains("\"page\":\"/about\""))
+}
+
+test "resolvePage reports a miss for an unknown path" {
+    let r = resolvePage("/nope/deeper")
+    assert(r.contains("\"found\":false"))
+    assert(r.contains("\"hasData\":false"))
+}
+
+test "a dataless page renders from a null-props payload (zero-fetch dispatch)" {
+    // The host builds this payload locally from resolvePage — no server round-trip.
+    let out = renderPage("{\"page\":\"/about\",\"props\":null,\"params\":null}")
+    assert(out.contains("__vyrn_fallback__") == false)
+    assert(out.contains("About"))
+}
+
+// ---- RFC-0070: lazy data — render the skeleton instantly, fill in on arrival -----
+
+test "renderPage paints the lazy home skeleton for the __loading__ sentinel" {
+    // The host's INSTANT paint: no props fetched yet. The props sentinel selects the
+    // `Loading` arm — the shell + the one-row spinner, NOT the (absent) list.
+    let out = renderPage("{\"page\":\"/\",\"props\":{\"__loading__\":true},\"params\":null}")
+    assert(out.contains("__vyrn_fallback__") == false)
+    // The static shell still renders (the create-island mount + the heading). The
+    // return is the std/html TREE as JSON, so the `#app` mount is `["id","app"]`.
+    assert(out.contains("[\"id\",\"app\"]"))
+    assert(out.contains("Recent pastes"))
+    // The localized loading row (default En) with its spinner.
+    assert(out.contains("Loading recent pastes"))
+    assert(out.contains("spinner"))
+}
+
+test "renderPage fills in the lazy home data view (Ready) once real props arrive" {
+    // The SAME page id, now with real props — the `Ready` arm renders the list and
+    // the skeleton is gone (vyrn-dom diffs the two trees; here we pin the render).
+    let payload = "{\"page\":\"/\",\"title\":\"x\",\"props\":[{\"id\":\"a\",\"title\":\"hi\",\"body\":\"b\",\"lang\":\"text\",\"created\":1}]}"
+    let out = renderPage(payload)
+    assert(out.contains("__vyrn_fallback__") == false)
+    assert(out.contains("hi"))
+    assert(out.contains("Loading recent pastes") == false)
+}
+
+test "resolvePage marks the lazy home page lazy, /about and /p/:id non-lazy" {
+    // The navigator reads `lazy` to choose instant-skeleton vs blocking nav.
+    assert(resolvePage("/").contains("\"lazy\":true"))
+    assert(resolvePage("/about").contains("\"lazy\":false"))
+    assert(resolvePage("/p/abc123").contains("\"lazy\":false"))
+}

@@ -15,13 +15,13 @@ fn main() -> Int64 {
     print("server starting")
     // Drive `handle` deterministically, exactly as the HTTP host would — each
     // call bumps the same module-level counter.
-    let health = handle(Request { method: "GET", path: "/health", body: "" })
+    let health = handle(Request { method: "GET", path: "/health", headers: [:], body: "" })
     print("\{health.status} \{health.body}")
 
-    let first = handle(Request { method: "GET", path: "/", body: "" })
+    let first = handle(Request { method: "GET", path: "/", headers: [:], body: "" })
     print("\{first.status} \{first.body}")
 
-    let second = handle(Request { method: "POST", path: "/", body: "hi" })
+    let second = handle(Request { method: "POST", path: "/", headers: [:], body: "hi" })
     print("\{second.status} \{second.body}")
     return 0
 }
@@ -33,17 +33,17 @@ fn main() -> Int64 {
 fn handle(req: Request) -> Response {
     hits = hits + 1
     if req.path == "/health" {
-        return Response { status: 200, contentType: "text/plain", body: "ok" }
+        return Response { status: 200, contentType: "text/plain", body: "ok", vary: "" }
     }
     return Response {
         status: 200,
         contentType: "text/html",
-        body: "<h1>hello #\{hits.toString()} via \{req.method}</h1>",
+        body: "<h1>hello #\{hits.toString()} via \{req.method}</h1>", vary: "",
     }
 }
 
 test "health returns 200 ok" {
-    let r = handle(Request { method: "GET", path: "/health", body: "" })
+    let r = handle(Request { method: "GET", path: "/health", headers: [:], body: "" })
     assertEq(r.status, 200)
     assertEq(r.body, "ok")
 }

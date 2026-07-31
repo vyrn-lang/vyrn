@@ -301,7 +301,14 @@ impl MoveCheck<'_> {
                 }
                 Ok(false)
             }
-            Stmt::Expr(e) => self.expr(e, consumed, scope).map(|_| false),
+            // A `panic(..)` statement diverges (RFC-0079), which here means
+            // exactly what `break`/`continue` mean: what follows is unreachable
+            // and a consumption on this path never flows to the block's exit.
+            // Matched by name rather than by type because this pass has no
+            // types; `panic` is reserved, so no user function can be it.
+            Stmt::Expr(e) => self
+                .expr(e, consumed, scope)
+                .map(|_| matches!(e, Expr::Call { name, .. } if name == "panic")),
             // A `region` is an ordinary nested block for move checking; it
             // diverges iff its body does (a `break` inside it exits the loop).
             Stmt::Region { body, .. } => Ok(self.block(body, consumed, scope)),
@@ -542,6 +549,7 @@ impl MoveCheck<'_> {
 pub fn pattern_bindings(p: &Pattern) -> Vec<&str> {
     match p {
         Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => vec![b],
+        Pattern::Success(b) | Pattern::Failure(b) => vec![b],
         Pattern::Variant(_, binds) => binds.iter().map(|s| s.as_str()).collect(),
         Pattern::None => vec![],
     }

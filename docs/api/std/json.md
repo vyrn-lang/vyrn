@@ -1,25 +1,25 @@
 # std/json
 
-std/json (RFC-0059) — one shared JSON value tree with a STRICT reader and a
-canonical writer, written in plain Vyrn on `bytes`/`stringFromBytes`/`slice`.
-Being ordinary comptime-pure Vyrn, it is importable anywhere — the generators
-(`std/tw`, `std/i18n`, `std/openapi`) are its first consumers, replacing three
-hand-rolled JSON hand-rollers that were each lenient in a different way.
+std/json (RFC-0059) — the shared JSON value tree and its canonical writer,
+written in plain Vyrn on `bytes`/`stringFromBytes`. Being ordinary
+comptime-pure Vyrn, it is importable anywhere — the generators (`std/tw`,
+`std/i18n`, `std/openapi`) are its first consumers, replacing three JSON
+hand-rollers that were each lenient in a different way.
 
-  import { Json, JsonField, parseJson, emit, emitPretty, jsonEq } from "std/json"
+  import { Json, JsonField, emit, emitPretty, jsonEq } from "std/json"
+  import { parseJson } from "std/jsonread"          // the reader
 
-NOTE: the reader is `parseJson`, not `parse` — `parse` is a reserved language
-builtin (`parse(String) -> Option<Int64>`), so the RFC's locked `parse` name is
-unavailable to a user module. This is the sole naming deviation; `emit` and
-`emitPretty` land as locked.
+RFC-0078 M2a moved the reader to `std/jsonread`, which imports this module —
+one direction only. This file therefore imports NOTHING, so a caller that only
+serializes links only the writer. That matters because `toJson` is to become
+exactly such a caller: it can link the tree and `emit` without dragging in a
+parser, and the direct wasm backend compiles this half today (the reader still
+wants `?` and `if let`, RFC-0077's own rows).
 
 A `String` is UTF-8 bytes; all offsets are BYTE offsets (like `std/strings`).
-`parse` is strict where the hand-rollers were lenient: commas are REQUIRED
-between members, trailing commas are REJECTED, duplicate object keys are
-REJECTED (naming the key), and the full escape set — including `\uXXXX` with
-surrogate pairs decoded to UTF-8 — is honored (a lone surrogate is an error).
-Every error carries a `line N, col M:` prefix. Object field order is preserved
-in source order, so deterministic generators can depend on it.
+`JNum` holds raw validated number text, so `emit` is byte-stable through a
+parse and object field order is whatever the tree stores — deterministic
+generators depend on both.
 
 ## JsonField
 
@@ -38,17 +38,6 @@ type Json = JNull | JBool(Bool) | JNum(String) | JStr(String) | JArr(Array<Json>
 A JSON value. `JNum` carries the RAW, validated number text (never a float):
 generators compare and re-emit numbers, nobody needs float semantics at
 comptime, and raw text makes emit → parse → emit byte-stable.
-
-## parseJson
-
-```vyrn
-fn parseJson(src: String) -> Result<Json, String>
-```
-
-Parse a whole JSON document into a `Json` tree, or a `line N, col M: <reason>`
-error. STRICT: commas required, trailing commas rejected, duplicate keys
-rejected, full escapes (incl. `\uXXXX` surrogate pairs), numbers validated and
-stored raw, object field order preserved.
 
 ## emit
 

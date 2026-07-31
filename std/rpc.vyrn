@@ -1,16 +1,25 @@
 /// std/rpc — Typed RPC as a library (RFC-0019), built entirely on RFC-0021
-/// generator imports. Three `gen fn`s over an ordinary contract module:
-/// `rpcServer`, `rpcClient`, and `rpcInProcess`. The compiler knows nothing
-/// about RPC — everything below is generated Vyrn source over `moduleInterface`
-/// reflection, `toJson`/`fromJson` (RFC-0018), `jsonSchema` (RFC-0003), `extern`
-/// (RFC-0012), and the `handle` convention (RFC-0016). No keyword, no builtin,
-/// no compilation roles.
+/// generator imports. The compiler knows nothing about RPC — everything below is
+/// generated Vyrn source over `moduleInterface` reflection, `toJson`/`fromJson`
+/// (RFC-0018), `jsonSchema` (RFC-0003), `extern` (RFC-0012), and the `handle`
+/// convention (RFC-0016). No keyword, no builtin, no compilation roles.
 ///
-/// A procedure is any EXPORTED function of the contract module with 0 or 1
-/// codable parameters and a codable (or `Unit`) return. Non-conforming exports
-/// fail generation with a load diagnostic pointing at the generator call.
+/// A procedure is any EXPORTED function of a procedure module with 0 or 1
+/// serializable parameters and a serializable (or `Unit`) return — the `Api`
+/// contract plus the serializability rule, both declared below. Non-conforming
+/// exports fail generation with a load diagnostic pointing at the generator call.
+///
+/// Two layers of generators:
+///
+/// - **Directory forms** (RFC-0072): `rpc(dir)` mounts every module under an api
+///   directory at its DERIVED path; `client(dir)` / `clientInProcess(dir)` emit
+///   the calling side. Nothing declares a route — the path is a function of the
+///   module path and the export name.
+/// - **Single-module forms** (RFC-0019): `rpcServer`, `rpcClient` and
+///   `rpcInProcess` over one module, for a library that legitimately has one.
 ///
 /// Inspect any generated module with:  vyrn emit-gen <file>
+/// Inspect the derived table with:     vyrn routes <file>
 
 // ---- shared pure helpers ---------------------------------------------------
 // (Everything here is comptime-pure — plain string building — so it is legal in
@@ -19,6 +28,38 @@
 // The shared infallible-decode home (RFC-0059): an ASCII transform of already-valid
 // UTF-8, so the `Err` arm is unreachable — routed through the one shared helper.
 import { fromBytesOr } from "std/strings"
+
+// The contract checker (RFC-0071), so `Api` below is enforced the same way
+// `std/ui`'s `Page` and `std/vyx`'s `Component` are.
+import { checkContract } from "std/contract"
+
+// ---- the `Api` contract ----------------------------------------------------
+// RFC-0071 M3 / RFC-0072 M2. Until now "what is a procedure module" was a
+// paragraph of this file's doc comment and a hand-rolled scan in
+// `validateContract`. It is a declaration now, which is what lets a project
+// attach it by role (`vyrn.json`'s `roles`), what lets the editor answer
+// questions about it, and what lets `vyrn why --contract` report on a module
+// nobody has generated from yet.
+
+/// What a procedure module may export (RFC-0072).
+///
+/// OPEN, and deliberately so: the names here are the application's vocabulary —
+/// `listPastes`, `createPaste` — so there is nothing to enumerate and a
+/// near-miss is not a mistake. What the contract states is the SHAPE every
+/// export must have, which is the total rule this layer has always applied:
+/// every export of an `api` module is a procedure.
+///
+/// The open rule constrains the return type only, and a procedure's return is a
+/// member type parameter, so what remains — at most one parameter, and both ends
+/// serializable — is a property of the TYPES rather than of the signature shape
+/// and cannot be spelled in the contract grammar. It is checked by
+/// `rpcIsSerializable` below, against a rule stated once and named in every
+/// message it produces.
+export contract Api {
+    /// A procedure: at most one serializable parameter in, a serializable value
+    /// (or nothing) out.
+    fn *(..) -> R
+}
 
 /// Uppercase the first byte of `s` (ASCII), leaving the rest untouched — the
 /// procedure `getUser` derives `vyrnRpcDoneGetUser` / `rpcPendingGetUser` this way.
@@ -72,21 +113,78 @@ fn contractError(detail: String) -> String {
     return "RPC_CONTRACT_ERROR__" + detail + "\n"
 }
 
-/// Reject any contract the RPC layer cannot model: an exported procedure with
-/// more than one parameter, or a single parameter that is not an exported named
-/// (codable) type. Returns "" when the contract is clean.
-fn validateContract(iface: ModuleInterface) -> String {
+/// THE serializability rule, stated once (RFC-0072 M2).
+///
+/// A value crosses the wire as JSON, and `fromJson` needs a declared type to
+/// validate the incoming bytes against — so both ends of a procedure must be a
+/// type the module's own reflection can name. `Unit` is serializable in the only
+/// sense that matters: nothing is sent, which is the 204 the server emits.
+///
+/// Named once so every message below can cite it, and so the rule the generator
+/// enforces is the rule this file documents rather than two things that drifted.
+fn rpcIsSerializable(spelling: String, iface: ModuleInterface) -> Bool {
+    if spelling == "" {
+        return true
+    }
+    return isNamedType(spelling, iface)
+}
+
+/// Reject any module the RPC layer cannot model. Returns "" when it is clean.
+///
+/// Two checks, in the order a reader would apply them. First the `Api` contract
+/// (RFC-0071): every export is a procedure, which is what the OPEN rule states.
+/// Then serializability, which the contract grammar cannot express because it is
+/// a property of the types rather than of the signature shape: at most one
+/// parameter, and both ends nameable by the module's own reflection.
+///
+/// A `gen fn`, because `contractOf` is compile-time reflection and has no
+/// runtime lowering by design (RFC-0071 M1) — the same reason `std/ui`'s
+/// `uiContractErrs` is one. Every caller is already a `gen fn`.
+gen fn validateContract(iface: ModuleInterface) -> String {
+    for iss in checkContract(iface, contractOf(Api)) {
+        return contractError(rpcIdentOf(iss.path) + "__" + rpcIdentOf(iss.key))
+    }
     for f in iface.functions {
         if f.params.length > 1 {
-            return contractError(f.name + "_must_take_at_most_one_parameter")
+            return contractError(
+                f.name + "__takes_" + f.params.length.toString() + "_parameters"
+                + "__a_procedure_takes_at_most_one"
+            )
         }
         if f.params.length == 1 {
-            if isNamedType(f.params[0].spelling, iface) == false {
-                return contractError(f.name + "_parameter_must_be_an_exported_named_codable_type")
+            if rpcIsSerializable(f.params[0].spelling, iface) == false {
+                return contractError(
+                    f.name + "__parameter_" + rpcIdentOf(f.params[0].spelling) + "_is_not_serializable"
+                    + "__a_procedure_parameter_must_be_an_exported_named_type"
+                )
             }
+        }
+        if rpcIsSerializable(f.ret, iface) == false {
+            return contractError(
+                f.name + "__return_" + rpcIdentOf(f.ret) + "_is_not_serializable"
+                + "__a_procedure_must_return_an_exported_named_type_or_nothing"
+            )
         }
     }
     return ""
+}
+
+/// `s` with every character an identifier cannot carry folded to `_`, so a type
+/// spelling (`Array<Paste>`) can ride the identifier a contract violation is
+/// reported through. The same transform `std/ui:uiIdentOf` applies, for the same
+/// reason: there is no message-carrying trap primitive.
+fn rpcIdentOf(s: String) -> String {
+    let raw = bytes(s)
+    let mut out: Array<UInt8> = []
+    for b in raw {
+        let ok = (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+        if ok {
+            out.push(b)
+        } else {
+            out.push('_')
+        }
+    }
+    return fromBytesOr(out, "x")
 }
 
 /// The import block a server / in-process module needs (RFC-0031): the contract's
@@ -184,22 +282,22 @@ fn serverHandlerFn(f: FnInfo) -> String {
         if retUnit {
             let runName = "rpcRun" + cap
             out = out + "        Valid(input) => " + runName + "(input),\n"
-            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }) },\n"
+            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }), vary: \"\" },\n"
             out = out + "    }\n}\n"
             out = out + "fn " + runName + "(input: " + reqType + ") -> Response {\n"
             out = out + "    " + f.name + "(input)\n"
-            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\" }\n}\n"
+            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\" }\n}\n"
         } else {
-            out = out + "        Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "(input)) },\n"
-            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }) },\n"
+            out = out + "        Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "(input)), vary: \"\" },\n"
+            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }), vary: \"\" },\n"
             out = out + "    }\n}\n"
         }
     } else {
         if retUnit {
             out = out + "    " + f.name + "()\n"
-            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\" }\n}\n"
+            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\" }\n}\n"
         } else {
-            out = out + "    return Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "()) }\n}\n"
+            out = out + "    return Response { status: 200, contentType: \"application/json\", body: toJson(" + f.name + "()), vary: \"\" }\n}\n"
         }
     }
     return out
@@ -242,21 +340,21 @@ fn serverRouterFn(iface: ModuleInterface) -> String {
     let mut out = "export fn rpcHandle(req: Request) -> Option<Response> {\n"
     out = out + "    if req.path == \"/rpc/$schema\" {\n"
     out = out + "        if req.method == \"GET\" {\n"
-    out = out + "            return Some(Response { status: 200, contentType: \"application/json\", body: rpcSchema() })\n"
+    out = out + "            return Some(Response { status: 200, contentType: \"application/json\", body: rpcSchema(), vary: \"\" })\n"
     out = out + "        }\n"
-    out = out + "        return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\" })\n"
+    out = out + "        return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\" })\n"
     out = out + "    }\n"
     for f in iface.functions {
         let cap = capFirst(f.name)
         out = out + "    if req.path == \"/rpc/" + f.name + "\" {\n"
         out = out + "        if req.method != \"POST\" {\n"
-        out = out + "            return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\" })\n"
+        out = out + "            return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\" })\n"
         out = out + "        }\n"
         out = out + "        return Some(rpcHandle" + cap + "(req.body))\n"
         out = out + "    }\n"
     }
     out = out + "    if req.path.startsWith(\"/rpc/\") {\n"
-    out = out + "        return Some(Response { status: 404, contentType: \"text/plain\", body: \"no such procedure\" })\n"
+    out = out + "        return Some(Response { status: 404, contentType: \"text/plain\", body: \"no such procedure\", vary: \"\" })\n"
     out = out + "    }\n"
     out = out + "    return None\n}\n"
     return out
@@ -460,6 +558,702 @@ export gen fn rpcInProcess(contract: String) -> String {
     out = out + rpcReplyTypes()
     for f in iface.functions {
         out = out + inProcStub(f)
+    }
+    return out
+}
+
+// ===========================================================================
+// RFC-0072 M3 — derived paths: the directory IS the API
+// ===========================================================================
+//
+// The single-module forms above need one module to reflect over, so an
+// application with more than one procedure module ends up hand-writing that
+// index — a file whose entire content is forwarding, written twice, and silent
+// when the second write is forgotten. The forms below take a DIRECTORY. Every
+// module under it is a procedure module (contract `Api`), every export of one is
+// a procedure, and its wire path derives from the module path and the export
+// name. The rule is total, which is exactly why it needs no magic names: a total
+// rule has no special name to hide behind ordinary syntax.
+//
+// `rpc(dir)` mounts the surface. `client(dir)` emits the calling side, and it is
+// SERVER-BLIND by construction — it reads each module's INTERFACE and never
+// imports one, so a procedure body cannot reach a client bundle even through the
+// generator. RFC-0072's audience rule forbids the same edge from the other
+// direction, and neither one depends on the other being right.
+
+import { Json, JsonField } from "std/json"
+import { parseJson } from "std/jsonread"
+import { replace, split } from "std/strings"
+
+/// One procedure module found under an api directory: the module path a
+/// generator can reflect (`./server/api/orders/refund`) and the api-RELATIVE
+/// path the template interpolates as `{module}` (`orders/refund`).
+type RpcModule = { modPath: String, rel: String }
+
+/// The resolved path rule for one api directory.
+///
+/// `prefix` and `path` are the template; `pinKeys`/`pinPaths` are the explicit
+/// overrides as parallel arrays — a comptime map buys nothing here, and two
+/// arrays keep declaration order, which is what `vyrn routes` prints.
+type RpcConfig = { prefix: String, path: String, pinKeys: Array<String>, pinPaths: Array<String> }
+
+/// One resolved route, as `vyrn routes` prints it.
+type RpcRoute = { path: String, key: String, pinned: Bool }
+
+/// Whether `path` is a directory — a `listDir` that succeeds. A `gen fn`
+/// (generation-only I/O), so codegen never lowers it.
+gen fn rpcIsDir(path: String) -> Bool {
+    return match listDir(path) {
+        Ok(ns) => true,
+        Err(err) => false,
+    }
+}
+
+/// `name` without its `.vyrn` extension.
+fn rpcStem(name: String) -> String {
+    let b = bytes(name)
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    while i < b.length - 5 {
+        out.push(b[i])
+        i = i + 1
+    }
+    return fromBytesOr(out, name)
+}
+
+/// Recursively collect every procedure module under `dir`, carrying the
+/// api-relative prefix built so far.
+///
+/// `module.vyrn` is excluded: it is the directory's own slot, and mounting a
+/// configuration file as procedures would make it part of the wire surface.
+gen fn rpcScan(dir: String, prefix: String) -> Array<RpcModule> {
+    let entries = match listDir(dir) {
+        Ok(ns) => ns,
+        Err(err) => [],
+    }
+    let mut out: Array<RpcModule> = []
+    for name in entries {
+        if name.endsWith(".vyrn") {
+            let st = rpcStem(name)
+            if st != "module" {
+                let rel = if prefix == "" { st } else { prefix + "/" + st }
+                out.push(RpcModule { modPath: dir + "/" + st, rel: rel })
+            }
+        } else {
+            let sub = dir + "/" + name
+            if rpcIsDir(sub) {
+                let deeper = if prefix == "" { name } else { prefix + "/" + name }
+                for m in rpcScan(sub, deeper) {
+                    out.push(m)
+                }
+            }
+        }
+    }
+    return out
+}
+
+/// A JSON value's string, or "" for anything else.
+fn rpcStrOf(j: Json) -> String {
+    return match j {
+        JStr(s) => s,
+        JNull => "",
+        JBool(b) => "",
+        JNum(n) => "",
+        JArr(xs) => "",
+        JObj(o) => "",
+    }
+}
+
+/// A JSON value's object fields, or none for anything else.
+fn rpcFieldsOf(j: Json) -> Array<JsonField> {
+    return match j {
+        JObj(fs) => fs,
+        JNull => [],
+        JBool(b) => [],
+        JNum(n) => [],
+        JStr(s) => [],
+        JArr(xs) => [],
+    }
+}
+
+/// The value of `key` in a JSON object, or `JNull`.
+fn rpcMember(j: Json, key: String) -> Json {
+    for f in rpcFieldsOf(j) {
+        if f.key == key {
+            return f.value
+        }
+    }
+    return JNull
+}
+
+/// Parse `path` as JSON, or `JNull` when it is absent or malformed. A missing
+/// config file is the normal case, not an error.
+gen fn rpcReadJson(path: String) -> Json {
+    let text = match readFile(path) {
+        Ok(t) => t,
+        Err(e) => "",
+    }
+    if text == "" {
+        return JNull
+    }
+    return match parseJson(text) {
+        Ok(j) => j,
+        Err(e) => JNull,
+    }
+}
+
+/// `cfg` with whatever the config document `doc` declares laid over it.
+fn rpcApplyConfig(cfg: RpcConfig, doc: Json) -> RpcConfig {
+    let p = rpcStrOf(rpcMember(doc, "prefix"))
+    let t = rpcStrOf(rpcMember(doc, "path"))
+    let mut keys = cfg.pinKeys
+    let mut paths = cfg.pinPaths
+    for f in rpcFieldsOf(rpcMember(doc, "pin")) {
+        let v = rpcStrOf(f.value)
+        if v != "" {
+            keys.push(f.key)
+            paths.push(v)
+        }
+    }
+    return RpcConfig {
+        prefix: if p == "" { cfg.prefix } else { p },
+        path: if t == "" { cfg.path } else { t },
+        pinKeys: keys,
+        pinPaths: paths,
+    }
+}
+
+/// The path rule governing `dir`.
+///
+/// The default is this document's — `/_` and `{module}/{name}` — overridden by
+/// an `rpc.json` beside the api directory, which may also PIN individual
+/// procedures by `{module}/{name}`. Both the flat form and the `{"rpc": {…}}`
+/// wrapper this RFC spells for `vyrn.json` are accepted, so the same object
+/// reads the same wherever it is written.
+///
+/// DEVIATION (see "M3 — as landed"): this RFC puts the key in `vyrn.json`, and a
+/// generator cannot read it there. RFC-0021 confines a generator's `readFile` to
+/// the constant path arguments it was given, and walking up out of the api
+/// directory to the project root is exactly the escape that sandbox exists to
+/// refuse. The keys are unchanged; the file is one the generator is allowed to
+/// open.
+///
+/// Configuration is JSON rather than a Vyrn declaration because a generator can
+/// only REFLECT over a module, never evaluate one — see the same section for why
+/// scanning a module's source for an `at(..)` call was the wrong shape.
+gen fn rpcConfig(dir: String) -> RpcConfig {
+    let cfg = RpcConfig { prefix: "/_", path: "{module}/{name}", pinKeys: [], pinPaths: [] }
+    let doc = rpcReadJson(dir + "/rpc.json")
+    let nested = rpcMember(doc, "rpc")
+    let applied = rpcApplyConfig(cfg, doc)
+    return rpcApplyConfig(applied, nested)
+}
+
+/// The path the template alone derives — the convention, before any pin.
+fn rpcTemplatePath(cfg: RpcConfig, rel: String, name: String) -> String {
+    return cfg.prefix + "/" + replace(replace(cfg.path, "{module}", rel), "{name}", name)
+}
+
+/// The wire path of one procedure: its pin if it has one, else the template.
+/// The LAST matching pin wins, so a nearer config document overrides a farther.
+fn rpcPathFor(cfg: RpcConfig, rel: String, name: String) -> String {
+    let key = rel + "/" + name
+    let mut pinned = ""
+    let mut i = 0
+    while i < cfg.pinKeys.length {
+        if cfg.pinKeys[i] == key {
+            pinned = cfg.pinPaths[i]
+        }
+        i = i + 1
+    }
+    if pinned != "" {
+        return pinned
+    }
+    return rpcTemplatePath(cfg, rel, name)
+}
+
+/// Every route the directory derives, in scan order.
+gen fn rpcRoutesOf(mods: Array<RpcModule>, cfg: RpcConfig) -> Array<RpcRoute> {
+    let mut out: Array<RpcRoute> = []
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for f in iface.functions {
+            let path = rpcPathFor(cfg, m.rel, f.name)
+            out.push(RpcRoute {
+                    path: path,
+                    key: m.rel + "/" + f.name,
+                    pinned: path != rpcTemplatePath(cfg, m.rel, f.name),
+                })
+        }
+    }
+    return out
+}
+
+/// The first pair of routes deriving the SAME path, as a contract error naming
+/// BOTH declarations. "" when every path is distinct.
+///
+/// Reachable through a pin or through a `{name}`-only template. Last-wins is
+/// never silent: two procedures answering one URL is a question only the author
+/// can settle.
+fn rpcCollision(routes: Array<RpcRoute>) -> String {
+    let mut i = 0
+    while i < routes.length {
+        let mut j = i + 1
+        while j < routes.length {
+            if routes[i].path == routes[j].path {
+                return contractError(
+                    "two_procedures_derive_the_same_path_" + rpcIdentOf(routes[i].path)
+                    + "__" + rpcIdentOf(routes[i].key) + "__and__" + rpcIdentOf(routes[j].key)
+                )
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+/// Validate every module under the directory against `Api` + serializability,
+/// returning the first objection or "".
+gen fn rpcValidateAll(mods: Array<RpcModule>) -> String {
+    for m in mods {
+        let err = validateContract(moduleInterface(m.modPath))
+        if err != "" {
+            return err
+        }
+    }
+    return ""
+}
+
+/// The Vyrn-level name a directory-derived procedure is reached by: its
+/// api-relative module path and export name, camel-joined (`orders/refund` +
+/// `run` -> `ordersRefundRun`).
+///
+/// DEVIATION (see "M3 — as landed"): this document writes `api.orders.refund.run`,
+/// which is a namespace inside a namespace, and RFC-0027's `import * as` binds
+/// exactly one level. One flat qualified name per procedure keeps every
+/// procedure distinct in the flat namespace and keeps the tree readable in the
+/// name.
+fn rpcQualified(rel: String, name: String) -> String {
+    let mut out = ""
+    for seg in split(rel, "/") {
+        if out == "" {
+            out = seg
+        } else {
+            out = out + capFirst(seg)
+        }
+    }
+    return out + capFirst(name)
+}
+
+/// `//@route` directives — one per derived route, in scan order.
+///
+/// A comment line the loader ignores and `vyrn routes` reads, so the resolved
+/// table has exactly ONE producer: the generator that also mounts it. The CLI
+/// prints; it does not recompute. That is the division RFC-0071 M4 drew between
+/// the LSP and `vyrn_frontend::contracts`, applied to routing.
+fn rpcRouteDirectives(routes: Array<RpcRoute>) -> String {
+    let mut out = ""
+    for r in routes {
+        let src = if r.pinned { "override" } else { "convention" }
+        out = out + "//@route POST " + r.path + " " + r.key + " " + src + "\n"
+    }
+    return out
+}
+
+// ---- rpc(dir) --------------------------------------------------------------
+
+/// The NAMESPACE binding a procedure module is reached through: `rpcM0`, `rpcM1`.
+///
+/// A namespace and not an import alias, because RFC-0027's `import * as` is the
+/// only thing that keeps a module's exports OUT of the flat namespace — and two
+/// api modules both exporting `get` is not a mistake, it is the normal shape of
+/// a directory-derived API. Named imports (however aliased) would make
+/// `pastes/get` and `orders/get` a "defined in both" error before this generator
+/// could say anything about either.
+fn rpcNs(i: Int64) -> String {
+    return "rpcM" + i.toString()
+}
+
+/// The import block a directory-level server module needs: one NAMESPACE per
+/// procedure module, and every reachable type from the module that DECLARES it,
+/// once. Types stay named imports — a type reached across modules is ONE
+/// declaration, so it collides with nothing.
+gen fn rpcDirImports(mods: Array<RpcModule>) -> String {
+    let mut out = ""
+    let mut typeMods: Array<String> = []
+    let mut typeNames: Array<String> = []
+    let mut mi = 0
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        if iface.functions.length > 0 {
+            out = out + "import * as " + rpcNs(mi) + " from \"" + m.modPath + "\"\n"
+        }
+        mi = mi + 1
+        for t in iface.types {
+            if rpcHasPair(typeMods, typeNames, t.module, t.name) == false {
+                typeMods.push(t.module)
+                typeNames.push(t.name)
+            }
+        }
+    }
+    let mut specs: Array<String> = []
+    for s in typeMods {
+        if rpcListContains(specs, s) == false {
+            specs.push(s)
+        }
+    }
+    for spec in specs {
+        let mut names: Array<String> = []
+        let mut i = 0
+        while i < typeMods.length {
+            if typeMods[i] == spec {
+                names.push(typeNames[i])
+            }
+            i = i + 1
+        }
+        if names.length > 0 {
+            out = out + "import { " + joinList(names, ", ") + " } from \"" + spec + "\"\n"
+        }
+    }
+    return out
+}
+
+/// Whether the parallel arrays already carry `(spec, name)`.
+fn rpcHasPair(mods: Array<String>, names: Array<String>, spec: String, name: String) -> Bool {
+    let mut i = 0
+    while i < mods.length {
+        if mods[i] == spec && names[i] == name {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// One directory-derived handler: decode, call the aliased real procedure,
+/// encode — the same decode-call-encode `serverHandlerFn` emits for a single
+/// module, over a qualified name.
+fn rpcDirHandler(f: FnInfo, qual: String, ns: String) -> String {
+    let handler = "rpcHandle" + capFirst(qual)
+    let real = ns + "." + f.name
+    let retUnit = f.ret == ""
+    let mut out = "fn " + handler + "(body: String) -> Response {\n"
+    if f.params.length == 1 {
+        let reqType = f.params[0].spelling
+        out = out + "    return match fromJson(" + reqType + ", body) {\n"
+        if retUnit {
+            let runName = "rpcRun" + capFirst(qual)
+            out = out + "        Valid(input) => " + runName + "(input),\n"
+            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }), vary: \"\" },\n"
+            out = out + "    }\n}\n"
+            out = out + "fn " + runName + "(input: " + reqType + ") -> Response {\n"
+            out = out + "    " + real + "(input)\n"
+            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\" }\n}\n"
+        } else {
+            out = out + "        Valid(input) => Response { status: 200, contentType: \"application/json\", body: toJson(" + real + "(input)), vary: \"\" },\n"
+            out = out + "        Invalid(issues) => Response { status: 422, contentType: \"application/json\", body: toJson(RpcIssues { issues: issues }), vary: \"\" },\n"
+            out = out + "    }\n}\n"
+        }
+    } else {
+        if retUnit {
+            out = out + "    " + real + "()\n"
+            out = out + "    return Response { status: 204, contentType: \"application/json\", body: \"\", vary: \"\" }\n}\n"
+        } else {
+            out = out + "    return Response { status: 200, contentType: \"application/json\", body: toJson(" + real + "()), vary: \"\" }\n}\n"
+        }
+    }
+    return out
+}
+
+/// The directory-wide `$schema` registry: every procedure with its request and
+/// response JSON Schema, keyed by the wire PATH as well as the name, because
+/// under a derived scheme the path is what a caller has.
+gen fn rpcDirSchema(mods: Array<RpcModule>, cfg: RpcConfig) -> String {
+    let mut out = "fn rpcSchema() -> String {\n"
+    out = out + "    let mut acc = \"{\\\"procedures\\\":[\"\n"
+    let mut i = 0
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for f in iface.functions {
+            let lead = if i > 0 { "," } else { "" }
+            let path = rpcPathFor(cfg, m.rel, f.name)
+            out = out + "    acc = acc + \"" + lead + "{\\\"path\\\":\\\"" + path + "\\\",\\\"name\\\":\\\"" + m.rel + "/" + f.name + "\\\",\\\"request\\\":\"\n"
+            if f.params.length == 1 && isNamedType(f.params[0].spelling, iface) {
+                out = out + "    acc = acc + jsonSchema(" + f.params[0].spelling + ")\n"
+            } else {
+                out = out + "    acc = acc + \"null\"\n"
+            }
+            out = out + "    acc = acc + \",\\\"response\\\":\"\n"
+            if isNamedType(f.ret, iface) {
+                out = out + "    acc = acc + jsonSchema(" + f.ret + ")\n"
+            } else {
+                out = out + "    acc = acc + \"null\"\n"
+            }
+            out = out + "    acc = acc + \"}\"\n"
+            i = i + 1
+        }
+    }
+    out = out + "    acc = acc + \"]}\"\n"
+    out = out + "    return acc\n}\n"
+    return out
+}
+
+/// The exported router over derived paths. Every path is distinct — a collision
+/// is a build error — so a flat chain of equality tests is both correct and the
+/// clearest thing to read.
+gen fn rpcDirRouter(mods: Array<RpcModule>, cfg: RpcConfig) -> String {
+    let mut out = "export fn rpcHandle(req: Request) -> Option<Response> {\n"
+    out = out + "    if req.path == \"" + cfg.prefix + "/$schema\" {\n"
+    out = out + "        if req.method == \"GET\" {\n"
+    out = out + "            return Some(Response { status: 200, contentType: \"application/json\", body: rpcSchema(), vary: \"\" })\n"
+    out = out + "        }\n"
+    out = out + "        return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\" })\n"
+    out = out + "    }\n"
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for f in iface.functions {
+            let qual = rpcQualified(m.rel, f.name)
+            out = out + "    if req.path == \"" + rpcPathFor(cfg, m.rel, f.name) + "\" {\n"
+            out = out + "        if req.method != \"POST\" {\n"
+            out = out + "            return Some(Response { status: 405, contentType: \"text/plain\", body: \"method not allowed\", vary: \"\" })\n"
+            out = out + "        }\n"
+            out = out + "        return Some(rpcHandle" + capFirst(qual) + "(req.body))\n"
+            out = out + "    }\n"
+        }
+    }
+    out = out + "    if req.path.startsWith(\"" + cfg.prefix + "/\") {\n"
+    out = out + "        return Some(Response { status: 404, contentType: \"text/plain\", body: \"no such procedure\", vary: \"\" })\n"
+    out = out + "    }\n"
+    out = out + "    return None\n}\n"
+    return out
+}
+
+/// `rpc(dir)` — mount every procedure module under `dir` at its derived path
+/// (RFC-0072 M3).
+///
+/// Nothing in the tree declares a route. The path is a function of the module's
+/// api-relative path and the export's name, configurable per project through
+/// `vyrn.json`'s `rpc` key and per directory through an `rpc.json` beside the
+/// modules. Two procedures deriving one path fail the build naming both.
+export gen fn rpc(dir: String) -> String {
+    let mods = rpcScan(dir, "")
+    let bad = rpcValidateAll(mods)
+    if bad != "" {
+        return bad
+    }
+    let cfg = rpcConfig(dir)
+    let routes = rpcRoutesOf(mods, cfg)
+    let clash = rpcCollision(routes)
+    if clash != "" {
+        return clash
+    }
+    let mut out = "/// Generated by std/rpc `rpc` (RFC-0072) — do not edit.\n"
+    out = out + rpcRouteDirectives(routes)
+    out = out + rpcDirImports(mods)
+    out = out + "type RpcIssues = { issues: Array<Issue> }\n"
+    let mut mi = 0
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for f in iface.functions {
+            out = out + rpcDirHandler(f, rpcQualified(m.rel, f.name), rpcNs(mi))
+        }
+        mi = mi + 1
+    }
+    out = out + rpcDirSchema(mods, cfg)
+    out = out + rpcDirRouter(mods, cfg)
+    return out
+}
+
+// ---- client(dir) -----------------------------------------------------------
+
+/// The per-procedure reply unifier over a qualified name (RFC-0068 semantics,
+/// unchanged).
+fn rpcDirUnifyFn(f: FnInfo, qual: String) -> String {
+    let cap = capFirst(qual)
+    let unify = "rpcUnify" + cap
+    let retUnit = f.ret == ""
+    let mut out = ""
+    if retUnit {
+        out = out + "fn " + unify + "(status: Int64, body: String) -> RpcReply<Bool> {\n"
+        out = out + "    if status == 200 { return Done(true) }\n"
+        out = out + "    if status == 204 { return Done(true) }\n"
+    } else {
+        out = out + "fn " + unify + "(status: Int64, body: String) -> RpcReply<" + f.ret + "> {\n"
+        out = out + "    if status == 200 {\n"
+        out = out + "        return match fromJson(" + f.ret + ", body) {\n"
+        out = out + "            Valid(v) => Done(v),\n"
+        out = out + "            Invalid(iss) => Failed(\"procedure `" + qual + "` returned a malformed reply\"),\n"
+        out = out + "        }\n"
+        out = out + "    }\n"
+    }
+    out = out + "    if status == 422 {\n"
+    out = out + "        return match fromJson(RpcIssues, body) {\n"
+    out = out + "            Valid(bag) => Rejected(bag.issues),\n"
+    out = out + "            Invalid(iss) => Failed(\"procedure `" + qual + "` sent an unparseable 422 body\"),\n"
+    out = out + "        }\n"
+    out = out + "    }\n"
+    out = out + "    if status == 0 {\n"
+    out = out + "        return Failed(\"procedure `" + qual + "` is unreachable\")\n"
+    out = out + "    }\n"
+    out = out + "    return Failed(\"procedure `" + qual + "` failed with status \" + status.toString())\n}\n"
+    return out
+}
+
+/// One directory-derived wire stub. The transport is handed the qualified NAME
+/// and the PATH, in that order.
+///
+/// The single-module form passes one string because the name is both: the URL is
+/// `/rpc/<name>` and the completion dispatcher is `vyrnRpcDone<Name>`. Under a
+/// derived scheme the path is the whole address and a pin can make it anything,
+/// so it no longer determines the dispatcher — the host would have to invert the
+/// template (and the pins) to route a reply. Passing both keeps the transport a
+/// transport: it POSTs to the path and calls back the named dispatcher.
+fn rpcDirClientFns(f: FnInfo, qual: String, path: String) -> String {
+    let cap = capFirst(qual)
+    let ret = if f.ret == "" { "Bool" } else { f.ret }
+    let cb = "fn(RpcReply<" + ret + ">)"
+    let mut out = rpcDirUnifyFn(f, qual)
+    out = out + "let mut rpcPending" + cap + ": Map<String, " + cb + "> = [:]\n"
+    if f.params.length == 1 {
+        out = out + "export fn " + qual + "(req: " + f.params[0].spelling + ", cb: " + cb + ") {\n"
+        out = out + "    let id = vyrnRpcCall(\"" + qual + "\", \"" + path + "\", toJson(req))\n"
+    } else {
+        out = out + "export fn " + qual + "(cb: " + cb + ") {\n"
+        out = out + "    let id = vyrnRpcCall(\"" + qual + "\", \"" + path + "\", \"\")\n"
+    }
+    out = out + "    rpcPending" + cap + "[id.toString()] = cb\n}\n"
+    out = out + "fn rpcDeliver" + cap + "(key: String, cb: " + cb + ", res: RpcReply<" + ret + ">) {\n"
+    out = out + "    rpcPending" + cap + ".remove(key)\n"
+    out = out + "    cb(res)\n}\n"
+    out = out + "export extern fn vyrnRpcDone" + cap + "(id: Int64, status: Int64, body: String) {\n"
+    out = out + "    let key = id.toString()\n"
+    out = out + "    match rpcPending" + cap + "[key] {\n"
+    out = out + "        Some(cb) => rpcDeliver" + cap + "(key, cb, rpcUnify" + cap + "(status, body)),\n"
+    out = out + "        None => rpcIgnoreReply(),\n"
+    out = out + "    }\n}\n"
+    return out
+}
+
+/// Every distinct type declaration reachable from the directory, re-emitted
+/// verbatim exactly once.
+///
+/// Re-emitted rather than imported: importing would put the api modules — and
+/// therefore their bodies — into the client build. This is the mechanical half
+/// of `client()` being server-blind.
+gen fn rpcClientTypes(mods: Array<RpcModule>) -> String {
+    let mut seen: Array<String> = []
+    let mut out = ""
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for t in iface.types {
+            if rpcListContains(seen, t.name) == false {
+                seen.push(t.name)
+                out = out + t.source + "\n"
+            }
+        }
+    }
+    return out
+}
+
+/// `client(dir)` — the calling side of a derived api directory (RFC-0072 M3).
+///
+/// SERVER-BLIND by construction: it reads each module's INTERFACE through
+/// `moduleInterface`, re-emits the type declarations it finds, and never imports
+/// an api module. There is therefore no path — not even an accidental one
+/// through the generator — by which a procedure body reaches a client bundle.
+///
+/// The emitted stubs are ordinary Vyrn, typechecked like anything else, which is
+/// the whole point: the DX failures catalogued for inference-based clients
+/// (router-size-proportional check latency, non-local depth errors, silent
+/// degradation to `any`) all follow from INFERRING a client type from a runtime
+/// router value. Here the client is generated from a checked declaration and
+/// then checked, so the fortieth procedure costs the checker one more ordinary
+/// module.
+export gen fn client(dir: String) -> String {
+    let mods = rpcScan(dir, "")
+    let bad = rpcValidateAll(mods)
+    if bad != "" {
+        return bad
+    }
+    let cfg = rpcConfig(dir)
+    let routes = rpcRoutesOf(mods, cfg)
+    let clash = rpcCollision(routes)
+    if clash != "" {
+        return clash
+    }
+    let mut out = "/// Generated by std/rpc `client` (RFC-0072) — do not edit.\n"
+    out = out + rpcRouteDirectives(routes)
+    out = out + rpcClientTypes(mods)
+    out = out + rpcReplyTypes()
+    out = out + "type RpcIssues = { issues: Array<RpcIssue> }\n"
+    out = out + "extern fn vyrnRpcCall(proc: String, path: String, body: String) -> Int64\n"
+    out = out + "fn rpcIgnoreReply() {\n}\n"
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for f in iface.functions {
+            let qual = rpcQualified(m.rel, f.name)
+            out = out + rpcDirClientFns(f, qual, rpcPathFor(cfg, m.rel, f.name))
+        }
+    }
+    return out
+}
+
+/// One in-process stub over a qualified name: call the aliased real procedure
+/// and hand the caller `Done(..)` synchronously.
+fn rpcDirInProcStub(f: FnInfo, qual: String, ns: String) -> String {
+    let ret = if f.ret == "" { "Bool" } else { f.ret }
+    let cb = "fn(RpcReply<" + ret + ">)"
+    let real = ns + "." + f.name
+    let retUnit = f.ret == ""
+    let mut out = ""
+    if f.params.length == 1 {
+        out = out + "export fn " + qual + "(req: " + f.params[0].spelling + ", cb: " + cb + ") {\n"
+        if retUnit {
+            out = out + "    " + real + "(req)\n"
+            out = out + "    cb(Done(true))\n}\n"
+        } else {
+            out = out + "    cb(Done(" + real + "(req)))\n}\n"
+        }
+    } else {
+        out = out + "export fn " + qual + "(cb: " + cb + ") {\n"
+        if retUnit {
+            out = out + "    " + real + "()\n"
+            out = out + "    cb(Done(true))\n}\n"
+        } else {
+            out = out + "    cb(Done(" + real + "()))\n}\n"
+        }
+    }
+    return out
+}
+
+/// `clientInProcess(dir)` — the same surface as `client(dir)`, dispatching
+/// directly instead of over the wire.
+///
+/// DEVIATION (see "M3 — as landed"): this document has ONE `client()` whose
+/// backend is chosen by the calling module's audience. A generator receives its
+/// arguments and nothing else — not the audience of the module that imported it
+/// — so the choice cannot be made inside `client()` without teaching the loader
+/// to pass audience into generation, which is a language change this milestone
+/// does not own. The two flavors are two generators, exactly as `rpcClient` and
+/// `rpcInProcess` already were, and the stubs are same-named, so a composition
+/// root swaps one import line.
+export gen fn clientInProcess(dir: String) -> String {
+    let mods = rpcScan(dir, "")
+    let bad = rpcValidateAll(mods)
+    if bad != "" {
+        return bad
+    }
+    let mut out = "/// Generated by std/rpc `clientInProcess` (RFC-0072) — do not edit.\n"
+    out = out + rpcDirImports(mods)
+    out = out + rpcReplyTypes()
+    let mut mi = 0
+    for m in mods {
+        let iface = moduleInterface(m.modPath)
+        for f in iface.functions {
+            out = out + rpcDirInProcStub(f, rpcQualified(m.rel, f.name), rpcNs(mi))
+        }
+        mi = mi + 1
     }
     return out
 }

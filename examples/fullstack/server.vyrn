@@ -1,16 +1,18 @@
-/// The server root. Two generators compose here: `rpcServer("./api")` (RFC-0019)
-/// synthesizes `rpcHandle` (POST /rpc/<name>, GET /rpc/$schema) from the contract,
-/// and `pages("./pages")` (RFC-0026 M3) synthesizes `route` from the file-based
-/// pages directory. `handle` checks `/rpc/*` FIRST and delegates everything else
-/// to `route` — so the RPC endpoints are byte-for-byte what they were, and the
-/// whole HTML surface is now server-rendered pages.
+/// The server root — the one module that legitimately names both sides, which is
+/// why the manifest's `server` key is what gives it its audience (RFC-0072 M1).
+/// Two generators compose here: `rpc("./server/api")` (RFC-0072 M3) mounts every
+/// procedure module under the api directory at its DERIVED path
+/// (POST /_/<module>/<name>, GET /_/$schema) — no file declares a route — and
+/// `pages("./server/pages")` (RFC-0026 M3) synthesizes `route` from the file-based
+/// pages directory. `handle` checks the RPC surface FIRST and delegates
+/// everything else to `route`.
 ///
 /// `vyrn dev` serves this alongside the built client wasm + the `public/` static
 /// assets (style.css, app.js); `vyrn serve server.vyrn` runs just this.
-import { rpcServer } from "std/rpc"
-import { rpcHandle } from rpcServer("./api")
+import { rpc } from "std/rpc"
+import { rpcHandle } from rpc("./server/api")
 import { pages } from "std/ui"
-import { route } from pages("./pages")
+import { route } from pages("./server/pages")
 
 fn handle(req: Request) -> Response {
     return match rpcHandle(req) {
@@ -21,11 +23,11 @@ fn handle(req: Request) -> Response {
 
 fn main() -> Int64 {
     // Drive `handle` once so `vyrn run server.vyrn` is a quick smoke test.
-    let schema = handle(Request { method: "GET", path: "/rpc/$schema", body: "" })
+    let schema = handle(Request { method: "GET", path: "/_/$schema", headers: [:], body: "" })
     print("$schema -> \{schema.status}")
-    let home = handle(Request { method: "GET", path: "/", body: "" })
+    let home = handle(Request { method: "GET", path: "/", headers: [:], body: "" })
     print("/ -> \{home.status}")
-    let user = handle(Request { method: "GET", path: "/users/7", body: "" })
+    let user = handle(Request { method: "GET", path: "/users/7", headers: [:], body: "" })
     print("/users/7 -> \{user.status}")
     return 0
 }

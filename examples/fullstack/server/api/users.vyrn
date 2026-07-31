@@ -1,0 +1,35 @@
+/// The user procedures — an ORDINARY Vyrn module with zero RPC annotations, and
+/// under `server/api` by RFC-0072's reading of its own path: this is server code
+/// (never in the client bundle) of the procedure kind (every export is checked
+/// against `std/rpc:Api`).
+///
+/// Nothing here declares a route. `rpc("./server/api")` mounts each export at
+/// `/_/users/<name>`, derived from the module's api-relative path and the export
+/// name; `client("./server/api")` reads this module's INTERFACE (RFC-0021
+/// `moduleInterface`) and synthesizes the browser stubs from it, so a body below
+/// cannot reach a browser even through the generator.
+import { GetUserReq, CreateUserReq, User, DeleteReq, DeleteResult } from "../../shared/wire"
+
+/// Look up a user by id. No database here (an imported module is stateless), so
+/// the result is derived deterministically from the id — enough to show a real,
+/// typed round trip.
+export fn byId(req: GetUserReq) -> User {
+    return User { id: req.id, name: "user\{req.id}", age: 30 }
+}
+
+/// "Create" a user. The request is already validated by the time the body runs
+/// (decode enforced `Username`/`Age`), so this just echoes it back with an id.
+export fn create(req: CreateUserReq) -> User {
+    return User { id: 1000, name: req.name, age: req.age }
+}
+
+/// "Delete" a user, returning a `Result` (RFC-0024) — an application-level
+/// outcome, NOT request validation. A missing/invalid request body is still a
+/// 422; a well-formed request that the app refuses is a **200** carrying
+/// `{"Err":"..."}`. Deleting the root user (id 0) is refused.
+export fn del(req: DeleteReq) -> DeleteResult {
+    if req.id == 0 {
+        return Err("cannot delete the root user")
+    }
+    return Ok(true)
+}

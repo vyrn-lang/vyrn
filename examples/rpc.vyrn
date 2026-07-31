@@ -1,80 +1,80 @@
 /// Typed RPC as a library (RFC-0019) — the deterministic, in-process flavor, so
 /// this is an ordinary three-way parity citizen (interp == native == wasm).
 ///
-/// `rpcInProcess("./fullstack/api")` reads the SAME contract the browser demo
-/// serves and synthesizes **same-named** `<proc>(req, cb)` dispatchers that run the
-/// real procedures and hand the result to the callback synchronously — no wire, no
-/// externs, no host. Same-named stubs come from import aliasing (RFC-0022): the
-/// generated module imports each procedure as `<proc>__real` and its stub takes the
-/// real name. The wire flavors (`rpcServer` / `rpcClient`) add a network and a JS
-/// runtime, so they live in `examples/fullstack/` under `vyrn dev`; this file keeps
-/// the contract's logic covered by the parity corpus.
+/// `clientInProcess("./fullstack/server/api")` reads the SAME api directory the
+/// browser demo serves and synthesizes `<module><Proc>(req, cb)` dispatchers that
+/// run the real procedures and hand the result to the callback synchronously — no
+/// wire, no externs, no host. The stubs are named exactly as `client()`'s wire
+/// stubs are (RFC-0072 M3), so a composition root swaps one import line and no
+/// call site moves. The wire flavor adds a network and a JS runtime, so it lives
+/// in `examples/fullstack/` under `vyrn dev`; this file keeps the procedures'
+/// logic covered by the parity corpus.
 ///
 /// Inspect the synthesized dispatch module with:  vyrn emit-gen examples/rpc.vyrn
-import { rpcInProcess } from "std/rpc"
-import { getUser, createUser, deleteUser, RpcReply } from rpcInProcess("./fullstack/api")
-import { GetUserReq, CreateUserReq, User, DeleteReq, DeleteResult } from "./fullstack/api"
+import { clientInProcess } from "std/rpc"
+import { usersById, usersCreate, usersDel, RpcReply } from clientInProcess("./fullstack/server/api")
+import { GetUserReq, CreateUserReq, User, DeleteReq, DeleteResult } from "./fullstack/shared/wire"
 
 // Module state: the last dispatch result, filled by the callbacks below.
 let mut line: String = "(none)"
 
-/// The completion callback for `getUser` — in-process, always `Done`.
+/// The completion callback for `usersById` — in-process, always `Done`.
 fn onGetUser(res: RpcReply<User>) {
     line = match res {
-        Done(u) => "getUser -> \{u.name} (age \{u.age})",
-        Rejected(issues) => "getUser failed",
-        Failed(why) => "getUser failed",
+        Done(u) => "usersById -> \{u.name} (age \{u.age})",
+        Rejected(issues) => "usersById failed",
+        Failed(why) => "usersById failed",
     }
 }
 
-/// The completion callback for `createUser`.
+/// The completion callback for `usersCreate`.
 fn onCreateUser(res: RpcReply<User>) {
     line = match res {
-        Done(u) => "createUser -> id \{u.id} \{u.name}",
-        Rejected(issues) => "createUser failed",
-        Failed(why) => "createUser failed",
+        Done(u) => "usersCreate -> id \{u.id} \{u.name}",
+        Rejected(issues) => "usersCreate failed",
+        Failed(why) => "usersCreate failed",
     }
 }
 
-/// The completion callback for `deleteUser` — a `Result` procedure (RFC-0024). An
+/// The completion callback for `usersDel` — a `Result` procedure (RFC-0024). An
 /// application-level `Err` is a `Done(Err(..))` here, distinct from the wire's
 /// decode failures (`Rejected`) and transport faults (`Failed`).
 fn onDeleteUser(res: RpcReply<DeleteResult>) {
     line = match res {
         Done(r) => match r {
-            Ok(done) => "deleteUser -> ok",
-            Err(why) => "deleteUser -> refused: \{why}",
+            Ok(done) => "usersDel -> ok",
+            Err(why) => "usersDel -> refused: \{why}",
         },
-        Rejected(issues) => "deleteUser failed",
-        Failed(why) => "deleteUser failed",
+        Rejected(issues) => "usersDel failed",
+        Failed(why) => "usersDel failed",
     }
 }
 
 fn main() -> Int64 {
-    getUser(GetUserReq { id: 7 }, onGetUser)
+    usersById(GetUserReq { id: 7 }, onGetUser)
     print(line)
-    createUser(CreateUserReq { name: "Ada", age: 36 }, onCreateUser)
+    usersCreate(CreateUserReq { name: "Ada", age: 36 }, onCreateUser)
     print(line)
-    deleteUser(DeleteReq { id: 5 }, onDeleteUser)
+    usersDel(DeleteReq { id: 5 }, onDeleteUser)
     print(line)
-    deleteUser(DeleteReq { id: 0 }, onDeleteUser)
+    usersDel(DeleteReq { id: 0 }, onDeleteUser)
     print(line)
     return 0
 }
 
-test "in-process getUser runs the real contract procedure" {
-    getUser(GetUserReq { id: 42 }, onGetUser)
-    assertEq(line, "getUser -> user42 (age 30)")
+test "in-process usersById runs the real procedure" {
+    usersById(GetUserReq { id: 42 }, onGetUser)
+    assertEq(line, "usersById -> user42 (age 30)")
 }
 
-test "in-process createUser echoes its validated fields" {
-    createUser(CreateUserReq { name: "Grace", age: 45 }, onCreateUser)
-    assertEq(line, "createUser -> id 1000 Grace")
+test "in-process usersCreate echoes its validated fields" {
+    usersCreate(CreateUserReq { name: "Grace", age: 45 }, onCreateUser)
+    assertEq(line, "usersCreate -> id 1000 Grace")
 }
 
-test "in-process deleteUser carries a Result outcome (RFC-0024)" {
-    deleteUser(DeleteReq { id: 5 }, onDeleteUser)
-    assertEq(line, "deleteUser -> ok")
-    deleteUser(DeleteReq { id: 0 }, onDeleteUser)
-    assertEq(line, "deleteUser -> refused: cannot delete the root user")
+test "in-process usersDel carries a Result outcome (RFC-0024)" {
+    usersDel(DeleteReq { id: 5 }, onDeleteUser)
+    assertEq(line, "usersDel -> ok")
+    usersDel(DeleteReq { id: 0 }, onDeleteUser)
+    assertEq(line, "usersDel -> refused: cannot delete the root user")
 }

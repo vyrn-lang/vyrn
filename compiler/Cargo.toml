@@ -1,18 +1,25 @@
 # Vyrn compiler workspace.
 #
-# Default members build with ZERO external dependencies, so `cargo build` and
-# `cargo test` work today without LLVM installed:
 #   - vyrn-frontend : lexer + parser + AST + type checker + tree-walking interpreter
-#   - vyrn-codegen  : emits textual LLVM IR (feed to `clang`/`llc` once LLVM is installed)
+#   - vyrn-codegen  : emits code (textual LLVM IR today; wasm directly, in progress)
 #   - vyrn-cli      : the `vyrn` driver
 #
-# The Inkwell (LLVM C++ API) backend lives in the EXCLUDED crate
-# `vyrn-codegen-llvm`. It requires a matching LLVM toolchain to build and is not
-# part of the default resolve. See compiler/README.md.
+# THE PROPERTY WORTH DEFENDING: `cargo build` and `cargo test` work on a machine
+# with no LLVM, no clang and no wasi sysroot. A contributor can hack on the
+# frontend, the checker and the interpreter — and run the whole test suite —
+# without installing a C toolchain. Anything that would break THAT is excluded.
 #
-# `vyrn-lsp` (the Language Server Protocol server) is also EXCLUDED: it pulls in
-# `lsp-server`/`lsp-types`, which would break the zero-external-dependency
-# property of the default resolve. Build it explicitly:
+# What is NOT a rule, though an earlier version of this comment implied it was:
+# "no external crates". That was generalized out of the sentence above, where it
+# does not follow — a Rust crate has nothing to do with whether clang is
+# installed. Crates are judged one at a time, on what they cost and what a
+# self-hosted Vyrn would have to do about them later.
+#
+# `vyrn-lsp` and `vyrn-genwasm` are EXCLUDED because they are heavy and neither
+# is needed to build or test the language: `lsp-server`/`lsp-types` for the
+# former, an embedded `wasmtime` for the latter (RFC-0076). `vyrn-cli` and
+# `vyrn-lsp` depend on `vyrn-genwasm` OPTIONALLY, behind a feature spelled
+# `wasm-gen` in each, so it enters the resolve only when asked for.
 #   cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml
 
 [workspace]
@@ -23,8 +30,8 @@ members = [
     "vyrn-cli",
 ]
 exclude = [
-    "vyrn-codegen-llvm",
     "vyrn-lsp",
+    "vyrn-genwasm",
 ]
 
 [profile.release]

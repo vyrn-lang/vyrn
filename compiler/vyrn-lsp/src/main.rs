@@ -26,6 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
+mod contracts;
 mod templates;
 
 use lsp_server::{Connection, Message, Notification, Request, Response};
@@ -34,18 +35,20 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::{
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
     CompletionTextEdit, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, Diagnostic as LspDiagnostic, DiagnosticSeverity,
     DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
     DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Documentation,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    InitializeParams, InitializeResult, Location, MarkupContent, MarkupKind, OneOf, Position,
+    InitializeParams, InitializeResult, InsertTextFormat, Location, MarkupContent, MarkupKind,
+    OneOf, Position,
     PublishDiagnosticsParams, Range, SemanticToken, SemanticTokenModifier, SemanticTokenType,
     SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
     SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
     SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
 };
 
 use vyrn_frontend::{
@@ -91,10 +94,11 @@ fn load_context(
     let manifest_dir = std::path::Path::new(&path)
         .parent()
         .and_then(|d| find_manifest(d))
-        .map(|(dir, deps)| {
-            opts.aliases = deps.into_iter().collect();
-            opts.alias_base = dir.clone();
-            dir
+        .map(|m| {
+            opts.aliases = m.deps.into_iter().collect();
+            opts.alias_base = m.dir.clone();
+            opts.audience = m.audience;
+            m.dir
         });
     let resolver = EditorResolver { manifest_dir, overlays: overlays.clone() };
     Some((opts, resolver, path))
@@ -124,7 +128,7 @@ fn std_root() -> Option<String> {
 /// Find `vyrn.json` by walking up from `start`; returns the manifest's
 /// directory (slash-separated) and its `dependencies` import map. A compact
 /// duplicate of `vyrn`'s reader (the CLI is a binary crate, not linkable).
-fn find_manifest(start: &std::path::Path) -> Option<(String, Vec<(String, String)>)> {
+fn find_manifest(start: &std::path::Path) -> Option<Manifest> {
     use vyrn_frontend::schema::Json;
     let mut dir = start.to_path_buf();
     loop {
@@ -142,10 +146,22 @@ fn find_manifest(start: &std::path::Path) -> Option<(String, Vec<(String, String
                     .collect(),
                 _ => Vec::new(),
             };
-            return Some((dir.to_string_lossy().replace('\\', "/"), deps));
+            let slash = dir.to_string_lossy().replace('\\', "/");
+            let audience = vyrn_frontend::audience::from_manifest(&text, &slash);
+            return Some(Manifest { dir: slash, deps, audience });
         }
         dir = dir.parent()?.to_path_buf();
     }
+}
+
+/// The manifest facts a load needs: dependency aliases and, since RFC-0072, the
+/// declared audience vocabulary. Carried so the editor rejects an import that
+/// widens audience exactly where the compiler does — a rule you only discover at
+/// the shell is half a rule.
+struct Manifest {
+    dir: String,
+    deps: Vec<(String, String)>,
+    audience: Option<vyrn_frontend::audience::AudienceMap>,
 }
 
 /// Read-only module resolver for the editor: local paths from disk; remote
@@ -262,6 +278,20 @@ fn dbg_log(msg: &str) {
 }
 
 fn main() {
+    // RFC-0076 M4. Choosing an engine, not adding analysis: the generator still
+    // runs the same Vyrn program and still returns the same source. This is the
+    // process the engine exists for — a compiled artifact is argument-independent
+    // and cached for the session, so the clang is paid once per generator instead
+    // of once per keystroke. Installed before any document can be opened, since
+    // generation happens deep inside the load, and it declines to the interpreter
+    // when there is no clang or no wasi sysroot, so an editor on a machine
+    // without a toolchain is slower and never broken. `VYRN_NO_WASM_GEN=1`
+    // forces the interpreter, spelled exactly as the CLI spells it.
+    #[cfg(feature = "wasm-gen")]
+    if std::env::var("VYRN_NO_WASM_GEN").is_err() {
+        vyrn_genwasm::install();
+    }
+
     // `Connection::stdio` sets up the stdin/stdout channels. The server is
     // single-threaded and blocking — no tokio, no I/O threads.
     let (connection, io_threads) = Connection::stdio();
@@ -288,6 +318,7 @@ fn main() {
                 vyx_ownerless: HashSet::new(),
                 synth_cache: RefCell::new(HashMap::new()),
                 css_cache: RefCell::new(HashMap::new()),
+                contract_cache: RefCell::new(HashMap::new()),
             };
             // `initialize` is a special handshake: read it, reply with
             // capabilities, then enter the main loop. EOF here just means the
@@ -340,6 +371,13 @@ struct Server {
     /// cheap signature (each file's len+mtime, plus the app-root and `public/`
     /// directory mtimes) changes, so a tooltip never re-walks/re-reads the disk.
     css_cache: RefCell<HashMap<std::path::PathBuf, CssIndex>>,
+    /// RFC-0071 M4: per app root, the roles the project declares (or the ones
+    /// discovered from its generator call sites) and the contracts they resolve
+    /// to. Re-derived only when `vyrn.json` or a root module changes, and each
+    /// cached contract re-checks its own declaring file — so editing
+    /// `std/ui.vyrn` is picked up without restarting the server, and a keystroke
+    /// in a page re-reads nothing.
+    contract_cache: RefCell<HashMap<std::path::PathBuf, contracts::ContractIndex>>,
 }
 
 /// RFC-0052: one app root's discovered stylesheets, with the signature they were
@@ -391,6 +429,11 @@ fn handle_initialize(connection: &Connection) -> Result<(), ()> {
             ..Default::default()
         }),
         document_symbol_provider: Some(OneOf::Left(true)),
+        // RFC-0071 M4: the did-you-mean rename on an export a closed contract
+        // does not name (`laod` → `data`). The only code action the server
+        // offers, so the capability is advertised plainly rather than filtered
+        // by kind.
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         // Scope-aware highlight (RFC-0050 §1): the handler resolves the binding
         // under the cursor and returns its ACTUAL references (not a word-match),
         // so registering this overrides VS Code's dumb textual occurrence
@@ -422,7 +465,29 @@ fn handle_initialize(connection: &Connection) -> Result<(), ()> {
 }
 
 fn main_loop(connection: &Connection, server: &mut Server) {
-    while let Ok(msg) = connection.receiver.recv() {
+    // URIs whose analysis is owed. Held only while more messages are already
+    // waiting — the moment the queue is empty they are analyzed, so nothing is
+    // delayed on an idle connection and no timer is involved.
+    let mut owed: Vec<Url> = Vec::new();
+    loop {
+        let msg = if owed.is_empty() {
+            match connection.receiver.recv() {
+                Ok(m) => m,
+                Err(_) => return,
+            }
+        } else {
+            // Something is owed: take whatever is ALREADY queued first, so a
+            // burst collapses. When nothing is left, settle the debt.
+            match connection.receiver.try_recv() {
+                Ok(m) => m,
+                Err(_) => {
+                    for uri in std::mem::take(&mut owed) {
+                        refresh_document(connection, server, &uri);
+                    }
+                    continue;
+                }
+            }
+        };
         match msg {
             Message::Request(req) => {
                 // `handle_shutdown` replies to `shutdown` and returns true; it
@@ -430,6 +495,10 @@ fn main_loop(connection: &Connection, server: &mut Server) {
                 // and the io threads can drain.
                 if connection.handle_shutdown(&req).unwrap_or(false) {
                     return;
+                }
+                // A request reads the analysis, so settle anything owed first.
+                for uri in std::mem::take(&mut owed) {
+                    refresh_document(connection, server, &uri);
                 }
                 let m = req.method.clone();
                 let u = request_uri(&req).map(|u| u.to_string()).unwrap_or_default();
@@ -462,7 +531,16 @@ fn main_loop(connection: &Connection, server: &mut Server) {
                         ))
                         .unwrap_or_default()
                 ));
-                handle_notification(connection, server, notif);
+                match handle_notification(connection, server, notif) {
+                    // Newest wins: one entry per document, refreshed once.
+                    Owed::Analyze(uri) => {
+                        owed.retain(|u| u != &uri);
+                        owed.push(uri);
+                    }
+                    // A close cancels the analysis it would have raced.
+                    Owed::Forget(uri) => owed.retain(|u| u != &uri),
+                    Owed::Nothing => {}
+                }
             }
             Message::Response(_) => {} // we sent no requests; ignore responses
         }
@@ -505,6 +583,10 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
         }
         "textDocument/documentHighlight" => {
             Response::new_ok(req.id, handle_document_highlight(server, req.params))
+        }
+        // RFC-0071 M4: the contract's did-you-mean rename.
+        "textDocument/codeAction" => {
+            Response::new_ok(req.id, handle_code_action(server, req.params))
         }
         "textDocument/formatting" => Response::new_ok(req.id, handle_formatting(server, req.params)),
         "textDocument/semanticTokens/full" => {
@@ -552,15 +634,17 @@ fn handle_is_dev_entry(server: &Server, params: serde_json::Value) -> bool {
 }
 
 /// The dev-entry predicate (RFC-0064): the root module imports `std/rpc` **and**
-/// has an `rpcServer(…)` call site in it. That is precisely the set of server
-/// roots `vyrn dev` builds+serves — a client (`rpcClient`), an in-process module
-/// (`rpcInProcess`), a library, and a CLI example are all excluded.
+/// mounts a SERVER surface from it — `rpc("./server/api")` (RFC-0072 M3) or the
+/// single-module `rpcServer(…)`. That is precisely the set of server roots
+/// `vyrn dev` builds+serves — a client (`client` / `rpcClient`), an in-process
+/// module (`clientInProcess` / `rpcInProcess`), a library, and a CLI example are
+/// all excluded.
 ///
 /// Deviation from the RFC letter (documented in RFC-0064 "As landed"): the RFC
 /// wrote the predicate as "calls `serve(` from std/rpc", but `std/rpc` exposes no
-/// `serve` — a server root is composed by importing from the `rpcServer("…")`
-/// GENERATOR (`import { rpcHandle } from rpcServer("./contract")`). The generator
-/// import IS the "import present + call site" the RFC describes, so `rpcServer` is
+/// `serve` — a server root is composed by importing from the mounting GENERATOR
+/// (`import { rpcHandle } from rpc("./server/api")`). The generator import IS the
+/// "import present + call site" the RFC describes, so the mounting generator is
 /// the real spelling of `serve`.
 ///
 /// Cheap on purpose: a lex+parse of the ROOT source only (no linking, no
@@ -580,7 +664,7 @@ fn is_dev_entry(source: &str) -> bool {
     let calls_server = program
         .imports
         .iter()
-        .any(|i| matches!(&i.source, ImportSource::Generator { name, .. } if name == "rpcServer"));
+        .any(|i| matches!(&i.source, ImportSource::Generator { name, .. } if name == "rpc" || name == "rpcServer"));
     imports_rpc && calls_server
 }
 
@@ -593,21 +677,34 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
     // when nothing resolves (the cursor is on a class token inside a string, not an
     // identifier), fall back to `Tw` class hover — the CSS rule `css()` emits, or
     // "safelisted (app-styled)".
-    let value = if is_vyrn_uri(uri) {
-        let (analysis, _) = lookup(server, uri)?;
-        match resolve(analysis, line, col) {
-            Some(r) => r.hover,
+    // RFC-0071 M4: the contract note for a member declaration under the cursor.
+    // Computed first because in a `.vyx` there may be no ordinary hover to
+    // attach it to — a `<script>`'s own declarations are not template
+    // expressions, so the forward map has nothing for them.
+    let note = contract_hover_note(server, uri, line, col);
+    let ordinary = if is_vyrn_uri(uri) {
+        lookup(server, uri).and_then(|(analysis, _)| match resolve(analysis, line, col) {
+            Some(r) => Some(r.hover),
             None => server
                 .docs
                 .get(uri)
-                .and_then(|src| class_token_hover(analysis, src, line, col))?,
-        }
+                .and_then(|src| class_token_hover(analysis, src, line, col)),
+        })
     } else {
-        let fwd = vyx_forward(server, uri, line, col)?;
-        match resolve(&fwd.synth.analysis, fwd.line, fwd.col) {
-            Some(r) => r.hover,
-            None => class_token_hover(&fwd.synth.analysis, &fwd.synth.gen_source, fwd.line, fwd.col)?,
-        }
+        vyx_forward(server, uri, line, col).and_then(|fwd| {
+            match resolve(&fwd.synth.analysis, fwd.line, fwd.col) {
+                Some(r) => Some(r.hover),
+                None => {
+                    class_token_hover(&fwd.synth.analysis, &fwd.synth.gen_source, fwd.line, fwd.col)
+                }
+            }
+        })
+    };
+    let value = match (ordinary, note) {
+        (Some(o), Some(n)) => format!("{o}\n\n---\n\n{n}"),
+        (Some(o), None) => o,
+        (None, Some(n)) => n,
+        (None, None) => return None,
     };
     // RFC-0052: a safelisted class generates no `std/tw` rule, but the app itself
     // styles it — append the matching rule(s) from the app's own stylesheet(s).
@@ -636,6 +733,15 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
         if let Some(loc) = import_path_definition(server, uri, line, col) {
             return Some(loc);
         }
+    }
+    // RFC-0071 M4: on a contract member's name at module scope, jump to the
+    // MEMBER in the contract. This wins over the ordinary resolution because
+    // that one would be a self-jump — the cursor is on the declaration it
+    // resolves to — and the contract is the thing the reader actually wants to
+    // see. A use of the same name inside a body is not at module scope, so it
+    // keeps resolving to the page's own declaration.
+    if let Some(loc) = contract_member_definition(server, uri, line, col) {
+        return Some(loc);
     }
     let (r, home_uri) = if is_vyrn_uri(uri) {
         let (analysis, u) = lookup(server, uri)?;
@@ -934,7 +1040,7 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
             .collect();
         return Some(CompletionResponse::Array(items));
     }
-    let items = if is_member_context(raw, line, col) {
+    let mut items: Vec<CompletionItem> = if is_member_context(raw, line, col) {
         member_completions(analysis, line, col)
     } else {
         completions(analysis)
@@ -942,6 +1048,14 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
     .into_iter()
     .map(to_completion_item)
     .collect();
+    // RFC-0071 M4: at module scope in a page (or any file a role attaches a
+    // contract to), the contract's members come first — they are the thing you
+    // are there to write, and each inserts its full declaration.
+    if !is_member_context(raw, line, col) {
+        let mut members = contract_completion_items(server, uri, line, col);
+        members.append(&mut items);
+        items = members;
+    }
     // Always return a list (possibly empty) — the client filters by prefix.
     Some(CompletionResponse::Array(items))
 }
@@ -977,7 +1091,16 @@ fn vyx_completion(server: &Server, uri: &Url, line: usize, col: usize) -> Option
             Some(class_token_response(&raw, line, start_col, col, cls))
         }
         VyxCursor::Other => {
-            let fwd = vyx_forward(server, uri, line, col)?;
+            // RFC-0071 M4: the governing contract's members, computed BEFORE the
+            // forward map is consulted. At module scope in a `<script>` there is
+            // usually nothing generated to map to (a blank line between
+            // declarations has no origin), and that is precisely where `head`
+            // and `data` have to be offered — so the contract path must not
+            // depend on the map succeeding.
+            let mut members = contract_completion_items(server, uri, line, col);
+            let Some(fwd) = vyx_forward(server, uri, line, col) else {
+                return (!members.is_empty()).then_some(CompletionResponse::Array(members));
+            };
             let gen = &fwd.synth.gen_source;
             // A string literal in the generated code → finite keys or `Tw` classes.
             if is_string_literal_context(Some(gen), fwd.line, fwd.col) {
@@ -997,7 +1120,10 @@ fn vyx_completion(server: &Server, uri: &Url, line: usize, col: usize) -> Option
             } else {
                 completions(&fwd.synth.analysis)
             };
-            Some(CompletionResponse::Array(items.into_iter().map(to_completion_item).collect()))
+            let mut out: Vec<CompletionItem> =
+                items.into_iter().map(to_completion_item).collect();
+            members.append(&mut out);
+            Some(CompletionResponse::Array(members))
         }
     }
 }
@@ -1738,6 +1864,226 @@ fn lookup<'s>(server: &'s Server, uri: &Url) -> Option<(&'s Analysis, Url)> {
     Some((server.analyses.get(uri)?, uri.clone()))
 }
 
+// ---------------------------------------------------------------------------
+// RFC-0071 M4: contract members in the editor
+// ---------------------------------------------------------------------------
+
+/// A document seen through the contract that governs it.
+struct ContractCtx {
+    view: vyrn_frontend::contracts::ContractView,
+    /// The document's Vyrn source — the buffer itself for a `.vyrn`, the
+    /// `<script>` body for a `.vyx`.
+    source: String,
+    /// Lines to add to a `source` position to reach the buffer (0 for `.vyrn`).
+    line_offset: usize,
+}
+
+impl ContractCtx {
+    /// A buffer line → the corresponding line in [`Self::source`], or `None`
+    /// when the cursor is outside the script region of a `.vyx`.
+    fn to_source_line(&self, line: usize) -> Option<usize> {
+        let l = line.checked_sub(self.line_offset)?;
+        (l > 0 && l <= self.source.lines().count() + 1).then_some(l)
+    }
+}
+
+/// Resolve `uri` to the contract that governs it, if any.
+///
+/// The chain is entirely the frontend's: app root → roles (`vyrn.json`'s
+/// `roles` key, else discovery from the generator call sites) → the role whose
+/// scope covers this file → the contract that role names. A file in no role, or
+/// a role whose contract module cannot be read, simply has no contract, and
+/// every capability below falls back to what it did before this milestone.
+fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
+    let path = uri_path(uri)?;
+    let text = server
+        .docs
+        .get(uri)
+        .cloned()
+        .or_else(|| std::fs::read_to_string(&path).ok())?;
+    let (source, line_offset) = if is_vyrn_uri(uri) {
+        (text, 0)
+    } else {
+        // A generator input: only `.vyx` carries a Vyrn `<script>`, and a cursor
+        // outside it is not at module scope in any module.
+        contracts::vyx_script(&text)?
+    };
+
+    let dir = std::path::Path::new(&path).parent()?.to_path_buf();
+    let app_dir = app_root_for(&dir);
+    let overlays = overlays_of(server);
+    let (opts, resolver, _) = load_context(uri, &overlays)?;
+
+    let mut cache = server.contract_cache.borrow_mut();
+    let roots = contracts::role_roots(&app_dir);
+    let sig = contracts::roles_sig(&app_dir, &roots);
+    let entry = cache
+        .entry(app_dir.clone())
+        .or_insert_with(|| contracts::ContractIndex {
+            sig,
+            derived: false,
+            roles: Vec::new(),
+            views: HashMap::new(),
+        });
+    if entry.sig != sig || !entry.derived {
+        entry.sig = sig;
+        entry.derived = true;
+        entry.roles = contracts::roles_of(&app_dir, &roots, &opts, &resolver);
+        entry.views.clear();
+    }
+    let role = vyrn_frontend::contracts::role_for(&path, &entry.roles)?.clone();
+    let key = format!("{}:{}", role.module, role.contract);
+    // A cached view is trusted only while its own declaring file is unchanged.
+    if let Some((was, view)) = entry.views.get(&key) {
+        if *was == contracts::file_sig(std::path::Path::new(&view.file)) {
+            return Some(ContractCtx {
+                view: view.clone(),
+                source,
+                line_offset,
+            });
+        }
+    }
+    // A manifest role's relative specifier is relative to the MANIFEST, so the
+    // importer is the manifest — not the page, which may live several
+    // directories down.
+    let manifest = app_dir.join("vyrn.json").to_string_lossy().replace('\\', "/");
+    let view = vyrn_frontend::contracts::load_role_contract(&role, &manifest, &opts, &resolver)?;
+    let file_sig = contracts::file_sig(std::path::Path::new(&view.file));
+    entry.views.insert(key, (file_sig, view.clone()));
+    Some(ContractCtx {
+        view,
+        source,
+        line_offset,
+    })
+}
+
+/// RFC-0071 M4 completion: the governing contract's members, offered at module
+/// scope as full declarations.
+///
+/// The two gates are what keep this from misfiring. **Module scope** — a
+/// contract member is a declaration, so it is offered where a declaration can
+/// go and nowhere else (never inside a function body, never inside a record
+/// type). **Role** — a `layout.vyx` beside a page is chrome with no contract, so
+/// it is not in the role and gets nothing.
+fn contract_completion_items(server: &Server, uri: &Url, line: usize, col: usize) -> Vec<CompletionItem> {
+    let Some(ctx) = contract_ctx(server, uri) else {
+        return Vec::new();
+    };
+    let Some(src_line) = ctx.to_source_line(line) else {
+        return Vec::new();
+    };
+    if !vyrn_frontend::at_module_scope(&ctx.source, src_line, col) {
+        return Vec::new();
+    }
+    let already = contracts::exported_names(&ctx.source);
+    vyrn_frontend::contracts::contract_completions(&ctx.view, &already)
+        .into_iter()
+        .map(|c| CompletionItem {
+            label: c.label,
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some(c.detail),
+            documentation: c.doc.map(|d| {
+                Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: d })
+            }),
+            insert_text: Some(c.snippet),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            // Contract members sort ABOVE the document's own symbols: at module
+            // scope in a page they are the thing you are there to write.
+            sort_text: Some(format!("0{}", c.sort)),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// RFC-0071 M4 hover / go-to-definition: the contract member named at the
+/// cursor, when the cursor is at module scope in a governed file.
+///
+/// Module scope is the discriminator that keeps a local variable called `data`
+/// inside a function body from claiming to be a contract member.
+fn contract_member_at(server: &Server, uri: &Url, line: usize, col: usize) -> Option<(ContractCtx, String)> {
+    let ctx = contract_ctx(server, uri)?;
+    let src_line = ctx.to_source_line(line)?;
+    if !vyrn_frontend::at_module_scope(&ctx.source, src_line, col) {
+        return None;
+    }
+    let text = server.docs.get(uri)?;
+    let (name, _, _) = contracts::ident_at(text, line, col)?;
+    ctx.view.member(&name)?;
+    Some((ctx, name))
+}
+
+/// The `member of contract …` block appended to a member's hover.
+fn contract_hover_note(server: &Server, uri: &Url, line: usize, col: usize) -> Option<String> {
+    let (ctx, name) = contract_member_at(server, uri, line, col)?;
+    vyrn_frontend::contracts::contract_member_hover(&ctx.view, &name)
+}
+
+/// Go-to-definition on a contract member name → the member's declaration inside
+/// the contract.
+fn contract_member_definition(
+    server: &Server,
+    uri: &Url,
+    line: usize,
+    col: usize,
+) -> Option<GotoDefinitionResponse> {
+    let (ctx, name) = contract_member_at(server, uri, line, col)?;
+    let m = ctx.view.member(&name)?;
+    let target = Url::from_file_path(ctx.view.file.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?;
+    Some(GotoDefinitionResponse::Scalar(Location {
+        uri: target,
+        range: lsp_range(m.line, m.col, m.end_col),
+    }))
+}
+
+/// `textDocument/codeAction` — the did-you-mean rename RFC-0071 asks for.
+///
+/// The offer is computed from the CONTRACT (an export the closed contract does
+/// not name, within the same Damerau-Levenshtein threshold `std/contract` uses),
+/// not by re-parsing a diagnostic message: a generator's diagnostic text is its
+/// own business, and reading it here would make the server know a generator.
+/// The diagnostics the client sent are attached by RANGE overlap, so the
+/// lightbulb still appears on the squiggle.
+fn handle_code_action(server: &Server, params: serde_json::Value) -> Option<Vec<CodeActionOrCommand>> {
+    let p: CodeActionParams = serde_json::from_value(params).ok()?;
+    let uri = &p.text_document.uri;
+    let ctx = contract_ctx(server, uri)?;
+    let mut out = Vec::new();
+    for fix in vyrn_frontend::contracts::contract_fixes(&ctx.view, &ctx.source) {
+        let range = lsp_range(fix.line + ctx.line_offset, fix.col, fix.end_col);
+        if !ranges_overlap(&range, &p.range) {
+            continue;
+        }
+        let diagnostics: Vec<LspDiagnostic> = p
+            .context
+            .diagnostics
+            .iter()
+            .filter(|d| ranges_overlap(&d.range, &range) || d.message.contains(&fix.from))
+            .cloned()
+            .collect();
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(
+            uri.clone(),
+            vec![TextEdit { range, new_text: fix.to.clone() }],
+        );
+        out.push(CodeActionOrCommand::CodeAction(CodeAction {
+            title: format!("Rename `{}` to `{}` ({})", fix.from, fix.to, ctx.view.site()),
+            kind: Some(CodeActionKind::QUICKFIX),
+            diagnostics: (!diagnostics.is_empty()).then_some(diagnostics),
+            edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+            is_preferred: Some(true),
+            ..Default::default()
+        }));
+    }
+    Some(out)
+}
+
+/// Whether two LSP ranges share at least a position (a zero-width cursor at the
+/// start or end of a range counts as touching it).
+fn ranges_overlap(a: &Range, b: &Range) -> bool {
+    let key = |p: &Position| (p.line, p.character);
+    key(&a.start) <= key(&b.end) && key(&b.start) <= key(&a.end)
+}
+
 /// LSP 0-based position → frontend 1-based (line, col).
 fn to_frontend(pos: &Position) -> (usize, usize) {
     ((pos.line + 1) as usize, (pos.character + 1) as usize)
@@ -1846,7 +2192,7 @@ fn install_root(
         server.vyx_owner.insert(f, root_uri.clone());
     }
     if let Some(c) = connection {
-        publish_remapped(c, &analysis);
+        publish_remapped(c, server, &analysis);
     }
     // A re-analysis of this owner invalidates any cached generation for it.
     server.synth_cache.borrow_mut().remove(root_uri);
@@ -2098,7 +2444,7 @@ fn path_distance(cand: &std::path::Path, vyx_dir: &std::path::Path) -> usize {
 /// Publish origin-remapped diagnostics (RFC-0033) grouped by input file, so a
 /// template error appears inside its `.vyx` buffer. Every referenced input is
 /// republished (empty when clean) so a fixed error clears.
-fn publish_remapped(connection: &Connection, analysis: &Analysis) {
+fn publish_remapped(connection: &Connection, server: &Server, analysis: &Analysis) {
     let mut by_file: HashMap<String, Vec<vyrn_frontend::diagnostics::Diagnostic>> = HashMap::new();
     for f in analysis.origins.input_files() {
         by_file.entry(f).or_default();
@@ -2111,7 +2457,15 @@ fn publish_remapped(connection: &Connection, analysis: &Analysis) {
     for (file, diags) in by_file {
         // `file` is an absolute slash path; rebuild a native path for the URI.
         if let Ok(uri) = Url::from_file_path(file.replace('/', std::path::MAIN_SEPARATOR_STR)) {
-            let src = std::fs::read_to_string(&file).unwrap_or_default();
+            // Prefer the open buffer. Reading from disk on every didChange both
+            // costs a syscall per generator input and reports against text the
+            // user has already edited away — the diagnostic ranges would be
+            // computed from a stale file.
+            let src = server
+                .docs
+                .get(&uri)
+                .cloned()
+                .unwrap_or_else(|| std::fs::read_to_string(&file).unwrap_or_default());
             publish(connection, &uri, &src, &diags);
         }
     }
@@ -2135,7 +2489,18 @@ fn refresh_document(connection: &Connection, server: &mut Server, uri: &Url) {
     }
 }
 
-fn handle_notification(connection: &Connection, server: &mut Server, notif: Notification) {
+/// Apply a notification's effect on server state and return the URI that now
+/// OWES an analysis, if any. The analysis itself is the caller's business —
+/// `main_loop` defers it until the message queue is drained, so a burst of
+/// keystrokes costs one analysis of the newest text rather than one per
+/// character. That matters most where analysis is slowest: editing a `.vyx`
+/// re-runs its owner's generators, which is seconds, and five queued keystrokes
+/// used to mean five of them back to back.
+fn handle_notification(
+    connection: &Connection,
+    server: &mut Server,
+    notif: Notification,
+) -> Owed {
     // Dispatch on the notification method. `lsp-types` gives typed params per
     // known method; unknown notifications are ignored.
     if DidOpenTextDocument::METHOD == notif.method {
@@ -2148,7 +2513,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             if let Some(p) = uri_path(&uri) {
                 server.vyx_ownerless.remove(&p);
             }
-            refresh_document(connection, server, &uri);
+            return Owed::Analyze(uri);
         }
     } else if DidChangeTextDocument::METHOD == notif.method {
         if let Ok(params) = serde_json::from_value::<DidChangeTextDocumentParams>(notif.params) {
@@ -2156,7 +2521,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             // Full sync: the last change carries the entire document text.
             if let Some(change) = params.content_changes.into_iter().last() {
                 server.docs.insert(uri.clone(), change.text.clone());
-                refresh_document(connection, server, &uri);
+                return Owed::Analyze(uri);
             }
         }
     } else if DidCloseTextDocument::METHOD == notif.method {
@@ -2164,6 +2529,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             // Drop the document and clear its diagnostics.
             server.docs.remove(&params.text_document.uri);
             server.analyses.remove(&params.text_document.uri);
+            let closed = params.text_document.uri.clone();
             let _ = connection.sender.send(Message::Notification(Notification::new(
                 PublishDiagnostics::METHOD.to_string(),
                 PublishDiagnosticsParams {
@@ -2172,9 +2538,21 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
                     version: None,
                 },
             )));
+            return Owed::Forget(closed);
         }
     }
     // Other notifications (didSave, etc.) are ignored.
+    Owed::Nothing
+}
+
+/// What a notification leaves outstanding. A close must be able to CANCEL a
+/// pending analysis: `reanalyze_root` falls back to reading the file from disk
+/// when a document is not open, so an analysis still owed when the client closes
+/// the document would re-publish diagnostics the close just cleared.
+enum Owed {
+    Analyze(Url),
+    Forget(Url),
+    Nothing,
 }
 
 /// Push the frontend's diagnostics for `uri` to the client.

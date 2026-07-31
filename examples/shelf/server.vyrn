@@ -1,17 +1,22 @@
 /// The shelf server root: the RPC and Connect handlers, the OpenAPI and GraphQL
-/// documents, the page router, and the theme stylesheet, all built from one
-/// contract. Page loaders read the store directly, so the home page
-/// server-renders the live list.
-import { rpcServer } from "std/rpc"
-import { rpcHandle } from rpcServer("./contract")
+/// documents, the page router, and the theme stylesheet, all built from the api
+/// directory. It is the one module that legitimately names both sides, which is
+/// why the manifest key that NAMES it is what gives it its audience (RFC-0072 M1).
+///
+/// The pages live under `server/` because every one of them is server-rendered:
+/// shelf's browser bundle is an island (the widgets), not a page bundle, so a
+/// `.vyrn` page here never reaches a browser and may read the store through the
+/// api module beside it.
+import { rpc } from "std/rpc"
+import { rpcHandle } from rpc("./server/api")
 import { connectServer } from "std/connect"
-import { connectHandle } from connectServer("./contract")
+import { connectHandle } from connectServer("./server/api/books")
 import { openapi } from "std/openapi"
-import { openapiJson } from openapi("./contract")
+import { openapiJson } from openapi("./server/api/books")
 import { sdl } from "std/graphql"
-import { sdlText } from sdl("./contract")
+import { sdlText } from sdl("./server/api/books")
 import { pages } from "std/ui"
-import { route } from pages("./routes")
+import { route } from pages("./server/routes")
 import { tw } from "std/tw"
 import * as theme from tw("./theme.json")
 
@@ -27,7 +32,7 @@ let mut middleware: Array<Middleware> = [
         return None
     },
         |req| if req.path =~ "/admin.*" {
-        Some(Response { status: 403, contentType: "text/plain", body: "forbidden" })
+        Some(Response { status: 403, contentType: "text/plain", body: "forbidden", vary: "" })
     } else {
         None
     },
@@ -52,16 +57,17 @@ fn handle(req: Request) -> Response {
 fn routed(req: Request) -> Response {
     // Baked constants served with their conventional content types.
     if req.method == "GET" && req.path == "/theme.css" {
-        return Response { status: 200, contentType: "text/css", body: theme.css() }
+        return Response { status: 200, contentType: "text/css", body: theme.css(), vary: "" }
     }
     if req.method == "GET" && req.path == "/openapi.json" {
-        return Response { status: 200, contentType: "application/json", body: openapiJson() }
+        return Response { status: 200, contentType: "application/json", body: openapiJson(), vary: "" }
     }
     if req.method == "GET" && req.path == "/schema.graphql" {
-        return Response { status: 200, contentType: "application/graphql", body: sdlText() }
+        return Response { status: 200, contentType: "application/graphql", body: sdlText(), vary: "" }
     }
-    // rpcHandle (/rpc/*) and connectHandle (the Connect /<service>.<Proc> surface)
-    // mount side by side — one contract, two protocols; anything else routes.
+    // rpcHandle (the derived /_/* surface) and connectHandle (the Connect
+    // /<service>.<Proc> surface) mount side by side — one api directory, two
+    // protocols; anything else routes.
     return match rpcHandle(req) {
         Some(r) => r,
         None => match connectHandle(req) {
@@ -74,24 +80,24 @@ fn routed(req: Request) -> Response {
 fn main() -> Int64 {
     // A smoke over handle. Mutating calls persist for the process, so run order
     // matters.
-    let list = handle(Request { method: "POST", path: "/rpc/listBooks", body: "" })
-    print("listBooks -> \{list.status}")
-    let tags = handle(Request { method: "POST", path: "/rpc/tagCounts", body: "" })
-    print("tagCounts -> \{tags.status}: \{tags.body}")
-    let bad = handle(Request { method: "POST", path: "/rpc/addBook", body: "{\"title\":\"\",\"url\":\"not-a-url\",\"tags\":[]}" })
-    print("addBook(bad) -> \{bad.status}: \{bad.body}")
-    let home = handle(Request { method: "GET", path: "/", body: "" })
+    let list = handle(Request { method: "POST", path: "/_/books/browse", headers: [:], body: "" })
+    print("books/browse -> \{list.status}")
+    let tags = handle(Request { method: "POST", path: "/_/books/tags", headers: [:], body: "" })
+    print("books/tags -> \{tags.status}: \{tags.body}")
+    let bad = handle(Request { method: "POST", path: "/_/books/add", headers: [:], body: "{\"title\":\"\",\"url\":\"not-a-url\",\"tags\":[]}" })
+    print("books/add(bad) -> \{bad.status}: \{bad.body}")
+    let home = handle(Request { method: "GET", path: "/", headers: [:], body: "" })
     print("/ -> \{home.status}")
     // The guard answers /admin before any route runs.
-    let blocked = handle(Request { method: "GET", path: "/admin/secrets", body: "" })
+    let blocked = handle(Request { method: "GET", path: "/admin/secrets", headers: [:], body: "" })
     print("/admin/secrets -> \{blocked.status}: \{blocked.body}")
-    let conn = handle(Request { method: "POST", path: "/contract.listBooks", body: "{}" })
-    print("connect listBooks -> \{conn.status}")
-    let badConn = handle(Request { method: "POST", path: "/contract.addBook", body: "{\"title\":\"\",\"url\":\"nope\",\"tags\":[]}" })
-    print("connect addBook(bad) -> \{badConn.status}: \{badConn.body}")
-    let oa = handle(Request { method: "GET", path: "/openapi.json", body: "" })
+    let conn = handle(Request { method: "POST", path: "/books.browse", headers: [:], body: "{}" })
+    print("connect books/browse -> \{conn.status}")
+    let badConn = handle(Request { method: "POST", path: "/books.add", headers: [:], body: "{\"title\":\"\",\"url\":\"nope\",\"tags\":[]}" })
+    print("connect books/add(bad) -> \{badConn.status}: \{badConn.body}")
+    let oa = handle(Request { method: "GET", path: "/openapi.json", headers: [:], body: "" })
     print("/openapi.json -> \{oa.status} (\{oa.body.byteLength} bytes)")
-    let gql = handle(Request { method: "GET", path: "/schema.graphql", body: "" })
+    let gql = handle(Request { method: "GET", path: "/schema.graphql", headers: [:], body: "" })
     print("/schema.graphql -> \{gql.status} (\{gql.body.byteLength} bytes)")
     return 0
 }

@@ -11,14 +11,18 @@
 //! skeleton they will hang from.
 
 pub mod ast;
+pub mod audience;
 pub mod checker;
 pub mod codec;
+pub mod contracts;
 pub mod consteval;
 pub mod diagnostics;
 pub mod finite;
 pub mod fmt;
 pub mod hash;
 pub mod interp;
+pub mod jsondec;
+pub mod jsonenc;
 pub mod lexer;
 pub mod loader;
 pub mod movecheck;
@@ -36,10 +40,19 @@ pub mod types;
 // directly. `diagnostics` (below) delegates to `symbols::analyze`, so the whole
 // pipeline lives in one place.
 pub use symbols::{
-    analyze, analyze_linked, class_completions, class_token_hover, classify_at, completions,
-    import_spec_at, member_completions, module_doc, references, resolve, semantic_tokens,
+    analyze, analyze_linked, at_module_scope, class_completions, class_token_hover, classify_at,
+    completions, import_spec_at, member_completions, module_doc, references, resolve, semantic_tokens,
     string_literal_completions, Analysis, Completion, DocExport, LocalBinding, LocalKind, ModuleDoc,
     RefRange, Resolution, SemKind, SemMods, SemToken, Symbol, SymbolKind, TokenInfo,
+};
+
+// RFC-0071 M4: role → contract resolution and the editor queries over a
+// resolved contract. Spelled `vyrn_frontend::contracts::` by the LSP and the
+// CLI, so the contract knowledge stays in ONE place and both are adapters.
+pub use contracts::{
+    contract_completions, contract_fixes, contract_member_hover, contract_status, discovered_roles,
+    load_contract, load_role_contract, role_for, roles_from_manifest, ContractCompletion, ContractFix,
+    ContractMemberView, ContractShape, ContractView, MemberStatus, Role, RoleScope, StatusEntry,
 };
 
 // The canonical formatter (RFC-0017). `fmt` the module and `fmt` the function
@@ -107,15 +120,75 @@ pub fn load(
     opts: &loader::LoadOptions,
     resolver: &dyn loader::ModuleResolver,
 ) -> Result<ast::Program, Vec<diagnostics::Diagnostic>> {
-    let (loaded, origins) = loader::load_with_origins(root_source, root_path, opts, resolver);
-    // RFC-0053: load/lex/parse diagnostics are already remapped by the loader.
-    let program = loaded?;
-    let mut diags = checker::check_accum(&program);
+    load_warned(root_source, root_path, opts, resolver).0
+}
+
+/// Like [`load`], but also returns the load's WARNINGS (RFC-0071 M2b) —
+/// diagnostics about a program that compiled.
+///
+/// This is the shape every tool wants: a warning is advice, so it accompanies
+/// the program rather than replacing it, and printing it must never change an
+/// exit code or a byte of the program's own output. `load` stays as the
+/// warning-oblivious entry point for callers that only care whether it built.
+/// Type-check `program`, synthesize what its builtins need into it, then
+/// move-check the result. Returns every diagnostic found.
+///
+/// The one place a LINKED program becomes a runnable one, and it has to be a
+/// single function because there are two callers: an ordinary load, and a
+/// generator re-loaded as its own root (RFC-0021), which RFC-0076 then compiles to
+/// wasm. A generator that missed the synthesis compiled to a module calling a
+/// function that was never emitted — found by `genwasm`, exactly the tier meant to
+/// find it.
+///
+/// The synthesis sits HERE and nowhere else because this is the only point with
+/// both halves of what it needs: the checker has just supplied the static type of
+/// every `toJson` argument (RFC-0078 M2b), and no engine has yet built its function
+/// table — all three build one, once, from a `&Program`. Afterwards the encoders
+/// are ordinary Vyrn: move-checked below with everything else, and lowered by every
+/// backend as source it cannot tell apart from the user's.
+pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
+    let (mut diags, json_types, json_dec_types) =
+        checker::check_accum_with_json_types(program);
     if diags.is_empty() {
-        diags.extend(movecheck::check_accum(&program));
+        let types = types::decl_map(program);
+        match jsonenc::encoders(&json_types, &types) {
+            Ok(fns) => program.functions.extend(fns),
+            Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
+        }
+        match jsondec::decoders(&json_dec_types, &types) {
+            Ok((fns, aliases)) => {
+                program.functions.extend(fns);
+                program.type_decls.extend(aliases);
+            }
+            Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
+        }
     }
     if diags.is_empty() {
-        Ok(program)
+        diags.extend(movecheck::check_accum(program));
+    }
+    diags
+}
+
+pub fn load_warned(
+    root_source: &str,
+    root_path: &str,
+    opts: &loader::LoadOptions,
+    resolver: &dyn loader::ModuleResolver,
+) -> (
+    Result<ast::Program, Vec<diagnostics::Diagnostic>>,
+    loader::Warnings,
+) {
+    let (loaded, origins, warnings, _graph) =
+        loader::load_with_origins(root_source, root_path, opts, resolver);
+    // RFC-0053: load/lex/parse diagnostics are already remapped by the loader.
+    let program = match loaded {
+        Ok(p) => p,
+        Err(diags) => return (Err(diags), warnings),
+    };
+    let mut program = program;
+    let mut diags = check_and_synthesize(&mut program);
+    if diags.is_empty() {
+        (Ok(program), warnings)
     } else {
         // RFC-0033: a diagnostic in a synthesized generator module at an origin-
         // governed line is reported against its input file (`.vyx`, …) with the
@@ -126,6 +199,8 @@ pub fn load(
                 origins.remap(d);
             }
         }
-        Err(diags)
+        // A program that failed to compile gets errors, not advice: dropping the
+        // warnings here keeps the failure output about the failure.
+        (Err(diags), Vec::new())
     }
 }

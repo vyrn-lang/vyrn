@@ -86,6 +86,10 @@ pub enum Tok {
     OrOr,       // ||
     Bang,       // !
     Question,   // ?
+    /// `??` (RFC-0079). Maximal munch, so the pre-0079 spelling `x??` — two
+    /// postfix `?` on a `Result<Option<T>, E>` — must now be written `(x?)?`.
+    /// There were zero occurrences across `std/`, `examples/` and `compiler/`.
+    QuestionQuestion, // ??
     Pipe,       // |
     Amp,        // &
     Caret,      // ^  (bitwise xor, RFC-0045)
@@ -178,6 +182,7 @@ pub fn token_name_and_text(tok: &Tok) -> (String, String) {
         Tok::OrOr => p("||"),
         Tok::Bang => p("!"),
         Tok::Question => p("?"),
+        Tok::QuestionQuestion => p("??"),
         Tok::Pipe => p("|"),
         Tok::Amp => p("&"),
         Tok::Caret => p("^"),
@@ -270,6 +275,7 @@ fn two_char_op(a: char, b: char) -> Option<Tok> {
         ('>', '=') => Some(Tok::GtEq),
         ('&', '&') => Some(Tok::AndAnd),
         ('|', '|') => Some(Tok::OrOr),
+        ('?', '?') => Some(Tok::QuestionQuestion),
         ('<', '<') => Some(Tok::Shl),
         ('>', '>') => Some(Tok::Shr),
         _ => None,
@@ -391,6 +397,20 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
                     ));
                 }
                 let ch = chars[i];
+                // The two lexers must agree on what is a legal token — fmt may not
+                // format a file `lex` refuses. This scan does not decode escapes, so
+                // it sees only the raw byte; `\u{0}` is caught in `lex`, and a file
+                // carrying one never reaches a formatter that would keep it.
+                if ch == '\0' {
+                    return Err(Diagnostic::error(
+                        line,
+                        0,
+                        "lex",
+                        "string literal contains a NUL byte; a Vyrn String is NUL-terminated \
+                         and cannot hold one"
+                            .into(),
+                    ));
+                }
                 if ch == '"' {
                     if triple {
                         if i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"' {
@@ -781,6 +801,25 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
             // differs (`"""` instead of `"`).
             let triple = i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"';
             i += if triple { 3 } else { 1 }; // opening quote(s)
+            // A Vyrn `String` is NUL-terminated in the native representation, so a
+            // String holding a NUL is not an awkward value — it is an
+            // unrepresentable one, truncated the moment it crosses to C. RFC-0014
+            // already refuses to MAKE one at runtime (`stringFromBytes` returns
+            // `bytes contain a NUL byte`), but the lexer used to hand one out for
+            // free: RFC-0078 M4b(3) found a raw NUL byte in a string literal
+            // accepted, which is why `bytes`/`stringFromBytes` was not a round
+            // trip. Rejecting it here closes the class at its only two entrances —
+            // a raw NUL byte in the source, and `\u{0}` (there is no `\0` escape).
+            let nul = |line: usize| {
+                Diagnostic::error(
+                    line,
+                    start_col,
+                    "lex",
+                    "string literal contains a NUL byte; a Vyrn String is NUL-terminated and \
+                     cannot hold one"
+                        .to_string(),
+                )
+            };
             let mut parts: Vec<String> = Vec::new();
             let mut exprs: Vec<String> = Vec::new();
             let mut cur = String::new();
@@ -794,6 +833,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                     ));
                 }
                 let ch = chars[i];
+                if ch == '\0' {
+                    return Err(nul(line));
+                }
                 if ch == '"' {
                     if triple {
                         // Only a run of three closes a triple-quoted string; a lone
@@ -931,6 +973,12 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                     // `\u{XXXX}` — a Unicode scalar by hex code point.
                     if chars[i + 1] == 'u' {
                         let (ch, next) = parse_unicode_escape(&chars, i, line, start_col)?;
+                        // `\u{0}` is the same unrepresentable value spelled the long
+                        // way round. M4b(3) checked there is no `\0` escape and
+                        // concluded the raw byte was the only door; it is not.
+                        if ch == '\0' {
+                            return Err(nul(line));
+                        }
                         cur.push(ch);
                         i = next;
                         continue;
@@ -1091,6 +1139,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
                 ('>', '=') => Some(Tok::GtEq),
                 ('&', '&') => Some(Tok::AndAnd),
                 ('|', '|') => Some(Tok::OrOr),
+                ('?', '?') => Some(Tok::QuestionQuestion),
                 ('<', '<') => Some(Tok::Shl),
                 ('>', '>') => Some(Tok::Shr),
                 _ => None,
@@ -1334,5 +1383,35 @@ mod tests {
             &lex("\"x's \\{y}\"").unwrap()[0].tok,
             Tok::TemplateStr { parts, .. } if parts[0] == "x's "
         ));
+    }
+
+    #[test]
+    fn a_nul_byte_in_a_string_literal_is_rejected() {
+        const MSG: &str = "string literal contains a NUL byte; a Vyrn String is NUL-terminated \
+                           and cannot hold one";
+        // A raw NUL byte in the source — the door RFC-0078 M4b(3) found open, and
+        // the reason `bytes`/`stringFromBytes` was not a round trip.
+        for src in [
+            "\"a\0b\"",                 // plain string
+            "\"\"\"a\0b\"\"\"",         // triple-quoted (RFC-0054)
+            "\"a\0b \\{x}\"",           // template literal part
+            "vyrn\"\"\"let s = \0\"\"\"", // inside a code quote
+        ] {
+            let e = lex(src).unwrap_err();
+            assert_eq!(e.message, MSG, "{src:?}");
+        }
+        // `\u{0}` is the same value spelled the long way; there is no `\0` escape.
+        assert_eq!(lex("\"a\\u{0}b\"").unwrap_err().message, MSG);
+        assert_eq!(lex("\"\\u{00}\"").unwrap_err().message, MSG);
+        // The formatter's lexer refuses it too — fmt may not format a file `lex`
+        // rejects.
+        assert_eq!(lex_with_trivia("\"a\0b\"").unwrap_err().message, MSG);
+        // Every other control character and escape is still fine: this closes one
+        // unrepresentable value, not the low range.
+        assert_eq!(lex("\"a\\u{1}b\"").unwrap()[0].tok, Tok::Str("a\u{1}b".into()));
+        assert_eq!(lex("\"a\\nb\"").unwrap()[0].tok, Tok::Str("a\nb".into()));
+        // A NUL *byte literal* is untouched — a byte is not a String, and
+        // `decodeUtf8(['h', '\x00', 'i'])` in `std/text` depends on it.
+        assert!(lex("'\\x00'").is_ok());
     }
 }

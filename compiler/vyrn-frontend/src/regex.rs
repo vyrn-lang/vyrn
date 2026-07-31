@@ -457,6 +457,7 @@ impl Nfa {
 /// A compiled, deterministic matcher. `table[state * 256 + byte]` is the next
 /// state (the table is complete — a dead state absorbs non-matches), and
 /// `accepting[state]` marks a full-match state.
+#[derive(Clone)]
 pub struct Dfa {
     pub start: u32,
     pub accepting: Vec<bool>,
@@ -1015,7 +1016,31 @@ impl Dfa {
 
 /// Compile a pattern to a DFA, or return a human-readable error for unsupported
 /// or malformed syntax.
+///
+/// Memoized on the pattern. A DFA is a pure function of its pattern string, but
+/// the checker asks for the same one at every value boundary — a themed app
+/// rebuilt one 1,225-state table ~65 times per keystroke, which measured as 96%
+/// of the checker. Cloning the table is a ~1 MB memcpy against a ~25 ms rebuild.
+/// Errors are cached too: they are just as deterministic.
 pub fn compile(pattern: &str) -> Result<Dfa, String> {
+    // ponytail: unbounded, but keyed by patterns that appear in the source being
+    // compiled — bounded by the program. Add an LRU if a long-lived process ever
+    // compiles unbounded distinct patterns.
+    thread_local! {
+        static MEMO: std::cell::RefCell<std::collections::HashMap<String, Result<Dfa, String>>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    MEMO.with(|m| {
+        if let Some(hit) = m.borrow().get(pattern) {
+            return hit.clone();
+        }
+        let out = compile_uncached(pattern);
+        m.borrow_mut().insert(pattern.to_string(), out.clone());
+        out
+    })
+}
+
+fn compile_uncached(pattern: &str) -> Result<Dfa, String> {
     let re = ReParser::parse(pattern)?;
     let nfa = Nfa::build(&re);
 

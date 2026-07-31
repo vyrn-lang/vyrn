@@ -1,46 +1,47 @@
-/// Split-contract typed RPC (RFC-0031), in-process flavor — a three-way parity
-/// citizen (interp == native == wasm). Where `examples/rpc.vyrn` reflects a
-/// SELF-CONTAINED contract, this one reflects a contract whose wire types live in
-/// a separate `wire` leaf and whose state lives in a `store` module. It proves
-/// `rpcInProcess` handles the reachable type closure: the generated dispatch
-/// module imports `GetReq`/`ItemResult` from `./rpcsplit/wire` (their declaring
-/// module), not from the contract that merely re-imports them.
+/// Split-module typed RPC (RFC-0031), in-process flavor — a three-way parity
+/// citizen (interp == native == wasm). Where `examples/rpc.vyrn` reflects an api
+/// directory whose procedures name types declared beside them, this one reflects
+/// one whose wire types live in a `shared` leaf and whose state lives in a
+/// `server/store` module. It proves the directory generators handle the reachable
+/// type closure: the generated dispatch module imports `GetReq`/`ItemResult` from
+/// `./rpcsplit/shared/wire` (their declaring module), not from the procedure
+/// module that merely names them.
 ///
 /// Inspect the synthesized dispatch module with:  vyrn emit-gen examples/rpcsplit.vyrn
-import { rpcInProcess } from "std/rpc"
-import { getItem, RpcReply } from rpcInProcess("./rpcsplit/contract")
-import { Id, Item, GetReq, ItemResult } from "./rpcsplit/wire"
+import { clientInProcess } from "std/rpc"
+import { itemsById, RpcReply } from clientInProcess("./rpcsplit/server/api")
+import { Id, Item, GetReq, ItemResult } from "./rpcsplit/shared/wire"
 
 // Module state: the last dispatch result, filled by the callback below.
 let mut line: String = "(none)"
 
-/// The completion callback for `getItem` — in-process, always `Done` (validated
+/// The completion callback for `itemsById` — in-process, always `Done` (validated
 /// types cannot be constructed invalid without the wire's `fromJson`).
 fn onGetItem(res: RpcReply<ItemResult>) {
     line = match res {
         Done(r) => match r {
-            Ok(it) => "getItem -> \{it.label}",
-            Err(why) => "getItem -> \{why}",
+            Ok(it) => "itemsById -> \{it.label}",
+            Err(why) => "itemsById -> \{why}",
         },
-        Rejected(issues) => "getItem failed",
-        Failed(why) => "getItem failed",
+        Rejected(issues) => "itemsById failed",
+        Failed(why) => "itemsById failed",
     }
 }
 
 fn main() -> Int64 {
-    getItem(GetReq { id: 1 }, onGetItem)
+    itemsById(GetReq { id: 1 }, onGetItem)
     print(line)
-    getItem(GetReq { id: 9 }, onGetItem)
+    itemsById(GetReq { id: 9 }, onGetItem)
     print(line)
     return 0
 }
 
-test "in-process getItem runs the real store procedure through the thin contract" {
-    getItem(GetReq { id: 2 }, onGetItem)
-    assertEq(line, "getItem -> beta")
+test "in-process itemsById runs the real store procedure with no forwarding layer" {
+    itemsById(GetReq { id: 2 }, onGetItem)
+    assertEq(line, "itemsById -> beta")
 }
 
-test "in-process getItem carries the store's Err outcome for a missing id" {
-    getItem(GetReq { id: 9 }, onGetItem)
-    assertEq(line, "getItem -> no item 9")
+test "in-process itemsById carries the store's Err outcome for a missing id" {
+    itemsById(GetReq { id: 9 }, onGetItem)
+    assertEq(line, "itemsById -> no item 9")
 }

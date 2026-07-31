@@ -19,7 +19,7 @@ import { route, hrefUsers, hrefItems, rootPath, itemsPath } from pages("./pages"
 
 /// Drive one request through the router and print its status.
 fn show(method: String, path: String) {
-    let r = route(Request { method: method, path: path, body: "" })
+    let r = route(Request { method: method, path: path, headers: [:], body: "" })
     print("\{method} \{path} -> \{r.status}")
 }
 
@@ -44,30 +44,30 @@ fn main() -> Int64 {
 }
 
 test "route matches static and dynamic paths" {
-    assertEq(route(Request { method: "GET", path: "/", body: "" }).status, 200)
-    assertEq(route(Request { method: "GET", path: "/items", body: "" }).status, 200)
-    assertEq(route(Request { method: "GET", path: "/items/42", body: "" }).status, 200)
-    assertEq(route(Request { method: "GET", path: "/users/7", body: "" }).status, 200)
+    assertEq(route(Request { method: "GET", path: "/", headers: [:], body: "" }).status, 200)
+    assertEq(route(Request { method: "GET", path: "/items", headers: [:], body: "" }).status, 200)
+    assertEq(route(Request { method: "GET", path: "/items/42", headers: [:], body: "" }).status, 200)
+    assertEq(route(Request { method: "GET", path: "/users/7", headers: [:], body: "" }).status, 200)
 }
 
 test "a non-integer dynamic segment 404s before user code" {
-    assertEq(route(Request { method: "GET", path: "/items/abc", body: "" }).status, 404)
-    assertEq(route(Request { method: "GET", path: "/users/x", body: "" }).status, 404)
+    assertEq(route(Request { method: "GET", path: "/items/abc", headers: [:], body: "" }).status, 404)
+    assertEq(route(Request { method: "GET", path: "/users/x", headers: [:], body: "" }).status, 404)
 }
 
 test "an unknown path 404s" {
-    assertEq(route(Request { method: "GET", path: "/nope", body: "" }).status, 404)
-    assertEq(route(Request { method: "GET", path: "/items/5/extra", body: "" }).status, 404)
+    assertEq(route(Request { method: "GET", path: "/nope", headers: [:], body: "" }).status, 404)
+    assertEq(route(Request { method: "GET", path: "/items/5/extra", headers: [:], body: "" }).status, 404)
 }
 
 test "a loader Invalid renders a 422 error page" {
-    let r = route(Request { method: "GET", path: "/users/0", body: "" })
+    let r = route(Request { method: "GET", path: "/users/0", headers: [:], body: "" })
     assertEq(r.status, 422)
     assert(r.body.contains("no user with id 0"))
 }
 
 test "a rendered page carries its content and typed-URL helpers hold" {
-    let r = route(Request { method: "GET", path: "/users/7", body: "" })
+    let r = route(Request { method: "GET", path: "/users/7", headers: [:], body: "" })
     assertEq(r.status, 200)
     assert(r.body.contains("User 7"))
     assert(r.body.contains("user7, age 30"))

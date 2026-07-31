@@ -57,7 +57,7 @@ export fn area(s: Shape) -> Int64 {
 
 /// A private helper — omitted from the docs (not exported).
 fn handle(req: Request) -> Response {
-    return Response { ok: true }
+    return Response { ok: true, vary: "" }
 }
 
 export type Request = { path: String }

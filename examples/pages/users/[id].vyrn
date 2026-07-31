@@ -1,15 +1,25 @@
-/// A dynamic route WITH a loader (`GET /users/:id`). `load` "fetches" the user
-/// and returns a `Validation<Data>`; on `Invalid` the synthesized router renders
-/// a 422 error page (built with std/html) listing the issues. Here id 0 is
+/// A dynamic route WITH data (`GET /users/:id`). `data` "fetches" the user and
+/// returns a `Validation<Data>`; on `Invalid` the synthesized router renders a
+/// 422 error page (built with std/html) listing the issues. Here id 0 is
 /// refused, so `/users/0` exercises the error path while `/users/7` renders.
+///
+/// RFC-0071: `data` is a declared member of the `std/ui:Page` contract, and its
+/// return TYPE says both things the router needs — `ParamQuery` means the
+/// deferred call receives this route's own `Params`, and blocks until it lands.
 import { el, text, Html } from "std/html"
+import { ParamQuery, paramQuery } from "std/ui"
 
 export type Params = { id: Int64 }
 export type Data = { name: String, age: Int64 }
 
+/// The user this route names.
+export fn data() -> ParamQuery<Params, Validation<Data>> {
+    return paramQuery(fetchUser)
+}
+
 /// No database here (an imported module is stateless), so the user is derived
 /// from the id — except id 0, which has no user and yields an `Invalid`.
-export fn load(p: Params) -> Validation<Data> {
+fn fetchUser(p: Params) -> Validation<Data> {
     if p.id == 0 {
         return Invalid([Issue { key: "user.missing", path: "id", message: "no user with id 0" }])
     }

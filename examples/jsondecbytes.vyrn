@@ -1,0 +1,268 @@
+/// The exact bytes `fromJson` produces — RFC-0078 M3's pin, and now its proof.
+///
+/// M3 rewired `fromJson` off the C shim's `__vyrn_json_parse` and its
+/// `__vyrn_vj_*` DOM onto `std/jsonread` plus generated Vyrn decoders, exactly as
+/// M2b rewired the writer. The bytes were captured BEFORE that swap: a test
+/// written afterwards proves whatever came out, not that the two readers agree.
+///
+/// So this example is deliberately dull, and deliberately weighted towards the
+/// FAILURE shapes — the accumulated `Issue`s nobody looks at, which is precisely
+/// where two readers disagree. It walks the surface where a decode can differ
+/// (issue key, path, message, and the ORDER issues accumulate in), prints it from
+/// `main` so parity checks interp == native == wasm on it, and pins the interesting
+/// rows as literals in the `test` blocks below.
+///
+/// Of twenty-five rows the swap moved SEVEN, and every one of them is a parse
+/// error: the four rewordings the strictness ruling required, plus the three rows
+/// where the two readers disagreed about which documents parse at all. Everything
+/// else — every issue key, path, message and accumulation order — is byte-identical
+/// to what the C decoder produced, which is what pinning first buys.
+///
+/// A refined scalar, so a `where` failure is observed as an accumulated Issue
+/// rather than a trap.
+type Age = Int64 where value > 0 && value < 200
+
+/// Nesting, an array and an `Option`, so a path (`kids[1].name`) is observed.
+type Kid = { name: String, age: Age }
+type Fam = { sur: String, kids: Array<Kid>, note: Option<String> }
+
+/// Every scalar `fromJson` can decode, so one line covers the number surface.
+type Nums = { i: Int64, i8v: Int8, u32v: UInt32, u64v: UInt64, f: Float64, b: Bool }
+
+/// A nullary enum (the RFC-0018 string form) and a payload enum (RFC-0024 objects).
+type Color = | Red | Green
+type Shape = | Dot | Circle(Int64) | Rect(Int64, Int64)
+
+/// One `Issue` as `key@path: message`, so a row is one comparable line.
+fn issue(i: Issue) -> String {
+    return i.key + "@" + i.path + ": " + i.message
+}
+
+/// Every issue of a failed decode, in accumulation ORDER, joined — or `ok` and the
+/// decoded witness. The order is the load-bearing part: a decode does not stop at
+/// the first problem, and two readers that report the same set in a different
+/// sequence are not interchangeable.
+fn issues(iss: Array<Issue>) -> String {
+    let mut out = ""
+    let mut first = true
+    for i in iss {
+        if first {
+            out = issue(i)
+            first = false
+        } else {
+            out = out + " | " + issue(i)
+        }
+    }
+    return out
+}
+
+/// `toJson` of a value the CHECKER typed. A `Valid(x)` binding is not enough on
+/// its own — `toJson` needs a static type, and a typed parameter is the cheapest
+/// way to give it one (passing a record does not consume it, RFC-0078 M2b).
+fn showFam(f: Fam) -> String { return toJson(f) }
+fn showNums(n: Nums) -> String { return toJson(n) }
+fn showColor(c: Color) -> String { return toJson(c) }
+fn showShape(v: Shape) -> String { return toJson(v) }
+
+fn famOf(s: String) -> String {
+    return match fromJson(Fam, s) {
+        Valid(f) => "ok " + showFam(f),
+        Invalid(iss) => issues(iss),
+    }
+}
+
+fn numsOf(s: String) -> String {
+    return match fromJson(Nums, s) {
+        Valid(n) => "ok " + showNums(n),
+        Invalid(iss) => issues(iss),
+    }
+}
+
+fn ageOf(s: String) -> String {
+    return match fromJson(Age, s) {
+        Valid(a) => "ok " + a.toString(),
+        Invalid(iss) => issues(iss),
+    }
+}
+
+fn colorOf(s: String) -> String {
+    return match fromJson(Color, s) {
+        Valid(c) => "ok " + showColor(c),
+        Invalid(iss) => issues(iss),
+    }
+}
+
+fn shapeOf(s: String) -> String {
+    return match fromJson(Shape, s) {
+        Valid(v) => "ok " + showShape(v),
+        Invalid(iss) => issues(iss),
+    }
+}
+
+/// A one-string record, for the rows where the two readers read differently.
+type S = { s: String }
+
+fn showS(v: S) -> String { return toJson(v) }
+
+fn sOf(src: String) -> String {
+    return match fromJson(S, src) {
+        Valid(v) => "ok " + showS(v),
+        Invalid(iss) => issues(iss),
+    }
+}
+
+fn main() -> Int64 {
+    // --- decodes that succeed -------------------------------------------------
+    print(famOf("{\"sur\":\"a\",\"kids\":[],\"note\":null}"))
+    print(famOf("{\"sur\":\"a\",\"kids\":[{\"name\":\"k\",\"age\":7}],\"note\":\"n\"}"))
+    // unknown fields are ignored, absent `Option` is `None` (RFC-0018)
+    print(famOf("{\"sur\":\"a\",\"kids\":[],\"extra\":[1,2]}"))
+    print(numsOf(
+            "{\"i\":9007199254740993,\"i8v\":-128,\"u32v\":4294967295,"
+            + "\"u64v\":18446744073709551615,\"f\":-0.5,\"b\":true}",
+        ))
+    print(ageOf("42"))
+    print(colorOf("\"Green\""))
+    print(shapeOf("\"Dot\""))
+    print(shapeOf("{\"Circle\":3}"))
+    print(shapeOf("{\"Rect\":[2,5]}"))
+
+    // --- decodes that fail: the shapes nobody looks at -------------------------
+    print(famOf("{}"))
+    print(famOf("{\"sur\":7,\"kids\":{}}"))
+    print(famOf("{\"sur\":\"a\",\"kids\":[{\"name\":\"k\",\"age\":0},{\"age\":300}]}"))
+    print(numsOf("{\"i\":1.5,\"i8v\":128,\"u32v\":-1,\"u64v\":true,\"f\":\"x\",\"b\":1}"))
+    print(ageOf("0"))
+    print(ageOf("\"7\""))
+    print(colorOf("\"Blue\""))
+    print(shapeOf("{\"Circle\":3,\"Rect\":[1,2]}"))
+    print(shapeOf("\"Circle\""))
+
+    // --- parse errors: one Issue, keyed `json.parse` ---------------------------
+    print(famOf("{ bad"))
+    print(famOf(""))
+    print(famOf("{\"sur\":\"a\",\"kids\":[]} trailing"))
+    print(famOf("{\"sur\":\"a\",\"kids\":[1,]}"))
+
+    // --- the rows where `std/jsonread` reads the same input differently --------
+    print(sOf("{\"s\":\"\\uD83D\\uDE00\"}"))
+    print(sOf("{\"s\":\"a\",\"s\":\"b\"}"))
+    print(sOf("{\"s\":\"a\",}"))
+    return 0
+}
+
+test "a clean decode round-trips through toJson" {
+    assertEq(
+        famOf("{\"sur\":\"a\",\"kids\":[{\"name\":\"k\",\"age\":7}],\"note\":\"n\"}"),
+        "ok {\"sur\":\"a\",\"kids\":[{\"name\":\"k\",\"age\":7}],\"note\":\"n\"}",
+    )
+    // Unknown fields ignored, absent Option omitted on the way back out.
+    assertEq(famOf("{\"sur\":\"a\",\"kids\":[],\"extra\":[1,2]}"), "ok {\"sur\":\"a\",\"kids\":[]}")
+}
+
+test "integers decode exactly, never through a Float64" {
+    // 9007199254740993 is 2^53+1: it survives only because the reader keeps a
+    // number's SOURCE TEXT and the decode target picks the conversion.
+    assertEq(
+        numsOf(
+            "{\"i\":9007199254740993,\"i8v\":-128,\"u32v\":4294967295,"
+            + "\"u64v\":18446744073709551615,\"f\":-0.5,\"b\":true}",
+        ),
+        "ok {\"i\":9007199254740993,\"i8v\":-128,\"u32v\":4294967295,"
+        + "\"u64v\":18446744073709551615,\"f\":-0.500000,\"b\":true}",
+    )
+}
+
+test "a missing field names the field, an unknown one is ignored" {
+    assertEq(
+        famOf("{}"),
+        "json.missing@sur: missing required field `sur` "
+        + "| json.missing@kids: missing required field `kids`",
+    )
+}
+
+test "a type mismatch says expected X, found Y, at the failing path" {
+    assertEq(
+        famOf("{\"sur\":7,\"kids\":{}}"),
+        "json.type@sur: expected string, found number | json.type@kids: expected array, found object",
+    )
+}
+
+test "issues accumulate, in path order, and do not stop at the first" {
+    // Three failures across two array elements, and the sequence is the
+    // element-then-declaration walk rather than the order of discovery: `kids[1]`'s
+    // MISSING name is reported before its out-of-range age, because `name` is
+    // declared first. A reader that reports the same set in another order is not a
+    // drop-in replacement.
+    assertEq(
+        famOf("{\"sur\":\"a\",\"kids\":[{\"name\":\"k\",\"age\":0},{\"age\":300}]}"),
+        "validate@kids[0].age: validation failed for `Age` "
+        + "| json.missing@kids[1].name: missing required field `name` "
+        + "| validate@kids[1].age: validation failed for `Age`",
+    )
+}
+
+test "every scalar can fail, and each failure is its own issue" {
+    assertEq(
+        numsOf("{\"i\":1.5,\"i8v\":128,\"u32v\":-1,\"u64v\":true,\"f\":\"x\",\"b\":1}"),
+        "json.type@i: expected integer, found number "
+        + "| json.type@i8v: expected integer, found number "
+        + "| json.type@u32v: expected integer, found number "
+        + "| json.type@u64v: expected integer, found boolean "
+        + "| json.type@f: expected number, found string "
+        + "| json.type@b: expected boolean, found number",
+    )
+}
+
+test "a refined scalar accumulates rather than trapping" {
+    assertEq(ageOf("42"), "ok 42")
+    assertEq(ageOf("0"), "validate@: validation failed for `Age`")
+    // A base-type failure suppresses the predicate: one issue, not two.
+    assertEq(ageOf("\"7\""), "json.type@: expected integer, found string")
+}
+
+test "enums decode by name, and an unknown tag lists what was expected" {
+    assertEq(colorOf("\"Green\""), "ok \"Green\"")
+    assertEq(colorOf("\"Blue\""), "json.type@: expected one of `Red`, `Green`, found string")
+    assertEq(shapeOf("{\"Circle\":3}"), "ok {\"Circle\":3}")
+    assertEq(shapeOf("{\"Rect\":[2,5]}"), "ok {\"Rect\":[2,5]}")
+}
+
+test "the three rows the strictness ruling moved" {
+    // RFC-0078's ruling, applied. Two of the three change which documents PARSE AT
+    // ALL, in opposite directions, so M3 was a semantic ruling and not a
+    // byte-formatting one — and `std/jsonread` won all three, each for its own
+    // reason:
+    //
+    //   1. A surrogate pair was REJECTED (`codec::parse` decoded each `\uXXXX`
+    //      independently, and a lone surrogate is not a `char`). It is exactly how
+    //      RFC 8259 escapes an astral codepoint, so refusing it meant Vyrn could
+    //      not read valid JSON that any other implementation writes. Now accepted.
+    //   2. A duplicate key was ACCEPTED, first occurrence winning. For a TYPED
+    //      decode the ambiguity is the problem — silently picking one is the only
+    //      outcome with no diagnosis — so it is rejected, naming the key. This is
+    //      the one direction that can break a working program, and pre-1.0 is when
+    //      to take it.
+    //   3. Every parse error's wording moved from a 0-based byte `position N` to a
+    //      1-based `line N, col M:` prefix. A byte offset into a document a human
+    //      did not write is not actionable.
+    assertEq(sOf("{\"s\":\"\\uD83D\\uDE00\"}"), "ok {\"s\":\"😀\"}")
+    assertEq(
+        sOf("{\"s\":\"a\",\"s\":\"b\"}"),
+        "json.parse@: line 1, col 13: duplicate object key: s",
+    )
+    assertEq(sOf("{\"s\":\"a\",}"), "json.parse@: line 1, col 10: trailing comma before '}'")
+}
+
+test "a parse error is exactly one issue, keyed json.parse" {
+    assertEq(famOf("{ bad"), "json.parse@: line 1, col 3: expected a string key")
+    assertEq(famOf(""), "json.parse@: line 1, col 1: unexpected end of input")
+    assertEq(
+        famOf("{\"sur\":\"a\",\"kids\":[]} trailing"),
+        "json.parse@: line 1, col 23: trailing content after the JSON value",
+    )
+    assertEq(
+        famOf("{\"sur\":\"a\",\"kids\":[1,]}"),
+        "json.parse@: line 1, col 22: trailing comma before ']'",
+    )
+}

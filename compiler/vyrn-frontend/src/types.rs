@@ -893,6 +893,15 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
 }
 
 /// Reduce `ty` to its structural form (scalar, `Record`, `Option`, `Result`, …).
+/// A program's type declarations by name — the map `resolve` and the JSON codec
+/// take. Every engine builds one of these; this is the shared spelling.
+pub fn decl_map(p: &crate::ast::Program) -> HashMap<String, TypeDecl> {
+    p.type_decls
+        .iter()
+        .map(|t| (t.name.clone(), t.clone()))
+        .collect()
+}
+
 pub fn resolve(ty: &Type, types: &HashMap<String, TypeDecl>) -> Type {
     resolve_d(ty, types, 0)
 }
@@ -1007,6 +1016,28 @@ fn merge_fields(fa: Vec<Field>, fb: Vec<Field>) -> Vec<Field> {
         }
     }
     out
+}
+
+/// What a `where` predicate has in scope: a record base binds every field by name
+/// (a cross-field predicate names them), and every other base binds the whole value
+/// as `value`. `Some(i)` is the field's index in the base record.
+///
+/// The predicate itself cannot be lowered in one place — one backend prints LLVM
+/// text, the other wasm bytes, and the interpreter evaluates it — so what is shared
+/// is the STRUCTURE all of them walk. `vyrn-codegen` had three copies before
+/// RFC-0077 M2d wanted a fourth, and RFC-0078 M3 moved it HERE because the decode
+/// path needs it too: a refined type's decoder calls a synthesized `Bool`-returning
+/// function whose parameters are exactly this list, so the accumulating `validate`
+/// check and the trapping one cannot disagree about what `value` binds.
+pub fn predicate_binds(decl: &TypeDecl) -> Vec<(String, Type, Option<usize>)> {
+    match &decl.base {
+        Type::Record(fs) => fs
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.name.clone(), f.ty.clone(), Some(i)))
+            .collect(),
+        base => vec![("value".to_string(), base.clone(), None)],
+    }
 }
 
 #[cfg(test)]

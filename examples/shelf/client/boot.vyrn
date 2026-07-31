@@ -1,0 +1,440 @@
+/// The browser client root. It holds all client-side view state (the fetched
+/// books, the tag histogram, the draft form, the delete-confirm id, the tag
+/// filter, the current locale) and drives the reactive UI. The typed RPC stubs
+/// each take a completion callback at the call site; the add path validates the
+/// draft with fromJson before firing the stub.
+import { client } from "std/rpc"
+import * as api from client("../server/api")
+import { i18n } from "std/i18n"
+import { setLocale, locale, Locale, transKey, t, tShelfAdd, tShelfTitle, tShelfUrl, tShelfTagsField, tShelfSave, tShelfRateLabel, tShelfDelete, tShelfConfirm, tShelfCancel, tShelfUnrated, tShelfEmpty, tShelfTags, tShelfFilterAll, tLangSwitch, tShelfCount } from i18n("../strings")
+import { splitTrim } from "../shared/util"
+import { BookView, TagCount, Labels } from "../shared/types"
+import { componentsThemed } from "std/vyx"
+import { shelfApp, bookCard } from componentsThemed("../app/widgets", "../theme.json")
+import { Html, toHtmlString, diff } from "std/html"
+
+/// An unvalidated mirror of AddBookReq — constructing it never traps, so a bad
+/// draft can be encoded and run through fromJson to surface Issues instead.
+type RawAdd = { title: String, url: String, tags: Array<String> }
+
+/// A parseable Int64 alias (a handler arg arrives as String).
+type IntArg = Int64
+
+/// The wire shape of a server 422 (`{"issues":[…]}`) — mirrored here for the
+/// raw-payload demo: app.js POSTs a body no typed stub could build and hands the
+/// server's reply to `showServerIssues` for rendering.
+type IssueBag = { issues: Array<api.RpcIssue> }
+
+// ---- client view state (module state; the locale lives in the i18n module) --
+
+let mut mode: String = "list"
+let mut detailId: Int64 = 0
+let mut books: Array<api.Book> = []
+let mut filter: String = ""
+let mut confirmId: Int64 = -1
+let mut draftTitle: String = ""
+let mut draftUrl: String = ""
+let mut draftTags: String = ""
+let mut issues: String = ""
+let mut detailStatus: String = "loading…"
+let mut detailTitle: String = ""
+let mut detailUrl: String = ""
+let mut detailRating: Int64 = 0
+let mut detailTags: String = ""
+
+/// The retained previous view for the patch protocol. `vyrnPatch` diffs
+/// the fresh view against this and returns only the changes, so a keystroke, a
+/// rate cycle, or a delete ships O(changes) ops instead of the whole shelf tree.
+let mut lastTree: Html = Empty
+
+// ---- helpers ---------------------------------------------------------------
+
+fn parseId(s: String) -> Int64 {
+    return match fromJson(IntArg, s) {
+        Valid(n) => n,
+        Invalid(issues) => -1,
+    }
+}
+
+/// Join a book's tags with ", ".
+fn tagsText(tags: Array<api.Tag>) -> String {
+    let mut out = ""
+    let mut i = 0
+    for t in tags {
+        if i > 0 {
+            out = out + ", "
+        }
+        out = out + t
+        i = i + 1
+    }
+    return out
+}
+
+/// Render an accumulated issue list as "path: message; …".
+fn renderIssues(iss: Array<api.RpcIssue>) -> String {
+    let mut out = ""
+    let mut i = 0
+    for issue in iss {
+        if i > 0 {
+            out = out + "; "
+        }
+        out = out + issue.path + ": " + issue.message
+        i = i + 1
+    }
+    return out
+}
+
+/// The label bundle for the current locale. The `.vyx` widgets receive resolved
+/// strings (scalar props); the ambient `currentLocale` is read by each stateful
+/// accessor, so no `loc` is threaded.
+fn labels() -> Labels {
+    return Labels {
+        add: tShelfAdd(),
+        title: tShelfTitle(),
+        url: tShelfUrl(),
+        tags: tShelfTagsField(),
+        save: tShelfSave(),
+        rate: tShelfRateLabel(),
+        del: tShelfDelete(),
+        confirm: tShelfConfirm(),
+        cancel: tShelfCancel(),
+        unrated: tShelfUnrated(),
+        empty: tShelfEmpty(),
+        tagsHdr: tShelfTags(),
+        filterAll: tShelfFilterAll(),
+        lang: tLangSwitch(),
+    }
+}
+
+/// The books to show, filtered by the active tag, as `BookView`s.
+fn bookViews() -> Array<BookView> {
+    let mut out: Array<BookView> = []
+    for b in books {
+        let mut show = filter.byteLength == 0
+        if show == false {
+            for t in b.tags {
+                if t == filter {
+                    show = true
+                }
+            }
+        }
+        if show {
+            out.push(BookView {
+                    id: b.id,
+                    title: b.title,
+                    url: b.url,
+                    rating: b.rating,
+                    tagsText: tagsText(b.tags),
+                    confirming: b.id == confirmId,
+                    detailHref: "/books/\{b.id}",
+                })
+        }
+    }
+    return out
+}
+
+/// The tag histogram over the fetched `books`, in first-seen fold order
+/// (identical to the server's `books/tags`). Deriving it CLIENT-SIDE from the same
+/// `books` the list renders — rather than a second, racing `books/tags` RPC —
+/// keeps the panel consistent with the list in ONE render: a delete updates the
+/// book list and its tag counts atomically, with no stale window and no reload
+/// (the old two-RPC refetch let the list re-render one completion before the tag
+/// map did). The server `books/tags` proc + its Map round-trip stay tested.
+fn histogram(bs: Array<api.Book>) -> Map<String, Int64> {
+    let mut m: Map<String, Int64> = [:]
+    for b in bs {
+        for tag in b.tags {
+            let cur = match m[tag] {
+                Some(c) => c,
+                None => 0,
+            }
+            m[tag] = cur + 1
+        }
+    }
+    return m
+}
+
+/// The tag histogram as `TagCount`s, with a DYNAMIC-KEY i18n label lookup
+/// (`transKey("tag." + name)`) so known tags are localized and unknown ones fall
+/// back to the raw name. Iterates the `books`-derived histogram via `keys()`.
+fn tagViews() -> Array<TagCount> {
+    let counts = histogram(books)
+    let mut out: Array<TagCount> = []
+    for name in counts.keys() {
+        let count = match counts[name] {
+            Some(c) => c,
+            None => 0,
+        }
+        let label = match transKey("tag." + name) {
+            Some(k) => t(k),
+            None => name,
+        }
+        let cls = if filter == name { "tag active" } else { "tag" }
+        out.push(TagCount { name: name, label: label, count: count, cls: cls })
+    }
+    return out
+}
+
+// ---- the view --------------------------------------------------------------
+
+fn listView() -> Html {
+    return shelfApp(
+        labels(),
+        bookViews(),
+        tagViews(),
+        tShelfCount(books.length),
+        issues,
+        draftTitle,
+        draftUrl,
+        draftTags,
+        tLangSwitch(),
+    )
+}
+
+fn detailView() -> Html {
+    let mut rating = tShelfUnrated()
+    if detailRating > 0 {
+        rating = "★ \{detailRating}"
+    }
+    return bookCard(detailTitle, detailUrl, rating, detailTags, detailStatus)
+}
+
+fn view() -> Html {
+    if mode == "detail" {
+        return detailView()
+    }
+    return listView()
+}
+
+// ---- RPC completion callbacks (passed at each call site) --------------------
+
+fn onListBooks(res: api.RpcReply<api.BookList>) {
+    match res {
+        Done(l) => setBooks(l),
+        Rejected(iss) => setIssues(renderIssues(iss)),
+        Failed(why) => setIssues(why),
+    }
+}
+fn setBooks(l: api.BookList) {
+    books = l.books
+}
+
+/// The reactive tag panel derives its histogram from `books` (see
+/// `histogram`/`tagViews`), so the client never calls `books/tags` — with callbacks
+/// passed at the call site, that procedure simply needs no handler here (the server
+/// proc + its Map round-trip stay exercised by the server's own smoke run).
+fn onGetBook(res: api.RpcReply<api.BookResult>) {
+    match res {
+        Done(r) => showDetail(r),
+        Rejected(iss) => setDetailStatus(renderIssues(iss)),
+        Failed(why) => setDetailStatus(why),
+    }
+}
+fn showDetail(r: api.BookResult) {
+    match r {
+        Ok(b) => fillDetail(b),
+        Err(why) => setDetailStatus(why),
+    }
+}
+fn fillDetail(b: api.Book) {
+    detailTitle = b.title
+    detailUrl = b.url
+    detailRating = b.rating
+    detailTags = tagsText(b.tags)
+    detailStatus = ""
+}
+fn setDetailStatus(s: String) {
+    detailStatus = s
+}
+
+fn onAddBook(res: api.RpcReply<api.BookResult>) {
+    match res {
+        Done(r) => afterAdd(r),
+        Rejected(iss) => setIssues(renderIssues(iss)),
+        Failed(why) => setIssues(why),
+    }
+}
+fn afterAdd(r: api.BookResult) {
+    match r {
+        Ok(b) => addSucceeded(),
+        Err(why) => setIssues(why),
+    }
+}
+fn addSucceeded() {
+    draftTitle = ""
+    draftUrl = ""
+    draftTags = ""
+    issues = ""
+    refetch()
+}
+
+fn onDeleteBook(res: api.RpcReply<api.DeleteResult>) {
+    match res {
+        Done(r) => afterDelete(r),
+        Rejected(iss) => setIssues(renderIssues(iss)),
+        Failed(why) => setIssues(why),
+    }
+}
+fn afterDelete(r: api.DeleteResult) {
+    match r {
+        Ok(done) => refetchClear(),
+        Err(why) => setIssues(why),
+    }
+}
+fn refetchClear() {
+    confirmId = -1
+    issues = ""
+    refetch()
+}
+
+fn onRateBook(res: api.RpcReply<api.BookResult>) {
+    match res {
+        Done(r) => afterRate(r),
+        Rejected(iss) => setIssues(renderIssues(iss)),
+        Failed(why) => setIssues(why),
+    }
+}
+fn afterRate(r: api.BookResult) {
+    match r {
+        Ok(b) => refetch(),
+        Err(why) => setIssues(why),
+    }
+}
+
+fn setIssues(s: String) {
+    issues = s
+}
+
+/// Re-read the shelf. The tag histogram is derived client-side from the returned
+/// books (see `histogram`/`tagViews`), so one `books/browse` completion updates the
+/// list AND its tag counts in a single render — no second, racing `books/tags`
+/// RPC, hence no post-delete stale window.
+fn refetch() {
+    api.booksBrowse(onListBooks)
+}
+
+// ---- event handlers (exported to JS, one String arg — the locked ABI) -------
+
+export extern fn bootList(arg: String) {
+    mode = "list"
+    refetch()
+}
+
+export extern fn bootDetail(arg: String) {
+    mode = "detail"
+    detailId = parseId(arg)
+    detailStatus = "loading…"
+    api.booksById(api.IdReq { id: detailId }, onGetBook)
+}
+
+export extern fn setDraftTitle(arg: String) {
+    draftTitle = arg
+}
+export extern fn setDraftUrl(arg: String) {
+    draftUrl = arg
+}
+export extern fn setDraftTags(arg: String) {
+    draftTags = arg
+}
+
+/// Validate the draft with `fromJson` (which returns `Invalid` instead of
+/// trapping, unlike constructing `AddBookReq` directly). Valid => fire the typed
+/// stub (a real server round trip); Invalid => surface the Issues in the UI.
+export extern fn submitAdd(arg: String) {
+    let raw = RawAdd { title: draftTitle, url: draftUrl, tags: splitTrim(draftTags, ",") }
+    match fromJson(api.AddBookReq, toJson(raw)) {
+        Valid(req) => api.booksAdd(req, onAddBook),
+        Invalid(iss) => setIssues(renderIssues(api.rpcIssuesFrom(iss))),
+    }
+}
+
+export extern fn askDelete(arg: String) {
+    confirmId = parseId(arg)
+}
+export extern fn cancelDelete(arg: String) {
+    confirmId = -1
+}
+export extern fn confirmDelete(arg: String) {
+    deleteById(parseId(arg))
+}
+fn deleteById(id: Int64) {
+    api.booksDel(api.IdReq { id: id }, onDeleteBook)
+}
+
+/// Cycle a book's rating 0/5 -> 1 -> … -> 5 -> 1 (always a valid 1..5 request).
+export extern fn cycleRate(arg: String) {
+    let id = parseId(arg)
+    let next = nextRating(id)
+    api.booksRate(api.RateReq { id: id, rating: next }, onRateBook)
+}
+fn nextRating(id: Int64) -> Int64 {
+    for b in books {
+        if b.id == id {
+            if b.rating >= 5 {
+                return 1
+            }
+            return b.rating + 1
+        }
+    }
+    return 1
+}
+
+/// Render a raw server 422 body (the raw-payload demo). A body that is not an
+/// issue bag surfaces the decode issues instead.
+export extern fn showServerIssues(arg: String) {
+    match fromJson(IssueBag, arg) {
+        Valid(bag) => setIssues(renderIssues(bag.issues)),
+        Invalid(iss) => setIssues(renderIssues(api.rpcIssuesFrom(iss))),
+    }
+}
+
+export extern fn setFilter(arg: String) {
+    filter = arg
+}
+export extern fn clearFilter(arg: String) {
+    filter = ""
+}
+
+export extern fn toggleLang(arg: String) {
+    setLocale(match locale() {
+            En => Uk,
+            Uk => En,
+        })
+}
+
+/// The view as JSON for vyrn-dom.js (the boot view; the host builds the DOM once
+/// from this).
+export extern fn vyrnView() -> String {
+    return toJson(view())
+}
+
+/// The patch loop: the host calls this on every render and applies the returned
+/// op stream, so only the changed nodes cross the extern boundary.
+export extern fn vyrnPatch() -> String {
+    let next = view()
+    let ops = diff(lastTree, next)
+    lastTree = next
+    return toJson(ops)
+}
+
+fn main() -> Int64 {
+    return 0
+}
+
+test "splitTrim parses a comma tag string, trimming and dropping empties" {
+    let r = splitTrim("fiction, web ,, reference ", ",")
+    assertEq(r.length, 3)
+    assertEq(r[0], "fiction")
+    assertEq(r[1], "web")
+    assertEq(r[2], "reference")
+}
+
+test "parseId maps integers and rejects non-integers" {
+    assertEq(parseId("42"), 42)
+    assertEq(parseId("abc"), -1)
+}
+
+test "bookCard renders a labeled card (view snapshot of a .vyx component)" {
+    let html = toHtmlString(bookCard("Dune", "https://x.dev/d", "★ 4", "fiction", ""))
+    assertEq(html, "<div class=\"card\"><div class=\"cardbody\"><h3><a href=\"https://x.dev/d\">Dune</a></h3><p class=\"rating\">★ 4</p><p class=\"tags\">fiction</p></div></div>")
+}
